@@ -301,7 +301,6 @@ class OptimizerVisitor:
             # nodes it walks through — it allows for them rather than needing
             # them gone.
             RedundantSortEliminationStrategy(telemetry),
-            OperatorFusionStrategy(telemetry),
             LimitPushdownStrategy(telemetry),
             LimitFilesPruningStrategy(telemetry),  # Prune files for LIMIT queries (after pushdown)
             #            EmptyTableStrategy(telemetry),
@@ -311,6 +310,19 @@ class OptimizerVisitor:
             # nodes it wraps, so Project<->Project fusion must run AFTER this, once
             # the pair is directly adjacent, not before.
             RedundantOperationsStrategy(telemetry),
+            # Fuses Order+Limit into a HeapSort. AFTER RedundantOperationsStrategy
+            # for the same reason ProjectFusionStrategy is: the rule requires the
+            # Order's single outgoing edge to land on the Limit, and a view or
+            # derived table leaves a Subquery boundary node between them. Run any
+            # earlier and `FROM (... ORDER BY ...) LIMIT n` never fuses — it kept
+            # a full Sort and, because TopNScanPushdownStrategy matches a
+            # HeapSort, never pushed the top-N into the scan either.
+            # The strategies it now runs after are unaffected by the Limit still
+            # being a node: LimitPushdownStrategy treats Order as a barrier, so
+            # the LIMIT is anchored above the sort and cannot reach a scan (which
+            # would be a wrong-rows bug), and LimitFilesPruningStrategy only ever
+            # reads a scan's `limit`, which that barrier leaves unset.
+            OperatorFusionStrategy(telemetry),
             # Fuses adjacent Project->Project pairs into one physical pass. After
             # ProjectionPushdownStrategy so it sees already-pruned column lists,
             # and after RedundantOperationsStrategy so Subquery boundary nodes

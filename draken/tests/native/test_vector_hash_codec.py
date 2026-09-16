@@ -127,7 +127,7 @@ class TestHexEncode:
         assert out.type == dn.DrakenType.VARCHAR
 
     def test_type_error_on_int_vector(self):
-        int_vec = dn.vector_from_sequence([1, 2, 3])
+        int_vec = dn.vector_int64_from_sequence([1, 2, 3])
         with pytest.raises(TypeError):
             hc.vector_hex_encode(int_vec)
 
@@ -255,7 +255,7 @@ class TestMD5:
             assert out1[i] == out2[i]
 
     def test_type_error_on_int_vector(self):
-        int_vec = dn.vector_from_sequence([1, 2, 3])
+        int_vec = dn.vector_int64_from_sequence([1, 2, 3])
         with pytest.raises(TypeError):
             hc.vector_md5(int_vec)
 

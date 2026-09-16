@@ -19,6 +19,7 @@ from typing import Dict
 from typing import Optional
 from typing import Tuple
 
+from opteryx.connectors import connector_factory
 from opteryx.connectors import view_store_connector
 from opteryx.connectors.capabilities.eidetic import ViewDefinition
 from opteryx.exceptions import DatasetNotFoundError
@@ -35,6 +36,40 @@ def _view_plan_from_definition(definition) -> Optional[Tuple[object, Dict[str, o
     # copied here.
     view_plan = view_plan.copy()
     return _bind_row_count_estimate(view_plan, definition.last_row_count), view_ctes
+
+
+_NO_CATALOG = object()
+
+
+def _store_holds_the_data(store, relation: str, telemetry) -> bool:
+    """Whether the view store's catalog is also the one serving this relation.
+
+    The store is the workspace's SETTINGS catalog. For an externally bound
+    workspace that is the opteryx catalog entry, and the only datasets it
+    holds for such a workspace are the listing stubs control.opteryx projects
+    - names with no schema, which queries are never meant to consult. Binding
+    against one does not raise: it produces a relation with no columns, so a
+    projection fails as "column not found" and a bare COUNT(*) is served from
+    the empty stub manifest as zero. A wrong answer, reported as success.
+
+    Compared by catalog FACTORY, not by connector object. Two resolvers
+    installed over one catalog answer with two connector objects - the false
+    negative that retired the earlier `store is not connector_factory(...)`
+    check, which reported every relation in an ordinary deployment missing -
+    but they share one factory, so this stays true there.
+
+    A data connector that holds no catalog at all (PostgreSQL) has no
+    factory to match the store's, so it compares unequal and binds on the
+    normal path. The sentinel only makes two connectors that BOTH hold no
+    catalog compare equal, which is the shape the fakes in
+    tests/unit/connectors/test_view_store_routing.py take.
+    """
+    data = connector_factory(relation, telemetry=telemetry)
+    if data is store:
+        return True
+    return getattr(store, "catalog_factory", _NO_CATALOG) is getattr(
+        data, "catalog_factory", _NO_CATALOG
+    )
 
 
 def resolve_relation(relation: str, telemetry, catalog_cache=None):
@@ -59,13 +94,18 @@ def resolve_relation(relation: str, telemetry, catalog_cache=None):
     every workspace, rather than existing only where the catalog also serves
     data. The early return above keeps disk and virtual relations free.
 
-    A DATASET answer from that lookup is honoured exactly as before. It used
-    to be dropped whenever the store was not the same OBJECT as
-    `connector_factory`'s answer, on the assumption that the two objects
-    differing meant the data lived outside the catalog. They also differ when
-    both resolvers are installed and resolve to the SAME catalog - two cache
-    entries, one catalog - which is the ordinary production shape, so every
-    relation in it reported as not found.
+    A DATASET answer from that lookup is honoured only when the store's
+    catalog is also the one serving the relation - see
+    `_store_holds_the_data`. It used to be dropped whenever the store was not
+    the same OBJECT as `connector_factory`'s answer, on the assumption that
+    the two objects differing meant the data lived outside the catalog. They
+    also differ when both resolvers are installed and resolve to the SAME
+    catalog - two cache entries, one catalog - which is the ordinary
+    production shape, so every relation in it reported as not found.
+    Comparing the catalog rather than the connector keeps that case working
+    while still dropping a stub answered for a workspace whose data lives in
+    an external catalog, which honouring it unconditionally bound queries
+    against - no columns, and a zero COUNT(*) reported as success.
 
     `catalog_cache` is an OPT-IN, caller-owned `CatalogCache`. It caches the round
     trip above and nothing else: what goes in it is the raw `(kind, object)` the
@@ -101,6 +141,8 @@ def resolve_relation(relation: str, telemetry, catalog_cache=None):
         if kind == "view":
             return "view", _view_plan_from_definition(obj)
         if kind == "dataset":
+            if not _store_holds_the_data(store, relation, telemetry):
+                return None, None
             return "dataset", obj
         return None, None
     finally:

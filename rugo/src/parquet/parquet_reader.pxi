@@ -17,15 +17,23 @@
 #
 # Endpoint: rugo's public `read_parquet()` / `decode_column_from_chunk()` API.
 # Its consumers are GENERAL-PURPOSE and Python-facing — `read_parquet` is a
-# library entry point, used for catalog/manifest reads and the rugo test suite,
-# where the caller wants ordinary Python values out the other end.
+# library entry point, used for catalog/manifest reads and the rugo test suite.
 #
-# BECAUSE OF THAT ENDPOINT, this reader deliberately MATERIALISES dictionary-
-# encoded columns into per-row Python lists and re-builds dense/auto-dict
-# vectors (see `_int64_list` / `_float64_list` / `_string_list` /
-# `_make_typed_*_dictionary_vector`). The dict on disk is FLATTENED to Python
-# objects here ON PURPOSE — that is what a standalone Python reader is for. It
-# is NOT a bug and NOT the hot path.
+# THIS READER FLATTENS THE ON-DISK DICTIONARY. A dict-encoded column is expanded
+# per row into a DENSE vector (see the `_make_typed_*_dictionary_vector`
+# makers); the dict shape does NOT survive this path. That is the endpoint's
+# choice and it is deliberate.
+#
+# WHAT IS *NOT* DELIBERATE — and what an earlier version of this banner claimed
+# was: materialising through a per-row PYTHON LIST. Every maker here returns a
+# `Vector`; the list was a pure intermediate that no caller ever saw, and the
+# `vector_*_from_sequence` constructor immediately parsed it straight back out.
+# MEASURED on a 1M-row PLAIN int64 column: 1.08 ms of C++ decode against
+# 17.68 ms building and re-reading PyLongs — 94% of the read. The materializers
+# are now native (`rugo_int_vector` / `rugo_float_vector` / `rugo_string_vector`
+# / `rugo_bool_vector` / `rugo_decimal_vector`), which is what CLAUDE.md §3
+# requires of a compiled path in any case. Flattening the dict and allocating a
+# Python object per value were never the same decision; do not re-conflate them.
 #
 # The OPTERYX QUERY ENGINE DOES NOT USE THIS FILE TO SCAN DATA. The execution
 # scan is the native C++ pipeline in
@@ -182,6 +190,7 @@ import draken.draken_native as _dn
 # the array constructor the child type when a list column carries no inferable
 # leaf value (every row null or empty) — see _make_array_vector.
 cdef int _DK_EL_VARCHAR = int(_dn.VARCHAR.value)
+cdef int _DK_EL_VARBINARY = int(_dn.VARBINARY.value)
 cdef int _DK_EL_INT8 = int(_dn.INT8.value)
 cdef int _DK_EL_INT16 = int(_dn.INT16.value)
 cdef int _DK_EL_INT32 = int(_dn.INT32.value)
@@ -206,9 +215,33 @@ cdef inline bint _text_is_printable(str text):
     return True
 
 
-cdef inline str _safe_decode_utf8(string raw_bytes):
-    cdef bytes b = raw_bytes
-    return b.decode("utf-8")
+cdef inline str _logical_str(string logical_type):
+    """The column's logical-type annotation as `str`; "" when the file carries none."""
+    return logical_type.decode("utf-8") if logical_type.size() > 0 else ""
+
+
+cdef inline bint _logical_is_string(str logical_str):
+    """True when the annotation declares TEXT, false for opaque binary.
+
+    THE single string/binary discriminator for BYTE_ARRAY data — the statistics
+    path (`decode_value`), the array leaf path (`_array_leaf_values` /
+    `_make_array_vector`) and the scalar path (`_make_string_vector`, which all
+    three byte_array shapes route through) all consult it; do not open-code a
+    second copy.
+
+    Parquet stores VARCHAR and BINARY identically on the wire, as BYTE_ARRAY;
+    only the String/UTF8 annotation tells them apart, and for a LIST column the
+    LEAF's annotation arrives here as "array<varchar>" (annotated) versus
+    "array<byte_array>" (plain binary). An absent annotation means BINARY, so
+    the bytes must be handed back opaque: unannotated BYTE_ARRAY is not required
+    to be valid UTF-8 (a truncated string bound carries a 0xff sentinel
+    precisely so the prefix sorts above everything sharing it).
+    """
+    return (
+        logical_str in ("varchar", "UTF8", "JSON", "BSON", "ENUM")
+        or logical_str.startswith("array<string")
+        or logical_str.startswith("array<varchar")
+    )
 
 
 def decode_value(
@@ -221,12 +254,8 @@ def decode_value(
         return None
 
     cdef str type_str = physical_type.decode("utf-8")
-    cdef str logical_str = logical_type.decode("utf-8") if logical_type.size() > 0 else ""
-    cdef bint is_string_logical = (
-        logical_str in ("varchar", "UTF8", "JSON", "BSON", "ENUM")
-        or logical_str.startswith("array<string")
-        or logical_str.startswith("array<varchar")
-    )
+    cdef str logical_str = _logical_str(logical_type)
+    cdef bint is_string_logical = _logical_is_string(logical_str)
     cdef str candidate
 
     # E33: an UNSIGNED column stores its magnitude in a signed int32/int64 slot, so
@@ -527,6 +556,7 @@ def read_rowgroup_stats(data):
          "columns": [
              {"name": str, "physical_type": str, "logical_type": str,
               "min": bytes|None, "max": bytes|None, "null_count": int,
+              "max_repetition_level": int,
               "is_sorted": bool, "sort_descending": bool,
               "sort_nulls_first": bool}, ...]}
 
@@ -567,6 +597,11 @@ def read_rowgroup_stats(data):
                 "max": (<bytes>fs.row_groups[rg_i].columns[c_i].max)
                        if fs.row_groups[rg_i].columns[c_i].has_max else None,
                 "null_count": fs.row_groups[rg_i].columns[c_i].null_count,
+                # >0 for a nested (list/map) leaf. null_count is then a count of
+                # null LEAF VALUES, which is not a count of null ROWS, so a
+                # caller pruning on it must know the difference — see
+                # rugo.parquet._row_group_mask.
+                "max_repetition_level": fs.row_groups[rg_i].columns[c_i].max_repetition_level,
                 "distinct_count": (fs.row_groups[rg_i].columns[c_i].distinct_count
                        if fs.row_groups[rg_i].columns[c_i].distinct_count >= 0 else None),
                 "bloom_offset": fs.row_groups[rg_i].columns[c_i].bloom_offset,
@@ -737,81 +772,6 @@ cdef inline bytes _dense_str_at(parquet_reader.DecodedColumn& col, Py_ssize_t id
     return (<char*>(base + start))[:ln]
 
 
-cdef list _int64_list(parquet_reader.DecodedColumn& col, int32_t num_rows,
-                      bint from_int32):
-    # FLATTEN-TO-PYTHON BY DESIGN (see module banner). This is rugo's standalone
-    # reader endpoint: even when the column is dict-encoded on disk, we expand it
-    # into a per-row Python list (`out[i] = dict_values[code]`) for a Python
-    # consumer. This is NOT the opteryx scan — that path (pool_reader) keeps the
-    # dict shape and never builds Python objects per row.
-    cdef list out = [None] * num_rows
-    cdef Py_ssize_t i, vi = 0, off = 0, r, j, cnt
-    cdef bint has_v = col.valid_bits.size() > 0
-    cdef uint8_t cw
-    # Unsigned columns store the raw magnitude in signed int32/int64 slots. Emit
-    # NON-NEGATIVE Python ints (reinterpret the bits) so the caller can build a
-    # DRAKEN_UINT64 vector — a plain `<int64_t>` cast would sign-extend a uint32
-    # (4e9 -> -294967296) or hand back a negative int64 for a uint64 > 2**63.
-    # Mirrors the array leaf path (`_array_leaf_values`).
-    cdef bint uns = col.is_unsigned
-    if _decoded_has_dictionary(col):
-        if not col.dict_codes_array.empty():
-            cw = col.code_width if col.code_width in (1, 2, 4) else 1
-            for i in range(num_rows):
-                if has_v and not _row_valid(col, i):
-                    continue
-                if from_int32:
-                    if uns:
-                        out[i] = <uint64_t><uint32_t>col.dict_int32_values[_read_code(col.dict_codes_array, i, cw)]
-                    else:
-                        out[i] = <int64_t>col.dict_int32_values[_read_code(col.dict_codes_array, i, cw)]
-                else:
-                    if uns:
-                        out[i] = <uint64_t>col.dict_int64_values[_read_code(col.dict_codes_array, i, cw)]
-                    else:
-                        out[i] = col.dict_int64_values[_read_code(col.dict_codes_array, i, cw)]
-        else:
-            for i in range(num_rows):
-                if has_v and not _row_valid(col, i):
-                    continue
-                if from_int32:
-                    if uns:
-                        out[i] = <uint64_t><uint32_t>col.dict_int32_values[col.dict_indices[vi]]
-                    else:
-                        out[i] = <int64_t>col.dict_int32_values[col.dict_indices[vi]]
-                else:
-                    if uns:
-                        out[i] = <uint64_t>col.dict_int64_values[col.dict_indices[vi]]
-                    else:
-                        out[i] = col.dict_int64_values[col.dict_indices[vi]]
-                vi += 1
-        return out
-    if col.rle_run_lengths.size() > 0:
-        # rle_int64_values holds resolved values for both int64 and int32 (rle_path)
-        for r in range(col.rle_run_lengths.size()):
-            cnt = col.rle_run_lengths[r]
-            for j in range(cnt):
-                if uns:
-                    out[off + j] = <uint64_t>col.rle_int64_values[r]
-                else:
-                    out[off + j] = col.rle_int64_values[r]
-            off += cnt
-        return out
-    for i in range(num_rows):
-        if has_v and not _row_valid(col, i):
-            continue
-        if from_int32:
-            if uns:
-                out[i] = <uint64_t><uint32_t>col.int32_values[vi]
-            else:
-                out[i] = <int64_t>col.int32_values[vi]
-        else:
-            if uns:
-                out[i] = <uint64_t>col.int64_values[vi]
-            else:
-                out[i] = col.int64_values[vi]
-        vi += 1
-    return out
 
 
 # _DRAKEN_LK_IPV4 is defined once for the whole extension in rugo_native.pyx
@@ -854,25 +814,10 @@ cdef inline Vector _make_int_vector(parquet_reader.DecodedColumn& col,
     Width comes from the IntType annotation (`int_bit_width`); an unannotated
     column has no annotation to read, so its width is exactly what the physical
     type says — int32 on the wire is a 32-bit column, int64 is a 64-bit one.
-    `_int64_list` has already reinterpreted unsigned bits to non-negative Python
-    ints, which the unsigned builders require."""
-    cdef list vals = _int64_list(col, num_rows, from_int32)
-    cdef int32_t w = col.int_bit_width
-    if col.is_unsigned:
-        if w == 8:
-            return Vector(_dn.vector_uint8_from_sequence(vals))
-        if w == 16:
-            return Vector(_dn.vector_uint16_from_sequence(vals))
-        if w == 32:
-            return Vector(_dn.vector_uint32_from_sequence(vals))
-        return Vector(_dn.vector_uint64_from_sequence(vals))
-    if w == 8:
-        return Vector(_dn.vector_int8_from_sequence(vals))
-    if w == 16:
-        return Vector(_dn.vector_int16_from_sequence(vals))
-    if w == 32 or (w == 0 and from_int32):
-        return Vector(_dn.vector_int32_from_sequence(vals))
-    return Vector(_dn.vector_from_sequence(vals))
+    One native call per column; no Python object is created per row. The width
+    dispatch and the unsigned bit reinterpretation live in `rugo_int_vector` —
+    see the C++ block above for the shapes handled and the narrowing check."""
+    return Vector(rugo_int_vector(col, num_rows, from_int32))
 
 
 # DECIMAL materialization — native, zero Python objects per row.
@@ -930,10 +875,10 @@ cdef extern from *:
     }
 
     // Scatter the decoded unscaled values of `col` into out[0, num_rows).
-    // Mirrors _int64_list's four source shapes exactly (dict via packed codes,
+    // Covers the four source shapes (dict via packed codes,
     // dict via compact indices, RLE runs, plain compact values). Null rows get
     // 0 and their validity bit cleared; the RLE shape carries no per-row
-    // validity, matching _int64_list.
+    // validity. `_rugo_scatter_int` below is its plain-integer twin.
     // T is int64_t (width <= 8) or __int128 (width 9..16); DictT/PlainT let the
     // int64 tier read a physical int32 column without a second copy of the loop.
     template <typename T, typename DictT, typename PlainT>
@@ -1092,111 +1037,623 @@ cdef Vector _make_decimal_vector(parquet_reader.DecodedColumn& col, int32_t num_
     return Vector(rugo_decimal_vector(col, num_rows))
 
 
-cdef list _float64_list(parquet_reader.DecodedColumn& col, int32_t num_rows,
-                        bint from_float32):
-    # FLATTEN-TO-PYTHON BY DESIGN — standalone rugo reader endpoint; see
-    # `_int64_list` and the module banner. Not the opteryx scan path.
-    cdef list out = [None] * num_rows
-    cdef Py_ssize_t i, vi = 0, off = 0, r, j, cnt
-    cdef bint has_v = col.valid_bits.size() > 0
-    cdef uint8_t cw
-    if _decoded_has_dictionary(col):
-        if not col.dict_codes_array.empty():
-            cw = col.code_width if col.code_width in (1, 2, 4) else 1
-            for i in range(num_rows):
-                if has_v and not _row_valid(col, i):
-                    continue
-                if from_float32:
-                    out[i] = <double>col.dict_float32_values[_read_code(col.dict_codes_array, i, cw)]
-                else:
-                    out[i] = col.dict_float64_values[_read_code(col.dict_codes_array, i, cw)]
-        else:
-            for i in range(num_rows):
-                if has_v and not _row_valid(col, i):
-                    continue
-                if from_float32:
-                    out[i] = <double>col.dict_float32_values[col.dict_indices[vi]]
-                else:
-                    out[i] = col.dict_float64_values[col.dict_indices[vi]]
-                vi += 1
-        return out
-    if col.rle_run_lengths.size() > 0:
-        # rle_float64_values holds resolved values for both float64 and float32 (rle_path)
-        for r in range(col.rle_run_lengths.size()):
-            cnt = col.rle_run_lengths[r]
-            for j in range(cnt):
-                out[off + j] = col.rle_float64_values[r]
-            off += cnt
-        return out
-    for i in range(num_rows):
-        if has_v and not _row_valid(col, i):
-            continue
-        if from_float32:
-            out[i] = <double>col.float32_values[vi]
-        else:
-            out[i] = col.float64_values[vi]
-        vi += 1
-    return out
+# INT / FLOAT materialization — native, zero Python objects per row.
+#
+# These replace a per-row Python round trip (a list of PyLong/PyFloat, which
+# `vector_*_from_sequence` immediately parsed back out). MEASURED on a 1M-row
+# PLAIN int64 column: C++ decode 1.08 ms against 17.68 ms in that round trip —
+# 94% of the read was spent allocating and re-parsing Python objects no caller
+# ever saw, since every materializer here returns a Vector. Wall clock for that
+# read went 17.30 ms -> 1.57 ms. Same construction as the DECIMAL block: scatter the
+# decoded values into a draken_malloc'd buffer, build the validity bitmap, hand
+# both to the bridge.
+#
+# The four source shapes (dict via packed codes, dict via compact indices, RLE
+# runs, plain compact values) and their null handling are preserved exactly —
+# including the two behaviours that are easy to lose:
+#
+#   * UNSIGNED REINTERPRETATION. Unsigned columns store the raw magnitude in a
+#     signed int32/int64 slot. `MidT` is the same-width UNSIGNED type, so the
+#     single `(MidT)` cast reinterprets the bits exactly as the old
+#     `<uint64_t><uint32_t>` casts did — a plain widening would sign-extend
+#     4e9 to -294967296.
+#   * NARROWING IS CHECKED, NOT TRUNCATED. `vector_int8_from_sequence` and its
+#     siblings raise OverflowError("int8: value out of range") for a value that
+#     does not fit the DECLARED width. `_rugo_put_int` reproduces that, message
+#     for message; a silent C truncation here would turn a self-contradictory
+#     file into a wrong answer. The check is `if constexpr`-gated on the width
+#     pair, so the int64 and uint64 tiers compile to a bare store.
+#
+# FLOATS ARE CANONICALISED. `vector_float{32,64}_from_sequence` canonicalises
+# -0.0 to +0.0 and NaN payloads to a quiet NaN inside the nanobind constructor;
+# hashing and grouping key on RAW BITS, so skipping it splits one value across
+# two GROUP BY groups while `f = 0.0` matches both. Going around the constructor
+# means doing it here — the same `draken::ops::fp_canon` io_pipeline.hpp applies
+# on the engine path, and the trap its PRECONDITION comment warns about.
+cdef extern from *:
+    """
+    #include <limits>
+    #include <type_traits>
+    #include "ops/float_ops.h"   // draken::ops::fp_canon
+
+    // Store `v` narrowed to OutT, rejecting what the from_sequence constructor
+    // rejected. The range test exists only when OutT is strictly narrower than
+    // MidT; every other instantiation compiles to the bare store. OutT and MidT
+    // always share signedness (see the dispatch below), so one comparison pair
+    // covers both families.
+    template <typename OutT, typename MidT>
+    static inline bool _rugo_put_int(OutT* out, size_t i, MidT v, const char* tname) {
+        if constexpr (sizeof(OutT) < sizeof(MidT)) {
+            if constexpr (std::is_signed<OutT>::value) {
+                if (v < (MidT)std::numeric_limits<OutT>::min()) {
+                    PyErr_Format(PyExc_OverflowError, "%s: value out of range", tname);
+                    return false;
+                }
+            }
+            if (v > (MidT)std::numeric_limits<OutT>::max()) {
+                PyErr_Format(PyExc_OverflowError, "%s: value out of range", tname);
+                return false;
+            }
+        }
+        out[i] = (OutT)v;
+        return true;
+    }
+
+    // Scatter a decoded integer column into out[0, num_rows). Mirrors
+    // the four source shapes. Null rows get 0 and their validity bit
+    // cleared; the RLE shape carries no per-row validity, matching the list
+    // path. RleMidT is the reinterpretation for RLE values, which are held as
+    // int64 for BOTH the int32 and int64 tiers — so it is uint64/int64 and does
+    // NOT follow MidT's width.
+    template <typename OutT, typename MidT, typename RleMidT,
+              typename DictT, typename PlainT>
+    static bool _rugo_scatter_int(const DecodedColumn& col, int32_t num_rows,
+                                  const std::vector<DictT>& dict_vals,
+                                  const std::vector<PlainT>& plain_vals,
+                                  bool has_dict, bool is_rle,
+                                  OutT* out, uint8_t* validity, bool* has_nulls,
+                                  const char* tname) {
+        const bool has_v = !col.valid_bits.empty();
+        if (has_dict) {
+            const size_t dict_sz = dict_vals.size();
+            const bool use_codes = !col.dict_codes_array.empty();
+            const uint8_t cw = (col.code_width == 1 || col.code_width == 2 ||
+                                col.code_width == 4) ? col.code_width : 1;
+            size_t vi = 0;
+            for (int32_t i = 0; i < num_rows; ++i) {
+                if (has_v && !((col.valid_bits[i >> 3] >> (i & 7)) & 1)) {
+                    out[i] = 0;
+                    validity[i >> 3] &= (uint8_t)~(1u << (i & 7));
+                    *has_nulls = true;
+                    continue;
+                }
+                uint32_t code = use_codes
+                    ? _rugo_read_code(col.dict_codes_array, (size_t)i, cw)
+                    : (vi < col.dict_indices.size() ? col.dict_indices[vi++] : 0xFFFFFFFFu);
+                if ((size_t)code >= dict_sz) {  // fail safe on a corrupt/short code stream
+                    PyErr_SetString(PyExc_ValueError, "dictionary code out of range");
+                    return false;
+                }
+                if (!_rugo_put_int<OutT, MidT>(out, (size_t)i, (MidT)dict_vals[code], tname))
+                    return false;
+            }
+            return true;
+        }
+        if (is_rle) {
+            // Runs summing past num_rows would run off the end of `out` — the
+            // list path raised IndexError there, so fail rather than truncate.
+            size_t off = 0;
+            for (size_t r = 0; r < col.rle_run_lengths.size(); ++r) {
+                const size_t cnt = col.rle_run_lengths[r];
+                if (off + cnt > (size_t)num_rows) {
+                    PyErr_SetString(PyExc_ValueError,
+                        "RLE run lengths exceed the column's row count");
+                    return false;
+                }
+                const RleMidT val = (RleMidT)col.rle_int64_values[r];
+                for (size_t j = 0; j < cnt; ++j)
+                    if (!_rugo_put_int<OutT, RleMidT>(out, off + j, val, tname))
+                        return false;
+                off += cnt;
+            }
+            return true;
+        }
+        size_t vi = 0;
+        const size_t avail = plain_vals.size();
+        for (int32_t i = 0; i < num_rows; ++i) {
+            if (has_v && !((col.valid_bits[i >> 3] >> (i & 7)) & 1)) {
+                out[i] = 0;
+                validity[i >> 3] &= (uint8_t)~(1u << (i & 7));
+                *has_nulls = true;
+                continue;
+            }
+            if (vi >= avail) {  // value stream shorter than the valid-row count
+                PyErr_SetString(PyExc_ValueError,
+                    "value stream shorter than the column's valid row count");
+                return false;
+            }
+            if (!_rugo_put_int<OutT, MidT>(out, (size_t)i, (MidT)plain_vals[vi++], tname))
+                return false;
+        }
+        return true;
+    }
+
+    template <typename OutT, bool FROM32, bool UNS>
+    static PyObject* _rugo_build_int(const DecodedColumn& col, int32_t num_rows,
+                                     bool has_dict, bool is_rle,
+                                     DrakenType dtype, const char* tname) {
+        using MidT = std::conditional_t<UNS,
+                         std::conditional_t<FROM32, uint32_t, uint64_t>,
+                         std::conditional_t<FROM32, int32_t,  int64_t>>;
+        using RleMidT = std::conditional_t<UNS, uint64_t, int64_t>;
+        const uint32_t length = (uint32_t)(num_rows > 0 ? num_rows : 0);
+        const size_t   slots  = length > 0u ? length : 1u;
+
+        uint8_t* validity = _rugo_alloc_validity(length);
+        if (!validity) return PyErr_NoMemory();
+        OutT* data = (OutT*)draken_malloc(slots * sizeof(OutT));
+        if (!data) { draken_free(validity); return PyErr_NoMemory(); }
+        bool has_nulls = false;
+
+        bool ok;
+        if constexpr (FROM32)
+            ok = _rugo_scatter_int<OutT, MidT, RleMidT, int32_t, int32_t>(
+                     col, num_rows, col.dict_int32_values, col.int32_values,
+                     has_dict, is_rle, data, validity, &has_nulls, tname);
+        else
+            ok = _rugo_scatter_int<OutT, MidT, RleMidT, int64_t, int64_t>(
+                     col, num_rows, col.dict_int64_values, col.int64_values,
+                     has_dict, is_rle, data, validity, &has_nulls, tname);
+        if (!ok) { draken_free(data); draken_free(validity); return NULL; }
+        if (!has_nulls) { draken_free(validity); validity = NULL; }
+        return draken_vector_own_raw((void*)data, validity, length, dtype);
+    }
+
+    // Build an int Vector at the column's DECLARED width and signedness, so a
+    // write/read round trip returns the type it started with. Width comes from
+    // the IntType annotation; an unannotated column (0) takes its width from the
+    // physical type. This dispatch table mirrors `_make_int_vector` exactly.
+    static PyObject* rugo_int_vector(const DecodedColumn& col, int32_t num_rows,
+                                     bool from_int32) {
+        const int32_t w   = col.int_bit_width;
+        const bool    uns = col.is_unsigned;
+        const bool has_codes = !col.dict_codes_array.empty() || !col.dict_indices.empty();
+        const bool has_dict  = has_codes && (from_int32 ? !col.dict_int32_values.empty()
+                                                        : !col.dict_int64_values.empty());
+        const bool is_rle    = !has_dict && !col.rle_run_lengths.empty();
+
+    #define _RUGO_INT(OUTT, F32, U, DT, TN) \
+        _rugo_build_int<OUTT, F32, U>(col, num_rows, has_dict, is_rle, DT, TN)
+
+        if (from_int32) {
+            if (uns) {
+                if (w == 8)  return _RUGO_INT(uint8_t,  true, true, DRAKEN_UINT8,  "uint8");
+                if (w == 16) return _RUGO_INT(uint16_t, true, true, DRAKEN_UINT16, "uint16");
+                if (w == 32) return _RUGO_INT(uint32_t, true, true, DRAKEN_UINT32, "uint32");
+                return _RUGO_INT(uint64_t, true, true, DRAKEN_UINT64, "uint64");
+            }
+            if (w == 8)  return _RUGO_INT(int8_t,  true, false, DRAKEN_INT8,  "int8");
+            if (w == 16) return _RUGO_INT(int16_t, true, false, DRAKEN_INT16, "int16");
+            if (w == 32 || w == 0)
+                         return _RUGO_INT(int32_t, true, false, DRAKEN_INT32, "int32");
+            return _RUGO_INT(int64_t, true, false, DRAKEN_INT64, "int64");
+        }
+        if (uns) {
+            if (w == 8)  return _RUGO_INT(uint8_t,  false, true, DRAKEN_UINT8,  "uint8");
+            if (w == 16) return _RUGO_INT(uint16_t, false, true, DRAKEN_UINT16, "uint16");
+            if (w == 32) return _RUGO_INT(uint32_t, false, true, DRAKEN_UINT32, "uint32");
+            return _RUGO_INT(uint64_t, false, true, DRAKEN_UINT64, "uint64");
+        }
+        if (w == 8)  return _RUGO_INT(int8_t,  false, false, DRAKEN_INT8,  "int8");
+        if (w == 16) return _RUGO_INT(int16_t, false, false, DRAKEN_INT16, "int16");
+        if (w == 32) return _RUGO_INT(int32_t, false, false, DRAKEN_INT32, "int32");
+        return _RUGO_INT(int64_t, false, false, DRAKEN_INT64, "int64");
+    #undef _RUGO_INT
+    }
+
+    // Scatter a decoded float column into out[0, num_rows). Mirrors
+    // the four source shapes. Every value passes through fp_canon on the
+    // way in — see the banner above this block.
+    template <typename OutT, typename DictT, typename PlainT>
+    static bool _rugo_scatter_float(const DecodedColumn& col, int32_t num_rows,
+                                    const std::vector<DictT>& dict_vals,
+                                    const std::vector<PlainT>& plain_vals,
+                                    bool has_dict, bool is_rle,
+                                    OutT* out, uint8_t* validity, bool* has_nulls) {
+        const bool has_v = !col.valid_bits.empty();
+        if (has_dict) {
+            const size_t dict_sz = dict_vals.size();
+            const bool use_codes = !col.dict_codes_array.empty();
+            const uint8_t cw = (col.code_width == 1 || col.code_width == 2 ||
+                                col.code_width == 4) ? col.code_width : 1;
+            size_t vi = 0;
+            for (int32_t i = 0; i < num_rows; ++i) {
+                if (has_v && !((col.valid_bits[i >> 3] >> (i & 7)) & 1)) {
+                    out[i] = (OutT)0;
+                    validity[i >> 3] &= (uint8_t)~(1u << (i & 7));
+                    *has_nulls = true;
+                    continue;
+                }
+                uint32_t code = use_codes
+                    ? _rugo_read_code(col.dict_codes_array, (size_t)i, cw)
+                    : (vi < col.dict_indices.size() ? col.dict_indices[vi++] : 0xFFFFFFFFu);
+                if ((size_t)code >= dict_sz) {
+                    PyErr_SetString(PyExc_ValueError, "dictionary code out of range");
+                    return false;
+                }
+                out[i] = draken::ops::fp_canon((OutT)dict_vals[code]);
+            }
+            return true;
+        }
+        if (is_rle) {
+            size_t off = 0;
+            for (size_t r = 0; r < col.rle_run_lengths.size(); ++r) {
+                const size_t cnt = col.rle_run_lengths[r];
+                if (off + cnt > (size_t)num_rows) {
+                    PyErr_SetString(PyExc_ValueError,
+                        "RLE run lengths exceed the column's row count");
+                    return false;
+                }
+                // rle_float64_values holds resolved values for float32 AND
+                // float64; the narrowing to float is exact for a binary32 value.
+                const OutT val = draken::ops::fp_canon((OutT)col.rle_float64_values[r]);
+                for (size_t j = 0; j < cnt; ++j) out[off + j] = val;
+                off += cnt;
+            }
+            return true;
+        }
+        size_t vi = 0;
+        const size_t avail = plain_vals.size();
+        for (int32_t i = 0; i < num_rows; ++i) {
+            if (has_v && !((col.valid_bits[i >> 3] >> (i & 7)) & 1)) {
+                out[i] = (OutT)0;
+                validity[i >> 3] &= (uint8_t)~(1u << (i & 7));
+                *has_nulls = true;
+                continue;
+            }
+            if (vi >= avail) {
+                PyErr_SetString(PyExc_ValueError,
+                    "value stream shorter than the column's valid row count");
+                return false;
+            }
+            out[i] = draken::ops::fp_canon((OutT)plain_vals[vi++]);
+        }
+        return true;
+    }
+
+    // Build a FLOAT32 or FLOAT64 Vector from a decoded parquet float column.
+    // A parquet `float` column becomes a FLOAT32 vector, not a widened FLOAT64
+    // one: the CARRIER was the bug the list path fixed, and a FLOAT64 tag makes
+    // every consumer read the column at 8 bytes.
+    static PyObject* rugo_float_vector(const DecodedColumn& col, int32_t num_rows,
+                                       bool from_float32) {
+        const uint32_t length = (uint32_t)(num_rows > 0 ? num_rows : 0);
+        const size_t   slots  = length > 0u ? length : 1u;
+        const bool has_codes = !col.dict_codes_array.empty() || !col.dict_indices.empty();
+        const bool has_dict  = has_codes && (from_float32 ? !col.dict_float32_values.empty()
+                                                          : !col.dict_float64_values.empty());
+        const bool is_rle    = !has_dict && !col.rle_run_lengths.empty();
+
+        uint8_t* validity = _rugo_alloc_validity(length);
+        if (!validity) return PyErr_NoMemory();
+        bool has_nulls = false;
+
+        if (from_float32) {
+            float* data = (float*)draken_malloc(slots * sizeof(float));
+            if (!data) { draken_free(validity); return PyErr_NoMemory(); }
+            if (!_rugo_scatter_float<float, float, float>(
+                    col, num_rows, col.dict_float32_values, col.float32_values,
+                    has_dict, is_rle, data, validity, &has_nulls)) {
+                draken_free(data); draken_free(validity); return NULL;
+            }
+            if (!has_nulls) { draken_free(validity); validity = NULL; }
+            return draken_vector_own_raw((void*)data, validity, length, DRAKEN_FLOAT32);
+        }
+        double* data = (double*)draken_malloc(slots * sizeof(double));
+        if (!data) { draken_free(validity); return PyErr_NoMemory(); }
+        if (!_rugo_scatter_float<double, double, double>(
+                col, num_rows, col.dict_float64_values, col.float64_values,
+                has_dict, is_rle, data, validity, &has_nulls)) {
+            draken_free(data); draken_free(validity); return NULL;
+        }
+        if (!has_nulls) { draken_free(validity); validity = NULL; }
+        return draken_vector_own_raw((void*)data, validity, length, DRAKEN_FLOAT64);
+    }
+    """
+    object rugo_int_vector(parquet_reader.DecodedColumn& col, int32_t num_rows, bint from_int32)
+    object rugo_float_vector(parquet_reader.DecodedColumn& col, int32_t num_rows, bint from_float32)
 
 
-cdef list _string_list(parquet_reader.DecodedColumn& col, int32_t num_rows):
-    # FLATTEN-TO-PYTHON BY DESIGN — standalone rugo reader endpoint; see
-    # `_int64_list` and the module banner. Not the opteryx scan path.
-    cdef list out = [None] * num_rows
-    cdef Py_ssize_t i, vi = 0, off = 0, r, j, cnt
-    cdef bint has_v = col.valid_bits.size() > 0
-    cdef uint8_t cw
-    cdef const uint8_t* arena
-    cdef uint32_t start
-    cdef int32_t ln
-    cdef bytes value
-    if _decoded_has_dictionary(col):
-        if not col.dict_codes_array.empty():
-            cw = col.code_width if col.code_width in (1, 2, 4) else 1
-            for i in range(num_rows):
-                if has_v and not _row_valid(col, i):
-                    continue
-                out[i] = _dict_str_at(col, _read_code(col.dict_codes_array, i, cw))
-        else:
-            for i in range(num_rows):
-                if has_v and not _row_valid(col, i):
-                    continue
-                out[i] = _dict_str_at(col, col.dict_indices[vi])
-                vi += 1
-        return out
-    if col.rle_run_lengths.size() > 0:
-        # Skip-dense RLE output (non-nullable dict byte_array column, mirrors
-        # `_int64_list`/`_float64_list`): each run's resolved string bytes live in
-        # rle_str_arena at [rle_str_offsets[r], +rle_str_lens[r]), repeated
-        # rle_run_lengths[r] times.
-        arena = col.rle_str_arena.data()
-        for r in range(col.rle_run_lengths.size()):
-            cnt = col.rle_run_lengths[r]
-            start = col.rle_str_offsets[r]
-            ln = col.rle_str_lens[r]
-            value = (<char*>(arena + start))[:ln]
-            for j in range(cnt):
-                out[off + j] = value
-            off += cnt
-        return out
-    for i in range(num_rows):
-        if has_v and not _row_valid(col, i):
-            continue
-        out[i] = _dense_str_at(col, vi)
-        vi += 1
-    return out
+# BYTE_ARRAY materialization — native, zero Python objects per row.
+#
+# Replaces a `vector_from_string_sequence` round trip that built one PyBytes per
+# row only to have the constructor parse it straight back out. MEASURED on
+# 100k rows x 4 string columns: 6.63 ms -> 1.42 ms.
+#
+# The output is a DENSE VARCHAR/VARBINARY vector — byte-for-byte the shape the
+# list path produced, including for a dict-encoded column, whose repeated values
+# are expanded per row exactly as the flatten did. `is_text` is the caller's
+# `_logical_is_string` verdict, kept in Cython so the String-annotation
+# discriminator stays in ONE place (shared with the statistics path and the
+# array leaf) rather than being re-derived here.
+#
+# hash32 is NOT computed: the slot field is dead (see string_slot.h), and this
+# is the same `draken_build_string_slot` the engine path and the jsonl builder
+# use. A column that is a downstream key gets its seed elsewhere.
+cdef extern from *:
+    """
+    #include <cstdlib>
+    #include <cstring>
+    #include "core/string_slot.h"
+
+    // Per-row source index, resolved once for all four shapes so the two build
+    // passes below are shape-blind. _RUGO_STR_NULL marks a null row.
+    #define _RUGO_STR_NULL 0xFFFFFFFFu
+
+    // Resolve row -> index into (offs, lens) for the column's shape, and hand
+    // back the arena those offsets address.
+    static bool _rugo_str_resolve(const DecodedColumn& col, int32_t num_rows,
+                                  bool has_dict, bool is_rle, uint32_t* idx,
+                                  const uint8_t** base_out,
+                                  const uint32_t** offs_out, const int32_t** lens_out,
+                                  size_t* count_out) {
+        const bool has_v = !col.valid_bits.empty();
+        if (has_dict) {
+            *base_out = col.string_dict_arena.data();
+            *offs_out = col.string_dict_offsets.data();
+            *lens_out = col.string_dict_lens.data();
+            *count_out = col.string_dict_lens.size();
+            const bool use_codes = !col.dict_codes_array.empty();
+            const uint8_t cw = (col.code_width == 1 || col.code_width == 2 ||
+                                col.code_width == 4) ? col.code_width : 1;
+            size_t vi = 0;
+            for (int32_t i = 0; i < num_rows; ++i) {
+                if (has_v && !((col.valid_bits[i >> 3] >> (i & 7)) & 1)) {
+                    idx[i] = _RUGO_STR_NULL;
+                    continue;
+                }
+                idx[i] = use_codes
+                    ? _rugo_read_code(col.dict_codes_array, (size_t)i, cw)
+                    : (vi < col.dict_indices.size() ? col.dict_indices[vi++] : _RUGO_STR_NULL);
+            }
+            return true;
+        }
+        if (is_rle) {
+            // Skip-dense RLE: run r's bytes live at rle_str_offsets[r] for
+            // rle_str_lens[r]. No per-row validity on this shape.
+            *base_out = col.rle_str_arena.data();
+            *offs_out = col.rle_str_offsets.data();
+            *lens_out = col.rle_str_lens.data();
+            *count_out = col.rle_str_lens.size();
+            size_t off = 0;
+            for (size_t r = 0; r < col.rle_run_lengths.size(); ++r) {
+                const size_t cnt = col.rle_run_lengths[r];
+                if (off + cnt > (size_t)num_rows) {
+                    PyErr_SetString(PyExc_ValueError,
+                        "RLE run lengths exceed the column's row count");
+                    return false;
+                }
+                for (size_t j = 0; j < cnt; ++j) idx[off + j] = (uint32_t)r;
+                off += cnt;
+            }
+            for (size_t i = off; i < (size_t)num_rows; ++i) idx[i] = _RUGO_STR_NULL;
+            return true;
+        }
+        *base_out = col.string_arena.data();
+        *offs_out = col.string_offsets.data();
+        *lens_out = col.string_lens.data();
+        *count_out = col.string_lens.size();
+        size_t vi = 0;
+        for (int32_t i = 0; i < num_rows; ++i) {
+            if (has_v && !((col.valid_bits[i >> 3] >> (i & 7)) & 1)) {
+                idx[i] = _RUGO_STR_NULL;
+                continue;
+            }
+            idx[i] = (uint32_t)vi++;
+        }
+        return true;
+    }
+
+    // Build a dense VARCHAR/VARBINARY Vector from a decoded BYTE_ARRAY column.
+    // Returns a NEW reference, or NULL with a Python exception set.
+    static PyObject* rugo_string_vector(const DecodedColumn& col, int32_t num_rows,
+                                        bool is_text) {
+        const uint32_t length = (uint32_t)(num_rows > 0 ? num_rows : 0);
+        const bool has_codes = !col.dict_codes_array.empty() || !col.dict_indices.empty();
+        const bool has_dict  = has_codes && !col.string_dict_lens.empty();
+        const bool is_rle    = !has_dict && !col.rle_run_lengths.empty();
+
+        uint32_t* idx = (uint32_t*)std::malloc((length > 0u ? length : 1u) * sizeof(uint32_t));
+        if (!idx) return PyErr_NoMemory();
+        const uint8_t*  base = nullptr;
+        const uint32_t* offs = nullptr;
+        const int32_t*  lens = nullptr;
+        size_t count = 0;
+        if (!_rugo_str_resolve(col, num_rows, has_dict, is_rle, idx,
+                               &base, &offs, &lens, &count)) {
+            std::free(idx);
+            return NULL;
+        }
+
+        // Pass 1 — size the arena and find the nulls.
+        size_t total_extern = 0;
+        bool has_nulls = false;
+        for (uint32_t i = 0; i < length; ++i) {
+            const uint32_t k = idx[i];
+            if (k == _RUGO_STR_NULL) { has_nulls = true; continue; }
+            if ((size_t)k >= count) {
+                std::free(idx);
+                PyErr_SetString(PyExc_ValueError, "dictionary code out of range");
+                return NULL;
+            }
+            const int32_t ln = lens[k];
+            if (ln > STR_INLINE_MAX) total_extern += (size_t)ln;
+        }
+        // Arena offsets are u32 — the same 4 GB cap the sequence constructor enforced.
+        if (total_extern > (size_t)UINT32_MAX) {
+            std::free(idx);
+            PyErr_SetString(PyExc_OverflowError,
+                "parquet byte_array column: total arena bytes exceed 4 GB limit");
+            return NULL;
+        }
+
+        // Pass 2 — write the arena and build the slots.
+        DrakenStringSlot* slots = (DrakenStringSlot*)draken_malloc(
+            (length > 0u ? length : 1u) * sizeof(DrakenStringSlot));
+        if (!slots) { std::free(idx); return PyErr_NoMemory(); }
+        uint8_t* arena = nullptr;
+        if (total_extern > 0u) {
+            arena = (uint8_t*)draken_malloc(total_extern);
+            if (!arena) { draken_free(slots); std::free(idx); return PyErr_NoMemory(); }
+        }
+        uint8_t* validity = nullptr;
+        if (has_nulls) {
+            validity = _rugo_alloc_validity(length);
+            if (!validity) {
+                draken_free(slots); if (arena) draken_free(arena); std::free(idx);
+                return PyErr_NoMemory();
+            }
+        }
+
+        uint32_t apos = 0;
+        for (uint32_t i = 0; i < length; ++i) {
+            const uint32_t k = idx[i];
+            if (k == _RUGO_STR_NULL) {
+                str_init_null(&slots[i]);
+                validity[i >> 3] &= (uint8_t)~(1u << (i & 7));
+                continue;
+            }
+            const uint8_t* sp = base + offs[k];
+            const uint32_t ln = (uint32_t)lens[k];
+            if (ln > STR_INLINE_MAX) {
+                std::memcpy(arena + apos, sp, ln);
+                draken_build_string_slot(&slots[i], arena + apos, ln, apos);
+                apos += ln;
+            } else {
+                draken_build_string_slot(&slots[i], sp, ln, 0u);
+            }
+        }
+        std::free(idx);
+
+        // draken_vector_own_string takes ownership of all three buffers on entry,
+        // whether it succeeds or fails — do not free them after this call.
+        return draken_vector_own_string(slots, arena, (size_t)total_extern, validity,
+                                        length,
+                                        is_text ? DRAKEN_VARCHAR : DRAKEN_VARBINARY);
+    }
+    """
+    object rugo_string_vector(parquet_reader.DecodedColumn& col, int32_t num_rows, bint is_text)
 
 
-cdef list _bool_list(parquet_reader.DecodedColumn& col, int32_t num_rows):
-    cdef list out = [None] * num_rows
-    cdef Py_ssize_t i, vi = 0
-    cdef bint has_v = col.valid_bits.size() > 0
-    for i in range(num_rows):
-        if has_v and not _row_valid(col, i):
-            continue
-        out[i] = col.boolean_values[vi] != 0
-        vi += 1
-    return out
+# BOOLEAN materialization — native, zero Python objects per row.
+#
+# Replaces a `vector_from_bool_sequence` round trip. MEASURED on a 1M-row
+# BOOLEAN column: 5.93 ms of an 8.08 ms read was the per-row PyBool round trip;
+# now 0.27 ms, and the read (2.44 ms) is faster than pyarrow's (2.94 ms).
+#
+# Layout matches `make_bool_from_sequence` exactly: data is BIT-PACKED, 1 bit
+# per row, LSB-first, null rows' value bit left 0. The validity tail mask is
+# NOT the same call the other builders here make — the bool constructor is the
+# one sequence constructor that masks validity bits past `length` so they do
+# not look valid, so this reproduces that rather than using the shared
+# `_rugo_alloc_validity`.
+#
+# BOOLEAN has one source shape: the plain compact value stream. Parquet's
+# boolean columns carry neither a dictionary nor rugo's RLE-run path.
+cdef extern from *:
+    """
+    static PyObject* rugo_bool_vector(const DecodedColumn& col, int32_t num_rows) {
+        const uint32_t n      = (uint32_t)(num_rows > 0 ? num_rows : 0);
+        const uint32_t bm     = (n + 7u) >> 3;
+        const uint32_t padded = ((bm + 7u) & ~7u);
+        const size_t   alloc  = (padded > 0u) ? (size_t)padded : 8u;
+
+        uint8_t* data = (uint8_t*)draken_malloc(alloc);
+        if (!data) return PyErr_NoMemory();
+        std::memset(data, 0, alloc);
+
+        uint8_t* validity = (uint8_t*)draken_malloc(alloc);
+        if (!validity) { draken_free(data); return PyErr_NoMemory(); }
+        std::memset(validity, 0xFF, alloc);
+
+        const bool   has_v = !col.valid_bits.empty();
+        const size_t avail = col.boolean_values.size();
+        const uint8_t* bv  = col.boolean_values.data();
+        bool has_nulls = false;
+
+        if (!has_v) {
+            // Dense: every row takes a value, so the length check is one compare
+            // for the whole column and the bits accumulate in a register — no
+            // per-row bounds test and no read-modify-write on `data`.
+            if (avail < (size_t)n) {
+                draken_free(data); draken_free(validity);
+                PyErr_SetString(PyExc_ValueError,
+                    "value stream shorter than the column's valid row count");
+                return NULL;
+            }
+            uint32_t i = 0u;
+            for (; i + 8u <= n; i += 8u) {
+                uint8_t byte = 0u;
+                for (uint32_t b = 0u; b < 8u; ++b)
+                    byte |= (uint8_t)((bv[i + b] != 0) << b);
+                data[i >> 3] = byte;
+            }
+            uint8_t tail = 0u;
+            for (uint32_t b = 0u; i + b < n; ++b)
+                tail |= (uint8_t)((bv[i + b] != 0) << b);
+            if (i < n) data[i >> 3] = tail;
+        } else {
+            // A column written OPTIONAL carries valid_bits even when nothing in
+            // it is null — which is what pyarrow emits by default, so this is
+            // the COMMON path, not the exceptional one. Accumulate both bytes in
+            // registers and store each once: a per-row `data[i>>3] |= ...` is a
+            // read-modify-write with a loop-carried dependency across every
+            // group of 8, and measured 5x the cost per row of the plain
+            // independent stores the int/float builders do.
+            const uint8_t* vbits = col.valid_bits.data();
+            const size_t   vbn   = col.valid_bits.size();
+            // Valid rows can never exceed n, so one compare retires the bounds
+            // test for the whole column in the case that matters.
+            const bool unchecked = (avail >= (size_t)n);
+            size_t vi = 0;
+            for (uint32_t base = 0u; base < n; base += 8u) {
+                const uint32_t lim = (n - base) < 8u ? (n - base) : 8u;
+                const uint8_t  vin = ((base >> 3) < vbn) ? vbits[base >> 3] : 0u;
+                uint8_t dbyte = 0u, vbyte = 0u;
+                for (uint32_t b = 0u; b < lim; ++b) {
+                    if (!((vin >> b) & 1)) { has_nulls = true; continue; }
+                    vbyte |= (uint8_t)(1u << b);
+                    if (!unchecked && vi >= avail) {
+                        draken_free(data); draken_free(validity);
+                        PyErr_SetString(PyExc_ValueError,
+                            "value stream shorter than the column's valid row count");
+                        return NULL;
+                    }
+                    dbyte |= (uint8_t)((bv[vi++] != 0) << b);
+                }
+                data[base >> 3]     = dbyte;
+                validity[base >> 3] = vbyte;
+            }
+        }
+
+        if (has_nulls) {
+            // Tail bits past n must not look valid (mirrors the constructor).
+            if ((n & 7u) != 0u && bm > 0u)
+                validity[bm - 1u] &= (uint8_t)((1u << (n & 7u)) - 1u);
+        } else {
+            draken_free(validity);
+            validity = NULL;
+        }
+        return draken_vector_own_raw((void*)data, validity, n, DRAKEN_BOOL);
+    }
+    """
+    object rugo_bool_vector(parquet_reader.DecodedColumn& col, int32_t num_rows)
+
+
+
+
+
+
 
 
 cdef Vector _make_int64_from_int32_vector(
@@ -1215,11 +1672,9 @@ cdef Vector _make_float32_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
     # A parquet `float` column becomes a FLOAT32 vector, not a widened FLOAT64
-    # one. `_float64_list` hands back Python floats (doubles) that each hold an
-    # exact binary32 value, so the narrowing here is exact by construction — it
-    # is the CARRIER that was wrong before, not the values: a FLOAT64-tagged
-    # vector makes every consumer read the column at 8 bytes.
-    return Vector(_dn.vector_float32_from_sequence(_float64_list(decoded_col, num_rows, True)))
+    # one — it is the CARRIER that was wrong before, not the values: a
+    # FLOAT64-tagged vector makes every consumer read the column at 8 bytes.
+    return Vector(rugo_float_vector(decoded_col, num_rows, True))
 
 
 cdef Vector _make_int32_as_int64_vector(
@@ -1231,13 +1686,24 @@ cdef Vector _make_int32_as_int64_vector(
 cdef Vector _make_float64_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    return Vector(_dn.vector_float64_from_sequence(_float64_list(decoded_col, num_rows, False)))
+    return Vector(rugo_float_vector(decoded_col, num_rows, False))
 
 
 cdef Vector _make_string_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    return Vector(_dn.vector_from_string_sequence(_string_list(decoded_col, num_rows)))
+    """THE byte_array scalar materializer — dense, dictionary and constant alike.
+
+    BYTE_ARRAY carries both VARCHAR and opaque BINARY; parquet stores them
+    identically on the wire and only the String annotation separates them, so
+    the annotation — via `_logical_is_string`, the one discriminator, shared
+    with the statistics path and the array leaf — decides the vector's type
+    tag. Storage is byte-identical either way; only the tag differs, and getting
+    it wrong makes every value of an unannotated column raise UnicodeDecodeError
+    on access while also lying about the type to anything that reads it.
+    """
+    cdef bint is_text = _logical_is_string(_logical_str(decoded_col.logical_type))
+    return Vector(rugo_string_vector(decoded_col, num_rows, is_text))
 
 
 
@@ -1417,19 +1883,22 @@ cdef Vector _make_typed_int64_from_int32_dictionary_vector(
 cdef Vector _make_typed_float64_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    return Vector(_dn.vector_float64_from_sequence(_float64_list(decoded_col, num_rows, False)))
+    return Vector(rugo_float_vector(decoded_col, num_rows, False))
 
 
 cdef Vector _make_typed_float32_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    return Vector(_dn.vector_float32_from_sequence(_float64_list(decoded_col, num_rows, True)))
+    return Vector(rugo_float_vector(decoded_col, num_rows, True))
 
 
 cdef Vector _make_typed_string_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    return Vector(_dn.vector_from_string_sequence(_string_list(decoded_col, num_rows)))
+    # Dispatch name only: `rugo_string_vector` resolves the dict shape and the
+    # dense shape through the same resolver, so there is ONE byte_array
+    # materializer and the text/binary tag cannot drift between the two.
+    return _make_string_vector(decoded_col, num_rows)
 
 
 cdef Vector _make_dictionary_vector(
@@ -1439,11 +1908,12 @@ cdef Vector _make_dictionary_vector(
     STANDALONE reader endpoint (see module banner).
 
     NOTE: despite the name, this does NOT preserve the on-disk dictionary. It
-    routes to the `_make_typed_*_dictionary_vector` makers, which FLATTEN the
-    column to a per-row Python list (`_int64_list` / `_string_list`) and rebuild
-    a dense/auto-dict vector — because this path serves Python consumers
-    (read_parquet / catalog / tests), not the engine. The opteryx execution scan
-    keeps dict shape natively in pool_reader; it never calls this.
+    routes to the `_make_typed_*_dictionary_vector` makers, which EXPAND the
+    column per row into a dense vector — because this path serves Python
+    consumers (read_parquet / catalog / tests), not the engine. The expansion is
+    native (no Python object per row); it is the dict SHAPE that is dropped, not
+    the cost that is paid. The opteryx execution scan keeps dict shape natively
+    in pool_reader; it never calls this.
     """
     cdef bytes col_type = decoded_col.type
 
@@ -1471,18 +1941,18 @@ cdef Vector _make_typed_constant_vector(
     if col_type == b"int32":
         return _make_int_vector(decoded_col, num_rows, True)
     if col_type == b"float64":
-        return Vector(_dn.vector_float64_from_sequence(_float64_list(decoded_col, num_rows, False)))
+        return Vector(rugo_float_vector(decoded_col, num_rows, False))
     if col_type == b"float32":
-        return Vector(_dn.vector_float32_from_sequence(_float64_list(decoded_col, num_rows, True)))
+        return Vector(rugo_float_vector(decoded_col, num_rows, True))
     if col_type == b"byte_array":
-        return Vector(_dn.vector_from_string_sequence(_string_list(decoded_col, num_rows)))
+        return _make_string_vector(decoded_col, num_rows)
     raise ValueError(f"unsupported constant column type: {col_type!r}")
 
 
 cdef Vector _make_bool_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    return Vector(_dn.vector_from_bool_sequence(_bool_list(decoded_col, num_rows)))
+    return Vector(rugo_bool_vector(decoded_col, num_rows))
 
 
 # --- list / array reconstruction ---------------------------------------------
@@ -1499,18 +1969,24 @@ cdef Vector _make_bool_vector(
 # stream only when def == max_def_level (present element).
 #
 # Element types: int32/int64 and their unsigned/narrow annotations, float32/
-# float64, bool, and byte_array (-> VARCHAR str) — each kept at its DECLARED
-# width, never widened (see `_make_array_vector`). Leaf VALUES are materialized
-# as plain Python scalars (int / float / bool / str); the width is carried by
+# float64, bool, and byte_array (-> VARCHAR str when the leaf carries a String
+# annotation, else VARBINARY bytes) — each kept at its DECLARED width, never
+# widened (see `_make_array_vector`). Leaf VALUES are materialized as plain
+# Python scalars (int / float / bool / str / bytes); the width is carried by
 # the `el_type` handed to `vector_array_from_sequence`, not inferred from them.
 
 
-cdef list _array_leaf_values(parquet_reader.DecodedColumn& col):
+cdef list _array_leaf_values(parquet_reader.DecodedColumn& col, bint leaf_is_text):
     """Present leaf values, in stream order, as a Python list.
 
     Mirrors the per-type/per-encoding accessors used by the scalar
     materializers (plain dense, dict via packed per-level codes, dict via
-    compact present-order indices)."""
+    compact present-order indices).
+
+    `leaf_is_text` comes from `_logical_is_string` and governs the BYTE_ARRAY
+    branch ONLY: text leaves are decoded to `str`, binary leaves handed back as
+    opaque `bytes`. The caller must derive it from the same predicate it uses to
+    pick `el_type`, so the values and the declared child type cannot disagree."""
     cdef bytes col_type = col.type
     cdef Py_ssize_t n_levels = col.def_levels.size()
     cdef int32_t max_def = col.max_def_level
@@ -1555,18 +2031,31 @@ cdef list _array_leaf_values(parquet_reader.DecodedColumn& col):
             else:
                 vals.append(iraw)
     elif col_type == b"byte_array":
-        # Draken's array constructor detects a string child by PyUnicode, so leaf
-        # values must be `str` (utf-8), matching the scalar string path's logical
-        # VARCHAR semantics.
-        for i in range(n_levels):
-            if col.def_levels[i] != max_def:
-                continue
-            if use_codes:
-                vals.append(_dict_str_at(col, _read_code(col.dict_codes_array, i, cw)).decode("utf-8"))
-            elif has_dict:
-                vals.append(_dict_str_at(col, col.dict_indices[vi]).decode("utf-8")); vi += 1
-            else:
-                vals.append(_dense_str_at(col, vi).decode("utf-8")); vi += 1
+        # Draken's array constructor discriminates the child by the Python type
+        # of the leaf: PyUnicode -> VARCHAR, PyBytes -> VARBINARY. So the leaf's
+        # String annotation, not its physical type, decides which we emit — an
+        # unannotated BYTE_ARRAY leaf is opaque binary and decoding it would both
+        # lie about the type and raise on any value that is not valid UTF-8.
+        if leaf_is_text:
+            for i in range(n_levels):
+                if col.def_levels[i] != max_def:
+                    continue
+                if use_codes:
+                    vals.append(_dict_str_at(col, _read_code(col.dict_codes_array, i, cw)).decode("utf-8"))
+                elif has_dict:
+                    vals.append(_dict_str_at(col, col.dict_indices[vi]).decode("utf-8")); vi += 1
+                else:
+                    vals.append(_dense_str_at(col, vi).decode("utf-8")); vi += 1
+        else:
+            for i in range(n_levels):
+                if col.def_levels[i] != max_def:
+                    continue
+                if use_codes:
+                    vals.append(_dict_str_at(col, _read_code(col.dict_codes_array, i, cw)))
+                elif has_dict:
+                    vals.append(_dict_str_at(col, col.dict_indices[vi])); vi += 1
+                else:
+                    vals.append(_dense_str_at(col, vi)); vi += 1
     elif col_type == b"float64":
         for i in range(n_levels):
             if col.def_levels[i] != max_def:
@@ -1620,7 +2109,10 @@ cdef Vector _make_array_vector(
             % (D, max_def, 2 * D + 1)
         )
 
-    cdef list leaf_vals = _array_leaf_values(decoded_col)  # raises for float/bool
+    # ONE derivation of the leaf's text/binary character, shared by the value
+    # materialization below and the `el_type` it is tagged with.
+    cdef bint leaf_is_text = _logical_is_string(_logical_str(decoded_col.logical_type))
+    cdef list leaf_vals = _array_leaf_values(decoded_col, leaf_is_text)
     cdef list out = []
     # open_lists[k] is the currently-open list at depth k (1..D); index 0 unused.
     cdef list open_lists = [None] * (D + 1)
@@ -1670,7 +2162,12 @@ cdef Vector _make_array_vector(
     # list<int32> coming back as a list<int64> (values identical, type a lie).
     cdef int32_t leaf_bits = decoded_col.int_bit_width
     if col_type == b"byte_array":
-        el_type = _DK_EL_VARCHAR
+        # BYTE_ARRAY carries both VARCHAR and opaque BINARY; only the String
+        # annotation separates them (see `_logical_is_string`). This must agree
+        # with what `_array_leaf_values` emitted above — it is the same `bint`,
+        # so it cannot drift — and it is what types an all-null/all-empty list
+        # column, where there is no leaf value for draken to infer from.
+        el_type = _DK_EL_VARCHAR if leaf_is_text else _DK_EL_VARBINARY
     elif col_type == b"int32":
         if decoded_col.is_unsigned:
             if leaf_bits == 8:
@@ -2121,158 +2618,6 @@ def stream_parquet_from_path(str path, column_names=None, row_group_mask=None):
         with nogil:
             unmap_memory_c(mapped_ptr, mapped_len)
 
-
-def decode_column_from_chunk_to_python(chunk_bytes, col_stats):
-    """Decode a single column from an isolated range-read buffer, returning a Python list.
-
-    For compatibility: returns a Python list instead of a Draken vector.
-    Prefer decode_column_from_chunk() which returns Draken vectors directly.
-
-    Args:
-        chunk_bytes: bytes / bytearray / memoryview — the raw column chunk.
-        col_stats:   dict — one column entry from read_metadata()['row_groups'][rg]['columns'][i].
-
-    Returns a Python list of decoded values, or None on failure.
-    """
-    cdef const uint8_t[::1] mem_view
-    cdef size_t size
-    cdef parquet_reader.ColumnStats cpp_col
-
-    if isinstance(chunk_bytes, (bytes, bytearray)):
-        mem_view = memoryview(chunk_bytes).cast('B')
-    elif isinstance(chunk_bytes, memoryview):
-        mem_view = chunk_bytes.cast('B')
-    else:
-        raise TypeError("chunk_bytes must be bytes, bytearray, or memoryview")
-
-    size = mem_view.shape[0]
-
-    # -----------------------------------------------------------------------
-    # Compute base_offset: the earliest byte of this column chunk in the file.
-    # All offsets stored in col_stats are absolute file positions; we subtract
-    # base_offset so they become offsets into chunk_bytes.
-    # -----------------------------------------------------------------------
-    dict_off = col_stats.get('dictionary_page_offset')
-    data_off = col_stats['data_page_offset']
-
-    if dict_off is not None and dict_off >= 0 and dict_off < data_off:
-        base_offset = dict_off
-    else:
-        base_offset = data_off
-
-    # -----------------------------------------------------------------------
-    # Populate cpp_col with chunk-relative offsets
-    # -----------------------------------------------------------------------
-    cpp_col.name = (col_stats.get('name') or '').encode('utf-8')
-    cpp_col.physical_type = (col_stats.get('physical_type') or '').encode('utf-8')
-
-    logical = col_stats.get('logical_type') or ''
-    cpp_col.logical_type = logical.encode('utf-8')
-
-    cpp_col.num_values             = col_stats.get('num_values') if col_stats.get('num_values') is not None else -1
-    cpp_col.total_uncompressed_size = col_stats.get('total_uncompressed_size') if col_stats.get('total_uncompressed_size') is not None else -1
-    cpp_col.total_compressed_size   = col_stats.get('total_compressed_size') if col_stats.get('total_compressed_size') is not None else -1
-
-    # Adjust absolute file offsets → chunk-relative
-    cpp_col.data_page_offset = (data_off - base_offset) if data_off is not None and data_off >= 0 else -1
-    cpp_col.index_page_offset = -1
-    cpp_col.dictionary_page_offset = (dict_off - base_offset) if dict_off is not None and dict_off >= 0 else -1
-
-    cpp_col.null_count     = col_stats.get('null_count')     if col_stats.get('null_count')     is not None else -1
-    cpp_col.distinct_count = col_stats.get('distinct_count') if col_stats.get('distinct_count') is not None else -1
-    cpp_col.bloom_offset   = -1
-    cpp_col.bloom_length   = -1
-
-    _tmp = col_stats.get('max_definition_level')
-    cpp_col.max_definition_level = _tmp if _tmp is not None else 0
-    _tmp = col_stats.get('max_repetition_level')
-    cpp_col.max_repetition_level = _tmp if _tmp is not None else 0
-    _tmp = col_stats.get('type_length')
-    cpp_col.type_length = _tmp if _tmp is not None else 0
-
-    # Convert codec string → int (e.g. 'SNAPPY' → 1). An unmapped name defaulted
-    # to 0 (UNCOMPRESSED), which handed compressed bytes to the plain decoder and
-    # produced garbage instead of a refusal — the same silent-wrong-answer class
-    # the codec guard in decode_column.cpp now rejects.
-    codec_str = col_stats.get('compression_codec') or 'UNCOMPRESSED'
-    if codec_str not in _CODEC_INT:
-        raise ValueError(
-            "rugo parquet reader: unrecognised compression codec %r" % codec_str
-        )
-    cpp_col.codec = _CODEC_INT[codec_str]
-
-    # Convert encoding strings → ints (e.g. ['PLAIN', 'RLE_DICTIONARY'] → [0, 8])
-    for enc_str in (col_stats.get('encodings') or []):
-        enc_int = _ENCODING_INT.get(enc_str, -1)
-        if enc_int >= 0:
-            cpp_col.encodings.push_back(enc_int)
-    if cpp_col.encodings.empty():
-        cpp_col.encodings.push_back(0)  # default: PLAIN
-
-    cdef parquet_reader.DecodedColumn result
-    with nogil:
-        result = parquet_reader.DecodeColumnFromChunk(&mem_view[0], size, &cpp_col)
-
-    if not result.success:
-        return None
-
-    cdef int32_t num_rows = <int32_t>result.num_rows
-
-    if result.type == b"int32":
-        if _should_emit_constant_vector(result, num_rows):
-            return _make_typed_constant_vector(result, <int32_t>result.num_rows).to_pylist()
-        if _should_emit_dictionary_vector(result, num_rows):
-            return _make_typed_int64_from_int32_dictionary_vector(result, <int32_t>result.num_rows).to_pylist()
-        if _decoded_has_dictionary(result):
-            _TEL["parquet_dict_materialize_fallbacks"] += 1
-        return _make_int64_from_int32_vector(result, num_rows).to_pylist()
-    elif result.type == b"int64":
-        if _should_emit_constant_vector(result, num_rows):
-            return _make_typed_constant_vector(result, <int32_t>result.num_rows).to_pylist()
-        if _should_emit_dictionary_vector(result, num_rows):
-            return _make_typed_int64_dictionary_vector(result, <int32_t>result.num_rows).to_pylist()
-        if _decoded_has_dictionary(result):
-            _TEL["parquet_dict_materialize_fallbacks"] += 1
-        return _make_int64_vector(result, num_rows).to_pylist()
-    elif result.type == b"byte_array":
-        if _should_emit_constant_vector(result, num_rows):
-            return [
-                _safe_decode_utf8(v) if v is not None else None
-                for v in _make_typed_constant_vector(result, <int32_t>result.num_rows).to_pylist()
-            ]
-        if _should_emit_dictionary_vector(result, num_rows):
-            return [
-                _safe_decode_utf8(v) if v is not None else None
-                for v in _make_typed_string_dictionary_vector(result, <int32_t>result.num_rows).to_pylist()
-            ]
-        if _decoded_has_dictionary(result):
-            _TEL["parquet_dict_materialize_fallbacks"] += 1
-        return [
-            _safe_decode_utf8(v) if v is not None else None
-            for v in _make_string_vector(result, <int32_t>result.num_rows).to_pylist()
-        ]
-    elif result.type == b"boolean":
-        return [bool(val) for val in result.boolean_values]
-    elif result.type == b"float32":
-        if _should_emit_constant_vector(result, num_rows):
-            return _make_typed_constant_vector(result, <int32_t>result.num_rows).to_pylist()
-        if _should_emit_dictionary_vector(result, num_rows):
-            return _make_typed_float32_dictionary_vector(result, <int32_t>result.num_rows).to_pylist()
-        if _decoded_has_dictionary(result):
-            _TEL["parquet_dict_materialize_fallbacks"] += 1
-        return _make_float32_vector(result, num_rows).to_pylist()
-    elif result.type == b"float64":
-        if _should_emit_constant_vector(result, num_rows):
-            return _make_typed_constant_vector(result, <int32_t>result.num_rows).to_pylist()
-        if _should_emit_dictionary_vector(result, num_rows):
-            return _make_typed_float64_dictionary_vector(result, <int32_t>result.num_rows).to_pylist()
-        if _decoded_has_dictionary(result):
-            _TEL["parquet_dict_materialize_fallbacks"] += 1
-        return _make_float64_vector(result, num_rows).to_pylist()
-    else:
-        return None
-
-
 def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
     """Decode a single column from an isolated range-read buffer (default: returns Draken Vector).
 
@@ -2463,115 +2808,5 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
         return _make_float64_vector(result, num_rows)
 
-    else:
-        return None
-
-
-def decode_column_from_memory(data, str column_name, row_group_stats, int row_group_index):
-    """Decode a specific column from memory for a specific row group.
-
-    Args:
-        data: bytes, bytearray, or memoryview containing parquet data
-        column_name: Name of the column to decode
-        row_group_stats: RowGroupStats object containing metadata for the row group
-        row_group_index: Index of the row group (for reference/debugging)
-
-    Returns a Python list containing the decoded values.
-    Only works for uncompressed, PLAIN-encoded int32, int64, string, boolean, float32, and float64 columns.
-
-    Returns None if the column cannot be decoded.
-    """
-    cdef const uint8_t[::1] mem_view
-    cdef size_t size
-    cdef parquet_reader.RowGroupStats cpp_row_group
-    cdef parquet_reader.ColumnStats cpp_col
-
-    # Convert input data to memory view
-    if isinstance(data, (bytes, bytearray)):
-        mem_view = memoryview(data).cast('B')
-    elif isinstance(data, memoryview):
-        mem_view = data.cast('B')
-    else:
-        raise TypeError("data must be bytes, bytearray, or memoryview")
-
-    size = mem_view.shape[0]
-
-    # Convert column name
-    cdef bytes column_bytes = column_name.encode("utf-8")
-    cdef string cpp_column = column_bytes
-
-    # Convert the Python row_group_stats to C++ RowGroupStats
-    cpp_row_group.num_rows = row_group_stats.num_rows
-    cpp_row_group.total_byte_size = row_group_stats.total_byte_size
-
-    # Convert the columns
-    for col in row_group_stats.columns:
-        cpp_col.name = col.name.encode("utf-8")
-        cpp_col.physical_type = col.physical_type.encode("utf-8")
-        cpp_col.logical_type = col.logical_type.encode("utf-8") if col.logical_type else b""
-        cpp_col.num_values = col.num_values if col.num_values is not None else -1
-        cpp_col.total_uncompressed_size = col.total_uncompressed_size if col.total_uncompressed_size is not None else -1
-        cpp_col.total_compressed_size = col.total_compressed_size if col.total_compressed_size is not None else -1
-        cpp_col.data_page_offset = col.data_page_offset if col.data_page_offset is not None else -1
-        cpp_col.index_page_offset = col.index_page_offset if col.index_page_offset is not None else -1
-        cpp_col.dictionary_page_offset = col.dictionary_page_offset if col.dictionary_page_offset is not None else -1
-        cpp_col.has_min = col.has_min if col.has_min is not None else False
-        cpp_col.has_max = col.has_max if col.has_max is not None else False
-
-        # Handle min/max values which can be different types
-        if col.min:
-            if isinstance(col.min, bytes):
-                cpp_col.min = col.min
-            elif isinstance(col.min, str):
-                cpp_col.min = col.min.encode("utf-8")
-            else:
-                cpp_col.min = str(col.min).encode("utf-8")
-        else:
-            cpp_col.min = b""
-
-        if col.max:
-            if isinstance(col.max, bytes):
-                cpp_col.max = col.max
-            elif isinstance(col.max, str):
-                cpp_col.max = col.max.encode("utf-8")
-            else:
-                cpp_col.max = str(col.max).encode("utf-8")
-        else:
-            cpp_col.max = b""
-
-        cpp_col.null_count = col.null_count if col.null_count is not None else -1
-        cpp_col.distinct_count = col.distinct_count if col.distinct_count is not None else -1
-        cpp_col.bloom_offset = col.bloom_offset if col.bloom_offset is not None else -1
-        cpp_col.bloom_length = col.bloom_length if col.bloom_length is not None else -1
-        cpp_col.encodings = col.encodings if col.encodings is not None else []
-        cpp_col.codec = col.codec if col.codec is not None else -1
-        cpp_col.type_length = col.type_length if getattr(col, 'type_length', None) is not None else 0
-        cpp_row_group.columns.push_back(cpp_col)
-
-    cdef parquet_reader.DecodedColumn result
-    with nogil:
-        result = parquet_reader.DecodeColumnFromMemory(
-            &mem_view[0], size, cpp_column, cpp_row_group, row_group_index)
-
-    if not result.success:
-        return None
-
-    cdef str col_type = result.type.decode("utf-8")
-
-    if col_type == "int32":
-        return list(result.int32_values)
-    elif col_type == "int64":
-        return list(result.int64_values)
-    elif col_type == "byte_array":
-        return [
-            _safe_decode_utf8(v) if v is not None else None
-            for v in _make_string_vector(result, <int32_t>result.num_rows).to_pylist()
-        ]
-    elif col_type == "boolean":
-        return [bool(val) for val in result.boolean_values]
-    elif col_type == "float32":
-        return list(result.float32_values)
-    elif col_type == "float64":
-        return list(result.float64_values)
     else:
         return None

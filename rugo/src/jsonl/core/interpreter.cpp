@@ -81,8 +81,9 @@ enum class Action : uint8_t {
     END_UNQUOTED_VAL         = 6,   // comma / } ending an unquoted value
     END_UNQUOTED_VAL_NEWLINE = 7,   // newline ending an unquoted value + finish record
     PUSH_RECORD              = 8,   // }
+    END_UNQUOTED_VAL_RECORD  = 11,  // '}' ending an unquoted value + finish record
     SET_COLON                = 9,   // remember ':' position — anchors the unquoted slice
-    ABANDON_RECORD           = 10   // newline before the first key closed the record early
+    ABANDON_RECORD           = 10   // newline closed the record before its '}' -- truncated
 };
 
 struct Transition {
@@ -132,7 +133,11 @@ constexpr std::array<std::array<Transition, 13>, 8> build_transition_table() {
     t[4][int(K::LBRACE)]  = { S::IN_UNQUOTED_VALUE, A::START_VALUE };
     t[4][int(K::OTHER)]   = { S::IN_UNQUOTED_VALUE, A::START_VALUE }; // '[' (array) and anything else
     t[4][int(K::COMMA)]   = { S::EXPECT_KEY_QUOTE,    A::END_UNQUOTED_VAL };
-    t[4][int(K::RBRACE)]  = { S::EXPECT_SEPARATOR,    A::END_UNQUOTED_VAL };
+    // See the note on t[6][RBRACE] below: this '}' closes the record as well as the
+    // scalar. (This is the entry that actually fires for a bare scalar -- true/false/
+    // null/number emit no marker of their own, so the FSA is still HERE, not in
+    // IN_UNQUOTED_VALUE, when the terminator arrives.)
+    t[4][int(K::RBRACE)]  = { S::EXPECT_RECORD_START, A::END_UNQUOTED_VAL_RECORD };
     t[4][int(K::NEWLINE)] = { S::EXPECT_RECORD_START, A::END_UNQUOTED_VAL_NEWLINE };
 
     // State 5: IN_STRING_VALUE
@@ -140,13 +145,30 @@ constexpr std::array<std::array<Transition, 13>, 8> build_transition_table() {
 
     // State 6: IN_UNQUOTED_VALUE
     t[6][int(K::COMMA)]   = { S::EXPECT_KEY_QUOTE,  A::END_UNQUOTED_VAL };
-    t[6][int(K::RBRACE)]  = { S::EXPECT_SEPARATOR,  A::END_UNQUOTED_VAL };
+    // A '}' here is BOTH the terminator of the unquoted scalar AND the close of the
+    // record -- there is no further delimiter to wait for. Parking in EXPECT_SEPARATOR
+    // and leaning on the following '\n' to PUSH_RECORD loses the row outright at EOF:
+    // `{"ok":true}` with no trailing newline reached finish() with committed spans and
+    // was reported as malformed. (A string value doesn't hit this: its closing quote is
+    // its own terminator, so the record's '}' is still free to push -- hence the bug
+    // only ever showed on a record whose LAST value was a bare true/false/null/number.)
+    t[6][int(K::RBRACE)]  = { S::EXPECT_RECORD_START, A::END_UNQUOTED_VAL_RECORD };
     t[6][int(K::NEWLINE)] = { S::EXPECT_RECORD_START,A::END_UNQUOTED_VAL_NEWLINE };
 
     // State 7: EXPECT_SEPARATOR
     t[7][int(K::COMMA)]   = { S::EXPECT_KEY_QUOTE,   A::NONE };
     t[7][int(K::RBRACE)]  = { S::EXPECT_RECORD_START, A::PUSH_RECORD };
-    t[7][int(K::NEWLINE)] = { S::EXPECT_RECORD_START, A::PUSH_RECORD };
+    // A newline HERE means the record ran out of line before its closing '}' -- it is
+    // truncated, not complete, so it must be abandoned rather than banked. It used to
+    // PUSH_RECORD because it was load-bearing for the ordinary case: a record ending in
+    // an unquoted scalar spent its '}' as the scalar's terminator and arrived here still
+    // open, so this newline was what banked it. Now that RBRACE closes the record where
+    // it occurs (t[4]/t[6] above), nothing well-formed reaches this transition, and
+    // banking here only ever fabricated a row from a brace-less fragment
+    // (`{"a":"x"` + newline silently became a complete row, malformed_count 0) -- the
+    // same class of invented row as the JSONBench defect the raw-newline and finish()
+    // checks already guard.
+    t[7][int(K::NEWLINE)] = { S::EXPECT_RECORD_START, A::ABANDON_RECORD };
 
     return t;
 }
@@ -553,7 +575,14 @@ struct MapBuilder {
             saw_open_brace_since_newline = true;
             break;
         case Action::ABANDON_RECORD:
+            // Drop the partial spans as well as flagging it. Without the discard the
+            // fragment's fields stayed in the arena and were swept into the NEXT record
+            // when that one banked -- so `{"a":1,\n{"a":2}\n` reported one row whose `a`
+            // was 1, the truncated line's value, and row 2's real value was never seen.
+            // A silent wrong answer, not just a spurious row.
             flag_malformed(cur_record_start_pos);
+            discard_record();
+            record_dead = false;
             break;
         case Action::SET_COLON:
             colon_pos = pos; break;
@@ -589,6 +618,11 @@ struct MapBuilder {
             break;
         case Action::END_UNQUOTED_VAL_NEWLINE:
             emit_unquoted(pos);  // record ends at the newline; bank/discard here (no driver skip)
+            if (record_dead) { discard_record(); record_dead = false; }
+            else bank_record();
+            break;
+        case Action::END_UNQUOTED_VAL_RECORD:
+            emit_unquoted(pos);  // record ends at this '}'; bank/discard here (no driver skip)
             if (record_dead) { discard_record(); record_dead = false; }
             else bank_record();
             break;

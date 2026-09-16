@@ -107,7 +107,7 @@ class TestNullHash:
         """NULL type hash must equal the hash of null rows in a typed vector."""
         null_type_hash = null_vec(1).hash()[0]
         # Build an all-null int64 vector and check its hash is the same.
-        int_vec = dn.vector_from_sequence([None])
+        int_vec = dn.vector_int64_from_sequence([None])
         int_null_hash = int_vec.hash()[0]
         assert null_type_hash == int_null_hash
 
@@ -141,7 +141,7 @@ class TestNullCompareOps:
 
     def test_compare_vector_null_typed(self):
         a = null_vec(3)
-        b = dn.vector_from_sequence([1, 2, 3])
+        b = dn.vector_int64_from_sequence([1, 2, 3])
         result = bool_pylist(a.compare_vector(b, self.EQ))
         assert result == [None, None, None]
 

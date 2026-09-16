@@ -70,7 +70,7 @@ vc = _load_vector_casts()
 # ---------------------------------------------------------------------------
 
 def iv(values):
-    return dn.vector_from_sequence(values)
+    return dn.vector_int64_from_sequence(values)
 
 def sv(values):
     return dn.vector_from_string_sequence(

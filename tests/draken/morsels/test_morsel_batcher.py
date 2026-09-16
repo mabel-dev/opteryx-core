@@ -22,7 +22,7 @@ from draken.morsels.morsel import MORSEL_MAX_ARENA_BYTES, Morsel, MorselBatcher
 
 
 def _ints(n, start=0):
-    return Morsel.from_vectors([b"a"], [dn.vector_from_sequence(list(range(start, start + n)))])
+    return Morsel.from_vectors([b"a"], [dn.vector_int64_from_sequence(list(range(start, start + n)))])
 
 
 def _strings(n, width, prefix=b"x"):

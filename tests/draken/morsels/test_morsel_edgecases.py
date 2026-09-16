@@ -20,7 +20,7 @@ def test_take_empty_preserves_schema_and_to_arrow():
     """Emptying a morsel keeps its columns and their names, and converts cleanly."""
     morsel = Morsel.from_vectors(
         [b"s", b"i"],
-        [dn.vector_from_string_sequence([b"a"]), dn.vector_from_sequence([1])],
+        [dn.vector_from_string_sequence([b"a"]), dn.vector_int64_from_sequence([1])],
     )
     assert morsel.num_rows == 1
 
@@ -41,7 +41,7 @@ def test_take_empty_with_all_null_strings():
         [b"s", b"i"],
         [
             dn.vector_from_string_sequence([None, None]),
-            dn.vector_from_sequence([1, 2]),
+            dn.vector_int64_from_sequence([1, 2]),
         ],
     )
     assert morsel.num_rows == 2
@@ -96,7 +96,7 @@ def test_take_single_index_preserves_data():
     """A one-row take carries the values through, including to Arrow."""
     morsel = Morsel.from_vectors(
         [b"s", b"n"],
-        [dn.vector_from_string_sequence([b"z"]), dn.vector_from_sequence([42])],
+        [dn.vector_from_string_sequence([b"z"]), dn.vector_int64_from_sequence([42])],
     )
 
     taken = morsel.take([0])

@@ -355,7 +355,7 @@ class TestCompare:
     def test_compare_vector_cross_type_int64_as_scale0(self):
         # INT64 is treated as scale-0 decimal: 1 == 1.00 after alignment.
         a = dec([Decimal('1.00')])
-        b = dn.vector_from_sequence([1])
+        b = dn.vector_int64_from_sequence([1])
         assert pylist(a.compare_vector(b, EQ)) == [True]
 
 

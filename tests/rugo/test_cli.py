@@ -54,7 +54,7 @@ def fixture_paths(tmp_path):
     morsel = Morsel.from_vectors(
         ["id", "name", "score"],
         [
-            Vector(dn.vector_from_sequence(ids)),
+            Vector(dn.vector_int64_from_sequence(ids)),
             Vector(dn.vector_from_string_sequence([n.encode() for n in names])),
             Vector(dn.vector_float64_from_sequence(scores)),
         ],
@@ -189,7 +189,7 @@ def test_diff_detects_added_and_removed_columns(fixture_paths, capsys, tmp_path)
 
     morsel = Morsel.from_vectors(
         ["id", "extra"],
-        [Vector(dn.vector_from_sequence([1, 2])), Vector(dn.vector_from_string_sequence([b"x", b"y"]))],
+        [Vector(dn.vector_int64_from_sequence([1, 2])), Vector(dn.vector_from_string_sequence([b"x", b"y"]))],
     )
     other_path = str(tmp_path / "other.parquet")
     with open(other_path, "wb") as f:

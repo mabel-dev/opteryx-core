@@ -28,7 +28,7 @@ import logging
 from typing import Generator
 
 
-from draken.draken_native import vector_from_sequence as _vector_from_sequence
+from draken.draken_native import vector_int64_from_sequence as _vector_from_sequence
 from opteryx.types.schema import RelationSchema
 
 # EOS sentinel in scope as _EOS_SENTINEL via the umbrella unit.

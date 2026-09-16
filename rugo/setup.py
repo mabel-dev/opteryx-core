@@ -56,6 +56,7 @@ from build_common import (  # noqa: E402
     build_ext,
     draken_rugo_extensions,
     write_draken_abi_modules,
+    write_rugo_build_identity,
 )
 
 # rugo's own version — single source of truth in rugo/__version__.py.
@@ -97,6 +98,14 @@ def discover_packages():
 # rugo/__init__.py calls the generated check on import; see the "draken ABI
 # stamp" section of build_common.py for what it defends against.
 print(f"draken ABI stamp: {write_draken_abi_modules('rugo')}")
+
+# The `created_by` rugo stamps into every parquet footer from THIS wheel. Bound
+# once: the same string is compiled in (-DRUGO_PARQUET_CREATED_BY) and published
+# as rugo.__writer_id__, so a file's footer and the loaded package agree. The
+# opteryx_core wheel bundles the same sources and stamps its own version here —
+# see the matching block in the root setup.py.
+RUGO_PARQUET_CREATED_BY = "rugo version %s" % __version__
+print(f"rugo writer identity: {write_rugo_build_identity(RUGO_PARQUET_CREATED_BY, 'rugo')}")
 
 
 setup(
@@ -140,7 +149,7 @@ setup(
     # apply here — rugo is its own distribution.
     python_requires=">=3.11",
     ext_modules=cythonize(
-        draken_rugo_extensions(parquet_created_by="rugo version %s" % __version__),
+        draken_rugo_extensions(parquet_created_by=RUGO_PARQUET_CREATED_BY),
         compiler_directives={
             "language_level": "3",
             # Declare modules free-threading-safe under a free-threaded CPython,

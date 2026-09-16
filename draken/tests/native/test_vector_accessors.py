@@ -83,7 +83,7 @@ def make_arr(values):
 
 
 def make_int64(values):
-    return dn.vector_from_sequence(values)
+    return dn.vector_int64_from_sequence(values)
 
 
 def extract_int64(vec):

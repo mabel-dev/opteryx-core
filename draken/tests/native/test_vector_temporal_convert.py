@@ -387,7 +387,7 @@ class TestUnixtime:
         assert result[2] == 86400
 
     def test_type_error_on_int64(self):
-        v = dn.vector_from_sequence([1, 2, 3])
+        v = dn.vector_int64_from_sequence([1, 2, 3])
         with pytest.raises(TypeError):
             vtc.vector_unixtime(v)
 

@@ -272,7 +272,15 @@ def render_scan(node: LogicalPlanNode) -> str:
         if node.predicates
         else ""
     )
-    hints = f" WITH({','.join(node.hints)})" if node.hints else ""
+    # Bare legacy hints and per-scan `name = value` settings render in one
+    # WITH(...), because that is how they were written. Omitting the settings
+    # would make the plan understate what this scan actually runs with.
+    _hint_parts = list(node.hints or [])
+    _hint_parts.extend(
+        f"{name}={literal.value}"
+        for name, literal in sorted((node.hint_settings or {}).items())
+    )
+    hints = f" WITH({','.join(_hint_parts)})" if _hint_parts else ""
     limit = f" LIMIT {node.limit}" if node.limit else ""
     # Shapes absorbed into the scan by the remote-pushdown strategies. Rendered
     # here so a plain EXPLAIN shows what the reader was asked to do, not only

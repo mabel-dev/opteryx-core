@@ -35,7 +35,7 @@ def _vector_for(values):
     if isinstance(sample, str):
         return dn.vector_from_string_sequence(values)
     if isinstance(sample, int) or sample is None:
-        return dn.vector_from_sequence(values)
+        return dn.vector_int64_from_sequence(values)
     raise TypeError(f"no vector constructor wired up for sample {sample!r}")
 
 

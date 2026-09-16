@@ -296,7 +296,7 @@ class TestCompareVector:
 
     def test_cross_type_throws(self):
         a = iv([(1, 0)])
-        b = dn.vector_from_sequence([1])
+        b = dn.vector_int64_from_sequence([1])
         with pytest.raises(Exception):
             a.compare_vector(b, EQ)
 
@@ -449,7 +449,7 @@ class TestArithmetic:
 
     def test_add_cross_type_throws(self):
         a = iv([(1, 0)])
-        b = dn.vector_from_sequence([1])
+        b = dn.vector_int64_from_sequence([1])
         with pytest.raises(Exception):
             _ = a.add(b)
 

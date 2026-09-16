@@ -3397,6 +3397,11 @@ class _Compiler:
         above)."""
         from opteryx import config
         from opteryx.connectors.parquet_io.pool_reader import native_scan_supported
+        from opteryx.connectors.parquet_io.io_tuning import resolve_coalesce_tuning
+        from opteryx.connectors.parquet_io.io_tuning import resolve_fetch_ahead
+        from opteryx.connectors.parquet_io.io_tuning import resolve_fetch_ahead_gate
+        from opteryx.connectors.parquet_io.io_tuning import resolve_http_tuning
+        from opteryx.connectors.parquet_io.io_tuning import resolve_in_flight_limit
         from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
         from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
         from opteryx.operators._operators import resolve_scan_filesystem
@@ -3590,6 +3595,11 @@ class _Compiler:
         # so row groups excluded / bytes read are unchanged. Only pruning; the
         # per-row residual is the relocated ExprFilter, not the scan.
         pruning = extract_predicate_stats(predicates) if predicates else None
+        # This relation's validated `WITH(name = value)` settings (None when it
+        # carries none) and the session's variables — the two layers the IO
+        # resolvers below merge, hint first.
+        _scan_vars = getattr(scan.properties, "variables", None)
+        _scan_overrides = getattr(scan, "scan_overrides", None)
         splan = open_native_scan_plan(
             paths,
             names,
@@ -3641,19 +3651,22 @@ class _Compiler:
             # Remote fetch-ahead depth (0 = off). Session-settable so a production
             # A/B needs no redeploy; the plan reports the depth it actually runs
             # in io_scan_diagnostics (`fetch_ahead_depth`).
-            fetch_ahead=_resolve_var(
-                "parquet_io_fetch_ahead",
-                getattr(scan.properties, "variables", None),
-                config.PARQUET_IO_FETCH_AHEAD,
-            ),
+            fetch_ahead=resolve_fetch_ahead(_scan_vars, _scan_overrides),
             # How many remote row groups this scan must submit before that depth is
             # armed at all — a separate knob from the depth, so either can be swept
             # without moving the other.
-            fetch_ahead_min_row_groups=_resolve_var(
-                "parquet_io_fetch_ahead_min_row_groups",
-                getattr(scan.properties, "variables", None),
-                config.PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS,
-            ),
+            fetch_ahead_min_row_groups=resolve_fetch_ahead_gate(
+                _scan_vars, _scan_overrides),
+            # Per-scan IO shaping. Resolved here, per scan, rather than left to
+            # the pipeline's compiled-in defaults: until this was plumbed the
+            # native path ignored every one of these SETs while the trampoline
+            # honoured them, so one query tuned differently depending on which
+            # path it took. `_scan_overrides` is this relation's validated
+            # `WITH(name = value)` settings and outranks the session's SET.
+            in_flight_limit_override=resolve_in_flight_limit(
+                _scan_vars, _scan_overrides),
+            http_tuning=resolve_http_tuning(_scan_vars, _scan_overrides),
+            coalesce_tuning=resolve_coalesce_tuning(_scan_vars, _scan_overrides),
         )
         self.footer_fetch_ns += splan.footer_fetch_ns
 
@@ -3699,6 +3712,11 @@ class _Compiler:
             pass1_worker_predicate_admissible,
         )
         from opteryx.connectors.parquet_io.pool_reader import native_scan_supported
+        from opteryx.connectors.parquet_io.io_tuning import resolve_coalesce_tuning
+        from opteryx.connectors.parquet_io.io_tuning import resolve_fetch_ahead
+        from opteryx.connectors.parquet_io.io_tuning import resolve_fetch_ahead_gate
+        from opteryx.connectors.parquet_io.io_tuning import resolve_http_tuning
+        from opteryx.connectors.parquet_io.io_tuning import resolve_in_flight_limit
         from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
         from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
         from opteryx.expression import get_all_nodes_of_type
@@ -3824,16 +3842,17 @@ class _Compiler:
                 config.PARQUET_LOCAL_IO_WORKERS,
             )
         )
-        fetch_ahead = _resolve_var(
-            "parquet_io_fetch_ahead",
-            getattr(scan.properties, "variables", None),
-            config.PARQUET_IO_FETCH_AHEAD,
-        )
-        fetch_ahead_gate = _resolve_var(
-            "parquet_io_fetch_ahead_min_row_groups",
-            getattr(scan.properties, "variables", None),
-            config.PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS,
-        )
+        # Per-scan IO shaping — resolved ONCE and applied to both passes, so the
+        # two plans for one scan cannot disagree about how to fetch.
+        # `_scan_overrides` is this relation's validated `WITH(name = value)`
+        # settings and outranks the session's SET.
+        _scan_vars = getattr(scan.properties, "variables", None)
+        _scan_overrides = getattr(scan, "scan_overrides", None)
+        fetch_ahead = resolve_fetch_ahead(_scan_vars, _scan_overrides)
+        fetch_ahead_gate = resolve_fetch_ahead_gate(_scan_vars, _scan_overrides)
+        in_flight_override = resolve_in_flight_limit(_scan_vars, _scan_overrides)
+        http_tuning = resolve_http_tuning(_scan_vars, _scan_overrides)
+        coalesce_tuning = resolve_coalesce_tuning(_scan_vars, _scan_overrides)
         # Row-group pruning triples — identical to the single-pass path, applied to
         # BOTH plans so the two agree on which row groups exist. Pass 2 re-submits
         # only the row groups pass 1 leaves standing, so its own work-item list is
@@ -3860,6 +3879,9 @@ class _Compiler:
                 pool=None,
                 fetch_ahead=fetch_ahead,
                 fetch_ahead_min_row_groups=fetch_ahead_gate,
+                in_flight_limit_override=in_flight_override,
+                http_tuning=http_tuning,
+                coalesce_tuning=coalesce_tuning,
                 filesystem=filesystem,
                 footer_bytes_cache=scan_footer_bytes_cache(),
             )

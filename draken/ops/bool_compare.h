@@ -1,5 +1,8 @@
 #pragma once
-// draken/ops/bool_compare.h — compare_vector for DRAKEN_BOOL (R5 close-out).
+// draken/ops/bool_compare.h — compare_vector / compare_scalar for DRAKEN_BOOL.
+// compare_vector landed in the R5 close-out; compare_scalar followed (the ops
+// table left the slot null, so every `bool_col OP literal` predicate died in
+// draken_compare_scalar with "unsupported type").
 //
 // The other compare kernels (int64_compare.h, fixed_int_ops.h, float_ops.h,
 // uint64_compare.h) all address `data` as an array of fixed-width elements.
@@ -62,6 +65,10 @@
 //
 // Callers must ensure both inputs have type == DRAKEN_BOOL; length equality is
 // checked here (throws, like i64_compare_vector).
+//
+// The ACCESS note above is about compare_vector. The compare_scalar kernel at
+// the bottom of this file is UNIFORM-PATH ONLY — no shape discriminant — and
+// carries its own note saying so.
 
 #include <cstdint>
 #include <stdexcept>
@@ -198,6 +205,87 @@ static inline VecResult bool_compare_vector(
         case 3:  return bool_compare_vector_impl<BoolCmpGe>(a, b);
         case 4:  return bool_compare_vector_impl<BoolCmpLt>(a, b);
         default: return bool_compare_vector_impl<BoolCmpLe>(a, b);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// compare_scalar — vector OP bool-literal.
+//
+// Registered as entries[DRAKEN_BOOL].compare_scalar, so the generic
+// draken_compare_scalar dispatcher answers a BOOL column instead of throwing
+// "unsupported type". The CmpScalarFn signature carries the literal as an
+// int64_t; for BOOL the only legal payloads are 0 (FALSE) and 1 (TRUE).
+// Anything else is a caller bug — a non-bool literal coerced into a bool
+// column's compare — and throws rather than silently comparing a stored bit
+// against, say, 5. (CLAUDE.md §1: fail fast, no silent degradation.)
+//
+// ACCESS — uniform only. Unlike bool_compare_vector above, this kernel has NO
+// shape discriminant: every row is read through `data[selection[i]]`, which is
+// correct for all three shapes (dense/constant/dict) with no special-casing.
+// The §11 dense-identity fast path in bool_compare_vector is NOT precedent —
+// see the ACCESS note at the top of this file. If a shape-specialized bool
+// compare_scalar is ever wanted, it must be surfaced to the architect first.
+//
+// Nulls: a null input row yields a null result row (validity 0, value bit 0) —
+// the same contract every other compare_scalar kernel implements.
+// Result: dense-identity DRAKEN_BOOL, validity dropped when every row is valid.
+// ---------------------------------------------------------------------------
+template<typename Op>
+static inline VecResult bool_compare_scalar_impl(
+    const DrakenVector& v, uint32_t scalar_bit)
+{
+    const uint32_t n     = v.length;
+    const uint32_t bm    = (n + 7u) >> 3;
+    const uint8_t* data  = static_cast<const uint8_t*>(v.data);
+    const uint8_t* vld   = v.validity;   // nullptr ⟹ all-valid
+
+    size_t val_alloc;
+    uint8_t* out_val = bool_alloc_buf(bm, val_alloc);
+
+    if (vld == nullptr) {
+        // No nulls — the result is unconditionally all-valid.
+        for (uint32_t i = 0u; i < n; ++i) {
+            if (Op::apply(bool_get_val(data, v.selection[i]), scalar_bit))
+                out_val[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+        }
+        return bool_make_result(out_val, nullptr, n, true);
+    }
+
+    size_t vld_alloc;
+    uint8_t* out_vld = nullptr;
+    try {
+        out_vld = bool_alloc_buf(bm, vld_alloc);
+    } catch (...) {
+        draken_free(out_val);
+        throw;
+    }
+
+    for (uint32_t i = 0u; i < n; ++i) {
+        if (!bool_get_valid(vld, i)) continue;   // result row stays NULL
+        out_vld[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+        if (Op::apply(bool_get_val(data, v.selection[i]), scalar_bit))
+            out_val[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+    }
+
+    const bool all_set = bool_is_all_set(out_vld, n);
+    return bool_make_result(out_val, out_vld, n, all_set);
+}
+
+static inline VecResult bool_compare_scalar(
+    const DrakenVector& v, int64_t scalar, int op)
+{
+    if (scalar != 0 && scalar != 1)
+        throw std::invalid_argument(
+            "bool_compare_scalar: BOOL column requires a boolean literal "
+            "(scalar must be 0 or 1)");
+    const uint32_t s = static_cast<uint32_t>(scalar);
+    switch (op) {
+        case 0:  return bool_compare_scalar_impl<BoolCmpEq>(v, s);
+        case 1:  return bool_compare_scalar_impl<BoolCmpNe>(v, s);
+        case 2:  return bool_compare_scalar_impl<BoolCmpGt>(v, s);
+        case 3:  return bool_compare_scalar_impl<BoolCmpGe>(v, s);
+        case 4:  return bool_compare_scalar_impl<BoolCmpLt>(v, s);
+        default: return bool_compare_scalar_impl<BoolCmpLe>(v, s);
     }
 }
 

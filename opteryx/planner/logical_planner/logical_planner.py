@@ -1972,6 +1972,105 @@ def _group_by_all_keys(projection: list, window_outputs: set) -> list:
     return _keys
 
 
+# ── Table hints: `SELECT ... FROM rel WITH(HINT, ...)` ──────────────────────
+#
+# Every hint is currently PARSED AND IGNORED — nothing in the engine reads
+# `node.hints`; the only consumer is the logical-plan renderer, which echoes it
+# back. This set exists so that a hint the engine has never heard of FAILS
+# rather than being silently swallowed: a typo'd hint that is quietly dropped
+# measures exactly like a hint that does nothing, which is indistinguishable
+# from a knob that does not work.
+#
+# These two names are the historical vocabulary and are accepted for
+# compatibility. When hints become load-bearing, a name joins this set at the
+# same time as the code that honours it — never before.
+TABLE_HINTS = frozenset({"NO_CACHE", "NO_PARTITION"})
+
+
+def _parse_table_hints(with_hints: list, relation_name: str) -> tuple:
+    """Extract and validate the `WITH(...)` hints on a table factor.
+
+    Returns ``(hints, settings)``:
+
+    * ``hints`` — bare legacy names (`NO_CACHE`), parsed and ignored.
+    * ``settings`` — ``{variable_name: literal_node}`` for the `key = value`
+      form, naming a PER-SCAN variable (`WITH(parquet_io_fetch_ahead=128)`).
+
+    Only the NAME is checked here, against the per-scan vocabulary. PERMISSION
+    and type are checked in the physical planner, where the session's variables
+    container is in scope — a hint runs the same `check_settable` gate as SET,
+    so it can never be a way around it.
+
+    The vocabulary is the variable names themselves, not short aliases: an alias
+    table is one more thing to drift out of step with `SHOW VARIABLES`.
+    """
+    from opteryx.connectors.parquet_io.io_tuning import PER_SCAN_VARIABLES
+
+    hints = []
+    settings = {}
+    for hint in with_hints:
+        identifier = hint.get("Identifier")
+        if identifier is not None:
+            name = identifier["value"].upper()
+            if name in TABLE_HINTS:
+                hints.append(name)
+                continue
+            if name.lower() in PER_SCAN_VARIABLES:
+                example = md_syntax("WITH(" + name.lower() + " = <value>)")
+                raise UnsupportedSyntaxError(
+                    compose(
+                        f"Query hint {md_column(identifier['value'])} needs a value",
+                        f"write it as {example}",
+                    )
+                )
+            raise UnsupportedSyntaxError(
+                compose(
+                    f"Query hint {md_column(identifier['value'])} is not supported",
+                    did_you_mean(
+                        suggest_alternative(name, set(TABLE_HINTS) | PER_SCAN_VARIABLES)
+                    ),
+                    f"supported hints are {', '.join(md_code(h) for h in sorted(TABLE_HINTS))} "
+                    f"and the per-scan settings {md_syntax('SHOW VARIABLES')} lists",
+                )
+            )
+
+        binary_op = hint.get("BinaryOp")
+        left = None if binary_op is None else binary_op.get("left", {}).get("Identifier")
+        if binary_op is None or left is None or binary_op.get("op") != "Eq":
+            raise UnsupportedSyntaxError(
+                compose(
+                    f"Unrecognised hint on {md_column(relation_name)}",
+                    f"hints are a bare name or {md_syntax('name = value')}",
+                )
+            )
+
+        name = left["value"].lower()
+        if name not in PER_SCAN_VARIABLES:
+            if name.upper() in TABLE_HINTS:
+                example = md_syntax("WITH(" + name.upper() + ")")
+                raise UnsupportedSyntaxError(
+                    compose(
+                        f"Query hint {md_column(left['value'])} does not take a value",
+                        f"write it as {example}",
+                    )
+                )
+            raise UnsupportedSyntaxError(
+                compose(
+                    f"{md_column(left['value'])} cannot be set on a single relation",
+                    did_you_mean(suggest_alternative(name, PER_SCAN_VARIABLES)),
+                    "only per-scan IO settings can be set with a hint; a setting "
+                    f"that sizes shared engine resources is set with {md_syntax('SET')}",
+                )
+            )
+        if name in settings:
+            raise UnsupportedSyntaxError(
+                f"Query hint {md_column(left['value'])} is set more than once "
+                f"on {md_column(relation_name)}"
+            )
+        settings[name] = logical_planner_builders.build(binary_op["right"])
+    return hints, settings
+
+
 def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     if "Query" in ast_branch:
         # Sometimes we get a full query plan here (e.g. when queries in set
@@ -3528,9 +3627,27 @@ def create_node_relation(relation: dict):
                 f"Column or Relation created by {function_name} has no name, use AS to give it a name."
             )
 
+        # A function dataset is COMPUTED, not read from files, so it has no
+        # reader to honour a per-scan IO setting. Validate the hints here too —
+        # without this, `WITH(anything)` on a function dataset was discarded
+        # silently, garbage included.
+        function_step_hints, function_step_settings = _parse_table_hints(
+            function["with_hints"], relation_name
+        )
+        if function_step_settings:
+            names = ", ".join(md_column(name) for name in sorted(function_step_settings))
+            raise UnsupportedSyntaxError(
+                compose(
+                    f"{names} cannot be set on {md_column(relation_name)}",
+                    f"{md_syntax(function_name)} computes its rows rather than "
+                    "reading them, so it has no IO to shape",
+                )
+            )
+
         function_step = LogicalPlanNode(
             node_type=LogicalPlanStepType.FunctionDataset, function=function_name
         )
+        function_step.hints = function_step_hints
         if function_name == "UNNEST":
             function_step.alias = f"$unnest-{random_string(6)}"
             function_step.relation = function_step.alias
@@ -3585,7 +3702,8 @@ def create_node_relation(relation: dict):
         from_step.alias = (
             from_step.relation if table["alias"] is None else table["alias"]["name"]["value"]
         )
-        from_step.hints = [hint["Identifier"]["value"] for hint in table["with_hints"]]
+        from_step.hints, from_step.hint_settings = _parse_table_hints(
+            table["with_hints"], relation_name)
 
         # Extract and validate AT / VERSION clause if present
         version_clause = table.get("version")

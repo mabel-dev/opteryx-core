@@ -57,7 +57,7 @@ Files touched: **110 opteryx + 5 rugo** = 115 (by-cimport count; Python-import o
 | `draken.vectors.timestamp_vector` | **10** | `TimestampVector`, `timestamp_dict_from_raw` | `DRAKEN_TIMESTAMP64`, `draken_vector_from_dense/constant/dict`. |
 | `draken.vectors.integer{8,16,32}_vector` | **18** (6 each) | `Integer8/16/32Vector` | `DRAKEN_INT8/16/32`, `draken_vector_from_dense/constant/dict`. |
 | `draken.vectors.date32_vector` | **6** | `Date32Vector` | `DRAKEN_DATE32`, `draken_vector_from_dense/constant/dict`. |
-| `draken.interop.vector_sequence` | **6** | `vector_from_sequence` | `draken.draken_native.vector_from_sequence` Python call at the boundary. |
+| `draken.interop.vector_sequence` | **6** | `vector_from_sequence` | `draken.draken_native.vector_int64_from_sequence` Python call at the boundary. |
 | `draken.vectors.float32_vector` | **5** | `Float32Vector` | `DRAKEN_FLOAT32`, `draken_vector_from_dense/constant/dict`. |
 | `draken.morsels.align` | **5** | `align_tables` | New `align_tables` built on `take` op — **one of the riskier sites** (see §3). |
 | `draken.vectors.vector_vector` | **3** | `VectorVector` | `DRAKEN_ARRAY` with nested child? Investigate. |
@@ -70,14 +70,14 @@ Files touched: **110 opteryx + 5 rugo** = 115 (by-cimport count; Python-import o
 
 | Old module | import sites | Mapped to new surface |
 |---|--:|---|
-| `draken.interop.vector_sequence` | 24 | `draken.draken_native.vector_from_sequence` |
+| `draken.interop.vector_sequence` | 24 | `draken.draken_native.vector_int64_from_sequence` |
 | `draken.vectors.string_vector` (module ref) | 17 | `draken.draken_native` + direct attribute access |
 | `draken.vectors.bool_vector` | 12 | `draken.draken_native.vector_from_bool_sequence` etc. |
 | `draken.vectors.string_vector` (class) | 10 | `draken.draken_native.Vector` (type check = `v.type == STRING`) |
 | `draken.morsels.morsel` | 13 | `draken.draken_native.Morsel` |
 | `draken.vectors.timestamp_vector` | 8 | `draken.draken_native.vector_timestamp_from_sequence` etc. |
 | `draken.vectors.date32_vector` | 8 | `draken.draken_native.vector_date32_from_sequence` etc. |
-| `draken.vectors.integer64_vector` | 6 | `draken.draken_native.vector_from_sequence` (auto-detect) etc. |
+| `draken.vectors.integer64_vector` | 6 | `draken.draken_native.vector_int64_from_sequence` (auto-detect) etc. |
 | `draken.vectors.float64_vector` | 5 | `draken.draken_native.vector_float64_from_sequence` etc. |
 | `draken.vectors.time_vector` | 3 | `draken.draken_native.vector_time32_from_sequence` etc. |
 | `draken.vectors.scalar_constructors` | 6 | `draken.draken_native.vector_from_constant` etc. |
@@ -647,7 +647,7 @@ Estimate: **~10h** (was 8h; +2h for C++ align_tables binding).
 
 #### Phase 10 — `interop.vector_sequence` (6 cimport + 24 Python import sites)
 
-Cimport sites become Python boundary calls to `draken.draken_native.vector_from_sequence`.
+Cimport sites become Python boundary calls to `draken.draken_native.vector_int64_from_sequence`.
 Estimate: **~5h** (was 4h).
 
 #### Phase 11 — Tail (scalar_constructors 3, vector_vector 3, time 1, null 1, decimal 4, interval 2 + var_vector 1)

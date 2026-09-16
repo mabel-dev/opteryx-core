@@ -85,8 +85,8 @@ struct DecodedColumnMeta {
 // Reuse contract: a DecodedColumn may be reused across column decodes via
 // reset() (retains vector capacity — the whole point). reset() MUST clear every
 // owning container below AND slice-assign the scalar base; the completeness test
-// test_decoded_column_reset_is_complete enforces this. 30 owning containers
-// (28 std::vector + `type` + `error_message`) + scalars (in DecodedColumnMeta).
+// test_decoded_column_reset_is_complete enforces this. 31 owning containers
+// (28 std::vector + `type` + `logical_type` + `error_message`) + scalars (in DecodedColumnMeta).
 struct DecodedColumn : DecodedColumnMeta {
   std::vector<uint8_t> valid_bits;       // Arrow-style validity bitmap: 1=valid, 0=null; empty=all-valid
   std::vector<int32_t> int32_values;
@@ -109,6 +109,16 @@ struct DecodedColumn : DecodedColumnMeta {
   std::vector<float> float32_values;     // for float32
   std::vector<double> float64_values;    // for float64
   std::string type; // "int32", "int64", "string", "boolean", "float32", "float64"
+  // The column's LOGICAL type string as metadata.cpp built it ("varchar",
+  // "decimal(P,S)", "array<byte_array>", "array<varchar>", …), copied verbatim
+  // from ColumnStats. The decoder does not interpret it — the bits it produces
+  // are identical either way. It is here because the physical type alone cannot
+  // tell a VARCHAR apart from opaque BINARY: parquet stores both as BYTE_ARRAY
+  // and distinguishes them only by the String annotation, and a LIST column
+  // carries its LEAF's annotation here as "array<...>". Only the vector
+  // materializer acts on it, via the one predicate in parquet_reader.pxi.
+  // Empty = the file says nothing, which means "don't know", never "not a string".
+  std::string logical_type;
   // Raw level vectors (populated when max_rep > 0 or max_def > 0, respectively).
   // Used by the Cython binding for list column offset/null-bitmap reconstruction.
   std::vector<int32_t> rep_levels;  // one entry per logical value (all pages)
@@ -173,7 +183,7 @@ struct DecodedColumn : DecodedColumnMeta {
     dict_codes_array.clear();    rle_int64_values.clear();     rle_float64_values.clear();
     rle_run_lengths.clear();     rle_str_arena.clear();        rle_str_offsets.clear();
     rle_str_lens.clear();
-    type.clear();                error_message.clear();
+    type.clear();                error_message.clear();       logical_type.clear();
     static_cast<DecodedColumnMeta&>(*this) = DecodedColumnMeta{};  // resets all meta scalars
   }
 };

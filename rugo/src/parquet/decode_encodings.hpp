@@ -49,6 +49,20 @@ int32_t DecodeRLEBitPackedIndicesNoPrefix(const uint8_t *data, size_t data_size,
                                           int32_t num_values, int bit_width,
                                           std::vector<int32_t> &indices);
 
+// Header-only probe: is this level stream a SINGLE RLE run of `expect_value`
+// that covers at least `num_values` entries?  Used to recognise the
+// all-present definition-level stream that every nullable-but-null-free
+// column carries, without expanding one int32 per row to discover it.
+// `data`/`data_size` span the raw RLE stream (no 4-byte prefix — the caller
+// skips it for V1).  Reads the leading varint header plus the run value only;
+// it never touches the rest of the stream and never allocates.
+// Returns false for anything it cannot prove, including a bit-packed leading
+// run, a run shorter than the page, or a truncated stream — "don't know" is
+// always reported as false, so a false answer only ever costs the full decode.
+bool LevelStreamIsSingleRunOf(const uint8_t *data, size_t data_size,
+                              int32_t num_values, int bit_width,
+                              int32_t expect_value);
+
 // Skip-dense variant: decode RLE/bit-packed dict indices directly into run-level SoA arrays
 // with no dense intermediate allocation.  RLE segments emit one (code, count) pair per
 // segment; bit-packed segments decode values and merge consecutive equals into runs.

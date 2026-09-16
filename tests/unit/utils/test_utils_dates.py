@@ -7,7 +7,6 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 import datetime
 import time
-import numpy
 import pytest
 
 from opteryx.utils import dates
@@ -34,23 +33,14 @@ DATE_TESTS = [
         ("1999-12-31T23:59:59.999999", datetime.datetime(1999,12,31,23,59,59,999999)),
         ("1999-12-31T23:59:59.99999999", None),
 
-        (numpy.datetime64('2021-02-21'), datetime.datetime(2021, 2, 21, 0, 0, 0)),  # Numpy datetime64 to datetime
-        (numpy.datetime64('2021-02-21T12:00:00'), datetime.datetime(2021, 2, 21, 12, 0)),  # Numpy datetime64 with time to datetime
-        (numpy.int64(1585699200), datetime.datetime(2020, 4, 1, 0, 0)),  # Unix timestamp as numpy int64 to datetime
         (1585699200, datetime.datetime(2020, 4, 1, 0, 0)),  # Unix timestamp as int to datetime
         (1585699200.0, datetime.datetime(2020, 4, 1, 0, 0)),  # Unix timestamp as float to datetime
         (datetime.date(2021, 2, 21), datetime.datetime(2021, 2, 21)),  # Python date to datetime
-        (numpy.datetime64('2021-02-21T12:00:00'), datetime.datetime(2021, 2, 21, 12, 0)), 
-        (numpy.int64(1585699200), datetime.datetime(2020, 4, 1, 0, 0)),  # Unix timestamp as numpy int64 to datetime (repeated to ensure cache performance)
         (datetime.datetime(2021, 2, 21, 12, 0), datetime.datetime(2021, 2, 21, 12, 0)),  # Python datetime to datetime (no conversion)
         (1613918723, datetime.datetime(2021, 2, 21, 14, 45, 23)),  # Unix timestamp (seconds since epoch)
         (1613918723.5678, datetime.datetime(2021, 2, 21, 14, 45, 23)),  # Unix timestamp with fractional seconds
-        (numpy.datetime64('2021-02-21'), datetime.datetime(2021, 2, 21)),  # numpy datetime64 with date only
-        (numpy.datetime64('2021-02-21T15:32:03'), datetime.datetime(2021, 2, 21, 15, 32, 3)),  # numpy datetime64 with date and time
-        (numpy.datetime64('2021-02-21T15:32:03.5678'), datetime.datetime(2021, 2, 21, 15, 32, 3)),  # numpy datetime64 with fractional seconds
         (datetime.datetime(2021, 2, 21, 15, 32, 3), datetime.datetime(2021, 2, 21, 15, 32, 3)),  # datetime object
         (datetime.date(2021, 2, 21), datetime.datetime(2021, 2, 21)),  # date object
-        (numpy.datetime64('2021-02-21T00:00:00.000000000'), datetime.datetime(2021, 2, 21, 0, 0)), 
 
         ("2021/02/21", None),  # Wrong separators
         ("2021-13-01", None),  # Invalid month
@@ -67,6 +57,27 @@ DATE_TESTS = [
 @pytest.mark.parametrize("string, expect", DATE_TESTS)
 def test_date_parser(string, expect):
     assert dates.parse_iso(string) == expect, f"{string}  {dates.parse_iso(string)}  {expect}"
+
+
+# A value that does not SPELL a date returns None (above). A TYPE parse_iso was
+# never built for is a programming error and is raised - folding it into the same
+# None let a wrong answer travel as "not a date".
+UNPARSEABLE_TYPES = [
+    [2021, 2, 21],
+    (2021, 2, 21),
+    {"year": 2021},
+    object(),
+]
+
+
+@pytest.mark.parametrize("value", UNPARSEABLE_TYPES)
+def test_date_parser_rejects_unknown_types(value):
+    with pytest.raises(TypeError):
+        dates.parse_iso(value)
+
+
+def test_date_parser_passes_null_through():
+    assert dates.parse_iso(None) is None
 
 
 # Tests for truncate_single helper function

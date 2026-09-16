@@ -21,7 +21,7 @@ from draken.morsels.morsel import Morsel
 def test_take_int_string_float():
     m = Morsel.from_vectors(
         [b"i", b"s", b"f"],
-        [dn.vector_from_sequence(list(range(10))),
+        [dn.vector_int64_from_sequence(list(range(10))),
          dn.vector_from_string_sequence([f"v{i}".encode("utf-8") for i in range(10)]),
          dn.vector_float64_from_sequence([float(i) for i in range(10)])],
     )
@@ -32,7 +32,7 @@ def test_take_int_string_float():
 
 
 def test_take_empty():
-    m = Morsel.from_vectors([b"i"], [dn.vector_from_sequence([1, 2, 3])])
+    m = Morsel.from_vectors([b"i"], [dn.vector_int64_from_sequence([1, 2, 3])])
     e = m.take([])
     assert e.num_rows == 0
     assert e.num_columns == 1
@@ -56,14 +56,14 @@ def test_take_timestamp_preserves_type():
 
 
 def test_take_with_nulls():
-    v = dn.vector_from_sequence([1, None, 3, None, 5])
+    v = dn.vector_int64_from_sequence([1, None, 3, None, 5])
     m = Morsel.from_vectors([b"i"], [v])
     t = m.take([4, 1, 3, 0])
     assert t.column(b"i").to_pylist() == [5, None, None, 1]
 
 
 def test_take_repeated_and_reordered():
-    m = Morsel.from_vectors([b"i"], [dn.vector_from_sequence([10, 20, 30])])
+    m = Morsel.from_vectors([b"i"], [dn.vector_int64_from_sequence([10, 20, 30])])
     t = m.take([2, 2, 2, 0])
     assert t.column(b"i").to_pylist() == [30, 30, 30, 10]
 

@@ -371,6 +371,19 @@ cdef class Vector:
         from draken.vectors.bool_vector import BoolVector
         return BoolVector(self._nb.in_list(values))
 
+    def is_null_mask(self):
+        # Rows that are NULL, as an ALL-VALID BOOL vector -- unlike is_null()
+        # below, which boxes every row through to_pylist(). A consumer that
+        # keeps "valid AND true" rows (Morsel.filter_mask) cannot answer IS NULL
+        # from any comparison, since those mark the very rows it needs as null.
+        from draken.vectors.bool_vector import BoolVector
+        return BoolVector(self._nb.is_null_mask())
+
+    def is_not_null_mask(self):
+        # Complement of is_null_mask(); the validity bitmap verbatim.
+        from draken.vectors.bool_vector import BoolVector
+        return BoolVector(self._nb.is_not_null_mask())
+
     def hash(self):
         return self._nb.hash()
 

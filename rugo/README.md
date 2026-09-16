@@ -274,6 +274,41 @@ data, bounds = write_parquet_with_bounds(morsel)           # + per-column min/ma
 
 Unsupported column types fail loud (no silent skip). Nested LIST/MAP/STRUCT and dictionary-encoded *output* are not yet implemented.
 
+#### Writer identity (`created_by`) and versions
+
+rugo is built into **two distributions**, and they stamp different text into the
+Parquet footer's `created_by`:
+
+| Installed as              | `created_by` in files it writes             | `rugo.__version__` |
+|---------------------------|---------------------------------------------|--------------------|
+| `opteryx_core` (bundled)  | `opteryx-rugo version <opteryx ver> (build <n>)` | the rugo source version |
+| `rugo` (standalone wheel) | `rugo version <rugo ver>`                   | the same rugo source version |
+
+Both strings mean "rugo wrote this". The versions in them are **not
+comparable**: the bundled build is released as part of `opteryx_core` and
+carries that version, while `rugo.__version__` always reports the standalone
+rugo source version regardless of which wheel is installed. So in the bundled
+case a file says `0.9.x` while `rugo.__version__` says `0.4.x`, and neither is
+wrong.
+
+To identify the writer from Python — including which of the two you have — read
+the build identity rather than the version:
+
+```python
+import rugo
+rugo.__writer_id__     # 'opteryx-rugo version 0.9.120 (build 3522)'  — EXACTLY what goes in the footer
+rugo.__distribution__  # 'opteryx_core' or 'rugo'
+rugo.__version__       # '0.4.38' — the rugo source version, in both cases
+```
+
+`__writer_id__` is generated at build time from the same string that is compiled
+into the writer, so it cannot drift from what the files actually say.
+
+This distinction does **not** affect the `sorted_by` trust gate. A reader trusts
+a file's row-group `sorting_columns` when `created_by` identifies rugo, and that
+check is a substring search for `rugo` — no version is parsed, and both
+spellings above pass it by construction.
+
 **Streaming writer:** `parquet.open_parquet_writer(sink, ...)` writes the same column types/encoding/compression/statistics/bloom-filter support above, but as one row group per `write_row_group(morsel)` call, pushing each chunk of bytes to `sink` (a callable taking bytes) as it's produced — footer/statistics accumulate incrementally and are emitted on `close()`. Peak memory is ~one row group regardless of the total file size, independent of `write_parquet`'s whole-morsel-in/whole-file-out shape. Every batch passed to the same writer must share the same column schema.
 
 ---

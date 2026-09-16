@@ -56,61 +56,36 @@ from opteryx.types.logical_type import LogicalCategory
 # the engine uses cannot drift.
 from opteryx.variables import resolve as _resolve_var
 
-cdef tuple _resolve_http_tuning(variables):
-    """Resolve the SET-able http_* variables (default -> env -> SET, via
-    `resolve()`) into the 6-tuple CppIOPipeline.__cinit__ expects. Bandwidth is
-    stored/SET in Mbps (the human-facing unit) and converted to bytes/s here,
-    matching HttpTuning's C++ field.
+# The three per-scan IO tuning groups resolve in ONE place, shared with the
+# native scan path (compiler.py -> open_native_scan_plan). Previously only this
+# trampoline resolved them, which is why every one of these SETs was inert on
+# the production native path. These stay cdef wrappers so the typed call sites
+# below are unchanged; the resolution itself lives in io_tuning.
+from opteryx.connectors.parquet_io.io_tuning import resolve_coalesce_tuning as _rt_coalesce
+from opteryx.connectors.parquet_io.io_tuning import resolve_http_tuning as _rt_http
+from opteryx.connectors.parquet_io.io_tuning import resolve_fetch_ahead as _rt_fetch_ahead
+from opteryx.connectors.parquet_io.io_tuning import resolve_fetch_ahead_gate as _rt_fetch_ahead_gate
+from opteryx.connectors.parquet_io.io_tuning import resolve_in_flight_limit as _rt_in_flight
 
-    The two multiplexing flags are stored as `disable_*` (the state a caller
-    normally does NOT want, per variables.py's naming convention) and inverted
-    here into the positive sense HttpTuning uses."""
-    cdef double _min_bw_mbps = _resolve_var(
-        "http_min_bandwidth_mbps", variables, config.HTTP_MIN_BANDWIDTH_MBPS)
-    return (
-        _resolve_var("http_max_connections_per_host", variables, config.HTTP_MAX_CONNECTIONS_PER_HOST),
-        _resolve_var("http_max_retries", variables, config.HTTP_MAX_RETRIES),
-        _min_bw_mbps * 1.0e6 / 8.0,
-        _resolve_var("http_request_timeout_floor_ms", variables, config.HTTP_REQUEST_TIMEOUT_FLOOR_MS),
-        not _resolve_var("disable_http_multiplexing", variables, config.DISABLE_HTTP_MULTIPLEXING),
-        _resolve_var("http_pipewait", variables, config.HTTP_PIPEWAIT),
-        _resolve_var("disable_http2", variables, config.DISABLE_HTTP2),
-    )
+
+cdef tuple _resolve_http_tuning(variables):
+    return _rt_http(variables)
 
 
 cdef tuple _resolve_coalesce_tuning(variables):
-    """(waste_ratio, max_bytes) for remote range coalescing — see
-    ParquetIOPipeline::set_coalesce_tuning for what each bound is protecting."""
-    return (
-        _resolve_var("parquet_io_coalesce_waste_ratio", variables,
-                     config.PARQUET_IO_COALESCE_WASTE_RATIO),
-        _resolve_var("parquet_io_coalesce_max_bytes", variables,
-                     config.PARQUET_IO_COALESCE_MAX_BYTES),
-    )
+    return _rt_coalesce(variables)
 
 
 cdef int _resolve_in_flight_limit(variables):
-    """ABSOLUTE cap on submitted-but-unconsumed row groups; 0 = auto
-    (workers + 2). Absolute rather than a delta so "many threads, shallow
-    window" is expressible without a negative value."""
-    return <int>_resolve_var(
-        "parquet_io_in_flight_limit", variables, config.PARQUET_IO_IN_FLIGHT_LIMIT)
+    return <int>_rt_in_flight(variables)
 
 
-cdef int _resolve_fetch_ahead(variables):
-    """Remote fetch-ahead depth; 0 = off (the coupled path). See
-    PARQUET_IO_FETCH_AHEAD in config.py."""
-    return <int>_resolve_var(
-        "parquet_io_fetch_ahead", variables, config.PARQUET_IO_FETCH_AHEAD)
+cdef int _resolve_fetch_ahead(variables, overrides):
+    return <int>_rt_fetch_ahead(variables, overrides)
 
 
-cdef int _resolve_fetch_ahead_gate(variables):
-    """Minimum remote row groups before the depth above is armed; 0 = no minimum.
-    A knob of its own, not derived from the depth or the worker count — see
-    PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS in config.py."""
-    return <int>_resolve_var(
-        "parquet_io_fetch_ahead_min_row_groups", variables,
-        config.PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS)
+cdef int _resolve_fetch_ahead_gate(variables, overrides):
+    return <int>_rt_fetch_ahead_gate(variables, overrides)
 
 
 # Hoisted out of the per-row-group hot path. Previously these imports happened
@@ -674,6 +649,9 @@ cdef class ParquetReadNode(ReaderNode):
     """
 
     cdef public set _parquet_files_seen
+    # Per-scan IO settings from this relation's `WITH(name = value)` hints,
+    # already name-checked and permission-gated by the planner. None = none set.
+    cdef public object scan_overrides
     # ── Stage 1: native single-pass scan state machine ────────────────────────
     # Setup runs once in _ensure_scan_started; next_morsel then pulls one morsel
     # per call. These fields hold the hoisted once-per-scan plan + cursor state.
@@ -785,6 +763,7 @@ cdef class ParquetReadNode(ReaderNode):
     def __init__(self, properties: QueryProperties, **parameters) -> None:
         ReaderNode.__init__(self, properties=properties, **parameters)
         self.predicates = parameters.get("predicates")
+        self.scan_overrides = parameters.get("scan_overrides")
         self._parquet_files_seen = set()
         self._records_to_read = 0
         self._records_unlimited = True
@@ -831,6 +810,11 @@ cdef class ParquetReadNode(ReaderNode):
     @property
     def name(self) -> str:  # pragma: no cover
         return "Parquet Read"
+
+    @property
+    def honours_scan_overrides(self):
+        """This reader resolves them — see `scan_overrides` and io_tuning."""
+        return True
 
     def to_mermaid(self, nid):  # pragma: no cover
         mermaid = f'NODE_{nid}[("**{self.name.upper()}**<br />'
@@ -1718,12 +1702,12 @@ cdef class ParquetReadNode(ReaderNode):
                 footer_bytes_cache=_FOOTER_CACHE,
                 null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass1_column_names],
                 string_types=[self._sp_string_type_by_name[c] for c in self._sp_pass1_column_names],
-                http_tuning=_resolve_http_tuning(getattr(self.properties, "variables", None)),
-                in_flight_limit_override=_resolve_in_flight_limit(getattr(self.properties, "variables", None)),
-                coalesce_tuning=_resolve_coalesce_tuning(getattr(self.properties, "variables", None)),
-                fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None)),
+                http_tuning=_rt_http(getattr(self.properties, "variables", None), self.scan_overrides),
+                in_flight_limit_override=<int>_rt_in_flight(getattr(self.properties, "variables", None), self.scan_overrides),
+                coalesce_tuning=_rt_coalesce(getattr(self.properties, "variables", None), self.scan_overrides),
+                fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None), self.scan_overrides),
                 fetch_ahead_min_row_groups=_resolve_fetch_ahead_gate(
-                    getattr(self.properties, "variables", None)),
+                    getattr(self.properties, "variables", None), self.scan_overrides),
             )
             # Q24 latmat: push the pass-1 predicate to the decode workers so the match
             # runs in parallel there (nogil), not serially on this thread. Only when the
@@ -1789,12 +1773,12 @@ cdef class ParquetReadNode(ReaderNode):
             null_fillers=[self._sp_null_filler_by_name[c] for c in column_names],
             string_types=[self._sp_string_type_by_name[c] for c in column_names],
             limit=self.limit if (not has_predicates and not self._sp_delete_positions) else None,
-            http_tuning=_resolve_http_tuning(getattr(self.properties, "variables", None)),
-            in_flight_limit_override=_resolve_in_flight_limit(getattr(self.properties, "variables", None)),
-            coalesce_tuning=_resolve_coalesce_tuning(getattr(self.properties, "variables", None)),
-            fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None)),
+            http_tuning=_rt_http(getattr(self.properties, "variables", None), self.scan_overrides),
+            in_flight_limit_override=<int>_rt_in_flight(getattr(self.properties, "variables", None), self.scan_overrides),
+            coalesce_tuning=_rt_coalesce(getattr(self.properties, "variables", None), self.scan_overrides),
+            fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None), self.scan_overrides),
             fetch_ahead_min_row_groups=_resolve_fetch_ahead_gate(
-                getattr(self.properties, "variables", None)),
+                getattr(self.properties, "variables", None), self.scan_overrides),
         )
 
     cdef void _coerce_vectors(self, list vectors):
@@ -2222,12 +2206,12 @@ cdef class ParquetReadNode(ReaderNode):
             footer_bytes_cache=_FOOTER_CACHE,
             null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass2_column_names],
             string_types=[self._sp_string_type_by_name[c] for c in self._sp_pass2_column_names],
-            http_tuning=_resolve_http_tuning(getattr(self.properties, "variables", None)),
-            in_flight_limit_override=_resolve_in_flight_limit(getattr(self.properties, "variables", None)),
-            coalesce_tuning=_resolve_coalesce_tuning(getattr(self.properties, "variables", None)),
-            fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None)),
+            http_tuning=_rt_http(getattr(self.properties, "variables", None), self.scan_overrides),
+            in_flight_limit_override=<int>_rt_in_flight(getattr(self.properties, "variables", None), self.scan_overrides),
+            coalesce_tuning=_rt_coalesce(getattr(self.properties, "variables", None), self.scan_overrides),
+            fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None), self.scan_overrides),
             fetch_ahead_min_row_groups=_resolve_fetch_ahead_gate(
-                getattr(self.properties, "variables", None)),
+                getattr(self.properties, "variables", None), self.scan_overrides),
         )
         self._lm_pass1_done = True
 
@@ -2312,12 +2296,12 @@ cdef class ParquetReadNode(ReaderNode):
             footer_bytes_cache=_FOOTER_CACHE,
             null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass2_column_names],
             string_types=[self._sp_string_type_by_name[c] for c in self._sp_pass2_column_names],
-            http_tuning=_resolve_http_tuning(getattr(self.properties, "variables", None)),
-            in_flight_limit_override=_resolve_in_flight_limit(getattr(self.properties, "variables", None)),
-            coalesce_tuning=_resolve_coalesce_tuning(getattr(self.properties, "variables", None)),
-            fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None)),
+            http_tuning=_rt_http(getattr(self.properties, "variables", None), self.scan_overrides),
+            in_flight_limit_override=<int>_rt_in_flight(getattr(self.properties, "variables", None), self.scan_overrides),
+            coalesce_tuning=_rt_coalesce(getattr(self.properties, "variables", None), self.scan_overrides),
+            fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None), self.scan_overrides),
             fetch_ahead_min_row_groups=_resolve_fetch_ahead_gate(
-                getattr(self.properties, "variables", None)),
+                getattr(self.properties, "variables", None), self.scan_overrides),
         )
         try:
             while True:

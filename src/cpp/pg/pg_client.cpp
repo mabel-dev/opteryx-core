@@ -129,14 +129,21 @@ static std::vector<uint8_t> frame(char type, const Out& body) {
     return o.b;
 }
 
+// A message as read: the type byte plus a VIEW of its payload inside the
+// transport's read buffer. Nothing is copied per message, so the view is live
+// only until the next read (see Transport::peek). A payload that must outlive
+// the next read - an ErrorResponse held back until ReadyForQuery - is copied
+// into an owning vector at that one call site.
 struct PgConnection::Msg {
     char type = 0;
-    std::vector<uint8_t> payload;
+    const uint8_t* payload = nullptr;
+    size_t len = 0;
 };
 
 struct Reader {
     const uint8_t* p;
     size_t n, pos = 0;
+    Reader(const uint8_t* data, size_t len) : p(data), n(len) {}
     explicit Reader(const std::vector<uint8_t>& v) : p(v.data()), n(v.size()) {}
     void need(size_t k) const { if (pos + k > n) fail("postgres protocol: truncated message"); }
     uint8_t u8() { need(1); return p[pos++]; }
@@ -270,45 +277,103 @@ public:
         }
     }
 
+    // UNBUFFERED exact read. The ONLY caller is start_tls, which must take the
+    // single-byte SSLRequest reply without reading a byte further: the bytes
+    // after it are the TLS handshake, and a buffered read that swallowed them
+    // would hand plaintext-side bytes to a session that is now encrypted. Every
+    // read after the handshake goes through peek/consume below.
     void read_exact(uint8_t* p, size_t n) {
         while (n > 0) {
             ssize_t r = ssl_ ? (ssize_t)SSL_read(ssl_, p, (int)n) : ::recv(fd_, p, n, 0);
-            if (r <= 0)
-                fail(ssl_ ? "postgres TLS read failed: " + ssl_err_text()
-                          : std::string("postgres read failed: ") +
-                                (r == 0 ? "connection closed by server" : strerror(errno)));
+            if (r <= 0) read_failed(r);
             p += r; n -= (size_t)r;
         }
+    }
+
+    // Ensure `n` bytes are buffered contiguously and return a pointer to them.
+    // The buffer is refilled with whole socket reads rather than one read per
+    // message, which is what keeps a 1.5M-row stream from costing two syscalls
+    // and one allocation per row. The returned pointer is invalidated by the
+    // next peek (which may compact the buffer or refill over the consumed
+    // prefix), so a caller that needs bytes to outlive its next read copies
+    // them.
+    const uint8_t* peek(size_t n) {
+        if (rend_ - rpos_ >= n) return rbuf_.data() + rpos_;
+        // Slide the unread tail to the front so the free space is one run.
+        if (rpos_ > 0) {
+            const size_t left = rend_ - rpos_;
+            if (left > 0) std::memmove(rbuf_.data(), rbuf_.data() + rpos_, left);
+            rpos_ = 0;
+            rend_ = left;
+        }
+        // One message larger than the buffer (a wide row, a big bytea): grow to
+        // fit it. The buffer keeps that capacity for the rest of the stream.
+        if (rbuf_.size() < n) rbuf_.resize(n);
+        while (rend_ - rpos_ < n) {
+            const size_t space = rbuf_.size() - rend_;
+            ssize_t r = ssl_ ? (ssize_t)SSL_read(ssl_, rbuf_.data() + rend_, (int)space)
+                             : ::recv(fd_, rbuf_.data() + rend_, space, 0);
+            if (r <= 0) read_failed(r);
+            rend_ += (size_t)r;
+        }
+        return rbuf_.data() + rpos_;
+    }
+
+    void consume(size_t n) {
+        rpos_ += n;
+        if (rpos_ == rend_) { rpos_ = 0; rend_ = 0; }
     }
 
     void send(const std::vector<uint8_t>& b) { write_all(b.data(), b.size()); }
 
 private:
+    [[noreturn]] void read_failed(ssize_t r) {
+        fail(ssl_ ? "postgres TLS read failed: " + ssl_err_text()
+                  : std::string("postgres read failed: ") +
+                        (r == 0 ? "connection closed by server" : strerror(errno)));
+    }
+
+    // 256 KiB: large enough that a narrow-row stream refills a few times per
+    // thousand rows, small enough to be irrelevant next to a morsel.
+    static constexpr size_t kReadBufBytes = 256u * 1024u;
+
     int fd_ = -1;
     SSL_CTX* ctx_ = nullptr;
     SSL* ssl_ = nullptr;
+    std::vector<uint8_t> rbuf_ = std::vector<uint8_t>(kReadBufBytes);
+    size_t rpos_ = 0;   // first unread byte
+    size_t rend_ = 0;   // one past the last byte read from the socket
 };
 
 // ---------------------------------------------------------------------------
 // Messages
 // ---------------------------------------------------------------------------
 
+// The protocol's own ceiling: a length field is int32 and the backend never
+// sends a message at 1 GB. A bogus length is refused here rather than sizing
+// the read buffer from it.
+static constexpr int32_t kMaxMsgLen = 1024 * 1024 * 1024;
+
 PgConnection::Msg PgConnection::read_msg() {
-    uint8_t hdr[5];
-    t_->read_exact(hdr, 5);
-    int32_t len = (int32_t)be32(hdr + 1);
+    const int32_t len = (int32_t)be32(t_->peek(5) + 1);
     if (len < 4) fail("postgres protocol: bad message length");
+    if (len > kMaxMsgLen) fail("postgres protocol: message length out of range");
+    const size_t total = 5u + (size_t)len - 4u;
+    // Re-peek for the whole message: this may compact or grow the buffer, so
+    // the header pointer above cannot be reused.
+    const uint8_t* p = t_->peek(total);
     Msg m;
-    m.type = (char)hdr[0];
-    m.payload.resize((size_t)len - 4);
-    if (!m.payload.empty()) t_->read_exact(m.payload.data(), m.payload.size());
+    m.type = (char)p[0];
+    m.payload = p + 5;
+    m.len = (size_t)len - 4;
+    t_->consume(total);
     return m;
 }
 
-static void parse_error_fields(const std::vector<uint8_t>& payload, std::string& severity,
+static void parse_error_fields(const uint8_t* payload, size_t payload_len, std::string& severity,
                                std::string& code, std::string& message, std::string& detail,
                                std::string& position) {
-    Reader r(payload);
+    Reader r(payload, payload_len);
     while (!r.done()) {
         uint8_t f = r.u8();
         if (f == 0) break;
@@ -324,9 +389,9 @@ static void parse_error_fields(const std::vector<uint8_t>& payload, std::string&
     }
 }
 
-void PgConnection::raise_server_error(const Msg& m) {
+void PgConnection::raise_server_error(const uint8_t* payload, size_t len) {
     std::string severity, code, message, detail, position;
-    parse_error_fields(m.payload, severity, code, message, detail, position);
+    parse_error_fields(payload, len, severity, code, message, detail, position);
     std::string text = "postgres " + severity + " [" + code + "]: " + message;
     if (!detail.empty()) text += " (" + detail + ")";
     if (!position.empty()) text += " at position " + position;
@@ -378,7 +443,7 @@ static std::string md5_hex(const std::string& s) {
 }
 
 void PgConnection::scram_sha256(const Msg& first, const PgConfig& config) {
-    Reader r(first.payload);
+    Reader r(first.payload, first.len);
     r.i32();  // auth code 10
     bool have = false;
     while (!r.done()) { std::string m = r.cstr(); if (m.empty()) break; if (m == "SCRAM-SHA-256") have = true; }
@@ -394,11 +459,11 @@ void PgConnection::scram_sha256(const Msg& first, const PgConfig& config) {
     t_->send(frame('p', o));
 
     Msg m = read_msg();
-    if (m.type == 'E') raise_server_error(m);
+    if (m.type == 'E') raise_server_error(m.payload, m.len);
     if (m.type != 'R') fail("postgres auth: unexpected message during SASL exchange");
-    Reader r2(m.payload);
+    Reader r2(m.payload, m.len);
     if (r2.i32() != 11) fail("postgres auth: expected SASLContinue");
-    const std::string server_first((const char*)m.payload.data() + 4, m.payload.size() - 4);
+    const std::string server_first((const char*)m.payload + 4, m.len - 4);
 
     std::string snonce, salt_b64; int iters = 0;
     size_t pos = 0;
@@ -436,11 +501,11 @@ void PgConnection::scram_sha256(const Msg& first, const PgConfig& config) {
     t_->send(frame('p', o2));
 
     Msg f = read_msg();
-    if (f.type == 'E') raise_server_error(f);
+    if (f.type == 'E') raise_server_error(f.payload, f.len);
     if (f.type != 'R') fail("postgres auth: unexpected message awaiting SASLFinal");
-    Reader r3(f.payload);
+    Reader r3(f.payload, f.len);
     if (r3.i32() != 12) fail("postgres auth: expected SASLFinal");
-    const std::string server_final((const char*)f.payload.data() + 4, f.payload.size() - 4);
+    const std::string server_final((const char*)f.payload + 4, f.len - 4);
     if (server_final.rfind("v=", 0) != 0) fail("postgres auth: SASLFinal carries no server verifier");
     const std::vector<uint8_t> v = b64_decode(server_final.substr(2));
     HMAC(EVP_sha256(), salted, 32, (const uint8_t*)"Server Key", 10, server_key, &len);
@@ -472,7 +537,7 @@ void PgConnection::startup(const PgConfig& config) {
         Msg m = read_msg();
         switch (m.type) {
             case 'R': {
-                Reader r(m.payload);
+                Reader r(m.payload, m.len);
                 const int32_t code = r.i32();
                 switch (code) {
                     case 0: break;                                    // AuthenticationOk
@@ -491,8 +556,8 @@ void PgConnection::startup(const PgConfig& config) {
                 }
                 break;
             }
-            case 'E': raise_server_error(m);
-            case 'S': { Reader r(m.payload); std::string k = r.cstr(); params_[k] = r.cstr(); break; }
+            case 'E': raise_server_error(m.payload, m.len);
+            case 'S': { Reader r(m.payload, m.len); std::string k = r.cstr(); params_[k] = r.cstr(); break; }
             case 'K': break;   // BackendKeyData (cancel is not implemented)
             case 'N': break;   // NoticeResponse
             case 'Z': {
@@ -544,7 +609,7 @@ void PgConnection::send_extended(const std::string& sql,
 }
 
 std::vector<PgField> PgConnection::parse_row_description(const Msg& m) {
-    Reader r(m.payload);
+    Reader r(m.payload, m.len);
     const int16_t n = r.i16();
     std::vector<PgField> fields;
     fields.reserve((size_t)n);
@@ -566,17 +631,20 @@ std::vector<PgField> PgConnection::describe(const std::string& sql) {
     healthy_ = false;  // until we see ReadyForQuery again
     send_extended(sql, {}, false, false);
     std::vector<PgField> fields;
-    Msg pending_error;
+    // The error is raised only once ReadyForQuery leaves the session reusable,
+    // so its payload has to survive the reads in between: this is one of the
+    // four sites that copy a message out of the read buffer.
+    std::vector<uint8_t> pending_error;
     bool have_error = false;
     for (;;) {
         Msg m = read_msg();
         switch (m.type) {
             case '1': case 't': case 'n': case 'N': break;   // ParseComplete, ParameterDescription, NoData, Notice
             case 'T': fields = parse_row_description(m); break;
-            case 'E': pending_error = std::move(m); have_error = true; break;
+            case 'E': pending_error.assign(m.payload, m.payload + m.len); have_error = true; break;
             case 'Z':
                 healthy_ = true;
-                if (have_error) raise_server_error(pending_error);
+                if (have_error) raise_server_error(pending_error.data(), pending_error.size());
                 return fields;
             default:
                 fail(std::string("postgres protocol: unexpected message '") + m.type + "' in describe");
@@ -593,14 +661,14 @@ std::vector<std::vector<std::optional<std::string>>> PgConnection::query_text(
     healthy_ = false;
     send_extended(sql, ps, false, true);
     std::vector<std::vector<std::optional<std::string>>> rows;
-    Msg pending_error;
+    std::vector<uint8_t> pending_error;   // see describe(): outlives later reads
     bool have_error = false;
     for (;;) {
         Msg m = read_msg();
         switch (m.type) {
             case '1': case '2': case 'n': case 'N': case 'T': break;
             case 'D': {
-                Reader r(m.payload);
+                Reader r(m.payload, m.len);
                 const int16_t n = r.i16();
                 std::vector<std::optional<std::string>> row;
                 row.reserve((size_t)n);
@@ -612,11 +680,11 @@ std::vector<std::vector<std::optional<std::string>>> PgConnection::query_text(
                 rows.push_back(std::move(row));
                 break;
             }
-            case 'C': { Reader r(m.payload); command_tag_ = r.cstr(); break; }
-            case 'E': pending_error = std::move(m); have_error = true; break;
+            case 'C': { Reader r(m.payload, m.len); command_tag_ = r.cstr(); break; }
+            case 'E': pending_error.assign(m.payload, m.payload + m.len); have_error = true; break;
             case 'Z':
                 healthy_ = true;
-                if (have_error) raise_server_error(pending_error);
+                if (have_error) raise_server_error(pending_error.data(), pending_error.size());
                 return rows;
             default:
                 fail(std::string("postgres protocol: unexpected message '") + m.type + "' in query");
@@ -639,7 +707,7 @@ std::vector<PgField> PgConnection::begin(const std::string& sql,
             case '1': case '2': case 'N': break;
             case 'T': {
                 auto fields = parse_row_description(m);
-                Reader r(m.payload);
+                Reader r(m.payload, m.len);
                 const int16_t n = r.i16();
                 for (int16_t i = 0; i < n; i++) {
                     r.cstr(); r.i32(); r.i16(); r.i32(); r.i16(); r.i32();
@@ -653,9 +721,10 @@ std::vector<PgField> PgConnection::begin(const std::string& sql,
             }
             case 'n': return {};                        // NoData: no result columns
             case 'E': {
-                Msg err = std::move(m);
+                // finish() reads on, so the payload has to be copied out first.
+                const std::vector<uint8_t> err(m.payload, m.payload + m.len);
                 finish();                               // drain to ReadyForQuery
-                raise_server_error(err);
+                raise_server_error(err.data(), err.size());
             }
             default:
                 streaming_ = false;
@@ -670,17 +739,19 @@ bool PgConnection::next_row(const uint8_t** payload, size_t* length) {
         Msg m = read_msg();
         switch (m.type) {
             case 'D':
-                row_buf_ = std::move(m.payload);
-                *payload = row_buf_.data();
-                *length = row_buf_.size();
+                // Straight out of the read buffer: no copy, no allocation. The
+                // pointer is live until the caller's next next_row(), which is
+                // exactly what this function documents.
+                *payload = m.payload;
+                *length = m.len;
                 return true;
             case 'N': break;
-            case 'C': { Reader r(m.payload); command_tag_ = r.cstr(); break; }
+            case 'C': { Reader r(m.payload, m.len); command_tag_ = r.cstr(); break; }
             case 's': break;                            // PortalSuspended (not used: no row cap)
             case 'E': {
-                Msg err = std::move(m);
+                const std::vector<uint8_t> err(m.payload, m.payload + m.len);
                 finish();
-                raise_server_error(err);
+                raise_server_error(err.data(), err.size());
             }
             case 'Z':
                 streaming_ = false;

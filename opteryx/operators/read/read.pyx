@@ -139,6 +139,17 @@ cdef class ReaderNode(BasePlanNode):
         """Friendly name for this step"""
         return "Reader"
 
+    @property
+    def honours_scan_overrides(self):
+        """Whether this reader READS the per-scan `WITH(name = value)` settings.
+
+        False here, and overridden to True only by a reader that actually
+        consumes them. The planner refuses a hint on a relation whose reader
+        does not, rather than accepting a setting that would quietly do
+        nothing — an inert knob is indistinguishable from a broken one.
+        """
+        return False
+
     def sensors(self):
         """Reader-specific details, merged onto the base counters (calls,
         execution_time, self_time, records/bytes) so scans report timing too —

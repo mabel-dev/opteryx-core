@@ -32,7 +32,7 @@ CASES = [
     ("int8", dn.vector_int8_from_sequence, [-128, 0, 127]),
     ("int16", dn.vector_int16_from_sequence, [-32768, 0, 32767]),
     ("int32", dn.vector_int32_from_sequence, [-2147483648, 0, 2147483647]),
-    ("int64", dn.vector_from_sequence, [-(2**63), 0, 2**63 - 1]),
+    ("int64", dn.vector_int64_from_sequence, [-(2**63), 0, 2**63 - 1]),
     ("uint8", dn.vector_uint8_from_sequence, [0, 200, 255]),
     ("uint16", dn.vector_uint16_from_sequence, [0, 40000, 65535]),
     ("uint32", dn.vector_uint32_from_sequence, [0, 3000000000, 4294967295]),

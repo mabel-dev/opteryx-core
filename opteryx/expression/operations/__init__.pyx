@@ -116,7 +116,7 @@ def to_temporal_array(values, source_type, target_type):
         for value in values
     ]
 
-    source_vec = _draken_native.vector_from_sequence(coerced)
+    source_vec = _draken_native.vector_int64_from_sequence(coerced)
     if target_type == LogicalCategory.DATE:
         return _draken_native.vector_reinterpret_as_date32(source_vec)
     if target_type == LogicalCategory.TIMESTAMP:

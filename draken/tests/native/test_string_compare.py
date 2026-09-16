@@ -110,7 +110,7 @@ class TestHashNulls:
     def test_null_string_hash_matches_null_int64_hash(self):
         # Both string and int64 null rows must produce the same mixed hash.
         str_null_hash = hashes([None])[0]
-        int_null_hash = dn.vector_from_sequence([None]).hash()[0]
+        int_null_hash = dn.vector_int64_from_sequence([None]).hash()[0]
         assert str_null_hash == int_null_hash
 
     def test_non_null_rows_not_null_hash(self):

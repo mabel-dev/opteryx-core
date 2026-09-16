@@ -534,6 +534,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     }
 
     result.type = target_col->physical_type;
+    result.logical_type = target_col->logical_type;
     result.max_rep_level = target_col->max_repetition_level;
     result.max_def_level = target_col->max_definition_level;
 
@@ -869,7 +870,51 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     if (target_col->max_repetition_level > 0) {
       all_rep_levels.reserve(total_needed > 0 ? total_needed : 100000);
     }
-    if (target_col->max_definition_level > 0) {
+
+    // ── All-present definition-level fast path ────────────────────────────
+    // Nearly every file in the wild is written OPTIONAL (pyarrow/pandas
+    // default) while containing no nulls at all, so max_definition_level > 0
+    // says almost nothing about whether nulls exist.  When a page's def-level
+    // stream is provably a single RLE run at max_definition_level, the levels
+    // it would expand to are a constant — one int32 per row, written, copied,
+    // scanned for present_count, and scanned again for the bitmap, only to
+    // conclude "all valid".  Instead we count those rows here and leave
+    // all_def_levels EMPTY, which is already the established all-valid
+    // encoding: DecodedColumn::valid_bits documents "empty = all-valid", and a
+    // required column (max_definition_level == 0) has always reached the
+    // consumers that way.
+    //
+    // Correctness rests on one invariant, maintained by flush_deferred_def_levels:
+    //   all_def_levels is EITHER empty (every page so far was provably
+    //   all-present) OR complete for every row accumulated so far.
+    // It is never partially filled, so no consumer can read a short array and
+    // silently treat a real row as null.  The moment a page cannot be proven
+    // all-present, the deferred rows are materialised as max_definition_level
+    // BEFORE that page appends, which is what keeps mixed chunks (one clean
+    // page, one page with nulls) correct.
+    //
+    // The `all_def_levels.empty()` half of the page guard is what makes that
+    // one-way: once real levels exist, EVERY later page must append real
+    // levels too.  Deferring after a flush would silently drop rows off the
+    // end of the array (nulls in page 1, clean page 2 — the array would stop
+    // at page 1 and page 2's rows would read as out-of-range).
+    //
+    // Nested columns are excluded: list reconstruction consumes def_levels
+    // positionally (ipc_serialize's level walk, _make_array_vector), so for
+    // them an empty array means "no values", not "all valid".
+    const bool def_defer_eligible = (target_col->max_definition_level > 0 &&
+                                     target_col->max_repetition_level == 0);
+    int32_t deferred_all_present_rows = 0;
+    auto flush_deferred_def_levels = [&]() {
+      if (deferred_all_present_rows <= 0) return;
+      if (total_needed > 0) all_def_levels.reserve((size_t)total_needed);
+      all_def_levels.insert(all_def_levels.end(),
+                            (size_t)deferred_all_present_rows,
+                            target_col->max_definition_level);
+      deferred_all_present_rows = 0;
+    };
+
+    if (target_col->max_definition_level > 0 && !def_defer_eligible) {
       all_def_levels.reserve(total_needed > 0 ? total_needed : 100000);
     }
 
@@ -1388,6 +1433,13 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       std::vector<int32_t>& page_rep_levels = _page_rep_levels;
       std::vector<int32_t>& def_levels      = _page_def_levels;
 
+      // Set when THIS page's def levels were proven to be one all-present RLE
+      // run and therefore never expanded. def_levels is cleared in that case,
+      // so consumers that walk it per row must use this flag instead — an
+      // empty def_levels on a nullable column means "all present", never
+      // "no rows".
+      bool page_all_present = false;
+
       // Level bit-widths (0 when the corresponding max level is 0 → not decoded).
       int rep_bit_width = 0;
       if (target_col->max_repetition_level > 0) {
@@ -1449,15 +1501,28 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           uint32_t level_payload_bytes = ReadLE32(data_ptr);
           size_t   level_slice_size    = 4 + (size_t)level_payload_bytes;
           if (level_slice_size > data_size) return;
-          size_t bytes_consumed = 0;
-          int32_t decoded_levels = DecodeRLEBitPackedIndicesWithConsumption(
-              data_ptr, level_slice_size,
-              page_values, def_bit_width, def_levels, bytes_consumed);
-          if (decoded_levels != page_values) return;
+          // Probe the RLE header BEFORE expanding — the whole point is to not
+          // build the array we are about to prove constant. The probe spans the
+          // stream after the 4-byte prefix.
+          if (def_defer_eligible && all_def_levels.empty() &&
+              LevelStreamIsSingleRunOf(data_ptr + 4, level_slice_size - 4,
+                                       page_values, def_bit_width,
+                                       target_col->max_definition_level)) {
+            def_levels.clear();      // chunk-scoped scratch: drop any prior page
+            page_all_present = true;
+            deferred_all_present_rows += page_values;
+          } else {
+            flush_deferred_def_levels();
+            size_t bytes_consumed = 0;
+            int32_t decoded_levels = DecodeRLEBitPackedIndicesWithConsumption(
+                data_ptr, level_slice_size,
+                page_values, def_bit_width, def_levels, bytes_consumed);
+            if (decoded_levels != page_values) return;
+            all_def_levels.insert(all_def_levels.end(),
+                                  def_levels.begin(), def_levels.end());
+          }
           data_ptr  += level_slice_size;
           data_size -= level_slice_size;
-          all_def_levels.insert(all_def_levels.end(),
-                                def_levels.begin(), def_levels.end());
         }
       } else {
         // ── DATA_PAGE_V2 ────────────────────────────────────────────────────
@@ -1494,12 +1559,22 @@ void DecodeColumnFromChunk(DecodedColumn &result,
 
         // Definition levels: raw RLE span, EXPLICIT byte count, no prefix.
         if (target_col->max_definition_level > 0) {
-          int32_t decoded_levels = DecodeRLEBitPackedIndicesNoPrefix(
-              def_region, (size_t)def_len, page_values, def_bit_width,
-              def_levels);
-          if (decoded_levels != page_values) return;
-          all_def_levels.insert(all_def_levels.end(),
-                                def_levels.begin(), def_levels.end());
+          if (def_defer_eligible && all_def_levels.empty() &&
+              LevelStreamIsSingleRunOf(def_region, (size_t)def_len,
+                                       page_values, def_bit_width,
+                                       target_col->max_definition_level)) {
+            def_levels.clear();      // chunk-scoped scratch: drop any prior page
+            page_all_present = true;
+            deferred_all_present_rows += page_values;
+          } else {
+            flush_deferred_def_levels();
+            int32_t decoded_levels = DecodeRLEBitPackedIndicesNoPrefix(
+                def_region, (size_t)def_len, page_values, def_bit_width,
+                def_levels);
+            if (decoded_levels != page_values) return;
+            all_def_levels.insert(all_def_levels.end(),
+                                  def_levels.begin(), def_levels.end());
+          }
         }
 
         // Values region only: decompress iff is_compressed (never the level
@@ -1536,6 +1611,9 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       // Compute the number of present (non-null) values in this page.
       // The value stream only contains entries for present slots; null slots
       // are represented solely in the validity bitmap built from def_levels.
+      // An empty def_levels means every slot is present: either the column is
+      // required (levels never decoded) or this page took the all-present fast
+      // path (levels proven constant, never expanded). Both give page_values.
       int32_t present_count = page_values;  // default: all values present
       if (!def_levels.empty()) {
         int32_t max_def = target_col->max_definition_level;
@@ -1687,6 +1765,19 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             int32_t code_idx = 0;
             int32_t row_offset = total_collected;
 
+            if (page_all_present) {
+              // Fast-path page: def_levels was never expanded, and every slot
+              // is present, so the value stream is positional — code_idx == i.
+              // Walking the (empty) def_levels here would scatter NOTHING and
+              // leave every code at its zero placeholder.
+              if ((int32_t)indices.size() < page_values) return;
+              for (int32_t i = 0; i < page_values; ++i) {
+                int32_t code = indices[i];
+                if (code < 0 || code >= (int32_t)dict_size) return;
+                WritePackedCode(result.dict_codes_array.data(), row_offset + i,
+                               code, result.code_width);
+              }
+            } else {
             for (int32_t i = 0; i < page_values && i < (int32_t)def_levels.size(); ++i) {
               if (def_levels[i] == max_def) {
                 if (code_idx >= (int32_t)indices.size()) return;
@@ -1696,6 +1787,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                                code, result.code_width);
               }
               // Null rows already zero-initialized
+            }
             }
           }
 
@@ -2039,6 +2131,11 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         // when that fired, the mode flags are already false.
         if (int32_dict_mode || int64_dict_mode || int128_dict_mode ||
             float32_dict_mode || float64_dict_mode) {
+          // This walks all_def_levels positionally over the rows decoded so
+          // far, so the deferred rows must be real before it runs. Only fires
+          // on a mixed dict+PLAIN chunk, so materialising here costs nothing
+          // on the common path.
+          flush_deferred_def_levels();
           const int32_t _md = target_col->max_definition_level;
           bool _ok;
           if (int32_dict_mode) {

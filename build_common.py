@@ -1300,3 +1300,91 @@ def write_draken_abi_modules(*consumer_packages):
             handle.write(content)
 
     return stamp
+
+
+# ---------------------------------------------------------------------------
+# rugo writer identity
+# ---------------------------------------------------------------------------
+#
+# rugo is compiled into two distributions that stamp DIFFERENT `created_by`
+# text into the parquet footers they write:
+#
+#   opteryx_core wheel : "opteryx-rugo version <opteryx ver> (build <n>)"
+#   standalone rugo    : "rugo version <rugo ver>"
+#
+# Both are correct, and `rugo.parquet_reader`'s sorting_columns trust gate
+# matches either (it looks for the bare substring "rugo" — see
+# rugo/src/parquet/metadata.cpp:IsTrustedRugoWriter). But `rugo.__version__`
+# always reads rugo/__version__.py, so in the bundled case a consumer sees one
+# number in Python and a different one in the file, with nothing tying them
+# together. This module is the tie: it publishes the EXACT footer string, from
+# the same value that becomes -DRUGO_PARQUET_CREATED_BY.
+
+_RUGO_BUILD_IDENTITY_MODULE = '''\
+# GENERATED FILE — do not edit, do not commit.
+#
+# Written by build_common.write_rugo_build_identity() on every build, from the
+# SAME string that is compiled into the parquet writer as the
+# RUGO_PARQUET_CREATED_BY macro. That is the whole point of this module: rugo
+# ships inside two distributions which stamp different `created_by` text, and
+# `rugo.__version__` alone cannot tell you which one is loaded.
+
+#: Exact `created_by` string this build writes into every parquet footer.
+RUGO_WRITER_ID = "@@CREATED_BY@@"
+
+#: Distribution whose build produced this copy: "opteryx_core" or "rugo".
+RUGO_DISTRIBUTION = "@@DISTRIBUTION@@"
+'''
+
+# Distributions that build rugo. A build that is neither is a packaging change
+# nobody has thought through, not a value to pass through silently.
+_RUGO_DISTRIBUTIONS = ("opteryx_core", "rugo")
+
+
+def write_rugo_build_identity(created_by, distribution):
+    """Generate ``rugo/_build_identity.py`` — the writer identity, readable from Python.
+
+    ``created_by`` MUST be the identical string the caller passes to
+    ``draken_rugo_extensions(parquet_created_by=...)``. Each setup.py binds it
+    to a single local and hands that same local to both, so the generated module
+    and the compiled macro cannot drift; ``tests/rugo/test_writer_identity.py``
+    closes the loop by reading the string back out of a file rugo really wrote.
+
+    Called explicitly by each setup.py; never at import time (see the module
+    docstring). Returns the identity so the caller can log it.
+    """
+    if distribution not in _RUGO_DISTRIBUTIONS:
+        raise ValueError(
+            f"unknown rugo-building distribution {distribution!r}; expected one of "
+            f"{', '.join(_RUGO_DISTRIBUTIONS)}. Refusing to stamp an identity that "
+            "no consumer knows how to interpret."
+        )
+
+    # The sorting_columns trust gate in rugo/src/parquet/metadata.cpp accepts a
+    # file only when its created_by contains "rugo". A stamp without that token
+    # would make rugo silently distrust its OWN files' sortedness claims — a
+    # lost optimisation with no error anywhere. Catch it at build time.
+    if "rugo" not in created_by:
+        raise ValueError(
+            f"parquet created_by {created_by!r} does not contain 'rugo'. "
+            "IsTrustedRugoWriter (rugo/src/parquet/metadata.cpp) gates row-group "
+            "sorting_columns on that substring, so this build would refuse to "
+            "trust the sortedness of files it wrote itself."
+        )
+
+    if '"' in created_by or "\\" in created_by:
+        raise ValueError(
+            f"parquet created_by {created_by!r} contains a quote or backslash; it "
+            "is emitted both as a C string literal and as a Python one, and this "
+            "generator does not escape."
+        )
+
+    content = _RUGO_BUILD_IDENTITY_MODULE.replace("@@CREATED_BY@@", created_by).replace(
+        "@@DISTRIBUTION@@", distribution
+    )
+    with open(
+        os.path.join(_REPO_ROOT, "rugo", "_build_identity.py"), "w", encoding="utf-8"
+    ) as handle:
+        handle.write(content)
+
+    return created_by

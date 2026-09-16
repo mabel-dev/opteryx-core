@@ -24,19 +24,29 @@
 
 #include <cstdint>
 #include <optional>
-#include <set>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
 #include "core/buffers.h"
 #include "core/draken_bridge.h"
+#include "core/kmv_sketch.h"
 
 namespace nb = nanobind;
 
+// THE sketch — draken/core/kmv_sketch.h, shared with skene's value-ordering
+// decline and rugo's dictionary-encoding decision. The family tag is a
+// correctness discriminant: these hashes are draken's Vector.hash(), which does
+// NOT interchange with skene's XXH3-over-value-bytes sketches (they disagree
+// about nulls and about decimal identity, so a cross-family union is a number
+// with no meaning — architect ruling 2026-08-21). Making the family part of the
+// TYPE means such a merge cannot compile.
+using ManifestSketch =
+    draken::KmvSketch<32u, draken::KmvHashFamily::kDrakenVectorHash>;
+
 // KMV sketch width — must match the writer (opteryx_catalog manifest.MIN_K_HASHES)
 // and the Python reader (manifest.estimate_cardinality K=32).
-static const uint32_t KMV_K = 32;
+static const uint32_t KMV_K = static_cast<uint32_t>(ManifestSketch::kK);
 
 static inline bool bit_valid(const uint8_t* validity, uint32_t idx) {
     // validity == NULL means "all valid" (unified-format convention).
@@ -128,23 +138,13 @@ static nb::object kmv_ndv(nb::object column, int64_t field_id,
 
     const uint64_t* ldata = static_cast<const uint64_t*>(v.leaf->data);
 
-    std::set<uint64_t> kmin;   // the K smallest distinct hashes seen so far
-    uint64_t worst = 0;        // == *kmin.rbegin() once kmin is full (size == K)
+    ManifestSketch kmin;       // the K smallest distinct hashes seen so far
 
     auto merge_row = [&](uint32_t i) {
         with_field_slice(v, i, field_id, [&](int32_t g0, int32_t g1) {
             for (int32_t g = g0; g < g1; ++g) {
                 if (!v.leaf_valid(g)) continue;
-                const uint64_t hv = ldata[v.lsel[static_cast<uint32_t>(g)]];
-                if (kmin.size() < KMV_K) {
-                    kmin.insert(hv);
-                    if (kmin.size() == KMV_K) worst = *kmin.rbegin();
-                } else if (hv < worst) {
-                    if (kmin.insert(hv).second) {
-                        kmin.erase(std::prev(kmin.end()));     // drop the largest
-                        worst = *kmin.rbegin();
-                    }
-                }
+                kmin.add(ldata[v.lsel[static_cast<uint32_t>(g)]]);
             }
         });
     };
@@ -155,19 +155,18 @@ static nb::object kmv_ndv(nb::object column, int64_t field_id,
         for (uint32_t i = 0, n = v.n_files(); i < n; ++i) merge_row(i);
     }
 
-    if (kmin.empty())
+    if (kmin.size() == 0u)
         return nb::none();
-    if (kmin.size() < KMV_K)
+    if (kmin.is_exact())
         return nb::int_(static_cast<int64_t>(kmin.size()));    // exact distinct count
 
-    // KMV estimate: (K-1) * 2^64 / kth-smallest. Numerator needs 128 bits; the
-    // result can exceed 2^64 for tiny kth, so build the Python int from a double
-    // (truncates toward zero, matching Python int(float)).
-    const uint64_t kth = *kmin.rbegin();                       // K-th smallest (index K-1)
-    const double num = static_cast<double>(
-        (static_cast<__int128>(KMV_K - 1)) << 64);
-    const double est = num / static_cast<double>(kth);
-    return nb::steal<nb::object>(PyLong_FromDouble(est));
+    // KMV estimate (K-1)/v, v = kth-smallest normalised into [0,1). The result
+    // can exceed 2^64 for tiny kth, so build the Python int from a double
+    // (truncates toward zero, matching Python int(float)). This replaces an
+    // open-coded (K-1)*2^64/kth here: the two expressions were verified to
+    // truncate identically over 2,000,000 random kth values, so the merged
+    // estimates this returns are unchanged.
+    return nb::steal<nb::object>(PyLong_FromDouble(kmin.estimate()));
 }
 
 // sketch_keep_mask(column, field_id, probe_hashes) -> bytes[n_files]
@@ -303,7 +302,93 @@ static nb::object char_class_field_totals(nb::object column, int64_t field_id,
     return out;
 }
 
+// ── Write side: the sketch opteryx/utils/kmv.py used to implement in Python ──
+//
+// ANALYZE feeds this one morsel of Vector.hash() output at a time; `min_k`
+// returns the sorted K smallest distinct hashes, which is the per-file sketch
+// the manifest stores and estimate_cardinality merges across files. It is the
+// SAME ManifestSketch the read side above merges with, so write and read cannot
+// drift — which they could when one was a Python `set` trimmed with
+// heapq.nsmallest and the other a C++ std::set.
+class ColumnSketch {
+  public:
+    void update(const std::vector<uint64_t>& hashes) {
+        // Pure C++ over the batch — the caller's list is already converted.
+        nb::gil_scoped_release _gil;
+        for (const uint64_t hash : hashes) sketch_.add(hash);
+    }
+
+    std::vector<uint64_t> min_k() const { return sketch_.min_k(ManifestSketch::kK); }
+
+  private:
+    ManifestSketch sketch_;
+};
+
+// Union of KMV sketches: the K smallest DISTINCT hashes across all of them.
+//
+// This is the whole reason a sketch is stored rather than a scalar, and the
+// union is EXACT: if a hash is among the K smallest of the combined set and it
+// came from sketch A, it is necessarily among the K smallest of A, so no input
+// can hide a hash the answer needs.
+//
+// ⛔ Every input must come from the SAME hash function. skene's stored sketches
+// are XXH3 over value bytes; ANALYZE's are draken's Vector.hash(). Merging
+// across those two produces a number with no meaning — see skene format.h,
+// ColumnSketchHeader, and the header block in draken/core/kmv_sketch.h.
+static std::vector<uint64_t> merge_min_k(
+        const std::vector<std::vector<uint64_t>>& sketches) {
+    ManifestSketch merged;
+    {
+        nb::gil_scoped_release _gil;
+        for (const auto& sketch : sketches)
+            for (const uint64_t hash : sketch) merged.add(hash);
+    }
+    return merged.min_k(ManifestSketch::kK);
+}
+
+// (distinct_count, is_exact) from a merged sketch.
+//
+// Fewer than K hashes means the sketch never filled, so it holds EVERY distinct
+// value and its length is the exact answer — the regime that matters most,
+// because it covers every low-cardinality column. At or above K it is the
+// standard KMV estimator (K-1)/v, relative standard error ~1/sqrt(K-2) (~18.9%
+// at K=32).
+//
+// The +0.5 is this function's own and is NOT the shared estimator's: kmv_ndv
+// above truncates (it matches Python's int(float) on the read path) while this
+// one rounds, which is what the Python it replaces did. Rounding here is
+// load-bearing for nothing but bit-for-bit continuity of numbers the planner
+// already consumes, so it is preserved verbatim rather than harmonised.
+static nb::object estimate_from_min_k(const std::vector<uint64_t>& min_k) {
+    if (min_k.size() < ManifestSketch::kK)
+        return nb::make_tuple(nb::int_(static_cast<int64_t>(min_k.size())), true);
+    const double v =
+        static_cast<double>(min_k[ManifestSketch::kK - 1u]) / draken::kKmvHashSpace;
+    if (v <= 0.0)
+        // Needs the K-th smallest hash to be 0 — report K rather than infinity,
+        // matching the shared estimator's own guard.
+        return nb::make_tuple(nb::int_(static_cast<int64_t>(ManifestSketch::kK)), false);
+    const double est = static_cast<double>(ManifestSketch::kK - 1u) / v;
+    return nb::make_tuple(nb::steal<nb::object>(PyLong_FromDouble(est + 0.5)), false);
+}
+
 void register_vector_sketch_reduce(nb::module_ &m) {
+    nb::class_<ColumnSketch>(m, "ColumnSketch")
+        .def(nb::init<>())
+        .def("update", &ColumnSketch::update, nb::arg("hashes"),
+            "Fold one batch of native per-row hashes (Vector.hash()) into the sketch.")
+        .def("min_k", &ColumnSketch::min_k,
+            "The sorted K smallest distinct hashes — the per-file sketch the manifest stores.");
+
+    m.def("merge_min_k", &merge_min_k, nb::arg("sketches"),
+        "Union of KMV sketches: the K=32 smallest DISTINCT hashes across all of them. "
+        "Every input must come from the SAME hash function (draken's Vector.hash()).");
+
+    m.def("estimate_from_min_k", &estimate_from_min_k, nb::arg("min_k"),
+        "(distinct_count, is_exact) from a merged K=32 sketch. Exact when the sketch "
+        "never filled, else the KMV (K-1)/v estimate.");
+
+
     m.def("kmv_ndv", &kmv_ndv,
         nb::arg("column"), nb::arg("field_id"), nb::arg("rows") = nb::none(),
         "Estimate distinct count for one column from a manifest's array<array<uint64>> "

@@ -167,6 +167,7 @@ cdef extern from "decode.hpp":
         vector[float] float32_values
         vector[double] float64_values
         string type
+        string logical_type
         bint is_unsigned
         int32_t int_bit_width
         bint is_decimal

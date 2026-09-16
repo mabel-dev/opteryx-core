@@ -573,13 +573,13 @@ class TestDictShape:
 
 class TestCrossType:
     def test_int64_float64_add_throws(self):
-        iv = dn.vector_from_sequence([1, 2, 3])
+        iv = dn.vector_int64_from_sequence([1, 2, 3])
         fv = f64([1.0, 2.0, 3.0])
         with pytest.raises(Exception):
             iv.add(fv)
 
     def test_float64_int64_add_throws(self):
-        iv = dn.vector_from_sequence([1, 2, 3])
+        iv = dn.vector_int64_from_sequence([1, 2, 3])
         fv = f64([1.0, 2.0, 3.0])
         with pytest.raises(Exception):
             fv.add(iv)

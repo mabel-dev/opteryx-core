@@ -66,7 +66,7 @@ def _register():
         host=url.hostname,
         port=url.port or 5432,
         dbname=url.path.lstrip("/"),
-        user=url.username,
+        user=urllib.parse.unquote(url.username or ""),
         password=urllib.parse.unquote(url.password or ""),
         sslmode=options.get("sslmode", "require"),
     )

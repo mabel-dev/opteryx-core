@@ -37,6 +37,7 @@
 #include "ops/int128_gather.h"    // i128_take, i128_slice, i128_materialize, i128_dictionary_encode (DECIMAL128)
 #include "ops/int64_compare.h"    // i64_compare_scalar, i64_compare_vector
 #include "ops/int64_predicates.h" // i64_between, i64_in_list + CarcharSet
+#include "ops/bool_compare.h"      // bool_compare_scalar, bool_compare_vector (DRAKEN_BOOL)
 #include "ops/fixed_int_ops.h"    // int8/16/32 kernels (D.6)
 #include "ops/float_ops.h"        // float32/64 kernels (D.7)
 #include "ops/string_hash.h"        // hash_string
@@ -311,11 +312,17 @@ struct OpsTable {
         entries[DRAKEN_INT64].in_list        = draken::ops::i64_in_list;
         entries[DRAKEN_INT64].ordinalize     = draken::ops::ordinalize_widen<int64_t>;
 
-        // BOOL — bit-packed hash kernel; keying for GROUP BY / DISTINCT / JOIN
-        // on a boolean key. Storage/compare/take handled elsewhere; only the
-        // keying hash slot lives here.
-        entries[DRAKEN_BOOL].hash          = draken::ops::hash_bool;
-        entries[DRAKEN_BOOL].ordinalize    = draken::ops::ordinalize_bool;
+        // BOOL — bit-packed. `data` is a BITMAP (1 bit per stored value), so the
+        // compare kernels are hand-written for that layout in ops/bool_compare.h
+        // rather than template instantiations over a fixed-width type.
+        // hash: keying for GROUP BY / DISTINCT / JOIN on a boolean key.
+        // compare_scalar: `bool_col OP literal`. The CmpScalarFn int64_t scalar
+        // must be 0 or 1 — the kernel throws on anything else rather than
+        // comparing a stored bit against an out-of-domain integer.
+        // take/slice/materialize are still handled elsewhere (not in this table).
+        entries[DRAKEN_BOOL].hash           = draken::ops::hash_bool;
+        entries[DRAKEN_BOOL].ordinalize     = draken::ops::ordinalize_bool;
+        entries[DRAKEN_BOOL].compare_scalar = draken::ops::bool_compare_scalar;
 
         // D.6 — INT8
         entries[DRAKEN_INT8].hash          = draken::ops::hash_int8;

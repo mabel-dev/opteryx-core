@@ -2305,6 +2305,12 @@ cdef class NativeScanPlan:
             # the native path can prove the knob bound and see the waste.
             "fetch_ahead_depth": self.pipeline_ptr.fetch_ahead_depth(),
             "prefetch_discarded_bytes": self.pipeline_ptr.prefetch_discarded_bytes(),
+            # The submission window this scan actually ran — the read-back that
+            # proves `parquet_io_in_flight_limit` reached the NATIVE path, which
+            # it did not before 2026-09-16. 0 is not a valid window, so a reading
+            # here is always the real number, auto (max(workers, fetch_ahead) + 2)
+            # or the override.
+            "in_flight_limit": self.in_flight_limit,
         }
 
     def set_pass1_predicate(self, size_t fn, size_t ctx, list columns):
@@ -2365,6 +2371,9 @@ cpdef NativeScanPlan open_native_scan_plan(
     footer_bytes_cache=None,
     int fetch_ahead=0,
     int fetch_ahead_min_row_groups=0,
+    int in_flight_limit_override=0,
+    http_tuning=None,
+    coalesce_tuning=None,
 ):
     """Plan-time setup for the fully-native scan-pull path (see `NativeScanPlan`).
     Mirrors `open_ipc_source`'s footer-fetch + row-group pruning + pool sizing,
@@ -2583,21 +2592,77 @@ cpdef NativeScanPlan open_native_scan_plan(
         fetch_ahead, fetch_ahead_min_row_groups,
         _count_remote_items([_wi_path for _wi_path, _ in work_items]),
     )
-    plan.in_flight_limit = _submission_window(decode_workers, fetch_ahead, 0)
+    plan.in_flight_limit = _submission_window(
+        decode_workers, fetch_ahead, in_flight_limit_override)
     est_rg = max_rg_bytes * 2
     dyn_pool_size = est_rg * (plan.in_flight_limit + 1)
     if dyn_pool_size < 256*1024*1024:
         dyn_pool_size = 256*1024*1024
+    cdef bint _remote_scan = _any_remote_path([_wi_path for _wi_path, _ in work_items])
     cdef shared_ptr[PriorityPool] _shared_handle
+    # Size the self-constructed decode pool to the WORK, not to the machine.
+    # `decode_workers` arrives already resolved from config + CPU count (see
+    # `config.resolve_parquet_local_io_workers`) and never consults how many row
+    # groups this scan actually has, so a single local file holding one row group
+    # constructed — and then joined — a 16-thread pool for every query. The threads
+    # past `n_items` cannot be given work: submission is one task per work item.
+    #
+    # Measured 2026-09-16, 18-core Apple Silicon, DOP pinned to 1, min-of-15 with
+    # the arms interleaved and their order alternated per round (uncompressed PLAIN
+    # int64, `SELECT c0`):
+    #
+    #     fixture                 width  teardown_close_scans   compile    total
+    #     1 file,  1 rg,  10k      16          0.454 ms        0.111 ms   1.240 ms
+    #     1 file,  1 rg,  10k       1          0.011 ms        0.043 ms   0.710 ms
+    #     1 file, 32 rg,   1M      16 (both arms — clamp inert)           ~2.04 ms
+    #     16 files, 1 rg,  1M      16 (both arms — clamp inert)           ~2.04 ms
+    #
+    # The construction half lands in `time_engine_compile` rather than the scan,
+    # because the pool is built HERE, at plan time; the join half is
+    # `time_engine_teardown_close_scans`. Both move, and the multi-row-group and
+    # multi-file fixtures are untouched by construction — they have work for all 16.
+    #
+    # LOCAL ONLY. A remote scan is latency-bound rather than work-bound: its threads
+    # sit on the network, so a width beyond the row-group count is the entire point
+    # there (the `parquet_gcs_io_workers` production sweep and the fetch-ahead gate
+    # both rest on that). `_remote_scan` keeps this clamp off that path — and note
+    # a partially-remote scan is treated as remote, since one network item is enough
+    # to want the fan-out.
+    #
+    # `plan.in_flight_limit` above is deliberately NOT re-derived from the clamped
+    # width. It is the submission window, and left at the configured width it stays
+    # >= n_items + 2 whenever this clamp fires, so the window can never become the
+    # thing that serialises a scan.
+    cdef int _pool_workers = decode_workers
     if pool is not None:
         _shared_handle = (<CppThreadPool>pool).pool_handle()
         plan.pipeline_ptr = new ParquetIOPipeline(_shared_handle, 1024)
     else:
-        plan.pipeline_ptr = new ParquetIOPipeline(decode_workers, 1024)
+        if not _remote_scan and plan.n_items < _pool_workers:
+            # n_items > 0 is guaranteed: the zero-item plan returned above.
+            _pool_workers = plan.n_items
+        plan.pipeline_ptr = new ParquetIOPipeline(_pool_workers, 1024)
     # Armed only when something is remote (see _any_remote_path); the window
     # above was validated either way.
-    if fetch_ahead > 0 and _any_remote_path([p for p, _ in work_items]):
+    if fetch_ahead > 0 and _remote_scan:
         plan.pipeline_ptr.set_fetch_ahead(fetch_ahead)
+    # Per-scan IO shaping, resolved by the caller through
+    # connectors/parquet_io/io_tuning (default -> env -> SET). Both are None
+    # unless the caller resolved them, in which case the pipeline keeps its own
+    # defaults / HttpClient::default_tuning() — the pre-2026-09-16 behaviour.
+    # Set once here, at plan time, before any submit; HttpTuning travels BY
+    # VALUE per request, so this never touches shared client state.
+    if coalesce_tuning is not None:
+        _waste_ratio, _max_bytes = coalesce_tuning
+        plan.pipeline_ptr.set_coalesce_tuning(<double>_waste_ratio, <int64_t>_max_bytes)
+    if http_tuning is not None:
+        (_max_host_connections, _max_retries, _min_bw_bytes_per_s,
+         _timeout_floor_ms, _use_multiplexing, _use_pipewait, _force_http11) = http_tuning
+        plan.pipeline_ptr.set_http_tuning(
+            <long>_max_host_connections, <int>_max_retries,
+            <double>_min_bw_bytes_per_s, <long>_timeout_floor_ms,
+            <bint>_use_multiplexing, <bint>_use_pipewait, <bint>_force_http11,
+        )
     # E37: hand the per-column key flags to the decoder so non-key string columns
     # skip the seed XXH3 entirely (the "hash only when a query needs it" gate).
     plan.pipeline_ptr.set_hash_key_columns(plan.hash_key_columns)

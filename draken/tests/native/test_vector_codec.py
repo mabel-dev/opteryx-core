@@ -125,7 +125,7 @@ class TestBase64Encode:
             assert got == orig
 
     def test_type_error_on_non_string_vector(self):
-        int_vec = dn.vector_from_sequence([1, 2, 3])
+        int_vec = dn.vector_int64_from_sequence([1, 2, 3])
         with pytest.raises(TypeError):
             vc.vector_base64_encode(int_vec)
 
@@ -248,7 +248,7 @@ class TestBase85Encode:
             assert got == orig
 
     def test_type_error_on_non_string_vector(self):
-        int_vec = dn.vector_from_sequence([1, 2, 3])
+        int_vec = dn.vector_int64_from_sequence([1, 2, 3])
         with pytest.raises(TypeError):
             vc.vector_base85_encode(int_vec)
 

@@ -481,28 +481,28 @@ class TestOpsOnDictShape:
 class TestErrors:
     def test_and_wrong_type(self):
         b = bvec([True, False])
-        i = dn.vector_from_sequence([1, 2])
+        i = dn.vector_int64_from_sequence([1, 2])
         with pytest.raises(Exception):
             b.bool_and(i)
 
     def test_or_wrong_type(self):
         b = bvec([True])
-        i = dn.vector_from_sequence([1])
+        i = dn.vector_int64_from_sequence([1])
         with pytest.raises(Exception):
             b.bool_or(i)
 
     def test_not_wrong_type(self):
-        i = dn.vector_from_sequence([1, 2])
+        i = dn.vector_int64_from_sequence([1, 2])
         with pytest.raises(Exception):
             i.bool_not()
 
     def test_any_wrong_type(self):
-        i = dn.vector_from_sequence([1])
+        i = dn.vector_int64_from_sequence([1])
         with pytest.raises(Exception):
             i.bool_any()
 
     def test_all_wrong_type(self):
-        i = dn.vector_from_sequence([1])
+        i = dn.vector_int64_from_sequence([1])
         with pytest.raises(Exception):
             i.bool_all()
 

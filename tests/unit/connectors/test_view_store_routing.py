@@ -17,7 +17,9 @@ view silently created somewhere we do not own.
 What is pinned here: the store is the catalog entry for a bound workspace and
 the SAME object as the data connector for an unbound one, a store that cannot
 hold views says so, a name a TABLE already holds is refused at CREATE, and the
-read path finds a stored view while still honouring a dataset answer.
+read path finds a stored view while still honouring a dataset answer -- and
+does NOT honour one for a workspace whose data lives in another catalog, where
+that answer is only our listing stub.
 
 ⛔ Two connector objects do NOT mean two places. Both resolvers installed and
 pointing at the same catalog gives two cache entries and so two objects; an
@@ -245,3 +247,88 @@ def test_a_dataset_answer_from_the_store_is_honoured(clean_registry):
 
     assert kind == "dataset"
     assert obj == "handle-for-cockroach.public.tpch_08"
+
+
+def test_a_stub_dataset_answer_for_an_EXTERNAL_catalog_is_not_honoured(clean_registry):
+    """A workspace bound to someone else's catalog must not bind against our stub.
+
+    The store is the workspace's SETTINGS catalog, and for an externally
+    bound workspace the only datasets it holds are the listing stubs
+    control.opteryx projects - names with no schema, which queries are never
+    meant to consult. Honouring that answer bound the query against the stub
+    and never contacted the external catalog at all.
+
+    It did not raise, which is what made it expensive: the relation bound
+    with NO columns, so a projection failed as "column not found" and a bare
+    COUNT(*) was served from the empty stub manifest as zero - a wrong answer
+    reported as success. Dropping the answer here sends binding down the
+    normal path, which goes to the data connector.
+
+    The sibling test above pins the case this must not break: two connector
+    objects over ONE catalog still get their dataset answer honoured. The
+    difference is the catalog, not the object identity.
+    """
+    from opteryx.managers.views import resolve_relation
+
+    class _OurCatalog:
+        pass
+
+    class _TheirCatalog:
+        pass
+
+    class _StoreHoldingAStub(CatalogConnector):
+        catalog_factory = _OurCatalog
+
+        def get_relation(self, relation):
+            # What a stub projection answers: a name, and no schema behind it.
+            return "dataset", f"stub-for-{relation}"
+
+    class _ExternalData(DataConnector):
+        catalog_factory = _TheirCatalog
+
+    set_workspace_resolver(lambda workspace: Resolution(_ExternalData, {"marker": "data"}))
+    set_workspace_settings_resolver(
+        lambda workspace: Resolution(_StoreHoldingAStub, {"marker": "catalog"})
+    )
+
+    data = connector_factory("polaris_test.interop_ns.people", telemetry=None)
+    store = view_store_connector("polaris_test.interop_ns.people", telemetry=None)
+    assert store.catalog_factory is not data.catalog_factory  # two catalogs, not two objects
+
+    kind, obj = resolve_relation("polaris_test.interop_ns.people", None)
+
+    assert kind is None, "a stub from OUR catalog was bound for a workspace whose data is external"
+    assert obj is None
+
+
+def test_a_data_connector_with_no_catalog_does_not_take_the_stores_stub(clean_registry):
+    """The PostgreSQL shape: rows come from a server that has no catalog at all.
+
+    `catalog_factory` is absent on that connector, so there is nothing to
+    match the store's and the dataset answer is dropped. Pinned because the
+    sentinel that makes two catalog-less fakes compare EQUAL must not also
+    make a catalog-less connector match a store that has one.
+    """
+    from opteryx.managers.views import resolve_relation
+
+    class _OurCatalog:
+        pass
+
+    class _StoreHoldingAStub(CatalogConnector):
+        catalog_factory = _OurCatalog
+
+        def get_relation(self, relation):
+            return "dataset", f"stub-for-{relation}"
+
+    set_workspace_resolver(lambda workspace: Resolution(DataConnector, {"marker": "data"}))
+    set_workspace_settings_resolver(
+        lambda workspace: Resolution(_StoreHoldingAStub, {"marker": "catalog"})
+    )
+
+    data = connector_factory("aiven.public.orders", telemetry=None)
+    assert not hasattr(data, "catalog_factory")
+
+    kind, obj = resolve_relation("aiven.public.orders", None)
+
+    assert kind is None
+    assert obj is None

@@ -42,7 +42,7 @@ INT64_MAX = 2**63 - 1
 # ---------------------------------------------------------------------------
 
 def make(lst):
-    return dn.vector_from_sequence(lst)
+    return dn.vector_int64_from_sequence(lst)
 
 def make_const(value, length):
     return dn.vector_from_constant(value, length)

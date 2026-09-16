@@ -191,21 +191,21 @@ class TestInt64:
     values = [-(2**63), -(2**63) + 1, -1, 0, 1, 2**63 - 2, 2**63 - 1]
 
     def test_vector_monotonic(self):
-        v = dn.vector_from_sequence(self.values)
+        v = dn.vector_int64_from_sequence(self.values)
         assert_order_isomorphism(self.values, v.ordinalize().to_pylist())
 
     def test_scalar_matches_vector(self):
-        scalar_vector_parity(DT.INT64, self.values, dn.vector_from_sequence)
+        scalar_vector_parity(DT.INT64, self.values, dn.vector_int64_from_sequence)
 
     def test_identity(self):
-        v = dn.vector_from_sequence(self.values)
+        v = dn.vector_int64_from_sequence(self.values)
         assert v.ordinalize().to_pylist() == self.values
 
     def test_empty(self):
-        assert dn.vector_from_sequence([]).ordinalize().to_pylist() == []
+        assert dn.vector_int64_from_sequence([]).ordinalize().to_pylist() == []
 
     def test_all_null(self):
-        v = dn.vector_from_sequence([None, None])
+        v = dn.vector_int64_from_sequence([None, None])
         assert v.ordinalize().to_pylist() == [ORDINAL_NULL, ORDINAL_NULL]
 
     def test_scalar_overflow_raises_cleanly(self):
@@ -232,7 +232,7 @@ class TestInt64:
         rng = random.Random(20260730)
         vals = [rng.randint(-(2**63), 2**63 - 1) for _ in range(500)]
         vals = list(dict.fromkeys(vals))  # de-dup (isomorphism needs distinct values)
-        v = dn.vector_from_sequence(vals)
+        v = dn.vector_int64_from_sequence(vals)
         assert_order_isomorphism(vals, v.ordinalize().to_pylist())
 
 
@@ -1045,7 +1045,7 @@ class TestShapePreservation:
         # A dict-shaped vector and the equivalent dense vector of the same
         # logical values must ordinalize to the same per-row result.
         logical = [100, 200, 100, 300, 200, 100]
-        dense = dn.vector_from_sequence(logical)
+        dense = dn.vector_int64_from_sequence(logical)
         dict_v = dn.vector_from_dict(values=[100, 200, 300], codes=[0, 1, 0, 2, 1, 0])
         assert dense.ordinalize().to_pylist() == dict_v.ordinalize().to_pylist()
 

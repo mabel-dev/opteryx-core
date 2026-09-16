@@ -44,7 +44,7 @@ vector_log = _vm.vector_log
 
 
 def make_int(lst):
-    return dn.vector_from_sequence(lst)
+    return dn.vector_int64_from_sequence(lst)
 
 
 def make_float(lst):

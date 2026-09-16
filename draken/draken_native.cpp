@@ -3,7 +3,7 @@
 // One module, one Python surface (doc 03). Exposes:
 //   Vector     — Python handle wrapping VectorOwner (RAII; destructor frees via mimalloc).
 //   Morsel     — dumb container grouping Vector handles; owns nothing in C++.
-//   vector_from_sequence(list)        — int64 ingestion.
+//   vector_int64_from_sequence(list)  — int64 ingestion.
 //   vector_from_string_sequence(list) — string ingestion (Milestone D.1).
 //
 // Edge marshalling (boxing/unboxing) lives ONLY in this file.
@@ -832,6 +832,48 @@ static VectorOwner make_bool_constant(nb::object value_obj, uint32_t length) {
 
     DrakenVector v = draken_vector_from_constant(data, length, DRAKEN_BOOL, validity);
     return VectorOwner(v, std::move(data_buf), std::move(validity_buf));
+}
+
+// D.5: validity → BOOL mask. `want_null` true builds IS NULL, false IS NOT NULL.
+//
+// buffers.h pins `validity` as a 1-bit-per-LOGICAL-ROW mask (NULL = all valid),
+// so this reads it directly and never walks `selection`: the answer is the same
+// for a dense, constant or dict vector, and no shape discriminant is involved.
+// IS NOT NULL is the bitmap verbatim, IS NULL its complement.
+//
+// The result is a DENSE BOOL vector with validity == nullptr — the mask itself
+// is never null. That is what lets it answer IS NULL at all: every comparison
+// kernel propagates nullness, so a null-propagating mask can never mark the
+// null rows TRUE for a consumer that keeps "valid AND true" rows.
+static VectorOwner make_null_mask(const DrakenVector& v, bool want_null) {
+    const uint32_t n      = v.length;
+    const uint32_t bm     = (n + 7u) >> 3;
+    const uint32_t padded = ((bm + 7u) & ~7u);
+    const size_t   alloc  = (padded > 0u) ? static_cast<size_t>(padded) : 8u;
+
+    uint8_t* data = static_cast<uint8_t*>(draken_malloc(alloc));
+    if (!data) throw std::bad_alloc();
+    std::memset(data, 0, alloc);
+    OwnedBuffer<void> data_buf(data);
+
+    const uint8_t* validity = v.validity;
+    if (validity == nullptr) {
+        // No bitmap means every row is valid: IS NULL is empty, IS NOT NULL full.
+        if (!want_null) std::memset(data, 0xFF, static_cast<size_t>(bm));
+    } else if (want_null) {
+        for (uint32_t b = 0u; b < bm; ++b)
+            data[b] = static_cast<uint8_t>(~validity[b]);
+    } else {
+        std::memcpy(data, validity, static_cast<size_t>(bm));
+    }
+
+    // Clear the bits past row n-1 so a partial trailing byte cannot read as set
+    // (complementing a validity byte sets its padding bits).
+    if (n > 0u && (n & 7u) != 0u)
+        data[bm - 1u] &= static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+
+    DrakenVector out = draken_vector_from_dense(data, n, DRAKEN_BOOL, nullptr);
+    return VectorOwner(out, std::move(data_buf), OwnedBuffer<uint8_t>());
 }
 
 // D.5: dict-encoded bool vector.
@@ -4689,13 +4731,38 @@ static VectorOwner take_child(const VectorOwner& src_child,
 // still fit the declared width; the narrow constructors raise OverflowError
 // otherwise, exactly as their scalar entry points do.
 // ---------------------------------------------------------------------------
+// Defined below (VARBINARY ingestion); needed here for the CT_BINARY child.
+static VectorOwner make_bytes_from_sequence(nb::list seq);
+
+// element_type arrives from Python as either a DrakenType member or its raw
+// int value. A factory that refuses draken's OWN type enum reads as a bug, so
+// accept both: existing callers pass int(t.value), new callers pass t. None
+// (and any negative int) means "not supplied" — infer from the values instead.
+static int resolve_element_type_arg(nb::handle obj) {
+    if (obj.is_none()) return -1;
+    // DrakenType first: nanobind enum members are not PyLong, and checking the
+    // enum before the int keeps a future arithmetic enum from being mis-read.
+    DrakenType as_enum;
+    if (nb::try_cast<DrakenType>(obj, as_enum, /*convert=*/false))
+        return static_cast<int>(as_enum);
+    if (PyLong_Check(obj.ptr())) {
+        const long v = PyLong_AsLong(obj.ptr());
+        if (v == -1 && PyErr_Occurred()) throw nb::python_error();
+        return static_cast<int>(v);
+    }
+    throw nb::type_error(
+        "vector_array_from_sequence: element_type must be a DrakenType member, "
+        "an int DrakenType value, or None");
+}
+
 static VectorOwner make_array_from_sequence(
         nb::list seq, int element_type = -1, int nesting_depth = 0) {
     const uint32_t length = static_cast<uint32_t>(seq.size());
 
     enum ChildType { CT_UNKNOWN, CT_INT8, CT_INT16, CT_INT32, CT_INT64,
                      CT_UINT8, CT_UINT16, CT_UINT32, CT_UINT64,
-                     CT_FLOAT32, CT_FLOAT64, CT_BOOL, CT_STRING, CT_ARRAY };
+                     CT_FLOAT32, CT_FLOAT64, CT_BOOL, CT_STRING, CT_BINARY,
+                     CT_ARRAY };
     ChildType child_type = CT_UNKNOWN;
     const bool leaf_is_uint64 = (nesting_depth == 1) && (element_type == DRAKEN_UINT64);
     // Declared leaf width wins over inference. Only at the leaf level, and only
@@ -4750,11 +4817,18 @@ static VectorOwner make_array_from_sequence(
                     child_type = leaf_is_uint64 ? CT_UINT64 : CT_INT64;
                 else if (PyFloat_Check(first.ptr()))                       child_type = CT_FLOAT64;
                 else if (PyUnicode_Check(first.ptr()))                     child_type = CT_STRING;
+                // bytes is VARBINARY, NOT VARCHAR. A `bytes` leaf is opaque
+                // binary that is not required to be valid UTF-8 — parquet's
+                // unannotated BYTE_ARRAY list element (e.g. a truncated string
+                // bound with a 0xff sentinel appended) is exactly that. Typing
+                // it CT_STRING would tag the child VARCHAR and every consumer
+                // that renders the child would then try to decode it.
+                else if (PyBytes_Check(first.ptr()))                       child_type = CT_BINARY;
                 else if (PyList_Check(first.ptr()) || PyTuple_Check(first.ptr())) child_type = CT_ARRAY;
                 else
                     throw std::invalid_argument(
                         "vector_array_from_sequence: unsupported child element type "
-                        "(expected bool, int, float, str, or list)");
+                        "(expected bool, int, float, str, bytes, or list)");
                 break;
             }
         }
@@ -4770,8 +4844,8 @@ static VectorOwner make_array_from_sequence(
         } else {
             switch (element_type) {
                 case DRAKEN_VARCHAR:
-                case DRAKEN_NVARCHAR:
-                case DRAKEN_VARBINARY: child_type = CT_STRING;  break;
+                case DRAKEN_NVARCHAR:  child_type = CT_STRING;  break;
+                case DRAKEN_VARBINARY: child_type = CT_BINARY;  break;
                 case DRAKEN_FLOAT32:   child_type = CT_FLOAT32; break;
                 case DRAKEN_FLOAT64:   child_type = CT_FLOAT64; break;
                 case DRAKEN_INT8:      child_type = CT_INT8;    break;
@@ -4838,6 +4912,14 @@ static VectorOwner make_array_from_sequence(
             child = std::make_unique<VectorOwner>(make_string_from_sequence(encoded));
             break;
         }
+        case CT_BINARY:
+            // Opaque bytes, tagged DRAKEN_VARBINARY. Storage is identical to the
+            // CT_STRING child above; only the type tag differs, which is what
+            // makes `child_elem_to_py` render the element via row_bytes instead
+            // of row_string. make_bytes_from_sequence is bytes-only, so a `str`
+            // that reached a binary child fails loud rather than being encoded.
+            child = std::make_unique<VectorOwner>(make_bytes_from_sequence(flat_children));
+            break;
         case CT_ARRAY:
             child = std::make_unique<VectorOwner>(make_array_from_sequence(
                 flat_children, element_type, nesting_depth - 1));
@@ -5280,7 +5362,6 @@ static VectorOwner make_nvarchar_from_sequence(nb::list seq) {
 // (no decode). Storage is identical across VARCHAR/NVARCHAR/VARBINARY; only the
 // type tag differs. Used where bytes data must carry a known source type
 // (e.g. MIN/MAX of a VARCHAR column preserving VARCHAR).
-static VectorOwner make_bytes_from_sequence(nb::list seq);  // defined below
 static VectorOwner make_bytes_from_sequence_typed(nb::list seq, DrakenType type) {
     VectorOwner owner = make_bytes_from_sequence(seq);  // produces DRAKEN_VARBINARY
     if (type != DRAKEN_VARBINARY) {
@@ -8494,6 +8575,28 @@ NB_MODULE(draken_native, m) {
         // compare_vector: vector OP vector (same type, same length) → bool mask.
         // Unsupported types throw std::invalid_argument.
         .def("compare_scalar", [](const VectorOwner& v, nb::object scalar, int op) -> VectorOwner {
+            // None is not a comparison operand for ANY column type: SQL's
+            // `x = NULL` is UNKNOWN for every row, so there is no mask to
+            // return. Checked first, before the type dispatch, because the
+            // answer does not depend on the column.
+            //
+            // This branch only runs because `scalar` is declared `.none()` in
+            // the arg spec below. WITHOUT that, nanobind rejects None during
+            // OVERLOAD RESOLUTION (nb_func.cpp: an argument that is Py_None
+            // without cast_flags::accepts_none fails the overload) and the body
+            // is never entered, so the caller got
+            //   "compare_scalar(): incompatible function arguments ...
+            //    1. compare_scalar(self, scalar: object, op: int)"
+            // — a signature advertising `object` that then refuses NoneType,
+            // naming neither NULL nor what to use instead. Letting None INTO the
+            // body and rejecting it here is what buys the real message;
+            // nb::type_error keeps the TypeError the float/fp16/bool suites
+            // already assert.
+            if (scalar.is_none())
+                throw nb::type_error(
+                    "compare_scalar: scalar must not be None — a comparison "
+                    "with NULL matches no row; test nullness with "
+                    "is_null_mask() / is_not_null_mask()");
             // D.13: array — whole-array comparison is unsupported (06, out of scope).
             if (v.vec.type == DRAKEN_ARRAY)
                 throw std::invalid_argument(
@@ -8505,6 +8608,23 @@ NB_MODULE(draken_native, m) {
             if (v.vec.type == DRAKEN_VECTOR_FP16)
                 throw std::invalid_argument(
                     "compare_scalar: ordering not supported for VECTOR_FP16");
+            // D.5: BOOL — bit-packed data, and the only meaningful literal is a
+            // boolean. This branch exists to REJECT, not to convert: `bool` is a
+            // subclass of `int`, so without it `True` would fall through to the
+            // integer path at the bottom (working only by accident) and, worse,
+            // `bool_col = 5` would coerce to an int64 5 and be compared against a
+            // stored 0/1 bit. Require an actual bool and fail clean otherwise
+            // (CLAUDE.md §9 — errors explicit and early). The kernel repeats the
+            // domain check for non-Python callers.
+            if (v.vec.type == DRAKEN_BOOL) {
+                PyObject* pyb = scalar.ptr();
+                if (!PyBool_Check(pyb))
+                    throw std::invalid_argument(
+                        "compare_scalar: BOOL vector requires a bool scalar (True or False)");
+                const int64_t sb = (pyb == Py_True) ? 1 : 0;
+                nb::gil_scoped_release _gil;
+                return vecresult_to_owner(draken_compare_scalar(v.vec, sb, op));
+            }
             if (v.vec.type == DRAKEN_DECIMAL) {
                 require_decimal_descriptor(v, "compare_scalar");
                 // Scale-aware: convert the literal at its OWN scale and let the
@@ -8628,9 +8748,12 @@ NB_MODULE(draken_native, m) {
                 : nb::cast<int64_t>(scalar);
             nb::gil_scoped_release _gil;
             return vecresult_to_owner(draken_compare_scalar(v.vec, si, op));
-        }, nb::arg("scalar"), nb::arg("op"),
+        }, nb::arg("scalar").none(), nb::arg("op"),
             "Compare each row against scalar. op: 0=eq 1=ne 2=gt 3=ge 4=lt 5=le.\n"
-            "INT64: scalar is int. STRING: scalar is str.\n"
+            "INT64: scalar is int. STRING: scalar is str. BOOL: scalar is bool\n"
+            "(True/False only — an int or float scalar is rejected, not coerced).\n"
+            "None is accepted by the signature only so the body can REJECT it\n"
+            "with a message that names NULL; it is never a valid operand.\n"
             "Returns a DRAKEN_BOOL vector (bit-packed, 1 bit/row, LSB-first).")
         .def("compare_vector", [](const VectorOwner& self, const VectorOwner& other, int op) -> VectorOwner {
             // Both operands are pre-unwrapped VectorOwner refs; the body touches
@@ -8944,6 +9067,21 @@ NB_MODULE(draken_native, m) {
             "lo_inclusive / hi_inclusive control whether bounds are closed.\n"
             "FLOAT32/64 vectors accept float bounds; integer vectors accept int bounds.\n"
             "Null input row → null output row. Returns a DRAKEN_BOOL vector.")
+        // C.4 — validity masks. Null-propagating compares cannot answer IS NULL
+        // (the rows to keep are exactly the ones they mark null), so the mask
+        // is built from the validity bitmap itself. See make_null_mask.
+        .def("is_null_mask",
+            [](const VectorOwner& v) -> VectorOwner {
+                return make_null_mask(v.vec, true);
+            },
+            "Rows that are NULL, as an all-valid DRAKEN_BOOL vector.\n"
+            "Reads the logical-row validity bitmap; shape-independent.")
+        .def("is_not_null_mask",
+            [](const VectorOwner& v) -> VectorOwner {
+                return make_null_mask(v.vec, false);
+            },
+            "Rows that are NOT NULL, as an all-valid DRAKEN_BOOL vector.\n"
+            "Reads the logical-row validity bitmap; shape-independent.")
         // in_list: hash-only membership via CarcharSet.
         //
         // CarcharSet stores 64-bit hashes only — no key verification. A hash
@@ -9444,9 +9582,16 @@ NB_MODULE(draken_native, m) {
         .def("__len__",     &Morsel::size);
 
     // Factory: Python list → dense int64 Vector.
-    m.def("vector_from_sequence", &make_int64_from_sequence, nb::arg("sequence"),
-        "Build a dense int64 Vector from a Python sequence. None elements become nulls.\n"
-        "All-valid input leaves validity==NULL (normalization invariant).");
+    // Named for its type like every other builder in this family (int8/16/32).
+    // It was once the no-suffix `vector_from_sequence`, which collided with the
+    // dtype-dispatching Python wrapper draken.vector_from_sequence and led
+    // consumers to expect dispatch/encoding from a raw INT64-only constructor.
+    m.def("vector_int64_from_sequence", &make_int64_from_sequence, nb::arg("sequence"),
+        "Build a dense INT64 Vector from a Python list[int | None].\n"
+        "None elements become null rows.\n"
+        "All-valid input leaves validity==NULL (normalization invariant).\n"
+        "This is the raw INT64 constructor — it does NOT dispatch on a dtype. For\n"
+        "dtype-dispatched ingestion use draken.vector_from_sequence(values, dtype).");
 
     // C.2 factories — constant and dict shapes for testing take/materialize/drop_nulls/dictionary_encode.
     m.def("vector_from_constant",
@@ -9478,8 +9623,12 @@ NB_MODULE(draken_native, m) {
     m.def("vector_from_string_sequence",
         [](nb::list seq) { return make_string_from_sequence(seq); },
         nb::arg("sequence"),
-        "Build a dense VARCHAR Vector from a Python list[str | None].\n"
-        "Elements are UTF-8 encoded at the Python boundary.\n"
+        "Build a dense VARCHAR Vector from a Python list[bytes | None].\n"
+        "BYTES-ONLY: elements must ALREADY be UTF-8 encoded. A Python str is\n"
+        "rejected with ValueError — no encoding happens at this edge (CLAUDE.md\n"
+        "§1: no Python objects in the native path). To pass list[str], call the\n"
+        "Python wrapper draken.vector_from_sequence(values, \"VARCHAR\")\n"
+        "(draken.interop.vector_sequence), which encodes str at one ingestion point.\n"
         "None elements become null rows.\n"
         "All-valid input leaves validity==NULL (normalization invariant).\n"
         "Raises OverflowError if total arena bytes exceed 4 GB.");
@@ -9525,7 +9674,11 @@ NB_MODULE(draken_native, m) {
     m.def("vector_from_nvarchar_sequence",
         [](nb::list seq) { return make_nvarchar_from_sequence(seq); },
         nb::arg("sequence"),
-        "Build a dense NVARCHAR Vector from a Python list[str | None].\n"
+        "Build a dense NVARCHAR Vector from a Python list[bytes | None].\n"
+        "BYTES-ONLY: elements must ALREADY be UTF-8 encoded; a Python str is\n"
+        "rejected with ValueError (this shares the VARCHAR ingestion path, so the\n"
+        "error names vector_from_string_sequence). Use the Python wrapper\n"
+        "draken.vector_from_sequence(values, \"NVARCHAR\") to pass list[str].\n"
         "Same storage as VARCHAR (slot+arena). Type tag drives codepoint-length ops.\n"
         "LENGTH returns UTF-8 codepoint count, not byte count.\n"
         "None elements become null rows.");
@@ -9663,7 +9816,10 @@ NB_MODULE(draken_native, m) {
     m.def("vector_from_string_dict_sequence",
         [](nb::list seq) { return make_string_dict_from_sequence(seq); },
         nb::arg("sequence"),
-        "Build a dict-encoded STRING Vector from a Python list[str | None].\n"
+        "Build a dict-encoded STRING Vector from a Python list[bytes | None].\n"
+        "BYTES-ONLY: elements must ALREADY be UTF-8 encoded; a Python str is\n"
+        "rejected with ValueError. Unlike the dense VARCHAR builder this one is NOT\n"
+        "routed by draken.vector_from_sequence — encode str before calling it.\n"
         "Deduplicates values: equal strings share one slot; long strings use\n"
         "length/prefix/hash32 fast-reject before exact byte verification.\n"
         "None elements become null rows.\n"
@@ -10253,6 +10409,7 @@ NB_MODULE(draken_native, m) {
     // Child type is inferred from the first non-null, non-empty element:
     //   int   → DRAKEN_INT64
     //   str   → DRAKEN_VARCHAR
+    //   bytes → DRAKEN_VARBINARY   (opaque; never decoded)
     //   list  → DRAKEN_ARRAY  (recursive: array-of-array)
     //
     // None rows → null (validity bit cleared).
@@ -10260,20 +10417,33 @@ NB_MODULE(draken_native, m) {
     //
     // Ownership: parent owns child; freeing parent frees entire subtree.
     m.def("vector_array_from_sequence",
-        [](nb::list seq, int element_type, int nesting_depth) {
-            return make_array_from_sequence(seq, element_type, nesting_depth);
+        [](nb::list seq, nb::object element_type, int nesting_depth) {
+            return make_array_from_sequence(
+                seq, resolve_element_type_arg(element_type), nesting_depth);
         },
         nb::arg("sequence"),
-        nb::arg("element_type") = -1,
+        nb::arg("element_type") = nb::none(),
         nb::arg("nesting_depth") = 0,
         "Build a dense DRAKEN_ARRAY Vector from a Python list[list | None].\n"
         "Each non-null element must be a list (or tuple) of homogeneous elements.\n"
-        "Child type inferred: int → INT64, str → STRING, list → ARRAY (recursive).\n"
+        "Child type inferred: int → INT64, str → VARCHAR, bytes → VARBINARY,\n"
+        "list → ARRAY (recursive). str and bytes are DISTINCT child types: a bytes\n"
+        "child is opaque binary, never decoded or validated as UTF-8.\n"
+        "NOTE — this str/bytes convention differs DELIBERATELY from the scalar\n"
+        "string factories (vector_from_string_sequence et al), which are BYTES-ONLY\n"
+        "and reject str. The two are not in conflict: here the element type is not\n"
+        "yet known and str vs bytes is the only signal that SELECTS it (VARCHAR vs\n"
+        "VARBINARY), so both must be accepted. There, the type is already fixed at\n"
+        "VARCHAR, so a str would carry no type information and would only push an\n"
+        "implicit encode into the native edge. A str child is encoded UTF-8 by the\n"
+        "ARRAY builder itself; the scalar edge never encodes.\n"
         "When a level has no inferable child (all rows null/empty), the child type\n"
         "is taken from the schema: element_type is the leaf scalar DrakenType and\n"
         "nesting_depth is the list nesting depth (>=2 forces an ARRAY child, the\n"
         "leaf type threading down the recursion). element_type<0/nesting_depth<=0\n"
         "keeps the legacy value-only behaviour (default INT64 leaf).\n"
+        "element_type accepts a DrakenType member (dn.DrakenType.VARCHAR), its raw\n"
+        "int value, or None/-1 for \"not supplied\".\n"
         "None elements become null rows (validity bit cleared).\n"
         "[] elements become valid empty sublists (distinct from null).\n"
         "Parent owns child; RAII destructor frees the entire nested subtree.\n"

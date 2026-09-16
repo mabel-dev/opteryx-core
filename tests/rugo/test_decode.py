@@ -8,6 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+import draken.draken_native as dn
 import rugo.rugo_native as rp
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -42,21 +43,30 @@ def test_can_decode_unsupported_types():
     assert rp.can_decode("testdata/parquet_tests/alltypes_plain.parquet") is False
 
 
-def test_decode_string_column():
-    """Test decoding a string column from binary.parquet."""
+def test_decode_binary_column():
+    """Test decoding an UNANNOTATED BYTE_ARRAY column from binary.parquet.
+
+    `foo` is `optional binary` with NO String annotation, and its values are the
+    control bytes 0x00..0x0b — opaque binary, not text. It must come back as a
+    VARBINARY vector of `bytes`. This test previously asserted `str`, which was
+    asserting the bug: the scalar materializer tagged every BYTE_ARRAY column
+    VARCHAR regardless of annotation (see
+    tests/rugo/test_parquet_scalar_binary_column.py).
+    """
     with open("testdata/parquet_tests/binary.parquet", "rb") as f:
         file_data = f.read()
 
     result = rp.read_parquet(file_data, ["foo"])
 
-    # binary.parquet has 12 string values in first row group
+    # binary.parquet has 12 values in first row group
     assert result is not None
     morsel = result[0]
     assert morsel.column_names == [b"foo"]
-    data = morsel.column("foo").to_pylist()
+    vector = morsel.column("foo")
+    assert vector.type == dn.VARBINARY
+    data = vector.to_pylist()
     assert isinstance(data, list)
-    assert len(data) == 12
-    assert all(isinstance(s, str) for s in data)
+    assert data == [bytes([i]) for i in range(12)]
 
 
 def test_decode_nonexistent_column():

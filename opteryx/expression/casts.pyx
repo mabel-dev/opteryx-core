@@ -153,7 +153,7 @@ def _cast_result_to_draken(result, resolved_type, args=()):
             [v if isinstance(v, bytes) else (str(v).encode("utf-8") if v is not None else None) for v in result]
         )
     if resolved_type in ("INTEGER", "BIGINT"):
-        return _draken_native_casts.vector_from_sequence(result)
+        return _draken_native_casts.vector_int64_from_sequence(result)
     if resolved_type == "DOUBLE":
         return _draken_native_casts.vector_float64_from_sequence(result)
     if resolved_type == "BOOLEAN":
@@ -164,12 +164,12 @@ def _cast_result_to_draken(result, resolved_type, args=()):
             (v - _dt.date(1970, 1, 1)).days if v is not None else None
             for v in result
         ]
-        int_vec = _draken_native_casts.vector_from_sequence(int_vals)
+        int_vec = _draken_native_casts.vector_int64_from_sequence(int_vals)
         return _draken_native_casts.vector_reinterpret_as_date32(int_vec)
     if resolved_type == "TIMESTAMP":
         from opteryx.types.timestamps._datetime_conversion import timestamp_to_int64_us as _ts_to_int
         int_vals = [_ts_to_int(v) if v is not None else None for v in result]
-        int_vec = _draken_native_casts.vector_from_sequence(int_vals)
+        int_vec = _draken_native_casts.vector_int64_from_sequence(int_vals)
         return _draken_native_casts.vector_reinterpret_as_timestamp64(int_vec)
     if resolved_type == "DECIMAL":
         # Infer precision/scale from args; default to DECIMAL(18, 6) (Decision F).
@@ -814,7 +814,7 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
         if s in _CAST_UNSIGNED_INT:
             def _uint_to_int64_cast(arr):
                 result = [int(v) if v is not None else None for v in arr]
-                return _draken_native_casts.vector_from_sequence(result)
+                return _draken_native_casts.vector_int64_from_sequence(result)
             return _uint_to_int64_cast, False, True
         if s in ("DECIMAL", "DECIMAL128"):
             return _decimal_numeric_native_only, False, False

@@ -499,6 +499,56 @@ int32_t DecodeRLEBitPackedIndicesNoPrefix(const uint8_t *data, size_t data_size,
 }
 
 // ---------------------------------------------------------------------------
+// LevelStreamIsSingleRunOf
+// ---------------------------------------------------------------------------
+// Decides the all-present question from the RLE header alone.  The hybrid
+// encoding puts a varint run header first: bit 0 selects bit-packed (1) or RLE
+// (0), and the remaining bits carry the count.  An RLE run is then followed by
+// the repeated value in round-up-to-byte(bit_width) bytes, little-endian.  So a
+// stream whose FIRST run is RLE, repeats `expect_value`, and is at least as
+// long as the page is all-`expect_value` for every level the page consumes —
+// whatever follows it is never read.
+//
+// Every failure mode returns false, which costs only the normal full decode.
+bool LevelStreamIsSingleRunOf(const uint8_t *data, size_t data_size,
+                              int32_t num_values, int bit_width,
+                              int32_t expect_value) {
+  if (bit_width <= 0 || bit_width > 32) return false;
+  if (num_values <= 0) return false;
+
+  const uint8_t *ptr = data;
+  const uint8_t *end = data + data_size;
+
+  // Varint run header. A header that runs off the end of the stream, or that
+  // never terminates within 32 bits, is not something we can prove.
+  uint32_t header    = 0;
+  int      shift     = 0;
+  bool     terminated = false;
+  while (ptr < end && shift < 32) {
+    const uint8_t byte = *ptr++;
+    header |= ((uint32_t)(byte & 0x7F)) << shift;
+    if ((byte & 0x80) == 0) { terminated = true; break; }
+    shift += 7;
+  }
+  if (!terminated) return false;
+
+  if ((header & 1) != 0) return false;            // bit-packed run: not provable
+  const int32_t count = (int32_t)(header >> 1);   // header is uint32 ⇒ fits int32
+  if (count < num_values) return false;           // run stops short of the page
+
+  const int bytes_needed = (bit_width + 7) / 8;
+  if ((size_t)(end - ptr) < (size_t)bytes_needed) return false;
+
+  uint32_t value = 0;
+  for (int i = 0; i < bytes_needed; i++)
+    value |= ((uint32_t)ptr[i]) << (i * 8);
+  // bit_width == 32 would make (1U << 32) undefined; mask only when it narrows.
+  if (bit_width < 32) value &= (1U << bit_width) - 1;
+
+  return (int32_t)value == expect_value;
+}
+
+// ---------------------------------------------------------------------------
 // DecodeRLEBitPackedIndicesToRuns
 // ---------------------------------------------------------------------------
 // Skip-dense variant: emits run-level SoA arrays (code, count) with no dense

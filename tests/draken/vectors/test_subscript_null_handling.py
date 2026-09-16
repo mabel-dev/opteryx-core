@@ -17,7 +17,7 @@ class TestSubscriptNullHandling:
 
     def test_int64_vector_subscript_null(self):
         """Int64 vectors should return None for null values, not raise ValueError."""
-        vec = dn.vector_from_sequence([1, 2, None])
+        vec = dn.vector_int64_from_sequence([1, 2, None])
 
         assert vec[0] == 1
         assert vec[1] == 2
@@ -81,7 +81,7 @@ class TestSubscriptNullHandling:
 
     def test_all_nulls(self):
         """Test vector with all nulls."""
-        vec = dn.vector_from_sequence([None, None, None])
+        vec = dn.vector_int64_from_sequence([None, None, None])
 
         assert vec[0] is None
         assert vec[1] is None

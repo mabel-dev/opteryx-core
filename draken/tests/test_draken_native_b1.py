@@ -13,7 +13,7 @@ import draken.draken_native as dn
 
 
 def make_vec(lst):
-    return dn.vector_from_sequence(lst)
+    return dn.vector_int64_from_sequence(lst)
 
 
 # ---------------------------------------------------------------------------

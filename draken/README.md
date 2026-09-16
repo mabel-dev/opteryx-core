@@ -193,18 +193,34 @@ v.array_get(i, j)     # value at element j of row i
 
 All constructors return a `Vector`. `None` in the input list produces a null row.
 
+> **The string constructors below are BYTES-ONLY.** `vector_from_string_sequence`,
+> `vector_from_nvarchar_sequence` and `vector_from_string_dict_sequence` reject a
+> Python `str` with `ValueError` — they do not encode. A `str` must not reach the
+> native edge (see the engineering contract, §1).
+>
+> If you have `list[str]`, use the Python wrapper instead:
+>
+> ```python
+> import draken
+> v = draken.vector_from_sequence(["a", "b", None], "VARCHAR")   # encodes str → UTF-8
+> ```
+>
+> `vector_from_sequence` is the wrapper, and only the wrapper. The raw
+> INT64-only native constructor is `dn.vector_int64_from_sequence` — named for
+> its type like every other builder in the family.
+
 ### Dense (identity selection)
 
 ```python
-dn.vector_from_sequence(values: list[int | None])            # → INT64
+dn.vector_int64_from_sequence(values: list[int | None])            # → INT64
 dn.vector_int8_from_sequence(values)                         # → INT8
 dn.vector_int16_from_sequence(values)                        # → INT16
 dn.vector_int32_from_sequence(values)                        # → INT32
 dn.vector_float32_from_sequence(values)                      # → FLOAT32
 dn.vector_float64_from_sequence(values)                      # → FLOAT64
 dn.vector_from_bool_sequence(values: list[bool | None])      # → BOOL
-dn.vector_from_string_sequence(values: list[str | None])     # → VARCHAR
-dn.vector_from_nvarchar_sequence(values: list[str | None])   # → NVARCHAR
+dn.vector_from_string_sequence(values: list[bytes | None])   # → VARCHAR (bytes-only)
+dn.vector_from_nvarchar_sequence(values: list[bytes | None]) # → NVARCHAR (bytes-only)
 dn.vector_from_bytes_sequence(values: list[bytes | None])    # → VARBINARY
 dn.vector_date32_from_sequence(values: list[date | None])    # → DATE32
 dn.vector_timestamp_from_sequence(
@@ -226,7 +242,15 @@ dn.vector_fp16_from_sequence(
     values: list[list[float] | None],
     dimension: int,
 )                                                            # → VECTOR_FP16
-dn.vector_array_from_sequence(values: list[list | None])     # → ARRAY
+dn.vector_array_from_sequence(
+    values: list[list | None],
+    element_type: DrakenType | int | None = None,  # enum or raw int both accepted
+    nesting_depth: int = 0,
+)                                                            # → ARRAY
+# ARRAY children accept BOTH str and bytes, unlike the scalar string factories:
+# here the element type is not yet known and str/bytes is what selects it
+# (str → VARCHAR child, bytes → VARBINARY child). element_type/nesting_depth
+# supply the type when a level has no inferable value (all rows null/empty).
 ```
 
 ### Constant (single value broadcast)
@@ -308,7 +332,7 @@ from datetime import date
 import draken.draken_native as dn
 
 # Build vectors
-ids    = dn.vector_from_sequence([1, 2, 3, None, 5])
+ids    = dn.vector_int64_from_sequence([1, 2, 3, None, 5])
 names  = dn.vector_from_string_sequence(["alice", "bob", "carol", None, "eve"])
 active = dn.vector_from_bool_sequence([True, False, True, None, True])
 
@@ -327,7 +351,7 @@ print(codes_vec.type)       # DrakenType.VARCHAR
 print(codes_vec.to_pylist())
 
 # Range predicate
-ages   = dn.vector_from_sequence([10, 25, 42, 17, 33])
+ages   = dn.vector_int64_from_sequence([10, 25, 42, 17, 33])
 adults = ages.between(18, 99, inclusive=True)
 print(adults.to_pylist())   # [False, True, True, False, True]
 ```

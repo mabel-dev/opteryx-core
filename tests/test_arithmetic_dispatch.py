@@ -28,7 +28,7 @@ class TestVectorTypeDiscrimination:
 
     def test_type_discrimination_int64_vector(self):
         """Test VectorType discrimination for an INT64 vector."""
-        v = dn.vector_from_sequence([1, 2, 3])
+        v = dn.vector_int64_from_sequence([1, 2, 3])
         vec_type = get_vector_type(v)
 
         assert vec_type == VectorType.INT64
@@ -69,7 +69,7 @@ class TestVectorTypeDiscrimination:
 
     def test_is_draken_vector_true(self):
         """Test is_draken_vector returns True for Draken vectors."""
-        v = dn.vector_from_sequence([1, 2, 3])
+        v = dn.vector_int64_from_sequence([1, 2, 3])
         assert is_draken_vector(v) is True
 
     def test_is_draken_vector_false_for_arrow(self):

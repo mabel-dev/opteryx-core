@@ -14,6 +14,12 @@ sys.setdlopenflags(_flags)
 from draken.vectors import Vector  # noqa: E402
 from draken.morsels import Morsel  # noqa: E402
 
+# The supported Python-list ingestion entry point: dispatches on dtype and
+# encodes str → UTF-8 bytes for the bytes-only VARCHAR/NVARCHAR native edge.
+# `vector_from_sequence` means THIS function; the raw INT64-only native builder
+# is spelled `draken.draken_native.vector_int64_from_sequence`.
+from draken.interop.vector_sequence import vector_from_sequence  # noqa: E402
+
 
 def preload_library_path():
     """Absolute path to the bundled standalone mimalloc shared library.
@@ -38,4 +44,4 @@ def preload_library_path():
     return None
 
 
-__all__ = ["Vector", "Morsel", "preload_library_path"]
+__all__ = ["Vector", "Morsel", "vector_from_sequence", "preload_library_path"]

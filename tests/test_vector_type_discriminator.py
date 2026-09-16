@@ -102,7 +102,7 @@ class TestIsScalar:
 
     def test_draken_vector_not_scalar(self):
         """A Draken vector is not a scalar."""
-        assert is_scalar(Vector(dn.vector_from_sequence([1, 2, 3]))) is False
+        assert is_scalar(Vector(dn.vector_int64_from_sequence([1, 2, 3]))) is False
 
     def test_custom_object_not_scalar(self):
         """Custom objects should NOT be recognized as scalars."""
@@ -123,7 +123,7 @@ class TestGetVectorType:
 
     def test_int64_vector(self):
         """INT64 discriminates as INT64."""
-        vec = Vector(dn.vector_from_sequence([1, 2, 3]))
+        vec = Vector(dn.vector_int64_from_sequence([1, 2, 3]))
         assert vec.type == dn.DrakenType.INT64
         assert get_vector_type(vec) == VectorType.INT64
 
@@ -253,7 +253,7 @@ class TestIsDrakenVector:
 
     def test_int64_vector_is_draken(self):
         """An INT64 vector should be recognized as a Draken vector."""
-        assert is_draken_vector(Vector(dn.vector_from_sequence([1, 2, 3]))) is True
+        assert is_draken_vector(Vector(dn.vector_int64_from_sequence([1, 2, 3]))) is True
 
     def test_float64_vector_is_draken(self):
         """A FLOAT64 vector should be recognized as a Draken vector."""

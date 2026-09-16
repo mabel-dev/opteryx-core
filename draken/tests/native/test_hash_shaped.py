@@ -46,7 +46,7 @@ class TestShapedHashParity:
         assert mat == dense
 
     def test_dense_int64(self):
-        v = dn.vector_from_sequence(list(range(20)))
+        v = dn.vector_int64_from_sequence(list(range(20)))
         dense, mat, hv = _parity(v)
         assert hv.is_dense
         assert mat == dense
@@ -57,7 +57,7 @@ class TestShapedHashParity:
         assert mat == dense
 
     def test_nullable_dense_int64(self):
-        v = dn.vector_from_sequence([1, None, 2, None, 3, 4])
+        v = dn.vector_int64_from_sequence([1, None, 2, None, 3, 4])
         dense, mat, hv = _parity(v)
         assert mat == dense
 
@@ -74,7 +74,7 @@ class TestShapedHashParity:
         assert mat == dense
 
     def test_empty(self):
-        v = dn.vector_from_sequence([])
+        v = dn.vector_int64_from_sequence([])
         dense, mat, hv = _parity(v)
         assert mat == dense == []
 

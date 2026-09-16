@@ -46,7 +46,7 @@ def make_string_vec(*strings):
 
 def make_int64_vec(value):
     """Build an Integer64Vector with one constant value."""
-    return dn.vector_from_sequence([value])
+    return dn.vector_int64_from_sequence([value])
 
 
 # ---------------------------------------------------------------------------

@@ -42,7 +42,7 @@ bw = _load_vector_bitwise()
 
 
 def make(lst):
-    return dn.vector_from_sequence(lst)
+    return dn.vector_int64_from_sequence(lst)
 
 
 def pylist(v):

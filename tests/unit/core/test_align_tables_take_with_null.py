@@ -18,7 +18,7 @@ from draken.morsels.morsel import Morsel, align_tables
 
 
 def _left(n):
-    return Morsel.from_vectors([b"lid"], [dn.vector_from_sequence(list(range(n)))])
+    return Morsel.from_vectors([b"lid"], [dn.vector_int64_from_sequence(list(range(n)))])
 
 
 def test_unmatched_rows_are_null_string_float():
@@ -36,14 +36,14 @@ def test_unmatched_rows_are_null_string_float():
 
 def test_all_unmatched():
     left = _left(3)
-    right = Morsel.from_vectors([b"r"], [dn.vector_from_sequence([7, 8, 9])])
+    right = Morsel.from_vectors([b"r"], [dn.vector_int64_from_sequence([7, 8, 9])])
     out = align_tables(left, right, array("i", [0, 1, 2]), array("i", [-1, -1, -1]))
     assert out.column(b"r").to_pylist() == [None, None, None]
 
 
 def test_no_unmatched_fast_path():
     left = _left(3)
-    right = Morsel.from_vectors([b"r"], [dn.vector_from_sequence([7, 8, 9])])
+    right = Morsel.from_vectors([b"r"], [dn.vector_int64_from_sequence([7, 8, 9])])
     out = align_tables(left, right, array("i", [0, 1, 2]), array("i", [2, 0, 1]))
     assert out.column(b"r").to_pylist() == [9, 7, 8]
 
@@ -52,7 +52,7 @@ def test_source_null_and_unmatched_interaction():
     # A matched row pointing at a source-null row stays null; an unmatched row
     # is null regardless. Both must read null.
     left = _left(3)
-    right = Morsel.from_vectors([b"x"], [dn.vector_from_sequence([5, None, 7])])
+    right = Morsel.from_vectors([b"x"], [dn.vector_int64_from_sequence([5, None, 7])])
     out = align_tables(left, right, array("i", [0, 1, 2]), array("i", [1, 2, -1]))
     assert out.column(b"x").to_pylist() == [None, 7, None]
 

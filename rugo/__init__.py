@@ -28,4 +28,13 @@ import draken  # load draken_native.so before rugo_native.so resolves its symbol
 
 from rugo.__version__ import __version__
 
-__all__ = ["__version__"]
+# rugo ships in two distributions, and `__version__` above is always the
+# STANDALONE rugo source version — it does not change when rugo is bundled
+# inside opteryx_core, which stamps its own version into the parquet footers it
+# writes. So `__version__` alone cannot be reconciled with a file's created_by.
+# These two can: they are generated at build time from the exact string that is
+# compiled into the writer. See build_common.write_rugo_build_identity.
+from rugo._build_identity import RUGO_DISTRIBUTION as __distribution__
+from rugo._build_identity import RUGO_WRITER_ID as __writer_id__
+
+__all__ = ["__version__", "__writer_id__", "__distribution__"]

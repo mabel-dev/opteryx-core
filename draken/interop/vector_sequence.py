@@ -46,11 +46,10 @@ from draken import draken_native as _draken_native
 # Each entry maps a logical type name → constructor function from
 # draken_native. Names are stored uppercase; lookup normalises input.
 _DTYPE_DISPATCH = {
-    # Integers — INT64 is the no-suffix constructor (matches
-    # `vector_from_sequence` semantics in the bare-no-dtype form).
-    "INT64": _draken_native.vector_from_sequence,
-    "INTEGER": _draken_native.vector_from_sequence,
-    "INT": _draken_native.vector_from_sequence,
+    # Integers — INT64 is also what the bare no-dtype call form resolves to.
+    "INT64": _draken_native.vector_int64_from_sequence,
+    "INTEGER": _draken_native.vector_int64_from_sequence,
+    "INT": _draken_native.vector_int64_from_sequence,
     "INT32": _draken_native.vector_int32_from_sequence,
     "INT16": _draken_native.vector_int16_from_sequence,
     "INT8": _draken_native.vector_int8_from_sequence,
@@ -161,7 +160,7 @@ def vector_from_sequence(values, dtype=None):
     type_name = _resolve_dtype_name(dtype)
 
     if type_name is None:
-        return _draken_native.vector_from_sequence(values)
+        return _draken_native.vector_int64_from_sequence(values)
 
     # DECIMAL needs precision/scale; dispatch with sensible defaults.
     if type_name == "DECIMAL":

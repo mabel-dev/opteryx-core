@@ -33,7 +33,7 @@ from opteryx.exceptions import DatasetReadError
 
 def _write_part(folder: str, values: list) -> None:
     os.makedirs(folder, exist_ok=True)
-    morsel = Morsel.from_vectors(["id"], [Vector(dn.vector_from_sequence(values))])
+    morsel = Morsel.from_vectors(["id"], [Vector(dn.vector_int64_from_sequence(values))])
     with open(os.path.join(folder, "part.parquet"), "wb") as fh:
         fh.write(write_parquet(morsel, bloom_filters=False, dictionary=False))
 

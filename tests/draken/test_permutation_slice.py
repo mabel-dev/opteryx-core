@@ -79,7 +79,7 @@ def test_permutation_slice_with_nulls():
 
 def test_dense_slice_unaffected():
     # A genuinely dense-identity vector still slices via the fast path correctly.
-    v = dn.vector_from_sequence([10, 20, 30, 40, 50])
+    v = dn.vector_int64_from_sequence([10, 20, 30, 40, 50])
     assert v.slice(1, 3).to_pylist() == [20, 30, 40]
 
 

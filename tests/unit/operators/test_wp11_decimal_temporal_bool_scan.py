@@ -166,7 +166,7 @@ def _write_ipv4(dataset_dir):
         [
             Vector(dn.vector_retag_uint32_as_ipv4(dn.vector_uint32_from_sequence(addresses))),
             Vector(dn.vector_uint32_from_sequence(addresses)),
-            Vector(dn.vector_from_sequence([1, 2, 3, 4])),
+            Vector(dn.vector_int64_from_sequence([1, 2, 3, 4])),
         ],
     )
     os.makedirs(dataset_dir, exist_ok=True)

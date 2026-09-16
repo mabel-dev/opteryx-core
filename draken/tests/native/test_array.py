@@ -239,7 +239,7 @@ class TestArrayAccessors:
             v.array_get(0, -3)
 
     def test_array_get_on_non_array_raises(self):
-        vi = dn.vector_from_sequence([1, 2, 3])
+        vi = dn.vector_int64_from_sequence([1, 2, 3])
         with pytest.raises(Exception):
             vi.array_get(0, 0)
 
@@ -249,7 +249,7 @@ class TestArrayAccessors:
         assert v.array_get(0, 1) == "world"
 
     def test_array_length_requires_array(self):
-        v = dn.vector_from_sequence([1, 2, 3])
+        v = dn.vector_int64_from_sequence([1, 2, 3])
         with pytest.raises(Exception):
             v.array_length(0)
 

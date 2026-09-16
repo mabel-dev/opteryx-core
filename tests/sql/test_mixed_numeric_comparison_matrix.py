@@ -92,7 +92,7 @@ def _vectors():
         "i8": Vector(dn.vector_int8_from_sequence(VALUES["i8"])),
         "i16": Vector(dn.vector_int16_from_sequence(VALUES["i16"])),
         "i32": Vector(dn.vector_int32_from_sequence(VALUES["i32"])),
-        "i64": Vector(dn.vector_from_sequence(VALUES["i64"])),
+        "i64": Vector(dn.vector_int64_from_sequence(VALUES["i64"])),
         "f64": Vector(dn.vector_float64_from_sequence(VALUES["f64"])),
         "dec": Vector(dn.vector_decimal_from_sequence(VALUES["dec"], 18, 2)),
     }

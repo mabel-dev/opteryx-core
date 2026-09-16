@@ -66,7 +66,7 @@ vector_concat   = ext.vector_concat
 
 def iv(lst):
     """int64 vector from list (None → null)."""
-    return dn.vector_from_sequence(lst)
+    return dn.vector_int64_from_sequence(lst)
 
 
 def sv(lst):

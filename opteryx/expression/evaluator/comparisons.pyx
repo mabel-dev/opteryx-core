@@ -206,10 +206,19 @@ cdef _bool_compare(int op_code, left, right):
             left_nb = left  # scalar
         return BoolVector(vector_in_list(left_nb, right))
 
-    # BOOL has NO native compare kernel — the ops table registers only the BOOL
-    # keying hash (ops/hash.h), so draken_compare_scalar / draken_compare_vector
-    # throw "unsupported type" for a DRAKEN_BOOL operand. A boolean comparison is
-    # computed here from the bit-packed mask, Kleene-correct (null in → null out).
+    # Bit algebra over the column's own bitmap, Kleene-correct (null in → null
+    # out). This predates the native kernels and is no longer the only answer:
+    # draken/ops/bool_compare.h supplies bool_compare_vector (since R5) and
+    # bool_compare_scalar (2026-09-16), and BOOL is a live branch in
+    # draken_compare_dv's switch (ops/compare_dv.cpp) — the dispatcher the
+    # native ExprFilter uses, so a bool predicate lowered onto the native filter
+    # is served there, not here.
+    #
+    # The ops table in ops/hash.h is a SEPARATE dispatcher, reached from the
+    # nanobind Vector methods. It now registers compare_scalar for DRAKEN_BOOL,
+    # but its compare_vector slot is still null, so draken_compare_vector still
+    # throws "unsupported type" on a bool operand. Keep the vector path below
+    # until that slot is registered.
     #
     # `left` is the BOOL column; `right` is the other operand. Bind-time scalar
     # literals are materialised as CONSTANT Vectors (BC_LOAD_LIT_CONST), so a

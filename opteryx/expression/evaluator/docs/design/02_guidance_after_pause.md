@@ -18,10 +18,10 @@ broadly correct:
 - Killing the inline `from draken.interop.arrow import vector_from_sequence`
   pattern inside `cdef`/`cpdef` method bodies (one of E.30a's tyre-fire
   findings). Replacing with module-level `import draken.draken_native as
-  _draken_native` and calling `_draken_native.vector_from_sequence(...)`
+  _draken_native` and calling `_draken_native.vector_int64_from_sequence(...)`
   is the right move.
 - Wrapping nanobind handles in the `Vector` cdef-class shim at consumer
-  boundaries (`Vector(_draken_native.vector_from_sequence(...))`).
+  boundaries (`Vector(_draken_native.vector_int64_from_sequence(...))`).
 - Updating evaluator-side imports off the deleted typed-Vector subclasses
   (`Integer64Vector`, `StringVector`, etc.) onto uniform `Vector`.
 
@@ -42,9 +42,9 @@ should be `cdef Vector` (the shim type), not `cdef object`:
    `cdef Vector nb_result` if it holds a Vector. If it holds something
    else, type it concretely. Never `object` in a compiled path.
 
-3. `cdef object result = Vector(_draken_native.vector_from_sequence(...))`
+3. `cdef object result = Vector(_draken_native.vector_int64_from_sequence(...))`
    in the collector finalize methods — should be `cdef Vector result =
-   Vector(_draken_native.vector_from_sequence(...))`. The
+   Vector(_draken_native.vector_int64_from_sequence(...))`. The
    `from-the-shim` cimport (`from draken.vectors.vector cimport Vector`)
    needs to be present at the top of each file that uses this pattern.
 

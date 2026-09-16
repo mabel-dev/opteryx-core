@@ -20,7 +20,7 @@ from draken import draken_native
 # ---------------------------------------------------------------------------
 
 def make_int64_vec(values):
-    return draken_native.vector_from_sequence(values)
+    return draken_native.vector_int64_from_sequence(values)
 
 
 # ---------------------------------------------------------------------------

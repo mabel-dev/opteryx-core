@@ -9,7 +9,7 @@ from draken.morsels.morsel import Morsel, align_tables
 
 
 def _morsel(name, values):
-    return Morsel.from_vectors([name], [dn.vector_from_sequence(values)])
+    return Morsel.from_vectors([name], [dn.vector_int64_from_sequence(values)])
 
 
 def _view(indices):

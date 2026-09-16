@@ -559,33 +559,55 @@ class SystemVariablesContainer:
                 suggestion = suggest_alternative(key, list(self._variables.keys()))
 
                 raise VariableNotFoundError(variable=key, suggestion=suggestion)
+            self.check_settable(key, value.type)
             variable_type, _, owner, visibility = self._variables[key]
-            if owner > self._owner:
-                raise PermissionsError(
-                    f"This session is not permitted to set the variable {md_column(key)}."
-                )
-            # A RESTRICTED variable requires `platform_admin` to WRITE, independent of
-            # (and in addition to) the owner-rank check above. This is deliberately
-            # separate from Visibility's read-side gate in variables_data.py: a
-            # RESTRICTED-but-USER-owned variable (e.g. `disable_optimizer`) would
-            # otherwise be settable by any caller purely by owner rank, with no
-            # entitlement check at all — visibility said "don't list it for
-            # non-admins" but said nothing about writes. `trace` is UNRESTRICTED
-            # specifically so it is NOT caught by this — see its comment above.
-            if visibility == Visibility.RESTRICTED and not self._caller_is_platform_admin():
-                raise PermissionsError(
-                    f"Setting {md_column(key)} requires the "
-                    f"{md_code(PLATFORM_ADMIN_ENTITLEMENT)} entitlement, which this "
-                    f"session does not hold."
-                )
-            if variable_type != value.type:
-                raise ValueError(
-                    f"The variable {md_column(key)} holds "
-                    f"{md_code(variable_type)} values, so {md_code(value.type)} "
-                    f"cannot be assigned to it."
-                )
 
         self._variables[key] = (variable_type, value.value, owner, visibility)
+
+    def check_settable(self, key: str, value_type) -> None:
+        """Owner / visibility / type gate for a write to `key`.
+
+        Extracted from `__setitem__` so that per-scan overrides — a table hint
+        naming one of these variables — run the IDENTICAL check. A hint is
+        inline SQL text; if it had its own gate, or none, it would be a way
+        around the permissions SET enforces.
+
+        Raises `VariableNotFoundError` for an unknown name (with a spelling
+        suggestion), `PermissionsError` for owner rank or a missing
+        `platform_admin` entitlement, and `ValueError` on a type mismatch.
+        """
+        if key not in self._variables:
+            from opteryx.utils import suggest_alternative
+
+            raise VariableNotFoundError(
+                variable=key,
+                suggestion=suggest_alternative(key, list(self._variables.keys())),
+            )
+        variable_type, _, owner, visibility = self._variables[key]
+        if owner > self._owner:
+            raise PermissionsError(
+                f"This session is not permitted to set the variable {md_column(key)}."
+            )
+        # A RESTRICTED variable requires `platform_admin` to WRITE, independent of
+        # (and in addition to) the owner-rank check above. This is deliberately
+        # separate from Visibility's read-side gate in variables_data.py: a
+        # RESTRICTED-but-USER-owned variable (e.g. `disable_optimizer`) would
+        # otherwise be settable by any caller purely by owner rank, with no
+        # entitlement check at all — visibility said "don't list it for
+        # non-admins" but said nothing about writes. `trace` is UNRESTRICTED
+        # specifically so it is NOT caught by this — see its comment above.
+        if visibility == Visibility.RESTRICTED and not self._caller_is_platform_admin():
+            raise PermissionsError(
+                f"Setting {md_column(key)} requires the "
+                f"{md_code(PLATFORM_ADMIN_ENTITLEMENT)} entitlement, which this "
+                f"session does not hold."
+            )
+        if variable_type != value_type:
+            raise ValueError(
+                f"The variable {md_column(key)} holds "
+                f"{md_code(variable_type)} values, so {md_code(value_type)} "
+                f"cannot be assigned to it."
+            )
 
     def _caller_is_platform_admin(self) -> bool:
         """Whether this container's caller holds `platform_admin`.

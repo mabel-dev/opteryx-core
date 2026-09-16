@@ -161,7 +161,7 @@ def is_scalar(obj) -> bool:
         >>> # For vectors, False:
         >>> import draken.draken_native as dn
         >>> from draken.vectors.vector import Vector
-        >>> vec = Vector(dn.vector_from_sequence([1, 2, 3]))
+        >>> vec = Vector(dn.vector_int64_from_sequence([1, 2, 3]))
         >>> is_scalar(vec)
         False
     """

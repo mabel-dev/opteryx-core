@@ -32,8 +32,12 @@ The Physical Planner does NOT optimize, bind, or rewrite the plan.
 """
 
 from opteryx.exceptions import InvalidInternalStateError
+from opteryx.exceptions import PermissionsError
 from opteryx.exceptions import NotSupportedError
 from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.exceptions import compose
+from opteryx.exceptions import md_code
+from opteryx.exceptions import md_column
 from opteryx.expression import NodeType
 from opteryx.expression import binary_operands
 from opteryx.expression import get_all_nodes_of_type
@@ -433,8 +437,67 @@ def _create_project_node(logical_node, query_properties, registry):
     )
 
 
+def _validated_scan_overrides(hint_settings, query_properties):
+    """Gate and coerce a scan's `WITH(name = value)` settings.
+
+    The logical planner has already checked each NAME against the per-scan
+    vocabulary. What is left is the part that needs a session: the SAME
+    owner / entitlement / type gate a `SET` of that variable would run, via
+    `SystemVariablesContainer.check_settable`. A hint is inline SQL text, so
+    without this it would be a way around the variables permission model —
+    every per-scan knob is `Visibility.RESTRICTED`.
+
+    Returns a plain ``{name: value}`` mapping, or None when the scan carries no
+    settings (the overwhelmingly common case, and the one that must allocate
+    nothing).
+    """
+    if not hint_settings:
+        return None
+    variables = getattr(query_properties, "variables", None)
+    if variables is None:
+        # No session container to check against. Fail rather than apply an
+        # ungated override — silently dropping it would be worse.
+        raise PermissionsError(
+            "Per-scan settings cannot be applied without a session: "
+            f"{', '.join(md_column(name) for name in sorted(hint_settings))}"
+        )
+    overrides = {}
+    for name, literal in sorted(hint_settings.items()):
+        variables.check_settable(name, literal.type)
+        overrides[name] = literal.value
+    return overrides
+
+
 def _create_scan_node(logical_node, query_properties, registry):
-    node_config = logical_node.properties
+    """Build the scan node, then refuse any per-scan setting it cannot honour.
+
+    The reader is not known until it has been chosen, so this check runs after
+    the build. A `WITH(name = value)` on a relation whose reader never reads
+    those settings would otherwise parse, pass the permission gate, and do
+    nothing — which is exactly the silent-no-op the hint vocabulary exists to
+    prevent. A knob that cannot bind must say so, not measure as "no effect".
+    """
+    node = _build_scan_node(logical_node, query_properties, registry)
+    requested = logical_node.properties.get("hint_settings")
+    if requested and not node.honours_scan_overrides:
+        names = ", ".join(md_column(name) for name in sorted(requested))
+        raise UnsupportedSyntaxError(
+            compose(
+                f"{names} cannot be set on {md_column(logical_node.relation or 'this relation')}",
+                f"it is read by {md_code(node.name)}, which does not take per-scan "
+                "IO settings — they are read by the Parquet reader",
+            )
+        )
+    return node
+
+
+def _build_scan_node(logical_node, query_properties, registry):
+    # Copied, not aliased: the per-scan hint settings below are replaced with
+    # their validated values, and that must not write back onto the logical node.
+    node_config = dict(logical_node.properties)
+    node_config["scan_overrides"] = _validated_scan_overrides(
+        node_config.pop("hint_settings", None), query_properties
+    )
     connector = node_config.get("connector")
 
     if connector == "__null__":

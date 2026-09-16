@@ -21,7 +21,7 @@ from draken.morsels.morsel import Morsel
 
 def _make_morsel_with_id_col(values):
     m = Morsel()
-    v = dn.vector_from_sequence(values)
+    v = dn.vector_int64_from_sequence(values)
     m.append_vector(b"id", v)
     return m
 

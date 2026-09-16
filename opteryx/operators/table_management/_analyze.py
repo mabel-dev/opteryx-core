@@ -226,6 +226,7 @@ def _analyze_one_file(blob: str, targets: List[str], categories: Dict[str, Logic
     import rugo.parquet as rugo_parquet
 
     string_targets = {name for name in targets if categories[name] in _STRING_CATEGORIES}
+    array_targets = {name for name in targets if categories[name] is LogicalCategory.ARRAY}
 
     sketches = {name: ColumnSketch() for name in targets}
     null_counts = {name: 0 for name in targets}
@@ -240,14 +241,15 @@ def _analyze_one_file(blob: str, targets: List[str], categories: Dict[str, Logic
             record_count += morsel.num_rows
             for name in targets:
                 col = morsel.column(name)
-                # ARRAY (and possibly other nested/complex types) don't
-                # support native hashing -- no min-k sketch for those,
-                # everything else works (mirrors the catalog's own
-                # _compute_column_stats).
-                try:
+                # ARRAY is the one category Vector.hash() declines -- no min-k
+                # sketch for those, everything else works (mirrors the
+                # catalog's own _compute_column_stats). Asked up front rather
+                # than caught: the type is known before the call, and a throw
+                # from hash() now means a MALFORMED column (an fp16 vector
+                # missing its descriptor), which must fail ANALYZE rather than
+                # silently cost it a sketch.
+                if name not in array_targets:
                     sketches[name].update(col.hash())
-                except ValueError:
-                    pass
                 null_counts[name] += col.null_count()
                 # ordinalize() doesn't support ARRAY/VECTOR_FP16/DECIMAL128
                 # (see draken/ops/ordinalize.h) -- no min/max/histogram for

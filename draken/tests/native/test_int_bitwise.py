@@ -71,7 +71,7 @@ INT64_MAX  = 2**63 - 1
 def i8(lst):    return dn.vector_int8_from_sequence(lst)
 def i16(lst):   return dn.vector_int16_from_sequence(lst)
 def i32(lst):   return dn.vector_int32_from_sequence(lst)
-def i64(lst):   return dn.vector_from_sequence(lst)
+def i64(lst):   return dn.vector_int64_from_sequence(lst)
 def py(v):      return v.to_pylist()
 
 

@@ -29,7 +29,7 @@ def test_slice_basic():
     morsel = Morsel.from_vectors(
         [b"a", b"b"],
         [
-            dn.vector_from_sequence([1, 2, 3, 4, 5]),
+            dn.vector_int64_from_sequence([1, 2, 3, 4, 5]),
             dn.vector_from_string_sequence([b"a", b"b", b"c", b"d", b"e"]),
         ],
     )
@@ -43,7 +43,7 @@ def test_slice_basic():
 
 def test_slice_offset_zero():
     """Test slicing from the beginning."""
-    morsel = Morsel.from_vectors([b"x"], [dn.vector_from_sequence([10, 20, 30, 40])])
+    morsel = Morsel.from_vectors([b"x"], [dn.vector_int64_from_sequence([10, 20, 30, 40])])
 
     sliced = morsel.slice(0, 2)
     assert (sliced.num_rows, sliced.num_columns) == (2, 1)
@@ -52,7 +52,7 @@ def test_slice_offset_zero():
 
 def test_slice_to_end():
     """Test slicing to the end of the morsel."""
-    morsel = Morsel.from_vectors([b"x"], [dn.vector_from_sequence([1, 2, 3, 4, 5])])
+    morsel = Morsel.from_vectors([b"x"], [dn.vector_int64_from_sequence([1, 2, 3, 4, 5])])
 
     sliced = morsel.slice(3, 2)
     assert (sliced.num_rows, sliced.num_columns) == (2, 1)
@@ -63,7 +63,7 @@ def test_slice_single_row():
     """Test slicing a single row."""
     morsel = Morsel.from_vectors(
         [b"a", b"b"],
-        [dn.vector_from_sequence([1, 2, 3]), dn.vector_from_sequence([10, 20, 30])],
+        [dn.vector_int64_from_sequence([1, 2, 3]), dn.vector_int64_from_sequence([10, 20, 30])],
     )
 
     sliced = morsel.slice(1, 1)
@@ -75,7 +75,7 @@ def test_slice_single_row():
 
 def test_slice_full_morsel():
     """Test slicing entire morsel."""
-    morsel = Morsel.from_vectors([b"a"], [dn.vector_from_sequence([1, 2, 3])])
+    morsel = Morsel.from_vectors([b"a"], [dn.vector_int64_from_sequence([1, 2, 3])])
 
     sliced = morsel.slice(0, 3)
     assert (sliced.num_rows, sliced.num_columns) == (morsel.num_rows, morsel.num_columns)
@@ -86,7 +86,7 @@ def test_slice_full_morsel():
 
 def test_slice_empty_result():
     """Test slicing with length 0."""
-    morsel = Morsel.from_vectors([b"a"], [dn.vector_from_sequence([1, 2, 3])])
+    morsel = Morsel.from_vectors([b"a"], [dn.vector_int64_from_sequence([1, 2, 3])])
 
     sliced = morsel.slice(1, 0)
     assert (sliced.num_rows, sliced.num_columns) == (0, 1)
@@ -94,7 +94,7 @@ def test_slice_empty_result():
 
 def test_slice_beyond_end_raises():
     """Over-slicing past the end fails loud — it does NOT truncate."""
-    morsel = Morsel.from_vectors([b"a"], [dn.vector_from_sequence([1, 2, 3])])
+    morsel = Morsel.from_vectors([b"a"], [dn.vector_int64_from_sequence([1, 2, 3])])
 
     with pytest.raises(IndexError):
         morsel.slice(1, 10)
@@ -102,7 +102,7 @@ def test_slice_beyond_end_raises():
 
 def test_slice_offset_at_end_raises():
     """A zero-width slice AT the end is legal; asking for rows past it is not."""
-    morsel = Morsel.from_vectors([b"a"], [dn.vector_from_sequence([1, 2, 3])])
+    morsel = Morsel.from_vectors([b"a"], [dn.vector_int64_from_sequence([1, 2, 3])])
 
     assert morsel.slice(3, 0).num_rows == 0
 
@@ -112,7 +112,7 @@ def test_slice_offset_at_end_raises():
 
 def test_slice_offset_beyond_end_raises():
     """Test slicing starting beyond the end."""
-    morsel = Morsel.from_vectors([b"a"], [dn.vector_from_sequence([1, 2, 3])])
+    morsel = Morsel.from_vectors([b"a"], [dn.vector_int64_from_sequence([1, 2, 3])])
 
     with pytest.raises(IndexError):
         morsel.slice(10, 5)
@@ -123,7 +123,7 @@ def test_slice_multiple_columns():
     morsel = Morsel.from_vectors(
         [b"int_col", b"float_col", b"str_col", b"bool_col"],
         [
-            dn.vector_from_sequence([1, 2, 3, 4, 5]),
+            dn.vector_int64_from_sequence([1, 2, 3, 4, 5]),
             dn.vector_float64_from_sequence([1.1, 2.2, 3.3, 4.4, 5.5]),
             dn.vector_from_string_sequence([b"a", b"b", b"c", b"d", b"e"]),
             dn.vector_from_bool_sequence([True, False, True, False, True]),
@@ -144,7 +144,7 @@ def test_slice_with_nulls():
     morsel = Morsel.from_vectors(
         [b"a", b"b"],
         [
-            dn.vector_from_sequence([1, None, 3, 4, None]),
+            dn.vector_int64_from_sequence([1, None, 3, 4, None]),
             dn.vector_from_string_sequence([b"x", None, b"z", None, b"v"]),
         ],
     )
@@ -162,9 +162,9 @@ def test_slice_preserves_column_names():
     morsel = Morsel.from_vectors(
         [b"foo", b"bar", b"baz"],
         [
-            dn.vector_from_sequence([1, 2]),
-            dn.vector_from_sequence([3, 4]),
-            dn.vector_from_sequence([5, 6]),
+            dn.vector_int64_from_sequence([1, 2]),
+            dn.vector_int64_from_sequence([3, 4]),
+            dn.vector_int64_from_sequence([5, 6]),
         ],
     )
 
@@ -177,7 +177,7 @@ def test_slice_preserves_column_types():
     morsel = Morsel.from_vectors(
         [b"int64", b"float64", b"string"],
         [
-            dn.vector_from_sequence([1, 2, 3]),
+            dn.vector_int64_from_sequence([1, 2, 3]),
             dn.vector_float64_from_sequence([1.0, 2.0, 3.0]),
             dn.vector_from_string_sequence([b"a", b"b", b"c"]),
         ],
@@ -195,7 +195,7 @@ def test_slice_large_morsel():
     morsel = Morsel.from_vectors(
         [b"a", b"b"],
         [
-            dn.vector_from_sequence(list(range(n))),
+            dn.vector_int64_from_sequence(list(range(n))),
             dn.vector_from_string_sequence([f"val_{i}".encode("utf-8") for i in range(n)]),
         ],
     )
@@ -212,7 +212,7 @@ def test_slice_large_morsel():
 def test_slice_consecutive():
     """Test consecutive slicing operations."""
     morsel = Morsel.from_vectors(
-        [b"a"], [dn.vector_from_sequence([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])]
+        [b"a"], [dn.vector_int64_from_sequence([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])]
     )
 
     sliced1 = morsel.slice(2, 6)
@@ -227,7 +227,7 @@ def test_slice_consecutive():
 
 def test_slice_single_column():
     """Test slicing morsel with single column."""
-    morsel = Morsel.from_vectors([b"only_col"], [dn.vector_from_sequence([100, 200, 300, 400])])
+    morsel = Morsel.from_vectors([b"only_col"], [dn.vector_int64_from_sequence([100, 200, 300, 400])])
 
     sliced = morsel.slice(1, 2)
     assert (sliced.num_rows, sliced.num_columns) == (2, 1)
@@ -250,7 +250,7 @@ def test_slice_with_array_type():
 
 def test_slice_empty_morsel():
     """Test slicing an already empty morsel."""
-    morsel = Morsel.from_vectors([b"a"], [dn.vector_from_sequence([])])
+    morsel = Morsel.from_vectors([b"a"], [dn.vector_int64_from_sequence([])])
     assert (morsel.num_rows, morsel.num_columns) == (0, 1)
 
     sliced = morsel.slice(0, 0)
@@ -264,7 +264,7 @@ def test_slice_empty_morsel():
 
 def test_slice_returns_new_morsel():
     """Test that slice returns a new morsel instance and leaves the source alone."""
-    morsel = Morsel.from_vectors([b"a"], [dn.vector_from_sequence([1, 2, 3, 4, 5])])
+    morsel = Morsel.from_vectors([b"a"], [dn.vector_int64_from_sequence([1, 2, 3, 4, 5])])
 
     sliced = morsel.slice(1, 2)
 
@@ -276,7 +276,7 @@ def test_slice_returns_new_morsel():
 
 def test_slice_negative_offset_raises():
     """A negative offset is rejected, not silently clamped."""
-    morsel = Morsel.from_vectors([b"a"], [dn.vector_from_sequence([1, 2, 3])])
+    morsel = Morsel.from_vectors([b"a"], [dn.vector_int64_from_sequence([1, 2, 3])])
 
     with pytest.raises(IndexError):
         morsel.slice(-1, 2)
@@ -284,7 +284,7 @@ def test_slice_negative_offset_raises():
 
 def test_slice_negative_length_raises():
     """A negative length is rejected, not silently treated as zero."""
-    morsel = Morsel.from_vectors([b"a"], [dn.vector_from_sequence([1, 2, 3])])
+    morsel = Morsel.from_vectors([b"a"], [dn.vector_int64_from_sequence([1, 2, 3])])
 
     with pytest.raises(IndexError):
         morsel.slice(1, -2)
@@ -302,7 +302,7 @@ def test_slice_with_different_numeric_types():
             dn.vector_int8_from_sequence([1, 2, 3, 4]),
             dn.vector_int16_from_sequence([10, 20, 30, 40]),
             dn.vector_int32_from_sequence([100, 200, 300, 400]),
-            dn.vector_from_sequence([1000, 2000, 3000, 4000]),
+            dn.vector_int64_from_sequence([1000, 2000, 3000, 4000]),
             dn.vector_uint8_from_sequence([5, 6, 7, 8]),
             dn.vector_float32_from_sequence([1.5, 2.5, 3.5, 4.5]),
             dn.vector_float64_from_sequence([10.5, 20.5, 30.5, 40.5]),

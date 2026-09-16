@@ -36,7 +36,7 @@ _VALUES = list(range(0, 200_000, 2))
 
 def _write_dataset(folder: str, bloom: bool):
     os.makedirs(folder, exist_ok=True)
-    morsel = Morsel.from_vectors(["i"], [Vector(dn.vector_from_sequence(_VALUES))])
+    morsel = Morsel.from_vectors(["i"], [Vector(dn.vector_int64_from_sequence(_VALUES))])
     with open(os.path.join(folder, "part.parquet"), "wb") as fh:
         fh.write(write_parquet(morsel, bloom_filters=bloom, dictionary=False))
 

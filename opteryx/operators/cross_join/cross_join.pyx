@@ -58,7 +58,7 @@ cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
     cdef int64_t* rvals = NULL
 
     if total_rows == 0:
-        return (_draken_native.vector_from_sequence([]), _draken_native.vector_from_sequence([]))
+        return (_draken_native.vector_int64_from_sequence([]), _draken_native.vector_int64_from_sequence([]))
 
     # dict values: [0, 1, ..., left_rows-1] — draken_malloc'd, ownership transferred to left_vec.
     dict_vals = <int64_t*>draken_malloc(<size_t>left_rows * sizeof(int64_t))

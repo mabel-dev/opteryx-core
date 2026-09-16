@@ -49,7 +49,7 @@ def _to_list(v):
 
 def _build_vectors():
     """Diverse dense vectors, including 4 timestamp units (distinct logical types)."""
-    ints = dn.vector_from_sequence([(i * 2654435761) % 100003 for i in range(N)])
+    ints = dn.vector_int64_from_sequence([(i * 2654435761) % 100003 for i in range(N)])
     floats = dn.vector_float64_from_sequence([float((i % 997) - 500) for i in range(N)])
     strs = dn.vector_from_string_sequence(
         [(b"row-%d-payload" % (i % 311)) for i in range(N)]
@@ -60,7 +60,7 @@ def _build_vectors():
     # every unit (s→2020, ns→1970+1.6s) so to_pylist verification works.
     ts = {
         unit: dn.vector_reinterpret_as_timestamp64(
-            dn.vector_from_sequence([1_600_000_000 + i for i in range(N)]),
+            dn.vector_int64_from_sequence([1_600_000_000 + i for i in range(N)]),
             unit,
         )
         for unit in ("s", "ms", "us", "ns")

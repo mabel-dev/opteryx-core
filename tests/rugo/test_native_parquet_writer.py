@@ -321,7 +321,7 @@ def test_array_column_row_group_splitting():
     m = Morsel.from_vectors(
         ["id", "arr"],
         [
-            Vector(dn.vector_from_sequence(ids)),
+            Vector(dn.vector_int64_from_sequence(ids)),
             Vector(dn.vector_array_from_sequence(data)),
         ],
     )
@@ -455,7 +455,7 @@ def test_page_splitting(compression):
 
     # Scalar INT64 column: unsplit vs. tightly page-split.
     ints = list(range(10_000))
-    m = Morsel.from_vectors(["id"], [Vector(dn.vector_from_sequence(ints))])
+    m = Morsel.from_vectors(["id"], [Vector(dn.vector_int64_from_sequence(ints))])
     buf_unsplit = write_parquet(m, compression=compression, max_page_bytes=0)
     buf_split = write_parquet(m, compression=compression, max_page_bytes=500)
 

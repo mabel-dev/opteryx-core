@@ -20,14 +20,14 @@
 #include "_thrift_writer.hpp"
 #include "_bloom_writer.hpp"
 
+#include "core/kmv_sketch.h"  // THE shared KMV sketch (draken, header-only)
+
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #ifdef HAVE_ZSTD
@@ -719,12 +719,34 @@ inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows) {
   return st;
 }
 
-// XXH64 hash of each non-null value's PLAIN-encoded bytes — the exact bytes a
-// reader hashes when probing. Matches encode_values: INT64/TIMESTAMP = 8 LE,
+// XXH64 hash of each value's PLAIN-encoded bytes — the exact bytes a reader
+// hashes when probing. Matches encode_values: INT64/TIMESTAMP = 8 LE,
 // INT32/DATE = 4 LE, DOUBLE = 8 LE IEEE, BYTE_ARRAY = raw value bytes (no
 // length prefix), FLBA/DECIMAL = the big-endian fixed-width bytes.
-inline std::vector<uint64_t> bloom_hashes(const ColumnInput &col, size_t num_rows) {
-  std::vector<uint64_t> hashes;
+//
+// ⭐ ONE hash pass per column, shared by BOTH consumers that need a value hash:
+// the bloom filter and the dictionary-encoding decision. They hash the same
+// values with the same function over the same byte images, so computing them
+// separately was the same work done twice. The buffer is indexed BY ROW (null
+// rows hold an unused 0) because the dictionary build needs a code per logical
+// row; bloom takes the compacted present-only view via compact_present_hashes.
+//
+// Returns false for a physical type with no value hash (bool), leaving
+// `row_hashes` untouched — neither consumer runs for those.
+inline bool hash_column_rows(const ColumnInput &col, size_t num_rows,
+                             std::vector<uint64_t> &row_hashes) {
+  switch (col.type) {
+  case PT_INT32:
+  case PT_INT64:
+  case PT_FLOAT:
+  case PT_DOUBLE:
+  case PT_BYTE_ARRAY:
+  case PT_FLBA:
+    break;
+  default:
+    return false; // bool / unsupported: no bloom, no dictionary
+  }
+  row_hashes.assign(num_rows, 0);
   uint8_t buf[16];
   // PRESERVE mode resolves value[codes[i]]; see compute_stats.
   const uint32_t *codes = col.codes;
@@ -736,28 +758,29 @@ inline std::vector<uint64_t> bloom_hashes(const ColumnInput &col, size_t num_row
     case PT_INT32: {
       int32_t v = col.i32[vi];
       std::memcpy(buf, &v, 4);
-      hashes.push_back(bloom_hash(buf, 4));
+      row_hashes[i] = bloom_hash(buf, 4);
       break;
     }
     case PT_INT64: {
       int64_t v = col.i64[vi];
       std::memcpy(buf, &v, 8);
-      hashes.push_back(bloom_hash(buf, 8));
+      row_hashes[i] = bloom_hash(buf, 8);
       break;
     }
-    case PT_FLOAT: {
+    // Floats are hashed over their BIT PATTERN, which is also how the
+    // dictionary keys them: -0.0 and +0.0 must not share an entry and each NaN
+    // payload stays distinct, so the sketch must count them as distinct too.
+    case PT_FLOAT:
       std::memcpy(buf, &col.f32[vi], 4);
-      hashes.push_back(bloom_hash(buf, 4));
+      row_hashes[i] = bloom_hash(buf, 4);
       break;
-    }
-    case PT_DOUBLE: {
+    case PT_DOUBLE:
       std::memcpy(buf, &col.f64[vi], 8);
-      hashes.push_back(bloom_hash(buf, 8));
+      row_hashes[i] = bloom_hash(buf, 8);
       break;
-    }
     case PT_BYTE_ARRAY: {
       const StrSlice &s = col.strs[vi];
-      hashes.push_back(bloom_hash(s.ptr, s.len));
+      row_hashes[i] = bloom_hash(s.ptr, s.len);
       break;
     }
     case PT_FLBA: {
@@ -765,16 +788,28 @@ inline std::vector<uint64_t> bloom_hashes(const ColumnInput &col, size_t num_row
       const uint8_t *le = col.dec_raw + (size_t)i * col.dec_width;
       for (int k = 0; k < col.dec_width; k++)
         buf[k] = le[col.dec_width - 1 - k];
-      hashes.push_back(bloom_hash(buf, col.dec_width));
+      row_hashes[i] = bloom_hash(buf, col.dec_width);
       break;
     }
     default:
-      break; // bool / unsupported: no bloom
+      break;
     }
   }
-  return hashes;
+  return true;
 }
 
+// The present (non-null) hashes in row order — what the bloom filter indexes.
+inline std::vector<uint64_t> compact_present_hashes(
+    const std::vector<uint64_t> &row_hashes, const uint8_t *validity,
+    size_t num_rows) {
+  std::vector<uint64_t> present;
+  present.reserve(num_rows);
+  for (size_t i = 0; i < num_rows; i++) {
+    if (is_valid(validity, i))
+      present.push_back(row_hashes[i]);
+  }
+  return present;
+}
 inline size_t bloom_ndv(std::vector<uint64_t> hashes) {
   std::sort(hashes.begin(), hashes.end());
   hashes.erase(std::unique(hashes.begin(), hashes.end()), hashes.end());
@@ -1105,13 +1140,82 @@ inline PageBuild build_array_data_pages(const ColumnInput &rg_col, int codec,
 
 // ---- dictionary encoding ----
 //
-// Auto-build cardinality gate: build a dictionary only when it pays off — the
-// distinct count must be at most half the present (non-null) values (>=2x
-// repetition) AND not exceed DICT_MAX_CARDINALITY entries (bounds the
-// dictionary-page size and the code bit width for pathological inputs). Both
-// thresholds are deliberately conservative; ZSTD recovers most of what a looser
-// gate would catch. Surfaced here for tuning.
-static const uint32_t DICT_MAX_CARDINALITY = 1u << 20; // 1,048,576 entries
+// Auto-build gate: BYTES, not entry count. A dictionary is built when the
+// bytes it would occupy beat the bytes PLAIN would occupy:
+//
+//     dict_page_bytes + code_bytes  <=  plain_bytes * DICT_BYTE_TOLERANCE
+//
+// where, over the `n` present (non-null) values of one column chunk:
+//
+//   plain_bytes     = n*w                 (fixed width w)
+//                   = n*4 + sum(len)      (BYTE_ARRAY: 4-byte length prefix)
+//   dict_page_bytes = NDV*w    /  NDV*4 + sum(len over DISTINCT values)
+//   code_bytes      = n * bit_width(NDV) / 8
+//
+// This replaces a single distinct-ratio constant (0.5) that priced an 8-byte
+// integer exactly like a 54-byte URL. The ratio at which dictionary encoding
+// starts to pay is width-dependent, and the inequality above IS that
+// dependence: rearranged for a distinct ratio r = NDV/n it reads
+// r = 1 - bit_width(NDV)/(8*value_bytes). Measured against public.github.events
+// that reproduces the observed break-evens — INT64 `repo_id` 0.719 predicted vs
+// 0.734 measured, and a 54-byte `actor_avatar_url` 0.963 predicted vs 0.963
+// measured. The old 0.5 was far too tight for wide strings and right only by
+// accident for narrow integers.
+//
+// ⛔ The comparison is UNCOMPRESSED bytes on both sides. ZSTD may reorder the
+// winner; deciding truthfully would mean encoding both ways and keeping the
+// smaller, which doubles the encode work. Ruled (2026-09-16): stay
+// uncompressed-only and say so here rather than pretend the gate is
+// codec-aware.
+//
+// The tolerance lets a dictionary win at slight byte parity, because a
+// dictionary column is also cheaper to READ — a sorted dictionary turns a
+// predicate into a contiguous code range, and the dict-skip probe can reject a
+// chunk without touching the data page. 1.05 buys that for at most 5% of bytes.
+static const double DICT_BYTE_TOLERANCE = 1.05;
+
+// Ceiling on the dictionary PAGE — the constraint the old entry-count cap
+// claimed to enforce and did not: entry count is not byte count for BYTE_ARRAY,
+// and 2^20 sixty-byte URLs is a 60 MB dictionary page.
+//
+// The ceiling is RELATIVE to the column chunk, not absolute. A fixed ceiling
+// (1 MiB, pyarrow's `dictionary_pagesize_limit` default) was measured to be the
+// binding constraint in exactly the regime this gate was redesigned for: 114k
+// distinct 55-byte URLs is a 6.7 MB dictionary page against an 11.8 MB PLAIN
+// column, so a fixed 1 MiB refused it before the width-aware inequality above
+// got a vote — 0.00% where the inequality alone measured -12.5%. A ceiling
+// below ~0.6x of PLAIN re-creates that block, which is why the fraction is
+// generous: the INEQUALITY is the economics, and the ceiling is only a guard
+// against an absolutely enormous page. A dictionary can never be larger than
+// PLAIN anyway — the inequality already forbids it.
+//
+// The absolute floor keeps small columns from being gated into nothing: below
+// ~1.4 MB of PLAIN the floor is what applies.
+static const size_t DICT_MIN_PAGE_BYTES = 1u << 20; // 1 MiB floor
+static const double DICT_MAX_PAGE_FRACTION = 0.75;  // of the chunk's PLAIN bytes
+
+// Codes are uint32_t, so the dictionary cannot exceed UINT32_MAX entries. With
+// a relative ceiling that bound is no longer implied by the ceiling itself (the
+// old 2^20 cap implied it), and the smallest BYTE_ARRAY entry is 4 bytes, so it
+// is clamped explicitly. Reaching it needs a ~17 GB dictionary page; the clamp
+// exists so overflow is impossible rather than merely implausible.
+static const size_t DICT_MAX_BUDGET_BYTES = (size_t)0xFFFFFFFFull * 4ull;
+
+// PLAIN-encoded width of one value, or 0 for the variable-width types. Only the
+// types the auto-build switch below actually handles return non-zero; BOOLEAN
+// and FLBA never reach the gate.
+inline size_t dict_fixed_value_bytes(int type) {
+  switch (type) {
+  case PT_INT32:
+  case PT_FLOAT:
+    return 4;
+  case PT_INT64:
+  case PT_DOUBLE:
+    return 8;
+  default:
+    return 0;
+  }
+}
 
 // BuiltDict owns the dictionary values + per-row codes produced by an
 // auto-build; it must outlive the build_dict_column call that reads it.
@@ -1241,176 +1345,254 @@ inline std::vector<uint8_t> encode_dict_indices(const uint32_t *codes, size_t n,
   return out;
 }
 
-// Cheap pre-check before the full auto-build hash pass: sample up to
-// SAMPLE_CAP present values at an even stride across the column and check
-// whether the sample already looks essentially all-distinct. If so, the full
-// build (which hashes up to present/2 rows before its own cap kicks in — see
-// DICT_MAX_CARDINALITY below) is very unlikely to succeed, so skip straight to
-// PLAIN instead of paying for it. A stride (not a prefix) avoids being fooled
-// by column locality (e.g. a value that's constant for a leading run then
-// diverges). This can only cost a compression opportunity on a low-cardinality
-// column whose sample happened to look diverse — never a correctness issue,
-// since PLAIN is always a valid fallback and the full build's own cap still
-// applies whenever this pre-check doesn't fire.
-static const size_t DICT_SAMPLE_CAP = 512;
-static const double DICT_SAMPLE_DISTINCT_THRESHOLD = 0.95;
+// ── Dictionary-encoding decision: ONE hash pass, KMV, then reuse ────────────
+//
+// Every present value is hashed EXACTLY ONCE, into `row_hashes`. Those hashes
+// then serve both halves of the decision:
+//
+//   1. a KMV sketch over them estimates the column's distinct count, and
+//   2. if that says proceed, the dictionary is built FROM THE SAME HASHES
+//      rather than hashing the column a second time.
+//
+// What this replaces: a 512-row strided sample whose distinct RATIO decided
+// whether to attempt the build. That statistic was structurally wrong, not
+// merely coarse. Distinct-count-in-a-sample is not an estimator of
+// distinct-fraction-in-a-column: drawing m values from a column holding NDV
+// distinct ones yields about NDV(1 - e^(-m/NDV)) distinct, which saturates
+// toward m — that is, toward "100% distinct" — for every NDV much larger than
+// m. Expected collisions are ~m^2/(2*NDV), so at m=512 the ratio only falls
+// below 0.95 when NDV is under ~5,000, and the pre-check therefore declined
+// dictionary encoding for essentially EVERY column above ~5k distinct values,
+// however repetitive.
+//
+// Measured on public.github.events row group 0 (262,144 rows), before this:
+// dictionary=True and dictionary=False produced BYTE-IDENTICAL output
+// (11,574,990 bytes both) — the pre-check rejected all 8 actor/repo columns,
+// including the integer ones. Their real distinct ratios are 0.23-0.28 against
+// a 0.5 gate, and feeding the writer dict-shaped vectors instead (PRESERVE
+// mode, which bypasses this gate entirely) measured 44.15 -> 31.83 B/row,
+// -27.9%, ~4.1 GB on that one dataset.
+//
+// K=1024, the transient width: this sketch dies at the end of the column, so
+// its only cost is 8KB and it buys ~3% relative standard error against ~18.9%
+// at K=32. Measured against true NDV on that same row group: actor_login
+// 61,450 vs 60,171 true; repo_id 74,494 vs 73,432; type 16 vs 16 (EXACT, the
+// sketch never filled); id 263,037 vs 262,144.
+//
+// The family tag is DECISION-ONLY and that is the point: this sketch is never
+// stored anywhere, so it is bound by nothing except being consistent with
+// itself for one column, and tagging it means it can never be merged with a
+// STORED skene or ANALYZE sketch (which would be meaningless — see
+// draken/core/kmv_sketch.h).
+using DictDecisionSketch =
+    draken::KmvSketch<1024u, draken::KmvHashFamily::kRugoWriterDecision>;
 
-template <typename T>
-inline bool dict_sample_looks_high_cardinality(const T *vals, const uint8_t *validity,
-                                               size_t num_rows, size_t present) {
-  if (present <= DICT_SAMPLE_CAP)
-    return false; // column is small enough that the full build is cheap anyway
-  const size_t stride = num_rows / DICT_SAMPLE_CAP;
-  std::unordered_set<T> seen;
-  size_t sampled = 0;
-  for (size_t i = 0; i < num_rows && sampled < DICT_SAMPLE_CAP; i += (stride ? stride : 1)) {
+// Estimated distinct count over the present rows, from hashes already computed.
+inline double dict_estimated_ndv(const std::vector<uint64_t> &row_hashes,
+                                 const uint8_t *validity, size_t num_rows) {
+  DictDecisionSketch sketch;
+  for (size_t i = 0; i < num_rows; i++) {
     if (!is_valid(validity, i))
       continue;
-    seen.insert(vals[i]);
-    sampled++;
+    sketch.add(row_hashes[i]);
   }
-  return sampled > 0 && (double)seen.size() / (double)sampled >= DICT_SAMPLE_DISTINCT_THRESHOLD;
+  return sketch.estimate();
 }
 
-inline bool dict_sample_looks_high_cardinality_f64(const double *vals, const uint8_t *validity,
-                                                    size_t num_rows, size_t present) {
-  if (present <= DICT_SAMPLE_CAP)
-    return false;
-  const size_t stride = num_rows / DICT_SAMPLE_CAP;
-  std::unordered_set<uint64_t> seen;
-  size_t sampled = 0;
-  for (size_t i = 0; i < num_rows && sampled < DICT_SAMPLE_CAP; i += (stride ? stride : 1)) {
-    if (!is_valid(validity, i))
+// How far over the budget the ESTIMATE must sit before the build is skipped.
+//
+// This is a skip-the-work threshold, not the gate. The gate is the BYTE budget,
+// enforced exactly, per value, inside the builders below — this only decides
+// whether attempting the build is worth the pass. The margin exists so the
+// estimator's own error cannot decline a column the builder would have
+// accepted: at K=1024 the relative standard error is ~3%, so 1.25x is beyond 8
+// sigma. It carries a second job for BYTE_ARRAY, where the DISTINCT values'
+// byte size is unknowable before the build and is priced at the mean
+// present-value length — the margin absorbs that length skew too.
+static const double DICT_ESTIMATE_SKIP_MARGIN = 1.25;
+
+// Total PLAIN bytes the present values of this column chunk would occupy. For
+// BYTE_ARRAY this walks the lengths only — the payload bytes are never touched.
+inline size_t dict_plain_bytes(const ColumnInput &col, size_t num_rows,
+                               size_t present) {
+  const size_t w = dict_fixed_value_bytes(col.type);
+  if (w != 0)
+    return present * w;
+  if (col.type != PT_BYTE_ARRAY)
+    return 0;
+  size_t total = 0;
+  for (size_t i = 0; i < num_rows; i++) {
+    if (!is_valid(col.validity, i))
       continue;
-    uint64_t bits;
-    std::memcpy(&bits, &vals[i], 8);
-    seen.insert(bits);
-    sampled++;
+    total += 4u + (size_t)col.strs[i].len;
   }
-  return sampled > 0 && (double)seen.size() / (double)sampled >= DICT_SAMPLE_DISTINCT_THRESHOLD;
+  return total;
 }
 
-inline bool dict_sample_looks_high_cardinality_f32(const float *vals, const uint8_t *validity,
-                                                    size_t num_rows, size_t present) {
-  if (present <= DICT_SAMPLE_CAP)
-    return false;
-  const size_t stride = num_rows / DICT_SAMPLE_CAP;
-  std::unordered_set<uint32_t> seen;
-  size_t sampled = 0;
-  for (size_t i = 0; i < num_rows && sampled < DICT_SAMPLE_CAP; i += (stride ? stride : 1)) {
-    if (!is_valid(validity, i))
-      continue;
-    uint32_t bits;
-    std::memcpy(&bits, &vals[i], 4);
-    seen.insert(bits);
-    sampled++;
+// The byte budget a dictionary build must stay inside, plus whether attempting
+// the build is worth the pass at all.
+//
+// `ndv_lo` / `ndv_hi` bracket the distinct count: equal when the bloom filter
+// handed us an exact one, spread by the estimator's margin otherwise. They are
+// used in the directions that keep each decision honest — the HIGH count sets
+// the code bit width (more code bytes => tighter budget, never optimistic), the
+// LOW count decides whether to attempt (never skips a column the builder might
+// have accepted).
+struct DictBudget {
+  bool worth_attempting = false;
+  size_t byte_budget = 0; // dictionary-page bytes the build may not exceed
+};
+
+inline DictBudget dict_byte_budget(const ColumnInput &col, size_t num_rows,
+                                   size_t present, size_t ndv_lo,
+                                   size_t ndv_hi) {
+  DictBudget out;
+  const size_t plain_bytes = dict_plain_bytes(col, num_rows, present);
+  if (plain_bytes == 0 || present == 0 || ndv_lo == 0)
+    return out;
+
+  const uint32_t bw_ndv =
+      (uint32_t)std::min<size_t>(ndv_hi ? ndv_hi : 1u, 0xFFFFFFFFu);
+  const size_t code_bytes =
+      (present * (size_t)dict_bit_width(bw_ndv) + 7u) / 8u;
+
+  const double allowed =
+      (double)plain_bytes * DICT_BYTE_TOLERANCE - (double)code_bytes;
+  if (allowed <= 0.0)
+    return out; // the codes alone already cost more than PLAIN
+  const size_t page_ceiling = std::max<size_t>(
+      DICT_MIN_PAGE_BYTES, (size_t)((double)plain_bytes * DICT_MAX_PAGE_FRACTION));
+  out.byte_budget = std::min<size_t>((size_t)allowed, page_ceiling);
+  out.byte_budget = std::min<size_t>(out.byte_budget, DICT_MAX_BUDGET_BYTES);
+
+  // Skip-the-work prediction. For a fixed width the dictionary's byte size is
+  // known exactly from the distinct count, so this is the real answer when the
+  // count is exact. For BYTE_ARRAY the DISTINCT values' byte size is unknowable
+  // until they are seen, so this prices them at the mean present-value length
+  // and leans generous by the same margin — the running budget inside
+  // build_string_dict is what actually enforces the gate, per value.
+  const size_t w = dict_fixed_value_bytes(col.type);
+  double predicted;
+  double ceiling = (double)out.byte_budget;
+  if (w != 0) {
+    predicted = (double)ndv_lo * (double)w;
+  } else {
+    predicted = (double)ndv_lo * ((double)plain_bytes / (double)present);
+    ceiling *= DICT_ESTIMATE_SKIP_MARGIN;
   }
-  return sampled > 0 && (double)seen.size() / (double)sampled >= DICT_SAMPLE_DISTINCT_THRESHOLD;
+  out.worth_attempting = predicted <= ceiling;
+  return out;
 }
 
-inline bool dict_sample_looks_high_cardinality_str(const StrSlice *vals, const uint8_t *validity,
-                                                    size_t num_rows, size_t present) {
-  if (present <= DICT_SAMPLE_CAP)
-    return false;
-  const size_t stride = num_rows / DICT_SAMPLE_CAP;
-  std::unordered_set<std::string_view> seen;
-  size_t sampled = 0;
-  for (size_t i = 0; i < num_rows && sampled < DICT_SAMPLE_CAP; i += (stride ? stride : 1)) {
-    if (!is_valid(validity, i))
-      continue;
-    const StrSlice &s = vals[i];
-    seen.insert(std::string_view((const char *)s.ptr, s.len));
-    sampled++;
+// ── Dictionary build over PRECOMPUTED row hashes ───────────────────────────
+//
+// Open-addressed hash -> code table keyed by the hash computed above, so the
+// build costs a probe per row and no second hash pass. Power-of-two capacity,
+// linear probing, doubled at 70% load; a rehash only moves (hash, row, code)
+// triples and never re-reads a value.
+//
+// ⛔ The VALUE is compared on every hash match, and that is a correctness
+// obligation rather than a tuning choice: XXH64 collides, and two distinct
+// values sharing one dictionary entry would silently write one value in place
+// of the other. `eq` is bit equality — which is what the std::unordered_map
+// keys this replaces meant for every type, integers by `==` and floats by the
+// bit pattern they were explicitly memcpy'd into.
+class HashedDictIndex {
+public:
+  explicit HashedDictIndex(size_t expected) {
+    size_t want = 16;
+    while (want < expected * 2u)
+      want <<= 1;
+    slots_.assign(want, Slot{});
+    mask_ = want - 1u;
   }
-  return sampled > 0 && (double)seen.size() / (double)sampled >= DICT_SAMPLE_DISTINCT_THRESHOLD;
-}
 
-// Auto-build a dictionary over fixed-width values. Returns false (=> emit
-// PLAIN) once the distinct count exceeds the gate; on success `dict` holds the
-// unique values in first-seen order and `codes` one code per logical row.
+  // Returns the existing code for `hash`/`row`, or kAbsent with `at` set to the
+  // slot the caller must fill via `insert`.
+  static const uint32_t kAbsent = 0xFFFFFFFFu;
+
+  template <typename EqFn>
+  uint32_t find(uint64_t hash, size_t row, EqFn &&eq, size_t &at) const {
+    size_t idx = (size_t)(hash * 0x9E3779B97F4A7C15ull >> 32) & mask_;
+    for (;;) {
+      const Slot &s = slots_[idx];
+      if (!s.used) {
+        at = idx;
+        return kAbsent;
+      }
+      if (s.hash == hash && eq(s.row, row))
+        return s.code;
+      idx = (idx + 1u) & mask_;
+    }
+  }
+
+  void insert(size_t at, uint64_t hash, size_t row, uint32_t code) {
+    slots_[at] = Slot{hash, (uint32_t)row, code, true};
+    if (++count_ * 10u > slots_.size() * 7u)
+      grow();
+  }
+
+private:
+  struct Slot {
+    uint64_t hash = 0;
+    uint32_t row = 0;
+    uint32_t code = 0;
+    bool used = false;
+  };
+
+  void grow() {
+    std::vector<Slot> bigger(slots_.size() * 2u, Slot{});
+    const size_t mask = bigger.size() - 1u;
+    for (const Slot &s : slots_) {
+      if (!s.used)
+        continue;
+      size_t idx = (size_t)(s.hash * 0x9E3779B97F4A7C15ull >> 32) & mask;
+      while (bigger[idx].used)
+        idx = (idx + 1u) & mask;
+      bigger[idx] = s;
+    }
+    slots_.swap(bigger);
+    mask_ = mask;
+  }
+
+  std::vector<Slot> slots_;
+  size_t mask_ = 0;
+  size_t count_ = 0;
+};
+
+// Auto-build a dictionary over fixed-width values from the precomputed row
+// hashes. Returns false (=> emit PLAIN) once the distinct count exceeds the
+// gate; on success `dict` holds the unique values in first-seen order and
+// `codes` one code per logical row.
+//
+// Values are keyed on their BIT PATTERN via memcmp, so this one template serves
+// integers and floats alike: -0.0 and +0.0 stay distinct dictionary entries and
+// NaN payloads are preserved verbatim, and the dictionary round-trips the exact
+// stored value rather than an ==-equivalent one.
 template <typename T>
 inline bool build_numeric_dict(const T *vals, const uint8_t *validity,
-                               size_t num_rows, size_t present,
-                               std::vector<T> &dict,
+                               size_t num_rows, size_t byte_budget,
+                               const std::vector<uint64_t> &row_hashes,
+                               size_t expected_distinct, std::vector<T> &dict,
                                std::vector<uint32_t> &codes) {
-  const size_t cap =
-      std::min<size_t>((size_t)DICT_MAX_CARDINALITY, present / 2);
-  std::unordered_map<T, uint32_t> seen;
+  const size_t cap = byte_budget / sizeof(T); // entries the budget affords
+  HashedDictIndex index(std::min(expected_distinct, cap));
+  auto eq = [vals](size_t a, size_t b) {
+    return std::memcmp(&vals[a], &vals[b], sizeof(T)) == 0;
+  };
   codes.assign(num_rows, 0);
   for (size_t i = 0; i < num_rows; i++) {
     if (!is_valid(validity, i))
       continue;
-    T v = vals[i];
-    auto it = seen.find(v);
-    if (it != seen.end()) {
-      codes[i] = it->second;
+    size_t at = 0;
+    const uint32_t found = index.find(row_hashes[i], i, eq, at);
+    if (found != HashedDictIndex::kAbsent) {
+      codes[i] = found;
     } else {
       if (dict.size() >= cap)
         return false;
-      uint32_t code = (uint32_t)dict.size();
-      seen.emplace(v, code);
-      dict.push_back(v);
-      codes[i] = code;
-    }
-  }
-  return true;
-}
-
-// Doubles are keyed by their bit pattern, not value: -0.0 and +0.0 must NOT
-// share an entry (writing one for the other would change the bytes), and each
-// NaN bit pattern stays distinct.
-inline bool build_double_dict(const double *vals, const uint8_t *validity,
-                              size_t num_rows, size_t present,
-                              std::vector<double> &dict,
-                              std::vector<uint32_t> &codes) {
-  const size_t cap =
-      std::min<size_t>((size_t)DICT_MAX_CARDINALITY, present / 2);
-  std::unordered_map<uint64_t, uint32_t> seen;
-  codes.assign(num_rows, 0);
-  for (size_t i = 0; i < num_rows; i++) {
-    if (!is_valid(validity, i))
-      continue;
-    uint64_t bits;
-    std::memcpy(&bits, &vals[i], 8);
-    auto it = seen.find(bits);
-    if (it != seen.end()) {
-      codes[i] = it->second;
-    } else {
-      if (dict.size() >= cap)
-        return false;
-      uint32_t code = (uint32_t)dict.size();
-      seen.emplace(bits, code);
-      dict.push_back(vals[i]);
-      codes[i] = code;
-    }
-  }
-  return true;
-}
-
-// Keyed on the raw bits, like build_double_dict: -0.0 and +0.0 are distinct
-// dictionary entries and NaN payloads are preserved verbatim, so the dictionary
-// round-trips the exact stored value rather than an == -equivalent one.
-inline bool build_float_dict(const float *vals, const uint8_t *validity,
-                             size_t num_rows, size_t present,
-                             std::vector<float> &dict,
-                             std::vector<uint32_t> &codes) {
-  const size_t cap =
-      std::min<size_t>((size_t)DICT_MAX_CARDINALITY, present / 2);
-  std::unordered_map<uint32_t, uint32_t> seen;
-  codes.assign(num_rows, 0);
-  for (size_t i = 0; i < num_rows; i++) {
-    if (!is_valid(validity, i))
-      continue;
-    uint32_t bits;
-    std::memcpy(&bits, &vals[i], 4);
-    auto it = seen.find(bits);
-    if (it != seen.end()) {
-      codes[i] = it->second;
-    } else {
-      if (dict.size() >= cap)
-        return false;
-      uint32_t code = (uint32_t)dict.size();
-      seen.emplace(bits, code);
+      const uint32_t code = (uint32_t)dict.size();
+      index.insert(at, row_hashes[i], i, code);
       dict.push_back(vals[i]);
       codes[i] = code;
     }
@@ -1419,33 +1601,42 @@ inline bool build_float_dict(const float *vals, const uint8_t *validity,
 }
 
 inline bool build_string_dict(const StrSlice *vals, const uint8_t *validity,
-                              size_t num_rows, size_t present,
+                              size_t num_rows, size_t byte_budget,
+                              const std::vector<uint64_t> &row_hashes,
+                              size_t expected_distinct,
                               std::vector<StrSlice> &dict,
                               std::vector<uint32_t> &codes) {
-  const size_t cap =
-      std::min<size_t>((size_t)DICT_MAX_CARDINALITY, present / 2);
-  std::unordered_map<std::string_view, uint32_t> seen;
+  // The dictionary's byte size is only knowable as the distinct values arrive,
+  // so the budget is enforced here, per value, as a RUNNING total: 4 bytes of
+  // PLAIN length prefix plus the payload, exactly what the dictionary page will
+  // hold. `expected_distinct` sizes the index and is not a gate.
+  size_t dict_bytes = 0;
+  HashedDictIndex index(expected_distinct);
+  auto eq = [vals](size_t a, size_t b) {
+    return vals[a].len == vals[b].len &&
+           std::memcmp(vals[a].ptr, vals[b].ptr, vals[a].len) == 0;
+  };
   codes.assign(num_rows, 0);
   for (size_t i = 0; i < num_rows; i++) {
     if (!is_valid(validity, i))
       continue;
-    const StrSlice &s = vals[i];
-    std::string_view key((const char *)s.ptr, s.len);
-    auto it = seen.find(key);
-    if (it != seen.end()) {
-      codes[i] = it->second;
+    size_t at = 0;
+    const uint32_t found = index.find(row_hashes[i], i, eq, at);
+    if (found != HashedDictIndex::kAbsent) {
+      codes[i] = found;
     } else {
-      if (dict.size() >= cap)
+      const size_t entry_bytes = 4u + (size_t)vals[i].len;
+      if (dict_bytes + entry_bytes > byte_budget)
         return false;
-      uint32_t code = (uint32_t)dict.size();
-      seen.emplace(key, code);
-      dict.push_back(s);
+      dict_bytes += entry_bytes;
+      const uint32_t code = (uint32_t)dict.size();
+      index.insert(at, row_hashes[i], i, code);
+      dict.push_back(vals[i]);
       codes[i] = code;
     }
   }
   return true;
 }
-
 // Build a dictionary page (PLAIN-encoded dict values) followed by an
 // RLE_DICTIONARY data page. `col` must point its typed buffers at the
 // `col.dict_count` dictionary values, with `col.codes` (one per logical row)
@@ -1954,13 +2145,33 @@ inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offse
 
     meta.stats[i] = compute_stats(rg_cols[i], rg_rows);
 
+    // ONE XXH64 pass per column, shared by the bloom filter and the
+    // dictionary-encoding decision below — see hash_column_rows. Skipped
+    // entirely when neither consumer wants it.
+    const size_t present_rows = rg_rows - (size_t)meta.stats[i].null_count;
+    const bool wants_dict_decision = rg_cols[i].codes == nullptr &&
+                                     rg_cols[i].dict_enabled && present_rows > 0;
+    std::vector<uint64_t> row_hashes;
+    bool have_row_hashes = false;
+    if (rg_cols[i].bloom || wants_dict_decision)
+      have_row_hashes = hash_column_rows(rg_cols[i], rg_rows, row_hashes);
+
+    // Set by the bloom block below, which sorts the hashes and therefore knows
+    // the distinct count EXACTLY. The dictionary decision reuses it rather than
+    // estimating a number it has already been handed.
+    size_t exact_ndv = 0;
+    bool have_exact_ndv = false;
+
     // Bloom filter immediately before its own data page (single contiguous
     // range read covers bloom + data). See the one-shot loop for rationale.
-    if (rg_cols[i].bloom) {
-      std::vector<uint64_t> hashes = bloom_hashes(rg_cols[i], rg_rows);
+    if (rg_cols[i].bloom && have_row_hashes) {
+      std::vector<uint64_t> hashes =
+          compact_present_hashes(row_hashes, rg_cols[i].validity, rg_rows);
       if (!hashes.empty()) {
         size_t ndv = bloom_ndv(hashes);
         meta.stats[i].distinct_count = (int64_t)ndv;
+        exact_ndv = ndv;
+        have_exact_ndv = true;
         BloomFilter bf = bloom_build(hashes, ndv, 0.01);
         std::vector<uint8_t> hdr = build_bloom_header((int32_t)bf.bitset.size());
         meta.bloom_offset[i] = base_offset + (int64_t)out.size();
@@ -1979,48 +2190,63 @@ inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offse
       use_dict = true;
       dcb = build_dict_column(rg_cols[i], rg_rows, codec, level);
     } else if (rg_cols[i].dict_enabled) {
-      size_t present = rg_rows - (size_t)meta.stats[i].null_count;
+      const size_t present = present_rows;
       ColumnInput dcol = rg_cols[i];
       bool built = false;
-      if (present > 0) {
-        switch (rg_cols[i].type) {
-        case PT_INT32:
-          if (!dict_sample_looks_high_cardinality<int32_t>(rg_cols[i].i32, rg_cols[i].validity,
-                                                            rg_rows, present))
+      if (have_row_hashes) {
+        // Bracket the distinct count. With an EXACT one in hand (the bloom
+        // filter already sorted these hashes) the bracket collapses to a point
+        // and no margin is bought; otherwise the KMV sketch estimates it and
+        // the bracket spans the estimator's error. dict_byte_budget uses the
+        // two ends in the directions that keep it honest.
+        size_t ndv_lo, ndv_hi, expected;
+        if (have_exact_ndv) {
+          ndv_lo = ndv_hi = expected = exact_ndv;
+        } else {
+          const double estimate =
+              dict_estimated_ndv(row_hashes, rg_cols[i].validity, rg_rows);
+          ndv_lo = (size_t)(estimate / DICT_ESTIMATE_SKIP_MARGIN);
+          ndv_hi = (size_t)(estimate * DICT_ESTIMATE_SKIP_MARGIN) + 1u;
+          expected = (size_t)estimate + 1u;
+        }
+        const DictBudget budget = dict_byte_budget(rg_cols[i], rg_rows, present,
+                                                   ndv_lo, ndv_hi);
+        const size_t byte_budget = budget.byte_budget;
+        if (budget.worth_attempting) {
+          switch (rg_cols[i].type) {
+          case PT_INT32:
             built = build_numeric_dict<int32_t>(rg_cols[i].i32, rg_cols[i].validity,
-                                                rg_rows, present, bd.i32, bd.codes);
-          if (built) { dcol.i32 = bd.i32.data(); dcol.dict_count = (uint32_t)bd.i32.size(); }
-          break;
-        case PT_INT64:
-          if (!dict_sample_looks_high_cardinality<int64_t>(rg_cols[i].i64, rg_cols[i].validity,
-                                                            rg_rows, present))
+                                                rg_rows, byte_budget, row_hashes, expected,
+                                                bd.i32, bd.codes);
+            if (built) { dcol.i32 = bd.i32.data(); dcol.dict_count = (uint32_t)bd.i32.size(); }
+            break;
+          case PT_INT64:
             built = build_numeric_dict<int64_t>(rg_cols[i].i64, rg_cols[i].validity,
-                                                rg_rows, present, bd.i64, bd.codes);
-          if (built) { dcol.i64 = bd.i64.data(); dcol.dict_count = (uint32_t)bd.i64.size(); }
-          break;
-        case PT_FLOAT:
-          if (!dict_sample_looks_high_cardinality_f32(rg_cols[i].f32, rg_cols[i].validity,
-                                                       rg_rows, present))
-            built = build_float_dict(rg_cols[i].f32, rg_cols[i].validity,
-                                     rg_rows, present, bd.f32, bd.codes);
-          if (built) { dcol.f32 = bd.f32.data(); dcol.dict_count = (uint32_t)bd.f32.size(); }
-          break;
-        case PT_DOUBLE:
-          if (!dict_sample_looks_high_cardinality_f64(rg_cols[i].f64, rg_cols[i].validity,
-                                                       rg_rows, present))
-            built = build_double_dict(rg_cols[i].f64, rg_cols[i].validity,
-                                      rg_rows, present, bd.f64, bd.codes);
-          if (built) { dcol.f64 = bd.f64.data(); dcol.dict_count = (uint32_t)bd.f64.size(); }
-          break;
-        case PT_BYTE_ARRAY:
-          if (!dict_sample_looks_high_cardinality_str(rg_cols[i].strs, rg_cols[i].validity,
-                                                       rg_rows, present))
+                                                rg_rows, byte_budget, row_hashes, expected,
+                                                bd.i64, bd.codes);
+            if (built) { dcol.i64 = bd.i64.data(); dcol.dict_count = (uint32_t)bd.i64.size(); }
+            break;
+          case PT_FLOAT:
+            built = build_numeric_dict<float>(rg_cols[i].f32, rg_cols[i].validity,
+                                              rg_rows, byte_budget, row_hashes, expected,
+                                              bd.f32, bd.codes);
+            if (built) { dcol.f32 = bd.f32.data(); dcol.dict_count = (uint32_t)bd.f32.size(); }
+            break;
+          case PT_DOUBLE:
+            built = build_numeric_dict<double>(rg_cols[i].f64, rg_cols[i].validity,
+                                               rg_rows, byte_budget, row_hashes, expected,
+                                               bd.f64, bd.codes);
+            if (built) { dcol.f64 = bd.f64.data(); dcol.dict_count = (uint32_t)bd.f64.size(); }
+            break;
+          case PT_BYTE_ARRAY:
             built = build_string_dict(rg_cols[i].strs, rg_cols[i].validity,
-                                      rg_rows, present, bd.strs, bd.codes);
-          if (built) { dcol.strs = bd.strs.data(); dcol.dict_count = (uint32_t)bd.strs.size(); }
-          break;
-        default:
-          break;
+                                      rg_rows, byte_budget, row_hashes, expected,
+                                      bd.strs, bd.codes);
+            if (built) { dcol.strs = bd.strs.data(); dcol.dict_count = (uint32_t)bd.strs.size(); }
+            break;
+          default:
+            break;
+          }
         }
       }
       if (built) {

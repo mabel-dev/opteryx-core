@@ -36,7 +36,7 @@ INT32_MAX  = 2147483647
 def i8(lst):     return dn.vector_int8_from_sequence(lst)
 def i16(lst):    return dn.vector_int16_from_sequence(lst)
 def i32(lst):    return dn.vector_int32_from_sequence(lst)
-def i64(lst):    return dn.vector_from_sequence(lst)
+def i64(lst):    return dn.vector_int64_from_sequence(lst)
 def u8(lst):     return dn.vector_uint8_from_sequence(lst)
 def u16(lst):    return dn.vector_uint16_from_sequence(lst)
 def u32(lst):    return dn.vector_uint32_from_sequence(lst)

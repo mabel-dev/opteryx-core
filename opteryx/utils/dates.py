@@ -133,34 +133,57 @@ def parse_iso(value):
     #   YYYY-MM-DD HH:MM:SS.mmmm   <- date and time with milliseconds
     #
     # If the last character is a Z, we ignore it.
-    # If we can't parse as a date we return None rather than error
+    #
+    # A VALUE that does not spell a date returns None rather than raising - every
+    # caller tests for that None and turns it into its own error message.
+    #
+    # A TYPE this function was not built for is a different thing: it is a
+    # programming error, and it is raised. Folding it into the same None hid it as
+    # "not a date" and let a wrong answer travel - a foreign scalar wrapping a
+    # perfectly good date parsed as nothing at all. The recognised domain is the
+    # SQL literal domain, because the planner is the only caller and hands over
+    # whatever the parser produced.
 
     from opteryx.compiled.functions.timestamp import parse_iso as c_parse_iso
 
-    try:
-        input_type = type(value)
+    # NULL in, NULL out - a NULL literal is a value the planner legitimately holds.
+    if value is None:
+        return None
 
-        if input_type is str and value.isdigit():
-            value = int(value)
-            input_type = int
+    input_type = type(value)
 
-        if input_type in (int, float):
+    if input_type is str and value.isdigit():
+        value = int(value)
+        input_type = int
+
+    if input_type is int or input_type is float:
+        try:
             return datetime.datetime.fromtimestamp(int(value), tz=datetime.timezone.utc).replace(
                 tzinfo=None
             )
+        except (ValueError, OverflowError, OSError):
+            # a number outside the datetime range is a bad VALUE, not a bad type
+            return None
 
-        if input_type is datetime.datetime:
-            return value.replace(microsecond=0)
-        if input_type is datetime.date:
-            return datetime.datetime.combine(value, datetime.time.min)
+    if input_type is datetime.datetime:
+        return value.replace(microsecond=0)
+    if input_type is datetime.date:
+        return datetime.datetime.combine(value, datetime.time.min)
 
-        if isinstance(value, str):
-            value = value.encode("utf-8")
+    if input_type is str:
+        value = value.encode("utf-8")
+        input_type = bytes
 
-        return c_parse_iso(value)
+    if input_type is bytes:
+        try:
+            return c_parse_iso(value)
+        except ValueError:
+            return None
 
-    except (ValueError, TypeError):
-        return None
+    raise TypeError(
+        f"`{type(value).__name__}` is not a type PARSE_ISO can read as a date - it takes a "
+        "date, a datetime, a number of seconds since the epoch, or text that spells a date."
+    )
 
 
 def truncate_single(dt: datetime.datetime, unit: str) -> datetime.datetime:

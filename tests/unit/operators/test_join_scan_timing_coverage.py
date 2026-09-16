@@ -20,7 +20,7 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), "../../.."))
 import pytest
 
 from draken.morsels.morsel import Morsel
-from draken.draken_native import vector_from_sequence
+from draken.draken_native import vector_int64_from_sequence
 
 from opteryx import EOS
 from opteryx.operators import BasePlanNode, PipelineContext
@@ -28,7 +28,7 @@ from opteryx.operators._operators import drive_scan
 
 
 def _morsel(n=3):
-    return Morsel.from_vectors([b"c"], [vector_from_sequence(list(range(n)))])
+    return Morsel.from_vectors([b"c"], [vector_int64_from_sequence(list(range(n)))])
 
 
 # ---------------------------------------------------------------------------

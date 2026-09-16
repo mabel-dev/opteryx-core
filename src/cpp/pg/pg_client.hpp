@@ -103,7 +103,10 @@ public:
     std::vector<PgField> begin(const std::string& sql,
                                const std::vector<std::optional<std::string>>& params);
     // next_row(): the next DataRow payload (int16 ncols, then per column int32 len
-    // + bytes; len == -1 is NULL). The pointer is valid until the next call.
+    // + bytes; len == -1 is NULL). The pointer is valid until the next call: it
+    // points INTO the transport's read buffer, which the next read may refill
+    // over. Nothing is copied or allocated per row - a caller that needs a row
+    // to outlive its next next_row() copies it.
     // Returns false once CommandComplete + ReadyForQuery have been consumed.
     // Throws PgError on a server ErrorResponse (after draining to ReadyForQuery,
     // so the connection is reusable).
@@ -127,13 +130,12 @@ private:
                        const std::vector<std::optional<std::string>>& params,
                        bool binary_results, bool describe_portal);
     static std::vector<PgField> parse_row_description(const Msg& m);
-    [[noreturn]] void raise_server_error(const Msg& m);
+    [[noreturn]] void raise_server_error(const uint8_t* payload, size_t len);
 
     std::unique_ptr<Transport> t_;
     std::map<std::string, std::string> params_;
     std::string server_version_;
     std::string command_tag_;
-    std::vector<uint8_t> row_buf_;    // last DataRow payload (next_row)
     bool streaming_ = false;          // between begin() and the final ReadyForQuery
     bool healthy_ = true;
 };

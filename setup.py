@@ -36,6 +36,7 @@ from build_common import (
     is_win,
     skene_extensions,
     write_draken_abi_modules,
+    write_rugo_build_identity,
 )
 
 LIBRARY = "opteryx"
@@ -422,12 +423,19 @@ if not _skip_build and not _DRAKEN_BUILD:
     _openssl_include_dirs, _openssl_link_args = resolve_openssl()
 
 
+# The `created_by` rugo stamps into every parquet footer from THIS wheel. Bound
+# once: the same string is compiled in (-DRUGO_PARQUET_CREATED_BY) and published
+# as rugo.__writer_id__, so a file's footer and the loaded package agree.
+# The opteryx version is deliberate — in this wheel rugo is a bundled component
+# of opteryx_core and has no release of its own; rugo/setup.py stamps the
+# standalone rugo version instead.
+RUGO_PARQUET_CREATED_BY = "opteryx-rugo version %s (build %s)" % (__version__, __build__)
+print(f"rugo writer identity: {write_rugo_build_identity(RUGO_PARQUET_CREATED_BY, 'opteryx_core')}")
+
+
 # Define all extensions
 extensions = [
-    *draken_rugo_extensions(
-        parquet_created_by="opteryx-rugo version %s (build %s)"
-        % (__version__, __build__)
-    ),
+    *draken_rugo_extensions(parquet_created_by=RUGO_PARQUET_CREATED_BY),
     # skene file-format extension (skene depends on draken alone; disjoint from rugo).
     *skene_extensions(),
     # Third-party libraries.

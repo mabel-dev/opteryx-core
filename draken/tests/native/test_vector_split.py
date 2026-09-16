@@ -252,6 +252,6 @@ class TestVectorSplitErrors:
             _split.vector_split(vec, ",")
 
     def test_non_string_vector(self):
-        vec = dn.vector_from_sequence([1, 2, 3])
+        vec = dn.vector_int64_from_sequence([1, 2, 3])
         with pytest.raises(Exception):
             _split.vector_split(vec, ord(","))

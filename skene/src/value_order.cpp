@@ -12,6 +12,7 @@
 
 #include "core/alloc.h"
 #include "core/interval_slot.h"
+#include "core/kmv_sketch.h"
 #include "core/string_slot.h"
 
 #define XXH_INLINE_ALL
@@ -116,91 +117,26 @@ CompareFn comparator_for(DrakenType type) {
 
 // ── KMV (K-minimum-values) distinct-count sketch ────────────────────────────
 //
-// Estimates how many DISTINCT values a column holds, in one pass, from the K
-// smallest value hashes. Bounded memory (K entries) and — once warm — one
-// compare per value, because a hash at or above the current K-th smallest is
-// rejected before it can be inserted.
+// THE implementation now lives in draken/core/kmv_sketch.h — promoted out of
+// this file, where it was private and exported in no header, so that skene's
+// decline decision, opteryx's manifest sketches and rugo's dictionary decision
+// are one piece of code rather than four. Every property it had here is
+// preserved there: sorted-array backing, the cached-threshold warm reject, the
+// min_k(k)-narrows-exactly guarantee and the v <= 0 guard in estimate().
 //
-// This is what separates it from the deduplicating hashtable it exists to
-// decide FOR or AGAINST: what makes that table expensive is the table (an
-// insert, a probe, and a rehash per distinct value), not the hash. So a sketch
-// can afford to look at every row where the table cannot.
+// K=1024, not the kSketchK=32 the stored sketch carries. Those 32 are sized to
+// be STORED per file and unioned across thousands of them, where width costs
+// bytes forever; this one is thrown away at the end of the column and its only
+// cost is 8KB of transient memory, so it buys the accuracy instead (~3% RSE
+// against ~18.9% at K=32) — and the 32 smallest OF the 1024 smallest are the
+// 32 smallest outright, so the stored sketch loses nothing by being taken
+// from it.
 //
-// EXACT, not estimated, whenever the column holds fewer than K distinct values:
-// the sketch then holds all of them and its size IS the answer. That is the
-// regime the decline below cares most about getting right, and it is the regime
-// where a ratio test has the least room for error.
-//
-// Above K distinct values it is the standard KMV estimator: with the K-th
-// smallest hash at normalized position v in [0,1), the distinct count is
-// (K-1)/v. Relative standard error is ~1/sqrt(K-2) — at K=1024 that is ~3%,
-// which is far inside the margin a 50% threshold needs, and three orders of
-// magnitude better than what a fixed-size row sample can offer (see the
-// decline in order_column for why that is not a fixable property of sampling).
-class KmvSketch {
-  public:
-    // One allocation for the life of the sketch: kK + 1 because `add` inserts
-    // before it trims, so the vector is momentarily one over its bound.
-    KmvSketch() { smallest_.reserve(kK + 1u); }
-
-    // BACKED BY A SORTED ARRAY, NOT A TREE. This holds exactly what a
-    // std::set<uint64_t> held — the kK smallest DISTINCT hashes, ascending —
-    // and every exit below matches the set's semantics case for case, so the
-    // hashes it yields are unchanged. Only the container is different.
-    //
-    // Why it was worth changing: the warm path is the whole loop, and on a
-    // std::set it read `*rbegin()`, which walks to the tree's rightmost node on
-    // EVERY value. Here the K-th smallest is `smallest_.back()`, cached in
-    // `threshold_` so the reject is a single compare against a register.
-    //
-    // The accepting path memmoves up to K-1 entries (8KB at kK=1024) instead of
-    // relinking three pointers, which sounds worse and is not: acceptance
-    // requires beating the K-th smallest hash, so after the first K values it
-    // happens O(K log N / N) of the time, while the reject runs N times.
-    void add(uint64_t hash) {
-        if (smallest_.size() >= kK) {
-            // Warm: the overwhelmingly common case, and now one compare.
-            if (hash >= threshold_) return;
-        }
-        // Dedup, exactly as std::set did: a hash already present is not a new
-        // distinct value and must not displace the current maximum.
-        const auto at = std::lower_bound(smallest_.begin(), smallest_.end(), hash);
-        if (at != smallest_.end() && *at == hash) return;
-        smallest_.insert(at, hash);
-        if (smallest_.size() > kK) smallest_.pop_back();
-        if (smallest_.size() >= kK) threshold_ = smallest_.back();
-    }
-
-    // The k smallest hashes, ascending. Taking the k smallest of the K smallest
-    // IS the k smallest overall, so a K=1024 sketch yields an exact K=32 one —
-    // which is why the decline decision keeps its 3% accuracy while the STORED
-    // sketch costs 32 hashes.
-    std::vector<uint64_t> min_k(size_t k) const {
-        const size_t n = k < smallest_.size() ? k : smallest_.size();
-        return std::vector<uint64_t>(smallest_.begin(), smallest_.begin() + n);
-    }
-
-    double estimate() const {
-        if (smallest_.size() < kK) return static_cast<double>(smallest_.size());
-        // 2^64 as a double. The K-th smallest hash divided by this is the
-        // fraction of the hash space the K smallest distinct values occupy.
-        constexpr double kHashSpace = 18446744073709551616.0;
-        const double v = static_cast<double>(smallest_.back()) / kHashSpace;
-        // Guard the divide: v == 0 needs the K-th smallest hash to be 0, which
-        // means every sampled hash collided at 0. Report K rather than infinity.
-        if (v <= 0.0) return static_cast<double>(kK);
-        return static_cast<double>(kK - 1u) / v;
-    }
-
-  private:
-    // 1024, not the 32 the manifest's KMV sketches use. Those are sized to be
-    // STORED per file and unioned across thousands of them, where width costs
-    // bytes forever; this one is thrown away at the end of the column and its
-    // only cost is 8KB of transient memory, so it buys the accuracy instead.
-    static constexpr size_t kK = 1024u;
-    std::vector<uint64_t> smallest_;   // ascending, distinct, at most kK
-    uint64_t              threshold_ = 0;  // == smallest_.back() once full
-};
+// The family tag is a correctness discriminant, not a label: these hashes are
+// XXH3 over value bytes (ValueKey below), which is NOT draken's Vector.hash()
+// that ANALYZE and the catalog stats engine sketch with. See format.h's
+// ColumnSketchHeader and the header block in kmv_sketch.h.
+using KmvSketch = draken::KmvSketch<1024u, draken::KmvHashFamily::kXxh3ValueBytes>;
 
 }  // namespace
 
@@ -339,10 +275,9 @@ Status order_column(const DrakenVector& vector, const LogicalType* logical,
     // hashes instead of length. `referenced` already excludes null rows, which
     // is exactly the non-null rule `ndv` is defined by.
     //
-    // Kept at K=1024 rather than kSketchK: the string decline below reads
-    // estimate() and needs its ~3% accuracy, and the 32 smallest of the 1024
-    // smallest are the 32 smallest outright, so the stored sketch loses nothing
-    // by being taken from it.
+    // K=1024, not kSketchK: the string decline below reads estimate() and needs
+    // its accuracy. The stored sketch is narrowed out of it for free — see the
+    // KmvSketch alias above.
     KmvSketch sketch;
     for (uint32_t code = 0; code < vector.data_length; ++code) {
         if (referenced[code]) sketch.add(static_cast<uint64_t>(key.hash(code)));

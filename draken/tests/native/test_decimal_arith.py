@@ -528,7 +528,7 @@ class TestDecimalNeg:
         # vector and re-tags it as DECIMAL with the supplied (precision, scale).
         # This is the same primitive shape as vector_reinterpret_as_timestamp64.
         INT64_MIN = -9_223_372_036_854_775_808
-        int_vec = dn.vector_from_sequence([INT64_MIN])
+        int_vec = dn.vector_int64_from_sequence([INT64_MIN])
         dec_vec = dn.vector_reinterpret_as_decimal(int_vec, precision=18, scale=0)
         # Confirm the planted state: the DECIMAL vector now holds INT64_MIN unscaled.
         assert dec_vec.type == dn.DrakenType.DECIMAL
@@ -553,7 +553,7 @@ class TestDecimalArithGuards:
     def test_decimal_plus_int64_works(self):
         # INT64 is accepted as a scale-0 decimal operand: 1.00 + 1 = 2.00.
         a = dec([Decimal('1.00')])
-        b = dn.vector_from_sequence([1])
+        b = dn.vector_int64_from_sequence([1])
         r = a.add(b)
         assert pylist(r) == [Decimal('2.00')]
 
