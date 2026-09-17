@@ -60,6 +60,22 @@ struct ColumnStats {
   int32_t max_definition_level = -1;
   int32_t max_repetition_level = -1;
 
+  // Per-nesting-depth definition-level thresholds for a REPEATED (list) column.
+  // Size is max_repetition_level + 1; index 0 is unused so depth k reads at [k].
+  // list_def_thresholds[k] is the SMALLEST definition level at which the list at
+  // depth k is non-null; that level plus one is the smallest at which it holds at
+  // least one entry (a REPEATED node always contributes exactly one def level).
+  //
+  // These replace the constants 2k-1 / 2k, which are correct ONLY when every
+  // schema node on the path is OPTIONAL. A `required` element, a `required` LIST
+  // group, or the legacy 2-level `repeated <leaf>` encoding all shift them, and
+  // the offsets cannot be recovered downstream: max_definition_level alone has
+  // already collapsed the per-node repetition types away. Derived in WalkLeaves,
+  // which is the one place that still sees them.
+  //
+  // Empty for a non-repeated column (max_repetition_level == 0).
+  std::vector<int32_t> list_def_thresholds;
+
   // Width of FIXED_LEN_BYTE_ARRAY values (bytes). 0 for other physical types.
   int32_t type_length = 0;
 

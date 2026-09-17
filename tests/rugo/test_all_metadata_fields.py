@@ -81,6 +81,12 @@ def test_all_metadata_fields_exposed():
             "compression_codec",
             "max_definition_level",
             "max_repetition_level",
+            # Per-nesting-depth definition-level thresholds for a list column
+            # (empty for a non-list column). Carried alongside the max levels
+            # because a list column's structure cannot be reconstructed from
+            # max_definition_level alone — only the schema walk sees which nodes
+            # are OPTIONAL. See ColumnStats::list_def_thresholds.
+            "list_def_thresholds",
             "type_length",
         }
 
@@ -122,6 +128,15 @@ def test_metadata_field_types():
         # Encodings should be a list of strings
         assert isinstance(col["encodings"], list)
         assert all(isinstance(enc, str) for enc in col["encodings"])
+
+        # list_def_thresholds: a list of ints, sized max_repetition_level + 1 for
+        # a list column (index 0 unused) and empty for a non-list column.
+        assert isinstance(col["list_def_thresholds"], list)
+        assert all(isinstance(t, int) for t in col["list_def_thresholds"])
+        if col["max_repetition_level"]:
+            assert len(col["list_def_thresholds"]) == col["max_repetition_level"] + 1
+        else:
+            assert col["list_def_thresholds"] == []
 
         # Compression codec should be string or None
         assert col["compression_codec"] is None or isinstance(col["compression_codec"], str)

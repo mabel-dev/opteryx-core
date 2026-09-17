@@ -846,6 +846,32 @@ static inline bool IsOptional(const SchemaElement &elem) {
   return elem.repetition_type == 1;
 }
 
+// A leaf's scalar logical type: its annotation, else derived from the physical
+// type. Shared by the scalar branch of EmitSchemaEntry and by the legacy 2-level
+// list branch (which wraps the result in "array<...>") so the two cannot drift.
+// Mirrored by the WalkLeaves fallback — the map entry this produces is what
+// WalkLeaves actually finds, so the two must agree.
+static std::string ResolveScalarLogicalType(const SchemaElement &elem) {
+  if (!elem.logical_type.empty()) return elem.logical_type;
+  if (elem.physical_type == "int96") {
+    // INT96 has exactly one meaning in the Parquet spec: a nanosecond timestamp
+    // (Impala/Hive legacy). It carries no ConvertedType/LogicalType annotation,
+    // so without this the schema reports logical "int96" and the timestamp never
+    // gets retagged. The decoder converts the 12-byte wire value to int64 nanos,
+    // so the logical type it advertises must match what consumers receive.
+    return "timestamp[ns]";
+  }
+  if (elem.type_length > 0 && elem.physical_type == "fixed_len_byte_array") {
+    return "fixed_len_byte_array[" + std::to_string(elem.type_length) + "]";
+  }
+  if (elem.physical_type == "byte_array" ||
+      elem.physical_type == "fixed_len_byte_array") {
+    return "binary";
+  }
+  if (!elem.physical_type.empty()) return elem.physical_type;
+  return "unknown";
+}
+
 static std::string ResolveArrayLogicalType(const SchemaElement &elem) {
   std::string child_type = "unknown";
   if (!elem.children.empty()) {
@@ -916,30 +942,44 @@ static void EmitSchemaEntry(const SchemaElement &elem, bool ancestor_optional,
     return;
   }
 
-  std::string logical = elem.logical_type;
-  if (logical.empty()) {
-    if (elem.physical_type == "int96") {
-      // INT96 has exactly one meaning in the Parquet spec: a nanosecond
-      // timestamp (Impala/Hive legacy). It carries no ConvertedType/LogicalType
-      // annotation, so without this the schema reports logical "int96" and the
-      // timestamp never gets retagged. The decoder converts the 12-byte wire
-      // value to int64 nanos, so the logical type it advertises must match what
-      // consumers will receive. Mirrored by the WalkLeaves fallback below —
-      // this map entry is what WalkLeaves actually finds, so the two must agree.
-      logical = "timestamp[ns]";
-    } else if (elem.type_length > 0 && elem.physical_type == "fixed_len_byte_array") {
-      logical =
-          "fixed_len_byte_array[" + std::to_string(elem.type_length) + "]";
-    } else if (elem.physical_type == "byte_array") {
-      logical = "binary";
-    } else if (elem.physical_type == "fixed_len_byte_array") {
-      logical = "binary";
-    } else if (!elem.physical_type.empty()) {
-      logical = elem.physical_type;
-    } else {
-      logical = "unknown";
+  // Legacy 2-level list encoding: a REPEATED leaf with no LIST annotation, as
+  // pre-annotation parquet-mr / Hive / Impala wrote it —
+  //     message schema { repeated binary tags (UTF8); }
+  // The element type is the node's OWN type (there is no wrapper group and no
+  // child to walk), and the column is a list exactly as the 3-level form is: it
+  // must be indistinguishable from here on, or the decoder produces list-shaped
+  // output while this layer advertises a scalar and the two paths collide.
+  //
+  // Leaves only. A REPEATED *group* with no annotation is a legacy list of
+  // structs, which is not supported anywhere else in the engine — it keeps
+  // falling through to the scalar branch, exactly as before.
+  //
+  // The 3-level form never reaches here: its LIST group is caught by the branch
+  // above, which returns without descending, so the inner `repeated group list`
+  // is never visited. A MAP's `repeated group key_value` is likewise unreachable
+  // (the MAP node has children and falls through without recursing).
+  if (elem.repetition_type == 2 && elem.children.empty()) {
+    const std::string array_type = "array<" + ResolveScalarLogicalType(elem) + ">";
+    if (is_top_level) {
+      SchemaField field;
+      field.name = canonical;
+      field.physical_type = "list";
+      field.logical_type = array_type;
+      // Deliberately `ancestor_optional`, not `nullable`: a REPEATED field has
+      // no null state of its own — an absent value is an EMPTY list, never a
+      // null one — so only an optional ancestor can make this column nullable.
+      field.nullable = ancestor_optional;
+      columns.push_back(std::move(field));
     }
+
+    map[canonical] = array_type;
+    if (elem.name != canonical) {
+      map[elem.name] = array_type;
+    }
+    return;
   }
+
+  const std::string logical = ResolveScalarLogicalType(elem);
 
   if (is_top_level) {
     SchemaField field;
@@ -1101,6 +1141,8 @@ struct LeafInfo {
   int32_t max_def_level    =  0;
   int32_t max_rep_level    =  0;
   int32_t type_length      =  0;
+  // See ColumnStats::list_def_thresholds. Index 0 unused; depth k reads at [k].
+  std::vector<int32_t> list_def_thresholds;
 };
 
 // Walk the schema tree once, collecting one LeafInfo per physical leaf in
@@ -1109,10 +1151,16 @@ static void WalkLeaves(
     const SchemaElement &elem,
     int32_t acc_def, int32_t acc_rep,
     const std::unordered_map<std::string, std::string> &logical_type_map,
-    std::vector<LeafInfo> &out)
+    std::vector<LeafInfo> &out,
+    std::vector<int32_t> &list_thresholds)
 {
-  // Accumulate Dremel levels for this node.
-  if (elem.repetition_type == 2) { acc_def++; acc_rep++; }
+  // Accumulate Dremel levels for this node. A REPEATED node opens a new nesting
+  // depth: record the def level reached BEFORE it is counted, which is exactly
+  // the smallest def at which the list it introduces is non-null (every OPTIONAL
+  // ancestor above it is then defined). REQUIRED ancestors contribute nothing, so
+  // an all-required path yields 0 — a list that can never be null.
+  const size_t thresholds_pushed = (elem.repetition_type == 2) ? 1u : 0u;
+  if (elem.repetition_type == 2) { list_thresholds.push_back(acc_def); acc_def++; acc_rep++; }
   else if (elem.repetition_type == 1) { acc_def++; }
 
   if (elem.children.empty()) {
@@ -1125,6 +1173,14 @@ static void WalkLeaves(
     li.max_def_level   = acc_def;
     li.max_rep_level   = acc_rep;
     li.type_length     = elem.type_length;
+    if (acc_rep > 0) {
+      // Index 0 is unused so depth k reads at [k]; list_thresholds holds the
+      // ancestors of THIS leaf, in depth order, one per REPEATED node.
+      li.list_def_thresholds.reserve(list_thresholds.size() + 1);
+      li.list_def_thresholds.push_back(0);
+      li.list_def_thresholds.insert(li.list_def_thresholds.end(),
+                                    list_thresholds.begin(), list_thresholds.end());
+    }
 
     auto it = logical_type_map.find(canonical);
     if (it != logical_type_map.end()) {
@@ -1150,12 +1206,14 @@ static void WalkLeaves(
     }
 
     out.push_back(std::move(li));
+    if (thresholds_pushed) list_thresholds.pop_back();
     return;
   }
 
   for (const auto &child : elem.children) {
-    WalkLeaves(child, acc_def, acc_rep, logical_type_map, out);
+    WalkLeaves(child, acc_def, acc_rep, logical_type_map, out, list_thresholds);
   }
+  if (thresholds_pushed) list_thresholds.pop_back();
 }
 
 // Apply per-leaf schema info to every row group's columns by position.
@@ -1174,6 +1232,7 @@ static void ApplyLeafInfosByIndex(FileStats &fs,
       col.repetition_type    = li.repetition_type;
       col.max_definition_level = li.max_def_level;
       col.max_repetition_level = li.max_rep_level;
+      col.list_def_thresholds  = li.list_def_thresholds;
       if (li.type_length > 0) col.type_length = li.type_length;
     }
   }
@@ -1298,8 +1357,9 @@ FileStats ReadParquetMetadataFromBuffer(const uint8_t *buf, size_t size,
     leaf_infos.reserve(fs.schema_columns.size() > 0
                            ? fs.schema_columns.size()
                            : 64);
+    std::vector<int32_t> list_thresholds;   // scratch: REPEATED ancestors of the current leaf
     for (const auto &field : fs.schema) {
-      WalkLeaves(field, 0, 0, logical_type_map, leaf_infos);
+      WalkLeaves(field, 0, 0, logical_type_map, leaf_infos, list_thresholds);
     }
     ApplyLeafInfosByIndex(fs, leaf_infos);
   }

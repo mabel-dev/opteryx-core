@@ -260,6 +260,7 @@ cdef extern from "pg/pg_scan_spec.hpp" namespace "opteryx::pg" nogil:
         uint32_t batch_rows
         int64_t row_limit
         bint zero_columns
+        bint schema_from_catalog
         int64_t rows_read
 
 cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
@@ -2570,7 +2571,8 @@ cdef class PostgresScanPlan:
 
     def __init__(self, dict config, str sql, list params, list out_identities,
                  list expected_oids, list column_types, list decimal_precision,
-                 list decimal_scale, int batch_rows, object row_limit, bint zero_columns):
+                 list decimal_scale, int batch_rows, object row_limit, bint zero_columns,
+                 bint schema_from_catalog=False):
         if not (len(out_identities) == len(expected_oids) == len(column_types)
                 == len(decimal_precision) == len(decimal_scale)):
             raise ValueError("PostgresScanPlan: column vectors must be parallel")
@@ -2598,6 +2600,7 @@ cdef class PostgresScanPlan:
         self.spec.batch_rows = <uint32_t>batch_rows
         self.spec.row_limit = -1 if row_limit is None else <int64_t>row_limit
         self.spec.zero_columns = zero_columns
+        self.spec.schema_from_catalog = schema_from_catalog
         self.spec.rows_read = -1
         self.scan_identity = None
 

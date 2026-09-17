@@ -171,57 +171,36 @@ cdef class ReaderNode(BasePlanNode):
             return f"{dataset_name} AS {self.alias}"
         return dataset_name
 
-    def plan_config(self, plan):
-        """Additional details for this step"""
-        from opteryx.expression import NodeType
-        from opteryx.planner.logical_planner import LogicalPlanStepType
+    def plan_config(self):
+        """What this reader ABSORBED from the plan.
 
-        def _is_numeric(node):
-            return node.node_type == NodeType.LITERAL and isinstance(
-                node.value, (int, float)
-            )
+        Pushdown removes operators: a predicate pushed into a parquet scan
+        leaves no Filter node behind, so without this the plan view showed a
+        bare relation name and the predicate simply vanished from the render.
 
-        def _is_string(node):
-            return node.node_type == NodeType.LITERAL and isinstance(node.value, str)
+        This reports the node's OWN state, which is the record of what was
+        pushed. It does not re-derive the decision: by the time a physical plan
+        exists the optimizer has already made it, and `self.predicates` /
+        `self.columns` / `self.limit` ARE the answer. The previous body asked
+        the physical plan for `LogicalPlanStepType` nodes and appended what it
+        found back onto those same fields -- it answered the wrong question and
+        mutated the reader while rendering it.
 
-        def _is_boolean(node):
-            return node.node_type == NodeType.LITERAL and isinstance(node.value, bool)
+        Keys carrying nothing are omitted, so a reader with no pushdown renders
+        as the relation alone rather than as a row of empty lists.
+        """
+        from opteryx.expression import format_expression
 
-        def _get_literal_value(node):
-            return node.value
+        config = {"relation": self.config}
 
-        def _get_column_name(node):
-            return node.value
+        if self.columns:
+            config["columns"] = [format_expression(column) for column in self.columns]
+        if self.predicates:
+            config["predicates"] = [format_expression(predicate) for predicate in self.predicates]
+        if self.limit is not None:
+            config["limit"] = self.limit
 
-        def _get_function_name(node):
-            return node.value
-
-        # can we push selections (WHERE) into this reader
-        if self.connector and self.connector.can_push_selection:
-            # get the selections from the plan
-            selections = plan.get_nodes_of_type(LogicalPlanStepType.Filter)
-            # if we have selections, push them into the reader
-            for selection in selections:
-                if selection.condition:
-                    self.predicates.append(selection.condition)
-
-        # can we push projections (SELECT) into this reader
-        if self.connector and self.connector.can_push_projection:
-            # get the projections from the plan
-            projections = plan.get_nodes_of_type(LogicalPlanStepType.Project)
-            # if we have projections, push them into the reader
-            for projection in projections:
-                if projection.columns:
-                    self.columns.extend(projection.columns)
-
-        # can we push limits (LIMIT) into this reader
-        if self.connector and self.connector.can_push_limit:
-            # get the limits from the plan
-            limits = plan.get_nodes_of_type(LogicalPlanStepType.Limit)
-            # if we have limits, push them into the reader
-            for limit in limits:
-                if limit.limit:
-                    self.limit = limit.limit
+        return config
 
     def read_morsels(self):
         """Source-side morsel iterator used by the push pipeline engine.

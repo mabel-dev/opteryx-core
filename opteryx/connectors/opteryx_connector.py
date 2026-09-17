@@ -1368,6 +1368,58 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
             return "dataset", obj
         return None, None
 
+    def get_relations(self, names):
+        """The plural of `get_relation`: resolve several relations in as few catalog
+        round trips as the catalog can do them in.
+
+        Returns ``{name: (kind, payload)}`` in the same shapes `get_relation`
+        answers with, and omits nothing - a name the catalog does not hold maps to
+        ``(None, None)``, exactly as the singular call reports it.
+
+        Names are grouped by WORKSPACE because a round trip is made to a catalog and
+        one connector serves several. A catalog with no plural `get_relations` is
+        asked one name at a time here, so it costs what it costs today and nothing
+        upstream has to know which kind it is talking to.
+        """
+        from opteryx.connectors.capabilities.eidetic import ViewDefinition
+
+        by_workspace: Dict[str, List[Tuple[str, str]]] = {}
+        answers: Dict[str, Tuple] = {}
+        for name in names:
+            workspace, relative_id = self._parse_identifier(name)
+            # Reserved nested schema served by table_engine(), not a catalog document
+            # - the singular path skips the round trip for it and so does this.
+            if relative_id.partition(".")[0] == "information_schema":
+                answers[name] = (None, None)
+                continue
+            by_workspace.setdefault(workspace, []).append((name, relative_id))
+
+        for workspace, pairs in by_workspace.items():
+            catalog = self._get_catalog(workspace)
+            plural = getattr(catalog, "get_relations", None)
+            if plural is None:
+                raw = {rel: catalog.get_relation(rel) for _name, rel in pairs}
+            else:
+                raw = plural([rel for _name, rel in pairs])
+            for name, relative_id in pairs:
+                kind, obj = raw.get(relative_id, (None, None))
+                if kind == "view":
+                    answers[name] = (
+                        "view",
+                        ViewDefinition(
+                            name=obj.name,
+                            statement=obj.definition,
+                            owner=obj.metadata.author,
+                            last_row_count=obj.metadata.last_execution_records,
+                            schema=_normalized_view_schema(obj.metadata.schema, name),
+                        ),
+                    )
+                elif kind == "dataset":
+                    answers[name] = ("dataset", obj)
+                else:
+                    answers[name] = (None, None)
+        return answers
+
     # Relation operations (Writable capability)
     def _dataset_location(self, relation_name: str) -> str:
         """Resolve the GCS location data files for this relation live under.

@@ -293,7 +293,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
             if not is_dataset_manifest(name)
         ]
 
-    def read_blob(self, *, blob_name: str, just_schema=False, projection=None, selection=None):
+    def read_blob(self, *, blob_name: str, just_schema=False):
         """
         Read a single blob using the filesystem.
 
@@ -306,8 +306,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         Args:
             blob_name: Path to the blob
             just_schema: If True, only return schema
-            projection: Columns to project
-            selection: Predicates to push down
 
         Returns:
             RelationSchema if just_schema=True

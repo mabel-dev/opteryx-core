@@ -19,7 +19,6 @@ from typing import Dict
 from typing import Optional
 from typing import Tuple
 
-from opteryx.connectors import connector_factory
 from opteryx.connectors import view_store_connector
 from opteryx.connectors.capabilities.eidetic import ViewDefinition
 from opteryx.exceptions import DatasetNotFoundError
@@ -38,41 +37,7 @@ def _view_plan_from_definition(definition) -> Optional[Tuple[object, Dict[str, o
     return _bind_row_count_estimate(view_plan, definition.last_row_count), view_ctes
 
 
-_NO_CATALOG = object()
-
-
-def _store_holds_the_data(store, relation: str, telemetry) -> bool:
-    """Whether the view store's catalog is also the one serving this relation.
-
-    The store is the workspace's SETTINGS catalog. For an externally bound
-    workspace that is the opteryx catalog entry, and the only datasets it
-    holds for such a workspace are the listing stubs control.opteryx projects
-    - names with no schema, which queries are never meant to consult. Binding
-    against one does not raise: it produces a relation with no columns, so a
-    projection fails as "column not found" and a bare COUNT(*) is served from
-    the empty stub manifest as zero. A wrong answer, reported as success.
-
-    Compared by catalog FACTORY, not by connector object. Two resolvers
-    installed over one catalog answer with two connector objects - the false
-    negative that retired the earlier `store is not connector_factory(...)`
-    check, which reported every relation in an ordinary deployment missing -
-    but they share one factory, so this stays true there.
-
-    A data connector that holds no catalog at all (PostgreSQL) has no
-    factory to match the store's, so it compares unequal and binds on the
-    normal path. The sentinel only makes two connectors that BOTH hold no
-    catalog compare equal, which is the shape the fakes in
-    tests/unit/connectors/test_view_store_routing.py take.
-    """
-    data = connector_factory(relation, telemetry=telemetry)
-    if data is store:
-        return True
-    return getattr(store, "catalog_factory", _NO_CATALOG) is getattr(
-        data, "catalog_factory", _NO_CATALOG
-    )
-
-
-def resolve_relation(relation: str, telemetry, catalog_cache=None):
+def resolve_relation(relation: str, telemetry, catalog_cache=None, memo=None):
     """Catalog resolution step: resolve a relation in a single catalog round
     trip, returning one of:
 
@@ -94,18 +59,30 @@ def resolve_relation(relation: str, telemetry, catalog_cache=None):
     every workspace, rather than existing only where the catalog also serves
     data. The early return above keeps disk and virtual relations free.
 
-    A DATASET answer from that lookup is honoured only when the store's
-    catalog is also the one serving the relation - see
-    `_store_holds_the_data`. It used to be dropped whenever the store was not
-    the same OBJECT as `connector_factory`'s answer, on the assumption that
-    the two objects differing meant the data lived outside the catalog. They
-    also differ when both resolvers are installed and resolve to the SAME
-    catalog - two cache entries, one catalog - which is the ordinary
-    production shape, so every relation in it reported as not found.
-    Comparing the catalog rather than the connector keeps that case working
-    while still dropping a stub answered for a workspace whose data lives in
-    an external catalog, which honouring it unconditionally bound queries
-    against - no columns, and a zero COUNT(*) reported as success.
+    A DATASET answer from that lookup is ALWAYS honoured: the catalog is
+    authoritative (architect, 2026-09-17). It is the record of every relation a
+    workspace exposes, whether the rows live in GCS or behind somebody else's
+    socket, and for an externally-bound workspace its entries are refreshed from
+    that source.
+
+    Two earlier gates stood here and both are gone. The first compared the store
+    to `connector_factory`'s answer by OBJECT identity, which reported every
+    relation missing in an ordinary deployment - two resolvers over one catalog
+    answer with two connector objects. The second compared their catalog
+    FACTORIES, which fixed that but dropped every externally-bound relation,
+    because a PostgreSQL connector holds no catalog to compare: each one was
+    then re-described from the SOURCE at bind time, two round trips per scan to
+    learn what the catalog already held, and with a worse row count than the
+    refresh had measured.
+
+    What the second gate was really protecting was an entry the refresh has
+    never described: no columns, so a projection failed as "column not found"
+    and a bare COUNT(*) was answered from the empty stub manifest as ZERO - a
+    wrong answer reported as success. That is now handled where the record is
+    actually read rather than by dropping every external answer: a connector
+    handed a record it cannot build a schema from asks the server, and one
+    handed a record that is described but INCOMPLETE refuses and names the
+    refresh. See `PostgresTable._schema_from_catalog_record`.
 
     `catalog_cache` is an OPT-IN, caller-owned `CatalogCache`. It caches the round
     trip above and nothing else: what goes in it is the raw `(kind, object)` the
@@ -117,6 +94,13 @@ def resolve_relation(relation: str, telemetry, catalog_cache=None):
     the catalog re-reads it every call for that reason, so an entry held for a minute
     is a plan built against a possibly superseded snapshot - see `opteryx.CatalogCache`
     for why that is fine for a check and wrong for anything that reads rows.
+
+    `memo` is the resolver's per-STATEMENT store of the same raw tuples, filled ahead
+    of time by `prefetch_relations` so that the relations named in one plan cost one
+    round trip between them rather than one each. It is not a cache: it lives for one
+    resolution and is not stale by construction, which is why the planner passes one
+    where it will not pass a `CatalogCache`. A name resolved through it still gets its
+    own `_finish` here.
     """
     import time as _cat_time
 
@@ -132,23 +116,92 @@ def resolve_relation(relation: str, telemetry, catalog_cache=None):
         if resolver is None:
             definition = _get_view_definition(relation, telemetry, store)
             return ("view", _view_plan_from_definition(definition)) if definition else (None, None)
-        cached = None if catalog_cache is None else catalog_cache.get(relation)
-        if cached is None:
-            cached = resolver(relation)
+
+        raw = None if memo is None else memo.get(relation)
+        if raw is None:
+            raw = None if catalog_cache is None else catalog_cache.get(relation)
+        if raw is None:
+            raw = resolver(relation)
             if catalog_cache is not None:
-                catalog_cache.put(relation, cached)
-        kind, obj = cached
-        if kind == "view":
-            return "view", _view_plan_from_definition(obj)
-        if kind == "dataset":
-            if not _store_holds_the_data(store, relation, telemetry):
-                return None, None
-            return "dataset", obj
-        return None, None
+                catalog_cache.put(relation, raw)
+            if memo is not None:
+                memo[relation] = raw
+        return _finish(store, relation, raw, telemetry)
     finally:
         # The catalog lookup is a cloud round trip (Firestore), distinct from the GCS
         # manifest/footer fetch timed as time_binding_metadata. Kept separate so the two
         # cloud costs are visible independently.
+        if telemetry is not None:
+            telemetry.time_binding_catalog += _cat_time.monotonic_ns() - _cat0
+
+
+def _finish(store, relation: str, raw, telemetry):
+    """Turn a connector's raw ``(kind, obj)`` answer into the resolver's answer.
+
+    Run PER REFERENCE, never once per name: a view becomes a fresh plan copy here
+    (the resolver splices, and so mutates, what it is given), and the dataset gate
+    below is evaluated against the relation actually being resolved. Only the round
+    trip that produced `raw` is shared - see `prefetch_relations`.
+    """
+    kind, obj = raw
+    if kind == "view":
+        return "view", _view_plan_from_definition(obj)
+    if kind == "dataset":
+        # THE CATALOG IS AUTHORITATIVE (architect, 2026-09-17) - see
+        # `resolve_relation` for what this replaced and what now guards the case
+        # the old gate was really protecting against.
+        return "dataset", obj
+    return None, None
+
+
+def prefetch_relations(relations, telemetry, memo, catalog_cache=None) -> None:
+    """Look up several relations in as few catalog round trips as the stores allow,
+    filling `memo` with the raw ``(kind, object)`` each one answered with.
+
+    This is the ONLY thing that is shared between references: `resolve_relation`
+    still runs per reference and still builds a relation its own view plan, so
+    two references to one view cannot end up spliced from one plan object.
+
+    What goes in `memo` is the same raw tuple `CatalogCache` holds, and for the same
+    reason - the dataset object is safe to share (the connector reads it and keeps its
+    own mutable state), a built view plan is not.
+
+    Relations are grouped by the catalog that would be asked for them, because that is
+    the thing a round trip is made to; a store that offers no plural `get_relations` is
+    simply left to `resolve_relation`'s per-name path, which is exactly today's cost.
+    Nothing here raises: a name that cannot be looked up in a batch is left out of the
+    memo and pays its own round trip, where the error surfaces against that one name.
+    """
+    import time as _cat_time
+
+    by_store: Dict[int, Tuple[object, list]] = {}
+    for relation in relations:
+        if relation in memo:
+            continue
+        if catalog_cache is not None:
+            cached = catalog_cache.get(relation)
+            if cached is not None:
+                memo[relation] = cached
+                continue
+        store = view_store_connector(relation, telemetry)
+        if not store.eidetic or getattr(store, "get_relations", None) is None:
+            continue
+        entry = by_store.setdefault(id(store), (store, []))
+        if relation not in entry[1]:
+            entry[1].append(relation)
+
+    _cat0 = _cat_time.monotonic_ns()
+    try:
+        for store, names in by_store.values():
+            if len(names) < 2:
+                # One name is one round trip either way; leave it to resolve_relation
+                # so a failure is raised from the same place it always was.
+                continue
+            for relation, raw in store.get_relations(names).items():
+                memo[relation] = raw
+                if catalog_cache is not None:
+                    catalog_cache.put(relation, raw)
+    finally:
         if telemetry is not None:
             telemetry.time_binding_catalog += _cat_time.monotonic_ns() - _cat0
 

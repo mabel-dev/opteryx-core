@@ -56,6 +56,10 @@ cdef extern from "metadata.hpp":
         int32_t repetition_type
         int32_t max_definition_level
         int32_t max_repetition_level
+        # Per-nesting-depth definition-level thresholds for a list column; size
+        # max_repetition_level + 1 (index 0 unused). NOT derivable from
+        # max_definition_level — see ColumnStats::list_def_thresholds.
+        vector[int32_t] list_def_thresholds
 
         # FIXED_LEN_BYTE_ARRAY width in bytes (0 for other physical types)
         int32_t type_length
@@ -153,6 +157,7 @@ cdef extern from "decode.hpp":
         int32_t max_def_level
         vector[int32_t] rep_levels
         vector[int32_t] def_levels
+        vector[int32_t] list_def_thresholds
         vector[int32_t] int32_values
         vector[int64_t] int64_values
         vector[uint8_t] string_arena

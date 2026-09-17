@@ -238,7 +238,6 @@ def render_order(node: LogicalPlanNode) -> str:
 def render_scan(node: LogicalPlanNode) -> str:
     from opteryx.expression import NodeType, get_all_nodes_of_type
 
-    io_async = "ASYNC " if getattr(node.connector, "async_read_blob", None) is not None else ""
     connector = (
         " " if getattr(node.connector, "__type__", None) is None else f" [{node.connector.__type__}] "
     )
@@ -297,7 +296,7 @@ def render_scan(node: LogicalPlanNode) -> str:
             f"{sc.name}{'' if ascending else ' DESC'}" for sc, ascending in node.topn_order_by
         )
         pushed += f" ORDER BY [{order}] LIMIT {node.topn_limit}"
-    return f"{io_async}SCAN{connector}({node.relation}{alias}{date_range}{hints}){columns}{predicates}{pushed}{limit}"
+    return f"SCAN{connector}({node.relation}{alias}{date_range}{hints}){columns}{predicates}{pushed}{limit}"
 
 
 @register_render(LogicalPlanStepType.Set)

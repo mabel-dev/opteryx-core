@@ -537,6 +537,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     result.logical_type = target_col->logical_type;
     result.max_rep_level = target_col->max_repetition_level;
     result.max_def_level = target_col->max_definition_level;
+    result.list_def_thresholds = target_col->list_def_thresholds;
 
     // E33: detect an IntType logical-type annotation ("int8"/"int16"/"int32"/
     // "int64" and the "uint*" forms, built in metadata.cpp from bitWidth +

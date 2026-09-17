@@ -253,6 +253,17 @@ medius-test: ## Build and run the Medius bounded middle-tier tests
 	    -o medius_test $(CURDIR)/third_party/mabel/medius/medius_test.cpp
 	@/tmp/opteryx-tests/medius_test
 
+decoded-column-reset-test: ## Build and run the DecodedColumn::reset() completeness test
+	$(call print_blue,"Building and running DecodedColumn reset completeness test...")
+	@mkdir -p /tmp/opteryx-tests
+	@cd /tmp/opteryx-tests && \
+	  clang++ -std=c++20 -O2 -Wall -Wextra \
+	    -I$(CURDIR)/rugo/src/parquet \
+	    $(CURDIR)/rugo/src/parquet/decoded_column_reset_test.cpp \
+	    -o decoded_column_reset_test
+	@/tmp/opteryx-tests/decoded_column_reset_test
+	$(call print_green,"✓ DecodedColumn reset completeness test passed")
+
 rle-dict-test: ## Build and run the RLE skip-dense -> Dict direct-builder tests
 	$(call print_blue,"Building and running RLE direct-dict tests...")
 	@mkdir -p /tmp/opteryx-tests

@@ -249,24 +249,21 @@ def test_a_dataset_answer_from_the_store_is_honoured(clean_registry):
     assert obj == "handle-for-cockroach.public.tpch_08"
 
 
-def test_a_stub_dataset_answer_for_an_EXTERNAL_catalog_is_not_honoured(clean_registry):
-    """A workspace bound to someone else's catalog must not bind against our stub.
+def test_a_dataset_answer_for_an_EXTERNAL_catalog_IS_honoured(clean_registry):
+    """The catalog is authoritative (architect, 2026-09-17), external or not.
 
-    The store is the workspace's SETTINGS catalog, and for an externally
-    bound workspace the only datasets it holds are the listing stubs
-    control.opteryx projects - names with no schema, which queries are never
-    meant to consult. Honouring that answer bound the query against the stub
-    and never contacted the external catalog at all.
+    This test used to assert the opposite. The answer WAS dropped whenever the
+    store's catalog was not the one serving the relation, which for a workspace
+    bound to a PostgreSQL server is never - a server holds no catalog to
+    compare. Every such relation was therefore re-described from the SOURCE at
+    bind time: two round trips per scan to be told what the catalog already
+    held, and a worse row count than the refresh had measured.
 
-    It did not raise, which is what made it expensive: the relation bound
-    with NO columns, so a projection failed as "column not found" and a bare
-    COUNT(*) was served from the empty stub manifest as zero - a wrong answer
-    reported as success. Dropping the answer here sends binding down the
-    normal path, which goes to the data connector.
-
-    The sibling test above pins the case this must not break: two connector
-    objects over ONE catalog still get their dataset answer honoured. The
-    difference is the catalog, not the object identity.
+    What the old gate was really protecting against was an entry the refresh has
+    never described - no columns, so a projection failed as "column not found"
+    and a bare COUNT(*) was answered from the empty stub manifest as zero, a
+    wrong answer reported as success. That protection now lives where the record
+    is actually read, and the two tests below pin both halves of it.
     """
     from opteryx.managers.views import resolve_relation
 
@@ -276,59 +273,59 @@ def test_a_stub_dataset_answer_for_an_EXTERNAL_catalog_is_not_honoured(clean_reg
     class _TheirCatalog:
         pass
 
-    class _StoreHoldingAStub(CatalogConnector):
+    class _StoreHoldingTheRecord(CatalogConnector):
         catalog_factory = _OurCatalog
 
         def get_relation(self, relation):
-            # What a stub projection answers: a name, and no schema behind it.
-            return "dataset", f"stub-for-{relation}"
+            return "dataset", f"record-for-{relation}"
 
     class _ExternalData(DataConnector):
         catalog_factory = _TheirCatalog
 
     set_workspace_resolver(lambda workspace: Resolution(_ExternalData, {"marker": "data"}))
     set_workspace_settings_resolver(
-        lambda workspace: Resolution(_StoreHoldingAStub, {"marker": "catalog"})
+        lambda workspace: Resolution(_StoreHoldingTheRecord, {"marker": "catalog"})
     )
 
     data = connector_factory("polaris_test.interop_ns.people", telemetry=None)
     store = view_store_connector("polaris_test.interop_ns.people", telemetry=None)
-    assert store.catalog_factory is not data.catalog_factory  # two catalogs, not two objects
+    assert store.catalog_factory is not data.catalog_factory  # two catalogs
 
     kind, obj = resolve_relation("polaris_test.interop_ns.people", None)
 
-    assert kind is None, "a stub from OUR catalog was bound for a workspace whose data is external"
-    assert obj is None
+    assert kind == "dataset"
+    assert obj == "record-for-polaris_test.interop_ns.people"
 
 
-def test_a_data_connector_with_no_catalog_does_not_take_the_stores_stub(clean_registry):
+def test_a_data_connector_with_no_catalog_still_takes_the_stores_record(clean_registry):
     """The PostgreSQL shape: rows come from a server that has no catalog at all.
 
-    `catalog_factory` is absent on that connector, so there is nothing to
-    match the store's and the dataset answer is dropped. Pinned because the
-    sentinel that makes two catalog-less fakes compare EQUAL must not also
-    make a catalog-less connector match a store that has one.
+    `catalog_factory` is absent on that connector, so there is nothing to match
+    the store's - which is exactly the case the old gate dropped, and exactly
+    the case this change exists for. The record is handed to the connector as
+    `prefetched_table`, and what it does with an incomplete one is pinned in
+    tests/unit/connectors/test_postgres_catalog_schema.py.
     """
     from opteryx.managers.views import resolve_relation
 
     class _OurCatalog:
         pass
 
-    class _StoreHoldingAStub(CatalogConnector):
+    class _StoreHoldingTheRecord(CatalogConnector):
         catalog_factory = _OurCatalog
 
         def get_relation(self, relation):
-            return "dataset", f"stub-for-{relation}"
+            return "dataset", f"record-for-{relation}"
 
     set_workspace_resolver(lambda workspace: Resolution(DataConnector, {"marker": "data"}))
     set_workspace_settings_resolver(
-        lambda workspace: Resolution(_StoreHoldingAStub, {"marker": "catalog"})
+        lambda workspace: Resolution(_StoreHoldingTheRecord, {"marker": "catalog"})
     )
 
     data = connector_factory("aiven.public.orders", telemetry=None)
-    assert not hasattr(data, "catalog_factory")
+    assert getattr(data, "catalog_factory", None) is None
 
     kind, obj = resolve_relation("aiven.public.orders", None)
 
-    assert kind is None
-    assert obj is None
+    assert kind == "dataset"
+    assert obj == "record-for-aiven.public.orders"

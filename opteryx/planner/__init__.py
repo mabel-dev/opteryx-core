@@ -311,20 +311,26 @@ def bind_statement(
         schema_only: bind without reading each relation's Manifest. Check-path only -
             the resulting plan cannot be optimized or executed.
     """
+    from opteryx.connectors import resolution_scope
+
     clean_sql, parsed_statements = parse_statement(
         operation, source=source, source_offset=source_offset, telemetry=telemetry
     )
-    return bind_parsed_statement(
-        parsed_statements=parsed_statements,
-        clean_sql=clean_sql,
-        parameters=parameters,
-        visibility_filters=visibility_filters,
-        execution_context=execution_context,
-        query_id=query_id,
-        telemetry=telemetry,
-        catalog_cache=catalog_cache,
-        schema_only=schema_only,
-    )
+    # The check path reaches binding through here rather than through
+    # `query_planner`, so the scope is opened here too. Nested inside
+    # `query_planner`'s it is a no-op - see `resolution_scope`.
+    with resolution_scope():
+        return bind_parsed_statement(
+            parsed_statements=parsed_statements,
+            clean_sql=clean_sql,
+            parameters=parameters,
+            visibility_filters=visibility_filters,
+            execution_context=execution_context,
+            query_id=query_id,
+            telemetry=telemetry,
+            catalog_cache=catalog_cache,
+            schema_only=schema_only,
+        )
 
 
 def build_logical_plan(
@@ -493,122 +499,128 @@ def query_planner(
     Takes no catalog cache, on purpose: a plan that reads rows is built against the
     catalog as it is now, not as it was up to a minute ago.
     """
+    from opteryx.connectors import resolution_scope
     from opteryx.models import QueryProperties
     from opteryx.planner.optimizer import do_optimizer
     from opteryx.planner.physical_planner import create_physical_plan
 
-    # Parse, resolve, rewrite and bind - the same path `Session.check` stops at the
-    # end of.
-    bound_plan, _clean_sql, _ast = bind_statement(
-        operation=operation,
-        parameters=parameters,
-        visibility_filters=visibility_filters,
-        execution_context=execution_context,
-        query_id=query_id,
-        telemetry=telemetry,
-        source=source,
-        source_offset=source_offset,
-    )
-
-    start = time.monotonic_ns()
-    # One memo of manifest-derived scan statistics for this query's plan —
-    # shared between the optimizer's refreshes and the result-size guard's,
-    # never across queries. See statistics_refresh._scan_stats.
-    scan_stats_cache: Dict[Any, Any] = {}
-    # Threaded explicitly from here on: Graph copies do not carry instance
-    # attributes, so `shared_ctes` on the plan object would not survive an
-    # optimizer strategy handing back a copy.
-    shared_ctes = getattr(bound_plan, "shared_ctes", None) or {}
-    # Recursive-CTE metadata rides the same way: the legs are shared_ctes
-    # entries, this maps each rcte_key to them (docs/RECURSIVE_CTE_DESIGN.md).
-    recursive_ctes = getattr(bound_plan, "recursive_ctes", None) or {}
-    optimized_plan = do_optimizer(
-        bound_plan, telemetry, scan_stats_cache=scan_stats_cache, shared_ctes=shared_ctes
-    )
-    shared_ctes = getattr(optimized_plan, "shared_ctes", None) or shared_ctes
-    telemetry.time_planning_optimizer += time.monotonic_ns() - start
-
-    # Refuse a query whose result is already known to blow the row limit, BEFORE any
-    # data is read — an accidental cross join should cost nothing, not an hour of IO.
-    # Only fires when every input has real row counts; see result_size_guard.
-    from opteryx.planner.result_size_guard import check_estimated_result_size
-    from opteryx.variables import resolve as _resolve_var
-
-    optimized_plan = check_estimated_result_size(
-        optimized_plan,
-        _resolve_var("sql_select_limit", execution_context.variables, 0),
-        telemetry=telemetry,
-        scan_stats_cache=scan_stats_cache,
-    )
-
-    # EXPLAIN ANALYZE: force the estimate refresh. `refresh_statistics` otherwise
-    # runs opportunistically (only when an optimizer strategy asks for it, plus
-    # result_size_guard above), so nodes it never reached carry no estimate and
-    # EXPLAIN's `est_rows`/`est_bytes` render NULL. On ANALYZE specifically that
-    # is worth paying plan time to avoid: the entire value of the statement is
-    # putting the planner's estimate beside the row count the query actually
-    # produced, which doubles as a cardinality-estimator audit on every real
-    # query — and a column that is blank half the time cannot do that job.
-    # Architect ruling D3, 2026-08-25. Plain EXPLAIN is deliberately NOT forced:
-    # it has no actuals to compare against, so it does not earn the plan time.
-    from opteryx.planner.logical_planner import LogicalPlanStepType as _LPST
-
-    if getattr(optimized_plan, "statistics_are_stale", True) and any(
-        node.node_type == _LPST.Explain and getattr(node, "analyze", False)
-        for _, node in optimized_plan.nodes(True)
-    ):
-        from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
-
-        optimized_plan = refresh_statistics(
-            optimized_plan, telemetry=telemetry, scan_stats_cache=scan_stats_cache
+    # One statement, one answer per workspace from the slot-2 resolver. Opened
+    # around the WHOLE of planning, not just the bind: the optimizer and the
+    # physical planner build connectors too, and each of those is another call
+    # into the resolver. See `opteryx.connectors.resolution_scope`.
+    with resolution_scope():
+        # Parse, resolve, rewrite and bind - the same path `Session.check` stops at the
+        # end of.
+        bound_plan, _clean_sql, _ast = bind_statement(
+            operation=operation,
+            parameters=parameters,
+            visibility_filters=visibility_filters,
+            execution_context=execution_context,
+            query_id=query_id,
+            telemetry=telemetry,
+            source=source,
+            source_offset=source_offset,
         )
 
-    # The `data_processed` billing meter, measured on the FINAL logical plan —
-    # after manifest pruning, projection pushdown and predicate pushdown, all of
-    # which change the answer. Plan-time by ruling (2026-08-24): jobs.opteryx
-    # enforces usage limits at submit time and has to quote the same number this
-    # bills, which a runtime counter cannot be. See planner/data_processed.py for
-    # the definition and for what that choice costs.
-    #
-    # `increase`, not assign: a semicolon-separated batch plans each statement
-    # through here and bills the sum, matching the one DATA_PROCESSED_BYTES event
-    # per execute() call that the session emits.
-    from opteryx.planner.data_processed import data_processed_by_scan
-    from opteryx.planner.data_processed import measure_data_processed
-    from opteryx.planner.data_processed import plan_relations
+        start = time.monotonic_ns()
+        # One memo of manifest-derived scan statistics for this query's plan —
+        # shared between the optimizer's refreshes and the result-size guard's,
+        # never across queries. See statistics_refresh._scan_stats.
+        scan_stats_cache: Dict[Any, Any] = {}
+        # Threaded explicitly from here on: Graph copies do not carry instance
+        # attributes, so `shared_ctes` on the plan object would not survive an
+        # optimizer strategy handing back a copy.
+        shared_ctes = getattr(bound_plan, "shared_ctes", None) or {}
+        # Recursive-CTE metadata rides the same way: the legs are shared_ctes
+        # entries, this maps each rcte_key to them (docs/RECURSIVE_CTE_DESIGN.md).
+        recursive_ctes = getattr(bound_plan, "recursive_ctes", None) or {}
+        optimized_plan = do_optimizer(
+            bound_plan, telemetry, scan_stats_cache=scan_stats_cache, shared_ctes=shared_ctes
+        )
+        shared_ctes = getattr(optimized_plan, "shared_ctes", None) or shared_ctes
+        telemetry.time_planning_optimizer += time.monotonic_ns() - start
 
-    telemetry.increase(
-        "billing_bytes",
-        measure_data_processed(optimized_plan, scan_stats_cache, shared_ctes),
-    )
-    # Per-scan breakdown of that same figure, keyed by the `uuid` the physical
-    # planner carries from the logical node onto the compiled scan node —
-    # EXPLAIN (mermaid.py) reads this so a TABLE SCAN's displayed bytes are the
-    # SAME number the bill was computed from, not a second, disagreeing
-    # estimate. One entry per Scan node, so a self-UNION's two legs are two
-    # entries, matching the two nodes EXPLAIN draws and the two `billing_bytes`
-    # above counts.
-    telemetry._reading["billing_bytes_by_scan"] = data_processed_by_scan(
-        optimized_plan, scan_stats_cache, shared_ctes
-    )
-    # The relations that figure was measured over, recorded from the SAME plan
-    # and the same scan walk. Downstream this is what attributes a query to the
-    # things it read; nothing else records it, and re-deriving it from the SQL
-    # text later would need the binder and could disagree with the number
-    # billed here. Unioned, not assigned, for the same reason `billing_bytes`
-    # is increased: a semicolon-separated batch plans each statement through
-    # here and the session emits one event for the batch.
-    telemetry.add_relations(plan_relations(optimized_plan, shared_ctes))
+        # Refuse a query whose result is already known to blow the row limit, BEFORE any
+        # data is read — an accidental cross join should cost nothing, not an hour of IO.
+        # Only fires when every input has real row counts; see result_size_guard.
+        from opteryx.planner.result_size_guard import check_estimated_result_size
+        from opteryx.variables import resolve as _resolve_var
 
-    # Default: build traditional physical plan
-    # before we write the new optimizer and execution engine, convert to a V1 plan
-    start = time.monotonic_ns()
-    query_properties = QueryProperties(query_id=query_id, variables=execution_context.variables)
-    physical_plan = create_physical_plan(optimized_plan, query_properties, shared_ctes=shared_ctes)
-    physical_plan.recursive_ctes = recursive_ctes
-    telemetry.time_planning_physical_planner += time.monotonic_ns() - start
+        optimized_plan = check_estimated_result_size(
+            optimized_plan,
+            _resolve_var("sql_select_limit", execution_context.variables, 0),
+            telemetry=telemetry,
+            scan_stats_cache=scan_stats_cache,
+        )
 
-    return physical_plan
+        # EXPLAIN ANALYZE: force the estimate refresh. `refresh_statistics` otherwise
+        # runs opportunistically (only when an optimizer strategy asks for it, plus
+        # result_size_guard above), so nodes it never reached carry no estimate and
+        # EXPLAIN's `est_rows`/`est_bytes` render NULL. On ANALYZE specifically that
+        # is worth paying plan time to avoid: the entire value of the statement is
+        # putting the planner's estimate beside the row count the query actually
+        # produced, which doubles as a cardinality-estimator audit on every real
+        # query — and a column that is blank half the time cannot do that job.
+        # Architect ruling D3, 2026-08-25. Plain EXPLAIN is deliberately NOT forced:
+        # it has no actuals to compare against, so it does not earn the plan time.
+        from opteryx.planner.logical_planner import LogicalPlanStepType as _LPST
+
+        if getattr(optimized_plan, "statistics_are_stale", True) and any(
+            node.node_type == _LPST.Explain and getattr(node, "analyze", False)
+            for _, node in optimized_plan.nodes(True)
+        ):
+            from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
+
+            optimized_plan = refresh_statistics(
+                optimized_plan, telemetry=telemetry, scan_stats_cache=scan_stats_cache
+            )
+
+        # The `data_processed` billing meter, measured on the FINAL logical plan —
+        # after manifest pruning, projection pushdown and predicate pushdown, all of
+        # which change the answer. Plan-time by ruling (2026-08-24): jobs.opteryx
+        # enforces usage limits at submit time and has to quote the same number this
+        # bills, which a runtime counter cannot be. See planner/data_processed.py for
+        # the definition and for what that choice costs.
+        #
+        # `increase`, not assign: a semicolon-separated batch plans each statement
+        # through here and bills the sum, matching the one DATA_PROCESSED_BYTES event
+        # per execute() call that the session emits.
+        from opteryx.planner.data_processed import data_processed_by_scan
+        from opteryx.planner.data_processed import measure_data_processed
+        from opteryx.planner.data_processed import plan_relations
+
+        telemetry.increase(
+            "billing_bytes",
+            measure_data_processed(optimized_plan, scan_stats_cache, shared_ctes),
+        )
+        # Per-scan breakdown of that same figure, keyed by the `uuid` the physical
+        # planner carries from the logical node onto the compiled scan node —
+        # EXPLAIN (mermaid.py) reads this so a TABLE SCAN's displayed bytes are the
+        # SAME number the bill was computed from, not a second, disagreeing
+        # estimate. One entry per Scan node, so a self-UNION's two legs are two
+        # entries, matching the two nodes EXPLAIN draws and the two `billing_bytes`
+        # above counts.
+        telemetry._reading["billing_bytes_by_scan"] = data_processed_by_scan(
+            optimized_plan, scan_stats_cache, shared_ctes
+        )
+        # The relations that figure was measured over, recorded from the SAME plan
+        # and the same scan walk. Downstream this is what attributes a query to the
+        # things it read; nothing else records it, and re-deriving it from the SQL
+        # text later would need the binder and could disagree with the number
+        # billed here. Unioned, not assigned, for the same reason `billing_bytes`
+        # is increased: a semicolon-separated batch plans each statement through
+        # here and the session emits one event for the batch.
+        telemetry.add_relations(plan_relations(optimized_plan, shared_ctes))
+
+        # Default: build traditional physical plan
+        # before we write the new optimizer and execution engine, convert to a V1 plan
+        start = time.monotonic_ns()
+        query_properties = QueryProperties(query_id=query_id, variables=execution_context.variables)
+        physical_plan = create_physical_plan(optimized_plan, query_properties, shared_ctes=shared_ctes)
+        physical_plan.recursive_ctes = recursive_ctes
+        telemetry.time_planning_physical_planner += time.monotonic_ns() - start
+
+        return physical_plan
 
 
 def execute_logical_plan(

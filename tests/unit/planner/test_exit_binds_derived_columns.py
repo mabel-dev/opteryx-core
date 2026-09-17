@@ -44,10 +44,10 @@ def view_in_catalog(monkeypatch):
     """Serve `heavy_planets` as a view without needing a real catalog."""
     real_resolve = views_module.resolve_relation
 
-    def resolve(relation, telemetry, catalog_cache=None):
+    def resolve(relation, telemetry, catalog_cache=None, memo=None):
         if relation == "heavy_planets":
             return "view", views_module._view_plan_from_definition(VIEW)
-        return real_resolve(relation, telemetry, catalog_cache)
+        return real_resolve(relation, telemetry, catalog_cache, memo=memo)
 
     monkeypatch.setattr(views_module, "resolve_relation", resolve)
 

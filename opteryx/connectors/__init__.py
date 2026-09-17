@@ -133,7 +133,8 @@ Performance Considerations:
 # This significantly improves module import time from ~500ms to ~130ms
 
 import re
-
+from contextlib import contextmanager
+from contextvars import ContextVar
 from enum import Enum
 
 # load the base set of prefixes
@@ -167,6 +168,27 @@ _default_connector = None
 # Slot 2: the installed resolver, or None
 _workspace_resolver = None
 
+# One statement's answers from the slot-2 resolver, `workspace -> Resolution`, or
+# None when no statement is being planned.
+#
+# WHY THIS EXISTS: the resolver is consulted on EVERY `connector_factory` call,
+# before the instance cache is consulted, because the cache is validated against
+# `Resolution.version` and only the resolver can supply that. The deployment's
+# resolver reads the workspace's `$properties` document to produce it, so a plan
+# naming five relations paid five document reads to learn the same thing five
+# times - measured at 200-1300ms each against a remote Firestore.
+#
+# WHY IT IS A SCOPE AND NOT A CACHE: it is created when planning a statement
+# starts and dropped when it ends, so nothing in it can be stale, and the
+# deployment's promise that a binding change goes live on the NEXT QUERY with no
+# redeploy is kept exactly - a statement is one query. A TTL cache would have
+# traded that promise away.
+#
+# A contextvar, not a module global, so a second statement planned on another
+# thread cannot read this one's answers. Planning is single-threaded, so nothing
+# inside a scope has to think about it.
+_resolution_scope: ContextVar = ContextVar("opteryx_resolution_scope", default=None)
+
 # The SETTINGS resolver, or None. Deliberately separate from
 # `_workspace_resolver`: see `set_workspace_settings_resolver`.
 _workspace_settings_resolver = None
@@ -193,6 +215,7 @@ __all__ = (
     # Utilities
     "set_default_connector",
     "set_workspace_resolver",
+    "resolution_scope",
     "set_workspace_settings_resolver",
     "workspace_settings_connector",
     "view_store_connector",
@@ -506,6 +529,31 @@ def _build_connector(connector, entry: dict, telemetry):
     raise ValueError(f"Invalid connector type: {type(connector)}")
 
 
+@contextmanager
+def resolution_scope():
+    """Hold the slot-2 resolver's answers for the duration of one statement.
+
+    Opened by the planner around the whole of planning. Inside it, a workspace is
+    resolved ONCE however many of its relations the statement names; outside it,
+    `connector_factory` resolves per call exactly as it always has, so nothing that
+    does not opt in changes behaviour.
+
+    Re-entrant by design: `query_planner` opens one and the bind it calls opens
+    another, and the inner one must not start a second, emptier scope. The outermost
+    scope is the statement, and it is the one that closes.
+
+    See `_resolution_scope` for why this is a scope rather than a cache.
+    """
+    if _resolution_scope.get() is not None:
+        yield
+        return
+    token = _resolution_scope.set({})
+    try:
+        yield
+    finally:
+        _resolution_scope.reset(token)
+
+
 def connector_factory(dataset, telemetry, **config):
     """
     Get or create a connector instance for the given dataset's workspace.
@@ -584,7 +632,17 @@ def connector_factory(dataset, telemetry, **config):
     if connector is None and _workspace_resolver is not None:
         workspace = dataset.split(".", 1)[0]
         if _IDENTIFIER.match(workspace):
-            resolution = _workspace_resolver(workspace)
+            # One resolution per workspace per statement when a scope is open. The
+            # answer is memoized whatever it is, `None` included: "this resolver does
+            # not claim this workspace" is as much an answer as a Resolution, and
+            # re-asking for it is the same document read.
+            scope = _resolution_scope.get()
+            if scope is not None and workspace in scope:
+                resolution = scope[workspace]
+            else:
+                resolution = _workspace_resolver(workspace)
+                if scope is not None:
+                    scope[workspace] = resolution
             if resolution is not None:
                 if not isinstance(resolution, Resolution):
                     raise ValueError(

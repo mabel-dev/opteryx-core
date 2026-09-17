@@ -357,6 +357,16 @@ class PostgresTable(
         self.schema_name, self.table_name = gateway.split_relation(dataset, original_relation)
         # lower-cased column name -> (name as PostgreSQL reports it, type OID, typmod)
         self._meta: Dict[str, Tuple[str, int, int]] = {}
+        # The catalog's record of this relation, resolved by the catalog
+        # resolution step. Present for a workspace whose catalog entry has been
+        # synced from the source, and then it is what the schema is built from -
+        # see `get_dataset_schema`. Absent only for a connector constructed
+        # directly over a server, which is what the sync itself does.
+        self._catalog_record = kwargs.get("prefetched_table")
+        # True once a schema has been built from the catalog rather than from
+        # the server, which is what lets a wire mismatch at execution blame the
+        # right thing. See `schema_from_catalog`.
+        self._schema_from_catalog = False
 
     @property
     def qualified_name(self) -> str:
@@ -364,9 +374,117 @@ class PostgresTable(
 
     # ---- schema ---------------------------------------------------------------
 
+    @property
+    def schema_from_catalog(self) -> bool:
+        """Whether this relation's schema was read from the catalog.
+
+        Read at execution to say WHICH record a wire mismatch contradicts - the
+        catalog's, or a description taken from the server moments earlier.
+        """
+        return self._schema_from_catalog
+
+    def _catalog_columns(self) -> Optional[List[dict]]:
+        """This relation's columns as the catalog holds them, or None if it holds
+        no description of it.
+
+        None is NOT "the relation is empty" and must never be read as one: it is
+        "this catalog entry has never been refreshed from the source", which the
+        caller turns into a refusal naming the refresh.
+        """
+        record = self._catalog_record
+        if record is None:
+            return None
+        metadata = getattr(record, "metadata", None)
+        if metadata is None:
+            return None
+        columns = metadata.schema
+        if not columns:
+            return None
+        return list(columns)
+
+    def _schema_from_catalog_record(self, columns: List[dict]) -> RelationSchema:
+        """Build the relation's schema from the catalog's record of it.
+
+        THE CATALOG IS AUTHORITATIVE. Nothing here asks the server what its
+        columns are, which is the whole point: the refresh already asked, and
+        planning a statement over eight relations paid sixteen round trips to
+        be told what the catalog already held.
+
+        A column with no `remote-type` is a refusal, not something to guess at.
+        The OID picks the wire decoder, and inferring one from the stored engine
+        type is not possible in the direction that matters - several PostgreSQL
+        types bind to one engine type, so a guess would decode some relations as
+        the wrong thing rather than fail. An entry written before `remote-type`
+        existed lands here, and it names the refresh that fixes it.
+
+        `remote-type` is the OID alone. The server's typmod is NOT stored, because
+        the only thing this reads it for is a NUMERIC's precision and scale, and
+        those are already stored as fields of their own - so it is rebuilt from
+        them rather than recorded twice and allowed to disagree.
+        """
+        built: List[SchemaColumn] = []
+        self._meta = {}
+        for column in columns:
+            name = column.get("name")
+            oid = column.get("remote-type")
+            if name is None or oid is None:
+                raise DatasetReadError(
+                    f"the catalog's record of {self.qualified_name} is out of date - it does "
+                    "not say what type the server holds for every column. Refresh this "
+                    "workspace's catalog statistics and run the statement again."
+                )
+            oid = int(oid)
+            typmod = -1
+            if oid == _OID_NUMERIC:
+                precision = column.get("precision")
+                scale = column.get("scale")
+                if precision is None or scale is None:
+                    raise DatasetReadError(
+                        f"the catalog's record of {self.qualified_name} is out of date - "
+                        f"column '{name}' is numeric but its precision and scale were not "
+                        "recorded. Refresh this workspace's catalog statistics and run the "
+                        "statement again."
+                    )
+                typmod = ((int(precision) << 16) | int(scale)) + 4
+            if name.lower() in self._meta:
+                raise DatasetReadError(
+                    f"{self.qualified_name} has two columns spelled '{name}' differing only "
+                    "by case; Opteryx column names are case-insensitive"
+                )
+            self._meta[name.lower()] = (name, oid, typmod)
+            built.append(
+                SchemaColumn(
+                    name=name,
+                    column_type=self._column_type(name, oid, typmod),
+                    identity=mint_column_identity(self.dataset, name),
+                )
+            )
+
+        statistics = getattr(self._catalog_record.metadata, "statistics", None) or {}
+        row_count = statistics.get("row-count")
+        self._schema_from_catalog = True
+        self.schema = RelationSchema(
+            name=self.dataset,
+            columns=built,
+            row_count_estimate=None if row_count is None else int(row_count),
+        )
+        return self.schema
+
     def get_dataset_schema(self) -> RelationSchema:
         if self.schema is not None:
             return self.schema
+
+        # The catalog first, and not as an optimization: it is the record of
+        # this relation, and it holds strictly more than a description taken
+        # from the server does (the refresh's row count falls back to `count(*)`
+        # where `reltuples` is -1, which is every unanalysed relation). The
+        # server is asked only by a connector built without a catalog record -
+        # the refresh itself, and a connector constructed directly over a
+        # server.
+        catalog_columns = self._catalog_columns()
+        if catalog_columns is not None:
+            return self._schema_from_catalog_record(catalog_columns)
+
         describe, query_text, _, _ = _pg_helpers()
         try:
             fields = describe(self.connection_config, f"SELECT * FROM {self.qualified_name}")

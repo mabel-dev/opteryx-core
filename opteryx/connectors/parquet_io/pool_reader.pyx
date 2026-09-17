@@ -651,6 +651,19 @@ cdef class CppIOPipeline:
             stats.codec = codec_map[codec_name]
             stats.max_definition_level = s_dict.get('max_definition_level', 0)
             stats.max_repetition_level = s_dict.get('max_repetition_level', 0)
+            # Per-depth list level thresholds, for the same reason the levels
+            # above are refused rather than defaulted: a LIST column's structure
+            # cannot be reconstructed without them, and no substitute is sound.
+            thresholds = s_dict.get('list_def_thresholds') or []
+            if stats.max_repetition_level > 0 and len(thresholds) != stats.max_repetition_level + 1:
+                raise ValueError(
+                    f"Column '{col_name}': list_def_thresholds is absent or the wrong "
+                    f"length ({len(thresholds)}, expected {stats.max_repetition_level + 1}); "
+                    "cannot decode a list column without it"
+                )
+            stats.list_def_thresholds.clear()
+            for threshold in thresholds:
+                stats.list_def_thresholds.push_back(threshold)
             stats.type_length = s_dict.get('type_length') or 0
             stats.encodings.clear()
             for enc_code in encoding_codes:
@@ -973,6 +986,11 @@ cpdef dict fetch_column_chunk_info(
             "encodings":             encodings_list,
             "max_definition_level":  col.max_definition_level  if col.max_definition_level >= 0  else None,
             "max_repetition_level":  col.max_repetition_level  if col.max_repetition_level >= 0  else None,
+            # Per-depth list level thresholds. Must ride this dict: the decoder
+            # cannot re-derive them (only the schema walk sees the per-node
+            # repetition types) and without them a LIST column is undecodable.
+            # Empty list for a non-list column.
+            "list_def_thresholds":   [t for t in col.list_def_thresholds],
             "type_length":           col.type_length            if col.type_length > 0             else None,
             "num_values":            col.num_values             if col.num_values >= 0             else None,
         }

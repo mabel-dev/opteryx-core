@@ -31,6 +31,11 @@ struct PgScanSpec {
     int64_t  row_limit = -1;       // pushed LIMIT (also in the SQL); -1 = none
     bool     zero_columns = false; // COUNT(*)-shaped scan: emit zero-column morsels
                                    // carrying only a row count
+    // Whether `expected_oids` came from the CATALOG's record of the relation
+    // rather than from a description taken off the server at bind time. Read
+    // only to say which record a wire mismatch contradicts, so the reader is
+    // sent to refresh the catalog rather than to hunt a phantom DDL change.
+    bool     schema_from_catalog = false;
 
     // Written by the Source (once, when the stream ends) and read from Python
     // after the driver finishes: rows the server sent. -1 = never ran. `mutable`

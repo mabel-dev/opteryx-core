@@ -5384,6 +5384,10 @@ class _Compiler:
             POSTGRES_SCAN_BATCH_ROWS,
             row_limit,
             statement.zero_columns,
+            # Which record the OIDs above came from, so a wire mismatch names
+            # the thing that is actually wrong - see the check in
+            # native_postgres_scan_source.hpp.
+            table.schema_from_catalog,
         )
         plan.scan_identity = scan.identity
         scan.scan_plan = plan

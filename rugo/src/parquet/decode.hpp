@@ -85,8 +85,8 @@ struct DecodedColumnMeta {
 // Reuse contract: a DecodedColumn may be reused across column decodes via
 // reset() (retains vector capacity — the whole point). reset() MUST clear every
 // owning container below AND slice-assign the scalar base; the completeness test
-// test_decoded_column_reset_is_complete enforces this. 31 owning containers
-// (28 std::vector + `type` + `logical_type` + `error_message`) + scalars (in DecodedColumnMeta).
+// test_decoded_column_reset_is_complete enforces this. 32 owning containers
+// (29 std::vector + `type` + `logical_type` + `error_message`) + scalars (in DecodedColumnMeta).
 struct DecodedColumn : DecodedColumnMeta {
   std::vector<uint8_t> valid_bits;       // Arrow-style validity bitmap: 1=valid, 0=null; empty=all-valid
   std::vector<int32_t> int32_values;
@@ -123,6 +123,13 @@ struct DecodedColumn : DecodedColumnMeta {
   // Used by the Cython binding for list column offset/null-bitmap reconstruction.
   std::vector<int32_t> rep_levels;  // one entry per logical value (all pages)
   std::vector<int32_t> def_levels;  // one entry per logical value (all pages)
+  // Per-nesting-depth definition-level thresholds, copied verbatim from
+  // ColumnStats — see the comment there for the derivation. Size is
+  // max_rep_level + 1 for a list column (index 0 unused, depth k at [k]); empty
+  // for a non-list column. Consumers walking rep/def levels MUST read these
+  // rather than assuming the all-OPTIONAL constants 2k-1 / 2k; a column whose
+  // element, LIST group or an intermediate level is REQUIRED shifts them.
+  std::vector<int32_t> list_def_thresholds;
   // Specific, actionable failure reason (e.g. a decompression error). Empty when
   // the column decoded, or when it was an "unsupported shape" honest rejection
   // (those stay message-less so the caller reports its generic decode failure).
@@ -170,7 +177,9 @@ struct DecodedColumn : DecodedColumnMeta {
   // the buffers are reused by the next decode. clear() retains capacity for the
   // trivially-destructible containers. The base slice-assign resets all 18 scalars
   // completely (incl. rle_last_code == -1). Keep this in sync with the member
-  // list above — test_decoded_column_reset_is_complete is the guard.
+  // list above — test_decoded_column_reset_is_complete (in
+  // decoded_column_reset_test.cpp) is the runtime guard, and the static_assert
+  // directly below this struct is the compile-time member-addition tripwire.
   void reset() {
     valid_bits.clear();          int32_values.clear();        int64_values.clear();
     int128_values.clear();       dict_indices.clear();
@@ -179,6 +188,7 @@ struct DecodedColumn : DecodedColumnMeta {
     dict_float32_values.clear();
     dict_float64_values.clear(); boolean_values.clear();       float32_values.clear();
     float64_values.clear();      rep_levels.clear();           def_levels.clear();
+    list_def_thresholds.clear();
     string_dict_arena.clear();   string_dict_offsets.clear();  string_dict_lens.clear();
     dict_codes_array.clear();    rle_int64_values.clear();     rle_float64_values.clear();
     rle_run_lengths.clear();     rle_str_arena.clear();        rle_str_offsets.clear();
@@ -187,6 +197,43 @@ struct DecodedColumn : DecodedColumnMeta {
     static_cast<DecodedColumnMeta&>(*this) = DecodedColumnMeta{};  // resets all meta scalars
   }
 };
+
+// Member-addition tripwire for the reuse contract above. A member added to
+// DecodedColumn but omitted from reset() leaks stale data from the previous
+// column into the next decode — a silent wrong answer, not a crash — so a new
+// member must not be able to land quietly. This breaks the BUILD the moment the
+// member list changes, naming the two obligations that come with it.
+//
+// It cannot live inside the class body: DecodedColumn is incomplete there.
+//
+// The sizes are DERIVED, never hardcoded: sizeof(std::string) is 24 on libc++
+// (ARM dev) and 32 on libstdc++ (x86 prod), so a literal byte count would pin
+// this to one toolchain and break the other's wheel build. Every std::vector<T>
+// instantiation is the same size regardless of T, so counting one of them is exact.
+//
+// These two counts are the SINGLE SOURCE OF TRUTH for the member list, shared
+// with the test: decoded_column_reset_test.cpp asserts its own coverage lists
+// against them. That is what makes the guard a chain rather than two independent
+// numbers — bumping a count here to clear this assert breaks the test file until
+// the new member is actually added to its coverage list, and therefore actually
+// filled, reset and checked.
+constexpr int kDecodedColumnVectorMembers = 29;
+constexpr int kDecodedColumnStringMembers = 3;  // type, logical_type, error_message
+
+static_assert(sizeof(DecodedColumn) ==
+                  sizeof(DecodedColumnMeta)
+                  + kDecodedColumnVectorMembers * sizeof(std::vector<int32_t>)
+                  + kDecodedColumnStringMembers * sizeof(std::string),
+              "DecodedColumn gained or lost a member: clear it in reset() AND cover it in "
+              "decoded_column_reset_test.cpp (bump the count above and the X-list there).");
+
+// Companion tripwire for the scalar base. Scalars are reset for free by the
+// slice-assign in reset(), so this is not a correctness guard — it exists so a
+// new scalar's DEFAULT gets covered by the test (rle_last_code == -1 is the
+// reason that matters). LP64 layout, both targets.
+static_assert(sizeof(DecodedColumnMeta) == 96,
+              "DecodedColumnMeta gained or lost a scalar: assert its default in "
+              "decoded_column_reset_test.cpp.");
 
 // Structure to hold a decoded table
 struct DecodedTable {

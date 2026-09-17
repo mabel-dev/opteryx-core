@@ -94,20 +94,34 @@ private:
         }
         std::vector<pg::PgField> fields = g.conn->begin(spec_->sql, params);
 
-        // The stream must be the relation the binder described: same column
-        // count, same OIDs, in order. Drift (a column type altered between bind
-        // and execute) fails here instead of decoding one type as another.
+        // The stream must be the relation the plan was built from: same column
+        // count, same OIDs, in order. Drift fails here instead of decoding one
+        // type as another.
+        //
+        // This is the whole safety net for planning from the catalog. The plan
+        // is built without asking the server anything, so the first
+        // RowDescription is the first moment the server's own account of the
+        // relation is available - and it arrives whether or not anyone looks at
+        // it, so checking it costs nothing. `schema_from_catalog` decides which
+        // record the mismatch indicts: a stale catalog entry is fixed by
+        // refreshing it, and saying "relation changed since binding" there would
+        // send the reader hunting a DDL change that may not have happened.
+        const std::string stale =
+            spec_->schema_from_catalog
+                ? " - information about this workspace appears to be out of date;"
+                  " refresh its catalog statistics and run the statement again"
+                : " (relation changed since binding?)";
         const size_t expected = spec_->zero_columns ? 1u : spec_->expected_oids.size();
         if (fields.size() != expected)
             throw pg::PgError("postgres scan: server returned " + std::to_string(fields.size()) +
-                              " columns, plan expected " + std::to_string(expected));
+                              " columns, plan expected " + std::to_string(expected) + stale);
         if (!spec_->zero_columns) {
             g.decoders.resize(fields.size());
             for (size_t i = 0; i < fields.size(); i++) {
                 if (fields[i].oid != spec_->expected_oids[i])
                     throw pg::PgError("postgres scan: column '" + fields[i].name + "' is " +
                                       pg::pg_oid_name(fields[i].oid) + " on the server but the plan bound it as " +
-                                      pg::pg_oid_name(spec_->expected_oids[i]) + " (relation changed since binding?)");
+                                      pg::pg_oid_name(spec_->expected_oids[i]) + stale);
                 g.decoders[i].init(fields[i].name, fields[i].oid,
                                    static_cast<DrakenType>(spec_->column_types[i]),
                                    spec_->decimal_precision[i], spec_->decimal_scale[i],

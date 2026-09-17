@@ -540,6 +540,7 @@ def _resolve(
     cte_body_keys: Optional[Dict[Tuple[int, str], str]] = None,
     cte_names: Optional[Dict[str, str]] = None,
     recursive_defs: Optional[Dict[str, "RecursiveCteDefinition"]] = None,
+    relation_memo: Optional[Dict[str, Tuple]] = None,
 ) -> LogicalPlan:
     """
     Expand every view reference in one plan, resolve every CTE reference to a
@@ -556,6 +557,7 @@ def _resolve(
     multiply-referenced body stays in the registry and its markers become
     MaterializedCteRef leaves that share the one body.
     """
+    from opteryx.managers.views import prefetch_relations
     from opteryx.managers.views import resolve_relation
 
     # nid -> (scope, expansion path). Held here rather than on the nodes: node properties
@@ -574,6 +576,28 @@ def _resolve(
 
     while True:
         expanded = False
+
+        # One round trip for this whole level. Every Scan still standing is a name
+        # that WILL be resolved before the loop ends, so asking for them together
+        # costs nothing extra and saves a round trip each; splicing a view in adds
+        # more Scans, and the next iteration asks for those together too. The memo
+        # is filled with raw catalog answers only - resolve_relation below still
+        # runs per node, so each reference to a view gets its own plan.
+        pending = []
+        for nid, node in plan.nodes(True):
+            if node.node_type != LogicalPlanStepType.Scan or nid in settled:
+                continue
+            relation = node.relation
+            if relation is None or relation in relation_memo:
+                continue
+            scope, _path, _via = scopes.get(nid, (root_scope, root_path, root_via_view))
+            if relation in scope:
+                # A CTE, resolved from the scope it was declared in - the catalog is
+                # never asked about it.
+                continue
+            pending.append(relation)
+        if len(pending) > 1:
+            prefetch_relations(pending, telemetry, relation_memo, catalog_cache)
 
         for nid, node in list(plan.nodes(True)):
             if node.node_type != LogicalPlanStepType.Scan or nid in settled:
@@ -618,6 +642,7 @@ def _resolve(
                                     cte_body_keys=cte_body_keys,
                                     cte_names=cte_names,
                                     recursive_defs=recursive_defs,
+                                    relation_memo=relation_memo,
                                 )
                             )
                         recursive_defs[body_key] = RecursiveCteDefinition(
@@ -659,12 +684,15 @@ def _resolve(
                         cte_body_keys=cte_body_keys,
                         cte_names=cte_names,
                         recursive_defs=recursive_defs,
+                        relation_memo=relation_memo,
                     )
                 node.pending_cte_key = body_key
                 settled.add(nid)
                 continue
             else:
-                kind, resolved = resolve_relation(relation, telemetry, catalog_cache)
+                kind, resolved = resolve_relation(
+                    relation, telemetry, catalog_cache, memo=relation_memo
+                )
                 if kind == "view":
                     if relation in path:
                         raise _cycle_error(relation, path)
@@ -721,6 +749,7 @@ def _resolve(
                 cte_body_keys=cte_body_keys,
                 cte_names=cte_names,
                 recursive_defs=recursive_defs,
+                relation_memo=relation_memo,
             )
 
     return plan
@@ -1068,6 +1097,10 @@ def do_resolve_relations(
     body_keys: Dict[Tuple[int, str], str] = {}
     names: Dict[str, str] = {}
     recursive_defs: Dict[str, RecursiveCteDefinition] = {}
+    # One statement, one store of raw catalog answers. Not a cache: it is created
+    # here and dropped when this returns, so nothing in it can be stale. It is what
+    # lets the relations of one plan share round trips - see `prefetch_relations`.
+    relation_memo: Dict[str, Tuple] = {}
     plan = _resolve(
         plan,
         common_table_expressions or {},
@@ -1078,5 +1111,6 @@ def do_resolve_relations(
         cte_body_keys=body_keys,
         cte_names=names,
         recursive_defs=recursive_defs,
+        relation_memo=relation_memo,
     )
     return _finalize_cte_sharing(plan, registry, names, recursive_defs)

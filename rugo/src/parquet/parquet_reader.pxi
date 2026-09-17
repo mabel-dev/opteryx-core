@@ -1958,13 +1958,23 @@ cdef Vector _make_bool_vector(
 # --- list / array reconstruction ---------------------------------------------
 # A repeated (LIST) column is decoded by C++ into parallel rep_levels/def_levels
 # (one entry per leaf position) plus the present leaf values (compact, in order).
-# Both the rugo writer and pyarrow emit the standard all-nullable nesting scheme
-# for a list nested D deep (D == max_rep_level): max_def_level == 2*D + 1, where
-# for list level k (1 = outermost .. D = innermost):
-#   * list k is non-null      when def >= 2k - 1
-#   * list k has a child entry when def >= 2k
-#   * the leaf element exists  when def >= 2D   (null element at 2D, present at 2D+1)
-# and repetition level r means list levels 1..r continue the previous record;
+# The definition levels that mark each nesting depth depend on WHICH schema nodes
+# are OPTIONAL, so they are derived from the schema by metadata.cpp's WalkLeaves
+# and carried on the column as `list_def_thresholds` (index 0 unused, depth k at
+# [k]); see ColumnStats::list_def_thresholds. For a list nested D deep
+# (D == max_rep_level), writing T[k] for that threshold:
+#   * list k is non-null       when def >= T[k]
+#   * list k has a child entry when def >= T[k] + 1   (a REPEATED node is +1 def)
+#   * the leaf element exists  when def == max_def_level; a def in
+#     [T[D] + 1, max_def_level) is a NULL element
+# The all-OPTIONAL case (rugo's writer, and pyarrow's default) gives the familiar
+# T[k] == 2k - 1 and max_def_level == 2*D + 1, but that is one shape among several:
+# a `required` element (pyarrow writes `list<item: T not null>` happily) lowers
+# max_def_level to 2*D and makes the null-element case unreachable, a `required`
+# LIST group gives T[k] == 0 (a list that can never be null), and the legacy
+# 2-level `repeated <leaf>` encoding gives T[1] == 0 with max_def_level == 1.
+# ⛔ Do NOT open-code 2k-1 / 2k here or in ipc_serialize.hpp's serialize_list_column.
+# Repetition level r means list levels 1..r continue the previous record;
 # a fresh sub-structure begins at depth r+1. A value is consumed from the leaf
 # stream only when def == max_def_level (present element).
 #
@@ -2102,11 +2112,20 @@ cdef Vector _make_array_vector(
             "rugo array reader: column has max_rep_level=%d but was routed to the "
             "array path" % D
         )
-    if max_def != 2 * D + 1:
-        raise NotImplementedError(
-            "rugo array reader: unsupported list level scheme (max_rep_level=%d, "
-            "max_def_level=%d; expected max_def_level=%d for all-nullable nesting)."
-            % (D, max_def, 2 * D + 1)
+    if decoded_col.list_def_thresholds.size() != <size_t>(D + 1):
+        raise RuntimeError(
+            "rugo array reader: column is missing its per-depth list level "
+            "thresholds (max_rep_level=%d, got %d entries, expected %d) - the "
+            "schema walk did not populate them."
+            % (D, decoded_col.list_def_thresholds.size(), D + 1)
+        )
+    # Smallest def at which a leaf slot exists under the innermost list.
+    cdef int32_t leaf_slot_def = decoded_col.list_def_thresholds[D] + 1
+    if max_def < leaf_slot_def:
+        raise RuntimeError(
+            "rugo array reader: inconsistent list level scheme (max_rep_level=%d, "
+            "max_def_level=%d, innermost list threshold=%d)."
+            % (D, max_def, decoded_col.list_def_thresholds[D])
         )
 
     # ONE derivation of the leaf's text/binary character, shared by the value
@@ -2128,11 +2147,11 @@ cdef Vector _make_array_vector(
         k = r + 1
         while k <= D:
             parent = out if k == 1 else open_lists[k - 1]
-            if d >= 2 * k - 1:               # list k is non-null
+            if d >= decoded_col.list_def_thresholds[k]:   # list k is non-null
                 new = []
                 parent.append(new)
                 open_lists[k] = new
-                if d < 2 * k:                # present but EMPTY -> no children
+                if d < decoded_col.list_def_thresholds[k] + 1:   # present but EMPTY
                     has_leaf = False
                     break
             else:                            # list k is null
@@ -2145,7 +2164,7 @@ cdef Vector _make_array_vector(
         # The innermost open list receives the leaf element.
         if d == max_def:                     # present element
             open_lists[D].append(leaf_vals[li]); li += 1
-        else:                                # d == 2*D -> null element
+        else:                                # leaf_slot_def <= d < max_def -> null element
             open_lists[D].append(None)
 
     # Leaf element type comes from the schema, not value inference: an all-null

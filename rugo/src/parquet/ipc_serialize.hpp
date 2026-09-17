@@ -715,12 +715,27 @@ static void serialize_list_column(ByteSink& out, const DecodedColumn& col) {
             "ARRAY column has max_rep_level=" + std::to_string(D) +
             " (expected >= 1 for a list column)");
     }
-    if (max_def != 2 * D + 1) {
+    // Per-depth definition-level thresholds, derived from the schema's actual
+    // repetition types (see ColumnStats::list_def_thresholds). `list_present[k]`
+    // is the smallest def at which the depth-k list is non-null; one more than
+    // that is the smallest at which it holds an entry, because a REPEATED node
+    // always contributes exactly one def level. This is NOT recoverable from
+    // max_def_level, so an absent vector is a decoder bug, not a file shape.
+    if (static_cast<int32_t>(col.list_def_thresholds.size()) != D + 1) {
         throw std::runtime_error(
-            "ARRAY column has an unsupported list level scheme (max_rep_level=" +
+            "ARRAY column is missing its per-depth list level thresholds "
+            "(max_rep_level=" + std::to_string(D) + ", got " +
+            std::to_string(col.list_def_thresholds.size()) + " entries, expected " +
+            std::to_string(D + 1) + ") — the schema walk did not populate them");
+    }
+    const std::vector<int32_t>& list_present = col.list_def_thresholds;
+    // Smallest def at which a leaf slot exists under the innermost list.
+    const int32_t leaf_slot_def = list_present[D] + 1;
+    if (max_def < leaf_slot_def) {
+        throw std::runtime_error(
+            "ARRAY column has an inconsistent list level scheme (max_rep_level=" +
             std::to_string(D) + ", max_def_level=" + std::to_string(max_def) +
-            "; expected max_def_level=" + std::to_string(2 * D + 1) +
-            " for all-nullable nesting)");
+            ", innermost list threshold=" + std::to_string(list_present[D]) + ")");
     }
 
     const bool use_codes = !col.dict_codes_array.empty();
@@ -813,9 +828,9 @@ static void serialize_list_column(ByteSink& out, const DecodedColumn& col) {
                 (k < D) ? static_cast<int32_t>(level_valid[k + 1].size())
                         : leaf_n;
             level_offsets[k].push_back(child_start);
-            if (def >= 2 * k - 1) {          // list k present
+            if (def >= list_present[k]) {    // list k present
                 level_valid[k].push_back(1);
-                if (def < 2 * k) { has_leaf = false; break; }   // present but empty
+                if (def < list_present[k] + 1) { has_leaf = false; break; }  // present but empty
             } else {                          // list k null
                 level_valid[k].push_back(0);
                 has_leaf = false;
@@ -825,7 +840,9 @@ static void serialize_list_column(ByteSink& out, const DecodedColumn& col) {
         if (!has_leaf) continue;
 
         // Leaf element under the innermost (level-D) list: def==max_def present,
-        // def==max_def-1 null. (has_leaf implies def in {max_def-1, max_def}.)
+        // anything lower null. (has_leaf implies def >= leaf_slot_def; when every
+        // level below the innermost list is REQUIRED, leaf_slot_def == max_def and
+        // the null branch is simply unreachable — a non-nullable element.)
         if (def == max_def) {
             if (leaf_tag == CHILD_STRING) {
                 ChildEntry ce;
@@ -864,7 +881,7 @@ static void serialize_list_column(ByteSink& out, const DecodedColumn& col) {
                 num_bytes.insert(num_bytes.end(), raw, raw + elem_size);
                 leaf_valid.push_back(1);
             }
-        } else {   // def == max_def - 1 : null leaf element within a present list
+        } else {   // leaf_slot_def <= def < max_def : null leaf element within a present list
             // A null leaf has NO slot in any decoded value stream — Parquet stores
             // only defined values, so the string arena / dict_indices / the numeric
             // buffers contain non-null values only. val_idx must NOT advance here;

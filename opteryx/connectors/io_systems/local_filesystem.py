@@ -235,4 +235,8 @@ class OpteryxLocalFileSystem:
         Returns:
             Random access file object (same as stream for our implementation)
         """
+        if columns or filters:
+            raise NotImplementedError(
+                "Column projection and filtering are not supported for local filesystem reads."
+            )
         return MemoryMappedFile(path)
