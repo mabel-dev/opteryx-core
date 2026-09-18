@@ -176,7 +176,7 @@ class _Connector(BaseConnector, Writable):
         )
 
     def open_data_file_writer(self, relation_name, sorted_by=None, sorted_descending=False,
-                              write_profile="fast"):
+                              write_profile="fast", pending_schema=None):
         return _RecordedDataFile(f"memory://{relation_name}/{len(_Connector.commits)}")
 
     def create_relation(self, relation_name, schema, author=None):

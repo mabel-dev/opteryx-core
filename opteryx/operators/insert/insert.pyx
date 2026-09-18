@@ -89,7 +89,9 @@ class InsertNode(BasePlanNode):
             # created with, and derives from that what it would have read.
             # Every other write here has a registered target: a replace, and an
             # INSERT, both land on a relation that already exists.
-            pending_schema=self.target_schema if self.create_target and not self.is_replace else None,
+            pending_schema=(
+                self.target_schema if self.create_target and not self.is_replace else None
+            ),
         )
 
     @property

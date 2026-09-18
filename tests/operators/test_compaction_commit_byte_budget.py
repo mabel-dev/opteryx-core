@@ -92,7 +92,12 @@ class _RecordingConnector:
         self.fail_on_row_group = None
 
     def open_data_file_writer(
-        self, relation_name, sorted_by=None, sorted_descending=False, write_profile="fast"
+        self,
+        relation_name,
+        sorted_by=None,
+        sorted_descending=False,
+        write_profile="fast",
+        pending_schema=None,
     ):
         writer = _RecordingWriter(
             self, f"file_{len(self.opened) + 1}.parquet", sorted_by, write_profile

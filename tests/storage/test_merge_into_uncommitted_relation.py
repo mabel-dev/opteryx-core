@@ -163,7 +163,7 @@ class _UncommittedConnector(BaseConnector, Writable):
         )
 
     def open_data_file_writer(self, relation_name, sorted_by=None, sorted_descending=False,
-                              write_profile="fast"):
+                              write_profile="fast", pending_schema=None):
         return _StreamedDataFile(
             f"memory://{relation_name}/{len(_UncommittedConnector.files_written) + 1}",
             _UncommittedConnector.files_written,
