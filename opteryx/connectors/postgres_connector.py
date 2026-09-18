@@ -279,7 +279,7 @@ class PostgresConnector(BaseConnector):
         """Where this relation's statistics manifest lives, or None if unconfigured.
 
         The SAME location an Opteryx-backed relation's manifests use - the
-        formula in `OpteryxConnector._dataset_location` plus `metadata/` - so
+        formula in the catalog's `_dataset_location` plus `metadata/` - so
         one storage layout serves both and the tooling that walks a workspace's
         metadata needs no special case. There are no snapshots here, so the file
         is named for the dataset rather than a snapshot id, and each refresh

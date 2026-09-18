@@ -1213,6 +1213,63 @@ def _intercept_show_grants_on(clean_sql: str):
     ]
 
 
+# LOAD SAMPLE <name> INTO <workspace>.<collection> [AT SCALE <n>]. Copies a
+# curated sample bundle out of the platform's staging bucket into a collection
+# the caller owns.
+#
+# Neither slot takes a placeholder. The target is an identifier because every
+# relation name is - a parameterised target would let runtime data choose which
+# collection gets written to. The sample name is an identifier for the same
+# reason: it selects WHICH data is copied, and the set it selects from is closed.
+#
+# `AT SCALE <n>` rather than the `AT <n>` shape it reads like: `AT` directly
+# after an object name is the version space (the SQL rewriter re-spells
+# `VERSION AS OF <tag>` into `AT(TAG => '<tag>')` in exactly that position), so a
+# bare `AT` here would sit in a slot that already means something else. SCALE
+# keeps the clause unambiguous for both the reader and the tokenizer.
+_LOAD_SAMPLE_RE = re.compile(
+    r"^\s*LOAD\s+SAMPLE\s+(?P<sample>[A-Za-z_][\w$]*)"
+    r"\s+INTO\s+(?P<target>[A-Za-z_][\w.$]*)"
+    r"(?:\s+AT\s+SCALE\s+(?P<scale>\d+(?:\.\d+)?|\.\d+))?"
+    r"\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_LOAD_LEAD = re.compile(r"^\s*LOAD\b", re.IGNORECASE)
+
+
+def _intercept_load_sample(clean_sql: str):
+    """Recognize `LOAD SAMPLE <name> INTO <target> [AT SCALE <n>]` before the parser.
+
+    Returns a synthesized single-statement AST list, or None when the statement
+    does not begin with LOAD.
+
+    sqlparser's Opteryx dialect has no LOAD statement, so without this the front
+    of parsing reports `Expected: an SQL statement, found: LOAD` - including
+    through `analyze_query`, which is how the jobs API pre-flights a statement
+    before queueing it. The scale is carried as written and range-checked when
+    the statement is planned, where the set of staged scale factors is known.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    if not _LOAD_LEAD.match(clean_sql):
+        return None
+    match = _LOAD_SAMPLE_RE.match(clean_sql)
+    if match is None:
+        raise UnsupportedSyntaxError(
+            "Expected: **LOAD SAMPLE** <sample> **INTO** <workspace>.<collection> "
+            "[**AT SCALE** <n>]. It is the only **LOAD** statement."
+        )
+    return [
+        {
+            "LoadSample": {
+                "sample": match.group("sample"),
+                "target": match.group("target"),
+                "scale": match.group("scale"),
+            }
+        }
+    ]
+
+
 # The order matters only in that each interceptor is asked about a statement it can
 # rule out on its first keyword; a statement matching two of them does not exist.
 _INTERCEPTORS = (
@@ -1229,6 +1286,7 @@ _INTERCEPTORS = (
     _intercept_show_grants_on,
     _intercept_show_create,
     _intercept_show_create_trigger,
+    _intercept_load_sample,
 )
 
 

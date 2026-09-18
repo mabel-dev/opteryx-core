@@ -47,9 +47,15 @@ class DataFileStream:
         target_file_bytes=None,
         sorted_by=None,
         write_profile="fast",
+        pending_schema=None,
     ):
         self.connector = connector
         self.relation_name = relation_name
+        # The schema the target is ABOUT to be created with, for a sink whose
+        # relation does not exist yet (CTAS) - None for every write to one that
+        # does. Passed straight through to each writer this stream opens; see
+        # Writable.open_data_file_writer for what a store does with it.
+        self.pending_schema = pending_schema
         # The ordering claim written into every row group - the caller's
         # assertion that the rows it pushes are ordered on that column. None
         # unless the rows really are (a sort-aware OPTIMIZE); never verified.
@@ -111,6 +117,7 @@ class DataFileStream:
                 sorted_by=self.sorted_by,
                 sorted_descending=False,
                 write_profile=self.write_profile,
+                pending_schema=self.pending_schema,
             )
         self._writer.write_row_group(batch)
         if self._writer.uncompressed_size_in_bytes >= self.target_file_bytes:

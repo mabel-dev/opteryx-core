@@ -1090,6 +1090,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         sorted_by: Optional[str] = None,
         sorted_descending: bool = False,
         write_profile: str = "fast",
+        pending_schema=None,
     ):
         """Open one streaming parquet file in the relation's directory.
 
@@ -1099,6 +1100,11 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         arrives. An empty directory with no dataset.json is invisible to
         relation_exists() and everything else, so this doesn't compromise
         atomicity - only a dataset.json write makes a relation "exist".
+
+        `pending_schema` is ignored, and this store is why the contract can say
+        a connector MAY ignore it: a directory's path follows from the relation
+        name, and the per-file statistics are keyed by column name, so there is
+        nothing about a not-yet-created relation left to derive.
         """
         from opteryx.connectors.parquet_io.parquet_writer import open_data_file_writer
 

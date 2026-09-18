@@ -106,6 +106,7 @@ class Writable:
         sorted_by: Optional[str] = None,
         sorted_descending: bool = False,
         write_profile: str = "fast",
+        pending_schema=None,
     ):
         """Open ONE new data file for `relation_name`, to be written a row
         group at a time and registered by a later commit.
@@ -114,6 +115,19 @@ class Writable:
         `create_relation`/`replace_relation`, deferred to EOS for atomicity) -
         a connector's write target for this must not depend on the relation
         already being registered there.
+
+        `pending_schema` is how a store that cannot honour that on its own is
+        told what it needs. A CTAS target does not exist in ANY form yet: a
+        store that derives a relation's write location or its column ids from
+        its registered entry has nothing to read, and asking it to read one
+        anyway is how this failed - `DatasetNotFound` naming the table being
+        created. So the CTAS sink passes the schema the relation is about to be
+        created with, and a store that needs it derives both from that instead,
+        by the same rules its create will use. It is None for every write to a
+        relation that already exists (INSERT, MERGE, OPTIMIZE, CREATE OR
+        REPLACE over an existing relation), and a store with nothing to derive
+        - one whose layout follows from the name, like a directory on disk -
+        ignores it.
 
         `write_profile` is "fast" (ingest and CTAS: the caller is waiting on
         the write) or "storage" (a rewrite that is read many times, so it may

@@ -82,6 +82,14 @@ class InsertNode(BasePlanNode):
             self.relation_name,
             coalesce_rows=parameters.get("write_coalesce_rows"),
             target_file_bytes=parameters.get("target_file_bytes"),
+            # A CTAS creating a relation that does not exist yet is the one
+            # write whose target the store cannot look up while the files are
+            # streaming - `create_relation` below runs only once they are all
+            # durable. So the store is handed the schema it is about to be
+            # created with, and derives from that what it would have read.
+            # Every other write here has a registered target: a replace, and an
+            # INSERT, both land on a relation that already exists.
+            pending_schema=self.target_schema if self.create_target and not self.is_replace else None,
         )
 
     @property

@@ -52,6 +52,9 @@ _SYNTHESIZED_TARGETS = {
     # name no permission system knows. Who may copy a job's results is a
     # different question, answered where those results live.
     "SaveResults": "name",
+    # The collection the sample is loaded INTO. The sample's own name is not a
+    # relation: it names a staged bundle nobody holds a policy on.
+    "LoadSample": "target",
     # The permission target is the object the grant is being administered on;
     # the principal receiving/losing it names a person, not a relation.
     "GrantAccess": "object_name",
@@ -78,6 +81,11 @@ _SYNTHESIZED_STATEMENTS = {
     "SaveResults": (False, True, "owner"),
     # Drops a stored object rather than data; the binder gates it at ALTER.
     "DropStatistics": (False, True, "owner"),
+    # Creates a collection and the datasets in it, and only ever creates - it
+    # refuses a collection that holds anything. That is the fresh-create writer
+    # tier CREATE COLLECTION holds, not the owner tier SaveResults needs: there
+    # is nothing of the caller's it can overwrite.
+    "LoadSample": (False, True, "writer"),
     # WRITE on the table the trigger hangs off, symmetric with creating one.
     "DropTrigger": (False, True, "writer"),
     # Ownership is a workspace-level change; the binder gates it at ALTER.

@@ -399,6 +399,14 @@ def render_drop_workspace(node: LogicalPlanNode) -> str:
     return f"DROP WORKSPACE {if_exists}({node.workspace_name})"
 
 
+@register_render(LogicalPlanStepType.LoadSample)
+def render_load_sample(node: LogicalPlanNode) -> str:
+    return (
+        f"LOAD SAMPLE {node.sample_name} INTO ({node.collection_name}) "
+        f"AT SCALE sf{node.scale_label}"
+    )
+
+
 @register_render(LogicalPlanStepType.Analyze)
 def render_analyze(node: LogicalPlanNode) -> str:
     return f"ANALYZE TABLE ({node.table_name})"

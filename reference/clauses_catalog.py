@@ -580,6 +580,30 @@ CLAUSE_DEFINITIONS = {
             "ALTER WORKSPACE."
         ),
     },
+    "load_sample": {
+        "canonical_name": "LOAD SAMPLE",
+        "planner_entry": "plan_load_sample",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "LOAD SAMPLE sample INTO workspace.collection [AT SCALE scale_factor]"
+        ],
+        "summary": "Copy a staged sample dataset into a collection.",
+        "documentation": (
+            "The parser has no LOAD statement, so this is recognized before parsing "
+            "(pre_parse) rather than re-spelled onto another statement's grammar. The "
+            "sample's files are COPIED into the target collection, so what lands there "
+            "is an ordinary dataset the caller owns, is billed for, and may drop without "
+            "reaching the staged originals every other workspace loads from."
+        ),
+        "notes": (
+            "The target must be an empty collection, named as workspace.collection; a "
+            "missing one is created. AT SCALE takes a staged scale factor - not an "
+            "arbitrary number - and defaults to the sample's own default. The clause is "
+            "AT SCALE rather than a bare AT because AT directly after an object name is "
+            "the version space (VERSION AS OF is rewritten into it)."
+        ),
+    },
     "explain": {
         "canonical_name": "EXPLAIN",
         "planner_entry": "plan_explain",

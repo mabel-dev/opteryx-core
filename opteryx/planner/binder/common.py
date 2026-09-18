@@ -49,6 +49,7 @@ from opteryx.planner.binder.relation import (
     visit_drop_collection,
     visit_drop_column,
     visit_drop_relation,
+    visit_load_sample,
     visit_create_tag,
     visit_drop_tag,
     visit_rollback_relation,
@@ -279,6 +280,11 @@ class BinderVisitor:
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
         return visit_drop_collection(self, node, context)
+
+    def visit_load_sample(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_load_sample(self, node, context)
 
     def visit_drop_trigger(
         self, node: Node, context: BindingContext

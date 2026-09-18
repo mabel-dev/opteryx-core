@@ -182,6 +182,16 @@ A recursive term that has not converged by this many passes fails loud — never
 truncated result. A cycle under UNION ALL recurs forever by definition; this is
 what stops it."""
 
+SAMPLE_DATA_LOCATION: str = str(get("SAMPLE_DATA_LOCATION", "")).rstrip("/")
+"""Storage prefix the LOAD SAMPLE bundles are staged under (e.g. gs://bucket/samples).
+
+No default: a bundle's location is a property of the DEPLOYMENT, not of the engine.
+Baking one in would point every installation at one operator's bucket - which the
+installation cannot read, and which its operator did not choose. Unset, LOAD SAMPLE
+refuses and says so, rather than failing as a permissions error against a bucket name
+nobody recognises.
+"""
+
 KVSTORE_LOCATION: str = str(get("KVSTORE_LOCATION", "")).strip()
 """Single-store KV location (e.g. file://, valkey://, gs://, memory://)."""
 

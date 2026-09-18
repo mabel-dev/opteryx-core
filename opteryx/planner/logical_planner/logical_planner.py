@@ -144,6 +144,8 @@ class LogicalPlanStepType(int, Enum):
 
     CallProcedure = auto()  # CALL <procedure>(<literals>)
 
+    LoadSample = auto()  # LOAD SAMPLE <name> INTO <workspace>.<collection>
+
 
 class LogicalPlan(Graph):
     pass
@@ -5555,6 +5557,81 @@ def plan_drop_workspace(statement, **kwargs):
     return plan
 
 
+def plan_load_sample(statement, **kwargs):
+    """
+    Create a logical plan for LOAD SAMPLE statement.
+
+    LOAD SAMPLE <sample> INTO <workspace>.<collection> [AT SCALE <n>]
+
+    Synthesized by pre_parse - the parser has no LOAD statement at all, and
+    unlike DROP WORKSPACE there is no statement shape to borrow, so there is
+    nothing for the SQL rewriter to re-spell it onto.
+
+    Both the sample and the scale are settled HERE rather than at execution:
+    the set of bundles and the set of staged scale factors are both closed and
+    both known without touching storage, so naming one that does not exist is a
+    syntax problem and should read like one - with the alternatives listed,
+    rather than a copy that starts and then finds an empty prefix.
+    """
+    from opteryx.managers.samples import get_sample
+    from opteryx.managers.samples import sample_names
+    from opteryx.managers.samples import scale_label
+    from opteryx.managers.samples import sample_root
+    from opteryx.managers.samples import scale_numbers
+    from opteryx.utils import suggest_alternative
+
+    root_node = "LoadSample"
+    plan = LogicalPlan()
+
+    load_statement = statement[root_node]
+
+    sample_name = load_statement["sample"]
+    sample = get_sample(sample_name)
+    if sample is None:
+        raise UnsupportedSyntaxError(
+            compose(
+                f"There is no sample called {md_code(sample_name)}. ",
+                did_you_mean(suggest_alternative(sample_name, sample_names())),
+                f"Loadable samples: {', '.join(md_code(name) for name in sample_names())}.",
+            )
+        )
+
+    # A sample is loaded INTO a collection, and a collection is always named
+    # `workspace.collection`. Rejected here rather than left for the connector
+    # to discover, where a bare name would resolve to some default workspace and
+    # silently write eight datasets somewhere the caller did not name.
+    target = load_statement["target"]
+    if target.count(".") != 1:
+        raise UnsupportedSyntaxError(
+            f"LOAD SAMPLE loads into a collection, named as "
+            f"{md_code('<workspace>.<collection>')} (got {md_code(target)})."
+        )
+
+    label = scale_label(sample, load_statement["scale"])
+    if label is None:
+        raise UnsupportedSyntaxError(
+            f"{md_code(sample.name)} is not staged at scale "
+            f"{md_code(load_statement['scale'])}. Staged scales: "
+            f"{', '.join(md_code(number) for number in scale_numbers(sample))}."
+        )
+
+    # Whether this deployment stages samples at all is settled here too. It costs
+    # one config read and no storage access, and the alternative is a statement that
+    # authorizes, creates the collection, and only then discovers there was never
+    # anywhere to copy from.
+    sample_root()
+
+    load_sample_node = LogicalPlanNode(node_type=LogicalPlanStepType.LoadSample)
+    load_sample_node.sample_name = sample.name
+    load_sample_node.collection_name = target
+    load_sample_node.scale_label = label
+    load_sample_node.tables = sample.tables
+
+    plan.add_node(random_string(), load_sample_node)
+
+    return plan
+
+
 # The two SYMBOLIC argument values EXECUTE accepts, and the only two: the
 # virtual-tag vocabulary the rest of the engine already speaks. `CURRENT` is
 # the head; `PREVIOUS` is the previous version of the DATA, stepping over the
@@ -7240,6 +7317,8 @@ QUERY_BUILDERS = {
     "RevokeAccess": plan_revoke_access,
     "ShowGrantsOn": plan_show_grants_on,
     "ShowEffectiveGrantsOn": plan_show_effective_grants_on,
+    # LOAD SAMPLE — synthesized pre-parse; the parser has no LOAD statement.
+    "LoadSample": plan_load_sample,
 }
 
 

@@ -78,6 +78,12 @@ class RelationManagementNode(BasePlanNode):
         # CREATE COLLECTION
         self.collection_name: Optional[str] = parameters.get("collection_name")
 
+        # LOAD SAMPLE. `collection_name` above is the target - a sample loads
+        # into a collection, so it names one exactly as CREATE COLLECTION does.
+        self.sample_name: Optional[str] = parameters.get("sample_name")
+        self.scale_label: Optional[str] = parameters.get("scale_label")
+        self.tables = parameters.get("tables")
+
         # DROP COLLECTION
         self.collection_names = parameters.get("collection_names")
 
@@ -204,6 +210,8 @@ class RelationManagementNode(BasePlanNode):
             )
         if self.action == "create_collection":
             return f"create collection {self.collection_name}"
+        if self.action == "load_sample":
+            return f"load sample {self.sample_name} (sf{self.scale_label}) into {self.collection_name}"
         if self.action == "drop_collection":
             return f"drop collection {', '.join(self.collection_names or [])}"
         if self.action == "cluster_by":
@@ -371,6 +379,21 @@ class RelationManagementNode(BasePlanNode):
                 self.collection_name, if_not_exists=self.if_not_exists, author=self._author
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "load_sample":
+            # The record count is the number of datasets created, which is what
+            # the caller can go and look at. The connector settles the
+            # empty-collection rule and does the copying; nothing here is
+            # recoverable by re-running, so it refuses before it copies rather
+            # than part-way through.
+            loaded = self.connector.load_sample(
+                self.collection_name,
+                self.sample_name,
+                self.scale_label,
+                self.tables,
+                author=self._author,
+            )
+            return NonTabularResult(record_count=loaded, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "drop_collection":
             dropped = 0

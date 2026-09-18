@@ -1421,30 +1421,13 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         return answers
 
     # Relation operations (Writable capability)
-    def _dataset_location(self, relation_name: str) -> str:
-        """Resolve the GCS location data files for this relation live under.
-
-        Called from `open_data_file_writer`, which runs before the relation is
-        necessarily registered in the catalog (CREATE OR REPLACE writes files
-        before creating/replacing the catalog entry at EOS - see insert.pyx).
-        For an existing relation this reads its real registered location; for
-        one that doesn't exist yet, it mirrors the exact formula
-        `catalog.create_dataset` will use for that identifier, since no
-        location has been assigned yet.
-        """
-        workspace, relative_id = self._parse_identifier(relation_name)
-        catalog = self._get_catalog(workspace)
-        if catalog.dataset_exists(relative_id):
-            return catalog.load_dataset(relative_id).metadata.location
-        collection, dataset_name = relative_id.split(".")
-        return f"gs://{catalog.gcs_bucket}/{catalog.workspace}/{collection}/{dataset_name}"
-
     def open_data_file_writer(
         self,
         relation_name: str,
         sorted_by: Optional[str] = None,
         sorted_descending: bool = False,
         write_profile: str = "fast",
+        pending_schema=None,
     ):
         """Open one streaming data file - see Writable.open_data_file_writer.
 
@@ -1453,6 +1436,16 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         engine sees a FileEntry on close. The two write profiles are the
         catalog's own two option sets: "fast" for ingest and CTAS, "storage"
         for a compaction rewrite that is read many times.
+
+        `pending_schema` names the CTAS case, where the dataset will not exist
+        until this statement's files are all durable: the catalog opens the
+        writer from the schema instead of from a registered dataset
+        (`open_pending_data_file_writer`). Both the location and the field-ids
+        it keys the file's statistics with are derived there, by the helpers
+        `create_dataset` itself uses - deliberately NOT mirrored here, because
+        a second copy of either formula in the engine drifts from the catalog's
+        silently, and a file keyed by stale field-ids describes its columns
+        under ids the finished dataset gives to other columns.
         """
         from opteryx_catalog.iops.fileio import COMPACTION_WRITE_PARQUET_OPTIONS
         from opteryx_catalog.iops.fileio import WRITE_PARQUET_OPTIONS
@@ -1469,12 +1462,21 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
 
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
-        dataset = catalog.load_dataset(relative_id)
-        handle = dataset.open_data_file_writer(
-            sorted_by=sorted_by,
-            sorted_descending=sorted_descending,
-            write_options=options,
-        )
+        if pending_schema is not None:
+            handle = catalog.open_pending_data_file_writer(
+                relative_id,
+                pending_schema,
+                sorted_by=sorted_by,
+                sorted_descending=sorted_descending,
+                write_options=options,
+            )
+        else:
+            dataset = catalog.load_dataset(relative_id)
+            handle = dataset.open_data_file_writer(
+                sorted_by=sorted_by,
+                sorted_descending=sorted_descending,
+                write_options=options,
+            )
         return _DataFileWriterHandle(handle)
 
     @staticmethod
@@ -1550,6 +1552,119 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         catalog = self._get_catalog(workspace)
 
         catalog.create_collection(relative_id, exists_ok=if_not_exists, author=author)
+
+    def load_sample(
+        self,
+        collection_name: str,
+        sample_name: str,
+        scale_label: str,
+        tables,
+        author: Optional[str] = None,
+    ) -> int:
+        """Copy a staged sample bundle into a collection, and return the table count.
+
+        The bundle's files are COPIED, not referenced. Every workspace that loads
+        a sample loads from the same staged prefix, so a manifest pointing at
+        those files directly would make one caller's DROP, compaction or
+        expiration reclaim storage out from under everyone else's datasets. A
+        copy makes what lands here an ordinary dataset with ordinary lifetime:
+        the caller owns the bytes and is billed for them.
+
+        The copy itself is server-side (`FileIO.copy`), so the bytes never come
+        through this process however large the scale factor is.
+
+        The target collection must be EMPTY. Loading into a collection that
+        already holds datasets would either collide with them or interleave a
+        sample's tables with the caller's own, and neither is recoverable by
+        re-running the statement.
+        """
+        from opteryx.managers.samples import get_sample
+        from opteryx.managers.samples import table_location
+
+        workspace, relative_id = self._parse_identifier(collection_name)
+        catalog = self._get_catalog(workspace)
+        collection = relative_id
+
+        # An existing collection has to be empty; a missing one is created. Both
+        # checked before anything is copied, so a refusal leaves nothing behind.
+        if catalog.collection_exists(collection):
+            occupants = list(catalog.list_datasets(collection)) + list(
+                catalog.list_views(collection)
+            )
+            if occupants:
+                raise ValueError(
+                    f"{collection_name} is not empty - it holds "
+                    f"{len(occupants)} relation(s). LOAD SAMPLE loads into an empty "
+                    "collection; use a new one, or drop what is in this one first."
+                )
+        else:
+            catalog.create_collection(collection, exists_ok=True, author=author)
+
+        sample = get_sample(sample_name)
+        io = catalog.io
+        loaded = 0
+
+        for table in tables:
+            prefix = table_location(sample, scale_label, table)
+            staged = [path for path in io.list_files(prefix) if path.endswith(".parquet")]
+            if not staged:
+                raise ValueError(
+                    f"Sample {sample_name} is missing table '{table}' at scale "
+                    f"sf{scale_label} - nothing staged under {prefix}."
+                )
+            staged.sort()
+
+            # The schema comes from the staged files themselves rather than from
+            # a declaration here, so a restaged bundle cannot drift away from a
+            # copy of its schema that nobody remembered to update.
+            schema = self._read_parquet_schema(io, staged[0], table)
+
+            relation = f"{collection}.{table}"
+            catalog.create_dataset(relation, schema, author=author)
+            location = catalog.load_dataset(relation).metadata.location
+
+            copied = []
+            for source in staged:
+                destination = f"{location}/{source.rsplit('/', 1)[-1]}"
+                io.copy(source, destination)
+                copied.append(destination)
+
+            # `read_sources=[]` is the provenance receipt for a statement that
+            # read no catalog relation - which this did not. The bytes came from
+            # a staging prefix, not from a dataset anyone can name.
+            catalog.load_dataset(relation).add_files(
+                files=copied,
+                author=author,
+                commit_message=f"LOAD SAMPLE {sample_name} AT SCALE sf{scale_label}",
+                read_sources=[],
+            )
+            loaded += 1
+
+        return loaded
+
+    @staticmethod
+    def _read_parquet_schema(io, location: str, schema_name: str):
+        """Read one staged parquet file's schema as the RelationSchema the catalog stores.
+
+        Read through rugo rather than pyarrow: the catalog wants a relation
+        schema in the platform's own type vocabulary, and rugo is what produces
+        one. A pyarrow schema is rejected outright by `create_dataset`, and
+        converting arrow types here would be a second, drifting copy of a
+        mapping that already exists.
+
+        Only the footer is needed, but `FileIO.new_input` has no ranged read, so
+        this pulls the whole file. It reads ONE file per table - the first - to
+        learn the schema the rest share.
+        """
+        from rugo.parquet import read_metadata_from_memoryview  # type: ignore[import]
+
+        from opteryx.connectors._rugo_schema import rugo_to_relation_schema
+
+        with io.new_input(location).open() as stream:
+            data = stream.read()
+        return rugo_to_relation_schema(
+            read_metadata_from_memoryview(memoryview(data)), schema_name=schema_name
+        )
 
     def drop_collection(
         self, collection_name: str, if_exists: bool = False, author: Optional[str] = None

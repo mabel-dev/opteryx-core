@@ -88,7 +88,7 @@ class _NoFilesystemConnector(BaseConnector, Writable):
         return _NoFilesystemTable(schema)
 
     def open_data_file_writer(self, relation_name, sorted_by=None, sorted_descending=False,
-                              write_profile="fast"):
+                              write_profile="fast", pending_schema=None):
         return _RecordedDataFile(f"memory://{relation_name}/{id(self)}")
 
     def insert(self, relation_name, file_entries, author=None, **kwargs):

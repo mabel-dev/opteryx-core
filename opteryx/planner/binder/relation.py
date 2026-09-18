@@ -134,6 +134,35 @@ def visit_create_collection(
     return node, context
 
 
+def visit_load_sample(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """
+    Bind the LOAD SAMPLE node to determine which connector should handle
+    copying the sample into the target collection.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.collection_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.collection_name} does not support LOAD SAMPLE"
+        )
+
+    # The fresh-create writer tier, the same one CREATE COLLECTION holds, and
+    # for the same reason: the statement only ever creates. It refuses to load
+    # into a collection that holds anything, so there is nothing of the caller's
+    # for it to overwrite and no owner-tier destruction to authorize.
+    if not can_perform_action(context.execution_context, node.collection_name, action="CREATE"):
+        raise PermissionError(
+            f"User does not have permission to load a sample into {node.collection_name}"
+        )
+
+    node.columns = []
+    return node, context
+
+
 def visit_drop_collection(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """
     Bind the DROP COLLECTION node to determine which connectors should handle
