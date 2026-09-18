@@ -154,6 +154,36 @@ bool parse_declared_type(const std::string& name, DeclaredType* out) {
         return true;
     }
 
+    // VARIANT — a JSON object or array held as JSON text (JSONL only; see the
+    // header). Same German-string storage as VARCHAR, distinct tag.
+    if (u == "VARIANT") {
+        out->type = DRAKEN_VARIANT;
+        out->logical_kind = LK_NONE;
+        return true;
+    }
+
+    // ARRAY<T> — the platform's own spelling (`str(ColumnType)` writes
+    // ARRAY<INT64>). T resolves through the SAME plain-name and alias tables as a
+    // scalar column, then is restricted to what the JSONL array builder can
+    // materialise as a child vector. Nothing parameterised nests here: an
+    // ARRAY<DECIMAL(18, 2)> or ARRAY<ARRAY<INT64>> is refused, not approximated.
+    if (u.size() > 7 && u.compare(0, 6, "ARRAY<") == 0 && u.back() == '>') {
+        std::string inner = u.substr(6, u.size() - 7);
+        size_t a = 0, b = inner.size();
+        while (a < b && is_space(inner[a])) ++a;
+        while (b > a && is_space(inner[b - 1])) --b;
+        inner = inner.substr(a, b - a);
+        DrakenType elem;
+        if (!(plain_name(inner, &elem) || alias_name(inner, &elem))) return false;
+        if (elem != DRAKEN_INT64 && elem != DRAKEN_UINT64 && elem != DRAKEN_FLOAT64 &&
+            elem != DRAKEN_BOOL && elem != DRAKEN_VARCHAR)
+            return false;
+        out->type = DRAKEN_ARRAY;
+        out->logical_kind = LK_NONE;
+        out->element = elem;
+        return true;
+    }
+
     DrakenType phys;
     if (plain_name(u, &phys) || alias_name(u, &phys)) {
         out->type = phys;
@@ -167,7 +197,8 @@ const char* declared_type_vocabulary() {
     return "INT8, INT16, INT32, INT64, UINT8, UINT16, UINT32, UINT64, FLOAT32, "
            "FLOAT64, BOOL, VARCHAR, DATE, TIMESTAMP[s|ms|us|ns], DECIMAL(p, s), "
            "IPV4 (aliases: INTEGER/INT/BIGINT, TINYINT, SMALLINT, DOUBLE/FLOAT, "
-           "REAL, STRING/TEXT, BOOLEAN)";
+           "REAL, STRING/TEXT, BOOLEAN); JSONL only: VARIANT, "
+           "ARRAY<INT64|UINT64|FLOAT64|BOOL|VARCHAR>";
 }
 
 }  // namespace rugo

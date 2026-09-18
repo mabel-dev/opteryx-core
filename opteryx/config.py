@@ -439,6 +439,30 @@ ignored."""
 PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS: int = int(
     get("PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS", 48)
 )
+
+PARQUET_IO_MEMORY_BUDGET_BYTES: int = int(get("PARQUET_IO_MEMORY_BUDGET_BYTES", 0))
+"""Memory admission budget for one parquet scan's IO pipeline, in BYTES.
+0 = auto: half of the cgroup memory limit when one is in effect (Cloud Run),
+else half of physical RAM, else off. -1 = off explicitly.
+
+What it bounds is what the pipeline itself HOLDS: decoded row groups from the
+moment a worker claims one until the consumer pops its result, plus compressed
+row-group bytes from fetch until decode has consumed them. Charges are the
+footer's own estimates (Σ total_uncompressed_size / Σ total_compressed_size of
+the projected columns), so the ledger is exact by construction and needs no
+allocator hook. A worker that would push the total over budget waits at the
+gate until a consumer pop releases enough; one is always admitted when nothing
+consumer-releasable is held, so the scan can never stall on its own budget.
+
+Why: before this the only bound on in-flight decode was a COUNT — the result
+queue capacity (1024) and the submission window — with no relation to bytes. On
+an 8 GiB worker a wide-row-group scan that ran ahead of a slow consumer was an
+OOM, surfaced as a 503 with no memory log (see docs/ on the worker OOM class).
+The pipeline reports the budget it runs (`memory_budget_bytes`), the peak it
+held (`memory_held_high_watermark`) and how long tickets waited at the gate
+(`admission_blocked_ns`) in io_scan_diagnostics — the read-backs that prove the
+knob binds and show whether it ever bit."""
+
 """Minimum REMOTE row groups a scan must submit before `PARQUET_IO_FETCH_AHEAD`
 is armed at all; below it the scan runs the coupled path (depth 0). Counted
 after row-group pruning, on the same work-item list the pipeline fetches, so a

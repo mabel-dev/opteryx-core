@@ -30,15 +30,15 @@ import warnings
 
 # Type names reported in result['schema'] for INFERRED columns. Deliberately narrower
 # than the DrakenType universe because inference itself is: the speculative path only
-# ever resolves to one of the first four, and "array"/"variant" are inference-only
-# outcomes (parse_arrays/parse_objects — see parse_array_column / ColumnType::Variant in
+# ever resolves to one of the first four, plus "array"/"variant" when parse_arrays/
+# parse_objects materialise a column (see parse_array_column / ColumnType::Variant in
 # column_builder.cpp).
 #
 # This is NOT the explicit_schema vocabulary. A DECLARED column accepts the platform's
-# canonical type names (IPV4, UINT32, DECIMAL(18, 2), TIMESTAMP[us], DATE, …) and is
-# validated by rugo::parse_declared_type — the same C++ parser that then does the
-# parsing, so what validates and what parses cannot drift. Declared names are echoed
-# back into result['schema'] verbatim, which is why they need no entry here.
+# canonical type names (IPV4, UINT32, DECIMAL(18, 2), TIMESTAMP[us], DATE, ARRAY<INT64>,
+# VARIANT, …) and is validated by rugo::parse_declared_type — the same C++ parser that
+# then does the parsing, so what validates and what parses cannot drift. Declared names
+# are echoed back into result['schema'] verbatim, which is why they need no entry here.
 _JSONL_INFERRED_SCHEMA_TYPES = ("int64", "double", "boolean", "string")
 
 # Typed-vector cimports removed as part of E.31 migration (same gap registry as E.28):
@@ -163,6 +163,7 @@ cdef extern from "core/column_builder.hpp" namespace "rugo::_jsonl":
         DrakenType type
         bint all_null
         bint array_fallback
+        bint key_absent
     # except + : parse_column_explicit (explicit_schema strict typing) throws
     # std::invalid_argument on a declared-type mismatch -> translated to Python ValueError.
     vector[ParsedColumn] parse_all_columns(
@@ -251,6 +252,14 @@ cdef object _maybe_prefilter(const uint8_t* buf, size_t buf_len, predicates):
     return (<char*>r.candidates.data())[:r.candidates.size()]
 
 
+cdef bint _names_contain(const vector[string]& names, const string& name):
+    cdef size_t i
+    for i in range(names.size()):
+        if names[i] == name:
+            return True
+    return False
+
+
 cdef str _jsonl_malformed_error(const uint8_t* buf_data, size_t buf_len, uint32_t offset):
     """Build a 1-based-line-number error message for the first malformed record detected
     by the C++ parser. Only ever called on the fail_on_error=True error path (not hot),
@@ -330,6 +339,11 @@ def read_jsonl(
         'columns': [],
         'schema': {},
         'malformed_count': 0,
+        # Declared (explicit_schema) columns whose key appeared in NO record of this
+        # buffer. Each is still returned, typed and all-null; this is how a caller
+        # pinning one chunk's schema onto another tells "this data lacks the column
+        # entirely" from "sparse here" (see ParsedColumn.key_absent).
+        'absent_columns': [],
     }
 
     # mmap state for the file-path case (freed in the finally below). `in_memory_data`
@@ -477,6 +491,16 @@ def read_jsonl(
                 column_names_cpp = sample_record_keys(
                     interp_result.all_records, buf_data, context.infer_sample_size
                 )
+                # A DECLARED column is always built, even when no sampled record carries
+                # it: a schema pinned from another chunk (or file) names columns this
+                # buffer may lack entirely, and the caller relies on getting every
+                # declared column back — typed, all-null, and listed in
+                # result['absent_columns'] — rather than a morsel missing it. Column
+                # discovery for everything else is unchanged.
+                for col in declared_schema:
+                    col_bytes = col.encode('utf-8')
+                    if not _names_contain(column_names_cpp, col_bytes):
+                        column_names_cpp.push_back(col_bytes)
                 total_rows = interp_result.num_records_passed
                 # Move (not copy) the record structure — tens of millions of
                 # FieldSpans + their per-record vectors.
@@ -487,7 +511,8 @@ def read_jsonl(
         if total_rows > 0 and not column_names_cpp.empty():
             vectors = _build_vectors(
                 buf_data, buf_len, records, column_names_cpp,
-                context, infer_schema, declared_schema, result['schema']
+                context, infer_schema, declared_schema, result['schema'],
+                result['absent_columns']
             )
             result['columns'] = vectors
             result['column_names'] = [col.decode('utf-8') for col in column_names_cpp]
@@ -596,7 +621,8 @@ cdef list _build_vectors(
     ParseContext& context,
     bint infer_schema,
     dict declared_schema,
-    dict schema_out
+    dict schema_out,
+    list absent_out
 ):
     """
     Parse every column of the buffer produced by the threaded scan+interpret path
@@ -631,16 +657,22 @@ cdef list _build_vectors(
         name = column_names[pi].decode('utf-8')
         if parsed[pi].array_fallback:
             # parse_array_column (column_builder.cpp) runs off the GIL and cannot warn
-            # itself; it flags this instead. Nested containers or a heterogeneous mix of
-            # scalar kinds inside the array are out of v1 scope — the column was returned
-            # as raw JSON text (DRAKEN_VARCHAR), same as parse_arrays=False.
+            # itself; it flags this instead. A row that is not a JSON array (a scalar or
+            # object value — including a STRING whose text merely looks like an array),
+            # malformed array text, nested containers or a heterogeneous mix of scalar
+            # kinds inside the array are out of v1 scope — the column was returned as raw
+            # JSON text (DRAKEN_VARCHAR), same as parse_arrays=False.
             warnings.warn(
-                f"JSONL column '{name}': array elements were nested or of mixed scalar "
-                f"types (unsupported by parse_arrays); returned as raw JSON text instead",
+                f"JSONL column '{name}': not every row is a JSON array of uniform scalar "
+                f"elements (a row was a non-array value or malformed array text, or its "
+                f"elements were nested or of mixed scalar types; unsupported by "
+                f"parse_arrays); returned as raw JSON text instead",
                 RuntimeWarning,
             )
         if name in declared_schema:
             schema_out[name] = declared_schema[name]
+            if parsed[pi].key_absent:
+                absent_out.append(name)
         elif infer_schema:
             schema_out[name] = "null" if parsed[pi].all_null else _jsonl_schema_type_name(parsed[pi].type)
     return vectors

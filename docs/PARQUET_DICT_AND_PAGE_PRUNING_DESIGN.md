@@ -4,6 +4,19 @@ Design note, 2026-08-25. Investigation only — no engine changes made.
 Prompted by a review of Apache Impala's scan pruning. Architect decisions
 required are marked **DECISION**.
 
+> **Status, 2026-09-18: Item B has since been built, and section B.1's
+> conclusion ("not actionable") no longer describes the code.** The reader
+> landed 2026-09-17/18 (`rugo/src/parquet/page_index.{hpp,cpp}` parses both
+> structures; `ParquetIOPipeline::compute_page_prune` skips and, remotely, does
+> not fetch the pages a pushed predicate cannot match). The writer landed
+> 2026-09-18 (`rugo/src/parquet/page_index_writer.hpp`): rugo emits both
+> structures when `max_page_bytes > 0`, and dictionary-encoded chunks now split
+> into several data pages instead of one, which was the prerequisite this note
+> identified. `max_page_bytes` still defaults to 0, so a caller opts in. The
+> measured numbers below are from the simulation; the delivered reader measures
+> 6.67x local / 5.38x remote on a clustered key with a wide projection. The
+> analysis is kept as written — it is the reasoning that led here.
+
 Out of scope (separate threads): bloom filters, join-build-side runtime
 min/max filters, reservation-based buffer pool.
 

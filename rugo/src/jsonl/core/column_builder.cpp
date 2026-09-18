@@ -211,7 +211,8 @@ StringColumnResult extract_column(
     bool                                       copy_bytes,
     bool                                       may_have_escapes,
     size_t                                     sample_size,
-    const RowExec*                             rows)
+    const RowExec*                             rows,
+    RecordValueTypes                           record_value_types)
 {
     const size_t num_rows = records.size();
     const size_t col_len  = column_name.size();
@@ -262,11 +263,13 @@ StringColumnResult extract_column(
     const uint16_t seed = candidates.empty() ? 0xFFFF : candidates[0];
 
     std::vector<uint8_t> chunk_seen(ranges.size(), 0);
+    std::vector<uint8_t> chunk_key(ranges.size(), 0);
     std::vector<uint8_t> chunk_esc(ranges.size(), 0);
 
     rex.run(ranges, [&](size_t ri) {
         uint16_t last_seen = seed;
         bool seen = false;
+        bool key  = false;
         bool esc  = false;
         for (size_t row = ranges[ri].begin; row < ranges[ri].end; ++row) {
             const auto& record = records[row];
@@ -296,6 +299,7 @@ StringColumnResult extract_column(
 
             if (found != nullptr) {
                 resolved[row] = found;
+                key = true;
                 const bool val_null =
                     is_null(buffer, found->value_start, found->value_start + found->value_width - 1);
                 if (!val_null) {
@@ -311,12 +315,14 @@ StringColumnResult extract_column(
             }
         }
         chunk_seen[ri] = seen ? 1 : 0;
+        chunk_key[ri]  = key  ? 1 : 0;
         chunk_esc[ri]  = esc  ? 1 : 0;
     });
 
     bool col_has_escape = false;
     for (size_t ri = 0; ri < ranges.size(); ++ri) {
         if (chunk_seen[ri]) result.any_value_seen = true;
+        if (chunk_key[ri])  result.any_key_seen = true;
         if (chunk_esc[ri])  col_has_escape = true;
     }
 
@@ -347,6 +353,16 @@ StringColumnResult extract_column(
     const bool do_unescape = col_has_escape && result.inferred_type == ColumnType::String;
     result.data_owned = copy_bytes || do_unescape;
 
+    // Value shapes are written in the emit pass below (resolved[] already holds each
+    // row's FieldSpan, so this is one byte per row and no extra key matching) — after the
+    // hint is known, so IfArrayHinted can be decided here rather than paid speculatively.
+    const bool record_types =
+        record_value_types == RecordValueTypes::Always ||
+        (record_value_types == RecordValueTypes::IfArrayHinted &&
+         result.inferred_type == ColumnType::Array);
+    if (record_types)
+        result.value_types.assign(num_rows, static_cast<uint8_t>(ValueType::Unknown));
+
     // Preallocate estimated string data (rough estimate)
     if (result.data_owned) result.data.reserve(num_rows * 16);
     result.offsets.resize(num_rows);
@@ -355,6 +371,7 @@ StringColumnResult extract_column(
     // Emit one value: NULL marks the bitmap; otherwise copy+unescape (do_unescape), copy
     // (copy_bytes), or reference the original buffer (zero-copy).
     auto emit_value = [&](const FieldSpan& f, size_t row) {
+        if (record_types) result.value_types[row] = f.type;
         const uint32_t vend = f.value_start + f.value_width - 1;
         if (is_null(buffer, f.value_start, vend)) {
             result.null_bitmap[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
@@ -771,20 +788,37 @@ static bool fill_string_array_column(
 }
 
 // Parse a column whose sampled type is a JSON array into a DRAKEN_ARRAY ParsedColumn.
-// v1 scope: every element across every row must be a uniform scalar kind (all-bool,
-// all-numeric [int widens to float], all-string, or all-null/empty) — nested containers
-// or a genuine mix of kinds fall back to raw JSON text (parse_varchar_column), same as
-// parse_arrays=False, with ParsedColumn.array_fallback set so the Cython edge can warn
-// (this function runs off the GIL and must not touch Python itself).
+// v1 scope: every non-null row must BE a JSON array (by value shape, not by its bytes —
+// a string value's slice is its content between the quotes, so the string "[1]" is
+// byte-identical to the array [1] and only StringColumnResult::value_types tells them
+// apart) and every element across every row must be a uniform scalar kind (all-bool,
+// all-numeric [int widens to float], all-string, or all-null/empty). A non-array row,
+// malformed array text, nested containers or a genuine mix of kinds fall back to raw
+// JSON text (parse_varchar_column), same as parse_arrays=False, with
+// ParsedColumn.array_fallback set so the Cython edge can warn (this function runs off
+// the GIL and must not touch Python itself). The speculative path is speculative by
+// design: it never throws on data — only the declared path (parse_column_explicit) is strict.
 static ParsedColumn parse_array_column(const uint8_t* base, StringColumnResult& scr,
                                       const RowExec& rows) {
     const uint32_t n = static_cast<uint32_t>(scr.num_rows);
+
+    // The caller must have asked extract_column to record value shapes (IfArrayHinted
+    // fills whenever the hint is Array, which is the only way here). Without them the
+    // string/array ambiguity above is undetectable, so refuse to guess.
+    if (scr.value_types.size() != scr.num_rows) {
+        throw std::runtime_error(
+            "parse_array_column: value_types not recorded for an Array-hinted column");
+    }
 
     ArrayElementSurvey survey;
     size_t total_elements = 0;
     bool parse_ok = true;
     for (uint32_t i = 0; i < n && parse_ok && !survey.saw_nested; ++i) {
         if (!row_valid(scr, i)) continue;
+        if (scr.value_types[i] != static_cast<uint8_t>(ValueType::Array)) {
+            parse_ok = false;  // a scalar or object row: out of scope, not an array
+            break;
+        }
         parse_ok = survey_array_row(base + scr.offsets[i], scr.lengths[i], survey, total_elements);
     }
 
@@ -956,6 +990,13 @@ PyObject* wrap_column(ParsedColumn& pc) {
 // — an address, a timestamp or a decimal read here parses byte-for-byte as the equivalent
 // CAST would.
 //
+// ARRAY<T> and VARIANT (2026-09-17): a declared VARIANT accepts a JSON object or array
+// (stored as raw JSON text) and refuses every scalar — a string that merely LOOKS like an
+// object is refused too, which is why extract_column is asked to record each row's shape.
+// A declared ARRAY<T> requires every row to be a well-formed JSON array whose elements all
+// fit T (element nulls allowed; nested containers refused), and builds the same child
+// vector the inferred path would have, with T fixed instead of surveyed.
+//
 // The strict per-row loop stays serial: it throws on the first bad value, and reporting the
 // FIRST offending row (not whichever chunk raced there first) is part of the contract. The
 // row walk in extract_column and the VARCHAR builder still parallelise.
@@ -973,6 +1014,100 @@ static ParsedColumn parse_column_explicit(
             "'; supported types are " + std::string(declared_type_vocabulary()));
     }
 
+    if (declared_is_structured(dt.type)) {
+        // may_have_escapes is deliberately FALSE here: unescaping rewrites a string
+        // value's bytes, and a container is JSON text that must stay byte-exact. The only
+        // rows unescaping could ever touch are string rows, and those are refused below.
+        OrdinalPredictor pred;
+        StringColumnResult scr = extract_column(buffer, records, name, pred,
+                                                /*copy_bytes=*/false, /*may_have_escapes=*/false,
+                                                SIZE_MAX, &rows, RecordValueTypes::Always);
+        const uint8_t* base = buffer;   // never copied: offsets index the source buffer
+        const uint32_t n = static_cast<uint32_t>(scr.num_rows);
+
+        auto refuse = [&](uint32_t i, const char* why) {
+            const uint32_t len = scr.lengths[i];
+            std::string got(reinterpret_cast<const char*>(base + scr.offsets[i]),
+                            len < 64u ? len : 64u);
+            throw std::invalid_argument(
+                "explicit_schema: column '" + name + "' row " + std::to_string(i) +
+                " value '" + got + "' is not a valid " + declared +
+                " (declared type mismatch: " + why + ")");
+        };
+
+        if (dt.type == DRAKEN_VARIANT) {
+            for (uint32_t i = 0; i < n; ++i) {
+                if (!row_valid(scr, i)) continue;
+                const uint8_t vt = scr.value_types[i];
+                if (vt != static_cast<uint8_t>(ValueType::Object) &&
+                    vt != static_cast<uint8_t>(ValueType::Array))
+                    refuse(i, "not a JSON object or array");
+            }
+            ParsedColumn pc = parse_varchar_column(base, scr, rows);
+            pc.type = DRAKEN_VARIANT;
+            pc.key_absent = !scr.any_key_seen;
+            return pc;
+        }
+
+        // DRAKEN_ARRAY: survey every row against the DECLARED element type.
+        size_t total_elements = 0;
+        for (uint32_t i = 0; i < n; ++i) {
+            if (!row_valid(scr, i)) continue;
+            if (scr.value_types[i] != static_cast<uint8_t>(ValueType::Array))
+                refuse(i, "not a JSON array");
+            ArrayElementSurvey sv;
+            size_t count = 0;
+            if (!survey_array_row(base + scr.offsets[i], scr.lengths[i], sv, count))
+                refuse(i, "not a well-formed JSON array");
+            if (sv.saw_nested) refuse(i, "an element is itself an array or object");
+            const bool saw_number = sv.saw_int || sv.saw_uint || sv.saw_real;
+            switch (dt.element) {
+                case DRAKEN_BOOL:
+                    if (saw_number || sv.saw_string) refuse(i, "an element is not a boolean");
+                    break;
+                case DRAKEN_VARCHAR:
+                    if (saw_number || sv.saw_bool) refuse(i, "an element is not a string");
+                    break;
+                case DRAKEN_INT64:
+                    if (sv.saw_bool || sv.saw_string) refuse(i, "an element is not a number");
+                    if (sv.saw_real) refuse(i, "an element is not an integer");
+                    if (sv.saw_uint) refuse(i, "an element is past INT64_MAX");
+                    break;
+                case DRAKEN_UINT64:
+                    if (sv.saw_bool || sv.saw_string) refuse(i, "an element is not a number");
+                    if (sv.saw_real) refuse(i, "an element is not an integer");
+                    if (sv.saw_neg_int) refuse(i, "an element is negative");
+                    break;
+                case DRAKEN_FLOAT64:
+                    if (sv.saw_bool || sv.saw_string) refuse(i, "an element is not a number");
+                    break;
+                default:
+                    // parse_declared_type only ever admits the five above.
+                    throw std::invalid_argument(
+                        "explicit_schema: column '" + name + "' declared " + declared +
+                        " has an element type the array builder cannot materialise");
+            }
+            total_elements += count;
+        }
+
+        ParsedColumn pc;
+        pc.type = DRAKEN_ARRAY;
+        pc.length = n;
+        pc.validity = own_validity_from_scr(scr, n);
+        pc.all_null = !scr.any_value_seen;
+        pc.key_absent = !scr.any_key_seen;
+        const bool ok = (dt.element == DRAKEN_VARCHAR)
+            ? fill_string_array_column(base, scr, n, total_elements, pc)
+            : fill_numeric_array_column(base, scr, n, dt.element, total_elements, pc);
+        if (!ok) {
+            // The survey above validated every row once; a re-walk failure is a bug,
+            // not bad data (same contract as parse_array_column).
+            throw std::runtime_error(
+                "parse_column_explicit: array element re-parse failed after survey succeeded");
+        }
+        return pc;
+    }
+
     OrdinalPredictor pred;
     StringColumnResult scr = extract_column(buffer, records, name, pred,
                                             /*copy_bytes=*/false, may_have_escapes,
@@ -983,6 +1118,7 @@ static ParsedColumn parse_column_explicit(
     if (declared_is_string(dt.type)) {
         ParsedColumn pc = parse_varchar_column(base, scr, rows);
         pc.type = dt.type;
+        pc.key_absent = !scr.any_key_seen;
         return pc;
     }
 
@@ -1029,6 +1165,8 @@ static ParsedColumn parse_column_explicit(
     pc.length = n;
     pc.data = data;
     pc.validity = own_validity_from_scr(scr, n);
+    pc.all_null = !scr.any_value_seen;
+    pc.key_absent = !scr.any_key_seen;
     pc.logical_kind = dt.logical_kind;
     pc.unit = dt.unit;
     pc.offset_minutes = dt.offset_minutes;
@@ -1064,9 +1202,15 @@ std::vector<ParsedColumn> parse_all_columns(
             return;
         }
         OrdinalPredictor pred;  // thread-local; per-column, no sharing
+        // Value shapes are only needed by parse_array_column (to tell a string row that
+        // looks like an array from a real one); IfArrayHinted makes every other column
+        // skip the per-row write entirely.
         StringColumnResult scr = extract_column(buffer, records, column_names[c], pred,
                                                 /*copy_bytes=*/false, may_have_escapes,
-                                                context.infer_sample_size, &rows);
+                                                context.infer_sample_size, &rows,
+                                                context.parse_arrays
+                                                    ? RecordValueTypes::IfArrayHinted
+                                                    : RecordValueTypes::Never);
         // Unescaped (or copied) columns own their bytes in scr.data; zero-copy columns
         // reference the original buffer.
         const uint8_t* base = scr.data_owned ? scr.data_ptr() : buffer;

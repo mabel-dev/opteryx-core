@@ -29,6 +29,9 @@ cdef extern from "declared_type.hpp" namespace "rugo":
 
     bint parse_declared_type(const string& name, DeclaredType* out) nogil
     const char* declared_type_vocabulary() nogil
+    # ARRAY<T> / VARIANT: valid declared types, but read out of JSON structure a CSV
+    # field does not have — refused here, not approximated (see declared_type.hpp).
+    bint declared_is_structured(DrakenType t) nogil
 
 
 cdef extern from "core/csv_parse_context.hpp" namespace "rugo::_csv":
@@ -219,6 +222,12 @@ def read_csv(
                     f"read_csv: explicit_schema[{col!r}] = {declared_type!r} is not a "
                     f"supported type; supported types are "
                     f"{declared_type_vocabulary().decode('utf-8')}"
+                )
+            if declared_is_structured(probe_type.type):
+                raise ValueError(
+                    f"read_csv: explicit_schema[{col!r}] = {declared_type!r} is a JSONL-only "
+                    f"type; a CSV field has no JSON structure to read an ARRAY or VARIANT "
+                    f"from. Supported types are {declared_type_vocabulary().decode('utf-8')}"
                 )
             ctx.explicit_schema[col.encode('utf-8')] = declared_bytes
 

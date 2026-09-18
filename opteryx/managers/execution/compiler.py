@@ -3402,6 +3402,7 @@ class _Compiler:
         from opteryx.connectors.parquet_io.io_tuning import resolve_fetch_ahead_gate
         from opteryx.connectors.parquet_io.io_tuning import resolve_http_tuning
         from opteryx.connectors.parquet_io.io_tuning import resolve_in_flight_limit
+        from opteryx.connectors.parquet_io.io_tuning import resolve_memory_budget
         from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
         from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
         from opteryx.operators._operators import resolve_scan_filesystem
@@ -3657,6 +3658,10 @@ class _Compiler:
             # without moving the other.
             fetch_ahead_min_row_groups=resolve_fetch_ahead_gate(
                 _scan_vars, _scan_overrides),
+            # Memory admission budget (bytes; 0 = off): what this scan's pipeline
+            # may hold in decoded + prefetched bytes. Read back as
+            # `memory_budget_bytes` in io_scan_diagnostics.
+            memory_budget=resolve_memory_budget(_scan_vars, _scan_overrides),
             # Per-scan IO shaping. Resolved here, per scan, rather than left to
             # the pipeline's compiled-in defaults: until this was plumbed the
             # native path ignored every one of these SETs while the trampoline
@@ -3717,6 +3722,7 @@ class _Compiler:
         from opteryx.connectors.parquet_io.io_tuning import resolve_fetch_ahead_gate
         from opteryx.connectors.parquet_io.io_tuning import resolve_http_tuning
         from opteryx.connectors.parquet_io.io_tuning import resolve_in_flight_limit
+        from opteryx.connectors.parquet_io.io_tuning import resolve_memory_budget
         from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
         from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
         from opteryx.expression import get_all_nodes_of_type
@@ -3851,6 +3857,7 @@ class _Compiler:
         fetch_ahead = resolve_fetch_ahead(_scan_vars, _scan_overrides)
         fetch_ahead_gate = resolve_fetch_ahead_gate(_scan_vars, _scan_overrides)
         in_flight_override = resolve_in_flight_limit(_scan_vars, _scan_overrides)
+        memory_budget = resolve_memory_budget(_scan_vars, _scan_overrides)
         http_tuning = resolve_http_tuning(_scan_vars, _scan_overrides)
         coalesce_tuning = resolve_coalesce_tuning(_scan_vars, _scan_overrides)
         # Row-group pruning triples — identical to the single-pass path, applied to
@@ -3882,6 +3889,7 @@ class _Compiler:
                 in_flight_limit_override=in_flight_override,
                 http_tuning=http_tuning,
                 coalesce_tuning=coalesce_tuning,
+                memory_budget=memory_budget,
                 filesystem=filesystem,
                 footer_bytes_cache=scan_footer_bytes_cache(),
             )

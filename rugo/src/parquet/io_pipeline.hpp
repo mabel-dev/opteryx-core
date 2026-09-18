@@ -49,6 +49,7 @@
 #include "http_client.hpp"
 #endif
 #include "decode.hpp"
+#include "page_index.hpp"
 #include "ipc_serialize.hpp"
 #include "metadata.hpp"
 #include "core/string_slot.h"   // Stage 4b: build Draken string slots in the worker
@@ -213,6 +214,10 @@ struct MorselRef {
     // applicable → the consumer evaluates on the main thread (fallback). std::vector,
     // freed automatically — NOT a draken buffer, so NOT touched by free_fn below.
     std::vector<uint8_t> survivor_mask;
+    // Memory admission (ParquetIOPipeline::set_memory_budget): the decoded-bytes
+    // estimate this result holds on the pipeline's ledger, released by the
+    // consumer's pop (try_get_result / wait_and_get_result). 0 = budget off.
+    int64_t charged_bytes = 0;
 
     MorselRef() = default;
     MorselRef(const MorselRef&) = delete;
@@ -1510,12 +1515,43 @@ static inline void parse_decimal_ps(const std::string& lt, uint8_t& precision, u
 
 class ParquetIOPipeline {
  private:
+    // PageIndex page pruning (compute_page_prune). The footer's per-page
+    // min/max (ColumnIndex) are tested against the pushed per-value predicates
+    // (dict_preds_, the same conjuncts the dictionary decode-skip consults); a
+    // page no predicate can match contributes its row range as zeros to a
+    // row-group-wide mask, and the OffsetIndex then turns that mask into, per
+    // column, (a) a PageJumpPlan the decoder advances by without reading the
+    // pruned pages and (b) the byte runs the remote fetch actually needs.
+    struct PagePrune {
+        bool active = false;      // at least one page was pruned → row_mask/jump/extents are live
+        bool all_pruned = false;  // no row survives → the row group is empty_filtered
+        std::vector<uint8_t> row_mask;              // one byte per row group row, 1 = keep
+        std::vector<PageJumpPlan> jump;             // parallel to column_stats; size()==0 → header-walk
+        // Absolute [start, end) byte runs to fetch, parallel to column_stats.
+        // Empty for a column without an OffsetIndex = the whole chunk.
+        std::vector<std::vector<std::pair<int64_t, int64_t>>> extents;
+        int64_t pages_pruned = 0;   // across every projected column
+        int64_t bytes_pruned = 0;   // header+payload bytes of those pages
+    };
+
     struct WorkItem {
         std::string path;
         int rg_idx;
         std::vector<std::string> column_names;
         std::vector<ColumnStats> column_stats;  // absolute file offsets
         std::vector<uint8_t> row_mask;           // empty = no mask (decode all rows)
+        // PageIndex page pruning: computed ONCE per item by whichever stage
+        // reaches it first (the fetch-ahead stage, or decode on the coupled
+        // path) and carried so the other stage reuses the identical plan.
+        bool page_prune_done = false;
+        PagePrune page_prune;
+        // Memory admission (set_memory_budget): the footer-derived estimates
+        // this item is charged for, and what it CURRENTLY holds on each ledger
+        // so every exit path releases exactly what was taken.
+        int64_t est_decoded_bytes = 0;
+        int64_t est_compressed_bytes = 0;
+        int64_t charged_decoded = 0;
+        int64_t charged_compressed = 0;
         // docs/EXECUTION_TRACING_DESIGN.md: 0 unless tracing is armed at enqueue
         // time (enqueue_pending stamps both together) — decode_row_group treats
         // issued_ns == 0 as "don't record spans for this item", so a query that
@@ -1716,6 +1752,129 @@ class ParquetIOPipeline {
     // submit; workers read it const, no sync.
     Pass1Pred pass1_pred_;
 
+    // ── PageIndex region cache ───────────────────────────────────────────────
+    // A writer lays every ColumnIndex of the file out contiguously, then every
+    // OffsetIndex, in the tail before the footer — so the index bytes one row
+    // group needs sit inside the same region every other row group of that file
+    // needs. One range read per FILE (widened at most once if a later row group
+    // asks past it), not one per row group. The bytes are immutable once
+    // published (a shared_ptr to a const vector), so a widening never pulls a
+    // buffer out from under a worker still reading the previous one.
+    struct PageIndexEntry {
+        std::mutex mu;
+        int64_t lo = -1, hi = -1;   // absolute [lo, hi) the bytes cover
+        std::shared_ptr<const std::vector<uint8_t>> bytes;
+    };
+    std::unordered_map<std::string, std::shared_ptr<PageIndexEntry>> page_index_cache_;
+    std::mutex page_index_mutex_;
+    std::atomic<uint64_t> page_index_fetches_{0};
+    std::atomic<uint64_t> page_index_bytes_fetched_{0};
+    std::atomic<uint64_t> page_index_pages_pruned_{0};
+    std::atomic<uint64_t> page_index_bytes_pruned_{0};
+    std::atomic<uint64_t> page_index_row_groups_pruned_{0};
+    std::atomic<uint64_t> page_index_gate_declines_{0};
+
+    // See the cost gate in compute_page_prune for the measurements behind it.
+    static constexpr double kPageIndexMaxCostRatio = 0.10;
+
+    // Bytes covering absolute [lo, hi) of `path`'s page-index region, and the
+    // absolute offset the returned buffer starts at. Throws on an IO failure —
+    // a range the footer said exists and the store cannot serve is an IO error
+    // like any other, not a reason to quietly decode every page.
+    std::shared_ptr<const std::vector<uint8_t>> page_index_region(
+            const std::string& path, int64_t lo, int64_t hi, int64_t& region_lo) {
+        std::shared_ptr<PageIndexEntry> entry;
+        {
+            std::lock_guard<std::mutex> lk(page_index_mutex_);
+            auto& slot = page_index_cache_[path];
+            if (!slot) slot = std::make_shared<PageIndexEntry>();
+            entry = slot;
+        }
+        std::lock_guard<std::mutex> lk(entry->mu);
+        if (entry->bytes && entry->lo <= lo && hi <= entry->hi) {
+            region_lo = entry->lo;
+            return entry->bytes;
+        }
+        const int64_t nlo = entry->bytes ? std::min(entry->lo, lo) : lo;
+        const int64_t nhi = entry->bytes ? std::max(entry->hi, hi) : hi;
+        auto [bytes, ns] = read_range(path, nlo, nhi - nlo);
+        (void)ns;
+        page_index_fetches_.fetch_add(1, std::memory_order_relaxed);
+        page_index_bytes_fetched_.fetch_add(static_cast<uint64_t>(bytes.size()),
+                                            std::memory_order_relaxed);
+        entry->bytes = std::make_shared<const std::vector<uint8_t>>(std::move(bytes));
+        entry->lo = nlo;
+        entry->hi = nhi;
+        region_lo = nlo;
+        return entry->bytes;
+    }
+
+    // ── Memory admission ─────────────────────────────────────────────────────
+    // set_memory_budget(bytes): a cap on what THIS pipeline holds — decoded
+    // results from the moment a worker claims an item until the consumer pops
+    // its result (held_decoded_), plus compressed row-group bytes from fetch
+    // until decode has consumed them (held_prefetch_). Charges are the footer's
+    // estimates (Σ total_uncompressed_size / Σ total_compressed_size of the
+    // projected columns) so the ledger is exact by construction: whatever was
+    // charged is what gets released, whichever path drops the item.
+    //
+    // Two ledgers, not one, is what makes the wait deadlock-free: a decode
+    // ticket may wait only while something a CONSUMER pop will release is held
+    // (held_decoded_ > 0), never on bytes only a decode can release; a fetch
+    // ticket waits only while some earlier fetch's bytes are still pending a
+    // decode (held_prefetch_ > 0), which the decode admission above guarantees
+    // will happen. And the consumer's own inline-help decode in
+    // wait_and_get_result never waits on admission at all: it is the drain.
+    // 0 (the default) = no budget, nothing changes.
+    int64_t memory_budget_bytes_ = 0;
+    std::atomic<int64_t>  held_decoded_{0};
+    std::atomic<int64_t>  held_prefetch_{0};
+    std::atomic<int64_t>  held_high_watermark_{0};
+    std::atomic<uint64_t> admission_blocked_ns_{0};
+    std::atomic<uint64_t> admission_waits_{0};
+
+    static int64_t sum_column_bytes(const std::vector<ColumnStats>& cs, bool compressed) {
+        int64_t n = 0;
+        for (const auto& c : cs) {
+            const int64_t v = compressed ? c.total_compressed_size : c.total_uncompressed_size;
+            if (v > 0) n += v;
+        }
+        return n;
+    }
+    void ledger_charge(std::atomic<int64_t>& which, int64_t n) {
+        if (n <= 0) return;
+        which.fetch_add(n, std::memory_order_relaxed);
+        const int64_t total = held_decoded_.load(std::memory_order_relaxed) +
+                              held_prefetch_.load(std::memory_order_relaxed);
+        int64_t prev = held_high_watermark_.load(std::memory_order_relaxed);
+        while (total > prev &&
+               !held_high_watermark_.compare_exchange_weak(prev, total, std::memory_order_relaxed)) {}
+    }
+    // Release + wake every admission waiter. The mutex is taken (and dropped)
+    // before the notify so a waiter between its predicate check and its wait
+    // cannot miss this release — the classic lost-wakeup ordering.
+    void ledger_release(std::atomic<int64_t>& which, int64_t n) {
+        if (n <= 0) return;
+        which.fetch_sub(n, std::memory_order_relaxed);
+        if (memory_budget_bytes_ > 0) {
+            { std::lock_guard<std::mutex> lk(queue_mutex_); }
+            queue_cv_.notify_all();
+        }
+    }
+    // Under queue_mutex_: the decode-side charge taken at claim time.
+    void claim_charge_locked(WorkItem& item) {
+        if (memory_budget_bytes_ <= 0) return;
+        item.charged_decoded = item.est_decoded_bytes;
+        ledger_charge(held_decoded_, item.charged_decoded);
+        // Coupled remote path: the compressed bytes are fetched inside decode and
+        // live until it returns, so they are charged here rather than by a fetch
+        // stage that does not exist for this item.
+        if (!item.prefetch_done && !path_is_local(item.path)) {
+            item.charged_compressed = item.est_compressed_bytes;
+            ledger_charge(held_prefetch_, item.charged_compressed);
+        }
+    }
+
     // Diagnostic counters for queue-contention investigation.
     std::atomic<uint64_t> spin_iterations_{0};
     std::atomic<uint64_t> enqueue_count_{0};
@@ -1832,9 +1991,227 @@ class ParquetIOPipeline {
         return bloom_prefix;
     }
 
+    // ── PageIndex page pruning ───────────────────────────────────────────────
+    // Fills item.page_prune once (memoised on the item). Pure in the sense the
+    // fetch geometry helpers are: the fetch-ahead stage computes it before it
+    // plans its ranges and decode reuses the SAME result, so the two stages
+    // cannot disagree about which bytes exist in a buffer.
+    //
+    // Applies only to an UNMASKED item: a pass-2 late-materialization item
+    // already carries the exact survivor mask, and nothing here could remove a
+    // row it could not — but it also could not add anything, and the pass-2
+    // consumer's "a masked submit cannot come back empty" invariant is worth
+    // more than the redundant work saved.
+    void compute_page_prune(WorkItem& item) {
+        if (item.page_prune_done) return;
+        item.page_prune_done = true;
+        PagePrune& pp = item.page_prune;
+        // A/B arm, same convention as RUGO_LOCAL_MMAP_CACHE / RUGO_PREAD_SMALL_CHUNKS
+        // above: RUGO_PAGE_INDEX_PRUNE=0 runs the pipeline as if no file carried a
+        // page index, so both arms of a measurement can read the SAME file in one
+        // binary. Default on.
+        static const bool prune_enabled = []() {
+            const char* v = getenv("RUGO_PAGE_INDEX_PRUNE");
+            return !(v != nullptr && v[0] == '0' && v[1] == '\0');
+        }();
+        if (!prune_enabled) return;
+        if (!item.row_mask.empty() || dict_preds_.empty() || item.column_stats.empty())
+            return;
+
+        const size_t ncols = item.column_stats.size();
+        auto indexed = [](const ColumnStats& cs) {
+            return cs.column_index_offset >= 0 && cs.column_index_length > 0 &&
+                   cs.offset_index_offset >= 0 && cs.offset_index_length > 0;
+        };
+        // 1. Is there anything to test? A predicate column with both indexes.
+        int64_t lo = std::numeric_limits<int64_t>::max(), hi = -1;
+        bool any_pred = false;
+        for (const auto& cs : item.column_stats) {
+            if (!indexed(cs)) continue;
+            lo = std::min(lo, std::min(cs.column_index_offset, cs.offset_index_offset));
+            hi = std::max(hi, std::max(cs.column_index_offset + cs.column_index_length,
+                                       cs.offset_index_offset + cs.offset_index_length));
+            if (cs.max_repetition_level == 0 && dict_preds_.count(cs.name) != 0) any_pred = true;
+        }
+        if (!any_pred) return;
+
+        // ── Cost gate ────────────────────────────────────────────────────────
+        // The index region has to be READ before the data fetch can be planned,
+        // so on a remote path it is a serial round trip in front of the scan,
+        // not a background cost. Pay it only when the bytes it could save are
+        // large compared with the bytes it costs — both of which the footer
+        // already states exactly, so this is arithmetic, not a guess.
+        //
+        // MEASURED (hits, 1M rows, 5 row groups, clustered UserID point lookup,
+        // dev/throttle_server.py; interleaved A/B, median of 3):
+        //                                   index     data     ratio   ON vs OFF
+        //   wide projection (6 cols)        0.79 MB   64.1 MB   0.012     5.48x FASTER
+        //   narrow projection (3 cols)      0.77 MB    0.96 MB  0.80      0.62x SLOWER
+        //   narrow, rtt 50ms                0.77 MB    0.96 MB  0.80      0.46x SLOWER
+        // The two cases are three orders of magnitude apart in that ratio, so
+        // the threshold is not a tuned constant sitting between two close
+        // numbers — anything in [0.02, 0.5] separates them identically.
+        //
+        // 0.10 caps the downside: the index can cost at most a tenth of the
+        // bytes it might remove, against an upside of nearly all of them. It
+        // NEVER changes the answer — only whether we spend on the index — so
+        // no correctness argument rides on the value.
+        const int64_t index_bytes = hi - lo;
+        int64_t projected_bytes = 0;
+        for (const auto& cs : item.column_stats)
+            if (cs.total_compressed_size > 0) projected_bytes += cs.total_compressed_size;
+        if (index_bytes > 0 &&
+            static_cast<double>(index_bytes) >
+                kPageIndexMaxCostRatio * static_cast<double>(projected_bytes)) {
+            page_index_gate_declines_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+
+        int64_t region_lo = 0;
+        auto region = page_index_region(item.path, lo, hi, region_lo);
+        auto at = [&](int64_t off, int32_t len) -> const uint8_t* {
+            if (off < region_lo ||
+                off + len > region_lo + static_cast<int64_t>(region->size())) {
+                throw std::runtime_error("page index range " + std::to_string(off) + "+" +
+                                         std::to_string(len) + " lies outside the fetched region");
+            }
+            return region->data() + (off - region_lo);
+        };
+
+        // 2. Offset indexes for every indexed scalar column (the jump plans need
+        // them all, not just the predicate columns), validated against the
+        // footer's chunk geometry. Row count comes from num_values, which for a
+        // scalar column IS the row count (nulls included); every scalar column
+        // of one row group must agree on it.
+        const std::vector<int64_t> base_offsets = compute_base_offsets(item);
+        std::vector<OffsetIndexData> oi(ncols);
+        std::vector<uint8_t> has_oi(ncols, 0);
+        int64_t num_rows = -1;
+        for (size_t i = 0; i < ncols; ++i) {
+            const ColumnStats& cs = item.column_stats[i];
+            if (!indexed(cs) || cs.max_repetition_level != 0) continue;
+            if (cs.num_values < 0) continue;
+            oi[i] = ParseOffsetIndex(at(cs.offset_index_offset, cs.offset_index_length),
+                                     static_cast<size_t>(cs.offset_index_length));
+            const auto& locs = oi[i].page_locations;
+            if (locs.empty() || locs.front().first_row_index != 0) {
+                throw std::runtime_error("page index: OffsetIndex for column '" + cs.name +
+                                         "' does not start at row 0");
+            }
+            const int64_t chunk_end = base_offsets[i] + cs.total_compressed_size;
+            for (const PageLocation& l : locs) {
+                if (l.offset < base_offsets[i] || l.offset + l.compressed_page_size > chunk_end) {
+                    throw std::runtime_error("page index: a page of column '" + cs.name +
+                                             "' lies outside its column chunk");
+                }
+            }
+            if (num_rows < 0) num_rows = cs.num_values;
+            else if (num_rows != cs.num_values) {
+                throw std::runtime_error("page index: scalar columns of row group " +
+                                         std::to_string(item.rg_idx) + " disagree on the row count");
+            }
+            if (locs.back().first_row_index >= num_rows) {
+                throw std::runtime_error("page index: OffsetIndex for column '" + cs.name +
+                                         "' lists a page beyond the row group's rows");
+            }
+            has_oi[i] = 1;
+        }
+        if (num_rows <= 0) return;
+
+        // 3. Per-page predicate test on each predicate column → row-group mask.
+        std::vector<uint8_t> mask(static_cast<size_t>(num_rows), 1);
+        bool any_pruned = false;
+        std::vector<uint8_t> keep;
+        for (size_t i = 0; i < ncols; ++i) {
+            if (!has_oi[i]) continue;
+            const ColumnStats& cs = item.column_stats[i];
+            auto pit = dict_preds_.find(cs.name);
+            if (pit == dict_preds_.end()) continue;
+            const ColumnIndexData ci = ParseColumnIndex(
+                at(cs.column_index_offset, cs.column_index_length),
+                static_cast<size_t>(cs.column_index_length));
+            const auto& locs = oi[i].page_locations;
+            const size_t pruned = EvaluatePagePredicate(
+                ci, locs.size(), pit->second.kind, &pit->second.int_vals,
+                &pit->second.str_vals, cs.physical_type,
+                StatsLogicalIsUnsigned(cs.logical_type), keep);
+            if (pruned == 0) continue;
+            any_pruned = true;
+            for (size_t p = 0; p < locs.size(); ++p) {
+                if (keep[p]) continue;
+                const int64_t r0 = locs[p].first_row_index;
+                const int64_t r1 = (p + 1 < locs.size()) ? locs[p + 1].first_row_index : num_rows;
+                std::fill(mask.begin() + r0, mask.begin() + r1, 0);
+            }
+        }
+        if (!any_pruned) return;
+
+        // 4. The mask is final: derive each indexed column's jump plan and the
+        // byte runs a remote fetch needs. A page is pruned for a column exactly
+        // when no row of its range survives — the same test the decoder's
+        // row-mask skip applies, decided here so the bytes can go unfetched.
+        pp.active = true;
+        pp.all_pruned = std::find(mask.begin(), mask.end(), uint8_t(1)) == mask.end();
+        pp.row_mask = std::move(mask);
+        pp.jump.resize(ncols);
+        pp.extents.resize(ncols);
+        for (size_t i = 0; i < ncols; ++i) {
+            if (!has_oi[i]) continue;
+            const ColumnStats& cs = item.column_stats[i];
+            const auto& locs = oi[i].page_locations;
+            const int64_t base = base_offsets[i];
+            const int64_t chunk_end = base + cs.total_compressed_size;
+            PageJumpPlan& jp = pp.jump[i];
+            auto& ex = pp.extents[i];
+            jp.page_offsets.reserve(locs.size());
+            jp.page_sizes.reserve(locs.size());
+            jp.page_rows.reserve(locs.size());
+            jp.pruned.reserve(locs.size());
+            // Everything before the first data page (the dictionary page) is
+            // always needed.
+            if (locs.front().offset > base) ex.emplace_back(base, locs.front().offset);
+            for (size_t p = 0; p < locs.size(); ++p) {
+                const int64_t r0 = locs[p].first_row_index;
+                const int64_t r1 = (p + 1 < locs.size()) ? locs[p + 1].first_row_index : num_rows;
+                const bool page_pruned =
+                    std::find(pp.row_mask.begin() + r0, pp.row_mask.begin() + r1, uint8_t(1)) ==
+                    pp.row_mask.begin() + r1;
+                jp.page_offsets.push_back(locs[p].offset - base);
+                jp.page_sizes.push_back(locs[p].compressed_page_size);
+                jp.page_rows.push_back(static_cast<int32_t>(r1 - r0));
+                jp.pruned.push_back(page_pruned ? 1 : 0);
+                if (page_pruned) {
+                    pp.pages_pruned += 1;
+                    pp.bytes_pruned += locs[p].compressed_page_size;
+                    continue;
+                }
+                const int64_t s = locs[p].offset, e = s + locs[p].compressed_page_size;
+                if (!ex.empty() && ex.back().second == s) ex.back().second = e;
+                else ex.emplace_back(s, e);
+            }
+            // Bytes after the last listed page (none, for a well-formed chunk)
+            // are kept rather than assumed absent.
+            const int64_t last_end = locs.back().offset + locs.back().compressed_page_size;
+            if (last_end < chunk_end) {
+                if (!ex.empty() && ex.back().second == last_end) ex.back().second = chunk_end;
+                else ex.emplace_back(last_end, chunk_end);
+            }
+        }
+        page_index_pages_pruned_.fetch_add(static_cast<uint64_t>(pp.pages_pruned),
+                                           std::memory_order_relaxed);
+        page_index_bytes_pruned_.fetch_add(static_cast<uint64_t>(pp.bytes_pruned),
+                                           std::memory_order_relaxed);
+        if (pp.all_pruned)
+            page_index_row_groups_pruned_.fetch_add(1, std::memory_order_relaxed);
+    }
+
     struct RemotePlan {
-        struct Group { int64_t start, end, useful; std::vector<size_t> cols; };
-        std::vector<int64_t> cstart, clen;
+        // One byte run to fetch. A column is one extent (its whole chunk) unless
+        // page pruning split it into the runs that survive.
+        struct Extent { int64_t start, end; size_t col; };
+        struct Group { int64_t start, end, useful; std::vector<size_t> extents; };
+        std::vector<int64_t> cstart, clen;   // per column: the chunk frame the decoder sees
+        std::vector<Extent>  extents;
         std::vector<Group>   groups;
     };
 
@@ -1848,36 +2225,50 @@ class ParquetIOPipeline {
         const size_t ncols = item.column_stats.size();
         plan.cstart.resize(ncols);
         plan.clen.resize(ncols);
-        std::vector<size_t> order(ncols);
+        const PagePrune& pp = item.page_prune;
         for (size_t i = 0; i < ncols; ++i) {
             plan.cstart[i] = base_offsets[i] - bloom_prefix[i];
             plan.clen[i]   = bloom_prefix[i] + item.column_stats[i].total_compressed_size;
-            order[i]       = i;
+            const bool sparse = pp.active && i < pp.extents.size() && !pp.extents[i].empty();
+            if (!sparse) {
+                plan.extents.push_back(RemotePlan::Extent{plan.cstart[i], plan.cstart[i] + plan.clen[i], i});
+                continue;
+            }
+            for (size_t k = 0; k < pp.extents[i].size(); ++k) {
+                int64_t st = pp.extents[i][k].first;
+                // The adjacent bloom filter rides in front of the chunk: it
+                // belongs to the first run, which starts at the chunk base.
+                if (k == 0) st = std::min(st, plan.cstart[i]);
+                plan.extents.push_back(RemotePlan::Extent{st, pp.extents[i][k].second, i});
+            }
         }
+        std::vector<size_t> order(plan.extents.size());
+        for (size_t i = 0; i < order.size(); ++i) order[i] = i;
         std::sort(order.begin(), order.end(),
-                  [&](size_t a, size_t b) { return plan.cstart[a] < plan.cstart[b]; });
+                  [&](size_t a, size_t b) { return plan.extents[a].start < plan.extents[b].start; });
 
         const int64_t max_bytes = coalesce_max_bytes_ > 0
             ? coalesce_max_bytes_ : std::numeric_limits<int64_t>::max();
-        for (size_t k = 0; k < ncols; ++k) {
-            const size_t  i = order[k];
-            const int64_t st = plan.cstart[i], e = plan.cstart[i] + plan.clen[i];
+        for (size_t k = 0; k < order.size(); ++k) {
+            const size_t  x = order[k];
+            const int64_t st = plan.extents[x].start, e = plan.extents[x].end;
+            const int64_t len = e - st;
             bool merged = false;
             if (!plan.groups.empty()) {
                 RemotePlan::Group& g = plan.groups.back();
                 const int64_t ne      = std::max(g.end, e);
                 const int64_t nspan   = ne - g.start;
-                const int64_t nuseful = g.useful + plan.clen[i];
+                const int64_t nuseful = g.useful + len;
                 const int64_t nwaste  = nspan - nuseful;
                 if (nspan <= max_bytes &&
                     static_cast<double>(nwaste) <=
                         coalesce_waste_ratio_ * static_cast<double>(nuseful)) {
-                    g.end = ne; g.useful = nuseful; g.cols.push_back(i);
+                    g.end = ne; g.useful = nuseful; g.extents.push_back(x);
                     merged = true;
                 }
             }
             if (!merged)
-                plan.groups.push_back(RemotePlan::Group{st, e, plan.clen[i], {i}});
+                plan.groups.push_back(RemotePlan::Group{st, e, len, {x}});
         }
         return plan;
     }
@@ -1981,10 +2372,36 @@ class ParquetIOPipeline {
     void run_one_pending() {
         WorkItem item;
         {
-            std::lock_guard<std::mutex> lk(queue_mutex_);
+            std::unique_lock<std::mutex> lk(queue_mutex_);
             if (pending_items_.empty()) return;
+            if (memory_budget_bytes_ > 0) {
+                // Memory admission: wait while what consumers will release is
+                // held AND this item would push the total over budget. Shutdown/
+                // cancel admit (the item bails at the top of decode and releases
+                // its charge); an empty queue means a helper took the item.
+                auto admissible = [this]() {
+                    if (pending_items_.empty()) return true;
+                    if (shutdown_.load(std::memory_order_relaxed) ||
+                        cancelled_.load(std::memory_order_relaxed)) return true;
+                    const int64_t held = held_decoded_.load(std::memory_order_relaxed);
+                    if (held == 0) return true;
+                    return held + held_prefetch_.load(std::memory_order_relaxed) +
+                           pending_items_.front().est_decoded_bytes <= memory_budget_bytes_;
+                };
+                if (!admissible()) {
+                    admission_waits_.fetch_add(1, std::memory_order_relaxed);
+                    const auto t0 = std::chrono::steady_clock::now();
+                    queue_cv_.wait(lk, admissible);
+                    admission_blocked_ns_.fetch_add(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - t0).count(),
+                        std::memory_order_relaxed);
+                }
+                if (pending_items_.empty()) return;
+            }
             item = std::move(pending_items_.front());
             pending_items_.pop_front();
+            claim_charge_locked(item);
         }
         decode_row_group(item);
     }
@@ -2012,10 +2429,44 @@ class ParquetIOPipeline {
             !path_is_local(item.path) && !item.column_stats.empty()) {
 #ifdef RUGO_ENABLE_HTTP
             try {
+                // Memory admission for the compressed bytes this fetch will hold
+                // until decode consumes them. Waits only while an EARLIER fetch's
+                // bytes are still pending a decode (see the ledger comment).
+                if (memory_budget_bytes_ > 0) {
+                    std::unique_lock<std::mutex> lk(queue_mutex_);
+                    auto admissible = [this, &item]() {
+                        if (shutdown_.load(std::memory_order_relaxed) ||
+                            cancelled_.load(std::memory_order_relaxed)) return true;
+                        const int64_t held = held_prefetch_.load(std::memory_order_relaxed);
+                        if (held == 0) return true;
+                        return held + held_decoded_.load(std::memory_order_relaxed) +
+                               item.est_compressed_bytes <= memory_budget_bytes_;
+                    };
+                    if (!admissible()) {
+                        admission_waits_.fetch_add(1, std::memory_order_relaxed);
+                        const auto t0 = std::chrono::steady_clock::now();
+                        queue_cv_.wait(lk, admissible);
+                        admission_blocked_ns_.fetch_add(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now() - t0).count(),
+                            std::memory_order_relaxed);
+                    }
+                    item.charged_compressed = item.est_compressed_bytes;
+                    ledger_charge(held_prefetch_, item.charged_compressed);
+                }
+                // Page pruning decides WHICH bytes to fetch, so it runs here,
+                // before the plan; decode reuses the memoised result.
+                compute_page_prune(item);
                 const auto base_offsets = compute_base_offsets(item);
                 const auto bloom_prefix = compute_bloom_prefix(item, base_offsets);
-                const RemotePlan plan = build_remote_plan(item, base_offsets, bloom_prefix);
-                item.prefetched = fetch_remote_groups(item, plan, &item.prefetch_ns);
+                if (item.page_prune.active && item.page_prune.all_pruned) {
+                    // Nothing survives: no bytes to buy. decode sees the same
+                    // verdict from the memoised plan and emits empty_filtered.
+                    item.prefetched.clear();
+                } else {
+                    const RemotePlan plan = build_remote_plan(item, base_offsets, bloom_prefix);
+                    item.prefetched = fetch_remote_groups(item, plan, &item.prefetch_ns);
+                }
                 item.prefetch_done = true;
             } catch (...) {
                 item.prefetched.clear();
@@ -2139,6 +2590,9 @@ class ParquetIOPipeline {
                 for (const auto& b : item.prefetched) nb += b.size();
                 prefetch_discarded_bytes_.fetch_add(nb, std::memory_order_relaxed);
             }
+            // Nothing was produced: both ledger charges come back here.
+            ledger_release(held_prefetch_, item.charged_compressed);
+            ledger_release(held_decoded_, item.charged_decoded);
             pending_work_--;
             queue_cv_.notify_one();
             return;
@@ -2159,6 +2613,7 @@ class ParquetIOPipeline {
         result.column_names = item.column_names;
         result.free_fn = pool_sink_.draken_free;   // owns abandoned direct buffers
         result.success = true;
+        result.charged_bytes = item.charged_decoded;   // released by the consumer's pop
 
         uint64_t total_read_ns = 0;
         uint64_t total_decode_ns = 0;
@@ -2240,9 +2695,6 @@ class ParquetIOPipeline {
                 std::chrono::steady_clock::now() - t_map).count();
         }
 
-        // Precompute mask pointer once — shared across all columns in this row group.
-        const uint8_t* mask_ptr = item.row_mask.empty() ? nullptr : item.row_mask.data();
-
         // Per-column base offset and bloom prefix. Computed once here and reused
         // for both the remote batch request and the in-loop chunk slicing — via
         // the same helpers the fetch-ahead stage uses, so the two stages cannot
@@ -2266,10 +2718,31 @@ class ParquetIOPipeline {
         std::vector<std::vector<uint8_t>> remote_buffers;
         std::vector<const uint8_t*>       col_ptr;
         std::vector<size_t>               col_len;
+        // Page pruning: a column whose surviving pages arrive as several runs is
+        // reassembled into one chunk-sized buffer (unfetched pages stay zero
+        // holes the decoder jumps over); a column fetched whole keeps the
+        // zero-copy slice into its group buffer.
+        std::vector<std::vector<uint8_t>> assembled;
+        std::vector<int64_t>              col_fetched;   // bytes actually transferred per column
 
         try {
+            // PageIndex page pruning — memoised on the item, so on the fetch-ahead
+            // path this is the fetch stage's result and no work happens here.
+            compute_page_prune(item);
+            const PagePrune& pp = item.page_prune;
+            // A pass-2 mask (item.row_mask) is exact and wins outright; page
+            // pruning only ever runs on an unmasked item (compute_page_prune).
+            const uint8_t* mask_ptr = !item.row_mask.empty() ? item.row_mask.data()
+                                    : (pp.active ? pp.row_mask.data() : nullptr);
+            // Every page of every predicate column pruned: no row survives, so
+            // the row group is empty_filtered exactly like a dictionary miss —
+            // no fetch, no decode, the consumer skips it.
+            if (pp.active && pp.all_pruned) {
+                result.empty_filtered = true;
+                result.empty_rows = static_cast<int64_t>(pp.row_mask.size());
+            }
 #ifdef RUGO_ENABLE_HTTP
-            if (remote && !item.column_stats.empty()) {
+            if (remote && !item.column_stats.empty() && !result.empty_filtered) {
                 const size_t ncols = item.column_stats.size();
                 const RemotePlan plan =
                     build_remote_plan(item, base_offsets, bloom_prefix);
@@ -2289,21 +2762,59 @@ class ParquetIOPipeline {
                     remote_buffers = fetch_remote_groups(item, plan, &total_read_ns);
                 }
 
-                // Point each column at its slice of whichever group buffer it
-                // landed in. A short/missing buffer leaves the column's view null
-                // and is caught at the decode site — never silently decoded from
-                // the wrong offset.
+                // Point each column at its bytes. A column fetched as ONE extent
+                // is a zero-copy slice of its group buffer; one fetched as several
+                // runs is reassembled into a chunk-sized buffer at each run's own
+                // offset. A short/missing buffer for ANY of a column's runs leaves
+                // the column's view null and is caught at the decode site — a
+                // half-assembled buffer would read a zero hole as end-of-column,
+                // never an error, so it must not reach the decoder.
                 col_ptr.assign(ncols, nullptr);
                 col_len.assign(ncols, 0);
+                col_fetched.assign(ncols, 0);
+                assembled.assign(ncols, {});
+                std::vector<int>     n_ext(ncols, 0);
+                std::vector<int>     n_ok(ncols, 0);
+                // Zero-copy is only sound when the column's ONE extent is the
+                // whole chunk frame: the decoder's offsets (and a jump plan's)
+                // are relative to cstart, so a single surviving RUN that starts
+                // later must still be placed at its own offset in an assembled
+                // buffer, never handed over as if it began the chunk.
+                std::vector<uint8_t> whole(ncols, 0);
+                for (const auto& e : plan.extents) ++n_ext[e.col];
+                for (const auto& e : plan.extents) {
+                    if (n_ext[e.col] == 1 && e.start == plan.cstart[e.col] &&
+                        e.end == plan.cstart[e.col] + plan.clen[e.col])
+                        whole[e.col] = 1;
+                }
                 for (size_t gi = 0; gi < plan.groups.size() && gi < remote_buffers.size(); ++gi) {
                     const RemotePlan::Group& g = plan.groups[gi];
                     const std::vector<uint8_t>& buf = remote_buffers[gi];
-                    for (size_t i : g.cols) {
-                        const size_t off = static_cast<size_t>(plan.cstart[i] - g.start);
-                        if (off + static_cast<size_t>(plan.clen[i]) <= buf.size()) {
-                            col_ptr[i] = buf.data() + off;
-                            col_len[i] = static_cast<size_t>(plan.clen[i]);
+                    for (size_t xi : g.extents) {
+                        const RemotePlan::Extent& e = plan.extents[xi];
+                        const size_t off = static_cast<size_t>(e.start - g.start);
+                        const size_t len = static_cast<size_t>(e.end - e.start);
+                        if (off + len > buf.size()) continue;   // short: column stays null
+                        ++n_ok[e.col];
+                        col_fetched[e.col] += static_cast<int64_t>(len);
+                        if (whole[e.col]) {
+                            col_ptr[e.col] = buf.data() + off;
+                            col_len[e.col] = len;
+                        } else {
+                            auto& a = assembled[e.col];
+                            if (a.empty()) a.assign(static_cast<size_t>(plan.clen[e.col]), 0);
+                            std::memcpy(a.data() + static_cast<size_t>(e.start - plan.cstart[e.col]),
+                                        buf.data() + off, len);
                         }
+                    }
+                }
+                for (size_t i = 0; i < ncols; ++i) {
+                    if (!whole[i] && n_ok[i] == n_ext[i] && !assembled[i].empty()) {
+                        col_ptr[i] = assembled[i].data();
+                        col_len[i] = assembled[i].size();
+                    } else if (n_ok[i] != n_ext[i]) {
+                        col_ptr[i] = nullptr;
+                        col_len[i] = 0;
                     }
                 }
             }
@@ -2314,8 +2825,11 @@ class ParquetIOPipeline {
             // decode stops re-mallocing the DecodedColumn's ~25 buffers. Function-
             // local → one per worker invocation, no cross-thread sharing.
             DecodedColumn scratch;
-            for (size_t i = 0; i < item.column_stats.size(); ++i) {
+            for (size_t i = 0; i < item.column_stats.size() && !result.empty_filtered; ++i) {
                 const auto& col_stats = item.column_stats[i];
+                // PageIndex jump plan for this column (nullptr = header-walk).
+                const PageJumpPlan* jump_ptr =
+                    (pp.active && i < pp.jump.size() && pp.jump[i].size() > 0) ? &pp.jump[i] : nullptr;
 
                 int64_t base_offset = base_offsets[i];
                 int64_t chunk_size = col_stats.total_compressed_size;
@@ -2354,8 +2868,10 @@ class ParquetIOPipeline {
                 // (draken_vector_from_dict, DRAKEN_DECIMAL); trampoline scan ->
                 // INT64 dict vector + vector_reinterpret_as_decimal, which is
                 // shape-preserving and retags dict->dict.
+                // Armed under a row_mask too (pass-2, page pruning): the decoder
+                // compacts the codes to the survivors and the column stays
+                // Dict-shaped — see DecodeColumnFromChunk's contract in decode.hpp.
                 const bool prefer_dict =
-                    (mask_ptr == nullptr) &&
                     col_stats.dictionary_page_offset >= 0 &&
                     (((pt == "int64" || pt == "int32") &&
                       (cl.empty() || cl == "int64" || cl == "int32" ||
@@ -2368,9 +2884,17 @@ class ParquetIOPipeline {
                 // (if any). Independent of prefer_dict — the probe only needs the
                 // dictionary (decoded before any data page), not the dict-shaped
                 // surviving representation.
+                //
+                // Armed only when the CALLER supplied no mask. A page-pruned row
+                // group qualifies (its mask is derived here, item.row_mask stays
+                // empty) and wants the probe. A pass-2 late-materialization item
+                // does not: its rows already matched the predicate, so the probe
+                // could only ever agree — and leaving it off keeps the pass-2
+                // consumer's "a masked submit never comes back empty" invariant
+                // exactly as strong as it was.
                 DictSkipPredicate skip;
                 const DictSkipPredicate* skip_ptr = nullptr;
-                if (mask_ptr == nullptr && !dict_preds_.empty()) {
+                if (item.row_mask.empty() && !dict_preds_.empty()) {
                     auto nit = dict_preds_.find(col_stats.name);
                     if (nit != dict_preds_.end()) {
                         skip.kind = nit->second.kind;
@@ -2407,10 +2931,12 @@ class ParquetIOPipeline {
                         static_cast<const uint8_t*>(mmap_base) + (base_offset - mmap_offset);
                     auto t_dec = std::chrono::steady_clock::now();
                     DecodeColumnFromChunk(scratch,
-                        chunk_ptr, static_cast<size_t>(chunk_size), &adjusted, mask_ptr, prefer_dict, skip_ptr);
+                        chunk_ptr, static_cast<size_t>(chunk_size), &adjusted, mask_ptr, prefer_dict, skip_ptr, jump_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
-                    result.bytes_fetched += chunk_size;
+                    // A jumped-over page is never faulted in from the mapping.
+                    result.bytes_fetched += chunk_size -
+                        (jump_ptr != nullptr ? pruned_bytes_of(*jump_ptr) : 0);
                 } else if (remote) {
                     // Batch-prefetched above: decode straight from the buffer.
                     // When bloom_prefix[i] > 0 the buffer carries the column's
@@ -2424,7 +2950,7 @@ class ParquetIOPipeline {
                     const uint8_t* raw_data = col_ptr[i];
                     const size_t   raw_size = col_len[i];
                     const size_t bpre = static_cast<size_t>(bloom_prefix[i]);
-                    result.bytes_fetched += chunk_size + static_cast<int64_t>(bpre);
+                    result.bytes_fetched += col_fetched[i];   // what was actually transferred
                     // Bloom decode-skip: the adjacent bloom proves this row group
                     // holds none of the pushed needles → zero surviving rows.
                     // Skip decode of this and the remaining columns, exactly like
@@ -2440,7 +2966,7 @@ class ParquetIOPipeline {
                     }
                     auto t_dec = std::chrono::steady_clock::now();
                     DecodeColumnFromChunk(scratch,
-                        raw_data + bpre, raw_size - bpre, &adjusted, mask_ptr, prefer_dict, skip_ptr);
+                        raw_data + bpre, raw_size - bpre, &adjusted, mask_ptr, prefer_dict, skip_ptr, jump_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                 } else {
@@ -2451,7 +2977,7 @@ class ParquetIOPipeline {
                     total_read_ns += read_ns;
                     auto t_dec = std::chrono::steady_clock::now();
                     DecodeColumnFromChunk(scratch,
-                        raw_bytes.data(), raw_bytes.size(), &adjusted, mask_ptr, prefer_dict, skip_ptr);
+                        raw_bytes.data(), raw_bytes.size(), &adjusted, mask_ptr, prefer_dict, skip_ptr, jump_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                 }
@@ -2640,6 +3166,13 @@ class ParquetIOPipeline {
         if (per_rg_mapped)
             munmap(mmap_base, mmap_len);
 
+        // The compressed bytes (prefetched or fetched above) are dead once this
+        // scope ends; release their charge now so a waiting fetch can proceed.
+        remote_buffers.clear();
+        assembled.clear();
+        ledger_release(held_prefetch_, item.charged_compressed);
+        item.charged_compressed = 0;
+
         result.read_ns = total_read_ns;
         result.decode_ns = total_decode_ns;
         // Accrue this row group's transferred bytes onto the pipeline. Done here,
@@ -2718,10 +3251,21 @@ class ParquetIOPipeline {
                 while (sz > prev &&
                        !queue_high_watermark_.compare_exchange_weak(
                            prev, sz, std::memory_order_relaxed)) {}
+            } else {
+                // Dropped: nobody will pop it, so its decoded charge comes back
+                // here instead (the release is a no-op when the budget is off).
+                held_decoded_.fetch_sub(result.charged_bytes, std::memory_order_relaxed);
             }
         }
         pending_work_--;
-        queue_cv_.notify_one();
+        if (memory_budget_bytes_ > 0) queue_cv_.notify_all();
+        else queue_cv_.notify_one();
+    }
+
+    static int64_t pruned_bytes_of(const PageJumpPlan& jp) {
+        int64_t n = 0;
+        for (size_t p = 0; p < jp.size(); ++p) if (jp.pruned[p]) n += jp.page_sizes[p];
+        return n;
     }
 
  public:
@@ -2806,6 +3350,18 @@ class ParquetIOPipeline {
             throw std::logic_error("set_fetch_ahead: called after work was submitted");
         fetch_ahead_ = depth;
         fetch_pool_ = std::make_unique<BS::thread_pool<BS::tp::priority>>(depth);
+    }
+
+    // Memory admission budget in bytes (0 = off). Set once at plan time, before
+    // any submit — the claim/admission paths read it unsynchronised on that
+    // promise, exactly like set_fetch_ahead. The read-back is memory_budget_bytes().
+    void set_memory_budget(int64_t bytes) {
+        if (bytes < 0) throw std::invalid_argument(
+            "set_memory_budget: bytes must be >= 0 (got " + std::to_string(bytes) + ")");
+        if (pending_work_.load(std::memory_order_relaxed) != 0 ||
+            enqueue_count_.load(std::memory_order_relaxed) != 0)
+            throw std::logic_error("set_memory_budget: called after work was submitted");
+        memory_budget_bytes_ = bytes;
     }
     // Primitive-args overload: Cython declares HttpTuning-by-struct awkwardly
     // (it's a plain C++ aggregate, not exposed to Python), so the binding calls
@@ -2931,6 +3487,8 @@ class ParquetIOPipeline {
         item.rg_idx = rg_idx;
         item.column_names = column_names;
         item.column_stats = column_stats;
+        item.est_decoded_bytes = sum_column_bytes(column_stats, false);
+        item.est_compressed_bytes = sum_column_bytes(column_stats, true);
         enqueue_pending(std::move(item));
     }
 
@@ -2951,6 +3509,8 @@ class ParquetIOPipeline {
         item.column_names = column_names;
         item.column_stats = column_stats;
         item.row_mask = row_mask;
+        item.est_decoded_bytes = sum_column_bytes(column_stats, false);
+        item.est_compressed_bytes = sum_column_bytes(column_stats, true);
         enqueue_pending(std::move(item));
     }
 
@@ -2959,8 +3519,22 @@ class ParquetIOPipeline {
         if (result_queue_.empty()) return false;
         out = std::move(result_queue_.front());
         result_queue_.pop_front();
-        queue_cv_.notify_one();  // wake a blocked producer if queue was full
+        pop_release_locked(out);
         return true;
+    }
+
+    // Under queue_mutex_: a popped result gives its decoded charge back and
+    // wakes whoever is blocked — a back-pressured producer (queue was full) or,
+    // with a budget, every admission waiter (notify_all: waiters have different
+    // thresholds, and the one woken by notify_one may not be the one that fits).
+    void pop_release_locked(MorselRef& out) {
+        if (memory_budget_bytes_ > 0) {
+            held_decoded_.fetch_sub(out.charged_bytes, std::memory_order_relaxed);
+            out.charged_bytes = 0;
+            queue_cv_.notify_all();
+        } else {
+            queue_cv_.notify_one();
+        }
     }
 
     /**
@@ -2974,7 +3548,7 @@ class ParquetIOPipeline {
             if (!result_queue_.empty()) {
                 out = std::move(result_queue_.front());
                 result_queue_.pop_front();
-                queue_cv_.notify_one();  // wake a blocked producer if queue was full
+                pop_release_locked(out);
                 return true;
             }
             if (shutdown_.load(std::memory_order_relaxed)) {
@@ -2990,6 +3564,9 @@ class ParquetIOPipeline {
             if (!pending_items_.empty()) {
                 WorkItem item = std::move(pending_items_.front());
                 pending_items_.pop_front();
+                // The consumer IS the drain: it never waits on admission, but it
+                // still charges so the release at its own pop stays balanced.
+                claim_charge_locked(item);
                 inline_decodes_.fetch_add(1, std::memory_order_relaxed);
                 lk.unlock();
                 decode_row_group(item);  // does its own queue_mutex_ locking + notify
@@ -3070,6 +3647,47 @@ class ParquetIOPipeline {
     int fetch_ahead_depth() const { return fetch_ahead_; }
     uint64_t prefetch_discarded_bytes() const {
         return prefetch_discarded_bytes_.load(std::memory_order_relaxed);
+    }
+
+    // Memory admission read-backs: the budget this pipeline actually runs (0 =
+    // off), the peak of both ledgers together, and how often / how long a
+    // ticket waited at the gate.
+    int64_t memory_budget_bytes() const { return memory_budget_bytes_; }
+    int64_t memory_held_high_watermark() const {
+        return held_high_watermark_.load(std::memory_order_relaxed);
+    }
+    uint64_t admission_blocked_ns() const {
+        return admission_blocked_ns_.load(std::memory_order_relaxed);
+    }
+    uint64_t admission_waits() const {
+        return admission_waits_.load(std::memory_order_relaxed);
+    }
+
+    // PageIndex page pruning read-backs. pages/bytes count every projected
+    // column's pruned pages (header + payload); row_groups counts the ones
+    // where nothing survived at all; fetches/bytes_fetched are the index-region
+    // reads themselves (one per file, widened at most once).
+    uint64_t page_index_pages_pruned() const {
+        return page_index_pages_pruned_.load(std::memory_order_relaxed);
+    }
+    uint64_t page_index_bytes_pruned() const {
+        return page_index_bytes_pruned_.load(std::memory_order_relaxed);
+    }
+    uint64_t page_index_row_groups_pruned() const {
+        return page_index_row_groups_pruned_.load(std::memory_order_relaxed);
+    }
+    uint64_t page_index_fetches() const {
+        return page_index_fetches_.load(std::memory_order_relaxed);
+    }
+    uint64_t page_index_bytes_fetched() const {
+        return page_index_bytes_fetched_.load(std::memory_order_relaxed);
+    }
+    // Row groups where the index was NOT read because it would have cost more
+    // than a tenth of the bytes it could remove (see the cost gate). A scan
+    // reporting 0 pages pruned AND 0 declines had no page index to read at all;
+    // one reporting declines chose not to look, which is a different thing.
+    uint64_t page_index_gate_declines() const {
+        return page_index_gate_declines_.load(std::memory_order_relaxed);
     }
 
     int pending_work_count() const {

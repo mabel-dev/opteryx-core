@@ -22,6 +22,15 @@ and translate the optimizer's pushed predicates / LIMIT / top-N / aggregate /
 DISTINCT into the scan statement with `$n` bind parameters (never interpolated
 literals).
 
+A predicate does NOT arrive spelled the way it was written: PredicateRewriteStrategy
+lowers `col LIKE 'x%'` to `_STARTS_WITH(col, b'x')`, `'%x'` to `_ENDS_WITH`, `'%x%'`
+to an `InStr` comparison, and negations of those to a NOT wrapping one. The renderer
+recognises each and spells it back as `col LIKE $1` with the pattern escaped, because
+the alternative is a table streamed in full to be filtered locally. `IN (...)` is
+pushed as `col IN ($1, $2, ...)` from the one literal node holding the members. The
+case-insensitive lowerings (ILIKE's `_CI_*` / `IInStr`) are NOT pushed: the server
+folds case by its locale and the engine folds it its own way.
+
 Every pushed shape is rendered with the ENGINE's semantics spelled out where
 PostgreSQL's defaults differ: NULLS FIRST under ASC and NULLS LAST under DESC
 (draken sorts NULL below every value), `COLLATE "C"` on text sort keys and text
@@ -64,7 +73,7 @@ from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import NotSupportedError
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.expression import NodeType, get_all_nodes_of_type
+from opteryx.expression import Node, NodeType, get_all_nodes_of_type
 from opteryx.models import QueryTelemetry
 from opteryx.types import logical_type as _lt
 from opteryx.types.logical_type import ColumnType, DrakenType, LogicalCategory, LogicalKind
@@ -313,6 +322,13 @@ class PostgresTable(
 
     # Translated to `column <op> $n`; each op has identical semantics on both
     # sides (Opteryx LIKE is case-sensitive, as PostgreSQL's is).
+    #
+    # `InStr`/`NotInStr` are what PredicateRewriteStrategy lowers an UNANCHORED
+    # `LIKE '%x%'` to before this gate ever sees it, so they are the same
+    # predicate as `Like`/`NotLike` and are spelled back as one. The
+    # case-insensitive twins (`IInStr`/`NotIInStr`, from ILIKE) stay OFF for the
+    # reason `ILike` itself is absent: the server folds case by its own locale
+    # and the engine folds it its way, so the two disagree on non-ASCII text.
     PUSHABLE_OPS = {
         "Eq": True,
         "NotEq": True,
@@ -322,6 +338,10 @@ class PostgresTable(
         "LtEq": True,
         "Like": True,
         "NotLike": True,
+        "InStr": True,
+        "NotInStr": True,
+        "InList": True,
+        "NotInList": True,
         "Between": True,
         "IsNull": True,
         "IsNotNull": True,
@@ -708,35 +728,52 @@ class PostgresTable(
     # ---- pushdown -----------------------------------------------------------
 
     def can_push(self, operator, types: set = None) -> bool:
-        if not PredicatePushable.can_push(self, operator, types):
-            return False
         condition = operator.condition
-        # The base gate admits a boolean-rooted FUNCTION (LIKE lowers to one, e.g.
-        # _STARTS_WITH). This connector translates predicates into SQL text and
-        # has no translation for a function call, so those stay as a Filter above
-        # the scan — a missed pushdown, never a failed query.
-        if get_all_nodes_of_type(condition, (NodeType.FUNCTION,)):
+        # A NOT root is refused by the base gate - its node-type allowlist is the
+        # set a generic reader can lower, and NOT is not in it. This connector
+        # emits SQL text, where `NOT (...)` is just SQL, and the shape matters:
+        # `col NOT LIKE 'x%'` is lowered by PredicateRewriteStrategy to a NOT
+        # wrapping a _STARTS_WITH, so refusing NOT here would push every anchored
+        # LIKE and strand every negation of one. The base gate is asked about what
+        # the NOT wraps; `_predicate_sql` puts the NOT back.
+        gate_operator = operator
+        if condition.node_type == NodeType.NOT:
+            if condition.centre is None:
+                return False
+            gate_operator = Node(node_type=NodeType.UNKNOWN, condition=condition.centre)
+        if not PredicatePushable.can_push(self, gate_operator, types):
             return False
         # BETWEEN is pushed only in its closed form; an open bound would need a
         # different SQL shape than `BETWEEN`, so decline rather than mistranslate.
         if condition.node_type == NodeType.BETWEEN and condition.value not in (None, (True, True)):
             return False
-        # Every identifier must be one of this relation's own columns.
+        # Every identifier must be one of this relation's own columns. This runs
+        # BEFORE the trial render below, because `pg_name` resolves through
+        # `_meta` and a foreign column has no entry to resolve.
         for node in get_all_nodes_of_type(condition, (NodeType.IDENTIFIER,)):
             if node.schema_column.name.lower() not in self._meta:
                 return False
-        # Every literal must be spellable as a PostgreSQL bind parameter. The
-        # builder has no fallback - a predicate admitted here and then refused by
-        # `_literal_text` is a failed query, not a missed pushdown - so the gate
-        # asks the renderer itself rather than restating what it can spell.
-        for node in get_all_nodes_of_type(condition, (NodeType.LITERAL,)):
-            if _render_literal(node) is _UNRENDERABLE:
-                return False
-        return True
+        # The renderer IS the gate. The builder has no fallback - a predicate
+        # admitted here and then refused there is a failed query, not a missed
+        # pushdown - so rather than restate what can be spelled (a restatement
+        # that drifts: the base gate admits boolean-rooted FUNCTIONs, of which
+        # only the LIKE-lowered ones have a spelling), the question is put to
+        # `_predicate_sql` itself and its answer is the answer. The parameter list
+        # is a throwaway: nothing else here is mutated by a render.
+        return _predicate_sql(self, condition, []) is not _UNRENDERABLE
 
     def _is_own_column(self, node) -> bool:
         """A plain IDENTIFIER bound to one of this relation's own columns, of a
-        type the statement builder can render (PUSHABLE_TYPES)."""
+        type the statement builder can render (PUSHABLE_TYPES) whose values mean
+        the same thing to the server as they do to the engine.
+
+        This is THE place `char(n)` is excluded, and with it every shape built on
+        this test: a top-N key, a GROUP BY key, a DISTINCT column, an aggregate
+        operand, a pushed LIKE and a pushed IN-list. See `_blank_padded` for why.
+        Declining here also declines `count(char_column)`, which would in fact be
+        safe - counting non-nulls reads no value - but one gate that is always
+        right beats a second, narrower one that has to stay in step with it.
+        """
         if node is None or node.node_type != NodeType.IDENTIFIER:
             return False
         schema_column = node.schema_column
@@ -744,7 +781,9 @@ class PostgresTable(
             return False
         if schema_column.name.lower() not in self._meta:
             return False
-        return schema_column.category in self.PUSHABLE_TYPES
+        if schema_column.category not in self.PUSHABLE_TYPES:
+            return False
+        return not _blank_padded(self, node)
 
     def can_push_topn(self, order_by) -> bool:
         """Any number of keys, each a plain column of this relation. NULL order
@@ -829,6 +868,24 @@ _UNARY_SQL = {
     "IsNotNull": "IS NOT NULL",
 }
 
+# The FUNCTION nodes PredicateRewriteStrategy lowers an ANCHORED LIKE into,
+# mapped to which end of the pattern the anchor was on. `col LIKE 'x%'` never
+# reaches a connector as a LIKE - it arrives as `_STARTS_WITH(col, b'x')` (and
+# its negation as NOT over that) - so this table is how the LIKE is recognised
+# and spelled back. The `_CI_` twins that ILIKE lowers to are deliberately
+# absent: see PUSHABLE_OPS.
+_LIKE_FUNCTIONS = {
+    "_STARTS_WITH": "prefix",
+    "_ENDS_WITH": "suffix",
+}
+
+# Longest IN-list pushed as `IN ($1, ..., $n)`. The wire client refuses a
+# statement with more than 32767 bind parameters, so an uncapped list would let
+# the gate admit a predicate that fails at execution instead of one that filters
+# locally. 1024 keeps 32 such predicates inside that ceiling, and a longer list
+# is a set the server would scan linearly anyway.
+_MAX_IN_LIST = 1024
+
 
 # `_render_literal` returns this for a literal it cannot spell as PostgreSQL
 # input syntax. It is a value, not an exception, because `can_push` has to ask
@@ -850,17 +907,28 @@ def _pg_input_syntax(text: str) -> Any:
 
 def _render_literal(node) -> Any:
     """A bound LITERAL node as a TEXT bind parameter, `None` for NULL, or
-    `_UNRENDERABLE`.
+    `_UNRENDERABLE`."""
+    return _render_value(node.value, node.type)
+
+
+def _render_value(value, column_type) -> Any:
+    """One value of a known ColumnType as a TEXT bind parameter, `None` for NULL,
+    or `_UNRENDERABLE`.
 
     The server casts the parameter to the column's type, so this is the
     literal's input-syntax form, never SQL.
 
-    Dispatch is on the literal's TYPE TAG, never on the Python type of its
-    value. A temporal literal reaches the connector as its PHYSICAL storage
-    integer - DATE32 is days since the epoch, TIMESTAMP64 microseconds - so the
-    `10470` of `CAST('1998-09-01' AS DATE)` is indistinguishable from the
-    integer 10470, and only `node.type` tells them apart. Rendering from the
-    value alone sent '10470' to the server as a date.
+    Dispatch is on the TYPE TAG, never on the Python type of the value. A
+    temporal literal reaches the connector as its PHYSICAL storage integer -
+    DATE32 is days since the epoch, TIMESTAMP64 microseconds - so the `10470` of
+    `CAST('1998-09-01' AS DATE)` is indistinguishable from the integer 10470,
+    and only the type tells them apart. Rendering from the value alone sent
+    '10470' to the server as a date.
+
+    Value and type are separate arguments rather than a node because an IN-list
+    is ONE literal node holding many values under a single `ARRAY<element>` type:
+    its members are rendered from `element`, which is the same dispatch and must
+    stay the same code.
 
     The days/microseconds renderings come from `opteryx.expression.formatter`,
     the engine's own literal formatters, so a pushed bound is spelled exactly as
@@ -869,13 +937,11 @@ def _render_literal(node) -> Any:
     from opteryx.expression.formatter import _format_date_days
     from opteryx.expression.formatter import _format_timestamp_micros
 
-    column_type = node.type
     if not isinstance(column_type, ColumnType):
         # An unbound or synthetic literal carries no type, and an untagged
         # integer cannot be told from an epoch day count.
         return _UNRENDERABLE
 
-    value = node.value
     physical = column_type.physical
     if value is None or physical == DrakenType.NULL:
         return None
@@ -905,47 +971,221 @@ def _render_literal(node) -> Any:
     return _UNRENDERABLE
 
 
-def _literal_text(node) -> Optional[str]:
-    """`_render_literal`, raising rather than returning the sentinel."""
-    text = _render_literal(node)
-    if text is _UNRENDERABLE:
-        raise NotSupportedError(
-            f"cannot push a {node.type} literal ({node.value!r}) into a PostgreSQL scan"
-        )
-    return text
+def _add_param(params: List[Optional[str]], text: Optional[str]) -> str:
+    """Bind `text` as the next `$n` and return that placeholder."""
+    params.append(text)
+    return f"${len(params)}"
 
 
-def _operand_sql(table: PostgresTable, node, params: List[Optional[str]]) -> str:
+def _operand_sql(table: PostgresTable, node, params: List[Optional[str]]) -> Any:
+    """An IDENTIFIER or LITERAL operand as SQL, or `_UNRENDERABLE`.
+
+    No `char(n)` test here: this renders an operand whatever the surrounding
+    predicate does with it, and `IS NULL` reads no value, so a blank-padded
+    column is perfectly safe under it. The shapes that DO read the value go
+    through `_value_operand_sql`.
+    """
     if node.node_type == NodeType.IDENTIFIER:
         return _quote_identifier(table.pg_name(node.schema_column))
     if node.node_type == NodeType.LITERAL:
-        params.append(_literal_text(node))
-        return f"${len(params)}"
-    raise NotSupportedError(f"cannot push a {node.node_type} operand into a PostgreSQL scan")
+        text = _render_literal(node)
+        if text is _UNRENDERABLE:
+            return _UNRENDERABLE
+        return _add_param(params, text)
+    return _UNRENDERABLE
 
 
-def _predicate_sql(table: PostgresTable, node, params: List[Optional[str]]) -> str:
+def _value_operand_sql(table: PostgresTable, node, params: List[Optional[str]]) -> Any:
+    """`_operand_sql` for a position whose answer depends on the operand's VALUE
+    (a comparison side, a BETWEEN bound). Declines a `char(n)` column."""
+    if _blank_padded(table, node):
+        return _UNRENDERABLE
+    return _operand_sql(table, node, params)
+
+
+def _blank_padded(table: PostgresTable, node) -> bool:
+    """Is this operand a `char(n)` column?
+
+    PostgreSQL reads a `char(n)`'s value with its trailing blanks REMOVED -
+    `bpchareq` and friends ignore them, `~~` casts to text first, and so do
+    ordering, grouping and DISTINCT - while the scan hands the engine the padded
+    value the column actually holds. So `'ab  '::char(4) = 'ab'` is TRUE on the
+    server and false in the engine, `LIKE '%b'` likewise, and a GROUP BY folds
+    together two values the engine keeps apart.
+
+    That makes every value-reading shape over such a column a wrong ANSWER, not a
+    slow one, so all of them decline it. The scan still reads and returns the
+    column; only pushing work about its value down is refused.
+    """
+    if node is None or node.node_type != NodeType.IDENTIFIER:
+        return False
+    schema_column = node.schema_column
+    if schema_column is None or schema_column.name is None:
+        return False
+    if schema_column.name.lower() not in table._meta:
+        return False
+    return table.column_oid(schema_column) == _OID_BPCHAR
+
+
+def _like_escape(text: str) -> str:
+    """A literal string as a LIKE pattern body matching itself and nothing else.
+
+    `%`, `_` and the escape character itself are the only characters LIKE reads,
+    and backslash is LIKE's default escape (no `ESCAPE` clause needed, and none
+    written: the pattern travels as a bind parameter, so `standard_conforming_
+    strings` - which governs how the SERVER parses a string literal - never
+    touches it).
+
+    The bodies that reach here carry no `%` or `_` today: PredicateRewriteStrategy
+    only lowers a LIKE to these shapes when the pattern has none besides its
+    anchor. They are escaped anyway because the escaping has to be right for the
+    body it is given, not for the body today's caller happens to pass.
+    """
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _like_pattern_text(node) -> Any:
+    """The pattern body of a lowered LIKE as `str`, or `_UNRENDERABLE`.
+
+    The two lowerings spell it differently and both are read here: a
+    `_STARTS_WITH`/`_ENDS_WITH` parameter is `bytes` tagged VARBINARY, an
+    `InStr` operand is `str` tagged VARCHAR.
+    """
+    if node is None or node.node_type != NodeType.LITERAL:
+        return _UNRENDERABLE
+    value = node.value
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    if isinstance(value, str):
+        return value
+    return _UNRENDERABLE
+
+
+def _like_sql(table: PostgresTable, column_node, pattern_node, shape: str,
+              params: List[Optional[str]]) -> Any:
+    """`column LIKE $n` for one of the LIKE shapes the optimizer lowered.
+
+    `shape` is 'prefix', 'suffix' or 'infix' - the three the rewriter produces
+    from `'x%'`, `'%x'` and `'%x%'`. The pattern is rebuilt here rather than
+    recovered, because by this point the original spelling is gone.
+    """
+    if not table._is_own_column(column_node):
+        return _UNRENDERABLE
+    body = _like_pattern_text(pattern_node)
+    if body is _UNRENDERABLE:
+        return _UNRENDERABLE
+    escaped = _like_escape(body)
+    pattern = {"prefix": escaped + "%", "suffix": "%" + escaped, "infix": "%" + escaped + "%"}[shape]
+    column = _quote_identifier(table.pg_name(column_node.schema_column))
+    return f"{column} LIKE {_add_param(params, pattern)}"
+
+
+def _in_list_sql(table: PostgresTable, node, params: List[Optional[str]]) -> Any:
+    """`column IN ($a, $b, ...)` for an InList/NotInList comparison.
+
+    The members live in ONE literal node as a Python list under an
+    `ARRAY<element>` type, so each is rendered from `element` - the same
+    type-tag dispatch every other literal takes, which is what keeps a pushed
+    `d IN (DATE '1998-09-01')` from shipping its epoch-day integer.
+    """
+    column_node, list_node = node.left, node.right
+    if not table._is_own_column(column_node):
+        return _UNRENDERABLE
+    if list_node is None or list_node.node_type != NodeType.LITERAL:
+        return _UNRENDERABLE
+    array_type = list_node.type
+    if not isinstance(array_type, ColumnType) or array_type.element is None:
+        return _UNRENDERABLE
+    values = list_node.value
+    if not isinstance(values, (list, tuple, set)):
+        return _UNRENDERABLE
+    values = list(values)
+    # An empty list has no SQL (`IN ()` is a syntax error), and a list past the
+    # cap is declined so the gate cannot admit a statement the wire client then
+    # refuses: its ceiling is 32767 bind parameters for the WHOLE statement, and
+    # this leaves room for many such predicates in one.
+    if not values or len(values) > _MAX_IN_LIST:
+        return _UNRENDERABLE
+    placeholders = []
+    for value in values:
+        text = _render_value(value, array_type.element)
+        # A NULL member cannot be built today - the parser refuses an IN-list of
+        # mixed types and NULL is its own - and it is declined rather than
+        # spelled because `IN (NULL)` and `NOT IN (NULL)` are the two shapes
+        # whose three-valued answer would have to be re-derived if it ever could.
+        if text is _UNRENDERABLE or text is None:
+            return _UNRENDERABLE
+        placeholders.append(_add_param(params, text))
+    column = _quote_identifier(table.pg_name(column_node.schema_column))
+    operator = "NOT IN" if node.value == "NotInList" else "IN"
+    return f"{column} {operator} ({', '.join(placeholders)})"
+
+
+def _predicate_sql(table: PostgresTable, node, params: List[Optional[str]]) -> Any:
+    """One pushed predicate as SQL text, or `_UNRENDERABLE`.
+
+    This is BOTH the gate (`can_push` trial-renders through it) and the
+    renderer, so the two cannot disagree. It returns a sentinel rather than
+    raising because the gate needs an answer, not control flow - the same
+    reason `_render_literal` does.
+    """
     node_type = node.node_type
+    if node_type == NodeType.NOT:
+        # `col NOT LIKE 'x%'` lowers to NOT over a _STARTS_WITH; the negation is
+        # spelled here and its operand renders as the positive form.
+        inner = _predicate_sql(table, node.centre, params) if node.centre is not None else _UNRENDERABLE
+        if inner is _UNRENDERABLE:
+            return _UNRENDERABLE
+        return f"NOT ({inner})"
+    if node_type == NodeType.FUNCTION:
+        # The anchored-LIKE lowerings. The case-insensitive twins (`_CI_*`) are
+        # absent for the reason ILIKE is not pushed at all: the server folds case
+        # by its locale and the engine folds it its own way.
+        shape = _LIKE_FUNCTIONS.get(node.value)
+        if shape is None:
+            return _UNRENDERABLE
+        parameters = list(node.parameters or [])
+        if len(parameters) != 2:
+            return _UNRENDERABLE
+        return _like_sql(table, parameters[0], parameters[1], shape, params)
     if node_type == NodeType.COMPARISON_OPERATOR:
+        if node.value in ("InList", "NotInList"):
+            return _in_list_sql(table, node, params)
+        if node.value in ("InStr", "NotInStr"):
+            # The unanchored `LIKE '%x%'` lowering, spelled back as the LIKE it
+            # came from.
+            inner = _like_sql(table, node.left, node.right, "infix", params)
+            if inner is _UNRENDERABLE:
+                return _UNRENDERABLE
+            return f"NOT ({inner})" if node.value == "NotInStr" else inner
         op = _COMPARISON_SQL.get(node.value)
         if op is None:
-            raise NotSupportedError(f"cannot push comparison '{node.value}' into a PostgreSQL scan")
-        left = _operand_sql(table, node.left, params)
-        right = _operand_sql(table, node.right, params)
+            return _UNRENDERABLE
+        left = _value_operand_sql(table, node.left, params)
+        right = _value_operand_sql(table, node.right, params)
+        if left is _UNRENDERABLE or right is _UNRENDERABLE:
+            return _UNRENDERABLE
         return f"{left} {op} {right}"
     if node_type == NodeType.UNARY_OPERATOR:
         op = _UNARY_SQL.get(node.value)
         if op is None:
-            raise NotSupportedError(f"cannot push unary '{node.value}' into a PostgreSQL scan")
-        return f"{_operand_sql(table, node.centre, params)} {op}"
+            return _UNRENDERABLE
+        centre = _operand_sql(table, node.centre, params)
+        if centre is _UNRENDERABLE:
+            return _UNRENDERABLE
+        return f"{centre} {op}"
     if node_type == NodeType.BETWEEN:
+        # Only the closed form; an open bound is a different SQL shape than
+        # `BETWEEN` and is declined rather than mistranslated.
         if node.value not in (None, (True, True)):
-            raise NotSupportedError("cannot push an open-bounded BETWEEN into a PostgreSQL scan")
-        subject = _operand_sql(table, node.left, params)
-        low = _operand_sql(table, node.right, params)
-        high = _operand_sql(table, node.centre, params)
+            return _UNRENDERABLE
+        subject = _value_operand_sql(table, node.left, params)
+        low = _value_operand_sql(table, node.right, params)
+        high = _value_operand_sql(table, node.centre, params)
+        if _UNRENDERABLE in (subject, low, high):
+            return _UNRENDERABLE
         return f"{subject} BETWEEN {low} AND {high}"
-    raise NotSupportedError(f"cannot push a {node_type} predicate into a PostgreSQL scan")
+    return _UNRENDERABLE
 
 
 def _emit_for_column(table: PostgresTable, schema_column: SchemaColumn) -> EmitColumn:
@@ -1099,9 +1339,11 @@ def _remote_aggregate(table: PostgresTable, aggregate) -> Optional[Tuple[str, Em
             # or a domain over it comes back as text), so the result is pinned to
             # text and the plan expects text — the OID must follow the spelling,
             # not the column.
-            if operand_oid == _OID_BPCHAR:
-                # char(n): a text cast strips the blank padding the scan keeps.
-                return None
+            #
+            # char(n) needed its own refusal here once (a `::text` cast strips the
+            # blank padding the scan keeps); `_is_own_column` above now declines
+            # every blank-padded operand, so a second test would only be a copy
+            # waiting to fall out of step with it.
             return (
                 f"{function.lower()}({_key_sql(table, operand_column)})::text",
                 emit(_OID_TEXT, result_type),
@@ -1178,7 +1420,22 @@ def build_scan_statement(
             select_list = "DISTINCT " + select_list
 
     sql = f"SELECT {select_list or '1'} FROM {table.qualified_name}"
-    clauses = [_predicate_sql(table, predicate, params) for predicate in (predicates or [])]
+    clauses = []
+    for predicate in predicates or []:
+        clause = _predicate_sql(table, predicate, params)
+        # `can_push` trial-renders through the same function, so a predicate that
+        # reaches here and cannot be spelled means the two disagreed - an engine
+        # inconsistency, exactly as an aggregate with no remote spelling is. It is
+        # never a missed pushdown at this point: the statement is already being
+        # built on the promise that the server applies this predicate, and
+        # dropping it would silently return unfiltered rows.
+        if clause is _UNRENDERABLE:
+            raise InvalidInternalStateError(
+                f"a {predicate.node_type.name} predicate ({predicate.value}) reached the "
+                "PostgreSQL statement builder but has no SQL spelling — can_push should "
+                "have declined it"
+            )
+        clauses.append(clause)
     if clauses:
         sql += " WHERE " + " AND ".join(f"({clause})" for clause in clauses)
     if aggregates is not None and groups:

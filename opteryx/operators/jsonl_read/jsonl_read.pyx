@@ -34,22 +34,26 @@ A predicate that filters out every row of a chunk is a legitimate zero-row
 result (decode_chunk returns None for it), not an error -- that chunk simply
 contributes nothing.
 
-rugo infers each chunk's schema independently (there is no working
-explicit_schema override yet to pin every chunk to the schema resolved at
-bind time), so every decoded chunk is validated -- by physical column NAME,
-since rugo's projected-column output order is not guaranteed to match the
-request order -- against the bind-time schema before being emitted; a
-mismatch fails loud rather than silently emitting wrongly-typed or misaligned
-columns.
+The bind-time schema is PINNED onto every chunk (2026-09-17): each projected
+column's bound type, spelled as `str(ColumnType)`, is passed to rugo as its
+`explicit_schema`, so rugo parses the column strictly as that type instead of
+re-inferring it from the chunk's own sample rows. A value that does not fit
+fails loud from rugo naming the column, row and value; a column a chunk lacks
+comes back typed and all-null. Decoded vectors are correlated back to the
+plan by physical column NAME, since rugo's output order is not the request
+order. Before this, a column that was null for the first rows of a later
+chunk drifted to VARCHAR and failed the whole query, and every file paid an
+extra projection-free decode of its first chunk just to check names.
 
 Stage 4: `path` (a glob or an exact path) is resolved at bind time
 (opteryx.planner.binder.dataset) into `jsonl_files`, a sorted, non-empty list
 of matched file paths -- length 1 for a non-glob path, so there is no separate
 single-file code path here. read_morsels() iterates that list sequentially
-(no cross-file parallelism), opening and chunking each file exactly as before;
-the same per-chunk schema validation applied within one file is applied
-identically across files, so a file whose decoded columns disagree with the
-bind-time schema fails loud, naming that file.
+(no cross-file parallelism). A bound column whose key appears in NO record of
+a chunk is column drift (a file in the glob that lacks the column) and fails
+loud naming the file and the columns -- NDJSON semantics would otherwise read
+it as a column of NULLs. A key that is merely sparse is present on some
+record and is fine.
 """
 
 from opteryx.exceptions import DatasetReadError
@@ -149,25 +153,27 @@ cdef class JsonlReadNode(ReaderNode):
         # the `columns=` request order, so this must be name-keyed, not positional.
         physical_to_expected = dict(zip(expected_physical_names, expected_columns))
 
+        # The bind-time schema, spelled the way rugo's declared-type vocabulary reads
+        # it (the platform's own `str(ColumnType)`), computed ONCE and pinned onto
+        # every chunk of every file. Predicate-only columns are not typed here:
+        # rugo evaluates a pushed predicate on the raw token during the map build.
+        explicit_schema = {
+            physical_name: str(expected.schema_column.column_type)
+            for physical_name, expected in physical_to_expected.items()
+        }
+
         for path in self.jsonl_files:
             file_obj = filesystem.open_input_file(path)
             try:
                 data = file_obj.memoryview
-                file_schema_validated = False
                 for chunk in iter_newline_chunks(data):
                     if len(chunk) == 0:
                         continue
 
                     # An EMPTY projection means "this query reads no columns"
                     # (COUNT(*), or a projection of only constants), NOT "a file with
-                    # zero columns". rugo answers a `columns=[]` request with the
-                    # chunk's FULL column set, so BOTH the per-file probe below and
-                    # the per-chunk check further down would compare those real
-                    # columns against an empty expectation and reject every file,
-                    # including a single non-glob one -- the bug this branch fixes.
-                    #
-                    # Emit the same shape the parquet scan's equivalent path emits: a
-                    # genuine ZERO-COLUMN morsel whose row count rides on
+                    # zero columns". Emit the same shape the parquet scan's equivalent
+                    # path emits: a genuine ZERO-COLUMN morsel whose row count rides on
                     # `zero_col_rows`, which is what `select([])` produces (draken's
                     # cxx_morsel_ops.h) and exactly the contract UngroupedAggSink's
                     # CountStar reads -- see parquet_read.pyx's `_next_cxx` ("No output
@@ -176,19 +182,12 @@ cdef class JsonlReadNode(ReaderNode):
                     # num_rows == 0 and silently turn COUNT(*) into 0, which is worse
                     # than the loud failure this replaces.
                     #
-                    # Skipping the drift checks is sound rather than merely convenient:
-                    # with nothing projected, no column of this file is read into the
-                    # result, so no disagreement between files (or between chunks) can
-                    # change the answer. Both checks still fire for every query that
-                    # projects at least one column -- a glob over genuinely divergent
-                    # files is unaffected.
-                    #
-                    # The probe's None-ambiguity does not arise here: with no requested
-                    # columns there is no "none of them exist in this chunk" case left
-                    # to distinguish, so None can only mean `predicates` filtered every
-                    # row out -- a legitimate zero-row chunk, skipped like any other.
+                    # With nothing projected there is nothing to pin and no column of
+                    # this file reaches the result, so no disagreement between files
+                    # can change the answer; None can only mean `predicates` filtered
+                    # every row out -- a legitimate zero-row chunk, skipped like any other.
                     if not expected_physical_names:
-                        count_morsel = decode_chunk(
+                        count_morsel, _ = decode_chunk(
                             chunk,
                             expected_physical_names,
                             predicates,
@@ -209,111 +208,53 @@ cdef class JsonlReadNode(ReaderNode):
                         yield result_morsel
                         continue
 
-                    if not file_schema_validated:
-                        # Stage 4: decode_chunk(..., predicates) returns None both when
-                        # every row is filtered out AND when none of the requested
-                        # columns exist in this chunk at all -- indistinguishable from
-                        # its return value alone. A predicate-free probe of this file's
-                        # first chunk resolves that ambiguity once per file, so a file
-                        # whose columns don't match the bind-time schema (e.g. a
-                        # different file matched by this glob) fails loud naming this
-                        # file, instead of silently contributing zero rows.
-                        probe_morsel = decode_chunk(
+                    try:
+                        chunk_morsel, absent_columns = decode_chunk(
                             chunk,
                             expected_physical_names,
-                            None,
+                            predicates,
                             fail_on_error=self.jsonl_fail_on_error,
                             infer_schema=self.jsonl_infer_schema,
                             infer_sample_size=self.jsonl_infer_sample_size,
+                            explicit_schema=explicit_schema,
                         )
-                        if probe_morsel is None:
-                            # Two different situations reach here, and the probe's
-                            # return value alone cannot tell them apart: this chunk
-                            # has RECORDS but none of the expected columns (real
-                            # schema drift -- fail loud), or this chunk has NO
-                            # RECORDS at all (blank/whitespace-only lines -- an
-                            # empty file, which is not an error). One more
-                            # projection-free decode of the same chunk separates
-                            # them: with no columns requested, rugo returns
-                            # whatever the chunk holds, so None can only mean
-                            # "no records". It costs a second decode only on a
-                            # path that was previously an unconditional raise.
-                            unprojected_morsel = decode_chunk(
-                                chunk,
-                                None,
-                                None,
-                                fail_on_error=self.jsonl_fail_on_error,
-                                infer_schema=self.jsonl_infer_schema,
-                                infer_sample_size=self.jsonl_infer_sample_size,
-                            )
-                            if unprojected_morsel is None:
-                                # Record-less chunk: contributes no rows, and
-                                # leaves this file unvalidated so the next chunk
-                                # that does hold records is still probed.
-                                continue
-                            raise DatasetReadError(
-                                f"READ_JSONL('{path}'): none of the expected columns "
-                                f"{sorted(expected_physical_names)} (from the bind-time schema, "
-                                "resolved from the first file in this glob's matched-file set) "
-                                "were found in this file."
-                            )
-                        probe_names = {
-                            n.decode("utf-8") if isinstance(n, bytes) else n
-                            for n in probe_morsel.column_names
-                        }
-                        if probe_names != set(expected_physical_names):
-                            raise DatasetReadError(
-                                f"READ_JSONL('{path}'): this file's columns {sorted(probe_names)} "
-                                f"do not match the expected {sorted(expected_physical_names)} from "
-                                "the bind-time schema (resolved from the first file in this glob's "
-                                "matched-file set)."
-                            )
-                        file_schema_validated = True
-
-                    chunk_morsel = decode_chunk(
-                        chunk,
-                        expected_physical_names,
-                        predicates,
-                        fail_on_error=self.jsonl_fail_on_error,
-                        infer_schema=self.jsonl_infer_schema,
-                        infer_sample_size=self.jsonl_infer_sample_size,
-                    )
+                    except ValueError as err:
+                        # rugo's declared-type mismatch: the message already names the
+                        # column, row and value; this adds the file. Not flow control --
+                        # the read is over, this is the error that ends it.
+                        raise DatasetReadError(
+                            f"READ_JSONL('{path}'): a value does not fit the schema resolved "
+                            f"at bind time (from the first file in this glob's matched-file "
+                            f"set). {err}"
+                        ) from err
                     if chunk_morsel is None:
                         # Every row in this chunk was filtered out by `predicates` --
                         # a legitimate zero-row result, not a decode failure. This
                         # chunk simply contributes nothing.
                         continue
 
-                    chunk_names = {
-                        n.decode("utf-8") if isinstance(n, bytes) else n
-                        for n in chunk_morsel.column_names
-                    }
-                    if chunk_names != set(expected_physical_names):
+                    if absent_columns:
+                        # A bound column whose key appears in NO record of this chunk is
+                        # column drift: a file in the glob that does not have the column
+                        # at all (a key that is merely sparse is present on SOME record
+                        # and does not trip this). Fail loud naming the file and columns
+                        # rather than emit a column of NULLs -- the same decision the
+                        # per-chunk name check took before pinning, kept deliberately.
                         raise DatasetReadError(
-                            f"READ_JSONL('{path}'): a chunk decoded columns {sorted(chunk_names)}, "
-                            f"expected {sorted(expected_physical_names)} from the bind-time schema. "
-                            "rugo infers each chunk's schema independently, so this file's "
-                            "columns are not uniform enough for chunked streaming, or it "
-                            "does not match the schema resolved from the first file in a "
-                            "glob's matched-file set."
+                            f"READ_JSONL('{path}'): the expected columns {sorted(absent_columns)} "
+                            "(from the bind-time schema, resolved from the first file in this "
+                            "glob's matched-file set) are absent from every record in a chunk "
+                            "of this file."
                         )
 
                     names = []
                     vectors = []
                     for physical_name in expected_physical_names:
+                        # Every expected column is present: declared columns are always
+                        # built by rugo (typed, all-null when the chunk lacks the key), and
+                        # each carries its declared type -- a mismatch raised above.
                         vector = chunk_morsel.column(physical_name.encode("utf-8"))
-                        expected_column = physical_to_expected[physical_name].schema_column
-                        if vector.type != expected_column.column_type.physical:
-                            raise DatasetReadError(
-                                f"READ_JSONL('{path}'): column '{physical_name}' decoded as "
-                                f"{vector.type!r} in this chunk but {expected_column.column_type.physical!r} "
-                                "at bind time. rugo infers each chunk's schema independently "
-                                "from its own sample rows, so this file's columns are not "
-                                "uniform enough for chunked streaming, or it does not match "
-                                "the schema resolved from the first file in a glob's "
-                                "matched-file set."
-                            )
-                        names.append(expected_column.identity)
+                        names.append(physical_to_expected[physical_name].schema_column.identity)
                         vectors.append(vector)
 
                     result_morsel = Morsel.from_vectors(names, vectors)

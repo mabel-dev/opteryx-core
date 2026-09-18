@@ -633,6 +633,7 @@ from draken.vectors.bool_vector cimport (
     bool_vector_from_bits,
 )
 from draken.vectors.vector cimport Vector, simd_popcount, from_decoded as vec_from_decoded
+from draken.vectors.vector cimport from_decoded_with_arena as vec_from_decoded_with_arena
 from draken.core.frame_arena cimport (
     DrakenFrameArena,
     draken_frame_arena_create,
@@ -1496,6 +1497,12 @@ cdef inline int _dv_vecresult_adopt_c(
         draken_frame_arena_adopt(arena, <void*><uint32_t*>vr.selection)
     if vr.validity != NULL and not vr.validity_embedded:
         draken_frame_arena_adopt(arena, vr.validity)
+    # A separately-allocated string arena is a SECOND owned buffer behind the same
+    # slot. The arena's tracking is what `_slot_to_pyobj` later reads to decide
+    # whether a pointer is independently owned (the same question it already asks
+    # of `validity`), so adopting it here is both the free and the record of it.
+    if vr.arena != NULL:
+        draken_frame_arena_adopt(arena, vr.arena)
     dv_store[slot_idx].data = vr.data
     dv_store[slot_idx].selection = vr.selection
     dv_store[slot_idx].data_length = vr.data_length
@@ -1688,6 +1695,7 @@ cdef object _slot_to_pyobj(DrakenVector* dv, object anc, DrakenFrameArena* arena
     cdef uint8_t* vp = dv.validity
     cdef size_t   vbytes
     cdef uint8_t* vcopy
+    cdef uint8_t* sa_arena
     # from_decoded / vec_from_decoded hand BOTH buffers to draken_vector_own_raw,
     # which takes ownership of each as an INDEPENDENT draken_malloc'd allocation
     # and frees them when the Vector dies. That holds for a dense kernel result
@@ -1717,6 +1725,21 @@ cdef object _slot_to_pyobj(DrakenVector* dv, object anc, DrakenFrameArena* arena
     draken_frame_arena_release(arena, dp)
     if dv.type == DRAKEN_BOOL:
         return from_decoded(dp, vp, <size_t>dv.length)
+    # A string block whose byte arena is a SEPARATE allocation has TWO owned
+    # pointers behind this one slot, and releasing only `dp` would leave the
+    # arena to be freed by the dying frame arena while the Vector's slots still
+    # resolve against it — a use-after-free, not a leak. Which case this is, is
+    # asked of the arena's own tracking, exactly as the validity branch above
+    # asks it: adopted means independently owned, so release it too and hand it
+    # over. An arena embedded in the block is not tracked, so it is not touched
+    # and the block continues to own its own bytes.
+    # VARIANT shares the VARCHAR family's slot/arena layout (see the copy helpers).
+    if (dv.type == DRAKEN_VARCHAR or dv.type == DRAKEN_NVARCHAR
+            or dv.type == DRAKEN_VARBINARY or dv.type == DRAKEN_VARIANT):
+        sa_arena = (<DrakenStringArena*>dp).arena
+        if sa_arena != NULL and draken_frame_arena_contains(arena, sa_arena):
+            draken_frame_arena_release(arena, sa_arena)
+            return vec_from_decoded_with_arena(dp, sa_arena, vp, dv.length, dv.type)
     return vec_from_decoded(dp, vp, dv.length, dv.type)
 
 
@@ -2608,10 +2631,18 @@ cdef size_t _dv_result_elem_size(DrakenType t) noexcept nogil:
 cdef int _dv_copy_result_string(
     const DrakenVector* src,
     DrakenVector* out_vec, void** out_data, uint8_t** out_validity, void** out_sel,
+    uint8_t** out_arena,
 ) noexcept nogil:
-    """Deep-copy a string result into ONE canonical consolidated block
-    [DrakenStringArena header | slots | arena] the caller owns — `data` points at
-    the header, exactly what draken's kernels read (buffers.h contract)."""
+    """Deep-copy a string result into a caller-owned [DrakenStringArena header |
+    slots] block plus a SEPARATELY allocated byte arena — `data` still points at the
+    header, exactly what draken's kernels read (buffers.h contract); `sa_out.arena`
+    points at that second allocation instead of into the block.
+
+    The arena travels out on ``out_arena`` (NULL when every slot is inline). This is
+    the ExprEvalFn twin of VecResult::arena (vec_result.h): the result owns TWO
+    buffers, not one, so the arena bytes are built where they land instead of being
+    copied into a consolidated block. A caller that ignores ``out_arena`` leaks it —
+    the whole hazard, which is why every call site takes it."""
     cdef uint32_t n = src.length
     cdef uint32_t alloc_n = n if n > 0 else 1
     cdef const DrakenStringArena* sa_in = <const DrakenStringArena*>src.data
@@ -2626,20 +2657,25 @@ cdef int _dv_copy_result_string(
         if not str_is_inline(slot):
             total_arena += str_length(slot)
     cdef size_t slots_off = sizeof(DrakenStringArena)
-    cdef size_t arena_off = slots_off + <size_t>alloc_n * sizeof(DrakenStringSlot)
-    cdef uint8_t* blk = <uint8_t*>draken_malloc(arena_off + total_arena)
+    cdef size_t blk_bytes = slots_off + <size_t>alloc_n * sizeof(DrakenStringSlot)
+    cdef uint8_t* blk = <uint8_t*>draken_malloc(blk_bytes)
     if blk == NULL:
         return -1
+    cdef uint8_t* arena_bytes = NULL
+    if total_arena > 0:
+        arena_bytes = <uint8_t*>draken_malloc(total_arena)
+        if arena_bytes == NULL:
+            draken_free(blk)
+            return -1
     cdef DrakenStringArena* sa_out = <DrakenStringArena*>blk
     cdef DrakenStringSlot* dst = <DrakenStringSlot*>(blk + slots_off)
-    cdef uint8_t* out_arena = blk + arena_off if total_arena > 0 else NULL
     sa_out.slots = dst
-    sa_out.arena = out_arena
+    sa_out.arena = arena_bytes
     sa_out.length = n
     sa_out.arena_used = total_arena
     sa_out.arena_cap = total_arena
     sa_out.null_bitmap = NULL
-    sa_out.owns_buffers = 0     # the ONE block is owned by the caller's VectorOwner
+    sa_out.owns_buffers = 0     # block AND arena are owned by the caller's VectorOwner
     sa_out.payloads_elided = 0
     sa_out.type = src.type
     cdef size_t arena_pos = 0
@@ -2653,7 +2689,7 @@ cdef int _dv_copy_result_string(
             memcpy(&dst[i], slot, sizeof(DrakenStringSlot))
         else:
             slen = str_length(slot)
-            memcpy(out_arena + arena_pos, str_data(slot, sa_in.arena), slen)
+            memcpy(arena_bytes + arena_pos, str_data(slot, sa_in.arena), slen)
             str_clone_with_offset(&dst[i], slot, <uint32_t>arena_pos)
             arena_pos += slen
     cdef size_t vbytes = (<size_t>n + 7) >> 3
@@ -2662,11 +2698,13 @@ cdef int _dv_copy_result_string(
         validity = <uint8_t*>draken_malloc(vbytes if vbytes > 0 else 1)
         if validity == NULL:
             draken_free(blk)
+            draken_free(arena_bytes)
             return -1
         memcpy(validity, src.validity, vbytes if vbytes > 0 else 1)
     cdef uint32_t* sel = <uint32_t*>draken_malloc(<size_t>alloc_n * sizeof(uint32_t))
     if sel == NULL:
         draken_free(blk)
+        draken_free(arena_bytes)
         if validity != NULL:
             draken_free(validity)
         return -1
@@ -2682,19 +2720,24 @@ cdef int _dv_copy_result_string(
     out_data[0] = blk
     out_validity[0] = validity
     out_sel[0] = sel
+    out_arena[0] = arena_bytes
     return 0
 
 
 cdef int _dv_copy_result_string_preserve(
     const DrakenVector* src,
     DrakenVector* out_vec, void** out_data, uint8_t** out_validity, void** out_sel,
+    uint8_t** out_arena,
 ) noexcept nogil:
     """SHAPE-PRESERVING twin of _dv_copy_result_string: deep-copy the src.data_length
     PHYSICAL string values into a K-slot canonical block, then carry the input's
     selection (length codes) and per-logical-row validity onto the result. Dense stays
     dense (k == length), constant stays constant (k == 1), dict stays dict (k < length)
     — no gather/force-expand. Used at the ExprProject boundary for computed columns
-    that feed a compression-aware consumer (GROUP BY / DISTINCT key)."""
+    that feed a compression-aware consumer (GROUP BY / DISTINCT key).
+
+    The byte arena is a SECOND caller-owned allocation handed back on ``out_arena``,
+    exactly as in _dv_copy_result_string — see that docstring for the ownership."""
     cdef uint32_t n = src.length
     cdef uint32_t k = src.data_length
     cdef uint32_t alloc_k = k if k > 0 else 1
@@ -2708,20 +2751,25 @@ cdef int _dv_copy_result_string_preserve(
         if not str_is_inline(slot):
             total_arena += str_length(slot)
     cdef size_t slots_off = sizeof(DrakenStringArena)
-    cdef size_t arena_off = slots_off + <size_t>alloc_k * sizeof(DrakenStringSlot)
-    cdef uint8_t* blk = <uint8_t*>draken_malloc(arena_off + total_arena)
+    cdef size_t blk_bytes = slots_off + <size_t>alloc_k * sizeof(DrakenStringSlot)
+    cdef uint8_t* blk = <uint8_t*>draken_malloc(blk_bytes)
     if blk == NULL:
         return -1
+    cdef uint8_t* arena_bytes = NULL
+    if total_arena > 0:
+        arena_bytes = <uint8_t*>draken_malloc(total_arena)
+        if arena_bytes == NULL:
+            draken_free(blk)
+            return -1
     cdef DrakenStringArena* sa_out = <DrakenStringArena*>blk
     cdef DrakenStringSlot* dst = <DrakenStringSlot*>(blk + slots_off)
-    cdef uint8_t* out_arena = blk + arena_off if total_arena > 0 else NULL
     sa_out.slots = dst
-    sa_out.arena = out_arena
+    sa_out.arena = arena_bytes
     sa_out.length = k
     sa_out.arena_used = total_arena
     sa_out.arena_cap = total_arena
     sa_out.null_bitmap = NULL
-    sa_out.owns_buffers = 0     # the ONE block is owned by the caller's VectorOwner
+    sa_out.owns_buffers = 0     # block AND arena are owned by the caller's VectorOwner
     sa_out.payloads_elided = 0
     sa_out.type = src.type
     cdef size_t arena_pos = 0
@@ -2731,7 +2779,7 @@ cdef int _dv_copy_result_string_preserve(
             memcpy(&dst[j], slot, sizeof(DrakenStringSlot))
         else:
             slen = str_length(slot)
-            memcpy(out_arena + arena_pos, str_data(slot, sa_in.arena), slen)
+            memcpy(arena_bytes + arena_pos, str_data(slot, sa_in.arena), slen)
             str_clone_with_offset(&dst[j], slot, <uint32_t>arena_pos)
             arena_pos += slen
     cdef size_t vbytes = (<size_t>n + 7) >> 3
@@ -2740,11 +2788,13 @@ cdef int _dv_copy_result_string_preserve(
         validity = <uint8_t*>draken_malloc(vbytes if vbytes > 0 else 1)
         if validity == NULL:
             draken_free(blk)
+            draken_free(arena_bytes)
             return -1
         memcpy(validity, src.validity, vbytes if vbytes > 0 else 1)
     cdef uint32_t* sel = <uint32_t*>draken_malloc(<size_t>alloc_n * sizeof(uint32_t))
     if sel == NULL:
         draken_free(blk)
+        draken_free(arena_bytes)
         if validity != NULL:
             draken_free(validity)
         return -1
@@ -2761,19 +2811,24 @@ cdef int _dv_copy_result_string_preserve(
     out_data[0] = blk
     out_validity[0] = validity
     out_sel[0] = sel
+    out_arena[0] = arena_bytes
     return 0
 
 
 cdef int _dv_copy_result_preserve_shape(
     const DrakenVector* src,
     DrakenVector* out_vec, void** out_data, uint8_t** out_validity, void** out_sel,
-    uint32_t vec_dim = 0,
+    uint8_t** out_arena, uint32_t vec_dim = 0,
 ) noexcept nogil:
     """SHAPE-PRESERVING twin of _dv_copy_result_dense: deep-copy the src.data_length
     PHYSICAL values (NOT a per-logical-row gather) plus the input's selection and
     validity into fresh caller-owned buffers, keeping the input's encoding. The arena
     is destroyed right after this returns — nothing may alias it. Fixed-width + BOOL +
     string/VARIANT only; returns -1 otherwise so the caller fails loud."""
+    # Only the string family owns a separate arena; every other arm — including the
+    # early -1 returns below — leaves it NULL ("the arena is wherever `data` says it
+    # is", vec_result.h).
+    out_arena[0] = NULL
     cdef uint32_t n = src.length
     cdef uint32_t k = src.data_length
     cdef uint32_t alloc_k = k if k > 0 else 1
@@ -2796,7 +2851,8 @@ cdef int _dv_copy_result_preserve_shape(
     # VARCHAR family. It is the result type of `->`.
     if (src.type == DRAKEN_VARCHAR or src.type == DRAKEN_NVARCHAR
             or src.type == DRAKEN_VARBINARY or src.type == DRAKEN_VARIANT):
-        return _dv_copy_result_string_preserve(src, out_vec, out_data, out_validity, out_sel)
+        return _dv_copy_result_string_preserve(src, out_vec, out_data, out_validity,
+                                               out_sel, out_arena)
 
     if src.type == DRAKEN_NULL:
         # Self-describing null (buffers.h): no data, no validity — nothing to copy.
@@ -2850,6 +2906,7 @@ cdef int _dv_copy_result_preserve_shape(
 cdef int _dv_copy_result_array_offsets(
     const DrakenVector* src,
     DrakenVector* out_vec, void** out_data, uint8_t** out_validity, void** out_sel,
+    uint8_t** out_arena,
 ) noexcept nogil:
     """DRAKEN_ARRAY twin of the fixed-width copy in _dv_copy_result_dense, for the
     identity-selection shape only (see caller). offsets[length+1] copies verbatim —
@@ -2857,6 +2914,8 @@ cdef int _dv_copy_result_array_offsets(
     i -> i. The CHILD element vector is NOT this function's concern: the caller
     (_dv_eval_span_cxx) forwards VecResult.child separately, unrelated to this
     parent-offsets buffer."""
+    # Offsets, not strings: no separate arena on this result.
+    out_arena[0] = NULL
     cdef uint32_t n = src.length
     cdef uint32_t alloc_n = n if n > 0 else 1
     cdef size_t vbytes = (<size_t>n + 7) >> 3
@@ -2900,7 +2959,7 @@ cdef int _dv_copy_result_array_offsets(
 cdef int _dv_copy_result_dense(
     const DrakenVector* src,
     DrakenVector* out_vec, void** out_data, uint8_t** out_validity, void** out_sel,
-    uint32_t vec_dim = 0,
+    uint8_t** out_arena, uint32_t vec_dim = 0,
 ) noexcept nogil:
     """Deep-copy an (arena-owned) expression result into fresh draken_malloc'd DENSE
     buffers the caller takes ownership of (data / validity / identity selection).
@@ -2908,6 +2967,10 @@ cdef int _dv_copy_result_dense(
     data[selection[i]] gather; BOOL is bit-packed. Fixed-width + BOOL only (the
     is_all_c_native contract guarantees a fixed-width result); returns -1 for
     anything else so the caller can fail loud."""
+    # Only the string family owns a separate arena; every other arm — including the
+    # early -1 returns below — leaves it NULL ("the arena is wherever `data` says it
+    # is", vec_result.h).
+    out_arena[0] = NULL
     cdef uint32_t n = src.length
     cdef uint32_t alloc_n = n if n > 0 else 1
     cdef size_t es = _dv_result_elem_size(src.type)
@@ -2931,7 +2994,8 @@ cdef int _dv_copy_result_dense(
     # VARCHAR family. It is the result type of `->`.
     if (src.type == DRAKEN_VARCHAR or src.type == DRAKEN_NVARCHAR
             or src.type == DRAKEN_VARBINARY or src.type == DRAKEN_VARIANT):
-        return _dv_copy_result_string(src, out_vec, out_data, out_validity, out_sel)
+        return _dv_copy_result_string(src, out_vec, out_data, out_validity, out_sel,
+                                      out_arena)
 
     if src.type == DRAKEN_ARRAY:
         # data is int32_t offsets[length+1] (buffers.h) — NOT one value per row
@@ -2944,7 +3008,8 @@ cdef int _dv_copy_result_dense(
         # fail loud rather than build unexercised gather logic for it.
         if (src.flags & DRAKEN_SEL_IDENTITY) == 0:
             return -1
-        return _dv_copy_result_array_offsets(src, out_vec, out_data, out_validity, out_sel)
+        return _dv_copy_result_array_offsets(src, out_vec, out_data, out_validity,
+                                            out_sel, out_arena)
 
     if src.type == DRAKEN_NULL:
         # Self-describing null (buffers.h): type==NULL means every row is null,
@@ -3004,13 +3069,14 @@ cdef int _dv_eval_span_cxx(
     BytecodeInstr* instrs, int count, const CxxMorsel* m,
     int* col_idx, DrakenVector** lit_dv,
     DrakenVector* out_vec, void** out_data, uint8_t** out_validity, void** out_sel,
+    uint8_t** out_arena,
     int* err_op, const char** err_msg, bint preserve_shape,
     VecResult** out_child,
 ) noexcept nogil:
     """Pure-nogil expression span for a COMPUTED column (the projection twin of
     _dv_filter_span_cxx): evaluate the program over pre-resolved (col_idx, lit_dv)
     and deep-copy the arena result into fresh caller-owned buffers. rc 0 → out_vec/
-    out_data/out_validity/out_sel filled (ownership transferred); 4 → kernel error
+    out_data/out_validity/out_sel/out_arena filled (ownership transferred); 4 → kernel error
     (``*err_msg`` set, see c_execute_dv_inner); 98 → non-fixed-width result (fail
     loud upstream); 99 → arena OOM; other → the c_execute rc. No PyObject
     anywhere — callable from the engine's worker threads.
@@ -3020,6 +3086,12 @@ cdef int _dv_eval_span_cxx(
     plain dense column); 1 keeps the result's compressed encoding (dict/constant
     stays compressed) and is set ONLY by the plan compiler for computed columns that
     feed a compression-aware consumer (GROUP BY / DISTINCT key).
+
+    ``*out_arena`` is the string result's byte ARENA when the boundary copy keeps it
+    as a SECOND owned allocation (see _dv_copy_result_string) — the ExprEvalFn twin of
+    VecResult::arena (vec_result.h). NULL for every non-string result, for an
+    all-inline string result, and on every non-zero rc; a caller that does not free it
+    leaks the bulk of the column, which no test can see.
 
     ``*out_child`` is set to NULL, then forwarded verbatim from c_execute_dv_inner
     on rc 0 — non-NULL only for an ARRAY result (out_vec.type == DRAKEN_ARRAY),
@@ -3040,6 +3112,7 @@ cdef int _dv_eval_span_cxx(
     cdef VecResult* child_local = NULL
     cdef DrakenFrameArena* arena = draken_frame_arena_create()
     out_child[0] = NULL
+    out_arena[0] = NULL
     if arena == NULL:
         err_op[0] = -99
         err_msg[0] = NULL
@@ -3060,13 +3133,13 @@ cdef int _dv_eval_span_cxx(
         # materialization cannot recover from the DrakenVector itself.
         if preserve_shape:
             if _dv_copy_result_preserve_shape(
-                    dv_stack[0], out_vec, out_data, out_validity, out_sel,
+                    dv_stack[0], out_vec, out_data, out_validity, out_sel, out_arena,
                     <uint32_t>instrs[count - 1].vec_dimension) != 0:
                 err_op[0] = -98
                 err_msg[0] = NULL
                 rc = 98
         elif _dv_copy_result_dense(
-                dv_stack[0], out_vec, out_data, out_validity, out_sel,
+                dv_stack[0], out_vec, out_data, out_validity, out_sel, out_arena,
                 <uint32_t>instrs[count - 1].vec_dimension) != 0:
             err_op[0] = -98
             err_msg[0] = NULL

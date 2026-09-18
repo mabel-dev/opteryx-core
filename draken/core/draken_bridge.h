@@ -101,6 +101,18 @@ const DrakenVector* draken_array_grandchild_unwrap(PyObject* obj);
 PyObject* draken_vector_own_raw(
     void* data, uint8_t* validity, uint32_t length, DrakenType type);
 
+// draken_vector_own_raw_with_arena — draken_vector_own_raw for a string vector
+// whose byte ARENA is a separate allocation rather than bytes inside `data`.
+//
+// Same contract as draken_vector_own_raw, plus: `arena` (draken_malloc'd, may be
+// NULL) is the buffer the block's DrakenStringArena::arena points at, and its
+// ownership transfers too. A caller that has a separate arena and uses the
+// plain draken_vector_own_raw leaks it; one that passes bytes living INSIDE
+// `data` here double-frees. nullptr is the "no separate arena" case and makes
+// the two functions identical.
+PyObject* draken_vector_own_raw_with_arena(
+    void* data, uint8_t* arena, uint8_t* validity, uint32_t length, DrakenType type);
+
 // draken_vector_own_raw_logical — draken_vector_own_raw plus a logical-type
 // descriptor.
 //

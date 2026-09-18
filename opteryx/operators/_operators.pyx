@@ -123,6 +123,7 @@ ctypedef int (*ExprEvalFn)(void* instrs, int count, const CxxMorsel* m,
                            int* col_idx, void** lit_dv,
                            DrakenVector* out_vec, void** out_data,
                            uint8_t** out_validity, void** out_sel,
+                           uint8_t** out_arena,
                            int* err_op, const char** err_msg,
                            VecResult** out_child) noexcept nogil
 
@@ -1981,20 +1982,26 @@ cdef int _expr_eval_tramp(void* instrs, int count, const CxxMorsel* m,
                           int* col_idx, void** lit_dv,
                           DrakenVector* out_vec, void** out_data,
                           uint8_t** out_validity, void** out_sel,
+                          uint8_t** out_arena,
                           int* err_op, const char** err_msg,
                           VecResult** out_child) noexcept nogil:
     """Native entry (matches ExprEvalFn) for ExprProjectOperator — the pure-nogil
     computed-column span in evaluation.pyx. Force-densifies the result (the default
-    boundary). No PyObject inside."""
+    boundary). No PyObject inside.
+
+    ``*out_arena`` comes back holding a string result's separately-owned byte arena
+    (NULL otherwise); the C++ caller adopts it into VectorOwner::arena_buf."""
     return _dv_eval_span_cxx(<BytecodeInstr*>instrs, count, m, col_idx,
                              <DrakenVector**>lit_dv, out_vec, out_data,
-                             out_validity, out_sel, err_op, err_msg, False, out_child)
+                             out_validity, out_sel, out_arena,
+                             err_op, err_msg, False, out_child)
 
 
 cdef int _expr_eval_preserve_tramp(void* instrs, int count, const CxxMorsel* m,
                                    int* col_idx, void** lit_dv,
                                    DrakenVector* out_vec, void** out_data,
                                    uint8_t** out_validity, void** out_sel,
+                                   uint8_t** out_arena,
                                    int* err_op, const char** err_msg,
                                    VecResult** out_child) noexcept nogil:
     """Shape-PRESERVING ExprEvalFn twin of _expr_eval_tramp — keeps a compressed
@@ -2004,10 +2011,13 @@ cdef int _expr_eval_preserve_tramp(void* instrs, int count, const CxxMorsel* m,
     pointer also keeps these columns from fusing with dense ExprProject columns in the
     engine's ExprMultiProjectOperator (fusion requires an identical fn). ARRAY results
     are NOT supported on this path (_dv_copy_result_preserve_shape rejects DRAKEN_ARRAY,
-    matching today's behaviour) — *out_child always comes back NULL here."""
+    matching today's behaviour) — *out_child always comes back NULL here. *out_arena
+    carries the string result's separately-owned byte arena, exactly as on the dense
+    twin: a compressed string key still has an arena behind its K physical slots."""
     return _dv_eval_span_cxx(<BytecodeInstr*>instrs, count, m, col_idx,
                              <DrakenVector**>lit_dv, out_vec, out_data,
-                             out_validity, out_sel, err_op, err_msg, True, out_child)
+                             out_validity, out_sel, out_arena,
+                             err_op, err_msg, True, out_child)
 
 
 cdef int _resolve_bc_for_layout(CompiledBytecode bc, list layout,

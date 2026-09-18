@@ -88,4 +88,27 @@ struct VecResult {
     // verbatim as opteryx DataError with no engine framing at all. Set ONLY by
     // draken_data_error_sentinel[_fmt]; every other producer leaves it 0.
     uint8_t           data_error       = 0u;
+
+    // The long-string byte ARENA, when this result keeps it as a SEPARATE
+    // allocation instead of inside `data`.
+    //
+    // A string result has historically been one block — [DrakenStringArena
+    // header | slots | arena bytes | validity] — because `data` was the only
+    // owned pointer a kernel could hand back. That forced the arena, which is
+    // the bulk of a string column, to be COPIED into the block by whatever
+    // built it. This field is the ownership edge that removes the copy: the
+    // header's `arena` pointer points here, and the consumer owns these bytes
+    // alongside `data` (VectorOwner::arena_buf is exactly that slot).
+    //
+    // nullptr means "the arena is wherever `data` says it is" — inside the
+    // block for a consolidated result, or absent for an all-inline column — and
+    // is what EVERY existing producer leaves it as, which is why they all stay
+    // correct untouched. A consumer that ignores this field is correct for
+    // every result that does not set it, and LEAKS for one that does; that is
+    // the whole hazard, and it is why the migration order is consumers first.
+    //
+    // Owned: draken_malloc'd, freed by the consumer. Never an interior pointer,
+    // unlike `validity` (see validity_embedded) — a non-null value here is
+    // always an allocation of its own.
+    uint8_t*          arena            = nullptr;
 };

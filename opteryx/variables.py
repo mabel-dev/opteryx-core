@@ -362,6 +362,13 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     "parquet_io_fetch_ahead_min_row_groups": (
         INT64, FromConfig("PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS"),
         VariableOwner.USER, Visibility.RESTRICTED),
+    # Memory admission budget for one scan's IO pipeline (bytes; 0 = auto from
+    # the cgroup limit / physical RAM, -1 = off). SET-able per scan because the
+    # right value is a share of the WORKER's memory, which the deployment knows
+    # and the engine only estimates — see PARQUET_IO_MEMORY_BUDGET_BYTES.
+    "parquet_io_memory_budget_bytes": (
+        INT64, FromConfig("PARQUET_IO_MEMORY_BUDGET_BYTES"),
+        VariableOwner.USER, Visibility.RESTRICTED),
 
     # ── SERVER (informational) — these DECLARE system behaviour to a client ─────
     # Not read by the engine, and that is not a reason to drop them: they are an

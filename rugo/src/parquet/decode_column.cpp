@@ -463,7 +463,8 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                                     float*   ext_float32,
                                     const uint8_t* row_mask,
                                     bool prefer_dict,
-                                    const DictSkipPredicate* skip_pred) {
+                                    const DictSkipPredicate* skip_pred,
+                                    const PageJumpPlan* jump) {
   result.reset();
   result.ext_int64   = ext_int64;
   result.ext_float64 = ext_float64;
@@ -478,6 +479,20 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     ext_float64 = nullptr;
     ext_int32  = nullptr;
     ext_float32 = nullptr;
+  }
+
+  // PageIndex jump plan invariants (PageJumpPlan, decode.hpp). Both are caller
+  // bugs, not file conditions, and a wrong answer is the failure mode — so they
+  // are refused with a reason rather than tolerated.
+  if (jump != nullptr) {
+    if (row_mask == nullptr) {
+      result.error_message = "page jump plan supplied without a row_mask";
+      return;
+    }
+    if (target_col->max_repetition_level != 0) {
+      result.error_message = "page jump plan supplied for a LIST column";
+      return;
+    }
   }
 
   rugo_tel::calls.fetch_add(1, std::memory_order_relaxed);
@@ -953,9 +968,32 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     // (header-only, no decompression) and only permit the skip when every DATA
     // page is dictionary-encoded (RLE_DICTIONARY=8 / PLAIN_DICTIONARY=2). Any
     // non-dict page, or any header we can't safely advance past, disables it.
+    //
+    // Under a row_mask (pass-2 late materialization, PageIndex page pruning)
+    // the skip stays ARMED for a scalar column: the dictionary decides exactly
+    // as it does unmasked, and the row count it reports is the mask's survivor
+    // count. A LIST column declines it under a mask — its mask is per logical
+    // row while num_values counts slots, so the two cannot be reconciled here.
+    const bool skip_eligible =
+        skip_pred != nullptr && skip_pred->kind >= 0 && target_col->num_values > 0 &&
+        (row_mask == nullptr || target_col->max_repetition_level == 0);
     bool dict_covers_all_rows = true;
-    if (skip_pred != nullptr && skip_pred->kind >= 0 && row_mask == nullptr &&
-        target_col->num_values > 0) {
+    if (skip_eligible && jump != nullptr) {
+      // With a page-jump plan only the SURVIVING pages are consulted: a pruned
+      // page contributes no rows whatever its encoding, and on the remote path
+      // its bytes are an unfetched hole that must not be parsed.
+      for (size_t p = 0; p < jump->size(); ++p) {
+        if (jump->pruned[p]) continue;
+        const uint8_t* at = file_data + jump->page_offsets[p];
+        if (at >= chunk_limit) { dict_covers_all_rows = false; break; }
+        TInput hin{at, chunk_limit};
+        PageHeader ph = ParsePageHeader(hin);
+        if (ph.page_type != 0 || (ph.encoding != 8 && ph.encoding != 2)) {
+          dict_covers_all_rows = false;
+          break;
+        }
+      }
+    } else if (skip_eligible) {
       const uint8_t* hscan = cursor;  // == data_page_offset
       while (hscan < chunk_limit) {
         TInput hin{hscan, chunk_limit};
@@ -976,8 +1014,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         hscan += hsize + cs;
       }
     }
-    if (skip_pred != nullptr && skip_pred->kind >= 0 && row_mask == nullptr &&
-        target_col->num_values > 0 && dict_covers_all_rows) {
+    if (skip_eligible && dict_covers_all_rows) {
       bool any_match = false;
       const int kind = skip_pred->kind;
       if (kind == 0 && (int64_dict_mode || int32_dict_mode) && skip_pred->int_vals) {
@@ -1036,7 +1073,14 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       }
       if (!any_match) {
         result.dict_all_filtered = true;
-        result.num_rows = target_col->num_values;
+        if (row_mask != nullptr) {
+          // Scalar column (LIST declined above): one mask byte per value.
+          int64_t survivors = 0;
+          for (int64_t r = 0; r < target_col->num_values; ++r) survivors += row_mask[r];
+          result.num_rows = static_cast<int32_t>(survivors);
+        } else {
+          result.num_rows = target_col->num_values;
+        }
         result.success = true;
         return;
       }
@@ -1341,9 +1385,34 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     }  // end Tier 3 parallel scope
 
     if (!used_parallel_path) {
+    // Index of the DATA page the cursor is about to read, in OffsetIndex order
+    // (dictionary pages are not counted — the OffsetIndex never lists them).
+    size_t jump_page = 0;
     // ── Sequential page loop ──────────────────────────────────────────────
     while (cursor < chunk_limit &&
            (total_needed <= 0 || total_collected < total_needed)) {
+
+      // ── PageIndex page jump ──────────────────────────────────────────
+      // A page the plan marks pruned has no surviving row: advance past it by
+      // the OffsetIndex geometry WITHOUT reading its header. On the remote
+      // path its bytes were never fetched (a zero hole), and a zero byte parses
+      // as a Thrift STOP — header-walking into it would end the column early
+      // and silently drop every page after it.
+      if (jump != nullptr && jump_page < jump->size() && jump->pruned[jump_page]) {
+        const uint8_t* at = file_data + jump->page_offsets[jump_page];
+        if (cursor > at) {
+          throw std::runtime_error(
+              "page jump plan does not match the page layout: cursor is past pruned "
+              "data page " + std::to_string(jump_page));
+        }
+        const int32_t rows = jump->page_rows[jump_page];
+        page_row_offset += rows;
+        total_collected += rows;
+        ++result.pages_skipped;
+        cursor = at + jump->page_sizes[jump_page];
+        ++jump_page;
+        continue;
+      }
 
       // Parse the page header at current cursor position.
       TInput header_in{cursor, chunk_limit};
@@ -1367,6 +1436,19 @@ void DecodeColumnFromChunk(DecodedColumn &result,
 
       int32_t page_values = page_header.num_values;
       if (page_values <= 0) break;  // Corrupt or empty page
+
+      // A surviving data page must start exactly where the OffsetIndex says
+      // this page index starts; anything else means the plan and the bytes
+      // disagree, and the only honest outcome is a refusal.
+      if (jump != nullptr) {
+        if (jump_page >= jump->size() ||
+            cursor != file_data + jump->page_offsets[jump_page]) {
+          throw std::runtime_error(
+              "page jump plan does not match the page layout at data page " +
+              std::to_string(jump_page));
+        }
+        ++jump_page;
+      }
 
       // Locate compressed payload.
       const uint8_t *compressed_data = cursor + header_size;
@@ -2950,6 +3032,14 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     // Success: all expected values collected (or at least some, if total unknown).
     if (total_needed > 0) {
       result.success = (total_rows_all_pages == total_needed);
+      if (!result.success) {
+        // A short page walk is a corrupt chunk or a decoder bug, never an
+        // "absent column": say how short, so it cannot be misread as the latter.
+        result.error_message =
+            "page walk collected " + std::to_string(total_rows_all_pages) +
+            " of " + std::to_string(total_needed) + " values" +
+            (jump != nullptr ? " (under a page jump plan)" : "");
+      }
     } else {
       result.success = (total_collected > 0);
     }
@@ -2999,11 +3089,12 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                                     float*   ext_float32,
                                     const uint8_t* row_mask,
                                     bool prefer_dict,
-                                    const DictSkipPredicate* skip_pred) {
+                                    const DictSkipPredicate* skip_pred,
+                                    const PageJumpPlan* jump) {
   DecodedColumn result;
   DecodeColumnFromChunk(result, file_data, file_size, target_col,
                         ext_int64, ext_float64, ext_int32, ext_float32,
-                        row_mask, prefer_dict, skip_pred);
+                        row_mask, prefer_dict, skip_pred, jump);
   return result;
 }
 

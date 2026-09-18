@@ -18,7 +18,8 @@ import pytest
 
 from opteryx.connectors.postgres_connector import PostgresConnector
 from opteryx.connectors.postgres_connector import PostgresTable
-from opteryx.connectors.postgres_connector import _literal_text
+from opteryx.connectors.postgres_connector import _UNRENDERABLE
+from opteryx.connectors.postgres_connector import _render_literal
 from opteryx.connectors.postgres_connector import build_scan_statement
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import NotSupportedError
@@ -64,12 +65,12 @@ def _table(prefix="pg", **connector_kwargs) -> PostgresTable:
     return table
 
 
-def _schema_column(name):
-    return SchemaColumn(name=name, column_type=_lt.INT64, identity=mint_column_identity("planets", name))
+def _schema_column(name, column_type=_lt.INT64):
+    return SchemaColumn(name=name, column_type=column_type, identity=mint_column_identity("planets", name))
 
 
-def _col(name):
-    return _Node(NodeType.IDENTIFIER, value=name, schema_column=_schema_column(name))
+def _col(name, column_type=_lt.INT64):
+    return _Node(NodeType.IDENTIFIER, value=name, schema_column=_schema_column(name, column_type))
 
 
 def _lit(value, column_type=_lt.INT64):
@@ -159,35 +160,43 @@ def test_unknown_column_fails_loud():
 
 
 def test_unsupported_predicate_shapes_fail_loud():
+    # `can_push` trial-renders through the same function the builder uses, so a
+    # shape that reaches the builder unspellable means the two disagreed: an
+    # engine inconsistency, raised as one. (Called directly here, bypassing the
+    # gate that would have declined each of these.)
     table = _table()
     disjunction = _Node(NodeType.OR, left=_cmp("Eq", _col("id"), _lit(1)), right=_cmp("Eq", _col("id"), _lit(2)))
-    with pytest.raises(NotSupportedError):
+    with pytest.raises(InvalidInternalStateError):
         build_scan_statement(table, _projection("id"), [disjunction], None)
     open_between = _Node(NodeType.BETWEEN, value=(False, True), left=_col("id"), right=_lit(2), centre=_lit(4))
-    with pytest.raises(NotSupportedError):
+    with pytest.raises(InvalidInternalStateError):
         build_scan_statement(table, _projection("id"), [open_between], None)
     function_operand = _cmp("Eq", _Node(NodeType.FUNCTION, value="LENGTH"), _lit(3))
-    with pytest.raises(NotSupportedError):
+    with pytest.raises(InvalidInternalStateError):
         build_scan_statement(table, _projection("id"), [function_operand], None)
-    unknown_op = _cmp("InList", _col("id"), _lit([1, 2]))
-    with pytest.raises(NotSupportedError):
+    unknown_op = _cmp("Overlaps", _col("id"), _lit(1))
+    with pytest.raises(InvalidInternalStateError):
         build_scan_statement(table, _projection("id"), [unknown_op], None)
+    # An IN-list whose literal carries a scalar type tag rather than ARRAY<...>
+    # has no element type to render its members from.
+    untyped_list = _cmp("InList", _col("id"), _lit([1, 2]))
+    with pytest.raises(InvalidInternalStateError):
+        build_scan_statement(table, _projection("id"), [untyped_list], None)
 
 
 # ---- literal rendering -------------------------------------------------------
 
 
 def test_literal_rendering():
-    assert _literal_text(_lit(None, _lt.INT64)) is None
-    assert _literal_text(_lit(True, _lt.BOOLEAN)) == "true"
-    assert _literal_text(_lit(False, _lt.BOOLEAN)) == "false"
-    assert _literal_text(_lit(42)) == "42"
-    assert _literal_text(_lit(1.5, _lt.FLOAT64)) == "1.5"
-    assert _literal_text(_lit(decimal.Decimal("1.50"), _lt.DECIMAL(6, 2))) == "1.50"
-    assert _literal_text(_lit("text", _lt.VARCHAR)) == "text"
-    assert _literal_text(_lit(b"bytes", _lt.VARCHAR)) == "bytes"
-    with pytest.raises(NotSupportedError):
-        _literal_text(_lit([1, 2], _lt.VARCHAR))
+    assert _render_literal(_lit(None, _lt.INT64)) is None
+    assert _render_literal(_lit(True, _lt.BOOLEAN)) == "true"
+    assert _render_literal(_lit(False, _lt.BOOLEAN)) == "false"
+    assert _render_literal(_lit(42)) == "42"
+    assert _render_literal(_lit(1.5, _lt.FLOAT64)) == "1.5"
+    assert _render_literal(_lit(decimal.Decimal("1.50"), _lt.DECIMAL(6, 2))) == "1.50"
+    assert _render_literal(_lit("text", _lt.VARCHAR)) == "text"
+    assert _render_literal(_lit(b"bytes", _lt.VARCHAR)) == "bytes"
+    assert _render_literal(_lit([1, 2], _lt.VARCHAR)) is _UNRENDERABLE
 
 
 def test_temporal_literals_render_from_the_type_tag_not_the_value():
@@ -195,33 +204,30 @@ def test_temporal_literals_render_from_the_type_tag_not_the_value():
     # is days since the epoch, a TIMESTAMP microseconds. Dispatching on the
     # Python type sent '10470' to the server as a date ('invalid input syntax
     # for type date'), so the tag is what decides.
-    assert _literal_text(_lit(10470, _lt.DATE)) == "1998-09-01"
-    assert _literal_text(_lit(0, _lt.DATE)) == "1970-01-01"
-    assert _literal_text(_lit(-1, _lt.DATE)) == "1969-12-31"
-    assert _literal_text(_lit(904644672000000, _lt.TIMESTAMP())) == "1998-09-01T10:11:12.000000"
+    assert _render_literal(_lit(10470, _lt.DATE)) == "1998-09-01"
+    assert _render_literal(_lit(0, _lt.DATE)) == "1970-01-01"
+    assert _render_literal(_lit(-1, _lt.DATE)) == "1969-12-31"
+    assert _render_literal(_lit(904644672000000, _lt.TIMESTAMP())) == "1998-09-01T10:11:12.000000"
     # ... and the same integer under an INTEGER tag is still the integer.
-    assert _literal_text(_lit(10470)) == "10470"
+    assert _render_literal(_lit(10470)) == "10470"
 
 
 def test_a_literal_without_a_type_tag_is_not_pushable():
     # An untagged 10470 cannot be told from an epoch day count, so it renders as
     # nothing rather than as a guess.
-    with pytest.raises(NotSupportedError):
-        _literal_text(_Node(NodeType.LITERAL, value=10470))
+    assert _render_literal(_Node(NodeType.LITERAL, value=10470)) is _UNRENDERABLE
 
 
 def test_pre_common_era_temporal_literals_are_declined():
     # The formatters spell year 0 and earlier in a form PostgreSQL cannot read
     # back (it wants a `BC` suffix), so those decline rather than mis-bind.
-    with pytest.raises(NotSupportedError):
-        _literal_text(_lit(-800000, _lt.DATE))
-    with pytest.raises(NotSupportedError):
-        _literal_text(_lit(-800000 * 86400 * 1000000, _lt.TIMESTAMP()))
+    assert _render_literal(_lit(-800000, _lt.DATE)) is _UNRENDERABLE
+    assert _render_literal(_lit(-800000 * 86400 * 1000000, _lt.TIMESTAMP())) is _UNRENDERABLE
 
 
 def test_can_push_declines_a_predicate_holding_an_unrenderable_literal():
     # The gate and the builder MUST agree: build_scan_statement has no fallback,
-    # so a predicate can_push admits and _literal_text then refuses is a failed
+    # so a predicate can_push admits and the renderer then refuses is a failed
     # query, not a missed pushdown. Real expression Nodes here - the gate walks
     # the tree with the engine's own traversal.
     def _predicate(literal):
@@ -628,14 +634,42 @@ def test_aggregates_without_an_exact_remote_spelling_are_declined(aggregate):
         build_scan_statement(table, [], None, None, groups=[], aggregates=[aggregate])
 
 
-def test_text_min_max_over_char_n_is_declined():
+def test_nothing_about_a_char_n_value_is_pushed():
+    # PostgreSQL reads a char(n) with its trailing blanks removed and the scan
+    # hands the engine the padded value, so EVERY shape that reads the value
+    # answers differently on the two sides — MIN/MAX and a LIKE match, but also a
+    # GROUP BY or DISTINCT (which folds together two values the engine keeps
+    # apart) and a top-N (which orders them differently). These used to be
+    # allowed; a pushed `= 'ab'` matched 'ab  ' on the server and nothing in the
+    # engine.
     table = _table()
     table._meta["padded"] = ("padded", 1042, 14)
     padded = _typed_col("padded", _lt.VARCHAR)
     assert table.can_push_aggregate([], [_agg("MAX", padded, _lt.VARCHAR)]) is False
-    # ...but the column is still a fine DISTINCT / GROUP BY key and top-N key.
-    assert table.can_push_distinct([padded]) is True
-    assert table.can_push_topn([(padded, True)]) is True
+    assert table.can_push_aggregate([padded], [_agg("COUNT", _wild(), _lt.INT64)]) is False
+    assert table.can_push_distinct([padded]) is False
+    assert table.can_push_topn([(padded, True)]) is False
+    for predicate in (
+        _cmp("Eq", _col("padded", _lt.VARCHAR), _lit(b"ab", _lt.VARCHAR)),
+        _cmp("Like", _col("padded", _lt.VARCHAR), _lit(b"ab%", _lt.VARCHAR)),
+        _Node(
+            NodeType.BETWEEN,
+            value=(True, True),
+            left=_col("padded", _lt.VARCHAR),
+            right=_lit(b"a", _lt.VARCHAR),
+            centre=_lit(b"b", _lt.VARCHAR),
+        ),
+    ):
+        with pytest.raises(InvalidInternalStateError):
+            build_scan_statement(table, _projection("id"), [predicate], None)
+    # The column is still read and returned; only pushing work about its value is
+    # refused. A null test reads no value, so it still pushes.
+    assert build_scan_statement(table, _projection("padded"), None, None).sql == (
+        'SELECT "padded" FROM "public"."planets"'
+    )
+    null_test = _Node(NodeType.UNARY_OPERATOR, value="IsNull", centre=_col("padded", _lt.VARCHAR))
+    statement = build_scan_statement(table, _projection("id"), [null_test], None)
+    assert statement.sql.endswith('WHERE ("padded" IS NULL)')
 
 
 def test_group_key_must_be_an_own_column():
@@ -669,3 +703,294 @@ if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 
     run_tests()
+
+
+# ---- LIKE and IN ------------------------------------------------------------
+#
+# A LIKE predicate does NOT reach a connector spelled as a LIKE:
+# PredicateRewriteStrategy lowers the anchored patterns to `_STARTS_WITH` /
+# `_ENDS_WITH` FUNCTION nodes (negated: a NOT wrapping one) and the unanchored
+# `'%x%'` to an `InStr` comparison, all BEFORE predicate pushdown runs. These
+# fixtures are those lowered shapes, verified against the optimizer's real
+# output, and the renderer's job is to put the LIKE back.
+
+
+def _fn(name, *parameters):
+    node = _Node(NodeType.FUNCTION, value=name)
+    node.parameters = list(parameters)
+    return node
+
+
+def _not(inner):
+    return _Node(NodeType.NOT, centre=inner)
+
+
+def _text_col(name="name"):
+    return _col(name, _lt.VARCHAR)
+
+
+def _where(table, predicate):
+    """The WHERE clause and bind parameters a single predicate produces."""
+    statement = build_scan_statement(table, _projection("id"), [predicate], None)
+    return statement.sql.split(" WHERE ", 1)[1], statement.params
+
+
+def test_anchored_like_is_spelled_back_as_a_like():
+    table = _table()
+    # `name LIKE 'Ea%'`
+    clause, params = _where(table, _fn("_STARTS_WITH", _text_col(), _lit(b"Ea", _lt.VARBINARY)))
+    assert clause == '("name" LIKE $1)'
+    assert params == ["Ea%"]
+    # `name LIKE '%th'`
+    clause, params = _where(table, _fn("_ENDS_WITH", _text_col(), _lit(b"th", _lt.VARBINARY)))
+    assert clause == '("name" LIKE $1)'
+    assert params == ["%th"]
+
+
+def test_unanchored_like_is_spelled_back_as_a_like():
+    # `name LIKE '%art%'` lowers to an InStr comparison whose operand is a str.
+    clause, params = _where(_table(), _cmp("InStr", _text_col(), _lit("art", _lt.VARCHAR)))
+    assert clause == '("name" LIKE $1)'
+    assert params == ["%art%"]
+
+
+def test_negated_like_forms_are_pushed_as_not():
+    table = _table()
+    # `name NOT LIKE 'Ea%'` — a NOT wrapping the lowered function.
+    clause, params = _where(table, _not(_fn("_STARTS_WITH", _text_col(), _lit(b"Ea", _lt.VARBINARY))))
+    assert clause == '(NOT ("name" LIKE $1))'
+    assert params == ["Ea%"]
+    # `name NOT LIKE '%art%'`
+    clause, params = _where(table, _cmp("NotInStr", _text_col(), _lit("art", _lt.VARCHAR)))
+    assert clause == '(NOT ("name" LIKE $1))'
+    assert params == ["%art%"]
+
+
+def test_like_pattern_metacharacters_are_escaped():
+    # The pattern body matched literally in the engine has to match literally on
+    # the server: `%` and `_` are LIKE's wildcards and backslash is its default
+    # escape, so all three are escaped. Anything else would turn `a_b` into a
+    # single-character wildcard match.
+    clause, params = _where(_table(), _fn("_STARTS_WITH", _text_col(), _lit(b"a_b%c\\d", _lt.VARBINARY)))
+    assert clause == '("name" LIKE $1)'
+    assert params == ["a\\_b\\%c\\\\d%"]
+
+
+def test_case_insensitive_like_lowerings_are_not_pushed():
+    # ILIKE folds case by the server's locale and by the engine's own rules; the
+    # two disagree on non-ASCII text, so neither `ILike` nor anything it lowers
+    # to is pushed. Declining is a missed pushdown, never a wrong answer.
+    table = _table()
+    for predicate in (
+        _fn("_CI_STARTS_WITH", _text_col(), _lit(b"ea", _lt.VARBINARY)),
+        _fn("_CI_ENDS_WITH", _text_col(), _lit(b"th", _lt.VARBINARY)),
+        _cmp("IInStr", _text_col(), _lit("art", _lt.VARCHAR)),
+        _cmp("NotIInStr", _text_col(), _lit("art", _lt.VARCHAR)),
+    ):
+        with pytest.raises(InvalidInternalStateError):
+            build_scan_statement(table, _projection("id"), [predicate], None)
+
+
+def test_in_list_becomes_one_bind_parameter_per_member():
+    clause, params = _where(
+        _table(), _cmp("InList", _text_col(), _lit([b"Earth", b"Mars"], _lt.ARRAY(_lt.VARCHAR)))
+    )
+    assert clause == '("name" IN ($1, $2))'
+    assert params == ["Earth", "Mars"]
+
+
+def test_not_in_list():
+    clause, params = _where(
+        _table(), _cmp("NotInList", _col("id"), _lit([1, 2, 3], _lt.ARRAY(_lt.INT64)))
+    )
+    assert clause == '("id" NOT IN ($1, $2, $3))'
+    assert params == ["1", "2", "3"]
+
+
+def test_in_list_members_render_from_the_element_type():
+    # The members are physical storage integers under an ARRAY<DATE> tag, exactly
+    # as a scalar DATE literal is — rendering them from the Python value would
+    # send the epoch day count to the server.
+    clause, params = _where(
+        _table(), _cmp("InList", _col("id"), _lit([10470, 0], _lt.ARRAY(_lt.DATE)))
+    )
+    assert clause == '("id" IN ($1, $2))'
+    assert params == ["1998-09-01", "1970-01-01"]
+
+
+def test_in_list_edge_cases_are_declined():
+    table = _table()
+    # `IN ()` is a syntax error, and a member that cannot be spelled (a pre-1 CE
+    # date) declines the whole list rather than dropping a member.
+    empty = _cmp("InList", _col("id"), _lit([], _lt.ARRAY(_lt.INT64)))
+    unspellable = _cmp("InList", _col("id"), _lit([10470, -800000], _lt.ARRAY(_lt.DATE)))
+    # Past the cap the wire client would refuse the statement (32767 bind
+    # parameters), so the gate has to decline rather than admit a failing query.
+    too_long = _cmp("InList", _col("id"), _lit(list(range(1025)), _lt.ARRAY(_lt.INT64)))
+    for predicate in (empty, unspellable, too_long):
+        with pytest.raises(InvalidInternalStateError):
+            build_scan_statement(table, _projection("id"), [predicate], None)
+    # ... and one member under the cap still pushes.
+    clause, _ = _where(table, _cmp("InList", _col("id"), _lit(list(range(1024)), _lt.ARRAY(_lt.INT64))))
+    assert clause.startswith('("id" IN ($1, $2,')
+
+
+def test_char_n_columns_decline_like_and_in():
+    # PostgreSQL strips a char(n)'s trailing blanks before comparing or matching
+    # it; the scan hands the engine the padded value. `'ab  '::char(4) LIKE '%b'`
+    # is therefore true on the server and false in the engine, so these shapes
+    # decline the column — the same reason a pushed MIN/MAX declines char(n).
+    table = _table()
+    table._meta["code"] = ("code", 1042, -1)  # bpchar
+    padded = _col("code", _lt.VARCHAR)
+    for predicate in (
+        _fn("_STARTS_WITH", padded, _lit(b"ab", _lt.VARBINARY)),
+        _cmp("InStr", padded, _lit("ab", _lt.VARCHAR)),
+        _cmp("InList", padded, _lit([b"ab"], _lt.ARRAY(_lt.VARCHAR))),
+    ):
+        with pytest.raises(InvalidInternalStateError):
+            build_scan_statement(table, _projection("id"), [predicate], None)
+
+
+def test_the_gate_admits_exactly_what_the_builder_can_spell():
+    # can_push and build_scan_statement MUST agree: the builder has no fallback,
+    # so anything the gate admits and the builder then refuses is a failed query.
+    # Real expression Nodes here — the gate walks the tree with the engine's own
+    # traversal and asks the base capability first.
+    table = _table()
+
+    def _predicate(condition):
+        return types.SimpleNamespace(condition=condition)
+
+    def _rcol(name, column_type=_lt.VARCHAR):
+        return Node(NodeType.IDENTIFIER, value=name, schema_column=_schema_column(name, column_type))
+
+    def _rlit(value, column_type):
+        return Node(NodeType.LITERAL, value=value, type=column_type)
+
+    boolean = _schema_column("", _lt.BOOLEAN)
+    starts_with = Node(
+        NodeType.FUNCTION,
+        value="_STARTS_WITH",
+        parameters=[_rcol("name"), _rlit(b"Ea", _lt.VARBINARY)],
+        schema_column=boolean,
+    )
+    ci_starts_with = Node(
+        NodeType.FUNCTION,
+        value="_CI_STARTS_WITH",
+        parameters=[_rcol("name"), _rlit(b"ea", _lt.VARBINARY)],
+        schema_column=boolean,
+    )
+    in_list = Node(
+        NodeType.COMPARISON_OPERATOR,
+        value="InList",
+        left=_rcol("name"),
+        right=_rlit([b"Earth"], _lt.ARRAY(_lt.VARCHAR)),
+    )
+    instr = Node(
+        NodeType.COMPARISON_OPERATOR,
+        value="InStr",
+        left=_rcol("name"),
+        right=_rlit("art", _lt.VARCHAR),
+    )
+
+    assert table.can_push(_predicate(starts_with)) is True
+    assert table.can_push(_predicate(Node(NodeType.NOT, centre=starts_with))) is True
+    assert table.can_push(_predicate(instr)) is True
+    assert table.can_push(_predicate(in_list)) is True
+    # ... and the declines.
+    assert table.can_push(_predicate(ci_starts_with)) is False
+    assert table.can_push(_predicate(Node(NodeType.NOT, centre=ci_starts_with))) is False
+    assert (
+        table.can_push(
+            _predicate(
+                Node(
+                    NodeType.COMPARISON_OPERATOR,
+                    value="InList",
+                    left=_rcol("name"),
+                    right=_rlit([10470, -800000], _lt.ARRAY(_lt.DATE)),
+                )
+            )
+        )
+        is False
+    )
+    # A function with no SQL spelling stays a local Filter.
+    assert (
+        table.can_push(
+            _predicate(
+                Node(
+                    NodeType.FUNCTION,
+                    value="ARRAY_CONTAINS",
+                    parameters=[_rcol("name"), _rlit(b"x", _lt.VARBINARY)],
+                    schema_column=boolean,
+                )
+            )
+        )
+        is False
+    )
+
+
+def test_the_optimizer_still_lowers_like_into_the_shapes_the_renderer_spells(monkeypatch):
+    """The one test here whose predicates are not hand-built.
+
+    Everything above asserts that the renderer spells a shape correctly; this
+    asserts that the shape is the one the optimizer actually produces. The two
+    are different risks: `col LIKE 'x%'` reaches a connector as `_STARTS_WITH`
+    only because PredicateRewriteStrategy puts it that way, and if that lowering
+    changes spelling the renderer goes on passing its own fixtures while every
+    real LIKE quietly stops being pushed and the server streams whole tables.
+
+    So a real query is planned against the file connector, the conditions its
+    scan gate is offered are captured, and THOSE nodes are replayed through the
+    PostgreSQL gate and builder.
+    """
+    import opteryx
+    from opteryx.connectors import DiskConnector
+    from opteryx.connectors.filesystem_connector import FileSystemTable
+
+    opteryx.register_workspace("testdata", DiskConnector)
+
+    captured = []
+    original = FileSystemTable.can_push
+
+    def _spy(self, operator, types_=None):
+        captured.append(operator.condition)
+        return original(self, operator, types_)
+
+    monkeypatch.setattr(FileSystemTable, "can_push", _spy)
+
+    def _pushed(where):
+        captured.clear()
+        for _ in opteryx.session().execute_to_morsels(
+            f"SELECT name FROM testdata.planets WHERE {where}"
+        ):
+            pass
+        table = _table()
+        table._meta = {"name": ("name", 25, -1), "id": ("id", 23, -1)}
+        rendered = []
+        for condition in captured:
+            if not table.can_push(types.SimpleNamespace(condition=condition)):
+                rendered.append(None)
+                continue
+            statement = build_scan_statement(table, _projection("name"), [condition], None)
+            rendered.append((statement.sql.split(" WHERE ", 1)[1], statement.params))
+        return rendered
+
+    assert _pushed("name LIKE 'Ea%'") == [('("name" LIKE $1)', ["Ea%"])]
+    assert _pushed("name LIKE '%th'") == [('("name" LIKE $1)', ["%th"])]
+    assert _pushed("name LIKE '%art%'") == [('("name" LIKE $1)', ["%art%"])]
+    assert _pushed("name NOT LIKE 'Ea%'") == [('(NOT ("name" LIKE $1))', ["Ea%"])]
+    assert _pushed("name NOT LIKE '%th'") == [('(NOT ("name" LIKE $1))', ["%th"])]
+    assert _pushed("name NOT LIKE '%art%'") == [('(NOT ("name" LIKE $1))', ["%art%"])]
+    # A pattern with no single anchor is not lowered at all and pushes as the
+    # LIKE it still is.
+    assert _pushed("name LIKE 'E%r%h'") == [('("name" LIKE $1)', ["E%r%h"])]
+    # ILIKE lowers to the case-insensitive twins, which are declined.
+    assert _pushed("name ILIKE 'ea%'") == [None]
+    assert _pushed("name IN ('Earth','Mars')") == [('("name" IN ($1, $2))', ["Earth", "Mars"])]
+    assert _pushed("name NOT IN ('Earth','Mars')") == [
+        ('("name" NOT IN ($1, $2))', ["Earth", "Mars"])
+    ]
+    # DisjunctiveDomainPushdownStrategy folds an OR of equalities into an
+    # IN-list, so making IN pushable makes that shape pushable too.
+    assert _pushed("id = 3 OR id = 4") == [('("id" IN ($1, $2))', ["3", "4"])]

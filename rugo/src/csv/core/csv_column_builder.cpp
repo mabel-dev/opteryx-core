@@ -940,6 +940,14 @@ StreamResult build_columns_streaming(
                 column_names[proj_ordinals[i]] + "'; supported types are " +
                 std::string(rugo::declared_type_vocabulary()));
         }
+        if (rugo::declared_is_structured(declared_types[i].type)) {
+            // Same backstop: ARRAY<T>/VARIANT are read out of JSON structure a CSV
+            // field does not have (declared_type.hpp). Refused, never approximated.
+            throw std::runtime_error(
+                "explicit_schema: type '" + it->second + "' for column '" +
+                column_names[proj_ordinals[i]] + "' is JSONL-only; a CSV field has no "
+                "JSON structure to read an ARRAY or VARIANT from");
+        }
         is_declared[i]    = 1;
         declared_names[i] = it->second;
     }

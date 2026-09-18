@@ -399,12 +399,14 @@ def visit_function_dataset(
         path = path_arg.value
 
         # Validate READ_JSONL's named options (Stage 3). Only `ignore_errors`,
-        # `infer_schema`, and `infer_sample_size` are wired through to rugo;
-        # `explicit_schema` is a known, documented gap (rugo has no working
-        # per-chunk explicit_schema override today -- see the module docstring
-        # in opteryx/connectors/jsonl_io/__init__.py), so it fails loud with a
-        # distinct error rather than being silently ignored or treated as a
-        # typo. Any other key is an unrecognized option.
+        # `infer_schema`, and `infer_sample_size` are wired through to rugo. A
+        # user-written `explicit_schema` is not: the scan node pins the schema
+        # it resolved from chunk 0 onto every chunk itself (see the module
+        # docstring in opteryx/connectors/jsonl_io/__init__.py), and letting a
+        # user override that at the READ_JSONL surface is a separate feature
+        # with its own type-name validation. It fails loud with a distinct
+        # error rather than being silently ignored or treated as a typo. Any
+        # other key is an unrecognized option.
         named_args = node.named_args or {}
 
         def _literal_value(key):
@@ -424,9 +426,9 @@ def visit_function_dataset(
             )
         if "explicit_schema" in written_options:
             raise NotSupportedError(
-                "READ_JSONL('explicit_schema=...') is not supported: rugo has no "
-                "working per-chunk explicit_schema override today, so this option "
-                "cannot be honored yet."
+                "READ_JSONL('explicit_schema=...') is not supported: the schema is "
+                "resolved from the first file's first chunk and pinned onto every "
+                "chunk; a user-declared override is not wired to READ_JSONL."
             )
         _validate_reader_options("READ_JSONL", node.args, named_args, _READ_JSONL_OPTIONS)
 

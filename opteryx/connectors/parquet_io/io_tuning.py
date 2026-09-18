@@ -40,6 +40,7 @@ __all__ = [
     "resolve_fetch_ahead_gate",
     "resolve_http_tuning",
     "resolve_in_flight_limit",
+    "resolve_memory_budget",
 ]
 
 # The variables a SINGLE SCAN may carry its own value for — the vocabulary a
@@ -67,6 +68,7 @@ PER_SCAN_VARIABLES = frozenset({
     "parquet_io_fetch_ahead",
     "parquet_io_fetch_ahead_min_row_groups",
     "parquet_io_in_flight_limit",
+    "parquet_io_memory_budget_bytes",
 })
 
 
@@ -150,3 +152,35 @@ def resolve_fetch_ahead_gate(variables, overrides=None) -> int:
     return int(_value(
         "parquet_io_fetch_ahead_min_row_groups", variables,
         config.PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS, overrides))
+
+
+# The auto budget's share of the container's (or host's) memory. Half: the scan
+# is one consumer among the query's operators — a sort/aggregate downstream of a
+# wide scan needs its own room, and the worker OOM this exists to prevent was a
+# scan that ran ahead of exactly such a consumer.
+_AUTO_MEMORY_BUDGET_FRACTION = 0.5
+
+
+def resolve_memory_budget(variables, overrides=None) -> int:
+    """Memory admission budget for the scan's IO pipeline, in bytes, as the
+    pipeline should run it: a positive cap, or 0 for off.
+
+    The knob's own vocabulary is 0 = auto, -1 = off. Auto derives from the
+    cgroup limit when one is in effect (the container's real ceiling), else
+    physical RAM (bare metal / dev), times _AUTO_MEMORY_BUDGET_FRACTION; when
+    neither can be detected there is nothing honest to derive from, and the
+    result is off (0) — which the pipeline's `memory_budget_bytes` read-back
+    then shows, rather than a guessed number."""
+    raw = int(_value(
+        "parquet_io_memory_budget_bytes", variables, config.PARQUET_IO_MEMORY_BUDGET_BYTES, overrides))
+    if raw > 0:
+        return raw
+    if raw < 0:
+        return 0
+    from opteryx.compiled.platform import cgroup_memory_limit_bytes
+    from opteryx.compiled.platform import physical_memory_total_bytes
+
+    ceiling = cgroup_memory_limit_bytes() or physical_memory_total_bytes() or 0
+    if ceiling <= 0:
+        return 0
+    return int(ceiling * _AUTO_MEMORY_BUDGET_FRACTION)

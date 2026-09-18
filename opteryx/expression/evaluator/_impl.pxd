@@ -31,6 +31,10 @@ cdef extern from "ops/vec_result.h":
         DrakenType        type
         uint8_t           flags
         uint8_t           validity_embedded
+        # Separately-allocated long-string arena, or NULL when the arena lives
+        # inside `data` (see ops/vec_result.h). Owned: whoever takes `data` must
+        # take this too, or the bytes leak.
+        uint8_t*          arena
         const char*       error_msg
         void*             child   # VecResult* — void* here, self-reference breaks
                                    # ctypedef-struct parsing; cast at use sites.
@@ -69,15 +73,22 @@ cdef int _dv_filter_span_with_consts_cxx(
 
 # Pure-nogil expression span for a COMPUTED column (projection twin of the filter
 # span): evaluate + deep-copy the arena result into fresh draken_malloc'd buffers
-# the caller owns. rc 0 → out_vec/out_data/out_validity/out_sel filled; 4 → kernel
-# error (*err_msg set, same contract as _dv_filter_span_cxx); 96 → kernel DATA
-# error (ditto); 98 → non-fixed-width result; 99 → arena OOM; other → not
-# applicable.
+# the caller owns. rc 0 → out_vec/out_data/out_validity/out_sel/out_arena filled;
+# 4 → kernel error (*err_msg set, same contract as _dv_filter_span_cxx); 96 →
+# kernel DATA error (ditto); 98 → non-fixed-width result; 99 → arena OOM; other →
+# not applicable.
+#
+# `out_arena` is the string result's byte ARENA when the boundary copy keeps it as a
+# SECOND owned allocation instead of packing it into `out_data` — the ExprEvalFn twin
+# of VecResult::arena (draken/ops/vec_result.h). NULL for every non-string result, for
+# an all-inline string result, and on every non-zero rc. It is the bulk of a string
+# column, and nothing but the caller's free can reclaim it.
 from libc.stdint cimport uint8_t
 cdef int _dv_eval_span_cxx(BytecodeInstr* instrs, int count, const CxxMorsel* m,
                            int* col_idx, DrakenVector** lit_dv,
                            DrakenVector* out_vec, void** out_data,
                            uint8_t** out_validity, void** out_sel,
+                           uint8_t** out_arena,
                            int* err_op, const char** err_msg,
                            bint preserve_shape,
                            VecResult** out_child) noexcept nogil

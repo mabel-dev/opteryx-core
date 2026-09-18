@@ -482,11 +482,14 @@ struct LatmatScanSource : Source {
                 return SourceResult::FINISHED;
             }
             if (result.empty_filtered) {
-                // rugo's dictionary decode-skip is disabled under a row_mask
-                // (io_pipeline.hpp checks `item.row_mask.empty()` before consulting
-                // dict_preds_), so a masked submit cannot legitimately come back
-                // empty. If it ever does, the pass-1 rows for this row group would be
-                // silently dropped from the answer — fail loud, never quietly.
+                // rugo's dictionary decode-skip is disabled for a CALLER-supplied
+                // row_mask (io_pipeline.hpp checks `item.row_mask.empty()` before
+                // consulting dict_preds_), and PageIndex page pruning — the other
+                // producer of empty_filtered — never runs on a masked item either
+                // (compute_page_prune). So a masked submit cannot legitimately come
+                // back empty. If it ever does, the pass-1 rows for this row group
+                // would be silently dropped from the answer — fail loud, never
+                // quietly.
                 err.code = 1;
                 err.msg = "LatmatScanSource: masked pass-2 row group came back "
                           "empty_filtered — its pass-1 survivors would be lost";

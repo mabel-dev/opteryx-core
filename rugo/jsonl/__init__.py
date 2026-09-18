@@ -110,6 +110,7 @@ def read_jsonl(
 
             INT8 INT16 INT32 INT64 · UINT8 UINT16 UINT32 UINT64 · FLOAT32 FLOAT64 · BOOL
             VARCHAR · DATE · TIMESTAMP[s|ms|us|ns] · DECIMAL(p, s) · IPV4
+            VARIANT · ARRAY<INT64|UINT64|FLOAT64|BOOL|VARCHAR>
 
         matched case-insensitively, with the usual SQL aliases (INTEGER, BIGINT, TINYINT,
         SMALLINT, DOUBLE, FLOAT, REAL, STRING, TEXT, BOOLEAN). The four original names —
@@ -119,6 +120,16 @@ def read_jsonl(
         widening, no fallback — and raises ValueError naming the column, row and value if
         anything doesn't fit. Declared columns are always reported back in the returned
         schema dict (see read_metadata / get_jsonl_schema), independent of infer_schema.
+
+        VARIANT and ARRAY<T> exist so a schema pinned from one chunk's inference can name
+        everything inference produces (the reader is fed 64MB chunks; inferring each
+        chunk on its own is what made a column drift between chunks). A declared VARIANT
+        accepts a JSON object or array per row, stored as raw JSON text, and refuses any
+        scalar — including a string that merely looks like an object. A declared ARRAY<T>
+        requires every row to be a well-formed JSON array whose elements all fit T
+        (element nulls allowed; a nested array or object is refused). T is limited to
+        the element types the array builder can materialise. Both are JSONL-only: the
+        CSV reader refuses them.
 
         Text forms go through draken's own parsers, so a value read here means exactly what
         the equivalent CAST would make it mean. Two consequences worth knowing:

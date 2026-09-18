@@ -59,6 +59,7 @@ struct DeclaredType {
     int16_t    offset_minutes = 0;
     uint8_t    precision      = 0;   // DECIMAL only
     uint8_t    scale          = 0;   // DECIMAL only
+    DrakenType element        = DRAKEN_NULL;   // ARRAY only: the element type; DRAKEN_NULL otherwise
 };
 
 // LogicalKind ordinals, restated so this header does not have to pull in
@@ -71,9 +72,26 @@ constexpr uint8_t LK_IPV4      = 5;
 
 // Resolve a declared type name. Returns false if `name` is not a type a reader
 // can parse values into — which includes names that ARE valid opteryx types but
-// have no strict scalar text form here (TIME, INTERVAL, VECTOR, ARRAY, VARIANT,
-// NULL). Those are refused rather than approximated.
+// have no strict text form here (TIME, INTERVAL, VECTOR, NULL). Those are
+// refused rather than approximated.
+//
+// ARRAY<T> and VARIANT ARE accepted (2026-09-17), because they are two of the
+// types JSONL inference itself produces and a schema pinned from a sample must
+// be able to name everything the sample could have inferred. They are JSONL
+// ONLY: both are read out of JSON structure (an array's elements, an object's
+// text), which a CSV field does not have — the CSV reader refuses them through
+// `declared_is_structured` below. T is limited to the element types the array
+// builder can materialise: INT64, UINT64, FLOAT64, BOOL, VARCHAR (and their
+// aliases). A bare `ARRAY` is refused: the platform's own spelling always
+// carries the element, and a declared schema is meant to be precise.
 bool parse_declared_type(const std::string& name, DeclaredType* out);
+
+// True for the declared types that can only be read from JSON structure
+// (ARRAY<T>, VARIANT). A reader whose values are flat text (CSV) must refuse a
+// column declared as one of these rather than store something that looks like it.
+inline bool declared_is_structured(DrakenType t) noexcept {
+    return t == DRAKEN_ARRAY || t == DRAKEN_VARIANT;
+}
 
 // Human-readable list of what `parse_declared_type` accepts, for error messages.
 // One place, so the error can never list a vocabulary the parser does not have.

@@ -1701,21 +1701,29 @@ struct SemiAntiProbeOperator : Join2ProbeOperator, EmitSubset {
         void* data = nullptr;
         uint8_t* validity = nullptr;
         void* sel = nullptr;
+        uint8_t* arena = nullptr;
         int err_op = 0;
         const char* kernel_msg = nullptr;
         VecResult* child = nullptr;
         int rc = residual_fn(residual.instrs, residual.count, pairs.get(),
                              residual.col_idx.data(), residual.lit_dv.data(),
-                             &v, &data, &validity, &sel, &err_op, &kernel_msg, &child);
+                             &v, &data, &validity, &sel, &arena, &err_op, &kernel_msg,
+                             &child);
         if (rc != 0) {
             set_span_error(err, "SemiAntiProbe: correlated residual evaluation failed",
                            rc, err_op, kernel_msg);
             return false;
         }
         // Take ownership of the span's buffers so they are released on every path out.
+        // `arena` is the string result's separately-owned byte arena (ExprEvalFn's
+        // out_arena). A BOOL residual never sets it, but the owner below is built
+        // BEFORE the type check that rejects a non-BOOL result, so it is handed over
+        // here rather than on the accepting path — otherwise the reject path drops
+        // the bulk of a string column on the floor.
         VectorOwner owner(v, OwnedBuffer<void>(data), OwnedBuffer<uint8_t>(validity),
-                          OwnedBuffer<void>(sel));
-        if (child != nullptr) { delete child; }   // a BOOL residual has no ARRAY child
+                          OwnedBuffer<void>(sel), OwnedBuffer<uint8_t>(arena));
+        // See native_unnest.hpp: `delete` frees the box, not what the child owns.
+        if (child != nullptr) { draken_vecresult_discard_c(child); }
         if (v.type != DRAKEN_BOOL) {
             err.code = 1;
             err.msg = "SemiAntiProbe: correlated residual did not evaluate to BOOL — "
@@ -2192,20 +2200,28 @@ struct Join2MarkSink : Sink {
         void* data = nullptr;
         uint8_t* validity = nullptr;
         void* sel = nullptr;
+        uint8_t* arena = nullptr;
         int err_op = 0;
         const char* kernel_msg = nullptr;
         VecResult* child = nullptr;
         int rc = residual_fn(residual.instrs, residual.count, pairs.get(),
                              residual.col_idx.data(), residual.lit_dv.data(),
-                             &v, &data, &validity, &sel, &err_op, &kernel_msg, &child);
+                             &v, &data, &validity, &sel, &arena, &err_op, &kernel_msg,
+                             &child);
         if (rc != 0) {
             set_span_error(err, "Join2MarkSink: correlated residual evaluation failed",
                            rc, err_op, kernel_msg);
             return false;
         }
+        // `arena` is the string result's separately-owned byte arena (ExprEvalFn's
+        // out_arena). A BOOL residual never sets it, but the owner below is built
+        // BEFORE the type check that rejects a non-BOOL result, so it is handed over
+        // here rather than on the accepting path — otherwise the reject path drops
+        // the bulk of a string column on the floor.
         VectorOwner owner(v, OwnedBuffer<void>(data), OwnedBuffer<uint8_t>(validity),
-                          OwnedBuffer<void>(sel));
-        if (child != nullptr) { delete child; }
+                          OwnedBuffer<void>(sel), OwnedBuffer<uint8_t>(arena));
+        // See native_unnest.hpp: `delete` frees the box, not what the child owns.
+        if (child != nullptr) { draken_vecresult_discard_c(child); }
         if (v.type != DRAKEN_BOOL) {
             err.code = 1;
             err.msg = "Join2MarkSink: correlated residual did not evaluate to BOOL — "

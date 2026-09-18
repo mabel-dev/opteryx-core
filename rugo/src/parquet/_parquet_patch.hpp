@@ -556,14 +556,11 @@ inline std::vector<uint8_t> PatchParquetColumns(const uint8_t *src, size_t src_l
     std::vector<ColumnInput> rg_cols = shapes;
 
     RGMeta meta;
-    meta.data_offsets.assign(ncols, 0);
-    meta.dict_offsets.assign(ncols, -1);
-    meta.sizes.assign(ncols, 0);
-    meta.uncompressed.assign(ncols, 0);
-    meta.stats.assign(ncols, ColumnStats{});
-    meta.bloom_offset.assign(ncols, -1);
-    meta.bloom_length.assign(ncols, 0);
-    meta.codecs.assign(ncols, CODEC_UNCOMPRESSED);
+    // A patched file carries no PageIndex: patching MOVES column chunks, so any
+    // index inherited from the source would point at the wrong bytes. Dropping
+    // it costs pruning on the rewritten file and nothing else — init_columns
+    // leaves ci_*/oi_* at the "absent" defaults and the footer omits them.
+    meta.init_columns(ncols, CODEC_UNCOMPRESSED);
     meta.row_count = (size_t)src_rg.num_rows;
     meta.total_byte_size = 0;
 
@@ -811,7 +808,7 @@ inline std::vector<uint8_t> PatchParquetColumns(const uint8_t *src, size_t src_l
       // the absolute offset the footer has to record.
       write_row_group_chunks(out, /*base_offset=*/0, add_cols, rg_rows,
                              CODEC_ZSTD, PROFILE_FAST, /*max_page_bytes=*/0,
-                             add_meta);
+                             /*want_index=*/false, add_meta);
       for (size_t k = 0; k < add_positions.size(); k++) {
         const size_t j = add_positions[k];
         meta.data_offsets[j] = add_meta.data_offsets[k];

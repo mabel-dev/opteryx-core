@@ -342,8 +342,13 @@ def test_type_names_are_case_insensitive_and_trimmed(spelling):
         "DECIMAL(0, 0)",
         "DECIMAL(4, 6)",  # scale past precision
         "TIMESTAMP[weeks]",
-        "ARRAY<INT64>",   # inference-only outcome, never declarable
-        "VARIANT",
+        "ARRAY",             # the platform's spelling always carries the element
+        "ARRAY<>",
+        "ARRAY<INT32>",      # not an element type the array builder materialises
+        "ARRAY<DECIMAL(18, 2)>",
+        "ARRAY<ARRAY<INT64>>",
+        "ARRAY<VARIANT>",
+        "NULL",
         "",
     ],
 )
@@ -356,6 +361,111 @@ def test_unsupported_type_names_fail_eagerly_naming_the_vocabulary(declared):
 
     with pytest.raises(ValueError):
         read_csv(b"c\n1\n", explicit_schema={"c": declared})
+
+
+# ---------------------------------------------------------------------------
+# VARIANT and ARRAY<T> -- the two inference outcomes a pinned schema must be
+# able to name (JSONL only)
+# ---------------------------------------------------------------------------
+
+
+def test_jsonl_declared_variant_holds_objects_and_arrays_as_json_text():
+    vector, values = _jsonl_column(
+        '{"v": {"a": 1, "b": [2, 3]}}\n{"v": [1, {"x": "y"}]}\n{"v": null}\n{"w": 1}',
+        {"v": "VARIANT"},
+    )
+    assert vector.type.value == 65, vector.type           # DRAKEN_VARIANT
+    assert values == ['{"a": 1, "b": [2, 3]}', '[1, {"x": "y"}]', None, None]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '"x"',
+        '"{\\"a\\": 1}"',   # a STRING that merely looks like an object
+        "1",
+        "true",
+    ],
+)
+def test_jsonl_declared_variant_refuses_scalars_naming_the_row(text):
+    with pytest.raises(ValueError) as err:
+        read_jsonl(('{"v": {"a": 1}}\n{"v": %s}\n' % text).encode(), explicit_schema={"v": "VARIANT"})
+    message = str(err.value)
+    assert "column 'v'" in message and "row 1" in message and "VARIANT" in message
+
+
+@pytest.mark.parametrize(
+    "declared,rows,child_tag,expected",
+    [
+        ("ARRAY<INT64>", ["[1, -2, null]", "[]", "null"], 4, [[1, -2, None], [], None]),
+        ("ARRAY<UINT64>", ["[18446744073709551615, 3]"], 107, [[18446744073709551615, 3]]),
+        ("ARRAY<FLOAT64>", ["[1, 2.5, 1e3]"], 21, [[1.0, 2.5, 1000.0]]),
+        ("ARRAY<BOOL>", ["[true, false, null]"], 50, [[True, False, None]]),
+        ("ARRAY<VARCHAR>", ['["a", "b\\nc", null]'], 60, [["a", "b\nc", None]]),
+        ("array<string>", ['["a"]'], 60, [["a"]]),      # aliases and case, as for scalars
+        ("ARRAY< bigint >", ["[7]"], 4, [[7]]),
+    ],
+)
+def test_jsonl_declared_array_builds_the_declared_child(declared, rows, child_tag, expected):
+    body = "\n".join('{"a": %s}' % r for r in rows)
+    vector, values = _jsonl_column(body, {"a": declared})
+    assert vector.type.value == 80, vector.type            # DRAKEN_ARRAY
+    assert vector.array_child_type.value == child_tag, vector.array_child_type
+    assert values == expected
+
+
+def test_jsonl_declared_array_does_not_widen_what_the_inferred_path_would():
+    """Inference would survey [1] and [2.5] to a FLOAT64 child; a declared INT64
+    child is a contract and the real is refused, naming the row."""
+    with pytest.raises(ValueError) as err:
+        read_jsonl(b'{"a": [1]}\n{"a": [2.5]}\n', explicit_schema={"a": "ARRAY<INT64>"})
+    message = str(err.value)
+    assert "column 'a'" in message and "row 1" in message and "ARRAY<INT64>" in message
+
+
+@pytest.mark.parametrize(
+    "declared,text",
+    [
+        ("ARRAY<INT64>", '["1"]'),
+        ("ARRAY<INT64>", "[true]"),
+        ("ARRAY<INT64>", "[18446744073709551615]"),   # past INT64_MAX: not widened to UINT64
+        ("ARRAY<UINT64>", "[-1]"),                    # negative: not wrapped
+        ("ARRAY<UINT64>", "[1.5]"),
+        ("ARRAY<FLOAT64>", '["1.5"]'),
+        ("ARRAY<BOOL>", "[1]"),
+        ("ARRAY<VARCHAR>", "[1]"),
+        ("ARRAY<VARCHAR>", "[[1]]"),                  # nested container
+        ("ARRAY<INT64>", '[{"a": 1}]'),
+        ("ARRAY<INT64>", "[1, 2,]"),                  # malformed array text
+        ("ARRAY<INT64>", '"[1, 2]"'),                 # a STRING that looks like an array
+        ("ARRAY<INT64>", '{"a": 1}'),                 # an object
+        ("ARRAY<INT64>", "7"),                        # a scalar
+    ],
+)
+def test_jsonl_declared_array_refuses_rather_than_falling_back(declared, text):
+    """The inferred path falls back to VARCHAR (with a warning) for anything out of
+    scope. A declared array is a contract: every one of these RAISES."""
+    with pytest.raises(ValueError) as err:
+        read_jsonl(('{"a": %s}\n' % text).encode(), explicit_schema={"a": declared})
+    message = str(err.value)
+    assert "column 'a'" in message and "row 0" in message and declared in message
+
+
+def test_jsonl_declared_structured_names_are_echoed_back_verbatim():
+    result = read_jsonl(
+        b'{"v": {"k": 1}, "a": [1], "n": 1}\n',
+        explicit_schema={"v": "VARIANT", "a": "ARRAY<INT64>"},
+    )
+    assert result["schema"] == {"v": "VARIANT", "a": "ARRAY<INT64>", "n": "int64"}
+
+
+@pytest.mark.parametrize("declared", ["VARIANT", "ARRAY<INT64>", "ARRAY<VARCHAR>"])
+def test_csv_refuses_structured_declared_types_eagerly(declared):
+    """Valid names, but read out of JSON structure a CSV field does not have. Refused
+    before a byte is read, naming the reason, not approximated as text."""
+    with pytest.raises(ValueError) as err:
+        read_csv(b"c\n[1]\n", explicit_schema={"c": declared})
+    assert "JSONL-only" in str(err.value)
 
 
 # ---------------------------------------------------------------------------

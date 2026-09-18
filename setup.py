@@ -1453,6 +1453,7 @@ extensions.append(
                 "rugo/src/parquet/bloom_filter.cpp",
                 "rugo/src/parquet/decode_encodings.cpp",
                 "rugo/src/parquet/decode_page.cpp",
+                "rugo/src/parquet/page_index.cpp",
                 "draken/simd/cpu_features.cpp",
                 "src/cpp/http_client.cpp",
             ]

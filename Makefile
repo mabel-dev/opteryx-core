@@ -62,7 +62,7 @@ define print_red
 	@echo -e "\033[0;31m$(1)\033[0m"
 endef
 
-.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q rugo-floor reference function-costs publish-reference
+.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q rugo-floor reference function-costs publish-reference page-index-test
 
 # Default target
 .DEFAULT_GOAL := help
@@ -264,6 +264,18 @@ decoded-column-reset-test: ## Build and run the DecodedColumn::reset() completen
 	@/tmp/opteryx-tests/decoded_column_reset_test
 	$(call print_green,"✓ DecodedColumn reset completeness test passed")
 
+page-index-test: ## Build and run the PageIndex (ColumnIndex/OffsetIndex) parse + page-predicate tests
+	$(call print_blue,"Building and running PageIndex tests...")
+	@mkdir -p /tmp/opteryx-tests
+	@cd /tmp/opteryx-tests && \
+	  clang++ -std=c++20 -O1 -Wall -Wextra \
+	    -I$(CURDIR)/rugo/src/parquet \
+	    $(CURDIR)/rugo/src/parquet/page_index.cpp \
+	    $(CURDIR)/rugo/src/parquet/page_index_test.cpp \
+	    -o page_index_test
+	@/tmp/opteryx-tests/page_index_test
+	$(call print_green,"✓ PageIndex tests passed")
+
 rle-dict-test: ## Build and run the RLE skip-dense -> Dict direct-builder tests
 	$(call print_blue,"Building and running RLE direct-dict tests...")
 	@mkdir -p /tmp/opteryx-tests
@@ -311,46 +323,16 @@ rle-dict-test: ## Build and run the RLE skip-dense -> Dict direct-builder tests
 
 kernel-parity: compile ## Build and run Phase 9a C ABI parity test
 	$(call print_blue,"Building and running C ABI parity test...")
-	@mkdir -p /tmp/opteryx-tests
-	@cd /tmp/opteryx-tests && \
-	  clang++ -std=c++20 -O3 \
-	    -I$(CURDIR) \
-	    -I$(CURDIR)/src/cpp \
-	    -I$(CURDIR)/draken \
-	    -I$(CURDIR)/draken/core \
-	    -I$(CURDIR)/third_party/boost_math \
-	    -I$(CURDIR)/third_party/cyan4973 \
-	    -I$(CURDIR)/third_party/utf8h \
-	    -I$(CURDIR)/third_party/mabel/carchar \
-	    -I$(CURDIR)/third_party/mabel/parvi \
-	    -I$(CURDIR)/third_party/fastfloat \
-	    -I$(CURDIR)/third_party/fastfloat/fast_float \
-	    -I$(CURDIR)/third_party/ulfjack/ryu \
-	    -I$(CURDIR)/third_party/yyjson/src \
+	@mkdir -p /tmp/opteryx-tests/kernel-parity
+	@cd /tmp/opteryx-tests/kernel-parity && \
+	  clang -std=c11 -O3 -w $(DRAKEN_KERNEL_INCLUDES) -c $(DRAKEN_KERNEL_C_SRCS)
+	@cd /tmp/opteryx-tests/kernel-parity && \
+	  clang++ -std=c++20 -O3 -w $(DRAKEN_KERNEL_INCLUDES) \
 	    $(CURDIR)/draken/ops/kernels/c_abi_test.cpp \
-	    $(CURDIR)/draken/core/vector_alloc.cpp \
-	    $(CURDIR)/draken/ops/kernels/error_handling.cpp \
-	    $(CURDIR)/draken/ops/kernels/result_helpers.cpp \
-	    $(CURDIR)/draken/ops/kernels/kernel_registry.cpp \
-	    $(CURDIR)/draken/ops/kernels/cast_numeric.cpp \
-	    $(CURDIR)/draken/ops/kernels/cast_string.cpp \
-	    $(CURDIR)/draken/ops/kernels/cast_temporal.cpp \
-	    $(CURDIR)/draken/ops/kernels/cast_dispatch.cpp \
-	    $(CURDIR)/draken/ops/kernels/extraction.cpp \
-	    $(CURDIR)/draken/ops/kernels/function_kernels.cpp \
-	    $(CURDIR)/draken/ops/kernels/string_trim.cpp \
-	    $(CURDIR)/draken/ops/kernels/string_reverse_initcap.cpp \
-	    $(CURDIR)/draken/ops/kernels/string_pad.cpp \
-	    $(CURDIR)/draken/ops/kernels/string_replace_soundex.cpp \
-	    $(CURDIR)/draken/ops/kernels/binary_op_arithmetic.cpp \
-	    $(CURDIR)/draken/ops/kernels/binary_op_other.cpp \
-	    $(CURDIR)/draken/ops/kernels/binary_op_temporal.cpp \
-	    $(CURDIR)/draken/ops/kernels/binop_dispatch.cpp \
-	    $(CURDIR)/third_party/ulfjack/ryu/d2fixed.c \
-	    $(CURDIR)/third_party/ulfjack/ryu/d2s.c \
-	    $(CURDIR)/third_party/yyjson/src/yyjson.c \
+	    $(DRAKEN_KERNEL_SRCS) \
+	    /tmp/opteryx-tests/kernel-parity/*.o \
 	    -o c_abi_test
-	@/tmp/opteryx-tests/c_abi_test
+	@/tmp/opteryx-tests/kernel-parity/c_abi_test
 	$(call print_green,"✓ C ABI parity test passed")
 
 # The draken C-ABI kernel TUs. kernel_registry.cpp's registry table names every
@@ -393,9 +375,9 @@ DRAKEN_KERNEL_SRCS := \
 	$(CURDIR)/third_party/crypto/sha1.cpp \
 	$(CURDIR)/third_party/crypto/sha2.cpp \
 	$(CURDIR)/third_party/crypto/sha512.cpp \
-	$(CURDIR)/src/cpp/simd_hash.cpp \
-	$(CURDIR)/src/cpp/simd_env.cpp \
-	$(CURDIR)/src/cpp/cpu_features.cpp
+	$(CURDIR)/draken/simd/simd_hash.cpp \
+	$(CURDIR)/draken/simd/simd_env.cpp \
+	$(CURDIR)/draken/simd/cpu_features.cpp
 
 # C (not C++) TUs. The vendored mabel codecs are C99 and do NOT compile as C++
 # (designated initializers, char-array init rules), so they get their own pass
@@ -417,6 +399,7 @@ DRAKEN_KERNEL_INCLUDES := \
 	-I$(CURDIR)/src/cpp \
 	-I$(CURDIR)/draken \
 	-I$(CURDIR)/draken/core \
+	-I$(CURDIR)/draken/simd \
 	-I$(CURDIR)/third_party/boost_math \
 	-I$(CURDIR)/third_party/cyan4973 \
 	-I$(CURDIR)/third_party/utf8h \

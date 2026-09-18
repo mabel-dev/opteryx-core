@@ -49,6 +49,17 @@ typedef int (*ExprFilterFn)(void* instrs, int count, const CxxMorsel* m,
                             int* const_col_idx, void** const_scalar_dv, int n_consts,
                             CxxMorsel** out_filtered, int* err_op,
                             const char** err_msg);
+// `out_arena` (uint8_t**) is the string result's byte ARENA, kept as a SECOND
+// owned allocation instead of packed into `out_data` — the ExprEvalFn twin of
+// VecResult::arena (draken/ops/vec_result.h), and the reason the span no longer
+// copies the bulk of a string column into its block. The DrakenStringArena header
+// in `out_data` points at it. NULL for every non-string result, for an all-inline
+// string result, and on every non-zero rc. It is draken_malloc'd and OWNED by the
+// caller: hand it to VectorOwner's `arena` slot (its 5th ctor argument, which is
+// exactly VectorOwner::arena_buf) on EVERY path out, including the paths that
+// reject the result — a caller that drops it leaks silently, with no test to catch
+// it.
+//
 // `out_child` (VecResult**) is set to NULL, or to an OWNED VecResult* for an
 // ARRAY result's element vector — non-null only when out_vec->type ==
 // DRAKEN_ARRAY (see evaluation.pyx's _dv_eval_span_cxx). The span-side kernel
@@ -57,7 +68,8 @@ typedef int (*ExprFilterFn)(void* instrs, int count, const CxxMorsel* m,
 typedef int (*ExprEvalFn)(void* instrs, int count, const CxxMorsel* m,
                           int* col_idx, void** lit_dv,
                           DrakenVector* out_vec, void** out_data,
-                          uint8_t** out_validity, void** out_sel, int* err_op,
+                          uint8_t** out_validity, void** out_sel,
+                          uint8_t** out_arena, int* err_op,
                           const char** err_msg, VecResult** out_child);
 
 // One plan-resolved expression program. `instrs` is BORROWED — the NativePlan
@@ -208,12 +220,14 @@ struct ExprMultiProjectOperator : Operator {
             void* data = nullptr;
             uint8_t* validity = nullptr;
             void* sel = nullptr;
+            uint8_t* arena = nullptr;
             int err_op = 0;
             const char* kernel_msg = nullptr;
             VecResult* child = nullptr;
             int rc = fn(progs[k].instrs, progs[k].count, m.get(),
                         progs[k].col_idx.data(), progs[k].lit_dv.data(),
-                        &v, &data, &validity, &sel, &err_op, &kernel_msg, &child);
+                        &v, &data, &validity, &sel, &arena, &err_op, &kernel_msg,
+                        &child);
             if (rc == 98) {
                 err.code = 1;
                 err.msg = "ExprMultiProjectOperator: expression result is not a "
@@ -226,9 +240,13 @@ struct ExprMultiProjectOperator : Operator {
                 return OpResult::NEED_INPUT;
             }
             CxxColumn nc;
+            // `arena` is the string result's separately-owned byte arena (null for
+            // every other result) — VectorOwner::arena_buf is precisely its slot, so
+            // it dies with the column exactly as the block does.
             nc.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data),
                                                    OwnedBuffer<uint8_t>(validity),
-                                                   OwnedBuffer<void>(sel));
+                                                   OwnedBuffer<void>(sel),
+                                                   OwnedBuffer<uint8_t>(arena));
             // ARRAY result (v.type == DRAKEN_ARRAY): `child` is the owned element
             // vector the span could not carry any other way (see ExprEvalFn's
             // out_child doc above) — adopt it as this column's child_owner, the

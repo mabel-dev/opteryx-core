@@ -915,6 +915,7 @@ def draken_rugo_extensions(parquet_created_by):
                     "rugo/src/parquet/metadata.cpp",
                     "rugo/src/parquet/decode_encodings.cpp",
                     "rugo/src/parquet/decode_page.cpp",
+                    "rugo/src/parquet/page_index.cpp",
                     "rugo/src/parquet/decode_column.cpp",
                     "rugo/src/parquet/decode.cpp",
                     "rugo/src/parquet/compression.cpp",

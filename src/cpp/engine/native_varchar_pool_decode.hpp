@@ -66,11 +66,23 @@ inline const uint8_t* varchar_pool_read_u32(const uint8_t* p, uint32_t* out) {
 // kernel (e.g. Morsel.slice). These helpers are the nogil, PyObject-free
 // counterpart of draken_vector_own_string{,_dict}.
 //
-// `src_slots` (nslots entries) and `src_arena` (arena_len bytes) are copied
-// verbatim into the block and then draken_free'd (ownership transferred, same as
-// draken_vector_own_string). Slot arena offsets are relative to the arena base,
-// so a verbatim copy needs no rebasing. `validity` (and `codes` for the dict
-// variant) are retained by the VectorOwner.
+// The header and the slot array are ALWAYS one allocation, because `data` has to
+// be a DrakenStringArena and the slots are small (16 bytes a row). The arena is
+// the part that is megabytes, and there are two ways it reaches the vector:
+//
+//   * `string_block_borrowing_arena` — the header points at the producer's OWN
+//     arena buffer, which the VectorOwner keeps alive in `arena_buf`. No copy.
+//     This is what `emit_dense_string_column` / `emit_dict_string_column` do, so
+//     it is the path every parquet and pool string column takes.
+//   * `consolidate_string_block` — the arena is copied into the block, for a
+//     producer that cannot give its arena away: the PostgreSQL decoder stages
+//     into a std::vector, and the ARRAY child decoder has one it could transfer
+//     but has not been moved over yet.
+//
+// Both are valid string vectors and nothing downstream can tell them apart: the
+// arena is reached through the `arena` POINTER in the header, never by walking
+// off the end of it, and slot offsets are relative to the arena base either way.
+// `validity` (and `codes` for the dict variant) are retained by the VectorOwner.
 inline uint8_t* consolidate_string_block(const DrakenStringSlot* src_slots, uint32_t nslots,
                                          const uint8_t* src_arena, size_t arena_len,
                                          DrakenType type, DrakenStringArena** out_sa,
@@ -85,14 +97,33 @@ inline uint8_t* consolidate_string_block(const DrakenStringSlot* src_slots, uint
     const size_t alloc_size = total > 0u ? total : sizeof(DrakenStringArena);
 
     uint8_t* block = static_cast<uint8_t*>(draken_malloc(alloc_size));
-    std::memset(block, 0, alloc_size);
+    // Zero the HEADER only, not the whole block. Every field of DrakenStringArena
+    // is assigned below (including payloads_elided, which buffers.h warns is not
+    // self-zeroing), so this covers just the alignment padding after them — but
+    // the slot array and the arena are a different matter: they are megabytes per
+    // morsel and the memcpys below overwrite them completely, so zeroing them
+    // first was a second full pass over the same bytes, on every string column of
+    // every scan. What a memcpy does NOT cover is zeroed by that memcpy's own
+    // else-branch, so no byte the vector can reach is ever left indeterminate.
+    std::memset(block, 0, struct_end);
     DrakenStringArena* sa = reinterpret_cast<DrakenStringArena*>(block);
     DrakenStringSlot* dslots = reinterpret_cast<DrakenStringSlot*>(block + struct_end);
     uint8_t* darena = (arena_len > 0u) ? (block + arena_start) : nullptr;
     if (nslots > 0u && src_slots)
         std::memcpy(dslots, src_slots, static_cast<size_t>(nslots) * sizeof(DrakenStringSlot));
-    if (arena_len > 0u && src_arena)
-        std::memcpy(darena, src_arena, arena_len);
+    else
+        // No source slots: the region is the one-slot placeholder `slots_bytes`
+        // reserves (nslots == 0), or a caller that passed a null slot pointer.
+        // Either way nothing wrote it, so it has to be zeroed here.
+        std::memset(dslots, 0, slots_bytes);
+    if (arena_len > 0u) {
+        if (src_arena)
+            std::memcpy(darena, src_arena, arena_len);
+        else
+            // arena_len says these bytes exist and `arena_used` will publish them,
+            // so they must be readable zeros rather than whatever malloc returned.
+            std::memset(darena, 0, arena_len);
+    }
     sa->slots = dslots;
     sa->arena = darena;
     sa->length = nslots;
@@ -109,6 +140,80 @@ inline uint8_t* consolidate_string_block(const DrakenStringSlot* src_slots, uint
     return block;
 }
 
+// Builds [ DrakenStringArena header | DrakenStringSlot[nslots] ] and points the
+// header's `arena` at `arena` WITHOUT copying it.
+//
+// This is the emission path for a producer that ALREADY owns its arena in a
+// draken_malloc'd buffer - every decoder here and in the parquet Source does,
+// because it decoded the value bytes into one. Those bytes are the bulk of a
+// string column, and copying them into a second block to then free the first was
+// a full extra pass plus a second allocation, per column, per morsel.
+//
+// The caller MUST hand `arena` to the VectorOwner's `arena_buf`, which is what
+// keeps it alive for exactly as long as the vector that points into it. Nothing
+// reads the arena by walking off the end of the header: `DrakenStringArena.arena`
+// is a pointer and every consumer dereferences it as one, which is why the arena
+// does not have to live inside the same allocation.
+//
+// `consolidate_string_block` above stays for producers that cannot hand their
+// arena over (the PostgreSQL decoder stages into a std::vector) or have not been
+// moved across yet (the ARRAY child decoder); they copy, exactly as before.
+inline uint8_t* string_block_borrowing_arena(const DrakenStringSlot* src_slots, uint32_t nslots,
+                                             uint8_t* arena, size_t arena_len,
+                                             DrakenType type, DrakenStringArena** out_sa,
+                                             bool payloads_elided = false) {
+    constexpr size_t kSlotAlign = alignof(DrakenStringSlot);
+    const size_t struct_end =
+        (sizeof(DrakenStringArena) + kSlotAlign - 1u) & ~(kSlotAlign - 1u);
+    const size_t slots_bytes = (nslots > 0u ? static_cast<size_t>(nslots) : 1u) *
+                               sizeof(DrakenStringSlot);
+
+    uint8_t* block = static_cast<uint8_t*>(draken_malloc(struct_end + slots_bytes));
+    std::memset(block, 0, struct_end);   // header padding only; every field is set below
+    DrakenStringArena* sa = reinterpret_cast<DrakenStringArena*>(block);
+    DrakenStringSlot* dslots = reinterpret_cast<DrakenStringSlot*>(block + struct_end);
+    if (nslots > 0u && src_slots)
+        std::memcpy(dslots, src_slots, static_cast<size_t>(nslots) * sizeof(DrakenStringSlot));
+    else
+        std::memset(dslots, 0, slots_bytes);
+    sa->slots = dslots;
+    // A zero-length arena publishes a NULL pointer exactly as the copying path
+    // does, so no consumer can tell the two constructions apart. The buffer is
+    // still handed to the VectorOwner by the caller, so a 1-byte placeholder
+    // allocation is released rather than leaked.
+    sa->arena = (arena_len > 0u) ? arena : nullptr;
+    sa->length = nslots;
+    sa->arena_used = arena_len;
+    sa->arena_cap = arena_len;
+    sa->payloads_elided = payloads_elided ? 1u : 0u;
+    sa->null_bitmap = nullptr;
+    sa->owns_buffers = 0;   // the VectorOwner owns block and arena, not this header
+    sa->type = type;
+    *out_sa = sa;
+    return block;
+}
+
+// The emission path for a producer that owns its arena: borrow it, except in the
+// ONE degenerate shape where borrowing cannot reproduce what copying did.
+//
+// `arena_len > 0` with a NULL buffer says "these bytes exist" while handing over
+// nothing to point at. The copying path answers that by materialising the bytes
+// as zeros inside the block, so `sa->arena` is a readable pointer; borrowing
+// would publish NULL and turn any long slot's `str_data(slot, sa->arena)` into a
+// NULL dereference. That shape therefore keeps copying. It is reachable from a
+// producer that records lengths without materialising payloads, which is exactly
+// what `payloads_elided` describes.
+inline uint8_t* string_arena_block(const DrakenStringSlot* src_slots, uint32_t nslots,
+                                   uint8_t* arena, size_t arena_len,
+                                   DrakenType type, DrakenStringArena** out_sa,
+                                   bool payloads_elided = false) {
+    if (arena_len > 0u && arena == nullptr)
+        return consolidate_string_block(src_slots, nslots, arena, arena_len, type, out_sa,
+                                        payloads_elided);
+    return string_block_borrowing_arena(src_slots, nslots, arena, arena_len, type, out_sa,
+                                        payloads_elided);
+}
+
 // Dense (positional) string column: nslots == length, selection = global identity.
 inline void emit_dense_string_column(DrakenStringSlot* src_slots, uint32_t length,
                                      uint8_t* src_arena, size_t arena_len,
@@ -118,10 +223,11 @@ inline void emit_dense_string_column(DrakenStringSlot* src_slots, uint32_t lengt
                                      bool row_sorted = false,
                                      bool row_sorted_descending = false) {
     DrakenStringArena* sa = nullptr;
-    uint8_t* block = consolidate_string_block(src_slots, length, src_arena, arena_len, type, &sa,
-                                              payloads_elided);
+    uint8_t* block = string_arena_block(src_slots, length, src_arena, arena_len, type, &sa,
+                                        payloads_elided);
     draken_free(src_slots);
-    draken_free(src_arena);
+    // src_arena is NOT freed: the vector points into it, and it is handed to the
+    // VectorOwner's arena_buf below.
     DrakenVector v = draken_vector_from_dense(sa, length, type, validity);
     // Clustering hint (rugo sorting_columns, trust-gated in metadata.cpp). Direct
     // scan callers pass the real value; pool/IPC deserialize callers leave the
@@ -130,7 +236,9 @@ inline void emit_dense_string_column(DrakenStringSlot* src_slots, uint32_t lengt
     if (row_sorted)
         v.flags |= DRAKEN_ROW_SORTED | (row_sorted_descending ? DRAKEN_ROW_SORTED_DESC : 0);
     out.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(block),
-                                            OwnedBuffer<uint8_t>(validity));
+                                            OwnedBuffer<uint8_t>(validity),
+                                            OwnedBuffer<void>(nullptr),
+                                            OwnedBuffer<uint8_t>(src_arena));
     // E37: attach the scan-carried seed (length entries), taking ownership.
     if (keyhash) out.own->keyhash_buf = OwnedBuffer<uint64_t>(keyhash);
     out.view = out.own->vec;
@@ -148,10 +256,9 @@ inline void emit_dict_string_column(DrakenStringSlot* src_slots, uint32_t data_l
                                     bool row_sorted = false,
                                     bool row_sorted_descending = false) {
     DrakenStringArena* sa = nullptr;
-    uint8_t* block = consolidate_string_block(src_slots, data_length, src_arena, arena_len,
-                                              type, &sa);
+    uint8_t* block = string_arena_block(src_slots, data_length, src_arena, arena_len, type, &sa);
     draken_free(src_slots);
-    draken_free(src_arena);
+    // src_arena is NOT freed: see emit_dense_string_column.
     DrakenVector v = draken_vector_from_dict(sa, data_length, codes, length, type, validity);
     if (sorted && draken_is_dict(&v))
         v.flags |= DRAKEN_DICT_KEYS_SORTED;
@@ -161,7 +268,8 @@ inline void emit_dict_string_column(DrakenStringSlot* src_slots, uint32_t data_l
         v.flags |= DRAKEN_ROW_SORTED | (row_sorted_descending ? DRAKEN_ROW_SORTED_DESC : 0);
     out.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(block),
                                             OwnedBuffer<uint8_t>(validity),
-                                            OwnedBuffer<void>(codes));
+                                            OwnedBuffer<void>(codes),
+                                            OwnedBuffer<uint8_t>(src_arena));
     // E37: attach the scan-carried seed (data_length distinct entries), taking ownership.
     if (keyhash) out.own->keyhash_buf = OwnedBuffer<uint64_t>(keyhash);
     out.view = out.own->vec;

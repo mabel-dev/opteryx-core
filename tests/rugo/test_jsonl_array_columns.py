@@ -329,6 +329,47 @@ def test_non_array_value_in_an_array_column_falls_back():
     assert_fell_back(vec)
 
 
+# A string value's slice is its content between the quotes, so the STRING "[3]" reaches
+# the builder as the same bytes as the ARRAY [3]. Only the recorded value shape
+# (StringColumnResult::value_types) tells them apart; a string is not an array.
+
+def test_string_that_looks_like_an_array_falls_back():
+    with pytest.warns(RuntimeWarning, match="column 'a'"):
+        vec = read_col('{"a":[1,2]}', '{"a":"[3]"}')
+    assert_fell_back(vec)
+    assert vec.to_pylist() == ["[1,2]", "[3]"]
+
+
+def test_string_that_looks_like_an_object_falls_back():
+    with pytest.warns(RuntimeWarning, match="column 'a'"):
+        vec = read_col('{"a":[1,2]}', '{"a":"{\\"k\\":1}"}')
+    assert_fell_back(vec)
+
+
+def test_string_that_looks_like_an_array_past_the_sample_window_falls_back():
+    # The hint is taken from the first rows; the shape check must cover EVERY row.
+    rows = ['{"a":[%d]}' % i for i in range(50)] + ['{"a":"[99]"}']
+    with pytest.warns(RuntimeWarning, match="column 'a'"):
+        vec = read_col(*rows)
+    assert_fell_back(vec)
+    assert vec.to_pylist()[-1] == "[99]"
+
+
+def test_all_real_arrays_still_materialise():
+    assert_array(
+        read_col('{"a":[1,2]}', '{"a":null}', '{"b":1}', '{"a":[3]}'),
+        DrakenType.INT64,
+        [[1, 2], None, None, [3]],
+    )
+
+
+def test_string_hinted_column_holding_array_text_stays_text_without_warning():
+    # The hint is String, so no array parsing is attempted and no shapes are recorded.
+    vec = read_col('{"a":"[1]"}', '{"a":[2]}')
+    assert vec.type == DrakenType.VARCHAR
+    assert vec.to_pylist() == ["[1]", "[2]"]
+
+
 # --------------------------------------------------------------------------
 # malformed array text: bracket-balanced but not valid JSON
 # --------------------------------------------------------------------------

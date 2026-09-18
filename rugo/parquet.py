@@ -729,7 +729,7 @@ def write_parquet(morsel, compression: str = "zstd", bloom_filters=True,
                   max_rows_per_row_group: int = 262144,
                   max_page_bytes: int = 0,
                   sorted_by=None, sorted_descending: bool = False,
-                  profile: str = "fast") -> bytes:
+                  profile: str = "fast", page_index: bool = True) -> bytes:
     """Serialize a Morsel to Parquet bytes.
 
     compression: "zstd" (default) or "none".
@@ -746,8 +746,13 @@ def write_parquet(morsel, compression: str = "zstd", bloom_filters=True,
         Pass 0 to write a single row group regardless of size.
     max_page_bytes: split each column chunk into multiple data pages once its
         estimated size exceeds this many bytes (default 0 = single page per
-        chunk). Independent per column. Dictionary-encoded chunks are
-        unaffected.
+        chunk). Independent per column. Dictionary-encoded chunks split on the
+        same row grid, behind one shared dictionary page.
+    page_index: True (default) writes a PageIndex (ColumnIndex + OffsetIndex)
+        in the file tail so a reader with a pushed predicate can skip whole
+        data pages — and, remotely, not fetch them. Only has an effect when
+        max_page_bytes > 0: over a single-page chunk the index would restate
+        what the footer statistics already say.
     sorted_by: name of a column the CALLER asserts is already ordered within
         every row group of this morsel (e.g. a clustering key merged from
         pre-sorted runs). Written verbatim into each row group's parquet
@@ -778,7 +783,7 @@ def write_parquet(morsel, compression: str = "zstd", bloom_filters=True,
                                  max_page_bytes=max_page_bytes,
                                  sorted_by=sorted_by,
                                  sorted_descending=sorted_descending,
-                                 profile=profile)
+                                 profile=profile, page_index=page_index)
 
 
 def write_parquet_with_bounds(morsel, compression: str = "zstd", bloom_filters=True,
@@ -786,7 +791,7 @@ def write_parquet_with_bounds(morsel, compression: str = "zstd", bloom_filters=T
                               max_rows_per_row_group: int = 262144,
                               max_page_bytes: int = 0,
                               sorted_by=None, sorted_descending: bool = False,
-                              profile: str = "fast"):
+                              profile: str = "fast", page_index: bool = True):
     """Like write_parquet but also returns {col_index: (min, max)} bounds.
 
     Note: bounds are only populated for single-row-group files.
@@ -799,13 +804,13 @@ def write_parquet_with_bounds(morsel, compression: str = "zstd", bloom_filters=T
                                              max_page_bytes=max_page_bytes,
                                              sorted_by=sorted_by,
                                              sorted_descending=sorted_descending,
-                                             profile=profile)
+                                             profile=profile, page_index=page_index)
 
 
 def open_parquet_writer(sink, compression: str = "zstd", bloom_filters=True,
                         dictionary: bool = True, max_page_bytes: int = 0,
                         sorted_by=None, sorted_descending: bool = False,
-                        profile: str = "fast"):
+                        profile: str = "fast", page_index: bool = True):
     """Open a streaming, constant-memory Parquet writer.
 
     Unlike write_parquet (whole morsel in, whole file out), this writes one row
@@ -841,14 +846,14 @@ def open_parquet_writer(sink, compression: str = "zstd", bloom_filters=True,
                                        max_page_bytes=max_page_bytes,
                                        sorted_by=sorted_by,
                                        sorted_descending=sorted_descending,
-                                       profile=profile)
+                                       profile=profile, page_index=page_index)
 
 
 def write_parquet_stream(morsel_iter, sink, compression: str = "zstd",
                          bloom_filters=True, dictionary: bool = True,
                          max_page_bytes: int = 0,
                          sorted_by=None, sorted_descending: bool = False,
-                         profile: str = "fast") -> int:
+                         profile: str = "fast", page_index: bool = True) -> int:
     """Stream an iterable of Morsels to a byte-chunk `sink` as one Parquet file.
 
     Thin wrapper over open_parquet_writer: one row group per yielded morsel,
@@ -862,7 +867,7 @@ def write_parquet_stream(morsel_iter, sink, compression: str = "zstd",
                                         max_page_bytes=max_page_bytes,
                                         sorted_by=sorted_by,
                                         sorted_descending=sorted_descending,
-                                        profile=profile)
+                                        profile=profile, page_index=page_index)
 
 
 def patch_columns(source: bytes, drop=None, rename=None, add=None, retype=None) -> bytes:

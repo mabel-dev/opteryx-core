@@ -39,7 +39,10 @@
 //
 // LIFETIME: the parent VectorOwner owns `offsets` (data_buf) and the parent
 // validity bitmap; its `child_owner` (draken/core/vector_owner.h) owns the child
-// VectorOwner outright, whose destructor chains recursively. Nothing here aliases
+// VectorOwner outright, whose destructor chains recursively. A STRING child owns
+// its byte arena too, in its own `arena_buf`: the header points at that buffer
+// rather than carrying a copy, so the arena lives exactly as long as the child
+// vector that reads it. Nothing here aliases
 // a child buffer into a second owner — the one sanctioned intra-morsel aliasing
 // pattern (draken/morsels/sort.hpp:805, a non-owning shared_ptr aliased onto
 // `own->child_owner.get()`) is a CONSUMER-side borrow of an already-built vector
@@ -57,7 +60,7 @@
 #include "core/alloc.h"          // draken_malloc / draken_free
 #include "core/string_slot.h"    // DrakenStringSlot, draken_build_string_slot
 #include "logical_type.h"        // LogicalType / logical_type_intern (ARRAY<TIMESTAMP> child)
-#include "native_varchar_pool_decode.hpp"  // varchar_pool_read_u32, consolidate_string_block
+#include "native_varchar_pool_decode.hpp"  // varchar_pool_read_u32, string_arena_block
 
 namespace opteryx::engine {
 
@@ -197,23 +200,31 @@ inline std::unique_ptr<VectorOwner> build_array_level(const uint8_t*& p, const u
             }
 
             uint8_t* child_validity = array_pool_copy_validity(child_bmap_src, child_bmap_len);
-            // The canonical string-vector block: [DrakenStringArena | slots | arena].
-            // A raw slot pointer is NOT a valid string vector `data` — the slot/arena
-            // kernels read `data` AS a DrakenStringArena*.
+            // `data` must be a DrakenStringArena — the slot/arena kernels read it as
+            // one, so a raw slot pointer is not a valid string vector. The header and
+            // the slots are that block; the arena above is NOT copied into it, it is
+            // pointed at and handed to this child owner's arena_buf (see
+            // string_arena_block). `total_arena` here counts every element, inline
+            // ones included, so for a column of short strings that copy was pure
+            // waste of exactly the bytes the note above calls dead weight.
             DrakenStringArena* sa = nullptr;
-            uint8_t* block = consolidate_string_block(slots, child_count, arena, total_arena,
-                                                      DRAKEN_VARCHAR, &sa);
+            uint8_t* block = string_arena_block(slots, child_count, arena, total_arena,
+                                                DRAKEN_VARCHAR, &sa);
             draken_free(slots);
-            draken_free(arena);
+            // `arena` is NOT freed: the child vector points into it for its lifetime.
+            // A zero-length arena still hands its one-byte placeholder over, so that
+            // allocation is released with the vector rather than leaked.
             // draken_vector_own_array publishes the child validity on the arena
-            // header as well as the vector (consolidate_string_block leaves it
-            // null, which is right for a top-level string column but not for an
-            // array child) — keep the two paths' output identical.
+            // header as well as the vector (the block builders leave it null, which
+            // is right for a top-level string column but not for an array child) —
+            // keep the two paths' output identical.
             sa->null_bitmap = child_validity;
             DrakenVector child_vec = draken_vector_from_dense(sa, child_count, DRAKEN_VARCHAR,
                                                              child_validity);
             child = std::make_unique<VectorOwner>(child_vec, OwnedBuffer<void>(block),
-                                                  OwnedBuffer<uint8_t>(child_validity));
+                                                  OwnedBuffer<uint8_t>(child_validity),
+                                                  OwnedBuffer<void>(nullptr),
+                                                  OwnedBuffer<uint8_t>(arena));
         } else {
             DrakenType child_type;
             uint32_t elem_size;

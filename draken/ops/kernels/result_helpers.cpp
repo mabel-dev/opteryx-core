@@ -6,16 +6,22 @@
 #include <cstring>
 
 /**
- * Phase 9c: consolidate hand-allocated string component buffers into the single
- * draken_malloc block a string DrakenVector requires, and return it as a
- * VecResult with the null bitmap embedded in that block.
+ * Phase 9c: turn hand-allocated string component buffers into the VecResult a
+ * string DrakenVector requires, with the null bitmap embedded in the block.
  *
- * Block layout (matches make_string_from_sequence):
- *   [ DrakenStringArena | DrakenStringSlot[length] | arena_bytes | validity ]
+ * Block layout:
+ *   [ DrakenStringArena | DrakenStringSlot[length] | validity ]
  *
- * Ownership: CONSUMES the three input buffers (freed after copying). The block
- * becomes VecResult.data; validity (if any) points inside the block and is
- * flagged validity_embedded so vecresult_to_owner does not free it twice.
+ * The byte ARENA is deliberately NOT in that list. It used to be copied in as a
+ * fourth region, which meant every string result paid a full copy of the largest
+ * thing it owned. The caller's arena buffer is kept instead and travels out on
+ * VecResult::arena, so the result owns two buffers rather than one.
+ *
+ * Ownership: CONSUMES all three input buffers. Slots and validity are copied and
+ * freed; the arena is consumed by being retained, so the consumer must take
+ * VecResult::arena as well as VecResult::data — vecresult_to_owner does, via
+ * VectorOwner::arena_buf. Validity (if any) points inside the block and is
+ * flagged validity_embedded so it is not freed twice.
  */
 
 // Consolidated string-block layout, shared by the consolidate-copy and the
@@ -113,13 +119,35 @@ extern "C" VecResult vecresult_from_string_buffers(
             "vecresult_from_string_buffers: type must be VARCHAR/NVARCHAR/VARBINARY/VARIANT");
     }
 
-    // --- Compute single-block layout -----------------------------------------
+    // The caller's ARENA is KEPT, not copied. It is already a draken_malloc'd
+    // buffer of exactly the right bytes, and it is the bulk of a string column —
+    // copying it into the block and freeing the original was a full extra pass
+    // and a second allocation per result. It travels out on VecResult::arena and
+    // the consumer owns it alongside `data`. Slots and validity are small and
+    // stay in the block, so `data` is still one allocation and `validity` is
+    // still an interior pointer (validity_embedded == 1), exactly as before.
+    //
+    // The one shape borrowing cannot reproduce: `arena_len` bytes declared with
+    // no buffer to point at. The old path materialised those as zeros inside the
+    // block, so they were readable; here they are materialised as their own
+    // zeroed buffer, which keeps `sa->arena` a valid pointer and keeps ownership
+    // uniform.
+    if (arena_len > 0u && arena == nullptr) {
+        arena = static_cast<uint8_t*>(draken_malloc(arena_len));
+        if (!arena) {
+            draken_free(slots);
+            draken_free(validity);
+            return draken_error_sentinel("vecresult_from_string_buffers: arena allocation failed");
+        }
+        std::memset(arena, 0, arena_len);
+    }
+
+    // --- Compute block layout: [ header | slots | validity ] -----------------
     constexpr size_t kSlotAlign = alignof(DrakenStringSlot);
     const size_t struct_end =
         (sizeof(DrakenStringArena) + kSlotAlign - 1u) & ~(kSlotAlign - 1u);
     const size_t slots_bytes  = (length > 0u ? (size_t)length : 1u) * sizeof(DrakenStringSlot);
-    const size_t arena_start  = struct_end + slots_bytes;
-    const size_t validity_start = arena_start + arena_len;
+    const size_t validity_start = struct_end + slots_bytes;
 
     size_t validity_bytes = 0u;
     if (validity) {
@@ -141,20 +169,28 @@ extern "C" VecResult vecresult_from_string_buffers(
 
     DrakenStringArena* sa     = reinterpret_cast<DrakenStringArena*>(block);
     DrakenStringSlot*  dslots = reinterpret_cast<DrakenStringSlot*>(block + struct_end);
-    uint8_t*           darena = (arena_len > 0u) ? (block + arena_start) : nullptr;
+    // A zero-length arena can still arrive as a LIVE allocation. Producers that size
+    // the arena up front from the row count (draken_date_format's n*32, the CAST ...
+    // FORMAT paths' k*32 / k*24) or clamp it to one byte (binop_string_concat) hand
+    // one over even when every row turned out to fit inline, so arena_len == 0 does
+    // NOT imply arena == nullptr. Ownership transferred on entry and `darena` is the
+    // only ownership record this result has, so an arena we do not KEEP we must FREE
+    // — dropping it leaked the whole scratch buffer (32 bytes per row, per call) for
+    // every short-format FORMAT_TIMESTAMP / CAST, which no test can see.
+    uint8_t*           darena = arena;
+    if (arena_len == 0u) { draken_free(arena); darena = nullptr; }
     uint8_t*           dvalid = validity        ? (block + validity_start) : nullptr;
 
-    // --- Copy components into the consolidated block -------------------------
+    // --- Copy the small components into the block ----------------------------
     if (length > 0u && slots)
         std::memcpy(dslots, slots, (size_t)length * sizeof(DrakenStringSlot));
-    if (arena_len > 0u && arena)
-        std::memcpy(darena, arena, arena_len);
     if (dvalid)
         std::memcpy(dvalid, validity, validity_bytes);
 
-    // Caller buffers consumed — free the originals now that they are copied.
+    // Slots and validity are consumed by the copy above; a non-empty arena is
+    // consumed by being KEPT (an empty one was already freed with `darena`), so it
+    // is deliberately not freed here.
     draken_free(slots);
-    draken_free(arena);
     draken_free(validity);
 
     // --- Initialise the embedded arena struct --------------------------------
@@ -179,5 +215,7 @@ extern "C" VecResult vecresult_from_string_buffers(
     r.flags             = 0;
     r.validity_embedded = dvalid ? 1u : 0u;
     r.ts_unit           = 0xFFu;
+    // The arena is a second owned buffer behind this result — see vec_result.h.
+    r.arena             = darena;
     return r;
 }

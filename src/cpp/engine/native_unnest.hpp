@@ -180,21 +180,31 @@ struct UnnestOperator : Operator {
         void* data = nullptr;
         uint8_t* validity = nullptr;
         void* sel = nullptr;
+        uint8_t* arena = nullptr;
         int err_op = 0;
         const char* kernel_msg = nullptr;
         VecResult* child = nullptr;
         int rc = filter_fn(filter_prog.instrs, filter_prog.count, &child_morsel,
                            filter_prog.col_idx.data(), filter_prog.lit_dv.data(),
-                           &v, &data, &validity, &sel, &err_op, &kernel_msg, &child);
+                           &v, &data, &validity, &sel, &arena, &err_op, &kernel_msg,
+                           &child);
         if (rc != 0) {
             set_span_error(err, "UnnestOperator: pushed predicate evaluation failed",
                            rc, err_op, kernel_msg);
             return false;
         }
         // Own the span's buffers so they are released on every path out of here.
+        // `arena` is the string result's separately-owned byte arena (ExprEvalFn's
+        // out_arena). A BOOL residual never sets it, but the owner below is built
+        // BEFORE the type check that rejects a non-BOOL result, so it is handed over
+        // here rather than on the accepting path — otherwise the reject path drops
+        // the bulk of a string column on the floor.
         VectorOwner owner(v, OwnedBuffer<void>(data), OwnedBuffer<uint8_t>(validity),
-                          OwnedBuffer<void>(sel));
-        if (child != nullptr) { delete child; }   // a BOOL result has no ARRAY child
+                          OwnedBuffer<void>(sel), OwnedBuffer<uint8_t>(arena));
+        // `delete` would free the BOX and leak everything the child owns (its data,
+        // validity, selection, arena and any nested child). Unreachable while a BOOL
+        // result has no ARRAY child, but this is the disposal a kernel result needs.
+        if (child != nullptr) { draken_vecresult_discard_c(child); }
         if (v.type != DRAKEN_BOOL) {
             err.code = 1;
             err.msg = "UnnestOperator: pushed predicate did not evaluate to BOOL — "

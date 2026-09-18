@@ -49,11 +49,31 @@ struct StringColumnResult {
     bool data_owned = false;          // offsets index into `data` (copy/unescape), not the buffer
     bool any_value_seen = false;      // true iff at least one row resolved a non-null value
                                        // (false => the column is absent/null on every row)
+    bool any_key_seen = false;        // true iff at least one row CARRIED the key at all
+                                       // (a present key with a null value counts; an absent
+                                       // key does not) — distinguishes "sparse" from "not
+                                       // in this data", which any_value_seen cannot
+    // Per-row value SHAPE (markers.hpp ValueType), filled only when extract_column is
+    // asked for it (RecordValueTypes). A string value's slice is its content between
+    // the quotes, so a string "[1]" and an array [1] are byte-identical as slices; this is
+    // the only way a consumer can tell them apart. Rows with no value hold Unknown.
+    // Empty when recording was not requested (or, under IfArrayHinted, the hint was not
+    // Array) — a consumer that needs it must check the size, never assume.
+    std::vector<uint8_t>  value_types;
 
     uint8_t*  data_ptr()   { return data.empty() ? nullptr : data.data(); }
     uint32_t* offset_ptr() { return offsets.empty() ? nullptr : offsets.data(); }
     uint32_t* length_ptr() { return lengths.empty() ? nullptr : lengths.data(); }
     uint8_t*  bitmap_ptr() { return null_bitmap.empty() ? nullptr : null_bitmap.data(); }
+};
+
+// Whether extract_column fills StringColumnResult::value_types.
+enum class RecordValueTypes : uint8_t {
+    Never,          // default: no consumer reads the shape, so no row pays the byte write
+    Always,         // declared ARRAY<T>/VARIANT: the strict per-row check needs every shape
+    IfArrayHinted,  // speculative path: fill only when the sample hint resolves to Array,
+                    // so parse_array_column can refuse a string row that merely looks like
+                    // an array; every other column pays nothing
 };
 
 // Extract one column (ordinal prediction for fast key lookup).
@@ -84,7 +104,11 @@ StringColumnResult extract_column(
     size_t                                     sample_size = SIZE_MAX,
     // Splits the row walk across workers. nullptr (the default) runs it serially in the
     // calling thread — required when the caller is itself already one task per column.
-    const RowExec*                             rows = nullptr
+    const RowExec*                             rows = nullptr,
+    // Fill result.value_types (one ValueType per row) — see RecordValueTypes. Off by
+    // default: only a declared ARRAY/VARIANT column or an Array-hinted speculative column
+    // needs the shape, and every other column would pay a byte write per row for nothing.
+    RecordValueTypes                           record_value_types = RecordValueTypes::Never
 );
 
 // Build an owned Draken VARCHAR Vector from an extracted column. Slice bytes are read
@@ -112,6 +136,11 @@ struct ParsedColumn {
     uint8_t*          validity = nullptr;          // draken_malloc'd or NULL (all valid)
     bool              is_string = false;
     bool              all_null = false;             // every row absent/null (schema reporting)
+    // Declared (explicit_schema) columns only: the key never appeared in ANY record. A
+    // caller pinning one chunk's schema onto another needs this to tell a column that is
+    // merely sparse here from one this data does not have at all — an all-null typed
+    // column is the RIGHT answer for both, so the vector alone cannot say which.
+    bool              key_absent = false;
     void*             data     = nullptr;          // typed buffer (own_raw)
     DrakenStringSlot* slots    = nullptr;          // string slots (own_string)
     uint8_t*          arena    = nullptr;
@@ -131,9 +160,10 @@ struct ParsedColumn {
     void*              array_child_data = nullptr;
 
     // Set when a column's first-sampled value was a JSON array, parse_arrays was
-    // requested, but some row's array contained nested containers or a heterogeneous
-    // mix of scalar element types (out of v1 scope) — the column fell back to raw
-    // JSON text (DRAKEN_VARCHAR) instead, same as parse_arrays=False. The caller
+    // requested, but some row was out of v1 scope — a non-array value (including a
+    // string whose text merely looks like an array), malformed array text, nested
+    // containers, or a heterogeneous mix of scalar element types — so the column fell
+    // back to raw JSON text (DRAKEN_VARCHAR) instead, same as parse_arrays=False. The caller
     // (Cython edge, under the GIL) surfaces this as a Python warning; C++ itself never
     // warns because parse_all_columns runs off the GIL.
     bool              array_fallback = false;

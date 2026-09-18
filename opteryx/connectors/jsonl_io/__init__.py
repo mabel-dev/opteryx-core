@@ -14,20 +14,25 @@ file's bytes are split here into newline-aligned chunks and each chunk is
 decoded through rugo independently, with the pushed-down projection/predicates
 (Stage 2) passed to every chunk's decode.
 
-Because rugo infers each chunk's schema independently (there is no working
-explicit_schema override to pin every chunk to one schema), JsonlReadNode is
-responsible for validating that every chunk's decoded columns/types agree
-with the schema resolved at bind time, and failing loudly if they don't.
+The schema is resolved ONCE, at bind time, from the first record-bearing
+chunk, and PINNED onto every chunk's decode as rugo's `explicit_schema`
+(2026-09-17): each projected column is parsed strictly as its bound type, a
+column this chunk lacks comes back typed and all-null, and a value that does
+not fit the bound type fails loud naming the column, row and value. Before
+this, rugo re-inferred every chunk from its own 5-row sample, and a column
+that happened to be null for the first rows of a later chunk drifted to
+VARCHAR and failed the whole query.
 """
 
 from typing import Iterator, Optional, Sequence
 
 from draken.draken_native import DrakenType
+from draken.morsels.morsel import Morsel
 
 from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.expression import NodeType
 from opteryx.types.logical_type import LogicalCategory
-from rugo.jsonl import read_jsonl as _rugo_read_jsonl
+from rugo.rugo_native import read_jsonl as _rugo_read_jsonl
 
 # Mirrors the chunk size used by the (now-removed) sequential chunked JSONL
 # reader that used to live in rugo/src/jsonl/_jsonl_reader.pxi.
@@ -154,25 +159,43 @@ def decode_chunk(
     fail_on_error: bool = True,
     infer_schema: bool = True,
     infer_sample_size: int = 5,
+    explicit_schema: Optional[dict] = None,
 ):
-    """Decode one newline-aligned chunk into a single Draken Morsel via rugo.
+    """Decode one newline-aligned chunk via rugo.
+
+    Returns ``(morsel, absent_columns)``. ``morsel`` is ``None`` if every row
+    in this chunk was filtered out by ``predicates`` -- a benign zero-row
+    result, not a decode failure, so the caller treats it as "this chunk
+    contributed no rows". ``absent_columns`` lists the declared columns whose
+    key appeared in NO record of the chunk (each is still in the morsel, typed
+    and all-null); it is how the scan node tells a file that lacks the bound
+    columns entirely from one where they are merely sparse.
 
     ``columns``/``predicates`` are the pushed-down projection (physical,
-    pre-alias names) and predicate tuples for this scan; rugo applies both
-    while decoding this chunk. ``fail_on_error``/``infer_schema``/
-    ``infer_sample_size`` are READ_JSONL's resolved options (Stage 3; see
-    opteryx.planner.binder.dataset), forwarded unchanged to rugo. Returns
-    ``None`` if every row in this chunk was filtered out by ``predicates`` --
-    a benign zero-row result, not a decode failure (see the fixed bug note in
-    rugo/jsonl/__init__.py's _JsonlReader.__iter__), so the caller should
-    simply treat it as "this chunk contributed no rows" rather than raising.
+    pre-alias names) and predicate tuples for this scan. ``explicit_schema``
+    is the bind-time schema pinned onto this chunk, ``{physical_name:
+    str(ColumnType)}`` -- the platform's own type spelling, which rugo's
+    declared-type vocabulary accepts verbatim. A value that does not fit its
+    declared type raises ``ValueError`` from rugo naming the column, row and
+    value. ``fail_on_error``/``infer_schema``/``infer_sample_size`` are
+    READ_JSONL's resolved options (Stage 3; see opteryx.planner.binder.dataset),
+    forwarded unchanged.
+
+    Calls rugo's native entry point rather than the ``rugo.jsonl`` facade
+    because the facade yields only the Morsel and drops ``absent_columns``.
     """
-    with _rugo_read_jsonl(
+    result = _rugo_read_jsonl(
         chunk,
         columns=columns,
         predicates=predicates,
+        explicit_schema=explicit_schema,
         fail_on_error=fail_on_error,
         infer_schema=infer_schema,
         infer_sample_size=infer_sample_size,
-    ) as reader:
-        return next(iter(reader), None)
+    )
+    if not result["success"]:
+        # Only ever means zero rows survived (see rugo/jsonl/__init__.py's
+        # _JsonlReader.__iter__); genuine failures raise from rugo directly.
+        return None, []
+    morsel = Morsel.from_vectors(result["column_names"], result["columns"])
+    return morsel, result["absent_columns"]

@@ -22,8 +22,18 @@ file out, re-chunked to the same ROWS_PER_ROW_GROUP.
 minutes to build should not be destroyed by a run that fails halfway, and the
 old tree is the only way back if the new one is wrong.
 
+⛔ PAGE SPLITTING CHANGES THE NUMBERS. `--max-page-bytes` (default 0 = one data
+page per column chunk, what every corpus carries today) splits chunks into
+several pages and writes a PageIndex over them. That is a layout change in the
+same class as the two above: more, smaller zstd blocks cost compression ratio,
+and the index costs tail bytes, so a corpus written with it is NOT comparable to
+one written without it on anything but rows. Build it as a SEPARATE tree and
+benchmark the two against each other; do not quote a page-split corpus against a
+number taken on a single-page one.
+
 Usage:
     python dev/rewrite_parquet_corpus.py <src_dir> <dst_dir> [--profile fast|storage]
+                                         [--max-page-bytes N] [--no-page-index]
 
 Dev tooling only — never imported by production code (repo rules §5).
 """
@@ -65,7 +75,8 @@ def _iter_parquet(src_dir: str):
     return found
 
 
-def rewrite_file(src: str, dst: str, profile: str) -> tuple[int, int]:
+def rewrite_file(src: str, dst: str, profile: str, max_page_bytes: int,
+                 page_index: bool) -> tuple[int, int]:
     """One parquet file in, one out. Returns (rows, row_groups)."""
     os.makedirs(os.path.dirname(dst), exist_ok=True)
 
@@ -75,7 +86,9 @@ def rewrite_file(src: str, dst: str, profile: str) -> tuple[int, int]:
     row_groups = 0
 
     with open(dst, "wb") as fh:
-        writer = open_parquet_writer(fh.write, compression="zstd", profile=profile)
+        writer = open_parquet_writer(fh.write, compression="zstd", profile=profile,
+                                     max_page_bytes=max_page_bytes,
+                                     page_index=page_index)
 
         def emit(morsel) -> None:
             nonlocal rows, row_groups
@@ -116,6 +129,17 @@ def main() -> int:
     ap.add_argument("src")
     ap.add_argument("dst")
     ap.add_argument("--profile", default="storage", choices=("fast", "storage"))
+    ap.add_argument(
+        "--max-page-bytes", type=int, default=0,
+        help="split each column chunk into data pages of about this many bytes "
+             "(0 = one page per chunk, the default every corpus was built with). "
+             "A PageIndex is written only when this is non-zero.",
+    )
+    ap.add_argument(
+        "--no-page-index", action="store_true",
+        help="split pages without writing the PageIndex (isolates the cost of "
+             "page splitting from the cost of the index).",
+    )
     args = ap.parse_args()
 
     src = os.path.abspath(args.src)
@@ -132,7 +156,11 @@ def main() -> int:
         print(f"ERROR: no .parquet files under {src}")
         return 1
 
-    print(f"rewriting {len(files)} file(s): {src} -> {dst}  (profile={args.profile})")
+    pages = (f"{args.max_page_bytes} B/page"
+              f"{'' if args.no_page_index else ' + PageIndex'}"
+              if args.max_page_bytes else "one page/chunk, no PageIndex")
+    print(f"rewriting {len(files)} file(s): {src} -> {dst}  "
+          f"(profile={args.profile}, {pages})")
     t0 = time.time()
     total_rows = 0
     total_rgs = 0
@@ -141,7 +169,8 @@ def main() -> int:
 
     for i, (full, rel) in enumerate(files, 1):
         out = os.path.join(dst, rel)
-        rows, rgs = rewrite_file(full, out, args.profile)
+        rows, rgs = rewrite_file(full, out, args.profile, args.max_page_bytes,
+                                 not args.no_page_index)
         total_rows += rows
         total_rgs += rgs
         src_bytes += os.path.getsize(full)

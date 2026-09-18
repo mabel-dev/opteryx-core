@@ -135,12 +135,13 @@ def test_column_drift_across_a_glob_still_fails(divergent_glob, fmt, ext):
     loud, naming the offending file.
 
     Two wordings are both the drift check doing its job: the file's decoded names
-    disagreeing with the expectation, and (JSONL's per-file probe) the projected
-    column being absent from the file altogether."""
+    disagreeing with the expectation (CSV), and the projected column's key being
+    absent from every record of the file (JSONL, whose bound schema is pinned onto
+    each chunk and reports the columns no record carried)."""
     with pytest.raises(DatasetReadError) as exc:
         _rows(f"SELECT b FROM READ_{fmt}('{divergent_glob}/*.{ext}')")
     message = str(exc.value)
-    assert "do not match the expected" in message or "were found in this file" in message
+    assert "do not match the expected" in message or "are absent from every record" in message
     assert "f2." + ext in message  # the offending file is named
 
     with pytest.raises(DatasetReadError):

@@ -18,6 +18,7 @@
 // only rugo can read is a defect.
 
 #include "_thrift_writer.hpp"
+#include "page_index_writer.hpp"
 #include "_bloom_writer.hpp"
 
 #include "core/kmv_sketch.h"  // THE shared KMV sketch (draken, header-only)
@@ -859,7 +860,88 @@ struct PageBuild {
   std::vector<uint8_t> bytes;
   std::vector<uint8_t> plain_bytes;
   size_t uncompressed_total;
+  // One entry per data page in `bytes` / `plain_bytes`, in order. Empty unless
+  // a page index was requested.
+  std::vector<PageMeta> pages;
 };
+
+// Per-page bounds/null state for one page, from that page's own column slice.
+// Reuses compute_stats so a page bound is derived by EXACTLY the same rules
+// (and the same declared-domain integer ordering) as the chunk bound the footer
+// carries — a page bound that disagreed with the chunk bound would be a bug.
+inline PageMeta make_page_meta(const ColumnInput &sub, size_t count,
+                               int64_t first_row, const PageBuild &pb, int codec) {
+  const ColumnStats ps = compute_stats(sub, count);
+  PageMeta pm;
+  pm.first_row_index = first_row;
+  pm.null_count = ps.null_count;
+  pm.null_page = (ps.null_count == (int64_t)count);
+  pm.has_bounds = ps.has_minmax;
+  if (ps.has_minmax) {
+    pm.min_bytes = ps.min_bytes;
+    pm.max_bytes = ps.max_bytes;
+  }
+  pm.stored_size = pb.bytes.size();
+  pm.plain_size = (codec == CODEC_ZSTD) ? pb.plain_bytes.size() : pb.bytes.size();
+  return pm;
+}
+
+// Rows per data page for a byte-size-triggered split. Estimated from
+// column-specific bytes/row (exact for fixed-width types, measured for
+// variable-width) and rounded up to a multiple of 8 so validity byte offsets
+// stay exact, mirroring row-group splitting's rounding.
+//
+// `col.codes != nullptr` (dictionary-encoded chunk) is sized on the PLAIN
+// footprint of the values a row resolves to, NOT on the encoded code stream.
+// That is deliberate: a dict column's code stream is so small that a byte
+// budget over it would put a whole row group in one page, which is exactly the
+// case the page index exists to break up. Sizing on the plain footprint gives a
+// dict column the same page GRID as it would have had unencoded — the
+// dictionary's win shows up as a smaller stored page, not as a coarser index.
+inline size_t rows_per_page_for(const ColumnInput &col, size_t rg_rows,
+                                size_t max_page_bytes) {
+  const uint32_t *codes = col.codes;
+  size_t rows_per_page;
+  if (col.type == PT_BYTE_ARRAY) {
+    // Variable width: measure actual encoded bytes (4-byte length + payload,
+    // present rows only) to get an honest average.
+    size_t total = 0;
+    for (size_t i = 0; i < rg_rows; i++)
+      if (is_valid(col.validity, i)) total += 4 + col.strs[codes ? codes[i] : i].len;
+    double bpr = rg_rows > 0 ? (double)total / (double)rg_rows : 1.0;
+    rows_per_page = (size_t)((double)max_page_bytes / std::max(1.0, bpr));
+  } else if (col.type == PT_FLBA) {
+    rows_per_page = max_page_bytes / (size_t)std::max(1, col.dec_width);
+  } else if (col.type == PT_BOOLEAN) {
+    rows_per_page = max_page_bytes * 8; // ~1 bit/row (def-level overhead ignored, small)
+  } else {
+    // 4-byte physical types (INT32, FLOAT) vs 8-byte (INT64, DOUBLE).
+    size_t width = (col.type == PT_INT32 || col.type == PT_FLOAT) ? 4 : 8;
+    rows_per_page = max_page_bytes / width;
+  }
+  if (rows_per_page == 0) rows_per_page = 8;
+  return (rows_per_page + 7) & ~(size_t)7; // byte-aligned validity slicing
+}
+
+// Offset a scalar ColumnInput's per-row buffers to start at row `start`.
+// PRESERVE/auto-dict columns (codes != nullptr) keep their typed buffers
+// pointing at the DICTIONARY values and slice `codes` instead.
+inline ColumnInput slice_rows(const ColumnInput &col, size_t start) {
+  ColumnInput sub = col;
+  if (col.codes) {
+    sub.codes = col.codes + start;
+  } else {
+    if (col.i32)     sub.i32     = col.i32     + start;
+    if (col.i64)     sub.i64     = col.i64     + start;
+    if (col.f32)     sub.f32     = col.f32     + start;
+    if (col.f64)     sub.f64     = col.f64     + start;
+    if (col.boolean) sub.boolean = col.boolean + start;
+    if (col.strs)    sub.strs    = col.strs    + start;
+    if (col.dec_raw) sub.dec_raw = col.dec_raw + start * (size_t)col.dec_width;
+  }
+  if (col.validity) sub.validity = col.validity + (start >> 3);
+  return sub;
+}
 
 // header ++ body, sized exactly.
 inline std::vector<uint8_t> concat_page(const std::vector<uint8_t> &header,
@@ -992,58 +1074,42 @@ inline PageBuild build_array_data_page(const ColumnInput &col, int codec,
 //
 // max_page_bytes == 0 disables splitting (single page per chunk, previous
 // behavior — the only path exercised before this feature existed). rows/page
-// is estimated from column-specific bytes/row (exact for fixed-width types,
-// measured for variable-width) and rounded up to a multiple of 8 so validity
-// byte offsets stay exact, mirroring row-group splitting's rounding.
+// comes from rows_per_page_for.
 //
-// Dictionary-encoded chunks (build_dict_column) are a different code path
-// entirely (dict page + one RLE_DICTIONARY data page keyed by codes) and are
-// NOT covered by this — a column that gets auto-dict-encoded keeps a single
-// page regardless of max_page_bytes. Scope: PLAIN-encoded scalar and array
-// (never dict-encoded today) columns only.
+// Dictionary-encoded chunks (build_dict_column) split too, on the same knob and
+// the same row grid: one shared dictionary page followed by N RLE_DICTIONARY
+// data pages. They have to — a page index over single-page dict chunks would
+// prune at row-group granularity on exactly the low-cardinality clustered
+// columns page pruning exists for. Arrays split via build_array_data_pages and
+// carry no page index (no leaf statistics, same rule as the footer's
+// Statistics).
+//
+// `want_index` asks for per-page bounds/offsets (PageMeta) alongside the bytes.
+// It costs one extra stats pass over the column, so it is off unless a page
+// index is actually going to be written.
 
 inline PageBuild build_data_pages(const ColumnInput &col, size_t rg_rows,
                                   int codec, int zstd_level,
-                                  size_t max_page_bytes) {
-  if (max_page_bytes == 0 || rg_rows <= 1)
-    return build_data_page(col, rg_rows, codec, zstd_level);
-
-  size_t rows_per_page;
-  if (col.type == PT_BYTE_ARRAY) {
-    // Variable width: measure actual encoded bytes (4-byte length + payload,
-    // present rows only) to get an honest average.
-    size_t total = 0;
-    for (size_t i = 0; i < rg_rows; i++)
-      if (is_valid(col.validity, i)) total += 4 + col.strs[i].len;
-    double bpr = rg_rows > 0 ? (double)total / (double)rg_rows : 1.0;
-    rows_per_page = (size_t)((double)max_page_bytes / std::max(1.0, bpr));
-  } else if (col.type == PT_FLBA) {
-    rows_per_page = max_page_bytes / (size_t)std::max(1, col.dec_width);
-  } else if (col.type == PT_BOOLEAN) {
-    rows_per_page = max_page_bytes * 8; // ~1 bit/row (def-level overhead ignored, small)
-  } else {
-    // 4-byte physical types (INT32, FLOAT) vs 8-byte (INT64, DOUBLE).
-    size_t width = (col.type == PT_INT32 || col.type == PT_FLOAT) ? 4 : 8;
-    rows_per_page = max_page_bytes / width;
+                                  size_t max_page_bytes, bool want_index) {
+  if (max_page_bytes == 0 || rg_rows <= 1) {
+    PageBuild pb = build_data_page(col, rg_rows, codec, zstd_level);
+    if (want_index)
+      pb.pages.push_back(make_page_meta(col, rg_rows, 0, pb, codec));
+    return pb;
   }
-  if (rows_per_page == 0) rows_per_page = 8;
-  rows_per_page = (rows_per_page + 7) & ~(size_t)7; // byte-aligned validity slicing
+
+  const size_t rows_per_page = rows_per_page_for(col, rg_rows, max_page_bytes);
 
   std::vector<uint8_t> out;
   std::vector<uint8_t> plain_out;
+  std::vector<PageMeta> pages;
   size_t total_uncompressed = 0;
   for (size_t start = 0; start < rg_rows; start += rows_per_page) {
     size_t count = std::min(rows_per_page, rg_rows - start);
-    ColumnInput sub = col;
-    if (col.i32)     sub.i32     = col.i32     + start;
-    if (col.i64)     sub.i64     = col.i64     + start;
-    if (col.f32)     sub.f32     = col.f32     + start;
-    if (col.f64)     sub.f64     = col.f64     + start;
-    if (col.boolean) sub.boolean = col.boolean + start;
-    if (col.strs)    sub.strs    = col.strs    + start;
-    if (col.dec_raw) sub.dec_raw = col.dec_raw + start * (size_t)col.dec_width;
-    if (col.validity) sub.validity = col.validity + (start >> 3);
+    ColumnInput sub = slice_rows(col, start);
     PageBuild pb = build_data_page(sub, count, codec, zstd_level);
+    if (want_index)
+      pages.push_back(make_page_meta(sub, count, (int64_t)start, pb, codec));
     out.insert(out.end(), pb.bytes.begin(), pb.bytes.end());
     plain_out.insert(plain_out.end(), pb.plain_bytes.begin(), pb.plain_bytes.end());
     total_uncompressed += pb.uncompressed_total;
@@ -1052,6 +1118,7 @@ inline PageBuild build_data_pages(const ColumnInput &col, size_t rg_rows,
   result.bytes = std::move(out);
   result.plain_bytes = std::move(plain_out);
   result.uncompressed_total = total_uncompressed;
+  result.pages = std::move(pages);
   return result;
 }
 
@@ -1653,10 +1720,14 @@ struct DictColumnBuild {
   // the middle of the dictionary page.
   std::vector<uint8_t> plain_bytes;
   size_t plain_dict_page_len = 0;
+  // One entry per DATA page (the dictionary page is not listed). Empty unless
+  // a page index was requested.
+  std::vector<PageMeta> pages;
 };
 
 inline DictColumnBuild build_dict_column(const ColumnInput &col, size_t num_rows,
-                                         int codec, int zstd_level) {
+                                         int codec, int zstd_level,
+                                         size_t max_page_bytes, bool want_index) {
   ColumnInput dv = col;
   dv.validity = nullptr; // dict values carry no nulls
   dv.codes = nullptr;    // read the dict buffer positionally [0, dict_count)
@@ -1747,66 +1818,106 @@ inline DictColumnBuild build_dict_column(const ColumnInput &col, size_t num_rows
   };
   std::vector<uint8_t> dh_buf = dict_header(dict_stored.size());
 
-  // ---- data page: def levels, bit_width byte, RLE/bit-packed indices ----
-  std::vector<uint8_t> data_body;
-  std::vector<uint8_t> def = encode_def_levels(col.validity, num_rows);
-  put_u32_le(data_body, (uint32_t)def.size());
-  data_body.insert(data_body.end(), def.begin(), def.end());
-  int bw = dict_bit_width(col.dict_count);
-  data_body.push_back((uint8_t)bw);
-  std::vector<uint32_t> present;
-  present.reserve(num_rows);
-  for (size_t i = 0; i < num_rows; i++)
-    if (is_valid(col.validity, i))
-      present.push_back(sorted ? inv[col.codes[i]] : col.codes[i]);
-  std::vector<uint8_t> idx =
-      encode_dict_indices(present.data(), present.size(), bw);
-  data_body.insert(data_body.end(), idx.begin(), idx.end());
+  // ---- data pages: def levels, bit_width byte, RLE/bit-packed indices ----
+  //
+  // One page per row range. The dictionary page above is SHARED by all of them
+  // (parquet allows exactly one dictionary page per column chunk); each data
+  // page carries its own definition levels and its own slice of the code
+  // stream, so a reader that jumps straight to page k still needs the
+  // dictionary page but no other data page — which is what makes page-level
+  // pruning work on a dict-encoded column.
+  const int bw = dict_bit_width(col.dict_count);
+  const size_t rows_per_page =
+      (max_page_bytes == 0 || num_rows <= 1)
+          ? num_rows
+          : rows_per_page_for(col, num_rows, max_page_bytes);
 
-  size_t data_uncompressed = data_body.size();
-  std::vector<uint8_t> data_stored = (codec == CODEC_ZSTD)
-                                         ? zstd_compress_block(data_body, zstd_level)
-                                         : data_body;
+  // Build one data page covering rows [start, start+count) of the chunk.
+  auto build_one = [&](size_t start, size_t count) {
+    std::vector<uint8_t> data_body;
+    std::vector<uint8_t> def =
+        encode_def_levels(col.validity ? col.validity + (start >> 3) : nullptr, count);
+    put_u32_le(data_body, (uint32_t)def.size());
+    data_body.insert(data_body.end(), def.begin(), def.end());
+    data_body.push_back((uint8_t)bw);
+    std::vector<uint32_t> present;
+    present.reserve(count);
+    for (size_t i = start; i < start + count; i++)
+      if (is_valid(col.validity, i))
+        present.push_back(sorted ? inv[col.codes[i]] : col.codes[i]);
+    std::vector<uint8_t> idx =
+        encode_dict_indices(present.data(), present.size(), bw);
+    data_body.insert(data_body.end(), idx.begin(), idx.end());
 
-  auto data_header = [&](size_t stored_size) {
-    TCompactWriter ph;
-    ph.structBegin();
-    ph.writeI32Field(1, PAGE_DATA);
-    ph.writeI32Field(2, (int32_t)data_uncompressed);
-    ph.writeI32Field(3, (int32_t)stored_size);
-    ph.writeFieldHeader(CT_STRUCT, 5); // data_page_header
-    ph.structBegin();
-    ph.writeI32Field(1, (int32_t)num_rows);  // num_values (incl. nulls)
-    ph.writeI32Field(2, ENC_RLE_DICTIONARY); // encoding
-    ph.writeI32Field(3, ENC_RLE);            // definition_level_encoding
-    ph.writeI32Field(4, ENC_RLE);            // repetition_level_encoding
-    ph.structEnd();
-    ph.structEnd();
-    return ph.buf;
+    const size_t data_uncompressed = data_body.size();
+    std::vector<uint8_t> data_stored =
+        (codec == CODEC_ZSTD) ? zstd_compress_block(data_body, zstd_level) : data_body;
+
+    auto data_header = [&](size_t stored_size) {
+      TCompactWriter ph;
+      ph.structBegin();
+      ph.writeI32Field(1, PAGE_DATA);
+      ph.writeI32Field(2, (int32_t)data_uncompressed);
+      ph.writeI32Field(3, (int32_t)stored_size);
+      ph.writeFieldHeader(CT_STRUCT, 5); // data_page_header
+      ph.structBegin();
+      ph.writeI32Field(1, (int32_t)count);     // num_values (incl. nulls)
+      ph.writeI32Field(2, ENC_RLE_DICTIONARY); // encoding
+      ph.writeI32Field(3, ENC_RLE);            // definition_level_encoding
+      ph.writeI32Field(4, ENC_RLE);            // repetition_level_encoding
+      ph.structEnd();
+      ph.structEnd();
+      return ph.buf;
+    };
+
+    PageBuild pb;
+    pb.bytes = concat_page(data_header(data_stored.size()), data_stored);
+    if (codec == CODEC_ZSTD) {
+      pb.plain_bytes = concat_page(data_header(data_uncompressed), data_body);
+      pb.uncompressed_total = pb.plain_bytes.size();
+    } else {
+      pb.uncompressed_total = pb.bytes.size();
+    }
+    return pb;
   };
-  std::vector<uint8_t> ph_buf = data_header(data_stored.size());
+
+  std::vector<uint8_t> data_stored_all;  // every data page, compressed variant
+  std::vector<uint8_t> data_plain_all;   // every data page, uncompressed variant
+  std::vector<PageMeta> pages;
+  // A zero-row chunk still emits one (empty) data page, as the single-page
+  // build always did — rows_per_page is 0 there and the loop runs exactly once.
+  for (size_t start = 0;;) {
+    const size_t count = (rows_per_page == 0) ? 0 : std::min(rows_per_page, num_rows - start);
+    PageBuild pb = build_one(start, count);
+    if (want_index) {
+      ColumnInput sub = slice_rows(col, start);
+      pages.push_back(make_page_meta(sub, count, (int64_t)start, pb, codec));
+    }
+    data_stored_all.insert(data_stored_all.end(), pb.bytes.begin(), pb.bytes.end());
+    data_plain_all.insert(data_plain_all.end(), pb.plain_bytes.begin(), pb.plain_bytes.end());
+    start += count;
+    if (start >= num_rows) break;
+  }
 
   auto assemble = [](const std::vector<uint8_t> &dhb,
                      const std::vector<uint8_t> &dbody,
-                     const std::vector<uint8_t> &phb,
-                     const std::vector<uint8_t> &pbody) {
+                     const std::vector<uint8_t> &data_pages) {
     std::vector<uint8_t> b;
-    b.reserve(dhb.size() + dbody.size() + phb.size() + pbody.size());
+    b.reserve(dhb.size() + dbody.size() + data_pages.size());
     b.insert(b.end(), dhb.begin(), dhb.end());
     b.insert(b.end(), dbody.begin(), dbody.end());
-    b.insert(b.end(), phb.begin(), phb.end());
-    b.insert(b.end(), pbody.begin(), pbody.end());
+    b.insert(b.end(), data_pages.begin(), data_pages.end());
     return b;
   };
 
   DictColumnBuild out;
   out.dict_page_len = dh_buf.size() + dict_stored.size();
-  out.bytes = assemble(dh_buf, dict_stored, ph_buf, data_stored);
+  out.bytes = assemble(dh_buf, dict_stored, data_stored_all);
+  out.pages = std::move(pages);
   if (codec == CODEC_ZSTD) {
     std::vector<uint8_t> pdh = dict_header(dict_uncompressed);
-    std::vector<uint8_t> pph = data_header(data_uncompressed);
     out.plain_dict_page_len = pdh.size() + dict_uncompressed;
-    out.plain_bytes = assemble(pdh, dict_body, pph, data_body);
+    out.plain_bytes = assemble(pdh, dict_body, data_plain_all);
     out.uncompressed_total = out.plain_bytes.size();
   } else {
     out.uncompressed_total = out.bytes.size();
@@ -1990,6 +2101,30 @@ inline void write_schema(TCompactWriter &w, const std::vector<ColumnInput> &cols
   }
 }
 
+// ---- PageIndex serialization ----
+//
+// PageMeta and the two Thrift serializers live in page_index_writer.hpp, which
+// depends on nothing but the Compact Protocol writer so page_index_test.cpp can
+// round-trip writer output through the reader's parser directly.
+
+// Map a column's parquet physical type onto the bound ordering the PageIndex
+// writer needs. Returns false for a column that cannot carry a sound
+// ColumnIndex: arrays (no leaf statistics, same rule as the footer's
+// Statistics) and FLBA (DECIMAL/INTERVAL), whose stats bytes are big-endian
+// two's complement and do not order byte-wise across zero.
+inline bool page_index_bound_kind(const ColumnInput &c, PageBoundKind &kind) {
+  if (c.is_array) return false;
+  switch (c.type) {
+  case PT_INT32:   kind = PB_INT32;  return true;
+  case PT_INT64:   kind = PB_INT64;  return true;
+  case PT_FLOAT:   kind = PB_FLOAT;  return true;
+  case PT_DOUBLE:  kind = PB_DOUBLE; return true;
+  case PT_BOOLEAN: kind = PB_BYTES;  return true;  // 1 byte, byte-wise order
+  case PT_BYTE_ARRAY: kind = PB_BYTES; return true;
+  default: return false;
+  }
+}
+
 // ---- ColumnMetaData / ColumnChunk / RowGroup ----
 
 inline void write_column_chunk(TCompactWriter &w, const ColumnInput &c,
@@ -1997,7 +2132,9 @@ inline void write_column_chunk(TCompactWriter &w, const ColumnInput &c,
                                int64_t dict_page_offset,
                                size_t compressed_total, size_t uncompressed_total,
                                int codec, const ColumnStats &stats,
-                               int64_t bloom_offset, int32_t bloom_length) {
+                               int64_t bloom_offset, int32_t bloom_length,
+                               int64_t oi_offset, int32_t oi_length,
+                               int64_t ci_offset, int32_t ci_length) {
   w.structBegin(); // ColumnChunk
   // file_offset points at the first page of the chunk (the dictionary page
   // when present, otherwise the data page).
@@ -2066,6 +2203,15 @@ inline void write_column_chunk(TCompactWriter &w, const ColumnInput &c,
     }
     w.structEnd();
   }
+  // PageIndex locations (ColumnChunk fields 4-7, ascending after meta_data).
+  // Both pairs are written together or not at all — rugo's reader needs both to
+  // prune, and a lone OffsetIndex would cost tail bytes nothing here consumes.
+  if (oi_offset >= 0 && ci_offset >= 0) {
+    w.writeI64Field(4, oi_offset); // offset_index_offset
+    w.writeI32Field(5, oi_length); // offset_index_length
+    w.writeI64Field(6, ci_offset); // column_index_offset
+    w.writeI32Field(7, ci_length); // column_index_length
+  }
   w.structEnd();
 }
 
@@ -2087,8 +2233,37 @@ struct RGMeta {
   // here. Parquet declares the codec in ColumnMetaData, so this is legal and
   // every conforming reader dispatches on it (rugo's own does).
   std::vector<int32_t>     codecs;
+  // Per-column data-page metadata for the PageIndex. Empty (per column, or
+  // entirely) when no page index was requested or the column carries none
+  // (arrays). ci_*/oi_* are filled by write_page_index once the tail is laid
+  // out; -1/0 means "this chunk has no index" and the footer omits the fields.
+  std::vector<std::vector<PageMeta>> pages;
+  std::vector<int64_t>     ci_offset;
+  std::vector<int32_t>     ci_length;
+  std::vector<int64_t>     oi_offset;
+  std::vector<int32_t>     oi_length;
   size_t row_count      = 0;
   size_t total_byte_size = 0;
+
+  // Size every per-column vector for a row group of `ncols` columns, with the
+  // "nothing here" defaults the footer reads as absence. ONE place, so a new
+  // per-column field cannot be initialised by write_row_group_chunks and missed
+  // by the patch path (whose footer would then index past the end).
+  void init_columns(size_t ncols, int codec) {
+    data_offsets.assign(ncols, 0);
+    dict_offsets.assign(ncols, -1);
+    sizes.assign(ncols, 0);
+    uncompressed.assign(ncols, 0);
+    stats.assign(ncols, ColumnStats{});
+    bloom_offset.assign(ncols, -1);
+    bloom_length.assign(ncols, 0);
+    codecs.assign(ncols, codec);
+    pages.assign(ncols, std::vector<PageMeta>{});
+    ci_offset.assign(ncols, -1);
+    ci_length.assign(ncols, 0);
+    oi_offset.assign(ncols, -1);
+    oi_length.assign(ncols, 0);
+  }
 };
 
 // Serialise every column chunk of ONE row group into `out`, recording ABSOLUTE
@@ -2099,17 +2274,26 @@ struct RGMeta {
 inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offset,
                                    const std::vector<ColumnInput> &rg_cols,
                                    size_t rg_rows, int codec, int profile,
-                                   size_t max_page_bytes, RGMeta &meta) {
+                                   size_t max_page_bytes, bool want_index,
+                                   RGMeta &meta) {
   const size_t ncols = rg_cols.size();
   meta.row_count = rg_rows;
-  meta.data_offsets.assign(ncols, 0);
-  meta.dict_offsets.assign(ncols, -1);
-  meta.sizes.assign(ncols, 0);
-  meta.uncompressed.assign(ncols, 0);
-  meta.stats.assign(ncols, ColumnStats{});
-  meta.bloom_offset.assign(ncols, -1);
-  meta.bloom_length.assign(ncols, 0);
-  meta.codecs.assign(ncols, codec);
+  meta.init_columns(ncols, codec);
+
+  // Turn per-page sizes into absolute file offsets, now that the chunk's
+  // stored-vs-plain variant is settled. Data pages run contiguously from
+  // meta.data_offsets[i] (which already skips the dictionary page).
+  auto finalize_pages = [&](size_t i, std::vector<PageMeta> pages) {
+    if (pages.empty()) return;
+    const bool use_plain = (codec == CODEC_ZSTD && meta.codecs[i] == CODEC_UNCOMPRESSED);
+    int64_t at = meta.data_offsets[i];
+    for (PageMeta &pm : pages) {
+      pm.size = (int64_t)(use_plain ? pm.plain_size : pm.stored_size);
+      pm.file_offset = at;
+      at += pm.size;
+    }
+    meta.pages[i] = std::move(pages);
+  };
 
   // Keep the compressed chunk only when it clears kKeepCompressedFloor. NOT
   // "whichever is smaller" — a chunk compressing to 96-100% of raw costs a full
@@ -2188,7 +2372,8 @@ inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offse
     BuiltDict bd;
     if (rg_cols[i].codes != nullptr) {
       use_dict = true;
-      dcb = build_dict_column(rg_cols[i], rg_rows, codec, level);
+      dcb = build_dict_column(rg_cols[i], rg_rows, codec, level,
+                              max_page_bytes, want_index);
     } else if (rg_cols[i].dict_enabled) {
       const size_t present = present_rows;
       ColumnInput dcol = rg_cols[i];
@@ -2252,7 +2437,8 @@ inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offse
       if (built) {
         dcol.codes = bd.codes.data();
         use_dict = true;
-        dcb = build_dict_column(dcol, rg_rows, codec, level);
+        dcb = build_dict_column(dcol, rg_rows, codec, level,
+                                max_page_bytes, want_index);
       }
     }
 
@@ -2270,14 +2456,16 @@ inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offse
       meta.data_offsets[i] = page_start + (int64_t)dcb.dict_page_len;
       meta.sizes[i]        = dcb.bytes.size();
       meta.uncompressed[i] = dcb.uncompressed_total;
+      finalize_pages(i, std::move(dcb.pages));
       out.insert(out.end(), dcb.bytes.begin(), dcb.bytes.end());
     } else {
       PageBuild pb = build_data_pages(rg_cols[i], rg_rows, codec, level,
-                                      max_page_bytes);
+                                      max_page_bytes, want_index);
       keep_compressed(pb, i);
       meta.data_offsets[i] = page_start;
       meta.sizes[i]        = pb.bytes.size();
       meta.uncompressed[i] = pb.uncompressed_total;
+      finalize_pages(i, std::move(pb.pages));
       out.insert(out.end(), pb.bytes.begin(), pb.bytes.end());
     }
   }
@@ -2357,6 +2545,65 @@ inline void write_draken_logical_kv(TCompactWriter &fm,
   }
 }
 
+// Append the file's PageIndex tail to `out` and record each chunk's index
+// locations in `rg_meta`. MUST be called after every row group's bytes and
+// before write_parquet_footer.
+//
+// Layout: ALL ColumnIndex structs first, then ALL OffsetIndex structs — the
+// spec's recommended order, and the one rugo's reader relies on when it fetches
+// the whole index region of a file as a single range.
+//
+// A chunk gets both structs or neither: page_index_bound_kind declines a column
+// whose bounds cannot be ordered soundly (arrays, FLBA decimals) and
+// serialize_column_index declines a page that is neither all-NULL nor bounded,
+// and an OffsetIndex alone would be tail bytes no reader here consumes.
+//
+// ⛔ A SINGLE-PAGE CHUNK GETS NO INDEX, whatever max_page_bytes says. The knob
+// is a byte budget; whether a chunk actually splits depends on its width and the
+// row group's row count, so `max_page_bytes > 0` does NOT imply more than one
+// page — a 1 MiB budget over a 262 144-row row group leaves every 4-byte column
+// in one page. A one-entry index restates the footer's own Statistics, and it is
+// not merely wasted: the reader fetches the whole index region as ONE range and
+// gates on its size against the bytes it could save, so degenerate entries push
+// that gate toward declining and penalise the columns that DID split.
+inline void write_page_index(std::vector<uint8_t> &out, int64_t base_offset,
+                             std::vector<RGMeta> &rg_meta,
+                             const std::vector<std::vector<ColumnInput>> &all_rg_cols) {
+  std::vector<std::vector<std::vector<uint8_t>>> ci(rg_meta.size());
+  for (size_t rg = 0; rg < rg_meta.size(); rg++) {
+    RGMeta &meta = rg_meta[rg];
+    ci[rg].resize(meta.pages.size());
+    if (meta.row_count == 0) continue;
+    for (size_t i = 0; i < meta.pages.size(); i++) {
+      if (meta.pages[i].size() < 2) continue; // see the single-page rule above
+      PageBoundKind kind;
+      if (!page_index_bound_kind(all_rg_cols[rg][i], kind)) continue;
+      ci[rg][i] = serialize_column_index(meta.pages[i], kind,
+                                         all_rg_cols[rg][i].is_unsigned);
+    }
+  }
+
+  for (size_t rg = 0; rg < rg_meta.size(); rg++) {
+    RGMeta &meta = rg_meta[rg];
+    for (size_t i = 0; i < ci[rg].size(); i++) {
+      if (ci[rg][i].empty()) continue;
+      meta.ci_offset[i] = base_offset + (int64_t)out.size();
+      meta.ci_length[i] = (int32_t)ci[rg][i].size();
+      out.insert(out.end(), ci[rg][i].begin(), ci[rg][i].end());
+    }
+  }
+  for (size_t rg = 0; rg < rg_meta.size(); rg++) {
+    RGMeta &meta = rg_meta[rg];
+    for (size_t i = 0; i < ci[rg].size(); i++) {
+      if (ci[rg][i].empty()) continue;
+      std::vector<uint8_t> oi = serialize_offset_index(meta.pages[i]);
+      meta.oi_offset[i] = base_offset + (int64_t)out.size();
+      meta.oi_length[i] = (int32_t)oi.size();
+      out.insert(out.end(), oi.begin(), oi.end());
+    }
+  }
+}
+
 // Append the FileMetaData footer + footer length + trailing PAR1 to `out`.
 // `schema_cols` supplies the schema/column shape (types, names, array depth);
 // `all_rg_cols[rg][i]` supplies each chunk's per-row-group shape (num_levels for
@@ -2385,7 +2632,8 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
       write_column_chunk(fm, all_rg_cols[rg][i], meta.row_count, meta.data_offsets[i],
                          meta.dict_offsets[i], meta.sizes[i], meta.uncompressed[i],
                          meta.codecs[i], meta.stats[i], meta.bloom_offset[i],
-                         meta.bloom_length[i]);
+                         meta.bloom_length[i], meta.oi_offset[i], meta.oi_length[i],
+                         meta.ci_offset[i], meta.ci_length[i]);
     fm.writeI64Field(2, (int64_t)meta.total_byte_size); // total_byte_size
     fm.writeI64Field(3, (int64_t)meta.row_count);       // num_rows
     write_sorting_columns(fm, all_rg_cols[rg]);         // sorting_columns (field 4, optional)
@@ -2429,7 +2677,12 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
                                          std::vector<ColumnStats> *out_stats =
                                              nullptr,
                                          size_t max_rows_per_rg = 0,
-                                         size_t max_page_bytes = 0) {
+                                         size_t max_page_bytes = 0,
+                                         bool page_index = true) {
+  // A PageIndex over one page per chunk would describe the granularity the
+  // footer's own Statistics already carry, so it rides on page splitting being
+  // on — see write_page_index.
+  const bool want_index = page_index && max_page_bytes > 0;
   // Array columns need row_level_offsets/row_element_offsets to be sliceable
   // per row group (see ColumnInput comment) — the caller must supply them
   // whenever it wants row-group splitting for a schema containing an ARRAY
@@ -2522,9 +2775,11 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
     // writer). base_offset == 0: `file` already starts at absolute 0 and
     // includes the leading PAR1, so file.size() is the absolute page offset.
     write_row_group_chunks(file, /*base_offset=*/0, rg_cols, rg_rows, codec,
-                           profile, max_page_bytes, rg_meta[rg]);
+                           profile, max_page_bytes, want_index, rg_meta[rg]);
   } // end row group loop
 
+  if (want_index)
+    write_page_index(file, /*base_offset=*/0, rg_meta, all_rg_cols);
   write_parquet_footer(file, cols, num_rows, rg_meta, all_rg_cols);
   // out_stats: only meaningful for single-RG files; unsupported for multi-RG.
   if (out_stats && n_rg == 1)
@@ -2548,8 +2803,10 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
 // (names/types); the schema is captured from the first batch.
 class StreamingParquetWriter {
  public:
-  StreamingParquetWriter(int codec, int profile, size_t max_page_bytes)
-      : codec_(codec), profile_(profile), max_page_bytes_(max_page_bytes) {
+  StreamingParquetWriter(int codec, int profile, size_t max_page_bytes,
+                         bool page_index)
+      : codec_(codec), profile_(profile), max_page_bytes_(max_page_bytes),
+        want_index_(page_index && max_page_bytes > 0) {
     const char *MAGIC = "PAR1";
     buf_.insert(buf_.end(), MAGIC, MAGIC + 4); // header (drained with row group 1)
   }
@@ -2563,7 +2820,7 @@ class StreamingParquetWriter {
     }
     rg_meta_.emplace_back();
     write_row_group_chunks(buf_, abs_offset_, rg_cols, rg_rows, codec_,
-                           profile_, max_page_bytes_, rg_meta_.back());
+                           profile_, max_page_bytes_, want_index_, rg_meta_.back());
     // Footer reads only shape fields (never data pointers) from these — store a
     // stripped copy so no per-batch data buffer is retained across row groups.
     all_rg_cols_.push_back(strip_data(rg_cols));
@@ -2583,6 +2840,11 @@ class StreamingParquetWriter {
   // Emit the footer, then return all remaining pending bytes (footer + any
   // row-group bytes not yet drained). After this the writer is complete.
   std::vector<uint8_t> finish() {
+    // The index tail goes out AFTER every row group's bytes and BEFORE the
+    // footer; abs_offset_ + buf_.size() is its absolute position whether or not
+    // the caller has been draining as it goes.
+    if (want_index_)
+      write_page_index(buf_, abs_offset_, rg_meta_, all_rg_cols_);
     write_parquet_footer(buf_, schema_cols_, (size_t)total_rows_, rg_meta_,
                          all_rg_cols_);
     return take_pending();
@@ -2608,6 +2870,7 @@ class StreamingParquetWriter {
   int codec_;
   int profile_;
   size_t max_page_bytes_;
+  bool want_index_;
   bool have_schema_ = false;
   int64_t abs_offset_ = 0;             // bytes already drained via take_pending
   int64_t total_rows_ = 0;

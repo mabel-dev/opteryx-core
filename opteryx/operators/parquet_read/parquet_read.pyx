@@ -66,6 +66,7 @@ from opteryx.connectors.parquet_io.io_tuning import resolve_http_tuning as _rt_h
 from opteryx.connectors.parquet_io.io_tuning import resolve_fetch_ahead as _rt_fetch_ahead
 from opteryx.connectors.parquet_io.io_tuning import resolve_fetch_ahead_gate as _rt_fetch_ahead_gate
 from opteryx.connectors.parquet_io.io_tuning import resolve_in_flight_limit as _rt_in_flight
+from opteryx.connectors.parquet_io.io_tuning import resolve_memory_budget as _rt_memory_budget
 
 
 cdef tuple _resolve_http_tuning(variables):
@@ -86,6 +87,10 @@ cdef int _resolve_fetch_ahead(variables, overrides):
 
 cdef int _resolve_fetch_ahead_gate(variables, overrides):
     return <int>_rt_fetch_ahead_gate(variables, overrides)
+
+
+cdef int64_t _resolve_memory_budget(variables, overrides):
+    return <int64_t>_rt_memory_budget(variables, overrides)
 
 
 # Hoisted out of the per-row-group hot path. Previously these imports happened
@@ -1708,6 +1713,8 @@ cdef class ParquetReadNode(ReaderNode):
                 fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None), self.scan_overrides),
                 fetch_ahead_min_row_groups=_resolve_fetch_ahead_gate(
                     getattr(self.properties, "variables", None), self.scan_overrides),
+                memory_budget=_resolve_memory_budget(
+                    getattr(self.properties, "variables", None), self.scan_overrides),
             )
             # Q24 latmat: push the pass-1 predicate to the decode workers so the match
             # runs in parallel there (nogil), not serially on this thread. Only when the
@@ -1778,6 +1785,8 @@ cdef class ParquetReadNode(ReaderNode):
             coalesce_tuning=_rt_coalesce(getattr(self.properties, "variables", None), self.scan_overrides),
             fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None), self.scan_overrides),
             fetch_ahead_min_row_groups=_resolve_fetch_ahead_gate(
+                getattr(self.properties, "variables", None), self.scan_overrides),
+            memory_budget=_resolve_memory_budget(
                 getattr(self.properties, "variables", None), self.scan_overrides),
         )
 
@@ -2212,6 +2221,8 @@ cdef class ParquetReadNode(ReaderNode):
             fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None), self.scan_overrides),
             fetch_ahead_min_row_groups=_resolve_fetch_ahead_gate(
                 getattr(self.properties, "variables", None), self.scan_overrides),
+            memory_budget=_resolve_memory_budget(
+                getattr(self.properties, "variables", None), self.scan_overrides),
         )
         self._lm_pass1_done = True
 
@@ -2301,6 +2312,8 @@ cdef class ParquetReadNode(ReaderNode):
             coalesce_tuning=_rt_coalesce(getattr(self.properties, "variables", None), self.scan_overrides),
             fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None), self.scan_overrides),
             fetch_ahead_min_row_groups=_resolve_fetch_ahead_gate(
+                getattr(self.properties, "variables", None), self.scan_overrides),
+            memory_budget=_resolve_memory_budget(
                 getattr(self.properties, "variables", None), self.scan_overrides),
         )
         try:

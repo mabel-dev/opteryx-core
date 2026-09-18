@@ -129,6 +129,8 @@ cdef extern from "ops/hash.h" nogil:
 cdef extern from "core/draken_bridge.h":
     const DrakenVector* draken_vector_unwrap(PyObject* obj)
     PyObject* draken_vector_own_raw(void* data, uint8_t* validity, uint32_t length, DrakenType dtype)
+    PyObject* draken_vector_own_raw_with_arena(void* data, uint8_t* arena, uint8_t* validity,
+                                              uint32_t length, DrakenType dtype)
     PyObject* draken_vector_own_dict_i64(void* data, uint32_t data_length,
                                           uint32_t* codes, uint32_t length,
                                           uint8_t* validity)
@@ -655,6 +657,25 @@ cdef Vector dict_from_decoded(void* dict_vals, uint32_t data_length,
     cdef PyObject* raw = draken_vector_own_dict(dict_vals, data_length, codes, length, validity, dtype)
     if raw == NULL:
         raise MemoryError("draken_vector_own_dict failed")
+    cdef Vector result = Vector.__new__(Vector)
+    result._nb = <object>raw
+    _vec_shim_decref(raw)
+    result._dv = draken_vector_unwrap(raw)
+    return result
+
+
+cdef Vector from_decoded_with_arena(void* data, uint8_t* arena, uint8_t* validity,
+                                    uint32_t length, DrakenType dtype):
+    """`from_decoded` for a string vector whose byte arena is a SEPARATE
+    allocation rather than bytes inside `data`.
+
+    `arena` is what the block's DrakenStringArena.arena points at, and its
+    ownership transfers with `data`. Pass NULL when there is no separate arena,
+    which makes this identical to from_decoded.
+    """
+    cdef PyObject* raw = draken_vector_own_raw_with_arena(data, arena, validity, length, dtype)
+    if raw == NULL:
+        raise MemoryError("draken_vector_own_raw_with_arena failed")
     cdef Vector result = Vector.__new__(Vector)
     result._nb = <object>raw
     _vec_shim_decref(raw)

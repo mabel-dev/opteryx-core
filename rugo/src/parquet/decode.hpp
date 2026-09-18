@@ -17,6 +17,29 @@ struct DictSkipPredicate {
   const std::vector<std::string>* str_vals = nullptr;  // kinds 1..4 (operands/patterns)
 };
 
+// PageIndex page-jump plan (page_index.hpp). Built by the IO pipeline from the
+// column's OffsetIndex once the row group's page-pruned row_mask is final: one
+// entry per DATA page in file order. A page marked `pruned` has NO surviving
+// row under the mask, so the decoder must advance PAST it using these offsets
+// and never read its bytes — on the remote path they were not fetched (the
+// buffer holds a hole there), so header-walking into it would parse zeros as a
+// STOP and silently truncate the column. Offsets are CHUNK-RELATIVE (the same
+// frame as ColumnStats::data_page_offset after the caller's base subtraction)
+// and point at the page HEADER; `page_sizes` covers header + payload.
+//
+// Invariants the decoder enforces (fail loud, never guess):
+//   * a plan is only ever supplied together with a row_mask;
+//   * the column has max_repetition_level == 0 (page rows == page values);
+//   * every non-pruned data page the decoder reaches starts exactly at the
+//     plan's offset for that page index.
+struct PageJumpPlan {
+  std::vector<int64_t> page_offsets;
+  std::vector<int32_t> page_sizes;
+  std::vector<int32_t> page_rows;
+  std::vector<uint8_t> pruned;   // 1 = jump over without reading
+  size_t size() const { return page_offsets.size(); }
+};
+
 // Scalar (non-owning) fields of DecodedColumn, factored into a base class so a
 // single whole-subobject default-assignment resets ALL of them completely — see
 // DecodedColumn::reset(). Making this a BASE (not a member) keeps every existing
@@ -283,7 +306,15 @@ DecodedTable ReadParquet(const uint8_t* data, size_t size,
 // rle skip-dense path) or materialising dense. The caller then builds a §11
 // "compressed" (Dict-shaped) DrakenVector. No-op on plain pages / non-numeric dict.
 // skip_pred (Phase 2): if non-null and no dictionary value satisfies it, the data
-// pages are not decoded and dict_all_filtered is set.
+// pages are not decoded and dict_all_filtered is set. This is supported UNDER a
+// row_mask as well (a page-pruning mask; the pipeline declines it for a
+// caller-supplied pass-2 mask — see io_pipeline.hpp): the dictionary decides
+// exactly as it does unmasked, and num_rows then reports the mask's survivor
+// count, not the chunk's. A LIST column under a mask is the one shape the skip
+// declines — its mask is per logical row while num_values counts slots.
+// prefer_dict is likewise armed under a mask: a masked dict column comes back
+// Dict-shaped with its codes compacted to the survivors.
+// jump: PageIndex page-jump plan (see PageJumpPlan) — only with a row_mask.
 // In-place (buffer-reusing) primary: decodes into caller-owned `out`, resetting
 // it at entry. Hoist one `out` above a per-row-group column loop and pass it each
 // column to reuse its vector capacity across columns. `out` is a function-local
@@ -296,17 +327,19 @@ void DecodeColumnFromChunk(DecodedColumn& out, const uint8_t* data, size_t size,
                            float*   ext_float32 = nullptr,
                            const uint8_t* row_mask = nullptr,
                            bool prefer_dict = false,
-                           const DictSkipPredicate* skip_pred = nullptr);
+                           const DictSkipPredicate* skip_pred = nullptr,
+                           const PageJumpPlan* jump = nullptr);
 
 // In-place convenience: mask-only (matches the 4-arg by-value convenience below).
 inline void DecodeColumnFromChunk(DecodedColumn& out, const uint8_t* data, size_t size,
                                   const ColumnStats* target_col,
                                   const uint8_t* row_mask,
                                   bool prefer_dict = false,
-                                  const DictSkipPredicate* skip_pred = nullptr) {
+                                  const DictSkipPredicate* skip_pred = nullptr,
+                                  const PageJumpPlan* jump = nullptr) {
   DecodeColumnFromChunk(out, data, size, target_col,
                         nullptr, nullptr, nullptr, nullptr,
-                        row_mask, prefer_dict, skip_pred);
+                        row_mask, prefer_dict, skip_pred, jump);
 }
 
 // By-value overload (thin shim over the in-place primary — see decode_column.cpp).
@@ -318,7 +351,8 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t* data, size_t size,
                                     float*   ext_float32 = nullptr,
                                     const uint8_t* row_mask = nullptr,
                                     bool prefer_dict = false,
-                                    const DictSkipPredicate* skip_pred = nullptr);
+                                    const DictSkipPredicate* skip_pred = nullptr,
+                                    const PageJumpPlan* jump = nullptr);
 
 // Convenience overload: no ext_* zero-copy buffers, only a row_mask.
 // Matches the 4-argument Cython binding DecodeColumnFromChunk(data, size, col, mask).
@@ -326,10 +360,11 @@ inline DecodedColumn DecodeColumnFromChunk(const uint8_t* data, size_t size,
                                            const ColumnStats* target_col,
                                            const uint8_t* row_mask,
                                            bool prefer_dict = false,
-                                           const DictSkipPredicate* skip_pred = nullptr) {
+                                           const DictSkipPredicate* skip_pred = nullptr,
+                                           const PageJumpPlan* jump = nullptr) {
   return DecodeColumnFromChunk(data, size, target_col,
                                nullptr, nullptr, nullptr, nullptr,
-                               row_mask, prefer_dict, skip_pred);
+                               row_mask, prefer_dict, skip_pred, jump);
 }
 
 // Decode a specific column from memory buffer for a specific row group.

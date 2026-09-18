@@ -82,6 +82,9 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         # fetches are decoupled from the decode thread count. Plan-time, once,
         # before any submit — see set_fetch_ahead in io_pipeline.hpp.
         void set_fetch_ahead(int depth) except +
+        # Memory admission budget in bytes (0 = off). Plan-time, once, before any
+        # submit — see set_memory_budget in io_pipeline.hpp.
+        void set_memory_budget(int64_t bytes) except +
         void set_http_tuning(long max_host_connections, int max_retries,
                               double min_bandwidth_bytes_per_s, long timeout_floor_ms,
                               bint use_multiplexing, bint use_pipewait, bint force_http11)
@@ -112,6 +115,16 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         uint64_t cancelled_skips() nogil
         int fetch_ahead_depth() nogil
         uint64_t prefetch_discarded_bytes() nogil
+        int64_t memory_budget_bytes() nogil
+        int64_t memory_held_high_watermark() nogil
+        uint64_t admission_blocked_ns() nogil
+        uint64_t admission_waits() nogil
+        uint64_t page_index_pages_pruned() nogil
+        uint64_t page_index_bytes_pruned() nogil
+        uint64_t page_index_row_groups_pruned() nogil
+        uint64_t page_index_fetches() nogil
+        uint64_t page_index_bytes_fetched() nogil
+        uint64_t page_index_gate_declines() nogil
         uint64_t spin_iterations() nogil
         uint64_t enqueue_count() nogil
         size_t queue_high_watermark() nogil
@@ -240,6 +253,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     int in_flight_limit_override=*,
     http_tuning=*,
     coalesce_tuning=*,
+    int64_t memory_budget=*,
 )
 
 # Plan-time eligibility gate for the native scan Source: proves from parsed

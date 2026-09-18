@@ -38,6 +38,12 @@ cdef class Vector:
 # Analogous to BoolVector.from_decoded in bool_vector.pxd.
 cdef Vector from_decoded(void* data, uint8_t* validity, uint32_t length, DrakenType dtype)
 
+# from_decoded_with_arena — from_decoded for a string vector whose byte arena is a
+# SEPARATE allocation. `arena` is what the block's DrakenStringArena.arena points at;
+# ownership transfers with `data`. NULL = no separate arena (identical to from_decoded).
+cdef Vector from_decoded_with_arena(void* data, uint8_t* arena, uint8_t* validity,
+                                    uint32_t length, DrakenType dtype)
+
 
 # dict_int64_from_decoded — create a dict-encoded int64 Vector from draken_malloc'd buffers.
 # dict_vals, codes, and validity MUST be draken_malloc'd; ownership transferred on call.

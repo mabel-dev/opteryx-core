@@ -130,16 +130,104 @@ def test_like_with_a_wildcard_underscore_is_pushed():
     assert "predicate pushdown into sc" in _explain_text(sql)
 
 
-def test_like_lowered_to_a_function_is_declined_not_broken():
-    # 'pg%' lowers to _STARTS_WITH, a FUNCTION the translator has no SQL for:
-    # it stays a Filter above the scan and the answer is still right.
+def test_every_lowered_like_shape_is_pushed_and_answered_correctly():
+    # The optimizer lowers an anchored LIKE to a _STARTS_WITH/_ENDS_WITH FUNCTION
+    # and an unanchored one to an InStr comparison before any connector sees it.
+    # All three are spelled back as `LIKE $1` here; the server's answer has to
+    # equal what the engine computes locally, and no Filter may remain.
     names = _column(f"SELECT table_name FROM {WORKSPACE}.information_schema.tables", "table_name")
-    expected = sum(1 for name in names if name.startswith("pg"))
-    sql = f"SELECT COUNT(*) FROM {WORKSPACE}.information_schema.tables WHERE table_name LIKE 'pg%'"
+    cases = [
+        ("LIKE 'pg%'", "pg%", sum(1 for n in names if n.startswith("pg"))),
+        ("LIKE '%tables'", "%tables", sum(1 for n in names if n.endswith("tables"))),
+        ("LIKE '%constraint%'", "%constraint%", sum(1 for n in names if "constraint" in n)),
+        ("NOT LIKE 'pg%'", "pg%", sum(1 for n in names if not n.startswith("pg"))),
+        ("NOT LIKE '%tables'", "%tables", sum(1 for n in names if not n.endswith("tables"))),
+        ("NOT LIKE '%constraint%'", "%constraint%", sum(1 for n in names if "constraint" not in n)),
+    ]
+    for predicate, expected_parameter, expected_count in cases:
+        sql = (
+            f"SELECT COUNT(*) FROM {WORKSPACE}.information_schema.tables "
+            f"WHERE table_name {predicate}"
+        )
+        count, captured = _pushed_params(sql)
+        assert count == expected_count > 0, predicate
+        # The pattern is rebuilt by the renderer, so the bind value is the proof
+        # that the right one was rebuilt.
+        assert captured == [[expected_parameter]], predicate
+        text = _explain_text(
+            f"SELECT table_name FROM {WORKSPACE}.information_schema.tables "
+            f"WHERE table_name {predicate}"
+        )
+        assert "predicate pushdown into sc" in text, predicate
+        assert "Filter" not in text, predicate
+
+
+def test_a_like_pattern_body_escapes_its_metacharacters():
+    # The only metacharacter that can reach the renderer inside a lowered
+    # pattern is a backslash (the rewriter lowers a LIKE only when the body has
+    # no `%` or `_`), and backslash is LIKE's own escape character: unescaped,
+    # `a\b%` would ask the server to match a literal 'b' where the engine asks
+    # for a backslash followed by 'b'.
+    sql = (
+        f"SELECT COUNT(*) FROM {WORKSPACE}.information_schema.tables "
+        "WHERE table_name LIKE 'a\\b%'"
+    )
+    count, captured = _pushed_params(sql)
+    assert captured == [["a\\\\b%"]]
+    assert count == 0
+
+
+def test_case_insensitive_like_is_not_pushed():
+    # ILIKE folds case by the server's locale and by the engine's own rules, so
+    # it stays a local Filter and the answer is still right.
+    names = _column(f"SELECT table_name FROM {WORKSPACE}.information_schema.tables", "table_name")
+    expected = sum(1 for name in names if name.lower().startswith("pg"))
+    sql = f"SELECT COUNT(*) FROM {WORKSPACE}.information_schema.tables WHERE table_name ILIKE 'PG%'"
     assert _column(sql, "COUNT(*)")[0] == expected > 0
-    text = _explain_text(f"SELECT table_name FROM {WORKSPACE}.information_schema.tables WHERE table_name LIKE 'pg%'")
+    text = _explain_text(
+        f"SELECT table_name FROM {WORKSPACE}.information_schema.tables WHERE table_name ILIKE 'PG%'"
+    )
     assert "predicate pushdown declined" in text
     assert "Filter" in text
+
+
+def test_in_list_is_pushed_and_matches_the_unpushed_plan():
+    sql = (
+        f"SELECT table_schema, table_name FROM {WORKSPACE}.information_schema.tables "
+        "WHERE table_schema IN ('pg_catalog', 'information_schema')"
+    )
+    pushed = sorted(_rows(sql))
+    assert pushed == sorted(_rows_without("disable_predicate_pushdown", sql))
+    assert pushed and {row[0] for row in pushed} == {"pg_catalog", "information_schema"}
+    text = _explain_text(sql)
+    assert "predicate pushdown into sc" in text
+    assert "Filter" not in text
+
+
+def test_not_in_list_is_pushed_and_drops_null_rows_like_the_server():
+    # `NOT IN` is NULL for a NULL subject on both sides, so the row is dropped by
+    # the server exactly as the engine drops it; the unpushed plan is the oracle.
+    sql = (
+        f"SELECT table_schema, table_name FROM {WORKSPACE}.information_schema.tables "
+        "WHERE table_schema NOT IN ('pg_catalog')"
+    )
+    pushed = sorted(_rows(sql))
+    assert pushed == sorted(_rows_without("disable_predicate_pushdown", sql))
+    assert pushed and all(row[0] != "pg_catalog" for row in pushed)
+    assert "predicate pushdown into sc" in _explain_text(sql)
+
+
+def test_an_or_of_equalities_folds_into_a_pushed_in_list():
+    # DisjunctiveDomainPushdownStrategy rewrites this to an IN-list before the
+    # scan gate sees it, so it pushes now that IN-lists are spellable.
+    sql = (
+        f"SELECT table_schema, table_name FROM {WORKSPACE}.information_schema.tables "
+        "WHERE table_schema = 'pg_catalog' OR table_schema = 'information_schema'"
+    )
+    pushed = sorted(_rows(sql))
+    assert pushed == sorted(_rows_without("disable_predicate_pushdown", sql))
+    assert pushed
+    assert "predicate pushdown into sc" in _explain_text(sql)
 
 
 # The fixture the temporal tests read. Provisioned out of band on the shared dev

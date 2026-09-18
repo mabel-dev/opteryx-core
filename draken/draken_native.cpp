@@ -2264,7 +2264,13 @@ static VectorOwner vecresult_to_owner(VecResult r) {
     OwnedBuffer<void>    codes_buf(r.owns_selection
                                     ? const_cast<void*>(static_cast<const void*>(r.selection))
                                     : nullptr);
-    VectorOwner owner(v, std::move(data_buf), std::move(val_buf), std::move(codes_buf));
+    // A string result that kept its byte arena as a separate allocation hands it
+    // over here; nullptr (every consolidated result) leaves arena_buf empty and
+    // the block owns its own bytes exactly as before. Freeing this is not
+    // optional — the vector's slots point into it.
+    OwnedBuffer<uint8_t> arena_buf(r.arena);
+    VectorOwner owner(v, std::move(data_buf), std::move(val_buf), std::move(codes_buf),
+                      std::move(arena_buf));
 
     // Phase 9c: attach the timestamp unit descriptor when the kernel set one.
     // DrakenVector/VecResult carry no LogicalType; it lives on the VectorOwner.
@@ -2485,11 +2491,26 @@ extern "C" const DrakenVector* draken_array_grandchild_unwrap(PyObject* obj) {
 extern "C" PyObject* draken_vector_own_raw(
     void* data, uint8_t* validity, uint32_t length, DrakenType type)
 {
+    return draken_vector_own_raw_with_arena(data, nullptr, validity, length, type);
+}
+
+// draken_vector_own_raw_with_arena — draken_vector_own_raw for a string vector
+// whose byte arena is a SEPARATE allocation rather than bytes inside `data`.
+//
+// `arena` is the buffer the block's DrakenStringArena::arena points at. Passing
+// it here is what makes the new Vector own it; without that the block outlives
+// the bytes its slots resolve against. nullptr means "there is no separate
+// arena", which is every non-string vector and every consolidated string block,
+// and makes this exactly draken_vector_own_raw.
+extern "C" PyObject* draken_vector_own_raw_with_arena(
+    void* data, uint8_t* arena, uint8_t* validity, uint32_t length, DrakenType type)
+{
     try {
         DrakenVector v = draken_vector_from_dense(data, length, type, validity);
         OwnedBuffer<void>    data_buf(data);
         OwnedBuffer<uint8_t> val_buf(validity);
-        VectorOwner owner(v, std::move(data_buf), std::move(val_buf));
+        VectorOwner owner(v, std::move(data_buf), std::move(val_buf),
+                          OwnedBuffer<void>(nullptr), OwnedBuffer<uint8_t>(arena));
         nb::object obj = nb::cast(std::move(owner));
         PyObject* result = obj.ptr();
         Py_INCREF(result);
