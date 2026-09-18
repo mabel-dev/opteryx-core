@@ -546,6 +546,18 @@
         "default_source": "environment",
         "environment_key": "PARQUET_IO_IN_FLIGHT_LIMIT"
     },
+    "parquet_io_memory_budget_bytes": {
+        "name": "parquet_io_memory_budget_bytes",
+        "type": "INT64",
+        "owner": "USER",
+        "visibility": "RESTRICTED",
+        "settable": true,
+        "requires_entitlement": "platform_admin",
+        "set_by": "platform_admin only",
+        "default": null,
+        "default_source": "environment",
+        "environment_key": "PARQUET_IO_MEMORY_BUDGET_BYTES"
+    },
     "parquet_late_materialization_abandon_after": {
         "name": "parquet_late_materialization_abandon_after",
         "type": "INT64",
