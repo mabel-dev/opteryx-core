@@ -5243,6 +5243,19 @@ WORKSPACE_PROPERTIES = {
     # egress_protection` is rejected here as an unknown property, and the
     # catalog's default stands with no route to clear it.
     "egress_protection": _parse_boolean_workspace_property,
+    # Whether the platform keeps this workspace's data compacted. UNLIKE its
+    # two siblings this is not stored on the workspace: it is the presence or
+    # absence of a WRITE grant held by the platform's maintenance identity, and
+    # the executor routes it to the permissions capability instead of the
+    # settings connector. It is listed here because this map is what decides
+    # which property names `ALTER WORKSPACE ... SET` will accept at all, and
+    # what type each one takes - both of which are true of this one too.
+    #
+    # The property exists so that turning maintenance on is a setting rather
+    # than an access-list entry naming an identity the workspace's owner has
+    # never heard of. The grant underneath is unchanged; what changes is that
+    # nobody has to know it is a grant.
+    "maintenance": _parse_boolean_workspace_property,
 }
 
 

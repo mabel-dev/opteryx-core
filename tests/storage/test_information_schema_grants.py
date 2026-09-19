@@ -126,6 +126,15 @@ class _ScriptedCapability:
     def effective_grants_on(self, execution_context, pattern):
         raise AssertionError("not reached")
 
+    # Required members since `ALTER WORKSPACE ... SET maintenance` - the
+    # workspace setting that is a WRITE grant to the platform's maintenance
+    # identity. No scenario here runs it, so a call reaching one is a bug.
+    def set_workspace_maintenance(self, execution_context, workspace, enabled):
+        raise AssertionError("set_workspace_maintenance should not be reached by these tests")
+
+    def workspace_maintenance(self, execution_context, workspace):
+        raise AssertionError("workspace_maintenance should not be reached by these tests")
+
     def effective_grants_in(self, execution_context, workspace, objects):
         self.asked.append((execution_context.user, workspace, list(objects)))
         asked = list(objects)

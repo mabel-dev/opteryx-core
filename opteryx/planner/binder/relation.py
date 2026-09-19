@@ -1475,6 +1475,12 @@ def visit_alter_workspace(self, node: Node, context: BindingContext) -> Tuple[No
             f"User does not have permission to alter workspace {node.workspace_name}"
         )
 
+    # Stashed for the operator, as visit_grant_access does: `maintenance` is
+    # applied through the permissions capability rather than written to the
+    # workspace record, and the capability needs the acting identity at
+    # execution time, where there is no BindingContext to read it from.
+    node.execution_context = context.execution_context
+
     node.columns = []
     return node, context
 

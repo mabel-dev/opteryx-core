@@ -728,6 +728,25 @@ class RelationManagementNode(BasePlanNode):
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "alter_workspace":
+            # `maintenance` is a property in the statement and a GRANT in the
+            # store. It is not written to the workspace record at all: what it
+            # names is whether the platform's maintenance identity holds WRITE
+            # here, so turning it on issues that grant and turning it off
+            # revokes it. One piece of state, so the setting and the authority
+            # cannot drift apart - there is no second place for them to disagree.
+            #
+            # WHICH identity is not decided here, exactly as `grant_access`
+            # below does not decide who may grant: the capability holds the
+            # name, and an engine with none registered refuses rather than
+            # reporting a success that granted nothing.
+            if self.property_name == "maintenance":
+                from opteryx.managers.permissions import set_workspace_maintenance
+
+                set_workspace_maintenance(
+                    self.execution_context, self.workspace_name, self.property_value
+                )
+                return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
             self.connector.set_workspace_property(
                 self.workspace_name,
                 self.property_name,

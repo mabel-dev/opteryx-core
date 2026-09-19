@@ -62,6 +62,8 @@ class ScriptedCapability:
         self.asked_ownership = []
         self.asked_workspace = []
         self.asked_principal = []
+        self.asked_maintenance = []
+        self.maintenance = {}
 
     def can_perform_action(self, execution_context, resource, action):
         self.asked.append((resource, action))
@@ -120,6 +122,16 @@ class ScriptedCapability:
 
     def effective_grants_in(self, execution_context, workspace, objects):
         raise AssertionError("effective_grants_in should not be reached by these tests")
+
+    # `ALTER WORKSPACE ... SET maintenance` is grant administration wearing a
+    # property's clothes, so it lands here rather than on the settings
+    # connector. Recorded rather than refused: this file has scenarios for it.
+    def set_workspace_maintenance(self, execution_context, workspace, enabled):
+        self.asked_maintenance.append((workspace, enabled))
+        self.maintenance[workspace] = enabled
+
+    def workspace_maintenance(self, execution_context, workspace):
+        return self.maintenance.get(workspace, False)
 
 
 @pytest.fixture(autouse=True)
@@ -607,6 +619,71 @@ def test_workspace_action_is_allowed_when_the_capability_permits_it(tmp_path, in
         list(session.execute_to_morsels("ALTER WORKSPACE ws SET deletion_protection TO OFF"))
 
     assert ("ws", "ALTER") in capability.asked_workspace
+
+
+def test_maintenance_goes_to_the_capability_not_the_connector(tmp_path, install):
+    """`maintenance` is the one workspace property that is not a property.
+
+    It names whether the platform's maintenance identity holds WRITE here, so
+    it is applied as grant administration. The local store implements no
+    workspace properties at all, so a run that reached the connector would
+    raise NotImplementedError - as the deletion_protection test above asserts
+    it does. Landing on the capability instead is the whole change."""
+    _seed(tmp_path, install)
+    capability = install(ScriptedCapability(allow_workspace={("ws", "ALTER")}))
+    session = opteryx.session(user="olive")
+
+    list(session.execute_to_morsels("ALTER WORKSPACE ws SET maintenance TO ON"))
+
+    assert capability.asked_maintenance == [("ws", True)]
+
+
+def test_maintenance_off_revokes(tmp_path, install):
+    """OFF is not a different statement, and not a no-op: the same call with
+    the other value, which the capability turns into a revoke."""
+    _seed(tmp_path, install)
+    capability = install(ScriptedCapability(allow_workspace={("ws", "ALTER")}))
+    session = opteryx.session(user="olive")
+
+    list(session.execute_to_morsels("ALTER WORKSPACE ws SET maintenance TO ON"))
+    list(session.execute_to_morsels("ALTER WORKSPACE ws SET maintenance TO OFF"))
+
+    assert capability.asked_maintenance == [("ws", True), ("ws", False)]
+
+
+def test_maintenance_is_gated_on_owning_the_workspace(tmp_path, install):
+    """Same gate as every other ALTER WORKSPACE, and deliberately not weaker
+    for being phrased as a setting: what it turns on is a standing WRITE grant
+    over the whole workspace."""
+    _seed(tmp_path, install)
+    capability = install(ScriptedCapability(allow_workspace=set()))
+    session = opteryx.session(user="olive")
+
+    with pytest.raises(PermissionError):
+        list(session.execute_to_morsels("ALTER WORKSPACE ws SET maintenance TO ON"))
+
+    assert ("ws", "ALTER") in capability.asked_workspace
+    assert capability.asked_maintenance == []
+
+
+def test_maintenance_with_no_capability_refuses_rather_than_reporting_success(tmp_path):
+    """An engine with no policy store cannot grant anything, so a green result
+    here would say maintenance was enabled when nothing was. Same refusal
+    GRANT gets, and for the same reason."""
+    _workspace(tmp_path)
+    session = opteryx.session(user="olive")
+
+    with pytest.raises(InvalidConfigurationError):
+        list(session.execute_to_morsels("ALTER WORKSPACE ws SET maintenance TO ON"))
+
+
+def test_maintenance_takes_a_boolean_like_its_siblings(tmp_path, install):
+    _seed(tmp_path, install)
+    install(ScriptedCapability(allow_workspace={("ws", "ALTER")}))
+    session = opteryx.session(user="olive")
+
+    with pytest.raises(UnsupportedSyntaxError):
+        list(session.execute_to_morsels("ALTER WORKSPACE ws SET maintenance TO SOMETIMES"))
 
 
 def test_secure_is_gated_on_owning_the_source_workspace(tmp_path, install):

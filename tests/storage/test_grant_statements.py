@@ -78,6 +78,15 @@ class RecordingAdminCapability:
     def effective_grants_in(self, execution_context, workspace, objects):
         raise AssertionError("effective_grants_in should not be reached by these tests")
 
+    # Required members since `ALTER WORKSPACE ... SET maintenance` - the
+    # workspace setting that is a WRITE grant to the platform's maintenance
+    # identity. No scenario here runs it, so a call reaching one is a bug.
+    def set_workspace_maintenance(self, execution_context, workspace, enabled):
+        raise AssertionError("set_workspace_maintenance should not be reached by these tests")
+
+    def workspace_maintenance(self, execution_context, workspace):
+        raise AssertionError("workspace_maintenance should not be reached by these tests")
+
 
 @pytest.fixture(autouse=True)
 def permissions_state():

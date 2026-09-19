@@ -104,6 +104,8 @@ __all__ = (
     "effective_grants_on",
     "grants_on",
     "register_permissions_capability",
+    "set_workspace_maintenance",
+    "workspace_maintenance",
 )
 
 # The members a capability must provide. Checked once, at registration, so a
@@ -116,7 +118,9 @@ __all__ = (
 # that is missing a member the engine will call must not be installed and then
 # fail at the statement. `effective_grants_on` was added with
 # `SHOW EFFECTIVE GRANTS ON`, and `effective_grants_in` with
-# `information_schema.grants`; a deployment must upgrade its capability in step.
+# `information_schema.grants`; `set_workspace_maintenance` and
+# `workspace_maintenance` with `ALTER WORKSPACE ... SET maintenance`; a
+# deployment must upgrade its capability in step.
 _REQUIRED_MEMBERS = (
     "can_perform_action",
     "can_perform_workspace_action",
@@ -128,6 +132,8 @@ _REQUIRED_MEMBERS = (
     "grants_on",
     "effective_grants_on",
     "effective_grants_in",
+    "set_workspace_maintenance",
+    "workspace_maintenance",
 )
 
 
@@ -183,6 +189,12 @@ class PermitAll:
 
     def apply_revoke(self, execution_context, pattern: str, role: str, principal: str):
         self._refuse_administration("REVOKE")
+
+    def set_workspace_maintenance(self, execution_context, workspace: str, enabled: bool):
+        self._refuse_administration("ALTER WORKSPACE ... SET maintenance")
+
+    def workspace_maintenance(self, execution_context, workspace: str):
+        self._refuse_administration("maintenance")
 
     def grants_on(self, execution_context, pattern: str):
         self._refuse_administration("SHOW GRANTS ON")
@@ -326,6 +338,39 @@ def apply_revoke(execution_context, pattern: str, role: str, principal: str):
     silently left in place. Returns the revoked policy's id.
     """
     return _capability().apply_revoke(execution_context, pattern, role, principal)
+
+
+def set_workspace_maintenance(execution_context, workspace: str, enabled: bool):
+    """Turn platform maintenance on or off for `workspace`.
+
+    Behind `ALTER WORKSPACE <ws> SET maintenance TO ON|OFF`, and the reason that
+    statement is not an ordinary workspace property: maintenance IS a WRITE
+    grant held by the identity the platform's compactor submits as, so turning
+    it on issues that grant and turning it off revokes it. Nothing is stored on
+    the workspace, which is what keeps the setting and the authority from ever
+    disagreeing - there is only one of them.
+
+    WHICH identity is not the engine's to know, exactly as it is not for
+    `can_principal_own_materialized_view` or `apply_grant`: the deployment
+    registers a capability, and the capability holds the name. An engine that
+    recognised a name would be one whose behaviour changed with a string it
+    could not see anyone configure.
+
+    Idempotent in both directions, because the state is the grant's existence:
+    turning on what is already on writes nothing.
+    """
+    return _capability().set_workspace_maintenance(execution_context, workspace, enabled)
+
+
+def workspace_maintenance(execution_context, workspace: str):
+    """Whether platform maintenance is on for `workspace`.
+
+    Read back from the grant rather than from a stored flag - the same single
+    source of truth `set_workspace_maintenance` writes to. What a caller sees
+    here is what the compactor's own permission check will decide, not a label
+    kept alongside it that could drift.
+    """
+    return _capability().workspace_maintenance(execution_context, workspace)
 
 
 def grants_on(execution_context, pattern: str):
