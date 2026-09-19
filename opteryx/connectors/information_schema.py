@@ -10,8 +10,8 @@ information_schema
 Minimum information_schema surface. Backed by the real Opteryx catalog
 (opteryx_catalog) via list_collections()/list_datasets()/list_views() -
 NOT a static/generated snapshot. Currently implements `tables`, `columns`,
-`views`, `schemata`, `triggers`, `tasks`, `column_relationships`, `grants` and
-`listeners`.
+`views`, `schemata`, `triggers`, `tasks`, `column_relationships`, `grants`,
+`maintenance` and `listeners`.
 
 information_schema is a reserved nested schema inside a catalog workspace,
 addressed as `<workspace>.information_schema.<table>` - e.g.
@@ -1960,6 +1960,70 @@ class InformationSchemaListenersTable(BaseTable):
         yield Morsel.from_vectors(list(self._COLUMNS), vectors)
 
 
+class InformationSchemaMaintenanceTable(BaseTable):
+    """Reads `information_schema.maintenance`: whether the platform keeps this
+    workspace's data compacted.
+
+    ONE ROW, for the workspace this information_schema belongs to. Not a row
+    per object, because the setting has no per-object value to report: it is
+    held at the workspace and everything inside inherits it, exactly as an
+    inherited grant is one policy and not a copy per dataset. A dataset page
+    showing "inherited from <workspace>" renders that from this row; a second
+    row per dataset saying the same thing would be a listing whose length was
+    its only content.
+
+    The value is not a stored flag. `maintenance` IS a WRITE grant held by the
+    platform's maintenance identity, so this asks the permissions capability
+    and reports what the compactor's own permission check would decide - there
+    is no second place for it to disagree with.
+
+    Not gated, and deliberately: this answers "is my data being maintained",
+    which is a property of the workspace rather than a fact about who holds
+    access to it, and it names no principal. `grants` remains owner-only, and
+    is where the policy underneath is visible to someone entitled to see it.
+    """
+
+    __mode__ = "Internal"
+    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$one_row
+    self_governs_permissions = True  # nothing to filter: one row, about the workspace itself
+
+    _COLUMNS = ("catalog_name", "maintenance")
+
+    def __init__(self, *, dataset, catalog, workspace, telemetry, execution_context=None, **kwargs):
+        BaseTable.__init__(self, dataset=dataset, telemetry=telemetry, **kwargs)
+        self.catalog = catalog
+        self.workspace = workspace
+        self.execution_context = execution_context
+
+    def get_dataset_schema(self) -> RelationSchema:
+        self.schema = RelationSchema(
+            name="information_schema.maintenance",
+            columns=[
+                SchemaColumn(
+                    name="catalog_name",
+                    column_type=_lt.VARCHAR,
+                    identity=mint_column_identity("information_schema.maintenance", "catalog_name"),
+                ),
+                SchemaColumn(
+                    name="maintenance",
+                    column_type=_lt.BOOLEAN,
+                    identity=mint_column_identity("information_schema.maintenance", "maintenance"),
+                ),
+            ],
+        )
+        return self.schema
+
+    def read_dataset(self, columns=None, predicates=None, **kwargs):
+        from opteryx.managers.permissions import workspace_maintenance
+
+        enabled = bool(workspace_maintenance(self.execution_context, self.workspace))
+        vectors = [
+            vector_from_sequence([self.workspace], dtype=DrakenType.VARCHAR),
+            vector_from_sequence([enabled], dtype=DrakenType.BOOL),
+        ]
+        yield Morsel.from_vectors(list(self._COLUMNS), vectors)
+
+
 _TABLE_CLASSES = {
     "tables": InformationSchemaTablesTable,
     "columns": InformationSchemaColumnsTable,
@@ -1969,5 +2033,6 @@ _TABLE_CLASSES = {
     "tasks": InformationSchemaTasksTable,
     "column_relationships": InformationSchemaColumnRelationshipsTable,
     "grants": InformationSchemaGrantsTable,
+    "maintenance": InformationSchemaMaintenanceTable,
     "listeners": InformationSchemaListenersTable,
 }
