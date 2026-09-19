@@ -423,6 +423,69 @@ def _extract_placeholders(node: Any) -> Set[str]:
     return names
 
 
+# A batch is as privileged as its most privileged statement, so the tiers are
+# ranked and the union takes the maximum. "denied" ranks above "owner": it is not a
+# higher privilege but a refusal, and a batch containing one statement nobody may
+# run is a batch nobody may run.
+_PERMISSION_RANK = {"reader": 0, "writer": 1, "owner": 2, "denied": 3}
+
+
+def union_descriptions(descriptions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Describe a BATCH as the union of its statements' descriptions.
+
+    `describe_statement` answers for one statement. A caller pre-flighting a batch -
+    a DDL file submitted whole - needs an answer about the batch, and the only safe
+    answer is the union: the engine runs every statement in it
+    (`QuerySession._execute_statements`), so a description covering only the first
+    understates what the submission does. It understated it in the direction that
+    matters: `SELECT * FROM a; DELETE FROM b` described as a `reader` read of `a`.
+
+    The union of each field:
+        query_type          the shared type when every statement agrees, else "Batch".
+                            A batch has no single type, and naming one statement's
+                            type for all of them is the misdescription this exists to
+                            stop - a caller switching on it should fail to recognise
+                            "Batch" rather than act on a wrong answer.
+        tables              every relation any statement references.
+        parameters          every placeholder any statement needs - all of them have
+                            to be supplied for the batch to run.
+        is_read             True only when EVERY statement is a read. One write makes
+                            the batch not a read.
+        is_mutation/is_ddl  True when ANY statement is.
+        permission_required the highest tier any statement needs (see _PERMISSION_RANK).
+
+    Parameters:
+        descriptions: one `describe_statement` result per statement, in order.
+
+    Returns:
+        The dict documented on `parse_query_info` - same fields, no more.
+    """
+    if not descriptions:
+        raise ValueError("Cannot describe an empty batch")
+    if len(descriptions) == 1:
+        return descriptions[0]
+
+    types = {d["query_type"] for d in descriptions}
+    tables: Set[str] = set()
+    parameters: Set[str] = set()
+    for description in descriptions:
+        tables.update(description["tables"])
+        parameters.update(description["parameters"])
+
+    return {
+        "query_type": types.pop() if len(types) == 1 else "Batch",
+        "tables": sorted(tables),
+        "parameters": sorted(parameters),
+        "is_read": all(d["is_read"] for d in descriptions),
+        "is_mutation": any(d["is_mutation"] for d in descriptions),
+        "is_ddl": any(d["is_ddl"] for d in descriptions),
+        "permission_required": max(
+            (d["permission_required"] for d in descriptions),
+            key=lambda tier: _PERMISSION_RANK[tier],
+        ),
+    }
+
+
 def describe_statement(parsed_statement: Dict[str, Any]) -> Dict[str, Any]:
     """
     Everything `analyze_query` reports, derived from one ALREADY-PARSED statement.
@@ -528,6 +591,16 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
         - permission_required: str - the role the statement needs: "reader",
           "writer", "owner", or "denied" for a statement none of them permits
 
+        A BATCH - several statements separated by `;`, as a DDL file submitted
+        whole - is described as the UNION of its statements, because the engine
+        runs all of them. `tables` and `parameters` cover every statement,
+        `is_mutation`/`is_ddl` are true if ANY statement is, `is_read` only if
+        EVERY statement is, and `permission_required` is the highest tier any of
+        them needs. `query_type` is the shared type when they agree and "Batch"
+        when they do not - a batch has no single type, and a caller switching on
+        it should fail to recognise "Batch" rather than act on one statement's
+        type as though it described the rest. See `union_descriptions`.
+
     Raises:
         QueryParseError: If the SQL cannot be parsed. This used to be a bare
             ValueError carrying the parser's own text; it is now the same error
@@ -552,11 +625,23 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
     # the engine runs happily does not parse.
     from opteryx.planner import parse_statement
 
-    _clean_sql, parsed_statements = parse_statement(sql)
+    from opteryx.utils.sql import split_sql_statements
 
-    if not parsed_statements or len(parsed_statements) == 0:
+    # Split BEFORE parsing. The pre-parse layer recognizes the statements sqlparser
+    # has no grammar for with whole-string anchored patterns, so handed a batch it
+    # claims the text on its leading keywords and then reports the whole block as bad
+    # syntax - which is what refused a file of `ALTER MATERIALIZED VIEW ... OWNER TO`
+    # statements that the engine runs one by one without complaint. The split is the
+    # same one `QuerySession._execute_statements` runs, so what is described here is
+    # what would be executed.
+    descriptions = []
+    for statement in split_sql_statements(sql):
+        _clean_sql, parsed_statements = parse_statement(statement.text)
+        if not parsed_statements:
+            raise ValueError("No statements found in SQL query")
+        descriptions.append(describe_statement(parsed_statements[0]))
+
+    if not descriptions:
         raise ValueError("No statements found in SQL query")
 
-    # For now, only handle the first statement
-    # Multiple statements could be handled in the future
-    return describe_statement(parsed_statements[0])
+    return union_descriptions(descriptions)

@@ -606,6 +606,88 @@ def test_save_is_not_planned_by_the_engine():
     assert "not by the query engine" in str(err.value)
 
 
+# ===================== batches are described as a union =====================
+#
+# The engine runs every statement of a batch (`QuerySession._execute_statements`),
+# so a description covering only the first understates what the submission does.
+
+
+def test_batch_of_intercepted_ddl_is_described_not_refused():
+    """The case this was found on: a file of ALTER MATERIALIZED VIEW ... OWNER TO
+    statements. Handed the block whole, the pre-parse layer claimed it on the leading
+    keywords and reported the syntax as bad, refusing a submission the engine runs
+    one statement at a time without complaint."""
+    info = opteryx.analyze_query(
+        "ALTER MATERIALIZED VIEW platform.billing.charges OWNER TO opteryx_runner;\n"
+        "ALTER MATERIALIZED VIEW platform.billing.usage OWNER TO opteryx_runner;"
+    )
+
+    assert info["tables"] == ["platform.billing.charges", "platform.billing.usage"]
+    assert info["is_ddl"]
+    assert info["permission_required"] == "owner"
+
+
+def test_a_write_behind_a_leading_read_is_not_described_as_a_read():
+    """The reason the union matters. Described from its first statement alone this
+    batch is a `reader` read of one table, and the DELETE is invisible to a caller
+    deciding whether the submitter may run it."""
+    info = opteryx.analyze_query("SELECT * FROM a.b.c; DELETE FROM a.b.d WHERE 1=1")
+
+    assert info["tables"] == ["a.b.c", "a.b.d"]
+    assert not info["is_read"]
+    assert info["is_mutation"]
+    assert info["permission_required"] == "writer"
+
+
+def test_batch_takes_the_highest_permission_tier():
+    info = opteryx.analyze_query("SELECT 1; DROP TABLE platform.billing.charges")
+
+    assert info["permission_required"] == "owner"
+    assert info["is_ddl"]
+
+
+def test_batch_parameters_are_every_statement_s():
+    """All of them have to be supplied for the batch to run."""
+    info = opteryx.analyze_query(
+        "SELECT * FROM a WHERE x = :first; SELECT * FROM b WHERE y = :second"
+    )
+
+    assert info["parameters"] == ["first", "second"]
+
+
+def test_query_type_is_shared_when_they_agree_and_batch_when_they_do_not():
+    """A batch has no single type. Naming one statement's type for all of them is the
+    misdescription the union exists to stop, so a caller switching on `query_type`
+    gets something it does not recognise instead of a wrong answer."""
+    assert opteryx.analyze_query("SELECT * FROM a; SELECT * FROM b")["query_type"] == "Query"
+    assert opteryx.analyze_query("SELECT * FROM a; DELETE FROM b")["query_type"] == "Batch"
+
+
+def test_one_statement_is_described_exactly_as_before():
+    """The union must not move the single-statement answer - every existing caller
+    sends one statement."""
+    info = opteryx.analyze_query("SELECT * FROM users WHERE id = 1")
+
+    assert info == {
+        "query_type": "Query",
+        "tables": ["users"],
+        "parameters": [],
+        "is_read": True,
+        "is_mutation": False,
+        "is_ddl": False,
+        "permission_required": "reader",
+    }
+
+
+def test_a_batch_with_one_unparseable_statement_still_fails():
+    """Fail on the statement that is wrong. Splitting must not swallow a parse error
+    for a later statement."""
+    from opteryx.exceptions import SqlError
+
+    with pytest.raises(SqlError):
+        opteryx.analyze_query("SELECT * FROM a; SELECT SELECT FROM")
+
+
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 

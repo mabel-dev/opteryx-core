@@ -39,6 +39,13 @@ and an explicit cast wherever the server's result type is not the type the
 binder bound the aggregate to. A shape that cannot be spelled that way is
 DECLINED by `can_push_*` and stays a local operator — never mistranslated.
 
+Listing (`Summarisable`): `information_schema.tables` derives its metadata
+columns from a dataset document's snapshot, and a workspace bound here has
+neither, so they all read NULL. `relation_summaries()` answers them from the
+server instead - `pg_class.reltuples`, `pg_total_relation_size`, and the
+CLUSTER order - in one statement per schema. See that method for what is
+deliberately left unanswered, and why.
+
 Execution (native): `PostgresReadNode` -> `NativePostgresScanSource`
 (src/cpp/engine/native_postgres_scan_source.hpp) streams the server's BINARY
 rows into morsels on a worker thread. Nothing in this module runs during
@@ -59,7 +66,7 @@ whose objects were created with quoted mixed-case names.
 
 import decimal
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from opteryx.connectors import TableType
 from opteryx.connectors.base.base_connector import BaseConnector, BaseTable
@@ -67,6 +74,8 @@ from opteryx.connectors.capabilities.aggregate_pushable import AggregatePushable
 from opteryx.connectors.capabilities.distinct_pushable import DistinctPushable
 from opteryx.connectors.capabilities.limit_pushable import LimitPushable
 from opteryx.connectors.capabilities.predicate_pushable import PredicatePushable
+from opteryx.connectors.capabilities.summarisable import RelationSummary
+from opteryx.connectors.capabilities.summarisable import Summarisable
 from opteryx.connectors.capabilities.topn_pushable import TopNPushable
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import DatasetReadError
@@ -151,7 +160,29 @@ def _sqlstate(error: RuntimeError) -> str:
     return text[start + 1 : end]
 
 
-class PostgresConnector(BaseConnector):
+def _positive_int(text: Optional[str], *, allow_zero: bool = False) -> Optional[int]:
+    """A numeric column of the summary statement as an int, or None.
+
+    The native client hands every value back as text. A server value of NULL,
+    an unparseable one, and - for counts - a non-positive one all mean the same
+    thing to a summary: the server did not say. `reltuples` is -1 when a
+    relation has never been analysed and 0 when it has no estimate, and neither
+    is the claim "this relation is empty". A SIZE of zero is a real measurement
+    (a freshly truncated or partitioned-parent relation genuinely occupies
+    nothing), so it is kept.
+    """
+    if text is None:
+        return None
+    try:
+        value = int(float(text))
+    except (TypeError, ValueError):
+        return None
+    if value < 0 or (value == 0 and not allow_zero):
+        return None
+    return value
+
+
+class PostgresConnector(BaseConnector, Summarisable):
     """Long-lived gateway for one PostgreSQL database.
 
     Cached by the resolution chain per workspace; creates a transient
@@ -274,6 +305,109 @@ class PostgresConnector(BaseConnector):
 
     def table_engine(self, name: str, **kwargs):
         return PostgresTable(dataset=name, gateway=self, **kwargs)
+
+    def relation_summaries(
+        self, schema_name: str, relation_names: Sequence[str]
+    ) -> Dict[str, RelationSummary]:
+        """The `Summarisable` contract - one statement for a whole schema.
+
+        `information_schema.tables` derives its metadata columns from a dataset
+        document's snapshot, and a workspace bound here has neither, so every
+        one of them read NULL. These come from the server that owns the
+        relations instead, all of them in a SINGLE `pg_class` scan however many
+        relations the schema holds: the requested names are filtered in Python,
+        because the alternative - a statement per relation - is the cost this
+        capability exists to avoid.
+
+        What each column is taken from, and what is deliberately NOT:
+
+        * rows - `pg_class.reltuples`, the planner's own estimate and the same
+          number `PostgresTable._row_estimate` plans with. It is flagged as an
+          ESTIMATE on the way out: the native path's record count is an exact
+          committed total, and the two land in the same column. `-1` (never
+          analysed) and `0` are both 'unknown' here, exactly as they are there.
+        * bytes - `pg_total_relation_size`, which is the relation plus its
+          indexes, TOAST and free space map: the server's notion of what the
+          relation occupies, not a byte count of rows a query would read. Asked
+          only of relations that have storage; a view or a foreign table has
+          none, and CASE keeps the function from being called on them at all.
+          A PARTITIONED parent (relkind 'p') reports its own size, which is
+          zero - the partitions hold the data and are relations in their own
+          right.
+        * sort order - the CLUSTER order (`pg_index.indisclustered`), rendered
+          as `<column> ASC|DESC` the way the native column renders a sort key.
+          This engine does not own the relation, so 'sort order' can only mean
+          what the server itself has been told to keep it in, and CLUSTER is
+          the only thing that means that. A primary key or an arbitrary btree
+          would have been available on nearly every table and would have said
+          something that is not true: an index is an access path, not an
+          ordering of the heap. Most tables have never been CLUSTERed and
+          correctly report nothing. An expression index is skipped (its
+          `indkey[0]` is 0, which names no attribute).
+        * updated_at - LEFT NULL. PostgreSQL keeps no per-relation modification
+          time. `pg_stat_user_tables.last_autoanalyze` is the usual stand-in
+          and it answers a different question - when the statistics collector
+          last ran, which moves without the data changing and stays still while
+          it does - and the statistics views reset with the server. A column
+          labelled "table updated at" holding that would be read as fact.
+        * snapshot id / sequence / file count - not fields on RelationSummary
+          at all; they describe a snapshot store. See the capability module.
+
+        Only the `postgres` dialect is answered. CockroachDB keeps no
+        PostgreSQL-shaped catalogue statistics (`reltuples` is NULL there for
+        every relation - the same reason `_row_estimate` reads SHOW STATISTICS
+        for it), so a wire-compatible server would return a table of zeroes and
+        nulls that LOOK like measurements. Nothing is claimed for it instead,
+        per this connector's rule that a statistic is declared, never guessed.
+
+        A server that cannot be reached, or refuses the read, yields an empty
+        mapping: the caller then renders these columns exactly as it did
+        before this existed. Listing what a workspace contains must not fail
+        because the workspace's server is down.
+        """
+        if self.dialect != DIALECT_POSTGRES:
+            return {}
+
+        wanted = {name.lower(): name for name in relation_names}
+        if not wanted:
+            return {}
+
+        _, query_text, _, _ = _pg_helpers()
+        try:
+            rows = query_text(
+                self.connection_config,
+                "SELECT c.relname, "
+                "       c.reltuples::float8::text, "
+                "       CASE WHEN c.relkind IN ('r', 'p', 'm') "
+                "            THEN pg_catalog.pg_total_relation_size(c.oid)::text END, "
+                "       (SELECT a.attname || CASE WHEN (i.indoption[0] & 1) = 1 "
+                "                                 THEN ' DESC' ELSE ' ASC' END "
+                "          FROM pg_catalog.pg_index i "
+                "          JOIN pg_catalog.pg_attribute a "
+                "            ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0] "
+                "         WHERE i.indrelid = c.oid AND i.indisclustered "
+                "         LIMIT 1) "
+                "  FROM pg_catalog.pg_class c "
+                "  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                " WHERE n.nspname = $1 "
+                "   AND c.relkind IN ('r', 'p', 'v', 'm', 'f')",
+                [schema_name],
+            )
+        except RuntimeError:
+            return {}
+
+        summaries: Dict[str, RelationSummary] = {}
+        for relname, reltuples, total_bytes, sort_order in rows:
+            name = wanted.get((relname or "").lower())
+            if name is None:
+                continue
+            summaries[name] = RelationSummary(
+                record_count=_positive_int(reltuples),
+                record_count_is_estimate=True,
+                byte_count=_positive_int(total_bytes, allow_zero=True),
+                sort_order=sort_order or None,
+            )
+        return summaries
 
     def stats_manifest_path(self, schema_name: str, table_name: str) -> Optional[str]:
         """Where this relation's statistics manifest lives, or None if unconfigured.

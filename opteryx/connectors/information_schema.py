@@ -39,6 +39,20 @@ knowable by binding the view body, which is out of scope here.
 Views have no dataset/snapshot, so they report NULL for all of these.
 A table with no committed snapshot yet also reports NULL for all of them.
 
+A workspace bound to a connector with NO metastore - a PostgreSQL server, say -
+has no dataset document and no snapshot for ANY of its relations, so all seven
+of those columns read NULL while the relations themselves query perfectly. For
+those workspaces `tables` takes a second path: it asks the workspace's DATA
+connector, if that connector declares the `Summarisable` capability, to
+describe the relations it owns. That call is BATCHED per collection - one
+round trip for a whole schema, never one per relation - and it replaces the
+per-table catalog round trips rather than adding to them. What comes back is
+whatever the source honestly knows: rows, bytes and sort order from a
+PostgreSQL server; never a snapshot id, sequence or file count, which describe
+a snapshot store this relation does not live in. See `_relation_summariser`
+for why a failure to resolve that binding leaves the columns NULL instead of
+failing the listing.
+
 `views` does one `load_view` catalog round trip per view found to surface its
 SQL text and metadata (owner, last-updated, last-execution stats). It is a
 separate table from `tables` (which lists views too, but only name/type) -
@@ -106,6 +120,7 @@ from draken.morsels.morsel import Morsel
 
 from opteryx.connectors.base.base_connector import BaseTable
 from opteryx.connectors.capabilities import PredicatePushable
+from opteryx.connectors.capabilities import RelationSummary
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.expression import NodeType
@@ -235,6 +250,11 @@ def _render_sort_order(sort_orders, relation_schema) -> Optional[str]:
 
     return f"{name} {'ASC' if normalized['ascending'] else 'DESC'}"
 
+
+# A relation the summariser did not answer for, so one code path renders
+# "the source said nothing about this table" and "there is no source to
+# ask" identically - which is what they mean.
+_EMPTY_SUMMARY = RelationSummary()
 
 _KEY_PUSHABLE_OPS = ("Eq", "NotEq", "InList", "NotInList")
 
@@ -426,6 +446,42 @@ class InformationSchemaTablesTable(BaseTable, _KeyColumnPredicatePushable):
         )
         return self.schema
 
+    def _relation_summariser(self):
+        """The workspace's DATA connector, if it can describe its own relations.
+
+        `information_schema` is served by the workspace's SETTINGS connector -
+        the opteryx catalog entry, which exists whatever the workspace's data
+        is bound to and needs no credential (see `connector_factory`). That is
+        the right place to answer FROM for every other column here, and the
+        wrong place to answer the per-relation statistics from when the data
+        lives somewhere else: the settings catalog holds no dataset document
+        for such a workspace, so those columns read NULL by construction.
+
+        So the data binding is consulted too, and ONLY for those columns. A
+        connector that declares `Summarisable` is returned and asked; anything
+        else - the native `OpteryxConnector`, a Mabel gateway - is not, and the
+        catalog path below stays exactly as it was. The two never both apply:
+        an externally-bound workspace domiciles no opteryx datasets, so a
+        summarising connector's workspace has no snapshots to prefer.
+
+        Resolving the data binding can FAIL where resolving settings cannot -
+        it decrypts a stored credential, and a credential can go bad. That is
+        the conflation `set_workspace_settings_resolver` exists to prevent, and
+        it must not come back in through this door: a workspace whose binding
+        will not resolve still has to be listable, and still has to be
+        repairable through SQL. A failure here therefore yields None and the
+        columns read NULL - which is what they read before this path existed.
+        """
+        from opteryx.connectors import connector_factory
+
+        try:
+            connector = connector_factory(self.workspace, telemetry=self.telemetry)
+        except Exception:
+            return None
+        if getattr(connector, "provides_relation_summaries", False):
+            return connector
+        return None
+
     def read_dataset(self, predicates=None, **kwargs) -> Iterable[Morsel]:
         compiled = _compile_key_predicates(predicates, self._pushable_columns)
 
@@ -440,6 +496,28 @@ class InformationSchemaTablesTable(BaseTable, _KeyColumnPredicatePushable):
         table_file_count = []
         table_bytes = []
         table_record_count = []
+
+        summariser = self._relation_summariser()
+
+        def _append_summary_row(summary):
+            """The metadata columns for a relation whose source, not this
+            catalog, is the thing that knows them.
+
+            A `RelationSummary` field the source could not answer is None, and
+            None reaches the column unchanged. The three snapshot columns are
+            not fields on a summary at all - they describe a snapshot store and
+            a remote relation has none - so they are NULL here by the same
+            reasoning that has always made them NULL for a view.
+            """
+            if summary is None:
+                summary = _EMPTY_SUMMARY
+            table_sort_order.append(summary.sort_order)
+            snapshot_id.append(None)
+            snapshot_sequence_id.append(None)
+            table_updated_at.append(summary.updated_at)
+            table_file_count.append(None)
+            table_bytes.append(summary.byte_count)
+            table_record_count.append(summary.record_count)
 
         def _append_stats_row(identifier: str):
             dataset = self.catalog.load_dataset(identifier)
@@ -480,16 +558,28 @@ class InformationSchemaTablesTable(BaseTable, _KeyColumnPredicatePushable):
                 if not _key_predicates_allow(compiled, {"table_schema": collection}):
                     continue
                 if want_tables:
-                    for name in self.catalog.list_datasets(collection):
-                        if not _key_predicates_allow(compiled, {"table_name": name}):
-                            continue
-                        if not _readable(self.execution_context, self.workspace, collection, name):
-                            continue
+                    # Filter FIRST, then fetch: the summariser is asked once
+                    # for the whole collection, so the names it is asked about
+                    # have to be settled before the call. The native path has
+                    # no such call to batch and is unchanged.
+                    names = [
+                        name
+                        for name in self.catalog.list_datasets(collection)
+                        if _key_predicates_allow(compiled, {"table_name": name})
+                        and _readable(self.execution_context, self.workspace, collection, name)
+                    ]
+                    summaries = {}
+                    if summariser is not None and names:
+                        summaries = summariser.relation_summaries(collection, names) or {}
+                    for name in names:
                         table_catalog.append(self.workspace)
                         table_schema.append(collection)
                         table_name.append(name)
                         table_type.append("BASE TABLE")
-                        _append_stats_row(f"{collection}.{name}")
+                        if summariser is None:
+                            _append_stats_row(f"{collection}.{name}")
+                        else:
+                            _append_summary_row(summaries.get(name))
                 if want_views:
                     for name in self.catalog.list_views(collection):
                         if not _key_predicates_allow(compiled, {"table_name": name}):
