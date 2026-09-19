@@ -10,6 +10,7 @@ import io
 import pytest
 
 from opteryx.connectors.manifest_disk_cache import CachingFileIO
+from opteryx.connectors.manifest_disk_cache import get_manifest_cache_metrics
 from opteryx.connectors.manifest_disk_cache import ManifestDiskCache
 from opteryx.connectors.manifest_disk_cache import RemoteManifestCache
 from opteryx.connectors.manifest_disk_cache import is_manifest_uri
@@ -50,6 +51,9 @@ class FakeFileIO:
 
     def exists(self, location):
         return True
+
+    def copy(self, source, destination):
+        return ("copy", source, destination)
 
     def list_files(self, prefix):
         return [prefix]
@@ -205,6 +209,44 @@ def test_non_manifest_operations_delegate_untouched(tmp_path):
     assert caching.exists("x") is True
     assert caching.list_files("p") == ["p"]
     assert caching.ls("p") == ["p"]
+    assert caching.copy("a", "b") == ("copy", "a", "b")
+
+
+def test_copy_does_not_touch_the_cache_even_for_a_manifest_uri(tmp_path):
+    # A copy reads and writes nothing through this wrapper, so neither end of it
+    # is a cache event - not even when a manifest URI is named. If a copy ever
+    # started populating a tier, a destination written twice would serve the
+    # first payload forever, which is exactly what the write-once licence rules
+    # out.
+    disk = ManifestDiskCache(directory=str(tmp_path), max_bytes=10_000)
+    caching = CachingFileIO(FakeFileIO(), [disk])
+
+    before = get_manifest_cache_metrics()
+    assert caching.copy(MANIFEST, MANIFEST) == ("copy", MANIFEST, MANIFEST)
+    assert get_manifest_cache_metrics() == before
+
+
+def test_wrapper_covers_the_whole_catalog_fileio_surface():
+    """The drift guard.
+
+    `CachingFileIO` delegates by explicit enumeration, so a method added to the
+    catalog's FileIO and not added here is an AttributeError at the call site -
+    which is how `copy` reached production missing. This fails the moment the
+    catalog grows a method the wrapper does not forward; the fix is a delegator
+    on the wrapper, never a `__getattr__` passthrough.
+    """
+    pytest.importorskip("opteryx_catalog")
+    from opteryx_catalog.iops.fileio import FileIO
+    from opteryx_catalog.iops.fileio import GcsFileIO
+
+    surface = {
+        name
+        for source in (FileIO, GcsFileIO)
+        for name in vars(source)
+        if not name.startswith("_")
+    }
+    missing = sorted(name for name in surface if not hasattr(CachingFileIO, name))
+    assert not missing, f"CachingFileIO does not delegate: {', '.join(missing)}"
 
 
 if __name__ == "__main__":  # pragma: no cover

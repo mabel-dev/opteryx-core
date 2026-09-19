@@ -353,7 +353,14 @@ class CachingFileIO:
     that served it, so the next read on this instance is local. A full miss reads
     from the wrapped ``FileIO`` and populates every tier.
 
-    Every non-manifest operation delegates untouched.
+    Every other operation delegates untouched, but the delegation is an EXPLICIT
+    enumeration, not a `__getattr__` passthrough: what this wrapper forwards is
+    stated here, where it can be read, rather than being whatever the inner
+    object happens to have. The cost is that a method added to the catalog's
+    `FileIO` and not added here becomes an `AttributeError` at the call site
+    rather than working - which is how `copy` was missed. The test suite holds a
+    drift guard comparing this surface to the catalog's for that reason; the
+    answer to a failure there is a delegator here, never a passthrough.
     """
 
     def __init__(self, inner, tiers):
@@ -395,6 +402,13 @@ class CachingFileIO:
 
     def exists(self, location: str) -> bool:
         return self._inner.exists(location)
+
+    def copy(self, source: str, destination: str) -> None:
+        # Server-side where the backend has it, so the bytes never come through
+        # this process. Nothing about a copy touches the manifest cache: neither
+        # end of it is read or written here, and a manifest URI names a
+        # write-once object that is never a copy's destination.
+        return self._inner.copy(source, destination)
 
     def list_files(self, prefix: str) -> list:
         return self._inner.list_files(prefix)
