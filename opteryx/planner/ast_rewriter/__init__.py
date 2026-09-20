@@ -14,6 +14,9 @@ Responsibilities:
 - Parameter substitution — replaces positional (?) and named (:name) placeholder nodes
   with literal AST nodes built from the caller-supplied parameter values. Done post-parse
   to prevent injection: parameter values never influence how the SQL is parsed.
+- Relation name variables — resolves `@@name` parts inside a relation name
+  (`personal.@@external_user.dataset`) to the session's own value. Done here so that
+  every later phase sees one already-resolved name. See `relation_variables`.
 - JSON accessor rewriting — fixes a sqlparser-rs representation bug where
   `document->(element = value)` is produced instead of `(document->element) = value`.
   Corrected here so the Logical Planner sees well-formed accessor expressions.
@@ -26,6 +29,7 @@ import decimal
 from typing import Any, Dict, List, Union
 
 from opteryx.exceptions import ParameterError
+from opteryx.planner.ast_rewriter.relation_variables import do_substitute_relation_variables
 
 LiteralNode = Dict[str, Any]
 
@@ -115,7 +119,7 @@ def parameter_dict_binder(node: Union[Dict, List], parameter_set: Dict[str, Any]
     return node
 
 
-def do_ast_rewriter(asts: List[dict], parameters: Union[list, dict]):
+def do_ast_rewriter(asts: List[dict], parameters: Union[list, dict], variables=None):
     # bind the user provided parameters, we this that here because we want it after the
     # AST has been created (to avoid injection flaws) but also because the order
     # matters
@@ -130,4 +134,7 @@ def do_ast_rewriter(asts: List[dict], parameters: Union[list, dict]):
     else:
         with_parameters_exchanged = asts
 
-    return with_parameters_exchanged
+    # After parameter binding, so a parameter VALUE can never introduce a `@@name`
+    # into a relation name - the same reasoning that puts parameter binding itself
+    # after the parse.
+    return do_substitute_relation_variables(with_parameters_exchanged, variables)

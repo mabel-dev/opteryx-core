@@ -604,6 +604,7 @@ def check_statement(
             parameters=parameters,
             telemetry=telemetry,
             catalog_cache=catalog_cache,
+            variables=execution_context.variables,
         )
     except reportable as error:
         # No plan was built, so there is nothing resolved to offer.

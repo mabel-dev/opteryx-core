@@ -79,7 +79,7 @@ def visit_clone_relation(self, node: Node, context: BindingContext) -> Tuple[Nod
     """
     Bind CREATE TABLE <target> CLONE <upstream>.
 
-    Three gates, in this order (FORKS_DESIGN.md S4.1):
+    Four gates, in this order (FORKS_DESIGN.md S4.1, plus the metastore gate):
 
     * CREATE on the target - the same tier as any other CREATE TABLE, and first,
       so a caller who may not write the target learns that rather than being
@@ -97,6 +97,11 @@ def visit_clone_relation(self, node: Node, context: BindingContext) -> Tuple[Nod
     applies: SECURE sanctions a NAMED OBJECT (a task, a materialized view), and
     a hand-run CLONE is not one, so the only way to open a workspace to forks
     is for its owner to turn the guard off deliberately.
+
+    The fourth gate is not about permission at all: the upstream must be held
+    in an Opteryx metastore, because a fork borrows its manifest. It is checked
+    after the permission gates so that a caller who may not read the upstream
+    learns that, rather than the shape of a workspace they have no grant on.
     """
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
@@ -123,15 +128,22 @@ def visit_clone_relation(self, node: Node, context: BindingContext) -> Tuple[Nod
             "be cloned"
         )
 
-    # A clone reads a MANIFEST, so the upstream has to be a relation that has
-    # one. An external table, a virtual dataset or anything behind a
-    # non-Writable connector has no snapshot to fork from.
+    # ONLY AN OPTERYX-BACKED RELATION CAN BE FORKED. A clone borrows the
+    # upstream's manifest entries and pins the snapshot they came from against
+    # expiration, and both are mechanics of our own snapshot store: an Iceberg
+    # or Postgres relation is governed by its own catalog, which has never
+    # promised to keep anything for us, so a fork of one would name files that
+    # can vanish underneath it. The connector puts the question to the
+    # metastore actually holding the relation, because one connector fronts the
+    # native catalog for one workspace and an external store for the next - see
+    # `BaseConnector.supports_forking`.
     source_connector = connector_factory(node.source_relation, telemetry=context.telemetry)
-    if not isinstance(source_connector, Writable):
+    if not source_connector.supports_forking(node.source_relation):
         raise UnsupportedSyntaxError(
-            f"**CLONE** reads {md_code(node.source_relation)}'s manifest, and that dataset "
-            "has none - it is projected from another catalog. Copy it with "
-            "**CREATE TABLE** ... **AS SELECT** instead."
+            f"{md_code(node.source_relation)} is not held in an Opteryx metastore, so it "
+            "cannot be cloned - **CLONE** borrows the upstream's own manifest, which only "
+            "an Opteryx-backed relation has. Copy it with **CREATE TABLE** ... "
+            "**AS SELECT** instead."
         )
 
     refusals = node.connector.egress_verdict(node.relation_name, [node.source_relation])
@@ -151,11 +163,18 @@ def visit_clone_collection(self, node: Node, context: BindingContext) -> Tuple[N
     workspace. Per-dataset READ is settled at execution, where the source's
     contents are known - a collection's membership is not something the binder
     can enumerate without a catalog listing it would then have to repeat.
+
+    The source's metastore is gated here exactly as it is for a single
+    relation: a collection is not a thing that can be forked in its own right,
+    it is a set of datasets each of which is forked, so a collection in a
+    workspace whose relations cannot be cloned cannot be cloned either.
     """
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
     from opteryx.exceptions import EgressRestrictedError
     from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.exceptions import md_code
     from opteryx.managers.permissions import can_perform_action
 
     node.connector = connector_factory(node.collection_name, telemetry=context.telemetry)
@@ -173,6 +192,17 @@ def visit_clone_collection(self, node: Node, context: BindingContext) -> Tuple[N
         raise PermissionError(
             f"User does not have permission to read {node.source_collection}, so it cannot "
             "be cloned"
+        )
+
+    # See visit_clone_relation: every dataset in the collection would be forked
+    # the same way, and a workspace whose relations have no manifest of ours has
+    # nothing for any of them to borrow.
+    source_connector = connector_factory(node.source_collection, telemetry=context.telemetry)
+    if not source_connector.supports_forking(node.source_collection):
+        raise UnsupportedSyntaxError(
+            f"{md_code(node.source_collection)} is not held in an Opteryx metastore, so it "
+            "cannot be cloned - **CLONE** borrows each dataset's own manifest, which only "
+            "an Opteryx-backed relation has."
         )
 
     refusals = node.connector.egress_verdict(node.collection_name, [node.source_collection])

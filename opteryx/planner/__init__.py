@@ -339,6 +339,7 @@ def build_logical_plan(
     parameters: Union[Iterable, Dict, None],
     telemetry,
     catalog_cache=None,
+    variables=None,
 ):
     """
     Rewrite the AST, plan it, expand its relations and rewrite the plan - everything
@@ -364,9 +365,11 @@ def build_logical_plan(
     else:
         params = [p for p in parameters or []]
 
-    # AST Rewriter adds temporal filters and parameters to the AST
+    # AST Rewriter adds temporal filters and parameters to the AST, and resolves
+    # `@@name` parts inside relation names - which is why it takes `variables`: the
+    # session's own identity, read once here so no later phase has to.
     start = time.monotonic_ns()
-    parsed_statement = do_ast_rewriter(parsed_statements, parameters=params)[0]
+    parsed_statement = do_ast_rewriter(parsed_statements, parameters=params, variables=variables)[0]
     telemetry.time_planning_ast_rewriter += time.monotonic_ns() - start
 
     # Logical Planner converts ASTs to logical plans.
@@ -462,6 +465,7 @@ def bind_parsed_statement(
         parameters=parameters,
         telemetry=telemetry,
         catalog_cache=catalog_cache,
+        variables=execution_context.variables,
     )
     bound_plan = bind_logical_plan(
         logical_plan=logical_plan,

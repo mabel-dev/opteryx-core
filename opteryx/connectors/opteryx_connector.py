@@ -82,7 +82,9 @@ from opteryx.exceptions import (
     DatasetNotFoundError,
     DatasetReadError,
     InvalidInternalStateError,
+    UnsupportedSyntaxError,
 )
+from opteryx.exceptions import md_code
 from opteryx.models import FileEntry, Manifest
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import SchemaColumn, RelationSchema
@@ -1552,6 +1554,35 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         catalog = self._get_catalog(workspace)
 
         catalog.create_collection(relative_id, exists_ok=if_not_exists, author=author)
+
+    def supports_forking(self, relation_name: str) -> bool:
+        """Whether this relation's workspace is backed by the native metastore.
+
+        THE METASTORE ANSWERS, NOT THIS CONNECTOR. This one class fronts the
+        Opteryx catalog for one workspace and an external metastore - Iceberg,
+        and whatever follows it - for the next, so the question has to be put
+        to the store that actually holds the relation. See
+        `BaseConnector.supports_forking` for why only the native store may say
+        yes, and `Metastore.supports_forking` (opteryx-catalog) for the
+        declaration itself.
+
+        An implementation that does not declare it is an ERROR rather than a
+        refusal: the same posture `bounds_are_ordinal` takes in
+        `get_dataset_metadata`, and for the same reason - a store that has not
+        said whether its files are ours to borrow has not been thought about,
+        and guessing either way is worse than saying so.
+        """
+        workspace, _ = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        declared = getattr(catalog, "supports_forking", None)
+        if declared is None:
+            raise UnsupportedSyntaxError(
+                f"{type(catalog).__name__} does not declare `supports_forking`, so whether "
+                f"{md_code(relation_name)} can be cloned is unknown. Implementations of "
+                "opteryx-catalog's `Metastore` must set it (True only for a store providing "
+                "Opteryx snapshot and fork-registry mechanics)."
+            )
+        return bool(declared)
 
     def clone_relation(
         self,

@@ -50,6 +50,29 @@ class BaseConnector:
     requires_execution_context = False  # table_engine() needs the caller's ExecutionContext (e.g. for row-level permission filtering)
     requires_original_case = False  # table_engine() needs the relation name as typed in SQL, before the binder's case-folding lowercases node.relation
 
+    def supports_forking(self, relation_name: str) -> bool:
+        """Whether `relation_name` can be the SOURCE of a CREATE TABLE ... CLONE.
+
+        A fork creates a dataset whose first manifest lists the upstream's
+        files, and registers itself on the upstream so expiration will not
+        retire the snapshot those files belong to. Both halves are Opteryx
+        snapshot-store mechanics: only the native metastore has a manifest of
+        ours to borrow, and only it can promise those files will still be
+        there. An Iceberg table's files are retired by the Iceberg catalog,
+        which knows nothing of our forks; a Postgres relation has no manifest
+        to borrow at all.
+
+        False here, and for every connector that does not override it, so a
+        source that cannot honestly support a fork is refused rather than
+        producing one resting on files nothing has promised to keep.
+
+        Answered PER RELATION rather than as a class attribute because one
+        connector serves many workspaces and they need not share a metastore -
+        OpteryxConnector fronts the native catalog for one workspace and an
+        external metastore for the next.
+        """
+        return False
+
     @property
     def __mode__(self):  # pragma: no cover
         raise NotImplementedError("__mode__ not defined")
