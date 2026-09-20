@@ -632,8 +632,20 @@ def _create_create_collection_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="create_collection", **logical_node.properties)
 
 
-def _create_load_sample_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="load_sample", **logical_node.properties)
+def _create_clone_relation_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="clone_relation", **logical_node.properties)
+
+
+def _create_clone_collection_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="clone_collection", **logical_node.properties)
+
+
+def _create_resync_relation_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="resync_relation", **logical_node.properties)
+
+
+def _create_detach_relation_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="detach_relation", **logical_node.properties)
 
 
 def _create_drop_collection_node(logical_node, query_properties, registry):
@@ -819,7 +831,10 @@ _DISPATCH = {
     LogicalPlanStepType.DropRelation:     _create_drop_relation_node,
     LogicalPlanStepType.CreateCollection: _create_create_collection_node,
     LogicalPlanStepType.DropCollection:   _create_drop_collection_node,
-    LogicalPlanStepType.LoadSample:       _create_load_sample_node,
+    LogicalPlanStepType.CloneRelation:    _create_clone_relation_node,
+    LogicalPlanStepType.CloneCollection:  _create_clone_collection_node,
+    LogicalPlanStepType.ResyncRelation:   _create_resync_relation_node,
+    LogicalPlanStepType.DetachRelation:   _create_detach_relation_node,
     LogicalPlanStepType.TruncateRelation: _create_truncate_relation_node,
     LogicalPlanStepType.AlterRelation:    _create_alter_relation_node,
     LogicalPlanStepType.RenameRelation:   _create_rename_relation_node,

@@ -1213,58 +1213,60 @@ def _intercept_show_grants_on(clean_sql: str):
     ]
 
 
-# LOAD SAMPLE <name> INTO <workspace>.<collection> [AT SCALE <n>]. Copies a
-# curated sample bundle out of the platform's staging bucket into a collection
-# the caller owns.
+# ALTER TABLE <fork> RESYNC [FORCE] | DETACH (FORKS_DESIGN.md S8.2, S8.3).
 #
-# Neither slot takes a placeholder. The target is an identifier because every
-# relation name is - a parameterised target would let runtime data choose which
-# collection gets written to. The sample name is an identifier for the same
-# reason: it selects WHICH data is copied, and the set it selects from is closed.
+# Intercepted here rather than added to the dialect, which is where
+# `ALTER TABLE ... CREATE TAG` is parsed: that route means a Rust change and a
+# smuggled transport through `SetTblProperties`, and these two clauses carry no
+# arguments to smuggle. The precedent for an ALTER form living here is
+# `_intercept_alter_task` and `_intercept_alter_workspace_secure` beside it.
 #
-# `AT SCALE <n>` rather than the `AT <n>` shape it reads like: `AT` directly
-# after an object name is the version space (the SQL rewriter re-spells
-# `VERSION AS OF <tag>` into `AT(TAG => '<tag>')` in exactly that position), so a
-# bare `AT` here would sit in a slot that already means something else. SCALE
-# keeps the clause unambiguous for both the reader and the tokenizer.
-_LOAD_SAMPLE_RE = re.compile(
-    r"^\s*LOAD\s+SAMPLE\s+(?P<sample>[A-Za-z_][\w$]*)"
-    r"\s+INTO\s+(?P<target>[A-Za-z_][\w.$]*)"
-    r"(?:\s+AT\s+SCALE\s+(?P<scale>\d+(?:\.\d+)?|\.\d+))?"
+# No placeholders in either slot, for the reason no relation name ever takes
+# one: a parameterised target would let runtime data choose which dataset is
+# overwritten - and RESYNC FORCE overwrites.
+_ALTER_FORK_RE = re.compile(
+    r"^\s*ALTER\s+TABLE\s+(?P<relation>[A-Za-z_][\w.$]*)"
+    r"\s+(?:(?P<resync>RESYNC)(?:\s+(?P<force>FORCE))?|(?P<detach>DETACH))"
     r"\s*;?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
-_LOAD_LEAD = re.compile(r"^\s*LOAD\b", re.IGNORECASE)
+# Only statements whose action word is one of these two are ours. Every other
+# ALTER TABLE - ADD COLUMN, RENAME, CLUSTER BY, the tag DDL - belongs to the
+# parser, so this must rule itself out cheaply rather than claim the verb.
+#
+# Matched against the ACTION, not the tail: `RESYNC FORCE` does not end in
+# RESYNC, and a tail test quietly handed it back to the parser, which reported
+# a syntax error naming every clause except the one that was written.
+_ALTER_FORK_LEAD = re.compile(
+    r"^\s*ALTER\s+TABLE\s+[A-Za-z_][\w.$]*\s+(?:RESYNC|DETACH)\b",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
-def _intercept_load_sample(clean_sql: str):
-    """Recognize `LOAD SAMPLE <name> INTO <target> [AT SCALE <n>]` before the parser.
+def _intercept_alter_fork(clean_sql: str):
+    """Recognize `ALTER TABLE <fork> RESYNC [FORCE]` and `... DETACH`.
 
     Returns a synthesized single-statement AST list, or None when the statement
-    does not begin with LOAD.
-
-    sqlparser's Opteryx dialect has no LOAD statement, so without this the front
-    of parsing reports `Expected: an SQL statement, found: LOAD` - including
-    through `analyze_query`, which is how the jobs API pre-flights a statement
-    before queueing it. The scale is carried as written and range-checked when
-    the statement is planned, where the set of staged scale factors is known.
+    is some other ALTER TABLE - which is most of them, and which the parser
+    handles perfectly well.
     """
     from opteryx.exceptions import UnsupportedSyntaxError
 
-    if not _LOAD_LEAD.match(clean_sql):
+    if not _ALTER_FORK_LEAD.match(clean_sql):
         return None
-    match = _LOAD_SAMPLE_RE.match(clean_sql)
+    match = _ALTER_FORK_RE.match(clean_sql)
     if match is None:
         raise UnsupportedSyntaxError(
-            "Expected: **LOAD SAMPLE** <sample> **INTO** <workspace>.<collection> "
-            "[**AT SCALE** <n>]. It is the only **LOAD** statement."
+            "Expected: **ALTER TABLE** <dataset> **RESYNC** [**FORCE**], or "
+            "**ALTER TABLE** <dataset> **DETACH**."
         )
+    if match.group("detach"):
+        return [{"DetachRelation": {"relation": match.group("relation")}}]
     return [
         {
-            "LoadSample": {
-                "sample": match.group("sample"),
-                "target": match.group("target"),
-                "scale": match.group("scale"),
+            "ResyncRelation": {
+                "relation": match.group("relation"),
+                "force": bool(match.group("force")),
             }
         }
     ]
@@ -1286,7 +1288,7 @@ _INTERCEPTORS = (
     _intercept_show_grants_on,
     _intercept_show_create,
     _intercept_show_create_trigger,
-    _intercept_load_sample,
+    _intercept_alter_fork,
 )
 
 

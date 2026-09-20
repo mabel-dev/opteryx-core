@@ -45,11 +45,14 @@ from opteryx.planner.binder.relation import (
     visit_alter_workspace_secure,
     visit_analyze,
     visit_create_collection,
+    visit_clone_collection,
+    visit_clone_relation,
     visit_create_relation,
+    visit_detach_relation,
     visit_drop_collection,
     visit_drop_column,
     visit_drop_relation,
-    visit_load_sample,
+    visit_resync_relation,
     visit_create_tag,
     visit_drop_tag,
     visit_rollback_relation,
@@ -271,6 +274,26 @@ class BinderVisitor:
     ) -> Tuple[Node, BindingContext]:
         return visit_drop_relation(self, node, context)
 
+    def visit_clone_relation(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_clone_relation(self, node, context)
+
+    def visit_clone_collection(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_clone_collection(self, node, context)
+
+    def visit_resync_relation(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_resync_relation(self, node, context)
+
+    def visit_detach_relation(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_detach_relation(self, node, context)
+
     def visit_create_collection(
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
@@ -280,11 +303,6 @@ class BinderVisitor:
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
         return visit_drop_collection(self, node, context)
-
-    def visit_load_sample(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
-        return visit_load_sample(self, node, context)
 
     def visit_drop_trigger(
         self, node: Node, context: BindingContext

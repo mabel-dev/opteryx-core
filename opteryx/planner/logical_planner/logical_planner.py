@@ -144,7 +144,10 @@ class LogicalPlanStepType(int, Enum):
 
     CallProcedure = auto()  # CALL <procedure>(<literals>)
 
-    LoadSample = auto()  # LOAD SAMPLE <name> INTO <workspace>.<collection>
+    CloneRelation = auto()  # CREATE TABLE <target> CLONE <upstream>
+    CloneCollection = auto()  # CREATE COLLECTION <target> CLONE <source>
+    ResyncRelation = auto()  # ALTER TABLE <fork> RESYNC [FORCE]
+    DetachRelation = auto()  # ALTER TABLE <fork> DETACH
 
 
 class LogicalPlan(Graph):
@@ -5256,6 +5259,17 @@ WORKSPACE_PROPERTIES = {
     # never heard of. The grant underneath is unchanged; what changes is that
     # nobody has to know it is a grant.
     "maintenance": _parse_boolean_workspace_property,
+    # Whether this workspace appears in dataset LISTINGS - the OData service
+    # document, and so every catalog tree drawn from it. Off means "readable,
+    # but not worth putting in front of everyone": a library namespace whose
+    # contents are forked once and would otherwise sit in every account's
+    # catalog forever.
+    #
+    # NOT A PERMISSION, and the one thing to be clear about when reaching for
+    # it: an unlisted workspace is still queryable by name, still appears in
+    # information_schema, and is still named in provenance. Who may read it is
+    # decided by grants and nowhere else.
+    "listed": _parse_boolean_workspace_property,
 }
 
 
@@ -5406,6 +5420,31 @@ def plan_create_collection(statement, **kwargs):
             f"CREATE COLLECTION names a collection as '<workspace>.<collection>' "
             f"(got '{collection_name}')."
         )
+
+    # CLONE: fork every dataset in the source collection into this one
+    # (FORKS_DESIGN.md S8.4). The parser carries it on CreateSchema exactly as
+    # it does on CreateTable, so this is the same statement one level up - and
+    # it is what makes "give me a copy of that sample" one statement rather
+    # than one per table.
+    clone_parts = create_statement.get("clone")
+    if clone_parts is not None:
+        source_collection = extract_variable(clone_parts)
+        if isinstance(source_collection, list):
+            source_collection = ".".join(source_collection)
+        if str(source_collection).count(".") != 1:
+            raise UnsupportedSyntaxError(
+                f"**CREATE COLLECTION** ... **CLONE** names a collection as "
+                f"{md_code('<workspace>.<collection>')} (got {md_code(str(source_collection))})."
+            )
+        if source_collection == collection_name:
+            raise UnsupportedSyntaxError(
+                f"Cannot clone {md_code(collection_name)} onto itself."
+            )
+        clone_node = LogicalPlanNode(node_type=LogicalPlanStepType.CloneCollection)
+        clone_node.collection_name = collection_name
+        clone_node.source_collection = source_collection
+        plan.add_node(random_string(), clone_node)
+        return plan
 
     create_collection_node = LogicalPlanNode(node_type=LogicalPlanStepType.CreateCollection)
     create_collection_node.collection_name = collection_name
@@ -5566,81 +5605,6 @@ def plan_drop_workspace(statement, **kwargs):
     drop_workspace_node.if_exists = drop_statement.get("if_exists", False)
 
     plan.add_node(random_string(), drop_workspace_node)
-
-    return plan
-
-
-def plan_load_sample(statement, **kwargs):
-    """
-    Create a logical plan for LOAD SAMPLE statement.
-
-    LOAD SAMPLE <sample> INTO <workspace>.<collection> [AT SCALE <n>]
-
-    Synthesized by pre_parse - the parser has no LOAD statement at all, and
-    unlike DROP WORKSPACE there is no statement shape to borrow, so there is
-    nothing for the SQL rewriter to re-spell it onto.
-
-    Both the sample and the scale are settled HERE rather than at execution:
-    the set of bundles and the set of staged scale factors are both closed and
-    both known without touching storage, so naming one that does not exist is a
-    syntax problem and should read like one - with the alternatives listed,
-    rather than a copy that starts and then finds an empty prefix.
-    """
-    from opteryx.managers.samples import get_sample
-    from opteryx.managers.samples import sample_names
-    from opteryx.managers.samples import scale_label
-    from opteryx.managers.samples import sample_root
-    from opteryx.managers.samples import scale_numbers
-    from opteryx.utils import suggest_alternative
-
-    root_node = "LoadSample"
-    plan = LogicalPlan()
-
-    load_statement = statement[root_node]
-
-    sample_name = load_statement["sample"]
-    sample = get_sample(sample_name)
-    if sample is None:
-        raise UnsupportedSyntaxError(
-            compose(
-                f"There is no sample called {md_code(sample_name)}. ",
-                did_you_mean(suggest_alternative(sample_name, sample_names())),
-                f"Loadable samples: {', '.join(md_code(name) for name in sample_names())}.",
-            )
-        )
-
-    # A sample is loaded INTO a collection, and a collection is always named
-    # `workspace.collection`. Rejected here rather than left for the connector
-    # to discover, where a bare name would resolve to some default workspace and
-    # silently write eight datasets somewhere the caller did not name.
-    target = load_statement["target"]
-    if target.count(".") != 1:
-        raise UnsupportedSyntaxError(
-            f"LOAD SAMPLE loads into a collection, named as "
-            f"{md_code('<workspace>.<collection>')} (got {md_code(target)})."
-        )
-
-    label = scale_label(sample, load_statement["scale"])
-    if label is None:
-        raise UnsupportedSyntaxError(
-            f"{md_code(sample.name)} is not staged at scale "
-            f"{md_code(load_statement['scale'])}. Staged scales: "
-            f"{', '.join(md_code(number) for number in scale_numbers(sample))}."
-        )
-
-    # Whether this deployment stages samples at all is settled here too. It costs
-    # one config read and no storage access, and the alternative is a statement that
-    # authorizes, creates the collection, and only then discovers there was never
-    # anywhere to copy from.
-    sample_root()
-
-    load_sample_node = LogicalPlanNode(node_type=LogicalPlanStepType.LoadSample)
-    load_sample_node.sample_name = sample.name
-    load_sample_node.collection_name = target
-    load_sample_node.scale_label = label
-    load_sample_node.tables = sample.tables
-
-    plan.add_node(random_string(), load_sample_node)
 
     return plan
 
@@ -6119,6 +6083,110 @@ def _plan_ctas(
     return plan
 
 
+def _plan_clone(create_statement, target_name: str, clone_parts):
+    """Plan `CREATE TABLE <target> CLONE <upstream>`.
+
+    A fork: the target's first manifest names the upstream's files, so nothing
+    is read, copied or recomputed. The engine's part is naming the two ends and
+    refusing the combinations that cannot mean anything; the catalog does the
+    rest (FORKS_DESIGN.md S4).
+
+    Reached from `plan_create_table` rather than given a statement of its own
+    because the vendored parser already produces this shape - `CreateTable`
+    with a `clone` field - so there is no grammar to add, no `pre_parse`
+    intercept, and no new verb for the classifier, autocomplete or `SHOW
+    CREATE` to learn.
+    """
+    source_name = extract_variable(clone_parts)
+    if isinstance(source_name, list):
+        source_name = ".".join(source_name)
+
+    # Every one of these describes the shape of a table this statement is
+    # defining. A clone defines none of it - it adopts the upstream's schema,
+    # whole - so accepting them would mean silently ignoring what was written.
+    for option in ["external", "temporary", "transient", "volatile", "iceberg", "or_replace"]:
+        if create_statement.get(option):
+            raise UnsupportedSyntaxError(
+                f"**CREATE TABLE** ... **CLONE** does not take {option.upper().replace('_', ' ')}: "
+                "a clone takes the schema and contents of the dataset it clones."
+            )
+    if create_statement.get("columns"):
+        raise UnsupportedSyntaxError(
+            "**CREATE TABLE** ... **CLONE** cannot declare columns - it takes the "
+            "schema of the dataset it clones."
+        )
+    if create_statement.get("query") is not None:
+        raise UnsupportedSyntaxError(
+            "**CREATE TABLE** takes **CLONE** or **AS SELECT**, not both. **CLONE** copies "
+            "a dataset by reference; **AS SELECT** runs a query and writes its rows."
+        )
+
+    if str(target_name).count(".") < 1 or str(source_name).count(".") < 1:
+        raise UnsupportedSyntaxError(
+            "**CREATE TABLE** ... **CLONE** names datasets, which are always at least "
+            f"{md_code('<collection>.<dataset>')} "
+            f"(got {md_code(str(target_name))} and {md_code(str(source_name))})."
+        )
+
+    plan = LogicalPlan()
+    clone_node = LogicalPlanNode(node_type=LogicalPlanStepType.CloneRelation)
+    clone_node.relation_name = target_name
+    clone_node.source_relation = source_name
+    clone_node.if_not_exists = bool(create_statement.get("if_not_exists", False))
+    plan.add_node(random_string(), clone_node)
+    return plan
+
+
+def plan_resync_relation(statement, **kwargs):
+    """Plan `ALTER TABLE <fork> RESYNC [FORCE]`.
+
+    Synthesized by pre_parse - the parser's ALTER TABLE grammar has no such
+    clause, and unlike the tag DDL there is nothing to smuggle through
+    `SetTblProperties` because the statement carries no arguments.
+
+    Whether the dataset IS a fork, whether it is behind, and whether FORCE is
+    needed are all settled by the catalog at execution: each is a fact about
+    two datasets' current snapshots, which a planner would have to read the
+    catalog to learn and which could change between then and the commit.
+    """
+    load_statement = statement["ResyncRelation"]
+    relation_name = load_statement["relation"]
+    if str(relation_name).count(".") < 1:
+        raise UnsupportedSyntaxError(
+            f"**ALTER TABLE** ... **RESYNC** names a dataset, which is always at least "
+            f"{md_code('<collection>.<dataset>')} (got {md_code(str(relation_name))})."
+        )
+
+    plan = LogicalPlan()
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.ResyncRelation)
+    node.relation_name = relation_name
+    node.force = bool(load_statement.get("force", False))
+    plan.add_node(random_string(), node)
+    return plan
+
+
+def plan_detach_relation(statement, **kwargs):
+    """Plan `ALTER TABLE <fork> DETACH`.
+
+    The one fork statement that moves bytes - it copies everything the fork
+    borrowed into the fork's own storage - which is why it is written out
+    rather than happening implicitly on the first write to a fork.
+    """
+    load_statement = statement["DetachRelation"]
+    relation_name = load_statement["relation"]
+    if str(relation_name).count(".") < 1:
+        raise UnsupportedSyntaxError(
+            f"**ALTER TABLE** ... **DETACH** names a dataset, which is always at least "
+            f"{md_code('<collection>.<dataset>')} (got {md_code(str(relation_name))})."
+        )
+
+    plan = LogicalPlan()
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.DetachRelation)
+    node.relation_name = relation_name
+    plan.add_node(random_string(), node)
+    return plan
+
+
 def plan_create_table(statement, **kwargs):
     """
     Create a logical plan for CREATE TABLE statement.
@@ -6147,6 +6215,19 @@ def plan_create_table(statement, **kwargs):
     create_table_node.if_not_exists = statement[root_node].get("if_not_exists", False)
 
     relation_parts = _identifier_parts(table_name_parts)
+
+    # CLONE path. Settled before the constraints are read, because a clone
+    # declares no columns and therefore has nothing for a near end to point at -
+    # and because every other option below is about a table whose shape this
+    # statement is defining, which a clone's is not: it takes the upstream's.
+    clone_parts = statement[root_node].get("clone")
+    if clone_parts is not None:
+        return _plan_clone(
+            statement[root_node],
+            target_name=create_table_node.relation_name,
+            clone_parts=clone_parts,
+        )
+
     relationships = _read_table_constraints(
         statement[root_node], create_table_node.relation_name, relation_parts
     )
@@ -7315,6 +7396,10 @@ QUERY_BUILDERS = {
     "DropFunction": plan_drop_workspace,  # DROP WORKSPACE, rewritten by the SQL rewriter
     "Drop": plan_drop,  # handles DROP VIEW and DROP TABLE
     "CreateTable": plan_create_table,
+    # Fork statements - synthesized pre-parse (CREATE TABLE ... CLONE needs no
+    # intercept: the vendored parser already produces it).
+    "ResyncRelation": plan_resync_relation,
+    "DetachRelation": plan_detach_relation,
     "Truncate": plan_truncate,
     "OptimizeTable": plan_optimize_table,
     "Insert": plan_insert,
@@ -7331,7 +7416,6 @@ QUERY_BUILDERS = {
     "ShowGrantsOn": plan_show_grants_on,
     "ShowEffectiveGrantsOn": plan_show_effective_grants_on,
     # LOAD SAMPLE — synthesized pre-parse; the parser has no LOAD statement.
-    "LoadSample": plan_load_sample,
 }
 
 

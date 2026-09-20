@@ -75,6 +75,180 @@ def visit_create_relation(self, node: Node, context: BindingContext) -> Tuple[No
     return node, context
 
 
+def visit_clone_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """
+    Bind CREATE TABLE <target> CLONE <upstream>.
+
+    Three gates, in this order (FORKS_DESIGN.md S4.1):
+
+    * CREATE on the target - the same tier as any other CREATE TABLE, and first,
+      so a caller who may not write the target learns that rather than being
+      able to probe another workspace's protection state with a clone they were
+      never going to be allowed to make;
+    * READ on the upstream - a fork exposes nothing a `SELECT *` would not,
+      so it is a read-tier act and not an owner-tier one;
+    * EGRESS out of the upstream's workspace, which is the gate that actually
+      decides whether forking is allowed at all.
+
+    THE EGRESS CHECK IS THE POINT. A fork is exactly the standing, systematic
+    copy that `egress_protection` exists to stop - a full mirror of someone
+    else's data, kept off the back of a single `reader` grant - so it is
+    refused while the upstream's workspace protects egress. No SECURE exemption
+    applies: SECURE sanctions a NAMED OBJECT (a task, a materialized view), and
+    a hand-run CLONE is not one, so the only way to open a workspace to forks
+    is for its owner to turn the guard off deliberately.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import EgressRestrictedError
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.managers.permissions import can_perform_action
+    from opteryx.exceptions import md_code
+
+    node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.relation_name} does not support CREATE TABLE ... CLONE"
+        )
+
+    if not can_perform_action(context.execution_context, node.relation_name, action="CREATE"):
+        raise PermissionError(
+            f"User does not have permission to create table {node.relation_name}"
+        )
+
+    if not can_perform_action(context.execution_context, node.source_relation, action="READ"):
+        raise PermissionError(
+            f"User does not have permission to read {node.source_relation}, so it cannot "
+            "be cloned"
+        )
+
+    # A clone reads a MANIFEST, so the upstream has to be a relation that has
+    # one. An external table, a virtual dataset or anything behind a
+    # non-Writable connector has no snapshot to fork from.
+    source_connector = connector_factory(node.source_relation, telemetry=context.telemetry)
+    if not isinstance(source_connector, Writable):
+        raise UnsupportedSyntaxError(
+            f"**CLONE** reads {md_code(node.source_relation)}'s manifest, and that dataset "
+            "has none - it is projected from another catalog. Copy it with "
+            "**CREATE TABLE** ... **AS SELECT** instead."
+        )
+
+    refusals = node.connector.egress_verdict(node.relation_name, [node.source_relation])
+    if refusals:
+        raise EgressRestrictedError(refusals[0].message)
+
+    node.columns = []
+    return node, context
+
+
+def visit_clone_collection(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """
+    Bind CREATE COLLECTION <target> CLONE <source>.
+
+    The table-level clone's gates, one level up: CREATE on the target
+    collection, READ on the source collection, and egress out of the source's
+    workspace. Per-dataset READ is settled at execution, where the source's
+    contents are known - a collection's membership is not something the binder
+    can enumerate without a catalog listing it would then have to repeat.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import EgressRestrictedError
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.collection_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.collection_name} does not support CREATE COLLECTION ... CLONE"
+        )
+
+    if not can_perform_action(context.execution_context, node.collection_name, action="CREATE"):
+        raise PermissionError(
+            f"User does not have permission to create collection {node.collection_name}"
+        )
+
+    if not can_perform_action(context.execution_context, node.source_collection, action="READ"):
+        raise PermissionError(
+            f"User does not have permission to read {node.source_collection}, so it cannot "
+            "be cloned"
+        )
+
+    refusals = node.connector.egress_verdict(node.collection_name, [node.source_collection])
+    if refusals:
+        raise EgressRestrictedError(refusals[0].message)
+
+    node.columns = []
+    return node, context
+
+
+def visit_resync_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """
+    Bind ALTER TABLE <fork> RESYNC [FORCE].
+
+    ALTER on the fork, and nothing on the upstream. That asymmetry is
+    deliberate: the reader was authorized to copy the upstream's data once,
+    when the fork was created, and resyncing re-reads the same relationship
+    rather than establishing a new one. Re-checking egress here would let an
+    upstream owner strand existing forks in a half-updated state by turning
+    the guard back on - which stops NEW forks, as it should, and should not
+    reach inside ones already made.
+
+    Whether the dataset is a fork at all, and whether FORCE was needed, are
+    settled at execution: both are facts about two datasets' current snapshots.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.relation_name} does not support ALTER TABLE ... RESYNC"
+        )
+
+    if not can_perform_action(context.execution_context, node.relation_name, action="ALTER"):
+        raise PermissionError(
+            f"User does not have permission to alter {node.relation_name}"
+        )
+
+    node.columns = []
+    return node, context
+
+
+def visit_detach_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """
+    Bind ALTER TABLE <fork> DETACH.
+
+    Same gate as RESYNC, and for the same reason - it changes only the fork.
+    DETACH copies the upstream's bytes into the caller's own storage, which
+    sounds like egress; it is not. Those bytes are already in a dataset this
+    caller owns and can read, and the copy makes the caller pay for storage
+    they were getting for free. Refusing it would leave a fork permanently
+    unable to stand on its own.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.relation_name} does not support ALTER TABLE ... DETACH"
+        )
+
+    if not can_perform_action(context.execution_context, node.relation_name, action="ALTER"):
+        raise PermissionError(
+            f"User does not have permission to alter {node.relation_name}"
+        )
+
+    node.columns = []
+    return node, context
+
+
 def visit_drop_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """
     Bind the DROP TABLE node to determine which connectors should handle
@@ -128,35 +302,6 @@ def visit_create_collection(
     if not can_perform_action(context.execution_context, node.collection_name, action="CREATE"):
         raise PermissionError(
             f"User does not have permission to create collection {node.collection_name}"
-        )
-
-    node.columns = []
-    return node, context
-
-
-def visit_load_sample(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
-    """
-    Bind the LOAD SAMPLE node to determine which connector should handle
-    copying the sample into the target collection.
-    """
-    from opteryx.connectors import connector_factory
-    from opteryx.connectors.capabilities import Writable
-    from opteryx.exceptions import ReadOnlyConnectorError
-    from opteryx.managers.permissions import can_perform_action
-
-    node.connector = connector_factory(node.collection_name, telemetry=context.telemetry)
-    if not isinstance(node.connector, Writable):
-        raise ReadOnlyConnectorError(
-            f"connector for {node.collection_name} does not support LOAD SAMPLE"
-        )
-
-    # The fresh-create writer tier, the same one CREATE COLLECTION holds, and
-    # for the same reason: the statement only ever creates. It refuses to load
-    # into a collection that holds anything, so there is nothing of the caller's
-    # for it to overwrite and no owner-tier destruction to authorize.
-    if not can_perform_action(context.execution_context, node.collection_name, action="CREATE"):
-        raise PermissionError(
-            f"User does not have permission to load a sample into {node.collection_name}"
         )
 
     node.columns = []

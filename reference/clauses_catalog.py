@@ -95,9 +95,15 @@ CLAUSE_DEFINITIONS = {
         "summary": "Set a protection property on a workspace itself, or sanction one object's copy out of it.",
         "documentation": (
             "Sets one of the properties in WORKSPACE_PROPERTIES on the workspace's catalog "
-            "entry. Both are protections and both default to ON: deletion_protection refuses "
+            "entry. Two are protections and both default to ON: deletion_protection refuses "
             "deletion of the workspace, egress_protection refuses automated copies of its "
-            "data into another workspace. Values are ON/OFF (TRUE/FALSE accepted). "
+            "data into another workspace. `listed` also defaults to ON and is NOT a "
+            "protection: turning it off keeps the workspace out of dataset listings - the "
+            "OData service document, and so every catalog tree drawn from it - without "
+            "changing who may read anything in it. An unlisted workspace is still queryable "
+            "by name, still in information_schema, and still named in provenance; it is for "
+            "a library namespace whose contents would otherwise sit in every account's "
+            "catalog forever. Values are ON/OFF (TRUE/FALSE accepted). "
             "SET SECURE is the narrow exemption from egress_protection: it sanctions ONE "
             "fully-qualified task or materialized view to copy the source workspace's data "
             "into the named destination workspaces, leaving the lock on for everything else; "
@@ -580,28 +586,92 @@ CLAUSE_DEFINITIONS = {
             "ALTER WORKSPACE."
         ),
     },
-    "load_sample": {
-        "canonical_name": "LOAD SAMPLE",
-        "planner_entry": "plan_load_sample",
+    "clone_collection": {
+        "canonical_name": "CREATE COLLECTION ... CLONE",
+        "planner_entry": "plan_create_collection",
         "scope": "statement",
         "status": "supported",
-        "syntax_forms": [
-            "LOAD SAMPLE sample INTO workspace.collection [AT SCALE scale_factor]"
-        ],
-        "summary": "Copy a staged sample dataset into a collection.",
+        "syntax_forms": ["CREATE COLLECTION collection_name CLONE source_collection"],
+        "summary": "Fork every dataset in a collection into a new one, copying no data.",
         "documentation": (
-            "The parser has no LOAD statement, so this is recognized before parsing "
-            "(pre_parse) rather than re-spelled onto another statement's grammar. The "
-            "sample's files are COPIED into the target collection, so what lands there "
-            "is an ordinary dataset the caller owns, is billed for, and may drop without "
-            "reaching the staged originals every other workspace loads from."
+            "The table-level clone applied across a collection, so a set of related "
+            "datasets can be forked in one statement rather than one per table. Each "
+            "dataset becomes a fork exactly as CREATE TABLE ... CLONE would make it."
         ),
         "notes": (
-            "The target must be an empty collection, named as workspace.collection; a "
-            "missing one is created. AT SCALE takes a staged scale factor - not an "
-            "arbitrary number - and defaults to the sample's own default. The clause is "
-            "AT SCALE rather than a bare AT because AT directly after an object name is "
-            "the version space (VERSION AS OF is rewritten into it)."
+            "Refused wholesale if any one dataset would be refused - the membership is "
+            "read and every target name checked before the first fork is created, "
+            "because a half-cloned collection is a state nobody can act on. Views are "
+            "not cloned: a view is a query over names, and copying one where those names "
+            "mean something else would silently read the wrong data."
+        ),
+    },
+    "clone_table": {
+        "canonical_name": "CREATE TABLE ... CLONE",
+        "planner_entry": "_plan_clone",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["CREATE TABLE table_name CLONE source_table"],
+        "summary": "Create a dataset as a fork of another, copying no data.",
+        "documentation": (
+            "A fork: the new dataset's first manifest lists the same files the source's "
+            "manifest listed, so nothing is read, copied or recomputed and the cost is "
+            "the same whether the source holds a megabyte or a terabyte. What lands is "
+            "an ordinary dataset - it can be queried, written to, time-travelled and "
+            "dropped - and writes to it land in its own storage, never touching the "
+            "files it borrowed. The source records that the fork exists and will not "
+            "expire the snapshot it rests on."
+        ),
+        "notes": (
+            "Requires READ on the source and CREATE on the target. A fork out of another "
+            "workspace is refused while that workspace has egress_protection on, and no "
+            "SECURE exemption applies - SECURE sanctions a named task or materialized "
+            "view, not a hand-run statement. Cannot be combined with AS SELECT, column "
+            "definitions or OR REPLACE: a clone takes the source's schema whole. The "
+            "source must be a dataset with a manifest, so a table projected from an "
+            "external catalog cannot be cloned - use CREATE TABLE AS SELECT."
+        ),
+    },
+    "resync_table": {
+        "canonical_name": "ALTER TABLE ... RESYNC",
+        "planner_entry": "plan_resync_relation",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["ALTER TABLE table_name RESYNC [FORCE]"],
+        "summary": "Make a fork equal its upstream's current contents again.",
+        "documentation": (
+            "Replaces a fork's contents with its source's, as they are now, moving no "
+            "data - the same borrow the original clone made. Manual only: nothing "
+            "resyncs a fork on a schedule, because a fork that refreshed itself would be "
+            "a materialized view, which already exists and has different guarantees."
+        ),
+        "notes": (
+            "Refused without FORCE when the fork has commits of its own since it was last "
+            "in sync - those are what would be superseded. FORCE discards nothing "
+            "physically: the superseded commits stay readable through time travel until "
+            "the fork's own retention retires them. Refused when the fork is already up "
+            "to date, rather than committing a snapshot that changed nothing."
+        ),
+    },
+    "detach_table": {
+        "canonical_name": "ALTER TABLE ... DETACH",
+        "planner_entry": "plan_detach_relation",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["ALTER TABLE table_name DETACH"],
+        "summary": "Turn a fork into an ordinary dataset by copying what it borrowed.",
+        "documentation": (
+            "The one fork statement that moves data: every file the fork borrowed is "
+            "copied into its own storage, its manifest is rewritten to name the copies, "
+            "and the relationship ends. Afterwards it is an ordinary dataset and its "
+            "former source owes it nothing - which is what lets that source be renamed "
+            "or dropped."
+        ),
+        "notes": (
+            "Only the current snapshot's files are copied. Older snapshots of the fork "
+            "keep naming the source's paths and may stop resolving once the source moves "
+            "on, which is the trade DETACH makes. The copied bytes are stored - and "
+            "billed - as the caller's own from then on."
         ),
     },
     "explain": {

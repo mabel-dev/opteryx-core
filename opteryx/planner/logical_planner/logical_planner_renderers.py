@@ -399,12 +399,25 @@ def render_drop_workspace(node: LogicalPlanNode) -> str:
     return f"DROP WORKSPACE {if_exists}({node.workspace_name})"
 
 
-@register_render(LogicalPlanStepType.LoadSample)
-def render_load_sample(node: LogicalPlanNode) -> str:
-    return (
-        f"LOAD SAMPLE {node.sample_name} INTO ({node.collection_name}) "
-        f"AT SCALE sf{node.scale_label}"
-    )
+@register_render(LogicalPlanStepType.CloneRelation)
+def render_clone_relation(node: LogicalPlanNode) -> str:
+    return f"CLONE ({node.source_relation}) INTO ({node.relation_name})"
+
+
+@register_render(LogicalPlanStepType.CloneCollection)
+def render_clone_collection(node: LogicalPlanNode) -> str:
+    return f"CLONE COLLECTION ({node.source_collection}) INTO ({node.collection_name})"
+
+
+@register_render(LogicalPlanStepType.ResyncRelation)
+def render_resync_relation(node: LogicalPlanNode) -> str:
+    force = " FORCE" if getattr(node, "force", False) else ""
+    return f"RESYNC ({node.relation_name}){force}"
+
+
+@register_render(LogicalPlanStepType.DetachRelation)
+def render_detach_relation(node: LogicalPlanNode) -> str:
+    return f"DETACH ({node.relation_name})"
 
 
 @register_render(LogicalPlanStepType.Analyze)

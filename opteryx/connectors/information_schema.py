@@ -1960,6 +1960,153 @@ class InformationSchemaListenersTable(BaseTable):
         yield Morsel.from_vectors(list(self._COLUMNS), vectors)
 
 
+class InformationSchemaForksTable(BaseTable):
+    """Reads `information_schema.forks`: the fork relationships this workspace
+    is one end of.
+
+    TWO SIDES, ONE TABLE. A row appears when this workspace holds the FORK
+    (its dataset document carries a `fork` block) and when it holds the
+    UPSTREAM (its dataset has a `forks/` registry). Filtering by `fork` answers
+    "what is this dataset a copy of"; filtering by `upstream` answers "who has
+    copied this, and how many" - which is the count a dataset page shows. One
+    table because they are one fact seen from two ends, and a reader should not
+    have to know which end they are standing on to ask about it.
+
+    REVISIONS ARE UPPER BOUNDS. `revisions_behind` and `revisions_ahead` are
+    sequence-number differences, and a sequence number advances on EVERY commit
+    - compaction and statistics refreshes included - so 3 may be three inserts
+    or it may be two compactions and a refresh that changed no row. Anything
+    rendering them must say "at most". Zero is exact, which is the answer that
+    matters: nothing whatsoever has happened on that side.
+
+    Gated at READ on the dataset in THIS workspace, per row, like every other
+    table here. The far end is named but not described: a row says
+    `personal.justin.lineitem` forked this dataset without saying anything
+    about what is in it, which is what the upstream's owner is entitled to
+    know. A far end in another workspace is never read, so a fork nobody here
+    can see still counts.
+    """
+
+    __mode__ = "Internal"
+    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$one_row
+    self_governs_permissions = True  # rows are gated per-dataset below
+
+    _COLUMNS = (
+        # The two ends, both fully qualified. Exactly one of them is in this
+        # workspace for any given row.
+        "fork",
+        "upstream",
+        # The upstream snapshot the fork rests on - the one the upstream may
+        # not expire while the fork exists.
+        "base_snapshot",
+        "revisions_behind",
+        "revisions_ahead",
+        "last_sync",
+    )
+
+    def __init__(self, *, dataset, catalog, workspace, telemetry, execution_context=None, **kwargs):
+        BaseTable.__init__(self, dataset=dataset, telemetry=telemetry, **kwargs)
+        self.catalog = catalog
+        self.workspace = workspace
+        self.execution_context = execution_context
+
+    def get_dataset_schema(self) -> RelationSchema:
+        column_types = {
+            "fork": _lt.VARCHAR,
+            "upstream": _lt.VARCHAR,
+            "base_snapshot": _lt.VARCHAR,
+            "revisions_behind": _lt.INTEGER,
+            "revisions_ahead": _lt.INTEGER,
+            "last_sync": _lt.TIMESTAMP(),
+        }
+        self.schema = RelationSchema(
+            name="information_schema.forks",
+            columns=[
+                SchemaColumn(
+                    name=column_name,
+                    column_type=column_types[column_name],
+                    identity=mint_column_identity("information_schema.forks", column_name),
+                )
+                for column_name in self._COLUMNS
+            ],
+        )
+        return self.schema
+
+    def read_dataset(self, **kwargs):
+        from draken.draken_native import DrakenType
+        from draken.interop.vector_sequence import vector_from_sequence
+        from draken.morsels.morsel import Morsel
+
+        fork = []
+        upstream = []
+        base_snapshot = []
+        revisions_behind = []
+        revisions_ahead = []
+        last_sync = []
+
+        # A catalog predating forks answers neither question: the same skew
+        # tolerance the triggers and listeners tables apply to their own
+        # newer catalog methods.
+        list_forks = getattr(self.catalog, "list_forks", None)
+
+        for collection in self.catalog.list_collections():
+            for name in self.catalog.list_datasets(collection):
+                if not _readable(self.execution_context, self.workspace, collection, name):
+                    continue
+                identifier = f"{collection}.{name}"
+                qualified = f"{self.workspace}.{identifier}"
+
+                dataset = None
+                try:
+                    dataset = self.catalog.load_dataset(identifier, load_history=True)
+                except Exception:  # noqa: BLE001 - catalog boundary, one row must not fail the scan
+                    dataset = None
+
+                # This dataset AS A FORK. The state walk needs the upstream,
+                # which `fork_state` loads for itself - and answers with zero
+                # rather than raising when it cannot, because this is a
+                # listing, not a decision.
+                state = dataset.fork_state() if dataset is not None else None
+                if state is not None:
+                    fork.append(qualified)
+                    upstream.append(state["upstream"])
+                    base_snapshot.append(str(state["base_snapshot"]))
+                    revisions_behind.append(state["revisions_behind"])
+                    revisions_ahead.append(state["revisions_ahead"])
+                    last_sync.append(_ms_to_datetime(state["last_sync_ms"]))
+
+                # This dataset AS AN UPSTREAM. The registry is the only source
+                # - a fork in another workspace is not readable from here, and
+                # must still be counted.
+                if list_forks is None:
+                    continue
+                try:
+                    registrations = list_forks(identifier)
+                except Exception:  # noqa: BLE001 - catalog boundary, see above
+                    continue
+                for row in registrations or ():
+                    fork.append(row.get("fork"))
+                    upstream.append(qualified)
+                    pinned = row.get("pinned-snapshot")
+                    base_snapshot.append(str(pinned) if pinned is not None else None)
+                    # Not computable from here: it would mean reading a dataset
+                    # in a workspace this caller may hold nothing in. The fork's
+                    # own row carries the numbers, for whoever can see it.
+                    revisions_behind.append(None)
+                    revisions_ahead.append(None)
+                    last_sync.append(_ms_to_datetime(row.get("created-at-ms")))
+
+        vectors = [
+            vector_from_sequence(fork, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(upstream, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(base_snapshot, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(revisions_behind, dtype=DrakenType.INTEGER),
+            vector_from_sequence(revisions_ahead, dtype=DrakenType.INTEGER),
+            vector_from_sequence(last_sync, dtype=DrakenType.TIMESTAMP64),
+        ]
+        yield Morsel.from_vectors(list(self._COLUMNS), vectors)
+
+
 class InformationSchemaMaintenanceTable(BaseTable):
     """Reads `information_schema.maintenance`: whether the platform keeps this
     workspace's data compacted.
@@ -2035,4 +2182,5 @@ _TABLE_CLASSES = {
     "grants": InformationSchemaGrantsTable,
     "maintenance": InformationSchemaMaintenanceTable,
     "listeners": InformationSchemaListenersTable,
+    "forks": InformationSchemaForksTable,
 }

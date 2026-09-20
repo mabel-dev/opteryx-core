@@ -78,11 +78,14 @@ class RelationManagementNode(BasePlanNode):
         # CREATE COLLECTION
         self.collection_name: Optional[str] = parameters.get("collection_name")
 
-        # LOAD SAMPLE. `collection_name` above is the target - a sample loads
-        # into a collection, so it names one exactly as CREATE COLLECTION does.
-        self.sample_name: Optional[str] = parameters.get("sample_name")
-        self.scale_label: Optional[str] = parameters.get("scale_label")
-        self.tables = parameters.get("tables")
+        # CLONE / RESYNC / DETACH. `relation_name` above is the target of all
+        # three - the fork - because that is the only dataset any of them
+        # writes to; `source_relation` is the upstream a CLONE reads, and
+        # RESYNC and DETACH need no such field because a fork already records
+        # its own upstream.
+        self.source_relation: Optional[str] = parameters.get("source_relation")
+        self.source_collection: Optional[str] = parameters.get("source_collection")
+        self.force: bool = parameters.get("force", False)
 
         # DROP COLLECTION
         self.collection_names = parameters.get("collection_names")
@@ -210,8 +213,14 @@ class RelationManagementNode(BasePlanNode):
             )
         if self.action == "create_collection":
             return f"create collection {self.collection_name}"
-        if self.action == "load_sample":
-            return f"load sample {self.sample_name} (sf{self.scale_label}) into {self.collection_name}"
+        if self.action == "clone_collection":
+            return f"clone collection {self.source_collection} into {self.collection_name}"
+        if self.action == "clone_relation":
+            return f"clone {self.source_relation} into {self.relation_name}"
+        if self.action == "resync_relation":
+            return f"resync {self.relation_name}" + (" (force)" if self.force else "")
+        if self.action == "detach_relation":
+            return f"detach {self.relation_name}"
         if self.action == "drop_collection":
             return f"drop collection {', '.join(self.collection_names or [])}"
         if self.action == "cluster_by":
@@ -380,20 +389,43 @@ class RelationManagementNode(BasePlanNode):
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
-        elif self.action == "load_sample":
-            # The record count is the number of datasets created, which is what
-            # the caller can go and look at. The connector settles the
-            # empty-collection rule and does the copying; nothing here is
-            # recoverable by re-running, so it refuses before it copies rather
-            # than part-way through.
-            loaded = self.connector.load_sample(
-                self.collection_name,
-                self.sample_name,
-                self.scale_label,
-                self.tables,
+        elif self.action == "clone_collection":
+            # One statement, one refusal: the connector checks every target
+            # name before it forks anything, because a half-cloned collection
+            # is the state nobody can act on.
+            cloned = self.connector.clone_collection(
+                self.collection_name, self.source_collection, author=self._author
+            )
+            return NonTabularResult(record_count=cloned, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "clone_relation":
+            # No bytes move: the new dataset's manifest names the source's
+            # files. The record count is 1 - the dataset created - rather than
+            # a row count, which would be the upstream's and would read as
+            # though this statement had written those rows.
+            self.connector.clone_relation(
+                self.relation_name,
+                self.source_relation,
                 author=self._author,
             )
-            return NonTabularResult(record_count=loaded, status=QueryStatus.SQL_SUCCESS)
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "resync_relation":
+            # The catalog settles whether this is a fork, whether it is behind,
+            # and whether FORCE was needed - all three are facts about two
+            # datasets' current snapshots, and none of them survives being
+            # decided earlier.
+            self.connector.resync_relation(
+                self.relation_name, author=self._author, force=self.force
+            )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "detach_relation":
+            # The one fork statement that copies. The count is the number of
+            # borrowed files materialised, which is what the caller is now
+            # storing and being billed for.
+            copied = self.connector.detach_relation(self.relation_name, author=self._author)
+            return NonTabularResult(record_count=copied, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "drop_collection":
             dropped = 0

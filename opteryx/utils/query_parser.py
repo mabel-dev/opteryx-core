@@ -52,9 +52,11 @@ _SYNTHESIZED_TARGETS = {
     # name no permission system knows. Who may copy a job's results is a
     # different question, answered where those results live.
     "SaveResults": "name",
-    # The collection the sample is loaded INTO. The sample's own name is not a
-    # relation: it names a staged bundle nobody holds a policy on.
-    "LoadSample": "target",
+    # The fork is the target of both: RESYNC replaces its contents and DETACH
+    # rewrites its manifest. Neither names its upstream here - a fork records
+    # that itself, and the statement does not repeat it.
+    "ResyncRelation": "relation",
+    "DetachRelation": "relation",
     # The permission target is the object the grant is being administered on;
     # the principal receiving/losing it names a person, not a relation.
     "GrantAccess": "object_name",
@@ -81,11 +83,16 @@ _SYNTHESIZED_STATEMENTS = {
     "SaveResults": (False, True, "owner"),
     # Drops a stored object rather than data; the binder gates it at ALTER.
     "DropStatistics": (False, True, "owner"),
-    # Creates a collection and the datasets in it, and only ever creates - it
-    # refuses a collection that holds anything. That is the fresh-create writer
-    # tier CREATE COLLECTION holds, not the owner tier SaveResults needs: there
-    # is nothing of the caller's it can overwrite.
-    "LoadSample": (False, True, "writer"),
+    # RESYNC replaces a dataset's entire contents with its upstream's - which
+    # is a mutation of data, not a change to the object - and FORCE will
+    # supersede the caller's own commits. Owner-tier for that reason: it is the
+    # one fork statement that can destroy work, and the tier is on the FORK,
+    # which is the only dataset it touches.
+    "ResyncRelation": (True, False, "owner"),
+    # DETACH changes what the dataset IS - it stops being a fork - and copies
+    # its borrowed files into storage the caller is then billed for. DDL, and
+    # owner-tier for the same reason ALTER is.
+    "DetachRelation": (False, True, "owner"),
     # WRITE on the table the trigger hangs off, symmetric with creating one.
     "DropTrigger": (False, True, "writer"),
     # Ownership is a workspace-level change; the binder gates it at ALTER.
@@ -205,6 +212,16 @@ def _collect_statement_target(ast: Dict[str, Any], tables: Set[str]) -> None:
             if name:
                 tables.add(name)
         return
+
+    if statement_type == "CreateTable":
+        # A clone READS its upstream, and reads it whole. The target is picked up
+        # by `_STATEMENT_TARGETS` below like any other CREATE TABLE; this adds
+        # the source, without which a caller pre-flighting permissions would be
+        # told the statement touches only a dataset that does not exist yet -
+        # and would never check the one it copies.
+        clone_name = _extract_table_name(body.get("clone"))
+        if clone_name:
+            tables.add(clone_name)
 
     synthesized_key = _SYNTHESIZED_TARGETS.get(statement_type)
     if synthesized_key is not None:
