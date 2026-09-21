@@ -4,7 +4,7 @@ Three statements, two routes into the planner. `CREATE TABLE ... CLONE` needs no
 intercept at all - the vendored parser already produces a `CreateTable` carrying
 a `clone` field, which is why that spelling was chosen over a bare `CLONE ... TO`
 that would have needed a regex, a classification, an autocomplete entry and a
-`SHOW CREATE` form of its own. `RESYNC` and `DETACH` do come through `pre_parse`,
+`SHOW CREATE` form of its own. `RESYNC` and `DETACH` are parsed by the aside parser,
 because sqlparser's ALTER TABLE grammar has no such clause.
 
 What is held here is the front half: that each statement reaches the right node
@@ -24,7 +24,6 @@ import pytest
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.logical_planner import do_logical_planning_phase
-from opteryx.planner.pre_parse import pre_parse
 from opteryx.third_party import sqloxide
 from opteryx.utils.query_parser import parse_query_info
 
@@ -34,7 +33,14 @@ FORK = "personal.justin.lineitem"
 
 def _node(sql):
     """The single logical node `sql` plans to."""
-    ast = pre_parse(sql) or sqloxide.parse_sql(sql, _dialect="opteryx")
+    # One front door: RESYNC and DETACH are parsed by the aside parser
+    # (`src/aside/admin.rs`) on the same token stream as everything else.
+    # Through `parse_statement`, not `sqloxide` directly, because that is where
+    # a GRAMMAR refusal is re-typed from the aside parser's error channel into
+    # the `UnsupportedSyntaxError` a reader gets.
+    from opteryx.planner import parse_statement
+
+    _clean_sql, ast = parse_statement(sql, telemetry=None)
     plan, _ast, _ctes = do_logical_planning_phase(ast[0])
     return plan[list(plan.nodes())[0]]
 
@@ -52,9 +58,13 @@ def test_clone_plans_to_a_clone_node_naming_both_ends():
     assert node.source_relation == UPSTREAM
 
 
-def test_clone_needs_no_pre_parse_intercept():
-    # The reason this spelling was chosen: the parser already knows it.
-    assert pre_parse(f"CREATE TABLE {FORK} CLONE {UPSTREAM}") is None
+def test_clone_needs_no_production_of_its_own():
+    # The reason this spelling was chosen: the parser already knows it, so it
+    # reaches the planner as sqlparser's own CreateTable.
+    [statement] = sqloxide.parse_sql(
+        f"CREATE TABLE {FORK} CLONE {UPSTREAM}", _dialect="opteryx"
+    )
+    assert "CreateTable" in statement
 
 
 @pytest.mark.parametrize("option", ["OR REPLACE", "TEMPORARY", "TRANSIENT"])
@@ -120,9 +130,11 @@ def test_the_clauses_are_case_insensitive():
     ],
 )
 def test_other_alter_table_forms_are_left_to_the_parser(sql):
-    # The intercept must rule itself out cheaply rather than claim the verb:
-    # almost every ALTER TABLE belongs to the parser.
-    assert pre_parse(sql) is None
+    # The production must rule itself out rather than claim the verb: almost
+    # every ALTER TABLE belongs to the parser. The action word is only visible
+    # PAST the table name, so this is the rewind that matters.
+    [statement] = sqloxide.parse_sql(sql, _dialect="opteryx")
+    assert "AlterTable" in statement
 
 
 def test_a_misspelt_fork_clause_says_what_was_expected():

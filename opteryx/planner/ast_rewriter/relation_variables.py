@@ -75,8 +75,35 @@ SUBSTITUTABLE = ("billing_account", "external_user")
 # Identifier parts. `name` covers Table (FROM, JOIN, DELETE, MERGE, TRUNCATE,
 # OPTIMIZE) and the DDL statements (CREATE TABLE, CREATE VIEW, ALTER TABLE);
 # `TableName` is INSERT's spelling, `table_name` is ANALYZE's, `parent_name` is
-# SHOW COLUMNS FROM's and `obj_name` is SHOW CREATE's.
-OBJECT_NAME_KEYS = frozenset({"name", "TableName", "table_name", "parent_name", "obj_name"})
+# SHOW COLUMNS FROM's and `obj_name` is SHOW CREATE's. `table` is the aside
+# parser's (`src/aside/`) for a relation a statement acts over - `CREATE TASK
+# ... ON <table>`; sqlparser also uses `table`, but for a TableFactor dict, and
+# the ObjectName shape test below tells the two apart.
+# The rest are the aside parser's. There are more than a tidy `name` + `table`
+# because several of these statements name SEVERAL relations that mean
+# different things, and collapsing them would make the planner guess which it
+# had: a schedule trigger names its holder (`table`), the task it fires
+# (`task`) and the dataset its runs are windowed over (`window_source`); fork
+# maintenance names the fork (`relation`); the egress exemption names a
+# workspace AND the task or view copying out of it (`object`).
+#
+# Several of these keys are shared with sqlparser - `table` is MERGE's
+# TableFactor, `relation` is a FROM item - but both hold a DICT there, and the
+# ObjectName shape test below (a LIST of Identifier parts) tells them apart.
+OBJECT_NAME_KEYS = frozenset(
+    {
+        "name",
+        "TableName",
+        "table_name",
+        "table",
+        "task",
+        "window_source",
+        "relation",
+        "object",
+        "parent_name",
+        "obj_name",
+    }
+)
 
 # The key whose value is a LIST of ObjectNames - `DROP TABLE a.b, c.d`.
 OBJECT_NAME_LIST_KEYS = frozenset({"names"})

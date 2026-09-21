@@ -36,14 +36,21 @@ _STATEMENT_TARGETS = {
     "ShowCreate": ("obj_name",),
 }
 
-# The statements synthesized by `opteryx.planner.pre_parse` rather than parsed:
-# each names its target as a plain dotted string, not an identifier-part list, so
-# it is read out directly instead of through `_extract_table_name`. The value is
-# the key holding that name. A trigger's own name is not here: it names a trigger,
-# not a relation, and the table it hangs off is the permission target.
+# Statements that do not come from sqlparser, and the key holding their
+# permission target. Two vintages, both live while the migration runs:
+#
+#   the ASIDE PARSER (`src/aside/`) gives an ObjectName - an identifier-part
+#   list, like every sqlparser statement;
+#   `opteryx.planner.pre_parse` gives a plain dotted string, because a regex
+#   captured it as text.
+#
+# Both are read below. The string branch goes when the last regex does.
+#
+# A trigger's own name is not here: it names a trigger, not a relation, and the
+# table it hangs off is the permission target.
 _SYNTHESIZED_TARGETS = {
     "DropStatistics": "table_name",
-    "DropTrigger": "table_name",
+    "DropTrigger": "table",
     "RefreshMaterializedView": "name",
     "AlterMaterializedViewOwner": "name",
     # The dataset being CREATED. The job whose results are copied is deliberately
@@ -226,6 +233,12 @@ def _collect_statement_target(ast: Dict[str, Any], tables: Set[str]) -> None:
     synthesized_key = _SYNTHESIZED_TARGETS.get(statement_type)
     if synthesized_key is not None:
         name = body.get(synthesized_key)
+        # An ObjectName from the aside parser, or a dotted string from a regex.
+        # Reading only the string shape is not harmless: `tables` is what a
+        # caller pre-flights permissions against, so a target it fails to
+        # recognize reads as "this statement touches nothing".
+        if isinstance(name, list):
+            name = _extract_table_name(name)
         # A grant's object can be a placeholder (see `pre_parse._slot_value`), and
         # this is the PRE-rewrite AST, so it is still one here. There is no name to
         # report - what the statement acts on is not decided until the parameters

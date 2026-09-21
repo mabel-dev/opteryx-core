@@ -5,8 +5,8 @@ use pyo3::prelude::*;
 use pythonize::PythonizeError;
 
 use sqlparser::ast::Statement;
-use sqlparser::parser::Parser;
 
+mod aside;
 mod opteryx_dialect;
 
 pub use opteryx_dialect::OpteryxDialect;
@@ -21,7 +21,10 @@ pub use opteryx_dialect::OpteryxDialect;
 #[pyo3(text_signature = "(sql, dialect)")]
 fn parse_sql(py: Python, sql: String, _dialect: String) -> PyResult<Py<PyAny>> {
     let chosen_dialect = Box::new(OpteryxDialect {});
-    let parse_result = Parser::parse_sql(&*chosen_dialect, &sql);
+    // The aside parser, not `Parser::parse_sql`: statements sqlparser has no
+    // grammar for are recognised on the token stream before it is handed over.
+    // Everything else reaches Python exactly as it did - see `aside`.
+    let parse_result = aside::parse_statements(&*chosen_dialect, &sql);
 
     let output = match parse_result {
         Ok(statements) => pythonize(py, &statements).map_err(|e| {

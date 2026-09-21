@@ -452,10 +452,10 @@ def test_permission_required_for_each_kind_of_statement():
 
 
 # ── Statements the parser has no grammar for ────────────────────────────────
-# These four are recognized before the parser, by opteryx.planner.pre_parse, and
-# synthesized straight into an AST. This function used to skip that step and hand
-# them to sqlparser unprepared, so it reported a syntax error for statements the
-# engine runs - and a caller that pre-flights a query before queueing it (the jobs
+# These four have no sqlparser grammar and are parsed by the aside parser
+# (`src/aside/`), on the same token stream as everything else. `analyze_query`
+# used to run ahead of the layer that recognised them and hand them to sqlparser
+# unprepared, so it reported a syntax error for statements the engine runs - and a caller that pre-flights a query before queueing it (the jobs
 # API does, to check permissions) rejected every one of them. `REFRESH
 # MATERIALIZED VIEW` reached a user as "Unable to parse query" from the Trigger
 # refresh button on a materialized view, which is the whole reason these exist.
@@ -519,8 +519,8 @@ def test_parse_rejects_a_near_miss_by_name():
 
 
 def test_the_planner_and_analyze_query_agree_on_what_parses():
-    """Both go through the same pre-parse layer, so neither can drift from the other."""
-    from opteryx.planner.pre_parse import pre_parse
+    """Both go through the same parser, so neither can drift from the other."""
+    from opteryx.planner import parse_statement
 
     for statement in (
         "REFRESH MATERIALIZED VIEW opteryx.public.daily;",
@@ -528,11 +528,13 @@ def test_the_planner_and_analyze_query_agree_on_what_parses():
         "ALTER MATERIALIZED VIEW opteryx.public.daily OWNER TO 'olive';",
         "DROP STATISTICS ON opteryx.public.orders;",
     ):
-        assert pre_parse(statement) is not None, statement
+        _clean_sql, [parsed] = parse_statement(statement, telemetry=None)
+        assert next(iter(parsed)) != "Query", statement
         assert opteryx.analyze_query(statement)["tables"] != []
 
-    # An ordinary statement is left for the parser
-    assert pre_parse("SELECT * FROM users") is None
+    # An ordinary statement is sqlparser's own
+    _clean_sql, [ordinary] = parse_statement("SELECT * FROM users", telemetry=None)
+    assert "Query" in ordinary
 
 
 # --- SAVE RESULTS OF <job> AS <dataset> -------------------------------------
@@ -564,35 +566,34 @@ def test_parse_save_results():
 def test_save_results_accepts_a_real_job_handle():
     """A job id opens with a digit and carries a hyphen, so it is not
     identifier-shaped and cannot borrow the object slot the other statements use."""
-    from opteryx.planner.pre_parse import pre_parse
-    parsed = pre_parse("SAVE RESULTS OF 20260829145017-34mo5tqwk8n77jsr AS personal.b.x")
+    from opteryx.planner import parse_statement
 
-    assert parsed == [
-        {
-            "SaveResults": {
-                "handle": "20260829145017-34mo5tqwk8n77jsr",
-                "name": "personal.b.x",
-            }
-        }
-    ]
+    _clean_sql, [parsed] = parse_statement(
+        "SAVE RESULTS OF 20260829145017-34mo5tqwk8n77jsr AS personal.b.x", telemetry=None
+    )
+    body = parsed["SaveResults"]
+    assert body["handle"] == "20260829145017-34mo5tqwk8n77jsr"
+    assert ".".join(p["Identifier"]["value"] for p in body["name"]) == "personal.b.x"
 
 
 def test_save_results_takes_no_placeholder():
     """The handle chooses WHOSE results get copied into the caller's workspace.
     A parameterised one would let runtime data make that choice."""
     from opteryx.exceptions import UnsupportedSyntaxError
-    from opteryx.planner.pre_parse import pre_parse
+    from opteryx.planner import parse_statement
+
     with pytest.raises(UnsupportedSyntaxError):
-        pre_parse("SAVE RESULTS OF :job AS personal.b.x")
+        parse_statement("SAVE RESULTS OF :job AS personal.b.x", telemetry=None)
 
 
 def test_a_malformed_save_names_the_statement_it_is_not():
     from opteryx.exceptions import UnsupportedSyntaxError
-    from opteryx.planner.pre_parse import pre_parse
+    from opteryx.planner import parse_statement
+
     with pytest.raises(UnsupportedSyntaxError):
-        pre_parse("SAVE THE WHALES")
+        parse_statement("SAVE THE WHALES", telemetry=None)
     with pytest.raises(UnsupportedSyntaxError):
-        pre_parse("SAVE RESULTS OF abc")
+        parse_statement("SAVE RESULTS OF abc", telemetry=None)
 
 
 def test_save_is_not_planned_by_the_engine():

@@ -15,7 +15,7 @@ lto = true
 
 [dependencies]
 pythonize = "0.28"
-serde = "1.0.171"
+serde = { version = "1.0.171", features = ["derive"] }
 
 [dependencies.pyo3]
 version = "0.28"

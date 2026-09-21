@@ -76,6 +76,31 @@ def object_names(node, found=None):
         "SHOW CREATE TABLE personal.@@external_user.dataset",
         "MERGE INTO personal.@@external_user.dataset t USING other.x s "
         "ON t.a = s.a WHEN MATCHED THEN DELETE",
+        # Parsed by the aside parser rather than sqlparser, and resolved by the
+        # same walk - which is the point of `src/aside/` existing.
+        "CREATE TASK personal.@@external_user.dataset AS SELECT 1",
+        "DROP TASK personal.@@external_user.dataset",
+        "ALTER TASK personal.@@external_user.dataset AS SELECT 1",
+        "CREATE TASK other.t ON personal.@@external_user.dataset AS SELECT 1",
+        "CREATE TRIGGER tick ON personal.@@external_user.dataset EXECUTE other.job",
+        "DROP TRIGGER tick ON personal.@@external_user.dataset",
+        "ALTER TRIGGER tick ON personal.@@external_user.dataset SUSPEND",
+        "ALTER TRIGGER tick ON personal.@@external_user.dataset OWNER TO bob",
+        "ALTER TRIGGER tick ON personal.@@external_user.dataset SET MINIMUM INTERVAL TO 5",
+        "CREATE TRIGGER tick ON SCHEDULE '0 * * * *' EXECUTE personal.@@external_user.dataset",
+        "REFRESH MATERIALIZED VIEW personal.@@external_user.dataset",
+        "ALTER MATERIALIZED VIEW personal.@@external_user.dataset SUSPEND",
+        "ALTER MATERIALIZED VIEW personal.@@external_user.dataset OWNER TO bob",
+        "SAVE RESULTS OF 20260921123456-abc AS personal.@@external_user.dataset",
+        "LISTEN TO personal.@@external_user.dataset",
+        "LISTEN TO personal.@@external_user.dataset FOR ERROR",
+        "UNLISTEN personal.@@external_user.dataset",
+        "DROP STATISTICS ON personal.@@external_user.dataset",
+        "SHOW CREATE TASK personal.@@external_user.dataset",
+        "SHOW CREATE TRIGGER tick ON personal.@@external_user.dataset",
+        "ALTER TABLE personal.@@external_user.dataset RESYNC",
+        "ALTER TABLE personal.@@external_user.dataset DETACH",
+        "ALTER WORKSPACE src SET SECURE personal.@@external_user.dataset TO dst",
     ],
 )
 def test_relation_name_is_resolved(statement):

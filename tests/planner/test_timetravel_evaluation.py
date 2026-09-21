@@ -78,3 +78,69 @@ def test_interval_plus_date_is_symmetric():
     now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
     diff = ts - now
     assert datetime.timedelta(days=0) < diff < datetime.timedelta(days=2)
+
+
+def test_a_date_typed_value_resolves_to_a_datetime():
+    """THE DATE BRANCH. A time-travel value is an instant however it was typed.
+
+    `'2026-09-20'::DATE` used to resolve to a `datetime.date`, and the
+    connectors take it from here as a point in time: `opteryx_connector` calls
+    `.timestamp()` on it and `date` has no such attribute, so a legal query
+    died as `'datetime.date' object has no attribute 'timestamp'` - an
+    attribute error wearing a Dataset Read Error's clothes.
+
+    Asserted as equality with the undecorated spelling rather than as a type:
+    the contract is that the three ways of naming one day cannot be told apart
+    downstream, which is the thing that was broken.
+    """
+    plain = extract_timetravel_timestamp(
+        _parse_version("SELECT * FROM $planets TIMESTAMP AS OF '2026-09-20'")
+    )
+    cast_to_date = extract_timetravel_timestamp(
+        _parse_version("SELECT * FROM $planets TIMESTAMP AS OF '2026-09-20'::DATE")
+    )
+    cast_to_timestamp = extract_timetravel_timestamp(
+        _parse_version("SELECT * FROM $planets TIMESTAMP AS OF '2026-09-20'::TIMESTAMP")
+    )
+
+    assert isinstance(cast_to_date, datetime.datetime)
+    assert cast_to_date == plain == cast_to_timestamp == datetime.datetime(2026, 9, 20)
+
+
+def test_current_date_resolves_to_a_datetime():
+    """`CURRENT_DATE` is DATE-typed, so it took the same broken branch - and
+    unlike the cast, nobody has to reach for an unusual spelling to hit it.
+    `CURRENT_DATE - INTERVAL '7' DAY` was fine throughout (the arithmetic
+    yields a timestamp), which is why the plain form went unnoticed."""
+    ts = extract_timetravel_timestamp(
+        _parse_version("SELECT * FROM $planets TIMESTAMP AS OF CURRENT_DATE")
+    )
+
+    assert isinstance(ts, datetime.datetime)
+    today = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+    assert ts == datetime.datetime(today.year, today.month, today.day)
+
+
+def test_the_resolved_value_is_what_a_connector_calls():
+    """The failure was never in the planner - it was one `.timestamp()` away,
+    in `opteryx_connector._to_snapshot`. This is that call, and nothing above
+    asserts it: a future normalizer could satisfy every equality here with an
+    object no connector can use."""
+    for sql in (
+        "SELECT * FROM $planets TIMESTAMP AS OF '2026-09-20'::DATE",
+        "SELECT * FROM $planets TIMESTAMP AS OF CURRENT_DATE",
+    ):
+        ts = extract_timetravel_timestamp(_parse_version(sql))
+        assert isinstance(ts.timestamp(), float)
+
+
+def test_a_time_of_day_survives_normalization():
+    """THE GUARD ON THE FIX. `datetime` subclasses `date`, so promoting "a
+    date" to midnight with a careless isinstance would truncate every
+    timestamp and move a point-in-time read backwards by up to a day -
+    silently, and in the direction of returning older data."""
+    ts = extract_timetravel_timestamp(
+        _parse_version("SELECT * FROM $planets TIMESTAMP AS OF '2026-09-20 13:45:00'::TIMESTAMP")
+    )
+
+    assert ts == datetime.datetime(2026, 9, 20, 13, 45)

@@ -42,6 +42,7 @@ import time
 from typing import Any, Dict, Generator, Iterable, Optional, Union
 
 from opteryx.exceptions import SqlError
+from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.expression.intervals import normalize_interval_value
 from opteryx.models import Node
@@ -65,6 +66,12 @@ from opteryx.types.logical_type import (
     LogicalCategory,
 )
 from opteryx.types.schema import ConstantColumn
+
+# Mirrors `GRAMMAR_ERROR_PREFIX` in src/aside/cursor.rs. The aside parser has one
+# error channel to Python - a `ValueError` carrying sqlparser's message - so a
+# refusal that quotes an Opteryx grammar back marks itself, and is re-typed here
+# as the `UnsupportedSyntaxError` the regex layer raised before it.
+ASIDE_GRAMMAR_ERROR_PREFIX = "OPTERYX-SYNTAX: "
 
 
 def _infer_collection_literal(value: Any):
@@ -248,7 +255,6 @@ def parse_statement(
     Raises:
         QueryParseError, positioned against the submitted text.
     """
-    from opteryx.planner.pre_parse import pre_parse
     from opteryx.planner.sql_rewriter import do_sql_rewrite
     from opteryx.third_party import sqloxide
 
@@ -259,20 +265,35 @@ def parse_statement(
         telemetry.time_planning_sql_rewriter += time.monotonic_ns() - start
 
     # Parser converts the SQL command into an AST.
-    # Statements sqlparser has no grammar for (DROP STATISTICS, trigger statements,
-    # REFRESH/ALTER MATERIALIZED VIEW) are recognized in the pre-parse layer and
-    # synthesized into an AST directly - see opteryx.planner.pre_parse.
-    parsed_statements = pre_parse(clean_sql)
-    if parsed_statements is None:
-        try:
-            parsed_statements = sqloxide.parse_sql(clean_sql, _dialect="opteryx")
-        except ValueError as parser_error:
-            from opteryx.planner.parse_error import raise_parse_error
+    #
+    # ONE front door. Statements sqlparser has no grammar for - task and trigger
+    # DDL, REFRESH, SAVE, the subscriptions, the grant surface, and the rest -
+    # are recognized by the ASIDE PARSER, in Rust, on the same token stream
+    # (`src/aside/`). There is no Python pre-parse layer any more: it was a
+    # regex front door that had to re-implement, per statement, what the
+    # tokenizer provides once. See `docs/ASIDE_PARSER_DESIGN.md`.
+    try:
+        parsed_statements = sqloxide.parse_sql(clean_sql, _dialect="opteryx")
+    except ValueError as parser_error:
+        from opteryx.planner.parse_error import raise_parse_error
 
-            # `clean_sql` carries both texts: the one the parser was given, which the
-            # reported line/column index, and the one the reader wrote, which is what
-            # the caret gets printed against. It maps between them.
-            raise_parse_error(clean_sql, parser_error)
+        # A GRAMMAR refusal from the aside parser, not a parse failure: the
+        # statement was recognized as one of ours and did not fit the form, so
+        # the reader needs the form quoted back rather than a caret at the token
+        # sqlparser gave up on. The prefix is the only way the two are
+        # distinguishable by the time they arrive as one ValueError - see
+        # `GRAMMAR_ERROR_PREFIX` in src/aside/cursor.rs.
+        message = str(parser_error)
+        marker = message.find(ASIDE_GRAMMAR_ERROR_PREFIX)
+        if marker >= 0:
+            raise UnsupportedSyntaxError(
+                message[marker + len(ASIDE_GRAMMAR_ERROR_PREFIX) :].strip()
+            ) from None
+
+        # `clean_sql` carries both texts: the one the parser was given, which the
+        # reported line/column index, and the one the reader wrote, which is what
+        # the caret gets printed against. It maps between them.
+        raise_parse_error(clean_sql, parser_error)
 
     return clean_sql, parsed_statements
 

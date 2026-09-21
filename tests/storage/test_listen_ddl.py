@@ -159,26 +159,30 @@ def _seed_task(session, task="ws.loader", sink="ws.sink"):
     ],
 )
 def test_malformed_statements_are_refused_by_name(statement):
-    from opteryx.planner.pre_parse import pre_parse
+    # These are parsed by the aside parser (`src/aside/listen.rs`) now, not by
+    # a regex in `pre_parse` - so the refusal comes from the token grammar and
+    # is asserted at the front door the statement actually goes through.
+    from opteryx.planner import parse_statement
 
     with pytest.raises(UnsupportedSyntaxError):
-        pre_parse(statement)
+        parse_statement(statement, telemetry=None)
 
 
 def test_unlisten_wildcard_is_refused():
     """`UNLISTEN *` is sqlparser's grammar and deliberately not ours: a
     statement that silently empties every subscription a user holds should not
     be one keystroke away from `UNLISTEN t`."""
-    from opteryx.planner.pre_parse import pre_parse
+    from opteryx.planner import parse_statement
 
     with pytest.raises(UnsupportedSyntaxError, match="wildcard"):
-        pre_parse("UNLISTEN *")
+        parse_statement("UNLISTEN *", telemetry=None)
 
 
 def test_no_for_clause_means_every_outcome():
-    from opteryx.planner.pre_parse import pre_parse
+    from opteryx.planner import parse_statement
 
-    assert pre_parse("LISTEN TO t")[0]["Listen"]["outcome"] == "EVERYTHING"
+    _clean, [statement] = parse_statement("LISTEN TO t", telemetry=None)
+    assert statement["Listen"]["outcome"] == "EVERYTHING"
 
 
 # --- recording

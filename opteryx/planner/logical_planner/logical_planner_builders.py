@@ -424,17 +424,40 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
     raise UnsupportedSyntaxError("Time-travel expression must resolve to a scalar value. Time travel takes a value that can be worked out before the query runs, for example `TIMESTAMP AS OF '2024-01-01'` or `TIMESTAMP AS OF NOW() - INTERVAL '1' DAY`.")
 
 
+def _as_datetime(value):
+    """Promote a bare ``date`` to midnight on that day.
+
+    A time-travel value is an INSTANT, whatever the expression that produced it
+    was typed as: `TIMESTAMP AS OF CURRENT_DATE` and `TIMESTAMP AS OF
+    '2026-09-20'::DATE` name the same moment as `TIMESTAMP AS OF '2026-09-20'`,
+    and a reader should not be able to tell which spelling was used. A `date`
+    reaching a connector cannot be that moment: `opteryx_connector` calls
+    `.timestamp()` on it, which `date` does not have, and `planet_data`
+    orders it against a `datetime`, which raises. Both surfaced as a read
+    error naming an attribute rather than a syntax the engine declined.
+
+    `datetime` is a SUBCLASS of `date`, so the isinstance pair is load-bearing:
+    testing for `date` alone would re-truncate every timestamp to midnight and
+    silently move a point-in-time read backwards by up to a day.
+    """
+    if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
+        return datetime.datetime(value.year, value.month, value.day)
+    return value
+
+
 def _normalize_timetravel_value(value, value_type: Optional[ColumnType]):
-    """Coerce a resolved time-travel scalar into a real ``datetime``/``date``.
+    """Coerce a resolved time-travel scalar into a real ``datetime``.
 
     Literal DATE/TIMESTAMP values are constant-folded elsewhere into their
     Draken-native physical representation (int days/microseconds since
     epoch), and plain string literals are never parsed. Connectors need a
     real Python temporal object (they call ``.timestamp()`` on it), so
     normalize here based on the resolved ``ColumnType`` category.
+
+    Always a ``datetime``, never a ``date`` - see `_as_datetime`.
     """
     if value is None or isinstance(value, (datetime.datetime, datetime.date)):
-        return value
+        return _as_datetime(value)
 
     cat = value_type.category if value_type is not None else None
 
@@ -457,10 +480,13 @@ def _normalize_timetravel_value(value, value_type: Optional[ColumnType]):
                 raise UnsupportedSyntaxError(
                     "Unable to parse date value in time-travel expression."
                 )
-            return dt.date()
+            # Truncated to the day because the resolved type says DATE - a time
+            # of day in the literal is not part of the value the user named -
+            # then carried as the midnight INSTANT rather than a `date`.
+            return datetime.datetime(dt.year, dt.month, dt.day)
         if isinstance(value, (int, float)):
-            return _EPOCH_DATE + datetime.timedelta(days=int(value))
-        return value
+            return _EPOCH_DT + datetime.timedelta(days=int(value))
+        return _as_datetime(value)
 
     if isinstance(value, str):
         dt = dates.parse_iso(value)
@@ -470,7 +496,7 @@ def _normalize_timetravel_value(value, value_type: Optional[ColumnType]):
             )
         return dt
 
-    return value
+    return _as_datetime(value)
 
 
 def _at_function_arguments(version_clause):

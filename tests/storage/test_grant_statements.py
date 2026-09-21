@@ -28,7 +28,21 @@ from opteryx.planner.ast_rewriter import do_ast_rewriter
 from opteryx.planner.logical_planner.logical_planner import (
     plan_alter_materialized_view_owner,
 )
-from opteryx.planner.pre_parse import pre_parse
+from opteryx.planner import parse_statement
+
+
+def parse_one(sql):
+    """One statement, through the front door it actually goes through.
+
+    The grant statements moved from `opteryx.planner.pre_parse` (regex) to the
+    aside parser (`src/aside/grant.rs`, a state machine over sqlparser's
+    tokens). `pre_parse` is gone entirely - there is one front door now - so
+    these tests assert the same properties (the synthesized AST, the value
+    slots, the refusals) one layer out, which is where they were always really
+    about.
+    """
+    _clean_sql, statements = parse_statement(sql, telemetry=None)
+    return statements
 
 
 class RecordingAdminCapability:
@@ -116,7 +130,7 @@ def _run(sql, user="alice", params=None):
 
 
 def test_grant_parses_to_a_synthesized_statement():
-    [statement] = pre_parse("GRANT reader ON DATASET a.b.c TO USER bob")
+    [statement] = parse_one("GRANT reader ON DATASET a.b.c TO USER bob")
     assert statement == {
         "GrantAccess": {
             "role": "reader",
@@ -128,7 +142,7 @@ def test_grant_parses_to_a_synthesized_statement():
 
 
 def test_revoke_parses_to_a_synthesized_statement():
-    [statement] = pre_parse("REVOKE OWNER ON WORKSPACE ws FROM USER 'x@y.z'")
+    [statement] = parse_one("REVOKE OWNER ON WORKSPACE ws FROM USER 'x@y.z'")
     assert statement == {
         "RevokeAccess": {
             "role": "owner",
@@ -140,29 +154,30 @@ def test_revoke_parses_to_a_synthesized_statement():
 
 
 def test_show_grants_on_parses_and_bare_show_grants_is_untouched():
-    [statement] = pre_parse("SHOW GRANTS ON COLLECTION ws.coll")
+    [statement] = parse_one("SHOW GRANTS ON COLLECTION ws.coll")
     assert statement == {
         "ShowGrantsOn": {"object_kind": "collection", "object_name": "ws.coll"}
     }
-    # Bare SHOW GRANTS is the session's own grants and stays on the parser path.
-    assert pre_parse("SHOW GRANTS") is None
+    # Bare SHOW GRANTS is the session's own grants and stays on the parser
+    # path - the aside parser reads far enough to be sure, then rewinds.
+    assert "ShowVariable" in parse_one("SHOW GRANTS")[0]
 
 
 def test_crossed_prepositions_are_refused():
     with pytest.raises(UnsupportedSyntaxError):
-        pre_parse("GRANT reader ON DATASET a.b.c FROM USER bob")
+        parse_one("GRANT reader ON DATASET a.b.c FROM USER bob")
     with pytest.raises(UnsupportedSyntaxError):
-        pre_parse("REVOKE reader ON DATASET a.b.c TO USER bob")
+        parse_one("REVOKE reader ON DATASET a.b.c TO USER bob")
 
 
 def test_unknown_roles_and_kinds_are_refused_by_name():
     with pytest.raises(UnsupportedSyntaxError):
-        pre_parse("GRANT admin ON DATASET a.b.c TO USER bob")
+        parse_one("GRANT admin ON DATASET a.b.c TO USER bob")
     with pytest.raises(UnsupportedSyntaxError):
-        pre_parse("GRANT reader ON TABLE a.b.c TO USER bob")
+        parse_one("GRANT reader ON TABLE a.b.c TO USER bob")
     with pytest.raises(UnsupportedSyntaxError):
         # USER is mandatory — it reserves the grammar for TO ROLE later.
-        pre_parse("GRANT reader ON DATASET a.b.c TO bob")
+        parse_one("GRANT reader ON DATASET a.b.c TO bob")
 
 
 # --- object kind → pattern (arity is asserted, never guessed)
@@ -261,7 +276,7 @@ def test_permit_all_refuses_grant_administration():
 
 
 def test_value_slots_parse_to_placeholder_nodes():
-    [statement] = pre_parse("GRANT reader ON DATASET :ds TO USER :username")
+    [statement] = parse_one("GRANT reader ON DATASET :ds TO USER :username")
     assert statement == {
         "GrantAccess": {
             "role": "reader",
@@ -270,7 +285,7 @@ def test_value_slots_parse_to_placeholder_nodes():
             "principal": {"Placeholder": ":username"},
         }
     }
-    [statement] = pre_parse("SHOW GRANTS ON COLLECTION :coll")
+    [statement] = parse_one("SHOW GRANTS ON COLLECTION :coll")
     assert statement == {
         "ShowGrantsOn": {"object_kind": "collection", "object_name": {"Placeholder": ":coll"}}
     }
@@ -348,34 +363,58 @@ def test_roles_and_kinds_do_not_take_parameters():
     """They are keywords from a closed set: a parameter there would make the
     statement's shape - which authority, which arity - depend on runtime data."""
     with pytest.raises(UnsupportedSyntaxError):
-        pre_parse("GRANT :role ON DATASET a.b.c TO USER bob")
+        parse_one("GRANT :role ON DATASET a.b.c TO USER bob")
     with pytest.raises(UnsupportedSyntaxError):
-        pre_parse("GRANT reader ON :kind a.b.c TO USER bob")
+        parse_one("GRANT reader ON :kind a.b.c TO USER bob")
 
 
 def test_identifier_slots_do_not_take_parameters():
     """A parameterised relation name would let runtime data choose what the
     statement acts on; the parser refuses `SELECT * FROM :t` for the same
     reason."""
+    for sql in ("DROP STATISTICS ON :table",):
+        with pytest.raises(UnsupportedSyntaxError):
+            parse_one(sql)
+
+
+def test_aside_parser_identifier_slots_do_not_take_parameters():
+    """The same property for the statements that have moved to the aside
+    parser (`src/aside/`), asserted at the front door they now go through.
+
+    There is no `pre_parse` layer any more, so the refusal comes from the token
+    grammar - which checks MORE slots than the regexes did, because a trigger's
+    own name and the task it fires are read as identifiers too."""
+    from opteryx.planner import parse_statement
+
     for sql in (
-        "DROP STATISTICS ON :table",
-        "DROP TRIGGER trg ON :table",
         "REFRESH MATERIALIZED VIEW :view",
         "ALTER MATERIALIZED VIEW :view OWNER TO bob",
+        "SAVE RESULTS OF job AS :dataset",
+        "DROP TRIGGER trg ON :table",
+        "CREATE TRIGGER :trg ON ws.t EXECUTE ws.job",
+        "CREATE TRIGGER trg ON ws.t EXECUTE :task",
+        "ALTER TRIGGER trg ON :table SUSPEND",
     ):
         with pytest.raises(UnsupportedSyntaxError):
-            pre_parse(sql)
+            parse_statement(sql, telemetry=None)
 
 
 def test_alter_materialized_view_owner_takes_a_parameter():
-    """The owner is a principal, the same kind of value GRANT's is."""
-    [statement] = pre_parse("ALTER MATERIALIZED VIEW a.b.c OWNER TO :who")
-    assert statement["AlterMaterializedViewOwner"] == {
-        "name": "a.b.c",
-        "owner": {"Placeholder": ":who"},
-        # A parameter carries a value, never the CURRENT_USER keyword.
-        "current_user": False,
-    }
+    """The owner is a principal, the same kind of value GRANT's is.
+
+    Parsed by the aside parser now, so the name arrives as an `ObjectName` -
+    but the owner slot is unchanged: still the `Placeholder` node the AST
+    rewriter binds, which is the property this test exists for."""
+    from opteryx.planner import parse_statement
+
+    _clean, [statement] = parse_statement(
+        "ALTER MATERIALIZED VIEW a.b.c OWNER TO :who", telemetry=None
+    )
+    body = statement["AlterMaterializedViewOwner"]
+    assert ".".join(p["Identifier"]["value"] for p in body["name"]) == "a.b.c"
+    assert body["owner"] == {"Placeholder": ":who"}
+    # A parameter carries a value, never the CURRENT_USER keyword.
+    assert body["current_user"] is False
     [bound] = do_ast_rewriter([statement], {"who": "bob"})
     plan = plan_alter_materialized_view_owner(bound)
     [node] = [plan[nid] for nid in plan.nodes()]
@@ -386,7 +425,7 @@ def test_alter_materialized_view_owner_takes_a_parameter():
 def test_an_identity_containing_a_quote_is_expressible():
     """`'[^']+'` had no escape, so an identity with a quote in it could not be
     written at all."""
-    [statement] = pre_parse("GRANT reader ON DATASET a.b.c TO USER 'o''brien'")
+    [statement] = parse_one("GRANT reader ON DATASET a.b.c TO USER 'o''brien'")
     assert statement["GrantAccess"]["principal"] == "o'brien"
 
 
@@ -413,21 +452,21 @@ def test_placeholders_are_reported_before_execution():
 
 
 def test_show_effective_grants_on_parses_to_its_own_statement():
-    [statement] = pre_parse("SHOW EFFECTIVE GRANTS ON DATASET ws.c.d")
+    [statement] = parse_one("SHOW EFFECTIVE GRANTS ON DATASET ws.c.d")
     assert statement == {
         "ShowEffectiveGrantsOn": {"object_kind": "dataset", "object_name": "ws.c.d"}
     }
     # Bare SHOW GRANTS is still the session's own grants, on the parser path.
-    assert pre_parse("SHOW GRANTS") is None
+    assert "ShowVariable" in parse_one("SHOW GRANTS")[0]
 
 
 def test_show_effective_grants_without_on_is_refused_by_name():
     """Rejected here rather than left to sqlparser, which knows no EFFECTIVE and
     would report a syntax error several words away from the cause."""
     with pytest.raises(UnsupportedSyntaxError, match="EFFECTIVE"):
-        pre_parse("SHOW EFFECTIVE GRANTS")
+        parse_one("SHOW EFFECTIVE GRANTS")
     with pytest.raises(UnsupportedSyntaxError):
-        pre_parse("SHOW EFFECTIVE GRANTS ON TABLE ws.c.d")
+        parse_one("SHOW EFFECTIVE GRANTS ON TABLE ws.c.d")
 
 
 def test_the_two_listings_ask_the_capability_different_questions(install):
@@ -490,7 +529,7 @@ def test_the_effective_listing_takes_the_same_object_kinds_and_arity(install):
 
 def test_the_effective_listing_takes_a_parameter_on_the_same_terms(install):
     capability = install(RecordingAdminCapability())
-    [statement] = pre_parse("SHOW EFFECTIVE GRANTS ON COLLECTION :coll")
+    [statement] = parse_one("SHOW EFFECTIVE GRANTS ON COLLECTION :coll")
     assert statement["ShowEffectiveGrantsOn"]["object_name"] == {"Placeholder": ":coll"}
     _run("SHOW EFFECTIVE GRANTS ON COLLECTION :coll", params={"coll": "ws.sales"})
     assert capability.applied == [("effective_grants_on", "ws.sales.*", "alice")]

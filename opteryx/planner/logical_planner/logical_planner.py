@@ -4353,7 +4353,8 @@ def plan_show_create_query(statement, **kwargs):
     if isinstance(show_step.object_name, list):
         show_step.object_name = ".".join(show_step.object_name)
     if obj_type == "TRIGGER":
-        show_step.trigger_name = statement[root_node].get("trigger_name")
+        trigger_name = statement[root_node].get("trigger_name")
+        show_step.trigger_name = trigger_name["value"] if trigger_name else None
     plan.add_node(random_string(), show_step)
     return plan
 
@@ -5351,9 +5352,11 @@ def plan_alter_workspace_secure(statement, **kwargs) -> LogicalPlan:
     root = "AlterWorkspaceSecure"
     body = statement[root]
 
-    workspace_name = body["workspace"]
-    secure_object = body["object"]
+    workspace_name = body["workspace"]["value"]
+    secure_object = _aside_object_name(body["object"])
     destinations = body["destinations"]
+    if destinations is not None:
+        destinations = [part["value"] for part in destinations]
 
     if secure_object.count(".") < 2:
         raise UnsupportedSyntaxError(
@@ -5997,7 +6000,7 @@ def plan_refresh_materialized_view(statement, **kwargs):
     from opteryx.exceptions import UnsupportedSyntaxError
     from opteryx.third_party import sqloxide
 
-    relation_name = statement["RefreshMaterializedView"]["name"]
+    relation_name = _aside_object_name(statement["RefreshMaterializedView"]["name"])
 
     connector = connector_factory(relation_name, telemetry=None)
     if not isinstance(connector, Writable) or not connector.is_materialized_view(relation_name):
@@ -6150,7 +6153,7 @@ def plan_resync_relation(statement, **kwargs):
     catalog to learn and which could change between then and the commit.
     """
     load_statement = statement["ResyncRelation"]
-    relation_name = load_statement["relation"]
+    relation_name = _aside_object_name(load_statement["relation"])
     if str(relation_name).count(".") < 1:
         raise UnsupportedSyntaxError(
             f"**ALTER TABLE** ... **RESYNC** names a dataset, which is always at least "
@@ -6173,7 +6176,7 @@ def plan_detach_relation(statement, **kwargs):
     rather than happening implicitly on the first write to a fork.
     """
     load_statement = statement["DetachRelation"]
-    relation_name = load_statement["relation"]
+    relation_name = _aside_object_name(load_statement["relation"])
     if str(relation_name).count(".") < 1:
         raise UnsupportedSyntaxError(
             f"**ALTER TABLE** ... **DETACH** names a dataset, which is always at least "
@@ -6583,13 +6586,91 @@ def plan_drop_statistics(statement, **kwargs) -> LogicalPlan:
     plan = LogicalPlan()
     node = LogicalPlanNode(node_type=LogicalPlanStepType.Analyze)
     node.action = "drop_statistics"
-    node.table_name = statement[root]["table_name"]
+    node.table_name = _aside_object_name(statement[root]["table_name"])
     node.analyze_columns = list(statement[root].get("columns") or [])
 
     node_id = random_string()
     plan.add_node(node_id, node)
 
     return plan
+
+
+def resolve_slot_value(value, slot: str) -> str:
+    """Read a VALUE slot from the aside parser at plan time.
+
+    A value slot (`src/aside/cursor.rs`, `ValueSlot`) arrives either as the
+    literal the grammar read, or - where the reader wrote a placeholder - as
+    the `{"Placeholder": ":name"}` node, which the AST rewriter replaces with
+    the bound value before the planner sees it. An UNBOUND placeholder arrives
+    here still a Placeholder (the rewriter does no work when no parameters were
+    supplied) and fails with the same error any other unbound placeholder
+    raises. It is never used as data: that is the whole point of routing these
+    slots through the rewriter.
+
+    Lived in `opteryx/planner/pre_parse.py` until that module was deleted, and
+    its companion `_slot_value` went with it - the classification it did by
+    regex is `ValueSlot::classify` now.
+
+    Parameters:
+        value: the slot, as it stands on the statement.
+        slot:  what the slot is, for the error message.
+
+    Returns:
+        The string the statement should act on.
+    """
+    from opteryx.exceptions import ParameterError
+
+    if isinstance(value, str):
+        return value
+    if "Placeholder" in value:
+        raise ParameterError(
+            "Unresolved parameter in query. Supply a value for every placeholder in the statement."
+        )
+    literal = value.get("Value")
+    if isinstance(literal, dict) and "SingleQuotedString" in literal:
+        return literal["SingleQuotedString"]
+    raise ParameterError(
+        f"The {slot} must be a string; the value supplied for its placeholder is not one."
+    )
+
+
+def _aside_object_name(parts) -> str:
+    """Join an `ObjectName` from the aside parser back into a dotted name.
+
+    The aside parser (`src/aside/`) returns names as sqlparser's own
+    `ObjectName` - a list of `Identifier` parts - rather than as the flat string
+    the regex layer captured. That is the whole point of it: a part can be
+    backtick-quoted (`my-task`) or a `@@name` the AST rewriter has already
+    resolved, neither of which survived the regex. Joining happens here, once
+    the parts are final.
+    """
+    return ".".join(part["Identifier"]["value"] for part in parts)
+
+
+def _reject_variables_in_task_body(task_sql: str, what: str) -> None:
+    """Refuse a `@@name` inside a task's body.
+
+    A task's body is stored as TEXT and re-parsed when it fires, by a session
+    that is not this one. Resolving `@@external_user` here and storing the
+    resolved text would pin the author's identity into a statement whose whole
+    point is to run later as somebody else; storing it UNRESOLVED would leave
+    the meaning to whoever re-parses it. Neither is a thing to choose silently,
+    so v1 refuses and says to write the name out.
+
+    The task's own name and its `ON <table>` are ordinary `ObjectName`s and DO
+    resolve - they are read now, not later. See
+    `docs/ASIDE_PARSER_DESIGN.md` §9.1.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    if "@@" not in task_sql:
+        return
+    raise UnsupportedSyntaxError(
+        f"A session variable cannot be used inside the statement a task runs, so "
+        f"{md_code(what)} cannot be created. A task runs later, as the principal its "
+        f"trigger names, so a variable in its body has no one answer. Write the name "
+        f"out in full."
+    )
 
 
 def plan_create_task(statement, **kwargs) -> LogicalPlan:
@@ -6619,6 +6700,8 @@ def plan_create_task(statement, **kwargs) -> LogicalPlan:
 
     root = "CreateTask"
     task_sql = statement[root]["statement"]
+    task_name = _aside_object_name(statement[root]["name"])
+    _reject_variables_in_task_body(task_sql, task_name)
 
     parsed = sqloxide.parse_sql(task_sql, _dialect="opteryx")
     if len(parsed) != 1:
@@ -6644,14 +6727,15 @@ def plan_create_task(statement, **kwargs) -> LogicalPlan:
         )
 
     node = LogicalPlanNode(node_type=LogicalPlanStepType.CreateTask)
-    node.task_name = statement[root]["name"]
+    node.task_name = task_name
     node.statement = task_sql
     node.or_replace = statement[root].get("or_replace", False)
     node.if_not_exists = statement[root].get("if_not_exists", False)
     # The dataset whose commits fire this task, if one was named. The trigger is
     # created alongside the task, the way a view's are - see the note on
     # `_CREATE_TASK_RE` for why it is declared rather than derived.
-    node.on_table = statement[root].get("on_table")
+    on_table = statement[root].get("table")
+    node.on_table = _aside_object_name(on_table) if on_table else None
 
     # Where it writes, separated from what it reads: a target needs WRITE and the
     # sources need only READ, so folding them together would demand read access
@@ -6681,7 +6765,7 @@ def plan_drop_task(statement, **kwargs) -> LogicalPlan:
     """
     root = "DropTask"
     node = LogicalPlanNode(node_type=LogicalPlanStepType.DropTask)
-    node.task_name = statement[root]["name"]
+    node.task_name = _aside_object_name(statement[root]["name"])
     node.if_exists = statement[root].get("if_exists", False)
 
     plan = LogicalPlan()
@@ -6712,6 +6796,8 @@ def plan_alter_task(statement, **kwargs) -> LogicalPlan:
 
     root = "AlterTask"
     task_sql = statement[root]["statement"]
+    task_name = _aside_object_name(statement[root]["name"])
+    _reject_variables_in_task_body(task_sql, task_name)
 
     parsed = sqloxide.parse_sql(task_sql, _dialect="opteryx")
     if len(parsed) != 1:
@@ -6733,7 +6819,7 @@ def plan_alter_task(statement, **kwargs) -> LogicalPlan:
         )
 
     node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterTask)
-    node.task_name = statement[root]["name"]
+    node.task_name = task_name
     node.statement = task_sql
 
     targets = extract_write_targets(inner)
@@ -6764,16 +6850,17 @@ def plan_create_trigger(statement, **kwargs) -> LogicalPlan:
     such clause.
     """
     root = "CreateTrigger"
+    window_source = statement[root].get("window_source")
     node = LogicalPlanNode(node_type=LogicalPlanStepType.CreateTrigger)
-    node.trigger_name = statement[root]["trigger_name"]
-    node.table_name = statement[root]["table_name"]
-    node.task_name = statement[root]["task_name"]
+    node.trigger_name = statement[root]["name"]["value"]
+    node.table_name = _aside_object_name(statement[root]["table"])
+    node.task_name = _aside_object_name(statement[root]["task"])
     node.or_replace = statement[root].get("or_replace", False)
     node.if_not_exists = statement[root].get("if_not_exists", False)
     node.event_kind = statement[root].get("event_kind") or "commit"
     node.schedule = statement[root].get("schedule")
     node.time_zone = statement[root].get("time_zone")
-    node.window_source = statement[root].get("window_source")
+    node.window_source = _aside_object_name(window_source) if window_source else None
 
     plan = LogicalPlan()
     plan.add_node(random_string(), node)
@@ -6788,12 +6875,10 @@ def plan_alter_trigger_owner(statement, **kwargs) -> LogicalPlan:
     a person running `EXECUTE` runs it as themselves and answers for it, so
     there is nothing to pin. A trigger fires with nobody present.
     """
-    from opteryx.planner.pre_parse import resolve_slot_value
-
     root = "AlterTriggerOwner"
     node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterTriggerOwner)
-    node.trigger_name = statement[root]["trigger_name"]
-    node.table_name = statement[root]["table_name"]
+    node.trigger_name = statement[root]["name"]["value"]
+    node.table_name = _aside_object_name(statement[root]["table"])
     node.owner_is_current_user = statement[root].get("owner_is_current_user", False)
     node.new_owner = (
         None
@@ -6816,8 +6901,8 @@ def plan_alter_trigger_suspended(statement, **kwargs) -> LogicalPlan:
     """
     root = "AlterTriggerSuspended"
     node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterTriggerSuspended)
-    node.trigger_name = statement[root]["trigger_name"]
-    node.table_name = statement[root]["table_name"]
+    node.trigger_name = statement[root]["name"]["value"]
+    node.table_name = _aside_object_name(statement[root]["table"])
     node.suspended = statement[root]["suspended"]
 
     plan = LogicalPlan()
@@ -6836,8 +6921,8 @@ def plan_alter_trigger_minimum_interval(statement, **kwargs) -> LogicalPlan:
     """
     root = "AlterTriggerMinimumInterval"
     node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterTriggerMinimumInterval)
-    node.trigger_name = statement[root]["trigger_name"]
-    node.table_name = statement[root]["table_name"]
+    node.trigger_name = statement[root]["name"]["value"]
+    node.table_name = _aside_object_name(statement[root]["table"])
     node.minimum_interval_seconds = int(statement[root]["minimum_interval_seconds"])
 
     plan = LogicalPlan()
@@ -6853,8 +6938,8 @@ def plan_drop_trigger(statement, **kwargs) -> LogicalPlan:
     root = "DropTrigger"
     plan = LogicalPlan()
     node = LogicalPlanNode(node_type=LogicalPlanStepType.DropTrigger)
-    node.trigger_name = statement[root]["trigger_name"]
-    node.table_name = statement[root]["table_name"]
+    node.trigger_name = statement[root]["name"]["value"]
+    node.table_name = _aside_object_name(statement[root]["table"])
     node.if_exists = statement[root].get("if_exists", False)
 
     plan.add_node(random_string(), node)
@@ -6871,12 +6956,10 @@ def plan_alter_materialized_view_owner(statement, **kwargs) -> LogicalPlan:
     all of them at once, which is the point of naming the view rather than a
     trigger - so it gets its own node, its own binder visitor, and its own
     permission check."""
-    from opteryx.planner.pre_parse import resolve_slot_value
-
     root = "AlterMaterializedViewOwner"
     plan = LogicalPlan()
     node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterMaterializedViewOwner)
-    node.relation_name = statement[root]["name"]
+    node.relation_name = _aside_object_name(statement[root]["name"])
     new_owner = statement[root]["owner"]
     # None is CURRENT_USER, which names no principal to resolve; anything else is
     # either the literal written or the value bound to its placeholder.
@@ -6900,7 +6983,7 @@ def plan_alter_materialized_view_suspended(statement, **kwargs) -> LogicalPlan:
     root = "AlterMaterializedViewSuspended"
     plan = LogicalPlan()
     node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterMaterializedViewSuspended)
-    node.relation_name = statement[root]["name"]
+    node.relation_name = _aside_object_name(statement[root]["name"])
     node.suspended = statement[root]["suspended"]
 
     plan.add_node(random_string(), node)
@@ -6942,8 +7025,6 @@ def _grant_object_pattern(object_kind: str, object_name: str) -> str:
 
 
 def _plan_grant_statement(statement, root: str, node_type) -> LogicalPlan:
-    from opteryx.planner.pre_parse import resolve_slot_value
-
     plan = LogicalPlan()
     node = LogicalPlanNode(node_type=node_type)
     node.object_kind = statement[root]["object_kind"]
@@ -6988,8 +7069,6 @@ def _plan_grant_listing(statement, root: str, node_type, effective: bool) -> Log
     the same by construction, which is the point: the two statements are two
     questions about one object, not two features.
     """
-    from opteryx.planner.pre_parse import resolve_slot_value
-
     plan = LogicalPlan()
     node = LogicalPlanNode(node_type=node_type)
     node.object_kind = statement[root]["object_kind"]
@@ -7042,7 +7121,7 @@ def plan_listen(statement, **kwargs) -> LogicalPlan:
     """
     root = "Listen"
     node = LogicalPlanNode(node_type=LogicalPlanStepType.Listen)
-    node.task_name = statement[root]["name"]
+    node.task_name = _aside_object_name(statement[root]["name"])
     # Already resolved to one of ERROR/SUCCESS/EVERYTHING by pre-parse; a
     # missing FOR clause arrives as EVERYTHING rather than as None.
     node.outcome = statement[root]["outcome"]
@@ -7061,7 +7140,7 @@ def plan_unlisten(statement, **kwargs) -> LogicalPlan:
     """
     root = "Unlisten"
     node = LogicalPlanNode(node_type=LogicalPlanStepType.Unlisten)
-    node.task_name = statement[root]["name"]
+    node.task_name = _aside_object_name(statement[root]["name"])
 
     plan = LogicalPlan()
     plan.add_node(random_string(), node)
