@@ -6647,30 +6647,40 @@ def _aside_object_name(parts) -> str:
     return ".".join(part["Identifier"]["value"] for part in parts)
 
 
-def _reject_variables_in_task_body(task_sql: str, what: str) -> None:
-    """Refuse a `@@name` inside a task's body.
+def _reject_pronouns_in_task_body(task_sql: str, what: str) -> None:
+    """Refuse the `$me` pronoun inside a task's body.
 
     A task's body is stored as TEXT and re-parsed when it fires, by a session
-    that is not this one. Resolving `@@external_user` here and storing the
-    resolved text would pin the author's identity into a statement whose whole
-    point is to run later as somebody else; storing it UNRESOLVED would leave
-    the meaning to whoever re-parses it. Neither is a thing to choose silently,
-    so v1 refuses and says to write the name out.
+    that is not this one. Resolving `$me` here and storing the resolved text
+    would pin the author's identity into a statement whose whole point is to
+    run later as somebody else; storing it UNRESOLVED would leave the meaning
+    to whoever re-parses it. Neither is a thing to choose silently, so v1
+    refuses and says to write the name out.
+
+    Matched on the TEXT, because the body is text here - it never becomes an
+    AST in this process, which is exactly why the rewriter cannot reach it.
+    Word-boundary matched so a column called `sum_me` is not mistaken for one;
+    a backtick-quoted `` `$me` `` is a name the reader escaped and is left
+    alone, the same rule the rewriter applies.
 
     The task's own name and its `ON <table>` are ordinary `ObjectName`s and DO
     resolve - they are read now, not later. See
     `docs/ASIDE_PARSER_DESIGN.md` §9.1.
     """
-    from opteryx.exceptions import UnsupportedSyntaxError
+    import re as _re
 
-    if "@@" not in task_sql:
-        return
-    raise UnsupportedSyntaxError(
-        f"A session variable cannot be used inside the statement a task runs, so "
-        f"{md_code(what)} cannot be created. A task runs later, as the principal its "
-        f"trigger names, so a variable in its body has no one answer. Write the name "
-        f"out in full."
-    )
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.planner.ast_rewriter.relation_pronouns import PRONOUNS
+
+    for pronoun in PRONOUNS:
+        if not _re.search(rf"(?<![`\w]){_re.escape(pronoun)}\b", task_sql, _re.IGNORECASE):
+            continue
+        raise UnsupportedSyntaxError(
+            f"{md_code(pronoun)} cannot be used inside the statement a task runs, so "
+            f"{md_code(what)} cannot be created. A task runs later, as the principal "
+            f"its trigger names, so a pronoun in its body has no one answer. Write "
+            f"the name out in full."
+        )
 
 
 def plan_create_task(statement, **kwargs) -> LogicalPlan:
@@ -6701,7 +6711,7 @@ def plan_create_task(statement, **kwargs) -> LogicalPlan:
     root = "CreateTask"
     task_sql = statement[root]["statement"]
     task_name = _aside_object_name(statement[root]["name"])
-    _reject_variables_in_task_body(task_sql, task_name)
+    _reject_pronouns_in_task_body(task_sql, task_name)
 
     parsed = sqloxide.parse_sql(task_sql, _dialect="opteryx")
     if len(parsed) != 1:
@@ -6797,7 +6807,7 @@ def plan_alter_task(statement, **kwargs) -> LogicalPlan:
     root = "AlterTask"
     task_sql = statement[root]["statement"]
     task_name = _aside_object_name(statement[root]["name"])
-    _reject_variables_in_task_body(task_sql, task_name)
+    _reject_pronouns_in_task_body(task_sql, task_name)
 
     parsed = sqloxide.parse_sql(task_sql, _dialect="opteryx")
     if len(parsed) != 1:

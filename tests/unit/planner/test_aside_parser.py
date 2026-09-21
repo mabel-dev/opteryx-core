@@ -88,16 +88,16 @@ def test_a_quoted_name_part_is_accepted():
     assert parts[-1]["Identifier"]["quote_style"] == "`"
 
 
-def test_a_session_variable_in_the_task_name_resolves():
-    # The reason this work started: `@@external_user` is substituted by the AST
-    # rewriter, which walks ObjectName positions. A regex-synthesized statement
-    # never became an AST, so it never reached the rewriter.
-    statement = rewrite("CREATE TASK personal.@@external_user.add_body AS SELECT 1")[0]
+def test_the_pronoun_in_the_task_name_resolves():
+    # The reason this work started: `$me` is substituted by the AST rewriter,
+    # which walks ObjectName positions. A regex-synthesized statement never
+    # became an AST, so it never reached the rewriter.
+    statement = rewrite("CREATE TASK personal.$me.add_body AS SELECT 1")[0]
     assert name_of(statement) == "personal.alice.add_body"
 
 
-def test_a_session_variable_in_the_on_clause_resolves():
-    statement = rewrite("CREATE TASK personal.@@external_user.t ON personal.@@external_user.src AS SELECT 1")[0]
+def test_the_pronoun_in_the_on_clause_resolves():
+    statement = rewrite("CREATE TASK personal.$me.t ON personal.$me.src AS SELECT 1")[0]
     assert name_of(statement, "table") == "personal.alice.src"
 
 
@@ -134,7 +134,7 @@ def test_a_semicolon_inside_a_literal_does_not_end_the_body():
     assert statement["CreateTask"]["statement"] == "SELECT 'a;b' AS x"
 
 
-def test_a_variable_in_the_body_is_refused():
+def test_a_pronoun_in_the_body_is_refused():
     # A body is stored as text and re-parsed when the task fires, as whoever the
     # trigger names. Resolving it now pins the author into it; leaving it pins
     # nobody. Neither is chosen silently - see ASIDE_PARSER_DESIGN.md §9.1.
@@ -142,7 +142,7 @@ def test_a_variable_in_the_body_is_refused():
     with pytest.raises(UnsupportedSyntaxError, match="cannot be used inside the statement a task runs"):
         list(
             session.execute_to_morsels(
-                "CREATE TASK ws.t AS INSERT INTO personal.@@external_user.log SELECT 1"
+                "CREATE TASK ws.t AS INSERT INTO personal.$me.log SELECT 1"
             )
         )
 
@@ -288,10 +288,10 @@ def test_a_trigger_name_may_be_quoted_but_not_dotted():
         parse("DROP TRIGGER a.b ON ws.t")
 
 
-def test_session_variables_resolve_in_every_relation_slot_a_trigger_names():
+def test_the_pronoun_resolves_in_every_relation_slot_a_trigger_names():
     statement = rewrite(
-        "CREATE TRIGGER tick ON SCHEDULE '0 * * * *' OVER personal.@@external_user.src "
-        "EXECUTE personal.@@external_user.job"
+        "CREATE TRIGGER tick ON SCHEDULE '0 * * * *' OVER personal.$me.src "
+        "EXECUTE personal.$me.job"
     )[0]["CreateTrigger"]
     for key in ("table", "task", "window_source"):
         joined = ".".join(p["Identifier"]["value"] for p in statement[key])
@@ -547,10 +547,10 @@ def test_a_grants_object_is_a_value_so_a_variable_is_not_resolved_in_it():
     # The one place `@@name` does NOT resolve, and deliberately: a grant's
     # object is a VALUE slot (it takes placeholders), not a relation name.
     # Unchanged from the regex this replaced - see src/aside/grant.rs.
-    body = rewrite("GRANT reader ON DATASET personal.@@external_user.x TO USER bob")[0][
+    body = rewrite("GRANT reader ON DATASET personal.$me.x TO USER bob")[0][
         "GrantAccess"
     ]
-    assert body["object_name"] == "personal.@@external_user.x"
+    assert body["object_name"] == "personal.$me.x"
 
 
 # --- the remainder ---------------------------------------------------------

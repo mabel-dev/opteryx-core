@@ -387,8 +387,8 @@ def build_logical_plan(
         params = [p for p in parameters or []]
 
     # AST Rewriter adds temporal filters and parameters to the AST, and resolves
-    # `@@name` parts inside relation names - which is why it takes `variables`: the
-    # session's own identity, read once here so no later phase has to.
+    # the `$me` pronoun inside relation names - which is why it takes `variables`:
+    # the session's own identity, read once here so no later phase has to.
     start = time.monotonic_ns()
     parsed_statement = do_ast_rewriter(parsed_statements, parameters=params, variables=variables)[0]
     telemetry.time_planning_ast_rewriter += time.monotonic_ns() - start

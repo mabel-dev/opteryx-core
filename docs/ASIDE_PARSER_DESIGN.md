@@ -15,7 +15,7 @@ planner builders read `ObjectName` slots; grammar refusals are re-typed from the
 `OPTERYX-SYNTAX:` channel in `opteryx.planner.parse_statement`.
 
 Tests: `tests/unit/planner/test_aside_parser.py` (114),
-`test_relation_name_variables.py` (46), and the existing DDL suites
+`test_relation_pronouns.py` (46), and the existing DDL suites
 (`test_create_task_ddl.py` 77, `test_triggers_ddl.py` 62) unchanged and
 passing. `tests/storage` green (1,270). `make q` green, clippy clean.
 
@@ -39,12 +39,46 @@ regex never checked (the trigger's own name, and the task it fires).
 `pre_parse` import beside it, because `DROP STATISTICS` has NOT moved and its
 test must keep exercising the layer that still owns it.
 
-**One asymmetry, preserved on purpose:** `@@external_user` resolves in every
-relation name the aside parser reads — except a GRANT's object, which is a
-VALUE slot (it takes placeholders) and stays text. That is what the regex did.
-Changing it means ruling that a grant's object is a NAME after all, which is a
-decision about that surface, not about parsing. Pinned by a test so it cannot
-drift either way unnoticed.
+**One asymmetry, preserved on purpose:** `$me` resolves in every relation name
+the aside parser reads — except a GRANT's object, which is a VALUE slot (it
+takes placeholders) and stays text. That is what the regex did. Changing it
+means ruling that a grant's object is a NAME after all, which is a decision
+about that surface, not about parsing. Pinned by a test so it cannot drift
+either way unnoticed.
+
+**A second, for the same reason:** a task's body is stored as text and
+re-parsed when it fires, so `$me` in one is REFUSED
+(`_reject_pronouns_in_task_body`) rather than resolved to the author or left
+to whoever re-parses it. See §9.1.
+
+## 0. Permissions — `personal.$me.*` needs no rule of its own
+
+Asked, and checked: the permissions model already answers this correctly, and
+**the engine is not where the answer lives**. `opteryx_access.implicit_grants`
+issues every identified session an `owner` grant on `personal.<identity>` and
+`personal.<identity>.*`, hardcoded rather than policy-issued, with the
+identity glob-escaped so metacharacters in it cannot widen the namespace.
+
+The pronoun needs nothing added to that, because of WHEN it resolves: the AST
+rewriter runs before the binder, so the name the capability is asked about is
+already `personal.alice.dataset`. By the time the gate sees it there is no
+pronoun. Measured, not assumed — `test_the_permission_gate_is_asked_about_the_
+resolved_name` records what the capability was asked and asserts the string.
+
+Three properties fall out, all verified against the real capability:
+
+- every action on `personal.<me>.*` passes (READ, WRITE, DROP, AUTOMATE, and
+  CREATE on the bare collection, which needs the second pattern because
+  `fnmatch` does not treat `personal.alice.*` as covering `personal.alice`);
+- matching is case-insensitive on both sides, so `personal.Alice.ds` matches;
+- `personal.bob.*` and other workspaces are refused, and the UNRESOLVED
+  `personal.$me.ds` is refused too.
+
+Putting a "`personal.$me.*` always passes" rule into the engine would have
+been the wrong fix twice over: the engine "stores no policy and interprets
+nothing" (`opteryx/managers/permissions/__init__.py`), and a second
+implementation of what a policy means is exactly what that module exists to
+prevent.
 
 §9.1 is RULED, and NOT the way this document recommended — the evidence went the
 other way (see the ruling). §9.2 is RULED with a correction: four keys, not
@@ -79,9 +113,21 @@ to the same dict shapes the planner already reads. Not a fork of sqlparser. Not
 more productions on the `Dialect::parse_statement` hook. Not a tokenizer of our
 own (§3.2).
 
-**Why now:** `personal.@@external_user.dataset` resolves in every statement
+**Spelling, ruled 2026-09-21:** the pronoun is `$me`. This work started with
+`@@external_user`, reusing the system-variable namespace, and the pronoun is
+better on three counts: `$` already means "the engine's own" in this dialect
+(`$planets`, `$variables`); there is exactly ONE pronoun, so there is no
+allowlist to get wrong — and an allowlist was needed, because a relation that
+cannot be found reports the name it looked for, which would have made
+`FROM x.@@local_store_root.y` a read channel for RESTRICTED variables; and it
+FAILS CLOSED, because `opteryx_access.is_engine_private` denies any resource
+with a `$`-prefixed segment BEFORE consulting any grant, so a name that
+reached a permission check unresolved is refused outright rather than merely
+unmatched.
+
+**Why now:** `personal.$me.dataset` resolves in every statement
 sqlparser parses (the AST rewriter substitutes name parts, one place — see
-`opteryx/planner/ast_rewriter/relation_variables.py`) and in none of the
+`opteryx/planner/ast_rewriter/relation_pronouns.py`) and in none of the
 ~25 forms pre-parse synthesises, because those never become an AST. That gap
 is the fourth instance of one defect, not a new one (§2).
 
@@ -111,7 +157,7 @@ re-implement by hand — and the ledger shows it:
 | Parameter placeholders | Paid by hand: `_PLACEHOLDER` / `_slot_value` / `resolve_slot_value`. Paid *after* `GRANT ... TO USER :username` created a grant for a principal literally named `:username`. (In the aside parser this is `Cursor::value_slot_tail` returning a `ValueSlot`, one reader for every form.) |
 | Quoted / hyphenated identifiers | Unpaid. Name slots are `[A-Za-z_][\w.$]*`; `` CREATE TASK personal.ada.`my-task` `` is refused (measured 2026-09-21). Backticks are the ONLY way to write a hyphenated name in this dialect. Paid for the moved forms. |
 | Source positions | Unpaid. No `span` anywhere in the module, so `attach_source_position` can underline nothing in these statements. Every `Ident` the aside parser builds carries one. |
-| `@@name` inside a relation name | Unpaid. The subject of this design. |
+| `$me` inside a relation name | Unpaid. The subject of this design. |
 
 The regex layer is not careless — its comments reason correctly about every
 choice it makes. It is the wrong *layer*: it re-derives, per statement, what
@@ -273,13 +319,13 @@ difference never leaks into a production.
 non-reserved: `SELECT fork, task FROM t` keeps working, and promoting a word to
 reserved is a silent break of every column that carries the name.
 
-### 3.5 What `@@name` gets, for free
+### 3.5 What `$me` gets, for free
 
 `parse_object_name` yields `ObjectName(Vec<Ident>)`; `is_identifier_start`
-already admits `@`; so `personal.@@external_user.add_body` arrives as three
+already admits `$`; so `personal.$me.add_body` arrives as three
 `Identifier` parts under `name` — the exact shape the AST rewriter's
 `OBJECT_NAME_KEYS` walk already substitutes. **No second resolution point.**
-`relation_variables.py` gains new keys only where a production chooses a field
+`relation_pronouns.py` gains new keys only where a production chooses a field
 name it does not already cover, which is a one-line frozenset edit per key,
 pinned by the sweep test. Step 1 added exactly one: `table` (§9.2). sqlparser
 also uses `table`, for MERGE's `TableFactor` DICT — the walk's ObjectName shape
@@ -366,8 +412,8 @@ nodes they already know.
 
 ## 8. Tests
 
-- `tests/unit/planner/test_relation_name_variables.py` sweep grows one case per
-  migrated form (`@@external_user` resolves in it).
+- `tests/unit/planner/test_relation_pronouns.py` sweep grows one case per
+  migrated form (`$me` resolves in it).
 - Per form: parse-shape tests in Rust? No — this crate has none and adding a
   Rust test harness is out of scope. Shape is pinned from Python through
   `sqloxide.parse_sql`, next to the existing planner tests.
@@ -383,7 +429,7 @@ nodes they already know.
 ### 9.1 A task body — RULED C, 2026-09-21, ON EVIDENCE
 
 This document recommended **A** (store the body regenerated from the resolved
-AST, so `@@external_user` means the author) gated on `ast_to_sql` round-tripping
+AST, so the pronoun means the author) gated on `ast_to_sql` round-tripping
 every body shape. **The gate failed, so A is dead.** Measured, 12 body shapes:
 
 - `SELECT a FROM ws.src FOR TODAY` — the SQL rewriter lifts a temporal clause
@@ -427,7 +473,7 @@ mean different things: the holder it lives under and the dataset its runs are
 windowed over. Collapsing them onto `table` would have made the planner guess
 which it had.
 
-All four are in `relation_variables.OBJECT_NAME_KEYS`, so `@@name` resolves in
+All four are in `relation_pronouns.OBJECT_NAME_KEYS`, so `$me` resolves in
 every one — pinned by the sweep. `table` is shared with sqlparser's MERGE, which
 puts a `TableFactor` DICT there; the walk's ObjectName shape test (a LIST of
 `Identifier` parts) tells them apart.
@@ -447,7 +493,7 @@ judge.
 | Front doors for one statement | up to 3 | 1 |
 | Quoted/hyphenated names in these forms | refused | accepted |
 | Source positions on these statements | none | every `Ident` |
-| `@@name` in these relation names | never | everywhere but a GRANT object |
+| `$me` in these relation names | never | everywhere but a GRANT object |
 | Placeholder machinery | `_PLACEHOLDER` + `_slot_value` + `resolve_slot_value` | `ValueSlot::classify` + `resolve_slot_value` |
 
 The Rust is larger than the Python it replaces, and that is the trade: a
