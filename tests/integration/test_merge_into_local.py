@@ -911,3 +911,138 @@ def test_composite_on_key(tmp_path):
         connectors._storage_prefixes.update(saved_prefixes)
         connectors._connector_cache.clear()
         connectors._connector_cache.update(saved_cache)
+
+
+# ── WHEN [NOT] MATCHED THEN DO NOTHING ──────────────────────────────────────
+# A DO NOTHING arm is a GUARD, not an omission. Arms are tried in declaration
+# order and the first whose condition holds claims the row, so an arm that does
+# nothing still SHIELDS the rows it claims from every later arm. Each test below
+# therefore asserts the shielded rows are genuinely unchanged — a test that only
+# asserted the statement ran would pass with the shadowing broken.
+
+
+def test_do_nothing_shields_rows_from_a_later_delete_arm(merge_env):
+    """The shadowing case. Without the guard arm cve 2 and 3 both match and are
+    deleted; with it, cve 3 is claimed first and must survive untouched."""
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING {SOURCE} AS t
+       ON n.cve = t.cve
+     WHEN MATCHED AND n.cve = 3 THEN DO NOTHING
+     WHEN MATCHED THEN DELETE
+    """
+    list(opteryx.session(user="tester").execute_to_morsels(sql))
+    assert _target_rows() == [
+        (1, 10, 1),  # never mentioned by the source
+        (3, 30, 1),  # claimed by the DO NOTHING arm — shielded from the DELETE
+    ]
+
+
+def test_do_nothing_shields_a_row_from_a_later_update_arm(merge_env):
+    """The same shadowing, against the arm that MUTATES rather than removes.
+    cve 3's details differ from the source's, so the UPDATE arm would rewrite it
+    (details 30 → 99, revision 1 → 2) if the guard arm did not claim it first."""
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING {SOURCE} AS t
+       ON n.cve = t.cve
+     WHEN MATCHED AND n.cve = 3 THEN DO NOTHING
+     WHEN MATCHED THEN UPDATE SET details = t.details, revision = n.revision + 1
+    """
+    list(opteryx.session(user="tester").execute_to_morsels(sql))
+    assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 30, 1)]
+
+
+def test_do_nothing_shielding_a_row_writes_no_snapshot(merge_env):
+    """A shielded row must cost nothing, not be retired and re-appended
+    unchanged: with every matched row claimed by the guard arm there is no work
+    at all, so no snapshot is written."""
+    target = merge_env["col.tgt"]
+    before = target.metadata.current_snapshot_id
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING {SOURCE} AS t
+       ON n.cve = t.cve
+     WHEN MATCHED THEN DO NOTHING
+     WHEN MATCHED THEN DELETE
+    """
+    list(opteryx.session(user="tester").execute_to_morsels(sql))
+    assert target.metadata.current_snapshot_id == before
+    assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 30, 1)]
+
+
+def test_not_matched_do_nothing_shields_rows_from_a_later_insert_arm(merge_env):
+    """DO NOTHING on the NOT MATCHED side claims unmatched SOURCE rows that
+    would otherwise reach the INSERT arm. cve 4 is the only unmatched source
+    row, so claiming it must leave the target exactly as it was."""
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING {SOURCE} AS t
+       ON n.cve = t.cve
+     WHEN NOT MATCHED AND t.cve = 4 THEN DO NOTHING
+     WHEN NOT MATCHED THEN INSERT (cve, details, revision) VALUES (t.cve, t.details, 1)
+    """
+    list(opteryx.session(user="tester").execute_to_morsels(sql))
+    assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 30, 1)]
+
+
+def test_not_matched_do_nothing_only_shields_the_rows_it_claims(merge_env):
+    """The guard must claim its OWN population's rows and no others: the same
+    statement with a predicate that excludes cve 4 must still insert it."""
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING {SOURCE} AS t
+       ON n.cve = t.cve
+     WHEN NOT MATCHED AND t.cve = 99 THEN DO NOTHING
+     WHEN NOT MATCHED THEN INSERT (cve, details, revision) VALUES (t.cve, t.details, 1)
+    """
+    list(opteryx.session(user="tester").execute_to_morsels(sql))
+    assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 30, 1), (4, 40, 1)]
+
+
+def test_every_arm_do_nothing_is_a_well_formed_no_op(merge_env):
+    """Not an error: a statement whose every arm does nothing is well formed,
+    succeeds, changes no row and writes no snapshot."""
+    target = merge_env["col.tgt"]
+    before = target.metadata.current_snapshot_id
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING {SOURCE} AS t
+       ON n.cve = t.cve
+     WHEN MATCHED THEN DO NOTHING
+     WHEN NOT MATCHED THEN DO NOTHING
+    """
+    list(opteryx.session(user="tester").execute_to_morsels(sql))
+    assert target.metadata.current_snapshot_id == before
+    assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 30, 1)]
+
+
+def test_not_matched_by_source_do_nothing_shields_rows_from_a_later_delete(merge_env):
+    """DO NOTHING is valid in the third population too. cve 1 is the only
+    target row the source never mentions; claiming it must shield it from the
+    BY SOURCE DELETE arm that would otherwise sync it away."""
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING {SOURCE} AS t
+       ON n.cve = t.cve
+     WHEN NOT MATCHED BY SOURCE AND n.cve = 1 THEN DO NOTHING
+     WHEN NOT MATCHED BY SOURCE THEN DELETE
+    """
+    list(opteryx.session(user="tester").execute_to_morsels(sql))
+    assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 30, 1)]
+
+
+def test_do_nothing_still_claims_its_row_for_the_cardinality_check(merge_env):
+    """A matched-twice target row is a cardinality violation even when both
+    matches take a DO NOTHING arm — the arm claims the row, and claiming it
+    twice is the violation the sink exists to catch."""
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING {WORKSPACE}.col.dup AS t
+       ON n.cve = t.cve
+     WHEN MATCHED THEN DO NOTHING
+    """
+    with pytest.raises(UnsupportedSyntaxError):
+        list(opteryx.session(user="tester").execute_to_morsels(sql))

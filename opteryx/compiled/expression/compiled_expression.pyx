@@ -1035,6 +1035,20 @@ def _c_native_binop(int op_code, left_phys, right_phys, result_phys=None):
         return False
     return False
 
+# IS [NOT] JSON operator name → its C-ABI kernel. These have NO BCUnaryOpCode:
+# the kernel is mandatory (no Python twin exists, and §2 forbids one), so the
+# node always lowers to BC_FUNCTION and a UOP code could never be emitted.
+_IS_JSON_KERNELS = {
+    "IsJsonValue": "draken_is_json_value",
+    "IsNotJsonValue": "draken_is_not_json_value",
+    "IsJsonScalar": "draken_is_json_scalar",
+    "IsNotJsonScalar": "draken_is_not_json_scalar",
+    "IsJsonArray": "draken_is_json_array",
+    "IsNotJsonArray": "draken_is_not_json_array",
+    "IsJsonObject": "draken_is_json_object",
+    "IsNotJsonObject": "draken_is_not_json_object",
+}
+
 # Unary op string → BCUnaryOpCode. Built once at module load.
 _UOP_CODE = {
     "IsNull":      UOP_IS_NULL,
@@ -2155,6 +2169,29 @@ cdef Py_ssize_t _linearize(
                 slot.flags = BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
                 slot.kernel_fn = <void*>(<unsigned long long>_se_fn)
                 return sub_depth   # pop 1, push 1 — net 0
+
+        # SQL:2016 IS [NOT] JSON — four shapes x two polarities, each its own
+        # C-ABI bool kernel (draken/ops/kernels/function_json_validate.cpp), so
+        # the predicate stays c-native. Same lowering as IsEmpty/IsNotEmpty
+        # above, with one difference: the kernel is MANDATORY. There is no
+        # second implementation to fall back to and §2 forbids building one, so
+        # an unresolved kernel is a loud plan-time failure, not a slow path.
+        if unary_op_str in _IS_JSON_KERNELS:
+            _ij_name = _IS_JSON_KERNELS[unary_op_str]
+            _ij_fn, _ij_ignore = _resolve_kernel_and_context(_ij_name, None, None)
+            if _ij_fn is None:
+                raise ValueError(
+                    f"compiled_expression: {_ij_name} kernel is not registered "
+                    "— IS JSON cannot be lowered"
+                )
+            sub_depth = _linearize(node.centre, bc, depth)
+            slot = bc._push_instr()
+            slot.opcode = BC_FUNCTION
+            slot.arity = 1
+            slot.bool_value = 0
+            slot.flags = BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
+            slot.kernel_fn = <void*>(<unsigned long long>_ij_fn)
+            return sub_depth   # pop 1, push 1 — net 0
 
         sub_depth = _linearize(node.centre, bc, depth)
         slot = bc._push_instr()

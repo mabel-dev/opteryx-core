@@ -100,6 +100,23 @@ from opteryx.utils import dates, suggest_alternative
 from opteryx.utils.vector_types import VectorType, get_vector_type
 
 
+def sort_is_ascending(options: dict) -> bool:
+    """
+    Decode the sort direction from an ORDER BY item's options.
+
+    sqlparser models the direction as `sort`: absent (the SQL default, ASC),
+    `Asc`, `Desc`, or `Using(<operator>)`. `USING` is a Postgres operator-class
+    sort we do not implement; our dialect does not enable it, so it cannot be
+    parsed - it is rejected rather than collapsed into a direction.
+    """
+    sort = options["sort"]
+    if sort is None or sort == "Asc":
+        return True
+    if sort == "Desc":
+        return False
+    raise UnsupportedSyntaxError("ORDER BY ... USING is not supported.")
+
+
 def _span_of(first: dict, last: Optional[dict] = None):
     """Flatten sqlparser's span onto an identifier we are building.
 
@@ -1912,12 +1929,21 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
                 order_by = [
                     (
                         build(item["expr"]),
-                        True if item["options"]["asc"] is None else item["options"]["asc"],
+                        sort_is_ascending(item["options"]),
                     )
                     for item in clause["OrderBy"]
                 ]
             elif "Limit" in clause:
                 limit = build(clause["Limit"]).value
+            else:
+                # sqlparser carries every in-argument clause here - WHERE, SEPARATOR,
+                # ON OVERFLOW, HAVING, the JSON clauses. Dropping one we do not read
+                # answers a question nobody asked: `SUM(x WHERE y)` silently became
+                # `SUM(x)`. Anything unrecognised is refused, not ignored.
+                clause_name = sorted(clause)[0] if isinstance(clause, dict) else clause
+                raise UnsupportedSyntaxError(
+                    f"{func}() has a {md_code(clause_name)} clause in its arguments which is not supported."
+                )
 
         duplicate_treatment = branch["args"]["List"].get("duplicate_treatment")
         null_treatment = branch["args"].get("null_treatment")
@@ -2401,6 +2427,64 @@ def _null_test(operand, negated: bool = False):
     """`operand IS NULL` / `operand IS NOT NULL`, as a UNARY_OPERATOR node."""
     return Node(
         NodeType.UNARY_OPERATOR, value="IsNotNull" if negated else "IsNull", centre=operand
+    )
+
+
+# SQL:2016 `<expr> IS [NOT] JSON [VALUE|SCALAR|ARRAY|OBJECT]`. sqlparser 0.63
+# parses this for every dialect (it is ungated in parse_infix), so it reaches us
+# whether or not we asked for it. `kind` is None for the bare form, which the
+# standard defines as VALUE.
+_IS_JSON_KINDS = {
+    None: "Value",
+    "Value": "Value",
+    "Scalar": "Scalar",
+    "Array": "Array",
+    "Object": "Object",
+}
+
+
+# The eight operator names `is_json` mints. Anything that needs to recognise an
+# IS JSON test reads this rather than re-spelling the names.
+IS_JSON_OPERATORS = frozenset(
+    f"Is{neg}Json{kind}" for kind in ("Value", "Scalar", "Array", "Object")
+    for neg in ("", "Not")
+)
+
+
+def is_json(branch, alias: Optional[List[str]] = None, key=None):
+    """`operand IS [NOT] JSON [kind]`, as a UNARY_OPERATOR node.
+
+    Same shape as `_null_test`: the operand rides on `.centre`, and the polarity
+    is baked into the operator name rather than left on a `negated` flag, so
+    INVERSIONS can flip `NOT (x IS JSON)` without a special case.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    unique_keys = branch.get("unique_keys")
+    if unique_keys is not None:
+        # Plain well-formedness is one non-allocating streaming pass. Duplicate-key
+        # detection means tracking every key at every nesting level — a materially
+        # more expensive kernel nobody has asked for yet. Refused explicitly rather
+        # than accepted and ignored: silently answering the WITHOUT question when
+        # WITH was asked would be a wrong answer, not a slow one. Ruled by the
+        # architect 2026-09-22 as a deliberate first-cut partial.
+        clause = "WITH UNIQUE KEYS" if unique_keys == "WithUniqueKeys" else "WITHOUT UNIQUE KEYS"
+        raise UnsupportedSyntaxError(
+            f"`IS JSON ... {clause}` is not supported. "
+            "Unique-key checking is not implemented; remove the clause to test "
+            "well-formedness only."
+        )
+
+    kind = branch.get("kind")
+    if kind not in _IS_JSON_KINDS:
+        raise UnsupportedSyntaxError(f"Unrecognized `IS JSON` kind: {kind}")
+
+    operator = ("IsNotJson" if branch["negated"] else "IsJson") + _IS_JSON_KINDS[kind]
+    return Node(
+        NodeType.UNARY_OPERATOR,
+        value=operator,
+        centre=build(branch["expr"]),
+        alias=alias,
     )
 
 
@@ -3155,6 +3239,7 @@ BUILDERS = {
     "Interval": literal_interval,
     "InUnnest": in_unnest,
     "IsFalse": is_compare,
+    "IsJson": is_json,
     "IsNotFalse": is_compare,
     "IsNotNull": is_compare,
     "IsNotTrue": is_compare,

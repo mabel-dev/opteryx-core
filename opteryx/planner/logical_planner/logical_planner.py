@@ -730,13 +730,18 @@ def _validate_where_clause_expression(
         return
 
     # Allowed: IS TRUE/FALSE/NULL
-    if node_type == NodeType.UNARY_OPERATOR and node.value in (
-        "IsTrue",
-        "IsNotTrue",
-        "IsFalse",
-        "IsNotFalse",
-        "IsNull",
-        "IsNotNull",
+    if node_type == NodeType.UNARY_OPERATOR and (
+        node.value
+        in (
+            "IsTrue",
+            "IsNotTrue",
+            "IsFalse",
+            "IsNotFalse",
+            "IsNull",
+            "IsNotNull",
+        )
+        # IS [NOT] JSON is likewise a boolean test over one operand.
+        or node.value in logical_planner_builders.IS_JSON_OPERATORS
     ):
         return
 
@@ -1499,7 +1504,7 @@ def _window_spec_nodes(over: Optional[dict]) -> Tuple[list, list]:
     _window_order_by = [
         (
             _strip_outer_nesting(logical_planner_builders.build(item["expr"])),
-            True if item["options"]["asc"] is None else item["options"]["asc"],
+            logical_planner_builders.sort_is_ascending(item["options"]),
         )
         for item in _over.get("order_by", [])
     ]
@@ -2311,7 +2316,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         _order_by = [
             (
                 _strip_outer_nesting(logical_planner_builders.build(item["expr"])),
-                True if item["options"]["asc"] is None else item["options"]["asc"],
+                logical_planner_builders.sort_is_ascending(item["options"]),
             )
             for item in _order_by["kind"]["Expressions"]
         ]
@@ -6445,7 +6450,7 @@ def plan_optimize_table(statement, **kwargs):
                 "Expressions": [
                     {
                         "expr": {"Identifier": {"value": column}},
-                        "options": {"asc": None, "nulls_first": None},
+                        "options": {"sort": None, "nulls_first": None},
                         "with_fill": None,
                     }
                     for column in _sort_columns

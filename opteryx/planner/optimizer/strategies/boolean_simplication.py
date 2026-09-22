@@ -44,6 +44,10 @@ HALF_INVERSIONS: dict = {
     "IsTrue": "IsNotTrue",
     "IsFalse": "IsNotFalse",
     "IsEmpty": "IsNotEmpty",
+    "IsJsonValue": "IsNotJsonValue",
+    "IsJsonScalar": "IsNotJsonScalar",
+    "IsJsonArray": "IsNotJsonArray",
+    "IsJsonObject": "IsNotJsonObject",
     # Any to All conversions (De Morgan's laws)
     "AnyOpEq": "AllOpNotEq",  # NOT(ANY x = y) → ALL x != y
     "AnyOpGtEq": "AllOpLt",  # NOT(ANY x >= y) → ALL x < y

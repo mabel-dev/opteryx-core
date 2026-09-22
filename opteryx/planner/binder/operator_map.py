@@ -9,6 +9,7 @@ from opteryx.exceptions import (
 )
 from opteryx.expression import NodeType
 from opteryx.expression.operator_catalog import is_known_operator
+from opteryx.planner.logical_planner.logical_planner_builders import IS_JSON_OPERATORS
 from opteryx.types.logical_type import LogicalCategory as OT
 from opteryx.types.logical_type import LogicalCategory as LC
 from opteryx.types.logical_type import (
@@ -433,6 +434,17 @@ _SQL_TO_LC: Dict[OT, LC] = {
 # heap address into user data. Removing these rows closes both at the binder.
 _STRING_CATEGORIES = frozenset({LC.VARCHAR, LC.NVARCHAR, LC.VARBINARY})
 
+# Operand categories `IS [NOT] JSON` accepts — see determine_type. `None` is an
+# unresolved operand and is left to the kernel, which fails loud.
+#
+# The untyped NULL literal is NOT here: `NULL IS JSON` is a type error, exactly
+# as `NULL IS TRUE` and `~NULL` already are. A NULL that arrived through a typed
+# column or a CAST is admitted and answers FALSE — the predicate is total, the
+# bare literal simply has no operand type to test.
+_IS_JSON_OPERAND_CATEGORIES = frozenset(
+    {LC.VARCHAR, LC.NVARCHAR, LC.VARBINARY, LC.VARIANT, None}
+)
+
 
 def _is_internal_operator(operator: str) -> bool:
     return operator.startswith(("AnyOp", "AllOp")) or operator in {
@@ -462,6 +474,20 @@ def determine_type(node):
             raise IncorrectTypeError(
                 f"Expected a BOOLEAN value for {convert_camel_to_sql_case(node.value)}, but received {node.centre.schema_column.category}."
             )
+        if node.node_type == NodeType.UNARY_OPERATOR and node.value in IS_JSON_OPERATORS:
+            # `IS [NOT] JSON` tests JSON TEXT. VARIANT is admitted because it is
+            # string-arena backed JSON text with the same slot layout, so
+            # `(doc -> 'a') IS JSON` composes; the kernel reads all four the same
+            # way. Anything else has no document to be well-formed. NULL passes
+            # (an untyped NULL literal) — the predicate is total and answers FALSE.
+            operand_category = node.centre.schema_column.category
+            if operand_category not in _IS_JSON_OPERAND_CATEGORIES:
+                raise IncorrectTypeError(
+                    f"Expected JSON text (VARCHAR, NVARCHAR, VARBINARY or VARIANT) "
+                    f"for {convert_camel_to_sql_case(node.value)}, but received "
+                    f"{operand_category}."
+                )
+            return BOOLEAN
         if node.value == "BitwiseNot":
             operand_type = node.centre.schema_column.category
             if operand_type not in (OT.INTEGER, None):

@@ -48,6 +48,7 @@ import random
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable
+from typing import FrozenSet
 from typing import Iterator
 from typing import List
 from typing import Optional
@@ -56,8 +57,11 @@ from typing import Sequence
 from opteryx import config
 from tests.fuzzing.harness import rows
 from tests.fuzzing.harness import scalar
+from tests.fuzzing.single_table_grammar import PRECEDENCE
 from tests.fuzzing.single_table_grammar import SelectQuery
 from tests.fuzzing.single_table_grammar import Statement
+from tests.fuzzing.single_table_grammar import precedence_dependent_operators
+from tests.fuzzing.single_table_grammar import precedence_probes
 
 
 def row_count(sql: str) -> int:
@@ -145,6 +149,13 @@ class OracleViolation(AssertionError):
 class OracleResult:
     name: str
     queries_executed: int
+    #: Only `parenthesisation_is_neutral` sets these. `probed`: the case had a
+    #: type-valid mis-parse to try. `discriminated`: one of those mis-parses
+    #: answered differently, so this case could have caught that parser bug.
+    probed: bool = False
+    discriminated: bool = False
+    #: The PRECEDENCE entries this case's minimal spelling depended on.
+    exercised: FrozenSet[str] = frozenset()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -632,6 +643,62 @@ def optimizer_strategy_differential(statement: Statement, rng: random.Random) ->
     return OracleResult(f"optimizer_strategy_differential", 2)
 
 
+# Mis-parses executed per case. Every probe is one more query, and a case where
+# the first two all agree rarely has a third that does not.
+_PROBES_PER_CASE = 2
+
+
+def parenthesisation_is_neutral(statement: Statement, rng: random.Random) -> OracleResult:
+    """The WHERE clause must answer the same with only the parentheses PRECEDENCE requires.
+
+    THE ONLY ORACLE HERE WITH AN INDEPENDENT REFERENCE FOR THE PARSE. Every other
+    one runs the engine's parse on both sides, so a precedence bug happens twice
+    and cancels. This one renders a single predicate tree two ways — fully
+    parenthesised (no precedence rule involved) and minimally parenthesised by
+    the fuzzer's own PRECEDENCE table — and a parser that binds any operator
+    differently from that table builds a different tree from the second spelling.
+    The table, not the engine, says what the text means.
+
+    A mis-parse then shows up in one of two ways, and both fail the case: an
+    ill-typed tree raises, and a well-typed one answers differently — IF the data
+    tells the two trees apart. That "if" is measured, not assumed: up to
+    `_PROBES_PER_CASE` mis-parses of this very predicate (single_table_grammar
+    .precedence_probes) are executed, and a case counts as DISCRIMINATING when
+    one of them answers differently. The run ledger reports the rate; a rate near
+    zero means this oracle is decoration and the ledger says so.
+    """
+    select = _require_select(statement, "parenthesisation_is_neutral")
+    tree = select.where_tree
+    if tree is None:
+        raise AssertionError("parenthesisation_is_neutral applied to a statement with no WHERE")
+
+    minimal = tree.minimal(PRECEDENCE)
+    parenthesised = multiset_positional(select.render())
+    bare = multiset_positional(select.render(replace_where=minimal))
+    if parenthesised != bare:
+        raise OracleViolation(
+            f"removing the parentheses PRECEDENCE says are redundant changed the result: "
+            f"{len(parenthesised)} rows fully parenthesised, {len(bare)} minimally — the parser "
+            f"binds some operator differently from the fuzzer's precedence table\n"
+            f"  first difference: {_first_difference(parenthesised, bare)}\n"
+            f"  full:    {tree.full()}\n  minimal: {minimal}\n  {select.render()}"
+        )
+
+    probes = precedence_probes(tree, PRECEDENCE)
+    chosen = rng.sample(probes, min(_PROBES_PER_CASE, len(probes)))
+    discriminated = False
+    for probe in chosen:
+        if multiset_positional(select.render(replace_where=probe.full())) != parenthesised:
+            discriminated = True
+    return OracleResult(
+        "parenthesisation_is_neutral",
+        2 + len(chosen),
+        probed=bool(chosen),
+        discriminated=discriminated,
+        exercised=frozenset(precedence_dependent_operators(tree, PRECEDENCE)),
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Applicability
 # ─────────────────────────────────────────────────────────────────────────────
@@ -694,6 +761,7 @@ def applicable_oracles(statement: Statement) -> List[Oracle]:
             if statement.deterministic_multiset:
                 oracles.append(tautology_is_neutral)
                 oracles.append(double_negation_is_neutral)
+                oracles.append(parenthesisation_is_neutral)
         if select.order_by and statement.deterministic_multiset:
             oracles.append(order_by_does_not_change_the_multiset)
         if select.limit is not None and select.offset is None:

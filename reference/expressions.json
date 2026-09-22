@@ -31,7 +31,16 @@
         "syntax_forms": [
             "expr BETWEEN low AND high",
             "expr NOT BETWEEN low AND high"
-        ]
+        ],
+        "precedence": {
+            "level": 10,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "BETWEEN",
+                "NOT BETWEEN"
+            ]
+        }
     },
     "CASE": {
         "ast_symbols": [
@@ -65,8 +74,17 @@
         "syntax_forms": [
             "CAST(expr AS type)",
             "TRY_CAST(expr AS type)",
-            "SAFE_CAST(expr AS type)"
-        ]
+            "SAFE_CAST(expr AS type)",
+            "expr::type"
+        ],
+        "precedence": {
+            "level": 2,
+            "levels": 15,
+            "position": "postfix",
+            "spellings": [
+                "::"
+            ]
+        }
     },
     "CUBE": {
         "ast_symbols": [
@@ -217,7 +235,16 @@
         "syntax_forms": [
             "a IS DISTINCT FROM b",
             "a IS NOT DISTINCT FROM b"
-        ]
+        ],
+        "precedence": {
+            "level": 12,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "IS DISTINCT FROM",
+                "IS NOT DISTINCT FROM"
+            ]
+        }
     },
     "MATCH_AGAINST": {
         "ast_symbols": [
@@ -389,7 +416,17 @@
         "syntax_forms": [
             "expr SIMILAR TO 'pattern'",
             "expr NOT SIMILAR TO 'pattern'"
-        ]
+        ],
+        "precedence": {
+            "level": 11,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "SIMILAR TO",
+                "NOT SIMILAR TO"
+            ],
+            "note": "Pattern matching binds LOOSER than comparison. Postgres has it tighter, so `a = b LIKE c` is `(a = b) LIKE c` here and `a = (b LIKE c)` there."
+        }
     },
     "STRING_LITERAL": {
         "ast_symbols": [

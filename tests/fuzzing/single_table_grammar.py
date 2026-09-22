@@ -568,6 +568,13 @@ _AGGREGATE_RETURNS: Dict[str, Optional[Ty]] = {
     "SUM": None,  # same as input
     "AVG": Ty.FLOAT,
     "MEDIAN": Ty.FLOAT,
+    # FLOAT whatever the input, measured: `VAR_POP("row_id")` over an INT64
+    # column returns a float. Absent here they defaulted to "same as input", so a
+    # bitwise operator over their INTEGER-typed alias was rejected by the binder.
+    "STDDEV_POP": Ty.FLOAT,
+    "STDDEV_SAMP": Ty.FLOAT,
+    "VAR_POP": Ty.FLOAT,
+    "VAR_SAMP": Ty.FLOAT,
     "MIN": None,
     "MAX": None,
     "COUNT": Ty.INTEGER,
@@ -635,11 +642,639 @@ class Relation:
         return [column for column in self.columns if column.ty in wanted]
 
 
-@dataclass(frozen=True)
-class Expr:
-    sql: str
+# ─────────────────────────────────────────────────────────────────────────────
+# Expression trees and the precedence reference
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# WHY THE GENERATOR HOLDS A TREE
+# ------------------------------
+# Every expression and predicate this module emits used to be rendered on the
+# spot, fully parenthesised: `(("a" + 1) * 2)`, `(("x" = 1) AND ("y" IS NULL))`.
+# That spelling depends on no precedence rule at all, so the fuzzer could not
+# find a single operator-precedence bug — and every oracle is metamorphic, so a
+# mis-parse happens identically on both sides of each comparison and cancels.
+#
+# The nodes below keep the structure, and render it two ways:
+#
+#   full()              every operator parenthesised, byte-for-byte the text this
+#                       module emitted before the tree existed. It is what every
+#                       statement is still generated with — readable repros, and
+#                       the side of the comparison no precedence rule can touch.
+#   minimal(table)      only the parentheses `table` says the parser needs.
+#
+# `parenthesisation_is_neutral` (single_table_oracles.py) executes both. The two
+# must answer identically, and the only thing that can make them differ is the
+# parser binding an operator differently from PRECEDENCE — which makes the table
+# below the INDEPENDENT REFERENCE for the parse, the thing a metamorphic oracle
+# otherwise lacks.
+
+# Never parenthesised: a column, a literal, a call, CASE ... END. Above every
+# binding strength PRECEDENCE can hold.
+_ATOMIC = 1_000
+
+
+def _load_precedence() -> Dict[str, int]:
+    """Spelling -> binding strength (higher binds tighter), from `reference/`.
+
+    THE TABLE IS THE PUBLISHED DOCUMENTATION, not a copy of it. Every operator
+    entry in operators.json, unary_ops.json and the operator-shaped entries of
+    expressions.json carries a `precedence` object, exported from the hand-written
+    reference/precedence_catalog.py — the same fields the docs site renders its
+    precedence table from. Reading them here means this oracle checks what the
+    documentation CLAIMS against what the parser DOES: a doc that is wrong fails
+    the fuzzer, and so does a parser change the doc does not record.
+
+    Prefix spellings are keyed `prefix <spelling>`, because unary `-` and binary
+    `-` share a spelling but not a binding strength.
+    """
+    table: Dict[str, int] = {}
+    for catalog in ("operators.json", "unary_ops.json", "expressions.json"):
+        for key, entry in _load_json(catalog).items():
+            if "precedence" not in entry:
+                continue
+            precedence = entry["precedence"]
+            if precedence is None:
+                raise AssertionError(f"reference/{catalog} `{key}` has a null precedence")
+            strength = precedence["levels"] + 1 - precedence["level"]
+            for spelling in precedence["spellings"]:
+                name = f"prefix {spelling}" if precedence["position"] == "prefix" else spelling
+                if table.get(name, strength) != strength:
+                    raise AssertionError(
+                        f"reference/ gives `{name}` two binding strengths ({table[name]} and "
+                        f"{strength}); the precedence table must place a spelling once"
+                    )
+                table[name] = strength
+    return table
+
+
+#: Operator spelling -> binding strength, read from `reference/` (see
+#: _load_precedence). A node naming a spelling absent from it raises KeyError
+#: when rendered minimally, and _EMITTED_SPELLINGS is checked against it at
+#: import — an undocumented operator fails loud rather than being rendered by a
+#: guess.
+PRECEDENCE: Dict[str, int] = _load_precedence()
+
+#: Every PRECEDENCE key this grammar can emit. `prefix -` and `::` are carried by
+#: literals (`-5`, `'2005-01-01'::DATE`), which are operator expressions to the
+#: parser even though the generator mints them as atoms.
+_EMITTED_SPELLINGS = frozenset(
+    {
+        "OR", "AND", "prefix NOT",
+        "IS NULL", "IS NOT NULL", "IS TRUE", "IS FALSE", "IS NOT TRUE", "IS NOT FALSE",
+        "IS DISTINCT FROM", "IS NOT DISTINCT FROM",
+        "LIKE", "NOT LIKE", "ILIKE", "NOT ILIKE", "RLIKE", "NOT RLIKE",
+        "=", "!=", "<>", "<", "<=", ">", ">=", "BETWEEN", "NOT BETWEEN", "IN", "NOT IN",
+        "|", "^", "<<", ">>", "&", "+", "-", "*", "/", "%", "||",
+        "prefix -", "::", "->>", "@>", "@>>",
+    }
+)
+_UNDOCUMENTED = sorted(_EMITTED_SPELLINGS - set(PRECEDENCE))
+if _UNDOCUMENTED:
+    raise AssertionError(
+        f"the grammar emits operators reference/ publishes no precedence for: {_UNDOCUMENTED}. "
+        f"Add them to reference/precedence_catalog.py and regenerate."
+    )
+
+
+class Node:
+    """One node of a generated expression. `ty` is the value's generator type."""
+
     ty: Ty
 
+    def full(self) -> str:
+        raise NotImplementedError
+
+    def minimal(self, table: Dict[str, int]) -> str:
+        return self._minimal(table)[0]
+
+    def _minimal(self, table: Dict[str, int]) -> Tuple[str, int]:
+        """(text, binding level of that text) under `table`."""
+        raise NotImplementedError
+
+
+def _wrapped(child: Node, table: Dict[str, int], needs_parens: bool) -> str:
+    text, _ = child._minimal(table)
+    return f"({text})" if needs_parens else text
+
+
+def _as_left_operand(child: Node, level: int, table: Dict[str, int]) -> str:
+    # Left-associative: an equal-level left operand needs no parentheses.
+    _, child_level = child._minimal(table)
+    return _wrapped(child, table, child_level < level)
+
+
+def _as_right_operand(child: Node, level: int, table: Dict[str, int]) -> str:
+    # The right operand is parsed with parse_subexpr(level), which stops at the
+    # first operator that does not bind STRICTLY tighter — so an equal-level
+    # right operand does need them.
+    _, child_level = child._minimal(table)
+    return _wrapped(child, table, child_level <= level)
+
+
+@dataclass(frozen=True)
+class Atom(Node):
+    """Text with no operator structure the renderer needs to see inside.
+
+    `binding` names the PRECEDENCE entry for a literal that is secretly an
+    operator expression (`-5`, `'2005-01-01'::DATE`); None means truly atomic.
+    """
+
+    text: str
+    ty: Ty
+    binding: Optional[str] = None
+
+    def full(self) -> str:
+        return self.text
+
+    def _minimal(self, table: Dict[str, int]) -> Tuple[str, int]:
+        return self.text, _ATOMIC if self.binding is None else table[self.binding]
+
+
+@dataclass(frozen=True)
+class Slot:
+    """A child inside a self-delimiting construct (a call's argument list, CAST,
+    CASE ... END). `floor` names the level the construct parses the child at;
+    None means parse_expr — the whole expression, so no parentheses are needed.
+    POSITION's needle is the one that is not: it is parsed at the BETWEEN level
+    so the parser can find the `IN` keyword after it."""
+
+    node: Node
+    floor: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class Delimited(Node):
+    """A construct its own keywords or parentheses delimit: `NAME(a, b)`,
+    `CAST(x AS T)`, `(CASE WHEN c THEN t ELSE e END)`. `wrap_full` is the redundant
+    outer pair the fully-parenthesised spelling has always put round a CASE."""
+
+    pieces: Tuple[object, ...]  # str | Slot
+    ty: Ty
+    wrap_full: bool = False
+
+    def full(self) -> str:
+        text = "".join(p if isinstance(p, str) else p.node.full() for p in self.pieces)
+        return f"({text})" if self.wrap_full else text
+
+    def _minimal(self, table: Dict[str, int]) -> Tuple[str, int]:
+        parts: List[str] = []
+        for piece in self.pieces:
+            if isinstance(piece, str):
+                parts.append(piece)
+            elif piece.floor is None:
+                parts.append(piece.node._minimal(table)[0])
+            else:
+                parts.append(_as_right_operand(piece.node, table[piece.floor], table))
+        return "".join(parts), _ATOMIC
+
+
+@dataclass(frozen=True)
+class Binary(Node):
+    """`left op right`. `full_parens=False` only for the one operator whose fully-
+    parenthesised spelling never carried its own pair: the JSON accessor inside
+    `("doc" ->> 'key' = 'x')`."""
+
+    op: str
+    left: Node
+    right: Node
+    ty: Ty
+    full_parens: bool = True
+
+    def full(self) -> str:
+        text = f"{self.left.full()} {self.op} {self.right.full()}"
+        return f"({text})" if self.full_parens else text
+
+    def _minimal(self, table: Dict[str, int]) -> Tuple[str, int]:
+        level = table[self.op]
+        left = _as_left_operand(self.left, level, table)
+        right = _as_right_operand(self.right, level, table)
+        return f"{left} {self.op} {right}", level
+
+
+@dataclass(frozen=True)
+class Prefix(Node):
+    """`NOT operand`. `full_parens=False` is the `a AND NOT (b)` connective, whose
+    NOT never carried a pair of its own."""
+
+    op: str
+    operand: Node
+    ty: Ty
+    full_parens: bool = True
+
+    def full(self) -> str:
+        text = f"{self.op} {self.operand.full()}"
+        return f"({text})" if self.full_parens else text
+
+    def _minimal(self, table: Dict[str, int]) -> Tuple[str, int]:
+        level = table[f"prefix {self.op}"]
+        # A prefix operand never needs parentheses to stop it binding LEFTWARD;
+        # only its own extent matters, and a nested prefix has none to lose.
+        if isinstance(self.operand, Prefix):
+            operand = self.operand._minimal(table)[0]
+        else:
+            operand = _as_right_operand(self.operand, level, table)
+        return f"{self.op} {operand}", level
+
+
+@dataclass(frozen=True)
+class Postfix(Node):
+    """`operand IS NULL`, `operand IS TRUE`, ..."""
+
+    op: str
+    operand: Node
+    ty: Ty
+
+    def full(self) -> str:
+        return f"({self.operand.full()} {self.op})"
+
+    def _minimal(self, table: Dict[str, int]) -> Tuple[str, int]:
+        level = table[self.op]
+        return f"{_as_left_operand(self.operand, level, table)} {self.op}", level
+
+
+@dataclass(frozen=True)
+class Between(Node):
+    operand: Node
+    low: Node
+    high: Node
+    negated: bool
+    ty: Ty
+
+    @property
+    def op(self) -> str:
+        return "NOT BETWEEN" if self.negated else "BETWEEN"
+
+    def full(self) -> str:
+        return f"({self.operand.full()} {self.op} {self.low.full()} AND {self.high.full()})"
+
+    def _minimal(self, table: Dict[str, int]) -> Tuple[str, int]:
+        level = table[self.op]
+        operand = _as_left_operand(self.operand, level, table)
+        # Both bounds are parsed with parse_subexpr(Between).
+        low = _as_right_operand(self.low, level, table)
+        high = _as_right_operand(self.high, level, table)
+        return f"{operand} {self.op} {low} AND {high}", level
+
+
+@dataclass(frozen=True)
+class InList(Node):
+    """`operand IN (members)`. The member list is self-delimiting literals;
+    `member_ty` is what the operand must stay for the list to remain well-typed."""
+
+    operand: Node
+    members: str
+    negated: bool
+    member_ty: Ty
+    ty: Ty
+
+    @property
+    def op(self) -> str:
+        return "NOT IN" if self.negated else "IN"
+
+    def full(self) -> str:
+        return f"({self.operand.full()} {self.op} ({self.members}))"
+
+    def _minimal(self, table: Dict[str, int]) -> Tuple[str, int]:
+        level = table[self.op]
+        return f"{_as_left_operand(self.operand, level, table)} {self.op} ({self.members})", level
+
+
+@dataclass(frozen=True)
+class Expr:
+    node: Node
+
+    @property
+    def sql(self) -> str:
+        return self.node.full()
+
+    @property
+    def ty(self) -> Ty:
+        return self.node.ty
+
+
+def _literal_binding(text: str) -> Optional[str]:
+    """The PRECEDENCE entry a literal's spelling makes it an operator expression
+    under, if any. Read off the text, because that is what the parser sees."""
+    if text.startswith("-"):
+        return "prefix -"
+    if text.endswith(("::DATE", "::TIMESTAMP")):
+        return "::"
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mis-parse probes
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The parenthesisation oracle can only see a precedence bug when the data tells
+# the two parses apart — and plenty of generated predicates are precedence-
+# insensitive (`a AND b OR c` agrees with `a AND (b OR c)` whenever `a` is true).
+# A probe is the tree a parser would build if it bound ONE adjacent operator pair
+# the other way: at each site where minimal() dropped a pair of parentheses, the
+# two operators are re-associated. If executing a probe answers differently from
+# the real tree, this case would have caught a parser that got that pair wrong:
+# the case DISCRIMINATED. The oracle counts those, so a run can say whether the
+# oracle is testing anything.
+#
+# A probe must be a query that could have been generated, or it will fail for a
+# reason that has nothing to do with precedence. So it is only built when it
+# type-checks under `_result_type`, and when it moves nothing into a position the
+# generator itself refuses (a literal-only operand, a NOT over a shape with no
+# negated kernel, an RLIKE anywhere but where the generator put it).
+
+# Re-associating a chain of ONE of these (`a OR b OR c` -> `a OR (b OR c)`) can
+# never change the answer, so it is not a probe: it would only inflate the count
+# of cases that "had something to discriminate".
+_ASSOCIATIVE = frozenset({"AND", "OR", "+", "*", "||", "&", "|", "^"})
+
+# Operators whose right operand the generator only ever makes a literal: a
+# divisor that cannot be zero, a shift count inside 0..63.
+_LITERAL_RIGHT_OPERAND = frozenset({"/", "%", "<<", ">>"})
+
+# Spellings the generator suppresses beneath a NOT (`negated_forms_allowed=False`)
+# because they have no native kernel there — see
+# single_table_known_gaps/float-in-list-only-works-at-top-level and
+# negated-array-contains-has-no-kernel. A probe that moves one under a NOT would
+# report that registered defect instead of testing precedence.
+_NOT_UNDER_NOT = frozenset(
+    {
+        "IS NOT NULL",
+        "IS NOT TRUE",
+        "IS NOT FALSE",
+        "IS NOT DISTINCT FROM",
+        "NOT LIKE",
+        "NOT ILIKE",
+        "NOT RLIKE",
+        "NOT BETWEEN",
+        "NOT IN",
+        "@>",
+        "@>>",
+    }
+)
+
+
+def _result_type(op: str, operands: Tuple[Ty, ...]) -> Optional[Ty]:
+    """The type `op` yields over `operands`, or None where the generator would
+    not build it. Deliberately the generator's own rules, not the engine's full
+    coercion lattice: a probe exists to be a query this grammar could emit."""
+    if Ty.UNKNOWN in operands:
+        return None
+    if op in ("AND", "OR"):
+        return Ty.BOOLEAN if operands == (Ty.BOOLEAN, Ty.BOOLEAN) else None
+    if op in ("NOT", "IS TRUE", "IS FALSE", "IS NOT TRUE", "IS NOT FALSE"):
+        return Ty.BOOLEAN if operands == (Ty.BOOLEAN,) else None
+    if op in ("IS NULL", "IS NOT NULL"):
+        return Ty.BOOLEAN if operands[0] in SCALAR else None
+    left = operands[0]
+    same = len(operands) == 2 and operands[1] == left
+    if op in _EQUALITY or op in ("IS DISTINCT FROM", "IS NOT DISTINCT FROM"):
+        return Ty.BOOLEAN if same and left in SCALAR else None
+    if op in _COMPARISONS:
+        return Ty.BOOLEAN if same and left in SCALAR and left is not Ty.BOOLEAN else None
+    if op in ("LIKE", "NOT LIKE"):
+        return Ty.BOOLEAN if left in (Ty.VARCHAR, Ty.VARBINARY) and operands[1] is Ty.VARCHAR else None
+    if op in ("ILIKE", "NOT ILIKE", "RLIKE", "NOT RLIKE"):
+        return Ty.BOOLEAN if operands == (Ty.VARCHAR, Ty.VARCHAR) else None
+    if op in ("BETWEEN", "NOT BETWEEN"):
+        return Ty.BOOLEAN if left in NUMERIC + TEMPORAL and operands == (left, left, left) else None
+    if op in ("+", "-", "*"):
+        return left if same and left in NUMERIC else None
+    if op == "/":
+        return left if same and left is Ty.FLOAT else None
+    if op == "%":
+        return left if same and left in (Ty.INTEGER, Ty.FLOAT) else None
+    if op in ("&", "|", "^", "<<", ">>"):
+        return Ty.INTEGER if same and left is Ty.INTEGER else None
+    if op == "||":
+        return Ty.VARCHAR if same and left is Ty.VARCHAR else None
+    # IN is typed by `_retyped` against its member type; the accessor and
+    # containment family are never re-associated (their operands are not typed
+    # finely enough here to say what a probe would mean).
+    return None
+
+
+def _retyped(node: Node) -> Optional[Node]:
+    """`node` with its type recomputed from its (possibly moved) operands."""
+    if isinstance(node, Binary):
+        ty = _result_type(node.op, (node.left.ty, node.right.ty))
+        return None if ty is None else Binary(node.op, node.left, node.right, ty)
+    if isinstance(node, Prefix):
+        ty = _result_type(node.op, (node.operand.ty,))
+        return None if ty is None else Prefix(node.op, node.operand, ty)
+    if isinstance(node, Postfix):
+        ty = _result_type(node.op, (node.operand.ty,))
+        return None if ty is None else Postfix(node.op, node.operand, ty)
+    if isinstance(node, Between):
+        ty = _result_type(node.op, (node.operand.ty, node.low.ty, node.high.ty))
+        return None if ty is None else Between(node.operand, node.low, node.high, node.negated, ty)
+    if isinstance(node, InList):
+        if node.operand.ty is not node.member_ty:
+            return None
+        return node
+    raise AssertionError(f"cannot retype {type(node).__name__}")
+
+
+def _replace_leftmost(node: Node, build) -> Optional[Node]:
+    """`node` with its leftmost operand L replaced by build(L), retyped."""
+    if isinstance(node, Binary):
+        inner = build(node.left)
+        return None if inner is None else _retyped(Binary(node.op, inner, node.right, node.ty))
+    if isinstance(node, Postfix):
+        inner = build(node.operand)
+        return None if inner is None else _retyped(Postfix(node.op, inner, node.ty))
+    if isinstance(node, Between):
+        inner = build(node.operand)
+        return None if inner is None else _retyped(
+            Between(inner, node.low, node.high, node.negated, node.ty)
+        )
+    if isinstance(node, InList):
+        inner = build(node.operand)
+        return None if inner is None else _retyped(
+            InList(inner, node.members, node.negated, node.member_ty, node.ty)
+        )
+    return None
+
+
+def _replace_rightmost(node: Node, build) -> Optional[Node]:
+    """`node` with its rightmost operand R replaced by build(R), retyped."""
+    if isinstance(node, Binary):
+        if node.op in _LITERAL_RIGHT_OPERAND:
+            return None
+        inner = build(node.right)
+        return None if inner is None else _retyped(Binary(node.op, node.left, inner, node.ty))
+    if isinstance(node, Prefix):
+        inner = build(node.operand)
+        return None if inner is None else _retyped(Prefix(node.op, inner, node.ty))
+    if isinstance(node, Between):
+        inner = build(node.high)
+        return None if inner is None else _retyped(
+            Between(node.operand, node.low, inner, node.negated, node.ty)
+        )
+    return None
+
+
+def _operator_level(node: Node, table: Dict[str, int]) -> int:
+    return node._minimal(table)[1]
+
+
+def _local_probes(node: Node, table: Dict[str, int]) -> List[Node]:
+    """Re-associations of `node` with each child whose parentheses minimal() drops."""
+    probes: List[Optional[Node]] = []
+    if isinstance(node, Binary):
+        level = table[node.op]
+        left, right = node.left, node.right
+        same_chain = node.op in _ASSOCIATIVE and isinstance(left, Binary) and left.op == node.op
+        if not same_chain and _ATOMIC > _operator_level(left, table) >= level:
+            # `a op_c b op r`, mis-bound as `a op_c (b op r)`.
+            probes.append(
+                _replace_rightmost(left, lambda b: _retyped(Binary(node.op, b, right, node.ty)))
+            )
+        if _ATOMIC > _operator_level(right, table) > level:
+            # `l op a op_c b`, mis-bound as `(l op a) op_c b`.
+            probes.append(
+                _replace_leftmost(right, lambda a: _retyped(Binary(node.op, left, a, node.ty)))
+            )
+    elif isinstance(node, Prefix):
+        level = table[_table_key(node)]
+        if not isinstance(node.operand, Prefix) and (
+            _ATOMIC > _operator_level(node.operand, table) > level
+        ):
+            # `NOT a op b`, mis-bound as `(NOT a) op b`.
+            probes.append(
+                _replace_leftmost(node.operand, lambda a: _retyped(Prefix(node.op, a, node.ty)))
+            )
+    elif isinstance(node, Postfix):
+        level = table[node.op]
+        if _ATOMIC > _operator_level(node.operand, table) >= level:
+            # `a op b IS NULL`, mis-bound as `a op (b IS NULL)`.
+            probes.append(
+                _replace_rightmost(node.operand, lambda b: _retyped(Postfix(node.op, b, node.ty)))
+            )
+    return [
+        probe
+        for probe in probes
+        if probe is not None and probe.ty is node.ty and _probe_is_generatable(probe)
+    ]
+
+
+def _children(node: Node) -> List[Node]:
+    if isinstance(node, Binary):
+        return [node.left, node.right]
+    if isinstance(node, (Prefix, Postfix, InList)):
+        return [node.operand]
+    if isinstance(node, Between):
+        return [node.operand, node.low, node.high]
+    if isinstance(node, Delimited):
+        return [piece.node for piece in node.pieces if isinstance(piece, Slot)]
+    return []
+
+
+def _with_child(node: Node, index: int, child: Node) -> Node:
+    """`node` with its `index`-th child (in _children order) replaced."""
+    if isinstance(node, Binary):
+        left, right = (child, node.right) if index == 0 else (node.left, child)
+        return Binary(node.op, left, right, node.ty, node.full_parens)
+    if isinstance(node, Prefix):
+        return Prefix(node.op, child, node.ty, node.full_parens)
+    if isinstance(node, Postfix):
+        return Postfix(node.op, child, node.ty)
+    if isinstance(node, InList):
+        return InList(child, node.members, node.negated, node.member_ty, node.ty)
+    if isinstance(node, Between):
+        parts = [node.operand, node.low, node.high]
+        parts[index] = child
+        return Between(parts[0], parts[1], parts[2], node.negated, node.ty)
+    if isinstance(node, Delimited):
+        pieces = list(node.pieces)
+        slots = [position for position, piece in enumerate(pieces) if isinstance(piece, Slot)]
+        pieces[slots[index]] = Slot(child, pieces[slots[index]].floor)
+        return Delimited(tuple(pieces), node.ty, node.wrap_full)
+    raise AssertionError(f"{type(node).__name__} has no children")
+
+
+def precedence_probes(node: Node, table: Dict[str, int]) -> List[Node]:
+    """Every whole tree that differs from `node` by one mis-bound operator pair."""
+    probes = list(_local_probes(node, table))
+    for index, child in enumerate(_children(node)):
+        probes.extend(_with_child(node, index, probe) for probe in precedence_probes(child, table))
+    return probes
+
+
+def _table_key(node: Node) -> Optional[str]:
+    """The PRECEDENCE entry that decides where `node` binds, if any."""
+    if isinstance(node, Atom):
+        return node.binding
+    if isinstance(node, Prefix):
+        return f"prefix {node.op}"
+    return _op_of(node)
+
+
+def precedence_dependent_operators(node: Node, table: Dict[str, int]) -> Set[str]:
+    """The PRECEDENCE entries whose parentheses minimal() drops somewhere in `node`.
+
+    Only these operators are tested by the parenthesisation oracle on this tree:
+    an operator whose every appearance keeps its parentheses, or has only atoms
+    beside it, reads the same whatever the parser thinks its precedence is.
+    """
+    found: Set[str] = set()
+    level = None
+    parent = None if isinstance(node, Atom) else _table_key(node)
+    if parent is not None:
+        level = table[parent]
+    for index, child in enumerate(_children(node)):
+        found |= precedence_dependent_operators(child, table)
+        name = _table_key(child)
+        if level is None or name is None or isinstance(node, Delimited):
+            continue
+        child_level = child._minimal(table)[1]
+        # The first operand of an infix or postfix form is its LEFT operand; every
+        # other operand (and a prefix operand) is parsed like a right operand.
+        is_left = index == 0 and not isinstance(node, Prefix)
+        if (child_level >= level) if is_left else (child_level > level):
+            found |= {parent, name}
+    return found
+
+
+def _subtree_nodes(node: Node) -> List[Node]:
+    found = [node]
+    for child in _children(node):
+        found.extend(_subtree_nodes(child))
+    return found
+
+
+def _op_of(node: Node) -> Optional[str]:
+    if isinstance(node, (Binary, Prefix, Postfix, Between, InList)):
+        return node.op
+    return None
+
+
+def _probe_is_generatable(probe: Node) -> bool:
+    nodes = _subtree_nodes(probe)
+    # RLIKE runs only where the generator put it (top-level predicate position,
+    # at most one connective deep); re-association moves it.
+    # single_table_known_gaps/rlike-outside-top-level-predicate-position.
+    if any(_op_of(n) in ("RLIKE", "NOT RLIKE") for n in nodes):
+        return False
+    for n in nodes:
+        if isinstance(n, Prefix) and n.op == "NOT":
+            for inner in _subtree_nodes(n.operand):
+                if _op_of(inner) in _NOT_UNDER_NOT:
+                    return False
+                if isinstance(inner, Binary) and isinstance(inner.right, Atom) and (
+                    inner.right.text.startswith("ANY(")
+                ):
+                    return False
+    return True
+
+
+# Longest run of infix operators one expression may chain past the depth budget,
+# and how often an infix operand is another infix operator. See
+# Generator._infix_operand.
+_MAX_INFIX_CHAIN = 3
+_INFIX_NEST_RATE = 0.5
+# How often a comparison's left operand is an infix chain outright. See
+# Generator._comparison_operand.
+_COMPARISON_CHAIN_RATE = 0.35
 
 # Interval units accepted by the temporal arithmetic path.
 _INTERVAL_UNITS = ("DAY", "HOUR", "MINUTE", "SECOND", "MONTH", "YEAR")
@@ -770,6 +1405,10 @@ class Generator:
             return f"'{moment}'::TIMESTAMP"
         raise AssertionError(f"no literal form for {ty}")
 
+    def literal_atom(self, ty: Ty) -> Atom:
+        text = self.literal(ty)
+        return Atom(text, ty, _literal_binding(text))
+
     def like_pattern(self) -> str:
         """A LIKE pattern with real metacharacters in it.
 
@@ -818,7 +1457,7 @@ class Generator:
                     "an ARRAY expression was requested over a relation with no ARRAY column; "
                     "can_produce() should have excluded this call site"
                 )
-            column = Expr(rng.choice(columns).quoted, Ty.ARRAY)
+            column = Expr(Atom(rng.choice(columns).quoted, Ty.ARRAY))
             if depth >= 2 or rng.random() < 0.6:
                 return column
             return self._function_call(ty, depth) or column
@@ -827,8 +1466,8 @@ class Generator:
         # a column or a literal — both are always well-typed.
         if depth >= 2 or rng.random() < 0.45:
             if columns and rng.random() < 0.75:
-                return Expr(rng.choice(columns).quoted, ty)
-            return Expr(self.literal(ty), ty)
+                return Expr(Atom(rng.choice(columns).quoted, ty))
+            return Expr(self.literal_atom(ty))
 
         builders = []
         if ty in NUMERIC:
@@ -856,10 +1495,69 @@ class Generator:
                 return built
 
         if columns:
-            return Expr(rng.choice(columns).quoted, ty)
-        return Expr(self.literal(ty), ty)
+            return Expr(Atom(rng.choice(columns).quoted, ty))
+        return Expr(self.literal_atom(ty))
 
-    def _arithmetic(self, ty: Ty, depth: int) -> Optional[Expr]:
+    # ── infix chains ─────────────────────────────────────────────────────────
+    #
+    # The general depth budget (`expression` falls back to a column or literal at
+    # depth 2, and a comparison's operands already start at depth 1) meant an
+    # arithmetic, bitwise or `||` operator in a WHERE clause only ever had
+    # columns and literals as operands. Measured over 20,000 statements: not one
+    # pair of those operators was ever adjacent, so a mis-parse of `a + b * c`
+    # was unreachable by every oracle — precedence is only visible where two
+    # operators meet.
+    #
+    # An infix operand therefore may itself be an infix operator of the same type
+    # family, on a SEPARATE budget from `depth`: a chain of up to
+    # `_MAX_INFIX_CHAIN` operators, whatever depth it starts at. Only the chain
+    # deepens, so function calls, CASE and casts keep their old nesting.
+    #
+    # DECIMAL does not chain. Precedence is syntax, not type, so INTEGER and FLOAT
+    # reach every arithmetic pair DECIMAL would; and a DECIMAL product chain
+    # overflows its 128-bit storage and raises (`d * d * d * d * d` over
+    # testdata.fuzzing.mixed: "dec128_mul: result overflows int128"), which would
+    # spend cases on overflow rather than on precedence. INTEGER overflow wraps,
+    # deterministically, so a long INTEGER chain costs nothing.
+
+    def _infix_builders(self, ty: Ty) -> List:
+        if ty in (Ty.INTEGER, Ty.FLOAT):
+            builders = [self._arithmetic]
+            if ty is Ty.INTEGER:
+                builders.append(self._bitwise)
+            return builders
+        if ty is Ty.VARCHAR:
+            return [self._string_concat]
+        return []
+
+    def _infix_operand(self, ty: Ty, depth: int, chain: int) -> Expr:
+        """An operand of an infix operator: sometimes another infix operator."""
+        builders = self._infix_builders(ty)
+        if builders and chain < _MAX_INFIX_CHAIN and self.rng.random() < _INFIX_NEST_RATE:
+            built = self.rng.choice(builders)(ty, depth, chain + 1)
+            if built is not None:
+                self.tags.add("infix_chain")
+                return built
+        return self.expression(ty, depth + 1)
+
+    def _comparison_operand(self, ty: Ty, depth: int) -> Expr:
+        """The left operand of a comparison or IS [NOT] DISTINCT FROM.
+
+        Nesting alone does not make arithmetic precedence TESTABLE, only
+        reachable: `expression` picks an infix builder for barely one comparison
+        operand in ten, so with chaining alone a table that put `*` below `+` was
+        caught once in 3,000 statements. A comparison is where an arithmetic
+        chain meets a predicate, so it starts one directly at
+        `_COMPARISON_CHAIN_RATE`.
+        """
+        builders = self._infix_builders(ty)
+        if builders and self.rng.random() < _COMPARISON_CHAIN_RATE:
+            built = self.rng.choice(builders)(ty, depth + 1, 0)
+            if built is not None:
+                return built
+        return self.expression(ty, depth + 1)
+
+    def _arithmetic(self, ty: Ty, depth: int, chain: int = 0) -> Optional[Expr]:
         rng = self.rng
         # Division and modulo by an expression can divide by zero; only integer
         # literals with a guaranteed non-zero value are used as the divisor, so
@@ -875,30 +1573,30 @@ class Generator:
         if ty is not Ty.DECIMAL:
             operators.append("%")
         operator = rng.choice(operators)
-        left = self.expression(ty, depth + 1)
+        left = self._infix_operand(ty, depth, chain)
         if operator in ("/", "%"):
             divisor = rng.choice([n for n in range(-9, 10) if n != 0])
             self.tags.add(f"arith{operator}")
-            return Expr(f"({left.sql} {operator} {divisor})", ty)
-        right = self.expression(ty, depth + 1)
+            return Expr(Binary(operator, left.node, Atom(str(divisor), ty, _literal_binding(str(divisor))), ty))
+        right = self._infix_operand(ty, depth, chain)
         self.tags.add(f"arith{operator}")
-        return Expr(f"({left.sql} {operator} {right.sql})", ty)
+        return Expr(Binary(operator, left.node, right.node, ty))
 
-    def _bitwise(self, ty: Ty, depth: int) -> Optional[Expr]:
+    def _bitwise(self, ty: Ty, depth: int, chain: int = 0) -> Optional[Expr]:
         operator = self.rng.choice(("&", "|", "^", "<<", ">>"))
-        left = self.expression(Ty.INTEGER, depth + 1)
+        left = self._infix_operand(Ty.INTEGER, depth, chain)
         self.tags.add(f"bitwise{operator}")
         # A shift COUNT must be 0..63, which operators.json records in the
         # ShiftLeft/ShiftRight notes — the operands are 64-bit and a count
         # outside that range fails loud rather than wrapping.
         right = self.rng.randint(0, 63) if operator in ("<<", ">>") else self.rng.randint(0, 255)
-        return Expr(f"({left.sql} {operator} {right})", Ty.INTEGER)
+        return Expr(Binary(operator, left.node, Atom(str(right), Ty.INTEGER), Ty.INTEGER))
 
-    def _string_concat(self, ty: Ty, depth: int) -> Optional[Expr]:
-        left = self.expression(Ty.VARCHAR, depth + 1)
-        right = self.expression(Ty.VARCHAR, depth + 1)
+    def _string_concat(self, ty: Ty, depth: int, chain: int = 0) -> Optional[Expr]:
+        left = self._infix_operand(Ty.VARCHAR, depth, chain)
+        right = self._infix_operand(Ty.VARCHAR, depth, chain)
         self.tags.add("string_concat")
-        return Expr(f"({left.sql} || {right.sql})", Ty.VARCHAR)
+        return Expr(Binary("||", left.node, right.node, Ty.VARCHAR))
 
     def _interval_arithmetic(self, ty: Ty, depth: int) -> Optional[Expr]:
         rng = self.rng
@@ -912,7 +1610,10 @@ class Generator:
         unit = rng.choice(_INTERVAL_UNITS)
         operator = rng.choice(("+", "-"))
         self.tags.add("interval")
-        return Expr(f"({base.sql} {operator} INTERVAL '{rng.randint(1, 30)}' {unit})", Ty.TIMESTAMP)
+        # An INTERVAL literal is typed UNKNOWN: Ty has no INTERVAL, and nothing
+        # but this operand position may hold one.
+        interval = Atom(f"INTERVAL '{rng.randint(1, 30)}' {unit}", Ty.UNKNOWN)
+        return Expr(Binary(operator, base.node, interval, Ty.TIMESTAMP))
 
     def _function_call(self, ty: Ty, depth: int) -> Optional[Expr]:
         candidates = _OVERLOADS_BY_RETURN.get(ty)
@@ -930,7 +1631,7 @@ class Generator:
         # the catalog now — `overload["homogeneous"]` and `parameters[].excludes`
         # respectively, applied in _load_function_overloads.
         shared_ty: Optional[Ty] = None
-        arguments: List[str] = []
+        arguments: List[Node] = []
         drawn_constants: Dict[int, str] = {}
         for index, param in enumerate(overload.params):
             allowed = tuple(t for t in param.accepts if self.can_produce(t))
@@ -954,7 +1655,7 @@ class Generator:
             if param.constant_only:
                 constant = self._constant_argument(overload.name, param, argument_ty)
                 drawn_constants[index] = constant
-                arguments.append(constant)
+                arguments.append(Atom(constant, argument_ty, _literal_binding(constant)))
             elif argument_ty is Ty.BOOLEAN:
                 # A BOOLEAN function argument is a predicate in operand
                 # position (IIF's condition), which is where RLIKE breaks.
@@ -969,7 +1670,13 @@ class Generator:
                     self._function_argument(overload.name, param, index, argument_ty, depth)
                 )
         self.tags.add(f"fn:{overload.name}")
-        return Expr(f"{overload.name}({', '.join(arguments)})", ty)
+        pieces: List[object] = [f"{overload.name}("]
+        for index, argument in enumerate(arguments):
+            if index:
+                pieces.append(", ")
+            pieces.append(Slot(argument))
+        pieces.append(")")
+        return Expr(Delimited(tuple(pieces), ty))
 
     def _narrow_for_drawn_constants(
         self,
@@ -997,7 +1704,7 @@ class Generator:
 
     def _function_argument(
         self, function: str, param: Param, index: int, ty: Ty, depth: int
-    ) -> str:
+    ) -> Node:
         """One non-constant argument.
 
         A parameter carrying catalog `minimum`/`maximum` bounds gets a literal
@@ -1008,9 +1715,10 @@ class Generator:
         of a list of function names.
         """
         if function in _BUCKET_WIDTH_FUNCTIONS and index == 0:
-            return str(self.rng.randint(1, 12))
+            return Atom(str(self.rng.randint(1, 12)), ty)
         if param.minimum is not None or param.maximum is not None:
-            return self._bounded_literal(function, param, ty)
+            bounded = self._bounded_literal(function, param, ty)
+            return Atom(bounded, ty, _literal_binding(bounded))
         # Precision, scale, length and position arguments are integers, and the
         # catalog types them as plain `integer` — so an unconstrained integer
         # literal produces `ROUND(x, -321178)`. That binds and executes, but it
@@ -1018,8 +1726,8 @@ class Generator:
         # function's actual behaviour. Not a correctness rule, so not a catalog
         # constraint: a taste rule about where to spend a fuzz case.
         if ty is Ty.INTEGER and index > 0 and function in _SMALL_INTEGER_ARGUMENT_FUNCTIONS:
-            return str(self.rng.randint(0, 12))
-        return self.expression(ty, depth + 1).sql
+            return Atom(str(self.rng.randint(0, 12)), ty)
+        return self.expression(ty, depth + 1).node
 
     def _bounded_literal(self, function: str, param: Param, ty: Ty) -> str:
         """A literal inside the catalog's declared bounds for this parameter.
@@ -1073,12 +1781,12 @@ class Generator:
             return "'" + self.rng.choice(("%Y-%m-%d", "%Y", "%H:%M:%S")) + "'"
         return self.literal(ty)
 
-    def _temporal_branch(self, ty: Ty) -> str:
+    def _temporal_branch(self, ty: Ty) -> Atom:
         """A temporal CASE branch: a column or a literal, never a function call."""
         columns = self.relation.of(ty)
         if columns and self.rng.random() < 0.7:
-            return self.rng.choice(columns).quoted
-        return self.literal(ty)
+            return Atom(self.rng.choice(columns).quoted, ty)
+        return self.literal_atom(ty)
 
     def _cast(self, ty: Ty, depth: int) -> Optional[Expr]:
         rng = self.rng
@@ -1092,7 +1800,7 @@ class Generator:
         # is what makes emitting both worthwhile rather than decorative.
         keyword = "TRY_CAST" if rng.random() < 0.3 else "CAST"
         self.tags.add(keyword.lower())
-        return Expr(f"{keyword}({operand.sql} AS {target})", ty)
+        return Expr(Delimited((f"{keyword}(", Slot(operand.node), f" AS {target})"), ty))
 
     def _overlay(self, ty: Ty, depth: int) -> Optional[Expr]:
         """`OVERLAY(s PLACING r FROM start [FOR length])` — SQL-92 string splice.
@@ -1110,11 +1818,25 @@ class Generator:
         start = rng.randint(1, 8)
         if rng.random() < 0.5:
             self.tags.add("sql92:OVERLAY")
-            return Expr(f"OVERLAY({source.sql} PLACING {replacement.sql} FROM {start})", Ty.VARCHAR)
+            return Expr(
+                Delimited(
+                    ("OVERLAY(", Slot(source.node), " PLACING ", Slot(replacement.node), f" FROM {start})"),
+                    Ty.VARCHAR,
+                )
+            )
         self.tags.add("sql92:OVERLAY/FOR")
+        length = rng.randint(0, 8)
         return Expr(
-            f"OVERLAY({source.sql} PLACING {replacement.sql} FROM {start} FOR {rng.randint(0, 8)})",
-            Ty.VARCHAR,
+            Delimited(
+                (
+                    "OVERLAY(",
+                    Slot(source.node),
+                    " PLACING ",
+                    Slot(replacement.node),
+                    f" FROM {start} FOR {length})",
+                ),
+                Ty.VARCHAR,
+            )
         )
 
     def _codec_round_trip(self, ty: Ty, depth: int) -> Optional[Expr]:
@@ -1130,7 +1852,7 @@ class Generator:
         encode, decode = self.rng.choice(_CODEC_ROUND_TRIPS)
         inner = self.expression(Ty.VARBINARY, depth + 1)
         self.tags.add(f"codec:{encode}")
-        return Expr(f"{decode}({encode}({inner.sql}))", Ty.VARBINARY)
+        return Expr(Delimited((f"{decode}({encode}(", Slot(inner.node), "))"), Ty.VARBINARY))
 
     def _sql92_spelling(self, ty: Ty, depth: int) -> Optional[Expr]:
         """A function reached by its SQL-92 spelling rather than its call form.
@@ -1168,14 +1890,17 @@ class Generator:
                 where = rng.choice(("BOTH", "LEADING", "TRAILING"))
                 characters = rng.choice(_TRIM_CHARACTER_SETS)
                 self.tags.add(f"sql92:TRIM/{where}")
-                return Expr(f"TRIM({where} '{characters}' FROM {operand.sql})", Ty.VARCHAR)
+                return Expr(
+                    Delimited((f"TRIM({where} '{characters}' FROM ", Slot(operand.node), ")"), Ty.VARCHAR)
+                )
             start = rng.randint(0, 12)
             if form == "substring":
                 self.tags.add("sql92:SUBSTRING/FROM")
-                return Expr(f"SUBSTRING({operand.sql} FROM {start})", Ty.VARCHAR)
+                return Expr(Delimited(("SUBSTRING(", Slot(operand.node), f" FROM {start})"), Ty.VARCHAR))
             self.tags.add("sql92:SUBSTRING/FROM-FOR")
+            length = rng.randint(0, 12)
             return Expr(
-                f"SUBSTRING({operand.sql} FROM {start} FOR {rng.randint(0, 12)})", Ty.VARCHAR
+                Delimited(("SUBSTRING(", Slot(operand.node), f" FROM {start} FOR {length})"), Ty.VARCHAR)
             )
 
         if ty is not Ty.INTEGER:
@@ -1190,12 +1915,18 @@ class Generator:
             needle = self.expression(Ty.VARCHAR, depth + 1)
             haystack = self.expression(Ty.VARCHAR, depth + 1)
             self.tags.add("sql92:POSITION/IN")
-            return Expr(f"POSITION({needle.sql} IN {haystack.sql})", Ty.INTEGER)
+            return Expr(
+                Delimited(
+                    ("POSITION(", Slot(needle.node, "BETWEEN"), " IN ", Slot(haystack.node), ")"),
+                    Ty.INTEGER,
+                )
+            )
 
         if form == "length_alias":
             alias = rng.choice(("CHARACTER_LENGTH", "CHAR_LENGTH"))
             self.tags.add(f"sql92:{alias}")
-            return Expr(f"{alias}({self.expression(Ty.VARCHAR, depth + 1).sql})", Ty.INTEGER)
+            operand = self.expression(Ty.VARCHAR, depth + 1)
+            return Expr(Delimited((f"{alias}(", Slot(operand.node), ")"), Ty.INTEGER))
 
         # EXTRACT carries the same part/operand coupling the call form does, and
         # for the same reason: draken_date_part refuses a sub-day part of a DATE
@@ -1206,7 +1937,7 @@ class Generator:
         operand_types = (Ty.TIMESTAMP,) if part in _SUB_DAY_PARTS else TEMPORAL
         self.tags.add("sql92:EXTRACT/FROM")
         operand = self.expression(rng.choice(operand_types), depth + 1)
-        return Expr(f"EXTRACT({part.upper()} FROM {operand.sql})", Ty.INTEGER)
+        return Expr(Delimited((f"EXTRACT({part.upper()} FROM ", Slot(operand.node), ")"), Ty.INTEGER))
 
     def _case(self, ty: Ty, depth: int) -> Optional[Expr]:
         # DECIMAL branches are omitted: a CASE blending a DECIMAL column with a
@@ -1229,17 +1960,31 @@ class Generator:
         # are fine — see
         # single_table_known_gaps/temporal-function-call-inside-a-case-branch.
         if ty in TEMPORAL:
-            then = Expr(self._temporal_branch(ty), ty)
-            otherwise = Expr(self._temporal_branch(ty), ty)
+            then = Expr(self._temporal_branch(ty))
+            otherwise = Expr(self._temporal_branch(ty))
         else:
             then = self.expression(ty, depth + 1)
             otherwise = self.expression(ty, depth + 1)
         self.tags.add("case")
-        return Expr(f"(CASE WHEN {condition} THEN {then.sql} ELSE {otherwise.sql} END)", ty)
+        return Expr(
+            Delimited(
+                (
+                    "CASE WHEN ",
+                    Slot(condition),
+                    " THEN ",
+                    Slot(then.node),
+                    " ELSE ",
+                    Slot(otherwise.node),
+                    " END",
+                ),
+                ty,
+                wrap_full=True,
+            )
+        )
 
     # ── predicates ───────────────────────────────────────────────────────────
 
-    def predicate(self, depth: int = 0, *, negated_forms_allowed: bool = True) -> str:
+    def predicate(self, depth: int = 0, *, negated_forms_allowed: bool = True) -> Node:
         """A BOOLEAN-valued expression usable as a WHERE clause.
 
         Never a bare column or a bare literal: the planner rejects both
@@ -1265,18 +2010,21 @@ class Generator:
             # folding rather than the predicate, and the corpus has few enough
             # BOOLEAN columns and forms that the two sides collide by chance
             # fairly often. One retry, then fall back to the left operand alone.
-            if right == left:
+            if right.full() == left.full():
                 right = self.predicate(depth + 1, negated_forms_allowed=right_negations)
-                if right == left:
+                if right.full() == left.full():
                     return left
-            return f"({left} {connective} {right})"
+            if connective.endswith(" NOT"):
+                # `a AND NOT (b)`: the NOT has never carried a pair of its own.
+                right = Prefix("NOT", right, Ty.BOOLEAN, full_parens=False)
+            return Binary(connective.split()[0], left, right, Ty.BOOLEAN)
         if depth < 2 and rng.random() < 0.08:
             self.tags.add("not")
             # `(NOT {child})`, not `(NOT ({child}))`: every predicate this class
             # returns is already parenthesised, and a SECOND pair around a
             # FLOAT IN-list drops the query out of the native kernel set
             # (single_table_known_gaps/float-in-list-only-works-at-top-level).
-            return f"(NOT {self.predicate(depth + 1, negated_forms_allowed=False)})"
+            return Prefix("NOT", self.predicate(depth + 1, negated_forms_allowed=False), Ty.BOOLEAN)
 
         builders = [
             self._comparison_predicate,
@@ -1299,21 +2047,21 @@ class Generator:
         # a tautology that would quietly weaken every predicate oracle.
         raise AssertionError(f"no predicate constructible over relation {self.relation.sql!r}")
 
-    def _comparison_predicate(self, depth: int, negated: bool) -> Optional[str]:
+    def _comparison_predicate(self, depth: int, negated: bool) -> Optional[Node]:
         rng = self.rng
         candidates = [c for c in self.relation.columns if c.ty in SCALAR]
         if not candidates:
             return None
         ty = rng.choice(candidates).ty
-        left = self.expression(ty, depth + 1)
+        left = self._comparison_operand(ty, depth)
         right = self.expression(ty, depth + 1)
         # BOOLEAN has no ordering: types.json lists BOOLEAN as comparable only
         # with BOOLEAN, and the engine rejects `bool <= bool` outright.
         operators = _EQUALITY if ty is Ty.BOOLEAN else _COMPARISONS
         self.tags.add("comparison")
-        return f"({left.sql} {rng.choice(operators)} {right.sql})"
+        return Binary(rng.choice(operators), left.node, right.node, Ty.BOOLEAN)
 
-    def _distinct_from_predicate(self, depth: int, negated: bool) -> Optional[str]:
+    def _distinct_from_predicate(self, depth: int, negated: bool) -> Optional[Node]:
         """`a IS [NOT] DISTINCT FROM b` — null-safe, and never UNKNOWN.
 
         Worth generating precisely because it is TOTAL: the predicate-partition
@@ -1326,34 +2074,35 @@ class Generator:
         if not candidates:
             return None
         ty = rng.choice(candidates).ty
-        left = self.expression(ty, depth + 1)
+        left = self._comparison_operand(ty, depth)
         right = self.expression(ty, depth + 1)
         form = "IS NOT DISTINCT FROM" if negated and rng.random() < 0.5 else "IS DISTINCT FROM"
         self.tags.add("distinct_from")
-        return f"({left.sql} {form} {right.sql})"
+        return Binary(form, left.node, right.node, Ty.BOOLEAN)
 
-    def _null_predicate(self, depth: int, negated: bool) -> Optional[str]:
+    def _null_predicate(self, depth: int, negated: bool) -> Optional[Node]:
         rng = self.rng
         candidates = [c for c in self.relation.columns if c.ty in SCALAR]
         if not candidates:
             return None
         column = rng.choice(candidates)
         self.tags.add("is_null")
-        return f"({column.quoted} {rng.choice(('IS NULL', 'IS NOT NULL') if negated else ('IS NULL',))})"
+        form = rng.choice(('IS NULL', 'IS NOT NULL') if negated else ('IS NULL',))
+        return Postfix(form, Atom(column.quoted, column.ty), Ty.BOOLEAN)
 
-    def _between_predicate(self, depth: int, negated: bool) -> Optional[str]:
+    def _between_predicate(self, depth: int, negated: bool) -> Optional[Node]:
         rng = self.rng
         candidates = [c for c in self.relation.columns if c.ty in NUMERIC + TEMPORAL]
         if not candidates:
             return None
         column = rng.choice(candidates)
-        low = self.literal(column.ty)
-        high = self.literal(column.ty)
-        negate = "NOT " if negated and rng.random() < 0.3 else ""
+        low = self.literal_atom(column.ty)
+        high = self.literal_atom(column.ty)
+        negate = negated and rng.random() < 0.3
         self.tags.add("between")
-        return f"({column.quoted} {negate}BETWEEN {low} AND {high})"
+        return Between(Atom(column.quoted, column.ty), low, high, negate, Ty.BOOLEAN)
 
-    def _in_list_predicate(self, depth: int, negated: bool) -> Optional[str]:
+    def _in_list_predicate(self, depth: int, negated: bool) -> Optional[Node]:
         rng = self.rng
         # A FLOAT IN-list only has a native kernel when it IS the whole
         # predicate: as a disjunct, or under a NOT, or wrapped in one extra
@@ -1366,11 +2115,11 @@ class Generator:
             return None
         column = rng.choice(candidates)
         members = ", ".join(self.literal(column.ty) for _ in range(rng.randint(1, 4)))
-        negate = "NOT " if negated and rng.random() < 0.3 else ""
+        negate = negated and rng.random() < 0.3
         self.tags.add("in_list")
-        return f"({column.quoted} {negate}IN ({members}))"
+        return InList(Atom(column.quoted, column.ty), members, negate, column.ty, Ty.BOOLEAN)
 
-    def _like_predicate(self, depth: int, negated: bool) -> Optional[str]:
+    def _like_predicate(self, depth: int, negated: bool) -> Optional[Node]:
         rng = self.rng
         # LIKE works on VARBINARY; ILIKE and RLIKE do not
         # ("Unable to perform `json_doc ILIKE ...` because the values are not
@@ -1399,9 +2148,9 @@ class Generator:
             operator = rng.choice(("LIKE", "NOT LIKE") if negated else ("LIKE",))
             pattern = self.like_pattern()
             column = rng.choice(text + binary)
-        return f"({column.quoted} {operator} {pattern})"
+        return Binary(operator, Atom(column.quoted, column.ty), Atom(pattern, Ty.VARCHAR), Ty.BOOLEAN)
 
-    def _boolean_column_predicate(self, depth: int, negated: bool) -> Optional[str]:
+    def _boolean_column_predicate(self, depth: int, negated: bool) -> Optional[Node]:
         rng = self.rng
         candidates = self.relation.of(Ty.BOOLEAN)
         if not candidates:
@@ -1412,9 +2161,12 @@ class Generator:
             forms += ("IS NOT TRUE", "IS NOT FALSE")
         form = rng.choice(forms)
         self.tags.add("boolean_predicate")
-        return f"({column.quoted} {form})"
+        operand = Atom(column.quoted, column.ty)
+        if form.startswith("= "):
+            return Binary("=", operand, Atom(form[2:], Ty.BOOLEAN), Ty.BOOLEAN)
+        return Postfix(form, operand, Ty.BOOLEAN)
 
-    def _case_predicate(self, depth: int, negated: bool) -> Optional[str]:
+    def _case_predicate(self, depth: int, negated: bool) -> Optional[Node]:
         """A bare CASE used directly as a WHERE predicate.
 
         Admitted by the RULING recorded on
@@ -1445,7 +2197,7 @@ class Generator:
         # These three cannot emit RLIKE today, but a CASE condition IS operand
         # position, so it carries the same flag every other CASE/IIF condition
         # carries — the guard belongs to the position, not to today's builders.
-        conditions: List[str] = []
+        conditions: List[Node] = []
         was_operand = self._predicate_is_an_operand
         self._predicate_is_an_operand = True
         try:
@@ -1466,27 +2218,28 @@ class Generator:
         # never fold to a constant — a constant predicate would test constant
         # folding rather than the CASE, and `WHERE <constant>` is refused as a bare
         # literal in the spelling this builder is here to cover.
-        arms = " ".join(
-            f"WHEN {condition} THEN {'TRUE' if index % 2 == 0 else 'FALSE'}"
-            for index, condition in enumerate(conditions)
-        )
+        pieces: List[object] = ["CASE "]
+        for index, condition in enumerate(conditions):
+            if index:
+                pieces.append(" ")
+            pieces += ["WHEN ", Slot(condition), f" THEN {'TRUE' if index % 2 == 0 else 'FALSE'}"]
         # No ELSE and `ELSE NULL` are the 3VL shapes: an unmatched row evaluates to
         # NULL, which a WHERE drops exactly as it drops FALSE.
         tail = rng.choice(("ELSE FALSE", "ELSE NULL", ""))
         if tail:
             self.tags.add(f"case_{tail.split()[1].lower()}_branch")
-            return f"(CASE {arms} {tail} END)"
+            return Delimited(tuple(pieces) + (f" {tail} END",), Ty.BOOLEAN, wrap_full=True)
         self.tags.add("case_no_else_branch")
-        return f"(CASE {arms} END)"
+        return Delimited(tuple(pieces) + (" END",), Ty.BOOLEAN, wrap_full=True)
 
-    def _array_predicate(self, depth: int, negated: bool) -> Optional[str]:
+    def _array_predicate(self, depth: int, negated: bool) -> Optional[Node]:
         rng = self.rng
         candidates = [c for c in self.relation.of(Ty.ARRAY) if c.name in ARRAY_ELEMENT_TYPES]
         if not candidates:
             return None
         column = rng.choice(candidates)
         element_ty = ARRAY_ELEMENT_TYPES[column.name]
-        probe = self.literal(element_ty)
+        probe = self.literal_atom(element_ty)
         # `NOT (x = ANY(arr))` has no native filter kernel, so an ARRAY
         # predicate is never generated where a NOT could reach it — see
         # single_table_known_gaps/negated-array-contains-has-no-kernel.
@@ -1496,10 +2249,13 @@ class Generator:
         if rng.random() < 0.4:
             self.tags.add("array_containment")
             members = ", ".join(self.literal(element_ty) for _ in range(rng.randint(1, 3)))
-            return f"({column.quoted} {rng.choice(('@>', '@>>'))} [{members}])"
-        return f"({probe} = ANY({column.quoted}))"
+            operator = rng.choice(('@>', '@>>'))
+            return Binary(operator, Atom(column.quoted, Ty.ARRAY), Atom(f"[{members}]", Ty.ARRAY), Ty.BOOLEAN)
+        # `ANY(column)` is not an expression on its own, only the right-hand side
+        # of a comparison, so it is held as an atom the renderer never wraps.
+        return Binary("=", probe, Atom(f"ANY({column.quoted})", element_ty), Ty.BOOLEAN)
 
-    def _json_predicate(self, depth: int, negated: bool) -> Optional[str]:
+    def _json_predicate(self, depth: int, negated: bool) -> Optional[Node]:
         rng = self.rng
         candidates = [c for c in self.relation.columns if c.name in _JSON_COLUMNS]
         if not candidates:
@@ -1507,7 +2263,12 @@ class Generator:
         column = rng.choice(candidates)
         key = rng.choice(_JSON_KEYS)
         self.tags.add("json_accessor")
-        return f"({column.quoted} ->> '{key}' {rng.choice(_COMPARISONS)} '{rng.choice(_STRING_LITERALS)}')"
+        operator = rng.choice(_COMPARISONS)
+        value = Atom(f"'{rng.choice(_STRING_LITERALS)}'", Ty.VARCHAR)
+        # The accessor's result is typed UNKNOWN: Ty cannot say what a JSON
+        # extraction yields, and nothing but this comparison consumes it.
+        accessor = Binary("->>", Atom(column.quoted, column.ty), Atom(f"'{key}'", Ty.VARCHAR), Ty.UNKNOWN, full_parens=False)
+        return Binary(operator, accessor, value, Ty.BOOLEAN)
 
 
 def _cast_yields(targets: Sequence[str], ty: Ty) -> bool:
@@ -1573,7 +2334,9 @@ class SelectQuery:
     projection: List[str]
     output_columns: Tuple[Column, ...]
     distinct: bool = False
-    where: Optional[str] = None
+    #: The WHERE predicate as a tree, so an oracle can render it more than one
+    #: way (see `parenthesisation_is_neutral`). `where` is its generated text.
+    where_tree: Optional[Node] = None
     group_by: List[str] = field(default_factory=list)
     having: Optional[str] = None
     #: The whole QUALIFY clause, without the keyword. Held structurally like every
@@ -1627,6 +2390,10 @@ class SelectQuery:
         return " ".join(parts)
 
     @property
+    def where(self) -> Optional[str]:
+        return None if self.where_tree is None else self.where_tree.full()
+
+    @property
     def sql(self) -> str:
         return self.render()
 
@@ -1661,7 +2428,7 @@ def build_select(rng: random.Random, relation: Relation, names: Names) -> Select
     # every column an ARRAY, say. `predicate()` raises rather than silently
     # emitting a tautology, so the caller has to check first.
     if _scalar_columns(relation) and rng.random() < 0.7:
-        query.where = generator.predicate()
+        query.where_tree = generator.predicate()
 
     _apply_order_limit(rng, generator, query)
     query.tags |= generator.tags
@@ -1811,7 +2578,7 @@ def _build_aggregate(generator: Generator, relation: Relation) -> SelectQuery:
         # (single_table_known_gaps/float-in-list-only-works-at-top-level).
         # Generating at depth 1 applies that rule, the same way a predicate under
         # a connective gets it.
-        aggregate_filter = generator.predicate(depth=1)
+        aggregate_filter = generator.predicate(depth=1).full()
         emitted.add("COUNT(*)")
         alias = generator.names.next("a")
         projection.append(f"COUNT(*) FILTER (WHERE {aggregate_filter}) AS {alias}")
@@ -2059,8 +2826,8 @@ def _wrap_set_operation(rng: random.Random, relation: Relation, names: Names) ->
     columns = rng.sample(candidates, rng.randint(1, min(2, len(candidates))))
     projection = ", ".join(column.quoted for column in columns)
 
-    left_where = generator.predicate()
-    right_where = generator.predicate()
+    left_where = generator.predicate().full()
+    right_where = generator.predicate().full()
     operator = rng.choice(("UNION", "UNION ALL", "INTERSECT", "EXCEPT", "INTERSECT ALL", "EXCEPT ALL"))
     sql = (
         f"SELECT {projection} FROM {relation.sql} WHERE {left_where} "

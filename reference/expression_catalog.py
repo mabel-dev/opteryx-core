@@ -38,6 +38,7 @@ NON_EXPRESSION_BUILDERS: dict[str, str] = {
     "IsNotNull": "Catalogued in unary_ops.json.",
     "IsNotTrue": "Catalogued in unary_ops.json.",
     "IsNull": "Catalogued in unary_ops.json.",
+    "IsJson": "Catalogued in unary_ops.json.",
     "IsTrue": "Catalogued in unary_ops.json.",
     "Function": "Function calls are catalogued in function_signatures.json.",
     "Ceil": "CEIL is catalogued in function_signatures.json.",
@@ -148,6 +149,7 @@ EXPRESSION_DEFINITIONS: dict[str, dict[str, Any]] = {
             "CAST(expr AS type)",
             "TRY_CAST(expr AS type)",
             "SAFE_CAST(expr AS type)",
+            "expr::type",
         ],
     },
     "CUBE": {
@@ -591,11 +593,23 @@ def _check_exhaustive() -> None:
 
 
 def export_expression_catalog() -> "OrderedDict[str, dict[str, Any]]":
+    from reference.precedence_catalog import EXPRESSIONS
+    from reference.precedence_catalog import check_precedence_coverage
+    from reference.precedence_catalog import precedence_for
+
     _check_exhaustive()
+    # Not required of every entry: literals, CASE, EXISTS and the like have no
+    # binding power. The operator-shaped forms (BETWEEN, IS DISTINCT FROM, `::`,
+    # SIMILAR TO) carry one.
+    check_precedence_coverage(EXPRESSIONS, EXPRESSION_DEFINITIONS, required=False)
 
     ordered: OrderedDict[str, dict[str, Any]] = OrderedDict()
     for name in sorted(EXPRESSION_DEFINITIONS):
-        ordered[name] = EXPRESSION_DEFINITIONS[name]
+        entry = dict(EXPRESSION_DEFINITIONS[name])
+        precedence = precedence_for(EXPRESSIONS, name)
+        if precedence is not None:
+            entry["precedence"] = precedence
+        ordered[name] = entry
     return ordered
 
 

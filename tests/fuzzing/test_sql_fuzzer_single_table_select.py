@@ -86,6 +86,11 @@ class _RunLedger:
         self.statements_executed = 0
         self.oracle_runs: Counter = Counter()
         self.oracle_queries = 0
+        # parenthesisation_is_neutral only: cases with a type-valid mis-parse to
+        # try, and cases where one answered differently (see that oracle).
+        self.precedence_probed = 0
+        self.precedence_discriminated = 0
+        self.precedence_exercised: Counter = Counter()
         self.known_gap_hits: Counter = Counter()
         self.constructs: Counter = Counter()
 
@@ -104,12 +109,49 @@ class _RunLedger:
             blocked = _ORACLES_BLOCKED_BY_REGISTER.get(name)
             suffix = f"  [blocked by {blocked}]" if blocked else ""
             lines.append(f"  {self.oracle_runs.get(name, 0):6d}  {name}{suffix}")
+        lines += ["", self.precedence_report()]
         if self.known_gap_hits:
             lines += ["", "registered defects hit (see single_table_known_gaps.py):"]
             for gap_id, count in self.known_gap_hits.most_common():
                 lines.append(f"  {count:6d}  {gap_id}")
         lines += ["", f"distinct SQL constructs generated: {len(self.constructs)}"]
         return "\n".join(lines)
+
+    def precedence_report(self) -> str:
+        """How much of parenthesisation_is_neutral's passing means anything.
+
+        A pass on a case whose predicate reads the same under every plausible
+        parse proves nothing, and most generated predicates are like that. A
+        case DISCRIMINATED when a deliberate mis-parse of its own predicate
+        answered differently — only those cases could have caught a parser that
+        binds wrongly. The rate is printed on every run so it cannot quietly
+        decay to zero.
+        """
+        runs = self.oracle_runs.get("parenthesisation_is_neutral", 0)
+        line = (
+            f"parenthesisation_is_neutral: {runs} cases, {self.precedence_probed} had a "
+            f"type-valid mis-parse to try, {self.precedence_discriminated} discriminated"
+        )
+        if not runs:
+            return line
+        from tests.fuzzing.single_table_grammar import _EMITTED_SPELLINGS
+        from tests.fuzzing.single_table_grammar import PRECEDENCE
+
+        rate = self.precedence_discriminated / runs
+        line += f" ({rate:.1%} of cases)"
+        if rate < _DECORATION_RATE:
+            line += (
+                f"\n  !! BELOW {_DECORATION_RATE:.0%}: on this run the oracle is close to "
+                f"DECORATION — almost none of its passes could have failed."
+            )
+        untested = sorted(_EMITTED_SPELLINGS - set(self.precedence_exercised))
+        line += (
+            f"\n  precedence entries never in a precedence-dependent position this run "
+            f"(a mis-parse of these could not have been seen): {untested}"
+            f"\n  documented precedence the grammar never emits, so never checked: "
+            f"{sorted(set(PRECEDENCE) - _EMITTED_SPELLINGS)}"
+        )
+        return line
 
 
 _ALL_ORACLE_NAMES = {
@@ -128,7 +170,14 @@ _ALL_ORACLE_NAMES = {
     "aggregate_identities",
     "group_counts_sum_to_the_total",
     "optimizer_strategy_differential",
+    "parenthesisation_is_neutral",
 }
+
+# Below this share of discriminating cases, parenthesisation_is_neutral is
+# reported as decoration. A reporting threshold, not a gate: the run does not
+# fail on it, because the rate is a property of the grammar's predicate shapes,
+# and changing those is a separate decision.
+_DECORATION_RATE = 0.05
 
 # Oracle -> the register entry that stops it running. An oracle here is expected
 # to be silent, and `test_zz_fuzzing_actually_ran` exempts it from the
@@ -190,6 +239,9 @@ def test_sql_fuzzing_single_table(seed):
             continue
         LEDGER.oracle_runs[result.name] += 1
         LEDGER.oracle_queries += result.queries_executed
+        LEDGER.precedence_probed += result.probed
+        LEDGER.precedence_discriminated += result.discriminated
+        LEDGER.precedence_exercised.update(result.exercised)
         print(f"  oracle ok: {result.name}")
 
 
@@ -751,6 +803,77 @@ def test_catalog_coverage_is_accounted_for():
     assert not redundant, (
         "these are excluded by hand AND declined by reference/; drop the EXCLUSIONS "
         f"entry and let the catalog speak: {redundant}"
+    )
+
+
+# Each corruption is a deliberately WRONG precedence entry: a claim about how
+# the parser binds that the parser does not honour. Under it, minimal() drops
+# parentheses the parser needs, and parenthesisation_is_neutral must notice.
+#
+# Arithmetic became testable only once the grammar chained infix operators
+# (Generator._infix_operand / _comparison_operand); before that no two arithmetic
+# operators were ever adjacent in a WHERE clause and this corruption could not
+# fire. It is still a thin signal — over seeds 0..2999 it re-spells 46 statements
+# and 3 of them discriminate — and the bitwise family (`& | ^ << >>`) is thinner
+# still: no bitwise corruption fired over the same 3,000 seeds, so none is listed.
+def _just_below(table: dict, spelling: str) -> float:
+    return table[spelling] - 0.5
+
+
+# Each value maps the CORRECT table to the entries a corruption overwrites.
+_WRONG_PRECEDENCE = {
+    "AND and OR swapped": lambda table: {"AND": table["OR"], "OR": table["AND"]},
+    "NOT below OR": lambda table: {"prefix NOT": _just_below(table, "OR")},
+    "* / % below + -": lambda table: {
+        spelling: _just_below(table, "+") for spelling in ("*", "/", "%")
+    },
+}
+
+
+@pytest.mark.parametrize("corruption", sorted(_WRONG_PRECEDENCE))
+def test_parenthesisation_oracle_fails_under_a_wrong_precedence_table(corruption, monkeypatch):
+    """Positive control: the oracle CAN fail, on statements this grammar generates.
+
+    An oracle that has never been seen to fail is not known to be able to. So the
+    fuzzer's precedence table is corrupted and the oracle is run over ordinary
+    generated statements until one fires. Only statements whose minimal spelling
+    the corruption actually changes are executed — on the rest the two tables
+    render identical SQL, so running them would only cost time.
+
+    The oracle's own exceptions are not caught: a registered defect in the
+    statement is skipped exactly as the fuzz driver would count it, and anything
+    else fails this test.
+    """
+    from tests.fuzzing import single_table_grammar as grammar
+
+    correct = dict(grammar.PRECEDENCE)
+    for spelling, level in _WRONG_PRECEDENCE[corruption](correct).items():
+        if spelling not in grammar.PRECEDENCE:
+            raise AssertionError(f"corruption names `{spelling}`, which PRECEDENCE does not list")
+        monkeypatch.setitem(grammar.PRECEDENCE, spelling, level)
+
+    executed = 0
+    for seed in range(3000):
+        rng = random.Random(seed)
+        statement = generate(rng, choose_relation(rng))
+        if oracles.parenthesisation_is_neutral not in oracles.applicable_oracles(statement):
+            continue
+        tree = statement.select.where_tree
+        if tree.minimal(grammar.PRECEDENCE) == tree.minimal(correct):
+            continue
+        executed += 1
+        try:
+            oracles.parenthesisation_is_neutral(statement, rng)
+        except oracles.OracleViolation as violation:
+            print(f"fired after {executed} affected statements (seed {seed}):\n{violation}")
+            return
+        except Exception as error:  # noqa: BLE001 - re-raised unless registered
+            if known_gaps.match(error) is None:
+                raise
+    raise AssertionError(
+        f"parenthesisation_is_neutral never fired under a WRONG precedence table "
+        f"({corruption}) across {executed} statements the corruption re-spells: the oracle "
+        f"cannot detect this class of mis-parse on the data it runs over"
     )
 
 

@@ -1,47 +1,15 @@
 {
-    "summary": "This has caught a few different problems",
-    "statement": "
-SET @planet = 'Saturn';
-
-SELECT 
-    planets.name AS nom, 
-    bigsats.occurances AS big_satellites_occurances, 
-    smallsats.occurances AS small_satellites_occurances 
-FROM 
-    (SELECT DISTINCT 
-         id AS planetId, 
-         name 
-     FROM 
-         $planets 
-     WHERE 
-         name = @planet) AS planets 
-LEFT JOIN 
-    (SELECT 
-         planetId, 
-         COUNT(*) AS occurances 
-     FROM 
-         testdata.satellites s1 
-     FOR DATES BETWEEN '2022-01-01' AND TODAY 
-     WHERE 
-         gm > 10 
-     GROUP BY 
-         planetId) AS bigsats 
-ON 
-    bigsats.planetId = planets.planetId 
-LEFT JOIN 
-    (SELECT 
-         planetId, 
-         COUNT(*) AS occurances 
-     FROM 
-         testdata.satellites s2 
-     FOR DATES IN LAST_MONTH 
-     WHERE 
-         gm < 10 
-     GROUP BY 
-         planetId) AS smallsats 
-ON 
-    smallsats.planetId = planets.planetId;
-
-    ",
-    "result": {"nom": ["Saturn"], "bigsats.occurances":[5], "smallsats.occurances":[56]}
+  "summary": "This has caught a few different problems",
+  "statement": "\nSET @planet = 'Saturn';\n\nSELECT \n    planets.name AS nom, \n    bigsats.occurances AS big_satellites_occurances, \n    smallsats.occurances AS small_satellites_occurances \nFROM \n    (SELECT DISTINCT \n         id AS planetId, \n         name \n     FROM \n         $planets \n     WHERE \n         name = @planet) AS planets \nLEFT JOIN \n    (SELECT \n         planetId, \n         COUNT(*) AS occurances \n     FROM \n         testdata.satellites s1  \n     WHERE \n         gm > 10 \n     GROUP BY \n         planetId) AS bigsats \nON \n    bigsats.planetId = planets.planetId \nLEFT JOIN \n    (SELECT \n         planetId, \n         COUNT(*) AS occurances \n     FROM \n         testdata.satellites s2  \n     WHERE \n         gm < 10 \n     GROUP BY \n         planetId) AS smallsats \nON \n    smallsats.planetId = planets.planetId;\n\n    ",
+  "result": {
+    "nom": [
+      "Saturn"
+    ],
+    "big_satellites_occurances": [
+      5
+    ],
+    "small_satellites_occurances": [
+      56
+    ]
+  }
 }

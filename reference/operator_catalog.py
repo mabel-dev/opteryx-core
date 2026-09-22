@@ -12,6 +12,9 @@ from opteryx.expression.operator_catalog import default_operator_friendly_name
 from opteryx.expression.operator_catalog import get_operator_definition
 from opteryx.expression.operator_catalog import get_operator_sql_symbol
 from opteryx.planner.binder.operator_map import OPERATOR_MAP
+from reference.precedence_catalog import OPERATORS
+from reference.precedence_catalog import check_precedence_coverage
+from reference.precedence_catalog import precedence_for
 
 # The published operator reference is two halves, and neither is hand-written twice.
 #
@@ -75,6 +78,7 @@ def _unique(values) -> list[str]:
 
 
 def export_operator_catalog() -> OrderedDict[str, dict[str, Any]]:
+    check_precedence_coverage(OPERATORS, OPERATOR_DEFINITIONS, required=True)
     exported: dict[str, dict[str, Any]] = {}
     for operator in sorted(OPERATOR_DEFINITIONS):
         metadata = get_operator_definition(operator)
@@ -124,6 +128,8 @@ def export_operator_catalog() -> OrderedDict[str, dict[str, Any]]:
             ),
             "signature_count": len(signatures),
             "signatures": signatures,
+            # How tightly it binds without parentheses - reference/precedence_catalog.py.
+            "precedence": precedence_for(OPERATORS, operator),
         }
         if metadata and metadata.notes:
             entry["notes"] = metadata.notes

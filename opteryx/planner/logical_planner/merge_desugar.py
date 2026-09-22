@@ -368,6 +368,15 @@ def _read_arms(clauses: List[dict]) -> List[_Arm]:
                     "there is no row to delete."
                 )
             arms.append(_Arm(population, clause.get("predicate"), MERGE_DELETE, {}))
+        elif "DoNothing" in action:
+            # Valid on every population, and NOT a dropped arm: arms are tried in
+            # declaration order and the first whose condition holds claims the
+            # row, so a DO NOTHING arm SHIELDS the rows it claims from every
+            # later arm. Dropping it here would let those rows fall through and
+            # be mutated - a silent wrong answer on a write path. It occupies its
+            # ordinal position in the chain exactly as the other three do; its
+            # blended values are never read, because NOOP appends no row.
+            arms.append(_Arm(population, clause.get("predicate"), MERGE_NOOP, {}))
         else:
             raise UnsupportedSyntaxError(f"Unsupported **MERGE** action: {sorted(action)}")
     if not arms:

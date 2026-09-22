@@ -78,6 +78,16 @@ VecResult draken_like_any(void* ctx, const DrakenVector* const* args, uint32_t n
 VecResult draken_in_list(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_is_empty(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_is_not_empty(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+// SQL:2016 `IS [NOT] JSON` — four shapes x two polarities, over JSON TEXT.
+// Total predicates (never null); see function_json_validate.cpp.
+VecResult draken_is_json_value(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_is_not_json_value(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_is_json_scalar(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_is_not_json_scalar(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_is_json_array(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_is_not_json_array(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_is_json_object(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_is_not_json_object(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_numeric_cmp(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_temporal_cmp(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_substring(void* ctx, const DrakenVector* const* args, uint32_t nargs);
@@ -248,6 +258,14 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_in_list", (kernel_fn_t)&draken_in_list},
     {"draken_is_empty", (kernel_fn_t)&draken_is_empty},
     {"draken_is_not_empty", (kernel_fn_t)&draken_is_not_empty},
+    {"draken_is_json_value", (kernel_fn_t)&draken_is_json_value},
+    {"draken_is_not_json_value", (kernel_fn_t)&draken_is_not_json_value},
+    {"draken_is_json_scalar", (kernel_fn_t)&draken_is_json_scalar},
+    {"draken_is_not_json_scalar", (kernel_fn_t)&draken_is_not_json_scalar},
+    {"draken_is_json_array", (kernel_fn_t)&draken_is_json_array},
+    {"draken_is_not_json_array", (kernel_fn_t)&draken_is_not_json_array},
+    {"draken_is_json_object", (kernel_fn_t)&draken_is_json_object},
+    {"draken_is_not_json_object", (kernel_fn_t)&draken_is_not_json_object},
     {"draken_numeric_cmp", (kernel_fn_t)&draken_numeric_cmp},
     {"draken_temporal_cmp", (kernel_fn_t)&draken_temporal_cmp},
     {"draken_substring", (kernel_fn_t)&draken_substring},

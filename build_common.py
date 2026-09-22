@@ -768,6 +768,7 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/ops/kernels/function_hash_encoding.cpp",  # Phase 9a-fn: MD5/SHA* (C ABI)
                 "draken/ops/kernels/function_codec.cpp",  # Phase 9a-fn: HEX/BASE64/BASE85 ENCODE/DECODE (C ABI)
                 "draken/ops/kernels/function_array_json.cpp",  # Phase 9a-fn: JSONB_OBJECT_KEYS (C ABI)
+                "draken/ops/kernels/function_json_validate.cpp",  # SQL:2016 IS [NOT] JSON (C ABI, no yyjson)
                 "draken/ops/kernels/function_temporal.cpp",  # Phase 9a-fn: FROM_UNIXTIME (C ABI)
                 "draken/ops/kernels/function_numeric.cpp",  # Phase 9a-fn: POWER/LOG/TRUNC (C ABI)
                 "draken/ops/kernels/function_string_extra.cpp",  # Phase 9a-fn: OCTET_LENGTH/POSITION/LEVENSHTEIN/TO_ASCII (C ABI)

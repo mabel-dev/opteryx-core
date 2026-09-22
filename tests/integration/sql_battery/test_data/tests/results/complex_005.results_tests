@@ -1,59 +1,30 @@
 {
   "summary": "This was an AI generated test case to perform a non-trival query",
-  "statement": "
-SELECT 
-    p.name AS planet_name,
-    p.density AS planet_density,
-    p.gravity AS planet_gravity,
-    p.orbitalPeriod AS orbital_period,
-    satellite_data.total_satellites,
-    satellite_data.avg_density,
-    satellite_data.max_radius,
-FROM 
-    $planets p
-JOIN 
-    (SELECT 
-         planetId,
-         COUNT(*) AS total_satellites,
-         AVG(density) AS avg_density,
-         MAX(radius) AS max_radius
-     FROM 
-         testdata.satellites as s1
-     WHERE 
-         gm > 1.0
-     GROUP BY 
-         planetId
-     HAVING 
-         COUNT(*) > 2) AS satellite_data ON p.id = satellite_data.planetId
-LEFT JOIN 
-    (SELECT 
-         planetId,
-         AVG(radius) AS avg_radius,
-         MIN(id) AS min_magnitude,
-         AVG(magnitude) as avg_magnitude
-     FROM 
-         testdata.satellites as s2
-     GROUP BY 
-         planetId
-     HAVING 
-         AVG(magnitude) < 25) AS orbital_data ON p.id = orbital_data.planetId
-WHERE 
-    p.gravity BETWEEN 0 AND 10 AND
-    p.orbitalPeriod > 10000 AND
-    orbital_data.avg_radius > 0
-ORDER BY 
-    satellite_data.total_satellites DESC,
-    satellite_data.avg_density,
-    orbital_data.min_magnitude ASC;
-",
+  "statement": "\nSELECT \n    p.name AS planet_name,\n    p.density AS planet_density,\n    p.gravity AS planet_gravity,\n    p.orbitalPeriod AS orbital_period,\n    satellite_data.total_satellites,\n    satellite_data.avg_density,\n    satellite_data.max_radius,\n    orbital_data.avg_magnitude\nFROM \n    $planets p\nJOIN \n    (SELECT \n         planetId,\n         COUNT(*) AS total_satellites,\n         AVG(density) AS avg_density,\n         MAX(radius) AS max_radius\n     FROM \n         testdata.satellites as s1\n     WHERE \n         gm > 1.0\n     GROUP BY \n         planetId\n     HAVING \n         COUNT(*) > 2) AS satellite_data ON p.id = satellite_data.planetId\nLEFT JOIN \n    (SELECT \n         planetId,\n         AVG(radius) AS avg_radius,\n         MIN(id) AS min_magnitude,\n         AVG(magnitude) as avg_magnitude\n     FROM \n         testdata.satellites as s2\n     GROUP BY \n         planetId\n     HAVING \n         AVG(magnitude) < 25) AS orbital_data ON p.id = orbital_data.planetId\nWHERE \n    p.gravity BETWEEN 0 AND 10 AND\n    p.orbitalPeriod > 10000 AND\n    orbital_data.avg_radius > 0\nORDER BY \n    satellite_data.total_satellites DESC,\n    satellite_data.avg_density,\n    orbital_data.min_magnitude ASC;\n",
   "result": {
-    "planet_name": ["Saturn", "Uranus"],
-    "planet_density": [687, 1271],
-    "planet_gravity": [9.0, 8.7],
-    "orbital_period": [10747.0, 30589.0],
-    "satellite_data.total_satellites": [7, 5],
-    "satellite_data.avg_density": [1.3435714285714284, 1.4972],
-    "satellite_data.max_radius": [2574.73, 788.9],
-    "orbital_data.avg_magnitude ": [20.75272727272727, 21.376666666666665]
-    }
+    "planet_name": [
+      "Uranus"
+    ],
+    "planet_density": [
+      1271
+    ],
+    "planet_gravity": [
+      "8.7"
+    ],
+    "orbital_period": [
+      30589.0
+    ],
+    "satellite_data.total_satellites": [
+      5
+    ],
+    "satellite_data.avg_density": [
+      1.4972
+    ],
+    "satellite_data.max_radius": [
+      788.9
+    ],
+    "orbital_data.avg_magnitude": [
+      21.376666666666665
+    ]
+  }
 }

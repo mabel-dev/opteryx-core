@@ -11,7 +11,104 @@
         "summary": "Boolean false test.",
         "syntax_forms": [
             "expr IS FALSE"
-        ]
+        ],
+        "precedence": {
+            "level": 12,
+            "levels": 15,
+            "position": "postfix",
+            "spellings": [
+                "IS FALSE"
+            ]
+        }
+    },
+    "IsJsonArray": {
+        "ast_symbol": "IsJsonArray",
+        "category": "json_predicate",
+        "documentation": "Returns true when the input is JSON text parsing to a JSON array.",
+        "implementation": "draken_is_json_array",
+        "node_type": "UNARY_OPERATOR",
+        "notes": "Total predicate \u2014 never returns NULL. Validates JSON TEXT without building a document. WITH/WITHOUT UNIQUE KEYS is parsed but refused.",
+        "operand_type": "json_text",
+        "status": "active",
+        "summary": "JSON array well-formedness test.",
+        "syntax_forms": [
+            "expr IS JSON ARRAY"
+        ],
+        "precedence": {
+            "level": 12,
+            "levels": 15,
+            "position": "postfix",
+            "spellings": [
+                "IS JSON ARRAY"
+            ]
+        }
+    },
+    "IsJsonObject": {
+        "ast_symbol": "IsJsonObject",
+        "category": "json_predicate",
+        "documentation": "Returns true when the input is JSON text parsing to a JSON object.",
+        "implementation": "draken_is_json_object",
+        "node_type": "UNARY_OPERATOR",
+        "notes": "Total predicate \u2014 never returns NULL. Validates JSON TEXT without building a document. WITH/WITHOUT UNIQUE KEYS is parsed but refused.",
+        "operand_type": "json_text",
+        "status": "active",
+        "summary": "JSON object well-formedness test.",
+        "syntax_forms": [
+            "expr IS JSON OBJECT"
+        ],
+        "precedence": {
+            "level": 12,
+            "levels": 15,
+            "position": "postfix",
+            "spellings": [
+                "IS JSON OBJECT"
+            ]
+        }
+    },
+    "IsJsonScalar": {
+        "ast_symbol": "IsJsonScalar",
+        "category": "json_predicate",
+        "documentation": "Returns true when the input is JSON text parsing to a JSON scalar \u2014 a string, number, boolean or null.",
+        "implementation": "draken_is_json_scalar",
+        "node_type": "UNARY_OPERATOR",
+        "notes": "Total predicate \u2014 never returns NULL. Validates JSON TEXT without building a document. WITH/WITHOUT UNIQUE KEYS is parsed but refused.",
+        "operand_type": "json_text",
+        "status": "active",
+        "summary": "JSON scalar well-formedness test.",
+        "syntax_forms": [
+            "expr IS JSON SCALAR"
+        ],
+        "precedence": {
+            "level": 12,
+            "levels": 15,
+            "position": "postfix",
+            "spellings": [
+                "IS JSON SCALAR"
+            ]
+        }
+    },
+    "IsJsonValue": {
+        "ast_symbol": "IsJsonValue",
+        "category": "json_predicate",
+        "documentation": "Returns true when the input is JSON text parsing to any well-formed JSON document.",
+        "implementation": "draken_is_json_value",
+        "node_type": "UNARY_OPERATOR",
+        "notes": "Total predicate \u2014 never returns NULL. Validates JSON TEXT without building a document. WITH/WITHOUT UNIQUE KEYS is parsed but refused.",
+        "operand_type": "json_text",
+        "status": "active",
+        "summary": "JSON value well-formedness test.",
+        "syntax_forms": [
+            "expr IS JSON",
+            "expr IS JSON VALUE"
+        ],
+        "precedence": {
+            "level": 12,
+            "levels": 15,
+            "position": "postfix",
+            "spellings": [
+                "IS JSON"
+            ]
+        }
     },
     "IsNotFalse": {
         "ast_symbol": "IsNotFalse",
@@ -25,7 +122,104 @@
         "summary": "Boolean is-not-false test.",
         "syntax_forms": [
             "expr IS NOT FALSE"
-        ]
+        ],
+        "precedence": {
+            "level": 12,
+            "levels": 15,
+            "position": "postfix",
+            "spellings": [
+                "IS NOT FALSE"
+            ]
+        }
+    },
+    "IsNotJsonArray": {
+        "ast_symbol": "IsNotJsonArray",
+        "category": "json_predicate",
+        "documentation": "Returns true when the input is NOT JSON text parsing to a JSON array. A malformed document, and a NULL, are both true.",
+        "implementation": "draken_is_not_json_array",
+        "node_type": "UNARY_OPERATOR",
+        "notes": "Total predicate \u2014 never returns NULL. Validates JSON TEXT without building a document. WITH/WITHOUT UNIQUE KEYS is parsed but refused.",
+        "operand_type": "json_text",
+        "status": "active",
+        "summary": "Negated JSON array well-formedness test.",
+        "syntax_forms": [
+            "expr IS NOT JSON ARRAY"
+        ],
+        "precedence": {
+            "level": 12,
+            "levels": 15,
+            "position": "postfix",
+            "spellings": [
+                "IS NOT JSON ARRAY"
+            ]
+        }
+    },
+    "IsNotJsonObject": {
+        "ast_symbol": "IsNotJsonObject",
+        "category": "json_predicate",
+        "documentation": "Returns true when the input is NOT JSON text parsing to a JSON object. A malformed document, and a NULL, are both true.",
+        "implementation": "draken_is_not_json_object",
+        "node_type": "UNARY_OPERATOR",
+        "notes": "Total predicate \u2014 never returns NULL. Validates JSON TEXT without building a document. WITH/WITHOUT UNIQUE KEYS is parsed but refused.",
+        "operand_type": "json_text",
+        "status": "active",
+        "summary": "Negated JSON object well-formedness test.",
+        "syntax_forms": [
+            "expr IS NOT JSON OBJECT"
+        ],
+        "precedence": {
+            "level": 12,
+            "levels": 15,
+            "position": "postfix",
+            "spellings": [
+                "IS NOT JSON OBJECT"
+            ]
+        }
+    },
+    "IsNotJsonScalar": {
+        "ast_symbol": "IsNotJsonScalar",
+        "category": "json_predicate",
+        "documentation": "Returns true when the input is NOT JSON text parsing to a JSON scalar \u2014 a string, number, boolean or null. A malformed document, and a NULL, are both true.",
+        "implementation": "draken_is_not_json_scalar",
+        "node_type": "UNARY_OPERATOR",
+        "notes": "Total predicate \u2014 never returns NULL. Validates JSON TEXT without building a document. WITH/WITHOUT UNIQUE KEYS is parsed but refused.",
+        "operand_type": "json_text",
+        "status": "active",
+        "summary": "Negated JSON scalar well-formedness test.",
+        "syntax_forms": [
+            "expr IS NOT JSON SCALAR"
+        ],
+        "precedence": {
+            "level": 12,
+            "levels": 15,
+            "position": "postfix",
+            "spellings": [
+                "IS NOT JSON SCALAR"
+            ]
+        }
+    },
+    "IsNotJsonValue": {
+        "ast_symbol": "IsNotJsonValue",
+        "category": "json_predicate",
+        "documentation": "Returns true when the input is NOT JSON text parsing to any well-formed JSON document. A malformed document, and a NULL, are both true.",
+        "implementation": "draken_is_not_json_value",
+        "node_type": "UNARY_OPERATOR",
+        "notes": "Total predicate \u2014 never returns NULL. Validates JSON TEXT without building a document. WITH/WITHOUT UNIQUE KEYS is parsed but refused.",
+        "operand_type": "json_text",
+        "status": "active",
+        "summary": "Negated JSON value well-formedness test.",
+        "syntax_forms": [
+            "expr IS NOT JSON",
+            "expr IS NOT JSON VALUE"
+        ],
+        "precedence": {
+            "level": 12,
+            "levels": 15,
+            "position": "postfix",
+            "spellings": [
+                "IS NOT JSON"
+            ]
+        }
     },
     "IsNotNull": {
         "ast_symbol": "IsNotNull",
@@ -39,7 +233,15 @@
         "summary": "Null negation test.",
         "syntax_forms": [
             "expr IS NOT NULL"
-        ]
+        ],
+        "precedence": {
+            "level": 12,
+            "levels": 15,
+            "position": "postfix",
+            "spellings": [
+                "IS NOT NULL"
+            ]
+        }
     },
     "IsNotTrue": {
         "ast_symbol": "IsNotTrue",
@@ -53,7 +255,15 @@
         "summary": "Boolean is-not-true test.",
         "syntax_forms": [
             "expr IS NOT TRUE"
-        ]
+        ],
+        "precedence": {
+            "level": 12,
+            "levels": 15,
+            "position": "postfix",
+            "spellings": [
+                "IS NOT TRUE"
+            ]
+        }
     },
     "IsNull": {
         "ast_symbol": "IsNull",
@@ -67,7 +277,15 @@
         "summary": "Null test.",
         "syntax_forms": [
             "expr IS NULL"
-        ]
+        ],
+        "precedence": {
+            "level": 12,
+            "levels": 15,
+            "position": "postfix",
+            "spellings": [
+                "IS NULL"
+            ]
+        }
     },
     "IsTrue": {
         "ast_symbol": "IsTrue",
@@ -81,7 +299,15 @@
         "summary": "Boolean true test.",
         "syntax_forms": [
             "expr IS TRUE"
-        ]
+        ],
+        "precedence": {
+            "level": 12,
+            "levels": 15,
+            "position": "postfix",
+            "spellings": [
+                "IS TRUE"
+            ]
+        }
     },
     "Not": {
         "ast_symbol": "Not",
@@ -95,6 +321,58 @@
         "summary": "Logical negation.",
         "syntax_forms": [
             "NOT expr"
-        ]
+        ],
+        "precedence": {
+            "level": 13,
+            "levels": 15,
+            "position": "prefix",
+            "spellings": [
+                "NOT"
+            ]
+        }
+    },
+    "UnaryMinus": {
+        "ast_symbol": "Minus",
+        "category": "arithmetic",
+        "documentation": "Negates a numeric expression.",
+        "implementation": "opteryx.planner.logical_planner.logical_planner_builders.unary_op",
+        "node_type": "BINARY_OPERATOR",
+        "notes": "A numeric literal is negated at plan time (`-5` is the literal -5); any other operand is lowered to `0 - expr`.",
+        "operand_type": "numeric",
+        "status": "active",
+        "summary": "Numeric negation.",
+        "syntax_forms": [
+            "-expr"
+        ],
+        "precedence": {
+            "level": 3,
+            "levels": 15,
+            "position": "prefix",
+            "spellings": [
+                "-"
+            ]
+        }
+    },
+    "UnaryPlus": {
+        "ast_symbol": "Plus",
+        "category": "arithmetic",
+        "documentation": "Returns a numeric expression unchanged.",
+        "implementation": "opteryx.planner.logical_planner.logical_planner_builders.unary_op",
+        "node_type": "UNARY_OPERATOR",
+        "notes": "Removed by the planner; the operand is used as written.",
+        "operand_type": "numeric",
+        "status": "active",
+        "summary": "Numeric identity.",
+        "syntax_forms": [
+            "+expr"
+        ],
+        "precedence": {
+            "level": 3,
+            "levels": 15,
+            "position": "prefix",
+            "spellings": [
+                "+"
+            ]
+        }
     }
 }

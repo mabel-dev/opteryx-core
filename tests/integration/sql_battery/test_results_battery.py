@@ -15,6 +15,7 @@ This suite executes a statement and confirms the output matches what was expecte
 """
 
 import glob
+import json
 import os
 import sys
 
@@ -22,36 +23,46 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.third_party import yyjson as orjson
-
 import opteryx
 from opteryx.utils.formatter import format_sql
 
 OS_SEP = os.sep
 
+# Anchored to this file, so collection does not depend on the invoking cwd.
+RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_data", "tests", "results")
+
 
 def get_tests(test_type):
-    suites = glob.glob(f"**/**.{test_type}", recursive=True)
+    suites = glob.glob(os.path.join(RESULTS_DIR, "**", f"*.{test_type}"), recursive=True)
     for suite in sorted(suites):
         with open(suite, mode="r") as test_file:
-            try:
-                yield {"file": suite, **orjson.loads(test_file.read())}
-            except Exception as err:  # pragma: no cover
-                print(err)
-                print(suite)
+            content = test_file.read()
+        try:
+            test = json.loads(content)
+        except json.JSONDecodeError as err:
+            raise ValueError(f"results test file {suite} is not valid JSON: {err}") from err
+        yield {"file": suite, **test}
 
 
 RESULTS_TESTS = list(get_tests("results_tests"))
 
 
-@pytest.mark.parametrize("test", RESULTS_TESTS)
+def _result_as_pydict(sql):
+    result = {}
+    for morsel in opteryx.session().execute_to_morsels(sql):
+        for name in morsel.column_names:
+            result.setdefault(name.decode(), []).extend(morsel.column(name).to_pylist())
+    return result
+
+
+@pytest.mark.parametrize("test", RESULTS_TESTS, ids=[os.path.basename(t["file"]) for t in RESULTS_TESTS])
 def test_results_tests(test):
     """ """
     sql = test["statement"]
-    result = opteryx.query_to_arrow(sql).to_pydict()
+    result = _result_as_pydict(sql)
 
-    printable_result = orjson.dumps(result, default=str, option=orjson.OPT_SORT_KEYS).decode()
-    printable_expected = orjson.dumps(test["result"], option=orjson.OPT_SORT_KEYS).decode()
+    printable_result = json.dumps(result, default=str, sort_keys=True)
+    printable_expected = json.dumps(test["result"], sort_keys=True)
 
     assert (
         printable_result == printable_expected
@@ -84,8 +95,6 @@ if __name__ == "__main__":  # pragma: no cover
     for index, test in enumerate(RESULTS_TESTS):
         printable = test["statement"]
         test_id = test["file"].split(OS_SEP)[-1].split(".")[0][0:25].ljust(25)
-        if hasattr(printable, "decode"):
-            printable = printable.decode()
         print(
             f"\033[38;2;255;184;108m{(index + 1):04}\033[0m",
             f"\033[0;35m{test_id}\033[0m",

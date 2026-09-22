@@ -348,6 +348,14 @@ def _format_expression_inner(root, qualify, cache):
             "IsNotNull": "%s IS NOT NULL",
             "IsEmpty": "%s IS EMPTY",
             "IsNotEmpty": "%s IS NOT EMPTY",
+            "IsJsonValue": "%s IS JSON VALUE",
+            "IsNotJsonValue": "%s IS NOT JSON VALUE",
+            "IsJsonScalar": "%s IS JSON SCALAR",
+            "IsNotJsonScalar": "%s IS NOT JSON SCALAR",
+            "IsJsonArray": "%s IS JSON ARRAY",
+            "IsNotJsonArray": "%s IS NOT JSON ARRAY",
+            "IsJsonObject": "%s IS JSON OBJECT",
+            "IsNotJsonObject": "%s IS NOT JSON OBJECT",
             "BitwiseNot": "~%s",
         }
         # Most unary operators carry their operand in `centre`, but EXISTS puts its

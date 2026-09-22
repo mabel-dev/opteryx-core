@@ -67,6 +67,14 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 14,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "AND"
+            ]
+        },
         "notes": "AND is three-valued. FALSE wins over an unknown - `FALSE AND NULL` is FALSE, because no value of the unknown side could make the pair true - while `TRUE AND NULL` is NULL. Only a TRUE result passes a WHERE clause, so a row whose condition is NULL is dropped exactly as a false one is."
     },
     "ArrayContainsAll": {
@@ -137,6 +145,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 1,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "@>>"
+            ],
+            "note": "Opteryx's own choice, above `::` and `[]`: `payload->>'id'::INTEGER` casts the extracted value, and `a->'b'[1]` indexes the extracted value. Postgres binds `::` tighter and casts the key. A cast on a containment operand regroups too: `a @> ['x']::ARRAY<VARCHAR>` is `(a @> ['x'])::ARRAY<VARCHAR>`."
+        },
         "notes": "`@>>` is ALL, `@>` is ANY."
     },
     "Arrow": {
@@ -288,6 +305,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 1,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "->"
+            ],
+            "note": "Opteryx's own choice, above `::` and `[]`: `payload->>'id'::INTEGER` casts the extracted value, and `a->'b'[1]` indexes the extracted value. Postgres binds `::` tighter and casts the key. A cast on a containment operand regroups too: `a @> ['x']::ARRAY<VARCHAR>` is `(a @> ['x'])::ARRAY<VARCHAR>`."
+        },
         "notes": "`->` keeps the value as JSON, so a selected string arrives still quoted (`\"Earth\"`); `->>` is the form that gives the text itself (`Earth`). That is the difference between the two, and the usual cause of a comparison against a string literal not matching. The result type is dynamic because the selected JSON value may be scalar, object, array, or null."
     },
     "AtArrow": {
@@ -358,6 +384,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 1,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "@>"
+            ],
+            "note": "Opteryx's own choice, above `::` and `[]`: `payload->>'id'::INTEGER` casts the extracted value, and `a->'b'[1]` indexes the extracted value. Postgres binds `::` tighter and casts the key. A cast on a containment operand regroups too: `a @> ['x']::ARRAY<VARCHAR>` is `(a @> ['x'])::ARRAY<VARCHAR>`."
+        },
         "notes": "`@>` is ANY, `@>>` is ALL - the pair is easy to mix up. `['a','b'] @> ['a','z']` is TRUE because one value matched; the same operands under `@>>` are FALSE."
     },
     "AtQuestion": {
@@ -508,6 +543,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 1,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "@?"
+            ],
+            "note": "Opteryx's own choice, above `::` and `[]`: `payload->>'id'::INTEGER` casts the extracted value, and `a->'b'[1]` indexes the extracted value. Postgres binds `::` tighter and casts the key. A cast on a containment operand regroups too: `a @> ['x']::ARRAY<VARCHAR>` is `(a @> ['x'])::ARRAY<VARCHAR>`."
+        },
         "notes": "The path must be a literal \u2014 it is resolved to RFC 6901 tokens once when the query is planned, using the same resolver `->` uses, so `doc @? 'city'`, `doc @? '$.contact.email'` and `doc @? '/contact/email'` all name the same thing. Existence is not extraction: a path whose value is JSON `null` is TRUE here, while `doc->'key' IS NOT NULL` is FALSE. A NULL document row is NULL; a row whose bytes are not valid JSON is an error, never a silent false."
     },
     "BitwiseAnd": {
@@ -571,7 +615,15 @@
                 "result_type_is_dynamic": false,
                 "cost_estimate": 100.0
             }
-        ]
+        ],
+        "precedence": {
+            "level": 7,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "&"
+            ]
+        }
     },
     "BitwiseOr": {
         "ast_symbol": "BitwiseOr",
@@ -634,7 +686,15 @@
                 "result_type_is_dynamic": false,
                 "cost_estimate": 100.0
             }
-        ]
+        ],
+        "precedence": {
+            "level": 9,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "|"
+            ]
+        }
     },
     "BitwiseXor": {
         "ast_symbol": "BitwiseXor",
@@ -698,6 +758,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 8,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "^"
+            ],
+            "note": "`^`, `<<` and `>>` share one tier, between `&` and `|`. MySQL binds `^` above `*` and the shifts above `&`, so `a & b << c` is `(a & b) << c` here and `a & (b << c)` in MySQL. The IPv4 containment operators `<<=` and `>>=` begin with the shift tokens and bind at this tier, not as comparisons."
+        },
         "notes": "`^` is exclusive OR, not exponentiation - a habit worth checking when porting SQL from systems where it raises to a power."
     },
     "Divide": {
@@ -834,6 +903,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 4,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "/"
+            ],
+            "note": "`||` binds like `*`. Postgres puts `||` below `+` and `-`; the two only meet in an expression that mixes strings and numbers."
+        },
         "notes": "`/` is true division: `5 / 2` is 2.5, never 2. A DECIMAL operand keeps the result DECIMAL; every other combination gives FLOAT, and `1 / 0` is therefore `inf` rather than an error."
     },
     "Eq": {
@@ -1101,6 +1179,14 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 10,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "="
+            ]
+        },
         "notes": "Comparison is three-valued: NULL on either side gives NULL, never true or false, and `NULL = NULL` is NULL too - `IS NULL` is the test for absence. String comparison is case-sensitive (`'Mars' = 'mars'` is false), unlike column NAMES, which are not."
     },
     "Gt": {
@@ -1355,6 +1441,14 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 10,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                ">"
+            ]
+        },
         "notes": "NULL on either side gives NULL, so ordering comparisons never match an absent value."
     },
     "GtEq": {
@@ -1609,6 +1703,14 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 10,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                ">="
+            ]
+        },
         "notes": "NULL on either side gives NULL, so ordering comparisons never match an absent value."
     },
     "ILike": {
@@ -1743,6 +1845,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 11,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "ILIKE"
+            ],
+            "note": "Pattern matching binds LOOSER than comparison. Postgres has it tighter, so `a = b LIKE c` is `(a = b) LIKE c` here and `a = (b LIKE c)` there."
+        },
         "notes": "Case folding is ASCII-only: `'ABC' ILIKE 'abc'` is true, but `'\u00c9COLE' ILIKE '\u00e9cole'` is FALSE - accented and other non-ASCII letters are compared as written. Where that matters, fold explicitly with a function instead."
     },
     "IPContainedBy": {
@@ -1806,6 +1917,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 8,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "<<="
+            ],
+            "note": "`^`, `<<` and `>>` share one tier, between `&` and `|`. MySQL binds `^` above `*` and the shifts above `&`, so `a & b << c` is `(a & b) << c` here and `a & (b << c)` in MySQL. The IPv4 containment operators `<<=` and `>>=` begin with the shift tokens and bind at this tier, not as comparisons."
+        },
         "notes": "Spelling follows PostgreSQL, CockroachDB and DuckDB's inet extension. A NULL address is not contained by any network and yields false. An invalid or prefix-less CIDR raises rather than matching nothing."
     },
     "IPContains": {
@@ -1869,6 +1989,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 8,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                ">>="
+            ],
+            "note": "`^`, `<<` and `>>` share one tier, between `&` and `|`. MySQL binds `^` above `*` and the shifts above `&`, so `a & b << c` is `(a & b) << c` here and `a & (b << c)` in MySQL. The IPv4 containment operators `<<=` and `>>=` begin with the shift tokens and bind at this tier, not as comparisons."
+        },
         "notes": "Spelling follows PostgreSQL, CockroachDB and DuckDB's inet extension."
     },
     "InList": {
@@ -2013,6 +2142,14 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 10,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "IN"
+            ]
+        },
         "notes": "IN is a shorthand for a chain of `=`, and inherits its rules: the comparison is exact and case-sensitive. A list mixing types - `IN (NULL, 2)` among them - is an error, not a match against the elements that do share a type."
     },
     "Like": {
@@ -2148,6 +2285,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 11,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "LIKE"
+            ],
+            "note": "Pattern matching binds LOOSER than comparison. Postgres has it tighter, so `a = b LIKE c` is `(a = b) LIKE c` here and `a = (b LIKE c)` there."
+        },
         "notes": "Matching is case-sensitive; ILIKE is the case-insensitive form. A NULL on either side is not matched."
     },
     "LongArrow": {
@@ -2292,6 +2438,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 1,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "->>"
+            ],
+            "note": "Opteryx's own choice, above `::` and `[]`: `payload->>'id'::INTEGER` casts the extracted value, and `a->'b'[1]` indexes the extracted value. Postgres binds `::` tighter and casts the key. A cast on a containment operand regroups too: `a @> ['x']::ARRAY<VARCHAR>` is `(a @> ['x'])::ARRAY<VARCHAR>`."
+        },
         "notes": "Use `->>` when the value is going to be compared with a string literal: `->` would leave it JSON-quoted and the comparison would not match."
     },
     "Lt": {
@@ -2545,6 +2700,14 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 10,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "<"
+            ]
+        },
         "notes": "NULL on either side gives NULL, so ordering comparisons never match an absent value."
     },
     "LtEq": {
@@ -2798,6 +2961,14 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 10,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "<="
+            ]
+        },
         "notes": "NULL on either side gives NULL, so ordering comparisons never match an absent value."
     },
     "MapAccess": {
@@ -2912,6 +3083,14 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 2,
+            "levels": 15,
+            "position": "postfix",
+            "spellings": [
+                "[]"
+            ]
+        },
         "notes": "Subscript access is ZERO-based and accepts negative indexes, which count back from the end: `[0]` is the first element and `[-1]` the last. Most SQL dialects index arrays from 1, so a query ported from one of those reads the WRONG element rather than erroring - an out-of-range index gives NULL, so nothing signals the mistake. For arrays the result type depends on the array element type, so the exported result type may be dynamic."
     },
     "Minus": {
@@ -3128,6 +3307,14 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 5,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "-"
+            ]
+        },
         "notes": "Unlike addition, subtraction is not symmetric across types: a timestamp minus an interval is a timestamp, but an interval minus a timestamp is not accepted."
     },
     "Modulo": {
@@ -3202,6 +3389,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 4,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "%"
+            ],
+            "note": "`||` binds like `*`. Postgres puts `||` below `+` and `-`; the two only meet in an expression that mixes strings and numbers."
+        },
         "notes": "The remainder takes the sign of the DIVIDEND, not the divisor: `-7 % 2` is -1 and `7 % -2` is 1. That is C and Go's rule, not Python's, where `-7 % 2` is 1."
     },
     "Multiply": {
@@ -3334,7 +3530,16 @@
                 "result_type_is_dynamic": false,
                 "cost_estimate": 100.0
             }
-        ]
+        ],
+        "precedence": {
+            "level": 4,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "*"
+            ],
+            "note": "`||` binds like `*`. Postgres puts `||` below `+` and `-`; the two only meet in an expression that mixes strings and numbers."
+        }
     },
     "MyIntegerDivide": {
         "ast_symbol": "MyIntegerDivide",
@@ -3398,6 +3603,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 4,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "DIV"
+            ],
+            "note": "`||` binds like `*`. Postgres puts `||` below `+` and `-`; the two only meet in an expression that mixes strings and numbers."
+        },
         "notes": "Truncation is toward zero, not toward minus infinity: `-7 DIV 2` is -3, where a floor division would give -4."
     },
     "NotEq": {
@@ -3668,6 +3882,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 10,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "!=",
+                "<>"
+            ]
+        },
         "notes": "`!=` does not mean \"everything else\": a row whose value is NULL answers NULL, not true, so it is dropped by the WHERE clause. Of the nine planets one has a surface pressure of 0 and four have none recorded, so `surface_pressure != 0` returns four rows, not eight - `OR surface_pressure IS NULL` is how the unknown rows are kept."
     },
     "NotILike": {
@@ -3798,6 +4021,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 11,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "NOT ILIKE"
+            ],
+            "note": "Pattern matching binds LOOSER than comparison. Postgres has it tighter, so `a = b LIKE c` is `(a = b) LIKE c` here and `a = (b LIKE c)` there."
+        },
         "notes": "Case folding is ASCII-only, exactly as for ILIKE."
     },
     "NotInList": {
@@ -3937,6 +4169,14 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 10,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "NOT IN"
+            ]
+        },
         "notes": "Like `!=`, a row whose value is NULL answers NULL rather than true, so it does not survive a WHERE clause."
     },
     "NotLike": {
@@ -4067,6 +4307,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 11,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "NOT LIKE"
+            ],
+            "note": "Pattern matching binds LOOSER than comparison. Postgres has it tighter, so `a = b LIKE c` is `(a = b) LIKE c` here and `a = (b LIKE c)` there."
+        },
         "notes": "Case-sensitive, like `LIKE` itself. NOT ILIKE is the case-insensitive form."
     },
     "NotRLike": {
@@ -4196,7 +4445,16 @@
                 "result_type_is_dynamic": false,
                 "cost_estimate": 100.0
             }
-        ]
+        ],
+        "precedence": {
+            "level": 11,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "NOT RLIKE"
+            ],
+            "note": "Pattern matching binds LOOSER than comparison. Postgres has it tighter, so `a = b LIKE c` is `(a = b) LIKE c` here and `a = (b LIKE c)` there."
+        }
     },
     "Or": {
         "ast_symbol": "Or",
@@ -4267,6 +4525,14 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 15,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "OR"
+            ]
+        },
         "notes": "OR is three-valued, and the mirror of AND: TRUE wins over an unknown - `TRUE OR NULL` is TRUE - while `FALSE OR NULL` is NULL, not FALSE."
     },
     "Plus": {
@@ -4455,6 +4721,14 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 5,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "+"
+            ]
+        },
         "notes": "Adding NULL gives NULL. Date arithmetic is only ever date-plus-interval, and the result is a TIMESTAMP even when the operand was a DATE - see Signatures."
     },
     "RLike": {
@@ -4583,6 +4857,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 11,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "RLIKE"
+            ],
+            "note": "Pattern matching binds LOOSER than comparison. Postgres has it tighter, so `a = b LIKE c` is `(a = b) LIKE c` here and `a = (b LIKE c)` there."
+        },
         "notes": "A regular expression is more expressive than a LIKE pattern and more expensive to run; prefer LIKE when a prefix or suffix match is all that is needed."
     },
     "ShiftLeft": {
@@ -4647,6 +4930,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 8,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "<<"
+            ],
+            "note": "`^`, `<<` and `>>` share one tier, between `&` and `|`. MySQL binds `^` above `*` and the shifts above `&`, so `a & b << c` is `(a & b) << c` here and `a & (b << c)` in MySQL. The IPv4 containment operators `<<=` and `>>=` begin with the shift tokens and bind at this tier, not as comparisons."
+        },
         "notes": "The shift count must be 0..63 - the operands are 64-bit integers, and a count outside that range fails loud ('bitwise_shl: shift count out of range') rather than wrapping or saturating."
     },
     "ShiftRight": {
@@ -4711,6 +5003,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 8,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                ">>"
+            ],
+            "note": "`^`, `<<` and `>>` share one tier, between `&` and `|`. MySQL binds `^` above `*` and the shifts above `&`, so `a & b << c` is `(a & b) << c` here and `a & (b << c)` in MySQL. The IPv4 containment operators `<<=` and `>>=` begin with the shift tokens and bind at this tier, not as comparisons."
+        },
         "notes": "Right shift is ARITHMETIC, not logical: the sign bit is copied, so `-1 >> 1` is -1 and a negative value never becomes positive by shifting. The shift count must be 0..63 - the operands are 64-bit integers, and a count outside that range fails loud ('bitwise_shr: shift count out of range') rather than wrapping or saturating."
     },
     "StringConcat": {
@@ -4806,6 +5107,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 4,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "||"
+            ],
+            "note": "`||` binds like `*`. Postgres puts `||` below `+` and `-`; the two only meet in an expression that mixes strings and numbers."
+        },
         "notes": "The operands must be the same string type; mixing VARCHAR and VARBINARY is rejected rather than silently coerced. `x || NULL` is NULL for every row - it is not treated as an empty string - but the expression still carries the string operand's type."
     },
     "Xor": {
@@ -4877,6 +5187,15 @@
                 "cost_estimate": 100.0
             }
         ],
+        "precedence": {
+            "level": 6,
+            "levels": 15,
+            "position": "infix",
+            "spellings": [
+                "XOR"
+            ],
+            "note": "Logical XOR binds TIGHTER than `&` and every comparison, unlike MySQL, where it sits between AND and OR. `a = b XOR c = d` is `a = (b XOR c) = d` - parenthesise the comparisons: `(a = b) XOR (c = d)`."
+        },
         "notes": "Unlike AND and OR, XOR has no dominant value: the answer always depends on both sides, so NULL on either side gives NULL."
     }
 }

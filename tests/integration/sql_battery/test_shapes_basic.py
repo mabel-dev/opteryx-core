@@ -951,6 +951,24 @@ STATEMENTS = [
         ("SELECT * FROM $planets WHERE ['a', 'b', 'c'] @>> ['a', 'b']", 9, 20, None),
         ("SELECT ['a', 'b', 'c'] @> ['a']", 1, 1, None),
         ("SELECT ['a', 'b', 'c'] @>> ['a', 'b']", 1, 1, None),
+        # SQL:2016 IS [NOT] JSON. sqlparser 0.63 parses this for every dialect
+        # (ungated in parse_infix), so it reaches the planner whether we asked
+        # for it or not. Values are asserted in test_is_json.py; these pin the
+        # shapes and the two refusals.
+        ("SELECT * FROM $planets WHERE name IS JSON", 0, 20, None),
+        ("SELECT * FROM $planets WHERE name IS NOT JSON", 9, 20, None),
+        ("SELECT * FROM $planets WHERE name IS JSON OBJECT", 0, 20, None),
+        ("SELECT * FROM $planets WHERE NOT (name IS JSON)", 9, 20, None),
+        ("SELECT name IS JSON, name IS JSON SCALAR, name IS JSON ARRAY FROM $planets", 9, 3, None),
+        ("SELECT '{\"a\":1}' IS JSON OBJECT", 1, 1, None),
+        ("SELECT '[1,2]' IS JSON ARRAY", 1, 1, None),
+        ("SELECT '\"x\"' IS JSON SCALAR", 1, 1, None),
+        ("SELECT 'nope' IS NOT JSON VALUE", 1, 1, None),
+        # Unique-key checking is not implemented; the clause is refused by name.
+        ("SELECT '{}' IS JSON WITH UNIQUE KEYS", None, None, UnsupportedSyntaxError),
+        ("SELECT '{}' IS JSON OBJECT WITHOUT UNIQUE KEYS", None, None, UnsupportedSyntaxError),
+        # The operand must be JSON text — `id` is an integer.
+        ("SELECT * FROM $planets WHERE id IS JSON", None, None, IncorrectTypeError),
 ]
 
 # fmt:on
@@ -4071,6 +4089,225 @@ def test_humanize_modes():
     assert lengths == [396], f"huge-double rendering changed length: {lengths!r}"
 
 
+def test_natural_join_in_a_multi_join_chain():
+    """
+    VALUE-level regression for the association of NATURAL JOIN inside a chain of
+    three or more relations.
+
+    NATURAL JOIN derives its predicate implicitly, from every column name common
+    to its TWO inputs. That makes the chain's shape load-bearing in a way an
+    explicit ON is not: move a relation in or out of the NATURAL JOIN's right
+    side and the implicit predicate silently changes, and with it the answer.
+
+        a NATURAL JOIN b INNER JOIN c ON ...     -- (a NJ b) NJ'd on a n b
+        a NATURAL JOIN (b INNER JOIN c ON ...)   -- NJ'd on a n (b u c)
+
+    sqlparser 0.62 built the second tree for the first query, but only under a
+    dialect with `supports_left_associative_joins_without_parens() == false`.
+    OpteryxDialect does not override that flag and the trait default is true, so
+    we never saw the mis-nested tree (measured against 0.62 itself, not
+    inferred); 0.63 fixes it for the dialects that did. This test is the guard
+    that keeps it that way.
+
+    The relations are built so the association is OBSERVABLE: `c` shares `x`
+    with `a` and `y` with `b`. Under the correct association the NATURAL JOIN
+    pairs on {k} alone and both rows survive; under the mis-nested one it pairs
+    on {k, x} and the second row is dropped. A chain whose relations share no
+    column names answers the same either way and would prove nothing.
+    """
+    a = "(SELECT 1 AS k, 10 AS x UNION ALL SELECT 2 AS k, 20 AS x) AS a"
+    b = "(SELECT 1 AS k, 100 AS y UNION ALL SELECT 2 AS k, 200 AS y) AS b"
+    c = "(SELECT 10 AS x, 100 AS y UNION ALL SELECT 99 AS x, 200 AS y) AS c"
+
+    def _rows(sql, columns):
+        collected = []
+        for morsel in opteryx.session().execute_to_morsels(sql):
+            collected.extend(zip(*[morsel.column(col).to_pylist() for col in columns]))
+        return sorted(collected)
+
+    columns = ["k", "x", "y", "cx"]
+    projection = "SELECT a.k AS k, a.x AS x, b.y AS y, c.x AS cx FROM "
+
+    # NATURAL JOIN LEADING - the shape the upstream bug needed.
+    leading = _rows(f"{projection}{a} NATURAL JOIN {b} INNER JOIN {c} ON b.y = c.y", columns)
+
+    # The same query with the implicit predicate written out. This is what the
+    # correct (left-deep) association MEANS, so it is the oracle; it also pins
+    # the derived predicate to {k} - had the mis-nesting derived {k, x}, only
+    # (1, 10, 100, 10) would survive.
+    explicit = _rows(
+        f"{projection}{a} INNER JOIN {b} ON a.k = b.k INNER JOIN {c} ON b.y = c.y", columns
+    )
+
+    assert leading == explicit, f"NATURAL JOIN chain diverged from its explicit form: {leading!r}"
+    assert leading == [(1, 10, 100, 10), (2, 20, 200, 99)], (
+        f"NATURAL JOIN associated wrongly in a multi-join chain: {leading!r}. "
+        "Two rows means it paired on {k} (correct); one row means the chain was "
+        "re-nested and it paired on {k, x} as well."
+    )
+
+    # NATURAL JOIN TRAILING - the same chain the other way round. Here the
+    # NATURAL JOIN's left input is the RESULT of the preceding join, so the
+    # common columns must be drawn from BOTH of the relations beneath it.
+    trailing = _rows(
+        "SELECT p1.id AS id, p1.name AS name FROM $planets AS p1 "
+        "INNER JOIN $planets AS p2 ON p1.id = p2.id NATURAL JOIN $planets AS p3",
+        ["id", "name"],
+    )
+    # Five, not nine: the implicit predicate covers every column, and the four
+    # planets with a NULL surface_pressure cannot equal themselves.
+    assert trailing == [
+        (1, "Mercury"),
+        (2, "Venus"),
+        (3, "Earth"),
+        (4, "Mars"),
+        (9, "Pluto"),
+    ], f"trailing NATURAL JOIN in a chain changed its answer: {trailing!r}"
+
+
+def test_is_distinct_from_operator_precedence():
+    """
+    VALUE-level regression: `IS [NOT] DISTINCT FROM` must bind TIGHTER than
+    `AND`/`OR`.
+
+    sqlparser 0.63 fixed "Honour operator precedence in IS [NOT] DISTINCT
+    FROM". Before it, the comparison bound too loosely and swallowed the
+    following conjunction:
+
+        a IS DISTINCT FROM b AND c
+          -> a IS DISTINCT FROM (b AND c)   WRONG (pre-0.63)
+          -> (a IS DISTINCT FROM b) AND c   CORRECT
+
+    Both trees are runnable and both return rows, so this is a wrong-answer
+    class bug, not a crash. It is invisible to a shape assertion (the row
+    counts differ but the column count does not) and invisible to any test
+    that parenthesises the comparison — which every existing test of this
+    operator does. Hence a value-level test here, in the file `make q` runs.
+
+    The all-boolean cases below are the load-bearing ones: with three boolean
+    operands BOTH parses type-check and execute, so a regression comes back as
+    a different answer rather than an error. The mixed-type cases that follow
+    are the natural spellings a user writes; under the loose binding they
+    compare a VARCHAR or a FLOAT to a boolean and fail loudly instead.
+    """
+
+    def _names(statement):
+        out = []
+        for morsel in opteryx.session().execute_to_morsels(statement):
+            morsel.materialize()
+            out.extend(morsel.column("name").to_pylist())
+        return sorted(out)
+
+    # -- AND, `IS DISTINCT FROM`, all operands boolean -------------------------
+    # Both parses run. The right-hand tree is spelled out so the assertion is
+    # not "these two agree" but "these two agree AND they are not that".
+    tight = _names(
+        "SELECT name FROM $planets "
+        "WHERE (id > 5) IS DISTINCT FROM (name = 'Earth') AND id > 7"
+    )
+    assert tight == _names(
+        "SELECT name FROM $planets "
+        "WHERE ((id > 5) IS DISTINCT FROM (name = 'Earth')) AND id > 7"
+    ), f"IS DISTINCT FROM did not bind tighter than AND: {tight!r}"
+    assert tight == ["Neptune", "Pluto"], tight
+    loose = _names(
+        "SELECT name FROM $planets "
+        "WHERE (id > 5) IS DISTINCT FROM ((name = 'Earth') AND id > 7)"
+    )
+    assert loose == ["Neptune", "Pluto", "Saturn", "Uranus"], loose
+    assert tight != loose, "the two parses stopped disagreeing - this test is now blind"
+
+    # -- OR, `IS DISTINCT FROM`, all operands boolean --------------------------
+    tight = _names(
+        "SELECT name FROM $planets "
+        "WHERE (id > 5) IS DISTINCT FROM (name = 'Earth') OR id = 7"
+    )
+    assert tight == _names(
+        "SELECT name FROM $planets "
+        "WHERE ((id > 5) IS DISTINCT FROM (name = 'Earth')) OR id = 7"
+    ), f"IS DISTINCT FROM did not bind tighter than OR: {tight!r}"
+    assert tight == ["Earth", "Neptune", "Pluto", "Saturn", "Uranus"], tight
+    loose = _names(
+        "SELECT name FROM $planets "
+        "WHERE (id > 5) IS DISTINCT FROM ((name = 'Earth') OR id = 7)"
+    )
+    assert tight != loose, "the two parses stopped disagreeing - this test is now blind"
+
+    # -- OR, `IS NOT DISTINCT FROM`, all operands boolean ----------------------
+    # The negated spelling is a separate token path in the builder, so it gets
+    # its own pair rather than riding on the affirmative one.
+    tight = _names(
+        "SELECT name FROM $planets "
+        "WHERE (id > 5) IS NOT DISTINCT FROM (name = 'Earth') OR id = 3"
+    )
+    assert tight == _names(
+        "SELECT name FROM $planets "
+        "WHERE ((id > 5) IS NOT DISTINCT FROM (name = 'Earth')) OR id = 3"
+    ), f"IS NOT DISTINCT FROM did not bind tighter than OR: {tight!r}"
+    assert tight == ["Earth", "Jupiter", "Mars", "Mercury", "Venus"], tight
+    loose = _names(
+        "SELECT name FROM $planets "
+        "WHERE (id > 5) IS NOT DISTINCT FROM ((name = 'Earth') OR id = 3)"
+    )
+    assert tight != loose, "the two parses stopped disagreeing - this test is now blind"
+
+    # -- OR, with a genuinely NULL operand, all operands boolean ---------------
+    # `surface_pressure` is NULL for the four gas giants, so the left operand
+    # of the comparison is exercised on real NULLs rather than on a literal.
+    tight = _names(
+        "SELECT name FROM $planets "
+        "WHERE (surface_pressure IS NULL) IS DISTINCT FROM (id > 6) OR id = 7"
+    )
+    assert tight == _names(
+        "SELECT name FROM $planets "
+        "WHERE ((surface_pressure IS NULL) IS DISTINCT FROM (id > 6)) OR id = 7"
+    ), f"IS DISTINCT FROM over a NULL-bearing operand mis-bound: {tight!r}"
+    assert tight == ["Jupiter", "Pluto", "Saturn", "Uranus"], tight
+    loose = _names(
+        "SELECT name FROM $planets "
+        "WHERE (surface_pressure IS NULL) IS DISTINCT FROM ((id > 6) OR id = 7)"
+    )
+    assert tight != loose, "the two parses stopped disagreeing - this test is now blind"
+
+    # -- the natural, mixed-type spellings -------------------------------------
+    # These are what a user actually writes. Under the loose binding the
+    # right-hand operand becomes a boolean and the comparison is a type error,
+    # so these guard the same regression from the other side.
+    assert (
+        _names("SELECT name FROM $planets WHERE name IS DISTINCT FROM 'Earth' AND id > 5")
+        == _names("SELECT name FROM $planets WHERE (name IS DISTINCT FROM 'Earth') AND id > 5")
+        == ["Neptune", "Pluto", "Saturn", "Uranus"]
+    )
+    assert (
+        _names("SELECT name FROM $planets WHERE name IS NOT DISTINCT FROM 'Earth' OR id > 7")
+        == _names("SELECT name FROM $planets WHERE (name IS NOT DISTINCT FROM 'Earth') OR id > 7")
+        == ["Earth", "Neptune", "Pluto"]
+    )
+
+    # A NULL column as a direct operand of the comparison. This is the whole
+    # reason the operator exists over `=`/`<>`, so the equality form is asserted
+    # alongside it: NULL <> 0.0 is UNKNOWN and drops the gas giants, whereas
+    # NULL IS DISTINCT FROM 0.0 is TRUE and keeps them.
+    distinct = _names(
+        "SELECT name FROM $planets WHERE surface_pressure IS DISTINCT FROM 0.0 AND id > 5"
+    )
+    assert distinct == _names(
+        "SELECT name FROM $planets WHERE (surface_pressure IS DISTINCT FROM 0.0) AND id > 5"
+    ), f"IS DISTINCT FROM over a NULL column mis-bound against AND: {distinct!r}"
+    assert distinct == ["Neptune", "Pluto", "Saturn", "Uranus"], distinct
+    assert _names("SELECT name FROM $planets WHERE surface_pressure <> 0.0 AND id > 5") == [
+        "Pluto"
+    ], "the NULL contrast is gone - IS DISTINCT FROM now answers as <> does"
+
+    not_distinct = _names(
+        "SELECT name FROM $planets WHERE surface_pressure IS NOT DISTINCT FROM 0.0 OR id > 7"
+    )
+    assert not_distinct == _names(
+        "SELECT name FROM $planets WHERE (surface_pressure IS NOT DISTINCT FROM 0.0) OR id > 7"
+    ), f"IS NOT DISTINCT FROM over a NULL column mis-bound against OR: {not_distinct!r}"
+    assert not_distinct == ["Mercury", "Neptune", "Pluto"], not_distinct
+
+
 if __name__ == "__main__":  # pragma: no cover
     import shutil
     import time
@@ -4252,6 +4489,14 @@ if __name__ == "__main__":  # pragma: no cover
             test_cross_join_output_mixes_raw_and_computed_columns,
         ),
         ("humanize scale systems", test_humanize_modes),
+        (
+            "natural join in a multi-join chain",
+            test_natural_join_in_a_multi_join_chain,
+        ),
+        (
+            "IS [NOT] DISTINCT FROM operator precedence",
+            test_is_distinct_from_operator_precedence,
+        ),
     ):
         print(f"\033[38;2;255;184;108m{name}\033[0m ", end="", flush=True)
         try:
