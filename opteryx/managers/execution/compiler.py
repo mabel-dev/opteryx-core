@@ -4384,13 +4384,35 @@ class _Compiler:
                 node, legs, mode, left_cols, right_cols, filter_residual
             )
 
+        # LEFT OUTER with the legs EXCHANGED — the preserved LEFT leg BUILDS and the
+        # right leg streams past it, emitting the same rows by a different
+        # materialisation (native_join2.hpp's JoinMode::RightOuter). Taken only when
+        # JoinAlgorithmStrategy set the flag, which is also where the two prices are
+        # owned: the exchange is BLOCKING, and a LIMIT above it cannot short-circuit
+        # the probe. Raised to mode 8 HERE rather than in `modes` above because it is
+        # not a join TYPE the parser can produce — no SQL spells it — it is a physical
+        # choice about an ordinary "left outer".
+        #
+        # Never with a residual: `residual` is lowered against the (build, probe) pair
+        # layout, and exchanging the legs reverses that layout. Equi-only is the shape
+        # the flag is granted for, and this is the second lock on it.
+        swap_left_outer = (
+            mode == 1
+            and getattr(node, "swap_build_side", False)
+            and residual is None
+            and bool(left_cols)
+        )
+        if swap_left_outer:
+            mode = 8
+
         # INNER / CROSS: build = left leg (CROSS builds right for the scalar side).
         # LEFT OUTER / SEMI / ANTI: the LEFT leg is the preserved/filtered side —
         # it must be the PROBE; the RIGHT leg builds the table.
+        # RIGHT OUTER (mode 8): the exchange — the preserved LEFT leg builds instead.
         if is_cross:
             build_id, probe_id = legs["right"], legs["left"]
             build_keys, probe_keys = [], []
-        elif mode == 0:
+        elif mode == 0 or mode == 8:
             build_id, probe_id = legs["left"], legs["right"]
             build_keys, probe_keys = left_cols, right_cols
         else:
@@ -4490,7 +4512,7 @@ class _Compiler:
         null_equal = mode in (6, 7)
         self.nplan.set_join2_build_sink(bp, build_key_idx, build_payload, ref,
                                         build_types, build_logical, build_element,
-                                        mode == 5,   # FULL OUTER: track matches
+                                        mode in (5, 8),  # build side preserved: track matches
                                         _estimate_to_int64(
                                             est_rows,
                                             f"output-row estimate for the {join_type} join"),
@@ -4567,12 +4589,17 @@ class _Compiler:
             # joined stream, and append a filter to the probe pipeline.
             bc = self._lower_expression(residual, "a nested-loop join condition")
             self.nplan.add_expr_filter(pp, bc, out_layout)
-        if mode == 5:
-            # FULL OUTER tail: the probe leg and the unmatched-build leg stream
-            # into ONE shared buffer (the UNION plumbing). The tail pipeline is
-            # created AFTER the probe pipeline — pipelines run in creation
-            # order, so by the time UnmatchedBuildSource pulls, every probe
-            # worker has finished and the matched[] flags are complete.
+        if mode in (5, 8):
+            # BUILD-PRESERVED tail, for both modes that preserve the build side:
+            # FULL OUTER, and the exchanged LEFT OUTER (mode 8), which reaches this
+            # with the SAME shape — it differs only in whether the probe also emitted
+            # its misses, a decision already made inside the probe operator.
+            #
+            # The probe leg and the unmatched-build leg stream into ONE shared buffer
+            # (the UNION plumbing). The tail pipeline is created AFTER the probe
+            # pipeline — pipelines run in creation order, so by the time
+            # UnmatchedBuildSource pulls, every probe worker has finished and the
+            # matched[] flags are complete.
             probe_types, probe_logical, probe_element = self._payload_types(
                 probe_id, [playout[j] for j in probe_payload])
             buf = self.nplan.new_buffer()

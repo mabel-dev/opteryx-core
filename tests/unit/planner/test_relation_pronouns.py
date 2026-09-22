@@ -218,6 +218,69 @@ def test_resolved_name_reaches_the_catalog_lookup():
     assert "$me" not in str(missing.value).lower()
 
 
+# --- what a pre-flight check reports ---------------------------------------
+#
+# `analyze_query` and `Session.check` describe the PRE-rewrite AST, so they used
+# to report `personal.$me.x` as the relation a statement names. A caller matching
+# that against grants matches nothing, and refuses a statement the engine would
+# have run - which is how an owned relation was reported as unauthorized rather
+# than as missing.
+
+
+def test_analyze_query_resolves_the_pronoun_for_the_named_user():
+    described = opteryx.analyze_query("SELECT * FROM personal.$me.notes", user="alice")
+    assert described["tables"] == ["personal.alice.notes"], described["tables"]
+
+
+def test_analyze_query_without_a_user_leaves_the_pronoun_as_written():
+    # There is no identity to substitute, and guessing one would name another
+    # user's data. The pronoun survives, unresolved and visible.
+    described = opteryx.analyze_query("SELECT * FROM personal.$me.notes")
+    assert described["tables"] == ["personal.$me.notes"], described["tables"]
+
+
+def test_analyze_query_describes_every_statement_of_a_batch():
+    described = opteryx.analyze_query(
+        "SELECT * FROM personal.$me.a; INSERT INTO personal.$me.b (x) VALUES (1)",
+        user="alice",
+    )
+    assert described["tables"] == ["personal.alice.a", "personal.alice.b"], described["tables"]
+
+
+def test_analyze_query_still_reports_the_parameters_written():
+    # The pronoun pass runs on the PRE-rewrite AST, where a `:name` is still
+    # recorded. Resolving one must not cost the other.
+    described = opteryx.analyze_query(
+        "SELECT * FROM personal.$me.notes WHERE dept = :department", user="alice"
+    )
+    assert described["tables"] == ["personal.alice.notes"], described["tables"]
+    assert described["parameters"] == ["department"], described["parameters"]
+
+
+def test_analyze_query_refuses_a_user_that_is_not_a_name():
+    # Validated, never repaired: a dotted value would change the name's arity and
+    # address a different workspace.
+    with pytest.raises(SqlError):
+        opteryx.analyze_query("SELECT * FROM personal.$me.notes", user="alice.smith")
+
+
+def test_check_reports_the_resolved_name_and_the_real_failure():
+    session = opteryx.session(user="alice")
+    checked = session.check("SELECT * FROM personal.$me.notes").as_dict()
+    assert checked["tables"] == ["personal.alice.notes"], checked["tables"]
+    # The relation is missing, and that is what is reported - not a refusal.
+    assert checked["error"]["type"] == "DatasetNotFoundError", checked["error"]
+
+
+def test_check_reports_an_unresolvable_pronoun_rather_than_raising():
+    # A check returns a diagnostic even when the statement cannot be understood:
+    # being wrong is the expected case while a statement is typed.
+    session = opteryx.session()
+    checked = session.check("SELECT * FROM personal.$me.notes").as_dict()
+    assert checked["ok"] is False
+    assert checked["error"]["type"] == "SqlError", checked["error"]
+
+
 # --- the permission gate sees the resolved name ----------------------------
 
 

@@ -44,6 +44,7 @@
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
 #include "core/string_slot.h"
+#include "core/validity_word.h"
 #include "ops/vec_result.h"
 
 namespace draken { namespace ops {
@@ -174,7 +175,7 @@ static inline void str_dict_scatter(
 {
     const uint32_t whole_bytes = n >> 3;
     if (src_null == nullptr) {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
+        DRAKEN_FOR_EACH_LIVE_BYTE(src_null, n, b, {
             const uint32_t base = b << 3;
             dst[b] = static_cast<uint8_t>(
                 (dict_bytes[selection[base+0]] << 0) |
@@ -185,12 +186,12 @@ static inline void str_dict_scatter(
                 (dict_bytes[selection[base+5]] << 5) |
                 (dict_bytes[selection[base+6]] << 6) |
                 (dict_bytes[selection[base+7]] << 7));
-        }
+        });
         for (uint32_t i = whole_bytes << 3; i < n; ++i)
             if (dict_bytes[selection[i]])
                 dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
     } else {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
+        DRAKEN_FOR_EACH_LIVE_BYTE(src_null, n, b, {
             const uint32_t base = b << 3;
             const uint8_t m = static_cast<uint8_t>(
                 (dict_bytes[selection[base+0]] << 0) |
@@ -202,7 +203,7 @@ static inline void str_dict_scatter(
                 (dict_bytes[selection[base+6]] << 6) |
                 (dict_bytes[selection[base+7]] << 7));
             dst[b] = static_cast<uint8_t>(m & src_null[b]);
-        }
+        });
         for (uint32_t i = whole_bytes << 3; i < n; ++i)
             if ((src_null[i >> 3] >> (i & 7)) & 1u)
                 if (dict_bytes[selection[i]])
@@ -246,7 +247,7 @@ static inline void str_dict_cross_scatter(
 {
     const uint32_t whole_bytes = n >> 3;
     if (comb_null == nullptr) {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
+        DRAKEN_FOR_EACH_LIVE_BYTE(comb_null, n, b, {
             const uint32_t base = b << 3;
             dst[b] = static_cast<uint8_t>(
                 (cross[a_sel[base+0] * dl_b + b_sel[base+0]] << 0) |
@@ -257,12 +258,12 @@ static inline void str_dict_cross_scatter(
                 (cross[a_sel[base+5] * dl_b + b_sel[base+5]] << 5) |
                 (cross[a_sel[base+6] * dl_b + b_sel[base+6]] << 6) |
                 (cross[a_sel[base+7] * dl_b + b_sel[base+7]] << 7));
-        }
+        });
         for (uint32_t i = whole_bytes << 3; i < n; ++i)
             if (cross[a_sel[i] * dl_b + b_sel[i]])
                 dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
     } else {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
+        DRAKEN_FOR_EACH_LIVE_BYTE(comb_null, n, b, {
             const uint32_t base = b << 3;
             const uint8_t m = static_cast<uint8_t>(
                 (cross[a_sel[base+0] * dl_b + b_sel[base+0]] << 0) |
@@ -274,7 +275,7 @@ static inline void str_dict_cross_scatter(
                 (cross[a_sel[base+6] * dl_b + b_sel[base+6]] << 6) |
                 (cross[a_sel[base+7] * dl_b + b_sel[base+7]] << 7));
             dst[b] = static_cast<uint8_t>(m & comb_null[b]);
-        }
+        });
         for (uint32_t i = whole_bytes << 3; i < n; ++i)
             if ((comb_null[i >> 3] >> (i & 7)) & 1u)
                 if (cross[a_sel[i] * dl_b + b_sel[i]])
@@ -308,7 +309,7 @@ static inline void str_cmp_scalar_eq(
 #define DRAKEN_STR_SCALAR_EQ_BIT(BASE, BIT) \
     (static_cast<unsigned>(str_eq_slots(&slots[selection[(BASE) + (BIT)]], arena, scalar_slot, scalar_bytes)) << (BIT))
 
-    for (uint32_t b = 0; b < whole_bytes; ++b) {
+    DRAKEN_FOR_EACH_LIVE_BYTE(src_null, n, b, {
         const uint32_t base = b << 3;
         const uint8_t m = static_cast<uint8_t>(
             DRAKEN_STR_SCALAR_EQ_BIT(base, 0) |
@@ -320,7 +321,7 @@ static inline void str_cmp_scalar_eq(
             DRAKEN_STR_SCALAR_EQ_BIT(base, 6) |
             DRAKEN_STR_SCALAR_EQ_BIT(base, 7));
         dst[b] = (src_null == nullptr) ? m : static_cast<uint8_t>(m & src_null[b]);
-    }
+    });
     for (uint32_t i = whole_bytes << 3; i < n; ++i) {
         if (src_null != nullptr && (((src_null[i >> 3] >> (i & 7)) & 1u) == 0u))
             continue;
@@ -345,7 +346,7 @@ static inline void str_cmp_scalar_ne(
 #define DRAKEN_STR_SCALAR_NE_BIT(BASE, BIT) \
     (static_cast<unsigned>(!str_eq_slots(&slots[selection[(BASE) + (BIT)]], arena, scalar_slot, scalar_bytes)) << (BIT))
 
-    for (uint32_t b = 0; b < whole_bytes; ++b) {
+    DRAKEN_FOR_EACH_LIVE_BYTE(src_null, n, b, {
         const uint32_t base = b << 3;
         const uint8_t m = static_cast<uint8_t>(
             DRAKEN_STR_SCALAR_NE_BIT(base, 0) |
@@ -357,7 +358,7 @@ static inline void str_cmp_scalar_ne(
             DRAKEN_STR_SCALAR_NE_BIT(base, 6) |
             DRAKEN_STR_SCALAR_NE_BIT(base, 7));
         dst[b] = (src_null == nullptr) ? m : static_cast<uint8_t>(m & src_null[b]);
-    }
+    });
     for (uint32_t i = whole_bytes << 3; i < n; ++i) {
         if (src_null != nullptr && (((src_null[i >> 3] >> (i & 7)) & 1u) == 0u))
             continue;
@@ -384,7 +385,7 @@ static inline void str_cmp_scalar_ord(
     const uint32_t whole_bytes = n >> 3;
 
     if (src_null == nullptr) {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
+        DRAKEN_FOR_EACH_LIVE_BYTE(src_null, n, b, {
             const uint32_t base = b << 3;
             dst[b] = static_cast<uint8_t>(
                 (static_cast<unsigned>(ApplyOrd::apply(str_compare(&slots[selection[base+0]], arena, scalar_slot, scalar_bytes))) << 0) |
@@ -395,13 +396,13 @@ static inline void str_cmp_scalar_ord(
                 (static_cast<unsigned>(ApplyOrd::apply(str_compare(&slots[selection[base+5]], arena, scalar_slot, scalar_bytes))) << 5) |
                 (static_cast<unsigned>(ApplyOrd::apply(str_compare(&slots[selection[base+6]], arena, scalar_slot, scalar_bytes))) << 6) |
                 (static_cast<unsigned>(ApplyOrd::apply(str_compare(&slots[selection[base+7]], arena, scalar_slot, scalar_bytes))) << 7));
-        }
+        });
         for (uint32_t i = whole_bytes << 3; i < n; ++i) {
             if (ApplyOrd::apply(str_compare(&slots[selection[i]], arena, scalar_slot, scalar_bytes)))
                 dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
         }
     } else {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
+        DRAKEN_FOR_EACH_LIVE_BYTE(src_null, n, b, {
             const uint32_t base = b << 3;
             const uint8_t m = static_cast<uint8_t>(
                 (static_cast<unsigned>(ApplyOrd::apply(str_compare(&slots[selection[base+0]], arena, scalar_slot, scalar_bytes))) << 0) |
@@ -413,7 +414,7 @@ static inline void str_cmp_scalar_ord(
                 (static_cast<unsigned>(ApplyOrd::apply(str_compare(&slots[selection[base+6]], arena, scalar_slot, scalar_bytes))) << 6) |
                 (static_cast<unsigned>(ApplyOrd::apply(str_compare(&slots[selection[base+7]], arena, scalar_slot, scalar_bytes))) << 7));
             dst[b] = static_cast<uint8_t>(m & src_null[b]);
-        }
+        });
         for (uint32_t i = whole_bytes << 3; i < n; ++i) {
             if ((src_null[i >> 3] >> (i & 7)) & 1u) {
                 if (ApplyOrd::apply(str_compare(&slots[selection[i]], arena, scalar_slot, scalar_bytes)))
@@ -545,7 +546,7 @@ static inline void str_cmp_vec_eq(
 #define DRAKEN_STR_VEC_EQ_BIT(BASE, BIT) \
     (static_cast<unsigned>(str_eq_slots(&a_slots[a_sel[(BASE) + (BIT)]], a_arena, &b_slots[b_sel[(BASE) + (BIT)]], b_arena)) << (BIT))
 
-    for (uint32_t b = 0; b < whole_bytes; ++b) {
+    DRAKEN_FOR_EACH_LIVE_BYTE(comb_null, n, b, {
         const uint32_t base = b << 3;
         const uint8_t m = static_cast<uint8_t>(
             DRAKEN_STR_VEC_EQ_BIT(base, 0) |
@@ -557,7 +558,7 @@ static inline void str_cmp_vec_eq(
             DRAKEN_STR_VEC_EQ_BIT(base, 6) |
             DRAKEN_STR_VEC_EQ_BIT(base, 7));
         dst[b] = (comb_null == nullptr) ? m : static_cast<uint8_t>(m & comb_null[b]);
-    }
+    });
     for (uint32_t i = whole_bytes << 3; i < n; ++i) {
         if (comb_null != nullptr && (((comb_null[i >> 3] >> (i & 7)) & 1u) == 0u))
             continue;
@@ -578,7 +579,7 @@ static inline void str_cmp_vec_ne(
 #define DRAKEN_STR_VEC_NE_BIT(BASE, BIT) \
     (static_cast<unsigned>(!str_eq_slots(&a_slots[a_sel[(BASE) + (BIT)]], a_arena, &b_slots[b_sel[(BASE) + (BIT)]], b_arena)) << (BIT))
 
-    for (uint32_t b = 0; b < whole_bytes; ++b) {
+    DRAKEN_FOR_EACH_LIVE_BYTE(comb_null, n, b, {
         const uint32_t base = b << 3;
         const uint8_t m = static_cast<uint8_t>(
             DRAKEN_STR_VEC_NE_BIT(base, 0) |
@@ -590,7 +591,7 @@ static inline void str_cmp_vec_ne(
             DRAKEN_STR_VEC_NE_BIT(base, 6) |
             DRAKEN_STR_VEC_NE_BIT(base, 7));
         dst[b] = (comb_null == nullptr) ? m : static_cast<uint8_t>(m & comb_null[b]);
-    }
+    });
     for (uint32_t i = whole_bytes << 3; i < n; ++i) {
         if (comb_null != nullptr && (((comb_null[i >> 3] >> (i & 7)) & 1u) == 0u))
             continue;
@@ -611,7 +612,7 @@ static inline void str_cmp_vec_ord(
     const uint32_t whole_bytes = n >> 3;
 
     if (comb_null == nullptr) {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
+        DRAKEN_FOR_EACH_LIVE_BYTE(comb_null, n, b, {
             const uint32_t base = b << 3;
             dst[b] = static_cast<uint8_t>(
                 (static_cast<unsigned>(ApplyOrd::apply(str_compare(&a_slots[a_sel[base+0]], a_arena, &b_slots[b_sel[base+0]], b_arena))) << 0) |
@@ -622,13 +623,13 @@ static inline void str_cmp_vec_ord(
                 (static_cast<unsigned>(ApplyOrd::apply(str_compare(&a_slots[a_sel[base+5]], a_arena, &b_slots[b_sel[base+5]], b_arena))) << 5) |
                 (static_cast<unsigned>(ApplyOrd::apply(str_compare(&a_slots[a_sel[base+6]], a_arena, &b_slots[b_sel[base+6]], b_arena))) << 6) |
                 (static_cast<unsigned>(ApplyOrd::apply(str_compare(&a_slots[a_sel[base+7]], a_arena, &b_slots[b_sel[base+7]], b_arena))) << 7));
-        }
+        });
         for (uint32_t i = whole_bytes << 3; i < n; ++i) {
             if (ApplyOrd::apply(str_compare(&a_slots[a_sel[i]], a_arena, &b_slots[b_sel[i]], b_arena)))
                 dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
         }
     } else {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
+        DRAKEN_FOR_EACH_LIVE_BYTE(comb_null, n, b, {
             const uint32_t base = b << 3;
             const uint8_t m = static_cast<uint8_t>(
                 (static_cast<unsigned>(ApplyOrd::apply(str_compare(&a_slots[a_sel[base+0]], a_arena, &b_slots[b_sel[base+0]], b_arena))) << 0) |
@@ -640,7 +641,7 @@ static inline void str_cmp_vec_ord(
                 (static_cast<unsigned>(ApplyOrd::apply(str_compare(&a_slots[a_sel[base+6]], a_arena, &b_slots[b_sel[base+6]], b_arena))) << 6) |
                 (static_cast<unsigned>(ApplyOrd::apply(str_compare(&a_slots[a_sel[base+7]], a_arena, &b_slots[b_sel[base+7]], b_arena))) << 7));
             dst[b] = static_cast<uint8_t>(m & comb_null[b]);
-        }
+        });
         for (uint32_t i = whole_bytes << 3; i < n; ++i) {
             if ((comb_null[i >> 3] >> (i & 7)) & 1u) {
                 if (ApplyOrd::apply(str_compare(&a_slots[a_sel[i]], a_arena, &b_slots[b_sel[i]], b_arena)))

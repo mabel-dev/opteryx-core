@@ -562,6 +562,7 @@ def check_statement(
     from opteryx.planner import bind_logical_plan
     from opteryx.planner import build_logical_plan
     from opteryx.planner import parse_statement
+    from opteryx.planner.ast_rewriter.relation_pronouns import do_substitute_relation_pronouns
     from opteryx.utils.query_parser import describe_statement
 
     # The binder's relation gates raise the BUILTIN PermissionError, so it is named
@@ -584,6 +585,21 @@ def check_statement(
     except SqlError as error:
         # Nothing parsed, so there is no AST to describe and nothing in scope. The
         # positioned error is the whole answer.
+        return QueryCheck(ok=False, statement=operation, error=error)
+
+    # Resolve `$me` before describing, so `tables` reports the name the binder will
+    # look for rather than the text the reader typed. This is the planner's own
+    # resolver, run early on the same AST the rewriter would run it on further down
+    # - it substitutes in place and a resolved part is no longer a pronoun, so the
+    # rewriter's pass over it below is a no-op. There is still ONE resolver.
+    #
+    # A pronoun that cannot be resolved leaves the statement's relation names
+    # unknowable, so it is reported like a parse failure: the error alone, with
+    # nothing described. It would otherwise raise out of a function whose contract
+    # is to return a diagnostic.
+    try:
+        do_substitute_relation_pronouns(parsed_statements, execution_context.variables)
+    except SqlError as error:
         return QueryCheck(ok=False, statement=operation, error=error)
 
     described = describe_statement(parsed_statements[0])

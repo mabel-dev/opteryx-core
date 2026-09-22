@@ -36,6 +36,17 @@ cdef class OuterJoinNode(JoinNode):
     cdef public object using
     cdef public list left_columns
     cdef public list right_columns
+    # LEFT OUTER only: exchange the legs so the PRESERVED (left) leg BUILDS and the
+    # right leg streams past it — compiler.py lowers it to JoinMode::RightOuter. Set
+    # by JoinAlgorithmStrategy, which owns the two prices (it blocks, and a LIMIT
+    # above the join can no longer short-circuit the probe).
+    #
+    # DECLARED, not inherited: this is a cdef class, so an attribute the class does
+    # not name cannot be set on an instance — and `getattr(node, "swap_build_side",
+    # False)` in the compiler would then return False forever, silently. The flag
+    # would read as "the optimizer declined" when in fact it never arrived. Same
+    # declaration, for the same reason, as FilterJoinNode's.
+    cdef public bint swap_build_side
 
     def __init__(self, properties=None, **parameters):
         # Ensure `join_type` exists before the base initializer accesses `self.name`
@@ -43,6 +54,8 @@ cdef class OuterJoinNode(JoinNode):
         JoinNode.__init__(self, properties=properties, **parameters)
         self.on = parameters.get("on")
         self.using = parameters.get("using")
+
+        self.swap_build_side = parameters.get("swap_build_side", False)
 
         self.left_columns = parameters.get("left_columns")
         self.left_readers = parameters.get("left_readers") or []

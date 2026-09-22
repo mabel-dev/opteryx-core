@@ -25,8 +25,11 @@ from typing import Generator, Optional
 
 # EOS sentinel in scope as _EOS_SENTINEL via the umbrella unit.
 from opteryx.constants import QueryStatus
+from opteryx.exceptions import md_code
 from opteryx.models import NonTabularResult
 from opteryx.models import QueryProperties
+from opteryx.models import row_count_phrase
+from opteryx.models import rows_message
 
 # BasePlanNode and Morsel in scope via _operators.pyx include (the latter
 # cimported there from draken.morsels.morsel).
@@ -139,12 +142,36 @@ class InsertNode(BasePlanNode):
             return "initial population of materialized view"
         return None
 
+    def _receipt(self):
+        """What this statement did, named as the STATEMENT the reader wrote.
+
+        One node serves INSERT, CTAS, CREATE MATERIALIZED VIEW and REFRESH, and
+        they are four different sentences: "1,000 rows inserted into `x`" is
+        true of all four and useful for only one. The flags already distinguish
+        them for the commit message, so they distinguish the receipt too rather
+        than a fifth field carrying the same fact.
+        """
+        # The count half only - the branches below have already named the
+        # relation, and repeating it reads as two relations ("created table `x`,
+        # 4 rows written to `x`").
+        rows = row_count_phrase(self._total_rows, "written")
+        if self.is_refresh:
+            return f"materialized view {md_code(self.relation_name)} refreshed, {rows}"
+        if self.is_materialized_view:
+            return f"created materialized view {md_code(self.relation_name)}, {rows}"
+        if self.is_replace:
+            return f"replaced {md_code(self.relation_name)}, {rows}"
+        if self.create_target:
+            return f"created table {md_code(self.relation_name)}, {rows}"
+        return rows_message(self._total_rows, "inserted", self.relation_name, preposition="into")
+
     def _push_impl(self, morsel):
         if self.is_noop:
             if morsel is _EOS_SENTINEL:
                 self.result = NonTabularResult(
                     record_count=0,
                     status=QueryStatus.SQL_SUCCESS,
+                    message=self._receipt(),
                 )
             return
 
@@ -211,6 +238,7 @@ class InsertNode(BasePlanNode):
             self.result = NonTabularResult(
                 record_count=self._total_rows,
                 status=QueryStatus.SQL_SUCCESS,
+                message=self._receipt(),
             )
             return
 

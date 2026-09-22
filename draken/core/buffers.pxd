@@ -12,7 +12,6 @@ from libc.stdint cimport int32_t
 from libc.stdint cimport uint8_t
 from libc.stdint cimport uint32_t
 from libc.stdint cimport uint64_t
-from libc.stdlib cimport free, malloc
 
 cdef extern from "core/buffers.h":
 
@@ -178,34 +177,3 @@ cdef extern from "core/vector_alloc.h":
         void* data, uint32_t data_length,
         const uint32_t* codes, uint32_t length,
         DrakenType type, uint8_t* validity) nogil
-
-
-# Variable-width buffer allocator (07: var_vector is "real but internalize, and
-# rename" — its one external caller is re-homed in a later milestone). Kept on
-# the frozen ABI surface here so the listed consumers continue to bind it via
-# `cimport draken.core.buffers`. Inline so it links into each extension.
-cdef inline DrakenVarBuffer* alloc_var_buffer(DrakenType dtype, size_t length, size_t bytes_cap):
-    cdef DrakenVarBuffer* buf = <DrakenVarBuffer*> malloc(sizeof(DrakenVarBuffer))
-    if buf == NULL:
-        raise MemoryError()
-
-    # allocate offsets: length + 1
-    buf.offsets = <uint32_t*> malloc((length + 1) * sizeof(uint32_t))
-    if buf.offsets == NULL:
-        free(buf)
-        raise MemoryError()
-
-    # allocate data buffer
-    if bytes_cap > 0:
-        buf.data = <uint8_t*> malloc(bytes_cap)
-        if buf.data == NULL:
-            free(buf.offsets)
-            free(buf)
-            raise MemoryError()
-    else:
-        buf.data = NULL
-
-    buf.null_bitmap = NULL
-    buf.length = length
-    buf.type = dtype
-    return buf

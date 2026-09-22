@@ -27,7 +27,11 @@ from opteryx.connectors.local_store_connector import LocalStoreConnector
 from opteryx.connectors.opteryx_connector import OpteryxConnector
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.managers.permissions import register_permissions_capability
-from opteryx_catalog.exceptions import DatasetNotFound
+
+# The lineage path itself imports opteryx_catalog (opteryx_connector's source
+# existence lookup), so the module cannot run without it - and CI installs no
+# catalog. Skip the module rather than fail collection for the whole suite.
+DatasetNotFound = pytest.importorskip("opteryx_catalog.exceptions").DatasetNotFound
 
 _OWNER_POLICY = [{"pattern": "*", "role": "owner"}]
 

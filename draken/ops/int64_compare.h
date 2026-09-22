@@ -35,6 +35,7 @@
 
 #include <new>        // std::bad_alloc / placement new — not reliably pulled in by <stdexcept> on stricter libc++
 #include "core/buffers.h"
+#include "core/validity_word.h"
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
 #include "ops/vec_result.h"
@@ -396,44 +397,77 @@ static inline void cmp_scalar_kernel(
         if constexpr (Identity) return data[pos];
         else                    return data[selection[pos]];
     };
+    // Pack the 8 comparisons for logical rows [base, base+8) into one byte.
+    // No RAW dependency on dst — this is the auto-vectorisation grain.
+    auto pack = [&](uint32_t base) -> uint8_t {
+        return static_cast<uint8_t>(
+            (static_cast<unsigned>(Op::apply(at(base+0), scalar)) << 0) |
+            (static_cast<unsigned>(Op::apply(at(base+1), scalar)) << 1) |
+            (static_cast<unsigned>(Op::apply(at(base+2), scalar)) << 2) |
+            (static_cast<unsigned>(Op::apply(at(base+3), scalar)) << 3) |
+            (static_cast<unsigned>(Op::apply(at(base+4), scalar)) << 4) |
+            (static_cast<unsigned>(Op::apply(at(base+5), scalar)) << 5) |
+            (static_cast<unsigned>(Op::apply(at(base+6), scalar)) << 6) |
+            (static_cast<unsigned>(Op::apply(at(base+7), scalar)) << 7));
+    };
 
     if (src_null == nullptr) {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
-            const uint32_t base = b << 3;
-            dst[b] = static_cast<uint8_t>(
-                (static_cast<unsigned>(Op::apply(at(base+0), scalar)) << 0) |
-                (static_cast<unsigned>(Op::apply(at(base+1), scalar)) << 1) |
-                (static_cast<unsigned>(Op::apply(at(base+2), scalar)) << 2) |
-                (static_cast<unsigned>(Op::apply(at(base+3), scalar)) << 3) |
-                (static_cast<unsigned>(Op::apply(at(base+4), scalar)) << 4) |
-                (static_cast<unsigned>(Op::apply(at(base+5), scalar)) << 5) |
-                (static_cast<unsigned>(Op::apply(at(base+6), scalar)) << 6) |
-                (static_cast<unsigned>(Op::apply(at(base+7), scalar)) << 7));
-        }
+        for (uint32_t b = 0; b < whole_bytes; ++b) dst[b] = pack(b << 3);
         for (uint32_t i = whole_bytes << 3; i < n; ++i) {
             if (Op::apply(at(i), scalar))
                 dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
         }
-    } else {
-        // Branchless: AND packed result with validity byte — null rows → bit 0.
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
-            const uint32_t base = b << 3;
-            const uint8_t m = static_cast<uint8_t>(
-                (static_cast<unsigned>(Op::apply(at(base+0), scalar)) << 0) |
-                (static_cast<unsigned>(Op::apply(at(base+1), scalar)) << 1) |
-                (static_cast<unsigned>(Op::apply(at(base+2), scalar)) << 2) |
-                (static_cast<unsigned>(Op::apply(at(base+3), scalar)) << 3) |
-                (static_cast<unsigned>(Op::apply(at(base+4), scalar)) << 4) |
-                (static_cast<unsigned>(Op::apply(at(base+5), scalar)) << 5) |
-                (static_cast<unsigned>(Op::apply(at(base+6), scalar)) << 6) |
-                (static_cast<unsigned>(Op::apply(at(base+7), scalar)) << 7));
-            dst[b] = static_cast<uint8_t>(m & src_null[b]);
-        }
-        for (uint32_t i = whole_bytes << 3; i < n; ++i) {
-            if ((src_null[i >> 3] >> (i & 7)) & 1u) {
-                if (Op::apply(at(i), scalar))
-                    dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        return;
+    }
+
+    // Word-wide validity (core/validity_word.h): classify 64 logical rows at a
+    // time so an ALL_NULL word skips the comparisons outright and an ALL_VALID
+    // word runs the same unmasked loop the no-null path runs. This
+    // discriminates on the NULL MASK only — it is not encoding-shape dispatch,
+    // and `at()` still honours the uniform data[selection[i]] contract in every
+    // arm.
+    //
+    // Two things this loop is shaped by, both measured:
+    //  * classification must be ONE load + two compares (draken_validity_full_bits).
+    //    Routing full words through the general tail-masking form cost 22% — more
+    //    than the masking it removed, at ~0.5 cycles/row.
+    //  * consecutive same-class words are COALESCED into one flat byte loop. A
+    //    per-word 8-iteration inner loop is too short a trip count to vectorise
+    //    and was also a net loss.
+    const uint32_t n_full_words = n >> 6;   // words whose 8 bytes are all whole
+    uint32_t w = 0;
+    while (w < n_full_words) {
+        const uint64_t bits = draken_validity_full_bits(src_null, w);
+        uint32_t w_end = w + 1u;
+
+        if (bits == ~(uint64_t)0) {                       // ALL_VALID run
+            while (w_end < n_full_words &&
+                   draken_validity_full_bits(src_null, w_end) == ~(uint64_t)0) ++w_end;
+            for (uint32_t b = w << 3; b < (w_end << 3); ++b)
+                dst[b] = pack(b << 3);
+        } else if (bits == (uint64_t)0) {                 // ALL_NULL run — skip
+            while (w_end < n_full_words &&
+                   draken_validity_full_bits(src_null, w_end) == (uint64_t)0) ++w_end;
+            // every row NULL → result bit 0 and validity bit 0; dst is pre-zeroed.
+        } else {                                          // MIXED run
+            while (w_end < n_full_words) {
+                const uint64_t x = draken_validity_full_bits(src_null, w_end);
+                if (x == (uint64_t)0 || x == ~(uint64_t)0) break;
+                ++w_end;
             }
+            for (uint32_t b = w << 3; b < (w_end << 3); ++b)
+                dst[b] = static_cast<uint8_t>(pack(b << 3) & src_null[b]);
+        }
+        w = w_end;
+    }
+
+    // Rows after the last full word: whole bytes, then the partial-byte tail.
+    for (uint32_t b = n_full_words << 3; b < whole_bytes; ++b)
+        dst[b] = static_cast<uint8_t>(pack(b << 3) & src_null[b]);
+    for (uint32_t i = whole_bytes << 3; i < n; ++i) {
+        if ((src_null[i >> 3] >> (i & 7)) & 1u) {
+            if (Op::apply(at(i), scalar))
+                dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
         }
     }
 }

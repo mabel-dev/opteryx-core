@@ -24,8 +24,10 @@ from opteryx.connectors import TableType
 from opteryx.constants import QueryStatus
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import InvalidInternalStateError
+from opteryx.exceptions import md_code
 from opteryx.models import NonTabularResult
 from opteryx.models import QueryProperties
+from opteryx.models import object_message
 
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
 
@@ -100,7 +102,13 @@ class ViewManagementNode(BasePlanNode):
             if self.action == "create_view" and self.if_not_exists:
                 existing_type, _ = self.connector.locate_object(self.view_name)
                 if existing_type == TableType.View:
-                    return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
+                    return NonTabularResult(
+                        record_count=0,
+                        status=QueryStatus.SQL_SUCCESS,
+                        message=object_message(
+                            "view", "", self.view_name, "already exists, nothing created"
+                        ),
+                    )
 
             # The session user, not a fixed literal - attributing every view to
             # "opteryx" made the stored owner useless for telling authors apart.
@@ -113,7 +121,15 @@ class ViewManagementNode(BasePlanNode):
                 schema=self.view_schema,
             )
 
-            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+            # `update_if_exists` is what the store DID, so it is what the
+            # receipt says: OR REPLACE over an existing view did not create one,
+            # and ALTER VIEW never does.
+            verb = "replaced" if update_if_exists else "created"
+            return NonTabularResult(
+                record_count=1,
+                status=QueryStatus.SQL_SUCCESS,
+                message=object_message(verb, "view", self.view_name),
+            )
 
         elif self.action == "drop_view":
             if not self.view_names:
@@ -136,7 +152,11 @@ class ViewManagementNode(BasePlanNode):
                 connector.drop_view(vn, author=self._author)
                 dropped += 1
 
-            return NonTabularResult(record_count=dropped, status=QueryStatus.SQL_SUCCESS)
+            return NonTabularResult(
+                record_count=dropped,
+                status=QueryStatus.SQL_SUCCESS,
+                message=f"dropped {dropped:,} view(s): {', '.join(md_code(v) for v in self.view_names)}",
+            )
 
         elif self.action == "comment":
             # COMMENT ON VIEW/TABLE/EXTENSION
@@ -163,7 +183,11 @@ class ViewManagementNode(BasePlanNode):
             # describer useless for telling authors apart.
             self.connector.set_comment(self.object_name, self.comment, describer=self._author)
 
-            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+            return NonTabularResult(
+                record_count=1,
+                status=QueryStatus.SQL_SUCCESS,
+                message=object_message("commented on", "", self.object_name),
+            )
 
         else:
             raise NotImplementedError(f"Unsupported view action: {self.action}")

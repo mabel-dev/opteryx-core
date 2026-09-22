@@ -33,6 +33,15 @@ node.swap_build_side for SEMI/ANTI where the build side is otherwise pinned:
    preference may break a row-count near-tie, never overturn it (see _decide_swap_reasoned)
 4. If table sizes and cardinalities are the same (e.g. self join), don't change order
 
+Those four rules are the INNER join's, and they read "larger table goes right"
+because the inner join builds its LEFT leg. The OUTER family is the mirror:
+`_compile_join` pins the build to the RIGHT leg, because the probe must be the
+preserved side. Only FULL OUTER gets a choice there -- it preserves BOTH legs, so
+either may build -- and it takes a rule of its own, a plain smaller-leg-builds test
+at _FULL_OUTER_SWAP_RATIO. LEFT OUTER gets none: exchanging its legs would change
+which rows are preserved, and the engine has no build-preserved JoinMode to
+exchange into.
+
 Algorithm selection (node.type, plus the band descriptors node.band_column,
 node.band_lower, node.band_upper and friends). A non-equi conjunct (pure theta,
 or mixed equi+theta) has no hash key to build from, so nested loop -- or a band
@@ -352,6 +361,38 @@ def _decide_swap_reasoned(
 # the swap fires where it is robust, not wherever it would help by a nose.
 _SWAP_BUILD_RATIO = 10.0
 
+# FULL OUTER: how much bigger the RIGHT (build) leg must be estimated to be before
+# its legs are exchanged. Unlike SEMI/ANTI above there is no streaming to give up —
+# FULL OUTER is already blocking (its unmatched-build tail cannot emit until every
+# probe worker has finished) — so the margin exists only to stop churn on noisy
+# estimates, not to buy back a lost short-circuit. 3x is the same threshold Rule 1
+# uses for the inner join's memory-pressure swap, and is deliberately the same
+# number: it is the point at which this codebase already says one leg dominates.
+_FULL_OUTER_SWAP_RATIO = 3.0
+
+# LEFT OUTER: how much bigger the RIGHT (build) leg must be estimated to be before the
+# join is exchanged onto JoinMode::RightOuter — the preserved LEFT leg builds and the
+# right leg streams past it.
+#
+# Strictly larger than _FULL_OUTER_SWAP_RATIO above, because this exchange has a price
+# FULL OUTER does not: a plain LEFT OUTER streams, and the exchanged form BLOCKS. It is
+# also, unlike every other rule in this file, not a straight win — it TRADES build-side
+# work for probe-side work, and the build side is the half that does not parallelise.
+# Measured on TPC-H SF10 `customer LEFT JOIN orders` (a 10.0x ratio), Q13 end to end:
+#
+#     1 worker    2611ms -> 2835ms   (8.6% WORSE)
+#    16 workers    392ms ->  290ms   (26% better)
+#
+# So the exchange buys parallel scaling, not single-threaded work, and a margin that
+# fires on a narrow ratio would regress narrow machines. 4x is deliberately BELOW the
+# 10x the SEMI/ANTI exchange demands — that margin exists to survive estimates known
+# to run 4.6x low, whereas this decision reads the same post-filter row counts the
+# inner-join rules trust — and deliberately ABOVE the 3x used for FULL OUTER.
+#
+# UNMEASURED BETWEEN 3x AND 10x. The number is reasoned, not fitted; the only ratio
+# with numbers against it is 10x. Narrowing it wants a sweep, not an opinion.
+_LEFT_OUTER_SWAP_RATIO = 4.0
+
 # Operators that consume their whole input before emitting. If one of these sits
 # between the join and any LIMIT, nothing downstream could have short-circuited the
 # probe, so the exchange costs no streaming that was ever going to happen.
@@ -498,6 +539,169 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
                     f" {_SWAP_BUILD_RATIO:g}x margin: {sides}",
                 )
                 context.optimized_plan[context.node_id] = node
+
+        # LEFT OUTER: exchange the legs so the PRESERVED side builds.
+        #
+        # `_compile_join` pins the build to the RIGHT leg because the preserved LEFT leg
+        # must PROBE — that is what lets an unmatched probe row emit a NULL build half.
+        # The pin is a correctness rule about the emit, but it also decides which leg is
+        # MATERIALISED, and those are separate questions. When the preserved leg is the
+        # far smaller one the pin is backwards: TPC-H SF10 `customer LEFT JOIN orders`
+        # builds 15,000,000 orders rows in order to preserve 1,500,000 customers.
+        #
+        # The exchange sets `swap_build_side`, which _compile_join lowers to
+        # JoinMode::RightOuter: INNER probing (a streamed row matching nothing is
+        # dropped — it is not preserved) plus build-side match marking, with the
+        # unmatched preserved rows emitted NULL-padded by the same tail FULL OUTER uses.
+        # Same rows, materialisation on the other leg. See native_join2.hpp.
+        #
+        # Two prices, both owned HERE because neither is detectable in the compiler:
+        #   * It is BLOCKING. A plain LEFT OUTER emits each probe row as it is matched;
+        #     the exchanged form emits nothing until the streamed leg is exhausted.
+        #   * Output arrives with the tail's rows in BUILD order, after the probe's.
+        # The LIMIT check below is the first price's gate. The second needs none: a join
+        # guarantees no order, and anything that needed one has its own Order node.
+        if node.node_type == LogicalPlanStepType.Join and node.type == "left outer":
+            can_exchange = bool(node.left_readers) and bool(node.right_readers)
+            # Equi-only. A non-equality ON clause compiles to a nested loop whose
+            # residual is lowered against the (build, probe) pair layout, and the
+            # exchange reverses that layout. _compile_join locks this a second time.
+            equi_only = bool(node.left_columns) and not _contains_non_equi_comparator(
+                node.on
+            )
+            if not can_exchange:
+                self.record_decision(
+                    "left outer join exchange",
+                    "declined, leg has no reader (synthetic relation): "
+                    f"left {_side_facts(node.left_size)},"
+                    f" right {_side_facts(node.right_size)}",
+                )
+            elif not equi_only:
+                self.record_decision(
+                    "left outer join exchange",
+                    "declined, ON clause is not a pure equality (the exchange reverses"
+                    " the pair layout a residual is lowered against)",
+                )
+            else:
+                left_stats, right_stats = self._side_statistics(
+                    context.pre_optimized_tree, context.node_id
+                )
+                left_rows = self._side_rows(left_stats, node.left_size)
+                right_rows = self._side_rows(right_stats, node.right_size)
+                sides = f"left {_side_facts(left_rows)}, right {_side_facts(right_rows)}"
+                # Each decline is recorded apart, for the same reason the SEMI/ANTI
+                # exchange above records its three: they point at different work. No
+                # statistics is an ESTIMATOR gap, a ratio under the margin is the rule
+                # behaving as designed, and a LIMIT is a correctness gate that would
+                # refuse the exchange however large the ratio got.
+                if not left_rows or not right_rows:
+                    self.record_decision(
+                        "left outer join exchange",
+                        f"declined, no row statistics: {sides}",
+                    )
+                elif right_rows <= left_rows * _LEFT_OUTER_SWAP_RATIO:
+                    self.record_decision(
+                        "left outer join exchange",
+                        f"declined, build leg {_ratio_text(right_rows, left_rows)}x"
+                        f" below the {_LEFT_OUTER_SWAP_RATIO:g}x margin: {sides}",
+                    )
+                elif _limit_can_short_circuit(context.pre_optimized_tree, context.node_id):
+                    self.record_decision(
+                        "left outer join exchange",
+                        f"declined, a LIMIT above the join could stop the probe early"
+                        f" (ratio {_ratio_text(right_rows, left_rows)}x): {sides}",
+                    )
+                else:
+                    node.swap_build_side = True
+                    self.telemetry.optimization_left_outer_join_build_side_swapped = (
+                        getattr(
+                            self.telemetry,
+                            "optimization_left_outer_join_build_side_swapped",
+                            0,
+                        )
+                        + 1
+                    )
+                    self.record_decision(
+                        "left outer join exchange",
+                        f"exchanged, build leg {_ratio_text(right_rows, left_rows)}x"
+                        f" clears the {_LEFT_OUTER_SWAP_RATIO:g}x margin: {sides}",
+                    )
+                    context.optimized_plan[context.node_id] = node
+
+        # FULL OUTER: which leg BUILDS is a free choice, and today it is not made.
+        #
+        # `_compile_join` pins the build side to the RIGHT leg (the probe is the
+        # preserved LEFT leg) — a correctness rule for LEFT OUTER, where only the left
+        # leg is preserved. FULL OUTER preserves BOTH legs, so for it that pin is an
+        # arbitrary default, and it is wrong whenever the right leg is the larger one:
+        # TPC-H SF10 `customer FULL OUTER JOIN orders` builds all 15,000,000 orders
+        # rows where the exchanged form builds 1,500,000 customers, and the build-side
+        # merge that follows does not parallelise (it flatlines at 4 workers), so the
+        # extra rows land almost entirely on the critical path. Measured 167.5ms ->
+        # 63.2ms at 16 workers.
+        #
+        # NOT extended to "left outer": exchanging its legs would change which rows are
+        # preserved. That needs a build-preserved JoinMode in the engine, which does not
+        # exist — `join_rewriter` converts RIGHT OUTER *into* LEFT OUTER for exactly
+        # that reason. "right outer" is already gone by the time this runs
+        # (JoinRewriteStrategy is the pass immediately before this one).
+        #
+        # The exchange is the inner join's, unchanged: the leg ATTRIBUTES below plus
+        # `flip_join_leg_labels` on the edges. Both are required — the physical plan
+        # reads the edge labels to pick the build leg, so swapping attributes alone
+        # silently reverts the build side (see flip_join_leg_labels' docstring).
+        if node.node_type == LogicalPlanStepType.Join and node.type == "full outer":
+            if not (node.left_readers and node.right_readers):
+                self.record_decision(
+                    "full outer join build side",
+                    "kept, leg has no reader (synthetic relation): "
+                    f"left {_side_facts(node.left_size)},"
+                    f" right {_side_facts(node.right_size)}",
+                )
+            else:
+                left_stats, right_stats = self._side_statistics(
+                    context.pre_optimized_tree, context.node_id
+                )
+                left_rows = self._side_rows(left_stats, node.left_size)
+                right_rows = self._side_rows(right_stats, node.right_size)
+                sides = f"left {_side_facts(left_rows)}, right {_side_facts(right_rows)}"
+                # Fail-safe on absent statistics, same posture as every other
+                # cost rule here: keep today's shape rather than exchange a join
+                # on a fabricated number.
+                if not left_rows or not right_rows:
+                    self.record_decision(
+                        "full outer join build side",
+                        f"kept, no row statistics: {sides}",
+                    )
+                elif right_rows <= left_rows * _FULL_OUTER_SWAP_RATIO:
+                    self.record_decision(
+                        "full outer join build side",
+                        f"kept, build leg {_ratio_text(right_rows, left_rows)}x below"
+                        f" the {_FULL_OUTER_SWAP_RATIO:g}x margin: {sides}",
+                    )
+                else:
+                    # fmt:off
+                    node.left_size, node.right_size = node.right_size, node.left_size
+                    node.left_columns, node.right_columns = node.right_columns, node.left_columns
+                    node.left_column, node.right_column = node.right_column, node.left_column
+                    node.left_readers, node.right_readers = node.right_readers, node.left_readers
+                    node.left_relation_names, node.right_relation_names = node.right_relation_names, node.left_relation_names
+                    # fmt:on
+                    flip_join_leg_labels(context.optimized_plan, context.node_id)
+                    self.telemetry.optimization_full_outer_join_build_side_swapped = (
+                        getattr(
+                            self.telemetry,
+                            "optimization_full_outer_join_build_side_swapped",
+                            0,
+                        )
+                        + 1
+                    )
+                    self.record_decision(
+                        "full outer join build side",
+                        f"exchanged, build leg {_ratio_text(right_rows, left_rows)}x"
+                        f" clears the {_FULL_OUTER_SWAP_RATIO:g}x margin: {sides}",
+                    )
+                    context.optimized_plan[context.node_id] = node
 
         if node.node_type == LogicalPlanStepType.Join and node.type == "inner":
             # Only reorder joins whose legs carry reader UUIDs. Joins without

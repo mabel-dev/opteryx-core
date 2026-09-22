@@ -30,6 +30,8 @@ previous implementation.
 
 from typing import Optional
 
+from opteryx.exceptions import md_code
+
 
 class CompactionCommitNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):
@@ -102,7 +104,11 @@ class CompactionCommitNode(BasePlanNode):
             # Selection found nothing worth rewriting. A pass that did no
             # work is a success, and committing a snapshot describing
             # nothing would be a lie about what happened.
-            self.result = NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
+            self.result = NonTabularResult(
+                record_count=0,
+                status=QueryStatus.SQL_SUCCESS,
+                message=f"nothing to compact in {md_code(self.relation_name)}",
+            )
             return
 
         try:
@@ -121,4 +127,15 @@ class CompactionCommitNode(BasePlanNode):
             self._stream.discard_outputs()
             raise
 
-        self.result = NonTabularResult(record_count=len(entries), status=QueryStatus.SQL_SUCCESS)
+        # Files, not rows. The count this statement is measured by is how many
+        # objects the relation is now made of - that is what OPTIMIZE was run to
+        # change - and calling them rows would report the one number a
+        # compaction never moves.
+        self.result = NonTabularResult(
+            record_count=len(entries),
+            status=QueryStatus.SQL_SUCCESS,
+            message=(
+                f"{len(entries):,} file(s) written to {md_code(self.relation_name)}, "
+                f"{len(self.retired_files):,} retired"
+            ),
+        )

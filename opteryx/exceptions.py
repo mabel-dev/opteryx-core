@@ -365,9 +365,9 @@ class ColumnNotFoundError(SqlError):
         the binder resolves every identifier with `case_insensitive=True` (see
         `locate_identifier_in_loaded_schemas`), so casing cannot be the cause of any
         error this class reports. It sent readers off to audit the one thing that was
-        certainly not wrong. Do not reintroduce it: DATASET names can be case
-        sensitive, because they can resolve to a filesystem path, but column names
-        never are.
+        certainly not wrong. Do not reintroduce it - and not for DATASET names
+        either: `DatasetNotFoundError` used to carry the same wrong advice and no
+        longer does.
 
         `span` is where the name was written - see `SqlError`, which turns it into a
         caret at the planner boundary. None whenever the reference was not something
@@ -421,6 +421,18 @@ class DatasetNotFoundError(SqlError):
     """Exception raised when a dataset is not found."""
 
     def __init__(self, connector: str, dataset: str = None, suggestion: Optional[str] = None):
+        """
+        The advice used to open "Dataset names are case sensitive". They are not, and
+        it sent readers off to audit the one thing that was not wrong - the same fault
+        `ColumnNotFoundError` documents, in the same words, for columns. Neither kind
+        of name is case sensitive; do not reintroduce it for either.
+
+        A relation that resolves to a PATH is not a counter-example: what is case
+        sensitive there is the FILESYSTEM (`Medicare1_1` resolves on APFS and not on
+        ext4), which is a property of where the bytes are, not of the name. Telling
+        every reader of every connector to check their casing to cover that is what
+        this error did before, and it was wrong far more often than it was right.
+        """
         self.dataset = dataset
         self.connector = connector
         self.suggestion = suggestion
@@ -434,8 +446,7 @@ class DatasetNotFoundError(SqlError):
                 # command that does not exist costs them a second error.
                 None
                 if suggestion
-                else "Dataset names are case sensitive, and may need qualifying with "
-                "their workspace and collection",
+                else "Dataset names may need qualifying with their workspace and collection",
             )
         )
 

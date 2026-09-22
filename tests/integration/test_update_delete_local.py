@@ -326,3 +326,38 @@ def test_merge_arm_assignment_is_not_case_sensitive(merge_env):
     )
     # cve 2 and 3 matched; cve 3's details came from the source.
     assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 99, 1)]
+
+
+# ── receipts ────────────────────────────────────────────────────────────────
+
+
+def _messages(sql):
+    session = opteryx.session(user="tester")
+    list(session.execute_to_morsels(sql))
+    return session.messages
+
+
+def test_delete_reports_what_it_removed(merge_env):
+    assert _messages(f"DELETE FROM {TARGET} WHERE cve = 2") == [
+        f"1 row deleted in `{TARGET}`"
+    ]
+
+
+def test_update_reports_what_it_changed(merge_env):
+    assert _messages(f"UPDATE {TARGET} SET revision = 99 WHERE cve > 1") == [
+        f"2 rows updated in `{TARGET}`"
+    ]
+
+
+def test_a_predicate_that_matched_nothing_says_so(merge_env):
+    """Not silence: the reader's question is whether the statement did nothing
+    or never ran, and only one of those two answers is this one."""
+    assert _messages(f"DELETE FROM {TARGET} WHERE cve = 9999") == [
+        f"no rows changed in `{TARGET}`"
+    ]
+
+
+def test_a_batch_reports_each_statement(merge_env):
+    assert _messages(
+        f"DELETE FROM {TARGET} WHERE cve = 1; DELETE FROM {TARGET} WHERE cve = 2;"
+    ) == [f"1 row deleted in `{TARGET}`", f"1 row deleted in `{TARGET}`"]

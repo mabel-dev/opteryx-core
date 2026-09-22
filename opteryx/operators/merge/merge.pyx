@@ -47,7 +47,9 @@ from libcpp.vector cimport vector as cppvector
 from libc.stdint cimport int32_t, int64_t
 
 from opteryx.constants import QueryStatus
+from opteryx.exceptions import md_code
 from opteryx.models import NonTabularResult
+from opteryx.models import row_count_phrase
 from opteryx.models import QueryProperties
 
 # Kept in step with rugo's row-group default, exactly as InsertNode does - see
@@ -158,6 +160,7 @@ class MergeNode(BasePlanNode):
                 self.result = NonTabularResult(
                     record_count=0,
                     status=QueryStatus.SQL_SUCCESS,
+                    message=self._receipt(),
                 )
                 return
             try:
@@ -177,6 +180,7 @@ class MergeNode(BasePlanNode):
             self.result = NonTabularResult(
                 record_count=self._acted_row_count(),
                 status=QueryStatus.SQL_SUCCESS,
+                message=self._receipt(),
             )
             return
 
@@ -269,6 +273,31 @@ class MergeNode(BasePlanNode):
     def _acted_row_count(self):
         cdef _MergeAddresses state = self._addresses
         return state.ptr.rows_inserted + state.ptr.rows_updated + state.ptr.rows_deleted
+
+    def _receipt(self):
+        """What this statement did, per ARM rather than as one total.
+
+        The three counters are reported separately because a MERGE does all
+        three in one statement and their sum describes none of them - "6 rows
+        merged" hides that it deleted four. DELETE FROM and UPDATE arrive here
+        with two of the three at zero, so the same builder gives them the plain
+        sentence they want without a second wording to keep in step.
+
+        A zero total is reported, not suppressed: a predicate that matched
+        nothing is the answer, and silence would read as a statement that never
+        ran.
+        """
+        cdef _MergeAddresses state = self._addresses
+        parts = []
+        if state.ptr.rows_inserted:
+            parts.append(row_count_phrase(state.ptr.rows_inserted, "inserted"))
+        if state.ptr.rows_updated:
+            parts.append(row_count_phrase(state.ptr.rows_updated, "updated"))
+        if state.ptr.rows_deleted:
+            parts.append(row_count_phrase(state.ptr.rows_deleted, "deleted"))
+        if not parts:
+            return f"no rows changed in {md_code(self.relation_name)}"
+        return f"{', '.join(parts)} in {md_code(self.relation_name)}"
 
     def _collect_delete_positions(self):
         """Read the accumulated addresses out of native state — the ONE crossing."""

@@ -25,6 +25,7 @@
 // errored mid-stream is discarded rather than pooled (its protocol state is
 // unknown).
 
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -57,8 +58,16 @@ struct PgConfig {
 // One error class for the whole client. `sqlstate` is set when the server sent
 // an ErrorResponse (five characters, e.g. "42P01"); empty for transport,
 // protocol and auth failures raised on this side.
+//
+// `transport` is set only for a socket/TLS read or write that failed -- the
+// connection died under us. It is what makes a retry decidable: a server error
+// (the server is fine, the statement is not) and a protocol or auth failure
+// (this client is wrong, or the credentials are) are reproducible and must NOT
+// be retried, while a dead socket says nothing about the statement at all. See
+// `pg_with_retry`.
 struct PgError : std::runtime_error {
     std::string sqlstate;
+    bool        transport = false;
     PgError(const std::string& what, std::string state = "")
         : std::runtime_error(what), sqlstate(std::move(state)) {}
 };
@@ -117,6 +126,29 @@ public:
     void finish();
 
     bool healthy() const { return healthy_; }
+
+    // Whether this connection's socket is still usable, as far as can be known
+    // without writing to it. For an IDLE connection only -- it reads the socket
+    // state, so it is meaningless mid-stream. False means definitely dead (the
+    // peer closed or reset it), true means "nothing says otherwise", which is
+    // not a guarantee: the server can close it in the gap between this check
+    // and the next write. That residual race is what the retry covers.
+    bool alive() const;
+
+    // Set by PgPool::acquire: true when this connection came out of the idle
+    // pool, false when it was just opened. Only the former is worth retrying --
+    // a connection that fails on its first use is reporting a server that is
+    // genuinely unreachable, and retrying only doubles the wait before saying so.
+    bool pooled() const { return pooled_; }
+    void set_pooled(bool v) { pooled_ = v; }
+
+    // When this connection was last returned to the pool. Idle connections age
+    // out (see PgPool::kMaxIdleSeconds) rather than being handed out at any age:
+    // the longer one sits, the likelier the server, a pooler or a NAT has
+    // dropped it, and an expired one costs a reconnect where a dead one costs a
+    // failed query and a retry.
+    std::chrono::steady_clock::time_point idle_since{};
+
     const std::string& server_version() const { return server_version_; }
     const std::string& command_tag() const { return command_tag_; }
 
@@ -138,21 +170,68 @@ private:
     std::string command_tag_;
     bool streaming_ = false;          // between begin() and the final ReadyForQuery
     bool healthy_ = true;
+    bool pooled_ = false;             // came from the idle pool, not freshly opened
 };
 
 class PgPool {
 public:
     static PgPool& instance();
-    // A pooled idle connection for `config`, or a freshly opened one.
+    // A pooled idle connection for `config`, or a freshly opened one. Pooled
+    // connections are checked for liveness and age first; dead or expired ones
+    // are dropped rather than handed out.
     std::unique_ptr<PgConnection> acquire(const PgConfig& config);
+    // A newly opened connection, ignoring the pool entirely. The retry path
+    // uses this: the whole point of the second attempt is not to be handed
+    // another connection from the same possibly-stale bucket.
+    std::unique_ptr<PgConnection> acquire_fresh(const PgConfig& config);
     // Returns a connection to the pool; unhealthy connections are closed instead.
     void release(const PgConfig& config, std::unique_ptr<PgConnection> conn);
 
 private:
     static constexpr size_t kMaxIdlePerKey = 4;
+    // How long a connection may sit idle before it is closed instead of reused.
+    // Comfortably under the shortest idle timeout anything upstream is likely to
+    // impose -- managed PostgreSQL, pgbouncer and cloud NATs reap at minutes,
+    // not seconds -- so in the ordinary case the socket is gone because it aged
+    // out here, not because the far end tore it down.
+    static constexpr std::chrono::seconds kMaxIdleSeconds{60};
     std::mutex mtx_;
     std::unordered_map<std::string, std::vector<std::unique_ptr<PgConnection>>> idle_;
 };
+
+// Run `fn` against a pooled connection, retrying ONCE on a freshly opened one
+// if the first attempt died of a transport error on a connection that came out
+// of the pool.
+//
+// Safe for anything whose work has not yet been observed: a pooled connection
+// that dies on the first write never delivered a row, never ran the statement
+// server-side (the bytes did not arrive) and therefore has nothing to replay.
+// It must NOT wrap work that has already emitted rows -- see the scan source,
+// which retries inside its start() and never once a row has been decoded.
+//
+// `fn` takes the connection and returns its result; it must leave the
+// connection fit to pool or throw.
+template <typename Fn>
+auto pg_with_retry(const PgConfig& config, Fn&& fn) -> decltype(fn(*(PgConnection*)nullptr)) {
+    for (int attempt = 0;; attempt++) {
+        std::unique_ptr<PgConnection> conn =
+            attempt == 0 ? PgPool::instance().acquire(config)
+                         : PgPool::instance().acquire_fresh(config);
+        try {
+            auto out = fn(*conn);
+            PgPool::instance().release(config, std::move(conn));
+            return out;
+        } catch (const PgError& e) {
+            const bool retryable = attempt == 0 && e.transport && conn->pooled();
+            // Dead or unknown protocol state either way: never back to the pool.
+            conn.reset();
+            if (!retryable) throw;
+        } catch (...) {
+            conn.reset();
+            throw;
+        }
+    }
+}
 
 // Convenience for the plan-time callers: acquire, run, release.
 std::vector<PgField> pg_describe(const PgConfig& config, const std::string& sql);

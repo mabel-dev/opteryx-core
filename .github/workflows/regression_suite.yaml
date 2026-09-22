@@ -51,6 +51,14 @@ jobs:
           python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/tests/requirements.txt
           python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/pyproject.toml
 
+      # The catalog-backed tests skip themselves when opteryx_catalog is absent
+      # (dev machines legitimately have none). That skip must never be how CI
+      # passes: assert the install landed, so a broken requirement is red here
+      # rather than ~300 quietly-skipped tests later.
+      - name: Verify opteryx_catalog is installed
+        run: |
+          python -c "import opteryx_catalog, importlib.metadata as m; print('opteryx-catalog', m.version('opteryx-catalog'))"
+
       - name: Report Tool Versions
         run: |
           # Requirements are deliberately unpinned so upstream fixes reach us

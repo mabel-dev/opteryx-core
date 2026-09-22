@@ -25,6 +25,7 @@
 #include <cstring>
 #include <stdexcept>
 
+#include "core/alloc.h"
 #include "core/buffers.h"
 #include "core/string_slot.h"
 #include "simd_hash.h"   // simd_hash_i64, NULL_HASH, MIX_HASH_CONSTANT
@@ -100,7 +101,7 @@ static inline void hash_string(const DrakenVector& v, uint64_t* out, uint32_t n)
     // Morsels are bounded at 64K rows so nd <= 64K and the allocation is at
     // most 512KB. Falls through to the dense path on allocation failure.
     if (draken_is_compressed(&v)) {
-        uint64_t* slot_hashes = static_cast<uint64_t*>(std::malloc(nd * sizeof(uint64_t)));
+        uint64_t* slot_hashes = static_cast<uint64_t*>(draken_malloc(nd * sizeof(uint64_t)));
         if (slot_hashes != nullptr) {
             // Phase 1: one hash per distinct slot (nulls are per-logical-row,
             // not per-slot; handled in the scatter loop below).
@@ -131,7 +132,7 @@ static inline void hash_string(const DrakenVector& v, uint64_t* out, uint32_t n)
                 simd_hash_i64(scratch, out + i, block);
                 i += block;
             }
-            std::free(slot_hashes);
+            draken_free(slot_hashes);
             return;
         }
         // malloc failed: fall through to dense path

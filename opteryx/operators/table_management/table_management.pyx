@@ -23,6 +23,7 @@ from opteryx.connectors import TableType
 from opteryx.constants import QueryStatus
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import NonTabularResult
+from opteryx.models import object_message
 from opteryx.models import QueryProperties
 
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
@@ -69,7 +70,13 @@ class TableManagementNode(BasePlanNode):
             connector = connector_factory(self.table_name, telemetry=self.telemetry)
             table_engine = connector.table_engine(self.table_name, telemetry=self.telemetry)
             written = analyze_table(table_engine, self.columns, author=self._author)
-            return NonTabularResult(record_count=written, status=QueryStatus.SQL_SUCCESS)
+            return NonTabularResult(
+                record_count=written,
+                status=QueryStatus.SQL_SUCCESS,
+                message=object_message(
+                    "analyzed", "table", self.table_name, f"({written:,} column(s) profiled)"
+                ),
+            )
 
         elif self.action == "drop_statistics":
             from opteryx.connectors import connector_factory
@@ -78,7 +85,14 @@ class TableManagementNode(BasePlanNode):
             connector = connector_factory(self.table_name, telemetry=self.telemetry)
             table_engine = connector.table_engine(self.table_name, telemetry=self.telemetry)
             removed = drop_statistics(table_engine, self.columns)
-            return NonTabularResult(record_count=removed, status=QueryStatus.SQL_SUCCESS)
+            return NonTabularResult(
+                record_count=removed,
+                status=QueryStatus.SQL_SUCCESS,
+                message=object_message(
+                    "dropped statistics for", "table", self.table_name,
+                    f"({removed:,} column(s))",
+                ),
+            )
 
         else:
             raise NotImplementedError(f"Unsupported table action: {self.action}")

@@ -20,6 +20,13 @@ google-cloud-storage
 minio
 openpyxl
 
+# The catalog the engine talks to. Test-only here: opteryx/ imports it lazily
+# and CI previously had none, so every catalog-backed test either skipped or
+# never ran. Installed WITHOUT the [parquet] extra deliberately - that extra
+# pulls the published rugo wheel, which would shadow the in-tree rugo built by
+# `make compile`.
+opteryx-catalog
+
 # test oracles only - never imported by opteryx/, rugo/, or draken/
 pyarrow
 jellyfish  # SOUNDEX reference for tests/unit/functions/test_soundex.py

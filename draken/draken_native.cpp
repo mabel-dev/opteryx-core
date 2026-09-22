@@ -592,7 +592,27 @@ static VectorOwner make_string_dict_from_sequence(nb::list seq) {
     // --- Pass 2: dedup non-null values using sg_eq_slots semantics ----------
     // Build temporary slots for dedup (arena_offset=0 for long; same as D.1).
     // Hash key = str_hash_seed; equality = sg_eq_slots exact verification.
-    std::unordered_map<uint64_t, std::vector<uint32_t>> dedup_map;
+    //
+    // The candidate index is draken::ops::SgDedupTable (ops/string_gather.h) —
+    // an open-addressed flat table — NOT a node-based map. See the comment on
+    // that type: the previous `unordered_map<uint64_t, vector<uint32_t>>` cost
+    // one node malloc PLUS one vector malloc per DISTINCT value and chased a
+    // pointer on every probe. The probe walk stops at the first EMPTY entry,
+    // which is also the insert position; every key-equal entry passed on the
+    // way is a 64-bit hash collision and is verified (and rejected) by
+    // sg_eq_slots, which remains the authoritative equality test. This is a
+    // data-structure choice, never an answer: the dedup body, the equality
+    // rule, and the first-appearance ordering held by `uniq_slots` are all
+    // unchanged.
+    //
+    // MEASURED (2026-09-22, interleaved A/B, both arms in one binary, arm
+    // order alternated within each round, 65,536-element lists, this pass
+    // isolated from the Python object handling): 1.4x / 1.9x / 2.7x on short
+    // values at 100 / 10,000 / all-unique distinct, and 1.8x / 2.0x / 3.2x on
+    // long values, with byte-identical codes. End-to-end through
+    // vector_from_string_dict_sequence the win is diluted by the per-element
+    // PyBytes handling in Pass 1, which this change does not touch.
+    draken::ops::SgDedupTable    dedup_map(length);
     std::vector<DrakenStringSlot> uniq_slots;   // unique slot for each group
     std::vector<const char*>      uniq_ptrs;    // source UTF-8 pointer per unique
     std::vector<uint32_t>         uniq_lens_u;  // UTF-8 byte length per unique
@@ -614,10 +634,15 @@ static VectorOwner make_string_dict_from_sequence(nb::list seq) {
 
         const uint64_t hseed = draken::ops::str_hash_seed(&tmp_slot, ubytes);
 
-        bool found = false;
-        auto it = dedup_map.find(hseed);
-        if (it != dedup_map.end()) {
-            for (uint32_t uidx : it->second) {
+        dedup_map.reserve_one();  // keeps `pos` below valid across a rehash
+
+        bool     found = false;
+        uint32_t pos   = dedup_map.probe_start(hseed);
+        for (;;) {
+            const draken::ops::SgDedupEntry& e = dedup_map.at(pos);
+            if (e.val_plus_one == 0u) break;  // empty — not present; insert here
+            if (e.key == hseed) {
+                const uint32_t uidx = e.val_plus_one - 1u;
                 // Long temporary slots use arena_offset=0; their source UTF-8
                 // pointers are the arena bases for exact candidate verification.
                 if (draken::ops::sg_eq_slots(
@@ -630,6 +655,7 @@ static VectorOwner make_string_dict_from_sequence(nb::list seq) {
                     break;
                 }
             }
+            pos = dedup_map.next(pos);
         }
         if (!found) {
             const uint32_t new_idx = static_cast<uint32_t>(uniq_slots.size());
@@ -637,7 +663,7 @@ static VectorOwner make_string_dict_from_sequence(nb::list seq) {
             uniq_ptrs.push_back(ptrs[i]);
             uniq_lens_u.push_back(ulen);
             codes[i] = new_idx;
-            dedup_map[hseed].push_back(new_idx);
+            dedup_map.insert_at(pos, hseed, new_idx);
         }
     }
 

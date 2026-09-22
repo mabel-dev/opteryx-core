@@ -91,7 +91,9 @@ cdef extern from "ops/hash.h" nogil:
 cdef extern from "simd_hash.h" nogil:
     void simd_mix_hash(uint64_t* dest, const uint64_t* values, size_t count)
 
-# draken allocator (mimalloc) — no GIL required. Used for the per-column hash
+# draken allocator (core/alloc.h: system malloc + trace hooks, NOT mimalloc —
+# a bundled libmimalloc can be LD_PRELOADed process-wide, but draken_malloc
+# never calls mi_* itself) — no GIL required. Used for the per-column hash
 # scratch buffer so the multi-column hash loop stays fully nogil.
 cdef extern from "core/alloc.h" nogil:
     void* draken_malloc(size_t n) nogil
@@ -485,7 +487,7 @@ cdef class Morsel:
         try:
             dvs = self._columns_to_pointers(col_indices, n_cols)
         finally:
-            free(col_indices)
+            draken_free(col_indices)
 
         # calloc zeroes the buffer — required for multi-column simd_mix_hash.
         cdef uint64_t* buf = <uint64_t*>calloc(<size_t>n, sizeof(uint64_t))
@@ -526,7 +528,7 @@ cdef class Morsel:
         # Single column → shape-preserving hash vector.
         if n_cols == 1:
             col_idx = col_indices[0]
-            free(col_indices)
+            draken_free(col_indices)
             if self._cxx is not None:
                 return Vector((<Vector>self._cxx_column(
                     self._col_names[col_idx]))._nb.hash_shaped())
@@ -538,7 +540,7 @@ cdef class Morsel:
         try:
             dvs = self._columns_to_pointers(col_indices, n_cols)
         finally:
-            free(col_indices)
+            draken_free(col_indices)
 
         if n == 0:
             draken_free(dvs)
@@ -747,7 +749,7 @@ cdef class Morsel:
         """Resolve column names → freshly-malloc'd int32 index array.
 
         columns=None → indices [0, _num_columns()).
-        Caller owns the returned buffer (free()). Raises KeyError on missing
+        Caller owns the returned buffer (draken_free()). Raises KeyError on missing
         name; MemoryError on alloc failure.
 
         Cxx-aware: when Cxx-backed, resolves names against the substrate
@@ -767,14 +769,14 @@ cdef class Morsel:
 
         if columns is None:
             n_cols = <int32_t>avail
-            result = <int32_t*>malloc((<size_t>n_cols if n_cols > 0 else 1) * sizeof(int32_t))
+            result = <int32_t*>draken_malloc((<size_t>n_cols if n_cols > 0 else 1) * sizeof(int32_t))
             if result == NULL:
                 raise MemoryError()
             for i in range(n_cols):
                 result[i] = <int32_t>i
         else:
             n_cols = <int32_t>len(columns)
-            result = <int32_t*>malloc((<size_t>n_cols if n_cols > 0 else 1) * sizeof(int32_t))
+            result = <int32_t*>draken_malloc((<size_t>n_cols if n_cols > 0 else 1) * sizeof(int32_t))
             if result == NULL:
                 raise MemoryError()
             for i in range(n_cols):
@@ -784,7 +786,7 @@ cdef class Morsel:
                 elif isinstance(name, bytes):
                     name_bytes = name
                 else:
-                    free(result)
+                    draken_free(result)
                     raise TypeError(
                         "Morsel._resolve_columns_to_indices: column name must be "
                         "str or bytes; got %s" % type(name).__name__
@@ -796,7 +798,7 @@ cdef class Morsel:
                         found = True
                         break
                 if not found:
-                    free(result)
+                    draken_free(result)
                     raise KeyError(
                         "Morsel._resolve_columns_to_indices: column not found: %r"
                         % name_bytes
@@ -862,7 +864,7 @@ cdef class Morsel:
             draken_hash(dv[0], hashes_ptr, <uint32_t>n)
             return 0
 
-        # Multi-column: scratch buffer for per-column hashes (mimalloc, no GIL).
+        # Multi-column: scratch buffer for per-column hashes (draken_malloc, no GIL).
         tmp = <uint64_t*>draken_malloc(<size_t>n * sizeof(uint64_t))
         if tmp == NULL:
             return 1
@@ -1042,7 +1044,7 @@ cdef class Morsel:
         if n == 0:
             result._zero_col_num_rows = ni
             return result
-        cdef int32_t* idx = <int32_t*>malloc(<size_t>(ni if ni > 0 else 1) * sizeof(int32_t))
+        cdef int32_t* idx = <int32_t*>draken_malloc(<size_t>(ni if ni > 0 else 1) * sizeof(int32_t))
         if idx == NULL:
             raise MemoryError()
         try:
@@ -1051,7 +1053,7 @@ cdef class Morsel:
             for i in range(n):
                 result._append_column(_take_native(self._get_column(i), idx, ni))
         finally:
-            free(idx)
+            draken_free(idx)
         return result
 
     def partition_by_hash(self, col_names, int n_bins):
@@ -1100,7 +1102,7 @@ cdef class Morsel:
         try:
             dvs = self._columns_to_pointers(col_indices, n_cols)
         finally:
-            free(col_indices)
+            draken_free(col_indices)
         cdef uint64_t* hashes = <uint64_t*>calloc(<size_t>n, sizeof(uint64_t))
         if hashes == NULL:
             draken_free(dvs)
@@ -1118,11 +1120,11 @@ cdef class Morsel:
 
         # 2) counting-partition row indices into contiguous per-bin ranges (nogil).
         cdef int32_t* counts = <int32_t*>calloc(<size_t>n_bins, sizeof(int32_t))
-        cdef int32_t* offsets = <int32_t*>malloc(<size_t>n_bins * sizeof(int32_t))
-        cdef int32_t* cursor = <int32_t*>malloc(<size_t>n_bins * sizeof(int32_t))
-        cdef int32_t* idx = <int32_t*>malloc(<size_t>n * sizeof(int32_t))
+        cdef int32_t* offsets = <int32_t*>draken_malloc(<size_t>n_bins * sizeof(int32_t))
+        cdef int32_t* cursor = <int32_t*>draken_malloc(<size_t>n_bins * sizeof(int32_t))
+        cdef int32_t* idx = <int32_t*>draken_malloc(<size_t>n * sizeof(int32_t))
         if counts == NULL or offsets == NULL or cursor == NULL or idx == NULL:
-            free(hashes); free(counts); free(offsets); free(cursor); free(idx)
+            free(hashes); free(counts); draken_free(offsets); draken_free(cursor); draken_free(idx)
             raise MemoryError()
         cdef uint64_t bucket
         with nogil:
@@ -1138,7 +1140,7 @@ cdef class Morsel:
                 idx[cursor[bucket]] = <int32_t>i
                 cursor[bucket] += 1
         free(hashes)
-        free(cursor)
+        draken_free(cursor)
 
         # 3) gather each bin's contiguous index slice into a sub-morsel. The
         #    routing is representation-agnostic: a Cxx-backed morsel stays Cxx
@@ -1164,7 +1166,7 @@ cdef class Morsel:
                         )
                 result.append(sub)
         finally:
-            free(counts); free(offsets); free(idx)
+            free(counts); draken_free(offsets); draken_free(idx)
         return result
 
     def slice(self, Py_ssize_t offset=0, Py_ssize_t length=0, Py_ssize_t start=-1):

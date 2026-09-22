@@ -629,7 +629,6 @@ from draken.vectors.bool_vector cimport (
     c_not_bitmap,
     c_or_bitmap,
     c_xor_bitmap,
-    c_get_bitmap_ptrs,
     bool_vector_from_bits,
 )
 from draken.vectors.vector cimport Vector, simd_popcount, from_decoded as vec_from_decoded

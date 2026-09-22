@@ -24,7 +24,11 @@ from typing import Optional
 
 from opteryx.constants import QueryStatus
 from opteryx.exceptions import DatasetNotFoundError
+from opteryx.exceptions import InvalidInternalStateError
+from opteryx.exceptions import md_code
+from opteryx.exceptions import md_column
 from opteryx.models import NonTabularResult
+from opteryx.models import object_message
 from opteryx.models import QueryProperties
 
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
@@ -39,6 +43,16 @@ def _trigger_holder_exists(connector, holder: str) -> bool:
     with a False default, so a store with no tasks answers rather than raises.
     """
     return connector.relation_exists(holder) or connector.is_task(holder)
+
+
+def _names(values) -> str:
+    """A comma-separated list of object names, each in a code span."""
+    return ", ".join(md_code(value) for value in values or ())
+
+
+def _absent(name: str) -> str:
+    """The IF EXISTS no-op: the statement ran, the target was not there."""
+    return f"{md_code(name)} does not exist, nothing changed"
 
 
 def _trigger_event(node) -> str:
@@ -322,6 +336,243 @@ class RelationManagementNode(BasePlanNode):
         return user
 
     def __call__(self, morsel=None, **kwargs) -> NonTabularResult:
+        """Run the action, then say what it did.
+
+        The receipt is built HERE rather than at each of the forty-odd return
+        statements below, so there is one place holding the wording and no way
+        for a new action to be added with a count and no sentence - `_receipt`
+        refuses an action it does not know.
+        """
+        result = self._apply(morsel, **kwargs)
+        result.message = self._receipt(result.record_count)
+        return result
+
+    def _receipt(self, count: int) -> str:
+        """What this statement did, for the person who ran it.
+
+        `count` is the same number the result carries, and its meaning is the
+        action's: the number of relations dropped, the number of files a DETACH
+        materialised, or - for the many actions that act on exactly one object -
+        1 for "done" and 0 for "IF [NOT] EXISTS matched, nothing happened". The
+        zero cases are spelled out rather than left to a bare "0", because the
+        reader's question there is whether their statement did nothing or ran at
+        all.
+
+        Every action in `_apply` has an entry. An action without one raises: a
+        receipt channel that silently says nothing for a new statement type is
+        the kind of fake-green this codebase does not keep (CLAUDE.md 1/9).
+        """
+        action = self.action
+
+        if action == "create_relation":
+            if not count:
+                return object_message("table", "", self.relation_name, "already exists, nothing created")
+            return object_message("created", "table", self.relation_name)
+
+        if action == "drop_relation":
+            kind = "materialized view(s)" if self.is_materialized_view else "table(s)"
+            if not count:
+                return f"no {kind} dropped"
+            return f"dropped {count:,} {kind}: {_names(self.relation_names)}"
+
+        if action == "create_collection":
+            return object_message("created", "collection", self.collection_name)
+
+        if action == "clone_collection":
+            return (
+                f"cloned collection {md_code(self.source_collection)} to "
+                f"{md_code(self.collection_name)} ({count:,} relation(s))"
+            )
+
+        if action == "clone_relation":
+            return f"cloned {md_code(self.source_relation)} to {md_code(self.relation_name)}"
+
+        if action == "resync_relation":
+            return f"resynced {md_code(self.relation_name)} with its upstream"
+
+        if action == "detach_relation":
+            return (
+                f"detached {md_code(self.relation_name)} "
+                f"({count:,} borrowed file(s) materialized)"
+            )
+
+        if action == "drop_collection":
+            if not count:
+                return "no collection(s) dropped"
+            return f"dropped {count:,} collection(s): {_names(self.collection_names)}"
+
+        if action == "truncate_relation":
+            return object_message("truncated", "", self.relation_name)
+
+        if action == "cluster_by":
+            if not count:
+                return _absent(self.relation_name)
+            return f"set cluster by on {md_code(self.relation_name)}"
+
+        if action == "rename_relation":
+            if not count:
+                return _absent(self.relation_name)
+            return f"renamed {md_code(self.relation_name)} to {md_code(self.new_relation_name)}"
+
+        if action == "add_column":
+            if not count:
+                return _absent(self.relation_name)
+            return f"added column {md_column(self.column_name)} to {md_code(self.relation_name)}"
+
+        if action == "drop_column":
+            if not count:
+                return _absent(self.relation_name)
+            return f"dropped column {md_column(self.column_name)} from {md_code(self.relation_name)}"
+
+        if action == "rename_column":
+            if not count:
+                return _absent(self.relation_name)
+            return (
+                f"renamed column {md_column(self.column_name)} to "
+                f"{md_column(self.new_column_name)} in {md_code(self.relation_name)}"
+            )
+
+        if action == "alter_column_type":
+            if not count:
+                return _absent(self.relation_name)
+            return (
+                f"changed the type of column {md_column(self.column_name)} in "
+                f"{md_code(self.relation_name)}"
+            )
+
+        if action == "add_relationship":
+            if not count:
+                return _absent(self.relation_name)
+            return (
+                f"added constraint {md_code(self.constraint_name)} on "
+                f"{md_code(self.relation_name)}"
+            )
+
+        if action == "drop_relationship":
+            if not count:
+                return (
+                    f"constraint {md_code(self.constraint_name)} not found on "
+                    f"{md_code(self.relation_name)}, nothing dropped"
+                )
+            return (
+                f"dropped constraint {md_code(self.constraint_name)} on "
+                f"{md_code(self.relation_name)}"
+            )
+
+        if action == "create_task":
+            if not count:
+                return object_message("task", "", self.task_name, "already exists, nothing created")
+            if self.on_table:
+                return (
+                    f"created task {md_code(self.task_name)}, fired by commits to "
+                    f"{md_code(self.on_table)}"
+                )
+            return object_message("created", "task", self.task_name)
+
+        if action == "create_trigger":
+            if not count:
+                return object_message(
+                    "trigger", "", self.trigger_name, "already exists, nothing created"
+                )
+            return (
+                f"created trigger {md_code(self.trigger_name)} on "
+                f"{md_code(_trigger_event(self))}"
+            )
+
+        if action == "alter_trigger_suspended":
+            state = "suspended" if self.suspended else "resumed"
+            return f"{state} trigger {md_code(self.trigger_name)} on {md_code(self.table_name)}"
+
+        if action == "alter_trigger_minimum_interval":
+            return (
+                f"set the minimum interval of trigger {md_code(self.trigger_name)} on "
+                f"{md_code(self.table_name)} to {self.minimum_interval_seconds:,} second(s)"
+            )
+
+        if action == "alter_trigger_owner":
+            return (
+                f"trigger {md_code(self.trigger_name)} on {md_code(self.table_name)} now "
+                f"runs as {md_code(self.resolved_owner)}"
+            )
+
+        if action == "drop_task":
+            return object_message("dropped", "task", self.task_name)
+
+        if action == "alter_task":
+            return f"redefined the statement of task {md_code(self.task_name)}"
+
+        if action == "listen":
+            return f"listening to task {md_code(self.task_name)}"
+
+        if action == "unlisten":
+            return f"no longer listening to task {md_code(self.task_name)}"
+
+        if action == "drop_trigger":
+            return (
+                f"dropped trigger {md_code(self.trigger_name)} on {md_code(self.table_name)}"
+            )
+
+        if action == "create_tag":
+            return (
+                f"created tag {md_code(self.tag_name)} on {md_code(self.relation_name)} "
+                f"at {md_code(self.version_spec)}"
+            )
+
+        if action == "drop_tag":
+            return f"dropped tag {md_code(self.tag_name)} on {md_code(self.relation_name)}"
+
+        if action == "rollback_relation":
+            return (
+                f"rolled {md_code(self.relation_name)} back to "
+                f"{md_code(self.version_spec)}"
+            )
+
+        if action == "alter_materialized_view_owner":
+            return f"changed the owner of materialized view {md_code(self.relation_name)}"
+
+        if action == "alter_materialized_view_suspended":
+            state = "suspended" if self.suspended else "resumed"
+            return f"{state} refreshes of materialized view {md_code(self.relation_name)}"
+
+        if action == "alter_workspace":
+            return (
+                f"set {md_column(self.property_name)} on workspace "
+                f"{md_code(self.workspace_name)}"
+            )
+
+        if action == "alter_workspace_secure":
+            if self.secure_destinations is None:
+                return (
+                    f"cleared the secure sanction on {md_code(self.secure_object)} in "
+                    f"workspace {md_code(self.workspace_name)}"
+                )
+            return (
+                f"marked {md_code(self.secure_object)} secure to "
+                f"{len(self.secure_destinations):,} destination(s): "
+                f"{_names(self.secure_destinations)}"
+            )
+
+        if action == "drop_workspace":
+            return object_message("dropped", "workspace", self.workspace_name)
+
+        if action == "grant_access":
+            return (
+                f"granted {md_column(self.role)} on {md_code(self.pattern)} to "
+                f"{md_code(self.principal)}"
+            )
+
+        if action == "revoke_access":
+            return (
+                f"revoked {md_column(self.role)} on {md_code(self.pattern)} from "
+                f"{md_code(self.principal)}"
+            )
+
+        if action == "call_procedure":
+            return object_message("called", "procedure", self.procedure_name)
+
+        raise InvalidInternalStateError(f"no receipt wording for relation action: {action}")
+
+    def _apply(self, morsel=None, **kwargs) -> NonTabularResult:
         if self.action == "create_relation":
             if self.connector.relation_exists(self.relation_name):
                 if self.if_not_exists:

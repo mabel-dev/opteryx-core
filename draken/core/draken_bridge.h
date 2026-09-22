@@ -27,8 +27,9 @@
 //   If caller code cannot allocate via draken_malloc (for example when a
 //   third-party C API or Cython typed-memoryview owns the buffer), the caller
 //   MUST copy the data into a draken_malloc'd buffer before calling the
-//   bridge (see draken/core/bitmap_ops.cpp::bool_vector_from_bits for a safe
-//   example). Do NOT rely on implicit or accidental cross-allocator frees.
+//   bridge (see draken/vectors/_bool_vector_bridge.cpp::bool_vector_from_bits
+//   for a safe example). Do NOT rely on implicit or accidental cross-allocator
+//   frees.
 
 // USAGE: called from C++ nanobind glue (draken_native.cpp) ONLY.
 //

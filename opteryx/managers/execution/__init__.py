@@ -73,4 +73,17 @@ def execute(plan, telemetry, trace_sink=None):
 
     if result_type == ResultType.TABULAR:
         return _with_optional_gc_disabled(results), result_type
+
+    # The one place every non-tabular result passes through, and it runs once
+    # per STATEMENT - so this is where a statement's receipt ("14 rows deleted
+    # in `x`") is surfaced. Not in the session: `_execute_statements` returns
+    # only the LAST statement's result, so a receipt read there would be the
+    # only one a semicolon-separated batch ever reported. `telemetry.messages`
+    # accumulates across the batch and carries all of them.
+    #
+    # `results` is a NonTabularResult on every branch above - there is no
+    # shape to test for, and an operator that produced nothing to say leaves
+    # `message` as None rather than inventing a sentence.
+    if results.message is not None:
+        telemetry.add_message(results.message)
     return results, result_type

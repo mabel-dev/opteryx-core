@@ -179,6 +179,15 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         self.rows_seen = 0
         self.blobs_seen = 0
 
+        # The name the reader WROTE, kept before `dataset` becomes a path. An error
+        # names the relation the statement names: `testdata.flat.planets`, not
+        # `testdata/flat/planets`, which is this connector's private spelling of it
+        # and not a name the reader can act on - the same relation read through the
+        # catalog is reported with dots. Held rather than reconstructed, because
+        # after normalization a separator the connector introduced and one the
+        # reader typed (`FROM 'data/file.parquet'`) are indistinguishable.
+        self.relation_name = self.dataset
+
         # Normalize dataset path
         if self.dataset and OS_SEP not in self.dataset and "/" not in self.dataset:
             self.dataset = self.dataset.replace(".", OS_SEP)
@@ -560,8 +569,8 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
 
         if self.schema is None:
             if os.path.isdir(self.dataset):
-                raise EmptyDatasetError(dataset=self.dataset.replace(OS_SEP, "."))
-            raise DatasetNotFoundError(dataset=self.dataset, connector=self.__type__)
+                raise EmptyDatasetError(dataset=self.relation_name)
+            raise DatasetNotFoundError(dataset=self.relation_name, connector=self.__type__)
 
         return self.schema
 

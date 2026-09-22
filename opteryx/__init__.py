@@ -142,7 +142,7 @@ def session(
     )
 
 
-def analyze_query(sql: str) -> Dict[str, Any]:
+def analyze_query(sql: str, user: Optional[str] = None) -> Dict[str, Any]:
     """
     Parse a SQL query and extract metadata without executing it.
 
@@ -159,6 +159,10 @@ def analyze_query(sql: str) -> Dict[str, Any]:
 
     Parameters:
         sql: SQL query string to parse
+        user: the caller's username - what `$me` stands for inside a relation name.
+            Supply it for a permission pre-check: without it, `personal.$me.x` is
+            reported as written, matches no grant and names no dataset, so the
+            caller refuses a statement the engine would have run.
 
     Returns:
         Dictionary containing:
@@ -185,7 +189,7 @@ def analyze_query(sql: str) -> Dict[str, Any]:
     """
     from opteryx.utils.query_parser import parse_query_info as _parse_query_info
 
-    return _parse_query_info(sql)
+    return _parse_query_info(sql, user=user)
 
 
 # Enable all warnings, including DeprecationWarning

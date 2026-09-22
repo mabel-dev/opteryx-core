@@ -9,6 +9,9 @@ from opteryx.models.file_entry import FileEntry
 from opteryx.models.logical_column import LogicalColumn
 from opteryx.models.manifest import Manifest
 from opteryx.models.non_tabular_result import NonTabularResult
+from opteryx.models.non_tabular_result import object_message
+from opteryx.models.non_tabular_result import row_count_phrase
+from opteryx.models.non_tabular_result import rows_message
 from opteryx.models.physical_plan import PhysicalPlan
 from opteryx.models.query_properties import QueryProperties
 from opteryx.models.query_telemetry import QueryTelemetry
@@ -21,6 +24,9 @@ __all__ = (
     "Manifest",
     "Node",
     "NonTabularResult",
+    "object_message",
+    "row_count_phrase",
+    "rows_message",
     "PhysicalPlan",
     "QueryProperties",
     "QueryTelemetry",

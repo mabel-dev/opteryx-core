@@ -30,12 +30,13 @@
 //
 // COMPRESS(v):
 //   Dict-encode a string vector.  Unique non-null values found via sg_eq_slots
-//   (exact equality; length/prefix/hash32 fast-reject before arena compare).
+//   (exact equality; length + first-4-bytes fast-reject before arena compare).
 //   Unique slots stored in
 //   first-appearance order; owned codes[length] map logical rows to unique slots.
 //   All-null / empty: constant-shape result (data_length=1).
-//   The stored hash32 in every unique slot is the XXH3 content hash (lower 32 bits
-//   of XXH3_64bits) — identical to D.1 ingestion invariant.
+//   E37: hash32 is a DEAD FIELD — always 0, no XXH3 is computed for it, and no
+//   reader consults it.  It is copied verbatim from the source slot only to keep
+//   the 16-byte slot copy whole.  See core/string_slot.h for the current note.
 //
 // Round-trip: materialize(dictionary_encode(dense)) produces the same logical values.
 //
@@ -196,7 +197,8 @@ static inline VecResult sg_finalize(const StrBlock& sb,
 //
 // Duplicated inline from string_compare.h to avoid the large include.
 // Short (≤12): exact — raw.lo and raw.hi cover all content.
-// Long  (>12): length + prefix + hash32 fast-reject, then arena byte compare.
+// Long  (>12): length + first-4-bytes fast-reject (raw.lo), then arena byte
+//              compare.  E37 removed the hash32 reject; hash32 is dead.
 // Must match str_eq_slots semantics exactly (runtime equality uses the same rule).
 // ---------------------------------------------------------------------------
 static inline int sg_eq_slots(const DrakenStringSlot* a,
@@ -335,6 +337,10 @@ static constexpr uint32_t kSgDirectOffsetsMaxKPerRow = 32u;
 template <typename Offsets>
 static inline VecResult str_slice_compact(const DrakenVector& v, uint32_t start,
                                           uint32_t n, Offsets& new_off);
+
+template <typename Offsets>
+static inline VecResult str_take_compact(const DrakenVector& v, const int32_t* indices,
+                                         uint32_t n, Offsets& new_off);
 
 // ---------------------------------------------------------------------------
 // SLICE — contiguous range [start, start+length). Same logic as take but
@@ -559,7 +565,39 @@ static inline VecResult str_slice_compact(const DrakenVector& v, uint32_t start,
 // repeated-value structure even after a filter/gather.
 //
 // Compact path (k > n): builds exactly n output slots from the referenced
-// source slots; same as the original implementation.
+// source slots.  The code -> output-arena-offset lookup is dispatched on the
+// SHAPE of the lookup exactly as str_slice's is (SgDirectOffsets vs
+// SgHashOffsets, chosen by kSgDirectOffsetsMaxKPerRow) — see the comment on
+// those types.  This is a data-structure choice, never an answer: both arms run
+// the same body and emit the same bytes — verified per call by comparing the
+// emitted slots, arena and validity across 8 JOB queries: zero mismatches.
+//
+// MEASURED on JOB skene, 1a/6a/8a/10a/13a/20a/26a/33a, MAX_EXECUTION_WORKER_CAP=4
+// (2026-09-22).  Both policies were instantiated in one binary and run on the
+// SAME call with the SAME inputs — per call, one untimed warm-up of each arm,
+// then paired reps alternating which arm leads.  The warm-up is load-bearing:
+// without it the trailing arm inherits the warm cache and the ratio inflates
+// (an uncorrected run showed 99% order bias).  Residual bias after correction
+// was within +/-2%.
+//
+//   kernel, thread-time: 28.6-36.6 ns/row with the bare std::unordered_map,
+//   12.4-14.3 ns/row with the flat array; row-weighted 30.3 -> 13.3, i.e.
+//   2.27x weighted, 2.10-2.64x per query (2 of the 8 reach 2.4x).
+//
+//   end to end: +5.6% +/- 1.1% of query wall time, 47 of 48 paired rounds,
+//   6 of 6 rounds.
+//
+// ⛔ Those two numbers are not the same number and must not be quoted as one.
+// ns/row is PER THREAD; the wall-clock share divides by DOP, so a 2.27x kernel
+// win is a ~5.6% query win at 4 workers (20a: ~76ms of thread time, ~19ms of
+// wall).  Quote the end-to-end figure when deciding whether this is worth
+// anything; quote ns/row only when comparing the two lookups to each other.
+//
+// The keys were dense dictionary codes the whole time.  Every call on that
+// suite fell inside the flat-array arm — the hash arm exists for the
+// dictionary-dwarfs-the-gather shape, not for the common one, and is therefore
+// NOT exercised by this measurement: kSgDirectOffsetsMaxKPerRow is reasoned,
+// not measured.
 // ---------------------------------------------------------------------------
 static inline VecResult str_take(const DrakenVector& v,
                                   const int32_t*      indices,
@@ -609,10 +647,28 @@ static inline VecResult str_take(const DrakenVector& v,
                            0u);
     }
 
-    // ── Compact path (k > n) ────────────────────────────────────────────
+    // ── Compact path (k > n): build exactly n output slots ────────────────
+    // Dispatched on the shape of the lookup, not on the data — identical to
+    // str_slice's choice above, for the same reason: dictionary codes are dense
+    // in [0, k), so unless the dictionary dwarfs the gather a flat array beats
+    // hashing them. Both arms run the SAME body and produce the same bytes.
+    if (n > 0u && k <= kSgDirectOffsetsMaxKPerRow * n) {
+        SgDirectOffsets new_off(k);
+        return str_take_compact(v, indices, n, new_off);
+    }
+    SgHashOffsets new_off_hash(n);
+    return str_take_compact(v, indices, n, new_off_hash);
+}
+
+template <typename Offsets>
+static inline VecResult str_take_compact(const DrakenVector& v, const int32_t* indices,
+                                         uint32_t n, Offsets& new_off) {
+    const DrakenStringArena* sa    = static_cast<const DrakenStringArena*>(v.data);
+    const DrakenStringSlot*  src_s = sa->slots;
+    const uint8_t*           src_a = sa->arena;
+    const uint8_t*           src_v = v.validity;
+
     // Phase 1: scan indices to compute arena layout.
-    std::unordered_map<uint32_t, uint32_t> new_off;
-    new_off.reserve(n);
     std::vector<uint32_t> seen_codes;
     seen_codes.reserve(n);
     size_t total_arena = 0u;
@@ -621,11 +677,11 @@ static inline VecResult str_take(const DrakenVector& v,
         const uint32_t src_log = static_cast<uint32_t>(indices[i]);
         if (!sg_val_row(src_v, src_log)) continue;
         const uint32_t code = v.selection[src_log];
-        if (!str_is_inline(&src_s[code]) && new_off.find(code) == new_off.end()) {
+        if (!str_is_inline(&src_s[code]) && !new_off.has(code)) {
             if (src_s[code].ext.arena_offset == STR_ELIDED_PAYLOAD_OFFSET) {
-                new_off[code] = STR_ELIDED_PAYLOAD_OFFSET;
+                new_off.set(code, STR_ELIDED_PAYLOAD_OFFSET);
             } else {
-                new_off[code] = static_cast<uint32_t>(total_arena);
+                new_off.set(code, static_cast<uint32_t>(total_arena));
                 total_arena  += src_s[code].ext.length;
             }
             seen_codes.push_back(code);
@@ -639,8 +695,8 @@ static inline VecResult str_take(const DrakenVector& v,
 
     if (sb.arena_bytes != nullptr) {
         for (uint32_t code : seen_codes)
-            if (new_off[code] != STR_ELIDED_PAYLOAD_OFFSET)
-                std::memcpy(sb.arena_bytes + new_off[code],
+            if (new_off.get(code) != STR_ELIDED_PAYLOAD_OFFSET)
+                std::memcpy(sb.arena_bytes + new_off.get(code),
                             src_a + src_s[code].ext.arena_offset,
                             src_s[code].ext.length);
     }
@@ -663,7 +719,7 @@ static inline VecResult str_take(const DrakenVector& v,
                 sb.slots[i].ext.length       = src->ext.length;
                 sb.slots[i].ext.prefix       = src->ext.prefix;
                 sb.slots[i].ext.hash32       = src->ext.hash32;
-                sb.slots[i].ext.arena_offset = new_off[code];
+                sb.slots[i].ext.arena_offset = new_off.get(code);
             }
             if (out_v != nullptr)
                 out_v[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
@@ -679,6 +735,134 @@ static inline VecResult str_take(const DrakenVector& v,
                        static_cast<uint8_t>(DRAKEN_SEL_IDENTITY |
                                             DRAKEN_SEL_PERMUTATION));
 }
+
+// ---------------------------------------------------------------------------
+// SgDedupTable — open-addressed flat hash table for str_dictionary_encode.
+//
+// Replaces `std::unordered_map<uint64_t, std::vector<uint32_t>>`, which cost
+// ONE node malloc PLUS one vector malloc per distinct value and chased a
+// pointer on every probe. Same class of defect as the offset maps above; the
+// keys here are 64-bit content hashes rather than dense dictionary codes, so a
+// flat direct-indexed array is not available — but an open-addressed table is,
+// and it removes the per-distinct-value allocations and the indirection.
+//
+// Storage: one draken_malloc'd array of 16-byte entries. Linear probing,
+// power-of-two capacity, load factor kept <= 0.5, doubling rehash. Collision
+// chains resolve IN PLACE — a genuine 64-bit hash collision simply occupies the
+// next probe position, and the probe walk verifies every key-equal candidate
+// with sg_eq_slots, which remains the authoritative equality test. Empty is
+// encoded as `val_plus_one == 0`, so no key value is reserved as a sentinel.
+//
+// This is a data-structure choice, never an answer: the dedup body, the
+// equality rule and the emitted codes are unchanged.
+//
+// FIRST-APPEARANCE ORDER is not held here — it lives, exactly as before, in
+// `unique_src_codes`, whose push_back order defines the emitted codes. This
+// table only maps hash -> unique index; it never reorders anything.
+//
+// MEASURED (2026-09-22, interleaved A/B, both arms in one binary, arm order
+// alternated within each round, 65,536-row vectors): 2.5x / 2.2x / 2.4x on
+// short (inline) columns at 100 / 10,000 / all-unique distinct values, and
+// 1.45x / 1.9x / 2.1x on long (extern) columns at the same three. Equivalence
+// verified against the previous implementation over 400 randomised cases
+// (varying row count, distinct count, short/long, with and without nulls):
+// identical dict size, per-row codes and dictionary slot bytes.
+// ---------------------------------------------------------------------------
+struct SgDedupEntry {
+    uint64_t key;
+    uint32_t val_plus_one;  // 0 == empty
+    uint32_t pad_;
+};
+
+class SgDedupTable {
+  public:
+    // `hint` is an upper bound on distinct values (the caller passes the row
+    // count). Capacity starts at the smaller of hint-derived and a fixed floor
+    // so a high-dedup column does not allocate for rows it will never store.
+    explicit SgDedupTable(uint32_t hint) {
+        uint32_t want = (hint < 512u) ? hint : 512u;
+        cap_ = 64u;
+        while (cap_ < want * 2u) cap_ <<= 1;
+        e_ = alloc_(cap_);
+    }
+    ~SgDedupTable() { if (e_ != nullptr) draken_free(e_); }
+    SgDedupTable(const SgDedupTable&)            = delete;
+    SgDedupTable& operator=(const SgDedupTable&) = delete;
+
+    // Must be called before each probe/insert pair: guarantees room for one
+    // more entry, so the position returned by a probe stays valid.
+    inline void reserve_one() {
+        if (count_ + 1u > (cap_ >> 1)) grow_();
+    }
+
+    // MEASURED, and the reason this finalizer exists: str_hash_seed is a SEED,
+    // not a finished hash. For INLINE slots it is `raw.lo + raw.hi * K` — the
+    // low 32 bits carry almost no entropy (raw.lo's low word is the string
+    // LENGTH, identical across a column, and a constant multiply pushes
+    // entropy upward, never down). Masking those bits for a probe index
+    // clustered catastrophically: the flat table ran 2.5-3x SLOWER than the
+    // unordered_map it replaced on short-string columns, while long-string
+    // columns — whose seed is a fully-mixed XXH3 — were already 1.5-3x faster.
+    // std::unordered_map hid the defect by taking a PRIME modulus of the whole
+    // 64 bits. An open-addressed table masks low bits, so it must finalize the
+    // seed first. splitmix64's finalizer, ~3 cycles.
+    static inline uint64_t finalize_(uint64_t k) noexcept {
+        k ^= k >> 33;
+        k *= 0xff51afd7ed558ccdULL;
+        k ^= k >> 29;
+        return k;
+    }
+    inline uint32_t probe_start(uint64_t key) const noexcept {
+        return static_cast<uint32_t>(finalize_(key)) & (cap_ - 1u);
+    }
+    inline uint32_t next(uint32_t pos) const noexcept {
+        return (pos + 1u) & (cap_ - 1u);
+    }
+    inline const SgDedupEntry& at(uint32_t pos) const noexcept { return e_[pos]; }
+
+    inline void insert_at(uint32_t pos, uint64_t key, uint32_t value) noexcept {
+        e_[pos].key          = key;
+        e_[pos].val_plus_one = value + 1u;
+        ++count_;
+    }
+
+  private:
+    // Allocate a zeroed table of `cap` entries. Never partially commits.
+    static SgDedupEntry* alloc_(uint32_t cap) {
+        const size_t bytes = static_cast<size_t>(cap) * sizeof(SgDedupEntry);
+        SgDedupEntry* p = static_cast<SgDedupEntry*>(draken_malloc(bytes));
+        if (p == nullptr) throw std::bad_alloc();
+        std::memset(p, 0, bytes);
+        return p;
+    }
+
+    // Strong exception guarantee: the new table is fully built before the old
+    // one is released, so a failed allocation leaves the table untouched and
+    // leaks nothing.
+    void grow_() {
+        // Hard ceiling: capacity is uint32 and must stay a power of two.
+        // 2^31 entries holds 2^30 distinct values — far past any real vector.
+        // Fail loudly rather than wrapping to zero.
+        if (cap_ > (1u << 30)) throw std::overflow_error(
+            "str_dictionary_encode: dedup table exceeds 2^31 entries");
+        const uint32_t new_cap = cap_ << 1;
+        SgDedupEntry*  ne      = alloc_(new_cap);  // throws: e_/cap_ unchanged
+        for (uint32_t i = 0; i < cap_; ++i) {
+            if (e_[i].val_plus_one == 0u) continue;
+            uint32_t pos =
+                static_cast<uint32_t>(finalize_(e_[i].key)) & (new_cap - 1u);
+            while (ne[pos].val_plus_one != 0u) pos = (pos + 1u) & (new_cap - 1u);
+            ne[pos] = e_[i];
+        }
+        draken_free(e_);
+        e_   = ne;
+        cap_ = new_cap;
+    }
+
+    SgDedupEntry* e_     = nullptr;
+    uint32_t      cap_   = 0u;
+    uint32_t      count_ = 0u;
+};
 
 // ---------------------------------------------------------------------------
 // COMPRESS — dict-encode a string vector.
@@ -708,9 +892,12 @@ static inline VecResult str_dictionary_encode(const DrakenVector& v) {
     }
 
     // Phase 1: scan all non-null rows; collect unique slots in first-appearance order.
-    // Key = str_hash_seed. sg_eq_slots resolves same-hash candidates exactly.
-    // Value = vector of unique-slot indices sharing this seed (for collision chains).
-    std::unordered_map<uint64_t, std::vector<uint32_t>> dedup;
+    // Key = str_hash_seed. sg_eq_slots resolves same-hash candidates exactly —
+    // the table only narrows the candidate set, it never decides equality.
+    // The probe walk stops at the first EMPTY entry, which is also the insert
+    // position; every key-equal entry passed on the way is a 64-bit hash
+    // collision and is verified (and rejected) by sg_eq_slots.
+    SgDedupTable dedup(n);
     std::vector<uint32_t> unique_src_codes;  // source data[] index for each unique entry
     std::vector<uint32_t> codes(n, 0u);     // output codes per logical row
     bool has_nonnull = false;
@@ -722,22 +909,28 @@ static inline VecResult str_dictionary_encode(const DrakenVector& v) {
         const DrakenStringSlot* slot    = &src_s[src_code];
         const uint64_t          hseed   = str_hash_seed(slot, src_a);
 
-        bool found = false;
-        auto it = dedup.find(hseed);
-        if (it != dedup.end()) {
-            for (uint32_t uidx : it->second) {
+        dedup.reserve_one();  // keeps `pos` below valid across a possible rehash
+
+        bool     found = false;
+        uint32_t pos   = dedup.probe_start(hseed);
+        for (;;) {
+            const SgDedupEntry& e = dedup.at(pos);
+            if (e.val_plus_one == 0u) break;  // empty — not present; insert here
+            if (e.key == hseed) {
+                const uint32_t uidx = e.val_plus_one - 1u;
                 if (sg_eq_slots(&src_s[unique_src_codes[uidx]], src_a, slot, src_a)) {
                     codes[i] = uidx;
                     found = true;
                     break;
                 }
             }
+            pos = dedup.next(pos);
         }
         if (!found) {
             const uint32_t new_idx = static_cast<uint32_t>(unique_src_codes.size());
             unique_src_codes.push_back(src_code);
             codes[i] = new_idx;
-            dedup[hseed].push_back(new_idx);
+            dedup.insert_at(pos, hseed, new_idx);
         }
     }
 

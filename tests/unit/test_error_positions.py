@@ -138,6 +138,19 @@ def test_column_names_are_not_case_sensitive(written):
     _run(f"SELECT {written} FROM $planets WHERE {written} = 'Earth'")
 
 
+def test_the_dataset_error_does_not_blame_casing():
+    """The same fault, in the same words, for relations: dataset names are not case
+    sensitive, so casing is never the cause of a not-found this error reports."""
+    import opteryx
+    from opteryx.exceptions import DatasetNotFoundError
+
+    with pytest.raises(DatasetNotFoundError) as raised:
+        list(opteryx.session().execute_to_morsels("SELECT * FROM testdata.no.such_dataset"))
+    assert "case sensitive" not in str(raised.value).lower()
+    # the genuinely useful half of the old advice stays
+    assert "workspace and collection" in str(raised.value)
+
+
 def test_the_column_error_does_not_blame_casing():
     """It used to open its advice with "Column names are case sensitive", which sent
     readers off to audit the one thing that could not possibly be wrong."""

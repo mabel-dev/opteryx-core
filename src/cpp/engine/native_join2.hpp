@@ -56,7 +56,31 @@ namespace opteryx::engine {
 // wrong answer — see Join2BuildSink::null_equal.
 enum class JoinMode : uint8_t {
     Inner = 0, LeftOuter = 1, Semi = 2, AntiNullAware = 3, Anti = 4, FullOuter = 5,
-    SemiNotDistinct = 6, AntiNotDistinct = 7
+    SemiNotDistinct = 6, AntiNotDistinct = 7,
+    // LEFT OUTER with the legs EXCHANGED: the preserved side BUILDS and the other
+    // side streams past it. Not new join semantics — the emitted rows are exactly
+    // LeftOuter's — but a different materialisation, taken when the preserved leg is
+    // the far smaller one. LeftOuter must PROBE its preserved side (that is what lets
+    // an unmatched probe row emit a NULL build half), which pins the OTHER leg into
+    // the hash table however large it is: TPC-H SF10 `customer LEFT JOIN orders`
+    // builds all 15,000,000 orders rows in order to preserve 1,500,000 customers.
+    //
+    // This mode inverts that. It probes like INNER (no NULL half on a probe miss — a
+    // streamed row matching nothing is simply dropped, because it is not the preserved
+    // side) and marks the build rows it hits, exactly as FullOuter does; the preserved
+    // rows no probe reached are then emitted, NULL-padded, by the same
+    // UnmatchedBuildSource tail. It differs from FullOuter in ONE flag — `left_outer`
+    // — and reuses every other piece unchanged.
+    //
+    // NULL keys fall out correctly with no special case: a NULL-keyed PROBE row is not
+    // preserved and is dropped, and a NULL-keyed BUILD row is preserved and is retained
+    // outside the keyed row space by the `track_matches` branch in Join2BuildSink::sink(),
+    // so the tail emits it unconditionally.
+    //
+    // The two prices are the planner's, not this file's, and are the same two the RIGHT
+    // SEMI/ANTI exchange documents: it is BLOCKING (nothing emits until the streamed leg
+    // is exhausted), and the tail's rows arrive in BUILD order.
+    RightOuter = 8
 };
 
 // Does this mode compare keys with IS NOT DISTINCT FROM (NULL equals NULL)?
@@ -346,6 +370,59 @@ struct Join2BuildGlobal : GlobalSinkState {
     size_t probe_row_count(uint64_t key) const { return csr.row_count_for(key); }
 };
 
+// Runs `fn(0..nt-1)`, the calling thread taking tid 0, and joins. finalize() is
+// called once, on the executor's driver thread, with every pipeline worker already
+// retired — so the sink's own parallel phases have to raise their own threads. A
+// template, not a std::function: these bodies are the per-bucket sweeps below and
+// must inline.
+template <typename F>
+inline void join_finalize_parallel(unsigned nt, F&& fn) {
+    std::vector<std::thread> th;
+    th.reserve(nt > 1 ? nt - 1 : 0);
+    for (unsigned t = 1; t < nt; ++t) th.emplace_back([&fn, t]() { fn(t); });
+    fn(0);
+    for (auto& x : th) x.join();
+}
+
+// The width a Join2 finalize phase runs at: the QUERY's authorised width, not a
+// second one derived from the hardware behind its back.
+//
+// This used to be `min(16, hardware_concurrency() - 2)` in both merge_build_rows()
+// and build_join_csr() — exactly the defect fixed for GroupBySink on 2026-08-29
+// (see GlobalSinkState::exec_dop in operator.hpp). Two consequences, both measured:
+// on a 1-2 vCPU Cloud Run service the derivation oversubscribes the container, and
+// at MAX_EXECUTION_WORKERS=2 on an 18-core box the CSR build still ran ~16 wide, so
+// Q09's join finalize moved only 1.67x across an 8x width change (105.5ms at 2,
+// 63.0ms at 16 — SF10, 2026-09-22) when it should have moved with the width.
+//
+// Unlike GroupBySink's merge this does NOT take the max of the two: that sink takes
+// the max because its partition merge was measured to WANT more threads than the
+// pipeline's DOP (a partition merges indivisibly, so width is its only lever). The
+// CSR sweeps are flat data-parallel passes over one array with no such structure —
+// there is nothing here that wants to run wider than the query was authorised for.
+inline unsigned join_finalize_width(const Join2BuildGlobal& g, size_t work) {
+    if (work < 65536) return 1;   // small build: the threads cost more than they save
+    const int dop = g.exec_dop;
+    return dop > 0 ? static_cast<unsigned>(dop) : 1u;
+}
+
+// Splits [0, n) into `nblocks` near-equal blocks and hands them out atomically, so a
+// straggler core (a Mac E-core, a throttled container) cannot hold the whole sweep.
+struct BucketBlocks {
+    size_t n = 0, nblocks = 0, blk = 0;
+    size_t lo(size_t i) const { return i * blk < n ? i * blk : n; }
+    size_t hi(size_t i) const { return lo(i) + blk < n ? lo(i) + blk : n; }
+};
+inline BucketBlocks bucket_blocks(size_t n, unsigned nt) {
+    BucketBlocks b;
+    b.n = n;
+    b.nblocks = nt == 1 ? 1 : static_cast<size_t>(nt) * 4;
+    b.blk = (n + b.nblocks - 1) / b.nblocks;
+    if (b.blk == 0) b.blk = 1;
+    b.nblocks = (n + b.blk - 1) / b.blk;
+    return b;
+}
+
 // Concatenate the queued per-worker row addresses into row_m/row_r, rebasing each
 // chunk's morsel indices as it goes. Called once from finalize(), before anything
 // reads the build address space.
@@ -375,10 +452,9 @@ inline void merge_build_rows(Join2BuildGlobal& g) {
     g.row_m.resize(running);
     g.row_r.resize(running);
 
-    unsigned hw = std::thread::hardware_concurrency();
-    unsigned nt = hw > 2 ? hw - 2 : 1;
-    if (nt > 16) nt = 16;
-    if (running < 65536) nt = 1;   // small build: the threads cost more than they save
+    // The query's authorised width — see join_finalize_width above. The CSR build
+    // below carried the same defect.
+    const unsigned nt = join_finalize_width(g, running);
 
     std::atomic<size_t> next{0};
     auto work = [&](unsigned) {
@@ -395,11 +471,7 @@ inline void merge_build_rows(Join2BuildGlobal& g) {
             if (n != 0) std::memcpy(dst_r, src_r.data(), n * sizeof(uint32_t));
         }
     };
-    std::vector<std::thread> th;
-    th.reserve(nt - 1);
-    for (unsigned t = 1; t < nt; ++t) th.emplace_back(work, t);
-    work(0);
-    for (auto& x : th) x.join();
+    join_finalize_parallel(nt, work);
 
     // Release the per-worker buffers now rather than holding a second copy of the
     // whole build address space alive until the sink is destroyed.
@@ -416,6 +488,13 @@ inline void merge_build_rows(Join2BuildGlobal& g) {
 // GroupBySink::finalize uses for its partition merge. Row ids are global build row ids:
 // chunks were queued in combine() in the same order as row_m/row_r, so chunk c covers
 // [base_c, base_c + chunk_c.size()).
+//
+// Every O(n) sweep here is parallel. They were serial until 2026-09-22 — a zero-fill
+// of the counters, the prefix sum, and a second array of scatter cursors initialised
+// from it — which on Q09's SF100 build (32.6M rows, so n = 33.5M buckets and 134MB per
+// bucket-sized array) was three single-threaded passes over 400MB inside a finalize
+// the whole query waits on. The cursor array is gone entirely: the counters ARE the
+// cursors, rewritten in place from "count" to "start of bucket" by the scan.
 inline void build_join_csr(Join2BuildGlobal& g) {
     const size_t total = g.total_rows;
     if (total == 0) return;
@@ -424,81 +503,121 @@ inline void build_join_csr(Join2BuildGlobal& g) {
 
     JoinCsr& c = g.csr;
     c.mask = n - 1;
-    c.off.assign(n + 1, 0);
+    c.off.resize(n + 1);   // every element is written by the scan below
     c.rows.resize(total);
     c.hashes.resize(total);
 
     // Flat view of the queued chunks: (chunk index, base global row id).
-    std::vector<size_t> base(g.hash_chunks.size(), 0);
+    const size_t nchunks = g.hash_chunks.size();
+    std::vector<size_t> base(nchunks, 0);
     size_t running = 0;
-    for (size_t i = 0; i < g.hash_chunks.size(); ++i) {
+    for (size_t i = 0; i < nchunks; ++i) {
         base[i] = running;
         running += g.hash_chunks[i].size();
     }
 
-    unsigned hw = std::thread::hardware_concurrency();
-    unsigned nt = hw > 2 ? hw - 2 : 1;
-    if (nt > 16) nt = 16;
-    if (total < 65536) nt = 1;   // small build: the threads cost more than they save
+    const unsigned nt = join_finalize_width(g, total);
+    const BucketBlocks bb = bucket_blocks(n, nt);
 
-    std::vector<std::atomic<uint32_t>> counts(n);
-    for (size_t i = 0; i < n; ++i) counts[i].store(0, std::memory_order_relaxed);
+    // ONE bucket-sized scratch array, two roles in sequence: the pass-1 histogram
+    // writes counts into it, the scan rewrites each entry in place as that bucket's
+    // first free slot, and pass 2 consumes it as the scatter cursor. Plain uint32_t
+    // (allocated UNinitialised — `new uint32_t[n]` default-initialises a trivial
+    // type) with std::atomic_ref for the concurrent phases: a
+    // std::vector<std::atomic<uint32_t>> cannot be created without a serial
+    // zero-fill, which is the cost being removed.
+    std::unique_ptr<uint32_t[]> slot(new uint32_t[n]);
 
+    std::atomic<size_t> zero_next{0};
+    join_finalize_parallel(nt, [&](unsigned) {
+        // Zero-fill, block-claimed. memset per block, not a per-element store loop.
+        for (;;) {
+            const size_t bi = zero_next.fetch_add(1);
+            if (bi >= bb.nblocks) break;
+            const size_t lo = bb.lo(bi), hi = bb.hi(bi);
+            if (hi > lo) std::memset(slot.get() + lo, 0, (hi - lo) * sizeof(uint32_t));
+        }
+    });
 
     // Pass 1: per-bucket histogram. Chunks are claimed atomically so a skewed chunk
     // distribution cannot leave a thread idle.
     {
         std::atomic<size_t> next{0};
-        auto work = [&](unsigned) {
+        join_finalize_parallel(nt, [&](unsigned) {
             for (;;) {
                 size_t ci = next.fetch_add(1);
-                if (ci >= g.hash_chunks.size()) break;
+                if (ci >= nchunks) break;
                 for (uint64_t h : g.hash_chunks[ci])
-                    counts[static_cast<size_t>(h) & c.mask].fetch_add(1, std::memory_order_relaxed);
+                    std::atomic_ref<uint32_t>(slot[static_cast<size_t>(h) & c.mask])
+                        .fetch_add(1, std::memory_order_relaxed);
             }
-        };
-        std::vector<std::thread> th;
-        th.reserve(nt - 1);
-        for (unsigned t = 1; t < nt; ++t) th.emplace_back(work, t);
-        work(0);
-        for (auto& x : th) x.join();
+        });
     }
 
-    // Prefix sum over buckets — O(n), no hashing and no allocation.
-    uint32_t run = 0;
-    for (size_t b = 0; b < n; ++b) {
-        c.off[b] = run;
-        run += counts[b].load(std::memory_order_relaxed);
-    }
-    c.off[n] = run;
-
-    // Pass 2: scatter. cursor[b] hands each writer a slot inside bucket b that no other
-    // writer can receive, so the passes need no merge and no per-key allocation.
+    // Prefix sum over buckets, as a two-pass block scan: per-block totals, a serial
+    // exclusive scan over the (nt*4) block totals, then per-block application. The
+    // application pass writes BOTH outputs — c.off[b] (the permanent CSR) and
+    // slot[b] rewritten from count to bucket start (the scatter cursor) — so the
+    // whole prefix phase touches the bucket array exactly twice.
     {
-        std::vector<std::atomic<uint32_t>> cursor(n);
-        for (size_t b = 0; b < n; ++b)
-            cursor[b].store(c.off[b], std::memory_order_relaxed);
+        std::vector<uint32_t> block_total(bb.nblocks, 0);
+        {
+            std::atomic<size_t> next{0};
+            join_finalize_parallel(nt, [&](unsigned) {
+                for (;;) {
+                    const size_t bi = next.fetch_add(1);
+                    if (bi >= bb.nblocks) break;
+                    uint32_t sum = 0;
+                    for (size_t b = bb.lo(bi), e = bb.hi(bi); b < e; ++b) sum += slot[b];
+                    block_total[bi] = sum;
+                }
+            });
+        }
+        std::vector<uint32_t> block_base(bb.nblocks, 0);
+        uint32_t run = 0;
+        for (size_t bi = 0; bi < bb.nblocks; ++bi) {
+            block_base[bi] = run;
+            run += block_total[bi];
+        }
+        {
+            std::atomic<size_t> next{0};
+            join_finalize_parallel(nt, [&](unsigned) {
+                for (;;) {
+                    const size_t bi = next.fetch_add(1);
+                    if (bi >= bb.nblocks) break;
+                    uint32_t r = block_base[bi];
+                    for (size_t b = bb.lo(bi), e = bb.hi(bi); b < e; ++b) {
+                        const uint32_t cnt = slot[b];
+                        c.off[b] = r;
+                        slot[b] = r;
+                        r += cnt;
+                    }
+                }
+            });
+        }
+        c.off[n] = run;
+    }
+
+    // Pass 2: scatter. slot[b] hands each writer a position inside bucket b that no
+    // other writer can receive, so the passes need no merge and no per-key allocation.
+    {
         std::atomic<size_t> next{0};
-        auto work = [&](unsigned) {
+        join_finalize_parallel(nt, [&](unsigned) {
             for (;;) {
                 size_t ci = next.fetch_add(1);
-                if (ci >= g.hash_chunks.size()) break;
+                if (ci >= nchunks) break;
                 const std::vector<uint64_t>& chunk = g.hash_chunks[ci];
                 const size_t b0 = base[ci];
                 for (size_t r = 0; r < chunk.size(); ++r) {
                     const uint64_t h = chunk[r];
                     const size_t b = static_cast<size_t>(h) & c.mask;
-                    const uint32_t p = cursor[b].fetch_add(1, std::memory_order_relaxed);
+                    const uint32_t p = std::atomic_ref<uint32_t>(slot[b])
+                                           .fetch_add(1, std::memory_order_relaxed);
                     c.rows[p] = static_cast<uint32_t>(b0 + r);
                     c.hashes[p] = h;
                 }
             }
-        };
-        std::vector<std::thread> th;
-        th.reserve(nt - 1);
-        for (unsigned t = 1; t < nt; ++t) th.emplace_back(work, t);
-        work(0);
-        for (auto& x : th) x.join();
+        });
     }
 
     c.built = true;
@@ -2363,13 +2482,22 @@ struct DeferredJoin2Probe : Operator {
                     emit_prune, emit_cols, join_mode_null_equal(mode),
                     emit_existence, existence_three_valued, existence_name);
             } else {
-                // FULL OUTER probes exactly like LEFT OUTER (preserved probe side,
-                // NULL build half on miss) and additionally marks matched build
-                // rows for the UnmatchedBuildSource tail pipeline.
+                // Two INDEPENDENT flags, and the three outer modes are the three
+                // useful combinations of them:
+                //   left_outer    — emit a probe row that matched nothing, with a NULL
+                //                   build half. True when the PROBE side is preserved.
+                //   track_matches — mark the build rows that were hit, so the
+                //                   UnmatchedBuildSource tail can emit the ones that
+                //                   were not. True when the BUILD side is preserved.
+                // FullOuter preserves both and sets both; LeftOuter preserves the probe
+                // side; RightOuter preserves the build side and is INNER probing plus
+                // the marks.
+                const bool probe_preserved = mode == JoinMode::LeftOuter
+                                             || mode == JoinMode::FullOuter;
+                const bool build_preserved = mode == JoinMode::FullOuter
+                                             || mode == JoinMode::RightOuter;
                 inner = std::make_unique<Join2ProbeOperator>(
-                    key_idx, payload_idx, ref,
-                    mode == JoinMode::LeftOuter || mode == JoinMode::FullOuter,
-                    mode == JoinMode::FullOuter);
+                    key_idx, payload_idx, ref, probe_preserved, build_preserved);
             }
         });
         return inner->make_state();

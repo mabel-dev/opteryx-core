@@ -85,14 +85,40 @@ public:
 
 private:
     void start(NativePostgresScanGlobal& g) {
-        g.conn = pg::PgPool::instance().acquire(spec_->config);
         std::vector<std::optional<std::string>> params;
         params.reserve(spec_->params.size());
         for (size_t i = 0; i < spec_->params.size(); i++) {
             if (spec_->param_is_null[i]) params.emplace_back(std::nullopt);
             else params.emplace_back(spec_->params[i]);
         }
-        std::vector<pg::PgField> fields = g.conn->begin(spec_->sql, params);
+
+        // Opening the stream, retried once on a freshly opened connection if a
+        // POOLED one died of a transport error.
+        //
+        // A connection can be reaped by the server, a pooler or a NAT while it
+        // sits idle in the pool, and nothing on this side learns of it until the
+        // next write -- which is exactly here, sending the Parse/Bind/Execute.
+        // The scan then failed with `postgres TLS write failed: ... Connection
+        // reset by peer` before a single byte of the statement reached the
+        // server, which is what makes the second attempt safe: nothing ran,
+        // nothing was emitted, so there is nothing to replay or double up.
+        //
+        // Deliberately confined to start(). A transport failure inside pull()
+        // has already handed rows upstream, and reissuing the statement there
+        // would re-deliver them; that path still fails the scan, as it must.
+        std::vector<pg::PgField> fields;
+        for (int attempt = 0;; attempt++) {
+            g.conn = attempt == 0 ? pg::PgPool::instance().acquire(spec_->config)
+                                  : pg::PgPool::instance().acquire_fresh(spec_->config);
+            try {
+                fields = g.conn->begin(spec_->sql, params);
+                break;
+            } catch (const pg::PgError& e) {
+                const bool retryable = attempt == 0 && e.transport && g.conn->pooled();
+                g.conn.reset();  // dead, or protocol state unknown: never pooled
+                if (!retryable) throw;
+            }
+        }
 
         // The stream must be the relation the plan was built from: same column
         // count, same OIDs, in order. Drift fails here instead of decoding one

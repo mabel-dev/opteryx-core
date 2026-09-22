@@ -176,7 +176,9 @@ cdef extern from "type_widening_wrappers.hpp":
 #   E.28-gap-7: string_from_dict_buffers / make_string_dict_only
 #   E.28-gap-8: Integer64Vector.from_constant / Float64Vector.from_constant / StringVector.from_constant
 #   E.28-gap-9: bool_vector_from_bits — symbol is compiled inline into each consumer;
-#               draken/core/bitmap_ops.cpp must be added to rugo.parquet_reader sources in setup.py
+#               draken/vectors/_bool_vector_bridge.cpp must be added to rugo.parquet_reader
+#               sources in setup.py (it moved out of draken/core/bitmap_ops.cpp so that
+#               core/bitmap_ops.h stays free of <Python.h>)
 from draken.vectors.vector cimport Vector
 from draken.morsels.morsel cimport Morsel
 

@@ -14,20 +14,6 @@
 #include <cmath>
 #include <cstring>
 
-// Stats counters for benchmarking and testing.
-// Not thread-safe — intended for single-threaded profiling scripts only.
-static uint64_t _vgs_hits   = 0;  // returned true  (handled; radix skipped)
-static uint64_t _vgs_misses = 0;  // returned false (fell through to radix)
-
-static inline void vergesort_reset_stats() {
-    _vgs_hits = _vgs_misses = 0;
-}
-
-static inline void vergesort_get_stats(uint64_t* hits, uint64_t* misses) {
-    *hits   = _vgs_hits;
-    *misses = _vgs_misses;
-}
-
 // Merge two adjacent sorted runs [lo, mid) and [mid, hi) in perm[],
 // using scratch buffer tmp[]. Compares via keys[perm[i]].
 static inline void _vgs_merge(
@@ -266,7 +252,6 @@ static inline bool vergesort_u64(
         }
 
         if (__builtin_expect(num_runs >= MAX_RUNS, 0)) {
-            ++_vgs_misses;
             return false;
         }
         runs[num_runs++] = run_start;
@@ -275,17 +260,14 @@ static inline bool vergesort_u64(
     runs[num_runs] = nn; // sentinel
 
     if (num_runs > THRESHOLD) {
-        ++_vgs_misses;
         return false;
     }
 
     // Already sorted: skip merge entirely.
     if (__builtin_expect(num_runs == 1, 0)) {
-        ++_vgs_hits;
         return true;
     }
 
     _vgs_merge_runs(perm, tmp, keys, runs, num_runs, nn);
-    ++_vgs_hits;
     return true;
 }

@@ -20,6 +20,22 @@ name joins, the binder's permission gates, the catalog cache, egress,
 telemetry — sees only the substituted name. There is no second resolution
 point and no downstream code that has to know the feature exists.
 
+WHAT IS NOT "AFTER IT"
+----------------------
+`analyze_query` and the describe half of `Session.check` read the PRE-rewrite
+AST — they have to, because the rewriter substitutes `:name` placeholders and
+they report which were written. They are not downstream of this, so they called
+it on nothing and reported `personal.$me.x` as the relation a statement names.
+A caller matching that against grants matches nothing, which is how a `$me`
+relation the reader owns was refused in production as unauthorized rather than
+reported as missing.
+
+So both call this FIRST, on the AST they are about to describe, and
+`analyze_query` takes the username to resolve against (it has no session). That
+is a second CALL SITE, not a second resolution: the pronoun is still read in
+exactly one place, and substituting early is invisible to the rewriter's own
+pass, which sees a name that is no longer a pronoun and leaves it alone.
+
 WHY A PRONOUN RATHER THAN A VARIABLE
 ------------------------------------
 This started as `@@external_user`, reusing the system-variable namespace, and

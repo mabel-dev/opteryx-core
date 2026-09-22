@@ -7,12 +7,18 @@
 // arena (e.g. the result Vector's data buffer at frame exit) are removed
 // from tracking via `release` and become the caller's responsibility.
 //
-// Backing allocator: draken_malloc / draken_free (mimalloc). No custom
-// bump arena — mimalloc's per-size-class fast paths are sufficient for
-// the expected allocation pattern (a few dozen mid-sized buffers per
-// evaluation frame). If measurement later shows allocator pressure, a
-// bump allocator can be layered behind this API without changing
-// callers.
+// Backing allocator: draken_malloc / draken_free, which are the SYSTEM
+// allocator (malloc/free) — see alloc.h for why draken must share one
+// process-wide allocator with foreign native libraries. No custom bump
+// arena: the justification is the allocation PATTERN, not the allocator.
+// MEASURED (ClickBench, 46,416 frames): mean 1.36 tracked buffers per
+// frame, 99.7% of frames at <=8, max 14. Peak scales with expression
+// NESTING DEPTH (~2 buffers per level), not projection width — a wide
+// 200-column string projection evaluates as one frame per expression
+// and peaks at 8. Per-frame allocator traffic is therefore far too
+// small for a bump arena to pay for its complexity. If measurement
+// later shows allocator pressure, a bump allocator can be layered
+// behind this API without changing callers.
 //
 // Thread safety: NONE. One arena per evaluation frame; no concurrent
 // access. Sharing across threads is unsupported.

@@ -1,11 +1,26 @@
 // draken/core/frame_arena.cpp — tracked-pointer per-frame allocator.
 //
 // See frame_arena.h for contract. Implementation: std::vector<void*>
-// tracking + draken_malloc/draken_free backing. release() does an O(n)
-// find+erase on the tracking list, which is fine for the expected
-// per-frame size (a few dozen entries at most). If profiling later
-// shows release() hot, swap for an unordered_set without changing the
-// public API.
+// tracking + draken_malloc/draken_free backing. release() and
+// contains() do an O(n) find over the tracking list.
+//
+// MEASURED 2026-09-22 — the vector STAYS; do not "optimize" this to an
+// unordered_set without new evidence. The scan is not hot, and it is
+// structural, not incidental: release()/contains() are called at FRAME
+// EXIT for the result slots, never per row or per morsel.
+//   ClickBench (46,416 frames): 10 release calls TOTAL, avg scan 1.00
+//     elements; 0 contains calls; max 14 tracked.
+//   Shapes battery (823 frames): 53 release (avg scan 1.77), 15
+//     contains (avg scan 2.13); max 11 tracked.
+// At n this small a hash container loses outright — hashing plus node
+// allocation plus pointer chasing, against a 1-2 element contiguous
+// scan that is already in cache.
+//
+// The vector also ADMITS DUPLICATES while a set would collapse them.
+// That difference is not load-bearing: a duplicate entry would make
+// destroy() free the same pointer twice, so a duplicate is a bug in
+// either container, never a behaviour to preserve. Measured duplicate
+// adopts across all of the above: ZERO.
 
 #include "frame_arena.h"
 #include "alloc.h"

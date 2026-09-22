@@ -529,6 +529,10 @@ def describe_statement(parsed_statement: Dict[str, Any]) -> Dict[str, Any]:
     was ever written, and `parameters` would come back empty for the very statement
     that has them.
 
+    Relation PRONOUNS are the exception, and the caller resolves them before calling
+    this: a `$me` left in a name is reported as the relation the statement reads, and
+    a caller matching that against grants matches nothing. See `relation_pronouns`.
+
     Parameters:
         parsed_statement: one parsed statement, as `parse_statement` returns.
 
@@ -583,7 +587,7 @@ def describe_statement(parsed_statement: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def parse_query_info(sql: str) -> Dict[str, Any]:
+def parse_query_info(sql: str, user: Optional[str] = None) -> Dict[str, Any]:
     """
     Parse a SQL query and extract metadata without executing it.
 
@@ -600,6 +604,13 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
 
     Parameters:
         sql: SQL query string to parse
+        user: the caller's username, which is what the `$me` pronoun in a relation
+            name stands for. Supply it whenever the answer will be used to decide
+            anything about the NAMES - a permission pre-check being the reason this
+            exists. Omitted, a name carrying `$me` is reported exactly as written,
+            unresolved, which matches no grant and names no dataset; the caller then
+            refuses a statement the engine would have run, which is what happened to
+            `personal.$me.x` in production. See `planner/ast_rewriter/relation_pronouns`.
 
     Returns:
         Dictionary containing:
@@ -632,6 +643,9 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
         type as though it described the rest. See `union_descriptions`.
 
     Raises:
+        SqlError: If `user` is supplied and is not a single name part - a value with
+            a dot would change a name's arity. Validated, never repaired; see
+            `relation_pronouns`.
         QueryParseError: If the SQL cannot be parsed. This used to be a bare
             ValueError carrying the parser's own text; it is now the same error
             the query planner raises for the same statement, so a caller sees one
@@ -654,8 +668,14 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
     # REFRESH MATERIALIZED VIEW / DROP TRIGGER / DROP STATISTICS was told a statement
     # the engine runs happily does not parse.
     from opteryx.planner import parse_statement
+    from opteryx.planner.ast_rewriter.relation_pronouns import do_substitute_relation_pronouns
 
     from opteryx.utils.sql import split_sql_statements
+
+    # The identity `$me` stands for, in the shape the ONE resolver reads it from.
+    # None when no identity was given, which is the resolver's own "there is nobody
+    # to be" and leaves the pronoun as written rather than guessing at a user.
+    variables = None if user is None else {"external_user": user}
 
     # Split BEFORE parsing. The pre-parse layer recognizes the statements sqlparser
     # has no grammar for with whole-string anchored patterns, so handed a batch it
@@ -669,6 +689,11 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
         _clean_sql, parsed_statements = parse_statement(statement.text)
         if not parsed_statements:
             raise ValueError("No statements found in SQL query")
+        # Resolved BEFORE describing, through the planner's own resolver rather than
+        # a second reading of the pronoun - what is reported is then the name the
+        # engine would bind, not the text the reader typed.
+        if variables is not None:
+            do_substitute_relation_pronouns(parsed_statements, variables)
         descriptions.append(describe_statement(parsed_statements[0]))
 
     if not descriptions:

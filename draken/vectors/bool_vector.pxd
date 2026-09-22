@@ -56,15 +56,15 @@ cdef extern from "core/bitmap_ops.h" nogil:
     # In-place AND: dst &= src over nbytes bytes (word-wide).
     void c_bitmap_and_inplace(uint8_t* dst, const uint8_t* src, size_t nbytes) nogil
 
-    # Extract bitmap pointers (currently a stub).
-    void c_get_bitmap_ptrs(void* draken_vector) nogil
-
     # Count set bits in a bitmap.
     size_t simd_popcount(const uint8_t* data, size_t nbytes) nogil
 
 # Create a BoolVector from raw bitmap buffers — returns Python object (BoolVector).
 # Declared outside nogil block because it returns a Python object.
-cdef extern from "core/bitmap_ops.h":
+# Lives in the shim/bridge layer, NOT core/bitmap_ops.h: it is the one Python-
+# returning member of that family, and core/ must stay <Python.h>-free so C++
+# consumers of the bitmap ops compile without CPython (CLAUDE.md §2/§5).
+cdef extern from "vectors/_bool_vector_bridge.h":
     object bool_vector_from_bits(uint8_t* bitmap, uint8_t* null_bitmap, uint32_t num_rows)
 
 

@@ -44,10 +44,46 @@
 //
 // What it does NOT do: share the source's value block. `VecResult.data` is
 // contractually OWNED (ops/vec_result.h), so a zero-copy window over the source
-// cannot be expressed through this interface — that needs a borrow flag plus a
-// keepalive on VecResult, the same thing VectorOwner::data_source models one level
-// up. Copying the value block once per slice is still strictly better than
-// copying a value per row whenever the test above passes.
+// cannot be expressed through this interface. Copying the value block once per
+// slice is still strictly better than copying a value per row whenever the test
+// above passes.
+//
+// DO NOT "FIX" THAT WITH A BORROW FLAG ON VecResult. That is the obvious next
+// thought (VectorOwner::data_source models exactly it one level up) and it was
+// investigated and MEASURED on 2026-09-22. It does not pay:
+//
+//   - Time. Timing the exact memcpys in-process, with the copies still happening
+//     so the query does identical work: JOB 1a 1.97ms of 187ms, 8a 2.35/324,
+//     13a 3.20/471, 26a 6.05/427, 6a 0.31/259, 20a 0.51/431. That is 0.1-1.4% of
+//     wall, and it OVERSTATES the prize — those are thread-nanoseconds summed
+//     across workers measured against single-threaded wall. In a profile the
+//     whole of str_slice+str_take is ~0.5% of non-idle CPU and every draken
+//     fixed-width op together is 2.6-4.1%; parquet decode is 62-67%.
+//
+//   - The bytes look big and the time is not. 13a copies 101.6 MB in 34 calls —
+//     ~3ms at memcpy bandwidth. This is the same trap as the paragraph above,
+//     running the other way, so do not argue this one from bytes saved either.
+//
+//   - A kernel cannot even NAME the keepalive. Kernels receive
+//     `const DrakenVector&`, which carries no ownership handle, and
+//     vector_slice_impl / vector_take_impl take `const VectorOwner&`. Only the
+//     CxxMorsel path has a shared_ptr to give (CxxColumn::own); the nanobind
+//     `Vector` holder has none at all. Scope would be CxxMorsel-only, i.e. one
+//     kernel with two ownership regimes chosen by its caller.
+//
+//   - The migration hazard is WORSE than the `arena` precedent that vec_result.h
+//     documents. A consumer that ignores `arena` leaks; a consumer that ignores a
+//     borrow flag calls draken_free on borrowed memory.
+//
+//   - It pins. A borrowed window keeps the whole source block alive for the
+//     lifetime of the smallest derived slice (LIMIT 10 over a 262k-row morsel
+//     holds the morsel), on an 8GiB worker where OOM surfaces as an opaque 503.
+//
+// Most of the copies are not borrowable anyway: fixed_dict_compact_take can only
+// borrow in its `d == k` branch, and the string COMPACT path (k > n) builds a new
+// arena layout by construction — on JOB 6a/20a that is 100% of the rows.
+// If this is ever revisited, revisit it as a MEMORY proposal (~85-100 MB of
+// transient allocation per JOB query) with an RSS measurement, not a speed one.
 
 #include <cstdint>
 #include <cstring>

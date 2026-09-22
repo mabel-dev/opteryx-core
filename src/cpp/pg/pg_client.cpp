@@ -11,6 +11,7 @@
 
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <poll.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -30,6 +31,16 @@ std::string PgConfig::key() const {
 }
 
 [[noreturn]] static void fail(const std::string& what) { throw PgError(what); }
+
+// The socket died: the read or write itself failed, which says nothing about
+// the statement and everything about the connection. Flagged so the retry path
+// can tell it apart from a server error or a protocol/auth failure, both of
+// which would fail identically on a fresh connection. See PgError::transport.
+[[noreturn]] static void fail_transport(const std::string& what) {
+    PgError e(what);
+    e.transport = true;
+    throw e;
+}
 
 static std::string ssl_err_text() {
     char buf[256];
@@ -211,6 +222,29 @@ static std::vector<uint8_t> b64_decode(const std::string& s) {
 // Transport
 // ---------------------------------------------------------------------------
 
+// Writing to a socket whose peer is gone raises SIGPIPE, and SIGPIPE's default
+// action is to kill the process. Every such write here is one this client
+// already handles -- it wants the EPIPE, not the signal -- so the signal is
+// suppressed at the two places it can be, WITHOUT touching the process-wide
+// disposition: changing that is the embedder's call, not a database client's.
+//
+//   * SO_NOSIGPIPE (macOS/BSD) covers every write on the socket, TLS included.
+//   * MSG_NOSIGNAL (Linux) covers the plaintext send() below.
+//
+// That leaves ONE combination uncovered: Linux + TLS, where the write happens
+// inside OpenSSL's own BIO with flags this code does not supply. Under CPython
+// that is already harmless -- the interpreter sets SIGPIPE to SIG_IGN at
+// startup, which is why a reset connection surfaced as an error rather than a
+// dead container -- so it is a real gap only for an embedder that both runs on
+// Linux and restores the default disposition. Closing it properly means giving
+// OpenSSL a custom BIO; it is called out here rather than papered over with a
+// global sigaction.
+#ifdef MSG_NOSIGNAL
+static constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+static constexpr int kSendFlags = 0;
+#endif
+
 class Transport {
 public:
     ~Transport() { close(); }
@@ -237,6 +271,34 @@ public:
             int one = 1;
             setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
             setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
+#ifdef SO_NOSIGPIPE
+            // macOS/BSD: EPIPE instead of SIGPIPE, for every write on this
+            // socket including the ones OpenSSL makes. See kSendFlags.
+            setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
+            // SO_KEEPALIVE alone inherits the system idle time -- two hours on
+            // Linux -- which is useless for noticing that a pooled connection's
+            // peer has gone away. Probing after a minute idle, then three
+            // probes ten seconds apart, means a connection dropped by a pooler
+            // or a NAT is detected by the kernel in about 90 seconds rather
+            // than on next use. That does not replace the liveness check and
+            // retry in PgPool::acquire -- keepalive cannot cover the gap
+            // between a check and the write that follows it -- it just means
+            // fewer dead connections are still in the pool to be checked.
+            int keep_idle = 60, keep_intvl = 10, keep_cnt = 3;
+            (void)keep_intvl; (void)keep_cnt;
+#if defined(TCP_KEEPIDLE)
+            setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, &keep_idle, sizeof keep_idle);
+#elif defined(TCP_KEEPALIVE)
+            // macOS spells the idle time TCP_KEEPALIVE; same units, same meaning.
+            setsockopt(s, IPPROTO_TCP, TCP_KEEPALIVE, &keep_idle, sizeof keep_idle);
+#endif
+#ifdef TCP_KEEPINTVL
+            setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, &keep_intvl, sizeof keep_intvl);
+#endif
+#ifdef TCP_KEEPCNT
+            setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT, &keep_cnt, sizeof keep_cnt);
+#endif
             if (::connect(s, ai->ai_addr, ai->ai_addrlen) == 0) { fd_ = s; break; }
             last_errno = errno;
             ::close(s);
@@ -269,10 +331,11 @@ public:
 
     void write_all(const uint8_t* p, size_t n) {
         while (n > 0) {
-            ssize_t w = ssl_ ? (ssize_t)SSL_write(ssl_, p, (int)n) : ::send(fd_, p, n, 0);
+            ssize_t w =
+                ssl_ ? (ssize_t)SSL_write(ssl_, p, (int)n) : ::send(fd_, p, n, kSendFlags);
             if (w <= 0)
-                fail(ssl_ ? "postgres TLS write failed: " + ssl_err_text()
-                          : std::string("postgres write failed: ") + strerror(errno));
+                fail_transport(ssl_ ? "postgres TLS write failed: " + ssl_err_text()
+                                    : std::string("postgres write failed: ") + strerror(errno));
             p += w; n -= (size_t)w;
         }
     }
@@ -326,11 +389,41 @@ public:
 
     void send(const std::vector<uint8_t>& b) { write_all(b.data(), b.size()); }
 
+    // Is this socket still usable? For an IDLE connection only.
+    //
+    // A connection parked in the pool should have nothing to say: the last
+    // statement drained to ReadyForQuery, and this client never issues LISTEN,
+    // so the server has no reason to send unprompted. Anything readable on it
+    // is therefore either the close itself (recv returns 0 on FIN, -1/ECONNRESET
+    // on RST) or bytes that mean the protocol state is not what we believe --
+    // and a connection whose state is in doubt is worth no more than a dead one.
+    // Both answer false.
+    //
+    // MSG_PEEK leaves whatever it saw in the kernel buffer, so this does not
+    // disturb the byte stream, TLS included: the peek reads ciphertext, which
+    // OpenSSL still gets to read for itself afterwards.
+    bool alive() const {
+        if (fd_ < 0) return false;
+        if (rend_ > rpos_) return false;  // buffered leftovers: state in doubt
+        pollfd pfd{};
+        pfd.fd = fd_;
+        pfd.events = POLLIN;
+        const int rc = ::poll(&pfd, 1, 0);
+        if (rc < 0) return false;
+        if (rc == 0) return true;  // nothing pending: the healthy idle case
+        if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) return false;
+        uint8_t probe = 0;
+        const ssize_t r = ::recv(fd_, &probe, 1, MSG_PEEK | MSG_DONTWAIT);
+        if (r == 0) return false;  // orderly close
+        if (r < 0) return errno == EAGAIN || errno == EWOULDBLOCK;
+        return false;  // unexpected data on an idle connection
+    }
+
 private:
     [[noreturn]] void read_failed(ssize_t r) {
-        fail(ssl_ ? "postgres TLS read failed: " + ssl_err_text()
-                  : std::string("postgres read failed: ") +
-                        (r == 0 ? "connection closed by server" : strerror(errno)));
+        fail_transport(ssl_ ? "postgres TLS read failed: " + ssl_err_text()
+                            : std::string("postgres read failed: ") +
+                                  (r == 0 ? "connection closed by server" : strerror(errno)));
     }
 
     // 256 KiB: large enough that a narrow-row stream refills a few times per
@@ -412,6 +505,14 @@ PgConnection::PgConnection(const PgConfig& config) : t_(std::make_unique<Transpo
     else if (config.sslmode != "disable")
         fail("postgres: sslmode must be disable, require or verify-full (got '" + config.sslmode + "')");
     startup(config);
+}
+
+bool PgConnection::alive() const {
+    // Mid-stream there are bytes in flight by definition, so the idle-socket
+    // reasoning in Transport::alive does not hold; and an unhealthy connection
+    // is already disqualified.
+    if (!healthy_ || streaming_ || !t_) return false;
+    return t_->alive();
 }
 
 PgConnection::~PgConnection() {
@@ -790,21 +891,47 @@ PgPool& PgPool::instance() {
     return *pool;
 }
 
+// Idle connections are vetted on the way OUT rather than on the way in: a
+// connection is fine when it is released and may be dead by the time it is
+// wanted, so the check is only worth anything at the moment of reuse.
+//
+// Taking the newest first (back of the bucket) is deliberate -- it is the least
+// likely to have aged out, and it keeps the oldest entries ageing quietly
+// towards expiry instead of being cycled back into service.
 std::unique_ptr<PgConnection> PgPool::acquire(const PgConfig& config) {
-    {
-        std::lock_guard<std::mutex> lock(mtx_);
-        auto it = idle_.find(config.key());
-        if (it != idle_.end() && !it->second.empty()) {
-            std::unique_ptr<PgConnection> c = std::move(it->second.back());
+    const auto now = std::chrono::steady_clock::now();
+    for (;;) {
+        std::unique_ptr<PgConnection> candidate;
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            auto it = idle_.find(config.key());
+            if (it == idle_.end() || it->second.empty()) break;
+            candidate = std::move(it->second.back());
             it->second.pop_back();
-            return c;
         }
+        // Outside the lock: closing a connection talks to the server (Terminate)
+        // and must not hold up every other thread's acquire while it does.
+        const bool expired = now - candidate->idle_since >= kMaxIdleSeconds;
+        if (expired || !candidate->alive()) {
+            candidate.reset();
+            continue;  // try the next one down; the bucket may still hold a live one
+        }
+        candidate->set_pooled(true);
+        return candidate;
     }
-    return std::make_unique<PgConnection>(config);
+    return acquire_fresh(config);
+}
+
+std::unique_ptr<PgConnection> PgPool::acquire_fresh(const PgConfig& config) {
+    auto conn = std::make_unique<PgConnection>(config);
+    conn->set_pooled(false);
+    return conn;
 }
 
 void PgPool::release(const PgConfig& config, std::unique_ptr<PgConnection> conn) {
     if (!conn || !conn->healthy()) return;  // dropped: destructor sends Terminate if it can
+    conn->idle_since = std::chrono::steady_clock::now();
+    conn->set_pooled(false);  // re-stamped by acquire; never stale from a past hand-out
     std::lock_guard<std::mutex> lock(mtx_);
     auto& bucket = idle_[config.key()];
     if (bucket.size() >= kMaxIdlePerKey) return;
@@ -813,30 +940,16 @@ void PgPool::release(const PgConfig& config, std::unique_ptr<PgConnection> conn)
 
 // A server-side error (bad relation name, permission) leaves the session usable —
 // the client drained to ReadyForQuery before raising — so the connection goes
-// back to the pool on that path too; release() itself drops an unhealthy one.
+// back to the pool on that path too; pg_with_retry's release drops an unhealthy
+// one, and only a transport failure on a pooled connection earns a second try.
 std::vector<PgField> pg_describe(const PgConfig& config, const std::string& sql) {
-    auto conn = PgPool::instance().acquire(config);
-    try {
-        std::vector<PgField> out = conn->describe(sql);
-        PgPool::instance().release(config, std::move(conn));
-        return out;
-    } catch (...) {
-        PgPool::instance().release(config, std::move(conn));
-        throw;
-    }
+    return pg_with_retry(config, [&](PgConnection& conn) { return conn.describe(sql); });
 }
 
 std::vector<std::vector<std::optional<std::string>>> pg_query_text(
     const PgConfig& config, const std::string& sql, const std::vector<std::string>& params) {
-    auto conn = PgPool::instance().acquire(config);
-    try {
-        auto out = conn->query_text(sql, params);
-        PgPool::instance().release(config, std::move(conn));
-        return out;
-    } catch (...) {
-        PgPool::instance().release(config, std::move(conn));
-        throw;
-    }
+    return pg_with_retry(config,
+                         [&](PgConnection& conn) { return conn.query_text(sql, params); });
 }
 
 }  // namespace opteryx::pg

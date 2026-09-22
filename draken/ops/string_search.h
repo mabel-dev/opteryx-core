@@ -43,6 +43,7 @@
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
 #include "core/string_slot.h"
+#include "core/validity_word.h" // word-wide validity classification
 #include "ops/int64_compare.h"  // cmp_alloc_bool_buf, cmp_copy_validity
 #include "ops/vec_result.h"
 #include "volnitsky.h"          // VolnitskyTable, volnitsky_{alloc,free,build,contains_*}
@@ -161,12 +162,11 @@ static inline VecResult str_starts_with(
         catch (...) { draken_free(dst); throw; }
     }
 
-    for (uint32_t i = 0; i < n; ++i) {
-        if (src_null && !((src_null[i >> 3] >> (i & 7u)) & 1u)) continue;
+    DRAKEN_FOR_EACH_VALID_ROW(src_null, n, i, {
         const DrakenStringSlot* slot = &sa->slots[sel[i]];
         if (_ss_prefix(str_data(slot, sa->arena), str_length(slot), needle, ndl_len))
             dst[i >> 3u] |= static_cast<uint8_t>(1u << (i & 7u));
-    }
+    });
     return _ss_make_result(dst, out_null, n);
 }
 
@@ -189,12 +189,11 @@ static inline VecResult str_starts_with_ci(
         catch (...) { draken_free(dst); throw; }
     }
 
-    for (uint32_t i = 0; i < n; ++i) {
-        if (src_null && !((src_null[i >> 3] >> (i & 7u)) & 1u)) continue;
+    DRAKEN_FOR_EACH_VALID_ROW(src_null, n, i, {
         const DrakenStringSlot* slot = &sa->slots[sel[i]];
         if (_ss_prefix_ci(str_data(slot, sa->arena), str_length(slot), needle_lower, ndl_len))
             dst[i >> 3u] |= static_cast<uint8_t>(1u << (i & 7u));
-    }
+    });
     return _ss_make_result(dst, out_null, n);
 }
 
@@ -217,12 +216,11 @@ static inline VecResult str_ends_with(
         catch (...) { draken_free(dst); throw; }
     }
 
-    for (uint32_t i = 0; i < n; ++i) {
-        if (src_null && !((src_null[i >> 3] >> (i & 7u)) & 1u)) continue;
+    DRAKEN_FOR_EACH_VALID_ROW(src_null, n, i, {
         const DrakenStringSlot* slot = &sa->slots[sel[i]];
         if (_ss_suffix(str_data(slot, sa->arena), str_length(slot), needle, ndl_len))
             dst[i >> 3u] |= static_cast<uint8_t>(1u << (i & 7u));
-    }
+    });
     return _ss_make_result(dst, out_null, n);
 }
 
@@ -245,12 +243,11 @@ static inline VecResult str_ends_with_ci(
         catch (...) { draken_free(dst); throw; }
     }
 
-    for (uint32_t i = 0; i < n; ++i) {
-        if (src_null && !((src_null[i >> 3] >> (i & 7u)) & 1u)) continue;
+    DRAKEN_FOR_EACH_VALID_ROW(src_null, n, i, {
         const DrakenStringSlot* slot = &sa->slots[sel[i]];
         if (_ss_suffix_ci(str_data(slot, sa->arena), str_length(slot), needle_lower, ndl_len))
             dst[i >> 3u] |= static_cast<uint8_t>(1u << (i & 7u));
-    }
+    });
     return _ss_make_result(dst, out_null, n);
 }
 
@@ -278,10 +275,9 @@ static inline VecResult str_contains(
             try { out_null = cmp_copy_validity(src_null, n); }
             catch (...) { draken_free(dst); throw; }
         }
-        for (uint32_t i = 0; i < n; ++i) {
-            if (src_null && !((src_null[i >> 3] >> (i & 7u)) & 1u)) continue;
+        DRAKEN_FOR_EACH_VALID_ROW(src_null, n, i, {
             dst[i >> 3u] |= static_cast<uint8_t>(1u << (i & 7u));
-        }
+        });
         return _ss_make_result(dst, out_null, n);
     }
 
@@ -339,14 +335,12 @@ static inline VecResult str_contains(
         try { out_null = cmp_copy_validity(src_null, n); }
         catch (...) { draken_free(dst); throw; }
     }
-    for (uint32_t i = 0; i < n; ++i) {
-        if (src_null && !((src_null[i >> 3] >> (i & 7u)) & 1u)) continue;
+    DRAKEN_FOR_EACH_VALID_ROW(src_null, n, i, {
         const DrakenStringSlot* slot = &sa->slots[sel[i]];
         if (simd_contains_cs(str_data(slot, sa->arena), str_length(slot),
                               needle, ndl_len))
             dst[i >> 3u] |= static_cast<uint8_t>(1u << (i & 7u));
-    }
-
+    });
     return _ss_make_result(dst, out_null, n);
 }
 
@@ -375,10 +369,9 @@ static inline VecResult str_contains_ci(
             try { out_null = cmp_copy_validity(src_null, n); }
             catch (...) { draken_free(dst); throw; }
         }
-        for (uint32_t i = 0; i < n; ++i) {
-            if (src_null && !((src_null[i >> 3] >> (i & 7u)) & 1u)) continue;
+        DRAKEN_FOR_EACH_VALID_ROW(src_null, n, i, {
             dst[i >> 3u] |= static_cast<uint8_t>(1u << (i & 7u));
-        }
+        });
         return _ss_make_result(dst, out_null, n);
     }
 
@@ -445,12 +438,11 @@ static inline VecResult str_contains_ci(
             if (src_null) out_null = cmp_copy_validity(src_null, n);
         } catch (...) { draken_free(dst); draken_free(slot_bits); throw; }
 
-        for (uint32_t i = 0; i < n; ++i) {
-            if (src_null && !((src_null[i >> 3] >> (i & 7u)) & 1u)) continue;
+        DRAKEN_FOR_EACH_VALID_ROW(src_null, n, i, {
             const uint32_t c = sel[i];
             if ((slot_bits[c >> 3u] >> (c & 7u)) & 1u)
                 dst[i >> 3u] |= static_cast<uint8_t>(1u << (i & 7u));
-        }
+        });
         draken_free(slot_bits);
         return _ss_make_result(dst, out_null, n);
     }
@@ -462,13 +454,12 @@ static inline VecResult str_contains_ci(
         try { out_null = cmp_copy_validity(src_null, n); }
         catch (...) { draken_free(dst); volnitsky_free(tbl); throw; }
     }
-    for (uint32_t i = 0; i < n; ++i) {
-        if (src_null && !((src_null[i >> 3] >> (i & 7u)) & 1u)) continue;
+    DRAKEN_FOR_EACH_VALID_ROW(src_null, n, i, {
         const DrakenStringSlot* slot = &sa->slots[sel[i]];
         if (volnitsky_contains_ci(str_data(slot, sa->arena), str_length(slot),
                                    needle_lower, ndl_len, tbl))
             dst[i >> 3u] |= static_cast<uint8_t>(1u << (i & 7u));
-    }
+    });
 
     volnitsky_free(tbl);
     return _ss_make_result(dst, out_null, n);

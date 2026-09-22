@@ -1,5 +1,4 @@
 #pragma once
-#include <Python.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -25,18 +24,12 @@ size_t simd_popcount(const uint8_t* data, size_t nbytes);
 /* In-place AND: dst &= src over nbytes bytes (word-wide). */
 void c_bitmap_and_inplace(uint8_t* dst, const uint8_t* src, size_t nbytes);
 
-/* Create a BoolVector from raw bitmap buffers.
- *
- * Parameters:
- *   bitmap       : uint8_t* pointing at the bit array (nbytes long)
- *   null_bitmap  : NULL if no nulls; otherwise uint8_t* validity bitmap
- *   num_rows     : logical row count
- *
- * Returns a new Python BoolVector object. On failure, returns NULL with
- * a Python exception set. The returned object owns the bitmaps (caller
- * must not free them after calling this function).
+/* NOTE: bool_vector_from_bits (bitmap -> Python BoolVector) is NOT declared
+ * here. It returns a PyObject* and lives in the shim/bridge layer at
+ * draken/vectors/_bool_vector_bridge.h. This header must stay free of
+ * <Python.h> so that every C++ consumer of the bitmap ops can compile without
+ * CPython headers (CLAUDE.md §2/§5).
  */
-PyObject* bool_vector_from_bits(uint8_t* bitmap, uint8_t* null_bitmap, uint32_t num_rows);
 
 /* AND two bitmaps: out = left & right.
  *
@@ -79,13 +72,6 @@ int c_not_bitmap(
     const uint8_t* src, const uint8_t* src_null,
     size_t nbytes, uint32_t num_rows
 );
-
-/* Extract bitmap pointers from a DrakenVector.
- *
- * This is a utility for converting a DrakenVector (unified format) into
- * loose bitmap pointers. Currently a no-op stub; may be needed for future VM work.
- */
-void c_get_bitmap_ptrs(void* draken_vector);
 
 #ifdef __cplusplus
 }

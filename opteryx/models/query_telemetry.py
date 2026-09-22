@@ -82,7 +82,14 @@ class _QueryTelemetry:
         self._reading["statement_relations"] = relations
 
     def add_message(self, message: str):
-        """collect warnings"""
+        """Something the person who ran the statement should be told.
+
+        Not a warning channel, despite starting as one: a DDL/DML statement's
+        receipt ("14 rows deleted in `x`") lands here too, because it is the
+        same question - what does the reader need to know that the result
+        itself does not say. Markdown, like every other message the engine
+        emits (see the markup contract in opteryx/exceptions.py).
+        """
         self._reading["messages"].append(message)
 
     def add_decision(self, label: str, detail: str):
