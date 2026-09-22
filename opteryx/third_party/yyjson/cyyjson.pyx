@@ -13,59 +13,6 @@ from cpython.unicode cimport PyUnicode_DecodeUTF8
 from libc.stdlib cimport free
 
 # ----------------------------------------------------------------------
-# yyjson C API declarations
-# ----------------------------------------------------------------------
-cdef extern from "yyjson.h":
-    ctypedef struct yyjson_val
-    ctypedef struct yyjson_doc
-    ctypedef struct yyjson_alc
-    ctypedef struct yyjson_read_err:
-        size_t pos
-        const char* msg
-        int code
-    ctypedef struct yyjson_write_err:
-        size_t pos
-        const char* msg
-        int code
-
-    yyjson_doc* yyjson_read_opts(char* dat, size_t len, unsigned int flags,
-                                 const yyjson_alc* alc, yyjson_read_err* err)
-    char* yyjson_write(const yyjson_doc* doc, unsigned int flags, size_t* len)
-    void yyjson_doc_free(yyjson_doc* doc)
-    yyjson_val* yyjson_doc_get_root(yyjson_doc* doc)
-
-    bint yyjson_is_null(yyjson_val* val)
-    bint yyjson_is_bool(yyjson_val* val)
-    bint yyjson_is_uint(yyjson_val* val)
-    bint yyjson_is_sint(yyjson_val* val)
-    bint yyjson_is_real(yyjson_val* val)
-    bint yyjson_is_str(yyjson_val* val)
-    bint yyjson_is_arr(yyjson_val* val)
-    bint yyjson_is_obj(yyjson_val* val)
-
-    bint yyjson_get_bool(yyjson_val* val)
-    unsigned long long yyjson_get_uint(yyjson_val* val)
-    long long yyjson_get_sint(yyjson_val* val)
-    double yyjson_get_real(yyjson_val* val)
-    const char* yyjson_get_str(yyjson_val* val)
-    size_t yyjson_get_len(yyjson_val* val)
-
-    size_t yyjson_arr_size(yyjson_val* arr)
-    yyjson_val* yyjson_arr_get(yyjson_val* arr, size_t idx)
-
-    size_t yyjson_obj_size(yyjson_val* obj)
-    yyjson_val* yyjson_obj_get(yyjson_val* obj, const char* key)
-
-    yyjson_val* yyjson_doc_ptr_get(yyjson_doc* doc, const char* ptr)
-    yyjson_val* yyjson_ptr_get(yyjson_val* val, const char* ptr)
-
-    ctypedef struct yyjson_obj_iter
-    yyjson_obj_iter yyjson_obj_iter_with(yyjson_val* obj)
-    yyjson_val* yyjson_obj_iter_next(yyjson_obj_iter* iter)
-    yyjson_val* yyjson_obj_iter_get_val(yyjson_val* key)
-
-
-# ----------------------------------------------------------------------
 cdef inline str _decode_str(const char* s, size_t length):
     return PyUnicode_DecodeUTF8(s, length, NULL)
 

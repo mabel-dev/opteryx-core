@@ -29,10 +29,12 @@ wrong proof here is inert rather than corrupting.
 Correctness — fail-safe by construction
 ---------------------------------------
 * Eligibility requires that *every* reference to the column, anywhere in the
-  plan, is a length-answerable operation. References are enumerated through the
-  authoritative :func:`expression_roots` accessor, which cannot under-count — a
-  column used raw anywhere (projected, grouped, joined, passed to any other
-  function, compared to a non-empty literal) is disqualified.
+  plan, is a length-answerable operation. Plan-node fields are enumerated through
+  the authoritative :func:`expression_roots` accessor, and within an expression
+  every Node-valued property is descended (not a hand-picked field list), so
+  neither level can under-count — a column used raw anywhere (projected,
+  grouped, joined, passed to any other function, compared to a non-empty
+  literal, or read inside a CASE) is disqualified.
 * A missed *eligible* reference only forgoes the optimisation. A missed *raw*
   reference would be a correctness bug, which is why field enumeration is
   delegated to ``expression_roots`` rather than hand-picked per node type.
@@ -74,6 +76,8 @@ becomes a second annotation when the decode side can honour it.
 from draken.draken_native import DrakenType
 
 from opteryx.expression import NodeType
+from opteryx.models import LogicalColumn
+from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -145,11 +149,30 @@ def _classify(expr, needs: dict, raw: set) -> None:
         raw.add(expr.schema_column.identity)
         return
 
-    _classify(expr.left, needs, raw)
-    _classify(expr.centre, needs, raw)
-    _classify(expr.right, needs, raw)
-    for parameter in expr.parameters or []:
-        _classify(parameter, needs, raw)
+    # A LogicalColumn is a leaf: it is the IDENTIFIER case above or it is unbound,
+    # and either way it has no children (and no `properties` to walk).
+    if not isinstance(expr, Node):
+        return
+
+    # Descend into EVERY property that holds an expression, not a hand-picked
+    # list of fields. `Node` is a property bag, so any attribute can carry a child:
+    # CASE keeps its operands in `conditions` / `results` / `else_result`, which a
+    # left/centre/right/parameters walk never visited. A column read only inside a
+    # CASE was therefore never seen as a raw use, got its payloads elided, and the
+    # CASE then read the elided bytes - `CASE WHEN s LIKE 'a%' THEN 1 ELSE 2 END +
+    # LENGTH(s)` segfaulted on the 0xFFFFFFFF sentinel offset. Visiting every
+    # expression-valued property can only over-count (disqualify), which forgoes the
+    # optimisation; it cannot under-count, which is the correctness failure.
+    #
+    # Column references are LogicalColumn, not Node, so both are children - the
+    # same pair get_all_nodes_of_type (opteryx/expression) descends into.
+    for value in expr.properties.values():
+        if isinstance(value, (Node, LogicalColumn)):
+            _classify(value, needs, raw)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                if isinstance(item, (Node, LogicalColumn)):
+                    _classify(item, needs, raw)
 
 
 class LengthOnlyColumnStrategy(OptimizationStrategy):

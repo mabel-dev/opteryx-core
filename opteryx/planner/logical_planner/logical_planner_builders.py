@@ -1918,7 +1918,7 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
     limit = None
     duplicate_treatment = None
     null_treatment = None
-    filter_condition = None
+    inline_filter = None
     args = []
 
     if branch["args"] != "None":
@@ -1935,6 +1935,14 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
                 ]
             elif "Limit" in clause:
                 limit = build(clause["Limit"]).value
+            elif "Where" in clause:
+                # AGG(expr WHERE cond) - the inline aggregate filter, and the ONLY
+                # spelling of it we accept (the standard `FILTER (WHERE ...)` form
+                # is refused below). It is put on the same `filter_condition`
+                # channel the FILTER clause used to arrive on, unbuilt, so there is
+                # exactly one representation from here down: the per-function
+                # refusals and the IIF lowering both read this one variable.
+                inline_filter = clause["Where"]
             else:
                 # sqlparser carries every in-argument clause here - WHERE, SEPARATOR,
                 # ON OVERFLOW, HAVING, the JSON clauses. Dropping one we do not read
@@ -1947,7 +1955,50 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
 
         duplicate_treatment = branch["args"]["List"].get("duplicate_treatment")
         null_treatment = branch["args"].get("null_treatment")
-        filter_condition = branch.get("filter")
+
+    # `AGG(expr) FILTER (WHERE cond)` is REFUSED; `AGG(expr WHERE cond)` is the
+    # spelling we accept. The two mean the same thing, and carrying both would
+    # leave two representations of one feature - so the standard form is named
+    # and redirected rather than supported in parallel.
+    #
+    # The dialect deliberately KEEPS `supports_filter_during_aggregation`
+    # (src/opteryx_dialect.rs). Turning it off would stop sqlparser recognising
+    # the clause at all, and `FILTER` would come back as a raw parse error or,
+    # worse, be taken as a column alias. It has to keep parsing for us to be able
+    # to refuse it here with the right syntax in hand.
+    if branch.get("filter") is not None:
+        if inline_filter is not None:
+            # Both channels at once. The advice cannot be "write it inline" - it
+            # ALREADY is inline - so this says which of the two to delete rather
+            # than rendering a spelling that would quietly drop one of them.
+            raise UnsupportedSyntaxError(
+                compose(
+                    f"{func}() has a filter in its arguments AND a "
+                    f"{md_syntax('FILTER (WHERE ...)')} clause",
+                    f"Remove the {md_syntax('FILTER')} clause and combine both "
+                    f"conditions into the one inside the arguments with "
+                    f"{md_code('AND')}",
+                )
+            )
+        built_filter = build(branch["filter"])
+        # With no arguments to put it among, there is no concrete spelling to
+        # offer - name the shape instead of rendering `SUM( WHERE ...)`.
+        corrected = (
+            _inline_filter_spelling(func, args, duplicate_treatment, built_filter)
+            if args
+            else f"{func}(expr WHERE {format_expression(built_filter)})"
+        )
+        raise UnsupportedSyntaxError(
+            compose(
+                f"{md_syntax('FILTER (WHERE ...)')} is not supported",
+                f"Write the condition inside the aggregate's arguments instead, as "
+                f"{md_code(corrected)}",
+            )
+        )
+
+    filter_condition = inline_filter
+    if filter_condition is not None:
+        filter_condition = build(filter_condition)
 
     # EXTRACT('epoch', x) -> UNIXTIME(x). EXTRACT is a registered function, so it
     # is also reachable as an ordinary call that never passes through `extract()`
@@ -2090,7 +2141,6 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
                     f"Move the condition into a **WHERE** clause, or filter the grouped result "
                     f"with **HAVING**."
                 )
-            filter_condition = build(filter_condition)
     else:  # pragma: no cover
         # Rewrite type-names used as cast functions: VARCHAR(x) → CAST(x AS VARCHAR)
         # The VALUE is what we tell the user to type, so it must be the CANONICAL
@@ -2140,12 +2190,12 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
     # only when `p` is TRUE — UNKNOWN excludes, exactly like FALSE — and
     # `vector_iif` already treats an UNKNOWN condition as false, so the two agree
     # on three-valued logic without a special case. Placed after the
-    # COUNT_DISTINCT rewrite so `COUNT_DISTINCT(x) FILTER (...)` and
-    # `COUNT(DISTINCT x) FILTER (...)` lower identically, and DISTINCT then
+    # COUNT_DISTINCT rewrite so `COUNT_DISTINCT(x WHERE ...)` and
+    # `COUNT(DISTINCT x WHERE ...)` lower identically, and DISTINCT then
     # applies to the IIF, which is what the standard requires.
     #
     # Until this existed the condition was parsed, bound, attached to the node as
-    # `condition` — and read by nothing, so `COUNT(*) FILTER (WHERE id > 6)`
+    # `condition` — and read by nothing, so `COUNT(* WHERE id > 6)`
     # silently answered COUNT(*).
     if filter_condition is not None:
         original_argument = args[0]
@@ -2170,8 +2220,8 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
         # internal rewrite into the caller's schema. Spelled out rather than taken
         # from `format_expression`, which renders an aggregate's FILTER clause as
         # if it were not there (see logical_planner_rewriter._aggregate_key).
-        alias = alias or _filtered_aggregate_spelling(
-            func, original_argument, duplicate_treatment, filter_condition
+        alias = alias or _inline_filter_spelling(
+            func, [original_argument], duplicate_treatment, filter_condition
         )
         filter_condition = None
 
@@ -2274,7 +2324,7 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
 
 
 #: Aggregates that IGNORE NULL input, and can therefore express
-#: `AGG(x) FILTER (WHERE p)` exactly as `AGG(IIF(p, x, NULL))`. Verified against
+#: `AGG(x WHERE p)` exactly as `AGG(IIF(p, x, NULL))`. Verified against
 #: the engine, not assumed: for each of these, `AGG(col)` over a column with
 #: NULLs equals `AGG(col)` over the same column filtered to non-NULL.
 #:
@@ -2302,11 +2352,23 @@ _NULL_IGNORING_AGGREGATES = frozenset(
 )
 
 
-def _filtered_aggregate_spelling(func, argument, duplicate_treatment, condition) -> str:
-    """How the caller wrote a filtered aggregate, for use as its output name."""
+def _inline_filter_spelling(func, args, duplicate_treatment, condition) -> str:
+    """Render a filtered aggregate in the spelling we accept: `AGG(expr WHERE cond)`.
+
+    Used for two things, and it has to be the same string for both: the output
+    column's name, and the corrective syntax the `FILTER (WHERE ...)` refusal
+    tells the user to write. If they diverged, the error would name a spelling
+    that produces a differently-named column.
+
+    It is spelled out here rather than taken from `format_expression`, which
+    renders an aggregate's filter as if it were not there (see
+    logical_planner_rewriter._aggregate_key).
+    """
     distinct = "DISTINCT " if duplicate_treatment == "Distinct" else ""
-    rendered = "*" if argument.node_type == NodeType.WILDCARD else format_expression(argument)
-    return f"{func}({distinct}{rendered}) FILTER (WHERE {format_expression(condition)})"
+    rendered = ", ".join(
+        "*" if arg.node_type == NodeType.WILDCARD else format_expression(arg) for arg in args
+    )
+    return f"{func}({distinct}{rendered} WHERE {format_expression(condition)})"
 
 
 def hex_literal(branch, alias: Optional[List[str]] = None, key=None):
@@ -2544,7 +2606,20 @@ def distinct_from(branch, alias: Optional[List[str]] = None, key=None):
     left, right = build(branch[0]), build(branch[1])
     distinct = key == "IsDistinctFrom"
 
-    both_known = _all_of(_null_test(left, negated=True), _null_test(right, negated=True))
+    # Every use of an operand gets its OWN node. Passing `left` and `right` into
+    # each test made the tree a DAG - one operand object in three or four places -
+    # so any rewrite that edits a node in place for one position edited it for all
+    # of them. A copy, not a second `build()`: `Node.copy` keeps the uuid, which is
+    # how decorrelation recognises the copies of one scalar-subquery operand as the
+    # SAME subquery and joins it once (see decorrelate_subquery._replace_every),
+    # where a rebuild would plan it again as an unrelated subquery per position.
+    def _left():
+        return left.copy()
+
+    def _right():
+        return right.copy()
+
+    both_known = _all_of(_null_test(_left(), negated=True), _null_test(_right(), negated=True))
     comparison = Node(
         NodeType.COMPARISON_OPERATOR,
         value="NotEq" if distinct else "Eq",
@@ -2554,13 +2629,13 @@ def distinct_from(branch, alias: Optional[List[str]] = None, key=None):
 
     if distinct:
         node = _any_of(
-            _all_of(_null_test(left), _null_test(right, negated=True)),
-            _all_of(_null_test(left, negated=True), _null_test(right)),
+            _all_of(_null_test(_left()), _null_test(_right(), negated=True)),
+            _all_of(_null_test(_left(), negated=True), _null_test(_right())),
             _all_of(both_known, comparison),
         )
     else:
         node = _any_of(
-            _all_of(_null_test(left), _null_test(right)),
+            _all_of(_null_test(_left()), _null_test(_right())),
             _all_of(both_known, comparison),
         )
 

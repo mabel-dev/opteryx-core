@@ -458,34 +458,44 @@ def aggregate_identities(statement: Statement, rng: random.Random) -> OracleResu
 
 
 def aggregate_filter_matches_where(statement: Statement, rng: random.Random) -> OracleResult:
-    """`COUNT(*) FILTER (WHERE p)` == the row count of the same relation under `p`.
+    """`AGG(x WHERE p)` over `WHERE w` == `AGG(x)` over `WHERE (w) AND (p)`.
 
-    An exact identity, not a metamorphic approximation: FILTER counts the rows
-    that survive the query's WHERE and satisfy `p`, which is by definition the
-    cardinality of `WHERE (w) AND (p)`. Two independent code paths — the
-    aggregate's own predicate and the filter operator — computing one number.
+    An exact identity for every aggregate the engine accepts a filter on. The
+    filter is lowered to `AGG(IIF(p, x, NULL))`, and those aggregates ignore NULL
+    input, so the rows `p` rejects contribute nothing - exactly as if the WHERE
+    had removed them. Two independent code paths compute one value: the
+    aggregate's own predicate and the filter operator. It is also the check that
+    the engine's list of NULL-ignoring aggregates (which gates the filter, and
+    which the generator reads) is right: a filterable aggregate that did NOT
+    ignore NULLs would answer differently here.
 
-    Was declined while FILTER was parsed, bound and then dropped — the clause
-    did nothing, so this identity failed on every statement carrying one. FILTER
-    is now lowered to `AGG(IIF(p, x, NULL))` in the logical planner and the
-    oracle runs normally.
+    Computed as a GLOBAL aggregate whatever the statement's grouping. Grouped, the
+    two sides legitimately differ: a group with no row satisfying `p` survives
+    the filtered form with a NULL value and is dropped by the WHERE form.
+
+    Was declined while the filter was parsed, bound and then dropped - the clause
+    did nothing, so this identity failed on every statement carrying one.
     """
+    from tests.fuzzing.single_table_grammar import with_aggregate_filter
+
     select = _require_select(statement, "aggregate_filter_matches_where")
-    if select.aggregate_filter is None:
-        raise AssertionError("aggregate_filter oracle applied to a statement with no FILTER")
+    if select.aggregate_filter is None or select.aggregate_filter_call is None:
+        raise AssertionError("aggregate_filter oracle applied to a statement with no filter")
 
     predicate = select.aggregate_filter
+    call = select.aggregate_filter_call
     where = f"WHERE {select.where}" if select.where else ""
     filtered = scalar(
-        f"SELECT COUNT(*) FILTER (WHERE {predicate}) AS n FROM {select.source} {where}".strip()
+        f"SELECT {with_aggregate_filter(call, predicate)} AS v FROM {select.source} {where}".strip()
     )
     combined = predicate if not select.where else f"({select.where}) AND ({predicate})"
-    counted = scalar(f"SELECT COUNT(*) AS n FROM {select.source} WHERE {combined}")
+    reference = scalar(f"SELECT {call} AS v FROM {select.source} WHERE {combined}")
 
-    if filtered != counted:
+    if _render(filtered) != _render(reference):
         raise OracleViolation(
-            f"COUNT(*) FILTER (WHERE p) = {filtered} but the same relation under `p` has "
-            f"{counted} rows\n  source: {select.source}, where: {select.where}\n  p: {predicate}"
+            f"{with_aggregate_filter(call, 'p')} = {filtered!r} but {call} over the rows "
+            f"satisfying `p` = {reference!r}\n  source: {select.source}, where: {select.where}"
+            f"\n  p: {predicate}"
         )
     return OracleResult("aggregate_filter_matches_where", 2)
 

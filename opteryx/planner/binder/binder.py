@@ -541,6 +541,15 @@ def bind_correlated_subquery(node: Node, context: Any) -> Tuple[Node, Dict]:
     """
     from opteryx.expression import get_all_nodes_of_type
     from opteryx.planner.binder.common import BinderVisitor
+    from opteryx.planner.logical_planner import LogicalPlanStepType
+
+    # Plan steps whose output columns are exactly their input's: the value a
+    # scalar subquery yields is declared further down (see below).
+    output_pass_through = (
+        LogicalPlanStepType.Limit,
+        LogicalPlanStepType.Order,
+        LogicalPlanStepType.Distinct,
+    )
 
     subplan = node.value
     exit_points = subplan.get_exit_points()
@@ -584,9 +593,16 @@ def bind_correlated_subquery(node: Node, context: Any) -> Tuple[Node, Dict]:
     # schema_column, so a silently unpublished one crashed project.py with an
     # AttributeError instead of binding the LIMIT/DISTINCT shapes the runtime
     # cardinality guard exists to admit.
+    #
+    # "Column-less" is not the test on its own: an ORDER BY step lists its SORT
+    # expressions in `columns`, which are not its output. `(SELECT o_totalprice ...
+    # ORDER BY o_orderdate DESC LIMIT 1)` stopped at the Order step and published
+    # o_orderdate's DATE as the subquery's type, so `(...) > 100000` was refused as
+    # DATE vs INTEGER. LIMIT, ORDER BY and DISTINCT pass their input's columns
+    # through unchanged, so they are descended whatever `columns` they carry.
     top_nid = bound_subplan.get_exit_points()[0]
     top = bound_subplan[top_nid]
-    while not top.columns:
+    while not top.columns or top.node_type in output_pass_through:
         feeders = bound_subplan.ingoing_edges(top_nid)
         if len(feeders) != 1:
             break
@@ -897,7 +913,7 @@ def inner_binder(
         # an alias, so an untyped NULL adopted the ConstantColumn of a DIFFERENTLY
         # TYPED null that merely rendered the same — and with it that null's type.
         #
-        # `COUNT(*) FILTER (WHERE p)` lowers to `COUNT(IIF(p, 1, NULL))`
+        # `COUNT(* WHERE p)` lowers to `COUNT(IIF(p, 1, NULL))`
         # (logical_planner_builders) where the ELSE is deliberately an UNTYPED null. If
         # `p` is a BOOL-typed null — `CAST(NULL AS BOOLEAN)` — the ELSE interned onto it
         # and came back BOOL, so the blend check refused a query whose branches are

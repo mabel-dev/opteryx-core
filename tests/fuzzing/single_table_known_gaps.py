@@ -411,11 +411,11 @@ REGISTER: List[RegisteredDefect] = [
             "  NOT ((f_null IN (1.5, 2.5)))          -- one redundant paren pair\n"
             "  NOT (f_null NOT IN (1.5, 2.5))        -- under a NOT\n"
             "  (mass <> -1.0) OR (ecc IN (-1.0))     -- as a disjunct\n"
-            "  COUNT(*) FILTER (WHERE gm IN (1.5, 2.5))   -- as a FILTER predicate\n"
+            "  COUNT(* WHERE gm IN (1.5, 2.5))   -- as a FILTER predicate\n"
             "The same shapes over an INTEGER or VARCHAR column all run.\n"
             "The FILTER door is worth spelling out because it does not LOOK nested: the "
             "predicate is written at the top level of the clause. It becomes nested because "
-            "`AGG(x) FILTER (WHERE p)` is lowered to `AGG(IIF(p, x, NULL))`, so `p` ends up as "
+            "`AGG(x WHERE p)` is lowered to `AGG(IIF(p, x, NULL))`, so `p` ends up as "
             "IIF's condition and the message names IIF rather than the filter:\n"
             "  NotSupportedError: a comparison in `IIF(gm IN [1.5, 2.5],1,null)`, outside the\n"
             "  c-native kernel set\n"
@@ -504,43 +504,20 @@ REGISTER: List[RegisteredDefect] = [
     # wrong answer keeps the shape), and this entry's own repro: the same
     # PARTITION BY key on both sides, in both spellings. The shape battery in the
     # same file carries them too, under "TWO AGGREGATE WINDOWS IN A CHAIN".
-    RegisteredDefect(
-        id="aggregate-window-over-a-grouped-source-filtered-on-its-aggregate",
-        repro=(
-            "WITH c AS (SELECT name, COUNT(*) AS n FROM testdata.planets GROUP BY name) "
-            "SELECT n, MAX(n) OVER (PARTITION BY name) AS w FROM c WHERE n > 0"
-        ),
-        error_type="NotSupportedError",
-        signature="a join without labelled left/right legs",
-        detail=(
-            "An AGGREGATE window over a CTE or derived table whose body is a GROUP BY, where "
-            "the OUTER query filters on an aggregate OUTPUT column, is refused by the physical "
-            "compiler (`_unsupported` in managers/execution/compiler.py). The user wrote no "
-            "join at all: the only join in the plan is the one window_to_join.py builds for "
-            "the window, so it is that join whose legs are unlabelled — the same "
-            "`left_relation_names`-must-be-STATED class the OVER () work hit, reached by a "
-            "different route.\n"
-            "\n"
-            "ALL THREE INGREDIENTS ARE REQUIRED — each was checked separately and each alone "
-            "runs clean:\n"
-            "  * the source must be derived AND grouped. A derived source with no GROUP BY is "
-            "    fine; a base table is fine.\n"
-            "  * the predicate must be one that CANNOT push below the aggregate. The same "
-            "    query with `WHERE name != 'x'` (the group KEY) runs — that predicate pushes "
-            "    down and leaves nothing between the source and the Window node. Only a "
-            "    predicate on the aggregate output leaves a Filter stranded there.\n"
-            "  * the window must be an AGGREGATE window. The ranking spelling "
-            "    (`ROW_NUMBER() OVER (ORDER BY n)`) runs — it does not lower to a join. "
-            "    `MAX(n) OVER ()` fails the same way, so it is not about PARTITION BY.\n"
-            "\n"
-            "Found 2026-08-13 alongside "
-            "`stacked-aggregate-windows-across-a-derived-boundary` (since fixed and deleted — "
-            "see the note above this entry), by the same deletion of the stale "
-            "`aggregate-window-over-a-derived-table` entry and the two generator suppressions "
-            "it was justifying. Two distinct defects were hiding behind that one suppression; "
-            "this is the second, and it is the one still open."
-        ),
-    ),
+    # `aggregate-window-over-a-grouped-source-filtered-on-its-aggregate` was
+    # registered here. It is FIXED (2026-09-22) — and it was never about GROUP BY or
+    # the window. window_to_join.py lowers an aggregate window to `input CROSS JOIN
+    # aggregate(copy of input)` and REUSES the Window's nid for that join. A filter
+    # that cannot push below its source (an aggregate OUTPUT here; a computed column
+    # does the same) is restored by predicate pushdown to its recorded position via
+    # plan_path — the node that sat above it, now the join — and the restore used
+    # `insert_node_before`, which redirects EVERY input of the target: the Filter
+    # swallowed both legs and the join was left with one unlabelled input.
+    # `_restore_at_original_position` (predicate_pushdown.py) now puts it on the ONE
+    # leg that carries its columns, keeping the edge's leg label. Pinned by
+    # test_filter_on_computed_column_below_an_aggregate_window
+    # (tests/integration/sql_battery/test_shapes_basic.py, in `make q`), which checks
+    # each answer against the filter written inside the subquery.
     RegisteredDefect(
         id="time-bucket-non-integer-magnitude",
         repro=(
@@ -614,7 +591,7 @@ REGISTER: List[RegisteredDefect] = [
     # key arrived with no type the SortSink could take. Any expression folding to a
     # BOOL null hit it (`NULLIF(TRUE, TRUE)` alone does), and no expression that
     # did not, ever did. Same one-line gap as `draken_iif: condition must be
-    # BOOLEAN` on `COUNT(*) FILTER (WHERE <folds to a BOOL null>)`, which is what
+    # BOOLEAN` on `COUNT(* WHERE <folds to a BOOL null>)`, which is what
     # led back to it; draken has `vector_from_bool_constant`, spelled on the other
     # naming pattern, which is why it was believed not to exist.
     # `window-plus-folded-literal-concat-filter-raises-typeerror` was registered

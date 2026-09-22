@@ -14,11 +14,13 @@
 // 2026-09-22. It is deliberately NOT the `draken_string_empty` /
 // `draken_json_path_exists` contract, which propagate the operand's mask.
 //
-// The validator is draken/ops/json_validate.h — a single non-allocating pass
-// over the bytes. yyjson is not involved: nothing here builds a document.
+// Well-formedness is yyjson's answer (draken/ops/json_validate.h), so a row that
+// passes is a row the engine's JSON functions can parse. One parse arena serves
+// the whole column (IsJsonReadPool, sized from the longest physical value).
 
 #include <cstdint>
 #include <cstring>
+#include <exception>
 
 #include "core/buffers.h"
 #include "core/string_slot.h"
@@ -55,6 +57,12 @@ VecResult jk_is_json(const DrakenVector* const* args, uint32_t nargs, uint8_t sh
             "%s: operand must be JSON text (VARCHAR, NVARCHAR, VARBINARY or VARIANT)",
             name);
 
+    // One parse arena for the whole column, reset per row in O(1). Sized from the
+    // longest PHYSICAL value, so it holds every row. Built BEFORE `out` is allocated:
+    // it is the only thing here that can throw (the kernel wrapper turns that into an
+    // error sentinel), and nothing is owned yet if it does.
+    draken::ops::IsJsonReadPool pool(draken::ops::max_slot_length(v));
+
     const uint32_t n = v->length;
     const size_t nb = (static_cast<size_t>(n) + 7u) / 8u;
     const size_t nb_alloc = nb > 0u ? nb : 1u;
@@ -65,10 +73,6 @@ VecResult jk_is_json(const DrakenVector* const* args, uint32_t nargs, uint8_t sh
 
     const auto* sa = static_cast<const DrakenStringArena*>(v->data);
 
-    // Hoisted out of the row loop: the validator's only state, reused across the
-    // whole column so a batch of N documents does no per-row setup.
-    draken::ops::JsonDepthStack stack;
-
     for (uint32_t i = 0u; i < n; ++i) {
         // A NULL row has no document, so it is not well-formed — `matched` stays
         // false and the polarity below turns that into the definite answer.
@@ -76,7 +80,7 @@ VecResult jk_is_json(const DrakenVector* const* args, uint32_t nargs, uint8_t sh
         if (jk_row_valid(v, i)) {
             const DrakenStringSlot* slot = &sa->slots[v->selection[i]];
             matched = draken::ops::json_is_wellformed(str_data(slot, sa->arena),
-                                                      str_length(slot), shape, stack);
+                                                      str_length(slot), shape, pool);
         }
         if (matched == want) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
     }
@@ -99,9 +103,14 @@ VecResult jk_is_json(const DrakenVector* const* args, uint32_t nargs, uint8_t sh
 // block and looks them up by unmangled name.
 extern "C" {
 
+// Exceptions must not cross the C ABI: the parse arena's allocation can throw.
 #define DRAKEN_IS_JSON_KERNEL(fn_name, shape, want)                                  \
     VecResult fn_name(void* /*ctx*/, const DrakenVector* const* args, uint32_t nargs) { \
-        return jk_is_json(args, nargs, (shape), (want), #fn_name);                    \
+        try {                                                                         \
+            return jk_is_json(args, nargs, (shape), (want), #fn_name);                \
+        } catch (const std::exception& e) {                                           \
+            return draken_error_sentinel_fmt("%s: %s", #fn_name, e.what());           \
+        }                                                                             \
     }
 
 DRAKEN_IS_JSON_KERNEL(draken_is_json_value, draken::ops::JSON_SHAPE_VALUE, true)

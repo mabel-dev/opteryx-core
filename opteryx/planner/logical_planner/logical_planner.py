@@ -7400,10 +7400,18 @@ def plan_call(statement, **kwargs) -> LogicalPlan:
                 f"{md_syntax('CALL')} does not take {md_syntax('DISTINCT')} or "
                 f"{md_syntax('ALL')} before its arguments."
             )
-        if argument_list.get("clauses"):
+        clauses = argument_list.get("clauses")
+        if clauses:
+            # Named rather than enumerated. sqlparser carries every in-argument
+            # clause in this one list, and 0.63 added a third reachable one (the
+            # aggregate filter, `WHERE`) to the ORDER BY and LIMIT this message
+            # used to list - which then described the wrong syntax back to the
+            # user. Reading the clause off the branch cannot fall out of step
+            # with what sqlparser actually produces.
+            found = sorted(clauses[0])[0] if isinstance(clauses[0], dict) else clauses[0]
             raise UnsupportedSyntaxError(
-                f"{md_syntax('CALL')} does not take {md_syntax('ORDER BY')} or "
-                f"{md_syntax('LIMIT')} inside its arguments."
+                f"{md_syntax('CALL')} does not take a {md_code(found)} clause "
+                f"inside its arguments."
             )
         arguments = [logical_planner_builders.build(a) for a in argument_list["args"]]
 

@@ -203,6 +203,7 @@ q:
 	@clear || true
 	@VALIDATE_OPTIMIZER_PLANS=1 $(PYTHON) tests/integration/sql_battery/test_shapes_basic.py
 	@$(PYTEST) tests/unit/operators/test_native_scan_residual_gate.py -q
+	@$(PYTEST) tests/integration/sql_battery/test_is_json.py -q
 	@$(PYTEST) tests/integration/sql_battery/test_results_battery.py -q
 
 rugo-floor: ## Run the rugo release floor (oracle + notebook actions + cli) — gates the rugo wheel
@@ -437,6 +438,25 @@ json-extract-bench: ## Build + run the draken `->`/`->>` kernel microbenchmark (
 	    $(JSON_BENCH_DIR)/*.o \
 	    -o json_extract_bench
 	@cd $(CURDIR) && $(JSON_BENCH_DIR)/json_extract_bench $(JSON_BENCH_ARGS)
+
+# JSON_VALIDATE_BENCH_ARGS is passed straight through, e.g.
+#   make json-validate-bench JSON_VALIDATE_BENCH_ARGS="--shape object --trunc 0,10"
+JSON_VALIDATE_BENCH_ARGS ?=
+JSON_VALIDATE_BENCH_DIR := /tmp/opteryx-tests/json-validate-bench
+
+json-validate-bench: ## Build + run the draken `IS [NOT] JSON` kernel microbenchmark (JSON_VALIDATE_BENCH_ARGS="...")
+	$(call print_blue,"Building IS JSON microbenchmark...")
+	@mkdir -p $(JSON_VALIDATE_BENCH_DIR)
+	@clang -std=c11 -O3 -w -I$(CURDIR)/third_party/yyjson/src \
+	    -c $(CURDIR)/third_party/yyjson/src/yyjson.c -o $(JSON_VALIDATE_BENCH_DIR)/yyjson.o
+	@clang++ -std=c++20 -O3 -w $(DRAKEN_KERNEL_INCLUDES) \
+	    $(CURDIR)/draken/ops/kernels/json_validate_bench.cpp \
+	    $(CURDIR)/draken/ops/kernels/function_json_validate.cpp \
+	    $(CURDIR)/draken/core/vector_alloc.cpp \
+	    $(CURDIR)/draken/ops/kernels/error_handling.cpp \
+	    $(JSON_VALIDATE_BENCH_DIR)/yyjson.o \
+	    -o $(JSON_VALIDATE_BENCH_DIR)/json_validate_bench
+	@cd $(CURDIR) && $(JSON_VALIDATE_BENCH_DIR)/json_validate_bench $(JSON_VALIDATE_BENCH_ARGS)
 
 # === TPC-H (skene v2 mirrors, DuckDB-calibrated) ===
 #

@@ -19,7 +19,6 @@ Includes:
 
 import math
 
-from opteryx.third_party import yyjson
 from opteryx.types.vectors.embeddings import embed_text_matrix, embed_text_values, get_embedding_provider
 
 # ============================================================================
@@ -334,27 +333,23 @@ def generate_series(*args):
 
 
 def jsonb_object_keys(arr):
-    """Extract the keys from an array of JSON objects or JSON strings/bytes."""
-    from draken.interop.vector_sequence import vector_from_sequence
+    """JSONB_OBJECT_KEYS(json) — NATIVE ONLY.
 
-    if len(arr) == 0:
-        return vector_from_sequence([], "ARRAY")
+    This is a fail-loud guard, not an implementation. JSONB_OBJECT_KEYS is
+    executed by `draken_jsonb_object_keys`
+    (draken/ops/kernels/function_array_json.cpp), and an ARRAY-returning function
+    is never constant-folded, so nothing should ever reach here.
 
-    arr = arr.to_pylist()
-    result = []
-
-    first_elem = arr[0]
-    if isinstance(first_elem, dict):
-        for row in arr:
-            result.append([str(key) for key in row.keys()])
-    elif isinstance(first_elem, (str, bytes)):
-        parser = yyjson.Parser()
-        for row in arr:
-            result.append(parser.parse(row).root.object_keys())
-    else:
-        raise ValueError("Unsupported dtype for array elements. Expected dict, str, or bytes.")
-
-    return vector_from_sequence(result, "ARRAY")
+    It exists because the catalog reads a missing `callable_ref` as "this function
+    is rewrite-only, desugar it" — so a None would send JSONB_OBJECT_KEYS to a
+    rewrite that does not exist. Answering in Python instead would be a silent
+    fallback, which this engine does not have.
+    """
+    raise NotImplementedError(
+        "JSONB_OBJECT_KEYS is executed by a native kernel (draken_jsonb_object_keys). "
+        "Reaching this Python guard means the call was not lowered to it — a bug, "
+        "not a supported path."
+    )
 
 
 def humanize(arr):

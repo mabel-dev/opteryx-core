@@ -827,6 +827,10 @@ _WRONG_PRECEDENCE = {
     "* / % below + -": lambda table: {
         spelling: _just_below(table, "+") for spelling in ("*", "/", "%")
     },
+    # The table the parser WAS: sqlparser bound XOR above AND (and above the
+    # comparisons) until OpteryxDialect placed it between AND and OR. The oracle
+    # catching this is the oracle being able to catch that defect.
+    "XOR above AND": lambda table: {"XOR": table["AND"] + 0.5},
 }
 
 

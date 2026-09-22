@@ -1423,8 +1423,9 @@ def _remote_aggregate(table: PostgresTable, aggregate) -> Optional[Tuple[str, Em
         )
 
     # Everything below is a single plain-column operand with no DISTINCT. A
-    # FILTER (WHERE ...) clause reaches here folded into the operand expression,
-    # so it fails the plain-column test and is declined with it.
+    # filtered aggregate - `AGG(expr WHERE cond)` - reaches here folded into the
+    # operand expression as an IIF, so it fails the plain-column test and is
+    # declined with it.
     if distinct or len(parameters) != 1 or not table._is_own_column(parameters[0]):
         return None
     operand_column = parameters[0].schema_column

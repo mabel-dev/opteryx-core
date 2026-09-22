@@ -141,6 +141,7 @@ def test_arguments_must_be_literals():
         "CALL tests.record_call('a', 'b') FILTER (WHERE TRUE)",
         "CALL tests.record_call(DISTINCT 'a', 'b')",
         "CALL tests.record_call('a', 'b' ORDER BY 1)",
+        "CALL tests.record_call('a' WHERE TRUE)",
     ],
 )
 def test_function_call_syntax_is_refused_not_ignored(sql):

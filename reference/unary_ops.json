@@ -13,7 +13,7 @@
             "expr IS FALSE"
         ],
         "precedence": {
-            "level": 12,
+            "level": 11,
             "levels": 15,
             "position": "postfix",
             "spellings": [
@@ -35,7 +35,7 @@
             "expr IS JSON ARRAY"
         ],
         "precedence": {
-            "level": 12,
+            "level": 11,
             "levels": 15,
             "position": "postfix",
             "spellings": [
@@ -57,7 +57,7 @@
             "expr IS JSON OBJECT"
         ],
         "precedence": {
-            "level": 12,
+            "level": 11,
             "levels": 15,
             "position": "postfix",
             "spellings": [
@@ -79,7 +79,7 @@
             "expr IS JSON SCALAR"
         ],
         "precedence": {
-            "level": 12,
+            "level": 11,
             "levels": 15,
             "position": "postfix",
             "spellings": [
@@ -102,7 +102,7 @@
             "expr IS JSON VALUE"
         ],
         "precedence": {
-            "level": 12,
+            "level": 11,
             "levels": 15,
             "position": "postfix",
             "spellings": [
@@ -124,7 +124,7 @@
             "expr IS NOT FALSE"
         ],
         "precedence": {
-            "level": 12,
+            "level": 11,
             "levels": 15,
             "position": "postfix",
             "spellings": [
@@ -146,7 +146,7 @@
             "expr IS NOT JSON ARRAY"
         ],
         "precedence": {
-            "level": 12,
+            "level": 11,
             "levels": 15,
             "position": "postfix",
             "spellings": [
@@ -168,7 +168,7 @@
             "expr IS NOT JSON OBJECT"
         ],
         "precedence": {
-            "level": 12,
+            "level": 11,
             "levels": 15,
             "position": "postfix",
             "spellings": [
@@ -190,7 +190,7 @@
             "expr IS NOT JSON SCALAR"
         ],
         "precedence": {
-            "level": 12,
+            "level": 11,
             "levels": 15,
             "position": "postfix",
             "spellings": [
@@ -213,7 +213,7 @@
             "expr IS NOT JSON VALUE"
         ],
         "precedence": {
-            "level": 12,
+            "level": 11,
             "levels": 15,
             "position": "postfix",
             "spellings": [
@@ -235,7 +235,7 @@
             "expr IS NOT NULL"
         ],
         "precedence": {
-            "level": 12,
+            "level": 11,
             "levels": 15,
             "position": "postfix",
             "spellings": [
@@ -257,7 +257,7 @@
             "expr IS NOT TRUE"
         ],
         "precedence": {
-            "level": 12,
+            "level": 11,
             "levels": 15,
             "position": "postfix",
             "spellings": [
@@ -279,7 +279,7 @@
             "expr IS NULL"
         ],
         "precedence": {
-            "level": 12,
+            "level": 11,
             "levels": 15,
             "position": "postfix",
             "spellings": [
@@ -301,7 +301,7 @@
             "expr IS TRUE"
         ],
         "precedence": {
-            "level": 12,
+            "level": 11,
             "levels": 15,
             "position": "postfix",
             "spellings": [
@@ -323,7 +323,7 @@
             "NOT expr"
         ],
         "precedence": {
-            "level": 13,
+            "level": 12,
             "levels": 15,
             "position": "prefix",
             "spellings": [

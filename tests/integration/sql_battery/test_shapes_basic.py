@@ -1167,12 +1167,12 @@ def test_literals_are_not_interned_across_types():
 
     `inner_binder` interns literals by rendered name, guarded on value being
     byte-identical and on the alias agreeing — neither of which separates two NULLs.
-    `COUNT(*) FILTER (WHERE p)` lowers to `COUNT(IIF(p, 1, NULL))` with a deliberately
+    `COUNT(* WHERE p)` lowers to `COUNT(IIF(p, 1, NULL))` with a deliberately
     UNTYPED else-NULL, so when `p` was a BOOL-typed null the else adopted its column
     and came back BOOL: "IIF: literal 1 is INT64 but literal None is BOOL", refusing a
     query whose branches are really INT64 and untyped NULL.
 
-    Asserted as answers, not just as "does not raise": FILTER admits a row only when
+    Asserted as answers, not just as "does not raise": the filter admits a row only when
     the predicate is TRUE, so an all-UNKNOWN predicate admits none — COUNT is 0 and
     SUM over no rows is NULL. The TRUE/column-predicate forms are pinned alongside so
     a fix that broke interning generally would show up here.
@@ -1185,12 +1185,12 @@ def test_literals_are_not_interned_across_types():
             produced += morsel.column("x").to_pylist()
         return produced[0]
 
-    assert one_value("SELECT COUNT(*) FILTER (WHERE CAST(NULL AS BOOLEAN)) AS x FROM $planets") == 0
-    assert one_value("SELECT SUM(id) FILTER (WHERE CAST(NULL AS BOOLEAN)) AS x FROM $planets") is None
+    assert one_value("SELECT COUNT(* WHERE CAST(NULL AS BOOLEAN)) AS x FROM $planets") == 0
+    assert one_value("SELECT SUM(id WHERE CAST(NULL AS BOOLEAN)) AS x FROM $planets") is None
     assert one_value("SELECT IIF(CAST(NULL AS BOOLEAN), 1, NULL) AS x FROM $planets") is None
     # Interning itself must still work — these never went through the new guard.
-    assert one_value("SELECT COUNT(*) FILTER (WHERE TRUE) AS x FROM $planets") == 9
-    assert one_value("SELECT COUNT(*) FILTER (WHERE id > 3) AS x FROM $planets") == 6
+    assert one_value("SELECT COUNT(* WHERE TRUE) AS x FROM $planets") == 9
+    assert one_value("SELECT COUNT(* WHERE id > 3) AS x FROM $planets") == 6
 
     # Two same-valued nulls of different declared types stay two columns.
     declared = [column.type for column in session.check(
@@ -1299,7 +1299,7 @@ def test_filtered_aggregate_over_a_constant_folded_null_condition():
     VALUE-level regression: a BOOL-typed NULL literal must materialise as a BOOL
     constant, not as an untyped DRAKEN_NULL.
 
-    `AGG(x) FILTER (WHERE p)` lowers to `AGG(IIF(p, x, NULL))`, and `draken_iif`
+    `AGG(x WHERE p)` lowers to `AGG(IIF(p, x, NULL))`, and `draken_iif`
     type-checks its CONDITION rather than short-circuiting on it — the one argument
     position where an untyped null is not interchangeable with a typed one. A `p`
     the optimizer can decide at plan time, whose surviving branch is NULL, folds to
@@ -1307,7 +1307,7 @@ def test_filtered_aggregate_over_a_constant_folded_null_condition():
     literal, and the query died with `draken_iif: condition must be BOOLEAN`.
 
     Found by the single-table fuzzer, so the assertion is on the ANSWER as well as
-    on not raising: FILTER admits a row only when `p` is TRUE, and an all-UNKNOWN
+    on not raising: the filter admits a row only when `p` is TRUE, and an all-UNKNOWN
     condition admits none — the same 0 the FALSE-condition form returns, which is
     asserted alongside it so a fix that made the query run by admitting rows would
     still fail here.
@@ -1315,12 +1315,12 @@ def test_filtered_aggregate_over_a_constant_folded_null_condition():
     session = opteryx.session()
 
     for statement, expected in (
-        ("SELECT COUNT(*) FILTER (WHERE (CASE WHEN ('beta' <= '0') THEN TRUE ELSE NULL END)) AS c FROM $planets", 0),
-        ("SELECT COUNT(*) FILTER (WHERE (CASE WHEN ('beta' <= '0') THEN TRUE ELSE FALSE END)) AS c FROM $planets", 0),
-        ("SELECT COUNT(*) FILTER (WHERE (CASE WHEN ('0' <= 'beta') THEN TRUE ELSE NULL END)) AS c FROM $planets", 9),
+        ("SELECT COUNT(* WHERE (CASE WHEN ('beta' <= '0') THEN TRUE ELSE NULL END)) AS c FROM $planets", 0),
+        ("SELECT COUNT(* WHERE (CASE WHEN ('beta' <= '0') THEN TRUE ELSE FALSE END)) AS c FROM $planets", 0),
+        ("SELECT COUNT(* WHERE (CASE WHEN ('0' <= 'beta') THEN TRUE ELSE NULL END)) AS c FROM $planets", 9),
         # The same shape with a COLUMN condition, which never folded and so never
         # broke — here to keep the two paths' answers pinned together.
-        ("SELECT COUNT(*) FILTER (WHERE (CASE WHEN (name <= 'M') THEN TRUE ELSE NULL END)) AS c FROM $planets", 2),
+        ("SELECT COUNT(* WHERE (CASE WHEN (name <= 'M') THEN TRUE ELSE NULL END)) AS c FROM $planets", 2),
     ):
         counted = []
         for morsel in session.execute_to_morsels(statement):
@@ -4308,6 +4308,618 @@ def test_is_distinct_from_operator_precedence():
     assert not_distinct == ["Mercury", "Neptune", "Pluto"], not_distinct
 
 
+def test_xor_operator_precedence():
+    """
+    VALUE-level regression: logical `XOR` binds between `AND` and `OR`
+    (AND > XOR > OR, the MySQL order), and looser than every comparison.
+
+    sqlparser rates XOR above `&` and the comparisons, and the Opteryx dialect
+    used to inherit that:
+
+        id = 1 XOR id = 2        -> id = (1 XOR id) = 2        a type error
+        a XOR b AND c            -> (a XOR b) AND c            a wrong answer
+
+    Ruled a parser defect (architect, 2026-09-22) and fixed in
+    OpteryxDialect::get_next_precedence. As with IS DISTINCT FROM above, the
+    all-boolean pairs are the load-bearing ones - both parses run, so a
+    regression is a different answer, not an error - and each asserts the two
+    parses still disagree on this data.
+
+    NOT has no case here on purpose: `NOT (a XOR b)` and `(NOT a) XOR b` are
+    equal for every input, so no data can tell those two parses apart.
+    """
+
+    def _names(statement):
+        out = []
+        for morsel in opteryx.session().execute_to_morsels(statement):
+            morsel.materialize()
+            out.extend(morsel.column("name").to_pylist())
+        return sorted(out)
+
+    # -- AND binds tighter than XOR ---------------------------------------------
+    tight = _names(
+        "SELECT name FROM $planets WHERE (id > 5) XOR (id > 7) AND (name = 'Pluto')"
+    )
+    assert tight == _names(
+        "SELECT name FROM $planets WHERE (id > 5) XOR ((id > 7) AND (name = 'Pluto'))"
+    ), f"AND did not bind tighter than XOR: {tight!r}"
+    assert tight == ["Neptune", "Saturn", "Uranus"], tight
+    loose = _names(
+        "SELECT name FROM $planets WHERE ((id > 5) XOR (id > 7)) AND (name = 'Pluto')"
+    )
+    assert loose == [], loose
+    assert tight != loose, "the two parses stopped disagreeing - this test is now blind"
+
+    # -- XOR binds tighter than OR ----------------------------------------------
+    tight = _names("SELECT name FROM $planets WHERE (id > 7) OR (id < 3) XOR (id > 8)")
+    assert tight == _names(
+        "SELECT name FROM $planets WHERE (id > 7) OR ((id < 3) XOR (id > 8))"
+    ), f"XOR did not bind tighter than OR: {tight!r}"
+    assert tight == ["Mercury", "Neptune", "Pluto", "Venus"], tight
+    loose = _names("SELECT name FROM $planets WHERE ((id > 7) OR (id < 3)) XOR (id > 8)")
+    assert loose == ["Mercury", "Neptune", "Venus"], loose
+    assert tight != loose, "the two parses stopped disagreeing - this test is now blind"
+
+    # -- comparisons bind tighter than XOR --------------------------------------
+    # The natural spelling. Under the old binding this was `id = (1 XOR id) = 2`
+    # and failed to type-check.
+    assert (
+        _names("SELECT name FROM $planets WHERE id = 1 XOR id = 2")
+        == _names("SELECT name FROM $planets WHERE (id = 1) XOR (id = 2)")
+        == ["Mercury", "Venus"]
+    )
+
+
+
+def test_length_only_decode_sees_column_uses_inside_case():
+    """
+    A string column read inside a CASE must not be decoded length-only.
+
+    LengthOnlyColumnStrategy elides a column's long payloads when every use of
+    it is length-answerable (LENGTH, `<> ''`). Its expression walk descended
+    left/centre/right/parameters only, and CASE keeps its operands in
+    `conditions` / `results` / `else_result` - so a LIKE, an `=` or a bare
+    projection inside a CASE was invisible, the column was judged length-only,
+    and the CASE then read the elided bytes at the 0xFFFFFFFF sentinel offset:
+
+        SELECT (CASE WHEN s_null LIKE 'a%' THEN 1 ELSE 2 END) + LENGTH(s_null)
+
+    SEGFAULTED the process (found by the single-table fuzzer). `s_null` is the
+    column that matters because it holds a string too long to store inline;
+    short strings carry no payload to elide, which is why `s_low` never crashed.
+
+    A regression here is a process crash, not an assertion - that is the
+    failure mode. Each answer is also checked against the same query with the
+    strategy switched off, and one LENGTH-only use inside a CASE is checked to
+    still get the optimisation, so the fix cannot pass by disabling it.
+    """
+    from opteryx import config
+    from opteryx.planner.optimizer.strategies import length_only_columns
+
+    table = "testdata.fuzzing.mixed"
+    long_value = "a string comfortably longer than twelve bytes"
+
+    def _answer(statement):
+        rows = []
+        for morsel in opteryx.session().execute_to_morsels(statement):
+            morsel.materialize()
+            rows.extend(tuple(morsel[i]) for i in range(len(morsel)))
+        return sorted(rows, key=repr)
+
+    def _unoptimized(statement):
+        previous = config.features.disable_length_only_column
+        config.features.disable_length_only_column = True
+        try:
+            return _answer(statement)
+        finally:
+            config.features.disable_length_only_column = previous
+
+    for statement in (
+        f"SELECT (CASE WHEN s_null LIKE 'a%' THEN 1 ELSE 2 END) + LENGTH(s_null) AS x FROM {table}",
+        f"SELECT (CASE WHEN s_null IS JSON THEN 1 ELSE 2 END) + LENGTH(s_null) AS x FROM {table}",
+        f"SELECT SUM(CASE WHEN s_null = '{long_value}' THEN 1 ELSE 0 END) + SUM(LENGTH(s_null)) AS x FROM {table}",
+        f"SELECT CASE WHEN row_id > 5 THEN s_null ELSE 'x' END AS y, LENGTH(s_null) AS x FROM {table}",
+        f"SELECT CASE WHEN row_id > 5 THEN 'x' ELSE s_null END AS y, LENGTH(s_null) AS x FROM {table}",
+    ):
+        assert _answer(statement) == _unoptimized(statement), statement
+
+    # The long value really is there, so the equality case above compared a real
+    # payload rather than passing on an absent one.
+    assert _answer(
+        f"SELECT COUNT(*) FROM {table} WHERE s_null = '{long_value}'"
+    ) != [(0,)], "the long s_null value is gone from the fixture - this test is now blind"
+
+    # A LENGTH-only use inside a CASE is still length-only, and still optimised.
+    annotated = []
+    complete = length_only_columns.LengthOnlyColumnStrategy.complete
+
+    def _recording(self, plan, context):
+        result = complete(self, plan, context)
+        for _, node in result.nodes(True):
+            if node.length_only_columns:
+                annotated.extend(
+                    column.name
+                    for column in node.schema.columns
+                    if column.identity in node.length_only_columns
+                )
+        return result
+
+    length_only_columns.LengthOnlyColumnStrategy.complete = _recording
+    try:
+        statement = f"SELECT CASE WHEN LENGTH(s_null) > 3 THEN 1 ELSE 2 END AS x FROM {table}"
+        optimized = _answer(statement)
+    finally:
+        length_only_columns.LengthOnlyColumnStrategy.complete = complete
+    assert annotated == ["s_null"], annotated
+    assert optimized == _unoptimized(statement)
+
+
+
+def test_filter_on_computed_column_below_an_aggregate_window():
+    """
+    An outer filter on a derived table's COMPUTED column, under an aggregate window.
+
+    WindowToJoinStrategy rewrites `agg OVER (...)` as `input CROSS JOIN
+    aggregate(copy of input)` and reuses the Window's node id for the join. The
+    filter cannot be pushed into the scan (its column is computed), so predicate
+    pushdown restores it to its original position - the node that sat above it,
+    which is now the join. The restore used `insert_node_before`, which redirects
+    EVERY input of the target, so the Filter swallowed both join legs and the join
+    was left with one unlabelled input: "a join without labelled left/right legs"
+    (or, on a variant with a constant column, "the compiled plan references a
+    column the stream does not carry"). Found by the single-table fuzzer.
+
+    Each answer is checked against the same query with the filter written inside
+    the subquery, which never took the restore path.
+    """
+
+    def _answer(statement):
+        rows = []
+        for morsel in opteryx.session().execute_to_morsels(statement):
+            morsel.materialize()
+            rows.extend(repr(tuple(morsel[i])) for i in range(len(morsel)))
+        return sorted(rows)
+
+    table = "testdata.fuzzing.mixed"
+    for outer, inner in (
+        (
+            f"SELECT MAX(v) OVER () AS w FROM (SELECT i_null + 1 AS v FROM {table}) AS sub WHERE v > 3",
+            f"SELECT MAX(v) OVER () AS w FROM (SELECT i_null + 1 AS v FROM {table} WHERE i_null + 1 > 3) AS sub",
+        ),
+        (
+            f"SELECT c, MAX(v) OVER (PARTITION BY c) AS w FROM "
+            f"(SELECT ABS(i_null) AS v, i_group AS c FROM {table}) AS sub WHERE v > 100000",
+            f"SELECT c, MAX(v) OVER (PARTITION BY c) AS w FROM "
+            f"(SELECT ABS(i_null) AS v, i_group AS c FROM {table} WHERE ABS(i_null) > 100000) AS sub",
+        ),
+        (
+            f"SELECT c, MAX(v) OVER (PARTITION BY c) AS w FROM "
+            f"(SELECT ABS(i_null) AS v, 7 AS c FROM {table}) AS sub WHERE v IS NULL",
+            f"SELECT c, MAX(v) OVER (PARTITION BY c) AS w FROM "
+            f"(SELECT ABS(i_null) AS v, 7 AS c FROM {table} WHERE ABS(i_null) IS NULL) AS sub",
+        ),
+    ):
+        expected = _answer(inner)
+        assert expected, f"the reference query returns nothing - this case is blind: {inner}"
+        assert _answer(outer) == expected, outer
+
+
+def test_inline_aggregate_filter():
+    """
+    VALUE-level regression: `AGG(expr WHERE cond)` must APPLY the condition.
+
+    sqlparser 0.63 added the inline aggregate filter ungated by any dialect flag,
+    so it began arriving for every dialect as a `Where` entry in the function's
+    argument-clause list. That list was consumed by a loop with arms for OrderBy
+    and Limit and no else, so the clause was dropped without a word:
+    `SUM(id WHERE id > 4)` answered 45 - the UNFILTERED total - under a column
+    labelled `SUM(id)`, with nothing on the result surface to say a filter had
+    been asked for and ignored.
+
+    Every assertion here is on the ANSWER against an independently-computed
+    reference, never on "does not raise": the whole failure mode is a query that
+    runs perfectly and returns the wrong number.
+
+    `FILTER (WHERE cond)` is the same feature and is REFUSED, so the reference is
+    the equivalent WHERE - two different code paths reaching one number.
+    """
+    session = opteryx.session()
+
+    def one_value(statement, column):
+        produced = []
+        for morsel in session.execute_to_morsels(statement):
+            produced += morsel.column(column).to_pylist()
+        return produced[0]
+
+    # The filter changes the answer, and changes it to the right one.
+    assert one_value("SELECT SUM(id) AS x FROM $planets", "x") == 45
+    reference = one_value("SELECT SUM(id) AS x FROM $planets WHERE id > 4", "x")
+    assert reference == 35, reference
+    assert one_value("SELECT SUM(id WHERE id > 4) AS x FROM $planets", "x") == reference
+
+    # COUNT(*), whose argument is a wildcard rather than an expression.
+    assert one_value("SELECT COUNT(* WHERE id > 4) AS x FROM $planets", "x") == one_value(
+        "SELECT COUNT(*) AS x FROM $planets WHERE id > 4", "x"
+    )
+
+    # DISTINCT applies to the filtered argument, not to the whole column.
+    assert one_value(
+        "SELECT COUNT(DISTINCT gravity WHERE id > 4) AS x FROM $planets", "x"
+    ) == one_value("SELECT COUNT(DISTINCT gravity) AS x FROM $planets WHERE id > 4", "x")
+
+    # The output column NAMES the filter. Half of what made the bug invisible was
+    # that the unfiltered answer came back under the bare `SUM(id)` heading.
+    names = [
+        morsel.column_names
+        for morsel in session.execute_to_morsels("SELECT SUM(id WHERE id > 4) FROM $planets")
+    ][0]
+    assert names == [b"SUM(id WHERE id > 4)"], names
+
+
+def test_aggregate_filter_spellings_we_refuse():
+    """
+    `FILTER (WHERE p)` is refused; `AGG(x WHERE p)` is the one spelling we accept.
+
+    The dialect deliberately keeps `supports_filter_during_aggregation` so that
+    sqlparser still RECOGNISES the clause - the refusal has to be able to name the
+    correct syntax back, which it cannot do if FILTER never parses.
+
+    The error text is asserted, not just the exception type: an error that does not
+    carry the working spelling leaves the user with no way forward.
+    """
+    session = opteryx.session()
+
+    with pytest.raises(UnsupportedSyntaxError) as refused:
+        list(session.execute_to_morsels("SELECT SUM(id) FILTER (WHERE id > 4) FROM $planets"))
+    assert "SUM(id WHERE id > 4)" in str(refused.value), refused.value
+
+    # Both channels at once. The message must not render a spelling that silently
+    # drops one of the two conditions.
+    with pytest.raises(UnsupportedSyntaxError) as both:
+        list(
+            session.execute_to_morsels(
+                "SELECT SUM(id WHERE id > 4) FILTER (WHERE id < 8) FROM $planets"
+            )
+        )
+    assert "SUM(id WHERE id > 4)" not in str(both.value), both.value
+    assert "SUM(id WHERE id < 8)" not in str(both.value), both.value
+
+
+def test_distinct_over_a_join_deduplicates_only_the_select_list():
+    """
+    `SELECT DISTINCT` has no Project of its own to fix its width: it deduplicates
+    the stream it is given. RedundantOperations deleted the Project beneath it
+    whenever the provider's `.columns` matched the SELECT list - but for a Join
+    that is the set needed ABOVE it, and for a Filter or Order the columns it
+    READS; all three emit their whole input. A swapped semi/anti join (full build
+    leg), a join with a residual (full-width payload), and a Filter or Order over
+    either left the join key in the stream, and DISTINCT counted (i_group, s_low)
+    pairs - 80 or 128 rows where 16 was right.
+
+    Each answer is checked against GROUP BY over the same FROM/WHERE.
+    """
+
+    def _answer(statement):
+        rows = []
+        for morsel in opteryx.session().execute_to_morsels(statement):
+            morsel.materialize()
+            rows.extend(repr(tuple(morsel[i])) for i in range(len(morsel)))
+        return sorted(rows)
+
+    mixed = "testdata.fuzzing.mixed"
+    wide = "testdata.fuzzing.wide"
+    for source in (
+        f"FROM {mixed} AS o ANTI JOIN (SELECT cat FROM {wide} WHERE cat < 'e') AS i "
+        f"ON i.cat = o.s_low WHERE o.s_low IS NOT NULL AND o.row_id > 1000",
+        f"FROM {mixed} AS o SEMI JOIN (SELECT cat FROM {wide}) AS i ON i.cat = o.s_low "
+        f"WHERE o.row_id > 10",
+        f"FROM {mixed} AS o INNER JOIN {wide} AS i ON i.cat = o.s_low "
+        f"AND i.row_id > o.row_id WHERE o.row_id < 40 AND o.i_group + i.row_id > 5",
+    ):
+        expected = _answer(f"SELECT o.i_group {source} GROUP BY o.i_group")
+        assert len(expected) > 1, source
+        got = _answer(f"SELECT DISTINCT o.i_group {source}")
+        assert got == expected, (source, len(got), len(expected))
+    ordered = (
+        f"FROM {mixed} AS o SEMI JOIN (SELECT cat FROM {wide}) AS i ON i.cat = o.s_low"
+    )
+    assert _answer(f"SELECT DISTINCT o.i_group {ordered} ORDER BY o.i_group") == _answer(
+        f"SELECT o.i_group {ordered} GROUP BY o.i_group"
+    )
+
+
+def test_unrecognised_function_argument_clause_is_refused():
+    """
+    An argument clause we do not read must RAISE, not be dropped.
+
+    This is the hole the inline filter fell through, pinned directly rather than
+    through whichever clause happens to be reachable today. sqlparser carries
+    Separator, OnOverflow, the JSON clauses and more in the same list, all behind
+    dialect flags we do not set - so none of them can be produced from SQL here,
+    and the only honest way to test the refusal is to hand the builder one.
+
+    Without this, a future sqlparser bump or dialect flag that starts emitting one
+    of them would reintroduce the same class of silent wrong answer, and the suite
+    would stay green through it.
+    """
+    from opteryx.planner.logical_planner.logical_planner_builders import function
+    from opteryx.third_party.sqloxide import parse_sql
+
+    parsed = parse_sql("SELECT SUM(id) FROM $planets", "mysql")
+    branch = parsed[0]["Query"]["body"]["Select"]["projection"][0]["UnnamedExpr"]["Function"]
+    branch["args"]["List"]["clauses"].append({"JsonNullClause": "AbsentOnNull"})
+
+    with pytest.raises(UnsupportedSyntaxError) as refused:
+        function(branch)
+    assert "JsonNullClause" in str(refused.value), refused.value
+
+
+
+def test_negation_of_shared_null_tests_is_not_applied_twice():
+    """
+    `NOT (a OR b)` where a and b share a sub-expression must invert it ONCE per use.
+
+    `x IS [NOT] DISTINCT FROM y` expands to null tests, and the binder resolves two
+    identical sub-expressions to one shared Node — so in
+
+        NOT ((i_group IS DISTINCT FROM -828842) OR (i_null IS NOT DISTINCT FROM i_group))
+
+    both expansions hold the SAME `i_group IS NOT NULL` object. Boolean
+    simplification applied De Morgan and then inverted each null test IN PLACE:
+    the shared node was flipped once for each NOT, ending where it began, and the
+    predicate matched all 2,000 rows instead of none. Found by the fuzzer's
+    predicate_partition oracle (|p| + |NOT p| exceeded |R|).
+
+    Every case is checked against the same query with the strategy switched off,
+    and the first against its known answer, so the test cannot pass by both
+    sides agreeing on a wrong value.
+    """
+    from opteryx import config
+
+    table = "testdata.fuzzing.mixed"
+
+    def _count(where):
+        statement = f"SELECT COUNT(*) FROM {table} WHERE {where}"
+        for morsel in opteryx.session().execute_to_morsels(statement):
+            morsel.materialize()
+            return morsel[0][0]
+
+    def _unoptimized(where):
+        previous = config.features.disable_boolean_simplification
+        config.features.disable_boolean_simplification = True
+        try:
+            return _count(where)
+        finally:
+            config.features.disable_boolean_simplification = previous
+
+    shared = (
+        'NOT (("i_group" IS DISTINCT FROM -828842) OR ("i_null" IS NOT DISTINCT FROM "i_group"))'
+    )
+    assert _count(shared) == 0, "i_group is never -828842, so the IS DISTINCT FROM is always TRUE"
+    for where in (
+        shared,
+        'NOT (("i_group" IS DISTINCT FROM "i_null") OR ("i_null" IS NOT DISTINCT FROM "i_group"))',
+        'NOT (("i_null" IS NULL) OR ("i_null" IS NOT NULL))',
+        '(NOT ("i_null" IS NULL)) AND ("i_null" IS NULL)',
+        'NOT (("row_id" = 5) OR ("row_id" = 5 AND "i_null" IS NULL))',
+    ):
+        assert _count(where) == _unoptimized(where), where
+
+
+
+def test_decorrelation_of_repeated_and_aggregate_nested_subqueries():
+    """
+    Two subquery shapes the decorrelation strategy mishandled, both through
+    expression nodes that appear in more than one place.
+
+    IS [NOT] DISTINCT FROM expands to null tests plus a comparison, reusing its
+    operand in each, and the binder's `post_bind` swaps repeats of a bound
+    expression for a COPY of the first - which deep-copies a subquery's plan with
+    its node ids. Decorrelation replaced only the first position, so the others
+    were decorrelated again: "A scalar subquery must return exactly one column,
+    this one returns 2", or (IS DISTINCT FROM) a second graft whose colliding ids
+    made a two-consumer subtree and crashed RedundantOperations.
+
+    A subquery inside an aggregate that HAVING references was claimed by the HAVING
+    filter, whose aggregate is the SAME object as the Aggregate step's - so the join
+    went in above the Aggregate, which then read a value produced above it: "the
+    compiled plan references a column the stream does not carry".
+
+    Each answer is checked against a spelling that never took either path.
+    """
+
+    def _answer(statement):
+        rows = []
+        for morsel in opteryx.session().execute_to_morsels(statement):
+            morsel.materialize()
+            rows.extend(repr(tuple(morsel[i])) for i in range(len(morsel)))
+        return sorted(rows)
+
+    table = "testdata.fuzzing.mixed"
+    correlated = f"(SELECT MAX(u.i_value) FROM {table} AS u WHERE u.i_group = t.i_group)"
+    per_group = (
+        f"FROM {table} AS t JOIN (SELECT i_group, MAX(i_value) AS m FROM {table} "
+        f"GROUP BY i_group) AS g ON g.i_group = t.i_group"
+    )
+    average = f"(SELECT AVG(i_value) FROM {table})"
+    for statement, reference in (
+        (
+            f"SELECT row_id FROM {table} AS t WHERE {correlated} IS DISTINCT FROM t.i_value",
+            f"SELECT t.row_id {per_group} WHERE g.m IS DISTINCT FROM t.i_value",
+        ),
+        (
+            f"SELECT row_id FROM {table} AS t WHERE {correlated} IS NOT DISTINCT FROM t.i_value",
+            f"SELECT t.row_id {per_group} WHERE g.m IS NOT DISTINCT FROM t.i_value",
+        ),
+        (
+            f"SELECT row_id FROM {table} WHERE i_value IS DISTINCT FROM {average}",
+            f"SELECT row_id FROM {table} WHERE i_value IS NULL OR i_value <> {average}",
+        ),
+        (
+            f"SELECT {average} IS DISTINCT FROM i_value AS d FROM {table}",
+            f"SELECT (i_value IS NULL OR i_value <> {average}) AS d FROM {table}",
+        ),
+        (
+            f"SELECT i_group FROM {table} GROUP BY i_group "
+            f"HAVING SUM(CASE WHEN i_value > {average} THEN 1 ELSE 0 END) > 1",
+            f"SELECT i_group FROM (SELECT i_group, SUM(CASE WHEN i_value > {average} "
+            f"THEN 1 ELSE 0 END) AS s FROM {table} GROUP BY i_group) AS x WHERE s > 1",
+        ),
+        (
+            f"SELECT COUNT(*) AS n FROM {table} "
+            f"HAVING SUM(CASE WHEN i_value > {average} THEN 1 ELSE 0 END) > 1",
+            f"SELECT n FROM (SELECT COUNT(*) AS n, SUM(CASE WHEN i_value > {average} "
+            f"THEN 1 ELSE 0 END) AS s FROM {table}) AS x WHERE s > 1",
+        ),
+    ):
+        expected = _answer(reference)
+        assert expected, f"the reference returns nothing - this case is blind: {reference}"
+        assert _answer(statement) == expected, statement
+
+
+
+def test_rewrites_keep_null_and_type_semantics():
+    """
+    Four optimizer rewrites that changed answers, found by the strategy audit.
+
+    1-2. "Can never be equal" folds (`int_col = 4.5`, `UPPER(s) = 'Ab'`, a
+         non-aligned `TRUNC(ts, 'day') = <mid-day>`) collapsed to a CONSTANT - but
+         the comparison is NULL on a NULL row. `WHERE i_null != 4.5` kept the
+         NULL rows (2000 where 1589 are correct), and in a SELECT list, under NOT
+         or inside IS NULL the NULLs became FALSE/TRUE. Now `x <> x` / `x = x`.
+    3.   `bin_value LIKE b'%a%b%'` became a substring search for the three bytes
+         `a%b` - the inner `%` is a wildcard. The VARCHAR branch had the guard.
+    4.   `x / 1` folded to `x`, so an INT64 column divided by 1 came back INT64
+         where `/` yields FLOAT64.
+
+    Each is checked against an independently known count or the same query with
+    the rewrite switched off, so the test cannot pass on both agreeing wrongly.
+    """
+    from opteryx import config
+
+    table = "testdata.fuzzing.mixed"
+
+    def _count(statement):
+        for morsel in opteryx.session().execute_to_morsels(statement):
+            morsel.materialize()
+            return morsel[0][0]
+
+    def _values(statement):
+        out = []
+        for morsel in opteryx.session().execute_to_morsels(statement):
+            morsel.materialize()
+            out.extend(morsel[i][0] for i in range(len(morsel)))
+        return out
+
+    non_null = _count(f"SELECT COUNT(i_null) FROM {table}")
+    nulls = _count(f"SELECT COUNT(*) FROM {table} WHERE i_null IS NULL")
+    assert nulls > 0 and non_null > 0, "the fixture lost its NULLs - this test is blind"
+
+    # 1-2: fractional-literal folds
+    assert _count(f"SELECT COUNT(*) FROM {table} WHERE i_null != 4.5") == non_null
+    assert _count(f"SELECT COUNT(*) FROM {table} WHERE i_null = 4.5") == 0
+    assert _count(f"SELECT COUNT(*) FROM {table} WHERE NOT (i_null = 4.5)") == non_null
+    assert _count(f"SELECT COUNT(*) FROM {table} WHERE (i_null != 4.5) IS NULL") == nulls
+    assert (
+        _count(f"SELECT COUNT(*) FROM (SELECT i_null = 4.5 AS x FROM {table}) AS q WHERE x IS NULL")
+        == nulls
+    )
+    # 2: case-fold and non-aligned TRUNC folds, in a SELECT list and under NOT
+    s_nulls = _count(f"SELECT COUNT(*) FROM {table} WHERE s_null IS NULL")
+    assert (
+        _count(f"SELECT COUNT(*) FROM (SELECT UPPER(s_null) = 'Ab' AS x FROM {table}) AS q WHERE x IS NULL")
+        == s_nulls
+    )
+    assert _count(f"SELECT COUNT(*) FROM {table} WHERE NOT (UPPER(s_null) = 'Ab')") == (
+        _count(f"SELECT COUNT(s_null) FROM {table}")
+    )
+    ts_nulls = _count(f"SELECT COUNT(*) FROM {table} WHERE ts_null IS NULL")
+    assert (
+        _count(
+            f"SELECT COUNT(*) FROM (SELECT TRUNC(ts_null, 'day') = '2005-06-15 12:00:00'::TIMESTAMP "
+            f"AS x FROM {table}) AS q WHERE x IS NULL"
+        )
+        == ts_nulls
+    )
+
+    # TRUNC `!=` a NON-aligned literal holds for every non-null row; it was
+    # rewritten to "outside that bucket" and dropped the bucket's rows.
+    busiest = _count(
+        f"SELECT COUNT(*) FROM {table} WHERE TRUNC(ts_value, 'day') = '2012-04-28 00:00:00'::TIMESTAMP"
+    )
+    assert busiest > 0, "no row on 2012-04-28 - the TRUNC != case is blind"
+    assert _count(
+        f"SELECT COUNT(*) FROM {table} WHERE TRUNC(ts_value, 'day') != '2012-04-28 12:00:00'::TIMESTAMP"
+    ) == _count(f"SELECT COUNT(ts_value) FROM {table}")
+    assert (
+        _count(
+            f"SELECT COUNT(*) FROM (SELECT TRUNC(ts_null, 'day') != '2012-04-28 12:00:00'::TIMESTAMP "
+            f"AS x FROM {table}) AS q WHERE x IS NULL"
+        )
+        == ts_nulls
+    )
+
+    # 3: an inner `%` in a VARBINARY LIKE pattern is a wildcard
+    binary = _count(f"SELECT COUNT(*) FROM {table} WHERE bin_value LIKE b'%a%b%'")
+    assert binary == _count(
+        f"SELECT COUNT(*) FROM {table} WHERE CAST(bin_value AS VARCHAR) LIKE '%a%b%'"
+    )
+    assert binary > 0, "no row matches b'%a%b%' - this case is blind"
+
+    # 4: `/` yields a float even when folding `x / 1`
+    folded = _values(f"SELECT i_value / 1 AS v FROM {table} WHERE row_id IN (1, 7)")
+    assert folded and all(isinstance(value, float) for value in folded), folded
+    previous = config.features.disable_constant_folding
+    config.features.disable_constant_folding = True
+    try:
+        unfolded = _values(f"SELECT i_value / 1 AS v FROM {table} WHERE row_id IN (1, 7)")
+    finally:
+        config.features.disable_constant_folding = previous
+    assert sorted(folded) == sorted(unfolded)
+
+
+
+def test_timestamp_cast_sink_sees_column_uses_inside_case():
+    """
+    An INT64 column cast to TIMESTAMP[unit] is retyped AT THE SCAN only when every
+    use of it is that cast. The use-walk skipped CASE's `conditions` / `results` /
+    `else_result`, so a raw use inside a CASE was missed and the scan column was
+    retyped to TIMESTAMP underneath it:
+
+        SELECT i_value::TIMESTAMP[s] AS t, CASE WHEN ... THEN i_value ELSE 0 END
+
+    failed with "branch types differ". Checked against the strategy switched off,
+    and the pure-cast shape is checked to still be retagged.
+    """
+    from opteryx import config
+
+    table = "testdata.fuzzing.mixed"
+
+    def _rows(statement):
+        out = []
+        for morsel in opteryx.session().execute_to_morsels(statement):
+            morsel.materialize()
+            out.extend(repr(tuple(morsel[i])) for i in range(len(morsel)))
+        return sorted(out)
+
+    def _unoptimized(statement):
+        previous = config.features.disable_timestamp_cast_sink
+        config.features.disable_timestamp_cast_sink = True
+        try:
+            return _rows(statement)
+        finally:
+            config.features.disable_timestamp_cast_sink = previous
+
+    for statement in (
+        f"SELECT i_value::TIMESTAMP[s] AS t, CASE WHEN row_id >= 0 THEN i_value ELSE 0 END AS raw FROM {table}",
+        f"SELECT i_value::TIMESTAMP[ms] AS t FROM {table} WHERE CASE WHEN i_value > 0 THEN TRUE ELSE FALSE END",
+        f"SELECT i_value::TIMESTAMP[s] AS t FROM {table}",
+    ):
+        expected = _unoptimized(statement)
+        assert expected, f"the reference returns nothing - this case is blind: {statement}"
+        assert _rows(statement) == expected, statement
+
+
 if __name__ == "__main__":  # pragma: no cover
     import shutil
     import time
@@ -4496,6 +5108,44 @@ if __name__ == "__main__":  # pragma: no cover
         (
             "IS [NOT] DISTINCT FROM operator precedence",
             test_is_distinct_from_operator_precedence,
+        ),
+        ("XOR operator precedence", test_xor_operator_precedence),
+        (
+            "length-only decode sees column uses inside CASE",
+            test_length_only_decode_sees_column_uses_inside_case,
+        ),
+        (
+            "filter on a computed column below an aggregate window",
+            test_filter_on_computed_column_below_an_aggregate_window,
+        ),
+        (
+            "negation of shared null tests is not applied twice",
+            test_negation_of_shared_null_tests_is_not_applied_twice,
+        ),
+        (
+            "decorrelation of repeated and aggregate-nested subqueries",
+            test_decorrelation_of_repeated_and_aggregate_nested_subqueries,
+        ),
+        (
+            "rewrites keep NULL and type semantics",
+            test_rewrites_keep_null_and_type_semantics,
+        ),
+        (
+            "timestamp cast sink sees column uses inside CASE",
+            test_timestamp_cast_sink_sees_column_uses_inside_case,
+        ),
+        ("inline aggregate filter applies its condition", test_inline_aggregate_filter),
+        (
+            "aggregate filter spellings we refuse",
+            test_aggregate_filter_spellings_we_refuse,
+        ),
+        (
+            "unrecognised function argument clause is refused",
+            test_unrecognised_function_argument_clause_is_refused,
+        ),
+        (
+            "DISTINCT over a join deduplicates only the SELECT list",
+            test_distinct_over_a_join_deduplicates_only_the_select_list,
         ),
     ):
         print(f"\033[38;2;255;184;108m{name}\033[0m ", end="", flush=True)

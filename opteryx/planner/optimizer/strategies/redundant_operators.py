@@ -30,6 +30,50 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
 
+# Steps that emit exactly their input's columns: a Project over one of these is
+# judged against whatever fixes the width beneath it.
+_PASS_THROUGH = (
+    LogicalPlanStepType.Filter,
+    LogicalPlanStepType.Order,
+    LogicalPlanStepType.Limit,
+)
+
+
+def _output_identities(plan: LogicalPlan, nid) -> set | None:
+    """The identities the step at `nid` emits, or None when that is not known.
+
+    Deny by default. A Join's `.columns` is what is needed ABOVE it
+    (projection_pushdown), not what it emits: the compiler narrows some join emits
+    to that set but not all (a swapped semi/anti emits its full build leg, a
+    residual keeps the payload full width). A Filter's or Order's `.columns` is what
+    it READS; they emit their whole input, so the answer is their input's.
+    """
+    node = plan[nid]
+    while node.node_type in _PASS_THROUGH:
+        nid = plan.ingoing_edges(nid)[0][0]
+        node = plan[nid]
+    if node.node_type == LogicalPlanStepType.Scan:
+        return {c.schema_column.identity for c in node.columns}
+    if node.node_type == LogicalPlanStepType.Project:
+        # A Project at runtime emits `columns ∪ passthrough_columns` (see
+        # projection.pyx).
+        return {
+            c.schema_column.identity
+            for c in list(node.columns) + list(node.passthrough_columns or [])
+        }
+    if node.node_type in (
+        LogicalPlanStepType.Aggregate,
+        LogicalPlanStepType.AggregateAndGroup,
+    ):
+        # Aggregate logical nodes' `.columns` conflates outputs with input
+        # identifiers referenced by the aggregates (binder uses it for upstream
+        # schema pruning — see binder/aggregate.py). The outputs are the
+        # aggregates and groups.
+        return {
+            c.schema_column.identity for c in (node.aggregates or []) + (node.groups or [])
+        }
+    return None
+
 
 class RedundantOperationsStrategy(OptimizationStrategy):
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
@@ -47,22 +91,15 @@ class RedundantOperationsStrategy(OptimizationStrategy):
             if len(providers) == 1:
                 provider_nid = providers[0][0]
                 provider_node = context.pre_optimized_tree[provider_nid]
-                if provider_node.node_type != LogicalPlanStepType.Subquery:
-                    # Aggregate logical nodes' `.columns` conflates outputs with
-                    # input identifiers referenced by the aggregates (binder uses
-                    # it for upstream schema pruning — see binder/aggregate.py).
-                    # For the redundancy check we want only the actual outputs.
-                    if provider_node.node_type in (
-                        LogicalPlanStepType.Aggregate,
-                        LogicalPlanStepType.AggregateAndGroup,
-                    ):
-                        provider_columns = {
-                            c.schema_column.identity
-                            for c in (provider_node.aggregates or [])
-                            + (provider_node.groups or [])
-                        }
-                    else:
-                        provider_columns = {c.schema_column.identity for c in provider_node.columns}
+                # Only a provider whose output width is KNOWN can make this Project
+                # a no-op. Trusting a Join's `.columns` deleted the Project over a
+                # swapped anti join, leaving its key in the stream: a `SELECT
+                # DISTINCT` above deduplicated (i_group, s_low) and returned 80 rows
+                # where 16 was right.
+                provider_columns = _output_identities(
+                    context.pre_optimized_tree, provider_nid
+                )
+                if provider_columns is not None:
                     # A Project at runtime emits `columns ∪ passthrough_columns` (see
                     # projection.pyx). Both must be considered when deciding whether the
                     # upstream operator already produces the same set of columns.

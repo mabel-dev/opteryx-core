@@ -48,6 +48,13 @@ from typing import Sequence
 from typing import Set
 from typing import Tuple
 
+# Aggregates that accept an inline filter, `AGG(x WHERE p)`: the engine's own list
+# of NULL-ignoring aggregates, which is what it gates the filter on. See the
+# filter block in _build_aggregate for why taking the engine's word is sound here.
+from opteryx.planner.logical_planner.logical_planner_builders import (
+    _NULL_IGNORING_AGGREGATES as _FILTERABLE_AGGREGATES,
+)
+
 _REFERENCE_DIR = Path(__file__).resolve().parents[2] / "reference"
 
 
@@ -719,7 +726,9 @@ PRECEDENCE: Dict[str, int] = _load_precedence()
 #: parser even though the generator mints them as atoms.
 _EMITTED_SPELLINGS = frozenset(
     {
-        "OR", "AND", "prefix NOT",
+        "OR", "XOR", "AND", "prefix NOT",
+        "IS JSON", "IS JSON SCALAR", "IS JSON ARRAY", "IS JSON OBJECT",
+        "IS NOT JSON", "IS NOT JSON SCALAR", "IS NOT JSON ARRAY", "IS NOT JSON OBJECT",
         "IS NULL", "IS NOT NULL", "IS TRUE", "IS FALSE", "IS NOT TRUE", "IS NOT FALSE",
         "IS DISTINCT FROM", "IS NOT DISTINCT FROM",
         "LIKE", "NOT LIKE", "ILIKE", "NOT ILIKE", "RLIKE", "NOT RLIKE",
@@ -985,7 +994,7 @@ def _literal_binding(text: str) -> Optional[str]:
 # Re-associating a chain of ONE of these (`a OR b OR c` -> `a OR (b OR c)`) can
 # never change the answer, so it is not a probe: it would only inflate the count
 # of cases that "had something to discriminate".
-_ASSOCIATIVE = frozenset({"AND", "OR", "+", "*", "||", "&", "|", "^"})
+_ASSOCIATIVE = frozenset({"AND", "OR", "XOR", "+", "*", "||", "&", "|", "^"})
 
 # Operators whose right operand the generator only ever makes a literal: a
 # divisor that cannot be zero, a shift count inside 0..63.
@@ -1007,6 +1016,10 @@ _NOT_UNDER_NOT = frozenset(
         "NOT RLIKE",
         "NOT BETWEEN",
         "NOT IN",
+        "IS NOT JSON",
+        "IS NOT JSON SCALAR",
+        "IS NOT JSON ARRAY",
+        "IS NOT JSON OBJECT",
         "@>",
         "@>>",
     }
@@ -1019,8 +1032,10 @@ def _result_type(op: str, operands: Tuple[Ty, ...]) -> Optional[Ty]:
     coercion lattice: a probe exists to be a query this grammar could emit."""
     if Ty.UNKNOWN in operands:
         return None
-    if op in ("AND", "OR"):
+    if op in ("AND", "OR", "XOR"):
         return Ty.BOOLEAN if operands == (Ty.BOOLEAN, Ty.BOOLEAN) else None
+    if op.startswith(("IS JSON", "IS NOT JSON")):
+        return Ty.BOOLEAN if operands[0] in (Ty.VARCHAR, Ty.VARBINARY) else None
     if op in ("NOT", "IS TRUE", "IS FALSE", "IS NOT TRUE", "IS NOT FALSE"):
         return Ty.BOOLEAN if operands == (Ty.BOOLEAN,) else None
     if op in ("IS NULL", "IS NOT NULL"):
@@ -1291,6 +1306,10 @@ _INTERVAL_UNITS = ("DAY", "HOUR", "MINUTE", "SECOND", "MONTH", "YEAR")
 _SUB_DAY_PARTS = frozenset({"hour", "minute", "second", "millisecond", "microsecond"})
 
 _COMPARISONS = ("=", "!=", "<>", "<", "<=", ">", ">=")
+
+# The IS JSON shapes, in the spellings reference/ publishes a precedence for.
+# `IS JSON VALUE` is accepted too but is the same predicate as `IS JSON`.
+_JSON_SHAPE_FORMS = ("IS JSON", "IS JSON SCALAR", "IS JSON ARRAY", "IS JSON OBJECT")
 _EQUALITY = ("=", "!=", "<>")
 
 # EXTRACT's part domain, read from the catalog rather than restated: the four
@@ -1437,9 +1456,16 @@ class Generator:
         else — so an ARRAY expression can only be a column. A relation with no
         ARRAY column therefore cannot satisfy an `array` parameter at all, and
         functions taking one are not chosen against it.
+
+        BOOLEAN is the same kind of case: a BOOLEAN argument is generated as a
+        predicate (IIF's condition), and a relation with no scalar column — a CTE
+        projecting only an ARRAY column — has nothing a predicate can be built
+        over, so `predicate()` raises rather than emit a tautology.
         """
         if ty is Ty.ARRAY:
             return bool(self.relation.of(Ty.ARRAY))
+        if ty is Ty.BOOLEAN:
+            return bool(_scalar_columns(self.relation))
         return True
 
     def expression(self, ty: Ty, depth: int = 0) -> Expr:
@@ -1948,6 +1974,11 @@ class Generator:
         # (single_table_known_gaps/case-rejects-two-identical-array-branches).
         if ty in (Ty.DECIMAL, Ty.ARRAY):
             return None
+        # The condition is a predicate, and a relation with no scalar column has
+        # nothing to build one over (see can_produce). Seed 395 reached this: a CTE
+        # projecting only `arr_str`, whose outer projection falls back to INTEGER.
+        if not self.can_produce(Ty.BOOLEAN):
+            return None
         was_operand = self._predicate_is_an_operand
         self._predicate_is_an_operand = True
         try:
@@ -2001,7 +2032,10 @@ class Generator:
         """
         rng = self.rng
         if depth < 2 and rng.random() < 0.3:
-            connective = rng.choice(("AND", "OR", "AND NOT", "OR NOT"))
+            # XOR binds between AND and OR (OpteryxDialect::get_next_precedence), so
+            # a chain mixing all three is exactly what parenthesisation_is_neutral
+            # needs to see.
+            connective = rng.choice(("AND", "OR", "XOR", "AND NOT", "OR NOT", "XOR NOT"))
             self.tags.add("connective")
             right_negations = negated_forms_allowed and not connective.endswith("NOT")
             left = self.predicate(depth + 1, negated_forms_allowed=negated_forms_allowed)
@@ -2034,6 +2068,7 @@ class Generator:
             self._like_predicate,
             self._boolean_column_predicate,
             self._distinct_from_predicate,
+            self._json_shape_predicate,
             self._array_predicate,
             self._json_predicate,
             self._case_predicate,
@@ -2079,6 +2114,25 @@ class Generator:
         form = "IS NOT DISTINCT FROM" if negated and rng.random() < 0.5 else "IS DISTINCT FROM"
         self.tags.add("distinct_from")
         return Binary(form, left.node, right.node, Ty.BOOLEAN)
+
+    def _json_shape_predicate(self, depth: int, negated: bool) -> Optional[Node]:
+        """`x IS [NOT] JSON [SCALAR | ARRAY | OBJECT]` — JSON well-formedness.
+
+        TOTAL, like IS DISTINCT FROM: a NULL is not JSON, so the predicate is never
+        UNKNOWN and predicate_partition's third bucket must stay empty. Over any
+        VARCHAR or VARBINARY column, not just the JSON-bearing ones: text that is
+        not JSON is the common case, and it is half of what is being tested.
+        """
+        rng = self.rng
+        candidates = self.relation.of(Ty.VARCHAR, Ty.VARBINARY)
+        if not candidates:
+            return None
+        column = rng.choice(candidates)
+        forms = _JSON_SHAPE_FORMS
+        if negated:
+            forms = forms + tuple(form.replace("IS JSON", "IS NOT JSON") for form in forms)
+        self.tags.add("is_json")
+        return Postfix(rng.choice(forms), Atom(column.quoted, column.ty), Ty.BOOLEAN)
 
     def _null_predicate(self, depth: int, negated: bool) -> Optional[Node]:
         rng = self.rng
@@ -2342,10 +2396,14 @@ class SelectQuery:
     #: The whole QUALIFY clause, without the keyword. Held structurally like every
     #: other clause so the oracles' re-renders carry it.
     qualify: Optional[str] = None
-    #: The predicate of an aggregate `FILTER (WHERE ...)` in the projection, if
+    #: The predicate of an aggregate's inline filter, `AGG(x WHERE ...)`, in the projection, if
     #: one was emitted. Read by the aggregate_filter_matches_where oracle, which
     #: needs the predicate itself rather than the rendered call.
     aggregate_filter: Optional[str] = None
+    #: The aggregate that filter is attached to, WITHOUT the filter —
+    #: `SUM("x")`, `COUNT(DISTINCT "x")`, `COUNT(*)`. The oracle renders both
+    #: `AGG(x WHERE p)` and the unfiltered reference `AGG(x)` from it.
+    aggregate_filter_call: Optional[str] = None
     order_by: List[str] = field(default_factory=list)
     limit: Optional[int] = None
     offset: Optional[int] = None
@@ -2493,6 +2551,41 @@ def _projectable_types(relation: Relation) -> List[Ty]:
     return [ty for ty in SCALAR if ty in present] or [Ty.INTEGER]
 
 
+def with_aggregate_filter(call: str, predicate: str) -> str:
+    """`SUM("x")` + `p` -> `SUM("x" WHERE p)`; `COUNT(*)` -> `COUNT(* WHERE p)`."""
+    if not call.endswith(")"):
+        raise AssertionError(f"not an aggregate call: {call!r}")
+    return f"{call[:-1]} WHERE {predicate})"
+
+
+def _aggregate_call(
+    rng: random.Random, relation: Relation, name: str
+) -> Optional[Tuple[str, Ty, str]]:
+    """`NAME([DISTINCT] column)` over a column `name` accepts: (call, output type, tag).
+
+    None when the relation has no column the aggregate takes.
+    """
+    accepted = _AGGREGATE_INPUT_TYPES.get(name, SCALAR)
+    candidates = [c for c in relation.columns if c.ty in accepted]
+    if name in _AGGREGATES_WITHHELD_FROM_NAN:
+        # An aggregate whose answer over a NaN-bearing column is unstable
+        # disarms every oracle that compares two runs, so it is withheld
+        # from the specials columns only — it still runs over every other
+        # column. The narrowing expires with the register entry that
+        # justifies it (test_nan_withholding_cites_a_live_register_entry).
+        candidates = [c for c in candidates if c.name not in NAN_BEARING_COLUMNS]
+    if not candidates:
+        return None
+    column = rng.choice(candidates)
+    distinct = "DISTINCT " if name in _DISTINCT_CAPABLE_AGGREGATES and rng.random() < 0.3 else ""
+    returns = _AGGREGATE_RETURNS.get(name)
+    return (
+        f"{name}({distinct}{column.quoted})",
+        column.ty if returns is None else returns,
+        f"agg:{name}{'/DISTINCT' if distinct else ''}",
+    )
+
+
 def _build_aggregate(generator: Generator, relation: Relation) -> SelectQuery:
     rng = generator.rng
     groupable = [c for c in _scalar_columns(relation) if c.ty is not Ty.ARRAY]
@@ -2528,27 +2621,16 @@ def _build_aggregate(generator: Generator, relation: Relation) -> SelectQuery:
             generator.tags.add("agg:COUNT(*)")
             aggregate_count += 1
             continue
-        accepted = _AGGREGATE_INPUT_TYPES.get(name, SCALAR)
-        candidates = [c for c in relation.columns if c.ty in accepted]
-        if name in _AGGREGATES_WITHHELD_FROM_NAN:
-            # An aggregate whose answer over a NaN-bearing column is unstable
-            # disarms every oracle that compares two runs, so it is withheld
-            # from the specials columns only — it still runs over every other
-            # column. The narrowing expires with the register entry that
-            # justifies it (test_nan_withholding_cites_a_live_register_entry).
-            candidates = [c for c in candidates if c.name not in NAN_BEARING_COLUMNS]
-        if not candidates:
+        built = _aggregate_call(rng, relation, name)
+        if built is None:
             continue
-        column = rng.choice(candidates)
-        distinct = "DISTINCT " if name in _DISTINCT_CAPABLE_AGGREGATES and rng.random() < 0.3 else ""
-        call = f"{name}({distinct}{column.quoted})"
+        call, out_ty, tag = built
         if call in emitted:
             continue
         emitted.add(call)
         projection.append(f"{call} AS {alias}")
-        returns = _AGGREGATE_RETURNS.get(name)
-        outputs.append(Column(alias, column.ty if returns is None else returns))
-        generator.tags.add(f"agg:{name}{'/DISTINCT' if distinct else ''}")
+        outputs.append(Column(alias, out_ty))
+        generator.tags.add(tag)
         aggregate_count += 1
 
     if aggregate_count == 0:
@@ -2557,33 +2639,44 @@ def _build_aggregate(generator: Generator, relation: Relation) -> SelectQuery:
         outputs.append(Column(alias, Ty.INTEGER))
         generator.tags.add("agg:COUNT(*)")
 
-    # `COUNT(*) FILTER (WHERE p)`. COUNT is the only aggregate that accepts a
-    # FILTER at all — every other one is refused at plan-build time ("Filters are
-    # not supported with aggregate function 'SUM'"), and so is COUNT(DISTINCT x)
-    # — so this is the whole of the construct's reachable surface, not a sample
-    # of it. Emitted at a high rate on purpose: it is the only shape the
-    # aggregate_filter_matches_where oracle can run against.
+    # `AGG(x WHERE p)` — the inline aggregate filter, the only spelling of it the
+    # engine accepts (`FILTER (WHERE p)` is refused at plan-build time and names
+    # this form in its message). It is lowered to `AGG(IIF(p, x, NULL))`, which is
+    # only faithful for an aggregate that IGNORES NULL input, so the engine accepts
+    # it on exactly those and refuses the rest by name ("does not ignore NULL
+    # input"). Every such aggregate the pool can produce is eligible here, plus
+    # `COUNT(* WHERE p)`; the set is the engine's own (_FILTERABLE_AGGREGATES), so
+    # the fuzzer's reach cannot silently lag it. That set is not trusted for
+    # CORRECTNESS: aggregate_filter_matches_where checks every emitted filter
+    # against `AGG(x)` over `WHERE (w) AND (p)`, which would expose an aggregate
+    # listed as NULL-ignoring that is not.
     #
-    # `"COUNT(*)"` is put into `emitted` because the FILTER'd count and a plain
-    # one COLLIDE: the filter is dropped from the aggregate's identity, so
-    # `COUNT(*) FILTER (WHERE p) AS n, COUNT(*) AS m` raises
-    # AmbiguousIdentifierError on `m`. Same root as
-    # single_table_known_gaps/aggregate-filter-is-silently-ignored, and it goes
-    # away when that does.
+    # Emitted at a high rate on purpose: it is the only shape the
+    # aggregate_filter_matches_where oracle can run against.
     aggregate_filter: Optional[str] = None
-    if _scalar_columns(relation) and "COUNT(*)" not in emitted and rng.random() < 0.55:
-        # depth=1, not the default 0. A FILTER predicate is lowered to the
-        # condition of an IIF, so it is NESTED by construction — and an IN-list
-        # on a FLOAT column only has a native kernel as the WHOLE predicate
-        # (single_table_known_gaps/float-in-list-only-works-at-top-level).
-        # Generating at depth 1 applies that rule, the same way a predicate under
-        # a connective gets it.
-        aggregate_filter = generator.predicate(depth=1).full()
-        emitted.add("COUNT(*)")
-        alias = generator.names.next("a")
-        projection.append(f"COUNT(*) FILTER (WHERE {aggregate_filter}) AS {alias}")
-        outputs.append(Column(alias, Ty.INTEGER))
-        generator.tags.add("agg:COUNT(*)/FILTER")
+    aggregate_filter_call: Optional[str] = None
+    if _scalar_columns(relation) and rng.random() < 0.55:
+        filterable = [name for name in pool if name in _FILTERABLE_AGGREGATES]
+        name = rng.choice(filterable) if filterable and rng.random() < 0.7 else "COUNT(*)"
+        built = (
+            ("COUNT(*)", Ty.INTEGER, "agg:COUNT(*)")
+            if name == "COUNT(*)"
+            else _aggregate_call(rng, relation, name)
+        )
+        if built is not None:
+            call, out_ty, tag = built
+            # depth=1, not the default 0. An aggregate filter is lowered to the
+            # condition of an IIF, so it is NESTED by construction — and an IN-list
+            # on a FLOAT column only has a native kernel as the WHOLE predicate
+            # (single_table_known_gaps/float-in-list-only-works-at-top-level).
+            # Generating at depth 1 applies that rule, the same way a predicate
+            # under a connective gets it.
+            aggregate_filter = generator.predicate(depth=1).full()
+            aggregate_filter_call = call
+            alias = generator.names.next("a")
+            projection.append(f"{with_aggregate_filter(call, aggregate_filter)} AS {alias}")
+            outputs.append(Column(alias, out_ty))
+            generator.tags.add(f"{tag}/FILTER")
 
     query = SelectQuery(
         source=relation.sql,
@@ -2591,6 +2684,7 @@ def _build_aggregate(generator: Generator, relation: Relation) -> SelectQuery:
         output_columns=tuple(outputs),
         group_by=group_by,
         aggregate_filter=aggregate_filter,
+        aggregate_filter_call=aggregate_filter_call,
         has_aggregate=True,
         tags={"aggregate"},
     )

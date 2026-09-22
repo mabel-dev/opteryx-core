@@ -68,7 +68,7 @@
             }
         ],
         "precedence": {
-            "level": 14,
+            "level": 13,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -617,7 +617,7 @@
             }
         ],
         "precedence": {
-            "level": 7,
+            "level": 6,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -688,7 +688,7 @@
             }
         ],
         "precedence": {
-            "level": 9,
+            "level": 8,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -759,7 +759,7 @@
             }
         ],
         "precedence": {
-            "level": 8,
+            "level": 7,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -1180,7 +1180,7 @@
             }
         ],
         "precedence": {
-            "level": 10,
+            "level": 9,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -1442,7 +1442,7 @@
             }
         ],
         "precedence": {
-            "level": 10,
+            "level": 9,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -1704,7 +1704,7 @@
             }
         ],
         "precedence": {
-            "level": 10,
+            "level": 9,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -1846,7 +1846,7 @@
             }
         ],
         "precedence": {
-            "level": 11,
+            "level": 10,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -1918,7 +1918,7 @@
             }
         ],
         "precedence": {
-            "level": 8,
+            "level": 7,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -1990,7 +1990,7 @@
             }
         ],
         "precedence": {
-            "level": 8,
+            "level": 7,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -2143,7 +2143,7 @@
             }
         ],
         "precedence": {
-            "level": 10,
+            "level": 9,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -2286,7 +2286,7 @@
             }
         ],
         "precedence": {
-            "level": 11,
+            "level": 10,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -2701,7 +2701,7 @@
             }
         ],
         "precedence": {
-            "level": 10,
+            "level": 9,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -2962,7 +2962,7 @@
             }
         ],
         "precedence": {
-            "level": 10,
+            "level": 9,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -3883,7 +3883,7 @@
             }
         ],
         "precedence": {
-            "level": 10,
+            "level": 9,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -4022,7 +4022,7 @@
             }
         ],
         "precedence": {
-            "level": 11,
+            "level": 10,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -4170,7 +4170,7 @@
             }
         ],
         "precedence": {
-            "level": 10,
+            "level": 9,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -4308,7 +4308,7 @@
             }
         ],
         "precedence": {
-            "level": 11,
+            "level": 10,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -4447,7 +4447,7 @@
             }
         ],
         "precedence": {
-            "level": 11,
+            "level": 10,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -4858,7 +4858,7 @@
             }
         ],
         "precedence": {
-            "level": 11,
+            "level": 10,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -4931,7 +4931,7 @@
             }
         ],
         "precedence": {
-            "level": 8,
+            "level": 7,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -5004,7 +5004,7 @@
             }
         ],
         "precedence": {
-            "level": 8,
+            "level": 7,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -5188,13 +5188,12 @@
             }
         ],
         "precedence": {
-            "level": 6,
+            "level": 14,
             "levels": 15,
             "position": "infix",
             "spellings": [
                 "XOR"
-            ],
-            "note": "Logical XOR binds TIGHTER than `&` and every comparison, unlike MySQL, where it sits between AND and OR. `a = b XOR c = d` is `a = (b XOR c) = d` - parenthesise the comparisons: `(a = b) XOR (c = d)`."
+            ]
         },
         "notes": "Unlike AND and OR, XOR has no dominant value: the answer always depends on both sides, so NULL on either side gives NULL."
     }

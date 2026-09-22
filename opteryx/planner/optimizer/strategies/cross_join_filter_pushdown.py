@@ -28,6 +28,7 @@ from opteryx.planner.optimizer.strategies.join_key_materialization import (
 )
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.planner.optimizer.strategies.optimization_strategy import OptimizerContext, OptimizationStrategy
+from opteryx.planner.optimizer.strategies.predicate_rewriter import _shallow
 
 # Arithmetic operators an equi-join key is allowed to be hoisted through, e.g.
 # `a.x = b.y - 53` (TPC-DS Q02's `d_week_seq1 = d_week_seq2 - 53`). Restricted
@@ -142,20 +143,25 @@ def _affine_hoist_target(expr: Optional[Node], relations: List[str]) -> bool:
 
 def _hoist_arithmetic_join_key(
     plan: LogicalPlan, join_id: str, join_node: LogicalPlanNode, pred: Node
-) -> bool:
+) -> Optional[Node]:
     """Rewrite `identifier = affine_expr(other_identifier, literal)` (or the
-    mirror) in place into `identifier = new_identifier`, materialising the
-    affine expression as a genuine column above the side it's bound to.
+    mirror) into a NEW `identifier = new_identifier`, materialising the affine
+    expression as a genuine column above the side it's bound to.
+
+    `pred` itself is not modified. It is the WHERE clause's own conjunct, also held
+    by the pre-optimization plan, and the column the new reference names only
+    exists above the Project this inserts - an in-place swap handed every other
+    holder an equality over a column it cannot see.
 
     Once rewritten, `pred` is an ordinary bare-identifier equality that
     `_extract_join_predicates`/`extract_join_fields` (and, transitively,
     DPccp's edge classifier and the row-count estimator) already handle --
     this function's only job is to make that shape true, not to duplicate
-    any of that logic. Returns True if `pred` was rewritten, False if it
-    doesn't match the recognised shape (`pred` is left untouched).
+    any of that logic. Returns the rewritten predicate, or None if `pred` doesn't
+    match the recognised shape.
     """
     if pred.node_type != NodeType.COMPARISON_OPERATOR or pred.value != "Eq":
-        return False
+        return None
     left_relations = join_node.left_relation_names or []
     right_relations = join_node.right_relation_names or []
 
@@ -185,14 +191,13 @@ def _hoist_arithmetic_join_key(
                 target_child_id = child_id
                 break
         if target_child_id is None:
-            return False
+            return None
 
         new_ref = materialize_operand_as_column(plan, target_child_id, other, expr_relations)
         if new_ref is None:
-            return False
-        setattr(pred, other_attr, new_ref)
-        return True
-    return False
+            return None
+        return _shallow(pred, **{other_attr: new_ref})
+    return None
 
 
 def _collect_scan_uuids(plan: LogicalPlan, root_id: str) -> List[str]:
@@ -509,13 +514,20 @@ class CrossJoinFilterPushdownStrategy(OptimizationStrategy):
 
             for join_id, join_node in cross_joins:
                 # Rewrite `a = b <op> literal` conjuncts (one side wrapped in
-                # arithmetic) into `a = <materialised column>` IN PLACE, before
+                # arithmetic) into `a = <materialised column>` as NEW nodes, before
                 # classification -- so the ordinary bare-identifier path below
                 # picks them up unchanged. Predicates already bare-identifier
                 # on both sides are untouched (_hoist_arithmetic_join_key
                 # returns False for them; nothing to hoist).
-                for conjunct in _split_and_conditions(remaining_condition):
+                conjuncts = _split_and_conditions(remaining_condition)
+                hoisted = [
                     _hoist_arithmetic_join_key(plan, join_id, join_node, conjunct)
+                    for conjunct in conjuncts
+                ]
+                if any(new is not None for new in hoisted):
+                    remaining_condition = _build_and_condition_tree(
+                        [new if new is not None else old for new, old in zip(hoisted, conjuncts)]
+                    )
 
                 join_preds, remaining_preds = _extract_join_predicates(
                     remaining_condition,

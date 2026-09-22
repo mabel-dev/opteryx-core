@@ -12,7 +12,7 @@ The defect this pins returned ZERO rows, silently, for
 
 against a live IPv4 column holding 92_077 matching rows, while
 `CAST(src_addr AS VARCHAR) = '192.168.4.136'` and
-`COUNT(*) FILTER (WHERE ...)` over the same predicate both answered correctly.
+`COUNT(* WHERE ...)` over the same predicate both answered correctly.
 
 CAUSE — not IPv4 at all, and not the comparison. Parquet has no unsigned and no
 narrow physical storage: UINT8/16/32 all travel as physical int32. The scan's
@@ -27,8 +27,9 @@ is asserted below because each is what made it look like something else:
 
   * only NARROW prefixes failed — a `/16` or `/24` rewrites to a BETWEEN, and
     only Eq/IN feed the decode-skip probe;
-  * `COUNT(*) FILTER` was right — the rewrite only visits WHERE conditions, so
-    FILTER keeps the native `ipv4_in_cidr` kernel and never pushes;
+  * `COUNT(* WHERE ...)` was right — the rewrite only visits WHERE conditions,
+    so an aggregate's own filter keeps the native `ipv4_in_cidr` kernel and
+    never pushes;
   * the value was above 127.255.255.255 — below the signed midpoint the two
     readings agree, so half the address space worked.
 
@@ -164,15 +165,15 @@ def test_host_route_where_matches_the_varchar_cast(dataset, predicate):
 
 
 def test_where_and_filter_agree(dataset):
-    """WHERE and COUNT(*) FILTER over the same predicate are the same question.
+    """WHERE and `COUNT(* WHERE ...)` over the same predicate are the same question.
 
-    They took different routes — FILTER is never rewritten to a range and never
+    They took different routes — an aggregate's filter is never rewritten to a range and never
     pushed — and the divergence was the first sign the comparison itself was
     fine. Parity here is the assertion that the two routes stay one answer.
     """
     filtered = _count(
         dataset,
-        select=f"COUNT(*) FILTER (WHERE src_addr <<= '{TARGET_TEXT}/32') AS c",
+        select=f"COUNT(* WHERE src_addr <<= '{TARGET_TEXT}/32') AS c",
     )
     assert filtered == EXPECTED
     assert _count(dataset, f"src_addr <<= '{TARGET_TEXT}/32'") == filtered

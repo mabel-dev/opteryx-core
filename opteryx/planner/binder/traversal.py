@@ -22,7 +22,15 @@ def post_bind(self, node):
     def _inner(branch):
         if branch.fully_bound is False:
             if branch.schema_column.identity in seen:
-                branch = seen[branch.schema_column.identity]
+                # A copy PER REPEAT, never the stored template itself. Handing every
+                # repeat the same object made the bound tree a DAG: IS [NOT]
+                # DISTINCT FROM (which repeats its operands) came out with one null
+                # test in two places, and a rewrite that inverted it in place for
+                # one NOT flipped it for the other too (a WHERE that matched every
+                # row instead of none). The recursion below also writes children
+                # back into whatever `branch` is, so a shared template was edited
+                # once per repeat.
+                branch = seen[branch.schema_column.identity].copy()
         elif branch.schema_column:
             seen[branch.schema_column.identity] = branch.copy()
         if branch.left is not None:

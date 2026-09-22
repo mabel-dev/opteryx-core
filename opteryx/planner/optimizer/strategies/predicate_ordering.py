@@ -38,6 +38,7 @@ from opteryx.types import logical_type as _lt
 from opteryx.types.schema import ConstantColumn
 from opteryx.utils import random_string
 
+from .predicate_rewriter import _shallow
 from .optimization_strategy import (
     OptimizationStrategy,
     OptimizerContext,
@@ -156,7 +157,8 @@ def rewrite_anded_any_eq_to_contains_all(predicate, telemetry):
     Notes:
       - We only match: LITERAL = ANY(IDENTIFIER)
       - We group by the SAME column identity
-      - Remaining AND nodes are neutralized to TRUE (since X AND TRUE == X)
+      - Absorbed members are left out of a new DNF (X AND TRUE == X); inputs are
+        not modified
     """
     anyeq_by_col = {}
 
@@ -177,48 +179,63 @@ def rewrite_anded_any_eq_to_contains_all(predicate, telemetry):
                                 "nodes": [],
                                 "column_node": param.right,
                             }
-                        grouped[col_id]["values"].append(param.left.value)
-                        grouped[col_id]["nodes"].append(param)
+                        # One object reached twice counts once.
+                        if all(member is not param for member in grouped[col_id]["nodes"]):
+                            grouped[col_id]["values"].append(param.left.value)
+                            grouped[col_id]["nodes"].append(param)
 
     collect_any_eq_and(predicate, anyeq_by_col)
 
+    # New nodes only. The matched `= ANY` nodes are the Filters' own condition
+    # objects, still held by the Filter steps this pass removed and by the
+    # pre-optimization plan; rewriting them in place turned every one after the
+    # first into LITERAL TRUE for all of those holders - a dropped filter. The
+    # fused node takes the first member's place and the absorbed members are left
+    # out of the new DNF's list (X AND TRUE == X, so dropping is the same thing).
+    replacements: dict = {}
+    absorbed: set = set()
     for data in anyeq_by_col.values():
         # Only worth rewriting if we have 2+ literals against the same array column
         if len(data["values"]) > 1:
             telemetry.optimization_predicate_rewriter_anyeq_to_contains_all += 1
-
-            # Reuse the first matched node as the replacement site
-            new_node = data["nodes"][0]
-
-            # Build right-hand side as an ARRAY constant of unique values
-            # (use a set to dedupe; order doesn't matter)
+            first = data["nodes"][0]
+            # An ARRAY constant of unique values (a set: order does not matter)
             values_set = set(data["values"])
-            new_node.left.value = values_set
             # Phase 2: build ARRAY ColumnType directly from old element type.
-            _old_elem_ct_po = new_node.left.type
-            _arr_ct_po = _lt.ARRAY(_old_elem_ct_po) if isinstance(_old_elem_ct_po, ColumnType) else _lt.ARRAY(_lt.VARIANT)
-            new_node.left.type = _arr_ct_po
-            new_node.left.schema_column = ConstantColumn(
-                name=new_node.left.name,
-                column_type=_arr_ct_po,
-                value=new_node.left.value,
+            _old_elem_ct_po = first.left.type
+            _arr_ct_po = (
+                _lt.ARRAY(_old_elem_ct_po)
+                if isinstance(_old_elem_ct_po, ColumnType)
+                else _lt.ARRAY(_lt.VARIANT)
             )
+            values_literal = _shallow(
+                first.left,
+                value=values_set,
+                type=_arr_ct_po,
+                schema_column=ConstantColumn(
+                    name=first.left.name, column_type=_arr_ct_po, value=values_set
+                ),
+            )
+            # column @>> ARRAY[...] - the column (array) on the left
+            replacements[id(first)] = _shallow(
+                first,
+                node_type=NodeType.COMPARISON_OPERATOR,
+                value="ArrayContainsAll",
+                left=data["column_node"],
+                right=values_literal,
+            )
+            absorbed.update(id(node) for node in data["nodes"][1:])
 
-            # Turn node into: column @>> ARRAY[...]
-            new_node.value = "ArrayContainsAll"  # your @>> operator
-            new_node.node_type = NodeType.COMPARISON_OPERATOR
-            new_node.right = data["column_node"]
-
-            # Swap so LHS is the column (array), RHS is the values array
-            new_node.left, new_node.right = new_node.right, new_node.left
-
-            # Neutralize the remaining AND'ed ANYOPEQ nodes to TRUE
-            for node in data["nodes"][1:]:
-                node.node_type = NodeType.LITERAL
-                node.type = _lt.BOOLEAN
-                node.value = True
-
-    return predicate
+    if not replacements:
+        return predicate
+    return _shallow(
+        predicate,
+        parameters=[
+            replacements.get(id(param), param)
+            for param in predicate.parameters
+            if id(param) not in absorbed
+        ],
+    )
 
 
 def order_predicates(predicates: list, telemetry, relation_stats=None) -> list:

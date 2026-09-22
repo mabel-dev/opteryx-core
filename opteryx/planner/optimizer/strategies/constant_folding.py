@@ -123,6 +123,26 @@ def _build_if_not_null_node(root, value, value_if_not_null) -> Node:
     return node
 
 
+def _keeps_result_type(root, operand) -> bool:
+    """True when folding `root` to `operand` leaves its RESULT TYPE unchanged.
+
+    An algebraic identity (`x * 1`, `x + 0`, `x / 1`) is only an identity of
+    values; the operator also decides the result's type, and the folded node keeps
+    `root`'s schema_column while reading the operand's data. `/` always yields a
+    float, so `i_value / 1` folded to the INT64 column answered -937218 where
+    `i_value / 2` answers -468609.0; DECIMAL `+ 0` widens the precision. Fold only
+    when nothing but the value would change - unknown types are not evidence.
+    """
+    root_column = root.schema_column
+    operand_column = operand.schema_column
+    if root_column is None or operand_column is None:
+        return False
+    return (
+        root_column.column_type is not None
+        and root_column.column_type == operand_column.column_type
+    )
+
+
 def _build_transparent_node(root, value, telemetry) -> Node:
     # An algebraic reduction (x * 1 -> x, TRUE AND x -> x) must keep the folded
     # expression's output identity — downstream references root's schema_column,
@@ -311,6 +331,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 and root.left.node_type == NodeType.LITERAL
                 and root.right.node_type == NodeType.IDENTIFIER
                 and root.left.value == 1
+                and _keeps_result_type(root, root.right)
             ):
                 # 1 * anything = anything (except NULL)
                 node = _build_transparent_node(root, root.right, telemetry)
@@ -321,6 +342,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 and root.right.node_type == NodeType.LITERAL
                 and root.left.node_type == NodeType.IDENTIFIER
                 and root.right.value == 1
+                and _keeps_result_type(root, root.left)
             ):
                 # anything * 1 = anything (except NULL)
                 node = _build_transparent_node(root, root.left, telemetry)
@@ -331,6 +353,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 and root.left.node_type == NodeType.LITERAL
                 and root.right.node_type == NodeType.IDENTIFIER
                 and root.left.value == 0
+                and _keeps_result_type(root, root.right)
             ):
                 # 0 + anything = anything (except NULL)
                 node = _build_transparent_node(root, root.right, telemetry)
@@ -341,6 +364,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 and root.right.node_type == NodeType.LITERAL
                 and root.left.node_type == NodeType.IDENTIFIER
                 and root.right.value == 0
+                and _keeps_result_type(root, root.left)
             ):
                 # anything +/- 0 = anything (except NULL)
                 node = _build_transparent_node(root, root.left, telemetry)
@@ -351,6 +375,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 and root.right.node_type == NodeType.LITERAL
                 and root.left.node_type == NodeType.IDENTIFIER
                 and root.right.value == 1
+                and _keeps_result_type(root, root.left)
             ):
                 # anything / 1 = anything (except NULL)
                 node = _build_transparent_node(root, root.left, telemetry)

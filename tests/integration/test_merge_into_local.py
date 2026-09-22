@@ -940,8 +940,13 @@ def test_do_nothing_shields_rows_from_a_later_delete_arm(merge_env):
 
 def test_do_nothing_shields_a_row_from_a_later_update_arm(merge_env):
     """The same shadowing, against the arm that MUTATES rather than removes.
-    cve 3's details differ from the source's, so the UPDATE arm would rewrite it
-    (details 30 → 99, revision 1 → 2) if the guard arm did not claim it first."""
+
+    Both cve 2 and cve 3 match, and the UPDATE arm is unconditional, so it would
+    rewrite BOTH. cve 3 is claimed by the guard arm first and must come out
+    byte-identical (details 30, not the source's 99; revision still 1) — while
+    cve 2, which the guard does not claim, must be updated. The asymmetry is the
+    proof: a guard that claimed everything, or nothing, fails one half.
+    """
     sql = f"""
     MERGE INTO {TARGET} AS n
     USING {SOURCE} AS t
@@ -950,7 +955,11 @@ def test_do_nothing_shields_a_row_from_a_later_update_arm(merge_env):
      WHEN MATCHED THEN UPDATE SET details = t.details, revision = n.revision + 1
     """
     list(opteryx.session(user="tester").execute_to_morsels(sql))
-    assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 30, 1)]
+    assert _target_rows() == [
+        (1, 10, 1),  # never mentioned by the source
+        (2, 20, 2),  # matched, NOT claimed by the guard — updated
+        (3, 30, 1),  # claimed by the DO NOTHING arm — shielded from the UPDATE
+    ]
 
 
 def test_do_nothing_shielding_a_row_writes_no_snapshot(merge_env):
@@ -1045,4 +1054,21 @@ def test_do_nothing_still_claims_its_row_for_the_cardinality_check(merge_env):
      WHEN MATCHED THEN DO NOTHING
     """
     with pytest.raises(UnsupportedSyntaxError):
+        list(opteryx.session(user="tester").execute_to_morsels(sql))
+
+
+def test_update_set_star_is_refused_by_name(merge_env):
+    """`UPDATE SET *` parses (sqlparser carries it as a second `kind` variant)
+    but binds every source column to a target column by position, an order
+    neither side states. It must be refused saying so — not arrive as an arm
+    that mysteriously assigns nothing."""
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING {SOURCE} AS t
+       ON n.cve = t.cve
+     WHEN MATCHED THEN UPDATE SET *
+    """
+    with pytest.raises(UnsupportedSyntaxError, match="SET \\*"):
         list(opteryx.session(user="tester").execute_to_morsels(sql))

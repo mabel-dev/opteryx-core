@@ -165,6 +165,7 @@ from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, Logica
 from opteryx.planner.optimizer.strategies.join_key_materialization import (
     materialize_operand_as_column,
 )
+from opteryx.planner.optimizer.strategies.predicate_rewriter import _shallow
 from opteryx.planner.optimizer.strategies.optimization_strategy import (
     FILTER_REFERENCED_NODE_TYPES,
     OptimizationStrategy,
@@ -194,17 +195,17 @@ def _is_in_subquery(node) -> bool:
     )
 
 
-def _find_exists(condition):
+def _find_exists(condition, into_aggregates: bool = True):
     """Locate the first EXISTS node, as (node, replace_fn)."""
-    return _find(condition, _is_exists)
+    return _find(condition, _is_exists, into_aggregates)
 
 
-def _find_in(condition):
+def _find_in(condition, into_aggregates: bool = True):
     """Locate the first IN-subquery node, as (node, replace_fn)."""
-    return _find(condition, _is_in_subquery)
+    return _find(condition, _is_in_subquery, into_aggregates)
 
 
-def _find_subquery(condition):
+def _find_subquery(condition, into_aggregates: bool = True):
     """
     Locate the first SCALAR subquery node, as (node, replace_fn).
 
@@ -212,21 +213,47 @@ def _find_subquery(condition):
     a boolean test, not a value. Descending into them would treat the same node
     as both, so they are skipped here and matched by `_find_exists` instead.
     """
-    return _find(condition, lambda n: n.node_type == NodeType.SUBQUERY)
+    return _find(condition, lambda n: n.node_type == NodeType.SUBQUERY, into_aggregates)
 
 
-def _find(condition, predicate):
+# The finders a FILTER's condition is searched with. A filter never searches inside
+# an aggregate: see `_find`'s `into_aggregates`.
+def _filter_find_exists(condition):
+    return _find_exists(condition, into_aggregates=False)
+
+
+def _filter_find_in(condition):
+    return _find_in(condition, into_aggregates=False)
+
+
+def _filter_find_subquery(condition):
+    return _find_subquery(condition, into_aggregates=False)
+
+
+def _find(condition, predicate, into_aggregates: bool = True):
     """
     First node satisfying `predicate`, with a callable that replaces it in place.
 
     Returns (node, replace_fn) or (None, None). `replace_fn(new)` returns the new
     root of the expression, which matters when the match IS the root.
+
+    `into_aggregates=False` stops at an AGGREGATOR. That is how a FILTER searches:
+    a subquery inside an aggregate is an input TO the aggregate, computed by the
+    Aggregate step below, and HAVING's aggregate is the SAME object as that step's
+    (the binder shares it). Claiming it from the HAVING filter put the join ABOVE
+    the Aggregate, which then read a value produced above it - `HAVING SUM(CASE
+    WHEN x > (SELECT AVG(x) ...) ...) > 1` died with "the stream does not carry".
+    Left alone, the Aggregate step's own rewrite (`_SUBQUERY_BEARING_ATTRS`)
+    replaces it in the shared node, which the filter then sees.
     """
     if condition is None:
         return None, None
 
     if predicate(condition):
         return condition, lambda new: new
+
+    if not into_aggregates and condition.node_type == NodeType.AGGREGATOR:
+        return None, None
 
     # An EXISTS/IN node owns the subquery beneath it; never look inside one while
     # searching for something else.
@@ -263,7 +290,7 @@ def _find(condition, predicate):
     ):
         if child is None:
             continue
-        found, replace_child = _find(child, predicate)
+        found, replace_child = _find(child, predicate, into_aggregates)
         if found is not None:
 
             def _replace(new, _c=condition, _a=attr, _rc=replace_child):
@@ -278,7 +305,7 @@ def _find(condition, predicate):
     # each of THEN/ELSE — none reachable via left/right/centre/parameters above.
     if condition.node_type == NodeType.CASE:
         for index, branch_condition in enumerate(condition.conditions or []):
-            found, replace_child = _find(branch_condition, predicate)
+            found, replace_child = _find(branch_condition, predicate, into_aggregates)
             if found is not None:
 
                 def _replace(new, _c=condition, _i=index, _rc=replace_child):
@@ -288,7 +315,7 @@ def _find(condition, predicate):
                 return found, _replace
 
         for index, branch_result in enumerate(condition.results or []):
-            found, replace_child = _find(branch_result, predicate)
+            found, replace_child = _find(branch_result, predicate, into_aggregates)
             if found is not None:
 
                 def _replace(new, _c=condition, _i=index, _rc=replace_child):
@@ -298,7 +325,7 @@ def _find(condition, predicate):
                 return found, _replace
 
         if condition.else_result is not None:
-            found, replace_child = _find(condition.else_result, predicate)
+            found, replace_child = _find(condition.else_result, predicate, into_aggregates)
             if found is not None:
 
                 def _replace(new, _c=condition, _rc=replace_child):
@@ -308,7 +335,7 @@ def _find(condition, predicate):
                 return found, _replace
 
     for index, param in enumerate(getattr(condition, "parameters", None) or []):
-        found, replace_param = _find(param, predicate)
+        found, replace_param = _find(param, predicate, into_aggregates)
         if found is not None:
 
             def _replace(new, _c=condition, _i=index, _rc=replace_param):
@@ -318,6 +345,88 @@ def _find(condition, predicate):
             return found, _replace
 
     return None, None
+
+
+def _consumable(embedded_plan: LogicalPlan) -> LogicalPlan:
+    """A copy of a subquery's embedded plan for this rewrite to consume.
+
+    Decorrelation takes the embedded plan apart - lifts its correlations out of its
+    filters, widens its aggregate, and grafts it into the outer plan. Doing that to
+    the plan the SUBQUERY node carries left every other holder of that node with a
+    plan that had already been consumed. `Graph.copy` deep-copies the steps while
+    keeping their node ids, the same copy CTE and view expansion use; only graph
+    structure is read from it here, so the instance attributes it does not carry
+    are not needed.
+    """
+    return embedded_plan.copy()
+
+
+def _replace_every(root, target, make_replacement):
+    """`root` with EVERY position holding `target` (by identity) replaced.
+
+    `_find` hands back a replacer for the FIRST position only, which is enough
+    while each SUBQUERY node appears once. It does not always: `a IS [NOT] DISTINCT
+    FROM b` expands to null tests plus a comparison and reuses its operand node in
+    all three (logical_planner_builders.distinct_from), so a scalar-subquery operand
+    is ONE node in three places. Replacing only the first left two positions
+    holding a subquery whose embedded plan this rewrite had already consumed, and
+    the next pass decorrelated it AGAIN - "A scalar subquery must return exactly one
+    column, this one returns 2". Every position gets its own replacement node.
+
+    A position can also hold a COPY of the subquery rather than the object itself.
+    The binder's `post_bind` (binder/traversal.py) swaps each repeat of an already
+    bound calculated expression for a `.copy()` of the first one, and `Node.copy`
+    deep-copies the embedded plan WITH ITS NODE IDS. Decorrelating that copy as a
+    second subquery grafted a second plan whose nids collide with the first - one
+    inner subtree with two Join consumers, which the optimizer's walk visits twice
+    (`RedundantOperationsStrategy` then died on `None.alias`). `Node.copy` keeps the
+    `uuid`, so a SUBQUERY node carrying the target's uuid is the same written
+    subquery; it is replaced by the same value, and its duplicate plan is dropped.
+
+    Children are replaced in place. That is safe on a shared parent because the
+    substitution means the same thing everywhere: the subquery IS that value.
+    """
+
+    def _is_target(node):
+        return node is target or (
+            isinstance(node, Node)
+            and node.node_type == NodeType.SUBQUERY
+            and node.uuid == target.uuid
+        )
+
+    if _is_target(root):
+        return make_replacement()
+    visited: set = set()
+
+    def _walk(node):
+        if not isinstance(node, Node) or id(node) in visited:
+            return
+        visited.add(id(node))
+        if node.node_type == NodeType.SUBQUERY:
+            return  # a different subquery's plan is not this rewrite's to touch
+        for attr in ("left", "right", "centre", "else_result"):
+            child = node.get(attr)
+            if _is_target(child):
+                setattr(node, attr, make_replacement())
+            else:
+                _walk(child)
+        for attr in ("parameters", "conditions", "results"):
+            children = node.get(attr)
+            if not children:
+                continue
+            # Rebuilt rather than assigned into: the binder stores `parameters` as a
+            # tuple (it is the output of a zip).
+            replaced = []
+            for child in children:
+                if _is_target(child):
+                    replaced.append(make_replacement())
+                else:
+                    _walk(child)
+                    replaced.append(child)
+            setattr(node, attr, type(children)(replaced) if isinstance(children, tuple) else replaced)
+
+    _walk(root)
+    return root
 
 
 def _is_outer(node) -> bool:
@@ -1309,7 +1418,7 @@ def _local_copy(column) -> LogicalColumn:
 def _has_work(condition) -> bool:
     return any(
         finder(condition)[0] is not None
-        for finder in (_find_subquery, _find_exists, _find_in)
+        for finder in (_filter_find_subquery, _filter_find_exists, _filter_find_in)
     )
 
 
@@ -1465,7 +1574,7 @@ def _decorrelate_projection_existence(plan: LogicalPlan, project_nid: str, telem
 
     negated = bool(remove.negated)
     if _is_in_subquery(remove):
-        inner_plan = remove.right.value
+        inner_plan = _consumable(remove.right.value)
         # The subquery's single output column is one side of the membership test —
         # also the "exactly one column" rule for an IN subquery.
         membership_column = _output_column(inner_plan)
@@ -1478,7 +1587,7 @@ def _decorrelate_projection_existence(plan: LogicalPlan, project_nid: str, telem
         three_valued = True
         replace_projection = False
     else:
-        inner_plan = remove.parameters[0].value
+        inner_plan = _consumable(remove.parameters[0].value)
         key_pairs, residual = _lift_correlations(inner_plan)
         if not key_pairs:
             # UNCORRELATED EXISTS is not this join: the test is "any row at all",
@@ -1780,9 +1889,9 @@ class DecorrelateSubqueryStrategy(OptimizationStrategy):
             # existence test was the whole predicate), and a scalar pass would then
             # be looking at a node that is no longer in the plan.
             for finder, rewrite in (
-                (_find_exists, _decorrelate_exists),
-                (_find_in, _decorrelate_in),
-                (_find_subquery, _decorrelate),
+                (_filter_find_exists, _decorrelate_exists),
+                (_filter_find_in, _decorrelate_in),
+                (_filter_find_subquery, _decorrelate),
             ):
                 while filter_nid in plan and finder(plan[filter_nid].condition)[0] is not None:
                     plan = rewrite(plan, filter_nid, self.telemetry)
@@ -2015,12 +2124,12 @@ def _decorrelate_in(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPla
     "simplified" to a plain anti join.
     """
     filter_node = plan[filter_nid]
-    in_node, replace_fn = _find_in(filter_node.condition)
+    in_node, replace_fn = _filter_find_in(filter_node.condition)
     if in_node is None:
         return plan
 
     negated = bool(in_node.negated)
-    inner_plan = in_node.right.value
+    inner_plan = _consumable(in_node.right.value)
 
     # The subquery's single output column is one side of the membership test. This
     # is also the "exactly one column" rule for an IN subquery.
@@ -2059,13 +2168,13 @@ def _decorrelate_exists(plan: LogicalPlan, filter_nid: str, telemetry) -> Logica
     EXISTS node is simply removed from the predicate.
     """
     filter_node = plan[filter_nid]
-    exists_node, replace_fn = _find_exists(filter_node.condition)
+    exists_node, replace_fn = _filter_find_exists(filter_node.condition)
     if exists_node is None:
         return plan
 
     negated = bool(exists_node.negated)
     subquery = exists_node.parameters[0]
-    inner_plan = subquery.value
+    inner_plan = _consumable(subquery.value)
 
     key_pairs, residual = _lift_correlations(inner_plan)
 
@@ -2730,7 +2839,7 @@ def _is_removable_conjunct(condition, target) -> bool:
 
 def _split_out(condition, target):
     """
-    Remove `target` from a conjunction.
+    Remove `target` from a conjunction, without modifying the input tree.
 
     Returns (found, remaining); remaining is None when `target` was the whole
     predicate. `_is_removable_conjunct` answers the `found` question without
@@ -2757,18 +2866,21 @@ def _split_out(condition, target):
             return True, right
         if right is None:
             return True, left
-        condition.left, condition.right = left, right
-        return True, condition
+        # A NEW AND node: `condition` is the Filter's own condition tree, which the
+        # pre-optimization plan holds too. Editing it in place removed the conjunct
+        # for every holder, leaving a Filter that had silently lost its EXISTS/IN
+        # test with no join to replace it.
+        return True, _shallow(condition, left=left, right=right)
     return False, condition
 
 
 def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
     filter_node = plan[filter_nid]
-    subquery, replace_subquery = _find_subquery(filter_node.condition)
+    subquery, _ = _filter_find_subquery(filter_node.condition)
     if subquery is None:
         return plan
 
-    inner_plan = subquery.value
+    inner_plan = _consumable(subquery.value)
 
     # --- pull the correlation out of the subquery -----------------------------
     key_pairs, residual = _lift_correlations(inner_plan)
@@ -2829,7 +2941,9 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
             _expose_key(inner_plan, inner_key)
 
     # --- the subquery's value becomes an ordinary column ----------------------
-    filter_node.condition = replace_subquery(_reference_to(value_column))
+    filter_node.condition = _replace_every(
+        filter_node.condition, subquery, lambda: _reference_to(value_column)
+    )
     filter_node.columns = [
         column
         for column in (filter_node.columns or [])
@@ -3051,11 +3165,11 @@ def _decorrelate_projection(plan: LogicalPlan, project_nid: str, telemetry) -> L
     does.
     """
     project_node = plan[project_nid]
-    subquery, replace_subquery = _find_subquery_in_node(project_node)
+    subquery, _ = _find_subquery_in_node(project_node)
     if subquery is None:
         return plan
 
-    inner_plan = subquery.value
+    inner_plan = _consumable(subquery.value)
 
     # --- pull the correlation out of the subquery -----------------------------
     key_pairs, residual = _lift_correlations(inner_plan)
@@ -3090,7 +3204,12 @@ def _decorrelate_projection(plan: LogicalPlan, project_nid: str, telemetry) -> L
         value_column.origin = [scalar_alias]
 
     # --- the subquery's value becomes an ordinary column ----------------------
-    replace_subquery(_reference_to(value_column))
+    for attribute in _SUBQUERY_BEARING_ATTRS.get(project_node.node_type, ()):
+        expressions = getattr(project_node, attribute)
+        for index, expression in enumerate(expressions or []):
+            expressions[index] = _replace_every(
+                expression, subquery, lambda: _reference_to(value_column)
+            )
 
     # --- graft the subquery in as a joined relation ---------------------------
     # Capture the outer leg BEFORE rewiring: insert_node_before moves every

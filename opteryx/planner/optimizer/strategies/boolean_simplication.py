@@ -61,6 +61,31 @@ INVERSIONS = {**HALF_INVERSIONS, **{v: k for k, v in HALF_INVERSIONS.items()}}
 _INVERTIBLE_NODE_TYPES = (NodeType.COMPARISON_OPERATOR, NodeType.UNARY_OPERATOR)
 
 
+def _inverted(node: LogicalPlanNode) -> LogicalPlanNode:
+    """A NEW node computing the negation of `node` — never `node` edited in place.
+
+    Expression trees are not guaranteed to be trees: the binder resolves two
+    identical sub-expressions to ONE shared Node. `a IS DISTINCT FROM b` expands to
+    null tests (see logical_planner_builders.distinct_from), so
+    `NOT (g IS DISTINCT FROM c OR x IS NOT DISTINCT FROM g)` holds a single
+    `g IS NOT NULL` object in BOTH expansions. Inverting it in place flipped it
+    once for each NOT under De Morgan - back to where it started - so both
+    occurrences read IS NOT NULL and the predicate matched every row instead of
+    none. A negation is a different expression, so it is a different node.
+
+    `schema_column` is not carried: it names the bound column of the ORIGINAL
+    expression (`g IS NOT NULL`), and the inverted node computes something else.
+    Children are shared, as they are unchanged.
+    """
+    properties = {
+        name: value
+        for name, value in node.properties.items()
+        if name not in ("node_type", "uuid", "schema_column")
+    }
+    properties["value"] = INVERSIONS[node.value]
+    return Node(node.node_type, **properties)
+
+
 def _directly_invertible(node: LogicalPlanNode) -> bool:
     """True when `NOT node` collapses to a single node with no NOT left behind."""
     while node is not None and node.node_type == NodeType.NESTED:
@@ -343,9 +368,8 @@ def update_expression_tree(node: LogicalPlanNode, telemetry: QueryTelemetry):
 
         # NOT(A = B) => A != B, NOT(x IN (..)) => x NOT IN (..), NOT(x IS NULL) => x IS NOT NULL
         if centre_node.node_type in _INVERTIBLE_NODE_TYPES and centre_node.value in INVERSIONS:
-            centre_node.value = INVERSIONS[centre_node.value]
             telemetry.optimization_boolean_rewrite_inversion += 1
-            return update_expression_tree(centre_node, telemetry)
+            return update_expression_tree(_inverted(centre_node), telemetry)
 
         # NOT(NOT(A)) => A
         if centre_node.node_type == NodeType.NOT:

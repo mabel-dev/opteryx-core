@@ -92,14 +92,19 @@ struct JDocGuard {
 // That is an allocation-strategy choice, not a behaviour switch — both arms parse
 // the same bytes into the same values. Without the cap a column holding a single
 // pathological multi-megabyte document would reserve ~13x its size up front.
+//
+// The read flags are a template parameter because they are part of the parse's
+// ANSWER, not its allocation: `IS JSON` (json_validate.h) must reject trailing
+// content that `->` deliberately stops before, so it reads with its own set.
 // ---------------------------------------------------------------------------
-class ReadPool {
+template <yyjson_read_flag Flags>
+class BasicReadPool {
   public:
     static constexpr size_t kMaxPoolBytes = 16u * 1024u * 1024u;
 
     // `max_doc_len` must be >= the longest document handed to read().
-    explicit ReadPool(size_t max_doc_len) {
-        const size_t need = yyjson_read_max_memory_usage(max_doc_len, kJsonReadFlags);
+    explicit BasicReadPool(size_t max_doc_len) {
+        const size_t need = yyjson_read_max_memory_usage(max_doc_len, Flags);
         if (need == 0u || need > kMaxPoolBytes) return;   // decline; use libc malloc
         buf_.resize(need);
         enabled_ = true;
@@ -107,17 +112,18 @@ class ReadPool {
 
     yyjson_doc* read(const char* data, size_t len, yyjson_read_err* err) noexcept {
         if (!enabled_)
-            return yyjson_read_opts(const_cast<char*>(data), len, kJsonReadFlags,
-                                    nullptr, err);
+            return yyjson_read_opts(const_cast<char*>(data), len, Flags, nullptr, err);
         yyjson_alc alc;
         yyjson_alc_pool_init(&alc, buf_.data(), buf_.size());
-        return yyjson_read_opts(const_cast<char*>(data), len, kJsonReadFlags, &alc, err);
+        return yyjson_read_opts(const_cast<char*>(data), len, Flags, &alc, err);
     }
 
   private:
     std::vector<char> buf_;
     bool              enabled_ = false;
 };
+
+using ReadPool = BasicReadPool<kJsonReadFlags>;
 
 // Longest PHYSICAL value in a string-family vector — the pool only has to hold the
 // biggest document that can actually be parsed, and a dict-shaped column's repeated

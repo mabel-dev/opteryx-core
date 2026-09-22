@@ -173,7 +173,7 @@ cdef Vector _materialise_constant_literal(object value, int physical_type,
             # and the conditional kernels type-check that argument rather than
             # short-circuiting on it: `draken_iif` refuses anything but
             # DRAKEN_BOOL outright ("condition must be BOOLEAN"), as does
-            # draken_if_then_else. `COUNT(*) FILTER (WHERE p)` lowers to
+            # draken_if_then_else. `COUNT(* WHERE p)` lowers to
             # `COUNT(IIF(p, 1, NULL))` (logical_planner_builders), so a `p` the
             # optimizer constant-folds to a BOOL-typed NULL — `CASE WHEN ('beta'
             # <= '0') THEN TRUE ELSE NULL END`, whose condition is decidable at

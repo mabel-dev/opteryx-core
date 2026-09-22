@@ -235,21 +235,19 @@ def _insert_assignments(action: dict) -> Dict[str, dict]:
     return dict(zip(columns, contents))
 
 
-def _update_assignments(action: dict, owner: str = "**MERGE INTO**'s **UPDATE** arm") -> Dict[str, dict]:
+def _set_assignments(assignments: List[dict], owner: str) -> Dict[str, dict]:
     """`{target column: value expression}` for a SET list.
 
-    Shared by MERGE's MATCHED arm and the UPDATE statement: the two spell SET
-    identically, so one reader means they cannot drift. `owner` names whichever
-    is being read, so the refusal points at the SQL the user actually wrote.
+    Shared by MERGE's MATCHED arm and the UPDATE statement. The two no longer
+    hold the list in the same PLACE - a merge arm carries it in `kind.Set`, the
+    statement in `assignments` - but an individual assignment is spelled
+    identically in both, and that is the part with shapes to get wrong. So each
+    caller finds its own list and this reads it, rather than one reader guessing
+    which of two containers it was handed. `owner` names whichever is being
+    read, so the refusal points at the SQL the user actually wrote.
     """
-    update = action["Update"]
-    if update.get("update_predicate") or update.get("delete_predicate"):
-        raise UnsupportedSyntaxError(
-            "**MERGE INTO** does not support **WHERE** on an **UPDATE** arm. "
-            "Put the condition on the arm itself: `WHEN MATCHED AND <cond> THEN`."
-        )
     out: Dict[str, dict] = {}
-    for assignment in update.get("assignments") or []:
+    for assignment in assignments:
         target = assignment.get("target", {}).get("ColumnName")
         if target is None or len(target) != 1:
             raise UnsupportedSyntaxError(
@@ -266,6 +264,33 @@ def _update_assignments(action: dict, owner: str = "**MERGE INTO**'s **UPDATE** 
         raise UnsupportedSyntaxError(f"{owner} assigns nothing.")
     return out
 
+
+def _update_assignments(action: dict, owner: str = "**MERGE INTO**'s **UPDATE** arm") -> Dict[str, dict]:
+    """The SET list of a MERGE `WHEN MATCHED THEN UPDATE` arm.
+
+    The arm holds its assignments under `kind`, the same place the INSERT arm
+    holds its VALUES - not in a top-level `assignments` key, which is where the
+    UPDATE *statement* keeps them. Reading the wrong one finds nothing and
+    reports the arm as assigning nothing, which is a refusal for SQL that is
+    perfectly well formed.
+    """
+    update = action["Update"]
+    if update.get("update_predicate") or update.get("delete_predicate"):
+        raise UnsupportedSyntaxError(
+            "**MERGE INTO** does not support **WHERE** on an **UPDATE** arm. "
+            "Put the condition on the arm itself: `WHEN MATCHED AND <cond> THEN`."
+        )
+    kind = update.get("kind")
+    # `SET *` takes every column from the source by position. The target's
+    # columns are read from its schema here, so honouring it would mean binding
+    # values to columns by an order neither side states - refuse it by name
+    # rather than let it arrive as an arm that assigns nothing.
+    if not isinstance(kind, dict) or "Set" not in kind:
+        raise UnsupportedSyntaxError(
+            f"{owner} must name what it assigns: `UPDATE SET a = ..., b = ...`. "
+            "`UPDATE SET *` is not supported."
+        )
+    return _set_assignments(kind["Set"] or [], owner)
 
 
 def _resolve_assignments(
@@ -1023,9 +1048,10 @@ def plan_update(statement, **kwargs):
     if not target_columns:
         raise UnsupportedSyntaxError(f"**UPDATE** target {relation_name} has no columns.")
 
-    # `_update_assignments` is MERGE's SET reader, and the arm and the statement
-    # spell SET identically - one reader, so the two cannot drift.
-    assignments = _update_assignments({"Update": update}, owner="**UPDATE**")
+    # The statement holds its SET list in `assignments`; a MERGE arm holds it in
+    # `kind.Set`. Each caller finds its own list, and `_set_assignments` reads
+    # the assignments themselves - which ARE spelled identically.
+    assignments = _set_assignments(update.get("assignments") or [], owner="**UPDATE**")
 
     resolved = _resolve_assignments(
         assignments, target_columns, relation_name, "**UPDATE**'s **SET**"

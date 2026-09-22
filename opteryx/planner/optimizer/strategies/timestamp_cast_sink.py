@@ -38,9 +38,11 @@ Correctness — this is fail-safe by construction:
   projection alias, a CTE, a function dataset — is therefore never eligible:
   nothing downstream would perform the retag the retyping assumes.
 * Eligibility requires that *every* reference to the column is the same
-  pure-retag cast. References are enumerated through the authoritative
-  :func:`expression_roots` accessor (it cannot under-count), so a column used
-  raw anywhere — including passed through a projection — is disqualified.
+  pure-retag cast. Plan-node fields are enumerated through the authoritative
+  :func:`expression_roots` accessor, and within an expression every Node-valued
+  property is descended (not a hand-picked field list), so a column used raw
+  anywhere — including passed through a projection or inside a CASE — is
+  disqualified.
 * A column carried in a pushed-down scan *predicate* is disqualified outright:
   predicates are normalised against the int64 representation, and retyping under
   one is out of scope here.
@@ -58,6 +60,8 @@ from draken.draken_native import TimestampUnit
 
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
+from opteryx.models import LogicalColumn
+from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -108,11 +112,25 @@ def _classify(expr, casted: dict, raw: set) -> None:
         raw.add(expr.schema_column.identity)
         return
 
-    _classify(expr.left, casted, raw)
-    _classify(expr.centre, casted, raw)
-    _classify(expr.right, casted, raw)
-    for parameter in expr.parameters or []:
-        _classify(parameter, casted, raw)
+    # A LogicalColumn is a leaf: the IDENTIFIER case above, or unbound.
+    if not isinstance(expr, Node):
+        return
+
+    # Every expression-valued property, not a hand-picked field list: CASE keeps
+    # its operands in `conditions` / `results` / `else_result`, which a
+    # left/centre/right/parameters walk never visited. A raw use inside a CASE was
+    # therefore missed, the scan column was retyped to TIMESTAMP underneath it, and
+    # `SELECT i::TIMESTAMP[s], CASE WHEN ... THEN i ELSE 0 END` failed with
+    # "branch types differ". Over-counting only forgoes the retag; under-counting
+    # mistypes a column. Column references are LogicalColumn, not Node, so both
+    # are children (the pair get_all_nodes_of_type descends into).
+    for value in expr.properties.values():
+        if isinstance(value, (Node, LogicalColumn)):
+            _classify(value, casted, raw)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                if isinstance(item, (Node, LogicalColumn)):
+                    _classify(item, casted, raw)
 
 
 class TimestampCastSinkStrategy(OptimizationStrategy):

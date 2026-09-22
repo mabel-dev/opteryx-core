@@ -25,6 +25,7 @@ after a join, we add conditions to the JOIN.
 from draken.draken_native import TimestampUnit
 
 from opteryx.connectors.capabilities import PredicatePushable
+from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import (
     BINARY_NODE_TYPES,
@@ -251,6 +252,81 @@ def _retainable_past_barrier(predicate, emitted, subtree_names) -> bool:
     if get_all_nodes_of_type(predicate.condition, (NodeType.AGGREGATOR,)):
         return False
     return True
+
+
+def _restore_at_original_position(plan, predicate) -> bool:
+    """Put an unplaced predicate back where it was collected, via its plan_path.
+
+    `plan_path[i]` is the chain of nodes that sat ABOVE the predicate's Filter;
+    the first one still in the plan is the restore point, and the Filter goes back
+    on the edge feeding it. For a single-input node that edge is unambiguous and
+    `insert_node_before` finds it.
+
+    For a MULTI-input node it is not. `insert_node_before` redirects EVERY edge
+    into the node, so restoring above a join swallowed both legs into the Filter
+    and left the join with one unlabelled input ("a join without labelled
+    left/right legs"). A predicate's original position can be above a join:
+    WindowToJoinStrategy rewrites an aggregate window as `input CROSS JOIN
+    aggregate(copy of input)` and REUSES the Window's nid for the join, so a
+    filter that sat below the window has the join as its restore point:
+
+        SELECT MAX(v) OVER () FROM (SELECT i_null + 1 AS v FROM t) AS sub WHERE v > 3
+
+    The Filter's original edge is the one from the leg that emits the columns it
+    reads - identities are unique per relation instance, so exactly one leg can
+    - and that edge keeps its leg label. No such single leg means the recorded
+    position cannot be reconstructed, which is an optimizer defect, reported
+    rather than turned into a malformed plan.
+
+    Returns False when no node on the path survives.
+    """
+    for nid in predicate.plan_path:
+        if nid not in plan:
+            continue
+        incoming = plan.ingoing_edges(nid)
+        if len(incoming) <= 1:
+            plan.insert_node_before(predicate.nid, predicate, nid)
+            return True
+
+        needed = _predicate_column_ids(predicate)
+        memo = {}
+        legs = [
+            (source, relationship)
+            for source, _, relationship in incoming
+            if needed and needed <= _emitted_identities(plan, source, memo)
+        ]
+        if len(legs) != 1:
+            raise InvalidInternalStateError(
+                f"a filter could not be restored to its original position above a "
+                f"{plan[nid].node_type.name} node: {len(legs)} of its {len(incoming)} "
+                f"inputs carry the columns the filter reads, and exactly one must."
+            )
+        source, relationship = legs[0]
+        plan.add_node(predicate.nid, predicate)
+        plan.remove_edge(source, nid, relationship)
+        plan.add_edge(source, predicate.nid)
+        plan.add_edge(predicate.nid, nid, relationship)
+        return True
+    return False
+
+
+def _detach_aliases(expression) -> None:
+    """Give an inlined expression copy its OWN column object, with no aliases.
+
+    The inlined copy must not answer to the alias it was defined under. But
+    `Node.copy` does not copy a node's schema_column (SchemaColumn has no `.copy`)
+    and `LogicalColumn.copy` hands back the same plain SchemaColumn, so clearing
+    `schema_column.aliases` on the copy cleared them on the alias-defining
+    Project's own output column - for a plain rename, the base relation's column -
+    and did so even when the rewrite was then declined. `branch_copy` detaches the
+    aliases list while keeping the column's identity and subclass.
+    """
+    schema_column = expression.schema_column
+    if schema_column is None:
+        return
+    detached = schema_column.branch_copy({})
+    detached.aliases = []
+    expression.schema_column = detached
 
 
 def _stamp_inlined_predicate(node, condition, identifiers, target) -> None:
@@ -846,10 +922,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     )
                 elif predicate.plan_path is not None:
                     self.telemetry.optimization_predicate_pushdown_unplaced += 1
-                    for nid in predicate.plan_path:
-                        if nid in context.optimized_plan:
-                            context.optimized_plan.insert_node_before(predicate.nid, predicate, nid)
-                            break
+                    _restore_at_original_position(context.optimized_plan, predicate)
             context.collected_predicates = retained_predicates
 
         elif node.node_type == LogicalPlanStepType.Filter:
@@ -1621,12 +1694,10 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             if _revert_inlined_predicate(predicate):
                 self.telemetry.optimization_predicate_pushdown_inline_reverted += 1
 
-            if predicate.plan_path is not None:
-                for nid in predicate.plan_path:
-                    if nid in context.optimized_plan:
-                        self.telemetry.optimization_predicate_pushdown_unplaced += 1
-                        context.optimized_plan.insert_node_before(predicate.nid, predicate, nid)
-                        break
+            if predicate.plan_path is not None and _restore_at_original_position(
+                context.optimized_plan, predicate
+            ):
+                self.telemetry.optimization_predicate_pushdown_unplaced += 1
         return context.optimized_plan
 
     def _handle_predicates(
@@ -1860,18 +1931,14 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 ):
                     continue
 
-                if getattr(expression_template, "copy", None) is not None:
-                    expression = expression_template.copy()
-                else:
-                    expression = expression_template
+                # Always a copy: both expression carriers (Node, LogicalColumn) have
+                # one, and the fields below must never be cleared on the template.
+                expression = expression_template.copy()
 
                 if isinstance(expression, Node):
                     expression.alias = None
                     expression.query_column = None
-                    if expression.schema_column:
-                        expression.schema_column.aliases = []
-                elif getattr(expression, "schema_column", None):
-                    expression.schema_column.aliases = []
+                _detach_aliases(expression)
 
                 literal_value = literal_candidate.value
                 if isinstance(literal_value, str):
@@ -1988,8 +2055,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             trunc_expression = expression_template.copy()
             trunc_expression.alias = None
             trunc_expression.query_column = None
-            if trunc_expression.schema_column:
-                trunc_expression.schema_column.aliases = []
+            _detach_aliases(trunc_expression)
             side_condition = Node(
                 node_type=NodeType.COMPARISON_OPERATOR,
                 value=op,
@@ -2135,8 +2201,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             trunc_expression = expression_template.copy()
             trunc_expression.alias = None
             trunc_expression.query_column = None
-            if trunc_expression.schema_column:
-                trunc_expression.schema_column.aliases = []
+            _detach_aliases(trunc_expression)
 
             new_condition = Node(
                 node_type=NodeType.COMPARISON_OPERATOR,

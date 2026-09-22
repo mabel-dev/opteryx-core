@@ -11,6 +11,11 @@ which is likewise never-null, and (also following that family) the BARE `NULL`
 literal is a type error rather than a row of answers — it has no operand type.
 Ruled by the architect 2026-09-22.
 
+Well-formedness is yyjson's answer, so a row that passes IS JSON is a row the
+engine's JSON functions can parse: invalid UTF-8 and unpaired `\\u` surrogates are
+NOT JSON, there is no nesting limit, and numbers are syntax-checked but never
+range-checked (`1e999` is JSON).
+
 `WITH`/`WITHOUT UNIQUE KEYS` parses but is refused: duplicate-key detection is
 not implemented, and answering the well-formedness question when the unique-key
 question was asked would be a wrong answer rather than a slow one.
@@ -59,6 +64,8 @@ DOCUMENTS = [
     ('"\\u00e9\\n\\\\"',           True,  True,  False, False),
     ('42',                         True,  True,  False, False),
     ('-0.5e+10',                   True,  True,  False, False),
+    ('1e999',                      True,  True,  False, False),  # syntax only: never range-checked
+    ('"\\ud83d\\ude00"',             True,  True,  False, False),  # a surrogate PAIR is fine
     ('0',                          True,  True,  False, False),
     ('true',                       True,  True,  False, False),
     ('false',                      True,  True,  False, False),
@@ -85,9 +92,18 @@ DOCUMENTS = [
     ('"unterminated',              False, False, False, False),
     ('"bad \\x escape"',           False, False, False, False),
     ('"\\u00zz"',                  False, False, False, False),  # \u without four hex digits
+    ('"\\ud800"',                  False, False, False, False),  # unpaired high surrogate
+    ('"\\udc00"',                  False, False, False, False),  # unpaired low surrogate
+    ('"\\ud800\\u0041"',            False, False, False, False),  # high surrogate, wrong partner
     ('TRUE',                       False, False, False, False),  # JSON keywords are lower case
     ('NaN',                        False, False, False, False),
     ('[1,2]]',                     False, False, False, False),  # unbalanced close
+    # --- last-byte gate edges: the root's last significant byte vs its opener --
+    ('{',                          False, False, False, False),  # opener is also the last byte
+    ('[ \n',                       False, False, False, False),  # trailing-ws skip stops at the opener
+    ('[{"a":1}',                   False, False, False, False),  # ends in the WRONG close
+    ('{"a":{"b":1}',               False, False, False, False),  # truncated after an inner close: passes the gate, parse rejects
+    ('{"a":[1}',                   False, False, False, False),  # right last byte, mismatched inside
 ]
 # fmt:on
 
@@ -186,17 +202,28 @@ def test_variant_operand_composes_with_arrow_extraction():
     assert _scalar("""SELECT ('{"a":"[1,2]"}' -> 'a') IS JSON SCALAR""") is True
 
 
-def test_deeply_nested_document_is_well_formed():
-    """Nesting well inside the validator's bitstack bound."""
-    depth = 200
+@pytest.mark.parametrize(
+    "hex_bytes,expected",
+    [
+        ("227822", True),        # "x" — control: same type, same path, valid bytes
+        ("22c3a922", True),      # "é" as valid two-byte UTF-8
+        ("22ff22", False),       # 0xFF is never UTF-8
+        ("22c022", False),       # truncated two-byte sequence
+        ("22c0af22", False),     # overlong encoding of '/'
+        ("22eda08022", False),   # UTF-8-encoded surrogate U+D800
+        ("22f490808022", False), # past U+10FFFF
+    ],
+)
+def test_invalid_utf8_is_not_json(hex_bytes, expected):
+    """Bytes that are not UTF-8 are not JSON — VARBINARY is held to the same rule."""
+    assert _scalar(f"SELECT HEX_DECODE('{hex_bytes}') IS JSON") is expected
+
+
+@pytest.mark.parametrize("depth", [200, 2000])
+def test_deeply_nested_document_is_well_formed(depth):
+    """There is no nesting limit: depth alone never makes a document malformed."""
     document = "[" * depth + "1" + "]" * depth
     assert _is_json(document, "ARRAY") is True
-
-
-def test_nesting_past_the_bound_is_reported_malformed():
-    """Past JSON_MAX_DEPTH the answer is 'not well-formed' — closed, not a crash."""
-    document = "[" * 2000 + "1" + "]" * 2000
-    assert _is_json(document, "ARRAY") is False
 
 
 @pytest.mark.parametrize("clause", ["WITH UNIQUE KEYS", "WITHOUT UNIQUE KEYS"])

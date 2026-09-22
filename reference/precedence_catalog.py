@@ -26,11 +26,12 @@ operator's operand extends over everything in a tighter tier, so `NOT a = b` is
 `NOT (a = b)` and `-a * b` is `(-a) * b`.
 
 Where this departs from standard SQL / Postgres / MySQL the tier says so in its
-`note`. Each one is what the parser does today. The `||`, `^ << >>` and LIKE
+`note`. Each one is what the parser does today, and the `||`, `^ << >>` and LIKE
 departures were ruled to be documented as the intended behaviour (architect,
-2026-09-22); the XOR tier was found after that ruling and is documented as the
-parser behaves, awaiting one. Changing any of them is a parser change, and the
-fuzzer will fail until this file and the parser agree.
+2026-09-22). Changing any of them is a parser change, and the fuzzer will fail
+until this file and the parser agree. (XOR was the fourth departure - sqlparser
+binds it above `&` and the comparisons - and was ruled a parser DEFECT the same
+day; the dialect now places it between AND and OR, where this file lists it.)
 """
 
 from __future__ import annotations
@@ -131,14 +132,6 @@ PRECEDENCE_TIERS: Tuple[Tier, ...] = (
         ),
     ),
     Tier((_infix("Plus", "+"), _infix("Minus", "-"))),
-    Tier(
-        (_infix("Xor", "XOR"),),
-        note=(
-            "Logical XOR binds TIGHTER than `&` and every comparison, unlike MySQL, where "
-            "it sits between AND and OR. `a = b XOR c = d` is `a = (b XOR c) = d` - "
-            "parenthesise the comparisons: `(a = b) XOR (c = d)`."
-        ),
-    ),
     Tier((_infix("BitwiseAnd", "&"),)),
     Tier(
         (
@@ -190,6 +183,9 @@ PRECEDENCE_TIERS: Tuple[Tier, ...] = (
     ),
     Tier((Member(UNARY_OPS, "Not", ("NOT",), PREFIX),)),
     Tier((_infix("And", "AND"),)),
+    # The Opteryx dialect places XOR here itself (OpteryxDialect::get_next_precedence);
+    # sqlparser's own table put it above `&` and the comparisons.
+    Tier((_infix("Xor", "XOR"),)),
     Tier((_infix("Or", "OR"),)),
 )
 

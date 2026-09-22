@@ -237,7 +237,7 @@ implementation time — the validator will reject a typo).
   `PUSHABLE_TYPES`.
 - Every aggregate is in the remote map below with a plain-identifier operand
   (or `COUNT(*)`), operand type admitted for that function.
-- No `FILTER (WHERE …)` on any aggregate; no ORDER BY inside an aggregate.
+- No filter on any aggregate (`AGG(expr WHERE …)`); no ORDER BY inside an aggregate.
 
 **Remote map (function → SQL → result type → expected OID):**
 

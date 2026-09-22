@@ -540,6 +540,13 @@ impl Dialect for OpteryxDialect {
     }
 
     // SELECT COUNT(*) FILTER (WHERE ID < 4)
+    //
+    // The PLANNER refuses this clause - `COUNT(* WHERE ID < 4)` is the spelling we
+    // accept - but the flag stays ON so that sqlparser keeps RECOGNISING it. With
+    // the flag off, `FILTER` is no longer a clause here and comes back either as a
+    // raw parse error or, worse, as a column alias; the planner then has nothing to
+    // recognise and cannot name the right syntax back to the user. It has to parse
+    // for us to refuse it well.
     fn supports_filter_during_aggregation(&self) -> bool {
         true
     }
@@ -606,6 +613,17 @@ impl Dialect for OpteryxDialect {
                 // a trailing cast or subscript and the outer expression applies it to the
                 // accessor's result instead.
                 Some(Ok(self.prec_value(Precedence::DoubleColon) + 1))
+            }
+            // Logical XOR binds between AND and OR (the MySQL order: AND > XOR > OR).
+            //
+            // sqlparser rates Precedence::Xor at 24 - above `&` and every comparison -
+            // so `id = 1 XOR id = 2` parsed as `id = (1 XOR id) = 2` and failed to
+            // type-check, and `a XOR b AND c` parsed as `(a XOR b) AND c`: a different,
+            // silently wrong answer when all three are boolean. Ruled a parser defect
+            // (architect, 2026-09-22). One step above OR keeps `a OR b XOR c` as
+            // `a OR (b XOR c)`, which is where it already was.
+            Token::Word(ref word) if word.keyword == Keyword::XOR => {
+                Some(Ok(self.prec_value(Precedence::Or) + 1))
             }
             // fall back to the default precedence table
             _ => None,

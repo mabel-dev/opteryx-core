@@ -292,7 +292,17 @@ def test_unary_ops_catalog_includes_supported_predicates():
         "IsNotTrue",
         "IsNull",
         "IsTrue",
+        "IsJsonValue",
+        "IsNotJsonValue",
+        "IsJsonScalar",
+        "IsNotJsonScalar",
+        "IsJsonArray",
+        "IsNotJsonArray",
+        "IsJsonObject",
+        "IsNotJsonObject",
         "Not",
+        "UnaryMinus",
+        "UnaryPlus",
     }
 
     is_null = catalog["IsNull"]
@@ -343,3 +353,23 @@ def test_clauses_catalog_includes_query_and_statement_capabilities():
     assert catalog["where"]["planner_entry"] == "plan_query"
     assert catalog["select"]["scope"] == "statement"
     assert catalog["with"]["planner_entry"] == "extract_ctes"
+
+
+def test_every_operator_publishes_its_precedence():
+    """Every operator carries a `precedence` object, and the levels form one ladder.
+
+    The docs site renders its precedence table from these fields and the SQL fuzzer
+    reads its reference parse from them, so an operator without one would be both
+    undocumented and unchecked. The export itself refuses a missing tier; this pins
+    the shape the two consumers read.
+    """
+    levels = set()
+    for exported in (export_operator_catalog(), export_unary_ops_catalog()):
+        for name, entry in exported.items():
+            precedence = entry["precedence"]
+            assert precedence is not None, name
+            assert precedence["position"] in ("infix", "prefix", "postfix"), name
+            assert precedence["spellings"], name
+            levels.add(precedence["level"])
+            total = precedence["levels"]
+    assert levels == set(range(1, total + 1))

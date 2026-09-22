@@ -11,15 +11,17 @@ cdef extern from "yyjson.h":
     ctypedef struct yyjson_alc:
         pass
 
-    # Fields must be declared: an opaque declaration here overrides the .pyx one,
-    # and `err.pos` then coerces the struct to a dict and fails with AttributeError.
+    # Fields must be declared: on an opaque struct `err.pos` coerces the struct
+    # to a dict and fails with AttributeError instead of reading the field.
     ctypedef struct yyjson_read_err:
         size_t pos
         const char* msg
         int code
 
     ctypedef struct yyjson_write_err:
-        pass
+        size_t pos
+        const char* msg
+        int code
 
     ctypedef struct yyjson_arr_iter:
         pass

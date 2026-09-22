@@ -48,6 +48,7 @@ from opteryx.utils import random_string
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
+from .predicate_rewriter import _shallow
 
 
 def passthrough_column(schema_column, source: Optional[str] = None) -> LogicalColumn:
@@ -184,10 +185,13 @@ class JoinKeyMaterializationStrategy(OptimizationStrategy):
             return
 
         rewrote = False
+        conjuncts = []
         for conjunct in split_and_conditions(node.on):
             hoists = plan_join_key_hoists(conjunct, left_relations, right_relations)
             if hoists is None:
+                conjuncts.append(conjunct)
                 continue
+            replaced = {}
             for expression, leg in hoists:
                 relations = left_relations if leg == "left" else right_relations
                 reference = materialize_operand_as_column(
@@ -195,18 +199,24 @@ class JoinKeyMaterializationStrategy(OptimizationStrategy):
                 )
                 if reference is None:
                     continue
-                # Replace the operand IN PLACE. Which side of the comparison it
-                # sits on is not implied by the leg — `l.client = CAST(f.client)`
-                # puts the left leg's expression on the RIGHT of the Eq.
-                if conjunct.left is expression:
-                    conjunct.left = reference
-                else:
-                    conjunct.right = reference
+                # Which side of the comparison the operand sits on is not implied
+                # by the leg — `l.client = CAST(f.client)` puts the left leg's
+                # expression on the RIGHT of the Eq.
+                replaced["left" if conjunct.left is expression else "right"] = reference
                 self.telemetry.optimization_join_key_materialized += 1
                 rewrote = True
+            # A NEW conjunct, never an in-place operand swap: the ON conjunct is
+            # also held by the pre-optimization plan, and the reference names a
+            # column that only exists above the Project just inserted on that leg.
+            conjuncts.append(_shallow(conjunct, **replaced) if replaced else conjunct)
 
         if not rewrote:
             return
+
+        on_condition = conjuncts[0]
+        for conjunct in conjuncts[1:]:
+            on_condition = Node(NodeType.AND, left=on_condition, right=conjunct)
+        node.on = on_condition
 
         # Rebuild the join's bookkeeping from the rewritten condition. Every
         # conjunct we touched is now bare-identifier on both sides, so this is the

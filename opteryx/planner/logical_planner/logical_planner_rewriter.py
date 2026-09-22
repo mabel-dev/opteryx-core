@@ -26,9 +26,9 @@ def _dedup_key(aggregate):
     projection then asked for a column nothing computed and the query died at
     compile time with "projecting a column the engine could not resolve".
 
-    FILTER, ORDER BY and LIMIT ride in the key for the same reason. They cannot
-    reach here today with distinct results — `format_expression` renders
-    `COUNT(x) FILTER (WHERE ...)` identically to `COUNT(x)`, so such a pair is
+    The filter, ORDER BY and LIMIT ride in the key for the same reason. They
+    cannot reach here today with distinct results — `format_expression` renders
+    `COUNT(x WHERE ...)` identically to `COUNT(x)`, so such a pair is
     rejected upstream as an ambiguous output name — but keying on them costs
     nothing and means a dedup here can never be the thing that silently loses an
     aggregate.

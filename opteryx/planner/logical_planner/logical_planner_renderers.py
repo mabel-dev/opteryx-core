@@ -4,7 +4,6 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 
-from platform import node
 from typing import Callable
 
 from opteryx.expression import format_expression
@@ -19,6 +18,16 @@ def register_render(step_type: LogicalPlanStepType):
     """
 
     def wrapper(func: Callable[["LogicalPlanNode"], str]):
+        # A plain assignment let a SECOND registration for one step type overwrite
+        # the first without a word - AggregateAndGroup carried two, and the loser
+        # was the one that did not render HAVING, so which of them ran came down
+        # to definition order. A renderer that never runs is dead code that still
+        # reads as live; this refuses the collision at IMPORT time instead.
+        if step_type in _render_registry:
+            raise AssertionError(
+                f"{step_type} already has a renderer "
+                f"({_render_registry[step_type].__name__}); {func.__name__} would replace it."
+            )
         _render_registry[step_type] = func
         return func
 
@@ -32,24 +41,15 @@ def render_filter(node: LogicalPlanNode) -> str:
 
 @register_render(LogicalPlanStepType.Aggregate)
 def render_aggregate(node: LogicalPlanNode) -> str:
-    response = "UNGROUPED AGGREGATE ["
-    for col in node.aggregates:
-        if col.condition:
-            response += (
-                f"{format_expression(col)} FILTER (WHERE {format_expression(col.condition)})"
-            )
-        else:
-            response += format_expression(col)
-        response += ", "
-    response = response.rstrip(", ") + "]"
-    return response
-
-
-@register_render(LogicalPlanStepType.AggregateAndGroup)
-def render_aggregate_group(node: LogicalPlanNode) -> str:
+    # An aggregate's filter is NOT rendered here, because it is not here to render:
+    # `AGG(x WHERE p)` is lowered to `AGG(IIF(p, x, NULL))` in the builder, so by
+    # the time a plan exists the condition is part of the argument expression and
+    # `format_expression` prints it. This used to carry a second arm that printed
+    # `... FILTER (WHERE <col.condition>)`; the lowering clears `condition` before
+    # the node is built, so that arm rendered nothing across the whole shape
+    # battery - and it printed a spelling the engine now refuses.
     aggregates = ", ".join(format_expression(col) for col in node.aggregates)
-    groups = ", ".join(format_expression(col) for col in node.groups)
-    return f"HASHED AGGREGATE [{aggregates}] GROUP BY [{groups}]"
+    return f"UNGROUPED AGGREGATE [{aggregates}]"
 
 
 @register_render(LogicalPlanStepType.Distinct)

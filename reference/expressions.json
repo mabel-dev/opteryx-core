@@ -33,7 +33,7 @@
             "expr NOT BETWEEN low AND high"
         ],
         "precedence": {
-            "level": 10,
+            "level": 9,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -237,7 +237,7 @@
             "a IS NOT DISTINCT FROM b"
         ],
         "precedence": {
-            "level": 12,
+            "level": 11,
             "levels": 15,
             "position": "infix",
             "spellings": [
@@ -418,7 +418,7 @@
             "expr NOT SIMILAR TO 'pattern'"
         ],
         "precedence": {
-            "level": 11,
+            "level": 10,
             "levels": 15,
             "position": "infix",
             "spellings": [
