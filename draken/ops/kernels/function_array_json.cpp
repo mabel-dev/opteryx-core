@@ -1632,17 +1632,20 @@ VecResult draken_array_contains_all(void* ctx, const DrakenVector* const* args, 
 //                BOOL (0/1), TIMESTAMP64 (raw instant, PRE-QUANTIZED to the
 //                array's own storage unit at bind time by
 //                compiled_expression.pyx — the kernel does a plain int64
-//                compare, no runtime unit ctx needed).
+//                compare, no runtime unit ctx needed), DATE32 (days since
+//                epoch, int32 storage — same arm as INT32), DECIMAL (the
+//                unscaled int64, item PRE-RESCALED to the array's scale at bind
+//                time by the same packer).
+//                count == 0 is the EMPTY set: the item cannot be represented in
+//                the element's storage (a DECIMAL item finer than the scale, or
+//                out of int64), so it matches nothing — FALSE, NULL on a NULL row.
 //   1 string  -> VARCHAR/NVARCHAR/VARBINARY/VARIANT, via arr_reduce_string
 //                directly (bypassing arr_any_eq's VARCHAR-only dispatch) so
 //                the whole string family works from one call, no duplicated
 //                logic.
 //   2 float64 -> FLOAT32/FLOAT64.
-// DECIMAL and DATE32 array elements are absent: DECIMAL arrays are unreachable
-// (rugo cannot decode list<decimal>, matching draken_sort/array_reduce's same
-// finding); DATE32 arrays decode but the leaf is not yet retagged from raw
-// INT32 (a pre-existing gap shared with GREATEST/LEAST/SORT, not something
-// this kernel can paper over — see array_native_kernel_four_walls).
+// DECIMAL128 elements are absent (no int128 arm): the packer declines them at
+// bind time, so they never reach here.
 VecResult draken_array_contains(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
     try {
         if (!args || nargs != 2u || !args[0] || !args[1])
@@ -1660,6 +1663,7 @@ VecResult draken_array_contains(void* ctx, const DrakenVector* const* args, uint
         const uint8_t* payload = reinterpret_cast<const uint8_t*>(c) + sizeof(in_list_ctx);
 
         if (c->kind == 0) {
+            if (c->count == 0u) return contains_never_match(parent);
             int64_t v;
             std::memcpy(&v, payload, sizeof(int64_t));
             switch (child->type) {
@@ -1672,11 +1676,13 @@ VecResult draken_array_contains(void* ctx, const DrakenVector* const* args, uint
                         ? contains_numeric_child<int16_t>(parent, child, static_cast<int16_t>(v))
                         : contains_never_match(parent);
                 case DRAKEN_INT32:
+                case DRAKEN_DATE32:
                     return numeric_item_fits<int32_t>(v)
                         ? contains_numeric_child<int32_t>(parent, child, static_cast<int32_t>(v))
                         : contains_never_match(parent);
                 case DRAKEN_INT64:
                 case DRAKEN_TIMESTAMP64:
+                case DRAKEN_DECIMAL:
                     return contains_numeric_child<int64_t>(parent, child, v);
                 case DRAKEN_UINT8:
                     return numeric_item_fits<uint8_t>(v)
@@ -1699,7 +1705,8 @@ VecResult draken_array_contains(void* ctx, const DrakenVector* const* args, uint
                 default:
                     return draken_error_sentinel_fmt(
                         "draken_array_contains: integer item but array elements are type %d "
-                        "(supported: int/uint family, BOOL, TIMESTAMP)", (int)child->type);
+                        "(supported: int/uint family, BOOL, TIMESTAMP, DATE, DECIMAL)",
+                        (int)child->type);
             }
         }
         if (c->kind == 2) {

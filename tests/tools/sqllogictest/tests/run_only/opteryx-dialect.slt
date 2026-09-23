@@ -1,7 +1,7 @@
 # Source: opteryx-dialect.run_tests
 
-# support hyphens in identifier names
-statement error DatasetNotFoundError
+# bare identifiers do not take hyphens (backtick-quote them) - see is_identifier_part in src/opteryx_dialect.rs
+statement error QueryParseError
 SELECT * FROM testdata.hyphened-name
 
 

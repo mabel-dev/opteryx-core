@@ -782,34 +782,70 @@ def _micros_to_storage_unit(long long micros, int unit_value):
     return None
 
 
-def _build_single_item_blob(value, element_ct):
+def _build_single_item_blob(value, item_ct, element_ct):
     """Serialize ONE scalar item — the LEFT (item) side of `item = ANY(arr)`
-    — into a one-element in_list_ctx blob. Kind is
-    inferred from the item's Python/bind-time type:
-      bool/int  -> kind 0 (int64)
-      float     -> kind 2 (float64)
-      str/bytes -> kind 1
-      TIMESTAMP64-tagged int (see _materialise_constant_literal) -> kind 0,
-        raw value converted from microseconds to the ARRAY's own storage
-        unit — draken_array_contains does a plain int64 compare, no runtime
-        unit ctx. `element_ct` is node.right.schema_column.column_type.element
-        (the array's element type — populated for a real column, unlike a
-        literal array; see _build_array_membership_blob's note on that).
-    Returns None (not eligible — caller falls through to plan-time refusal)
-    for anything else: NULL, DATE (DATE32 array children are not yet
-    unit-retagged — see draken_array_contains's DECIMAL/DATE32 note),
-    DECIMAL (array children unreachable), or a TIMESTAMP item whose precision
-    the array's unit cannot represent losslessly.
+    — into a one-element in_list_ctx blob. draken_array_contains compares raw
+    storage values with no runtime ctx, so every coercion happens HERE, keyed on
+    `element_ct` (node.right's bound ColumnType.element — the array's element
+    type; ARRAY_AGG propagates its operand's type, see binder
+    _aggregate_return_type):
+      DATE32 array   -> DATE item only, kind 0 (days since epoch — the DATE
+                        literal is already that raw day count).
+      FLOAT array    -> int / float / Decimal item, kind 2 (float64).
+      DECIMAL array  -> int / float / Decimal item RESCALED to the element's
+                        scale, kind 0 (the unscaled int64 the child stores). An
+                        item that the scale cannot represent exactly, or that
+                        overflows int64, can never equal a stored value: it packs
+                        as the EMPTY kind-0 set, which the kernel answers FALSE
+                        (NULL on a NULL row) — exact, never a rounded neighbour.
+                        A float item is taken at its shortest round-trip repr.
+      TIMESTAMP array-> int item (raw microseconds) converted to the element's
+                        storage unit, kind 0; lossy -> declined.
+      otherwise      -> inferred from the item: bool/int kind 0, float kind 2,
+                        str/bytes kind 1.
+    Returns None (not eligible — caller falls through to plan-time refusal) for
+    NULL, a DATE item against a non-DATE array (or vice versa), DECIMAL128
+    elements (no int128 arm), and any item/element pairing not listed above.
     """
     if value is None:
+        return None
+    elem = element_ct.physical.name if element_ct is not None else ""
+    item_is_date = item_ct is not None and item_ct.physical.name == "DATE32"
+    if elem == "DATE32" or item_is_date:
+        if elem == "DATE32" and item_is_date and isinstance(value, int) \
+                and not isinstance(value, bool):
+            return _pack_membership_blob([value], 0, 0)
+        return None
+    if elem in ("FLOAT32", "FLOAT64"):
+        if isinstance(value, bool) or not isinstance(value, (int, float, _decimal.Decimal)):
+            return None
+        return _pack_membership_blob([float(value)], 2, 0)
+    if elem == "DECIMAL":
+        if isinstance(value, bool) or not isinstance(value, (int, float, _decimal.Decimal)):
+            return None
+        if element_ct.logical is None or element_ct.logical.scale is None:
+            return None
+        # Wide context: the rescale must be exact, never rounded by the default
+        # 28-digit context before the representability check below sees it.
+        ctx = _decimal.Context(prec=1000)
+        exact = _decimal.Decimal(repr(value)) if isinstance(value, float) else _decimal.Decimal(value)
+        if not exact.is_finite():
+            return _pack_membership_blob([], 0, 0)
+        scaled = exact.scaleb(int(element_ct.logical.scale), context=ctx)
+        if scaled != scaled.to_integral_value(context=ctx):
+            return _pack_membership_blob([], 0, 0)
+        raw = int(scaled)
+        if raw < -9223372036854775808 or raw > 9223372036854775807:
+            return _pack_membership_blob([], 0, 0)
+        return _pack_membership_blob([raw], 0, 0)
+    if elem == "DECIMAL128":
         return None
     if isinstance(value, bool):
         return _pack_membership_blob([int(value)], 0, 0)
     if isinstance(value, float):
         return _pack_membership_blob([value], 2, 0)
     if isinstance(value, int):
-        if element_ct is not None and getattr(
-                getattr(element_ct, "physical", None), "name", "") == "TIMESTAMP64":
+        if elem == "TIMESTAMP64":
             if element_ct.logical is None or element_ct.logical.unit is None:
                 return None
             raw = _micros_to_storage_unit(value, int(element_ct.logical.unit.value))
@@ -820,6 +856,8 @@ def _build_single_item_blob(value, element_ct):
     if isinstance(value, (str, bytes)):
         return _pack_membership_blob([value], 1, 0)
     return None
+
+
 cdef type _CarcharSetWrapper_t = None
 cdef type _PerfectHashSet_t = None
 
@@ -1641,7 +1679,7 @@ cdef Py_ssize_t _linearize(
         #     not bare Python lists.
         #
         # A computed (non-column, non-literal) array, or an item type this
-        # kernel doesn't cover (DECIMAL, DATE, mixed types), is not eligible
+        # kernel doesn't cover (see _build_single_item_blob), is not eligible
         # and falls through to the generic compare, which the native engine
         # then refuses (no fallback) — never a silent wrong answer.
         if op_str == "AnyOpEq" and node.left != NULL and node.right != NULL:
@@ -1672,7 +1710,8 @@ cdef Py_ssize_t _linearize(
                 _ac_right_ct = (<object>node.right.schema_column).column_type \
                     if node.right.schema_column != NULL else None
                 _ac_element_ct = getattr(_ac_right_ct, "element", None) if _ac_right_ct is not None else None
-                _ac_blob = _build_single_item_blob(<object>node.left.value, _ac_element_ct)
+                _ac_blob = _build_single_item_blob(<object>node.left.value, left_type,
+                                                   _ac_element_ct)
                 if _ac_blob is not None:
                     from draken.ops.kernels._kernel_registry import alloc_in_list_ctx as _ac_alloc
                     _ac_fn, _ac_ctx = _resolve_kernel_and_context(
@@ -3735,12 +3774,15 @@ cdef _validate_temporal_at_bind(
     type lives in ColumnType.element. Without unwrapping it here, every
     `col IN (cast(lit AS DATE), ...)` reads as a DATE-vs-ARRAY mismatch even
     though each element was explicitly cast, because this check inspects the
-    array's own category rather than what it is an array OF.
+    array's own category rather than what it is an array OF. `item <op> ANY/ALL(arr)`
+    has the same shape — the comparand is each ELEMENT — so it unwraps too;
+    otherwise `CAST(x AS DATE) = ANY(date_array)` reads as DATE-vs-ARRAY and the
+    array (an aggregate, not an IDENTIFIER) is misreported as an un-cast literal.
     """
     _ensure_sql_types()
     cdef object _lcat = left_type.category if left_type is not None else None
     cdef object _rcat = right_type.category if right_type is not None else None
-    if op == "InList" or op == "NotInList":
+    if op == "InList" or op == "NotInList" or op.startswith("AnyOp") or op.startswith("AllOp"):
         if _rcat is _LogicalCategory_ARRAY and right_type.element is not None:
             _rcat = right_type.element.category
     cdef bint left_is_temporal = (_lcat is _LogicalCategory_DATE) or (_lcat is _LogicalCategory_TIMESTAMP)

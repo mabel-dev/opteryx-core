@@ -321,42 +321,10 @@ REGISTER: List[RegisteredDefect] = [
     # AN OPTIMIZER PASS IS LOAD-BEARING — disabling it does not just cost speed,
     # it breaks the plan. Found by the optimizer differential oracle.
     # ─────────────────────────────────────────────────────────────────────────
-    RegisteredDefect(
-        id="having-in-a-derived-table-needs-predicate-pushdown-to-run",
-        repro=(
-            "SELECT name FROM (SELECT name, COUNT(*) AS c FROM testdata.planets "
-            "GROUP BY name HAVING COUNT(*) < 1) AS sub"
-        ),
-        error_type="KeyError",
-        signature="which the stream does not carry",
-        disabled_strategy="disable_predicate_pushdown",
-        detail=(
-            "A HAVING inside a DERIVED TABLE only runs because predicate pushdown runs. Turn "
-            "that one strategy off and the query dies:\n"
-            "    expression references column b'$derived_qxJeRfqC' which the\n"
-            "    stream does not carry (layout: [...])\n"
-            "The same query with the strategy enabled is fine, and the FLAT spelling — the same "
-            "GROUP BY/HAVING without the enclosing derived table — is fine either way. So it is "
-            "the derived-table boundary that loses the HAVING's `$derived_` column when the "
-            "predicate is not pushed.\n"
-            "\n"
-            "This matters beyond the oracle. An optimizer strategy is semantics-preserving by "
-            "definition: disabling one may cost time but must never change the answer, let alone "
-            "raise. A pass that is load-bearing is a pass whose kill switch is a lie, and the "
-            "kill switches are what DISABLE_OPTIMIZER debugging rests on — the tool you reach "
-            "for when a plan is suspect is the one that breaks. It is the same class as the "
-            "projection-pushdown case that was fixed by having the binder seed Scan.columns.\n"
-            "\n"
-            "The aggregate FILTER in the statement that first produced this is NOT required; it "
-            "reduces to a plain COUNT(*). Registered with disabled_strategy rather than left to "
-            "fail the run at random, because seeds are random per run and this would surface "
-            "only when the oracle happened to draw this one strategy out of fifteen.\n"
-            "\n"
-            "FOUND BY: the single-table fuzzer on the CONCAT one-overload-per-string-type run, "
-            "which shifted the RNG draw and so the statements generated. Unrelated to that "
-            "change — there is no string concatenation anywhere on this path."
-        ),
-    ),
+    # `having-in-a-derived-table-needs-predicate-pushdown-to-run` is FIXED (2026-09-23):
+    # `SELECT name FROM (SELECT name, COUNT(*) AS c FROM testdata.planets GROUP BY name
+    # HAVING COUNT(*) < 1) AS sub` now answers correctly with predicate pushdown both on
+    # and off (checked with HAVING < 1, >= 1 and = 1 against the planet names).
     # `repeated-nullary-function-in-one-projection-fails-to-bind` was registered
     # here for less than an hour. It is FIXED — inner_binder's "adopt a derived
     # column an earlier occurrence already registered" branch REWRITES the node

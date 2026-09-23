@@ -2162,8 +2162,10 @@ cpdef IpcRowGroupSource open_pass2_source(
 
     ``string_types``: see `open_ipc_source`."""
     if decode_workers <= 0:
-        import os
-        decode_workers = max(2, (os.cpu_count() or 4) - 2)
+        raise ValueError(
+            f"open_pass2_source needs a resolved decode width, got {decode_workers}; "
+            "pass the scan's pass-1 width"
+        )
 
     cdef IpcRowGroupSource src = IpcRowGroupSource()
     src.column_names = list(column_names)
@@ -3133,112 +3135,3 @@ def iter_row_groups_ipc(
             with open(diag_json_path, "a") as diag_file:
                 diag_file.write(json.dumps(record) + "\n")
         src.close()
-
-
-def iter_pass2_row_groups_ipc(
-    filesystem,
-    work_items,
-    column_names,
-    decode_workers=None,
-    file_sizes=None,
-    connector=None,
-    query_id=None,
-    prefetched_footers=None,
-    footer_bytes_cache=None,
-):
-    """
-    C++ Parquet IO pipeline for pass-2 late materialization.
-
-    Decodes pass-2 columns in parallel, applying a per-row-group mask so only
-    surviving rows (from pass-1 predicate evaluation) are decoded and serialized.
-
-    work_items: list of (path, rg_idx, mask_bytes) triples.
-    column_names: pass-2 (projection-only) column names.
-
-    Yields row_group dicts with __path__, __row_group__, __parquet_scan_strategy__,
-    and __bytes_fetched__ in completion order.
-    """
-    if not work_items:
-        return
-
-    # Pass-2 decode is CPU-bound (decompress + materialize), so size the worker
-    # pool to the host: use all but two cores, with a floor of two. Mirrors the
-    # thread_pool_manager convention (os.cpu_count() or 4) with a floor of 2.
-    if decode_workers is None:
-        import os
-        decode_workers = max(2, (os.cpu_count() or 4) - 2)
-
-    # Planning-time URL signer: converts gs:// paths to signed HTTPS URLs.
-    cdef dict orig_to_cpp
-    cdef dict cpp_to_orig
-    orig_to_cpp, cpp_to_orig = _sign_paths(filesystem, [w[0] for w in work_items])
-
-    cdef CppIOPipeline pipeline = CppIOPipeline(
-        decode_workers=decode_workers,
-        queue_capacity=1024,
-        pool_size=256*1024*1024,
-        auth_header=_native_auth_header(filesystem),
-    )
-
-    cdef unordered_map[string, FileStats] local_footers_native
-    cdef string path_bytes_cpp
-    cdef const uint8_t* footer_buf_ptr
-    cdef size_t footer_buf_size
-    cdef RowGroupStats* rg_ptr
-
-    try:
-        # Load footers for all paths needed (footer cache hits expected — pass 1 already fetched them).
-        # TODO: factor out footer-loading logic shared with iter_row_groups_ipc.
-        for path, rg_idx, mask_bytes in work_items:
-            path_bytes_cpp = path.encode('utf-8')
-            if local_footers_native.count(path_bytes_cpp) == 0:
-                envelope, _ = _read_footer_payload(orig_to_cpp.get(path, path), -1, footer_bytes_cache)
-                footer_buf_ptr = <const uint8_t*>envelope
-                footer_buf_size = len(envelope)
-                local_footers_native[path_bytes_cpp] = ReadParquetMetadataFromBuffer(
-                    footer_buf_ptr, footer_buf_size
-                )
-
-        # Submit all pass-2 work items with their masks.
-        for path, rg_idx, mask_bytes in work_items:
-            path_bytes_cpp = path.encode('utf-8')
-            rg_ptr = &local_footers_native[path_bytes_cpp].row_groups[rg_idx]
-            pipeline.submit_work_native_masked(
-                orig_to_cpp.get(path, path), rg_idx, column_names, rg_ptr, bytes(mask_bytes)
-            )
-
-        # Consume results in completion order.
-        results_received = 0
-        while results_received < len(work_items):
-            result = pipeline.wait_result()
-            if result is None:
-                raise RuntimeError(
-                    f"Parquet pass-2 pipeline drained with {len(work_items) - results_received} "
-                    f"result(s) missing"
-                )
-
-            if not result['success']:
-                raise RuntimeError(f"Parquet pass-2 pipeline error: {result.get('error', 'unknown')}")
-
-            row_group = deserialize_row_group(result['ref_ids'], pipeline.pool)
-            row_group.update(result['direct'])  # WP-6b direct columns
-
-            # Build typed metadata object; remove all __*__ keys from dict.
-            # Yield (ScanRowGroup, {col: Vector}) to separate metadata from data.
-            path_str = cpp_to_orig.get(result['path'], result['path'])
-            telemetry_dict = {
-                '__bytes_fetched__': result['bytes_fetched'],
-                '__time_read_ranges_ns__': result.get('read_ns', 0),
-                '__time_decode_columns_ns__': result.get('decode_ns', 0),
-            }
-            scan_rg = _make_scan_row_group(path_str, result['rg_idx'], 'cpp-pipeline-pass2', telemetry_dict)
-            # row_group is now pure {col: Vector}; clean for the operator.
-            results_received += 1
-            yield (scan_rg, row_group)
-
-    finally:
-        # WP-8: cancel before close so unconsumed pass-2 row groups bail in the
-        # workers rather than decode during wait_shutdown (e.g. on early
-        # abandonment). Harmless flag flip on normal exhaustion.
-        pipeline.cancel()
-        pipeline.close()

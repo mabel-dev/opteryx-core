@@ -145,29 +145,29 @@ _DOCUMENTATION = {
 }
 
 _SQL_FORMS = {
-    "ANY_VALUE": ["ANY_VALUE(expr)"],
-    "APPROX_COUNT_DISTINCT": ["APPROX_COUNT_DISTINCT(expr)"],
+    "ANY_VALUE": ["ANY_VALUE(expr)", "ANY_VALUE(DISTINCT expr)"],
+    "APPROX_COUNT_DISTINCT": ["APPROX_COUNT_DISTINCT(expr)", "APPROX_COUNT_DISTINCT(DISTINCT expr)"],
     "APPROX_PERCENTILE": ["APPROX_PERCENTILE(expr, percentile)"],
-    "CIDR_AGG": ["CIDR_AGG(ipv4_expr)"],
+    "CIDR_AGG": ["CIDR_AGG(ipv4_expr)", "CIDR_AGG(DISTINCT ipv4_expr)"],
     "ARRAY_AGG": [
         "ARRAY_AGG(expr)",
         "ARRAY_AGG(DISTINCT expr)",
         "ARRAY_AGG(expr LIMIT n)",
         "ARRAY_AGG(expr ORDER BY expr [ASC|DESC] LIMIT n)",
     ],
-    "AVG": ["AVG(expr)"],
+    "AVG": ["AVG(expr)", "AVG(DISTINCT expr)"],
     "CORR": ["CORR(x, y)"],
     "COUNT": ["COUNT(*)", "COUNT(expr)", "COUNT(DISTINCT expr)"],
     "COUNT_DISTINCT": ["COUNT_DISTINCT(expr)", "COUNT(DISTINCT expr)"],
-    "MAX": ["MAX(expr)"],
-    "MEDIAN": ["MEDIAN(expr)"],
-    "MIN": ["MIN(expr)"],
-    "SUM": ["SUM(expr)"],
-    "STDDEV": ["STDDEV(expr)"],
-    "STDDEV_POP": ["STDDEV_POP(expr)"],
-    "STDDEV_SAMP": ["STDDEV_SAMP(expr)"],
-    "VAR_POP": ["VAR_POP(expr)"],
-    "VAR_SAMP": ["VAR_SAMP(expr)"],
+    "MAX": ["MAX(expr)", "MAX(DISTINCT expr)"],
+    "MEDIAN": ["MEDIAN(expr)", "MEDIAN(DISTINCT expr)"],
+    "MIN": ["MIN(expr)", "MIN(DISTINCT expr)"],
+    "SUM": ["SUM(expr)", "SUM(DISTINCT expr)"],
+    "STDDEV": ["STDDEV(expr)", "STDDEV(DISTINCT expr)"],
+    "STDDEV_POP": ["STDDEV_POP(expr)", "STDDEV_POP(DISTINCT expr)"],
+    "STDDEV_SAMP": ["STDDEV_SAMP(expr)", "STDDEV_SAMP(DISTINCT expr)"],
+    "VAR_POP": ["VAR_POP(expr)", "VAR_POP(DISTINCT expr)"],
+    "VAR_SAMP": ["VAR_SAMP(expr)", "VAR_SAMP(DISTINCT expr)"],
 }
 
 

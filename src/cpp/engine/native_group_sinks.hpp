@@ -2361,9 +2361,7 @@ struct UngroupedAggSink : Sink {
             }
             item_sets.resize(items.size());
             if (!items.empty()) {
-                unsigned hw = std::thread::hardware_concurrency();
-                unsigned nt = hw > 2 ? hw - 2 : 1;
-                if (nt > 16) nt = 16;
+                unsigned nt = static_cast<unsigned>(g.query_dop);
                 if (nt > items.size()) nt = static_cast<unsigned>(items.size());
                 if (queued < 65536) nt = 1;   // small distinct: inline
                 std::atomic<size_t> next{0};
@@ -4609,9 +4607,7 @@ struct DistinctSink : Sink {
         // disjoint by hash, so they dedup AND emit in parallel; output order across
         // partitions is unspecified — exactly SQL's contract for DISTINCT / GROUP BY
         // without ORDER BY (and the compiler never dop-1-pins this sink's consumer).
-        unsigned hw = std::thread::hardware_concurrency();
-        unsigned nt = hw > 2 ? hw - 2 : 1;
-        if (nt > 16) nt = 16;
+        unsigned nt = static_cast<unsigned>(g.query_dop);
         if (nt > nonempty_parts) nt = static_cast<unsigned>(nonempty_parts);
         if (total < 65536) nt = 1;   // small distinct: inline, no threads
         if (nt < 1) nt = 1;
@@ -4847,9 +4843,7 @@ struct WindowTopKSink : Sink {
         std::array<std::vector<uint32_t>, kGBParts> b_row_m, b_row_r;
         std::array<std::vector<int64_t>, kGBParts> b_rn;
         {
-            unsigned hw = std::thread::hardware_concurrency();
-            unsigned mnt = hw > 2 ? hw - 2 : 1;
-            if (mnt > 16) mnt = 16;
+            unsigned mnt = static_cast<unsigned>(g.query_dop);
             if (mnt > nonempty_buckets) mnt = static_cast<unsigned>(nonempty_buckets);
             if (entry_total < 65536) mnt = 1;   // small window: inline, no threads
             if (mnt < 1) mnt = 1;
@@ -4923,9 +4917,7 @@ struct WindowTopKSink : Sink {
         size_t num_chunks = (total + chunk_rows - 1) / chunk_rows;
         std::vector<MorselPtr> chunk_out(num_chunks);
 
-        unsigned hw = std::thread::hardware_concurrency();
-        unsigned nt = hw > 2 ? static_cast<unsigned>(hw - 2) : 1u;
-        if (nt > 16) nt = 16;
+        unsigned nt = static_cast<unsigned>(g.query_dop);
         if (nt > num_chunks) nt = static_cast<unsigned>(num_chunks);
         if (total < 200000) nt = 1;
         if (nt < 1) nt = 1;

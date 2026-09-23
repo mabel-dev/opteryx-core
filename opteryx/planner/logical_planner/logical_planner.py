@@ -17,6 +17,7 @@ from typing import List, Optional, Tuple
 
 from opteryx.exceptions import (
     InvalidInternalStateError,
+    NotSupportedError,
     PermissionsError,
     SqlError,
     UnnamedColumnError,
@@ -3017,6 +3018,25 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
 
         if _framed_specs:
             from opteryx.types.schema import SchemaColumn, mint_column_identity
+
+            # FramedWindowSink has no DISTINCT framing: its function tuples carry
+            # (kind, out, arg, frame) only, so the modifier would vanish here and a
+            # plain running aggregate would be returned in its place. Refuse it
+            # while the aggregate node still says DISTINCT. (The unframed path above
+            # is fine — window_to_join lowers it through the regular aggregate,
+            # which honours DISTINCT.)
+            for _agg_node, _partition_by, _wob, _frame in _framed_specs:
+                if _agg_node.duplicate_treatment == "Distinct":
+                    raise NotSupportedError(
+                        compose(
+                            f"{md_syntax(f'{_agg_node.value}(DISTINCT ...) OVER (ORDER BY ...)')}"
+                            " is not supported - a window with an ORDER BY or frame "
+                            "cannot aggregate DISTINCT values",
+                            f"{md_syntax(f'{_agg_node.value}(DISTINCT ...) OVER ()')} and "
+                            f"{md_syntax('OVER (PARTITION BY ...)')} without an "
+                            f"{md_syntax('ORDER BY')} are supported",
+                        )
+                    )
 
             # Group by distinct PARTITION BY + window ORDER BY: functions that share
             # both need only one sorted pass (FramedWindowSink computes every one of

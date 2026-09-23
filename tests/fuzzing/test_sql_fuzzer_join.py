@@ -1418,8 +1418,14 @@ def test_regression_theta_on_condition_is_inner_only():
     radius` gave LEFT 179 (truth 161), SEMI 7 (truth 4), ANTI 2 (truth 5). The
     algebra identities could not see it, because dropping the conjunct uniformly
     left them all satisfied over the wrong answers.
+
+    The refusal is JoinConditionHoistStrategy's, raised before the compiler's own
+    guard is reached, and it is an UnsupportedSyntaxError - the statement parsed
+    fine and Opteryx will not run it (see QueryParseError's docstring for the
+    distinction). It names the join as WRITTEN: the hoist runs before a RIGHT
+    JOIN is rewritten into a LEFT one.
     """
-    from opteryx.exceptions import NotSupportedError
+    from opteryx.exceptions import UnsupportedSyntaxError
 
     on = ("testdata.planets.id = testdata.satellites.planetId "
           "AND testdata.planets.mass > testdata.satellites.radius")
@@ -1431,15 +1437,18 @@ def test_regression_theta_on_condition_is_inner_only():
         f"INNER with a theta conjunct is no longer the filtered cartesian product "
         f"(INNER {inner}, CROSS+WHERE {crossed})")
 
-    for join_type in ("LEFT JOIN", "RIGHT JOIN", "FULL OUTER JOIN",
-                      "LEFT SEMI JOIN", "LEFT ANTI JOIN"):
-        with pytest.raises(NotSupportedError) as raised:
+    for join_type, named in (("LEFT JOIN", "LEFT OUTER"), ("RIGHT JOIN", "RIGHT OUTER"),
+                             ("FULL OUTER JOIN", "FULL OUTER"), ("LEFT SEMI JOIN", "LEFT SEMI"),
+                             ("LEFT ANTI JOIN", "LEFT ANTI")):
+        with pytest.raises(UnsupportedSyntaxError) as raised:
             harness.scalar(
                 f"SELECT COUNT(*) FROM testdata.planets {join_type} "
                 f"testdata.satellites ON {on}")
         assert "not an equality between the two relations" in str(raised.value), (
             f"{join_type} with a theta ON conjunct no longer refuses with the "
             f"expected message: {raised.value}")
+        assert f"**{named}**" in str(raised.value), (
+            f"{join_type}'s refusal no longer names the join as written: {raised.value}")
 
     # The equi-only join is untouched by the guard.
     equi = "testdata.planets.id = testdata.satellites.planetId"

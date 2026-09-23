@@ -170,11 +170,14 @@ static MorselPtr make_morsel(std::vector<CxxColumn> cols) {
 
 // The public entry point — picks AoS or SortKeyCmp itself. Callers below that pass
 // take_first == SIZE_MAX over AoS-eligible keys are exercising the AoS path.
+// Fixed width so the parallel stable-sort path is exercised the same on every host.
+static constexpr unsigned kSortThreads = 4;
+
 static std::vector<uint32_t> sort_via_dispatch(const std::vector<SortKeyColumn>& keys, size_t n,
                                                size_t take_first) {
     std::vector<uint32_t> perm(n);
     std::iota(perm.begin(), perm.end(), 0u);
-    sort_perm(keys, perm, take_first);
+    sort_perm(keys, perm, take_first, kSortThreads);
     return perm;
 }
 
@@ -182,7 +185,7 @@ static std::vector<uint32_t> sort_via_generic(const std::vector<SortKeyColumn>& 
                                               size_t take_first) {
     std::vector<uint32_t> perm(n);
     std::iota(perm.begin(), perm.end(), 0u);
-    sort_perm_cmp(SortKeyCmp{keys}, perm, take_first);
+    sort_perm_cmp(SortKeyCmp{keys}, perm, take_first, kSortThreads);
     return perm;
 }
 
@@ -361,7 +364,7 @@ static void test_string_keys() {
 
     std::vector<uint32_t> perm(n);
     std::iota(perm.begin(), perm.end(), 0u);
-    sort_perm(keys, perm, SIZE_MAX);
+    sort_perm(keys, perm, SIZE_MAX, kSortThreads);
 
     CHECK(!valid[perm[0]], "NULL string must sort first under ASC");
     std::vector<std::string> got;
@@ -383,7 +386,7 @@ static void test_decimal128_keys() {
 
     std::vector<uint32_t> perm(n);
     std::iota(perm.begin(), perm.end(), 0u);
-    sort_perm(keys, perm, SIZE_MAX);
+    sort_perm(keys, perm, SIZE_MAX, kSortThreads);
     for (size_t i = 0; i + 1 < n; ++i)
         CHECK(v[perm[i]] <= v[perm[i + 1]], "DECIMAL128 not ascending");
     CHECK(v[perm[0]] == -big, "most-negative int128 must sort first");
@@ -408,7 +411,7 @@ static void test_five_columns_fall_back() {
 
     std::vector<uint32_t> perm(n);
     std::iota(perm.begin(), perm.end(), 0u);
-    sort_perm(keys, perm, SIZE_MAX);
+    sort_perm(keys, perm, SIZE_MAX, kSortThreads);
     for (size_t i = 0; i + 1 < n; ++i) {
         uint32_t x = perm[i], y = perm[i + 1];
         bool ok = false;
@@ -455,7 +458,7 @@ static void test_sort_morsels_across_morsels() {
     for (size_t chunk : {size_t(64), size_t(1000)}) {
         ErrCtx err;
         std::vector<MorselPtr> out;
-        bool ok = sort_morsels(ms, {{0, true}}, SIZE_MAX, chunk, out, err);
+        bool ok = sort_morsels(ms, {{0, true}}, SIZE_MAX, chunk, kSortThreads, out, err);
         CHECK(ok && err.code == 0, "sort_morsels failed");
         std::vector<int64_t> got;
         for (const MorselPtr& m : out) {
@@ -469,7 +472,7 @@ static void test_sort_morsels_across_morsels() {
     // TopN across morsels
     ErrCtx err;
     std::vector<MorselPtr> out;
-    bool ok = sort_morsels(ms, {{0, true}}, 10, 10, out, err);
+    bool ok = sort_morsels(ms, {{0, true}}, 10, 10, kSortThreads, out, err);
     CHECK(ok && err.code == 0, "sort_morsels TopN failed");
     size_t emitted = 0;
     for (const MorselPtr& m : out) emitted += m->num_rows();

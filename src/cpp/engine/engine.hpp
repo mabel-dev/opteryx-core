@@ -1469,7 +1469,7 @@ public:
             pn->dop_used = pdop;
             const uint64_t w0 = telem_now_ns();
             const uint64_t c0 = telem_process_cpu_now_ns();
-            pn->result = run_pipeline(p, pdop, err, pool, &pn->skew);
+            pn->result = run_pipeline(p, pdop, dop, err, pool, &pn->skew);
             // Accumulate (not assign): a pipeline inside a LoopSpan runs once per
             // iteration and its reading should cover all of them. Identical for
             // the ordinary single-run pipeline, which starts from zero.

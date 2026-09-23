@@ -139,14 +139,14 @@ static void compare(const char* label, const std::vector<MorselPtr>& ms,
           "old build_sort_keys failed");
     std::vector<uint32_t> old_perm(n);
     std::iota(old_perm.begin(), old_perm.end(), 0u);
-    opteryx::engine::sort_perm(old_keys, old_perm, take_first);
+    opteryx::engine::sort_perm(old_keys, old_perm, take_first, 4u);
 
     ErrCtx e2;
     std::vector<::SortKeyColumn> new_keys;
     CHECK(::build_sort_keys(ms, new_spec, n, new_keys, e2), "new build_sort_keys failed");
     std::vector<uint32_t> new_perm(n);
     std::iota(new_perm.begin(), new_perm.end(), 0u);
-    ::sort_perm(new_keys, new_perm, take_first);
+    ::sort_perm(new_keys, new_perm, take_first, 4u);
 
     size_t compare_len = std::min(take_first, n);
     for (size_t i = 0; i < compare_len; ++i) {

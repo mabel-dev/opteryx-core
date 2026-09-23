@@ -710,6 +710,7 @@ cdef class ParquetReadNode(ReaderNode):
     # _sp_* it shares via read_morsels).
     cdef object _sp_filesystem
     cdef object _sp_connector_type
+    cdef int _sp_decode_workers
     cdef object _sp_blob_paths
     cdef dict _sp_file_sizes
     cdef object _sp_query_id
@@ -1681,6 +1682,18 @@ cdef class ParquetReadNode(ReaderNode):
         self._decode_start_ns = <int64_t>time.monotonic_ns()
         self._total_rows_before_filter = 0
 
+        # Resolved ONCE per scan and used by every pass: pass-2 used to take no width
+        # and fell back to `cpu - 2` from the whole host, local or remote alike.
+        self._sp_decode_workers = _resolve_var(
+            "parquet_gcs_io_workers", getattr(self.properties, "variables", None),
+            config.PARQUET_GCS_IO_WORKERS,
+        ) if connector_type in ("GCS", "GS", "S3") else config.resolve_parquet_local_io_workers(
+            _resolve_var(
+                "parquet_local_io_workers", getattr(self.properties, "variables", None),
+                config.PARQUET_LOCAL_IO_WORKERS,
+            ),
+        )
+
         if two_pass_eligible:
             # Native two-pass latmat: open the pass-1 (filter columns) source with
             # predicate pushdown; pass-2 is opened after pass-1 drains (the barrier).
@@ -1691,15 +1704,7 @@ cdef class ParquetReadNode(ReaderNode):
                 filesystem,
                 blob_paths,
                 self._sp_pass1_column_names,
-                decode_workers=_resolve_var(
-                    "parquet_gcs_io_workers", getattr(self.properties, "variables", None),
-                    config.PARQUET_GCS_IO_WORKERS,
-                ) if connector_type in ("GCS", "GS", "S3") else config.resolve_parquet_local_io_workers(
-                    _resolve_var(
-                        "parquet_local_io_workers", getattr(self.properties, "variables", None),
-                        config.PARQUET_LOCAL_IO_WORKERS,
-                    )
-                ),
+                decode_workers=self._sp_decode_workers,
                 predicates=self._sp_predicate_stats,
                 file_sizes=file_sizes or None,
                 connector=connector_type,
@@ -1763,15 +1768,7 @@ cdef class ParquetReadNode(ReaderNode):
             filesystem,
             blob_paths,
             column_names,
-            decode_workers=_resolve_var(
-                    "parquet_gcs_io_workers", getattr(self.properties, "variables", None),
-                    config.PARQUET_GCS_IO_WORKERS,
-                ) if connector_type in ("GCS", "GS", "S3") else config.resolve_parquet_local_io_workers(
-                    _resolve_var(
-                        "parquet_local_io_workers", getattr(self.properties, "variables", None),
-                        config.PARQUET_LOCAL_IO_WORKERS,
-                    )
-                ),
+            decode_workers=self._sp_decode_workers,
             predicates=self._sp_predicate_stats,
             file_sizes=file_sizes or None,
             connector=connector_type,
@@ -2209,6 +2206,7 @@ cdef class ParquetReadNode(ReaderNode):
             self._sp_filesystem,
             pass2_work,
             self._sp_pass2_column_names,
+            decode_workers=self._sp_decode_workers,
             file_sizes=self._sp_file_sizes or None,
             connector=self._sp_connector_type,
             query_id=self._sp_query_id,
@@ -2301,6 +2299,7 @@ cdef class ParquetReadNode(ReaderNode):
             self._sp_filesystem,
             pass2_work,
             self._sp_pass2_column_names,
+            decode_workers=self._sp_decode_workers,
             file_sizes=self._sp_file_sizes or None,
             connector=self._sp_connector_type,
             query_id=self._sp_query_id,

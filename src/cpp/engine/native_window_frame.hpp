@@ -186,7 +186,7 @@ struct FramedWindowSink : Sink, EmitSubset {
         if (!build_sort_keys(src, sort_spec, n, keys, err)) return;
         std::vector<uint32_t> perm(n);
         for (size_t i = 0; i < n; ++i) perm[i] = static_cast<uint32_t>(i);
-        sort_perm(keys, perm);
+        sort_perm(keys, perm, SIZE_MAX, static_cast<unsigned>(g.query_dop));
 
         // Partition boundaries — one forward + one backward sweep, shared by every
         // function. `part_start[i]`/`part_end[i]` are the [first, one-past-last)
@@ -473,9 +473,7 @@ struct FramedWindowSink : Sink, EmitSubset {
         size_t num_chunks = (n + chunk_rows - 1) / chunk_rows;
         std::vector<MorselPtr> chunk_out(num_chunks);
 
-        unsigned hw = std::thread::hardware_concurrency();
-        unsigned nt = hw > 2 ? static_cast<unsigned>(hw - 2) : 1u;
-        if (nt > 16) nt = 16;
+        unsigned nt = static_cast<unsigned>(g.query_dop);
         if (nt > num_chunks) nt = static_cast<unsigned>(num_chunks);
         if (n < 200000) nt = 1;
         if (nt < 1) nt = 1;

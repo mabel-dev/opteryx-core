@@ -288,23 +288,6 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     "parquet_gcs_io_workers": (INT64, FromConfig("PARQUET_GCS_IO_WORKERS"), VariableOwner.SERVER, Visibility.RESTRICTED),
     "parquet_local_io_workers": (INT64, FromConfig("PARQUET_LOCAL_IO_WORKERS", via="resolve_parquet_local_io_workers"), VariableOwner.SERVER, Visibility.RESTRICTED),
     "max_execution_workers": (INT64, FromConfig("MAX_EXECUTION_WORKERS", via="resolve_max_execution_workers"), VariableOwner.SERVER, Visibility.RESTRICTED),
-    # The IO-side twin of `max_execution_worker_cap` below, and registered for the
-    # same reason: it decided the local-Parquet read width of every query while being
-    # readable only as an env var. Both caps are now rows, so the pair that governs
-    # the two auto branches is discoverable together rather than one visible and one
-    # not. SERVER/RESTRICTED under the ruling above — a cap on a worker count is as
-    # much an engine property as the count.
-    "parquet_local_io_worker_cap": (INT64, FromConfig("PARQUET_LOCAL_IO_WORKER_CAP"), VariableOwner.SERVER, Visibility.RESTRICTED),
-    # The ceiling applied when `max_execution_workers` is left on "auto" (0): the
-    # engine then runs `min(cap, max(2, cpu - 2))`. It is a SEPARATE knob and not a
-    # synonym — an explicit positive `max_execution_workers` is honoured exactly and
-    # is NOT clamped by this, so setting the cap alone does nothing to a session that
-    # has pinned a worker count. Registered here because it was previously readable
-    # only as an env var: `SHOW VARIABLES` could not show the number that decided the
-    # default DOP of every query, which is precisely the invisibility the module
-    # docstring above calls out. SERVER/RESTRICTED to match `max_execution_workers`,
-    # under the ruling recorded at the head of this block.
-    "max_execution_worker_cap": (INT64, FromConfig("MAX_EXECUTION_WORKER_CAP"), VariableOwner.SERVER, Visibility.RESTRICTED),
     # Same reasoning as the three above, for the HTTP client that services GCS
     # range reads (src/cpp/http_client.cpp / rugo/src/parquet/io_pipeline.hpp).
     # Named for what they DO, not for the env var they replace — the old env-only

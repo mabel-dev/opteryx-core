@@ -16,9 +16,6 @@ from opteryx.exceptions import (
     InvalidInternalStateError,
     UnexpectedDatasetReferenceError,
     UnsupportedSyntaxError,
-    compose,
-    md_code,
-    md_syntax,
 )
 from opteryx.expression import NodeType
 from opteryx.expression.functions import get_catalog as _get_function_catalog
@@ -296,6 +293,24 @@ def _operand_column_type(operand):
     return None
 
 
+def _aggregate_operand_type(node: Node) -> Optional[_ColumnType]:
+    """The bound ColumnType of an aggregate's first operand, or None when it is
+    unknown (no operand, an unbound expression, or a NULL-typed operand)."""
+    if not node.parameters:
+        return None
+    param = node.parameters[0]
+    sc = getattr(param, "schema_column", None)
+    if sc is not None:
+        param_type = sc.column_type  # ColumnType or None
+    elif param.node_type == NodeType.LITERAL:
+        param_type = getattr(param, "type", None)  # ColumnType from Phase 2
+    else:
+        param_type = None
+    if param_type is None or param_type.category in (None, LogicalCategory.NULL):
+        return None
+    return param_type
+
+
 def _aggregate_return_type(node: Node) -> Optional[_ColumnType]:
     """Best-effort result-type inference for aggregate functions.
 
@@ -308,8 +323,13 @@ def _aggregate_return_type(node: Node) -> Optional[_ColumnType]:
     if name in _AGGREGATE_RESULT_DOUBLE:
         return _CT_FLOAT64
     if name == "ARRAY_AGG":
-        # Element type is unknown at bind time; VARIANT is a safe placeholder.
-        return _lt.ARRAY(_lt.VARIANT)
+        # The array's elements ARE the operand's values, so the element type is the
+        # operand's (the runtime child carries that same physical tag — DATE32 stays
+        # DATE32, DECIMAL stays DECIMAL). Consumers that coerce against the element
+        # at bind time (`item = ANY(arr)`'s DECIMAL rescale, the temporal-literal
+        # check) need it. VARIANT only when the operand's type is itself unknown.
+        operand_type = _aggregate_operand_type(node)
+        return _lt.ARRAY(operand_type if operand_type is not None else _lt.VARIANT)
     if name == "CIDR_AGG":
         # Unlike ARRAY_AGG, the element type is FIXED and known here: CIDR_AGG
         # always renders blocks as text regardless of its operand, so there is
@@ -321,17 +341,8 @@ def _aggregate_return_type(node: Node) -> Optional[_ColumnType]:
         # DECIMAL inputs (matches DuckDB and the runtime: the AVG collector divides as
         # double). Typing AVG(DECIMAL) as DOUBLE keeps the binder honest with the
         # runtime — an earlier DECIMAL passthrough was a latent lie.
-        if node.parameters:
-            param = node.parameters[0]
-            sc = getattr(param, "schema_column", None)
-            if sc is not None:
-                param_type = sc.column_type  # ColumnType or None
-            elif param.node_type == NodeType.LITERAL:
-                param_type = getattr(param, "type", None)  # ColumnType from Phase 2
-            else:
-                param_type = None
-            if param_type is None or param_type.category in (None, LogicalCategory.NULL):
-                return None
+        param_type = _aggregate_operand_type(node)
+        if param_type is not None:
             if name == "AVG" and param_type.category in (
                 LogicalCategory.INTEGER,
                 LogicalCategory.DECIMAL,
@@ -1384,23 +1395,11 @@ def inner_binder(
             # fail loud. The runtime cast reads the params independently, so this only
             # corrects the schema-column metadata.
             if target_type_name == "DECIMAL":
-                # Both parameters are required. There is no default precision and
-                # scale to fall back on — a DECIMAL's descriptor IS its type, and
-                # picking one on the caller's behalf would silently decide how their
-                # numbers round. The cast lowering has always required the pair; it
-                # said so from inside the expression compiler as a raw Python
-                # ValueError, which named no clause and offered no spelling.
-                if len(node.parameters) != 2 or any(
-                    parameter.node_type != NodeType.LITERAL for parameter in node.parameters
-                ):
-                    raise UnsupportedSyntaxError(
-                        compose(
-                            f"{md_syntax('CAST')} to {md_code('DECIMAL')} needs a precision "
-                            "and a scale",
-                            f"Write the target type as {md_code('DECIMAL(precision, scale)')}, "
-                            f"for example {md_code('DECIMAL(18, 4)')}",
-                        )
-                    )
+                # Both parameters are always present here: a parsed cast without
+                # them is refused by the cast builder (logical_planner_builders,
+                # _decimal_needs_precision_and_scale), the only place that knows how
+                # the user spelled it, and every synthesized DECIMAL cast carries
+                # the pair from its target ColumnType.
                 precision = int(node.parameters[0].value)
                 scale = int(node.parameters[1].value)
 

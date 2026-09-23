@@ -847,7 +847,20 @@ def cast(branch, alias: Optional[List[str]] = None, key=None):
     data_type = _extract_data_type(raw_data_type, branch, cast_parameters, build_literal_node)
 
     # Validate and normalize the data type
-    normalized_type = _normalize_cast_type(data_type)
+    normalized_type = _normalize_cast_type(
+        data_type, refused_as=f"{md_syntax('CAST')} can produce"
+    )
+
+    if normalized_type == "DECIMAL" and len(cast_parameters) != 2:
+        # Refused here, not in the binder: only the parse knows which spelling the
+        # user wrote, so only here can the message show them their own cast fixed.
+        operand = format_expression(source_expr)
+        if kind == "DoubleColon":
+            spell = lambda target: f"{operand}::{target}"  # noqa: E731
+        else:
+            keyword = {"TryCast": "TRY_CAST", "SafeCast": "SAFE_CAST"}.get(kind, "CAST")
+            spell = lambda target: f"{keyword}({operand} AS {target})"  # noqa: E731
+        raise _decimal_needs_precision_and_scale(cast_parameters, spell)
 
     # Apply TRY_CAST or SAFE_CAST prefix if needed
     if kind in {"TryCast", "SafeCast"}:
@@ -975,12 +988,16 @@ def _extract_data_type(raw_data_type, branch, args, build_literal_node):
     # the word crashed with a raw `KeyError: 'Array'` instead of an SqlError.
     _raw_type = branch["data_type"]
 
-    # Handle DECIMAL precision and scale
-    if isinstance(_raw_type, dict) and "PrecisionAndScale" in _raw_type.get("Decimal", {}):
-        precision = _raw_type["Decimal"]["PrecisionAndScale"][0]
-        scale = _raw_type["Decimal"]["PrecisionAndScale"][1]
+    # Handle DECIMAL precision and scale. A lone precision (`DECIMAL(10)`) is carried
+    # too, not dropped: the pair is required, and the refusal names what is missing.
+    _decimal = _raw_type.get("Decimal") if isinstance(_raw_type, dict) else None
+    if isinstance(_decimal, dict) and "PrecisionAndScale" in _decimal:
+        precision = _decimal["PrecisionAndScale"][0]
+        scale = _decimal["PrecisionAndScale"][1]
         args.append(build_literal_node(precision))
         args.append(build_literal_node(scale))
+    elif isinstance(_decimal, dict) and "Precision" in _decimal:
+        args.append(build_literal_node(_decimal["Precision"]))
 
     # Handle ARRAY element types
     if isinstance(_raw_type, dict) and "Array" in _raw_type:
@@ -1041,8 +1058,13 @@ _IMPLIED_ALIAS_CANONICAL = {
 }
 
 
-def _normalize_cast_type(data_type: str) -> str:
-    """Normalize and validate the cast target type."""
+def _normalize_cast_type(data_type: str, *, refused_as: str) -> str:
+    """Normalize and validate a type name written in SQL.
+
+    `refused_as` completes "`X` is not a type ..." in the refusals, naming the
+    surface the user wrote the type on — a CAST target or a column declaration —
+    so a CREATE TABLE is never told about a CAST it does not contain.
+    """
     lower_type = data_type.lower()
     upper_type = data_type.upper()
 
@@ -1173,8 +1195,10 @@ def _normalize_cast_type(data_type: str) -> str:
         ("STRING", "CHAR", "TEXT"): "VARCHAR",
         # NUMERIC is the standard's exact-numeric spelling — DECIMAL, not DOUBLE.
         # Suggesting DOUBLE sent the reader to a type that cannot hold what they
-        # asked for.
-        ("NUMERIC",): "DECIMAL",
+        # asked for. The suggestion carries the parameters: a bare DECIMAL is itself
+        # refused (_decimal_needs_precision_and_scale), so suggesting it would only
+        # walk the user into a second error.
+        ("NUMERIC",): "DECIMAL(precision, scale)",
         ("REAL",): "FLOAT32",
         ("TINYINT", "BYTE"): "INT8",
         ("SMALLINT",): "INT16",
@@ -1198,7 +1222,7 @@ def _normalize_cast_type(data_type: str) -> str:
     if suggestion is not None:
         raise SqlError(
             compose(
-                f"{md_code(upper_type)} is not a type {md_syntax('CAST')} can produce",
+                f"{md_code(upper_type)} is not a type {refused_as}",
                 did_you_mean(suggestion),
             )
         )
@@ -1228,7 +1252,7 @@ def _normalize_cast_type(data_type: str) -> str:
         )
         raise SqlError(
             compose(
-                f"{md_code(upper_type)} is not a type {md_syntax('CAST')} can produce",
+                f"{md_code(upper_type)} is not a type {refused_as}",
                 did_you_mean(suggestion),
             )
         )
@@ -1238,7 +1262,7 @@ def _normalize_cast_type(data_type: str) -> str:
     # the user typed and reads like the engine mangled their SQL.
     raise SqlError(
         compose(
-            f"{md_code(upper_type)} is not a type {md_syntax('CAST')} can produce",
+            f"{md_code(upper_type)} is not a type {refused_as}",
             f"{md_syntax('SHOW COLUMNS FROM')} on any table lists the type names in use",
         )
     )
@@ -1259,6 +1283,42 @@ def _timestamp_unit_forms():
         "_TIMESTAMP_S": _TU.SECONDS,
         "_TIMESTAMP_US": _TU.MICROSECONDS,
     }
+
+
+def _decimal_needs_precision_and_scale(params, spell) -> UnsupportedSyntaxError:
+    """The refusal for a DECIMAL written without both its precision and its scale.
+
+    There is no default to fall back on: a DECIMAL's precision and scale ARE its
+    type, and picking a pair on the user's behalf would silently decide how their
+    numbers round. So the message has to carry the fix. `spell(target)` renders the
+    user's own construct with `target` as the type (`CAST(x AS <target>)`,
+    `x::<target>`, or the bare type in a column declaration), so they are shown
+    what they wrote and the same thing corrected.
+    """
+    if len(params) == 1:
+        precision = int(params[0].value)
+        written = f"DECIMAL({precision})"
+        problem = f"{md_code(spell(written))} has a precision ({precision}) but no scale"
+        example_precision, example_scale = precision, (2 if precision > 2 else 0)
+        template = f"DECIMAL({precision}, scale)"
+    else:
+        problem = f"{md_code(spell('DECIMAL'))} has no precision or scale"
+        example_precision, example_scale = 18, 4
+        template = "DECIMAL(precision, scale)"
+    example = f"DECIMAL({example_precision}, {example_scale})"
+    digits = f"{example_precision} digit{'' if example_precision == 1 else 's'}"
+    after = "none" if example_scale == 0 else str(example_scale)
+    return UnsupportedSyntaxError(
+        compose(
+            problem,
+            f"A {md_code('DECIMAL')} has no default: the precision is the total number "
+            "of digits and the scale is how many of them come after the decimal point, "
+            "and both are part of the type",
+            f"Write it as {md_code(spell(template))}, for example "
+            f"{md_code(spell(example))}, which holds up to {digits} with {after} after "
+            "the decimal point",
+        )
+    )
 
 
 def column_type_from_ast(branch) -> "ColumnType":
@@ -1283,7 +1343,7 @@ def column_type_from_ast(branch) -> "ColumnType":
     params: list = []
     raw_name = _extract_data_type(branch["data_type"], branch, params, build_literal_node)
     try:
-        normalized = _normalize_cast_type(raw_name)
+        normalized = _normalize_cast_type(raw_name, refused_as="a column can be declared as")
     except SqlError:
         # The cast surface deliberately REFUSES alias spellings (TINYINT, BIGINT,
         # TEXT, REAL) and points at the exact name instead. A DECLARED type is a
@@ -1316,8 +1376,9 @@ def column_type_from_ast(branch) -> "ColumnType":
     # already understands the canonical string spelling of each — so rebuild that
     # spelling rather than growing a third construction path.
     if normalized == "DECIMAL":
-        if len(params) < 2:
-            raise UnsupportedSyntaxError("DECIMAL requires a precision and scale, e.g. DECIMAL(10, 2)")
+        if len(params) != 2:
+            # The DDL callers prefix the statement and the column name.
+            raise _decimal_needs_precision_and_scale(params, lambda target: target)
         return parse_column_type(f"DECIMAL({int(params[0].value)}, {int(params[1].value)})")
     if normalized == "VECTOR":
         if not params:

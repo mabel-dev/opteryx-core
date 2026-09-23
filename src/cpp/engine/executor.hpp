@@ -112,6 +112,10 @@ struct WorkerCtx {
     // is the barrier skew.
     uint64_t            t_first_ns = 0;
     uint64_t            t_last_ns  = 0;
+    // Owned copy of this worker's error text, taken ON THE WORKER THREAD as
+    // run_worker exits (see WorkerErrLatch there). Lives as long as the ctxs vector
+    // in run_pipeline_impl, i.e. until the driver-side latch_err_msg has copied it.
+    std::string         err_text;
 };
 
 // Straggler picture for one pipeline run. Filled by run_pipeline_impl from the
@@ -147,6 +151,26 @@ inline void run_worker(WorkerCtx* ctx) {
     std::vector<std::unique_ptr<OperatorState>> op_states;
     op_states.reserve(p.operators.size());
     for (Operator* op : p.operators) op_states.push_back(op->make_state());
+    // ErrCtx::msg is borrowed, and the commonest lender is a per-THREAD buffer:
+    // set_span_error/format_kernel_error (native_expression.hpp) point it at a
+    // thread_local std::string that is MOVE-assigned — freeing the previous text —
+    // the next time any operator on this pool thread formats an error. The driver
+    // does not read `e` until every worker has finished, and by then this pool
+    // thread may have run another worker task of the same pipeline that failed the
+    // same way, leaving `e.msg` pointing at freed memory (observed as a garbage
+    // UnicodeDecodeError, different bytes each run, on `1 = ANY(float_array)`).
+    // Copy the text into this worker's own slot on the way out, still on the thread
+    // that owns the lender. Declared AFTER lsrc/lsink/op_states so it destructs
+    // FIRST: text held in those states (a scan's own error string) is still alive.
+    struct WorkerErrLatch {
+        WorkerCtx* c;
+        ErrCtx&    e;
+        ~WorkerErrLatch() {
+            if (e.code == 0 || e.msg == nullptr) return;
+            c->err_text.assign(e.msg);
+            e.msg = c->err_text.c_str();
+        }
+    } _err_latch{ctx, e};
 
     // Push `m` through operators[stage:] into the sink. An operator may EMIT zero
     // times (NEED_INPUT — fully consumed, drop), once (EMIT), or MANY times
@@ -294,12 +318,14 @@ inline void latch_err_msg(ErrCtx& err) {
 // checks errors and finalizes exactly as before.
 template <typename DispatchFn>
 inline std::unique_ptr<GlobalSinkState>
-run_pipeline_impl(Pipeline& p, int dop, ErrCtx& err, DispatchFn&& dispatch,
+run_pipeline_impl(Pipeline& p, int dop, int query_dop, ErrCtx& err, DispatchFn&& dispatch,
                   PipelineSkew* skew = nullptr) {
     if (dop < 1) dop = 1;
+    if (query_dop < dop) query_dop = dop;
     std::unique_ptr<GlobalSourceState> gsrc = p.source->make_global();
     std::unique_ptr<GlobalSinkState>   gsink = p.sink->make_global();
     gsink->exec_dop = dop;   // finalize()'s parallel width — see GlobalSinkState::exec_dop
+    gsink->query_dop = query_dop;   // see GlobalSinkState::query_dop
     std::vector<ErrCtx> errs(static_cast<size_t>(dop));
     std::vector<WorkerCtx> ctxs(static_cast<size_t>(dop));
     for (int w = 0; w < dop; ++w) {
@@ -354,7 +380,7 @@ run_pipeline_impl(Pipeline& p, int dop, ErrCtx& err, DispatchFn&& dispatch,
 // see the free-threaded deadlock note above before raising dop here.
 inline std::unique_ptr<GlobalSinkState>
 run_pipeline(Pipeline& p, int dop, ErrCtx& err, PipelineSkew* skew = nullptr) {
-    return run_pipeline_impl(p, dop, err, [](std::vector<WorkerCtx>& ctxs) {
+    return run_pipeline_impl(p, dop, dop, err, [](std::vector<WorkerCtx>& ctxs) {
         std::vector<std::thread> threads;
         threads.reserve(ctxs.size());
         for (WorkerCtx& ctx : ctxs) threads.emplace_back(run_worker, &ctx);
@@ -381,8 +407,9 @@ run_pipeline(Pipeline& p, int dop, ErrCtx& err, PipelineSkew* skew = nullptr) {
 // code, the same pattern draken_native.so uses for draken_vector_unwrap et al.) ensures
 // the pool is only ever touched by the code that was compiled against its true layout.
 inline std::unique_ptr<GlobalSinkState>
-run_pipeline(Pipeline& p, int dop, ErrCtx& err, void* pool, PipelineSkew* skew = nullptr) {
-    return run_pipeline_impl(p, dop, err, [pool](std::vector<WorkerCtx>& ctxs) {
+run_pipeline(Pipeline& p, int dop, int query_dop, ErrCtx& err, void* pool,
+             PipelineSkew* skew = nullptr) {
+    return run_pipeline_impl(p, dop, query_dop, err, [pool](std::vector<WorkerCtx>& ctxs) {
         for (WorkerCtx& ctx : ctxs) bs_pool_submit_native(pool, &run_worker_task, &ctx);
         bs_pool_wait_native(pool);
     }, skew);

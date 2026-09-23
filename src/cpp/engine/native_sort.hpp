@@ -73,10 +73,11 @@ inline void sort_and_emit(const std::vector<MorselPtr>& ms,
                           const std::vector<SortKeySpec>& spec,
                           size_t take_first,          // SIZE_MAX = all rows
                           size_t chunk_rows,
+                          unsigned nthreads,          // sort width — see parallel_stable_sort_cmp
                           MorselBuffer* out, ErrCtx& err,
                           const std::vector<uint32_t>* emit_cols = nullptr) {
     std::vector<MorselPtr> sorted;
-    if (!sort_morsels(ms, spec, take_first, chunk_rows, sorted, err, emit_cols)) return;
+    if (!sort_morsels(ms, spec, take_first, chunk_rows, nthreads, sorted, err, emit_cols)) return;
     for (MorselPtr& m : sorted) {
         if (!out->append(m)) {
             err.code = 1;
@@ -139,7 +140,8 @@ struct SortSink : Sink, EmitSubset {
     }
     void finalize(GlobalSinkState& gs, ErrCtx& err) override {
         auto& g = static_cast<SortGlobal&>(gs);
-        sort_and_emit(g.morsels, spec, SIZE_MAX, chunk_rows, out, err, emit_ptr());
+        sort_and_emit(g.morsels, spec, SIZE_MAX, chunk_rows,
+                      static_cast<unsigned>(g.query_dop), out, err, emit_ptr());
     }
 };
 
@@ -179,9 +181,12 @@ struct TopNSink : Sink, EmitSubset {
     // NO emit subset here, deliberately: this is an INTERMEDIATE sort whose output
     // is sorted again on the next round and once more in finalize. Dropping the
     // ORDER BY key here would leave nothing to sort by.
+    //
+    // Width 1: this runs ON an execution worker, which must not fan out threads of its
+    // own. It is also always a partial sort (rows > n_limit), which never threads.
     void compact(TopNLocal& l, ErrCtx& err) {
         MorselBuffer tmp;
-        sort_and_emit(l.morsels, spec, n_limit, n_limit == 0 ? 1 : n_limit, &tmp, err);
+        sort_and_emit(l.morsels, spec, n_limit, n_limit == 0 ? 1 : n_limit, 1u, &tmp, err);
         if (err.code != 0) return;
         l.morsels = tmp.take_resident();
         l.rows = 0;
@@ -207,8 +212,8 @@ struct TopNSink : Sink, EmitSubset {
     }
     void finalize(GlobalSinkState& gs, ErrCtx& err) override {
         auto& g = static_cast<TopNGlobal&>(gs);
-        sort_and_emit(g.candidates, spec, n_limit, n_limit == 0 ? 1 : n_limit, out, err,
-                      emit_ptr());
+        sort_and_emit(g.candidates, spec, n_limit, n_limit == 0 ? 1 : n_limit,
+                      static_cast<unsigned>(g.query_dop), out, err, emit_ptr());
     }
 };
 
@@ -359,7 +364,7 @@ struct WindowSink : Sink, EmitSubset {
         if (!build_sort_keys(src, sort_spec, n, keys, err)) return;
         std::vector<uint32_t> perm(n);
         for (size_t i = 0; i < n; ++i) perm[i] = static_cast<uint32_t>(i);
-        sort_perm(keys, perm);
+        sort_perm(keys, perm, SIZE_MAX, static_cast<unsigned>(g.query_dop));
 
         // Rank numbers in perm order (gather_rows emits rows in perm order too).
         // Navigation functions (LAG/LEAD) get no rank: their per-row value is a
@@ -570,9 +575,7 @@ struct WindowSink : Sink, EmitSubset {
         size_t num_chunks = (total + chunk_rows - 1) / chunk_rows;
         std::vector<MorselPtr> chunk_out(num_chunks);
 
-        unsigned hw = std::thread::hardware_concurrency();
-        unsigned nt = hw > 2 ? static_cast<unsigned>(hw - 2) : 1u;
-        if (nt > 16) nt = 16;
+        unsigned nt = static_cast<unsigned>(g.query_dop);
         if (nt > num_chunks) nt = static_cast<unsigned>(num_chunks);
         if (total < 200000) nt = 1;
         if (nt < 1) nt = 1;

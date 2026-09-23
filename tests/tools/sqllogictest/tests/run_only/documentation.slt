@@ -74,23 +74,23 @@ SELECT CAST('2022-01-01' AS TIMESTAMP)
 
 
 # types
-statement error TypeError
+statement ok
 SELECT INTERVAL '1' YEAR
 
 
 # nulls
-statement error TypeError
+statement ok
 SELECT name = null FROM $planets
 
-statement error TypeError
+statement ok
 SELECT name FROM $planets WHERE name = null
 
 
 # CASE
-statement error ValueError
+statement ok
 SELECT name, CASE numberOfMoons WHEN 0 THEN 'none' WHEN 1 THEN 'one' ELSE 'lots' END as how_many_moons from $planets
 
-statement error ValueError
+statement ok
 SELECT name, CASE WHEN numberOfMoons = 0 THEN 'none' WHEN numberOfMoons = 1 THEN 'one' ELSE 'lots' END as how_many_moons from $planets
 
 
@@ -100,10 +100,10 @@ SELECT name, CASE WHEN numberOfMoons = 0 THEN 'none' WHEN numberOfMoons = 1 THEN
 # crashed Opteryx (excluded): SELECT '192.168.0.1' | '192.168.0.0/24'
 
 # ADVANCED STRUCTS
-statement error TypeError
+statement ok
 SELECT birth_place->'town' FROM testdata.astronauts
 
-statement error TypeError
+statement error VariantKeyError
 SELECT birth_place->'town', COUNT(*) FROM testdata.astronauts WHERE birth_place->'state' IS NOT NULL GROUP BY birth_place->'town'
 
 statement error FunctionNotFoundError

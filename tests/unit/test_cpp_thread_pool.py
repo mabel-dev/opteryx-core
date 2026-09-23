@@ -4,19 +4,16 @@ Tests both CppThreadPool and thread pool manager to ensure correct behavior,
 exception handling, and compatibility with ThreadPoolExecutor interface.
 """
 
-import concurrent.futures
 import pytest
 import time
 
 from opteryx.compiled.thread_pool import CppThreadPool
 from opteryx.connectors.parquet_io.thread_pool_manager import (
     create_thread_pool,
-    get_decode_pool,
     get_range_pool,
     get_footer_pool,
     get_filesystem_pool,
     shutdown_all_pools,
-    PythonThreadPoolWrapper,
     _pools,
 )
 
@@ -162,36 +159,9 @@ class TestThreadPoolManager:
 
     def test_create_thread_pool_cpp(self):
         """Test creating C++ thread pool."""
-        pool = create_thread_pool(name="test", max_workers=4, use_cpp=True)
+        pool = create_thread_pool(name="test", max_workers=4)
         assert pool is not None
         assert pool.max_workers == 4
-        pool.shutdown()
-
-    def test_create_thread_pool_python_fallback(self):
-        """Test creating Python thread pool fallback."""
-        # Use use_cpp=False to force Python fallback
-        pool = create_thread_pool(name="test", max_workers=4, use_cpp=False)
-        assert isinstance(pool, PythonThreadPoolWrapper)
-        pool.shutdown()
-
-    def test_get_decode_pool(self):
-        """Test get_decode_pool creates pool on demand."""
-        pool = get_decode_pool(max_workers=8)
-        assert pool is not None
-
-        # Second call should return same pool
-        pool2 = get_decode_pool(max_workers=8)
-        assert pool is pool2
-
-        pool.shutdown()
-
-    def test_get_decode_pool_default_uses_cpu_count_minus_two(self, monkeypatch):
-        """Test default decode pool sizing derives from cpu_count()-2."""
-        import os
-
-        monkeypatch.setattr(os, "cpu_count", lambda: 8)
-        pool = get_decode_pool()
-        assert pool.max_workers == 6
         pool.shutdown()
 
     def test_get_range_pool(self):
@@ -240,7 +210,7 @@ class TestThreadPoolManager:
 
     def test_shutdown_all_pools(self):
         """Test shutting down all pools."""
-        pool1 = get_decode_pool(max_workers=4)
+        pool1 = get_range_pool(name="range-test-a", max_workers=4)
         pool2 = get_range_pool(name="range-test", max_workers=4)
         pool3 = get_footer_pool(max_workers=4)
 
@@ -255,14 +225,14 @@ class TestThreadPoolManager:
 
     def test_pool_reuse_after_creation(self):
         """Test that pools are reused when requested again."""
-        pool1 = get_decode_pool(max_workers=4)
+        pool1 = get_range_pool(name="reuse-test", max_workers=4)
 
         # Submit task
         future1 = pool1.submit(lambda: 42)
         result1 = future1.result()
 
         # Get "same" pool again (should be cached)
-        pool2 = get_decode_pool(max_workers=4)
+        pool2 = get_range_pool(name="reuse-test", max_workers=4)
         assert pool1 is pool2
 
         # Should still work
@@ -273,36 +243,6 @@ class TestThreadPoolManager:
         assert result2 == 99
 
         pool1.shutdown()
-
-
-class TestPythonThreadPoolWrapper:
-    """Test Python fallback wrapper."""
-
-    def test_wrapper_creation(self):
-        """Test creating wrapper."""
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-        wrapper = PythonThreadPoolWrapper(executor)
-        assert wrapper is not None
-        wrapper.shutdown()
-
-    def test_wrapper_submit(self):
-        """Test submitting tasks via wrapper."""
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-        wrapper = PythonThreadPoolWrapper(executor)
-
-        future = wrapper.submit(lambda x: x * 2, 5)
-        result = future.result()
-
-        assert result == 10
-        wrapper.shutdown()
-
-    def test_wrapper_context_manager(self):
-        """Test wrapper as context manager."""
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-
-        with PythonThreadPoolWrapper(executor) as wrapper:
-            future = wrapper.submit(lambda: "done")
-            assert future.result() == "done"
 
 
 class TestThreadPoolConcurrency:

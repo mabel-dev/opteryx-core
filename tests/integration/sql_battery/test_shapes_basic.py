@@ -1955,6 +1955,58 @@ def test_window_over_whole_relation():
     }, f"OVER () mixed with a partition spec: {mixed}"
 
 
+def test_window_distinct_aggregate_is_refused_under_an_ordered_frame():
+    """
+    VALUE-level regression: `agg(DISTINCT x) OVER (ORDER BY ...)` used to lose DISTINCT
+    silently — the framed window sink carries no duplicate treatment, so
+    `COUNT(DISTINCT id % 3) OVER (ORDER BY id)` returned 1..9 (the plain running count,
+    correct is 1,2,3,3,3,3,3,3,3) and `SUM(DISTINCT id % 3)` returned the plain running
+    sum. There is no DISTINCT framing, so every ordered/framed shape must be REFUSED by
+    name, while the unframed shapes — which lower through the regular aggregate and do
+    honour DISTINCT — keep returning the right values.
+    """
+    session = opteryx.session()
+
+    for statement, fn in (
+        ("SELECT id, COUNT(DISTINCT id % 3) OVER (ORDER BY id) AS c FROM $planets", "COUNT"),
+        ("SELECT id, SUM(DISTINCT id % 3) OVER (ORDER BY id) AS c FROM $planets", "SUM"),
+        (
+            "SELECT id, AVG(DISTINCT id) OVER (PARTITION BY number_of_moons ORDER BY id "
+            "ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS c FROM $planets",
+            "AVG",
+        ),
+    ):
+        with pytest.raises(NotSupportedError) as raised:
+            for _ in session.execute_to_morsels(statement):
+                pass
+        assert f"{fn}(DISTINCT ...) OVER (ORDER BY ...)" in str(raised.value), str(raised.value)
+
+    # Unframed: whole relation — ids 1..9 mod 3 is {0, 1, 2}, summing to 3.
+    whole = {}
+    for morsel in session.execute_to_morsels(
+        "SELECT id, COUNT(DISTINCT id % 3) OVER () AS c, SUM(DISTINCT id % 3) OVER () AS s "
+        "FROM $planets"
+    ):
+        for row_id, count, total in zip(
+            morsel.column("id").to_pylist(),
+            morsel.column("c").to_pylist(),
+            morsel.column("s").to_pylist(),
+        ):
+            whole[row_id] = (count, total)
+    assert whole == {i: (3, 3) for i in range(1, 10)}, f"DISTINCT OVER (): {whole}"
+
+    # Unframed, partitioned: Mercury (1) and Venus (2) share the 0-moon partition,
+    # 1 % 3 and 2 % 3 are distinct; every other planet is alone in its partition.
+    parts = {}
+    for morsel in session.execute_to_morsels(
+        "SELECT id, COUNT(DISTINCT id % 3) OVER (PARTITION BY number_of_moons) AS c "
+        "FROM $planets"
+    ):
+        for row_id, count in zip(morsel.column("id").to_pylist(), morsel.column("c").to_pylist()):
+            parts[row_id] = count
+    assert parts == {1: 2, 2: 2, **{i: 1 for i in range(3, 10)}}, f"DISTINCT OVER (PARTITION BY): {parts}"
+
+
 def test_window_functions_are_named_for_their_expression():
     """
     NAME-level regression: an unaliased window function is named by the expression it
@@ -4806,6 +4858,114 @@ def test_join_key_coercion_is_per_pair_not_per_column():
         assert got == expected, (on, len(got), len(expected))
 
 
+def test_scalar_subquery_in_having():
+    """
+    Two predicate-pushdown faults, both on a HAVING that compares an aggregate with
+    a scalar subquery.
+
+    Uncorrelated: the predicate's column set counted IDENTIFIERs only, so
+    `COUNT(*)` - an aggregator - was invisible and `HAVING COUNT(*) > (SELECT
+    MIN(..))` looked like it read the subquery's value alone. It was placed on the
+    subquery's leg of the cross join, away from the COUNT: "the compiled plan
+    references a column the stream does not carry".
+
+    Correlated: the HAVING folded onto the first grouped aggregate whose OUTPUT
+    covered its direct reads - the decorrelated subquery's own - which then counted
+    the subquery's rows as the outer COUNT(*): [3] where [3, 4, 7, 8, 9] was right.
+    A HAVING now folds only onto the aggregate that owns its aggregators.
+
+    Every answer is computed here from the raw rows.
+    """
+    from collections import defaultdict
+
+    def _values(statement):
+        found = []
+        for morsel in opteryx.session().execute_to_morsels(statement):
+            morsel.materialize()
+            found.extend(tuple(morsel[i]) for i in range(len(morsel)))
+        return found
+
+    def _keys(statement):
+        return sorted(row[0] for row in _values(statement))
+
+    satellites = "testdata.satellites"
+    planets = "testdata.planets"
+    radii = defaultdict(list)
+    for planet, radius in _values(f"SELECT planetId, radius FROM {satellites}"):
+        radii[planet].append(radius)
+    planet_rows = {row[0]: row for row in _values(f"SELECT id, diameter, number_of_moons FROM {planets}")}
+    mean_radius = sum(r for v in radii.values() for r in v) / sum(len(v) for v in radii.values())
+    smallest_diameter = min(row[1] for row in planet_rows.values())
+
+    for statement, expected in (
+        (
+            f"SELECT sq_o.id FROM {planets} AS sq_o GROUP BY sq_o.id "
+            f"HAVING COUNT(*) > (SELECT MIN(sq_i.planetId) FROM {satellites} AS sq_i)",
+            [],
+        ),
+        (
+            f"SELECT planetId FROM {satellites} GROUP BY planetId "
+            f"HAVING COUNT(*) > (SELECT MIN(id) + 1 FROM {planets})",
+            sorted(k for k, v in radii.items() if len(v) > min(planet_rows) + 1),
+        ),
+        (
+            f"SELECT planetId FROM {satellites} GROUP BY planetId "
+            f"HAVING SUM(radius) > (SELECT AVG(radius) FROM {satellites})",
+            sorted(k for k, v in radii.items() if sum(v) > mean_radius),
+        ),
+        (
+            f"SELECT planetId FROM {satellites} GROUP BY planetId HAVING MAX(radius) < "
+            f"(SELECT MIN(p.diameter) FROM {planets} AS p) AND COUNT(*) > 1",
+            sorted(k for k, v in radii.items() if max(v) < smallest_diameter and len(v) > 1),
+        ),
+        (
+            f"SELECT s.planetId FROM {satellites} AS s GROUP BY s.planetId HAVING COUNT(*) >= "
+            f"(SELECT MAX(p.number_of_moons) FROM {planets} AS p WHERE p.id = s.planetId)",
+            sorted(k for k, v in radii.items() if k in planet_rows and len(v) >= planet_rows[k][2]),
+        ),
+        (
+            f"SELECT s.planetId FROM {satellites} AS s GROUP BY s.planetId HAVING SUM(s.radius) < "
+            f"(SELECT MAX(p.diameter) FROM {planets} AS p WHERE p.id = s.planetId)",
+            sorted(k for k, v in radii.items() if k in planet_rows and sum(v) < planet_rows[k][1]),
+        ),
+        (
+            f"SELECT planetId FROM {satellites} GROUP BY planetId "
+            f"HAVING SUM(radius) > 10 AND MAX(radius) < 1000",
+            sorted(k for k, v in radii.items() if sum(v) > 10 and max(v) < 1000),
+        ),
+    ):
+        assert _keys(statement) == expected, statement
+
+
+def test_comparing_an_aggregate_from_an_empty_left_join_leg():
+    """
+    A LEFT JOIN whose right leg is an EMPTY grouped aggregate yields an all-NULL
+    aggregate column. Comparing it raised out of the native filter
+    ("ExprFilterOperator: predicate evaluation failed (err_op=11)") instead of
+    evaluating to UNKNOWN; `IS NULL` over the same column was always fine. It now
+    answers - this pins that it keeps answering, and answers right. Satellites has
+    no radius over 1,000,000, so the leg is empty.
+    """
+
+    def _ids(statement):
+        found = []
+        for morsel in opteryx.session().execute_to_morsels(statement):
+            morsel.materialize()
+            found.extend(morsel[i][0] for i in range(len(morsel)))
+        return sorted(found)
+
+    planets = _ids("SELECT id FROM testdata.planets")
+    for aggregate in ("MAX(sq_i.id)", "COUNT(*)"):
+        leg = (
+            f"(SELECT sq_i.planetId AS sq_key, {aggregate} AS sq_agg FROM testdata.satellites "
+            f"AS sq_i WHERE sq_i.radius > 1000000.0 GROUP BY sq_i.planetId) AS sq_j"
+        )
+        joined = f"SELECT sq_o.id FROM testdata.planets AS sq_o LEFT JOIN {leg} ON sq_j.sq_key = sq_o.id"
+        assert _ids(f"{joined} WHERE sq_j.sq_agg > 0") == [], aggregate
+        assert _ids(f"{joined} WHERE sq_o.id < sq_j.sq_agg") == [], aggregate
+        assert _ids(f"{joined} WHERE sq_j.sq_agg IS NULL") == planets, aggregate
+
+
 def test_unrecognised_function_argument_clause_is_refused():
     """
     An argument clause we do not read must RAISE, not be dropped.
@@ -5366,6 +5526,145 @@ def test_using_merged_column_is_the_coalesce_of_both_keys():
     ) == [(20, 7)]
 
 
+def test_decimal_without_precision_and_scale_shows_the_fix():
+    """
+    A DECIMAL has no default precision or scale, so a CAST or column declaration
+    without both is refused. The refusal must tell the user exactly how to fix what
+    THEY wrote: it echoes their own spelling (CAST / TRY_CAST / SAFE_CAST / `::` /
+    a DDL column) with the parameters filled in, and says which part is missing.
+    """
+    cases = (
+        (
+            "SELECT CAST('22.0' AS DECIMAL)",
+            "has no precision or scale",
+            "`CAST('22.0' AS DECIMAL(18, 4))`",
+        ),
+        (
+            "SELECT TRY_CAST('22.0' AS DECIMAL)",
+            "has no precision or scale",
+            "`TRY_CAST('22.0' AS DECIMAL(18, 4))`",
+        ),
+        (
+            "SELECT SAFE_CAST(name AS DECIMAL) FROM $planets",
+            "has no precision or scale",
+            "`SAFE_CAST(name AS DECIMAL(18, 4))`",
+        ),
+        ("SELECT 21 + 21::DECIMAL", "has no precision or scale", "`21::DECIMAL(18, 4)`"),
+        (
+            "SELECT CAST('22.0' AS DECIMAL(10))",
+            "has a precision (10) but no scale",
+            "`CAST('22.0' AS DECIMAL(10, 2))`",
+        ),
+        (
+            "CREATE TABLE decimal_probe (x DECIMAL(12))",
+            "has a precision (12) but no scale",
+            "`DECIMAL(12, 2)`",
+        ),
+    )
+    for sql, missing, fix in cases:
+        try:
+            for _ in opteryx.session().execute_to_morsels(sql):
+                pass
+        except UnsupportedSyntaxError as err:
+            message = str(err)
+            assert missing in message, f"{sql}: does not say what is missing: {message}"
+            assert fix in message, f"{sql}: does not show the fix {fix}: {message}"
+            continue
+        raise AssertionError(f"DECIMAL without precision and scale was accepted: {sql}")
+
+
+def test_any_over_date_decimal_float_arrays():
+    """
+    VALUE-level regression for `item = ANY(arr)` over DATE, DECIMAL and FLOAT64
+    arrays. These used to reach draken_array_contains with an item it could not
+    compare and die with a raw RuntimeError — and, because the executor handed the
+    driver a borrowed pointer into a worker thread's error buffer that a later
+    failure on the same thread freed, sometimes a UnicodeDecodeError over random
+    bytes instead.
+
+    ARRAY_AGG now carries its operand's type as the element type, so the item is
+    coerced at bind time: a DATE item compares as days, an int item against a
+    FLOAT64 array compares as float, and a DECIMAL array compares the item rescaled
+    to the array's scale — an item the scale cannot hold (3.75 at scale 1) matches
+    nothing. A NULL element is skipped (the `= ANY` contract), and an un-cast
+    VARCHAR literal against a DATE array is refused exactly as `'...' = date_col` is.
+    """
+
+    # Positional: an `= ANY` output column does not keep its alias (it is named
+    # e.g. `3.7 ANYOPEQ gr`) — a separate naming defect this test must not hinge on.
+    def _rows(sql, width):
+        collected = []
+        for morsel in opteryx.session().execute_to_morsels(sql):
+            names = morsel.column_names
+            assert len(names) == width, f"{sql}: {names!r}"
+            collected.extend(zip(*[morsel.column(name).to_pylist() for name in names]))
+        return sorted(collected, key=repr)
+
+    # DECIMAL(3,1) gravity and FLOAT64 mass, one array per gravity value.
+    planets = _rows(
+        "SELECT g, 3.7 = ANY(gr) AS d1, CAST(3.70 AS DECIMAL(5,2)) = ANY(gr) AS d2, "
+        "3.75 = ANY(gr) AS d3, 1 = ANY(gr) AS d4, 0.33 = ANY(m) AS f1, "
+        "1898 = ANY(m) AS f2, 1 = ANY(m) AS f3 "
+        "FROM (SELECT gravity AS g, ARRAY_AGG(mass) AS m, ARRAY_AGG(gravity) AS gr "
+        "FROM $planets GROUP BY gravity) AS A",
+        8,
+    )
+    hits = {str(g): flags for g, *flags in planets}
+    assert hits["3.7"] == [True, True, False, False, True, False, False], hits
+    assert hits["23.1"] == [False, False, False, False, False, True, False], hits
+    for g, flags in hits.items():
+        if g not in ("3.7", "23.1"):
+            assert flags == [False] * 7, (g, flags)
+
+    # DATE32 array — same answer with and without the array also projected (the
+    # temporal-literal check used to refuse the form without it).
+    for projection in ("", ", i"):
+        dates = _rows(
+            f"SELECT status, CAST('1936-03-07' AS DATE) = ANY(i) AS hit{projection} "
+            "FROM (SELECT status, ARRAY_AGG(birth_date) AS i FROM testdata.astronauts "
+            "GROUP BY status) AS A",
+            2 + (projection != ""),
+        )
+        dates = [row[:2] for row in dates]
+        assert dates == [
+            ("Active", False),
+            ("Deceased", False),
+            ("Management", False),
+            ("Retired", True),
+        ], f"DATE = ANY{projection}: {dates!r}"
+
+    # NULL elements are skipped; an all-NULL array is FALSE.
+    src = (
+        "(SELECT k, CAST(v AS DECIMAL(4,1)) AS dv, CAST(v AS FLOAT64) AS fv, "
+        "CAST(ds AS DATE) AS tv FROM (SELECT * FROM (VALUES ('a', 1, '2000-01-02'), "
+        "('a', NULL, NULL), ('b', NULL, NULL), ('c', 2, '2000-01-03')) AS t(k, v, ds)) AS t) AS s"
+    )
+    nulls = _rows(
+        "SELECT k, 1 = ANY(a) AS d, 1.05 = ANY(a) AS lossy, 1 = ANY(f) AS f, "
+        "CAST('2000-01-02' AS DATE) = ANY(t) AS t "
+        "FROM (SELECT k, ARRAY_AGG(dv) AS a, ARRAY_AGG(fv) AS f, ARRAY_AGG(tv) AS t "
+        f"FROM {src} GROUP BY k) AS S",
+        5,
+    )
+    assert nulls == [
+        ("a", True, False, True, True),
+        ("b", False, False, False, False),
+        ("c", False, False, False, False),
+    ], f"NULL elements: {nulls!r}"
+
+    # Un-cast VARCHAR literal against a DATE array: refused at bind, every time.
+    for _ in range(5):
+        try:
+            for _ in opteryx.session().execute_to_morsels(
+                "SELECT '1936-03-07' = ANY(i) FROM (SELECT ARRAY_AGG(birth_date) AS i "
+                "FROM testdata.astronauts GROUP BY status) AS A"
+            ):
+                pass
+        except IncompatibleTypesError:
+            continue
+        raise AssertionError("VARCHAR literal = ANY(date array) was accepted")
+
+
 if __name__ == "__main__":  # pragma: no cover
     import shutil
     import time
@@ -5471,6 +5770,7 @@ if __name__ == "__main__":  # pragma: no cover
             test_window_aggregates_with_distinct_partition_specs,
         ),
         ("window over the whole relation", test_window_over_whole_relation),
+        ("window DISTINCT refused under an ordered frame", test_window_distinct_aggregate_is_refused_under_an_ordered_frame),
         (
             "window functions are named for their expression",
             test_window_functions_are_named_for_their_expression,
@@ -5613,7 +5913,23 @@ if __name__ == "__main__":  # pragma: no cover
             "join key coercion is per pair, not per column",
             test_join_key_coercion_is_per_pair_not_per_column,
         ),
+        (
+            "scalar subquery in HAVING",
+            test_scalar_subquery_in_having,
+        ),
+        (
+            "comparing an aggregate from an empty LEFT JOIN leg",
+            test_comparing_an_aggregate_from_an_empty_left_join_leg,
+        ),
         ("DISTINCT on SUM/AVG/STDDEV/MEDIAN", test_distinct_operand_aggregates),
+        (
+            "DECIMAL without precision and scale shows the fix",
+            test_decimal_without_precision_and_scale_shows_the_fix,
+        ),
+        (
+            "= ANY over DATE / DECIMAL / FLOAT64 arrays",
+            test_any_over_date_decimal_float_arrays,
+        ),
     ):
         print(f"\033[38;2;255;184;108m{name}\033[0m ", end="", flush=True)
         try:

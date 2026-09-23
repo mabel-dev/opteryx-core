@@ -101,7 +101,7 @@ SELECT b'apple' > 'banana'
 statement ok
 SELECT 'banana' > b'apple'
 
-statement error SqlError
+statement ok
 SELECT b'apple' LIKE 'a%ple'
 
 statement ok
@@ -128,7 +128,7 @@ SELECT b'apple' >= 'banana'
 statement ok
 SELECT 'banana' >= b'apple'
 
-statement error SqlError
+statement ok
 SELECT b'apple' NOT LIKE 'a%ple'
 
 
@@ -142,7 +142,7 @@ SELECT b'apple' > b'banana'
 statement ok
 SELECT b'banana' = b'apple'
 
-statement error SqlError
+statement ok
 SELECT b'apple' LIKE b'a%ple'
 
 statement ok
@@ -157,7 +157,7 @@ SELECT b'apple' <= b'banana'
 statement ok
 SELECT b'apple' >= b'banana'
 
-statement error SqlError
+statement ok
 SELECT b'apple' NOT LIKE b'a%ple'
 
 
@@ -361,7 +361,7 @@ SELECT 21 + 21 = 42; -- True
 statement ok
 SELECT 21 + 21.0 = 42.0; -- True
 
-statement ok
+statement error UnsupportedSyntaxError
 SELECT 21 + 21::DECIMAL = 42; -- True
 
 statement ok
@@ -371,11 +371,11 @@ statement ok
 SELECT 21.0 + 21.0 = 42.0; -- True
 
 # SELECT 21.0 + 21::DECIMAL = 42.0; -- True
-statement error SqlError
+statement error UnsupportedSyntaxError
 SELECT 21::DECIMAL + 21 = 42; -- True
 
 # SELECT 21::DECIMAL + 21.0 = 42.0; -- True
-statement error SqlError
+statement error UnsupportedSyntaxError
 SELECT 21::DECIMAL + 21::DECIMAL = 42; -- True
 
 
@@ -386,7 +386,7 @@ SELECT 42 - 21 = 21; -- True
 statement ok
 SELECT 42 - 21.0 = 21.0; -- True
 
-statement error SqlError
+statement error UnsupportedSyntaxError
 SELECT 42 - 21::DECIMAL = 21; -- True
 
 statement ok
@@ -396,11 +396,11 @@ statement ok
 SELECT 42.0 - 21.0 = 21.0; -- True
 
 # SELECT 42.0 - 21::DECIMAL = 21.0; -- True
-statement error SqlError
+statement error UnsupportedSyntaxError
 SELECT 42::DECIMAL - 21 = 21; -- True
 
 # SELECT 42::DECIMAL - 21.0 = 21.0; -- True
-statement error SqlError
+statement error UnsupportedSyntaxError
 SELECT 42::DECIMAL - 21::DECIMAL = 21; -- True
 
 
@@ -411,7 +411,7 @@ SELECT 21 * 2 = 42; -- True
 statement ok
 SELECT 21 * 2.0 = 42.0; -- True
 
-statement error SqlError
+statement error UnsupportedSyntaxError
 SELECT 21 * 2::DECIMAL = 42; -- True
 
 statement ok
@@ -421,11 +421,11 @@ statement ok
 SELECT 21.0 * 2.0 = 42.0; -- True
 
 # SELECT 21.0 * 2::DECIMAL = 42.0; -- True
-statement error SqlError
+statement error UnsupportedSyntaxError
 SELECT 21::DECIMAL * 2 = 42; -- True
 
 # SELECT 21::DECIMAL * 2.0 = 42.0; -- True
-statement error SqlError
+statement error UnsupportedSyntaxError
 SELECT 21::DECIMAL * 2::DECIMAL = 42; -- True
 
 
@@ -436,7 +436,7 @@ SELECT 42 / 2 = 21; -- True
 statement ok
 SELECT 42 / 2.0 = 21.0; -- True
 
-statement error SqlError
+statement error UnsupportedSyntaxError
 SELECT 42 / 2::DECIMAL = 21; -- True
 
 statement ok
@@ -446,64 +446,64 @@ statement ok
 SELECT 42.0 / 2.0 = 21.0; -- True
 
 # SELECT 42.0 / 2::DECIMAL = 21.0; -- True
-statement error SqlError
+statement error UnsupportedSyntaxError
 SELECT 42::DECIMAL / 2 = 21; -- True
 
 # SELECT 42::DECIMAL / 2.0 = 21.0; -- True
-statement error SqlError
+statement error UnsupportedSyntaxError
 SELECT 42::DECIMAL / 2::DECIMAL = 21; -- True
 
 
-statement error SqlError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_date - current_timestamp > INTERVAL '1' DAY
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE current_timestamp - birth_date > INTERVAL '1' DAY
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_date + INTERVAL '1' DAY < current_timestamp
 
-statement error SqlError
+statement ok
 SELECT * FROM testdata.astronauts WHERE current_timestamp + INTERVAL '1' DAY > birth_date
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_date - INTERVAL '1' DAY < current_timestamp
 
-statement error SqlError
+statement ok
 SELECT * FROM testdata.astronauts WHERE current_timestamp - INTERVAL '1' DAY > birth_date
 
-statement error SqlError
+statement ok
 SELECT * FROM testdata.astronauts WHERE (birth_date + INTERVAL '1' DAY) - current_timestamp > INTERVAL '1' DAY
 
-statement error SqlError
+statement ok
 SELECT * FROM testdata.astronauts WHERE (current_timestamp + INTERVAL '1' DAY) - birth_date > INTERVAL '1' DAY
 
 # SELECT * FROM testdata.astronauts WHERE (birth_date - current_timestamp) + INTERVAL '1' DAY > INTERVAL '1' DAY;
 # SELECT * FROM testdata.astronauts WHERE (current_timestamp - birth_date) + INTERVAL '1' DAY > INTERVAL '1' DAY;
-statement error SqlError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_date + INTERVAL '1' DAY > INTERVAL '1' DAY - current_timestamp
 
-statement error SqlError
+statement ok
 SELECT * FROM testdata.astronauts WHERE (current_timestamp + INTERVAL '1' DAY) - birth_date > INTERVAL '1' DAY
 
 # SELECT * FROM testdata.astronauts WHERE (birth_date - current_timestamp) + INTERVAL '1' DAY > INTERVAL '1' DAY;
 # SELECT * FROM testdata.astronauts WHERE (current_timestamp - birth_date) + INTERVAL '1' DAY > INTERVAL '1' DAY;
-statement error SqlError
+statement ok
 SELECT * FROM testdata.astronauts WHERE current_timestamp + INTERVAL '1' DAY = birth_date
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_date + INTERVAL '1' DAY = current_timestamp
 
-statement error SqlError
+statement ok
 SELECT * FROM testdata.astronauts WHERE current_timestamp - INTERVAL '1' DAY = birth_date
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_date - INTERVAL '1' DAY = current_timestamp
 
-statement error SqlError
+statement ok
 SELECT * FROM testdata.astronauts WHERE INTERVAL '1' DAY + current_timestamp = birth_date
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE INTERVAL '1' DAY + birth_date = current_timestamp
 
 
@@ -620,16 +620,16 @@ SELECT -0 = 0
 
 
 # Comparisons with Interval Arithmetic
-statement error SqlError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_date - current_timestamp > INTERVAL '1' DAY
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_date + INTERVAL '1' DAY < current_timestamp
 
-statement error SqlError
+statement ok
 SELECT * FROM testdata.astronauts WHERE current_timestamp - INTERVAL '1' DAY = birth_date
 
-statement error SqlError
+statement ok
 SELECT * FROM testdata.astronauts WHERE INTERVAL '1' DAY + current_timestamp = birth_date
 
 
@@ -764,13 +764,13 @@ SELECT CAST(BLOB('hello world') AS VARCHAR) RLIKE 'hello.*world'
 
 
 # EXTRACT returns different typed values depending on the input
-statement error InvalidFunctionParameterError
+statement error NotSupportedError
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(CENTURY FROM birth_date) <= 15
 
-statement error InvalidFunctionParameterError
+statement error NotSupportedError
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(DECADE FROM birth_date) <= 15
 
-statement error InvalidFunctionParameterError
+statement error NotSupportedError
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(isoyear FROM birth_date) < 1900
 
 statement ok
@@ -788,10 +788,10 @@ SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(QUARTER FROM birth_date
 statement ok
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(MONTH FROM birth_date) = 1
 
-statement error InvalidFunctionParameterError
+statement error NotSupportedError
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(week FROM birth_date) = 1
 
-statement error InvalidFunctionParameterError
+statement error NotSupportedError
 SELECT birth_date FROM testdata.astronauts WHERE EXTRACT(isoweek FROM birth_date) = 1
 
 statement ok
@@ -824,90 +824,90 @@ SELECT EXTRACT(NANOSECONDS FROM NOW()) < 1000000000
 statement error IncompatibleTypesError
 SELECT EXTRACT(DAY FROM NOW()) = 'Monday'
 
-statement error InvalidFunctionParameterError
+statement ok
 SELECT EXTRACT(EPOCH FROM NOW()) > 0.0
 
 statement error InvalidFunctionParameterError
 SELECT EXTRACT(JULIAN FROM NOW()) > 2450000.0
 
-statement error InvalidFunctionParameterError
+statement error IncorrectTypeError
 SELECT EXTRACT(DATE FROM NOW()) > NOW()
 
 
 # CASE statements with mixed types
-statement error ValueError
+statement ok
 SELECT CASE WHEN id > 0 THEN 1 ELSE 1.5 END AS result FROM $planets
 
-statement error ValueError
+statement ok
 SELECT CASE WHEN id > 0 THEN 1.5 ELSE 2 END AS result FROM $planets
 
-statement error ValueError
+statement error IncompatibleTypesError
 SELECT CASE WHEN id > 0 THEN '1' ELSE 2 END AS result FROM $planets
 
-statement error ValueError
+statement error IncompatibleTypesError
 SELECT CASE WHEN id > 0 THEN '1.5' ELSE 2.5 END AS result FROM $planets
 
-statement error ValueError
+statement error IncompatibleTypesError
 SELECT CASE WHEN id > 0 THEN 'TRUE' ELSE FALSE END AS result FROM $planets
 
-statement error ValueError
+statement ok
 SELECT CASE WHEN id > 0 THEN 'short' ELSE 'much longer string' END AS result FROM $planets
 
-statement error ValueError
+statement ok
 SELECT CASE WHEN id > 0 THEN 'valid' ELSE NULL END AS result FROM $planets
 
-statement error ValueError
+statement ok
 SELECT CASE WHEN mass > 10 THEN 100.5 ELSE 2 END AS result FROM $planets
 
-statement error ValueError
+statement error IncompatibleTypesError
 SELECT CASE WHEN mass > 10 THEN 'Heavy' ELSE mass END AS result FROM $planets
 
-statement error TypeError
+statement ok
 SELECT CASE WHEN name = 'Earth' THEN 'Home' ELSE name END AS result FROM $planets
 
-statement error ValueError
+statement ok
 SELECT CASE WHEN id > 0 THEN 'Exist' ELSE NULL END AS result FROM $planets
 
 statement ok
 SELECT CASE WHEN id > mass THEN 'IdGreater' ELSE 'MassGreater' END AS result FROM $planets
 
-statement error ValueError
+statement ok
 SELECT CASE WHEN id > 0 AND mass < 10 THEN 'SmallPositive' ELSE 'Other' END AS result FROM $planets
 
-statement error ValueError
+statement ok
 SELECT CASE WHEN LENGTH(name) > 4 THEN 'LongName' ELSE 'ShortName' END AS result FROM $planets
 
-statement error ValueError
+statement ok
 SELECT CASE WHEN mass / id > 1 THEN 'Dense' ELSE 'Sparse' END AS result FROM $planets
 
-statement error ValueError
+statement ok
 SELECT CASE id WHEN 1 THEN 'One' WHEN 2 THEN 'Two' ELSE 'Other' END AS result FROM $planets
 
-statement error TypeError
+statement ok
 SELECT CASE name WHEN 'Earth' THEN 'Third' WHEN 'Mars' THEN 'Fourth' ELSE 'Unknown' END AS result FROM $planets
 
-statement error ValueError
+statement ok
 SELECT CASE mass WHEN 0 THEN 'Massless' WHEN 1 THEN 'UnitMass' ELSE 'Massive' END AS result FROM $planets
 
-statement error ValueError
+statement error IncompatibleTypesError
 SELECT CASE id WHEN 0 THEN 'Zero' WHEN 1 THEN 1.5 ELSE 'Other' END AS result FROM $planets
 
-statement error TypeError
+statement ok
 SELECT CASE name WHEN NULL THEN 'NoName' ELSE name END AS result FROM $planets
 
-statement error ValueError
+statement ok
 SELECT CASE WHEN id > 0 THEN CASE WHEN mass < 10 THEN 'Light' ELSE 'Heavy' END ELSE 'Unknown' END AS result FROM $planets
 
-statement error ValueError
+statement ok
 SELECT CASE WHEN id > 0 THEN CASE WHEN name = 'Earth' THEN 'BluePlanet' ELSE 'OtherPlanet' END ELSE 'NoId' END AS result FROM $planets
 
-statement error ValueError
+statement ok
 SELECT CASE WHEN id > 0 THEN 1 WHEN id < 0 THEN 2.5 ELSE 3.0 END AS result FROM $planets
 
-statement error ValueError
+statement ok
 SELECT CASE WHEN id > 0 THEN name || ' is positive' ELSE name || ' is not positive' END AS result FROM $planets
 
-statement error ValueError
+statement ok
 SELECT CASE WHEN id > 0 THEN UPPER(name) ELSE LOWER(name) END AS result FROM $planets
 
 
@@ -959,28 +959,28 @@ SELECT COUNT(DISTINCT surfacePressure > 1) AS AM FROM $planets; -- BOOLEAN (with
 # crashed Opteryx (excluded): SELECT CAST(CAST(alma_mater AS ARRAY<BOOLEAN>) AS ARRAY<VARCHAR>) FROM testdata.astronauts
 # crashed Opteryx (excluded): SELECT CAST(CAST(alma_mater AS ARRAY<BLOB>) AS ARRAY<VARCHAR>) FROM testdata.astronauts
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place->>'town' ILIKE b'C%e%r'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place->>'town' ILIKE 'C%e%r'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place->>'town' LIKE b'C%e%r'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place->>'town' LIKE 'C%e%r'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place->'town' ILIKE b'C%e%r'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place->'town' ILIKE 'C%e%r'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place->'town' LIKE b'C%e%r'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place->'town' LIKE 'C%e%r'
 
 statement error UnsupportedSyntaxError
@@ -1008,177 +1008,177 @@ statement error UnsupportedSyntaxError
 SELECT * FROM testdata.astronauts WHERE VARCHAR(birth_place->'town') LIKE 'C%e%r'
 
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE 'MIT' = ANY(alma_mater)
 
-statement error TypeError
+statement ok
 SELECT 1 = ANY(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement ok
 SELECT 1 = ANY(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement ok
 SELECT 1 = ANY(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT '1936-03-07' = ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 
-statement error TypeError
+statement ok
 SELECT CAST('1936-03-07' AS DATE) = ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 
-statement error TypeError
+statement ok
 SELECT True = ANY(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A
 
 
-statement error TypeError
+statement error NotSupportedError
 SELECT * FROM testdata.astronauts WHERE 'MIT' != ANY(alma_mater)
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 != ANY(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 != ANY(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 != ANY(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT '1936-03-07' != ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT CAST('1936-03-07' AS DATE) != ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT True != ANY(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A
 
 
-statement error TypeError
+statement error NotSupportedError
 SELECT * FROM testdata.astronauts WHERE 'MIT' > ANY(alma_mater)
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 > ANY(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 > ANY(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 > ANY(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT '1936-03-07' > ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT CAST('1936-03-07' AS DATE) > ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT True > ANY(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A
 
 
-statement error TypeError
+statement error NotSupportedError
 SELECT * FROM testdata.astronauts WHERE 'MIT' >= ANY(alma_mater)
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 >= ANY(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 >= ANY(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 >= ANY(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT '1936-03-07' >= ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT CAST('1936-03-07' AS DATE) >= ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT True >= ANY(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A
 
 
-statement error TypeError
+statement error NotSupportedError
 SELECT * FROM testdata.astronauts WHERE 'MIT' < ANY(alma_mater)
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 < ANY(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 < ANY(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 < ANY(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT '1936-03-07' < ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT CAST('1936-03-07' AS DATE) < ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT True < ANY(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A
 
 
-statement error TypeError
+statement error NotSupportedError
 SELECT * FROM testdata.astronauts WHERE 'MIT' <= ANY(alma_mater)
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 <= ANY(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 <= ANY(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 <= ANY(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT '1936-03-07' <= ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT CAST('1936-03-07' AS DATE) <= ANY(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT True <= ANY(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A
 
 
-statement error TypeError
+statement error NotSupportedError
 SELECT * FROM testdata.astronauts WHERE 'MIT' = ALL(alma_mater)
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 = ALL(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 = ALL(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 = ALL(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT '1936-03-07' = ALL(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT CAST('1936-03-07' AS DATE) = ALL(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT True = ALL(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A
 
 
-statement error TypeError
+statement error NotSupportedError
 SELECT * FROM testdata.astronauts WHERE 'MIT' != ALL(alma_mater)
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 != ALL(i) FROM (SELECT ARRAY_AGG(id) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 != ALL(i) FROM (SELECT ARRAY_AGG(mass) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT 1 != ALL(i) FROM (SELECT ARRAY_AGG(gravity) AS i FROM $planets GROUP BY gravity) AS A
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT '1936-03-07' != ALL(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT CAST('1936-03-07' AS DATE) != ALL(i), i FROM (SELECT ARRAY_AGG(birth_date) AS i FROM testdata.astronauts GROUP BY status) AS A
 
-statement error TypeError
+statement error NotSupportedError
 SELECT True != ALL(i) FROM (SELECT ARRAY_AGG(id > 5) AS i FROM $planets GROUP BY gravity) AS A

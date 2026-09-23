@@ -100,7 +100,16 @@ struct OperatorState     { virtual ~OperatorState()     = default; };
 // cost identical at DOP 2 and DOP 16 (measured 2026-08-29). DOP is already resolved
 // from the core count by resolve_max_execution_workers; deriving a SECOND width
 // from the hardware behind its back is how the two disagreed.
-struct GlobalSinkState   { virtual ~GlobalSinkState()   = default; int exec_dop = 1; };
+//
+// `query_dop` is the QUERY's authorised width, set alongside `exec_dop`. The two differ
+// when the pipeline was pinned narrower than the query (set_pipeline_dop — e.g. the
+// pipeline reading a WindowSink's sorted output runs at 1 to keep order). That pin is
+// about the pipeline's EMIT order; it says nothing about how wide the next breaker's own
+// finalize may run. A sink whose finalize is a one-shot pool-let over its whole buffered
+// input (sort, window gather, DISTINCT/top-K merge) sizes from `query_dop`, so a second
+// window function or an ORDER BY stacked on a pinned pipeline is not forced serial.
+// Those sites used to derive `min(16, hardware_concurrency() - 2)` (removed 2026-09-23).
+struct GlobalSinkState   { virtual ~GlobalSinkState()   = default; int exec_dop = 1; int query_dop = 1; };
 struct LocalSinkState    { virtual ~LocalSinkState()    = default; };
 
 enum class SourceResult { HAVE_MORE, FINISHED };

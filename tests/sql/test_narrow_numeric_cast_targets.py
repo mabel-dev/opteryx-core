@@ -30,7 +30,7 @@ import pytest
 
 import opteryx
 from draken.draken_native import DrakenType
-from opteryx.exceptions import SqlError
+from opteryx.exceptions import SqlError, UnsupportedSyntaxError
 
 _SESSION = opteryx.session()
 
@@ -179,7 +179,13 @@ def test_float_is_double_and_float_precision_picks_the_width():
 
 @pytest.mark.parametrize(
     "alias, suggestion",
-    [("TINYINT", "INT8"), ("SMALLINT", "INT16"), ("REAL", "FLOAT32"), ("NUMERIC", "DECIMAL")],
+    [
+        ("TINYINT", "`INT8`"),
+        ("SMALLINT", "`INT16`"),
+        ("REAL", "`FLOAT32`"),
+        # A bare DECIMAL is refused too, so the suggestion must carry its parameters.
+        ("NUMERIC", "`DECIMAL(precision, scale)`"),
+    ],
 )
 def test_aliases_are_still_rejected_but_now_name_the_exact_width(alias, suggestion):
     """TINYINT is not a name in this dialect — but the error should send the
@@ -187,6 +193,18 @@ def test_aliases_are_still_rejected_but_now_name_the_exact_width(alias, suggesti
     with pytest.raises(SqlError) as err:
         _typed(f"SELECT CAST(1 AS {alias}) AS x")
     assert suggestion in str(err.value), str(err.value)
+
+
+def test_a_refused_declared_type_does_not_talk_about_cast():
+    """A column declaration contains no CAST, so its refusal must not mention one —
+    it names the declaration and still carries the suggestion."""
+    with pytest.raises(UnsupportedSyntaxError) as err:
+        for _ in opteryx.session().execute_to_morsels("CREATE TABLE ddl_probe (x NUMERIC)"):
+            pass
+    message = str(err.value)
+    assert "CAST" not in message, message
+    assert "is not a type a column can be declared as" in message, message
+    assert "`DECIMAL(precision, scale)`" in message, message
 
 
 if __name__ == "__main__":

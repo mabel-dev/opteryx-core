@@ -17,7 +17,7 @@ SELECT * FROM $planets WHERE FALSE OR TRUE
 
 
 # [#561] HASH JOIN with an empty table
-statement error TypeError
+statement ok
 SELECT * FROM $planets LEFT JOIN (SELECT planetId as id FROM testdata.satellites WHERE id < 0) AS SQ USING (id)
 
 
@@ -45,7 +45,7 @@ SELECT * FROM testdata.satellites WHERE name = '********'
 statement ok
 SELECT COUNT(1) FROM testdata.satellites
 
-statement error KeyError
+statement ok
 SELECT SUM(42) FROM $planets
 
 
@@ -53,13 +53,13 @@ SELECT SUM(42) FROM $planets
 statement error FunctionNotFoundError
 SELECT birth_date - TODAY() FROM testdata.astronauts
 
-statement error NotImplementedError
+statement ok
 SELECT birth_date - NOW() FROM testdata.astronauts
 
-statement error NotImplementedError
+statement ok
 SELECT birth_date - current_timestamp FROM testdata.astronauts
 
-statement error NotImplementedError
+statement ok
 SELECT birth_date - current_date FROM testdata.astronauts
 
 # SELECT DATE(birth_date) - TODAY() FROM testdata.astronauts;
@@ -79,13 +79,13 @@ SELECT TIMESTAMP("2022-02-01") - TODAY() FROM testdata.astronauts
 statement error FunctionNotFoundError
 SELECT DATEDIFF('days', birth_date, TODAY()) FROM testdata.astronauts
 
-statement error IncompatibleTypesError
+statement error ColumnNotFoundError
 SELECT DATEDIFF('days', "2022-01-02", "2010-10-01") FROM testdata.astronauts
 
-statement error IncompatibleTypesError
+statement error ColumnNotFoundError
 SELECT DATEDIFF('days', "2022-01-02", "2010-10-01")
 
-statement error IncompatibleTypesError
+statement error ColumnNotFoundError
 SELECT DATEDIFF('minutes', "2022-01-02", "2010-10-01")
 
 statement error UnsupportedSyntaxError
@@ -96,28 +96,28 @@ SELECT DATEDIFF('days', TIMESTAMP("2022-01-02"), CAST("2010-10-01" AS TIMESTAMP)
 
 
 # testing NOTs
-statement error AttributeError
+statement ok
 SELECT (true IS NOT null)
 
-statement error AttributeError
+statement ok
 SELECT true IS NOT null
 
-statement error AttributeError
+statement ok
 SELECT NOT (true IS NOT null)
 
-statement error TypeError
+statement ok
 SELECT NOT true IS null
 
-statement error AttributeError
+statement ok
 SELECT (false IS NOT null)
 
-statement error AttributeError
+statement ok
 SELECT false IS NOT null
 
-statement error AttributeError
+statement ok
 SELECT NOT (false IS NOT null)
 
-statement error TypeError
+statement ok
 SELECT NOT false IS null
 
 
@@ -128,7 +128,7 @@ SELECT 1 IS NULL
 statement ok
 SELECT 1.0 IS NULL
 
-statement error AttributeError
+statement error UnsupportedSyntaxError
 SELECT CAST('1.2' AS DECIMAL) IS NULL
 
 
@@ -159,7 +159,7 @@ SELECT TRUE OR FALSE
 statement ok
 SELECT TRUE AND FALSE
 
-statement error TypeError
+statement ok
 SELECT TRUE XOR FALSE
 
 statement ok
@@ -169,28 +169,28 @@ statement ok
 SELECT NOT FALSE
 
 
-statement error RuntimeError
+statement error NotSupportedError
 SELECT APPROX_PERCENTILE(id, 0.5) FROM $planets GROUP BY TRUE
 
-statement error RuntimeError
+statement error NotSupportedError
 SELECT AVG(id) FROM $planets GROUP BY TRUE
 
-statement error RuntimeError
+statement error NotSupportedError
 SELECT COUNT(id) FROM $planets GROUP BY TRUE
 
-statement error RuntimeError
+statement error NotSupportedError
 SELECT COUNT_DISTINCT(id) FROM $planets GROUP BY TRUE
 
-statement error RuntimeError
+statement error NotSupportedError
 SELECT COUNT(DISTINCT id) FROM $planets GROUP BY TRUE
 
-statement error RuntimeError
+statement error NotSupportedError
 SELECT MAX(id) FROM $planets GROUP BY TRUE
 
-statement error RuntimeError
+statement error NotSupportedError
 SELECT MIN(id) FROM $planets GROUP BY TRUE
 
-statement error RuntimeError
+statement error NotSupportedError
 SELECT SUM(id) FROM $planets GROUP BY TRUE
 
 
@@ -200,16 +200,16 @@ SHOW COLUMNS FROM $planets
 
 
 # [670] nesting
-statement error TypeError
+statement ok
 SELECT ARRAY_AGG(DISTINCT LEFT(LOWER(name), 1) LIMIT 2) from testdata.satellites GROUP BY planetId
 
-statement error TypeError
+statement ok
 SELECT ARRAY_AGG(DISTINCT RIGHT(LOWER(name), 1) LIMIT 2) from testdata.satellites GROUP BY planetId
 
-statement error TypeError
+statement ok
 SELECT ARRAY_AGG(DISTINCT LEFT(UPPER(name), 1) LIMIT 2) from testdata.satellites GROUP BY planetId
 
-statement error TypeError
+statement ok
 SELECT ARRAY_AGG(DISTINCT RIGHT(UPPER(name), 1) LIMIT 2) from testdata.satellites GROUP BY planetId
 
 
@@ -222,13 +222,13 @@ SELECT COUNT(*), SUM(id) FROM $planets
 
 
 # [712]
-statement error RuntimeError
+statement error NotSupportedError
 SELECT SUM(14) FROM $planets GROUP BY FALSE
 
-statement error RuntimeError
+statement error NotSupportedError
 SELECT COUNT(14) FROM $planets GROUP BY FALSE
 
-statement error KeyError
+statement ok
 SELECT SUM(14) FROM $planets
 
 statement ok
@@ -236,36 +236,36 @@ SELECT COUNT(14) FROM $planets
 
 
 # [711]
-statement error TypeError
+statement ok
 SELECT TRUNC(current_date, 'YEAR')
 
-statement error TypeError
+statement ok
 SELECT TRUNC(current_date, 'MONTH')
 
-statement error TypeError
+statement ok
 SELECT TRUNC(current_date, 'year')
 
-statement error TypeError
+statement ok
 SELECT TRUNC(current_date, 'month')
 
 
 # -> (Arrow) Tests
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' = 'CA'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' != 'CA'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' <= 'CA'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' >= 'CA'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' < 'CA'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' > 'CA'
 
 statement error UnsupportedSyntaxError
@@ -304,225 +304,225 @@ SELECT * FROM testdata.astronauts WHERE BLOB(birth_place) -> 'state' < 'CA'
 statement error UnsupportedSyntaxError
 SELECT * FROM testdata.astronauts WHERE BLOB(birth_place) -> 'state' > 'CA'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' LIKE 'C%'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' ILIKE 'c%'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' RLIKE '^C.*$'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' IS NULL
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' IS NOT NULL
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' = 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' != 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' <= 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' >= 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' < 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' > 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' LIKE 'C%' AND name != 'Finn'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' ILIKE 'c%' AND name != 'Finn'
 
-statement error TypeError
+statement error IncorrectTypeError
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' RLIKE '^C.*$' AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' IS NULL AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place -> 'state' IS NOT NULL AND name != 'Finn'
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') = 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') != 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') <= 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') >= 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') < 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') > 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') LIKE 'C%' AND name != 'Finn'
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') ILIKE 'c%' AND name != 'Finn'
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') RLIKE '^C.*$' AND name != 'Finn'
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') IS NULL AND name != 'Finn'
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place -> 'state', 'Jake') IS NOT NULL AND name != 'Finn'
 
 
 # ->> (Long Arrow) Tests
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' = 'CA'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' != 'CA'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' <= 'CA'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' >= 'CA'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' < 'CA'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' > 'CA'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' LIKE 'C%'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' ILIKE 'c%'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' RLIKE '^C.*$'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' IS NULL
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' IS NOT NULL
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' = 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' != 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' <= 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' >= 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' < 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' > 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' LIKE 'C%' AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' ILIKE 'c%' AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' RLIKE '^C.*$' AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' IS NULL AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place ->> 'state' IS NOT NULL AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') = 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') != 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') <= 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') >= 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') < 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') > 'CA' AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') LIKE 'C%' AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') ILIKE 'c%' AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') RLIKE '^C.*$' AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') IS NULL AND name != 'Finn'
 
-statement error TypeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place ->> 'state', 'Jake') IS NOT NULL AND name != 'Finn'
 
 
 # @? Tests
-statement error AttributeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place @? 'state' IS NULL
 
-statement error AttributeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place @? 'state' IS NOT NULL
 
-statement error AttributeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place @? 'state' IS NULL AND name != 'Finn'
 
-statement error AttributeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place @? 'state' IS NOT NULL AND name != 'Finn'
 
-statement error AttributeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place @? 'state' IS TRUE AND name != 'Finn'
 
-statement error AttributeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place @? 'state' IS NOT TRUE AND name != 'Finn'
 
-statement error AttributeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place @? 'state' IS FALSE AND name != 'Finn'
 
-statement error AttributeError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_place @? 'state' IS NOT FALSE AND name != 'Finn'
 
-statement error NotImplementedError
+statement error IncompatibleTypesError
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place @? 'state', 'Jake') IS NULL AND name != 'Finn'
 
-statement error NotImplementedError
+statement error IncompatibleTypesError
 SELECT * FROM testdata.astronauts WHERE IFNULL(birth_place @? 'state', 'Jake') IS NOT NULL AND name != 'Finn'
 
 
 statement ok
 select * from testdata.tpch_001.lineitem, testdata.tpch_001.part where (p_partkey = l_partkey and p_brand = 'Brand#32' and p_container in ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG') and l_quantity >= 7 and l_quantity <= 7 + 10 and p_size between 1 and 5 and l_shipmode in ('AIR', 'AIR REG') and l_shipinstruct = 'DELIVER IN PERSON')
 
-statement error InvalidInternalStateError
+statement ok
 select * from testdata.tpch_001.lineitem, testdata.tpch_001.part where (p_partkey = l_partkey and l_quantity >= 7 and l_quantity <= 7 + 10 and l_shipmode in ('AIR', 'AIR REG') and l_shipinstruct = 'DELIVER IN PERSON')
 
 statement ok

@@ -140,47 +140,6 @@ REGISTER: List[RegisteredDefect] = [
         ),
     ),
     RegisteredDefect(
-        id="comparing-an-aggregate-column-from-an-empty-left-join-leg-raises",
-        repro=(
-            "SELECT sq_o.id FROM testdata.planets AS sq_o LEFT JOIN "
-            "(SELECT sq_i.planetId AS sq_key, MAX(sq_i.id) AS sq_agg "
-            "FROM testdata.satellites AS sq_i WHERE sq_i.radius > 1000000.0 "
-            "GROUP BY sq_i.planetId) AS sq_j ON sq_j.sq_key = sq_o.id "
-            "WHERE sq_j.sq_agg > 0"
-        ),
-        error_type="RuntimeError",
-        signature="ExprFilterOperator: predicate evaluation failed (err_op=11)",
-        requires_tag="inner-filter:empty",
-        detail=(
-            "A LEFT JOIN whose right leg is an EMPTY grouped aggregate produces an all-NULL "
-            "aggregate column, and COMPARING that column raises out of the native filter "
-            "instead of evaluating to UNKNOWN. Every outer row should simply be dropped by "
-            "the WHERE.\n"
-            "\n"
-            "NOT A SUBQUERY BUG. The repro contains no subquery predicate at all — this fuzzer "
-            "found it because the `corr_scalar` join rewrite builds exactly this shape, and the "
-            "corpus carries an inner filter that matches nothing so the empty-set branch is "
-            "reachable. It is a defect in the JOIN path.\n"
-            "\n"
-            "MEASURED — what does and does not trip it (satellites has no radius > 1000000):\n"
-            "  LEFT JOIN, empty grouped aggregate, `sq_j.sq_agg > 0`            RAISES\n"
-            "  LEFT JOIN, empty grouped aggregate, `sq_o.id < sq_j.sq_agg`      RAISES\n"
-            "  ... with COUNT(*) instead of MAX                                 RAISES\n"
-            "  LEFT JOIN, empty grouped aggregate, `sq_j.sq_agg IS NULL`        ok (9 rows)\n"
-            "  LEFT JOIN, empty grouped aggregate, no filter at all             ok (9 rows)\n"
-            "  LEFT JOIN, NON-empty grouped aggregate, same comparison          ok (5 rows)\n"
-            "  LEFT JOIN, empty GROUP BY leg with NO aggregate, same comparison ok (0 rows)\n"
-            "  INNER JOIN, empty grouped aggregate, same comparison             ok (0 rows)\n"
-            "  CROSS JOIN, empty UNGROUPED aggregate, same comparison           ok (0 rows)\n"
-            "\n"
-            "So it is specifically the AGGREGATE output column of an EMPTY grouped leg, reached "
-            "by a COMPARISON. `IS NULL` over the same column is fine, which says the column is "
-            "present and marked null — what the comparison kernel cannot handle is the buffer "
-            "behind it. That is the `ptr.data == NULL` family the vector-model rules warn "
-            "about, arriving through the join rather than through a scan."
-        ),
-    ),
-    RegisteredDefect(
         id="skip-level-exists-over-two-aliased-derived-relations-is-refused",
         repro=(
             "SELECT sq_o.id FROM testdata.planets AS sq_o WHERE EXISTS "
@@ -220,27 +179,6 @@ REGISTER: List[RegisteredDefect] = [
             "correlation that names a relation below no join it can see, and the message names "
             "a BUILD-SIDE key, so the deferred pair is reaching the ancestor join with a "
             "reference the operator cannot attribute to either leg."
-        ),
-    ),
-    RegisteredDefect(
-        id="scalar-subquery-in-having-leaks-a-native-keyerror",
-        repro=(
-            "SELECT sq_o.id FROM testdata.planets AS sq_o GROUP BY sq_o.id "
-            "HAVING COUNT(*) > (SELECT MIN(sq_i.planetId) FROM testdata.satellites AS sq_i)"
-        ),
-        error_type="KeyError",
-        signature="which the stream does not carry",
-        detail=(
-            "A scalar subquery in HAVING is not planned: the decorrelated value column is "
-            "never routed to the aggregate's output stream, and the failure surfaces from the "
-            "native engine as a bare KeyError naming a `$derived_...` identity.\n"
-            "\n"
-            "A KeyError is not a user-facing error — it names an internal column identity the "
-            "caller has no way to act on, and it is an exception class no caller can "
-            "reasonably catch. Either HAVING joins WHERE as a supported position, or it is "
-            "refused in the planner with the same UnsupportedSyntaxError the SELECT list gets "
-            "(`Scalar subqueries are supported in the **WHERE** clause but not yet in the "
-            "**SELECT** list`). Leaking a KeyError is neither."
         ),
     ),
 ]

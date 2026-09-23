@@ -394,18 +394,6 @@
         "default": 1200,
         "default_source": "literal"
     },
-    "max_execution_worker_cap": {
-        "name": "max_execution_worker_cap",
-        "type": "INT64",
-        "owner": "SERVER",
-        "visibility": "RESTRICTED",
-        "settable": false,
-        "requires_entitlement": null,
-        "set_by": "not settable via SQL",
-        "default": null,
-        "default_source": "environment",
-        "environment_key": "MAX_EXECUTION_WORKER_CAP"
-    },
     "max_execution_workers": {
         "name": "max_execution_workers",
         "type": "INT64",
@@ -581,18 +569,6 @@
         "default": null,
         "default_source": "environment",
         "environment_key": "PARQUET_LATE_MATERIALIZATION_MAX_SELECTIVITY"
-    },
-    "parquet_local_io_worker_cap": {
-        "name": "parquet_local_io_worker_cap",
-        "type": "INT64",
-        "owner": "SERVER",
-        "visibility": "RESTRICTED",
-        "settable": false,
-        "requires_entitlement": null,
-        "set_by": "not settable via SQL",
-        "default": null,
-        "default_source": "environment",
-        "environment_key": "PARQUET_LOCAL_IO_WORKER_CAP"
     },
     "parquet_local_io_workers": {
         "name": "parquet_local_io_workers",

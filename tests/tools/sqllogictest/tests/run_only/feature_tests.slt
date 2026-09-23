@@ -38,7 +38,7 @@ SELECT CAST('22' AS INTEGER)
 statement ok
 SELECT CAST('22.0' AS FLOAT64)
 
-statement ok
+statement error UnsupportedSyntaxError
 SELECT CAST('22.0' AS DECIMAL)
 
 statement ok
@@ -57,7 +57,7 @@ SELECT TRY_CAST('22' AS INTEGER)
 statement ok
 SELECT TRY_CAST('22.0' AS FLOAT64)
 
-statement ok
+statement error UnsupportedSyntaxError
 SELECT TRY_CAST('22.0' AS DECIMAL)
 
 statement ok
@@ -76,7 +76,7 @@ SELECT CAST('12345' AS VARCHAR)
 statement ok
 SELECT CAST('22.5' AS VARCHAR)
 
-statement error TypeError
+statement ok
 SELECT CAST(NULL AS VARCHAR)
 
 statement ok
@@ -92,7 +92,7 @@ SELECT CAST('48656c6c6f' AS VARBINARY); -- "Hello" in hexadecimal
 statement ok
 SELECT CAST('48656c6c6f' AS VARBINARY)
 
-statement error TypeError
+statement ok
 SELECT CAST(NULL AS VARBINARY)
 
 
@@ -105,7 +105,7 @@ SELECT TRY_CAST('12345' AS VARCHAR)
 statement ok
 SELECT TRY_CAST('22.5' AS VARCHAR)
 
-statement error TypeError
+statement ok
 SELECT TRY_CAST(NULL AS VARCHAR)
 
 statement ok
@@ -117,19 +117,19 @@ SELECT TRY_CAST(FALSE AS VARCHAR)
 statement ok
 SELECT TRY_CAST('48656c6c6f' AS VARBINARY)
 
-statement error TypeError
+statement ok
 SELECT TRY_CAST(NULL AS VARBINARY)
 
-statement error ValueError
+statement ok
 SELECT TRY_CAST('Not a number' AS INTEGER)
 
-statement error ValueError
+statement ok
 SELECT TRY_CAST('Not a number' AS FLOAT64)
 
-statement error ValueError
+statement ok
 SELECT TRY_CAST('2022-01-01' AS INTEGER);  -- Invalid cast
 
-statement error ValueError
+statement ok
 SELECT TRY_CAST('3.14159' AS INTEGER);  -- Should return NULL
 
 statement ok
@@ -148,7 +148,7 @@ SELECT SAFE_CAST('12345' AS VARCHAR)
 statement ok
 SELECT SAFE_CAST('22.5' AS VARCHAR)
 
-statement error TypeError
+statement ok
 SELECT SAFE_CAST(NULL AS VARCHAR)
 
 statement ok
@@ -160,19 +160,19 @@ SELECT SAFE_CAST(FALSE AS VARCHAR)
 statement ok
 SELECT SAFE_CAST('48656c6c6f' AS VARBINARY)
 
-statement error TypeError
+statement ok
 SELECT SAFE_CAST(NULL AS VARBINARY)
 
-statement error ValueError
+statement ok
 SELECT SAFE_CAST('Not a number' AS INTEGER)
 
-statement error ValueError
+statement ok
 SELECT SAFE_CAST('Not a number' AS FLOAT64)
 
-statement error ValueError
+statement ok
 SELECT SAFE_CAST('2022-01-01' AS INTEGER);  -- Invalid cast
 
-statement error ValueError
+statement ok
 SELECT SAFE_CAST('3.14159' AS INTEGER);  -- Should return NULL
 
 statement ok
@@ -182,28 +182,28 @@ statement ok
 SELECT SAFE_CAST('42' AS BOOLEAN);  -- Invalid cast
 
 
-statement error TypeError
+statement ok
 SELECT CAST(NULL AS INTEGER)
 
-statement error TypeError
+statement ok
 SELECT CAST(NULL AS FLOAT64)
 
-statement error TypeError
+statement ok
 SELECT TRY_CAST(NULL AS INTEGER)
 
-statement error TypeError
+statement ok
 SELECT TRY_CAST(NULL AS FLOAT64)
 
-statement error TypeError
+statement ok
 SELECT CAST(NULL AS BOOLEAN)
 
-statement error TypeError
+statement ok
 SELECT TRY_CAST(NULL AS BOOLEAN)
 
-statement error TypeError
+statement ok
 SELECT CAST(NULL AS TIMESTAMP)
 
-statement error TypeError
+statement ok
 SELECT TRY_CAST(NULL AS TIMESTAMP)
 
 
@@ -261,23 +261,23 @@ statement ok
 SELECT LEFT('ab', 1)
 
 
-statement error ValueError
+statement ok
 SELECT CASE id WHEN 3 THEN 'Earth' WHEN 1 THEN 'Mercury' ELSE 'Elsewhere' END FROM $planets
 
-statement error ValueError
+statement ok
 SELECT CASE id WHEN 3 THEN 'Earth' WHEN 1 THEN 'Mercury' END FROM $planets
 
-statement error ValueError
+statement ok
 SELECT CASE WHEN id = 3 THEN 'Earth' WHEN id = 1 THEN 'Mercury' ELSE 'Elsewhere' END FROM $planets
 
-statement error ValueError
+statement ok
 SELECT CASE WHEN id = 3 THEN 'Earth' WHEN id = 1 THEN 'Mercury' END FROM $planets
 
 
-statement error SqlError
+statement ok
 SELECT * FROM testdata.astronauts WHERE death_date > current_timestamp - interval '50' YEAR
 
-statement error SqlError
+statement ok
 SELECT * FROM testdata.astronauts WHERE birth_date < current_timestamp + interval '50' YEAR
 
 
@@ -407,7 +407,7 @@ SELECT USER()
 statement ok
 SELECT DATABASE()
 
-statement error NotImplementedError
+statement ok
 SELECT CURRENT_TIMESTAMP() - birth_date, CURRENT_TIMESTAMP(), birth_date FROM testdata.astronauts
 
 statement ok
@@ -468,13 +468,13 @@ SELECT ['a', 'b', 'c'] @> ['a', 'a', 'b']
 statement ok
 SELECT ['a', 'b', 'c'] @> ('a', 'a')
 
-statement error NotSupportedError
+statement ok
 SELECT missions @> ('STS-1 (Columbia)', 'STS-9 (Columbia)') FROM testdata.astronauts
 
-statement error NotSupportedError
+statement ok
 SELECT missions @> ['STS-77'] FROM testdata.astronauts
 
-statement error NotSupportedError
+statement ok
 SELECT missions @> ('Gemini 3', 'STS-1 (Columbia)') FROM testdata.astronauts
 
 statement error NotSupportedError

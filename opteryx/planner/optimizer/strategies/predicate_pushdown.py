@@ -92,10 +92,16 @@ def _emitted_identities(plan, nid, memo):
 
 
 def _predicate_column_ids(predicate):
-    """The set of column identities a predicate references."""
+    """The set of column identities a predicate references.
+
+    An AGGREGATOR counts as the column it produces: a Filter reading `COUNT(*)`
+    reads that aggregate's output from the stream. Counting identifiers alone left
+    `COUNT(*)` invisible, so `HAVING COUNT(*) > (SELECT MIN(..) ..)` looked like it
+    read only the subquery's value - the ungrouped aggregate on the subquery's leg
+    emits that, and the HAVING filter was placed there, away from the COUNT."""
     cond = predicate.condition if getattr(predicate, "condition", None) is not None else predicate
     out = set()
-    for ident in get_all_nodes_of_type(cond, (NodeType.IDENTIFIER,)):
+    for ident in get_all_nodes_of_type(cond, (NodeType.IDENTIFIER, NodeType.AGGREGATOR)):
         sc = getattr(ident, "schema_column", None)
         if sc is not None and sc.identity is not None:
             out.add(sc.identity)
@@ -1160,11 +1166,34 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             # ABOVE this aggregate, so folding named a column the stream cannot
             # carry and the physical compile died on it. Every other arm in this
             # file already gates on `_emitted_identities`; this one did not.
+            #
+            # And the aggregators must be THIS node's. The binder attaches a HAVING's
+            # aggregates to the Aggregate of its own query block, so ownership is
+            # identity membership in `node.aggregates`. Without it the predicate
+            # folded onto the first AggregateAndGroup whose OUTPUT covered its
+            # direct reads - for `HAVING COUNT(*) >= (SELECT MAX(..) .. WHERE
+            # p.id = s.planetId)` that was the decorrelated subquery's own aggregate,
+            # which then counted PLANET rows as the outer COUNT(*): [3] where
+            # [3, 4, 7, 8, 9] was right. A predicate not folded here stays
+            # collected, and is restored above its own aggregate.
             _emit_memo: dict = {}
             emitted = _emitted_identities(context.optimized_plan, context.node_id, _emit_memo)
+            owned = {
+                aggregate.schema_column.identity
+                for aggregate in (node.aggregates or [])
+                if aggregate.schema_column is not None
+            }
             for predicate in context.collected_predicates:
                 has_agg = get_all_nodes_of_type(predicate.condition, (NodeType.AGGREGATOR,))
-                if has_agg and _outside_aggregate_column_ids(predicate, emitted) <= emitted:
+                if (
+                    has_agg
+                    and all(
+                        aggregator.schema_column is not None
+                        and aggregator.schema_column.identity in owned
+                        for aggregator in has_agg
+                    )
+                    and _outside_aggregate_column_ids(predicate, emitted) <= emitted
+                ):
                     # This is a HAVING predicate — push into the aggregate
                     having_predicates.append(predicate)
                 else:
@@ -1184,28 +1213,10 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     and_node.right = cond
                     combined = and_node
 
-                # Extract all aggregator nodes from the HAVING condition
-                # and add them to the aggregate node if not already present
-                aggregators_in_having = get_all_nodes_of_type(combined, (NodeType.AGGREGATOR,))
-                existing_aggregates = list(node.aggregates or [])
-
-                # Check which aggregators from HAVING are not already in the aggregates list
-                for agg in aggregators_in_having:
-                    # Check if this aggregator is already in the list by comparing their structure
-                    is_duplicate = any(
-                        format_expression(agg) == format_expression(existing_agg)
-                        for existing_agg in existing_aggregates
-                    )
-                    if not is_duplicate:
-                        # Add this aggregator to the list of aggregates
-                        existing_aggregates.append(agg)
-
-                # Add the having_condition to node properties and update the node
+                # Every aggregator the condition reads is already one of this node's
+                # (the ownership gate above), so there is nothing to add.
                 node_properties = dict(node.properties)
                 node_properties["having_condition"] = combined
-                # Update aggregates list with any new aggregators from HAVING
-                if len(existing_aggregates) > len(node.aggregates or []):
-                    node_properties["aggregates"] = existing_aggregates
 
                 context.optimized_plan.add_node(context.node_id, LogicalPlanNode(**node_properties))
 

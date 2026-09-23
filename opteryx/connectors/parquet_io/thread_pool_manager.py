@@ -1,17 +1,15 @@
 """Centralized thread pool management for Parquet I/O operations.
 
-Provides C++ thread pool (BS::thread_pool via Cython) with automatic
-fallback to Python ThreadPoolExecutor if C++ extension unavailable.
+Provides the C++ thread pool (BS::thread_pool via Cython). There is no Python
+fallback: an unavailable C++ backend raises.
 
-This module manages all global thread pools used across Opteryx:
+This module manages the global thread pools used across Opteryx:
 - Range read pools (local, GCS, HTTP)
-- Column decode pools
 - Footer prefetch pools
 """
 
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -42,11 +40,7 @@ else:
     )
 
 
-def create_thread_pool(
-    name: str,
-    max_workers: int,
-    use_cpp: bool = True,
-) -> "ThreadPool":
+def create_thread_pool(name: str, max_workers: int) -> "ThreadPool":
     """Create a thread pool with C++ backend.
 
     C++ BS::thread_pool is required (no Python fallback).
@@ -55,20 +49,13 @@ def create_thread_pool(
     Args:
         name: Name for the pool (used for logging and thread names)
         max_workers: Maximum number of concurrent workers
-        use_cpp: Must be True (C++ backend required)
 
     Returns:
         CppThreadPool instance
 
     Raises:
-        RuntimeError: If C++ backend unavailable or use_cpp=False
+        RuntimeError: If the C++ backend is unavailable
     """
-    if not use_cpp:
-        raise ValueError(
-            "C++ thread pool (BS::thread_pool) is required. "
-            "use_cpp=False is not supported."
-        )
-
     if not _cpp_thread_pool_available:
         raise RuntimeError(
             "C++ thread pool backend is required but unavailable. "
@@ -81,7 +68,7 @@ def create_thread_pool(
 class ThreadPool:
     """Abstract base for thread pool implementations.
 
-    Provides a unified interface for both C++ and Python thread pools.
+    The interface the pool manager hands out; CppThreadPool implements it.
     """
 
     def submit(self, fn, *args, **kwargs):
@@ -113,26 +100,6 @@ class ThreadPool:
         """Context manager exit."""
         self.shutdown(wait=True)
         return False
-
-
-class PythonThreadPoolWrapper(ThreadPool):
-    """Wrapper around Python ThreadPoolExecutor to match ThreadPool interface."""
-
-    def __init__(self, executor: ThreadPoolExecutor):
-        """Initialize wrapper.
-
-        Args:
-            executor: ThreadPoolExecutor instance
-        """
-        self.executor = executor
-
-    def submit(self, fn, *args, **kwargs):
-        """Submit task to executor."""
-        return self.executor.submit(fn, *args, **kwargs)
-
-    def shutdown(self, wait: bool = True):
-        """Shutdown the executor."""
-        self.executor.shutdown(wait=wait)
 
 
 class LazyPoolProxy:
@@ -219,24 +186,6 @@ def _get_or_create_pool(name: str, max_workers: int) -> ThreadPool:
                 f"(backend: {'C++' if _cpp_thread_pool_available else 'Python'})"
             )
         return _pools[name]
-
-
-def get_decode_pool(max_workers: Optional[int] = None) -> ThreadPool:
-    """Get the global column decode pool.
-
-    Args:
-        max_workers: Max workers (default: cpu_count - 2)
-
-    Returns:
-        Shared decode thread pool
-    """
-    if max_workers is None:
-        import os
-
-        cpu_count = os.cpu_count() or 4
-        max_workers = max(1, cpu_count - 2)
-
-    return _get_or_create_pool("parquet-decode", max_workers)
 
 
 def get_range_pool(name: str = "parquet-range", max_workers: int = 32) -> ThreadPool:

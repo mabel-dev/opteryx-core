@@ -57,6 +57,7 @@ cdef extern from "morsels/sort.hpp" nogil:
         const vector[SortKeyColumn]& keys,
         vector[uint32_t]& perm,
         size_t take_first,
+        unsigned nthreads,
     ) nogil
 
     # Aliased to avoid colliding with this module's own `def sort_morsels` below —
@@ -66,9 +67,17 @@ cdef extern from "morsels/sort.hpp" nogil:
         const vector[SortKeySpec]& spec,
         size_t take_first,
         size_t chunk_rows,
+        unsigned nthreads,
         vector[shared_ptr[CxxMorsel]]& out,
         ErrCtx& err,
     ) nogil
+
+
+# Standalone callers have no query DOP: this module sorts at the host's full width,
+# the same as rugo's other native pools. The engine never comes through here — its
+# sinks pass the query's authorised width to the C++ core directly.
+cdef extern from "<thread>" namespace "std::thread" nogil:
+    unsigned hardware_concurrency()
 
 
 cdef size_t SIZE_MAX_C = <size_t>-1
@@ -140,7 +149,7 @@ def sort_morsels(list morsels, list column_names, list ascending, limit=None,
     cdef bint ok
 
     with nogil:
-        ok = c_sort_morsels(cxx_in, spec, take_first, chunk_rows, cxx_out, err)
+        ok = c_sort_morsels(cxx_in, spec, take_first, chunk_rows, hardware_concurrency(), cxx_out, err)
 
     if not ok:
         raise ValueError(err.msg.decode() if err.msg != NULL else "sort failed")
@@ -186,7 +195,7 @@ cpdef morsel_sort(Morsel morsel, list column_names, list ascending):
         if ok:
             for i in range(n):
                 perm[i] = <uint32_t>i
-            sort_perm(keys, perm, SIZE_MAX_C)
+            sort_perm(keys, perm, SIZE_MAX_C, hardware_concurrency())
 
     if not ok:
         raise ValueError(err.msg.decode() if err.msg != NULL else "sort failed")

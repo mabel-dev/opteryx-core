@@ -9,7 +9,8 @@
         "description": "Returns one non-null value from the input set.",
         "documentation": "Useful when a grouped query only needs one representative value from each group.",
         "sql_forms": [
-            "ANY_VALUE(expr)"
+            "ANY_VALUE(expr)",
+            "ANY_VALUE(DISTINCT expr)"
         ],
         "parameters": [
             {
@@ -40,7 +41,8 @@
         "description": "Estimates the number of distinct input values.",
         "documentation": "Uses a sketch-based estimator instead of exact deduplication.",
         "sql_forms": [
-            "APPROX_COUNT_DISTINCT(expr)"
+            "APPROX_COUNT_DISTINCT(expr)",
+            "APPROX_COUNT_DISTINCT(DISTINCT expr)"
         ],
         "parameters": [
             {
@@ -142,7 +144,8 @@
         "description": "Computes the arithmetic mean of the input values.",
         "documentation": "Ignores nulls and divides the running sum by the number of non-null values.",
         "sql_forms": [
-            "AVG(expr)"
+            "AVG(expr)",
+            "AVG(DISTINCT expr)"
         ],
         "parameters": [
             {
@@ -171,7 +174,8 @@
         "description": "Collects IPv4 addresses into the smallest list of CIDR blocks that covers exactly those addresses.",
         "documentation": "Returns ARRAY<VARCHAR> of CIDR blocks, ascending and non-overlapping. The cover is MINIMAL and unique: adjacent addresses fold into the largest aligned block, so 10.0.0.0-10.0.0.7 becomes a single 10.0.0.0/29. The operand must be IPV4 (a plain integer column is rejected). Duplicate addresses are free - the set deduplicates on insert - and NULLs are not members, so a group with no addresses returns an empty array rather than NULL. Works with and without GROUP BY. Bounded by two independent budgets, one on the collected address set and one on the emitted text: see @@cidr_agg_state_budget_bytes and @@cidr_agg_emit_budget_bytes.",
         "sql_forms": [
-            "CIDR_AGG(ipv4_expr)"
+            "CIDR_AGG(ipv4_expr)",
+            "CIDR_AGG(DISTINCT ipv4_expr)"
         ],
         "parameters": [
             {
@@ -302,7 +306,8 @@
         "description": "Returns the largest non-null input value.",
         "documentation": "Returns the greatest comparable non-null value encountered.",
         "sql_forms": [
-            "MAX(expr)"
+            "MAX(expr)",
+            "MAX(DISTINCT expr)"
         ],
         "parameters": [
             {
@@ -333,7 +338,8 @@
         "description": "Computes the exact median (middle value) of the input values.",
         "documentation": "Buffers all non-null values per group and selects the middle. Even-count inputs interpolate; result type is FLOAT. Buffering is bounded by a global 512MB memory budget \u2014 exceeding it raises an error. Decimal inputs must be CAST to FLOAT.",
         "sql_forms": [
-            "MEDIAN(expr)"
+            "MEDIAN(expr)",
+            "MEDIAN(DISTINCT expr)"
         ],
         "parameters": [
             {
@@ -364,7 +370,8 @@
         "description": "Returns the smallest non-null input value.",
         "documentation": "Returns the smallest comparable non-null value encountered.",
         "sql_forms": [
-            "MIN(expr)"
+            "MIN(expr)",
+            "MIN(DISTINCT expr)"
         ],
         "parameters": [
             {
@@ -395,7 +402,8 @@
         "description": "Computes the population standard deviation of the input values.",
         "documentation": "Population standard deviation (N denominator, not N-1/sample). Ignores nulls. DECIMAL inputs must be CAST to DOUBLE first.",
         "sql_forms": [
-            "STDDEV(expr)"
+            "STDDEV(expr)",
+            "STDDEV(DISTINCT expr)"
         ],
         "parameters": [
             {
@@ -426,7 +434,8 @@
         "description": "Computes the population standard deviation of the input values.",
         "documentation": "Population standard deviation (N denominator). Identical to STDDEV \u2014 an alternate SQL spelling of the same function. Ignores nulls. DECIMAL inputs must be CAST to DOUBLE first.",
         "sql_forms": [
-            "STDDEV_POP(expr)"
+            "STDDEV_POP(expr)",
+            "STDDEV_POP(DISTINCT expr)"
         ],
         "parameters": [
             {
@@ -457,7 +466,8 @@
         "description": "Computes the sample standard deviation of the input values.",
         "documentation": "Sample standard deviation (N-1 denominator, Bessel's correction). Ignores nulls. NULL for a group with fewer than 2 non-null values (N-1 == 0 is undefined). DECIMAL inputs must be CAST to DOUBLE first.",
         "sql_forms": [
-            "STDDEV_SAMP(expr)"
+            "STDDEV_SAMP(expr)",
+            "STDDEV_SAMP(DISTINCT expr)"
         ],
         "parameters": [
             {
@@ -488,7 +498,8 @@
         "description": "Sums the input values.",
         "documentation": "Nulls are ignored; non-null values are accumulated.",
         "sql_forms": [
-            "SUM(expr)"
+            "SUM(expr)",
+            "SUM(DISTINCT expr)"
         ],
         "parameters": [
             {
@@ -517,7 +528,8 @@
         "description": "Computes the population variance of the input values.",
         "documentation": "Population variance (N denominator) \u2014 STDDEV_POP without the final square root. Ignores nulls. DECIMAL inputs must be CAST to DOUBLE first.",
         "sql_forms": [
-            "VAR_POP(expr)"
+            "VAR_POP(expr)",
+            "VAR_POP(DISTINCT expr)"
         ],
         "parameters": [
             {
@@ -548,7 +560,8 @@
         "description": "Computes the sample variance of the input values.",
         "documentation": "Sample variance (N-1 denominator, Bessel's correction) \u2014 STDDEV_SAMP without the final square root. Ignores nulls. NULL for a group with fewer than 2 non-null values. DECIMAL inputs must be CAST to DOUBLE first.",
         "sql_forms": [
-            "VAR_SAMP(expr)"
+            "VAR_SAMP(expr)",
+            "VAR_SAMP(DISTINCT expr)"
         ],
         "parameters": [
             {

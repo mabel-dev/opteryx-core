@@ -541,7 +541,13 @@ SUPPORT_MATRIX: Tuple[Tuple[str, str, Optional[str]], ...] = (
     (
         "scalar subquery in the SELECT list",
         f"SELECT sq_o.name, (SELECT MIN(sq_i.planetId) FROM {_M_INNER}) AS m FROM {_M_OUTER}",
-        "not yet in the **SELECT** list",
+        None,
+    ),
+    (
+        "correlated scalar subquery in the SELECT list",
+        f"SELECT sq_o.name, (SELECT MIN(sq_i.id) FROM {_M_INNER} WHERE {_M_CORR}) AS m "
+        f"FROM {_M_OUTER}",
+        "must be uncorrelated",
     ),
     (
         "correlated scalar subquery on a non-equality",
@@ -571,7 +577,13 @@ SUPPORT_MATRIX: Tuple[Tuple[str, str, Optional[str]], ...] = (
         "scalar subquery in HAVING",
         "SELECT sq_o.id FROM testdata.planets AS sq_o GROUP BY sq_o.id "
         f"HAVING COUNT(*) > (SELECT MIN(sq_i.planetId) FROM {_M_INNER})",
-        "which the stream does not carry",
+        None,
+    ),
+    (
+        "correlated scalar subquery in HAVING",
+        "SELECT sq_o.id FROM testdata.planets AS sq_o GROUP BY sq_o.id "
+        f"HAVING COUNT(*) >= (SELECT MIN(sq_i.id) FROM {_M_INNER} WHERE {_M_CORR})",
+        None,
     ),
 )
 

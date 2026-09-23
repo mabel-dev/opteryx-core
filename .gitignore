@@ -250,6 +250,8 @@ opteryx/third_party/mbleven.c
 **.jsonl
 opteryx/expression/**/*.c*
 draken/vectors/*.c*
+# Hand-written (not Cython output) — must be committed; build_common lists it as a source.
+!draken/vectors/_bool_vector_bridge.cpp
 draken/poc/*.c*
 draken/poc/*.h
 draken/morsels/_morsel_shim.cpp

@@ -247,7 +247,7 @@ SELECT Company, Rocket, COUNT(DISTINCT Location) FROM testdata.missions GROUP BY
 statement ok
 SELECT Company, Rocket, MAX(Price) FROM testdata.missions GROUP BY ALL HAVING MAX(Price) > 500; -- HAVING clause with GROUP BY ALL
 
-statement error TypeError
+statement ok
 SELECT Company, Rocket, ARRAY_AGG(Location) FROM testdata.missions GROUP BY ALL; -- ARRAY_AGG with GROUP BY ALL
 
 statement ok

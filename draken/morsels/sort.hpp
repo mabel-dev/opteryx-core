@@ -372,13 +372,16 @@ inline void build_aos_keys(const std::vector<SortKeyColumn>& keys, size_t n,
 // slices are merged pairwise in a binary tree.
 // One-shot pool-let, same idiom as GroupBySink::finalize / UngroupedAggGlobal's
 // COUNT(DISTINCT) merge — thread only when it's worth it.
+//
+// `nthreads` is the CALLER's width — the engine passes the query's authorised DOP, a
+// standalone caller (rugo, draken's Python sort) passes its own. It used to be derived
+// here as `min(16, hardware_concurrency() - 2)`, a second width behind the query's
+// back that held a 192-vCPU host to 16 (removed 2026-09-23).
 template <class Cmp>
-inline void parallel_stable_sort_cmp(Cmp cmp, std::vector<uint32_t>& perm) {
+inline void parallel_stable_sort_cmp(Cmp cmp, std::vector<uint32_t>& perm, unsigned nthreads) {
     const size_t n = perm.size();
 
-    unsigned hw = std::thread::hardware_concurrency();
-    unsigned nt = hw > 2 ? static_cast<unsigned>(hw - 2) : 1u;
-    if (nt > 16) nt = 16;
+    unsigned nt = nthreads;
     if (n < 200000) nt = 1;   // small: thread spawn/join overhead isn't worth it
     if (nt < 1) nt = 1;
 
@@ -436,8 +439,8 @@ inline void parallel_stable_sort_cmp(Cmp cmp, std::vector<uint32_t>& perm) {
 // Pre-unification entry point, kept for callers that hold SortKeyColumns and want
 // the general comparator explicitly.
 inline void parallel_stable_sort_perm(const std::vector<SortKeyColumn>& keys,
-                                      std::vector<uint32_t>& perm) {
-    parallel_stable_sort_cmp(SortKeyCmp{keys}, perm);
+                                      std::vector<uint32_t>& perm, unsigned nthreads) {
+    parallel_stable_sort_cmp(SortKeyCmp{keys}, perm, nthreads);
 }
 
 // ---- the two-stage sort ------------------------------------------------------------
@@ -469,7 +472,8 @@ inline constexpr uint32_t SORT_VERGESORT_THRESHOLD = 16;
 // way (SQL's ORDER BY..LIMIT contract; cross-worker compaction is already
 // tie-unstable).
 template <class Cmp>
-inline void sort_perm_cmp(Cmp cmp, std::vector<uint32_t>& perm, size_t take_first) {
+inline void sort_perm_cmp(Cmp cmp, std::vector<uint32_t>& perm, size_t take_first,
+                          unsigned nthreads) {
     const size_t n = perm.size();
     if (take_first < n) {
         std::partial_sort(perm.begin(),
@@ -495,13 +499,13 @@ inline void sort_perm_cmp(Cmp cmp, std::vector<uint32_t>& perm, size_t take_firs
     // reversed run contains no equal keys, and reversal keeps every element inside
     // its own run's index range — so the relative order of equal keys is unchanged
     // and this sort yields exactly what it would have from the identity permutation.
-    parallel_stable_sort_cmp(cmp, perm);
+    parallel_stable_sort_cmp(cmp, perm, nthreads);
 }
 
 // Stable multi-key permutation over `perm`, dispatching to the AoS comparator when
 // the key shape allows it and to SortKeyCmp otherwise. Both produce the same order.
 inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32_t>& perm,
-                      size_t take_first = SIZE_MAX) {
+                      size_t take_first, unsigned nthreads) {
     const size_t n = perm.size();
     if (aos_keys_eligible(keys) && aos_build_worth_it(n, take_first)) {
         switch (keys.size()) {
@@ -512,7 +516,7 @@ inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32
                 std::array<bool, NP> asc{};                                      \
                 build_aos_keys<NP>(keys, n, rows, masks, asc);                   \
                 sort_perm_cmp(AoSKeyCmpN<NP>{rows.data(), masks.data(), asc},    \
-                              perm, take_first);                                 \
+                              perm, take_first, nthreads);                       \
                 return;                                                          \
             }
             DRAKEN_SORT_AOS_ARM(1)
@@ -523,7 +527,7 @@ inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32
             default: break;   // unreachable — aos_keys_eligible bounds the size
         }
     }
-    sort_perm_cmp(SortKeyCmp{keys}, perm, take_first);
+    sort_perm_cmp(SortKeyCmp{keys}, perm, take_first, nthreads);
 }
 
 // One level of an ARRAY column's element subtree: the element's physical type plus
@@ -1015,7 +1019,7 @@ inline size_t flatten_rows(const std::vector<MorselPtr>& ms,
 // valid — nothing is released early here, only not copied out.
 inline bool sort_morsels(const std::vector<MorselPtr>& ms,
                          const std::vector<SortKeySpec>& spec,
-                         size_t take_first, size_t chunk_rows,
+                         size_t take_first, size_t chunk_rows, unsigned nthreads,
                          std::vector<MorselPtr>& out, ErrCtx& err,
                          const std::vector<uint32_t>* emit_cols = nullptr) {
     std::vector<MorselPtr> src;
@@ -1029,7 +1033,7 @@ inline bool sort_morsels(const std::vector<MorselPtr>& ms,
     if (!build_sort_keys(src, spec, n, keys, err)) return false;
     std::vector<uint32_t> perm(n);
     for (size_t i = 0; i < n; ++i) perm[i] = static_cast<uint32_t>(i);
-    sort_perm(keys, perm, take_first);
+    sort_perm(keys, perm, take_first, nthreads);
 
     size_t total = n < take_first ? n : take_first;
     const std::vector<std::string>& names = src.front()->names;

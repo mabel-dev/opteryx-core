@@ -62,7 +62,7 @@ define print_red
 	@echo -e "\033[0;31m$(1)\033[0m"
 endef
 
-.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q rugo-floor reference function-costs publish-reference page-index-test
+.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q rugo-floor reference function-costs publish-reference page-index-test err-latch-test
 
 # Default target
 .DEFAULT_GOAL := help
@@ -195,6 +195,7 @@ update: ## Update all dependencies
 test: ## Run full test suite with compiled extensions
 	@$(PIP) install --upgrade pytest pytest-xdist
 	@clear || true
+	@$(MAKE) --no-print-directory err-latch-test
 	@MANUAL_TEST=1 VALIDATE_OPTIMIZER_PLANS=1 $(PYTEST) -n auto --color=yes
 
 
@@ -241,6 +242,24 @@ et: compile ## Run expression engine tests (value-checked gates)
 	$(call print_blue,"Running expression engine tests...")
 	@clear || true
 	@$(PYTEST) tests/test_expression_engine.py -v --tb=short
+
+err-latch-test: ## Build (ASan) and run the executor ErrCtx message-lifetime test
+	$(call print_blue,"Building and running executor error-latch test under ASan...")
+	@mkdir -p /tmp/opteryx-tests
+	@cd /tmp/opteryx-tests && \
+	  clang++ -std=c++20 -O1 -g -fsanitize=address -fno-omit-frame-pointer -pthread \
+	    -I$(CURDIR) \
+	    -I$(CURDIR)/draken \
+	    -I$(CURDIR)/draken/core \
+	    -I$(CURDIR)/src/cpp \
+	    -I$(CURDIR)/src/cpp/engine \
+	    -I$(CURDIR)/third_party/cyan4973 \
+	    -I$(shell $(PYTHON) -c "import sysconfig; print(sysconfig.get_paths()['include'])") \
+	    $(CURDIR)/src/cpp/engine/test_err_latch.cpp \
+	    $(CURDIR)/draken/core/trace_bridge.cpp \
+	    -o test_err_latch
+	@/tmp/opteryx-tests/test_err_latch
+	$(call print_green,"✓ Executor error-latch test passed")
 
 medius-test: ## Build and run the Medius bounded middle-tier tests
 	$(call print_blue,"Building and running Medius tests...")

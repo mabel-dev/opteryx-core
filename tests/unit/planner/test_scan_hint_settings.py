@@ -154,8 +154,6 @@ def test_shared_pool_knobs_are_not_in_the_per_scan_vocabulary():
         "parquet_gcs_io_workers",
         "parquet_local_io_workers",
         "max_execution_workers",
-        "max_execution_worker_cap",
-        "parquet_local_io_worker_cap",
     ):
         assert name not in PER_SCAN_VARIABLES
 
