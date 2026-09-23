@@ -312,8 +312,10 @@ SELECT * FROM UNNEST((1, 2, 3)) AS id INNER JOIN $planets USING(id)
 query error io failed
 SELECT * FROM $planets WHERE LENGTH(name) BETWEEN 4 AND 6
 
-statement error io failed
-SELECT * FROM $planets, testdata.satellites, testdata.astronauts
+# 9 x 177 x 357 = 568,701 rows. Asserted as an aggregate: `SELECT *` here is
+# valid but ships ~27M cells through the driver's JSON pipe.
+query shape 1 1
+SELECT COUNT(*) FROM $planets, testdata.satellites, testdata.astronauts
 
 statement error io failed
 SELECT COUNT(*), planetId FROM testdata.satellites
@@ -324,13 +326,13 @@ SELECT *, id FROM $planets
 statement error io failed
 SELECT id, * FROM $planets
 
-query error io failed
+query shape 25 28
 SELECT * FROM $planets AS p INNER JOIN testdata.satellites AS s ON p.id = s.planetId WHERE p.name = 'Jupiter' AND s.radius = 1.0
 
-query error io failed
+query shape 67 28
 SELECT * FROM $planets AS p INNER JOIN testdata.satellites AS s ON p.id = s.planetId WHERE p.name = 'Jupiter'
 
-query error io failed
+query shape 0 0
 SELECT * FROM $planets AS p INNER JOIN $planets AS s ON p.id = s.id WHERE p.name = 'Jupiter' AND p.id = 1.0
 
 query error io failed
@@ -387,7 +389,7 @@ SELECT IFNULL(alma_mater, []) FROM testdata.astronauts
 query error io failed
 SELECT s,e FROM generate_series('2024-01-01', '2025-01-01', '1mo') as s, generate_series('2024-01-01', '2025-01-01', '1mo') as e
 
-query error io failed
+query shape 1593 28
 SELECT * from $planets, testdata.satellites
 
 query error io failed
@@ -447,25 +449,25 @@ SELECT name, mission FROM testdata.astronauts CROSS JOIN UNNEST (missions) AS mi
 query error io failed
 SELECT name, mission FROM testdata.astronauts CROSS JOIN UNNEST (missions) AS mission WHERE NOT mission LIKE 'Apollo 11'
 
-query error io failed
+query shape 170 10
 SELECT * FROM (SELECT * FROM testdata.satellites LEFT JOIN (SELECT id AS pid, mass FROM $planets) AS p ON testdata.satellites.planetId = p.pid) AS mapped WHERE mass > 1
 
-query error io failed
+query shape 170 2
 SELECT * FROM (SELECT planetId, mass FROM testdata.satellites LEFT JOIN $planets AS p ON testdata.satellites.planetId = p.id) AS mapped WHERE mass > 1
 
-query error io failed
+query shape 170 28
 SELECT * FROM testdata.satellites LEFT JOIN $planets AS p ON testdata.satellites.planetId = p.id WHERE mass > 1
 
-query error io failed
+query shape 170 2
 SELECT * FROM (SELECT p.id, mass FROM (SELECT * FROM testdata.satellites) AS s LEFT JOIN $planets AS p ON s.planetId = p.id) AS mapped WHERE mass > 1
 
 query error io failed
 SELECT * FROM (SELECT * FROM testdata.satellites) AS s LEFT JOIN (SELECT id as pid, mass FROM $planets) AS p ON s.planetId = p.pid WHERE mass > 1
 
-query error io failed
+query shape 170 28
 SELECT * FROM testdata.satellites LEFT JOIN (SELECT * FROM (SELECT * FROM $planets) AS p) AS planets ON testdata.satellites.planetId = planets.id WHERE mass > 1
 
-query error io failed
+query shape 170 2
 SELECT * FROM (SELECT * FROM (SELECT p.id, mass FROM testdata.satellites LEFT JOIN $planets AS p ON testdata.satellites.planetId = p.id) AS joined) AS mapped WHERE mass > 1
 
 query error io failed
@@ -507,13 +509,13 @@ SELECT DISTINCT id, gm, density, magnitude FROM testdata.satellites WHERE radius
 query error io failed
 SELECT Company, Price, Mission FROM testdata.missions WHERE Price <= 4279346967 AND NOT Price BETWEEN 137294968 AND 2336093823 ORDER BY Company DESC LIMIT 9
 
-statement error io failed
+statement error AmbiguousIdentifierError
 SELECT * FROM (SELECT * FROM (SELECT * FROM testdata.satellites LEFT JOIN $planets AS p ON testdata.satellites.planetId = p.id) AS joined) AS mapped WHERE mass > 1
 
-statement error io failed
+statement error AmbiguousIdentifierError
 SELECT * FROM (SELECT * FROM testdata.satellites LEFT JOIN (SELECT * FROM $planets) AS p ON testdata.satellites.planetId = p.id) AS mapped WHERE mass > 1
 
-statement error io failed
+statement error AmbiguousIdentifierError
 SELECT * FROM (SELECT * FROM testdata.satellites LEFT JOIN $planets AS p ON testdata.satellites.planetId = p.id) AS mapped WHERE mass > 1
 
 query error io failed

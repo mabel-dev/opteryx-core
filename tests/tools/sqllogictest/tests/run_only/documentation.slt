@@ -32,13 +32,13 @@ SELECT DISTINCT planetId FROM testdata.satellites
 statement ok
 SELECT DISTINCT planetId FROM testdata.satellites ORDER BY planetId
 
-statement error InvalidInternalStateError
+statement ok
 SELECT * FROM testdata.satellites, $planets WHERE planetId = $planets.id
 
-statement error InvalidInternalStateError
+statement ok
 SELECT * FROM testdata.satellites, $planets WHERE testdata.satellites.planetId = $planets.id
 
-statement error InvalidInternalStateError
+statement ok
 SELECT * FROM testdata.satellites INNER JOIN $planets ON testdata.satellites.planetId = $planets.id
 
 statement ok

@@ -97,7 +97,11 @@ SELECT * FROM $planets AS p1 INNER JOIN $planets AS p2 ON p1.id = p2.id RIGHT OU
 
 
 # INNER JOIN with NATURAL JOIN
-statement ok
+# The NATURAL JOIN's left input is the RESULT of the preceding join, so it
+# carries p1's AND p2's copy of every column. Which copy the implicit
+# predicate pairs on is undefined, so the join refuses it - as standard SQL
+# does - whatever the projection. Ruled 2026-09-23.
+statement error AmbiguousIdentifierError
 SELECT * FROM $planets AS p1 INNER JOIN $planets AS p2 ON p1.id = p2.id NATURAL JOIN $planets AS p3
 
 
@@ -122,7 +126,11 @@ SELECT * FROM $planets AS p1 FULL OUTER JOIN $planets AS p2 ON p1.id = p2.id RIG
 
 
 # FULL OUTER JOIN with NATURAL JOIN
-statement ok
+# The NATURAL JOIN's left input is the RESULT of the preceding join, so it
+# carries p1's AND p2's copy of every column. Which copy the implicit
+# predicate pairs on is undefined, so the join refuses it - as standard SQL
+# does - whatever the projection. Ruled 2026-09-23.
+statement error AmbiguousIdentifierError
 SELECT * FROM $planets AS p1 FULL OUTER JOIN $planets AS p2 ON p1.id = p2.id NATURAL JOIN $planets AS p3
 
 
@@ -142,7 +150,11 @@ SELECT * FROM $planets AS p1 LEFT OUTER JOIN $planets AS p2 ON p1.id = p2.id RIG
 
 
 # LEFT OUTER JOIN with NATURAL JOIN
-statement ok
+# The NATURAL JOIN's left input is the RESULT of the preceding join, so it
+# carries p1's AND p2's copy of every column. Which copy the implicit
+# predicate pairs on is undefined, so the join refuses it - as standard SQL
+# does - whatever the projection. Ruled 2026-09-23.
+statement error AmbiguousIdentifierError
 SELECT * FROM $planets AS p1 LEFT OUTER JOIN $planets AS p2 ON p1.id = p2.id NATURAL JOIN $planets AS p3
 
 
@@ -157,7 +169,11 @@ SELECT * FROM $planets AS p1 LEFT OUTER JOIN $planets AS p2 ON p1.id = p2.id LEF
 
 
 # RIGHT OUTER JOIN with NATURAL JOIN
-statement ok
+# The NATURAL JOIN's left input is the RESULT of the preceding join, so it
+# carries p1's AND p2's copy of every column. Which copy the implicit
+# predicate pairs on is undefined, so the join refuses it - as standard SQL
+# does - whatever the projection. Ruled 2026-09-23.
+statement error AmbiguousIdentifierError
 SELECT * FROM $planets AS p1 RIGHT OUTER JOIN $planets AS p2 ON p1.id = p2.id NATURAL JOIN $planets AS p3
 
 

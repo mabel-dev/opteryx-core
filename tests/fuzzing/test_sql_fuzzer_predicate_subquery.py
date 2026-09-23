@@ -41,8 +41,7 @@ from tests.fuzzing import subquery_oracles as oracles
 from tests.fuzzing.harness import case_seeds
 from tests.fuzzing.harness import rows
 from tests.fuzzing.subquery_grammar import FORMS
-from tests.fuzzing.subquery_grammar import POSITION_REFUSAL_SIGNATURE
-from tests.fuzzing.subquery_grammar import POSITIONS_REFUSED_PROMPTLY
+from tests.fuzzing.subquery_grammar import NESTED_POSITIONS
 from tests.fuzzing.subquery_grammar import SUPPORT_MATRIX
 from tests.fuzzing.subquery_grammar import assert_null_coverage
 from tests.fuzzing.subquery_grammar import generate
@@ -235,10 +234,11 @@ _REFUSAL_DEADLINE = 20.0
 
 
 @pytest.mark.parametrize(
-    "label,sql", POSITIONS_REFUSED_PROMPTLY, ids=[row[0] for row in POSITIONS_REFUSED_PROMPTLY]
+    "label,sql,verdict", NESTED_POSITIONS, ids=[row[0] for row in NESTED_POSITIONS]
 )
-def test_subquery_position_is_refused_promptly(label, sql):
-    """An EXISTS/IN outside a top-level conjunct must be REFUSED, and must return.
+def test_nested_subquery_position_terminates_with_its_verdict(label, sql, verdict):
+    """An EXISTS/IN outside a top-level conjunct must reach its verdict - answered
+    (`verdict` None) or refused with `verdict` in the message - and must return.
 
     Both halves matter, and the second is why this runs in a subprocess rather
     than under `pytest.raises`.
@@ -253,12 +253,13 @@ def test_subquery_position_is_refused_promptly(label, sql):
 
     An in-process assertion here would, if that regressed, hang the entire suite
     with no output. A subprocess with a deadline fails the run in bounded time
-    instead, and still fails it if the query is answered rather than refused.
+    instead, and still fails it if the verdict is the wrong one.
 
     The two EXISTS spellings are covered by the same test because they were the
     same bug: they DID terminate, but only by looping twice and then reporting
     `**EXISTS** requires a correlated equality predicate` about a correlation
-    the first pass had already lifted out. Both now name the position.
+    the first pass had already lifted out. Both are now answered, lowered to a
+    per-row boolean value.
     """
     script = (
         "import sys; sys.path.insert(1, %r)\n"
@@ -282,22 +283,27 @@ def test_subquery_position_is_refused_promptly(label, sql):
     except subprocess.TimeoutExpired:
         raise AssertionError(
             f"`{label}` did not terminate within {_REFUSAL_DEADLINE}s. The planner "
-            f"non-termination is back: _build_filter_join must refuse a subquery "
-            f"_split_out cannot remove from the predicate.\n  {sql}"
+            f"non-termination is back: _build_filter_join must lower or refuse a "
+            f"subquery _split_out cannot remove from the predicate.\n  {sql}"
         ) from None
 
     output = completed.stdout.strip()
+    if verdict is None:
+        assert output == "ANSWERED", (
+            f"`{label}` should be answered.\n  {sql}\n  exit={completed.returncode}\n"
+            f"  stdout={output[:400]}\n  stderr={completed.stderr.strip()[-400:]}"
+        )
+        return
     assert output.startswith("REFUSED UnsupportedSyntaxError"), (
         f"`{label}` should be refused with UnsupportedSyntaxError.\n  {sql}\n"
         f"  exit={completed.returncode}\n  stdout={output[:400]}\n"
         f"  stderr={completed.stderr.strip()[-400:]}"
     )
-    assert POSITION_REFUSAL_SIGNATURE in output, (
+    assert verdict in output, (
         f"`{label}` is refused, but not by the positional guard — it no longer says "
-        f"{POSITION_REFUSAL_SIGNATURE!r}, so some other path is refusing it and the guard "
-        f"may not be reached at all.\n  {sql}\n  {output[:400]}"
+        f"{verdict!r}, so some other path is refusing it and the guard may not be "
+        f"reached at all.\n  {sql}\n  {output[:400]}"
     )
-
 
 def test_wrong_answer_correlated_scalar_subquery_drops_unmatched_outer_rows():
     """Pins subquery_known_gaps/correlated-scalar-subquery-drops-unmatched-outer-rows.
@@ -515,8 +521,8 @@ if __name__ == "__main__":  # pragma: no cover
         test_sql_fuzzing_predicate_subquery(_seed)
     for _defect in known_gaps.REGISTER:
         test_registered_defect_still_reproduces(_defect)
-    for _label, _sql in POSITIONS_REFUSED_PROMPTLY:
-        test_subquery_position_is_refused_promptly(_label, _sql)
+    for _label, _sql, _verdict in NESTED_POSITIONS:
+        test_nested_subquery_position_terminates_with_its_verdict(_label, _sql, _verdict)
     test_wrong_answer_correlated_scalar_subquery_drops_unmatched_outer_rows()
     test_not_in_over_an_empty_subquery_is_true_for_every_row()
     test_register_shape_tags_are_reachable()

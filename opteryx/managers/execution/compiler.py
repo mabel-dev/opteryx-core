@@ -1697,6 +1697,15 @@ class _Compiler:
     _STDDEV_FAMILY_FUNCS = frozenset(
         {"STDDEV", "STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP"}
     )
+    # DISTINCT cannot change these answers (an extreme, any member, a set union, a
+    # distinct-count sketch), so the modifier is dropped rather than implemented.
+    _DISTINCT_INVARIANT_FUNCS = frozenset(
+        {"MIN", "MAX", "ANY_VALUE", "CIDR_AGG", "APPROX_COUNT_DISTINCT"}
+    )
+    # DISTINCT dedups the operand in the native sink (AggSpec2::distinct_operand —
+    # mirrors agg_fn_takes_distinct_operand). COUNT and ARRAY_AGG have their own
+    # DISTINCT paths; CORR and APPROX_PERCENTILE refuse it.
+    _DISTINCT_OPERAND_FUNCS = frozenset({"SUM", "AVG", "MEDIAN"}) | _STDDEV_FAMILY_FUNCS
     # MEDIAN is numeric-only (native_group_sinks.hpp's median_operand_supported) —
     # narrower than _AGG_OPERAND_TYPES (which also allows DECIMAL/BOOL/temporal for
     # SUM/AVG/MIN/MAX/STDDEV). Matches the legacy Cython median collectors exactly.
@@ -1856,7 +1865,11 @@ class _Compiler:
                 _unsupported(f"{func} with {len(params)} parameters")
             operand = params[0]
             distinct = getattr(agg, "duplicate_treatment", None) == "Distinct"
-            if distinct and func not in ("COUNT", "ARRAY_AGG"):
+            if distinct and func in self._DISTINCT_INVARIANT_FUNCS:
+                # Duplicates cannot change the answer — lower as the plain aggregate.
+                distinct = False
+            if distinct and func not in self._DISTINCT_OPERAND_FUNCS and func not in (
+                    "COUNT", "ARRAY_AGG"):
                 _unsupported(f"{func}(DISTINCT ...)")
             if func == "COUNT" and operand.node_type == NodeType.WILDCARD:
                 if distinct:
@@ -2016,6 +2029,11 @@ class _Compiler:
                   "STDDEV_SAMP": "StddevSamp", "VAR_POP": "VarPop",
                   "VAR_SAMP": "VarSamp",
                   "MEDIAN": "Median", "ANY_VALUE": "AnyValue"}[func]
+            if distinct:
+                # Dedups the operand exactly as COUNT(DISTINCT col) does (draken
+                # value hash, NULLs excluded) — see AggSpec2::distinct_operand.
+                specs.append((sc.identity, fn, idx, {"distinct_operand": True}))
+                continue
             specs.append((sc.identity, fn, idx))
         # Each aggregate's OUTPUT identity and its bind-time result type, folded
         # into the same identity -> (physical type, ColumnType) tracking every
@@ -4419,16 +4437,40 @@ class _Compiler:
             build_id, probe_id = legs["right"], legs["left"]
             build_keys, probe_keys = right_cols, left_cols
 
+        # RIGHT / FULL OUTER JOIN ... USING (and NATURAL): each merged column is
+        # COALESCE(left key, right key), emitted BY THE JOIN (binder/join.py mints its
+        # identity). On probe-emitted rows that is the probe key — matched rows have
+        # equal keys, unmatched rows a NULL build half — so the probe key is listed a
+        # second time in the probe payload under the merged identity. On the rows the
+        # unmatched-build tail emits the probe half is NULL, so the tail fills that
+        # slot from the build key instead (UnmatchedBuildSource::fill_from_build).
+        # Keys are matched as an unordered pair: RIGHT OUTER arrives here with its
+        # legs swapped (join_rewriter), which reverses left/right but not the pair.
+        # Resolved from the PRE-coercion key lists — the merged column carries the
+        # key's own value, never a synthetic CAST.
+        merged_specs = []   # (merged identity, build key identity, probe key identity)
+        for merged_identity, key_a, key_b in (getattr(node, "using_merged", None) or []):
+            if mode not in (0, 1, 5, 8):
+                _unsupported("a merged USING column on a join that does not emit rows "
+                             "from both sides")
+            match = [k for k in range(len(build_keys))
+                     if {build_keys[k], probe_keys[k]} == {key_a, key_b}]
+            if len(match) != 1:
+                _unsupported("a merged USING column whose keys are not a join key pair")
+            k = match[0]
+            merged_specs.append((merged_identity, build_keys[k], probe_keys[k]))
+
         # Keys whose two sides disagree on numeric category get a materialized CAST
         # column so both sides hash the same representation (see _join_key_coercions).
-        coercions = self._join_key_coercions(node, build_keys, probe_keys)
+        build_coercions, probe_coercions = self._join_key_coercions(
+            node, build_keys, probe_keys)
 
         bp, blayout = self.compile_node(build_id)
         self.nplan.set_current_identity(node.identity)  # own the build sink + probe below
         self.nplan.set_current_display_name(type(node).__name__)
         # `blayout` is the leg's real output; `bkeyout` may carry extra synthetic cast
         # columns at the end. Payload/output use the former, key indices the latter.
-        bkeyout, build_keys = self._coerce_join_keys(bp, blayout, build_keys, coercions)
+        bkeyout, build_keys = self._coerce_join_keys(bp, blayout, build_keys, build_coercions)
         build_key_idx = []
         for identity in build_keys:
             if identity not in bkeyout:
@@ -4497,6 +4539,15 @@ class _Compiler:
                 else list(range(len(blayout)))
             build_types, build_logical, build_element = self._payload_types(
                 build_id, [blayout[i] for i in build_payload])
+        # The unmatched-build tail copies each merged column's BUILD key out of the
+        # build half, so it must be retained even when nothing above wants it.
+        if mode in (5, 8):
+            for _, build_key, _ in merged_specs:
+                position = blayout.index(build_key)
+                if position not in build_payload:
+                    build_payload.append(position)
+                    build_types, build_logical, build_element = self._payload_types(
+                        build_id, [blayout[i] for i in build_payload])
         # `join_output_rows_estimate` (JoinBuildShapeStrategy) is how many rows this
         # join is expected to EMIT — the one number the build sink cannot measure for
         # itself when it decides whether consolidating its retained payload beats
@@ -4521,7 +4572,7 @@ class _Compiler:
         pp, playout = self.compile_node(probe_id)
         self.nplan.set_current_identity(node.identity)  # probe op belongs to the join
         self.nplan.set_current_display_name(type(node).__name__)
-        pkeyout, probe_keys = self._coerce_join_keys(pp, playout, probe_keys, coercions)
+        pkeyout, probe_keys = self._coerce_join_keys(pp, playout, probe_keys, probe_coercions)
         probe_key_idx = []
         for identity in probe_keys:
             if identity not in pkeyout:
@@ -4573,16 +4624,22 @@ class _Compiler:
             if existence_name is not None:
                 return pp, semi_layout + [existence_name]   # rows kept, verdict appended
             return pp, semi_layout            # existence filter — probe rows, narrowed
+        # Merged USING columns ride at the END of the probe payload: the probe key
+        # again, labelled with the merged identity (see merged_specs above).
+        merged_probe_positions = [playout.index(probe_key) for _, _, probe_key in merged_specs]
+        emitted_probe_payload = probe_payload + merged_probe_positions
         self.nplan.add_join2_probe(pp, ref, probe_key_idx,
-                                   [] if mode in semi_anti_modes else probe_payload, mode,
-                                   semi_emit, existence_name, existence_three_valued)
+                                   [] if mode in semi_anti_modes else emitted_probe_payload,
+                                   mode, semi_emit, existence_name, existence_three_valued)
         if existence_name is not None:
             return pp, semi_layout + [existence_name]       # rows kept, verdict appended
         if mode in semi_anti_modes:
             return pp, semi_layout            # existence filter — probe rows, narrowed
         # Join2ProbeOperator emits build payload columns first, then probe payload — in
         # payload-index order, so the output layout is the two RETAINED lists.
-        out_layout = [blayout[i] for i in build_payload] + [playout[j] for j in probe_payload]
+        out_layout = ([blayout[i] for i in build_payload]
+                      + [playout[j] for j in probe_payload]
+                      + [merged for merged, _, _ in merged_specs])
         if residual is not None:
             # nested_loop residual `on` predicate over the combined layout. Lower
             # it (fails loud if not c-native), resolve column refs against the
@@ -4601,14 +4658,20 @@ class _Compiler:
             # UnmatchedBuildSource pulls, every probe worker has finished and the
             # matched[] flags are complete.
             probe_types, probe_logical, probe_element = self._payload_types(
-                probe_id, [playout[j] for j in probe_payload])
+                probe_id, [playout[j] for j in emitted_probe_payload])
+            # (probe payload slot of the merged column, build payload column of its
+            # build key) — the tail copies the latter into the former.
+            fill_from_build = [
+                (len(probe_payload) + m, build_payload.index(blayout.index(build_key)))
+                for m, (_, build_key, _) in enumerate(merged_specs)
+            ]
             buf = self.nplan.new_buffer()
             self.nplan.set_buffer_append_sink(pp, buf)
             tail = self.nplan.new_pipeline()
             self.nplan.set_current_identity(node.identity)
             self.nplan.set_current_display_name(type(node).__name__)
             self.nplan.set_unmatched_build_source(tail, ref, probe_types, probe_logical,
-                                                  probe_element)
+                                                  probe_element, fill_from_build)
             self.nplan.set_buffer_append_sink(tail, buf)
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
@@ -4636,11 +4699,12 @@ class _Compiler:
         build_id, probe_id = legs["left"], legs["right"]
         build_keys, probe_keys = left_cols, right_cols
 
-        coercions = self._join_key_coercions(node, build_keys, probe_keys)
+        build_coercions, probe_coercions = self._join_key_coercions(
+            node, build_keys, probe_keys)
         bp, blayout = self.compile_node(build_id)
         self.nplan.set_current_identity(node.identity)
         self.nplan.set_current_display_name(type(node).__name__)
-        bkeyout, build_keys = self._coerce_join_keys(bp, blayout, build_keys, coercions)
+        bkeyout, build_keys = self._coerce_join_keys(bp, blayout, build_keys, build_coercions)
         build_key_idx = []
         for identity in build_keys:
             if identity not in bkeyout:
@@ -4669,7 +4733,7 @@ class _Compiler:
         sp, playout = self.compile_node(probe_id)
         self.nplan.set_current_identity(node.identity)
         self.nplan.set_current_display_name(type(node).__name__)
-        pkeyout, probe_keys = self._coerce_join_keys(sp, playout, probe_keys, coercions)
+        pkeyout, probe_keys = self._coerce_join_keys(sp, playout, probe_keys, probe_coercions)
         probe_key_idx = []
         for identity in probe_keys:
             if identity not in pkeyout:
@@ -4739,17 +4803,28 @@ class _Compiler:
     }
 
     def _join_key_coercions(self, node, build_keys, probe_keys):
-        """Map key identity -> (bound IDENTIFIER node, cast target name, target type)
-        for the keys whose two sides would hash differently. Read off ``node.on``'s
-        bound schema columns, so it does not depend on either leg having compiled."""
+        """``(build_coercions, probe_coercions)``: two lists PARALLEL to ``build_keys``
+        and ``probe_keys``, each entry None or (bound IDENTIFIER node, cast target
+        name, target type) for a key whose pair would hash differently. Read off
+        ``node.on``'s bound schema columns, so it does not depend on either leg having
+        compiled.
+
+        Per POSITION, never per identity: a coercion belongs to a key PAIR. One column
+        can key two pairs - `o.k = j.id AND o.k = j.avg`, which a correlated scalar
+        subquery `o.k = (SELECT AVG(..) .. WHERE id = o.k)` decorrelates into - and
+        only the INT-vs-FLOAT pair needs `o.k` cast. Keyed by identity, the cast
+        leaked onto the INT-vs-INT pair too, which then hashed FLOAT64 against INT64,
+        matched nothing, and returned zero rows."""
         from opteryx.expression import NodeType, get_all_nodes_of_type
         from opteryx.operators._operators import JoinNode
         from opteryx.types.logical_type import LogicalCategory
         from opteryx.types.logical_type import find_compatible_type as _lt_find_compatible
 
+        build_coercions = [None] * len(build_keys)
+        probe_coercions = [None] * len(probe_keys)
         on = getattr(node, "on", None)
         if on is None or not build_keys:
-            return {}
+            return build_coercions, probe_coercions
 
         by_identity = {}
         for comparison in get_all_nodes_of_type(on, (NodeType.COMPARISON_OPERATOR,)):
@@ -4763,8 +4838,7 @@ class _Compiler:
                     by_identity[schema_column.identity] = side
 
         numeric = (LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.DECIMAL)
-        coercions = {}
-        for build_identity, probe_identity in zip(build_keys, probe_keys):
+        for position, (build_identity, probe_identity) in enumerate(zip(build_keys, probe_keys)):
             build_node = by_identity.get(build_identity)
             probe_node = by_identity.get(probe_identity)
             if build_node is None or probe_node is None:
@@ -4794,13 +4868,11 @@ class _Compiler:
             if target_name is None:
                 _unsupported(
                     "a join between %s and %s keys" % (build_category.name, probe_category.name))
-            for identity, key_node, column_type in (
-                (build_identity, build_node, build_ct),
-                (probe_identity, probe_node, probe_ct),
-            ):
-                if column_type.physical != target.physical:
-                    coercions[identity] = (key_node, target_name, target)
-        return coercions
+            if build_ct.physical != target.physical:
+                build_coercions[position] = (build_node, target_name, target)
+            if probe_ct.physical != target.physical:
+                probe_coercions[position] = (probe_node, target_name, target)
+        return build_coercions, probe_coercions
 
     def _asof_match_coercions(self, node):
         """Key-coercion entries for an ASOF MATCH_CONDITION whose two sides differ.
@@ -4821,8 +4893,9 @@ class _Compiler:
         CAST the narrower side and order on that, so both sides normalise through one
         encoding.
 
-        Returns the same {identity: (key_node, target_name, target_ct)} shape
-        `_coerce_join_keys` consumes. The IDENTIFIER operands are SYNTHESISED — an
+        Returns {identity: (key_node, target_name, target_ct)}; the call site hands
+        `_coerce_join_keys` the one entry per side it takes (an ASOF join has a single
+        match column on each side, so there is no pair for an identity to leak into). The IDENTIFIER operands are SYNTHESISED — an
         AsofJoinNode keeps only the two column identities, not the bound comparison
         (`node.on` is None for ASOF) — but they carry the real identity and the real
         ColumnType, which is all the lowering resolves against.
@@ -4899,10 +4972,16 @@ class _Compiler:
     def _coerce_join_keys(self, p, layout, keys, coercions):
         """Append a CAST column for every key in ``keys`` that needs coercing.
 
-        Returns ``(grown_layout, keys)`` where ``keys`` names the columns to hash —
-        the synthetic identity where one was minted, the original otherwise. The
-        caller keeps the PRE-growth layout for payload/output purposes."""
-        if not coercions:
+        ``coercions`` is PARALLEL to ``keys`` (see _join_key_coercions): entry i is
+        None or the cast for key i. Returns ``(grown_layout, keys)`` where ``keys``
+        names the columns to hash — the synthetic identity where one was minted, the
+        original otherwise. The caller keeps the PRE-growth layout for payload/output
+        purposes."""
+        if len(coercions) != len(keys):
+            raise InvalidInternalStateError(
+                "join key coercions are not parallel to the join keys"
+            )
+        if not any(coercions):
             return layout, keys
         from opteryx.expression import Node, NodeType
         from opteryx.planner import build_literal_node
@@ -4910,12 +4989,16 @@ class _Compiler:
 
         layout = list(layout)
         out_keys = []
-        for identity in keys:
-            entry = coercions.get(identity)
+        # The same column cast to the same target at two positions is ONE column.
+        minted = {}
+        for identity, entry in zip(keys, coercions):
             if entry is None or identity not in layout:
                 out_keys.append(identity)
                 continue
             key_node, target_name, target_ct = entry
+            if (identity, target_name) in minted:
+                out_keys.append(minted[(identity, target_name)])
+                continue
             schema_column = FunctionColumn(
                 name="%s::%s(join key)" % (self._layout_name(identity), target_name),
                 column_type=target_ct,
@@ -4945,6 +5028,7 @@ class _Compiler:
             layout = self._add_computed(p, [cast_node], layout)
             if schema_column.identity not in layout:
                 _unsupported("an implicit join-key cast the projection layer declined")
+            minted[(identity, target_name)] = schema_column.identity
             out_keys.append(schema_column.identity)
         return layout, out_keys
 
@@ -5241,9 +5325,9 @@ class _Compiler:
         # the match-column index moves onto the coerced column.
         coercions = self._asof_match_coercions(node)
         bmatchout, (asof_right,) = self._coerce_join_keys(
-            bp, blayout, [asof_right], coercions)
+            bp, blayout, [asof_right], [coercions.get(asof_right)])
         pmatchout, (asof_left,) = self._coerce_join_keys(
-            pp, playout, [asof_left], coercions)
+            pp, playout, [asof_left], [coercions.get(asof_left)])
 
         ref = self.nplan.new_join2_ref()
         self.nplan.set_current_identity(node.identity)  # own the asof build sink + probe

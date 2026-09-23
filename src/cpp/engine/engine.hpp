@@ -650,10 +650,20 @@ public:
                                     std::vector<int> lt_precision,
                                     std::vector<int> lt_scale,
                                     std::vector<int> lt_dimension,
-                                    std::vector<std::vector<int>> elem_chain) {
+                                    std::vector<std::vector<int>> elem_chain,
+                                    std::vector<size_t> fill_probe_slot,
+                                    std::vector<size_t> fill_build_col) {
         auto probe_logical = intern_logical_vec(lt_kind, lt_unit, lt_precision,
                                                 lt_scale, lt_dimension);
         auto probe_element = decode_elem_chains(elem_chain, probe_types.size());
+        // USING / NATURAL merged columns — see UnmatchedBuildSource::fill_from_build.
+        if (fill_probe_slot.size() != fill_build_col.size())
+            throw std::runtime_error(
+                "set_unmatched_build_source: merged USING fill lists are not aligned");
+        std::vector<std::pair<size_t, size_t>> fills;
+        fills.reserve(fill_probe_slot.size());
+        for (size_t i = 0; i < fill_probe_slot.size(); ++i)
+            fills.emplace_back(fill_probe_slot[i], fill_build_col[i]);
         auto schema = std::make_shared<CxxMorsel>();
         schema->columns.reserve(probe_types.size());
         for (size_t c = 0; c < probe_types.size(); ++c)
@@ -662,7 +672,7 @@ public:
         schema->names.resize(probe_types.size());
         schema->zero_col_rows = 0;
         set_source_(p, std::make_unique<UnmatchedBuildSource>(
-            join2_refs[ref].get(), std::move(schema)));
+            join2_refs[ref].get(), std::move(schema), std::move(fills)));
     }
     // RIGHT SEMI / RIGHT ANTI, half one: consume the STREAMED leg and mark the build
     // rows it hits. Emits nothing — see Join2MarkSink. `key_idx` are the streamed

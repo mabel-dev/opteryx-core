@@ -577,60 +577,75 @@ SUPPORT_MATRIX: Tuple[Tuple[str, str, Optional[str]], ...] = (
 
 
 # An EXISTS/IN subquery that is not a top-level conjunct of the WHERE clause.
-# Decorrelation turns the existence test into a JOIN, and a join expresses
-# neither a disjunct nor a negation of a row-level test, so every one of these
-# is refused — by the guard at the top of `_build_filter_join`.
+# The top-level rewrite turns the existence test into a SEMI/ANTI join, which
+# expresses neither a disjunct nor a negation of a row-level test. Instead these
+# lower to a per-row boolean VALUE substituted in place (`_materialize_boolean_value`
+# for EXISTS, `_materialize_in_membership`'s three-valued existence flag for IN), or
+# are refused by the guard at the top of `_build_filter_join`: NOT IN, and an IN
+# that correlates, whose three-valued flag is not worked out for correlation keys.
 #
 # THESE ARE NOT IN `SUPPORT_MATRIX`, and the reason is not tidiness. Before that
 # guard existed, the four IN spellings made the PLANNER LOOP FOREVER: the driving
 # loop in `_rewrite_filters` re-found a node `_split_out` had failed to remove.
 # A row in the in-process matrix would, if that regressed, hang the whole test
-# suite with no output. `test_subquery_position_is_refused_promptly` runs each of
-# these in a SUBPROCESS with a deadline instead, so a return of the hang fails
-# the run in bounded time rather than wedging it.
+# suite with no output. `test_nested_subquery_position_terminates_with_its_verdict`
+# runs each of these in a SUBPROCESS with a deadline instead, so a return of the
+# hang fails the run in bounded time rather than wedging it.
 #
-# The two EXISTS spellings are here for the same reason and because they share
-# the root cause: they used to be refused for `**EXISTS** requires a correlated
+# The EXISTS spellings are here for the same reason and because they share the
+# root cause: they used to be refused for `**EXISTS** requires a correlated
 # equality predicate` — a misdiagnosis, since the correlation was right there.
 # The first pass lifted the correlation out of the subquery, failed to remove the
 # EXISTS node, and the second pass then found no correlation left to lift.
-POSITIONS_REFUSED_PROMPTLY: Tuple[Tuple[str, str], ...] = (
+#
+# The verdict is None for a shape that must be ANSWERED. Whether the answer is
+# RIGHT is not checked here - these tables hold no NULLs, and a NULL is where
+# IN's three-valued answer differs; see test_shapes_basic's
+# `test_nested_in_subquery_is_three_valued`.
+NESTED_POSITIONS: Tuple[Tuple[str, str, Optional[str]], ...] = (
     (
         "NOT (x IN (subquery))",
         f"SELECT sq_o.name FROM {_M_OUTER} WHERE NOT (sq_o.id IN "
         f"(SELECT sq_i.planetId FROM {_M_INNER}))",
+        None,
     ),
     (
         "(x IN (subquery)) IS NULL",
         f"SELECT sq_o.name FROM {_M_OUTER} WHERE (sq_o.id IN "
         f"(SELECT sq_i.planetId FROM {_M_INNER})) IS NULL",
+        None,
     ),
     (
         "(x IN (subquery)) = TRUE",
         f"SELECT sq_o.name FROM {_M_OUTER} WHERE (sq_o.id IN "
         f"(SELECT sq_i.planetId FROM {_M_INNER})) = TRUE",
+        None,
     ),
     (
         "x NOT IN (subquery) as a disjunct",
         f"SELECT sq_o.name FROM {_M_OUTER} WHERE sq_o.id NOT IN "
         f"(SELECT sq_i.planetId FROM {_M_INNER}) OR sq_o.id > 100",
+        "only supported as a top-level condition",
+    ),
+    (
+        "NOT (correlated x IN (subquery))",
+        f"SELECT sq_o.name FROM {_M_OUTER} WHERE NOT (sq_o.name IN "
+        f"(SELECT sq_i.name FROM {_M_INNER} WHERE {_M_CORR}))",
+        "only supported as a top-level condition",
     ),
     (
         "EXISTS as a disjunct",
         f"SELECT sq_o.name FROM {_M_OUTER} WHERE sq_o.id > 2 OR EXISTS "
         f"(SELECT 1 FROM {_M_INNER} WHERE {_M_CORR})",
+        None,
     ),
     (
         "parenthesised NOT (EXISTS ...)",
         f"SELECT sq_o.name FROM {_M_OUTER} WHERE NOT (EXISTS "
         f"(SELECT 1 FROM {_M_INNER} WHERE {_M_CORR}))",
+        None,
     ),
 )
-
-#: What every entry above must be refused WITH. One shared substring, because
-#: one guard raises them all — if they stop agreeing, the guard has been
-#: bypassed for some of them and the hang can come back for those.
-POSITION_REFUSAL_SIGNATURE = "only supported as a top-level condition"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

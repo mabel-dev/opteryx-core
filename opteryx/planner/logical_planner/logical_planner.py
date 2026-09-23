@@ -3619,6 +3619,22 @@ def create_node_relation(relation: dict):
         else:  # pragma: no cover
             raise NotImplementedError(relation["relation"]["Derived"])
 
+    elif "Table" not in relation["relation"]:
+        # Every FROM item below is a `Table` (a named relation, possibly with args).
+        # Anything else is a table factor we have no lowering for. Say so, rather
+        # than indexing ["Table"] on it and surfacing a raw KeyError: the statement
+        # parsed fine, so this is unsupported syntax, not an internal fault.
+        factor = next(iter(relation["relation"]))
+        if factor == "NestedJoin":
+            raise UnsupportedSyntaxError(
+                "Parenthesised joins in **FROM** are not supported. Write the joins "
+                "in sequence without the brackets - Opteryx associates them to the "
+                "left, which is what the brackets would mean here anyway."
+            )
+        raise UnsupportedSyntaxError(
+            f"**{factor}** is not a supported **FROM** item."
+        )
+
     elif relation["relation"]["Table"]["args"]:
         # If we have args, we're a function dataset (like UNNEST)
         function = relation["relation"]["Table"]

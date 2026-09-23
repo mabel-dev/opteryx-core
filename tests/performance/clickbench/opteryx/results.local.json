@@ -54,16 +54,16 @@ Q42/41          32.67ms        32.11ms              -     32.39ms       32.11ms 
 Q43/42          46.59ms        46.16ms              -     46.38ms       46.16ms       46.59ms  [4.20x]
 --- ✅ done
 
-make clickbench (11.82s seconds) [256K rg] (22-SEP) [1.11x]
+make clickbench (11.76s seconds) [256K rg] (23-SEP) [1.10x]
 make clickbench-skene (11.10s) (18-SEP) [1.04x]
 
 (125.6 seconds) <- Opteryx 0.26.8
 (15.13 seconds) <- best on clickbench parquet files (18-SEP)
 (10.65 seconds) <- DuckDB Baseline
 
-make tpch-sf1    (707.7ms) (22-SEP) [SF1] [2.03x]
-make tpch-sf10   (3114.9ms) (22-SEP) [SF10] [0.75x]
-make tpch-sf100  (34688.9ms) (18-SEP) [SF100] [1.14x]
+make tpch-sf1    (699.3ms) (23-SEP) [SF1] [2.01x]
+make tpch-sf10   (3105.1ms) (23-SEP) [SF10] [0.74x]
+make tpch-sf100  (32663.4ms) (18-SEP) [SF100] [1.07x]
 make tpcds-sf1   (25.6s) (25-AUG) [1 fails] [SF1]
 make tpcds-sf001 (18.3s) (25-AUG) [1 fails] [SF001]
 make medicare1   (420.7ms) (18-SEP) [2.42x]

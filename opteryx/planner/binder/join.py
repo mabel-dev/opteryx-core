@@ -3,6 +3,7 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
+import copy
 from typing import Tuple
 
 from opteryx.exceptions import InvalidInternalStateError, UnsupportedSyntaxError
@@ -12,45 +13,41 @@ from opteryx.planner.binder.binder import inner_binder
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.join_helpers import (
     convert_using_to_on,
+    locate_using_column,
     extract_join_fields,
     get_mismatched_condition_column_types,
     reject_unhoistable_join_operands,
 )
 from opteryx.types.logical_type import LogicalCategory
-from opteryx.types.schema import RelationSchema
+from opteryx.types.schema import RelationSchema, mint_column_identity
 from opteryx.utils import random_string
 
 
 def _pop_using_column(
     context: BindingContext, relation_names: list, column_name: str, side: str
-) -> Tuple[object, str]:
-    """Take `column_name` out of the one relation on this leg that holds it.
+) -> Tuple[object, list]:
+    """Take `column_name` out of the one place on this leg that holds it.
 
-    A leg can name more than one relation — a subquery boundary alongside the scans
-    spliced beneath it, or several relations chained into the same side — and only one
-    of them holds the column. Popping from every name in turn and keeping the LAST
-    result is wrong twice over: `pop_column` REMOVES the column, so a duplicated name
-    (see join_leg_preprocess) popped it and then returned None on the second pass, and
-    the caller then set `.origin` on that None. Stop at the first relation that has it,
-    and skip names no longer in scope rather than raising KeyError on them.
+    That place is either a relation named on the leg, or the merged column of a
+    USING / NATURAL JOIN lower down the leg (a `$shared-*` schema) - see
+    `locate_using_column`, which also refuses a column held twice on one leg.
 
-    Returns (column, relation_name). Never returns None — a USING column that no
-    relation on this leg holds is a broken join, and says so.
+    Popping matters: the column moves into this join's own merged column, so it
+    must stop being visible under its old home.
+
+    Returns (column, origins) - origins being every relation the column came from,
+    which the merged column inherits, so `a.id` still resolves to it however many
+    USING joins the chain has passed through.
     """
-    from opteryx.exceptions import ColumnNotFoundError
-
-    for relation_name in relation_names:
-        schema = context.schemas.get(relation_name)
-        if schema is None:
-            continue
-        column = schema.pop_column(column_name)
-        if column is not None:
-            return column, relation_name
-
-    raise ColumnNotFoundError(
-        message=f"JOIN ... USING references column '{column_name}', which is not present "
-        f"in the {side} side of the join."
+    schema_key, schema_column = locate_using_column(
+        context.schemas, relation_names, column_name, side
     )
+    context.schemas[schema_key].pop_column(schema_column.name)
+    if schema_key.startswith("$shared-"):
+        origins = list(schema_column.origin)
+    else:
+        origins = [schema_key]
+    return schema_column, origins
 
 
 def _bind_on_condition_split(
@@ -156,6 +153,7 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
                 {n.value for n in node.using},
                 node.left_relation_names,
                 node.right_relation_names,
+                context.schemas,
             )
         if node.on:
             node.on, context = inner_binder(node.on, context)
@@ -215,6 +213,7 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             {n.value for n in node.using},
             node.left_relation_names,
             node.right_relation_names,
+            context.schemas,
         )
     if node.on:
         # All conditions have been mapped to 'on' conditions
@@ -314,26 +313,52 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
         # Remove the columns used in the join condition from both relations, they're in
         # the result set but not belonging to either table, whilst still belonging to both.
         # We create a new schema to put them in, $shared-nnn.
+        #
+        # The merged column is COALESCE(left.k, right.k) (SQL-92). For INNER and LEFT
+        # OUTER that is always the left value, so the left column is kept as-is. For
+        # RIGHT and FULL OUTER it is not - a row only the right side produced has a
+        # NULL left key - so the merged column is a NEW column the join emits
+        # natively (probe-emitted rows carry the probe key, unmatched-build rows the
+        # build key; see compiler._compile_join and UnmatchedBuildSource). Keeping
+        # the left column there returned NULL for every right-only row's key.
+        coalesces = node.type in ("right outer", "full outer")
         columns = []
-
-        # Loop through all using fields in the node
-        left_relation_name = ""
-        right_relation_name = ""
+        using_merged = []
+        origins: list = []
         for column_name in (n.value for n in node.using):
-            left_column, left_relation_name = _pop_using_column(
+            left_column, left_origins = _pop_using_column(
                 context, node.left_relation_names, column_name, "left"
             )
-            _, right_relation_name = _pop_using_column(
+            right_column, right_origins = _pop_using_column(
                 context, node.right_relation_names, column_name, "right"
             )
+            merged_origins = list(dict.fromkeys(left_origins + right_origins))
+            origins = merged_origins
 
-            # we need to decide which column we're going to keep
-            left_column.origin = [left_relation_name, right_relation_name]
-            columns.append(left_column)
+            if coalesces:
+                merged = copy.copy(left_column)
+                merged.identity = mint_column_identity("$shared", column_name)
+                merged.aliases = None
+                merged.nullable = left_column.nullable or right_column.nullable
+                # Statistics describe the LEFT column; the coalesced one can hold
+                # right-only values outside that range, so it carries none.
+                merged.highest_value = None
+                merged.lowest_value = None
+                merged.null_count = None
+                using_merged.append(
+                    (merged.identity, left_column.identity, right_column.identity)
+                )
+            else:
+                merged = left_column
+            merged.origin = merged_origins
+            columns.append(merged)
+
+        if using_merged:
+            node.using_merged = using_merged
 
         # shared columns exist in both schemas in some uses and in neither in others
         context.schemas[f"$shared-{random_string()}"] = RelationSchema(
-            name=f"^{left_relation_name}#^{right_relation_name}#", columns=columns
+            name="#".join(f"^{o}" for o in origins) + "#", columns=columns
         )
 
     # SEMI and ANTI joins only return columns from one table

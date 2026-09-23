@@ -1603,6 +1603,48 @@ def _decorrelate_projection_existence(plan: LogicalPlan, project_nid: str, telem
         three_valued = False
         replace_projection = True
 
+    flag = _graft_existence_join(
+        plan,
+        project_nid,
+        inner_plan,
+        remove,
+        key_pairs,
+        residual,
+        negated,
+        three_valued,
+        replace_projection,
+        UnsupportedSyntaxError(_SELECT_LIST_EXISTENCE_REFUSAL),
+    )
+    replace_fn(flag)
+
+    telemetry.optimization_decorrelate_select_list_existence = (
+        getattr(telemetry, "optimization_decorrelate_select_list_existence", 0) + 1
+    )
+    return plan
+
+
+def _graft_existence_join(
+    plan: LogicalPlan,
+    anchor_nid: str,
+    inner_plan: LogicalPlan,
+    remove,
+    key_pairs,
+    residual,
+    negated: bool,
+    three_valued: bool,
+    replace_projection: bool,
+    refusal: UnsupportedSyntaxError,
+):
+    """
+    Graft `inner_plan` in as a LEFT EXISTENCE join directly below `anchor_nid`, and
+    return the reference to the flag it emits - under `remove`'s own bound identity,
+    so the caller substitutes it wherever `remove` sat.
+
+    The flag is a per-row VALUE, every outer row surviving with its own answer;
+    `three_valued` makes it IN's (UNKNOWN when x is NULL, or when nothing matched
+    and the subquery returned a NULL) rather than EXISTS's TRUE/FALSE. `refusal` is
+    raised for a correlation this node's own inputs do not supply.
+    """
     join_type = "left existence anti" if negated else "left existence"
 
     # The subquery must emit the join keys, and anything the residual reads — the
@@ -1633,7 +1675,7 @@ def _decorrelate_projection_existence(plan: LogicalPlan, project_nid: str, telem
 
     outer_relations: set = set()
     outer_schemas: dict = {}
-    for provider, _target, _relation in plan.ingoing_edges(project_nid):
+    for provider, _target, _relation in plan.ingoing_edges(anchor_nid):
         found_relations, found_schemas = _collect_relations(plan, provider)
         outer_relations |= found_relations
         outer_schemas.update(found_schemas)
@@ -1644,10 +1686,10 @@ def _decorrelate_projection_existence(plan: LogicalPlan, project_nid: str, telem
     # is proved for an ancestor that is itself an existence FILTER — it says
     # nothing about one that emits a per-row value.
     if any(outer_key.source not in outer_relations for _inner_key, outer_key in key_pairs):
-        raise UnsupportedSyntaxError(_SELECT_LIST_EXISTENCE_REFUSAL)
+        raise refusal
     for column in _all_columns_of(residual):
         if _is_outer(column) and column.source not in outer_relations:
-            raise UnsupportedSyntaxError(_SELECT_LIST_EXISTENCE_REFUSAL)
+            raise refusal
 
     on_condition = None
     for inner_key, outer_key in key_pairs:
@@ -1713,16 +1755,11 @@ def _decorrelate_projection_existence(plan: LogicalPlan, project_nid: str, telem
             "decorrelation built a join key naming a relation that is on neither leg"
         )
 
-    replace_fn(flag)
-
     join_nid = random_string()
-    plan.insert_node_before(join_nid, join, project_nid)
+    plan.insert_node_before(join_nid, join, anchor_nid)
     plan.add_edge(inner_exit, join_nid)
 
-    telemetry.optimization_decorrelate_select_list_existence = (
-        getattr(telemetry, "optimization_decorrelate_select_list_existence", 0) + 1
-    )
-    return plan
+    return flag
 
 
 def _project_uncorrelated_exists(plan, project_nid, inner_plan, remove, replace_fn,
@@ -2211,12 +2248,19 @@ def _not_top_level_error(remove) -> UnsupportedSyntaxError:
     """
     if _is_in_subquery(remove):
         keyword = "**IN**"
+        # IN nested is lowered only uncorrelated - see `_materialize_in_membership`.
+        nested = "provided it is not **NOT IN** and does not correlate with the outer query"
         example = (
             "**WHERE** x **NOT IN** (**SELECT** ...) rather than "
             "**WHERE** **NOT** (x **IN** (**SELECT** ...))"
         )
     else:
         keyword = "**EXISTS**"
+        nested = (
+            "provided it correlates only by equality to the immediately enclosing query "
+            "(no non-equality correlation, no correlation reaching past the immediate "
+            "enclosing scope)"
+        )
         example = (
             "**WHERE** **NOT EXISTS** (**SELECT** ...) rather than "
             "**WHERE** **NOT** (**EXISTS** (**SELECT** ...))"
@@ -2224,9 +2268,7 @@ def _not_top_level_error(remove) -> UnsupportedSyntaxError:
     return UnsupportedSyntaxError(
         f"An {keyword} subquery is only supported as a top-level condition of the "
         f"**WHERE** clause, alone or **AND**ed with other conditions — or nested under "
-        f"**OR**/**NOT**/a comparison, provided it correlates only by equality to the "
-        f"immediately enclosing query (no **NOT IN**, no non-equality correlation, no "
-        f"correlation reaching past the immediate enclosing scope). Here it sits inside "
+        f"**OR**/**NOT**/a comparison, {nested}. Here it sits inside "
         f"another expression - under **NOT**, **OR**, **IS NULL**, or a comparison - and "
         f"neither decorrelation lowers that. Write it at the top level instead ({example})."
     )
@@ -2585,6 +2627,10 @@ def _materialize_boolean_value(
     inner rows would duplicate the outer row N times, corrupting every OTHER
     clause of the surrounding query, not just this one boolean test.
 
+    That lowering is for EXISTS only. `c IS NOT NULL` is TRUE or FALSE, and IN is
+    three-valued - under NOT or IS NULL the difference is the answer - so an IN
+    goes to `_materialize_in_membership` instead.
+
     Deliberately narrower than the SEMI/ANTI path, because none of it can be
     proven sound without support this rewrite does not build:
       - NOT IN (`join_type == "left anti null-aware"`) is refused. Its
@@ -2611,6 +2657,11 @@ def _materialize_boolean_value(
         raise _not_top_level_error(remove)
     if residual is not None:
         raise _not_top_level_error(remove)
+
+    if _is_in_subquery(remove):
+        return _materialize_in_membership(
+            plan, filter_nid, inner_plan, remove, replace_fn, key_pairs, telemetry, counter
+        )
 
     negated = join_type == "left anti"
 
@@ -2752,6 +2803,65 @@ def _materialize_boolean_value(
     )
     return plan
 
+
+def _materialize_in_membership(
+    plan: LogicalPlan,
+    filter_nid: str,
+    inner_plan: LogicalPlan,
+    remove,
+    replace_fn,
+    key_pairs,
+    telemetry,
+    counter: str,
+) -> LogicalPlan:
+    """
+    A non-removable `x IN (subquery)` as a THREE-valued boolean, substituted in place.
+
+        outer WHERE ... NOT (x IN (SELECT y FROM inner)) ...
+    ->  outer LEFT EXISTENCE JOIN inner ON x = y      (emits the IN node's flag)
+        WHERE ... NOT (<flag>) ...
+
+    IN is UNKNOWN when x is NULL, and when nothing matched while some y was NULL.
+    `_materialize_boolean_value`'s `c IS NOT NULL` said FALSE for both, which NOT
+    and IS NULL then turned into wrong rows - `NOT (x IN S)` returned every
+    unmatched row where the answer was none. The existence join's three-valued
+    flag is the one the SELECT-list path already computes for this same test
+    (`_decorrelate_projection_existence`); this reuses it.
+
+    Uncorrelated only - the SELECT-list path's limit, for its reason: how IN's
+    three-valued rules combine with correlation keys (an existence test, not a
+    membership test) is not worked out. `key_pairs` is the membership pair alone
+    exactly when nothing correlated. NOT IN is refused before this is reached.
+    """
+    if len(key_pairs) != 1:
+        raise _not_top_level_error(remove)
+
+    filter_node = plan[filter_nid]
+    flag = _graft_existence_join(
+        plan,
+        filter_nid,
+        inner_plan,
+        remove,
+        key_pairs,
+        None,
+        False,
+        True,
+        False,
+        _not_top_level_error(remove),
+    )
+    filter_node.condition = replace_fn(flag)
+    filter_node.columns = [
+        column
+        for column in (filter_node.columns or [])
+        if column.node_type in FILTER_REFERENCED_NODE_TYPES
+    ] + [_reference_to(remove.schema_column)]
+
+    setattr(
+        telemetry,
+        f"{counter}_materialized",
+        getattr(telemetry, f"{counter}_materialized", 0) + 1,
+    )
+    return plan
 
 def _all_columns_of(node):
     """Every identifier under `node`, from either side of the correlation."""

@@ -51,10 +51,11 @@ cdef class ExitNode(BasePlanNode):
             final_names.append(column.alias)
 
         # A result with two columns sharing an output name is ambiguous — reject it.
-        # Note: once column identities became genuinely unique, `SELECT *` over a join
-        # of relations that share a column name produces distinct columns with the same
-        # name; per architect decision this errors here (rather than emit duplicate
-        # names or auto-suffix). Queries must qualify/alias such columns explicitly.
+        # `SELECT *` over a join does not reach this: the binder's wildcard expansion
+        # names each colliding column by its relation (`a.id`, `b.id`), as an explicit
+        # qualified reference is named (binder/project.py, visit_exit). What still
+        # reaches it is two explicit outputs given the same name (`SELECT a.id AS x,
+        # b.id AS x`), which is refused rather than emitted with duplicate names.
         if len(set(final_names)) != len(final_names):
             from collections import Counter
 

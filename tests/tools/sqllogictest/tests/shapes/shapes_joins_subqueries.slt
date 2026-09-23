@@ -408,7 +408,7 @@ SELECT CEILING(surface_pressure, 0) FROM $planets
 query shape 9 1
 SELECT FLOOR(surface_pressure, 0) FROM $planets
 
-query error AmbiguousIdentifierError
+query shape 9 21
 SELECT * FROM $planets LEFT JOIN (SELECT id FROM testdata.satellites WHERE planetId < 0) AS S ON $planets.id = S.id
 
 query shape 9 1
@@ -417,19 +417,19 @@ SELECT * FROM (SELECT name FROM (SELECT name FROM $planets WHERE LENGTH(name) > 
 query shape 0 0
 SELECT P.name, S.name FROM $planets AS P CROSS JOIN testdata.satellites AS S WHERE P.id = S.id AND P.name LIKE '%X%'
 
-query error AmbiguousIdentifierError
+query shape 2 28
 SELECT * FROM $planets LEFT JOIN testdata.satellites ON testdata.satellites.planetId = $planets.id WHERE testdata.satellites.id IS NULL
 
-query error AmbiguousIdentifierError
+query shape 2 28
 SELECT * FROM $planets LEFT JOIN testdata.satellites ON testdata.satellites.planetId = $planets.id WHERE testdata.satellites.name IS NULL
 
 query shape 2 20
 SELECT * FROM (SELECT * FROM $planets ORDER BY id DESC LIMIT 5) AS SQ WHERE id > 7
 
-query error AmbiguousIdentifierError
+query shape 177 28
 SELECT * FROM $planets INNER JOIN testdata.satellites ON testdata.satellites.planetId = $planets.id
 
-query error AmbiguousIdentifierError
+query shape 179 28
 SELECT * FROM $planets LEFT JOIN testdata.satellites ON testdata.satellites.planetId = $planets.id ORDER BY $planets.name
 
 query shape 9 1

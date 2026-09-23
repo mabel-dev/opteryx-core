@@ -967,6 +967,10 @@ STATEMENTS = [
         # Unique-key checking is not implemented; the clause is refused by name.
         ("SELECT '{}' IS JSON WITH UNIQUE KEYS", None, None, UnsupportedSyntaxError),
         ("SELECT '{}' IS JSON OBJECT WITHOUT UNIQUE KEYS", None, None, UnsupportedSyntaxError),
+        # A table factor we cannot lower must be refused as unsupported SYNTAX, not
+        # surface as a raw KeyError from indexing ["Table"] on a factor that isn't one.
+        ("SELECT * FROM ($planets AS p1 INNER JOIN $planets AS p2 ON p1.id = p2.id)", None, None, UnsupportedSyntaxError),
+        ("SELECT * FROM $planets PIVOT (SUM(id) FOR name IN (1))", None, None, UnsupportedSyntaxError),
         # The operand must be JSON text — `id` is an integer.
         ("SELECT * FROM $planets WHERE id IS JSON", None, None, IncorrectTypeError),
 ]
@@ -4146,23 +4150,23 @@ def test_natural_join_in_a_multi_join_chain():
         "re-nested and it paired on {k, x} as well."
     )
 
-    # NATURAL JOIN TRAILING - the same chain the other way round. Here the
-    # NATURAL JOIN's left input is the RESULT of the preceding join, so the
-    # common columns must be drawn from BOTH of the relations beneath it.
-    trailing = _rows(
-        "SELECT p1.id AS id, p1.name AS name FROM $planets AS p1 "
-        "INNER JOIN $planets AS p2 ON p1.id = p2.id NATURAL JOIN $planets AS p3",
-        ["id", "name"],
-    )
-    # Five, not nine: the implicit predicate covers every column, and the four
-    # planets with a NULL surface_pressure cannot equal themselves.
-    assert trailing == [
-        (1, "Mercury"),
-        (2, "Venus"),
-        (3, "Earth"),
-        (4, "Mars"),
-        (9, "Pluto"),
-    ], f"trailing NATURAL JOIN in a chain changed its answer: {trailing!r}"
+    # NATURAL JOIN TRAILING over a leg that carries a column TWICE. The left
+    # input of the NATURAL JOIN is `p1 JOIN p2`, which holds both p1.id and
+    # p2.id (and two of every other column). Which copy the implicit predicate
+    # pairs on is undefined, so - as standard SQL does - it is refused at the
+    # join, whatever the projection. (Trailing NATURAL JOIN over a leg whose
+    # common columns are each held ONCE is covered by
+    # test_using_over_a_multi_relation_join_leg.)
+    for projection in ("SELECT p1.id", "SELECT *"):
+        sql = (
+            f"{projection} FROM $planets AS p1 "
+            "INNER JOIN $planets AS p2 ON p1.id = p2.id NATURAL JOIN $planets AS p3"
+        )
+        try:
+            _rows(sql, ["id"])
+        except AmbiguousIdentifierError:
+            continue
+        raise AssertionError(f"NATURAL JOIN over a duplicated left column ran: {sql}")
 
 
 def test_is_distinct_from_operator_precedence():
@@ -4628,6 +4632,180 @@ def test_distinct_over_a_join_deduplicates_only_the_select_list():
     )
 
 
+def test_nested_in_subquery_is_three_valued():
+    """
+    `x IN (subquery)` is UNKNOWN when x is NULL, and when nothing matched while the
+    subquery returned a NULL. An IN that is not a top-level conjunct - under NOT, IS
+    NULL, OR - is lowered to a per-row value, and that value was `c IS NOT NULL`
+    over a LEFT JOIN to a count: TRUE or FALSE, never UNKNOWN. Wherever the
+    difference shows, rows were wrong: `NOT (x IN S)` returned all 1192 non-matching
+    rows where the answer was none, and `(x IN S) IS NULL` returned none where it
+    was 411 or 1192. It is now the existence join's three-valued flag.
+
+    Each answer is checked against SQL's IN computed here, over the same rows. A
+    correlated nested IN is refused: the three-valued rules are not worked out for
+    correlation keys.
+    """
+
+    def _values(statement):
+        found = []
+        for morsel in opteryx.session().execute_to_morsels(statement):
+            morsel.materialize()
+            found.extend(morsel[i][0] for i in range(len(morsel)))
+        return found
+
+    def _row_ids(statement):
+        return sorted(_values(statement))
+
+    def _in(x, members):
+        if not members:
+            return False
+        if x is None:
+            return None
+        if x in members:
+            return True
+        return None if None in members else False
+
+    table = "testdata.fuzzing.mixed"
+    outer = []
+    for morsel in opteryx.session().execute_to_morsels(f"SELECT row_id, i_null FROM {table}"):
+        morsel.materialize()
+        outer.extend(tuple(morsel[i]) for i in range(len(morsel)))
+    for inner in (
+        f"SELECT i_null FROM {table} WHERE i_null < 5",
+        f"SELECT i_null FROM {table} WHERE i_null < 5 OR i_null IS NULL",
+        f"SELECT i_null FROM {table} WHERE i_null > 1000000",
+    ):
+        members = _values(inner)
+        for predicate, holds in (
+            (f"NOT (o.i_null IN ({inner}))", lambda v: v is False),
+            (f"(o.i_null IN ({inner})) IS NULL", lambda v: v is None),
+            (f"(o.i_null IN ({inner})) = TRUE", lambda v: v is True),
+            (f"o.i_null IN ({inner}) OR o.row_id < 0", lambda v: v is True),
+        ):
+            expected = sorted(row_id for row_id, x in outer if holds(_in(x, members)))
+            got = _row_ids(f"SELECT o.row_id FROM {table} AS o WHERE {predicate}")
+            assert got == expected, (predicate, len(got), len(expected))
+
+    # Over a JOIN: the existence join's probe side is then a join's output morsel,
+    # which carries no names - and the flag emit indexed them by column position,
+    # a segfault (TPC-DS Q45). Something above must need a probe column besides
+    # the flag, or the emit is not narrowed and the indexing never ran.
+    pairs = []
+    for morsel in opteryx.session().execute_to_morsels(
+        f"SELECT a.row_id, a.i_group, b.i_null FROM {table} AS a "
+        f"INNER JOIN {table} AS b ON a.row_id = b.row_id"
+    ):
+        morsel.materialize()
+        pairs.extend(tuple(morsel[i]) for i in range(len(morsel)))
+    joined = f"FROM {table} AS a INNER JOIN {table} AS b ON a.row_id = b.row_id"
+    for inner in (
+        f"SELECT i_null FROM {table} WHERE i_null < 5",
+        f"SELECT i_null FROM {table} WHERE i_null < 5 OR i_null IS NULL",
+    ):
+        members = _values(inner)
+        got = []
+        for morsel in opteryx.session().execute_to_morsels(
+            f"SELECT a.row_id, a.i_group, b.i_null IN ({inner}) AS f {joined}"
+        ):
+            morsel.materialize()
+            got.extend(repr(tuple(morsel[i])) for i in range(len(morsel)))
+        assert sorted(got) == sorted(
+            repr((row_id, group, _in(x, members))) for row_id, group, x in pairs
+        ), inner
+        got = _row_ids(
+            f"SELECT a.row_id {joined} WHERE NOT (a.i_group < 3 OR b.i_null IN ({inner}))"
+        )
+        expected = sorted(
+            row_id
+            for row_id, group, x in pairs
+            if group is not None and group >= 3 and _in(x, members) is False
+        )
+        assert got == expected, (inner, len(got), len(expected))
+
+    # EXISTS is two-valued, and stays on the count lowering.
+    keys = {x for x in _values(f"SELECT i_null FROM {table} WHERE i_null < 5") if x is not None}
+    correlated = f"EXISTS (SELECT 1 FROM {table} AS i WHERE i.i_null < 5 AND i.i_null = o.i_null)"
+    assert _row_ids(f"SELECT o.row_id FROM {table} AS o WHERE NOT ({correlated})") == sorted(
+        row_id for row_id, x in outer if x not in keys
+    )
+
+    try:
+        _row_ids(
+            f"SELECT o.row_id FROM {table} AS o WHERE NOT (o.i_null IN "
+            f"(SELECT i.i_null FROM {table} AS i WHERE i.i_group = o.i_group))"
+        )
+    except UnsupportedSyntaxError as error:
+        assert "only supported as a top-level condition" in str(error)
+    else:
+        raise AssertionError("a correlated nested IN was answered, not refused")
+
+
+def test_join_key_coercion_is_per_pair_not_per_column():
+    """
+    A join-key coercion belongs to a key PAIR. One column can key two pairs -
+    `o.k = j.id AND o.k = j.avg` is what `o.k = (SELECT AVG(..) .. WHERE id = o.k)`
+    decorrelates into - and only the INT-vs-FLOAT pair needs `o.k` cast. The
+    coercions were keyed by column identity, so the cast leaked onto the INT-vs-INT
+    pair, which then hashed FLOAT64 against INT64 and matched nothing: 0 rows where
+    1106 were right. MAX in the same shape was correct only because MAX keeps INT64.
+
+    Checked against the answer computed here, over satellites so that AVG has a
+    fractional part for most planets and most rows must NOT match.
+    """
+
+    def _values(statement):
+        found = []
+        for morsel in opteryx.session().execute_to_morsels(statement):
+            morsel.materialize()
+            found.extend(tuple(morsel[i]) for i in range(len(morsel)))
+        return found
+
+    outer = "testdata.fuzzing.mixed"
+    inner = "testdata.satellites"
+    sums = {}
+    for planet, sat_id in _values(f"SELECT planetId, id FROM {inner}"):
+        total, count = sums.get(planet, (0, 0))
+        sums[planet] = (total + sat_id, count + 1)
+    averages = {planet: total / count for planet, (total, count) in sums.items()}
+    rows = _values(f"SELECT row_id, i_group FROM {outer}")
+
+    expected = sorted(r for r, k in rows if k in averages and k == averages[k])
+    got = sorted(
+        r
+        for (r,) in _values(
+            f"SELECT o.row_id FROM {outer} AS o WHERE o.i_group = "
+            f"(SELECT AVG(s.id) FROM {inner} AS s WHERE s.planetId = o.i_group)"
+        )
+    )
+    assert got == expected, (len(got), len(expected))
+
+    # The same shape where every AVG is whole, so a non-empty answer is required.
+    expected = sorted(r for r, k in rows if k is not None and 1 <= k <= 9)
+    assert len(expected) > 0
+    got = sorted(
+        r
+        for (r,) in _values(
+            f"SELECT o.row_id FROM {outer} AS o WHERE o.i_group = "
+            f"(SELECT AVG(p.id) FROM testdata.planets AS p WHERE p.id = o.i_group)"
+        )
+    )
+    assert got == expected, (len(got), len(expected))
+
+    # Written as the join, both key orders, plus a third pair on the same column.
+    derived = (
+        "(SELECT id, AVG(id) AS a, CAST(id AS FLOAT64) AS f FROM testdata.planets "
+        "GROUP BY id) AS j"
+    )
+    for on in (
+        "o.i_group = j.id AND o.i_group = j.a",
+        "o.i_group = j.a AND o.i_group = j.id",
+        "o.i_group = j.id AND o.i_group = j.a AND o.i_group = j.f",
+    ):
+        got = sorted(r for (r,) in _values(f"SELECT o.row_id FROM {outer} AS o JOIN {derived} ON {on}"))
+        assert got == expected, (on, len(got), len(expected))
+
+
 def test_unrecognised_function_argument_clause_is_refused():
     """
     An argument clause we do not read must RAISE, not be dropped.
@@ -4920,6 +5098,274 @@ def test_timestamp_cast_sink_sees_column_uses_inside_case():
         assert _rows(statement) == expected, statement
 
 
+def test_using_over_a_multi_relation_join_leg():
+    """
+    VALUE-level regression for `convert_using_to_on` on a leg that names more
+    than one relation.
+
+    A NATURAL JOIN or USING whose LEFT input is the result of a preceding join
+    names every relation beneath it, and each common column lives in only one of
+    them. The old code looped the left x right product, rebuilt the whole
+    condition set for every pair, appended each to an `all_conditions` list it
+    then threw away, and returned `conditions[0]` - the leftover local from the
+    LAST pair. Everything but the last relation's conjuncts was silently
+    discarded, and columns were demanded off relations that never had them.
+
+    Both surfaces are covered, because both reach the same helper:
+
+        a JOIN b ON ... NATURAL JOIN c      -- implicit, derived from the schemas
+        a JOIN b ON ... JOIN c USING (...)  -- explicit
+
+    `c` shares `q` with `a` and `s` with `b`, so the predicate must span BOTH
+    left relations. Pairing on `s` alone (what the last-pair-wins bug would have
+    kept) or on `q` alone each return two rows; the correct {q, s} returns one.
+    """
+    a = "(SELECT 1 AS p, 10 AS q UNION ALL SELECT 2 AS p, 20 AS q) AS a"
+    b = "(SELECT 1 AS r, 100 AS s UNION ALL SELECT 2 AS r, 200 AS s) AS b"
+    c = (
+        "(SELECT 10 AS q, 100 AS s UNION ALL SELECT 20 AS q, 300 AS s "
+        "UNION ALL SELECT 77 AS q, 200 AS s) AS c"
+    )
+    columns = ["p", "q", "r", "s"]
+    projection = "SELECT a.p AS p, a.q AS q, b.r AS r, b.s AS s FROM "
+    leg = f"{a} INNER JOIN {b} ON a.p = b.r"
+
+    def _rows(sql):
+        collected = []
+        for morsel in opteryx.session().execute_to_morsels(sql):
+            collected.extend(zip(*[morsel.column(col).to_pylist() for col in columns]))
+        return sorted(collected)
+
+    natural = _rows(f"{projection}{leg} NATURAL JOIN {c}")
+    assert natural == [(1, 10, 1, 100)], (
+        f"NATURAL JOIN over a two-relation left leg: {natural!r}. Two rows means "
+        "only one of the two left relations reached the predicate."
+    )
+
+    # The explicit spelling of the same predicate, and the explicit USING that
+    # goes through the identical helper, must all agree.
+    assert natural == _rows(
+        f"{projection}{leg} INNER JOIN {c} ON a.q = c.q AND b.s = c.s"
+    ), "NATURAL JOIN diverged from its written-out predicate"
+    assert natural == _rows(f"{projection}{leg} INNER JOIN {c} USING (q, s)"), (
+        "explicit USING diverged from NATURAL JOIN over the same leg"
+    )
+
+    # A single USING column living in the FIRST left relation is the case that
+    # used to raise ColumnNotFoundError naming a column the user never wrote.
+    single = _rows(f"{projection}{leg} INNER JOIN {c} USING (q)")
+    assert single == [(1, 10, 1, 100), (2, 20, 2, 200)], (
+        f"USING (q) over a two-relation left leg: {single!r}"
+    )
+
+
+def test_select_star_over_a_join_qualifies_colliding_columns():
+    """
+    `SELECT *` over a join of relations that share a column name returns every
+    column, naming each colliding one by its relation - `a.id`, `b.id` - exactly
+    as an explicit `SELECT a.id, b.id` is named. Non-colliding columns keep their
+    bare names, and a single-relation `SELECT *` is untouched.
+
+    A BARE reference to a shared name (`SELECT id`) is still ambiguous and still
+    refused: the architect's ruling was about unqualified references, and `*`
+    references no column by name. Before this, the wildcard expanded every column
+    under its bare name and the Exit's duplicate-name check refused the result, so
+    `SELECT *` failed over any join whose relations shared a column name.
+    """
+    def _names(sql):
+        morsels = list(opteryx.session().execute_to_morsels(sql))
+        return [n.decode() if isinstance(n, bytes) else n for n in morsels[0].column_names]
+
+    a = "(SELECT 1 AS id, 2 AS x) AS a"
+    b = "(SELECT 1 AS id, 3 AS y) AS b"
+
+    assert _names(f"SELECT * FROM {a} INNER JOIN {b} ON a.id = b.id") == [
+        "a.id", "x", "b.id", "y"
+    ]
+    assert _names(f"SELECT a.id, b.id FROM {a} INNER JOIN {b} ON a.id = b.id") == [
+        "a.id", "b.id"
+    ]
+
+    # The shape the v2_planner.slt matrix exercises: a three-way self-join.
+    names = _names(
+        "SELECT * FROM $planets AS p1 INNER JOIN $planets AS p2 ON p1.id = p2.id "
+        "INNER JOIN $planets AS p3 ON p1.id = p3.id"
+    )
+    assert len(names) == 60 and len(set(names)) == 60, names
+    assert names[:2] == ["p1.id", "p1.name"], names
+
+    # USING coalesces its column into ONE output; it is not a collision.
+    names = _names("SELECT * FROM $planets AS a INNER JOIN $planets AS b USING (id)")
+    assert names.count("id") == 1 and "a.id" not in names and "b.id" not in names, names
+
+    assert _names("SELECT * FROM $planets")[:2] == ["id", "name"]
+
+    try:
+        _names(f"SELECT id FROM {a} INNER JOIN {b} ON a.id = b.id")
+    except AmbiguousIdentifierError:
+        pass
+    else:
+        raise AssertionError("a bare reference to a shared column name was not refused")
+
+
+def test_distinct_operand_aggregates():
+    """
+    VALUE-level regression for DISTINCT on aggregates other than COUNT/ARRAY_AGG.
+
+    SUM/AVG/STDDEV family/MEDIAN(DISTINCT x) dedup the operand in the native sink
+    exactly as COUNT(DISTINCT x) does (NULLs excluded) and accumulate the distinct
+    values once, after the per-worker sets are merged. MIN/MAX/ANY_VALUE are
+    distinct-invariant and simply lower as the plain aggregate. CORR and
+    APPROX_PERCENTILE refuse DISTINCT. An ORDER BY inside SUM has no effect on the
+    answer and is accepted.
+
+    The relation carries duplicates, NULLs, and an all-NULL group so a sink that
+    summed duplicates, counted NULLs, or averaged over the wrong denominator is
+    visible in the value, not just the shape.
+    """
+    t = (
+        "(SELECT * FROM (VALUES ('a', 1), ('a', 1), ('a', 2), ('a', NULL), "
+        "('b', 5), ('b', 5), ('b', NULL), ('c', NULL)) AS t(k, v)) AS t"
+    )
+
+    def _rows(sql, columns):
+        collected = []
+        for morsel in opteryx.session().execute_to_morsels(sql):
+            collected.extend(zip(*[morsel.column(col).to_pylist() for col in columns]))
+        return sorted(collected, key=repr)
+
+    # Grouped: duplicates collapse, NULLs are ignored, an all-NULL group is NULL
+    # (and COUNT(DISTINCT) is 0 there, as it always was).
+    grouped = _rows(
+        "SELECT k, SUM(DISTINCT v) AS s, AVG(DISTINCT v) AS a, MEDIAN(DISTINCT v) AS m, "
+        f"COUNT(DISTINCT v) AS c, SUM(v) AS p FROM {t} GROUP BY k",
+        ["k", "s", "a", "m", "c", "p"],
+    )
+    assert grouped == [
+        ("a", 3, 1.5, 1.5, 2, 4),
+        ("b", 5, 5.0, 5.0, 1, 10),
+        ("c", None, None, None, 0, None),
+    ], f"grouped DISTINCT aggregates: {grouped!r}"
+
+    # Ungrouped: distinct {1, 2, 5}.
+    [(s, a, var)] = _rows(
+        f"SELECT SUM(DISTINCT v) AS s, AVG(DISTINCT v) AS a, VAR_SAMP(DISTINCT v) AS var FROM {t}",
+        ["s", "a", "var"],
+    )
+    assert (s, a) == (8, 8 / 3), f"ungrouped SUM/AVG(DISTINCT): {(s, a)!r}"
+    assert abs(var - 13 / 3) < 1e-12, f"VAR_SAMP(DISTINCT) over {{1, 2, 5}}: {var!r}"
+
+    # Empty input: SUM/AVG/MEDIAN are NULL, COUNT(DISTINCT) is 0; grouped is no rows.
+    empty = _rows(
+        "SELECT SUM(DISTINCT v) AS s, AVG(DISTINCT v) AS a, MEDIAN(DISTINCT v) AS m, "
+        f"COUNT(DISTINCT v) AS c FROM {t} WHERE k = 'zzz'",
+        ["s", "a", "m", "c"],
+    )
+    assert empty == [(None, None, None, 0)], f"DISTINCT aggregates over no rows: {empty!r}"
+    assert _rows(f"SELECT k, SUM(DISTINCT v) AS s FROM {t} WHERE k = 'zzz' GROUP BY k", ["k", "s"]) == []
+
+    # Float and DECIMAL (64- and 128-bit) operands dedup on value.
+    [(fs, fa)] = _rows(
+        "SELECT SUM(DISTINCT f) AS s, AVG(DISTINCT f) AS a "
+        "FROM (SELECT * FROM (VALUES (1.5), (1.5), (2.25), (NULL)) AS t(f)) AS t",
+        ["s", "a"],
+    )
+    assert (fs, fa) == (3.75, 1.875), f"float SUM/AVG(DISTINCT): {(fs, fa)!r}"
+    for precision in (10, 30):
+        [(ds,)] = _rows(
+            f"SELECT SUM(DISTINCT d) AS s FROM (SELECT CAST(x AS DECIMAL({precision},2)) AS d "
+            "FROM (VALUES (1.10), (1.10), (2.05)) AS t(x)) AS t",
+            ["s"],
+        )
+        assert ds == decimal.Decimal("3.15"), f"DECIMAL({precision},2) SUM(DISTINCT): {ds!r}"
+
+    # ORDER BY inside SUM is impotent; distinct-invariant aggregates just run.
+    [(ordered, plain, lo, hi)] = _rows(
+        "SELECT SUM(DISTINCT id % 3 ORDER BY id) AS o, SUM(DISTINCT id % 3) AS p, "
+        "MIN(DISTINCT id) AS lo, MAX(DISTINCT id) AS hi FROM $planets",
+        ["o", "p", "lo", "hi"],
+    )
+    assert (ordered, plain, lo, hi) == (3, 3, 1, 9), f"{(ordered, plain, lo, hi)!r}"
+
+    for sql in (
+        "SELECT CORR(DISTINCT id, id) FROM $planets",
+        "SELECT APPROX_PERCENTILE(DISTINCT id, 0.5) FROM $planets",
+    ):
+        try:
+            _rows(sql, [])
+        except NotSupportedError:
+            continue
+        raise AssertionError(f"DISTINCT was not refused: {sql}")
+
+
+def test_using_merged_column_is_the_coalesce_of_both_keys():
+    """
+    VALUE-level regression for the merged column of a JOIN ... USING.
+
+    SQL-92 defines the merged column as COALESCE(left key, right key). The binder
+    used to keep the LEFT column as the merged one, which is right for INNER and
+    LEFT OUTER only by coincidence: on a RIGHT or FULL OUTER join, every row only
+    the right side produced came back with a NULL key. The join now emits the
+    merged column natively - the probe key on probe-emitted rows, the build key on
+    the rows the unmatched-build tail emits.
+
+    Also covers USING CHAINS, which could not bind at all: the merged column lives
+    in a `$shared-*` schema that is not on the next join's leg, and a qualified
+    lookup (`c.id`) admitted EVERY `$shared` schema, so it saw two `id`s.
+    """
+    a = "(SELECT 1 AS id, 10 AS x UNION ALL SELECT 2 AS id, 20 AS x) AS a"
+    b = "(SELECT 2 AS id, 200 AS y UNION ALL SELECT 3 AS id, 300 AS y) AS b"
+    c = (
+        "(SELECT 2 AS id, 7 AS z UNION ALL SELECT 3 AS id, 8 AS z "
+        "UNION ALL SELECT 4 AS id, 9 AS z) AS c"
+    )
+
+    def _rows(sql, columns):
+        collected = []
+        for morsel in opteryx.session().execute_to_morsels(sql):
+            collected.extend(zip(*[morsel.column(col).to_pylist() for col in columns]))
+        return sorted(collected, key=lambda row: tuple((v is None, v) for v in row))
+
+    # The merged key per join type: a = {1, 2}, b = {2, 3}.
+    for join, expected in (
+        ("INNER JOIN", [(2,)]),
+        ("LEFT JOIN", [(1,), (2,)]),
+        ("RIGHT JOIN", [(2,), (3,)]),
+        ("FULL OUTER JOIN", [(1,), (2,), (3,)]),
+    ):
+        got = _rows(f"SELECT id FROM {a} {join} {b} USING (id)", ["id"])
+        assert got == expected, f"{join} ... USING merged key: {got!r}"
+
+    # The payload still NULL-pads; only the merged key is coalesced.
+    assert _rows(f"SELECT id, x, y FROM {a} FULL OUTER JOIN {b} USING (id)", ["id", "x", "y"]) == [
+        (1, 10, None), (2, 20, 200), (3, None, 300)
+    ]
+
+    # USING chains, including a coalesce carried through two levels.
+    assert _rows(
+        f"SELECT id, x, y, z FROM {a} INNER JOIN {b} USING (id) INNER JOIN {c} USING (id)",
+        ["id", "x", "y", "z"],
+    ) == [(2, 20, 200, 7)]
+    assert _rows(
+        f"SELECT id, x, y, z FROM {a} FULL OUTER JOIN {b} USING (id) INNER JOIN {c} USING (id)",
+        ["id", "x", "y", "z"],
+    ) == [(2, 20, 200, 7), (3, None, 300, 8)]
+    assert _rows(
+        f"SELECT id FROM {a} FULL OUTER JOIN {b} USING (id) FULL OUTER JOIN {c} USING (id)",
+        ["id"],
+    ) == [(1,), (2,), (3,), (4,)]
+    assert _rows(
+        f"SELECT id FROM {a} RIGHT JOIN {b} USING (id) RIGHT JOIN {c} USING (id)", ["id"]
+    ) == [(2,), (3,), (4,)]
+
+    # An explicit ON after a USING, naming the merged column through a relation it
+    # was merged from.
+    assert _rows(
+        f"SELECT x, z FROM {a} INNER JOIN {b} USING (id) INNER JOIN {c} ON a.id = c.id",
+        ["x", "z"],
+    ) == [(20, 7)]
+
+
 if __name__ == "__main__":  # pragma: no cover
     import shutil
     import time
@@ -5106,6 +5552,18 @@ if __name__ == "__main__":  # pragma: no cover
             test_natural_join_in_a_multi_join_chain,
         ),
         (
+            "using over a multi-relation join leg",
+            test_using_over_a_multi_relation_join_leg,
+        ),
+        (
+            "select * over a join qualifies colliding columns",
+            test_select_star_over_a_join_qualifies_colliding_columns,
+        ),
+        (
+            "using merged column is the coalesce of both keys",
+            test_using_merged_column_is_the_coalesce_of_both_keys,
+        ),
+        (
             "IS [NOT] DISTINCT FROM operator precedence",
             test_is_distinct_from_operator_precedence,
         ),
@@ -5147,6 +5605,15 @@ if __name__ == "__main__":  # pragma: no cover
             "DISTINCT over a join deduplicates only the SELECT list",
             test_distinct_over_a_join_deduplicates_only_the_select_list,
         ),
+        (
+            "nested IN subquery is three-valued",
+            test_nested_in_subquery_is_three_valued,
+        ),
+        (
+            "join key coercion is per pair, not per column",
+            test_join_key_coercion_is_per_pair_not_per_column,
+        ),
+        ("DISTINCT on SUM/AVG/STDDEV/MEDIAN", test_distinct_operand_aggregates),
     ):
         print(f"\033[38;2;255;184;108m{name}\033[0m ", end="", flush=True)
         try:

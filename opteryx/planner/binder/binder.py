@@ -684,10 +684,29 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
         # to a filesystem path, which is case-sensitive on POSIX.
         source_lower = node.source.lower()
         suffix = f".{source_lower}"
+
+        def _shared_holds_it_for_this_qualifier(schema) -> bool:
+            # A `$shared-*` schema holds the merged column of a USING / NATURAL
+            # JOIN, which belongs to EVERY relation it was merged from (`origin`)
+            # and to no other. It is a candidate for `x.col` only when `x` is one of
+            # those relations. Admitting every `$shared` schema for every qualifier
+            # made `c.id` ambiguous after `a JOIN b USING (id)` - c's own `id` and
+            # the merged a/b `id` both matched - so `... JOIN c ON a.id = c.id`,
+            # and every USING chain, could not bind.
+            column = schema.find_column(node.source_column, case_insensitive=True)
+            if column is None:
+                return False
+            origin = column.origin or []
+            if isinstance(origin, str):
+                origin = [origin]
+            return any(
+                o.lower() == source_lower or o.lower().endswith(suffix) for o in origin
+            )
+
         return {
             name: schema
             for name, schema in schemas.items()
-            if name.startswith("$shared")
+            if (name.startswith("$shared") and _shared_holds_it_for_this_qualifier(schema))
             or name.lower() == source_lower
             or name.lower().endswith(suffix)
         }
@@ -767,7 +786,28 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
     # relation's OWN spelling here is what keeps it canonical for every consumer
     # built from `.source` after this point (relation-name lists, `all_relations`,
     # the optimizer) — they compare by exact string and never fold case themselves.
-    node.source = found_source_relation.name
+    #
+    # One exception: a QUALIFIED reference that resolved to the merged column of a
+    # USING / NATURAL JOIN (a `$shared-*` schema, named `^a#^b#`). The canonical
+    # relation for `a.id` there is `a` — the origin entry the qualifier matched, in
+    # its own spelling — not the internal schema name. `extract_join_fields` sides a
+    # join key by `.source`, so leaving `^a#^b#` made `a JOIN b USING (id) JOIN c
+    # ON a.id = c.id` (and every USING chain) a join with no key at all.
+    shared_hit = node.source and any(
+        key.startswith("$shared") and schema is found_source_relation
+        for key, schema in candidate_schemas.items()
+    )
+    if shared_hit:
+        qualifier = node.source.lower()
+        origin = column.origin or []
+        if isinstance(origin, str):
+            origin = [origin]
+        node.source = next(
+            o for o in origin
+            if o.lower() == qualifier or o.lower().endswith(f".{qualifier}")
+        )
+    else:
+        node.source = found_source_relation.name
 
     # if we have an alias for a column not known about in the schema, add it
     if node.alias and node.alias not in column.all_names:

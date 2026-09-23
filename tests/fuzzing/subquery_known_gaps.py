@@ -31,7 +31,7 @@ with `exists-outside-a-top-level-conjunct-blames-the-correlation`, which was the
 same root cause wearing a misleading message (the first pass lifted the
 correlation out, the second pass found none left, and blamed the user for it).
 
-Those positions are now pinned by `POSITIONS_REFUSED_PROMPTLY` in
+Those positions are now pinned by `NESTED_POSITIONS` in
 `subquery_grammar.py`, checked in a SUBPROCESS with a deadline. The subprocess is
 not superstition: if the guard is ever removed, an in-process check would hang
 the whole suite with no output instead of failing it.

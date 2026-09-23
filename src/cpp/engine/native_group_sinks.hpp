@@ -365,6 +365,13 @@ struct AggSpec2 {
     // APPROX_PERCENTILE's second argument — a query-time constant (0.0-1.0),
     // validated at plan time (compiler.py). Ignored by every other fn.
     double  percentile = 0.5;
+    // SUM/AVG/STDDEV family/MEDIAN(DISTINCT col) — see agg_fn_takes_distinct_operand.
+    // The operand is deduped exactly as COUNT(DISTINCT col) dedups it (draken value
+    // hash, 64-bit hash identity, NULLs excluded) and each distinct VALUE is carried
+    // beside its hash, then folded into the ordinary lanes only once the per-worker
+    // sets are merged: a worker's partial sum over ITS distinct values would count
+    // a value twice if two workers both saw it.
+    bool    distinct_operand = false;
 };
 
 struct AggCell {
@@ -622,6 +629,16 @@ inline void agg2_update(AggCell& c, const DrakenVector& v, uint32_t row, bool is
 inline bool agg_fn_is_stddev_family(AggFn fn) noexcept {
     return fn == AggFn::Stddev || fn == AggFn::StddevSamp
         || fn == AggFn::VarPop || fn == AggFn::VarSamp;
+}
+
+// The aggregates AggSpec2::distinct_operand applies to. MIN/MAX/ANY_VALUE/CIDR_AGG/
+// APPROX_COUNT_DISTINCT are distinct-invariant (the compiler drops the flag),
+// COUNT(DISTINCT) is its own fn, ARRAY_AGG has aa_distinct, and CORR/
+// APPROX_PERCENTILE refuse DISTINCT at plan time. A spec outside this set carrying
+// the flag is refused at capture — never silently aggregated with duplicates.
+inline bool agg_fn_takes_distinct_operand(AggFn fn) noexcept {
+    return fn == AggFn::Sum || fn == AggFn::Avg || fn == AggFn::Median
+        || agg_fn_is_stddev_family(fn);
 }
 
 // STDDEV accumulation: always double (mean/variance are inherently non-exact,
@@ -1824,6 +1841,12 @@ struct GBCountDistinct {
     opteryx::carchar::CarcharSet seen;   // dedup on gb_mix2(gid, value_hash)
     std::vector<uint32_t> pair_gid;      // group id per distinct pair (pre-merge)
     std::vector<uint64_t> pair_vhash;    // value hash per distinct pair
+    // AggSpec2::distinct_operand only: the operand VALUE of each distinct pair,
+    // parallel to pair_gid. Exactly one is filled — pair_raw128 for a DECIMAL128
+    // operand, pair_raw (agg2_read_raw's container) for everything else. Both stay
+    // empty for COUNT(DISTINCT), which only ever needs the count.
+    std::vector<int64_t>  pair_raw;
+    std::vector<__int128> pair_raw128;
 
     size_t size() const { return pair_gid.size(); }
     // Record (gid, vhash); returns true iff this pair is NEW to the set.
@@ -1835,6 +1858,17 @@ struct GBCountDistinct {
         }
         return false;
     }
+    // Same dedup, carrying the operand value of a NEW pair.
+    bool insert_raw(uint32_t gid, uint64_t vhash, int64_t raw) {
+        if (!insert(gid, vhash)) return false;
+        pair_raw.push_back(raw);
+        return true;
+    }
+    bool insert_raw128(uint32_t gid, uint64_t vhash, __int128 raw) {
+        if (!insert(gid, vhash)) return false;
+        pair_raw128.push_back(raw);
+        return true;
+    }
 };
 
 // Ungrouped COUNT(DISTINCT): per-spec, per-hash-partition dedup of distinct VALUE
@@ -1844,12 +1878,79 @@ struct GBCountDistinct {
 struct UCDPartition {
     opteryx::carchar::CarcharSet seen;
     std::vector<uint64_t> distinct;
+    // AggSpec2::distinct_operand only — parallel to `distinct`, one filled (see
+    // GBCountDistinct::pair_raw).
+    std::vector<int64_t>  raw;
+    std::vector<__int128> raw128;
     size_t size() const { return distinct.size(); }
     bool insert(uint64_t h) {
         if (seen.insert_or_ignore(h)) { distinct.push_back(h); return true; }
         return false;
     }
+    bool insert_raw(uint64_t h, int64_t r) {
+        if (!insert(h)) return false;
+        raw.push_back(r);
+        return true;
+    }
+    bool insert_raw128(uint64_t h, __int128 r) {
+        if (!insert(h)) return false;
+        raw128.push_back(r);
+        return true;
+    }
+    // Union `src` into this set, carrying values. Returns the number of NEW values.
+    int64_t absorb(const UCDPartition& src) {
+        int64_t added = 0;
+        const bool has128 = !src.raw128.empty();
+        const bool has64 = !src.raw.empty();
+        for (size_t k = 0; k < src.distinct.size(); ++k) {
+            uint64_t h = src.distinct[k];
+            bool fresh = has128 ? insert_raw128(h, src.raw128[k])
+                       : has64  ? insert_raw(h, src.raw[k])
+                                : insert(h);
+            if (fresh) added += 1;
+        }
+        return added;
+    }
 };
+
+// AggSpec2::distinct_operand, ungrouped: fold one partition's distinct values into
+// the spec's cell (or MEDIAN state) with the SAME arithmetic the per-row paths use
+// (agg2_update's non-extreme branch, agg2_update_stddev, MedianState::append), so
+// the emitters read the cell exactly as they would for the non-DISTINCT aggregate.
+// Only MEDIAN can fail (its value cap).
+inline bool agg2_fold_distinct(AggCell& c, opteryx::ungrouped::MedianState& med,
+                               AggFn fn, bool is_float, const UCDPartition& d,
+                               ErrCtx& err) {
+    if (!d.raw128.empty()) {   // DECIMAL128: SUM/AVG only (exact int128 lane)
+        for (__int128 r : d.raw128) c.isum += r;
+        c.valid += static_cast<int64_t>(d.raw128.size());
+        return true;
+    }
+    const bool stddev = agg_fn_is_stddev_family(fn);
+    for (int64_t r : d.raw) {
+        double x;
+        if (is_float) std::memcpy(&x, &r, sizeof(x));
+        else x = static_cast<double>(r);
+        if (fn == AggFn::Median) {
+            if (!med.append(x)) {
+                err.code = 1;
+                err.msg = kMedianCapExceededMsg;
+                return false;
+            }
+            continue;
+        }
+        if (stddev) {
+            c.fsum += x;
+            c.fsumsq += x * x;
+        } else if (is_float) {
+            c.fsum += x;
+        } else {
+            c.isum += r;
+        }
+    }
+    if (fn != AggFn::Median) c.valid += static_cast<int64_t>(d.raw.size());
+    return true;
+}
 
 // ---- UngroupedAggSink ---------------------------------------------------------------
 
@@ -1913,6 +2014,12 @@ struct UngroupedAggSink : Sink {
             bool str_minmax = sort_type_is_string(t)
                 && (specs[s].fn == AggFn::Min || specs[s].fn == AggFn::Max
                     || specs[s].fn == AggFn::AnyValue);
+            if (specs[s].distinct_operand && !agg_fn_takes_distinct_operand(specs[s].fn)) {
+                err.code = 1;
+                err.msg = "DISTINCT operand flag on an aggregate that has no "
+                          "distinct-operand path — fail loud, never a silent wrong answer";
+                return false;
+            }
             // ARRAY_AGG is grouped-only (the binder rejects it without a GROUP BY,
             // and the compiler again at plan time). Reaching the ungrouped sink means
             // one of those gates broke — say so rather than read a lane that the
@@ -2025,6 +2132,28 @@ struct UngroupedAggSink : Sink {
             }
             if (specs[s].col_idx == kAggNoOperand) continue;
             const DrakenVector& v = in->columns[static_cast<size_t>(specs[s].col_idx)].view;
+            if (specs[s].distinct_operand) {
+                // SUM/AVG/STDDEV/MEDIAN(DISTINCT): COUNT(DISTINCT col)'s dedup,
+                // carrying each distinct value; the cell is filled from the merged
+                // sets at finalize (agg2_fold_distinct), never here.
+                std::array<UCDPartition, kGBParts>& DP = l.dparts[s];
+                std::vector<size_t> vcol{static_cast<size_t>(specs[s].col_idx)};
+                std::vector<uint64_t> vh;
+                if (!compute_row_hashes(in, vcol, vh, err)) return SinkResult::CONTINUE;
+                if (v.type == DRAKEN_DECIMAL128) {
+                    for (uint32_t i = 0; i < v.length; ++i) {
+                        if (!sort_row_valid(v, i)) continue;
+                        DP[vh[i] >> kGBPartShift].insert_raw128(vh[i], agg2_read_i128(v, i));
+                    }
+                } else {
+                    bool is_f = l.meta[s].is_float;
+                    for (uint32_t i = 0; i < v.length; ++i) {
+                        if (!sort_row_valid(v, i)) continue;
+                        DP[vh[i] >> kGBPartShift].insert_raw(vh[i], agg2_read_raw(v, i, is_f));
+                    }
+                }
+                continue;
+            }
             if (specs[s].fn == AggFn::Count) {
                 for (uint32_t i = 0; i < v.length; ++i) {
                     if (sort_row_valid(v, i)) c.valid += 1;
@@ -2184,7 +2313,7 @@ struct UngroupedAggSink : Sink {
                 if (specs[s].fn == AggFn::ApproxPercentile) {
                     td_merge(g.tds[s].h, l.tds[s].h);
                 }
-                if (specs[s].fn == AggFn::CountDistinct) {
+                if (specs[s].fn == AggFn::CountDistinct || specs[s].distinct_operand) {
                     for (size_t part = 0; part < kGBParts; ++part) {
                         if (l.dparts[s][part].size() > 0)
                             g.dpending[s][part].push_back(
@@ -2211,13 +2340,17 @@ struct UngroupedAggSink : Sink {
         // COUNT(DISTINCT): union each spec's queued worker sets. Partitions are
         // disjoint by hash, so (spec, partition) sets union AND count in parallel
         // (one-shot pool-let, same pattern as GroupBySink::finalize).
+        // SUM/AVG/STDDEV/MEDIAN(DISTINCT) ride the same union; each item's merged
+        // set is kept and folded into the spec's cell below.
         std::vector<std::atomic<int64_t>> dcounts(specs.size());
         for (auto& dc : dcounts) dc.store(0);
+        std::vector<std::pair<size_t, size_t>> items;   // (spec, partition)
+        std::vector<UCDPartition> item_sets;            // distinct_operand items only
         {
-            std::vector<std::pair<size_t, size_t>> items;   // (spec, partition)
             size_t queued = 0;
             for (size_t s = 0; s < specs.size(); ++s) {
-                if (specs[s].fn != AggFn::CountDistinct) continue;
+                if (specs[s].fn != AggFn::CountDistinct && !specs[s].distinct_operand)
+                    continue;
                 for (size_t part = 0; part < kGBParts; ++part) {
                     if (!g.dpending[s][part].empty()) {
                         items.emplace_back(s, part);
@@ -2226,6 +2359,7 @@ struct UngroupedAggSink : Sink {
                     }
                 }
             }
+            item_sets.resize(items.size());
             if (!items.empty()) {
                 unsigned hw = std::thread::hardware_concurrency();
                 unsigned nt = hw > 2 ? hw - 2 : 1;
@@ -2243,12 +2377,11 @@ struct UngroupedAggSink : Sink {
                         UCDPartition merged = std::move(list[0]);
                         int64_t cnt = static_cast<int64_t>(merged.size());
                         for (size_t i = 1; i < list.size(); ++i) {
-                            UCDPartition& src = list[i];
-                            for (uint64_t h : src.distinct)
-                                if (merged.insert(h)) cnt += 1;
-                            src = UCDPartition();
+                            cnt += merged.absorb(list[i]);
+                            list[i] = UCDPartition();
                         }
                         dcounts[sp].fetch_add(cnt);
+                        if (specs[sp].distinct_operand) item_sets[it] = std::move(merged);
                     }
                 };
                 std::vector<std::thread> threads;
@@ -2257,6 +2390,17 @@ struct UngroupedAggSink : Sink {
                 worker(0);
                 for (auto& th : threads) th.join();
             }
+        }
+        // Fold each distinct_operand spec's merged sets into its cell, in (spec,
+        // partition) order. Serial: one sequential pass over the distinct values,
+        // and MEDIAN's state is not safe to append to from several threads.
+        for (size_t it = 0; it < items.size(); ++it) {
+            size_t sp = items[it].first;
+            if (!specs[sp].distinct_operand) continue;
+            if (!agg2_fold_distinct(g.cells[sp], g.medians[sp], specs[sp].fn,
+                                    g.meta[sp].is_float, item_sets[it], err))
+                return;
+            item_sets[it] = UCDPartition();
         }
         auto m = std::make_shared<CxxMorsel>();
         m->zero_col_rows = 1;
@@ -2428,6 +2572,85 @@ inline void gb_lanes_resize(GBLanes& L, GBKind k, size_t n) {
             // emit_lane_column). resize() default-constructs fresh TDigestPtrs.
             L.td.resize(n);
             return;
+    }
+}
+
+// AggSpec2::distinct_operand, grouped: fold a merged partition's distinct
+// (group, value) pairs into the spec's lanes — the same per-kind arithmetic
+// GroupBySink::sink's pass C applies per row (including SUM's INT64 overflow trap),
+// run once over the DISTINCT values after every worker's set has been merged.
+// Kind dispatched once, tight loop per kind.
+inline bool gb_fold_distinct(GBLanes& L, GBKind kind, bool is_float,
+                             const GBCountDistinct& D, ErrCtx& err) {
+    const size_t n = D.size();
+    auto as_double = [is_float](int64_t r) -> double {
+        double x;
+        if (is_float) std::memcpy(&x, &r, sizeof(x));
+        else x = static_cast<double>(r);
+        return x;
+    };
+    switch (kind) {
+        case GBKind::SumI:
+            for (size_t k = 0; k < n; ++k) {
+                uint32_t e = D.pair_gid[k];
+                if (__builtin_add_overflow(L.i64[e], D.pair_raw[k], &L.i64[e])) {
+                    err.code = 1;
+                    err.msg = "SUM overflow: exact integer sum exceeds INT64 "
+                              "— fail loud, never a wrapped answer";
+                    return false;
+                }
+                L.valid[e] += 1;
+            }
+            return true;
+        case GBKind::AvgI:
+            for (size_t k = 0; k < n; ++k) {
+                uint32_t e = D.pair_gid[k];
+                L.i128[e] += D.pair_raw[k];
+                L.valid[e] += 1;
+            }
+            return true;
+        case GBKind::SumF:
+        case GBKind::AvgF:
+            for (size_t k = 0; k < n; ++k) {
+                uint32_t e = D.pair_gid[k];
+                L.f64[e] += as_double(D.pair_raw[k]);
+                L.valid[e] += 1;
+            }
+            return true;
+        case GBKind::SumD128:
+        case GBKind::AvgD128:
+            for (size_t k = 0; k < n; ++k) {
+                uint32_t e = D.pair_gid[k];
+                L.i128[e] += D.pair_raw128[k];
+                L.valid[e] += 1;
+            }
+            return true;
+        case GBKind::Stddev:
+        case GBKind::StddevSamp:
+        case GBKind::VarPop:
+        case GBKind::VarSamp:
+            for (size_t k = 0; k < n; ++k) {
+                uint32_t e = D.pair_gid[k];
+                double x = as_double(D.pair_raw[k]);
+                L.f64[e] += x;
+                L.f64sq[e] += x * x;
+                L.valid[e] += 1;
+            }
+            return true;
+        case GBKind::Median:
+            for (size_t k = 0; k < n; ++k) {
+                if (!L.median[D.pair_gid[k]].append(as_double(D.pair_raw[k]))) {
+                    err.code = 1;
+                    err.msg = kMedianCapExceededMsg;
+                    return false;
+                }
+            }
+            return true;
+        default:
+            err.code = 1;
+            err.msg = "DISTINCT operand fold reached an aggregate kind with no "
+                      "distinct-operand path — fail loud, never a silent wrong answer";
+            return false;
     }
 }
 
@@ -2940,6 +3163,12 @@ struct GroupBySink : Sink {
             bool str_minmax = sort_type_is_string(t)
                 && (specs[s].fn == AggFn::Min || specs[s].fn == AggFn::Max
                     || specs[s].fn == AggFn::AnyValue);
+            if (specs[s].distinct_operand && !agg_fn_takes_distinct_operand(specs[s].fn)) {
+                err.code = 1;
+                err.msg = "DISTINCT operand flag on an aggregate that has no "
+                          "distinct-operand path — fail loud, never a silent wrong answer";
+                return false;
+            }
             // ARRAY_AGG copies values instead of ordering/summing them, so it takes
             // the string family too — its own guard, not agg2's.
             if (specs[s].fn == AggFn::ArrayAgg) {
@@ -3460,6 +3689,30 @@ struct GroupBySink : Sink {
                 return vvalid == nullptr || ((vvalid[i >> 3] >> (i & 7)) & 1u);
             };
 
+            if (specs[s].distinct_operand) {
+                // SUM/AVG/STDDEV/MEDIAN(DISTINCT): the CountDistinct dedup below,
+                // carrying each new pair's value. The lanes stay untouched until
+                // merge_and_emit_partition folds the merged pairs (gb_fold_distinct).
+                std::vector<size_t> vcol{static_cast<size_t>(specs[s].col_idx)};
+                if (!compute_row_hashes(in, vcol, l.cd_vhash, err))
+                    return SinkResult::CONTINUE;
+                if (vtype == DRAKEN_DECIMAL128) {
+                    for (uint32_t i = 0; i < rows; ++i) {
+                        if (!row_ok(i)) continue;
+                        l.parts[l.mk_hash[i] >> kGBPartShift].cd[s].insert_raw128(
+                            l.mk_ent[i], l.cd_vhash[i], agg2_read_i128(v, i));
+                    }
+                } else {
+                    for (uint32_t i = 0; i < rows; ++i) {
+                        if (!row_ok(i)) continue;
+                        l.parts[l.mk_hash[i] >> kGBPartShift].cd[s].insert_raw(
+                            l.mk_ent[i], l.cd_vhash[i],
+                            agg2_read_raw_at(vtype, vdata, vsel, i, is_f));
+                    }
+                }
+                continue;
+            }
+
             switch (kind) {
                 case GBKind::Valid:
                     for (uint32_t i = 0; i < rows; ++i) {
@@ -3817,6 +4070,23 @@ struct GroupBySink : Sink {
             for (size_t s = 0; s < nspecs; ++s) {
                 GBKind kind = g.kinds[s];
                 if (kind == GBKind::Rows) continue;
+                if (specs[s].distinct_operand) {
+                    // Re-key the worker's distinct (group, value) pairs under the
+                    // merged group ids, carrying values; its lanes are still empty
+                    // (the fold after this loop fills the merged lanes).
+                    GBCountDistinct& SC = src.cd[s];
+                    GBCountDistinct& DC = merged.cd[s];
+                    if (!SC.pair_raw128.empty()) {
+                        for (size_t pi = 0; pi < SC.size(); ++pi)
+                            DC.insert_raw128(ge[SC.pair_gid[pi]], SC.pair_vhash[pi],
+                                             SC.pair_raw128[pi]);
+                    } else {
+                        for (size_t pi = 0; pi < SC.size(); ++pi)
+                            DC.insert_raw(ge[SC.pair_gid[pi]], SC.pair_vhash[pi],
+                                          SC.pair_raw[pi]);
+                    }
+                    continue;
+                }
                 GBLanes& D = merged.lanes[s];
                 const GBLanes& S = src.lanes[s];
                 bool want_max = specs[s].fn == AggFn::Max;
@@ -4006,6 +4276,15 @@ struct GroupBySink : Sink {
                 }
             }
             src = GBPartition();   // release the merged-in worker table
+        }
+        // SUM/AVG/STDDEV/MEDIAN(DISTINCT): every worker's pairs are merged now, so
+        // each distinct (group, value) is present exactly once — fold them in.
+        for (size_t s = 0; s < nspecs; ++s) {
+            if (!specs[s].distinct_operand) continue;
+            if (!gb_fold_distinct(merged.lanes[s], g.kinds[s], g.meta[s].is_float,
+                                  merged.cd[s], err))
+                return;
+            merged.cd[s] = GBCountDistinct();
         }
         if (prof) gb_fin_merge_ns.fetch_add(gb_prof_now() - prof_t0,
                                             std::memory_order_relaxed);

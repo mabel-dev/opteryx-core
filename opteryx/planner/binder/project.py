@@ -3,6 +3,7 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
+from collections import Counter
 from typing import Tuple
 
 from opteryx.exceptions import UnsupportedSyntaxError
@@ -89,6 +90,7 @@ def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
                 # (e.g. ORDER BY LENGTH(name) with no explicit Project step), never a
                 # real relation `*` should expand into.
                 seen_identities = set()
+                expanded = []
                 for name, schema in context.schemas.items():
                     if name == "$derived":
                         continue
@@ -97,16 +99,33 @@ def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
                             continue
                         if (schema_col.identity, schema_col.name) in seen_identities:
                             continue
-                        output_columns.append(
-                            LogicalColumn(
-                                node_type=NodeType.IDENTIFIER,
-                                source_column=schema_col.name,
-                                source=None,
-                                alias=schema_col.name,
-                                schema_column=schema_col,
-                            )
-                        )
+                        expanded.append(schema_col)
                         seen_identities.add((schema_col.identity, schema_col.name))
+
+                # Over a join, relations can share a column name. A bare reference to
+                # such a name is ambiguous and is refused by the binder, but `*` names
+                # no column - it asks for all of them - so it must not fail. Qualify
+                # each colliding column with the relation it came from, exactly as an
+                # explicit `SELECT a.id, b.id` would be named. Non-colliding columns
+                # keep their bare names. A column with more than one origin is the
+                # single coalesced column of a USING / NATURAL JOIN and stays bare.
+                name_counts = Counter(schema_col.name for schema_col in expanded)
+                for schema_col in expanded:
+                    output_name = schema_col.name
+                    origin = schema_col.origin
+                    if isinstance(origin, str):
+                        origin = [origin]
+                    if name_counts[schema_col.name] > 1 and origin and len(origin) == 1:
+                        output_name = f"{origin[0]}.{schema_col.name}"
+                    output_columns.append(
+                        LogicalColumn(
+                            node_type=NodeType.IDENTIFIER,
+                            source_column=schema_col.name,
+                            source=None,
+                            alias=output_name,
+                            schema_column=schema_col,
+                        )
+                    )
             continue
 
         # Explicit projection: emit one output per `node.columns` entry, even when

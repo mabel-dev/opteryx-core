@@ -47,6 +47,12 @@ cdef class OuterJoinNode(JoinNode):
     # would read as "the optimizer declined" when in fact it never arrived. Same
     # declaration, for the same reason, as FilterJoinNode's.
     cdef public bint swap_build_side
+    # RIGHT / FULL OUTER JOIN ... USING (and NATURAL): one (merged_identity,
+    # left_key_identity, right_key_identity) per merged column, which the join emits
+    # as COALESCE(left key, right key) - see binder/join.py and compiler._compile_join.
+    # DECLARED for the same reason as swap_build_side: an undeclared attribute on a
+    # cdef class cannot be set, and the compiler's getattr would read None forever.
+    cdef public object using_merged
 
     def __init__(self, properties=None, **parameters):
         # Ensure `join_type` exists before the base initializer accesses `self.name`
@@ -56,6 +62,7 @@ cdef class OuterJoinNode(JoinNode):
         self.using = parameters.get("using")
 
         self.swap_build_side = parameters.get("swap_build_side", False)
+        self.using_merged = parameters.get("using_merged")
 
         self.left_columns = parameters.get("left_columns")
         self.left_readers = parameters.get("left_readers") or []

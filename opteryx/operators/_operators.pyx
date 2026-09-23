@@ -157,6 +157,7 @@ cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nog
         bint aa_descending
         int64_t aa_limit
         double percentile
+        bint distinct_operand
 
 cdef extern from "core/alloc.h" nogil:
     void draken_free(void* ptr)
@@ -465,7 +466,9 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                         cppvector[int] lt_precision,
                                         cppvector[int] lt_scale,
                                         cppvector[int] lt_dimension,
-                                        cppvector[cppvector[int]] elem_chain)
+                                        cppvector[cppvector[int]] elem_chain,
+                                        cppvector[size_t] fill_probe_slot,
+                                        cppvector[size_t] fill_build_col) except +
         void set_join2_mark_sink(size_t p, size_t ref, cppvector[size_t] key_idx,
                                  cppvector[size_t] payload_idx,
                                  void* instrs, int count, cppvector[int] col_idx,
@@ -3205,20 +3208,32 @@ cdef class NativePlan:
         self._e.set_join2_bound_slots(p, v)
 
     def set_unmatched_build_source(self, size_t p, size_t ref, list probe_types,
-                                   list probe_logical=None, list probe_element=None):
+                                   list probe_logical, list probe_element,
+                                   list fill_from_build):
         """FULL OUTER tail pipeline source: emits build rows no probe matched,
         NULL-padded on the probe half. ``probe_types``/``probe_logical``/
         ``probe_element`` are the PROBE payload columns' plan-known types — the mirror
         of ``set_join2_build_sink``'s payload types, and for the same reason: the
         all-NULL probe half needs a typed schema even when the probe side streamed
         zero rows. An ARRAY column's element chain is not optional here: gathering a
-        NULL ARRAY row still emits a typed, empty child vector."""
+        NULL ARRAY row still emits a typed, empty child vector.
+
+        ``fill_from_build`` is a list of ``(probe_slot, build_col)``: the merged
+        column of a USING / NATURAL JOIN sits in probe payload slot ``probe_slot``,
+        and on these rows it carries build payload column ``build_col`` rather than
+        NULL — COALESCE(left key, right key) on a row only the build side produced.
+        Empty for every join with no merged column."""
         cdef cppvector[DrakenType] ts
         cdef cppvector[int] lk, lu, lp, lsc, ld
         cdef cppvector[cppvector[int]] ec
+        cdef cppvector[size_t] fill_slot, fill_col
         _fill_payload_types(probe_types, probe_logical, probe_element,
                             ts, lk, lu, lp, lsc, ld, ec)
-        self._e.set_unmatched_build_source(p, ref, ts, lk, lu, lp, lsc, ld, ec)
+        for probe_slot, build_col in fill_from_build:
+            fill_slot.push_back(<size_t>probe_slot)
+            fill_col.push_back(<size_t>build_col)
+        self._e.set_unmatched_build_source(p, ref, ts, lk, lu, lp, lsc, ld, ec,
+                                           fill_slot, fill_col)
 
     def set_join2_mark_sink(self, size_t p, size_t ref, list key_idx,
                             list payload_idx, CompiledBytecode bc=None,
@@ -3794,9 +3809,9 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
     named sentinels compiler.py mirrors from native_group_sinks.hpp:
     ``_AGG_NO_OPERAND`` (-1, CountStar) / ``_AGG_WHOLE_ROW`` (-2, whole-row
     CountDistinct — COUNT(DISTINCT *)). ``options`` carries the per-function
-    extras: ARRAY_AGG's modifiers, APPROX_PERCENTILE's ``percentile``, and
-    CORR's second operand column index (``col_idx2``); every other function
-    ignores it.
+    extras: ARRAY_AGG's modifiers, APPROX_PERCENTILE's ``percentile``, CORR's
+    second operand column index (``col_idx2``), and ``distinct_operand`` for
+    SUM/AVG/STDDEV family/MEDIAN(DISTINCT ...); every other function ignores it.
     """
     cdef cppvector[AggSpec2] out
     cdef AggSpec2 s
@@ -3855,6 +3870,7 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
             s.aa_descending = False
             s.aa_limit = -1
             s.percentile = 0.5
+            s.distinct_operand = False
         else:
             s.col_idx2 = <int>opts.get("col_idx2", -1)
             s.aa_distinct = <bint>bool(opts.get("distinct", False))
@@ -3862,6 +3878,7 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
             s.aa_descending = <bint>bool(opts.get("descending", False))
             s.aa_limit = <int64_t>(-1 if opts.get("limit") is None else opts["limit"])
             s.percentile = <double>opts.get("percentile", 0.5)
+            s.distinct_operand = <bint>bool(opts.get("distinct_operand", False))
         out.push_back(s)
     return out
 

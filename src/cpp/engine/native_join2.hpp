@@ -1945,15 +1945,28 @@ struct SemiAntiProbeOperator : Join2ProbeOperator, EmitSubset {
                                                  OwnedBuffer<void>(sel));
         flag.view = flag.own->vec;
 
+        // Names are POSITIONAL and optional inside the engine — a join's output
+        // morsel carries none — so they are carried only when parallel to the
+        // columns, and left empty when the input had none: the rule gather_rows
+        // (draken/morsels/sort.hpp) encodes. Indexing `in->names` by column
+        // position ran off an empty vector whenever the probe side was a join.
+        const bool carry_names = in->names.size() == in->columns.size();
+        if (!carry_names && !in->names.empty()) {
+            err.code = 1;
+            err.msg = "SemiAntiProbe: probe name list is neither empty nor parallel to "
+                      "the probe columns — cannot carry it through the existence emit";
+            return OpResult::NEED_INPUT;
+        }
+
         auto morsel = std::make_shared<CxxMorsel>();
         morsel->zero_col_rows = n;
         const std::vector<uint32_t>* keep = emit_ptr();
         if (keep == nullptr) {
             morsel->columns = in->columns;   // CxxColumn is a view + shared owner
-            morsel->names = in->names;
+            if (carry_names) morsel->names = in->names;
         } else {
             morsel->columns.reserve(keep->size() + 1);
-            morsel->names.reserve(keep->size() + 1);
+            if (carry_names) morsel->names.reserve(keep->size() + 1);
             for (uint32_t c : *keep) {
                 if (c >= in->columns.size()) {
                     err.code = 1;
@@ -1962,11 +1975,11 @@ struct SemiAntiProbeOperator : Join2ProbeOperator, EmitSubset {
                     return OpResult::NEED_INPUT;
                 }
                 morsel->columns.push_back(in->columns[c]);
-                morsel->names.push_back(in->names[c]);
+                if (carry_names) morsel->names.push_back(in->names[c]);
             }
         }
         morsel->columns.push_back(std::move(flag));
-        morsel->names.push_back(existence_name);
+        if (carry_names) morsel->names.push_back(existence_name);
         out = std::move(morsel);
         return OpResult::EMIT;
     }
@@ -2090,10 +2103,20 @@ struct UnmatchedBuildSource : Source {
     // Zero-row, plan-typed PROBE payload columns — what the all-NULL probe half is
     // gathered against (the exact mirror of Join2BuildGlobal::schema_morsel).
     MorselPtr probe_schema;
+    // USING / NATURAL merged columns, as (probe payload slot, build payload column).
+    // The merged column is COALESCE(left key, right key). On the rows the PROBE emits
+    // that is the probe key (matched: both keys are equal; unmatched: the build half
+    // is NULL), so the compiler lists the probe key a second time in the probe payload
+    // and labels that slot as the merged column. On the rows THIS source emits the
+    // probe half is NULL, so the slot must carry the BUILD key instead — copied from
+    // the build half, not NULL-padded. Leaving it NULL returned a NULL key for every
+    // right-only row of a RIGHT / FULL OUTER JOIN ... USING.
+    std::vector<std::pair<size_t, size_t>> fill_from_build;
     static constexpr uint32_t kChunk = 65536;
 
-    UnmatchedBuildSource(const Join2Ref* r, MorselPtr schema)
-        : ref(r), probe_schema(std::move(schema)) {}
+    UnmatchedBuildSource(const Join2Ref* r, MorselPtr schema,
+                         std::vector<std::pair<size_t, size_t>> fills)
+        : ref(r), probe_schema(std::move(schema)), fill_from_build(std::move(fills)) {}
 
     std::unique_ptr<GlobalSourceState> make_global() override {
         return std::make_unique<UnmatchedBuildSourceGlobal>();
@@ -2150,6 +2173,7 @@ struct UnmatchedBuildSource : Source {
             // Probe payload: every row is the null-row sentinel against the
             // plan-typed zero-row schema — the same emit LEFT OUTER uses for its
             // build half, mirrored.
+            const size_t build_col_count = morsel->columns.size();
             if (probe_schema && !probe_schema->columns.empty()) {
                 for (const CxxColumn& c : probe_schema->columns) {
                     if (array_child_missing(c)) {
@@ -2168,6 +2192,25 @@ struct UnmatchedBuildSource : Source {
                 if (err.code != 0 || phalf == nullptr) return SourceResult::FINISHED;
                 for (CxxColumn& c : phalf->columns)
                     morsel->columns.push_back(std::move(c));
+            }
+
+            // Merged USING columns: the build key, not NULL (see fill_from_build).
+            // A copy of a CxxColumn is a view plus a shared owner — no bytes move.
+            for (const auto& fill : fill_from_build) {
+                const size_t slot = build_col_count + fill.first;
+                if (fill.second >= build_col_count || slot >= morsel->columns.size()) {
+                    err.code = 1;
+                    err.msg = "FULL OUTER: merged USING column refers to a payload "
+                              "column that was not emitted";
+                    return SourceResult::FINISHED;
+                }
+                if (morsel->columns[fill.second].view.type != morsel->columns[slot].view.type) {
+                    err.code = 1;
+                    err.msg = "FULL OUTER: merged USING column's build and probe keys "
+                              "differ in type";
+                    return SourceResult::FINISHED;
+                }
+                morsel->columns[slot] = morsel->columns[fill.second];
             }
 
             out = std::move(morsel);

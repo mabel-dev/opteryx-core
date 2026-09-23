@@ -10,9 +10,17 @@ Isolated here to break the circular import between common.py (which imports join
 and join.py (which needs these functions from common.py).
 """
 
-from typing import List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
-from opteryx.exceptions import UnsupportedSyntaxError, compose, md_code, md_syntax
+from opteryx.exceptions import (
+    AmbiguousIdentifierError,
+    ColumnNotFoundError,
+    InvalidInternalStateError,
+    UnsupportedSyntaxError,
+    compose,
+    md_code,
+    md_syntax,
+)
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.expression.formatter import format_expression
 from opteryx.models import LogicalColumn, Node
@@ -25,6 +33,9 @@ from opteryx.types.logical_type import (
 # the relation-name arithmetic says: an aggregate is not a per-row value, a
 # subquery is a plan rather than an expression, and a wildcard is not one value.
 _UNHOISTABLE_NODE_TYPES = (NodeType.AGGREGATOR, NodeType.SUBQUERY, NodeType.WILDCARD)
+
+if TYPE_CHECKING:  # pragma: no cover
+    from opteryx.types.schema import RelationSchema
 
 
 def _is_numeric_join_coercible(left_type, right_type) -> bool:
@@ -440,65 +451,161 @@ def reject_unhoistable_join_operands(
         )
 
 
+def locate_using_column(
+    schemas: Dict[str, "RelationSchema"], relation_names: List[str], field: str, side: str
+) -> Tuple[str, object]:
+    """Find the ONE column named `field` on a join leg, for USING / NATURAL JOIN.
+
+    Returns `(schema_key, schema_column)`: the key in `schemas` that holds it, and
+    the column itself.
+
+    Two places can hold it:
+
+      * a relation named on the leg, in its own schema; or
+      * the merged column of a USING / NATURAL JOIN lower down the leg. That column
+        was taken OUT of its relations' schemas and lives in a `$shared-*` schema,
+        which is not named on the leg - it belongs to the leg when every relation it
+        was merged from is on it (`origin`). Without this, `a JOIN b USING (id)
+        JOIN c USING (id)` could not see the `id` the first join produced.
+
+    Two DISTINCT columns (different identities) is ambiguous and raises - e.g. the
+    left input of `a JOIN b ON a.id = b.id NATURAL JOIN c` carries both a.id and
+    b.id, and which one the join pairs on is undefined; standard SQL refuses it.
+    The same identity reachable twice (a subquery alongside the scans beneath it) is
+    one column, not two.
+    """
+    leg = set(relation_names)
+    found: List[Tuple[str, object]] = []
+    seen_identities: Set[bytes] = set()
+
+    def _consider(schema_key: str, schema) -> None:
+        schema_column = schema.column(field)
+        if schema_column is None or schema_column.identity in seen_identities:
+            return
+        seen_identities.add(schema_column.identity)
+        found.append((schema_key, schema_column))
+
+    for relation_name in relation_names:
+        schema = schemas.get(relation_name)
+        if schema is not None:
+            _consider(relation_name, schema)
+    for schema_key, schema in schemas.items():
+        if not schema_key.startswith("$shared-"):
+            continue
+        schema_column = schema.column(field)
+        if schema_column is None:
+            continue
+        origin = schema_column.origin
+        if isinstance(origin, str):
+            origin = [origin]
+        if origin and set(origin) <= leg:
+            _consider(schema_key, schema)
+
+    if len(found) > 1:
+        holders = [key if not key.startswith("$shared-") else "/".join(col.origin)
+                   for key, col in found]
+        raise AmbiguousIdentifierError(
+            message=f"Column '{field}' appears more than once in the {side} side of a "
+            f"**JOIN ... USING** or **NATURAL JOIN** (in `{holders[0]}` and "
+            f"`{holders[1]}`), so which one to join on is ambiguous. Use "
+            f"**JOIN ... ON** and name the columns explicitly."
+        )
+    if not found:
+        raise ColumnNotFoundError(
+            message=f"JOIN ... USING references column '{field}', which is not present "
+            f"in the {side} side of the join."
+        )
+    return found[0]
+
+
 def convert_using_to_on(
     using_fields: Set[str],
     left_relation_names: List[str],
     right_relation_names: List[str],
+    schemas: Dict[str, "RelationSchema"],
 ) -> Node:
     """
-    Converts a USING field to an ON field for JOIN operations.
+    Converts USING fields to the equivalent ON condition.
+
+    Each field is equated ONCE, between the relation on the left leg that actually
+    holds it and the relation on the right leg that actually holds it. A leg can
+    name more than one relation - a NATURAL JOIN or USING whose left input is the
+    RESULT of a preceding join names every relation beneath it - and a given field
+    lives in only one of them.
+
+    This used to loop over the left x right product, rebuilding the full set of
+    conditions for every pair and appending each to an `all_conditions` list that
+    was then thrown away: the function returned `conditions[0]`, the leftover local
+    from the LAST pair. On a multi-relation leg that silently discarded every
+    other relation's conjuncts, and asked for columns off relations that never had
+    them - `a.p = b.r NATURAL JOIN c` on {q, s} built `b.q = c.q` and raised
+    ColumnNotFoundError naming a column the user never wrote.
+
+    `schemas` is the binding context's schema map; a relation name with no schema
+    in it is skipped rather than raising, matching `_pop_using_column`.
 
     Parameters:
         using_fields: Set[str]
-            Set of common fields to use for joining.
+            Common fields to join on.
         left_relation_names: List[str]
-            Names of the left relations.
+            Names of the relations on the left leg.
         right_relation_names: List[str]
-            Names of the right relations.
+            Names of the relations on the right leg.
+        schemas: Dict[str, RelationSchema]
+            Schemas for every relation in scope, used to place each field.
 
     Returns:
         Node
             The condition node representing the ON clause.
     """
-    all_conditions = []
 
-    # Loop through all combinations of left and right relation names
-    for left_relation_name in left_relation_names:
-        for right_relation_name in right_relation_names:
-            conditions = []
-            for field in using_fields:
-                condition = Node(
-                    node_type=NodeType.COMPARISON_OPERATOR,
-                    value="Eq",
-                    do_not_create_column=True,
-                )
-                condition.left = LogicalColumn(
-                    node_type=NodeType.IDENTIFIER,
-                    source=left_relation_name,
-                    source_column=field,
-                )
-                condition.right = LogicalColumn(
-                    node_type=NodeType.IDENTIFIER,
-                    source=right_relation_name,
-                    source_column=field,
-                )
-                conditions.append(condition)
+    def _relation_holding(field: str, relation_names: List[str], side: str) -> str:
+        # The ON names the column by a relation ON THE LEG - that is what
+        # extract_join_fields sides it by. A merged USING column lives in a
+        # `$shared-*` schema, so it is named by one of the relations it was merged
+        # from, which resolves to it through `origin`.
+        schema_key, schema_column = locate_using_column(schemas, relation_names, field, side)
+        if schema_key in relation_names:
+            return schema_key
+        return schema_column.origin[0]
 
-            if len(conditions) == 1:
-                all_conditions.append(conditions[0])
+    # Sorted, not set-iteration order: the conjuncts are built into the plan, and a
+    # set of strings does not iterate in a stable order between runs.
+    conditions = []
+    for field in sorted(using_fields):
+        condition = Node(
+            node_type=NodeType.COMPARISON_OPERATOR,
+            value="Eq",
+            do_not_create_column=True,
+        )
+        condition.left = LogicalColumn(
+            node_type=NodeType.IDENTIFIER,
+            source=_relation_holding(field, left_relation_names, "left"),
+            source_column=field,
+        )
+        condition.right = LogicalColumn(
+            node_type=NodeType.IDENTIFIER,
+            source=_relation_holding(field, right_relation_names, "right"),
+            source_column=field,
+        )
+        conditions.append(condition)
+
+    if not conditions:
+        raise InvalidInternalStateError(
+            "A JOIN ... USING was built with no columns to join on."
+        )
+
+    # Fold into a balanced tree of ANDed conditions
+    while len(conditions) > 1:
+        folded = []
+        for i in range(0, len(conditions), 2):
+            if i + 1 < len(conditions):
+                and_node = Node(node_type=NodeType.AND, do_not_create_column=True)
+                and_node.left = conditions[i]
+                and_node.right = conditions[i + 1]
+                folded.append(and_node)
             else:
-                # Create a tree of ANDed conditions
-                while len(conditions) > 1:
-                    new_conditions = []
-                    for i in range(0, len(conditions), 2):
-                        if i + 1 < len(conditions):
-                            and_node = Node(node_type=NodeType.AND, do_not_create_column=True)
-                            and_node.left = conditions[i]
-                            and_node.right = conditions[i + 1]
-                            new_conditions.append(and_node)
-                        else:
-                            new_conditions.append(conditions[i])
-                    conditions = new_conditions
-                all_conditions.append(conditions[0])
+                folded.append(conditions[i])
+        conditions = folded
 
     return conditions[0]

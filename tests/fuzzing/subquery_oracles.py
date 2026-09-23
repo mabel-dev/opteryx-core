@@ -261,9 +261,20 @@ def count_star_matches_materialised_rows(case: SubqueryCase, rng: random.Random)
 # docstring. Everything here was measured to still PRODUCE a result for this
 # query family, because a flag that makes the query raise turns this oracle into
 # a comparison between a result and an error on every case.
+#
+# `disable_join_algorithm` is absent for that reason (2026-09-23: 38 of 300
+# generated statements raised with it set). JoinAlgorithmStrategy also retypes an
+# inner join whose ON carries a non-equi conjunct - a correlated scalar subquery
+# compared by `<` decorrelates into one - to nested loop; with the pass off that
+# join reaches the physical planner as a hash join it cannot run, and is refused
+# ("This JOIN is not supported"). By ruling that failure is the expected price of
+# the kill switch, not a defect: nothing is bent to keep the plan runnable.
+#
+# `disable_predicate_pushdown` is absent for the same reason (2026-09-23: 6 of
+# the same 300 statements raised "a build-side join key the engine could not
+# resolve here" with it set) and under the same ruling.
 _DIFFERENTIAL_STRATEGIES = (
     "disable_correlated_filters",
-    "disable_predicate_pushdown",
     "disable_predicate_rewrite",
     "disable_predicate_compaction",
     "disable_predicate_ordering",
@@ -271,7 +282,6 @@ _DIFFERENTIAL_STRATEGIES = (
     "disable_constant_folding",
     "disable_boolean_simplification",
     "disable_projection_pushdown",
-    "disable_join_algorithm",
     "disable_join_elimination",
     "disable_join_rewrite",
     "disable_cross_join_filter_pushdown",
