@@ -523,9 +523,10 @@ inline void build_join_csr(Join2BuildGlobal& g) {
     // writes counts into it, the scan rewrites each entry in place as that bucket's
     // first free slot, and pass 2 consumes it as the scatter cursor. Plain uint32_t
     // (allocated UNinitialised — `new uint32_t[n]` default-initialises a trivial
-    // type) with std::atomic_ref for the concurrent phases: a
+    // type) with relaxed __atomic_fetch_add for the concurrent phases: a
     // std::vector<std::atomic<uint32_t>> cannot be created without a serial
-    // zero-fill, which is the cost being removed.
+    // zero-fill, which is the cost being removed. The builtin, not
+    // std::atomic_ref: the macOS CI toolchain's libc++ does not ship atomic_ref.
     std::unique_ptr<uint32_t[]> slot(new uint32_t[n]);
 
     std::atomic<size_t> zero_next{0};
@@ -548,8 +549,8 @@ inline void build_join_csr(Join2BuildGlobal& g) {
                 size_t ci = next.fetch_add(1);
                 if (ci >= nchunks) break;
                 for (uint64_t h : g.hash_chunks[ci])
-                    std::atomic_ref<uint32_t>(slot[static_cast<size_t>(h) & c.mask])
-                        .fetch_add(1, std::memory_order_relaxed);
+                    __atomic_fetch_add(&slot[static_cast<size_t>(h) & c.mask], 1u,
+                                       __ATOMIC_RELAXED);
             }
         });
     }
@@ -611,8 +612,7 @@ inline void build_join_csr(Join2BuildGlobal& g) {
                 for (size_t r = 0; r < chunk.size(); ++r) {
                     const uint64_t h = chunk[r];
                     const size_t b = static_cast<size_t>(h) & c.mask;
-                    const uint32_t p = std::atomic_ref<uint32_t>(slot[b])
-                                           .fetch_add(1, std::memory_order_relaxed);
+                    const uint32_t p = __atomic_fetch_add(&slot[b], 1u, __ATOMIC_RELAXED);
                     c.rows[p] = static_cast<uint32_t>(b0 + r);
                     c.hashes[p] = h;
                 }
