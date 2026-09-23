@@ -151,6 +151,60 @@ def test_jsonl_reader_is_canonical(text_files):
 
 
 # ---------------------------------------------------------------------------
+# the DECLARED-type reader, not just the inferred one
+# ---------------------------------------------------------------------------
+# rugo has two float parsers and until 2026-09-22 only the inferred one
+# canonicalised: `fast_parse_float64` (inferred) vs `strict_double` feeding
+# `declared_parse_into` (declared). The tests above go through READ_CSV, which
+# sniffs, so they never touched the declared arm — while opteryx's own JSONL
+# scan pins a bind-time schema onto every chunk and therefore ALWAYS takes it.
+# These call rugo's native entry point directly, because that is the only place
+# a declared schema can be stated without a catalog.
+
+
+def _declared_jsonl(values, declared):
+    from draken.morsels.morsel import Morsel
+    from rugo.rugo_native import read_jsonl as _read
+
+    payload = ("\n".join(json.dumps({"f": v}) for v in values) + "\n").encode()
+    result = _read(
+        payload,
+        columns=None,
+        predicates=None,
+        explicit_schema={"f": declared},
+        fail_on_error=True,
+        infer_schema=True,
+        infer_sample_size=100,
+    )
+    morsel = Morsel.from_vectors(result["column_names"], result["columns"])
+    return [morsel[i][0] for i in range(morsel.num_rows)]
+
+
+@pytest.mark.parametrize("declared", ["DOUBLE", "FLOAT32"])
+def test_declared_float_column_is_canonical(declared):
+    read = _declared_jsonl((-0.0, 0.0, -0.0, 1.5), declared)
+    assert {repr(v) for v in read if v == 0.0} == {"0.0"}, read
+
+
+def test_declared_float32_underflow_does_not_reintroduce_the_sign():
+    """The reason the canon sits AFTER the narrowing cast rather than on the
+    parsed double: -1e-60 is a perfectly ordinary negative double, and only
+    becomes a signed zero when it underflows to float32. Canonicalising the
+    double would leave this one signed."""
+    read = _declared_jsonl((-1e-60, 1.5), "FLOAT32")
+    assert repr(read[0]) == "0.0", read
+
+
+def test_declared_reader_matches_the_inferred_reader(text_files):
+    """The two parsers must not disagree: a column means the same thing whether
+    its type was declared or sniffed."""
+    _, jsonl_path = text_files
+    inferred = [v for (v,) in _rows(f"SELECT f FROM READ_JSONL('{jsonl_path}')")]
+    declared = _declared_jsonl((-0.0, 0.0, -0.0, 1.5), "DOUBLE")
+    assert [repr(v) for v in inferred] == [repr(v) for v in declared]
+
+
+# ---------------------------------------------------------------------------
 # the fix must not have touched the OTHER special values
 # ---------------------------------------------------------------------------
 

@@ -11,6 +11,17 @@
 // schema is a contract, and the caller declared it precisely so a mismatch is
 // visible instead of silently reinterpreted.
 //
+// The ONE value a float arm rewrites is `-0.0` (and a non-canonical NaN), via
+// `fp_canon`. That is not a reinterpretation: float_ops.h's architect-locked
+// contract (2026-05-22) says the two zeros compare EQUAL and everything that
+// hashes — GROUP BY, DISTINCT, the set operations — may key on raw bits only
+// because ingestion removed the difference first. A reader that let `-0.0`
+// through put the engine into a state where `f = 0.0` matched rows that
+// `GROUP BY f` then split into two groups. The inferred path
+// (`fast_parse_float64`) has always canonicalised; this is the declared path
+// doing the same, so a column means the same thing whether its type was
+// declared or sniffed.
+//
 // Text forms route through draken's own parsers, never a local reimplementation:
 //   IPV4      draken/core/ipv4.h        (dotted-quad ONLY — see below)
 //   DATE      draken/core/iso_datetime.h
@@ -44,6 +55,7 @@
 #include "core/ipv4.h"
 #include "core/iso_datetime.h"
 #include "core/decimal_text.h"
+#include "ops/float_ops.h"   // fp_canon — ingestion canonicalisation of -0.0 / NaN
 
 namespace rugo {
 
@@ -114,6 +126,9 @@ inline bool strict_uint64(const uint8_t* p, uint32_t len, uint64_t* out) noexcep
     return true;
 }
 
+// Parses only — canonicalisation belongs to the two float arms of
+// `declared_parse_into`, because what must be canonical is the value STORED, and
+// for FLOAT32 that is the narrowed float, not this double.
 inline bool strict_double(const uint8_t* p, uint32_t len, double* out) noexcept {
     if (len == 0) return false;
     const char* first = reinterpret_cast<const char*>(p);
@@ -219,13 +234,17 @@ inline bool declared_parse_into(const DeclaredType& dt, const uint8_t* p, uint32
             // A finite double that becomes infinite as a float is out of range,
             // not a rounding difference.
             if (std::isinf(f) && !std::isinf(d)) return false;
-            static_cast<float*>(buffer)[index] = f;
+            // Canon AFTER the narrowing cast, not on `d`: a small negative that
+            // underflows to zero as a float (-1e-60 -> -0.0f) has a sign the
+            // double never had, so canonicalising the double would miss it. Canon
+            // does not touch the infinities the check above rejects on.
+            static_cast<float*>(buffer)[index] = draken::ops::fp_canon(f);
             return true;
         }
         case DRAKEN_FLOAT64: {
             double d;
             if (!detail::strict_double(p, len, &d)) return false;
-            static_cast<double*>(buffer)[index] = d;
+            static_cast<double*>(buffer)[index] = draken::ops::fp_canon(d);
             return true;
         }
         case DRAKEN_BOOL: {
