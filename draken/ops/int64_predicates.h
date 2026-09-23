@@ -32,9 +32,10 @@
 //   No read past ceil(n/8).  Tested at sizes 1..9 (test_int64_predicates.py).
 //
 // ALLOCATOR DISCIPLINE
-//   between: output buffer owned via mimalloc (draken_malloc/draken_free).
-//   in_list: the CarcharSet is constructed entirely from std::vector (system heap)
-//   and passed by const reference — no buffer crosses allocator boundaries.
+//   between: output buffer owned by draken (draken_malloc/draken_free), so it
+//   is transferable across the extension boundary and visible to OPTERYX_FREE_TRACE.
+//   in_list: the CarcharSet owns its own std::vector storage and is passed by
+//   const reference — no buffer changes hands, so nothing crosses the boundary.
 
 #include <cstdint>
 #include <cstring>

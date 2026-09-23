@@ -2,7 +2,6 @@
 # Cython shim for draken.morsels.morsel — E.24 vtable bridge.
 
 from libc.stdint cimport int32_t, uint32_t, uint64_t
-from libc.stdlib cimport malloc, calloc, free
 from libc.string cimport memcpy, memset
 from libc.stddef cimport size_t
 
@@ -97,6 +96,7 @@ cdef extern from "simd_hash.h" nogil:
 # scratch buffer so the multi-column hash loop stays fully nogil.
 cdef extern from "core/alloc.h" nogil:
     void* draken_malloc(size_t n) nogil
+    void* draken_calloc(size_t count, size_t size) nogil
     void  draken_free(void* p) nogil
 
 
@@ -489,8 +489,8 @@ cdef class Morsel:
         finally:
             draken_free(col_indices)
 
-        # calloc zeroes the buffer — required for multi-column simd_mix_hash.
-        cdef uint64_t* buf = <uint64_t*>calloc(<size_t>n, sizeof(uint64_t))
+        # draken_calloc zeroes the buffer — required for multi-column simd_mix_hash.
+        cdef uint64_t* buf = <uint64_t*>draken_calloc(<size_t>n, sizeof(uint64_t))
         if buf == NULL:
             draken_free(dvs)
             raise MemoryError()
@@ -502,11 +502,11 @@ cdef class Morsel:
             draken_free(dvs)
 
         if needs_gil:
-            free(buf)
+            draken_free(buf)
             raise NotImplementedError("Morsel.hash: DRAKEN_ARRAY columns cannot be hashed via this path")
 
         cdef bytes raw = (<const char*>buf)[:n * sizeof(uint64_t)]
-        free(buf)
+        draken_free(buf)
         return _array('Q', raw)
 
     def hash_keys(self, col_names=None):
@@ -746,7 +746,7 @@ cdef class Morsel:
 
     cdef int32_t* _resolve_columns_to_indices(self, object columns,
                                               int32_t* n_cols_out) except NULL:
-        """Resolve column names → freshly-malloc'd int32 index array.
+        """Resolve column names → a freshly draken_malloc'd int32 index array.
 
         columns=None → indices [0, _num_columns()).
         Caller owns the returned buffer (draken_free()). Raises KeyError on missing
@@ -1103,7 +1103,7 @@ cdef class Morsel:
             dvs = self._columns_to_pointers(col_indices, n_cols)
         finally:
             draken_free(col_indices)
-        cdef uint64_t* hashes = <uint64_t*>calloc(<size_t>n, sizeof(uint64_t))
+        cdef uint64_t* hashes = <uint64_t*>draken_calloc(<size_t>n, sizeof(uint64_t))
         if hashes == NULL:
             draken_free(dvs)
             raise MemoryError()
@@ -1113,18 +1113,18 @@ cdef class Morsel:
         finally:
             draken_free(dvs)
         if needs_gil:
-            free(hashes)
+            draken_free(hashes)
             raise NotImplementedError(
                 "partition_by_hash: column type cannot be hashed via this path"
             )
 
         # 2) counting-partition row indices into contiguous per-bin ranges (nogil).
-        cdef int32_t* counts = <int32_t*>calloc(<size_t>n_bins, sizeof(int32_t))
+        cdef int32_t* counts = <int32_t*>draken_calloc(<size_t>n_bins, sizeof(int32_t))
         cdef int32_t* offsets = <int32_t*>draken_malloc(<size_t>n_bins * sizeof(int32_t))
         cdef int32_t* cursor = <int32_t*>draken_malloc(<size_t>n_bins * sizeof(int32_t))
         cdef int32_t* idx = <int32_t*>draken_malloc(<size_t>n * sizeof(int32_t))
         if counts == NULL or offsets == NULL or cursor == NULL or idx == NULL:
-            free(hashes); free(counts); draken_free(offsets); draken_free(cursor); draken_free(idx)
+            draken_free(hashes); draken_free(counts); draken_free(offsets); draken_free(cursor); draken_free(idx)
             raise MemoryError()
         cdef uint64_t bucket
         with nogil:
@@ -1139,7 +1139,7 @@ cdef class Morsel:
                 bucket = hashes[i] & mask
                 idx[cursor[bucket]] = <int32_t>i
                 cursor[bucket] += 1
-        free(hashes)
+        draken_free(hashes)
         draken_free(cursor)
 
         # 3) gather each bin's contiguous index slice into a sub-morsel. The
@@ -1166,7 +1166,7 @@ cdef class Morsel:
                         )
                 result.append(sub)
         finally:
-            free(counts); draken_free(offsets); draken_free(idx)
+            draken_free(counts); draken_free(offsets); draken_free(idx)
         return result
 
     def slice(self, Py_ssize_t offset=0, Py_ssize_t length=0, Py_ssize_t start=-1):

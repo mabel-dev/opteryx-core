@@ -29,7 +29,7 @@
 // No shape discrimination by default. Constant and dict fast paths are
 // architect-approved exceptions (see buffers.h approved exceptions comment).
 //
-// ALLOCATOR DISCIPLINE: output buffer owned by mimalloc (draken_malloc).
+// ALLOCATOR DISCIPLINE: output buffer owned by draken (draken_malloc).
 // CarcharSet is constructed and owned by the caller (std::vector storage);
 // passed by const reference — no allocator-boundary crossing.
 

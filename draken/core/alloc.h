@@ -3,7 +3,7 @@
 // Single entry point for every transferable buffer the new draken vector model
 // owns. The per-vector RAII ownership layer (unique_ptr + stateless deleter,
 // Milestone B) frees through draken_free; everything that allocates an owned
-// buffer goes through draken_malloc / draken_aligned_malloc.
+// buffer goes through draken_malloc / draken_calloc / draken_aligned_malloc.
 //
 // Allocator: the system allocator (malloc/free). draken buffers cross extension
 // boundaries (e.g. column_deserializer allocates, a draken Vector frees on GC),
@@ -74,6 +74,32 @@ static inline void* draken_malloc(size_t size) {
             int bt_sz = backtrace(bt, 32);
             backtrace_symbols_fd(bt, bt_sz, STDERR_FILENO);
             fprintf(stderr, "-- end DRAKEN_MALLOC TRACE --\n");
+            fflush(stderr);
+        }
+    }
+    return p;
+}
+
+// Zero-initialised allocation. Delegates to calloc rather than
+// draken_malloc + memset on purpose: for large blocks the allocator can hand
+// back fresh zero pages from the OS, so the zeroing costs nothing and is not an
+// eager write over the whole buffer. Callers that need a zeroed buffer on a hot
+// path (per-morsel hash scratch, partition bin counts) depend on that.
+// Returns NULL on failure, like draken_malloc — it does not throw. Pairs with
+// draken_free.
+static inline void* draken_calloc(size_t count, size_t size) {
+    void* p = calloc(count, size);
+    const DrakenTraceConfig* tc = draken_trace_config();
+    if (tc->enabled && p != nullptr) {
+        size_t asize = DRAKEN_USABLE_SIZE(p);
+        size_t min_sz = tc->min_sz;
+        size_t max_sz = tc->max_sz;
+        if (asize >= min_sz && asize <= max_sz) {
+            fprintf(stderr, "DRAKEN_CALLOC TRACE: ptr=%p req=%zux%zu size=%zu\n", p, count, size, asize);
+            void* bt[32];
+            int bt_sz = backtrace(bt, 32);
+            backtrace_symbols_fd(bt, bt_sz, STDERR_FILENO);
+            fprintf(stderr, "-- end DRAKEN_CALLOC TRACE --\n");
             fflush(stderr);
         }
     }

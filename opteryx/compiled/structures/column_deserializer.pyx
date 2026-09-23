@@ -21,7 +21,7 @@ existing Cython path because their construction requires building slot arrays
 and arenas; that work stays in Cython.
 
 All vectors end up with owned memory (draken_malloc-allocated, freed by the
-Vector's dealloc via mimalloc) so there are no lifetime dependencies on the
+Vector's dealloc via draken_free) so there are no lifetime dependencies on the
 MemoryPool read buffer after this function returns.
 
 Note: draken_vector_own_array does not support per-element child nullability.
