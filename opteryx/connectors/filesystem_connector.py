@@ -6,7 +6,6 @@ This provides a gateway connector (FileSystemConnector) and transient table read
 """
 
 import os
-from threading import Lock
 from typing import Dict, Generator, Optional, Tuple
 
 from opteryx.connectors import TableType
@@ -192,8 +191,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         if self.dataset and OS_SEP not in self.dataset and "/" not in self.dataset:
             self.dataset = self.dataset.replace(".", OS_SEP)
 
-        self._stats_lock = Lock()
-
     def can_push_topn(self, order_by) -> bool:
         return single_physical_column_topn(order_by)
 
@@ -287,6 +284,11 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         executor's file list, ANALYZE), so the exclusion lives here rather than
         being re-derived — and missed — at each call site.
 
+        The list is SORTED. Filesystem enumeration order is unspecified (readdir
+        order, object-store paging), and a dataset's bind-time schema is the first
+        file's — so an unsorted listing let a folder of differing schemas bind to a
+        different schema from run to run.
+
         Args:
             prefix: Directory/path prefix to list files from
             predicates: Optional predicates (not used for file listing)
@@ -296,11 +298,11 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         """
         from opteryx.models.manifest_io import is_dataset_manifest
 
-        return [
+        return sorted(
             name
             for name in self.filesystem.list_files(prefix, recursive=True)
             if not is_dataset_manifest(name)
-        ]
+        )
 
     def read_blob(self, *, blob_name: str, just_schema=False):
         """
@@ -539,10 +541,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
                         self.telemetry.estimated_row_count += schema.row_count_estimate
                     yield schema
                 except Exception as err:
-                    if "Invalid" in type(err).__name__ or "Arrow" in type(err).__name__:
-                        with self._stats_lock:
-                            self.telemetry.unreadable_data_blobs += 1
-                        continue
                     raise DataError(
                         f"Unable to read file {blob_name}: {type(err).__name__}"
                     ) from err
