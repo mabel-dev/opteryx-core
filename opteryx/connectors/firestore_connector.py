@@ -34,10 +34,15 @@ Deliberately minimal - this is expected to be rarely used:
 
     `doc` is VARCHAR rather than VARIANT only because Draken has no Python
     constructor for a VARIANT vector; the JSON operators accept either.
-  * No predicate pushdown. Every read is a full `listDocuments` scan, filtered
-    by the engine. LIMIT is honoured by stopping the page walk (see
-    `_PAGE_SIZES`) - Firestore bills per document returned, so a LIMIT that
-    still fetched the whole collection would cost the customer real money.
+  * No predicate pushdown. Every read is a scan of the collection with
+    `runQuery`, filtered by the engine. `runQuery` streams a whole range in
+    one response, where `listDocuments` pages at a size Firestore caps for
+    large documents - measured on a 7.5k-document collection, 33s of paging
+    against 11s of ranged queries read one after another.
+  * The scan is split by the pushed LIMIT (see `_partitions_for`): a small
+    LIMIT is one query asking for exactly that many documents - Firestore
+    bills per document returned - and a large or absent one is split with
+    `partitionQuery` into ranges read in parallel.
   * Executed in Python over Firestore's REST API (no client library, no
     native Source): the generic "Reader" node drives `read_dataset`, the same
     route `information_schema` takes.
@@ -67,6 +72,7 @@ service-account key (the JSON text) as `credentials`.
 import datetime
 import json
 import math
+import queue
 import threading
 import time
 import urllib.error
@@ -90,11 +96,21 @@ from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_ident
 FIRESTORE_ENDPOINT = "https://firestore.googleapis.com/v1"
 _DATASTORE_SCOPE = "https://www.googleapis.com/auth/datastore"
 
-# Page sizes for the listDocuments walk, in order; the last repeats. Small
-# first pages keep `LIMIT n` cheap - the reader stops pulling pages as soon as
-# the LIMIT is met, so `LIMIT 10` costs at most 50 billed reads, not 300 - and
-# a full scan still reaches Firestore's 300-per-page ceiling quickly.
-_PAGE_SIZES = (50, 100, 200, 300)
+# A LIMIT at or under this is read as ONE query carrying the limit: splitting
+# it would read up to one LIMIT per range, and billed reads are the cost.
+_SERIAL_LIMIT = 300
+# A LIMIT above it is split into ceil(n / _DOCS_PER_PARTITION) ranges, clamped
+# to [_MIN_LIMITED_PARTITIONS, _MAX_LIMITED_PARTITIONS]; each range may read
+# up to the LIMIT, so the clamp bounds the over-read. No LIMIT: a full scan.
+_DOCS_PER_PARTITION = 300
+_MIN_LIMITED_PARTITIONS = 2
+_MAX_LIMITED_PARTITIONS = 8
+_FULL_SCAN_PARTITIONS = 8
+# Documents per runQuery within a range. Bounds memory (a response is decoded
+# whole) without going back to per-page round trips.
+_QUERY_CHUNK = 1000
+
+_ORDER_BY_NAME = [{"field": {"fieldPath": "__name__"}, "direction": "ASCENDING"}]
 
 # Transient statuses retried with backoff before the read is failed.
 _RETRY_STATUSES = (429, 500, 502, 503, 504)
@@ -109,6 +125,16 @@ _COLUMNS = (
     ("created_at", _lt.TIMESTAMP(), DrakenType.TIMESTAMP64),
     ("updated_at", _lt.TIMESTAMP(), DrakenType.TIMESTAMP64),
 )
+
+
+def _partitions_for(limit: Optional[int]) -> int:
+    """How many ranges to read a scan in, from the LIMIT pushed into it."""
+    if limit is None:
+        return _FULL_SCAN_PARTITIONS
+    if limit <= _SERIAL_LIMIT:
+        return 1
+    wanted = math.ceil(limit / _DOCS_PER_PARTITION)
+    return min(max(wanted, _MIN_LIMITED_PARTITIONS), _MAX_LIMITED_PARTITIONS)
 
 
 def _parse_rfc3339(text: Optional[str]) -> Optional[datetime.datetime]:
@@ -326,6 +352,67 @@ class FirestoreConnector(BaseConnector):
             f"{FIRESTORE_ENDPOINT}/{self.documents_root}{urllib.parse.quote(collection)}?{query}"
         )
 
+    def run_query(
+        self,
+        collection: str,
+        *,
+        start: Optional[str] = None,
+        start_inclusive: bool = True,
+        end: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Documents of a top-level collection in `__name__` order, from `start`
+        (a document resource name) up to but excluding `end`."""
+        structured: Dict[str, Any] = {
+            "from": [{"collectionId": collection}],
+            "orderBy": _ORDER_BY_NAME,
+        }
+        if start:
+            structured["startAt"] = {
+                "values": [{"referenceValue": start}],
+                "before": start_inclusive,
+            }
+        if end:
+            structured["endAt"] = {"values": [{"referenceValue": end}], "before": True}
+        if limit is not None:
+            structured["limit"] = limit
+        root = self.documents_root.rstrip("/")
+        rows = self._request(
+            f"{FIRESTORE_ENDPOINT}/{root}:runQuery", {"structuredQuery": structured}
+        )
+        return [row["document"] for row in rows if "document" in row]
+
+    def partition_points(self, collection: str, count: int) -> List[str]:
+        """Up to `count` document names splitting the collection into ranges.
+
+        `partitionQuery` only accepts a collection-GROUP query, which also
+        spans any nested collection with the same id, so points outside the
+        top-level collection are dropped - that merges two ranges, never loses
+        a document. The points are approximate: ranges come back uneven."""
+        if count < 1:
+            return []
+        root = self.documents_root.rstrip("/")
+        body: Dict[str, Any] = {
+            "structuredQuery": {
+                "from": [{"collectionId": collection, "allDescendants": True}],
+                "orderBy": _ORDER_BY_NAME,
+            },
+            "partitionCount": count,
+        }
+        prefix = f"{self.documents_root}{collection}/"
+        points = set()
+        while True:
+            page = self._request(f"{FIRESTORE_ENDPOINT}/{root}:partitionQuery", body)
+            for cursor in page.get("partitions") or []:
+                name = (cursor.get("values") or [{}])[0].get("referenceValue", "")
+                if name.startswith(prefix) and "/" not in name[len(prefix) :]:
+                    points.add(name)
+            token = page.get("nextPageToken")
+            if not token:
+                break
+            body["pageToken"] = token
+        return sorted(points)
+
     def list_collection_ids(self) -> List[str]:
         """Every top-level collection id in the database, one page at a time.
 
@@ -407,10 +494,10 @@ class FirestoreTable(BaseTable):
     # Routes through the generic Python "Reader" physical node (see
     # physical_planner._build_scan_node), like information_schema.
     interal_only = True
-    # The Reader stops iterating once the LIMIT is met, and read_dataset only
-    # fetches a page when the Reader asks for more - so a pushed LIMIT stops
-    # the billed page walk. Nothing is ever filtered here, so there is no
-    # pushed predicate for a LIMIT to be counted against.
+    # The Reader passes the pushed LIMIT to read_dataset, which sizes the read
+    # from it (see _partitions_for), and stops pulling once it is met. Nothing
+    # is ever filtered here, so there is no pushed predicate for a LIMIT to be
+    # counted against.
     supports_limit_pushdown = True
 
     def __init__(
@@ -446,34 +533,107 @@ class FirestoreTable(BaseTable):
         )
         return self.schema
 
-    def _documents(self) -> Iterator[List[Dict[str, Any]]]:
-        """Pages of raw documents, fetched only as they are consumed."""
-        token = None
-        page_number = 0
-        while True:
-            page_size = _PAGE_SIZES[min(page_number, len(_PAGE_SIZES) - 1)]
-            page = self.gateway.list_page(self.collection, page_size, token)
-            page_number += 1
-            documents = page.get("documents") or []
+    def _range_documents(
+        self, start: Optional[str], end: Optional[str], limit: Optional[int], stop: threading.Event
+    ) -> Iterator[List[Dict[str, Any]]]:
+        """One range's documents, `_QUERY_CHUNK` at a time, resuming after the
+        last name read. `limit` caps the range, `stop` abandons it."""
+        after = None
+        remaining = limit
+        while not stop.is_set():
+            size = _QUERY_CHUNK if remaining is None else min(_QUERY_CHUNK, remaining)
+            documents = self.gateway.run_query(
+                self.collection,
+                start=after or start,
+                start_inclusive=after is None,
+                end=end,
+                limit=size,
+            )
             if documents:
                 yield documents
-            token = page.get("nextPageToken")
-            if not token:
+            if len(documents) < size:
                 return
+            after = documents[-1]["name"]
+            if remaining is not None:
+                remaining -= len(documents)
+                if remaining <= 0:
+                    return
 
-    def read_dataset(self, **kwargs) -> Iterable[Morsel]:
+    def _morsel(self, documents: List[Dict[str, Any]]) -> Morsel:
         root = self.gateway.documents_root
-        for documents in self._documents():
-            ids, docs, created, updated = [], [], [], []
-            for document in documents:
-                ids.append(document["name"].rsplit("/", 1)[-1])
-                fields = document.get("fields", {})
-                decoded = {key: _decode_value(value, root) for key, value in fields.items()}
-                docs.append(json.dumps(decoded, ensure_ascii=False, separators=(",", ":")))
-                created.append(_parse_rfc3339(document.get("createTime")))
-                updated.append(_parse_rfc3339(document.get("updateTime")))
-            vectors = [
-                vector_from_sequence(values, dtype=draken_type)
-                for values, (_, _, draken_type) in zip((ids, docs, created, updated), _COLUMNS)
-            ]
-            yield Morsel.from_vectors([name for name, _, _ in _COLUMNS], vectors)
+        ids, docs, created, updated = [], [], [], []
+        for document in documents:
+            ids.append(document["name"].rsplit("/", 1)[-1])
+            fields = document.get("fields", {})
+            decoded = {key: _decode_value(value, root) for key, value in fields.items()}
+            docs.append(json.dumps(decoded, ensure_ascii=False, separators=(",", ":")))
+            created.append(_parse_rfc3339(document.get("createTime")))
+            updated.append(_parse_rfc3339(document.get("updateTime")))
+        vectors = [
+            vector_from_sequence(values, dtype=draken_type)
+            for values, (_, _, draken_type) in zip((ids, docs, created, updated), _COLUMNS)
+        ]
+        return Morsel.from_vectors([name for name, _, _ in _COLUMNS], vectors)
+
+    def read_dataset(self, limit: Optional[int] = None, **kwargs) -> Iterable[Morsel]:
+        """Morsels of the collection, read in `_partitions_for(limit)` ranges.
+
+        Ranges are read on worker threads and handed over through a bounded
+        queue, so memory is a few chunks per range, not the collection; the
+        engine's Reader stops pulling at the LIMIT, and closing this generator
+        stops the workers. Morsels arrive in no particular order."""
+        stop = threading.Event()
+        partitions = _partitions_for(limit)
+        points = (
+            self.gateway.partition_points(self.collection, partitions - 1)
+            if partitions > 1
+            else []
+        )
+        bounds = [None] + points + [None]
+        ranges = list(zip(bounds, bounds[1:]))
+
+        if len(ranges) == 1:
+            for documents in self._range_documents(None, None, limit, stop):
+                yield self._morsel(documents)
+            return
+
+        handoff: "queue.Queue" = queue.Queue(maxsize=2 * len(ranges))
+        done = object()
+
+        def put(item) -> bool:
+            while not stop.is_set():
+                try:
+                    handoff.put(item, timeout=0.1)
+                    return True
+                except queue.Full:
+                    continue
+            return False
+
+        def worker(start, end):
+            try:
+                for documents in self._range_documents(start, end, limit, stop):
+                    if not put(documents):
+                        return
+            except BaseException as err:  # re-raised on the consuming thread
+                put(err)
+            finally:
+                put(done)
+
+        threads = [
+            threading.Thread(target=worker, args=bounds_pair, daemon=True, name="firestore-range")
+            for bounds_pair in ranges
+        ]
+        for thread in threads:
+            thread.start()
+        try:
+            finished = 0
+            while finished < len(threads):
+                item = handoff.get()
+                if item is done:
+                    finished += 1
+                elif isinstance(item, BaseException):
+                    raise item
+                else:
+                    yield self._morsel(item)
+        finally:
+            stop.set()

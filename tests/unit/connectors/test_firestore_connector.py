@@ -22,6 +22,7 @@ from opteryx.connectors import register_workspace
 from opteryx.connectors.firestore_connector import FirestoreConnector
 from opteryx.connectors.firestore_connector import _decode_value
 from opteryx.connectors.firestore_connector import _parse_rfc3339
+from opteryx.connectors.firestore_connector import _partitions_for
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import UnsupportedSyntaxError
 
@@ -50,11 +51,36 @@ def _collection(size):
 
 
 class FakeFirestore:
-    """Serves collections page by page and records each page request."""
+    """Serves collections the way listDocuments, runQuery and partitionQuery
+    do, and records every call."""
 
     def __init__(self, collections):
         self.collections = collections
         self.requests = []
+        self.queries = []
+        self.partition_requests = []
+        self.fail_after = None
+
+    def run_query(self, collection, start=None, start_inclusive=True, end=None, limit=None):
+        self.queries.append((collection, start, start_inclusive, end, limit))
+        if self.fail_after is not None and len(self.queries) > self.fail_after:
+            raise RuntimeError("firestore went away")
+        documents = sorted(self.collections.get(collection, []), key=lambda d: d["name"])
+        if start is not None:
+            documents = [
+                d for d in documents if (d["name"] >= start if start_inclusive else d["name"] > start)
+            ]
+        if end is not None:
+            documents = [d for d in documents if d["name"] < end]
+        return documents if limit is None else documents[:limit]
+
+    def partition_points(self, collection, count):
+        self.partition_requests.append((collection, count))
+        documents = sorted(d["name"] for d in self.collections.get(collection, []))
+        if count < 1 or not documents:
+            return []
+        step = len(documents) / (count + 1)
+        return [documents[int(step * (i + 1))] for i in range(count)]
 
     def list_page(self, collection, page_size, page_token):
         self.requests.append((collection, page_size, page_token))
@@ -77,6 +103,14 @@ def firestore(monkeypatch):
         lambda self, collection, page_size, page_token: fake.list_page(
             collection, page_size, page_token
         ),
+    )
+    monkeypatch.setattr(
+        FirestoreConnector, "run_query", lambda self, collection, **kw: fake.run_query(collection, **kw)
+    )
+    monkeypatch.setattr(
+        FirestoreConnector,
+        "partition_points",
+        lambda self, collection, count: fake.partition_points(collection, count),
     )
     saved_prefixes = dict(connectors._storage_prefixes)
     saved_cache = dict(connectors._connector_cache)
@@ -208,12 +242,84 @@ def test_collections_allowlist_hides_everything_else(firestore):
 # ---------------------------------------------------------------- page walk
 
 
-def test_full_read_walks_every_page_with_growing_page_sizes(firestore):
+def _ids(morsels):
+    return [row["id"] for morsel in morsels for row in morsel.to_arrow().to_pylist()]
+
+
+def test_partitions_follow_the_limit():
+    assert [_partitions_for(n) for n in (1, 10, 200, 300)] == [1, 1, 1, 1]
+    assert [_partitions_for(n) for n in (301, 500, 600, 601, 900, 2400, 2401, 50000)] == [
+        2, 2, 2, 3, 3, 8, 8, 8
+    ]
+    assert _partitions_for(None) == 8
+
+
+def test_full_read_splits_into_ranges_and_reads_every_document_once(firestore):
     gateway = FirestoreConnector(project="p", prefix="fs", preserve_sql_case=True)
     table = gateway.table_engine("fs.orders", telemetry=None, original_relation="fs.Orders")
-    total = sum(morsel.num_rows for morsel in table.read_dataset())
-    assert total == 420
-    assert [size for _, size, _ in firestore.requests] == [50, 100, 200, 300]
+    ids = _ids(table.read_dataset())
+    assert sorted(ids) == sorted(f"o{i:04d}" for i in range(420))
+    assert firestore.partition_requests == [("Orders", 7)]
+    # Eight ranges, each ended by the next one's first document.
+    starts = [q[1] for q in firestore.queries if q[2]]
+    assert len(starts) == 8
+
+
+def test_small_limit_is_one_query_asking_for_exactly_that_many(firestore):
+    gateway = FirestoreConnector(project="p", prefix="fs", preserve_sql_case=True)
+    table = gateway.table_engine("fs.orders", telemetry=None, original_relation="fs.Orders")
+    assert len(_ids(table.read_dataset(limit=10))) == 10
+    assert firestore.partition_requests == []
+    assert firestore.queries == [("Orders", None, True, None, 10)]
+
+
+def test_large_limit_splits_and_caps_every_range_at_the_limit(firestore):
+    gateway = FirestoreConnector(project="p", prefix="fs", preserve_sql_case=True)
+    table = gateway.table_engine("fs.orders", telemetry=None, original_relation="fs.Orders")
+    ids = _ids(table.read_dataset(limit=350))
+    # The fake collection is 420 documents, so both ranges fit under the cap.
+    assert sorted(ids) == sorted(f"o{i:04d}" for i in range(420))
+    assert firestore.partition_requests == [("Orders", 1)]
+    assert all(q[4] == 350 for q in firestore.queries)
+
+
+def test_ranges_are_read_in_chunks_resuming_after_the_last_name(firestore, monkeypatch):
+    import opteryx.connectors.firestore_connector as module
+
+    monkeypatch.setattr(module, "_QUERY_CHUNK", 100)
+    gateway = FirestoreConnector(project="p", prefix="fs", preserve_sql_case=True)
+    table = gateway.table_engine("fs.orders", telemetry=None, original_relation="fs.Orders")
+    ids = _ids(table.read_dataset(limit=250))
+    assert len(ids) == 250 and len(set(ids)) == 250
+    # 100 + 100 + 50: the last chunk asks only for what the limit has left.
+    assert [q[4] for q in firestore.queries] == [100, 100, 50]
+    assert [q[2] for q in firestore.queries] == [True, False, False]
+
+
+def test_a_failing_range_fails_the_read(firestore):
+    firestore.fail_after = 2
+    gateway = FirestoreConnector(project="p", prefix="fs", preserve_sql_case=True)
+    table = gateway.table_engine("fs.orders", telemetry=None, original_relation="fs.Orders")
+    with pytest.raises(RuntimeError, match="went away"):
+        list(table.read_dataset())
+
+
+def test_closing_the_read_early_stops_the_workers(firestore, monkeypatch):
+    import threading
+    import opteryx.connectors.firestore_connector as module
+
+    monkeypatch.setattr(module, "_QUERY_CHUNK", 5)
+    gateway = FirestoreConnector(project="p", prefix="fs", preserve_sql_case=True)
+    table = gateway.table_engine("fs.orders", telemetry=None, original_relation="fs.Orders")
+    reader = table.read_dataset()
+    next(reader)
+    reader.close()
+    for thread in threading.enumerate():
+        if thread.name == "firestore-range":
+            thread.join(timeout=2)
+            assert not thread.is_alive()
+    # Nowhere near the 84 chunks a full read of 420 documents would take.
+    assert len(firestore.queries) < 40
 
 
 def test_missing_collection_is_dataset_not_found(firestore):
@@ -241,13 +347,14 @@ def test_json_operators_filter_in_the_engine(firestore):
     assert [row["id"] for row in rows] == ["o0001"]
 
 
-def test_limit_stops_the_page_walk(firestore):
+def test_sql_limit_reaches_the_reader(firestore):
     register_workspace("fs", FirestoreConnector, project="p", preserve_sql_case=True)
     rows = _rows("SELECT id FROM fs.Orders LIMIT 10")
     assert len(rows) == 10
-    # Binding reads one document to prove the collection exists; the scan
-    # then stops after the first (50-document) page.
-    assert [size for _, size, _ in firestore.requests] == [1, 50]
+    # Binding reads one document to prove the collection exists; the scan is
+    # then one query for exactly the ten rows asked for.
+    assert [size for _, size, _ in firestore.requests] == [1]
+    assert firestore.queries == [("Orders", None, True, None, 10)]
 
 
 if __name__ == "__main__":  # pragma: no cover

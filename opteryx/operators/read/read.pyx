@@ -222,9 +222,12 @@ cdef class ReaderNode(BasePlanNode):
                 relation_schema_cols.append(col)
         relation_schema.columns = relation_schema_cols
         start_clock = time.monotonic_ns()
+        # The LIMIT is still applied below; it is passed so a reader that pays
+        # per row fetched (Firestore bills per document) can size its read.
         reader = self.connector.read_dataset(
             columns=self.columns,
             predicates=self.predicates,
+            limit=self.limit,
         )
 
         records_to_read = self.limit if self.limit is not None else float("inf")
