@@ -4,12 +4,12 @@ from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import ExtractionOperator
 from opteryx.compiled.structures.expressions import Function
 from opteryx.compiled.structures.expressions import Literal
+from opteryx.compiled.structures.plan_steps import FilterStep
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 from opteryx.expression import NodeType
 from opteryx.models import QueryTelemetry
-from opteryx.planner.logical_planner import LogicalPlanNode, LogicalPlanStepType
 from opteryx.planner.optimizer.strategies.constant_folding import fold_constants
 from opteryx.planner.optimizer.strategies.predicate_ordering import order_predicates
 from opteryx.types.logical_type import ARRAY, INT64, VARCHAR
@@ -31,7 +31,7 @@ def _identifier(name, value_type):
 
 
 def _filter(condition):
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.Filter)
+    node = FilterStep()
     node.condition = condition
     return node
 

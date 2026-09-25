@@ -38,6 +38,7 @@ from cpython.dict cimport PyDict_Copy
 from cpython cimport dict
 from opteryx.compiled.functions.random_helper import random_string_c
 from opteryx.compiled.structures.expressions import EXPRESSION_TYPES
+from opteryx.compiled.structures.expressions import is_expression as value_is_expression
 
 
 cdef inline object _inner_copy(object obj, dict memo):
@@ -68,6 +69,34 @@ cdef inline object _inner_copy(object obj, dict memo):
     if hasattr(obj, "copy"):
         return obj.copy()
     return obj
+
+
+cdef void _collect_expressions(object value, list out):
+    # TRANSITIONAL (with Node.expressions)
+    if value_is_expression(value):
+        out.append(value)
+        return
+    cdef type value_type = type(value)
+    if value_type is list or value_type is tuple or value_type is set:
+        for item in value:
+            _collect_expressions(item, out)
+    elif value_type is dict:
+        for item in value.values():
+            _collect_expressions(item, out)
+
+
+cdef object _map_held_expressions(object fn, object value):
+    # TRANSITIONAL (with Node.map_expressions)
+    if value_is_expression(value):
+        return fn(value)
+    cdef type value_type = type(value)
+    if value_type is list:
+        return [_map_held_expressions(fn, item) for item in value]
+    if value_type is tuple:
+        return tuple([_map_held_expressions(fn, item) for item in value])
+    if value_type is dict:
+        return {key: _map_held_expressions(fn, item) for key, item in value.items()}
+    return value
 
 
 cdef class Node:
@@ -147,6 +176,30 @@ cdef class Node:
         if node_type_str.startswith("LogicalPlanStepType."):
             node_type_str = node_type_str[20:]
         return f"<Node type={node_type_str}>"
+
+    # TRANSITIONAL (stage 3A): the typed plan-step API on the attribute-bag Node,
+    # so plan-node consumers move onto it before the steps become typed classes
+    # (opteryx/compiled/structures/plan_steps.pyx). Deleted at that switch.
+    def expressions(self, include_columns=True):
+        """Every expression the step holds (roots only), found by shape."""
+        cdef list out = []
+        for key, value in self._properties.items():
+            if key == "columns" and not include_columns:
+                continue
+            _collect_expressions(value, out)
+        return tuple(out)
+
+    def map_expressions(self, object fn):
+        """Replace every expression the step holds with fn(expression), in place."""
+        for key, value in list(self._properties.items()):
+            self._properties[key] = _map_held_expressions(fn, value)
+
+    def operator_parameters(self):
+        return self.properties
+
+    def shallow_copy(self):
+        """A new step of the same type sharing this one's field values, same uuid."""
+        return type(self)(self.node_type, uuid=self.uuid, **self._properties)
 
     cpdef Node copy(self, dict memo=None):
         """

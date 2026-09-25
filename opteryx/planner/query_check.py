@@ -303,7 +303,11 @@ def _in_scope_relations(bound_plan) -> Tuple[CheckedRelation, ...]:
     relations: List[CheckedRelation] = []
     seen: set = set()
 
+    from opteryx.compiled.structures.plan_steps import steps_with
+
     for _, node in bound_plan.nodes(True):
+        if node.node_type not in steps_with("unpruned_columns"):
+            continue
         columns = node.unpruned_columns
         if columns is None:
             continue
@@ -329,33 +333,18 @@ def _in_scope_relations(bound_plan) -> Tuple[CheckedRelation, ...]:
 
 
 def _expression_roots(node):
-    """Every expression hanging off one plan node, however it is stored.
+    """Every expression one plan step holds (its declared expression fields).
 
-    Node properties hold expressions bare, in lists, and inside `(expr, ascending)`
-    tuples for ORDER BY - so this looks for them rather than knowing each property's
-    shape, which is how a walk stops finding things the day a property changes.
-    """
-    from opteryx.models import is_expression
+    A SET statement's `value` is left out: it is the assigned constant, not a name
+    the reader can complete against. (A step's `schema` is the relation's own
+    columns, reported as `relations`; subquery plans hanging off an expression are
+    a different scope with their own names and are never reached from here.)"""
+    from opteryx.planner.logical_planner import LogicalPlanStepType
 
-    found = []
-
-    def _walk(value):
-        if is_expression(value):
-            found.append(value)
-        elif isinstance(value, (list, tuple)):
-            for item in value:
-                _walk(item)
-
-    for prop, value in node.properties.items():
-        # `schema` is the relation's own columns, reported as `relations`; the
-        # subquery plans hanging off `value` are a different scope with their own
-        # names, and reporting them here would offer the reader a name that is not
-        # in scope where they are typing.
-        if prop in ("schema", "unpruned_columns", "connector", "manifest", "value"):
-            continue
-        _walk(value)
-
-    return found
+    roots = node.expressions()
+    if node.node_type == LogicalPlanStepType.Set:
+        return [root for root in roots if root is not node.value]
+    return list(roots)
 
 
 def _walk_expression(root, seen):

@@ -75,7 +75,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from opteryx.expression import ExpressionColumn, NodeType, get_all_nodes_of_type
 from opteryx.models import Node
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.types.logical_type import ARRAY as _CT_ARRAY
 from opteryx.types.logical_type import BOOLEAN as _CT_BOOLEAN
 from opteryx.types.schema import ConstantColumn
@@ -352,7 +352,7 @@ class DisjunctiveDomainPushdownStrategy(OptimizationStrategy):
     the module docstring for the full reasoning and the TPC-H Q7 example.
     """
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Filter and node.condition is not None:
             conjuncts: List[Node] = []
             derived: List[Node] = []

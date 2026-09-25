@@ -87,7 +87,6 @@ _JOIN_SQL = (
 
 
 def test_statistics_refresh_narrows_value_range_from_filter():
-    from opteryx.planner.logical_planner import LogicalPlanStepType
 
     plan = _optimized_plan("SELECT * FROM testdata.tpch_001.orders WHERE o_orderkey > 1000 AND o_orderkey < 2000")
     # the scan carries the BETWEEN; the narrowing it drives is exercised below.

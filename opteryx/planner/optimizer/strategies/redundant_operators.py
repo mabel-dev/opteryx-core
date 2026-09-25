@@ -24,7 +24,7 @@ impotent steps.
 """
 
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
@@ -76,7 +76,7 @@ def _output_identities(plan: LogicalPlan, nid) -> set | None:
 
 
 class RedundantOperationsStrategy(OptimizationStrategy):
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         # If we're a project and the providing step has the same columns, we're
         # not doing anything so can be removed.
         if node.node_type == LogicalPlanStepType.Project:

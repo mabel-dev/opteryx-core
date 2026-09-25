@@ -21,13 +21,13 @@ import pytest
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.planner.plan_context import PlanContext
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner.logical_planner import LogicalPlanNode
+from opteryx.compiled.structures.plan_steps import step_classes
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.optimizer.plan_validator import validate_plan
 
 
 def _node(step_type):
-    n = LogicalPlanNode(node_type=step_type)
+    n = step_classes()[step_type]()
     n.columns = []
     return n
 

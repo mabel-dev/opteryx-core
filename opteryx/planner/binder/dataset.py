@@ -272,7 +272,7 @@ def visit_function_dataset(
         types = {}
         element_types = {}
         if len(node.values) > 0:
-            for i, column in enumerate(node.columns):
+            for i, column in enumerate(node.column_aliases):
                 if len(node.values[0]) >= i:
                     value = node.values[0][i]
                     types[column] = value.type  # ColumnType
@@ -299,7 +299,7 @@ def visit_function_dataset(
                 source=relation_name,
                 schema_column=_build_value_column(column),
             )
-            for column in node.columns
+            for column in node.column_aliases
         ]
         schema = RelationSchema(
             name=relation_name,
@@ -639,13 +639,11 @@ def visit_function_dataset(
                 for name in sample_morsel.column_names
             ]
 
-        if node.columns:
+        if node.column_aliases:
             # READ_JSONL('...') AS alias(col1, col2, ...) -- renaming columns via
-            # the alias's own column list -- is not supported: `node.columns`
-            # holds pre-bind plain strings here, never replaced with bound
-            # LogicalColumn objects the rest of the pipeline expects, so this
-            # shape crashes later with an opaque AttributeError instead of
-            # failing loud at the point of the actual problem. `AS alias` (a
+            # the alias's own column list (`node.column_aliases`) -- is not
+            # supported: nothing maps the names onto the file's columns, so it is
+            # refused here rather than silently ignored. `AS alias` (a
             # plain relation rename, no column list) is unaffected.
             raise NotSupportedError(
                 f"READ_JSONL('{path}') AS alias(...) is not supported -- only "
@@ -815,7 +813,7 @@ def visit_function_dataset(
         physical_schema = rugo_to_relation_schema(rugo_metadata, schema_name=relation_name)
         physical_names = [c.name for c in physical_schema.columns]
 
-        if node.columns:
+        if node.column_aliases:
             # See the identical check/comment on the READ_JSONL branch above --
             # AS alias(col1, col2, ...) column renaming is not supported; AS
             # alias (relation rename only) is unaffected.
@@ -1052,7 +1050,7 @@ def visit_function_dataset(
                 for name in sample_morsel.column_names
             ]
 
-        if node.columns:
+        if node.column_aliases:
             # See the identical check/comment on the READ_JSONL branch above --
             # AS alias(col1, col2, ...) column renaming is not supported; AS
             # alias (relation rename only) is unaffected.

@@ -83,7 +83,7 @@ def _find_scan_for_relation(
 ):
     """Find the Scan node inside ``subplan_id`` whose relation matches.
 
-    Returns the LogicalPlanNode or None if no Scan with a manifest is present.
+    Returns the PlanStep or None if no Scan with a manifest is present.
     """
     for _, node in _walk_subplan(plan, subplan_id):
         if node.node_type != LogicalPlanStepType.Scan:

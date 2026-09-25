@@ -13,7 +13,7 @@ Goal: Preposition for following actions
 from opteryx.expression import NodeType
 from opteryx.models import QueryTelemetry
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
@@ -63,7 +63,7 @@ INVERSIONS = {**HALF_INVERSIONS, **{v: k for k, v in HALF_INVERSIONS.items()}}
 _INVERTIBLE_NODE_TYPES = (NodeType.COMPARISON_OPERATOR, NodeType.UNARY_OPERATOR)
 
 
-def _inverted(node: LogicalPlanNode) -> LogicalPlanNode:
+def _inverted(node: PlanStep) -> PlanStep:
     """A NEW node computing the negation of `node` — never `node` edited in place.
 
     Expression trees are not guaranteed to be trees: the binder resolves two
@@ -82,7 +82,7 @@ def _inverted(node: LogicalPlanNode) -> LogicalPlanNode:
     return node.replace(value=INVERSIONS[node.value], schema_column=None)
 
 
-def _directly_invertible(node: LogicalPlanNode) -> bool:
+def _directly_invertible(node: PlanStep) -> bool:
     """True when `NOT node` collapses to a single node with no NOT left behind."""
     while node is not None and node.node_type == NodeType.NESTED:
         node = node.centre
@@ -141,7 +141,7 @@ class BooleanSimplificationStrategy(OptimizationStrategy):  # pragma: no cover
     query plan.
     """
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Filter:
             # do the work
             node.condition = update_expression_tree(node.condition, self.telemetry)
@@ -159,7 +159,7 @@ class BooleanSimplificationStrategy(OptimizationStrategy):  # pragma: no cover
         return len(candidates) > 0
 
 
-def _is_literal_true(node: LogicalPlanNode) -> bool:
+def _is_literal_true(node: PlanStep) -> bool:
     """Check if a node is a literal TRUE value."""
     if node is None:
         return False
@@ -168,7 +168,7 @@ def _is_literal_true(node: LogicalPlanNode) -> bool:
     return False
 
 
-def _is_literal_false(node: LogicalPlanNode) -> bool:
+def _is_literal_false(node: PlanStep) -> bool:
     """Check if a node is a literal FALSE value."""
     if node is None:
         return False
@@ -177,7 +177,7 @@ def _is_literal_false(node: LogicalPlanNode) -> bool:
     return False
 
 
-def _flatten_and_chain(node: LogicalPlanNode, telemetry: QueryTelemetry) -> list:
+def _flatten_and_chain(node: PlanStep, telemetry: QueryTelemetry) -> list:
     """
     Flatten nested AND chains into a list of conditions.
     e.g., ((A AND B) AND C) becomes [A, B, C]
@@ -192,7 +192,7 @@ def _flatten_and_chain(node: LogicalPlanNode, telemetry: QueryTelemetry) -> list
     return left_conditions + right_conditions
 
 
-def _rebuild_and_chain(conditions: list) -> LogicalPlanNode:
+def _rebuild_and_chain(conditions: list) -> PlanStep:
     """
     Rebuild AND chain from a list of conditions.
     [A, B, C] becomes ((A AND B) AND C)
@@ -208,7 +208,7 @@ def _rebuild_and_chain(conditions: list) -> LogicalPlanNode:
     return result
 
 
-def _simplify_and_chain(node: LogicalPlanNode, telemetry: QueryTelemetry):
+def _simplify_and_chain(node: PlanStep, telemetry: QueryTelemetry):
     """Simplify an AND chain in a single pass.
 
     Flattens the whole chain once, simplifies each conjunct once, then folds
@@ -276,7 +276,7 @@ def _simplify_and_chain(node: LogicalPlanNode, telemetry: QueryTelemetry):
     return _rebuild_and_chain(kept)
 
 
-def _flatten_or_chain(node: LogicalPlanNode) -> list:
+def _flatten_or_chain(node: PlanStep) -> list:
     """
     Flatten nested OR chains into a list of conditions.
     e.g., ((A OR B) OR C) becomes [A, B, C]
@@ -291,7 +291,7 @@ def _flatten_or_chain(node: LogicalPlanNode) -> list:
     return left_conditions + right_conditions
 
 
-def _rebuild_or_chain(conditions: list) -> LogicalPlanNode:
+def _rebuild_or_chain(conditions: list) -> PlanStep:
     """
     Rebuild OR chain from a list of conditions.
     [A, B, C] becomes ((A OR B) OR C)
@@ -307,7 +307,7 @@ def _rebuild_or_chain(conditions: list) -> LogicalPlanNode:
     return result
 
 
-def update_expression_tree(node: LogicalPlanNode, telemetry: QueryTelemetry):
+def update_expression_tree(node: PlanStep, telemetry: QueryTelemetry):
     # break out of nests
     if node.node_type == NodeType.NESTED:
         return update_expression_tree(node.centre, telemetry)

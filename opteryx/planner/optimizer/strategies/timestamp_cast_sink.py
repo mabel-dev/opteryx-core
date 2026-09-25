@@ -61,7 +61,7 @@ from draken.draken_native import TimestampUnit
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.logical_planner.node_expressions import expression_roots
 from opteryx.types.logical_type import ColumnType
@@ -126,10 +126,10 @@ class TimestampCastSinkStrategy(OptimizationStrategy):
     # are settled — eligibility reads the pushed predicates.
     requires = ("projection-pushed",)
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node is None:
             return context
-        context.optimized_plan.add_node(context.node_id, LogicalPlanNode(**node.properties))
+        context.optimized_plan.add_node(context.node_id, node.shallow_copy())
         if context.parent_nid:
             # Re-adding the edge must preserve its relationship: a join leg label
             # records which side of the parent join this branch feeds.
@@ -173,13 +173,11 @@ class TimestampCastSinkStrategy(OptimizationStrategy):
                 # An aggregate's ``columns`` is a derived input-column list
                 # (redundant with groups/aggregates); it lists the column as a
                 # bare identifier, which is read bookkeeping, not a raw use.
-                exclude = (
-                    ("columns",)
-                    if node.node_type
-                    in (LogicalPlanStepType.AggregateAndGroup, LogicalPlanStepType.Aggregate)
-                    else ()
+                include_columns = node.node_type not in (
+                    LogicalPlanStepType.AggregateAndGroup,
+                    LogicalPlanStepType.Aggregate,
                 )
-                for root in expression_roots(node, exclude=exclude):
+                for root in expression_roots(node, include_columns=include_columns):
                     _classify(root, casted, raw)
 
         # Eligible: emitted by a retag-capable Scan, cast-only use, single

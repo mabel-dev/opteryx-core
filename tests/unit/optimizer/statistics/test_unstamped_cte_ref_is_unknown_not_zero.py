@@ -14,12 +14,13 @@ stand-in a scan with no manifest counts gets.
 
 import os
 import sys
+from opteryx.compiled.structures.plan_steps import ExitStep
+from opteryx.compiled.structures.plan_steps import JoinStep
+from opteryx.compiled.structures.plan_steps import MaterializedCteRefStep
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
-from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.planner.optimizer.statistics_refresh import _UNKNOWN_ROW_COUNT
 from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
@@ -39,19 +40,19 @@ def _plan_with_unstamped_ref_joined_to_big_relation():
     plan = LogicalPlan()
     plan_context = PlanContext()
 
-    unstamped = LogicalPlanNode(node_type=LogicalPlanStepType.MaterializedCteRef)
+    unstamped = MaterializedCteRefStep()
     unstamped.cte_key = "unstamped"
 
-    big = LogicalPlanNode(node_type=LogicalPlanStepType.MaterializedCteRef)
+    big = MaterializedCteRefStep()
     big.cte_key = "big"
     plan_context.set_cte_statistics(
         "big", RelationStatistics(columns={}, row_count_metric=_BIG_ROW_COUNT)
     )
 
-    join = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+    join = JoinStep()
     join.type = "inner"
 
-    exit_node = LogicalPlanNode(node_type=LogicalPlanStepType.Exit)
+    exit_node = ExitStep()
 
     plan.add_node("unstamped_ref", unstamped)
     plan.add_node("big_relation", big)

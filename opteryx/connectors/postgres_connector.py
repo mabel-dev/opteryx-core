@@ -87,6 +87,7 @@ from opteryx.models import QueryTelemetry
 from opteryx.types import logical_type as _lt
 from opteryx.types.logical_type import ColumnType, DrakenType, LogicalCategory, LogicalKind
 from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.compiled.structures.plan_steps import FilterStep
 
 # Rows per morsel the native Source cuts the server stream into. One morsel of
 # this size holds a few megabytes for a typical row width; the stream is
@@ -875,11 +876,9 @@ class PostgresTable(
             if condition.centre is None:
                 return False
             # A Filter over what the NOT wraps — can_push reads only its condition.
-            from opteryx.planner.logical_planner import LogicalPlanNode
-            from opteryx.planner.logical_planner import LogicalPlanStepType
 
-            gate_operator = LogicalPlanNode(
-                node_type=LogicalPlanStepType.Filter, condition=condition.centre
+            gate_operator = FilterStep(
+                condition=condition.centre
             )
         if not PredicatePushable.can_push(self, gate_operator, types):
             return False

@@ -36,10 +36,11 @@ partial/best-effort fusion.
 
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import rewrite_children
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
 from opteryx.compiled.structures.expressions import Nested
+from opteryx.compiled.structures.plan_steps import ProjectStep
 
 
 def _identity_of(node):
@@ -95,7 +96,7 @@ class ProjectFusionStrategy(OptimizationStrategy):
     provides = ("project-fused",)
     requires = ("projection-pushed",)
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Project:
             edges = context.optimized_plan.outgoing_edges(context.node_id)
             if len(edges) == 1:
@@ -114,7 +115,7 @@ class ProjectFusionStrategy(OptimizationStrategy):
         return plan
 
     @staticmethod
-    def _try_fuse(lower: LogicalPlanNode, upper: LogicalPlanNode):
+    def _try_fuse(lower: PlanStep, upper: PlanStep):
         """Build a fused Project node, or return None if the pair can't be fused
         safely (see module docstring — no partial fusion)."""
         lower_cols = list(lower.columns or []) + list(getattr(lower, "passthrough_columns", None) or [])
@@ -167,7 +168,7 @@ class ProjectFusionStrategy(OptimizationStrategy):
             else:
                 hoisted.append(lower_expr.copy())
 
-        fused = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
+        fused = ProjectStep()
         fused.columns = [_substitute_column(c, inline_map) for c in upper_cols]
         fused.passthrough_columns = [_substitute_column(c, inline_map) for c in upper_order]
         # Carry forward any hoisted columns `upper` already had (a prior fusion

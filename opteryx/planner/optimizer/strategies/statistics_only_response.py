@@ -38,6 +38,7 @@ from .optimization_strategy import (
     OptimizerContext,
     get_nodes_of_type_from_logical_plan,
 )
+from opteryx.compiled.structures.plan_steps import ProjectStep
 
 
 def find_scan_node(logical_plan):
@@ -58,12 +59,12 @@ def find_aggregate_node(logical_plan):
     Find the Aggregate node in the logical plan.
 
     Returns:
-        The Aggregate node if found, None otherwise.
+        (nid, node) of the Aggregate node, or (None, None).
     """
-    for _, node in logical_plan.nodes(data=True):
+    for nid, node in logical_plan.nodes(data=True):
         if node.node_type == LogicalPlanStepType.Aggregate:
-            return node
-    return None
+            return nid, node
+    return None, None
 
 
 def find_exit_node(logical_plan):
@@ -212,7 +213,7 @@ def is_statistics_only_query(logical_plan) -> bool:
         return False
 
     # Find aggregate node
-    aggregate_node = find_aggregate_node(logical_plan)
+    _, aggregate_node = find_aggregate_node(logical_plan)
     if not aggregate_node:
         return False
 
@@ -592,7 +593,7 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
             return plan
 
         # Locate nodes we'll need
-        aggregate_node = find_aggregate_node(plan)
+        aggregate_nid, aggregate_node = find_aggregate_node(plan)
         scan_node = find_scan_node(plan)
         exit_node = find_exit_node(plan)
 
@@ -778,13 +779,14 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         if len(ordered_literals) == len(literals):
             literals = ordered_literals
 
-        # Rewrite aggregate node into a Project with the literal columns
-        aggregate_node.node_type = LogicalPlanStepType.Project
-        aggregate_node.columns = literals
-        # Remove aggregate-specific attributes to avoid confusion downstream
-        aggregate_node.aggregates = None
-        aggregate_node.groups = None
-        aggregate_node.projection = None
+        # A NEW Project with the literal columns in the aggregate's place.
+        plan[aggregate_nid] = ProjectStep(
+            uuid=aggregate_node.uuid,
+            columns=literals,
+            schema=aggregate_node.schema,
+            all_relations=aggregate_node.all_relations,
+            pre_update_columns=aggregate_node.pre_update_columns,
+        )
 
         # Point the source(s) to $one_row so physical planner / executor treat
         # this as a projection-only plan (no table scanning required). We apply

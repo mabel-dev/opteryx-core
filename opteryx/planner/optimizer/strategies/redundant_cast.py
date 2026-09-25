@@ -58,7 +58,7 @@ replace an expression with a transparent `NESTED` wrapper around its operand.
 """
 
 from opteryx.expression import NodeType
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
 from opteryx.compiled.structures.expressions import Nested
@@ -119,7 +119,7 @@ def _eliminate_redundant_casts(node, telemetry, value_context=False):
 
 
 class RedundantCastEliminationStrategy(OptimizationStrategy):
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Project:
             node.columns = [_eliminate_redundant_casts(c, self.telemetry) for c in node.columns]
             context.optimized_plan[context.node_id] = node

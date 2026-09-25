@@ -16,7 +16,7 @@ from typing import Optional
 from typing import Set
 
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
@@ -59,7 +59,7 @@ class LimitPushdownStrategy(OptimizationStrategy):
         LogicalPlanStepType.FramedWindow,
     }
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Limit:
             if node.offset is not None or node.limit in (None, 0):
                 return context
@@ -112,14 +112,14 @@ class LimitPushdownStrategy(OptimizationStrategy):
         return len(candidates) > 0
 
     @staticmethod
-    def _collect_relations(node: LogicalPlanNode) -> Set[str]:
+    def _collect_relations(node: PlanStep) -> Set[str]:
         relations = getattr(node, "all_relations", None)
         if relations:
             return set(relations)
         return set()
 
     def _should_skip_branch(
-        self, limit_node: LogicalPlanNode, node: LogicalPlanNode, context: OptimizerContext
+        self, limit_node: PlanStep, node: PlanStep, context: OptimizerContext
     ) -> bool:
         targets: Set[str] = context.limit_targets[id(limit_node)]
         if not targets:
@@ -129,8 +129,8 @@ class LimitPushdownStrategy(OptimizationStrategy):
 
     def _apply_to_scan(
         self,
-        limit_node: LogicalPlanNode,
-        scan_node: LogicalPlanNode,
+        limit_node: PlanStep,
+        scan_node: PlanStep,
         context: OptimizerContext,
     ) -> Optional[bool]:
         targets: Set[str] = context.limit_targets[id(limit_node)]
@@ -165,7 +165,7 @@ class LimitPushdownStrategy(OptimizationStrategy):
         return False
 
     def _place_before_node(
-        self, limit_node: LogicalPlanNode, _: LogicalPlanNode, context: OptimizerContext
+        self, limit_node: PlanStep, _: PlanStep, context: OptimizerContext
     ) -> None:
         if context.collected_nids[id(limit_node)] in context.optimized_plan:
             context.optimized_plan.remove_node(context.collected_nids[id(limit_node)], heal=True)

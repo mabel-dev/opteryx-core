@@ -12,17 +12,16 @@ a metric input stays a metric, an estimate stays an estimate.
 
 import os
 import sys
+from opteryx.compiled.structures.plan_steps import LimitStep
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
-from opteryx.planner.logical_planner import LogicalPlanNode
-from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.planner.optimizer.statistics_refresh import _limit_stats
 
 
 def _limit_node(limit=None, offset=None):
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.Limit)
+    node = LimitStep()
     node.limit = limit
     node.offset = offset
     return node

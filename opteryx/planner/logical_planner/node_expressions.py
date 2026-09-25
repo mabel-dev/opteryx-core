@@ -79,26 +79,19 @@ def _collect_roots(value, out: List) -> None:
             _collect_roots(item, out)
 
 
-def expression_roots(node, exclude=()) -> List:
+def expression_roots(node, include_columns: bool = True) -> List:
     """Return every top-level expression tree the plan ``node`` evaluates.
 
     See the module docstring for the completeness/purity contract.
 
-    ``exclude`` names property keys to skip. The only sanctioned use is dropping
-    *derived bookkeeping* column lists — e.g. an aggregate's ``columns`` (the
-    input columns it reads, a projection-pushdown artifact redundant with
-    ``groups``/``aggregates``) — which would otherwise read as standalone column
-    references. Excluding a genuine expression-bearing field would under-count
-    and is unsafe; keep this list to known-derived attributes.
+    ``include_columns=False`` leaves out the step's output ``columns``. The
+    sanctioned uses are a Scan (its ``columns`` is its emit list, not a read) and an
+    aggregate (its ``columns`` is *derived bookkeeping* — the input columns it reads,
+    a projection-pushdown artifact redundant with ``groups``/``aggregates``), whose
+    columns would otherwise read as standalone column references. Leaving out a
+    genuine expression-bearing field would under-count and is unsafe.
     """
-    roots: List = []
-    for key, value in node.properties.items():
-        if key == "node_type" or key == "uuid":
-            continue
-        if key in exclude:
-            continue
-        _collect_roots(value, roots)
-    return roots
+    return list(node.expressions(include_columns=include_columns))
 
 
 def referenced_identities(node) -> Set[str]:

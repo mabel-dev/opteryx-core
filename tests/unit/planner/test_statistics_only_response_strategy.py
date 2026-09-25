@@ -11,7 +11,6 @@ it leaves non-eligible plans unchanged.
 import types
 
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
 from opteryx.expression import NodeType
 from opteryx.planner.optimizer.strategies.statistics_only_response import (
@@ -23,6 +22,12 @@ from opteryx.planner.optimizer.strategies.statistics_only_response import (
 from opteryx.planner.optimizer.strategies.statistics_only_response import (
     is_simple_aggregate,
 )
+from opteryx.compiled.structures.expressions import Aggregator
+from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.compiled.structures.expressions import Wildcard
+from opteryx.compiled.structures.plan_steps import AggregateStep
+from opteryx.compiled.structures.plan_steps import ExitStep
+from opteryx.compiled.structures.plan_steps import ScanStep
 
 def _telemetry():
     return types.SimpleNamespace(optimization_statistics_only_response=0)
@@ -50,48 +55,47 @@ class MockManifest:
         return clone
 
 
-class MockAggregator:
-    def __init__(self):
-        # Minimal aggregator shape expected by the strategy
-        self.node_type = NodeType.AGGREGATOR
-        self.value = "COUNT"
-        # Parameters: first parameter is wildcard for COUNT(*)
-        self.parameters = [types.SimpleNamespace(node_type=NodeType.WILDCARD)]
-        # Keep schema_column identity shape to match other code paths where needed
-        self.schema_column = types.SimpleNamespace(identity="$COUNT(*)", column_type=None)
-        self.duplicate_treatment = None
-        self.condition = None
+def _count_star():
+    """COUNT(*) — the aggregate shape the strategy answers from the manifest."""
+    return Aggregator(
+        value="COUNT",
+        parameters=[Wildcard()],
+        schema_column=types.SimpleNamespace(identity="$COUNT(*)", column_type=None),
+    )
 
 
-class MockDistinctCountAggregator(MockAggregator):
-    def __init__(self):
-        super().__init__()
-        self.parameters = [types.SimpleNamespace(node_type=NodeType.IDENTIFIER)]
-        self.duplicate_treatment = "Distinct"
+def _count_distinct():
+    return Aggregator(
+        value="COUNT",
+        parameters=[LogicalColumn(NodeType.IDENTIFIER, "x")],
+        duplicate_treatment="Distinct",
+        schema_column=types.SimpleNamespace(identity="$COUNT(*)", column_type=None),
+    )
 
 
 def make_simple_count_plan(count=9, alias="my_count"):
     plan = LogicalPlan()
 
     # Scan node
-    scan = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    scan = ScanStep()
     scan.relation = "planets"
     scan.alias = "planets"
     scan.manifest = MockManifest(count)
 
     # Aggregate node representing `SELECT COUNT(*) AS alias` over the scan
-    agg = LogicalPlanNode(node_type=LogicalPlanStepType.Aggregate)
-    aggregator = MockAggregator()
+    agg = AggregateStep()
+    aggregator = _count_star()
     agg.aggregates = [aggregator]
 
     # Exit node to hold column alias. The strategy pairs Exit columns to aggregates
     # by schema IDENTITY (Exit order is not guaranteed to match aggregate order), so
     # the column has to carry the aggregate's identity for its alias to be found.
-    exit_node = LogicalPlanNode(node_type=LogicalPlanStepType.Exit)
+    exit_node = ExitStep()
     exit_node.columns = [
-        types.SimpleNamespace(
+        LogicalColumn(
+            NodeType.IDENTIFIER,
+            None,
             alias=alias,
-            source_column=None,
             schema_column=types.SimpleNamespace(identity=aggregator.schema_column.identity),
         )
     ]
@@ -195,5 +199,5 @@ def test_get_count_from_manifest():
 
 
 def test_is_simple_aggregate_rejects_count_distinct():
-    aggregate_node = types.SimpleNamespace(aggregates=[MockDistinctCountAggregator()])
+    aggregate_node = types.SimpleNamespace(aggregates=[_count_distinct()])
     assert not is_simple_aggregate(aggregate_node)

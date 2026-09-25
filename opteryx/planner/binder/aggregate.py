@@ -211,7 +211,8 @@ def visit_distinct(self, node: Node, context: BindingContext) -> Tuple[Node, Bin
     node.columns = []
     if node.on:
         # Bind the local columns to physical columns
-        node.on, group_contexts = zip(*(inner_binder(col, context) for col in node.on))
+        bound_on, group_contexts = zip(*(inner_binder(col, context) for col in node.on))
+        node.on = list(bound_on)
         for col in node.on:
             _reject_variant_key("DISTINCT ON", col)
         from opteryx.planner.binder.binder import merge_schemas

@@ -11,11 +11,12 @@ Goal: Break filters into units which are easier to handle
 """
 
 from opteryx.expression import NodeType
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.utils import random_string
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext, filter_referenced_columns
 from .predicate_rewriter import rewrite_anded_not_like_to_all
+from opteryx.compiled.structures.plan_steps import FilterStep
 
 
 def _inner_split(node):
@@ -47,7 +48,7 @@ def _inner_split(node):
 
 class SplitConjunctivePredicatesStrategy(OptimizationStrategy):
     rebuilds_plan = True  # rebuilds the whole plan into an empty working plan
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         """
         Conjunctive Predicates (ANDs) can be split and executed in any order to get the
         same result. This means we can split them into separate steps in the plan.
@@ -81,7 +82,7 @@ class SplitConjunctivePredicatesStrategy(OptimizationStrategy):
                 self.telemetry.optimization_split_conjunctions += len(split_predicates) - 1
             new_nodes = []
             for predicate in split_predicates:
-                new_node = LogicalPlanNode(node_type=LogicalPlanStepType.Filter)
+                new_node = FilterStep()
                 new_node.condition = predicate
                 new_node.columns = filter_referenced_columns(predicate)
 
@@ -112,7 +113,7 @@ class SplitConjunctivePredicatesStrategy(OptimizationStrategy):
 
         for i, new_node in enumerate(new_nodes):
             nid = random_string() if (i + 1) < len(new_nodes) else context.node_id
-            context.optimized_plan.add_node(nid, LogicalPlanNode(**new_node.properties))
+            context.optimized_plan.add_node(nid, new_node.shallow_copy())
             if context.parent_nid:
                 context.optimized_plan.add_edge(
                     nid, context.parent_nid, parent_relationship if i == 0 else None

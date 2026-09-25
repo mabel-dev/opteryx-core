@@ -26,7 +26,7 @@ from opteryx.planner.optimizer.strategies.join_key_materialization import (
     materialize_operand_as_column,
     split_and_conditions as _split_and_conditions,
 )
-from opteryx.planner.logical_planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.planner.optimizer.strategies.optimization_strategy import OptimizerContext, OptimizationStrategy
 from opteryx.compiled.structures.expressions import And
 
@@ -142,7 +142,7 @@ def _affine_hoist_target(expr: Optional[Node], relations: List[str]) -> bool:
 
 
 def _hoist_arithmetic_join_key(
-    plan: LogicalPlan, join_id: str, join_node: LogicalPlanNode, pred: Node
+    plan: LogicalPlan, join_id: str, join_node: PlanStep, pred: Node
 ) -> Optional[Node]:
     """Rewrite `identifier = affine_expr(other_identifier, literal)` (or the
     mirror) into a NEW `identifier = new_identifier`, materialising the affine
@@ -219,7 +219,7 @@ def _collect_scan_uuids(plan: LogicalPlan, root_id: str) -> List[str]:
     return uuids
 
 
-def _is_unconverted_cross_join(node: LogicalPlanNode) -> bool:
+def _is_unconverted_cross_join(node: PlanStep) -> bool:
     # A window join (`agg OVER ()`, window_to_join.py) is a cross join with no ON, so it
     # matches everything below — but it is not one of the implicit `FROM a, b` joins this
     # strategy exists to convert. Its right leg is a synthetic one-row aggregate, and its
@@ -256,7 +256,7 @@ def _subplan_relation_names(
 
 
 def _try_dissolve_cross_join_in_inner_join(
-    plan: LogicalPlan, inner_join_id: str, inner_join_node: LogicalPlanNode
+    plan: LogicalPlan, inner_join_id: str, inner_join_node: PlanStep
 ) -> bool:
     """
     Handles the pattern that arises after predicate pushdown converts an outer
@@ -285,7 +285,7 @@ def _try_dissolve_cross_join_in_inner_join(
         return False
 
     cross_join_id: Optional[str] = None
-    cross_join_node: Optional[LogicalPlanNode] = None
+    cross_join_node: Optional[PlanStep] = None
     other_child_id: Optional[str] = None
     other_child_rel: Optional[object] = None
 
@@ -435,7 +435,7 @@ def _try_dissolve_cross_join_in_inner_join(
 def _collect_cross_joins(
     plan: LogicalPlan,
     node_id: str,
-    result: List[Tuple[str, LogicalPlanNode]],
+    result: List[Tuple[str, PlanStep]],
     visited: Optional[Set[str]] = None,
 ) -> None:
     """
@@ -482,7 +482,7 @@ class CrossJoinFilterPushdownStrategy(OptimizationStrategy):
 
     requires = ("predicates-pushed",)
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         return context
 
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:
@@ -504,7 +504,7 @@ class CrossJoinFilterPushdownStrategy(OptimizationStrategy):
             if filter_node.condition is None:
                 continue
 
-            cross_joins: List[Tuple[str, LogicalPlanNode]] = []
+            cross_joins: List[Tuple[str, PlanStep]] = []
             _collect_cross_joins(plan, filter_id, cross_joins)
             if not cross_joins:
                 continue

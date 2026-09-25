@@ -23,10 +23,11 @@ from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.planner.expression_traits import has_volatile_function
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.utils import random_string
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
+from opteryx.compiled.structures.plan_steps import ProjectStep
 
 
 def _collect_identifier_names(expr) -> set:
@@ -63,7 +64,7 @@ def _make_passthrough(original: Node) -> Node:
 
 
 class GroupKeyReductionStrategy(OptimizationStrategy):
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type != LogicalPlanStepType.AggregateAndGroup:
             return context
 
@@ -102,7 +103,7 @@ class GroupKeyReductionStrategy(OptimizationStrategy):
         for agg in aggregates:
             project_columns.append(_make_passthrough(agg))
 
-        project_node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
+        project_node = ProjectStep()
         project_node.columns = project_columns
         project_node.passthrough_columns = []
 

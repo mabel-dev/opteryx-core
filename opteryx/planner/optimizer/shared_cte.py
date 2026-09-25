@@ -38,9 +38,9 @@ from typing import Tuple
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.relation_resolver import iter_plan_forest
+from opteryx.compiled.structures.plan_steps import FilterStep
 
 __all__ = ["coordinate_shared_cte", "strip_body_boundary"]
 
@@ -249,7 +249,7 @@ def _push_common_predicates(body: LogicalPlan, refs, body_schema, telemetry) -> 
         translated = _translate_condition(
             donor.condition, donor_mapping, body_columns_by_identity
         )
-        body_filter = LogicalPlanNode(LogicalPlanStepType.Filter)
+        body_filter = FilterStep()
         body_filter.condition = translated
         body_filter.columns = get_all_nodes_of_type(
             translated, (NodeType.IDENTIFIER, NodeType.AGGREGATOR)

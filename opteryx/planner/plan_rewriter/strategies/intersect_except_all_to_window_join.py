@@ -37,7 +37,7 @@ a later stage (the column names are needed to build the partition / join keys).
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, Node
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.plan_rewriter.strategies._set_op_join_common import column_names as _column_names
 from opteryx.planner.plan_rewriter.strategies._set_op_join_common import live_relations
@@ -48,6 +48,9 @@ from opteryx.types.schema import SchemaColumn, mint_column_identity
 from opteryx.utils import random_string
 from opteryx.compiled.structures.expressions import And
 from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.plan_steps import JoinStep
+from opteryx.compiled.structures.plan_steps import ProjectStep
+from opteryx.compiled.structures.plan_steps import WindowStep
 
 _ROW_NUMBER_NAME = "$row_number"
 
@@ -100,7 +103,7 @@ def _make_window(partition_relation: str, col_names: list):
         column_type=_lt.INT64,
         identity=mint_column_identity(rn_relation, _ROW_NUMBER_NAME),
     )
-    window = LogicalPlanNode(node_type=LogicalPlanStepType.Window)
+    window = WindowStep()
     window.partition_by = [
         LogicalColumn(
             node_type=NodeType.IDENTIFIER, source=partition_relation, source_column=c
@@ -135,7 +138,7 @@ class IntersectExceptAllToWindowJoinStrategy(PlanRewriteStrategy):
             for _, node in plan.nodes(True)
         )
 
-    def visit(self, node: LogicalPlanNode, context: PlanRewriteContext) -> PlanRewriteContext:
+    def visit(self, node: PlanStep, context: PlanRewriteContext) -> PlanRewriteContext:
         if not context.rewritten_plan:
             context.rewritten_plan = context.pre_rewrite_tree.copy()
 
@@ -180,7 +183,7 @@ class IntersectExceptAllToWindowJoinStrategy(PlanRewriteStrategy):
                         conditions.append(_eq(left_rel, col, right_rel, col))
             conditions.append(_eq(left_rn_rel, _ROW_NUMBER_NAME, right_rn_rel, _ROW_NUMBER_NAME))
 
-            join = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+            join = JoinStep()
             # not-distinct on BOTH the value columns and $row_number: the ALL forms
             # compare rows the same way the DISTINCT forms do, they just count
             # occurrences as well. $row_number is never NULL, so the rule only ever
@@ -195,7 +198,7 @@ class IntersectExceptAllToWindowJoinStrategy(PlanRewriteStrategy):
             plan[nid] = join
 
             # Drop the row-number column from the output.
-            project = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
+            project = ProjectStep()
             project.columns = [
                 LogicalColumn(node_type=NodeType.IDENTIFIER, source=None, source_column=c)
                 for c in col_names

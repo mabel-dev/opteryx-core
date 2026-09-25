@@ -24,11 +24,12 @@ from opteryx.managers import views as views_module
 from opteryx.models import Node
 from opteryx.planner import execute_logical_plan
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
-from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.utils import random_string
 from opteryx.compiled.structures.expressions import Aggregator
 from opteryx.compiled.structures.expressions import Wildcard
+from opteryx.compiled.structures.plan_steps import AggregateStep
+from opteryx.compiled.structures.plan_steps import ExitStep
+from opteryx.compiled.structures.plan_steps import ScanStep
 
 # A view whose body carries an IN-subquery — the shape the plan rewriter lowers to a
 # LEFT SEMI join, and the shape a real semi-join view (e.g. exploited_vulnerabilities) has.
@@ -62,7 +63,7 @@ def odata_style_count_plan(relation):
     """
     plan = LogicalPlan()
 
-    scan = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    scan = ScanStep()
     scan.relation = relation
     scan.alias = relation.split(".")[-1]
     scan.hints = []
@@ -73,14 +74,14 @@ def odata_style_count_plan(relation):
         value="COUNT", parameters=[Wildcard()]
     )
     count.alias = "count"
-    aggregate = LogicalPlanNode(node_type=LogicalPlanStepType.Aggregate)
+    aggregate = AggregateStep()
     aggregate.groups = []
     aggregate.aggregates = [count]
     aggregate_id = random_string()
     plan.add_node(aggregate_id, aggregate)
     plan.add_edge(scan_id, aggregate_id)
 
-    exit_node = LogicalPlanNode(node_type=LogicalPlanStepType.Exit)
+    exit_node = ExitStep()
     exit_node.columns = [count]
     exit_id = random_string()
     plan.add_node(exit_id, exit_node)
@@ -111,14 +112,14 @@ def test_count_over_a_view_containing_a_subquery(view_in_catalog):
 def test_view_rows_still_read(view_in_catalog):
     """The non-aggregate path over the same view was always fine — keep it that way."""
     plan = LogicalPlan()
-    scan = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    scan = ScanStep()
     scan.relation = "heavy_planets"
     scan.alias = "heavy_planets"
     scan.hints = []
     scan_id = random_string()
     plan.add_node(scan_id, scan)
 
-    exit_node = LogicalPlanNode(node_type=LogicalPlanStepType.Exit)
+    exit_node = ExitStep()
     exit_node.columns = [Wildcard()]
     exit_id = random_string()
     plan.add_node(exit_id, exit_node)

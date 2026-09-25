@@ -26,11 +26,12 @@ import os
 import sys
 
 import pytest
+from opteryx.compiled.structures.plan_steps import FunctionDatasetStep
+from opteryx.compiled.structures.plan_steps import ProjectStep
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 import opteryx
-from opteryx.exceptions import InvalidInternalStateError
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn
 
@@ -145,39 +146,17 @@ def test_cte_over_values_that_does_project():
 # --- the guard: no bare AttributeError out of the resolver ---------------------------
 
 
-def test_a_non_expression_projection_is_a_typed_error_naming_the_relation():
-    """The boundary contract is checked where the relation is still named.
-
-    Without this the same class of defect reaches `binder/project.py` and surfaces
-    as `AttributeError: 'str' object has no attribute 'node_type'` — no error type
-    the caller can catch, and no mention of which relation produced it.
-    """
-    from opteryx.planner.relation_resolver import _boundary_columns
-
-    class _FakePlan:
-        def __init__(self, node):
-            self._node = node
-
-        def __getitem__(self, _nid):
-            return self._node
-
-        def ingoing_edges(self, _nid):
-            return []
-
-    from opteryx.planner.logical_planner import LogicalPlanNode
-    from opteryx.planner.logical_planner import LogicalPlanStepType
-
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
-    node.columns = ("c",)
-
-    with pytest.raises(InvalidInternalStateError) as err:
-        _boundary_columns(_FakePlan(node), "nid", "brands")
-    assert "brands" in str(err.value)
+def test_a_non_expression_projection_is_refused_where_it_is_written():
+    # A projection that is not a list of expressions cannot be put on a step at all:
+    # the typed step refuses it at the write, before anything downstream reads it.
+    node = ProjectStep()
+    with pytest.raises(TypeError):
+        node.columns = ("c",)
+    with pytest.raises(TypeError):
+        node.columns = ["c"]
 
 
 def test_a_well_formed_projection_passes_the_guard():
-    from opteryx.planner.logical_planner import LogicalPlanNode
-    from opteryx.planner.logical_planner import LogicalPlanStepType
     from opteryx.planner.relation_resolver import _boundary_columns
 
     class _FakePlan:
@@ -190,13 +169,13 @@ def test_a_well_formed_projection_passes_the_guard():
         def ingoing_edges(self, _nid):
             return []
 
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
+    node = ProjectStep()
     node.columns = [LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="c")]
     assert _boundary_columns(_FakePlan(node), "nid", "brands") == node.columns
 
     # a leaf with no projection at all is the wildcard, not an error
-    values = LogicalPlanNode(node_type=LogicalPlanStepType.FunctionDataset, function="VALUES")
-    values.columns = ("c",)
+    values = FunctionDatasetStep(function="VALUES")
+    values.column_aliases = ("c",)
     wildcard = _boundary_columns(_FakePlan(values), "nid", "brands")
     assert len(wildcard) == 1 and wildcard[0].node_type == NodeType.WILDCARD
 

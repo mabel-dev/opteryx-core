@@ -5,7 +5,7 @@
 
 """
 The Logical Planner converts a rewritten AST into a LogicalPlan — a directed graph of
-LogicalPlanNode instances connected by data-flow edges.
+PlanStep instances connected by data-flow edges.
 
 Input:  a single parsed and AST-rewritten statement (dict produced by sqloxide)
 Output: a tuple of (LogicalPlan, ast dict, CTEs dict)
@@ -23,7 +23,7 @@ Column types, schema references, and resolved identities are added by the Binder
 
 from opteryx.planner.logical_planner.logical_planner import (
     LogicalPlan,
-    LogicalPlanNode,
+    PlanStep,
     LogicalPlanStepType,
     RecursiveCteDefinition,
     apply_visibility_filters,
@@ -34,7 +34,7 @@ from opteryx.planner.logical_planner.logical_planner_builders import build
 __all__ = (
     "apply_visibility_filters",
     "LogicalPlan",
-    "LogicalPlanNode",
+    "PlanStep",
     "LogicalPlanStepType",
     "RecursiveCteDefinition",
     "do_logical_planning_phase",

@@ -13,6 +13,7 @@ single-layer query to prove fusion doesn't change the answer.
 import os
 import sys
 import uuid
+from opteryx.compiled.structures.plan_steps import ProjectStep
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
@@ -171,7 +172,7 @@ def test_trivial_rename_chain_fusion_preserves_results():
 
 
 from opteryx.models import QueryTelemetry
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode
+from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.optimizer.strategies.optimization_strategy import OptimizerContext
 from opteryx.planner.optimizer.strategies.project_fusion import ProjectFusionStrategy
 
@@ -183,7 +184,7 @@ def test_fanned_out_project_is_not_fused():
     # before any column/identity resolution is attempted.
     plan = LogicalPlan()
     for nid in ("lower", "upper_a", "upper_b"):
-        node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
+        node = ProjectStep()
         node.columns = []
         plan.add_node(nid, node)
     plan.add_edge("lower", "upper_a")

@@ -61,7 +61,7 @@ from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, Node
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.planner.plan_rewriter.strategies.rewrite_strategy import (
     PlanRewriteContext,
     PlanRewriteStrategy,
@@ -70,12 +70,17 @@ from opteryx.utils import random_string
 from opteryx.compiled.structures.expressions import And
 from opteryx.compiled.structures.expressions import Wildcard
 from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.plan_steps import AggregateAndGroupStep
+from opteryx.compiled.structures.plan_steps import AggregateStep
+from opteryx.compiled.structures.plan_steps import JoinStep
+from opteryx.compiled.structures.plan_steps import ProjectStep
+from opteryx.compiled.structures.plan_steps import SubqueryStep
 
 # Alias prefix for the CTE's copy of the window's source relation. Minted, never typed.
 WINDOW_SOURCE_ALIAS_PREFIX = "$win_src-"
 
 
-def _source_relation(plan: LogicalPlan) -> LogicalPlanNode:
+def _source_relation(plan: LogicalPlan) -> PlanStep:
     """The one relation a window's source sub-plan exposes to the query above it.
 
     The rewriter rebuilds the outer leg of the join as a SINGLE qualified wildcard
@@ -135,7 +140,7 @@ def _window_source(plan: LogicalPlan, win_nid: str) -> str:
 
 
 def _build_window_cte(
-    plan: LogicalPlan, source_subplan: LogicalPlan, win_node: LogicalPlanNode
+    plan: LogicalPlan, source_subplan: LogicalPlan, win_node: PlanStep
 ) -> tuple:
     """Build one aggregate CTE for one partition spec and merge it into `plan`.
 
@@ -182,7 +187,7 @@ def _build_window_cte(
     if inner_partition_by:
         # AggregateAndGroup: GROUP BY partition columns, compute window aggregates.
         # projection exposes both partition cols and aggregate results for the join.
-        agg_step = LogicalPlanNode(node_type=LogicalPlanStepType.AggregateAndGroup)
+        agg_step = AggregateAndGroupStep()
         agg_step.groups = inner_partition_by
         agg_step.aggregates = list(agg_nodes)
         agg_step.projection = inner_partition_by + list(agg_nodes)
@@ -192,7 +197,7 @@ def _build_window_cte(
         # one; `AggregateAndGroup` with an empty group list is not the same statement
         # and has no such guarantee. That one row is what makes the cross join below a
         # broadcast rather than a multiplication of the outer rows.
-        agg_step = LogicalPlanNode(node_type=LogicalPlanStepType.Aggregate)
+        agg_step = AggregateStep()
         agg_step.groups = []
         agg_step.aggregates = list(agg_nodes)
     agg_nid = random_string()
@@ -203,7 +208,7 @@ def _build_window_cte(
     # $project before the Subquery wrapper's visit_exit runs. Without it, aggregate
     # columns added to $derived by the AggAndGroup binder are popped by visit_exit and
     # never appear in the subquery's output schema.
-    project_step = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
+    project_step = ProjectStep()
     project_step.columns = list(inner_partition_by) + list(agg_nodes)
     project_step.passthrough_columns = []
     project_step.except_columns = None
@@ -212,7 +217,7 @@ def _build_window_cte(
     inner_plan.add_edge(agg_nid, project_nid)
 
     # Wrap in a Subquery node so the binder treats it as a named relation.
-    subquery_wrapper = LogicalPlanNode(node_type=LogicalPlanStepType.Subquery)
+    subquery_wrapper = SubqueryStep()
     subquery_wrapper.alias = subquery_alias
     subquery_wrapper.columns = [Wildcard()]
     subquery_wrapper_nid = random_string()
@@ -278,7 +283,7 @@ def _rewrite_window_chain(plan: LogicalPlan, chain: list) -> LogicalPlan:
             win_refs.append(win_ref)
         left_nid = win_nid
 
-    filter_step = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
+    filter_step = ProjectStep()
     filter_step.passthrough_columns = []
     filter_step.except_columns = None
     filter_step.columns = [outer_wildcard] + win_refs
@@ -291,7 +296,7 @@ def _rewrite_window_chain(plan: LogicalPlan, chain: list) -> LogicalPlan:
 def _replace_window_with_join(
     plan: LogicalPlan,
     win_nid: str,
-    win_node: LogicalPlanNode,
+    win_node: PlanStep,
     left_nid: str,
     subquery_wrapper_nid: str,
     subquery_alias: str,
@@ -333,7 +338,7 @@ def _replace_window_with_join(
     # `left_relation_names` has to be stated here rather than left None: the binder
     # back-fills it from the identifiers in a bound ON condition, and a cross join has
     # no ON to read. Left unset it reached the row-size estimate as None and died there.
-    join_node = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+    join_node = JoinStep()
     join_node.type = "inner" if on_condition is not None else "cross join"
     join_node.on = on_condition
     join_node.using = None
@@ -413,7 +418,7 @@ def _innermost_chain_first(plan: LogicalPlan, chains: list) -> list:
     return sorted(chains, key=lambda chain: source_size[chain[0]])
 
 
-def _is_aggregate_window(node: LogicalPlanNode) -> bool:
+def _is_aggregate_window(node: PlanStep) -> bool:
     """Aggregate windows (SUM/COUNT/... OVER) lower to a GROUP BY + broadcast join.
 
     Ranking windows (ROW_NUMBER/RANK/DENSE_RANK) carry `outputs` and are executed by
@@ -434,7 +439,7 @@ class WindowToJoinStrategy(PlanRewriteStrategy):
     def should_i_run(self, plan: LogicalPlan) -> bool:
         return any(_is_aggregate_window(node) for _, node in plan.nodes(True))
 
-    def visit(self, node: LogicalPlanNode, context: PlanRewriteContext) -> PlanRewriteContext:
+    def visit(self, node: PlanStep, context: PlanRewriteContext) -> PlanRewriteContext:
         if not context.rewritten_plan:
             context.rewritten_plan = context.pre_rewrite_tree.copy()
 

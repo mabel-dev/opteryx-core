@@ -40,7 +40,7 @@ aggregate and the Exit is already gone.
 """
 
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
@@ -54,10 +54,12 @@ class AggregateScanPushdownStrategy(OptimizationStrategy):
     requires = ("projection-pushed", "predicates-pushed", "project-fused")
     provides = ("aggregates-pushed",)
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type not in _AGGREGATE_TYPES:
             return context
-        if node.grouping_sets is not None or node.having_condition is not None:
+        if node.node_type == LogicalPlanStepType.AggregateAndGroup and (
+            node.grouping_sets is not None or node.having_condition is not None
+        ):
             return context
 
         ingoing = context.optimized_plan.ingoing_edges(context.node_id)

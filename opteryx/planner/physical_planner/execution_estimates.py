@@ -31,7 +31,7 @@ from typing import Optional
 
 from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.plan_context import PlanContext
 
@@ -58,7 +58,7 @@ _BUILD_PAYLOAD_JOINS = frozenset(
 )
 
 
-def join_output_rows_estimate(node: LogicalPlanNode, plan_context: PlanContext) -> Optional[int]:
+def join_output_rows_estimate(node: PlanStep, plan_context: PlanContext) -> Optional[int]:
     """The join's estimated output row count, or None when unknown or when the
     join type has no build payload to size.
 
@@ -73,7 +73,7 @@ def join_output_rows_estimate(node: LogicalPlanNode, plan_context: PlanContext) 
     return int(stats.row_count)
 
 
-def group_count_estimate(plan: LogicalPlan, nid: str, node: LogicalPlanNode) -> Optional[int]:
+def group_count_estimate(plan: LogicalPlan, nid: str, node: PlanStep) -> Optional[int]:
     """Best available distinct-group-count bound for a GROUP BY / DISTINCT, or
     None when neither signal resolves.
 
@@ -114,7 +114,7 @@ def _total_record_count(scans: list) -> Optional[int]:
     return total
 
 
-def _ndv_product(node: LogicalPlanNode, scans: list) -> Optional[int]:
+def _ndv_product(node: PlanStep, scans: list) -> Optional[int]:
     columns = node.groups if node.node_type == LogicalPlanStepType.AggregateAndGroup else node.on
     if not columns:
         # An EMPTY column list means two different things. GROUP BY () is a scalar

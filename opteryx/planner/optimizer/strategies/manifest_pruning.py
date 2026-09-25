@@ -32,7 +32,7 @@ Key benefits:
 
 from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
@@ -56,7 +56,7 @@ class ManifestPruningStrategy(OptimizationStrategy):
         super().__init__(telemetry)
         self.collected_predicates = []
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         """
         Visit each node in the logical plan.
 

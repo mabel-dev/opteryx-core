@@ -56,7 +56,7 @@ from opteryx.expression import ExpressionColumn, NodeType, format_expression
 from opteryx.models import QueryTelemetry
 from opteryx.planner import build_literal_node
 from opteryx.planner.binder.operator_map import determine_type, _STRING_CATEGORIES
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory, ColumnType
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import ConstantColumn
@@ -2321,7 +2321,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
 
 
 class PredicateRewriteStrategy(OptimizationStrategy):
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Filter:
             condition = _rewrite_predicate(node.condition, self.telemetry)
             # A Filter's root carries no identity anything reads, and pushdown /

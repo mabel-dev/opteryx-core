@@ -17,7 +17,11 @@ Two layers:
 
 import os
 import sys
-from types import SimpleNamespace
+
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.plan_steps import ExitStep
+from opteryx.compiled.structures.plan_steps import JoinStep
+from opteryx.compiled.structures.plan_steps import ScanStep
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
@@ -26,8 +30,6 @@ import pytest
 from opteryx.models import QueryTelemetry
 from opteryx.planner.plan_context import PlanContext
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner.logical_planner import LogicalPlanNode
-from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.planner.optimizer.strategies.join_algorithm import JoinAlgorithmStrategy
@@ -106,7 +108,7 @@ _K = b"tes_k_000000001"
 
 
 def _scan_with_stats(relation, row_count, plan_context):
-    n = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    n = ScanStep()
     n.relation = relation
     n.all_relations = {relation}
     n.columns = []
@@ -123,9 +125,9 @@ def _scan_with_stats(relation, row_count, plan_context):
 
 
 def _inner_join_node():
-    n = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+    n = JoinStep()
     n.type = "inner"
-    n.on = SimpleNamespace(value="Eq")
+    n.on = Comparison(value="Eq")
     # Join keys are raw column identities, matching how RelationStatistics is keyed.
     n.left_columns = [_K]
     n.right_columns = [_K]
@@ -150,7 +152,7 @@ def _build_join_plan(join_node, left_scan, right_scan):
     plan.add_node("r", right_scan)
     plan.add_edge("l", "j", "left")
     plan.add_edge("r", "j", "right")
-    exit_node = LogicalPlanNode(node_type=LogicalPlanStepType.Exit)
+    exit_node = ExitStep()
     exit_node.columns = []
     plan.add_node("e", exit_node)
     plan.add_edge("j", "e")

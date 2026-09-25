@@ -642,6 +642,14 @@ extensions = [
         include_dirs=include_dirs,
         extra_compile_args=C_FLAGS,
     ),
+    # Typed logical plan steps (one declared class per LogicalPlanStepType) —
+    # replaces the attribute-bag Node for plan nodes.
+    Extension(
+        "opteryx.compiled.structures.plan_steps",
+        sources=["opteryx/compiled/structures/plan_steps.pyx"],
+        include_dirs=include_dirs,
+        extra_compile_args=C_FLAGS,
+    ),
     Extension(
         "opteryx.compiled.structures.node",
         sources=["opteryx/compiled/structures/node.pyx"],

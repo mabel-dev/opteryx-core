@@ -11,6 +11,7 @@ from opteryx.planner.binder.binder import merge_schemas
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.compiled.structures.plan_steps import steps_with
 
 
 def post_bind(self, node, context):
@@ -36,7 +37,7 @@ def post_bind(self, node, context):
         branch.map_children(_inner)
         return branch
 
-    if node.condition:
+    if node.node_type == LogicalPlanStepType.Filter and node.condition:
         node.condition = _inner(node.condition)
     if node.columns:
         # if it doesn't have a schema column here - we can remove it
@@ -143,9 +144,12 @@ def traverse(
     if return_node.all_relations is None:
         return_node.all_relations = set()  # Initialize as an empty set if None
 
-    return_node.all_relations.update(
-        {value for value in [return_node.relation, return_node.alias] if value is not None}
-    )
+    names = []
+    if return_node.node_type in steps_with("relation"):
+        names.append(return_node.relation)
+    if return_node.node_type in steps_with("alias"):
+        names.append(return_node.alias)
+    return_node.all_relations.update({value for value in names if value is not None})
 
     children = graph.ingoing_edges(node)
     for plan_node_id, _, _ in children:

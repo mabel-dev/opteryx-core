@@ -23,6 +23,7 @@ import os
 import sys
 from types import SimpleNamespace
 from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.plan_steps import ScanStep
 
 sys.path.insert(1, os.path.join(sys.path[0], "..", "..", "..", ".."))
 
@@ -33,8 +34,6 @@ from opteryx.models import Node
 from opteryx.planner.cost_estimation import plan_adapter
 from opteryx.planner.cost_estimation import JoinVertex
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner.logical_planner import LogicalPlanNode
-from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.planner.plan_context import PlanContext
@@ -47,7 +46,7 @@ from opteryx.compiled.structures.expressions import LogicalColumn
 def _make_scan(
     relation: str, row_count: int, column_specs: dict, plan_context: PlanContext, alias: str = None
 ):
-    """A Scan LogicalPlanNode with schema, its identity-keyed statistics
+    """A Scan PlanStep with schema, its identity-keyed statistics
     recorded in ``plan_context``.
 
     ``column_specs``: {name: (distinct_count, null_fraction)}. Returns
@@ -78,8 +77,7 @@ def _make_scan(
         },
         row_count_metric=row_count,
     )
-    scan = LogicalPlanNode(
-        node_type=LogicalPlanStepType.Scan,
+    scan = ScanStep(
         relation=relation,
         alias=alias,
         schema=schema,

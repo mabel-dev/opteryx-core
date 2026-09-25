@@ -30,7 +30,7 @@ from typing import Dict, FrozenSet, List, Optional
 
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext, predicate_key
 from opteryx.compiled.structures.expressions import And
@@ -215,7 +215,7 @@ class DisjunctionSimplificationStrategy(OptimizationStrategy):
     docstring).
     """
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Filter and node.condition is not None:
             conjuncts = _split_and(node.condition)
             changed = False

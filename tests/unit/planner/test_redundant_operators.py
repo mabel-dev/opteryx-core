@@ -8,6 +8,9 @@ both must be considered when deciding redundancy.
 
 import os
 import sys
+from opteryx.compiled.structures.plan_steps import ExitStep
+from opteryx.compiled.structures.plan_steps import ProjectStep
+from opteryx.compiled.structures.plan_steps import ScanStep
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
@@ -16,7 +19,6 @@ from opteryx.planner.plan_context import PlanContext
 from opteryx.expression import NodeType
 from opteryx.models import QueryTelemetry
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.optimizer.strategies.redundant_operators import (
     RedundantOperationsStrategy,
@@ -42,7 +44,7 @@ def _column(name):
 
 
 def _scan(columns):
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    node = ScanStep()
     node.columns = list(columns)
     node.relation = "fake"
     node.alias = "fake"
@@ -51,7 +53,7 @@ def _scan(columns):
 
 
 def _project(columns, passthrough_columns=None):
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
+    node = ProjectStep()
     node.columns = list(columns)
     if passthrough_columns is not None:
         node.passthrough_columns = list(passthrough_columns)
@@ -60,7 +62,7 @@ def _project(columns, passthrough_columns=None):
 
 
 def _exit():
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.Exit)
+    node = ExitStep()
     node.columns = []
     return node
 
@@ -146,7 +148,7 @@ def test_project_without_passthrough_columns_attribute_still_works():
     """Test 5 — no ``passthrough_columns`` attribute (positive: rule still works).
 
     Some Project nodes (e.g. those built inside subqueries) don't set
-    ``passthrough_columns``. ``LogicalPlanNode.__getattr__`` returns ``None``
+    ``passthrough_columns``. ``PlanStep.__getattr__`` returns ``None``
     for missing properties, and the fix's ``getattr(..., None) or []``
     handles that case.
     """

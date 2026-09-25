@@ -31,7 +31,7 @@ from opteryx.planner.cost_estimation.predicate_cost import (
 )
 from opteryx.planner.cost_estimation.fallback_selectivity import DEFAULT_SELECTIVITY
 from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory, ColumnType
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import ConstantColumn
@@ -42,6 +42,7 @@ from .optimization_strategy import (
     get_nodes_of_type_from_logical_plan,
 )
 from opteryx.compiled.structures.expressions import Dnf
+from opteryx.compiled.structures.plan_steps import FilterStep
 
 # If we have no data, we assume these default selectivities. Defined ONCE in
 # fallback_selectivity, shared with the stats-informed estimator, so the same
@@ -266,7 +267,7 @@ def order_predicates(predicates: list, telemetry, relation_stats=None) -> list:
 class PredicateOrderingStrategy(OptimizationStrategy):
     optimization_technique = "cost"
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Filter:
             context.collected_nids[id(node)] = context.node_id
             context.collected_predicates.append(node)
@@ -277,7 +278,7 @@ class PredicateOrderingStrategy(OptimizationStrategy):
                 context.collected_predicates = []
                 return context
 
-            new_node = LogicalPlanNode(LogicalPlanStepType.Filter)
+            new_node = FilterStep()
             new_node.condition = Dnf()
             # `node` is the node feeding the collected filter chain; its refreshed
             # statistics are the input relation the predicates filter against.

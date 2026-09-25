@@ -37,7 +37,7 @@ from opteryx.planner.cost_estimation import JoinTreeNode
 from opteryx.planner.cost_estimation import enumerate_join_tree
 from opteryx.planner.cost_estimation.plan_adapter import build_join_graph
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner.logical_planner import PlanStep
 
 from .cross_join_chain_reorder import _Leaf
 from .cross_join_chain_reorder import _collect_chain_top_down
@@ -70,7 +70,7 @@ def _tree_is_left_deep_in_leaf_order(
 
 def _apply_join_tree(
     plan: LogicalPlan,
-    chain: List[Tuple[str, LogicalPlanNode]],
+    chain: List[Tuple[str, PlanStep]],
     leaves: List[_Leaf],
     tree: JoinTree,
 ) -> None:
@@ -135,7 +135,6 @@ def _apply_join_tree(
         join_node.type = "cross join"
         join_node.on = None
         join_node.using = None
-        join_node.condition = None
         join_node.left_columns = None
         join_node.right_columns = None
         join_node.columns = None
@@ -170,7 +169,7 @@ class JoinPlanningStrategy(OptimizationStrategy):
     equi-key predicate.
     """
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         return context
 
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:

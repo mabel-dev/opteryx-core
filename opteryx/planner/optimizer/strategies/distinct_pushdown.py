@@ -21,7 +21,7 @@ Order:
 """
 
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
@@ -105,7 +105,7 @@ class DistinctPushdownStrategy(OptimizationStrategy):
             return False
         return (ndv / rows) >= _DEGENERATE_NDV_RATIO
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if (node.node_type == LogicalPlanStepType.Distinct) and node.on is None:
             context.collected_distincts.append(node)
             return context

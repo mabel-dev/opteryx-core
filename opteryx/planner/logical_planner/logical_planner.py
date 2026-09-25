@@ -51,6 +51,75 @@ from opteryx.types.vectors.vector_types import (
     node_is_vector_query_expression,
 )
 from opteryx.utils import dnf, random_string, suggest_alternative
+from opteryx.compiled.structures.plan_steps import PlanStep
+from opteryx.compiled.structures.plan_steps import step_classes
+from opteryx.compiled.structures.plan_steps import steps_with
+from opteryx.compiled.structures.plan_steps import AddColumnStep
+from opteryx.compiled.structures.plan_steps import AddRelationshipStep
+from opteryx.compiled.structures.plan_steps import AggregateAndGroupStep
+from opteryx.compiled.structures.plan_steps import AggregateStep
+from opteryx.compiled.structures.plan_steps import AlterColumnTypeStep
+from opteryx.compiled.structures.plan_steps import AlterMaterializedViewOwnerStep
+from opteryx.compiled.structures.plan_steps import AlterMaterializedViewSuspendedStep
+from opteryx.compiled.structures.plan_steps import AlterRelationStep
+from opteryx.compiled.structures.plan_steps import AlterTaskStep
+from opteryx.compiled.structures.plan_steps import AlterTriggerMinimumIntervalStep
+from opteryx.compiled.structures.plan_steps import AlterTriggerOwnerStep
+from opteryx.compiled.structures.plan_steps import AlterTriggerSuspendedStep
+from opteryx.compiled.structures.plan_steps import AlterViewStep
+from opteryx.compiled.structures.plan_steps import AlterWorkspaceSecureStep
+from opteryx.compiled.structures.plan_steps import AlterWorkspaceStep
+from opteryx.compiled.structures.plan_steps import AnalyzeStep
+from opteryx.compiled.structures.plan_steps import CallProcedureStep
+from opteryx.compiled.structures.plan_steps import CloneCollectionStep
+from opteryx.compiled.structures.plan_steps import CloneRelationStep
+from opteryx.compiled.structures.plan_steps import CommentStep
+from opteryx.compiled.structures.plan_steps import CompactionCommitStep
+from opteryx.compiled.structures.plan_steps import CreateCollectionStep
+from opteryx.compiled.structures.plan_steps import CreateRelationStep
+from opteryx.compiled.structures.plan_steps import CreateTagStep
+from opteryx.compiled.structures.plan_steps import CreateTaskStep
+from opteryx.compiled.structures.plan_steps import CreateTriggerStep
+from opteryx.compiled.structures.plan_steps import CreateViewStep
+from opteryx.compiled.structures.plan_steps import DetachRelationStep
+from opteryx.compiled.structures.plan_steps import DistinctStep
+from opteryx.compiled.structures.plan_steps import DropCollectionStep
+from opteryx.compiled.structures.plan_steps import DropColumnStep
+from opteryx.compiled.structures.plan_steps import DropRelationStep
+from opteryx.compiled.structures.plan_steps import DropRelationshipStep
+from opteryx.compiled.structures.plan_steps import DropTagStep
+from opteryx.compiled.structures.plan_steps import DropTaskStep
+from opteryx.compiled.structures.plan_steps import DropTriggerStep
+from opteryx.compiled.structures.plan_steps import DropViewStep
+from opteryx.compiled.structures.plan_steps import DropWorkspaceStep
+from opteryx.compiled.structures.plan_steps import ExceptStep
+from opteryx.compiled.structures.plan_steps import ExitStep
+from opteryx.compiled.structures.plan_steps import ExplainStep
+from opteryx.compiled.structures.plan_steps import FilterStep
+from opteryx.compiled.structures.plan_steps import FramedWindowStep
+from opteryx.compiled.structures.plan_steps import FunctionDatasetStep
+from opteryx.compiled.structures.plan_steps import InsertStep
+from opteryx.compiled.structures.plan_steps import IntersectStep
+from opteryx.compiled.structures.plan_steps import JoinStep
+from opteryx.compiled.structures.plan_steps import LimitStep
+from opteryx.compiled.structures.plan_steps import ListenStep
+from opteryx.compiled.structures.plan_steps import OrderStep
+from opteryx.compiled.structures.plan_steps import ProjectStep
+from opteryx.compiled.structures.plan_steps import RenameColumnStep
+from opteryx.compiled.structures.plan_steps import RenameRelationStep
+from opteryx.compiled.structures.plan_steps import ResyncRelationStep
+from opteryx.compiled.structures.plan_steps import RollbackRelationStep
+from opteryx.compiled.structures.plan_steps import ScanStep
+from opteryx.compiled.structures.plan_steps import SetStep
+from opteryx.compiled.structures.plan_steps import ShowColumnsStep
+from opteryx.compiled.structures.plan_steps import ShowManifestStep
+from opteryx.compiled.structures.plan_steps import ShowStep
+from opteryx.compiled.structures.plan_steps import SubqueryStep
+from opteryx.compiled.structures.plan_steps import TruncateRelationStep
+from opteryx.compiled.structures.plan_steps import UnionStep
+from opteryx.compiled.structures.plan_steps import UnlistenStep
+from opteryx.compiled.structures.plan_steps import UnnestStep
+from opteryx.compiled.structures.plan_steps import WindowStep
 
 
 class LogicalPlanStepType(int, Enum):
@@ -161,36 +230,6 @@ class LogicalPlan(Graph):
     pass
 
 
-class LogicalPlanNode(Node):
-    def copy(self, memo=None) -> "Node":
-        if memo is None:
-            memo = {}
-        cached = memo.get(id(self))
-        if cached is not None:
-            return cached
-        parent_copy = super().copy(memo)
-        new_node = LogicalPlanNode(**parent_copy.properties)
-        new_node.uuid = parent_copy.uuid
-        # super().copy() registered id(self) -> the plain-Node intermediate;
-        # replace it with the correctly-typed LogicalPlanNode so any other
-        # reference to this same node (via the shared memo) lands here too.
-        memo[id(self)] = new_node
-        return new_node
-
-    def __str__(self):  # pragma: no cover
-        try:
-            from opteryx.planner.logical_planner.logical_planner_renderers import _render_registry
-
-            render_fn = _render_registry.get(self.node_type)
-            if render_fn:
-                return render_fn(self)
-        except Exception as err:
-            import warnings
-
-            warnings.warn(f"Problem drawing logical plan - {err}")
-        return self.node_type.name
-
-
 def _set_operation_leg_columns(leg_plan: Graph) -> Optional[list]:
     """The columns one leg of a set operation projects — its own EXIT node's columns.
 
@@ -263,7 +302,11 @@ def get_subplan_schemas(sub_plan: Graph) -> List[str]:
         current_node = sub_plan[node["name"]]
 
         # Start with the alias of the current node, if it exists
-        aliases = [current_node.alias] if current_node.alias else []
+        aliases = (
+            [current_node.alias]
+            if current_node.node_type in steps_with("alias") and current_node.alias
+            else []
+        )
 
         # If this node is a subquery, stop traversal here
         if current_node.node_type == LogicalPlanStepType.Subquery:
@@ -858,7 +901,7 @@ def _validate_where_clause_expression(
     )
 
 
-def _find_base_scan(plan: LogicalPlan) -> "LogicalPlanNode":
+def _find_base_scan(plan: LogicalPlan) -> "PlanStep":
     """Refuse a window with no base table, or with more than one, while the clause that
     wrote it is still in hand.
 
@@ -2099,7 +2142,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                 right_readers = get_subplan_reads(right_sub_plan)
 
                 # Create binary cross join node
-                join_step = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+                join_step = JoinStep()
                 join_step.type = "cross join"
                 join_step.implied_join = True
                 join_step.left_relation_names = left_relation_names
@@ -2147,7 +2190,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         if len(_relations) == 0:
             raise UnsupportedSyntaxError("Statement has a **WHERE** clause but no **FROM** clause.")
         _validate_where_clause_expression(_selection)
-        selection_step = LogicalPlanNode(node_type=LogicalPlanStepType.Filter)
+        selection_step = FilterStep()
         selection_step.condition = _selection
         previous_step_id, step_id = step_id, random_string()
         inner_plan.add_node(step_id, selection_step)
@@ -2848,7 +2891,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             )
 
         if _grouped_keys:
-            _grouped_step = LogicalPlanNode(node_type=LogicalPlanStepType.AggregateAndGroup)
+            _grouped_step = AggregateAndGroupStep()
             _grouped_step.groups = _grouped_keys
             _grouped_step.aggregates = _grouped_aggregates
             _grouped_step.projection = list(_grouped_columns)
@@ -2860,7 +2903,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             # that promises exactly one row out for any input. `AggregateAndGroup` over an
             # empty key list makes no such promise, and the window above reads that one
             # row as its whole partition.
-            _grouped_step = LogicalPlanNode(node_type=LogicalPlanStepType.Aggregate)
+            _grouped_step = AggregateStep()
             _grouped_step.groups = []
             _grouped_step.aggregates = _grouped_aggregates
         previous_step_id, step_id = step_id, random_string()
@@ -2872,7 +2915,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         # `visit_exit` pops `$derived` — without this the aggregate columns never appear
         # in the boundary's schema at all (the same requirement `window_to_join` has when
         # it builds its own aggregate CTE).
-        _grouped_project = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
+        _grouped_project = ProjectStep()
         _grouped_project.columns = list(_grouped_columns)
         _grouped_project.passthrough_columns = []
         _grouped_project.except_columns = None
@@ -2891,7 +2934,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             # It reads the Project's output, which is the same scope it reads today, and
             # its aggregates and group keys are all grouped columns — so unlike the
             # un-windowed path it needs no pass-through columns above.
-            _having_step = LogicalPlanNode(node_type=LogicalPlanStepType.Filter)
+            _having_step = FilterStep()
             _having_step.condition = _having
             previous_step_id, step_id = step_id, random_string()
             inner_plan.add_node(step_id, _having_step)
@@ -2899,7 +2942,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             _having = None
             _having_passthrough = []
 
-        _grouped_relation = LogicalPlanNode(node_type=LogicalPlanStepType.Subquery)
+        _grouped_relation = SubqueryStep()
         _grouped_relation.alias = f"{GROUPED_AGGREGATE_ALIAS_PREFIX}{random_string(6)}"
         _grouped_relation.columns = [Wildcard()]
         previous_step_id, step_id = step_id, random_string()
@@ -2955,7 +2998,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                     _by_partition[_key] = (_partition_by, [])
                 _by_partition[_key][1].append(_agg_node)
             for _key, (_partition_by, _agg_nodes) in _by_partition.items():
-                _window_step = LogicalPlanNode(node_type=LogicalPlanStepType.Window)
+                _window_step = WindowStep()
                 _window_step.aggregates = _agg_nodes
                 _window_step.partition_by = _partition_by
                 previous_step_id, step_id = step_id, random_string()
@@ -3017,7 +3060,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                     )
                     for _agg_node, _frame in _outs
                 ]
-                _win_step = LogicalPlanNode(node_type=LogicalPlanStepType.FramedWindow)
+                _win_step = FramedWindowStep()
                 _win_step.partition_by = _partition_by
                 _win_step.order_by = _wob
                 _win_step.outputs = _outputs
@@ -3061,7 +3104,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                 )
                 for _kind, _win_alias, _params in _outs
             ]
-            _win_step = LogicalPlanNode(node_type=LogicalPlanStepType.Window)
+            _win_step = WindowStep()
             _win_step.partition_by = _partition_by
             _win_step.order_by = _window_order_by
             _win_step.outputs = _outputs
@@ -3081,7 +3124,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         for _slot, _original in _qualify_window_slots:
             _qualify = _replace_node(_qualify, _original, _projection[_slot])
 
-        qualify_step = LogicalPlanNode(node_type=LogicalPlanStepType.Filter)
+        qualify_step = FilterStep()
         qualify_step.condition = _qualify
         previous_step_id, step_id = step_id, random_string()
         inner_plan.add_node(step_id, qualify_step)
@@ -3115,7 +3158,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         if _groups == NodeType.WILDCARD:
             _groups = _group_by_all_keys(_projection, _window_output_aliases)
 
-        group_step = LogicalPlanNode(node_type=LogicalPlanStepType.AggregateAndGroup)
+        group_step = AggregateAndGroupStep()
         group_step.groups = _groups
         group_step.aggregates = _aggregates
         group_step.projection = _projection
@@ -3128,7 +3171,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             inner_plan.add_edge(previous_step_id, step_id)
     # aggregates
     elif len(_aggregates) > 0:
-        aggregate_step = LogicalPlanNode(node_type=LogicalPlanStepType.Aggregate)
+        aggregate_step = AggregateStep()
         aggregate_step.groups = _groups
         aggregate_step.aggregates = _aggregates
 
@@ -3270,7 +3313,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                     continue
                 _order_by_columns_not_in_projection.append(source_column)
 
-        project_step = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
+        project_step = ProjectStep()
         project_step.columns = _projection
         project_step.passthrough_columns = _order_by_columns_not_in_projection
         project_step.except_columns = _projection_except_columns(_projection)
@@ -3310,7 +3353,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
 
     # having
     if _having:
-        having_step = LogicalPlanNode(node_type=LogicalPlanStepType.Filter)
+        having_step = FilterStep()
         having_step.condition = _having
         previous_step_id, step_id = step_id, random_string()
         inner_plan.add_node(step_id, having_step)
@@ -3319,7 +3362,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
 
     # distinct
     if ast_branch["Select"].get("distinct"):
-        distinct_step = LogicalPlanNode(node_type=LogicalPlanStepType.Distinct)
+        distinct_step = DistinctStep()
         if isinstance(ast_branch["Select"]["distinct"], dict):
             distinct_step.on = [
                 _strip_outer_nesting(c)
@@ -3342,7 +3385,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
 
     # order
     if _order_by:
-        order_step = LogicalPlanNode(node_type=LogicalPlanStepType.Order)
+        order_step = OrderStep()
         order_step.order_by = _order_by
         previous_step_id, step_id = step_id, random_string()
         inner_plan.add_node(step_id, order_step)
@@ -3353,7 +3396,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     _limit = ast_branch.get("limit")
     _offset = ast_branch.get("offset")
     if _limit or _offset:
-        limit_step = LogicalPlanNode(node_type=LogicalPlanStepType.Limit)
+        limit_step = LimitStep()
         limit_step.limit = None if _limit is None else logical_planner_builders.build(_limit).value
         limit_step.offset = (
             None if _offset is None else logical_planner_builders.build(_offset).value
@@ -3364,7 +3407,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             inner_plan.add_edge(previous_step_id, step_id)
 
     # add the exit node
-    exit_node = LogicalPlanNode(node_type=LogicalPlanStepType.Exit)
+    exit_node = ExitStep()
     exit_node.columns = _projection
     exit_node.hidden_columns = _hidden_window_columns
     previous_step_id, step_id = step_id, random_string()
@@ -3380,9 +3423,9 @@ STATEMENT PLANNERS
 """
 
 
-def process_join_tree(join: dict) -> LogicalPlanNode:
+def process_join_tree(join: dict) -> PlanStep:
     """
-    Processes a join tree from the AST and returns a LogicalPlanNode representing the join.
+    Processes a join tree from the AST and returns a PlanStep representing the join.
     """
 
     def extract_join_type(join: dict) -> str:
@@ -3477,17 +3520,16 @@ def process_join_tree(join: dict) -> LogicalPlanNode:
             )
         unnest_alias = join["relation"]["Table"]["alias"]["name"]["value"]
 
-        # if we're a UNNEST JOIN, we're a different node type
-        join_step.node_type = LogicalPlanStepType.Unnest
-        join_step.unnest_column = unnest_column
-        join_step.unnest_alias = unnest_alias
-        join_step.unnest_function = function
-        join_step.alias = f"$unnest-{random_string(6)}"
+        # An UNNEST JOIN is its own step: a NEW Unnest carrying the join's type.
+        return UnnestStep(
+            type=join_step.type,
+            unnest_column=unnest_column,
+            unnest_alias=unnest_alias,
+            unnest_function=function,
+            alias=f"$unnest-{random_string(6)}",
+        )
 
-        # return the updated node
-        return join_step
-
-    join_step = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+    join_step = JoinStep()
 
     join_step.type = extract_join_type(join)
 
@@ -3543,7 +3585,7 @@ def create_node_relation(relation: dict):
             if "Values" not in subquery["subquery"]["body"]:
                 # SUBQUERY nodes wrap other queries and the result is available as a relation in
                 # the parent query.
-                subquery_step = LogicalPlanNode(node_type=LogicalPlanStepType.Subquery)
+                subquery_step = SubqueryStep()
                 if subquery["alias"] is None:
                     subquery_step.alias = f"$subquery-{random_string(6)}"
                 else:
@@ -3568,11 +3610,11 @@ def create_node_relation(relation: dict):
                 #
                 # We have the name of the relation (alias), the column names (columns) and the
                 # values in each row (values)
-                values_step = LogicalPlanNode(
-                    node_type=LogicalPlanStepType.FunctionDataset, function="VALUES"
+                values_step = FunctionDatasetStep(
+                    function="VALUES"
                 )
                 values_step.alias = subquery["alias"]["name"]["value"]
-                values_step.columns = tuple(
+                values_step.column_aliases = tuple(
                     col["name"]["value"] for col in subquery["alias"]["columns"]
                 )
                 values_step.values = [
@@ -3636,8 +3678,8 @@ def create_node_relation(relation: dict):
                 )
             )
 
-        function_step = LogicalPlanNode(
-            node_type=LogicalPlanStepType.FunctionDataset, function=function_name
+        function_step = FunctionDatasetStep(
+            function=function_name
         )
         function_step.hints = function_step_hints
         if function_name == "UNNEST":
@@ -3675,7 +3717,7 @@ def create_node_relation(relation: dict):
         function_step.args = args
         function_step.named_args = named_args
         if function["alias"] is not None:
-            function_step.columns = tuple(
+            function_step.column_aliases = tuple(
                 col["name"]["value"] for col in function["alias"]["columns"]
             )
 
@@ -3688,7 +3730,7 @@ def create_node_relation(relation: dict):
         # system. This has many physical implementations but at this point all we have is the
         # name/location of the relation (relation), what the relation is called inside the
         # query (alias) and if there are any hints (hints)
-        from_step = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+        from_step = ScanStep()
         table = relation["relation"]["Table"]
         from_step.relation = relation_name
         from_step.alias = (
@@ -3766,7 +3808,7 @@ def create_node_relation(relation: dict):
 
 def plan_explain(statement, **kwargs) -> LogicalPlan:
     plan = LogicalPlan()
-    explain_node = LogicalPlanNode(node_type=LogicalPlanStepType.Explain)
+    explain_node = ExplainStep()
     explain_node.analyze = statement["Explain"]["analyze"]
     explain_format = statement["Explain"].get("format")
 
@@ -3825,11 +3867,11 @@ def plan_query(statement: dict) -> LogicalPlan:
 
         op_type = set_operation["op"]
         if op_type == "Union":
-            set_op_node = LogicalPlanNode(node_type=LogicalPlanStepType.Union)
+            set_op_node = UnionStep()
         elif op_type == "Intersect":
-            set_op_node = LogicalPlanNode(node_type=LogicalPlanStepType.Intersect)
+            set_op_node = IntersectStep()
         elif op_type == "Except":
-            set_op_node = LogicalPlanNode(node_type=LogicalPlanStepType.Except)
+            set_op_node = ExceptStep()
         else:
             raise UnsupportedSyntaxError(f"Unsupported SET operator '{op_type}'. **UNION**, **UNION ALL**, **EXCEPT** and **INTERSECT** are the supported forms.")
 
@@ -3885,7 +3927,7 @@ def plan_query(statement: dict) -> LogicalPlan:
 
         # UNION ALL
         if set_op_node.modifier != "All":
-            distinct = LogicalPlanNode(node_type=LogicalPlanStepType.Distinct)
+            distinct = DistinctStep()
             head_nid, step_id = step_id, random_string()
             plan.add_node(step_id, distinct)
             plan.add_edge(head_nid, step_id)
@@ -3898,7 +3940,7 @@ def plan_query(statement: dict) -> LogicalPlan:
             if _offset:
                 _offset = _offset.get("value")
             if _limit or _offset:
-                limit_step = LogicalPlanNode(node_type=LogicalPlanStepType.Limit)
+                limit_step = LimitStep()
                 limit_step.limit = (
                     None if _limit is None else logical_planner_builders.build(_limit).value
                 )
@@ -3911,7 +3953,7 @@ def plan_query(statement: dict) -> LogicalPlan:
                     plan.add_edge(head_nid, step_id)
 
         # add the exit node
-        exit_node = LogicalPlanNode(node_type=LogicalPlanStepType.Exit)
+        exit_node = ExitStep()
         # A set operation's output shape is its LEFT leg's — taken from that leg's own
         # EXIT node, which is what the leg declares it projects. This used to take the
         # first Project node found in the leg's GRAPH, which is a different node as
@@ -3957,8 +3999,7 @@ def plan_set_variable(statement, **kwargs):
     root_node = "SingleAssignment"
     statement = statement["Set"]
     plan = LogicalPlan()
-    set_step = LogicalPlanNode(
-        node_type=LogicalPlanStepType.Set,
+    set_step = SetStep(
         variable=extract_variable(statement[root_node]["variable"]),
         value=extract_value(statement[root_node]["values"]),
     )
@@ -3970,14 +4011,14 @@ def plan_show_columns(statement, **kwargs):
     root_node = "ShowColumns"
     plan = LogicalPlan()
 
-    from_step = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    from_step = ScanStep()
     table = statement[root_node]["show_options"]["show_in"]["parent_name"]
     from_step.relation = ".".join(part["Identifier"]["value"] for part in table)
     from_step.alias = from_step.relation
     step_id = random_string()
     plan.add_node(step_id, from_step)
 
-    show_step = LogicalPlanNode(node_type=LogicalPlanStepType.ShowColumns)
+    show_step = ShowColumnsStep()
     show_step.extended = statement[root_node]["extended"]
     show_step.full = statement[root_node]["full"]
     show_step.relation = from_step.relation
@@ -3988,7 +4029,7 @@ def plan_show_columns(statement, **kwargs):
     _filter = statement[root_node]["show_options"].get("filter_position")
     if _filter:
         _filter = _filter["Suffix"]
-        filter_node = LogicalPlanNode(node_type=LogicalPlanStepType.Filter)
+        filter_node = FilterStep()
         filter_node.condition = extract_simple_filter(_filter, "name")
         previous_step_id, step_id = step_id, random_string()
         plan.add_node(step_id, filter_node)
@@ -4014,7 +4055,7 @@ def _plan_virtual_dataset_scan(relation: str, internal_relation: bool) -> Logica
     """
     plan = LogicalPlan()
 
-    from_step = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    from_step = ScanStep()
     from_step.relation = relation
     from_step.alias = relation
     # For a relation in INTERNAL_ONLY_DATASETS, binder.visit_scan rejects the scan
@@ -4023,7 +4064,7 @@ def _plan_virtual_dataset_scan(relation: str, internal_relation: bool) -> Logica
     step_id = random_string()
     plan.add_node(step_id, from_step)
 
-    exit_node = LogicalPlanNode(node_type=LogicalPlanStepType.Exit)
+    exit_node = ExitStep()
     # A BARE wildcard: `value` must be None. A non-None `value` marks a QUALIFIED
     # wildcard (`rel.*`) and binder.visit_exit then expands only columns whose
     # origin matches `value[0]` — so `(None,)` silently expands to nothing.
@@ -4052,7 +4093,7 @@ def _plan_show_manifest(table_name: str) -> LogicalPlan:
     """
     plan = LogicalPlan()
 
-    from_step = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    from_step = ScanStep()
     from_step.relation = table_name
     from_step.alias = table_name
     from_step.hints = []
@@ -4063,7 +4104,7 @@ def _plan_show_manifest(table_name: str) -> LogicalPlan:
     step_id = random_string()
     plan.add_node(step_id, from_step)
 
-    show_step = LogicalPlanNode(node_type=LogicalPlanStepType.ShowManifest)
+    show_step = ShowManifestStep()
     show_step.relation = table_name
     previous_step_id, step_id = step_id, random_string()
     plan.add_node(step_id, show_step)
@@ -4116,7 +4157,7 @@ def _plan_show_history(
         history_view = "snapshots_all"
     plan = LogicalPlan()
 
-    from_step = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    from_step = ScanStep()
     from_step.relation = table_name
     from_step.alias = table_name
     from_step.hints = []
@@ -4133,7 +4174,7 @@ def _plan_show_history(
     step_id = random_string()
     plan.add_node(step_id, from_step)
 
-    show_step = LogicalPlanNode(node_type=node_type)
+    show_step = step_classes()[node_type]()
     show_step.relation = table_name
     # Carried on the Show node as well as the Scan: the Scan's copy picks the
     # loader, this one picks the output schema, and both being the same value
@@ -4178,14 +4219,14 @@ def _plan_show_triggers(table_name: str) -> LogicalPlan:
 
     plan = LogicalPlan()
 
-    from_step = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    from_step = ScanStep()
     from_step.relation = relation
     from_step.alias = relation
     from_step.hints = []
     step_id = random_string()
     plan.add_node(step_id, from_step)
 
-    filter_node = LogicalPlanNode(node_type=LogicalPlanStepType.Filter)
+    filter_node = FilterStep()
     filter_node.condition = build_expression_tree(
         relation, [("trigger_holder", "Eq", relative)]
     )
@@ -4193,7 +4234,7 @@ def _plan_show_triggers(table_name: str) -> LogicalPlan:
     plan.add_node(step_id, filter_node)
     plan.add_edge(previous_step_id, step_id)
 
-    exit_node = LogicalPlanNode(node_type=LogicalPlanStepType.Exit)
+    exit_node = ExitStep()
     exit_node.columns = [Wildcard()]
     previous_step_id, step_id = step_id, random_string()
     plan.add_node(step_id, exit_node)
@@ -4314,7 +4355,7 @@ def plan_show_variables(statement, **kwargs):
 def plan_show_create_query(statement, **kwargs):
     root_node = "ShowCreate"
     plan = LogicalPlan()
-    show_step = LogicalPlanNode(node_type=LogicalPlanStepType.Show)
+    show_step = ShowStep()
     # sqlparser spells these `Table`/`View`; MATERIALIZED VIEW and TASK arrive
     # from pre-parse, which has no ShowCreateObject to spell them with (see
     # _intercept_show_create).
@@ -4358,7 +4399,7 @@ def plan_create_view(statement, **kwargs):
     root_node = "CreateView"
     plan = LogicalPlan()
 
-    create_view_node = LogicalPlanNode(node_type=LogicalPlanStepType.CreateView)
+    create_view_node = CreateViewStep()
 
     # Extract view name
     view_name_parts = statement[root_node]["name"]
@@ -4458,7 +4499,7 @@ def plan_alter_view(statement, **kwargs):
     root_node = "AlterView"
     plan = LogicalPlan()
 
-    alter_view_node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterView)
+    alter_view_node = AlterViewStep()
 
     # Extract view name
     view_name_parts = statement[root_node]["name"]
@@ -4550,7 +4591,7 @@ def plan_alter_table(statement, **kwargs):
                 )
             cluster_columns.append(expr["Identifier"]["value"])
 
-        alter_relation_node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterRelation)
+        alter_relation_node = AlterRelationStep()
         alter_relation_node.relation_name = relation_name
         alter_relation_node.cluster_columns = cluster_columns
         alter_relation_node.if_exists = if_exists
@@ -4577,7 +4618,7 @@ def plan_alter_table(statement, **kwargs):
                 f"RENAME TO target is the same as the source ({relation_name}). Choose a different name for the target."
             )
 
-        rename_relation_node = LogicalPlanNode(node_type=LogicalPlanStepType.RenameRelation)
+        rename_relation_node = RenameRelationStep()
         rename_relation_node.relation_name = relation_name
         rename_relation_node.new_relation_name = new_name
         rename_relation_node.if_exists = if_exists
@@ -4632,7 +4673,7 @@ def plan_alter_table(statement, **kwargs):
                     f"**ALTER TABLE ... ADD COLUMN** does not support column option: {option}"
                 )
 
-        add_column_node = LogicalPlanNode(node_type=LogicalPlanStepType.AddColumn)
+        add_column_node = AddColumnStep()
         add_column_node.relation_name = relation_name
         add_column_node.if_exists = if_exists
         add_column_node.column_name = column_name
@@ -4663,7 +4704,7 @@ def plan_alter_table(statement, **kwargs):
                 "multiple drops into one statement each."
             )
 
-        drop_column_node = LogicalPlanNode(node_type=LogicalPlanStepType.DropColumn)
+        drop_column_node = DropColumnStep()
         drop_column_node.relation_name = relation_name
         drop_column_node.if_exists = if_exists
         drop_column_node.column_name = column_names[0]["value"]
@@ -4675,7 +4716,7 @@ def plan_alter_table(statement, **kwargs):
     if "RenameColumn" in operation:
         rename_op = operation["RenameColumn"]
 
-        rename_column_node = LogicalPlanNode(node_type=LogicalPlanStepType.RenameColumn)
+        rename_column_node = RenameColumnStep()
         rename_column_node.relation_name = relation_name
         rename_column_node.if_exists = if_exists
         rename_column_node.column_name = rename_op["old_column_name"]["value"]
@@ -4735,7 +4776,7 @@ def plan_alter_table(statement, **kwargs):
                 f"unsupported column type in **ALTER TABLE ... ALTER COLUMN ... TYPE** for '{column_name}': {err}"
             ) from err
 
-        alter_column_type_node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterColumnType)
+        alter_column_type_node = AlterColumnTypeStep()
         alter_column_type_node.relation_name = relation_name
         alter_column_type_node.if_exists = if_exists
         alter_column_type_node.column_name = column_name
@@ -4759,7 +4800,7 @@ def plan_alter_table(statement, **kwargs):
                 "nothing for CASCADE or RESTRICT to decide."
             )
 
-        drop_relationship_node = LogicalPlanNode(node_type=LogicalPlanStepType.DropRelationship)
+        drop_relationship_node = DropRelationshipStep()
         drop_relationship_node.relation_name = relation_name
         drop_relationship_node.relation_parts = _identifier_parts(relation_name_parts)
         drop_relationship_node.if_exists = if_exists
@@ -5105,7 +5146,7 @@ def _plan_add_constraint(add_op, relation_name: str, relation_name_parts, if_exi
     )
     relation_parts = declaration["relation_parts"]
 
-    add_relationship_node = LogicalPlanNode(node_type=LogicalPlanStepType.AddRelationship)
+    add_relationship_node = AddRelationshipStep()
     add_relationship_node.relation_name = relation_name
     add_relationship_node.relation_parts = relation_parts
     add_relationship_node.if_exists = if_exists
@@ -5170,7 +5211,7 @@ def _plan_reserved_property_ddl(properties, relation_name: str, if_exists: bool)
     plan = LogicalPlan()
 
     if _ROLLBACK_VERSION_KEY in values:
-        node = LogicalPlanNode(node_type=LogicalPlanStepType.RollbackRelation)
+        node = RollbackRelationStep()
         # Carried as text for the same reason CreateTag's is: `current`,
         # `previous` and a tag name are all instructions to go and ask the
         # catalog something, and a planner that resolved them would be reading
@@ -5187,13 +5228,13 @@ def _plan_reserved_property_ddl(properties, relation_name: str, if_exists: bool)
         )
 
     if values[_TAG_ACTION_KEY] == "create":
-        node = LogicalPlanNode(node_type=LogicalPlanStepType.CreateTag)
+        node = CreateTagStep()
         # Carried as text, not resolved here: CURRENT and PREVIOUS name a snapshot
         # the catalog has to be asked for, and a planner that resolved them would
         # be reading the catalog to build a plan that then reads it again.
         node.version_spec = values[_TAG_VERSION_KEY]
     else:
-        node = LogicalPlanNode(node_type=LogicalPlanStepType.DropTag)
+        node = DropTagStep()
 
     node.relation_name = relation_name
     node.if_exists = if_exists
@@ -5311,7 +5352,7 @@ def plan_alter_workspace(statement, **kwargs):
             f"Workspace property '{property_name}' takes a single value. Give exactly one value."
         )
 
-    alter_workspace_node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterWorkspace)
+    alter_workspace_node = AlterWorkspaceStep()
     alter_workspace_node.workspace_name = workspace_name
     alter_workspace_node.property_name = property_name
     alter_workspace_node.property_value = parser(property_name, values[0])
@@ -5364,7 +5405,7 @@ def plan_alter_workspace_secure(statement, **kwargs) -> LogicalPlan:
                 unique.append(destination)
         destinations = unique
 
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterWorkspaceSecure)
+    node = AlterWorkspaceSecureStep()
     node.workspace_name = workspace_name
     node.secure_object = secure_object
     # None means DROP SECURE - withdraw the sanction.
@@ -5430,13 +5471,13 @@ def plan_create_collection(statement, **kwargs):
             raise UnsupportedSyntaxError(
                 f"Cannot clone {md_code(collection_name)} onto itself."
             )
-        clone_node = LogicalPlanNode(node_type=LogicalPlanStepType.CloneCollection)
+        clone_node = CloneCollectionStep()
         clone_node.collection_name = collection_name
         clone_node.source_collection = source_collection
         plan.add_node(random_string(), clone_node)
         return plan
 
-    create_collection_node = LogicalPlanNode(node_type=LogicalPlanStepType.CreateCollection)
+    create_collection_node = CreateCollectionStep()
     create_collection_node.collection_name = collection_name
     create_collection_node.if_not_exists = create_statement.get("if_not_exists", False)
 
@@ -5471,7 +5512,7 @@ def plan_drop(statement, **kwargs):
 
     if object_type == "View":
         # DROP VIEW path (unchanged)
-        drop_view_node = LogicalPlanNode(node_type=LogicalPlanStepType.DropView)
+        drop_view_node = DropViewStep()
 
         # Extract view names (can drop multiple views)
         names = drop_statement["names"]
@@ -5492,7 +5533,7 @@ def plan_drop(statement, **kwargs):
 
     elif object_type == "Table":
         # DROP TABLE path (new)
-        drop_relation_node = LogicalPlanNode(node_type=LogicalPlanStepType.DropRelation)
+        drop_relation_node = DropRelationStep()
 
         # Extract table names (can drop multiple tables)
         names = drop_statement["names"]
@@ -5517,7 +5558,7 @@ def plan_drop(statement, **kwargs):
         # connector's MV drop (which also removes the refresh triggers from
         # every source dataset) and so the type guards can point a plain
         # DROP TABLE at the right statement, and vice versa.
-        drop_relation_node = LogicalPlanNode(node_type=LogicalPlanStepType.DropRelation)
+        drop_relation_node = DropRelationStep()
 
         names = drop_statement["names"]
         relation_names = []
@@ -5538,7 +5579,7 @@ def plan_drop(statement, **kwargs):
         # DROP COLLECTION path — rewritten to DROP SCHEMA by the SQL rewriter
         # (sql_rewriter.rewrite_drop_collection) since the parser has no
         # COLLECTION object type of its own.
-        drop_collection_node = LogicalPlanNode(node_type=LogicalPlanStepType.DropCollection)
+        drop_collection_node = DropCollectionStep()
 
         names = drop_statement["names"]
         collection_names = []
@@ -5590,7 +5631,7 @@ def plan_drop_workspace(statement, **kwargs):
             f"DROP WORKSPACE names a workspace, not a relation within one (got '{workspace_name}'). Give the workspace name on its own."
         )
 
-    drop_workspace_node = LogicalPlanNode(node_type=LogicalPlanStepType.DropWorkspace)
+    drop_workspace_node = DropWorkspaceStep()
     drop_workspace_node.workspace_name = workspace_name
     drop_workspace_node.if_exists = drop_statement.get("if_exists", False)
 
@@ -6047,7 +6088,7 @@ def _plan_ctas(
     plan += source_plan
     source_tail_id = exit_node_id
 
-    insert_step = LogicalPlanNode(node_type=LogicalPlanStepType.Insert)
+    insert_step = InsertStep()
     insert_step.relation_name = relation_name
     insert_step.values_feeder = None
     insert_step.source_tail_id = source_tail_id
@@ -6119,7 +6160,7 @@ def _plan_clone(create_statement, target_name: str, clone_parts):
         )
 
     plan = LogicalPlan()
-    clone_node = LogicalPlanNode(node_type=LogicalPlanStepType.CloneRelation)
+    clone_node = CloneRelationStep()
     clone_node.relation_name = target_name
     clone_node.source_relation = source_name
     clone_node.if_not_exists = bool(create_statement.get("if_not_exists", False))
@@ -6148,7 +6189,7 @@ def plan_resync_relation(statement, **kwargs):
         )
 
     plan = LogicalPlan()
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.ResyncRelation)
+    node = ResyncRelationStep()
     node.relation_name = relation_name
     node.force = bool(load_statement.get("force", False))
     plan.add_node(random_string(), node)
@@ -6171,7 +6212,7 @@ def plan_detach_relation(statement, **kwargs):
         )
 
     plan = LogicalPlan()
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.DetachRelation)
+    node = DetachRelationStep()
     node.relation_name = relation_name
     plan.add_node(random_string(), node)
     return plan
@@ -6193,7 +6234,7 @@ def plan_create_table(statement, **kwargs):
     root_node = "CreateTable"
     plan = LogicalPlan()
 
-    create_table_node = LogicalPlanNode(node_type=LogicalPlanStepType.CreateRelation)
+    create_table_node = CreateRelationStep()
 
     # Extract table name
     table_name_parts = statement[root_node]["name"]
@@ -6299,7 +6340,6 @@ def plan_create_table(statement, **kwargs):
         )
         columns.append(flat_col)
 
-    create_table_node.columns = columns
 
     # Build RelationSchema
     schema = RelationSchema(name=create_table_node.relation_name, columns=columns)
@@ -6336,7 +6376,7 @@ def plan_truncate(statement, **kwargs):
     relation_name = ".".join(p["Identifier"]["value"] for p in name_parts)
 
     plan = LogicalPlan()
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.TruncateRelation)
+    node = TruncateRelationStep()
     node.relation_name = relation_name
     node.if_exists = truncate_stmt.get("if_exists", False)
 
@@ -6443,7 +6483,7 @@ def plan_optimize_table(statement, **kwargs):
 
     plan = plan_query(query)
 
-    sink = LogicalPlanNode(node_type=LogicalPlanStepType.CompactionCommit)
+    sink = CompactionCommitStep()
     sink.relation_name = relation_name
     return _attach_sink(plan, sink)
 
@@ -6490,8 +6530,8 @@ def plan_insert(statement, **kwargs):
 
     if "Values" in body:
         # VALUES source — mirror the existing FromClause VALUES path.
-        values_step = LogicalPlanNode(
-            node_type=LogicalPlanStepType.FunctionDataset, function="VALUES"
+        values_step = FunctionDatasetStep(
+            function="VALUES"
         )
         values_step.alias = f"$insert_values-{random_string(6)}"
         values_step.values = [
@@ -6502,14 +6542,14 @@ def plan_insert(statement, **kwargs):
         # with the actual column names from the target relation's schema.
         if values_step.values:
             num_cols = len(values_step.values[0])
-            values_step.columns = tuple(f"$col{i}" for i in range(num_cols))
+            values_step.column_aliases = tuple(f"$col{i}" for i in range(num_cols))
         else:
-            values_step.columns = ()
+            values_step.column_aliases = ()
 
         values_id = random_string()
         plan.add_node(values_id, values_step)
 
-        insert_step = LogicalPlanNode(node_type=LogicalPlanStepType.Insert)
+        insert_step = InsertStep()
         insert_step.relation_name = relation_name
         insert_step.values_feeder = values_step
         insert_step.source_tail_id = None
@@ -6530,7 +6570,7 @@ def plan_insert(statement, **kwargs):
         plan += source_plan
         source_tail_id = exit_node_id
 
-        insert_step = LogicalPlanNode(node_type=LogicalPlanStepType.Insert)
+        insert_step = InsertStep()
         insert_step.relation_name = relation_name
         insert_step.values_feeder = None
         insert_step.source_tail_id = source_tail_id
@@ -6549,7 +6589,7 @@ def plan_analyze_query(statement, **kwargs) -> LogicalPlan:
         raise UnsupportedSyntaxError("**ANALYZE** without TABLE keyword is not supported. Write `ANALYZE TABLE <table>`.")
 
     plan = LogicalPlan()
-    analyze_node = LogicalPlanNode(node_type=LogicalPlanStepType.Analyze)
+    analyze_node = AnalyzeStep()
     analyze_node.action = "analyze_table"
     analyze_node.table_name = ".".join(
         part["Identifier"]["value"] for part in statement[root]["table_name"]
@@ -6571,7 +6611,7 @@ def plan_drop_statistics(statement, **kwargs) -> LogicalPlan:
     logical node / Table Management physical node, dispatching on `action`."""
     root = "DropStatistics"
     plan = LogicalPlan()
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.Analyze)
+    node = AnalyzeStep()
     node.action = "drop_statistics"
     node.table_name = _aside_object_name(statement[root]["table_name"])
     node.analyze_columns = list(statement[root].get("columns") or [])
@@ -6723,7 +6763,7 @@ def plan_create_task(statement, **kwargs) -> LogicalPlan:
             f"A task cannot be defined as a **{inner_root.upper()}** statement."
         )
 
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.CreateTask)
+    node = CreateTaskStep()
     node.task_name = task_name
     node.statement = task_sql
     node.or_replace = statement[root].get("or_replace", False)
@@ -6761,7 +6801,7 @@ def plan_drop_task(statement, **kwargs) -> LogicalPlan:
     leaves a trigger nobody can see.
     """
     root = "DropTask"
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.DropTask)
+    node = DropTaskStep()
     node.task_name = _aside_object_name(statement[root]["name"])
     node.if_exists = statement[root].get("if_exists", False)
 
@@ -6815,7 +6855,7 @@ def plan_alter_task(statement, **kwargs) -> LogicalPlan:
             f"A task cannot be defined as a **{inner_root.upper()}** statement."
         )
 
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterTask)
+    node = AlterTaskStep()
     node.task_name = task_name
     node.statement = task_sql
 
@@ -6848,7 +6888,7 @@ def plan_create_trigger(statement, **kwargs) -> LogicalPlan:
     """
     root = "CreateTrigger"
     window_source = statement[root].get("window_source")
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.CreateTrigger)
+    node = CreateTriggerStep()
     node.trigger_name = statement[root]["name"]["value"]
     node.table_name = _aside_object_name(statement[root]["table"])
     node.task_name = _aside_object_name(statement[root]["task"])
@@ -6873,7 +6913,7 @@ def plan_alter_trigger_owner(statement, **kwargs) -> LogicalPlan:
     there is nothing to pin. A trigger fires with nobody present.
     """
     root = "AlterTriggerOwner"
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterTriggerOwner)
+    node = AlterTriggerOwnerStep()
     node.trigger_name = statement[root]["name"]["value"]
     node.table_name = _aside_object_name(statement[root]["table"])
     node.owner_is_current_user = statement[root].get("owner_is_current_user", False)
@@ -6897,7 +6937,7 @@ def plan_alter_trigger_suspended(statement, **kwargs) -> LogicalPlan:
     updating.
     """
     root = "AlterTriggerSuspended"
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterTriggerSuspended)
+    node = AlterTriggerSuspendedStep()
     node.trigger_name = statement[root]["name"]["value"]
     node.table_name = _aside_object_name(statement[root]["table"])
     node.suspended = statement[root]["suspended"]
@@ -6917,7 +6957,7 @@ def plan_alter_trigger_minimum_interval(statement, **kwargs) -> LogicalPlan:
     0 removes the floor.
     """
     root = "AlterTriggerMinimumInterval"
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterTriggerMinimumInterval)
+    node = AlterTriggerMinimumIntervalStep()
     node.trigger_name = statement[root]["name"]["value"]
     node.table_name = _aside_object_name(statement[root]["table"])
     node.minimum_interval_seconds = int(statement[root]["minimum_interval_seconds"])
@@ -6934,7 +6974,7 @@ def plan_drop_trigger(statement, **kwargs) -> LogicalPlan:
     per dataset, and it is the permission target (WRITE) the binder checks."""
     root = "DropTrigger"
     plan = LogicalPlan()
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.DropTrigger)
+    node = DropTriggerStep()
     node.trigger_name = statement[root]["name"]["value"]
     node.table_name = _aside_object_name(statement[root]["table"])
     node.if_exists = statement[root].get("if_exists", False)
@@ -6955,7 +6995,7 @@ def plan_alter_materialized_view_owner(statement, **kwargs) -> LogicalPlan:
     permission check."""
     root = "AlterMaterializedViewOwner"
     plan = LogicalPlan()
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterMaterializedViewOwner)
+    node = AlterMaterializedViewOwnerStep()
     node.relation_name = _aside_object_name(statement[root]["name"])
     new_owner = statement[root]["owner"]
     # None is CURRENT_USER, which names no principal to resolve; anything else is
@@ -6979,7 +7019,7 @@ def plan_alter_materialized_view_suspended(statement, **kwargs) -> LogicalPlan:
     broken"."""
     root = "AlterMaterializedViewSuspended"
     plan = LogicalPlan()
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterMaterializedViewSuspended)
+    node = AlterMaterializedViewSuspendedStep()
     node.relation_name = _aside_object_name(statement[root]["name"])
     node.suspended = statement[root]["suspended"]
 
@@ -7023,7 +7063,7 @@ def _grant_object_pattern(object_kind: str, object_name: str) -> str:
 
 def _plan_grant_statement(statement, root: str, node_type) -> LogicalPlan:
     plan = LogicalPlan()
-    node = LogicalPlanNode(node_type=node_type)
+    node = step_classes()[node_type]()
     node.object_kind = statement[root]["object_kind"]
     # The object and the principal are value slots: either the literal the
     # pre-parse grammar captured, or the value bound to the placeholder written
@@ -7067,7 +7107,7 @@ def _plan_grant_listing(statement, root: str, node_type, effective: bool) -> Log
     questions about one object, not two features.
     """
     plan = LogicalPlan()
-    node = LogicalPlanNode(node_type=node_type)
+    node = step_classes()[node_type]()
     node.object_kind = statement[root]["object_kind"]
     node.object_name = resolve_slot_value(statement[root]["object_name"], "granted object")
     node.pattern = _grant_object_pattern(node.object_kind, node.object_name)
@@ -7117,7 +7157,7 @@ def plan_listen(statement, **kwargs) -> LogicalPlan:
     context, which is the only place it can honestly come from.
     """
     root = "Listen"
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.Listen)
+    node = ListenStep()
     node.task_name = _aside_object_name(statement[root]["name"])
     # Already resolved to one of ERROR/SUCCESS/EVERYTHING by pre-parse; a
     # missing FOR clause arrives as EVERYTHING rather than as None.
@@ -7136,7 +7176,7 @@ def plan_unlisten(statement, **kwargs) -> LogicalPlan:
     also what the duplicate-LISTEN refusal hands the caller.
     """
     root = "Unlisten"
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.Unlisten)
+    node = UnlistenStep()
     node.task_name = _aside_object_name(statement[root]["name"])
 
     plan = LogicalPlan()
@@ -7272,7 +7312,7 @@ def plan_comment(statement, **kwargs):
     root_node = "Comment"
     plan = LogicalPlan()
 
-    comment_node = LogicalPlanNode(node_type=LogicalPlanStepType.Comment)
+    comment_node = CommentStep()
 
     # Extract object name (e.g., workspace.collection.view)
     object_name_parts = statement[root_node]["object_name"]
@@ -7423,7 +7463,7 @@ def plan_call(statement, **kwargs) -> LogicalPlan:
             f"({', '.join(procedure.parameters) or 'none'}); {len(values)} given."
         )
 
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.CallProcedure)
+    node = CallProcedureStep()
     node.procedure_name = procedure_name
     node.arguments = values
 
@@ -7525,8 +7565,7 @@ def _insert_visibility_filter(logical_plan, nid, node, filter_dnf, telemetry) ->
         )
 
         # If the filter is an empty list, it means that the relation should not be visible
-        filter_node = LogicalPlanNode(
-            node_type=LogicalPlanStepType.Filter,
+        filter_node = FilterStep(
             condition=expression_tree,  # Use the built expression tree
             all_relations={node.relation, node.alias},
         )
@@ -7541,8 +7580,7 @@ def _insert_visibility_filter(logical_plan, nid, node, filter_dnf, telemetry) ->
         # Apply the transformation from DNF to an expression tree
         expression_tree = build_expression_tree(node.alias, filter_dnf)
 
-        filter_node = LogicalPlanNode(
-            node_type=LogicalPlanStepType.Filter,
+        filter_node = FilterStep(
             condition=expression_tree,  # Use the built expression tree
             all_relations={node.relation, node.alias},
         )

@@ -73,6 +73,7 @@ from typing import Optional
 from typing import Tuple
 
 from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.compiled.structures.plan_steps import MergeStep
 
 # Action codes carried in `$merge_action`. MergeNode is the only reader.
 #   NOOP   — nothing at all: no delete position, no appended row. An unmatched
@@ -517,7 +518,6 @@ def plan_merge(statement, **kwargs):
     from opteryx.constants.row_identity import ROW_IDENTITY_FILE
     from opteryx.constants.row_identity import ROW_IDENTITY_ORDINAL
     from opteryx.exceptions import ReadOnlyConnectorError
-    from opteryx.planner.logical_planner.logical_planner import LogicalPlanNode
     from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
     from opteryx.planner.logical_planner.logical_planner import plan_query
     from opteryx.utils import random_string
@@ -729,7 +729,7 @@ def plan_merge(statement, **kwargs):
     # same sink, so "MERGE" is not a safe assumption there.
     target_scan.row_identity_statement = "MERGE INTO"
 
-    merge_step = LogicalPlanNode(node_type=LogicalPlanStepType.Merge)
+    merge_step = MergeStep()
     merge_step.relation_name = target_name
     merge_step.target_column_names = tuple(target_columns)
     merge_step.source_tail_id = exit_node_id
@@ -921,10 +921,8 @@ def _sink_node(relation_name: str, target_columns, alias: str, keyword: str, ope
     and the audit trail. Two fields rather than one derived from the other: the
     catalog's vocabulary is its own, and deriving it by taking the first word of
     a message would make a wording change a silent history change."""
-    from opteryx.planner.logical_planner.logical_planner import LogicalPlanNode
-    from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
 
-    step = LogicalPlanNode(node_type=LogicalPlanStepType.Merge)
+    step = MergeStep()
     step.relation_name = relation_name
     step.target_column_names = tuple(target_columns)
     step.target_alias = alias

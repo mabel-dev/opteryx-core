@@ -69,7 +69,7 @@ stay independent by construction.
 """
 
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory
 
@@ -83,7 +83,7 @@ class TopNManifestPruningStrategy(OptimizationStrategy):
 
     requires = ("predicates-pushed", "topn-scan-pushdown")
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type != LogicalPlanStepType.Scan:
             return context
 

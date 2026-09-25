@@ -81,10 +81,7 @@ def _surviving_subquery_nodes(plan):
     """Every NodeType.SUBQUERY expression node left anywhere in the plan."""
     found = []
     for _nid, node in plan.nodes(True):
-        for column in node.columns or []:
-            found.extend(get_all_nodes_of_type(column, (NodeType.SUBQUERY,)))
-        if node.condition is not None:
-            found.extend(get_all_nodes_of_type(node.condition, (NodeType.SUBQUERY,)))
+        found.extend(get_all_nodes_of_type(list(node.expressions()), (NodeType.SUBQUERY,)))
     return found
 
 

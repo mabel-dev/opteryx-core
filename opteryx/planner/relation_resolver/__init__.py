@@ -55,13 +55,15 @@ from typing import Tuple
 
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
-from opteryx.models import Node
 from opteryx.models import is_expression
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.logical_planner import RecursiveCteDefinition
 from opteryx.compiled.structures.expressions import Wildcard
+from opteryx.compiled.structures.plan_steps import steps_with
+from opteryx.compiled.structures.plan_steps import MaterializedCteRefStep
+from opteryx.compiled.structures.plan_steps import SubqueryStep
 
 __all__ = [
     "do_resolve_relations",
@@ -126,9 +128,6 @@ def copy_sub_plan(plan: LogicalPlan) -> LogicalPlan:
     new_plan._cached_ingoing_edges = None
     new_plan._mutation_epoch = 0
 
-    # NOTE: Node.properties returns a FRESH dict on every access, so
-    # `node.properties[key] = value` writes into a throwaway and is silently discarded.
-    # Replacing a property value requires setattr.
     def _rekey_embedded(value):
         if isinstance(value, LogicalPlan):
             return copy_sub_plan(value)
@@ -143,18 +142,11 @@ def copy_sub_plan(plan: LogicalPlan) -> LogicalPlan:
             else:
                 value.map_children(_rekey_embedded)
             return value
-        if type(value) is LogicalPlanNode:
-            for prop, val in list(value.properties.items()):
-                replacement = _rekey_embedded(val)
-                if replacement is not val:
-                    setattr(value, prop, replacement)
         return value
 
+    # The only plans a step holds are inside its expressions (a SUBQUERY's value).
     for _nid, node in new_plan.nodes(True):
-        for prop, val in list(node.properties.items()):
-            replacement = _rekey_embedded(val)
-            if replacement is not val:
-                setattr(node, prop, replacement)
+        node.map_expressions(_rekey_embedded)
 
     return new_plan
 
@@ -272,14 +264,11 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX):
         if is_expression(property):
             for child in property.children():
                 _prop(child)
-        elif type(property) is LogicalPlanNode:
-            for p in property.properties:
-                property.properties[p] = _prop(property.properties[p])
         return property
 
     for nid, node in plan.nodes(True):
-        for property in node.properties:
-            node.properties[property] = _prop(node.properties[property])
+        for expression in node.expressions():
+            _prop(expression)
 
     # Window and FramedWindow nodes carry a pre-minted output relation
     # (`$window-XXXXXX` / `$framedwindow-XXXXXX`) and pre-minted SchemaColumn
@@ -348,10 +337,11 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX):
                 node.right_relation_names = [
                     relations.get(n.lower(), n) for n in node.right_relation_names
                 ]
-            if node.left_readers:
-                node.left_readers = [uuid_remap.get(u, u) for u in node.left_readers]
-            if node.right_readers:
-                node.right_readers = [uuid_remap.get(u, u) for u in node.right_readers]
+            if node.node_type in steps_with("left_readers"):
+                if node.left_readers:
+                    node.left_readers = [uuid_remap.get(u, u) for u in node.left_readers]
+                if node.right_readers:
+                    node.right_readers = [uuid_remap.get(u, u) for u in node.right_readers]
             plan[nid] = node
 
     return plan
@@ -439,13 +429,12 @@ def _output_columns(sub_plan: LogicalPlan, head_nid: str):
     body's names. Walk down (edges run leaf -> head) past the column-less nodes to the
     projection they wrap.
 
-    Only the node types in `_PROJECTION_NODES` are read for that projection. `columns`
-    is not one property with one meaning: a FunctionDataset (VALUES, UNNEST,
-    GENERATE_SERIES) puts its output NAMES there, as plain strings. `SELECT * FROM
-    (VALUES ...) AS v(c)` leaves no Project at all, so a CTE body of exactly that has
-    the FunctionDataset AT its head — the walk used to return `('c',)` and the Binder
-    died reading `node_type` off a `str`. A body headed by one of those projects
-    everything it produces, which the wildcard says exactly.
+    Only the node types in `_PROJECTION_NODES` are read for that projection. A
+    FunctionDataset (VALUES, UNNEST, GENERATE_SERIES) carries its output NAMES
+    (`column_aliases`) until it is bound, and `SELECT * FROM (VALUES ...) AS v(c)`
+    leaves no Project at all, so a CTE body of exactly that has the FunctionDataset AT
+    its head. A body headed by one of those projects everything it produces, which
+    the wildcard says exactly.
 
     Found by walking THIS sub-plan rather than carried from the logical planner: the
     plan is copied per reference and `LogicalColumn.copy()` takes no memo, so a list
@@ -475,25 +464,11 @@ def _output_columns(sub_plan: LogicalPlan, head_nid: str):
 
 
 def _boundary_columns(sub_plan: LogicalPlan, head_nid: str, relation: str) -> list:
-    """The projection to stamp on a relation's Subquery boundary node.
-
-    The Binder reads these as expression Nodes (`column.node_type`). Anything else
-    reaching it dies as a bare `AttributeError` inside `binder/project.py` with no
-    mention of the SQL that produced it, so the contract is checked HERE, where the
-    relation is still named.
-    """
-    from opteryx.exceptions import InvalidInternalStateError
-    from opteryx.expression import NodeType
-
-    columns = _output_columns(sub_plan, head_nid) or [Wildcard()]
-    bad = [column for column in columns if not is_expression(column)]
-    if bad:
-        raise InvalidInternalStateError(
-            f"Relation '{relation}' produced a projection the binder cannot read: "
-            f"{', '.join(repr(column) for column in bad)}. "
-            "A relation body's output columns must be expression nodes."
-        )
-    return list(columns)
+    """The projection to stamp on a relation's Subquery boundary node: the body's
+    output columns, or the wildcard when its head projects everything it produces.
+    (A step's `columns` holds only expressions — the typed step refuses anything
+    else where it is written.)"""
+    return list(_output_columns(sub_plan, head_nid) or [Wildcard()])
 
 
 def _splice(plan: LogicalPlan, nid: str, node, sub_plan: LogicalPlan) -> LogicalPlan:
@@ -511,8 +486,17 @@ def _splice(plan: LogicalPlan, nid: str, node, sub_plan: LogicalPlan) -> Logical
             f"Relation '{node.relation}' cannot be expanded here — it has no consumer."
         )
 
-    node.node_type = LogicalPlanStepType.Subquery
-    node.columns = _boundary_columns(sub_plan, sub_plan_head, node.relation or node.alias)
+    # A NEW Subquery step in the Scan's place, carrying the fields a boundary has.
+    plan[nid] = SubqueryStep(
+        uuid=node.uuid,
+        alias=node.alias,
+        relation=node.relation,
+        hints=node.hints,
+        hint_settings=node.hint_settings,
+        all_relations=node.all_relations,
+        pre_update_columns=node.pre_update_columns,
+        columns=_boundary_columns(sub_plan, sub_plan_head, node.relation or node.alias),
+    )
     plan += sub_plan
     plan.add_edge(sub_plan_head, nid, outgoing[0][2])
     return join_leg_preprocess(plan)
@@ -530,18 +514,9 @@ def _expression_subqueries(node) -> list:
     from opteryx.expression import NodeType
     from opteryx.expression import get_all_nodes_of_type
 
-    roots = []
-    for key, value in node.properties.items():
-        if key in ("node_type", "uuid"):
-            continue
-        # A plan node held as a property (INSERT's `values_feeder`) is a vertex of
-        # the graph, resolved by the graph walk in its own right — not an expression.
-        if is_expression(value):
-            roots.append(value)
-        elif isinstance(value, (list, tuple, set)):
-            roots.extend(v for v in value if is_expression(v))
-
-    return get_all_nodes_of_type(roots, (NodeType.SUBQUERY,))
+    # A step held as a field (INSERT's `values_feeder`) is a vertex of the graph,
+    # resolved by the graph walk in its own right — not an expression.
+    return get_all_nodes_of_type(list(node.expressions()), (NodeType.SUBQUERY,))
 
 
 def _resolve(
@@ -794,33 +769,17 @@ def _embedded_plans(node) -> list:
     `_expression_subqueries` — the plan is the SUBQUERY expression node's value)."""
     found: list = []
 
-    def _walk(value):
-        if isinstance(value, LogicalPlan):
-            found.append(value)
-        elif isinstance(value, (list, tuple, set)):
-            for v in value:
-                _walk(v)
-        elif isinstance(value, dict):
-            for v in value.values():
-                _walk(v)
-        elif is_expression(value):
-            # The only plan an expression holds is a SUBQUERY's `value`.
-            if value.node_type == NodeType.SUBQUERY:
-                _walk(value.value)
-            else:
-                for child in value.children():
-                    _walk(child)
-        elif type(value) is LogicalPlanNode:
-            props = value.properties
-            for key, val in (props or {}).items():
-                if key in ("node_type", "uuid"):
-                    continue
-                _walk(val)
+    def _walk(expression):
+        # The only plan an expression holds is a SUBQUERY's `value`.
+        if expression.node_type == NodeType.SUBQUERY:
+            if isinstance(expression.value, LogicalPlan):
+                found.append(expression.value)
+        else:
+            for child in expression.children():
+                _walk(child)
 
-    for key, value in node.properties.items():
-        if key in ("node_type", "uuid"):
-            continue
-        _walk(value)
+    for expression in node.expressions():
+        _walk(expression)
     return found
 
 
@@ -828,7 +787,10 @@ def _pending_refs(plan: LogicalPlan):
     """(plan, nid, node) for every pending CTE marker in `plan`'s forest."""
     for member in iter_plan_forest(plan):
         for nid, node in list(member.nodes(True)):
-            if getattr(node, "pending_cte_key", None) is not None:
+            if (
+                node.node_type in steps_with("pending_cte_key")
+                and node.pending_cte_key is not None
+            ):
                 yield member, nid, node
 
 
@@ -979,10 +941,19 @@ def _finalize_cte_sharing(
     for site_iter in remaining:
         for member, nid, node in site_iter:
             key = node.pending_cte_key
-            node.pending_cte_key = None
-            node.node_type = LogicalPlanStepType.MaterializedCteRef
-            node.cte_key = key
-            node.cte_name = names.get(key)
+            # A NEW reference step in the pending Scan's place.
+            member[nid] = MaterializedCteRefStep(
+                uuid=node.uuid,
+                alias=node.alias,
+                relation=node.relation,
+                hints=node.hints,
+                hint_settings=node.hint_settings,
+                all_relations=node.all_relations,
+                pre_update_columns=node.pre_update_columns,
+                columns=node.columns,
+                cte_key=key,
+                cte_name=names.get(key),
+            )
             if key in recursive_defs:
                 if key not in recursive_used:
                     recursive_used.append(key)
@@ -1026,7 +997,7 @@ def _finalize_cte_sharing(
 
     def _add_boundary(body: LogicalPlan, alias: str):
         head = body.get_exit_points()[0]
-        boundary = LogicalPlanNode(LogicalPlanStepType.Subquery)
+        boundary = SubqueryStep()
         boundary.alias = alias
         boundary.columns = _boundary_columns(body, head, boundary.alias)
         boundary_nid = random_string()

@@ -27,7 +27,7 @@ from opteryx.expression.evaluator import execute_bytecode
 from opteryx.managers.virtual_datasets import one_row_data
 from opteryx.models import Node, QueryTelemetry
 from opteryx.planner import build_literal_node
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.types.logical_type import BOOLEAN, LogicalCategory
 from opteryx.types.logical_type import LogicalCategory as LC
 
@@ -614,7 +614,7 @@ def _fold(expression: Node, telemetry: QueryTelemetry) -> Node:
 
 
 class ConstantFoldingStrategy(OptimizationStrategy):
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         """
         Constant Folding is when we precalculate expressions (or sub expressions)
         which contain only constant or literal values.

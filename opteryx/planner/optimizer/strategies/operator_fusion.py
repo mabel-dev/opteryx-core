@@ -23,7 +23,7 @@ into joins.
 """
 
 from opteryx.expression import NodeType
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.vectors.vector_types import (
     get_vector_source_identifier,
@@ -32,6 +32,7 @@ from opteryx.types.vectors.vector_types import (
 )
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
+from opteryx.compiled.structures.plan_steps import HeapSortStep
 
 
 class OperatorFusionStrategy(OptimizationStrategy):
@@ -61,19 +62,19 @@ class OperatorFusionStrategy(OptimizationStrategy):
             expression.value == "COSINE_SIMILARITY" and descending
         )
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Order:
             edges = context.optimized_plan.outgoing_edges(context.node_id)
             if len(edges) == 1:
                 next_node_id = edges[0][1]
                 next_node = context.optimized_plan[next_node_id]
                 if next_node.node_type == LogicalPlanStepType.Limit and not next_node.offset:
-                    new_node = LogicalPlanNode(node_type=LogicalPlanStepType.HeapSort)
+                    new_node = HeapSortStep()
                     new_node.limit = next_node.limit
                     new_node.order_by = node.order_by
                     # This strategy runs AFTER projection pushdown, so the fused node
                     # is the only place the Order's active-column set can come from —
-                    # a fresh LogicalPlanNode has none, and without it the HeapSort
+                    # a fresh PlanStep has none, and without it the HeapSort
                     # would gather every column including an ORDER BY key nothing
                     # above it reads. The ORDER's set, not the LIMIT's: the fused node
                     # emits what the Order emitted, and a LIMIT adds no columns of its

@@ -51,6 +51,7 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.physical_planner.execution_estimates import group_count_estimate
 from opteryx.planner.physical_planner.execution_estimates import join_output_rows_estimate
 from opteryx.planner.plan_context import PlanContext
+from opteryx.compiled.structures.plan_steps import steps_with
 
 # Inverse of a comparison op, for normalizing `literal OP column` to
 # `column OP literal` (rugo's predicate tuples are always column-relative).
@@ -204,7 +205,7 @@ def _scan_reader_for_manifest(manifest, dataset: str) -> str:
 
 
 def _create_aggregate_node(logical_node, query_properties, registry):
-    node_config = logical_node.properties
+    node_config = logical_node.operator_parameters()
     return registry.create(
         "Aggregate",
         query_properties,
@@ -213,7 +214,7 @@ def _create_aggregate_node(logical_node, query_properties, registry):
 
 
 def _create_aggregate_and_group_node(logical_node, query_properties, registry, group_count_estimate):
-    node_config = logical_node.properties
+    node_config = logical_node.operator_parameters()
     return registry.create(
         "Aggregate and Group",
         query_properties,
@@ -229,7 +230,7 @@ def _create_aggregate_and_group_node(logical_node, query_properties, registry, g
 
 
 def _create_distinct_node(logical_node, query_properties, registry, group_count_estimate):
-    node_config = logical_node.properties
+    node_config = logical_node.operator_parameters()
     return registry.create(
         "Distinct",
         query_properties,
@@ -239,7 +240,7 @@ def _create_distinct_node(logical_node, query_properties, registry, group_count_
 
 
 def _create_window_node(logical_node, query_properties, registry):
-    node_config = logical_node.properties
+    node_config = logical_node.operator_parameters()
     return registry.create(
         "Window",
         query_properties,
@@ -255,7 +256,7 @@ def _create_window_node(logical_node, query_properties, registry):
 
 
 def _create_framed_window_node(logical_node, query_properties, registry):
-    node_config = logical_node.properties
+    node_config = logical_node.operator_parameters()
     return registry.create(
         "Framed Window",
         query_properties,
@@ -273,15 +274,15 @@ def _create_framed_window_node(logical_node, query_properties, registry):
 
 
 def _create_exit_node(logical_node, query_properties, registry):
-    return registry.create("Exit", query_properties, **logical_node.properties)
+    return registry.create("Exit", query_properties, **logical_node.operator_parameters())
 
 
 def _create_explain_node(logical_node, query_properties, registry):
-    return registry.create("Explain", query_properties, **logical_node.properties)
+    return registry.create("Explain", query_properties, **logical_node.operator_parameters())
 
 
 def _create_filter_node(logical_node, query_properties, registry):
-    node_config = logical_node.properties
+    node_config = logical_node.operator_parameters()
     return registry.create(
         "Filter",
         query_properties,
@@ -296,7 +297,7 @@ def _create_function_dataset_node(logical_node, query_properties, registry):
         # the generic single-Morsel DATASET_FUNCTIONS path (VALUES/UNNEST/
         # GENERATE_SERIES), so it gets its own scan operator, the same way
         # Parquet scans are routed to "Parquet Reader" in _create_scan_node.
-        node_config = dict(logical_node.properties)
+        node_config = dict(logical_node.operator_parameters())
         physical_by_identity = node_config.get("jsonl_physical_by_identity") or {}
         # `logical_node.columns` reflects whatever projection_pushdown pruned it
         # to; re-derive the matching physical (pre-alias) names by identity --
@@ -318,13 +319,13 @@ def _create_function_dataset_node(logical_node, query_properties, registry):
         # translation; node_config["predicates"]/["columns"] are already real column
         # identifiers (not JSONL's raw-key remap), and the manifest/connector are
         # already fully resolved.
-        node_config = dict(logical_node.properties)
+        node_config = dict(logical_node.operator_parameters())
         return registry.create("Parquet Reader", query_properties, **node_config)
     if logical_node.function == "READ_CSV":
         # READ_CSV reads each file whole (no chunking -- see CsvReadNode's module
         # docstring), but the projection/predicate translation shape is otherwise
         # identical to READ_JSONL above.
-        node_config = dict(logical_node.properties)
+        node_config = dict(logical_node.operator_parameters())
         physical_by_identity = node_config.get("csv_physical_by_identity") or {}
         node_config["csv_physical_columns"] = [
             physical_by_identity[column.schema_column.identity]
@@ -334,17 +335,17 @@ def _create_function_dataset_node(logical_node, query_properties, registry):
             node_config.get("predicates"), physical_by_identity
         )
         return registry.create("CSV Reader", query_properties, **node_config)
-    return registry.create("Function Dataset", query_properties, **logical_node.properties)
+    return registry.create("Function Dataset", query_properties, **logical_node.operator_parameters())
 
 
 def _create_heap_sort_node(logical_node, query_properties, registry):
-    return registry.create("Heap Sort", query_properties, **logical_node.properties)
+    return registry.create("Heap Sort", query_properties, **logical_node.operator_parameters())
 
 
 def _create_join_node(logical_node, query_properties, registry, output_rows_estimate):
     # The join's expected output rows sizes the native build sink (see
     # execution_estimates); None for join types with no build payload.
-    node_config = {**logical_node.properties, "join_output_rows_estimate": output_rows_estimate}
+    node_config = {**logical_node.operator_parameters(), "join_output_rows_estimate": output_rows_estimate}
     join_type = node_config.get("type")
 
     if join_type == "inner":
@@ -397,7 +398,7 @@ def _create_join_node(logical_node, query_properties, registry, output_rows_esti
 
 
 def _create_scalar_guard_node(logical_node, query_properties, registry):
-    node_config = logical_node.properties
+    node_config = logical_node.operator_parameters()
     return registry.create(
         "Scalar Guard",
         query_properties,
@@ -406,7 +407,7 @@ def _create_scalar_guard_node(logical_node, query_properties, registry):
 
 
 def _create_limit_node(logical_node, query_properties, registry):
-    node_config = logical_node.properties
+    node_config = logical_node.operator_parameters()
     return registry.create(
         "Limit",
         query_properties,
@@ -415,7 +416,7 @@ def _create_limit_node(logical_node, query_properties, registry):
 
 
 def _create_order_node(logical_node, query_properties, registry):
-    node_config = logical_node.properties
+    node_config = logical_node.operator_parameters()
     return registry.create(
         "Sort",
         query_properties,
@@ -433,7 +434,7 @@ def _create_order_node(logical_node, query_properties, registry):
 
 
 def _create_project_node(logical_node, query_properties, registry):
-    node_config = logical_node.properties
+    node_config = logical_node.operator_parameters()
     return registry.create(
         "Projection",
         query_properties,
@@ -485,7 +486,7 @@ def _create_scan_node(logical_node, query_properties, registry):
     prevent. A knob that cannot bind must say so, not measure as "no effect".
     """
     node = _build_scan_node(logical_node, query_properties, registry)
-    requested = logical_node.properties.get("hint_settings")
+    requested = logical_node.operator_parameters().get("hint_settings")
     if requested and not node.honours_scan_overrides:
         names = ", ".join(md_column(name) for name in sorted(requested))
         raise UnsupportedSyntaxError(
@@ -501,7 +502,7 @@ def _create_scan_node(logical_node, query_properties, registry):
 def _build_scan_node(logical_node, query_properties, registry):
     # Copied, not aliased: the per-scan hint settings below are replaced with
     # their validated values, and that must not write back onto the logical node.
-    node_config = dict(logical_node.properties)
+    node_config = dict(logical_node.operator_parameters())
     node_config["scan_overrides"] = _validated_scan_overrides(
         node_config.pop("hint_settings", None), query_properties
     )
@@ -559,15 +560,15 @@ def _build_scan_node(logical_node, query_properties, registry):
 
 
 def _create_materialized_cte_ref_node(logical_node, query_properties, registry):
-    return registry.create("CTE Reference", query_properties, **logical_node.properties)
+    return registry.create("CTE Reference", query_properties, **logical_node.operator_parameters())
 
 
 def _create_set_node(logical_node, query_properties, registry):
-    return registry.create("Set Variable", query_properties, **logical_node.properties)
+    return registry.create("Set Variable", query_properties, **logical_node.operator_parameters())
 
 
 def _create_show_node(logical_node, query_properties, registry):
-    node_config = logical_node.properties
+    node_config = logical_node.operator_parameters()
     object_type = node_config["object_type"]
 
     if object_type == "VARIABLE":
@@ -579,212 +580,212 @@ def _create_show_node(logical_node, query_properties, registry):
 
 
 def _create_create_view_node(logical_node, query_properties, registry):
-    return registry.create("View Management", query_properties, action="create_view", **logical_node.properties)
+    return registry.create("View Management", query_properties, action="create_view", **logical_node.operator_parameters())
 
 
 def _create_alter_view_node(logical_node, query_properties, registry):
-    return registry.create("View Management", query_properties, action="alter_view", **logical_node.properties)
+    return registry.create("View Management", query_properties, action="alter_view", **logical_node.operator_parameters())
 
 
 def _create_drop_view_node(logical_node, query_properties, registry):
-    return registry.create("View Management", query_properties, action="drop_view", **logical_node.properties)
+    return registry.create("View Management", query_properties, action="drop_view", **logical_node.operator_parameters())
 
 
 def _create_show_columns_node(logical_node, query_properties, registry):
-    return registry.create("Show Columns", query_properties, **logical_node.properties)
+    return registry.create("Show Columns", query_properties, **logical_node.operator_parameters())
 
 
 def _create_show_manifest_node(logical_node, query_properties, registry):
-    return registry.create("Show Manifest", query_properties, **logical_node.properties)
+    return registry.create("Show Manifest", query_properties, **logical_node.operator_parameters())
 
 
 def _create_show_snapshots_node(logical_node, query_properties, registry):
-    return registry.create("Show Snapshots", query_properties, **logical_node.properties)
+    return registry.create("Show Snapshots", query_properties, **logical_node.operator_parameters())
 
 
 def _create_show_lineage_node(logical_node, query_properties, registry):
-    return registry.create("Show Lineage", query_properties, **logical_node.properties)
+    return registry.create("Show Lineage", query_properties, **logical_node.operator_parameters())
 
 
 def _create_show_sources_node(logical_node, query_properties, registry):
-    return registry.create("Show Sources", query_properties, **logical_node.properties)
+    return registry.create("Show Sources", query_properties, **logical_node.operator_parameters())
 
 
 def _create_union_node(logical_node, query_properties, registry):
-    return registry.create("Union", query_properties, **logical_node.properties)
+    return registry.create("Union", query_properties, **logical_node.operator_parameters())
 
 
 def _create_unnest_node(logical_node, query_properties, registry):
-    return registry.create("Unnest Join", query_properties, **logical_node.properties)
+    return registry.create("Unnest Join", query_properties, **logical_node.operator_parameters())
 
 
 def _create_analyze_node(logical_node, query_properties, registry):
-    return registry.create("Table Management", query_properties, **logical_node.properties)
+    return registry.create("Table Management", query_properties, **logical_node.operator_parameters())
 
 
 def _create_comment_node(logical_node, query_properties, registry):
     # COMMENT ON VIEW/TABLE/EXTENSION - use ViewManagementNode with 'comment' action
-    return registry.create("View Management", query_properties, action="comment", **logical_node.properties)
+    return registry.create("View Management", query_properties, action="comment", **logical_node.operator_parameters())
 
 
 def _create_create_relation_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="create_relation", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="create_relation", **logical_node.operator_parameters())
 
 
 def _create_drop_relation_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="drop_relation", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="drop_relation", **logical_node.operator_parameters())
 
 
 def _create_create_collection_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="create_collection", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="create_collection", **logical_node.operator_parameters())
 
 
 def _create_clone_relation_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="clone_relation", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="clone_relation", **logical_node.operator_parameters())
 
 
 def _create_clone_collection_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="clone_collection", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="clone_collection", **logical_node.operator_parameters())
 
 
 def _create_resync_relation_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="resync_relation", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="resync_relation", **logical_node.operator_parameters())
 
 
 def _create_detach_relation_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="detach_relation", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="detach_relation", **logical_node.operator_parameters())
 
 
 def _create_drop_collection_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="drop_collection", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="drop_collection", **logical_node.operator_parameters())
 
 
 def _create_truncate_relation_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="truncate_relation", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="truncate_relation", **logical_node.operator_parameters())
 
 
 def _create_alter_relation_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="cluster_by", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="cluster_by", **logical_node.operator_parameters())
 
 
 def _create_create_tag_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="create_tag", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="create_tag", **logical_node.operator_parameters())
 
 
 def _create_drop_tag_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="drop_tag", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="drop_tag", **logical_node.operator_parameters())
 
 
 def _create_rollback_relation_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="rollback_relation", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="rollback_relation", **logical_node.operator_parameters())
 
 
 def _create_rename_relation_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="rename_relation", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="rename_relation", **logical_node.operator_parameters())
 
 
 def _create_add_column_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="add_column", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="add_column", **logical_node.operator_parameters())
 
 
 def _create_drop_column_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="drop_column", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="drop_column", **logical_node.operator_parameters())
 
 
 def _create_rename_column_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="rename_column", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="rename_column", **logical_node.operator_parameters())
 
 
 def _create_alter_column_type_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="alter_column_type", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="alter_column_type", **logical_node.operator_parameters())
 
 
 def _create_add_relationship_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="add_relationship", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="add_relationship", **logical_node.operator_parameters())
 
 
 def _create_drop_relationship_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="drop_relationship", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="drop_relationship", **logical_node.operator_parameters())
 
 
 def _create_alter_workspace_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="alter_workspace", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="alter_workspace", **logical_node.operator_parameters())
 
 
 def _create_alter_workspace_secure_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="alter_workspace_secure", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="alter_workspace_secure", **logical_node.operator_parameters())
 
 
 def _create_drop_workspace_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="drop_workspace", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="drop_workspace", **logical_node.operator_parameters())
 
 
 def _create_insert_node(logical_node, query_properties, registry):
-    return registry.create("Insert", query_properties, **logical_node.properties)
+    return registry.create("Insert", query_properties, **logical_node.operator_parameters())
 
 
 def _create_compaction_commit_node(logical_node, query_properties, registry):
-    return registry.create("Compaction Commit", query_properties, **logical_node.properties)
+    return registry.create("Compaction Commit", query_properties, **logical_node.operator_parameters())
 
 
 def _create_merge_node(logical_node, query_properties, registry):
-    return registry.create("Merge", query_properties, **logical_node.properties)
+    return registry.create("Merge", query_properties, **logical_node.operator_parameters())
 
 
 def _create_drop_trigger_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="drop_trigger", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="drop_trigger", **logical_node.operator_parameters())
 
 
 def _create_create_trigger_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="create_trigger", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="create_trigger", **logical_node.operator_parameters())
 
 
 def _create_alter_trigger_suspended_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="alter_trigger_suspended", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="alter_trigger_suspended", **logical_node.operator_parameters())
 
 
 def _create_alter_trigger_minimum_interval_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="alter_trigger_minimum_interval", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="alter_trigger_minimum_interval", **logical_node.operator_parameters())
 
 
 def _create_create_task_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="create_task", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="create_task", **logical_node.operator_parameters())
 
 
 def _create_alter_trigger_owner_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="alter_trigger_owner", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="alter_trigger_owner", **logical_node.operator_parameters())
 
 
 def _create_drop_task_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="drop_task", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="drop_task", **logical_node.operator_parameters())
 
 
 def _create_alter_task_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="alter_task", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="alter_task", **logical_node.operator_parameters())
 
 
 def _create_listen_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="listen", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="listen", **logical_node.operator_parameters())
 
 
 def _create_unlisten_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="unlisten", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="unlisten", **logical_node.operator_parameters())
 
 
 def _create_alter_materialized_view_owner_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="alter_materialized_view_owner", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="alter_materialized_view_owner", **logical_node.operator_parameters())
 
 
 def _create_alter_materialized_view_suspended_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="alter_materialized_view_suspended", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="alter_materialized_view_suspended", **logical_node.operator_parameters())
 
 
 def _create_grant_access_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="grant_access", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="grant_access", **logical_node.operator_parameters())
 
 
 def _create_revoke_access_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="revoke_access", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="revoke_access", **logical_node.operator_parameters())
 
 
 def _create_call_procedure_node(logical_node, query_properties, registry):
@@ -793,13 +794,13 @@ def _create_call_procedure_node(logical_node, query_properties, registry):
     # executes every non-tabular statement (GRANT and REVOKE are already there for the
     # same reason), and it is the path that runs OFF the native per-morsel engine,
     # which is where a Python callable belongs.
-    return registry.create("Relation Management", query_properties, action="call_procedure", **logical_node.properties)
+    return registry.create("Relation Management", query_properties, action="call_procedure", **logical_node.operator_parameters())
 
 
 def _create_show_grants_on_node(logical_node, query_properties, registry):
     # Both listings, attached and effective: one operator, told which question
     # to ask by the `effective` property the logical plan carries.
-    return registry.create("Show Grants", query_properties, **logical_node.properties)
+    return registry.create("Show Grants", query_properties, **logical_node.operator_parameters())
 
 
 _DISPATCH = {
@@ -913,9 +914,9 @@ def create_physical_plan(
             node = creator(logical_node, query_properties, registry)
 
         # Copy optimizer/binder attached metadata from logical node to physical node
-        node.manifest = logical_node.manifest
-        if getattr(logical_node, "uuid", None) is not None:
-            node.uuid = logical_node.uuid
+        if logical_node.node_type in steps_with("manifest"):
+            node.manifest = logical_node.manifest
+        node.uuid = logical_node.uuid
 
         plan.add_node(nid, node)
 

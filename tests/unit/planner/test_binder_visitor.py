@@ -5,24 +5,28 @@ correctly and that we're merging values correctly.
 
 import os
 import sys
+from opteryx.compiled.structures.plan_steps import FilterStep
+from opteryx.compiled.structures.plan_steps import ProjectStep
+from opteryx.compiled.structures.plan_steps import ScanStep
+from opteryx.compiled.structures.plan_steps import UnionStep
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.common import BinderVisitor
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanStepType
 from opteryx.types.schema import RelationSchema
 
 
 def test_logical_plan_visitor():
     plan = LogicalPlan()
-    scan_node_left = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    scan_node_left = ScanStep()
     scan_node_left.relation = "left"
-    scan_node_right = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    scan_node_right = ScanStep()
     scan_node_right.relation = "right"
-    project_node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
-    filter_node = LogicalPlanNode(node_type=LogicalPlanStepType.Filter)
-    union_node = LogicalPlanNode(node_type=LogicalPlanStepType.Union)
+    project_node = ProjectStep()
+    filter_node = FilterStep()
+    union_node = UnionStep()
     plan.add_node(1, scan_node_left)
     plan.add_node(2, project_node)
     plan.add_node(3, filter_node)

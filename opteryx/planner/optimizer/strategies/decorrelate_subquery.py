@@ -162,7 +162,7 @@ from opteryx.models import LogicalColumn
 from opteryx.models import is_expression
 from opteryx.planner.binder.join_helpers import extract_join_fields
 from opteryx.planner.binder.join_helpers import hoistable_operand_leg
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.planner.optimizer.strategies.join_key_materialization import (
     materialize_operand_as_column,
 )
@@ -182,6 +182,13 @@ from opteryx.compiled.structures.expressions import Wildcard
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import Aggregator
+from opteryx.compiled.structures.plan_steps import steps_with
+from opteryx.compiled.structures.plan_steps import AggregateAndGroupStep
+from opteryx.compiled.structures.plan_steps import AggregateStep
+from opteryx.compiled.structures.plan_steps import JoinStep
+from opteryx.compiled.structures.plan_steps import ProjectStep
+from opteryx.compiled.structures.plan_steps import ScalarSubqueryGuardStep
+from opteryx.compiled.structures.plan_steps import WindowStep
 
 
 def _is_exists(node) -> bool:
@@ -755,7 +762,7 @@ def _guard_scalar_cardinality(inner_plan: LogicalPlan, telemetry) -> None:
     if _emits_exactly_one_row(inner_plan):
         return
     exit_nid = inner_plan.get_exit_points()[0]
-    guard = LogicalPlanNode(node_type=LogicalPlanStepType.ScalarSubqueryGuard)
+    guard = ScalarSubqueryGuardStep()
     guard_nid = random_string()
     inner_plan.add_node(guard_nid, guard)
     inner_plan.add_edge(exit_nid, guard_nid)
@@ -884,7 +891,7 @@ def _graft_key_reducer(plan: LogicalPlan, filter_nid, inner_plan, local_pairs, t
     inner_plan += reducer_source
     right_relations, right_schemas = _collect_relations(inner_plan, reducer_exit)
 
-    reducer = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+    reducer = JoinStep()
     reducer.type = "left semi"
     reducer.on = on_condition
     reducer.using = None
@@ -932,7 +939,7 @@ def _expose_key(plan: LogicalPlan, key_column) -> None:
     decorrelated relation emits one row per correlation key and the join can
     match on it.
     """
-    _, aggregate = _aggregate_node(plan)
+    aggregate_nid, aggregate = _aggregate_node(plan)
     if aggregate is None:
         raise UnsupportedSyntaxError(
             "Correlated scalar subquery could not be decorrelated: it has no aggregate "
@@ -944,9 +951,8 @@ def _expose_key(plan: LogicalPlan, key_column) -> None:
         # requires `projection` (its output column list, aggregates + keys) — a
         # plain Aggregate carries no such attribute, so it has to be built here or
         # the physical node fails with KeyError('projection').
-        aggregate.node_type = LogicalPlanStepType.AggregateAndGroup
-        aggregate.groups = [key_column]
-        aggregate.projection = list(aggregate.aggregates or []) + [key_column]
+        aggregate = _grouped_by(aggregate, key_column)
+        plan[aggregate_nid] = aggregate
     else:
         aggregate.groups = list(aggregate.groups or []) + [key_column]
         aggregate.projection = list(aggregate.projection or []) + [key_column]
@@ -960,7 +966,23 @@ def _expose_key(plan: LogicalPlan, key_column) -> None:
             node.columns = list(node.columns or []) + [key_column]
 
 
-def _carry_column_upward(node, column) -> None:
+def _grouped_by(aggregate, column):
+    """A NEW AggregateAndGroup grouping an ungrouped Aggregate's aggregates by
+    `column`. AggregateAndGroup also requires `projection` (its output column list,
+    aggregates + keys), which a plain Aggregate has no field for."""
+    return AggregateAndGroupStep(
+        uuid=aggregate.uuid,
+        aggregates=aggregate.aggregates,
+        groups=[column],
+        projection=list(aggregate.aggregates or []) + [column],
+        columns=aggregate.columns,
+        schema=aggregate.schema,
+        all_relations=aggregate.all_relations,
+        pre_update_columns=aggregate.pre_update_columns,
+    )
+
+
+def _carry_column_upward(plan, nid, column) -> None:
     """
     Make `column` survive one operator on the way to the ancestor join.
 
@@ -974,17 +996,16 @@ def _carry_column_upward(node, column) -> None:
     sound because the ancestor join then binds the column; the two changes are a
     pair and neither is correct without the other.
     """
+    node = plan[nid]
     if node.node_type == LogicalPlanStepType.AggregateAndGroup:
         node.groups = list(node.groups or []) + [column]
         node.projection = list(node.projection or []) + [column]
         node.columns = list(node.columns or []) + [column]
     elif node.node_type == LogicalPlanStepType.Aggregate:
-        # Same promotion `_expose_key` performs: a plain Aggregate has no
-        # `projection`, and the physical node fails with KeyError without one.
-        node.node_type = LogicalPlanStepType.AggregateAndGroup
-        node.groups = [column]
-        node.projection = list(node.aggregates or []) + [column]
+        # Same promotion `_expose_key` performs.
+        node = _grouped_by(node, column)
         node.columns = list(node.columns or []) + [column]
+        plan[nid] = node
     elif node.node_type == LogicalPlanStepType.Project:
         node.columns = list(node.columns or []) + [column]
 
@@ -1070,7 +1091,7 @@ def _defer_correlation_to_ancestor(plan: LogicalPlan, from_nid: str, inner_key, 
             # too; unverified, so refuse rather than guess.
             return False
 
-        _carry_column_upward(consumer, carried)
+        _carry_column_upward(plan, consumer_nid, carried)
         current = consumer_nid
 
 
@@ -1143,7 +1164,7 @@ def _rewrite_order_limit_to_row_number(inner_plan: LogicalPlan, key_pairs) -> bo
         schema_column=rn_schema_column,
     )
 
-    window = LogicalPlanNode(node_type=LogicalPlanStepType.Window)
+    window = WindowStep()
     window.partition_by = [_local_copy(inner_key) for inner_key, _outer_key in key_pairs]
     window.order_by = list(order_by)
     # Post-bind producer: the binder's window visitor never sees this node, so both
@@ -1327,9 +1348,11 @@ def _collect_relations(plan: LogicalPlan, root_nid: str):
             continue
         seen.add(nid)
         node = plan[nid]
-        schema = node.schema
+        schema = node.schema if node.node_type in steps_with("schema") else None
         if schema is not None:
-            name = node.alias or node.relation or schema.name
+            alias = node.alias if node.node_type in steps_with("alias") else None
+            relation = node.relation if node.node_type in steps_with("relation") else None
+            name = alias or relation or schema.name
             schemas[name] = schema
             relations.add(name)
         for child, _target, _relation in plan.ingoing_edges(nid):
@@ -1678,7 +1701,7 @@ def _graft_existence_join(
         if origin:
             inner_relations.update(origin)
 
-    join = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+    join = JoinStep()
     join.type = join_type
     join.on = on_condition
     join.using = None
@@ -1760,7 +1783,7 @@ def _project_uncorrelated_exists(plan, project_nid, inner_plan, remove, replace_
     inner_relations, inner_schemas = _collect_relations(plan, agg_nid)
     inner_relations.add(count_relation)
 
-    join = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+    join = JoinStep()
     join.type = "cross join"
     join.on = None
     join.using = None
@@ -1791,7 +1814,7 @@ class DecorrelateSubqueryStrategy(OptimizationStrategy):
             for _, node in plan.nodes(True)
         )
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if (
             node.node_type == LogicalPlanStepType.Filter and _has_work(node.condition)
         ) or _node_has_subquery(node) or _node_has_existence(node):
@@ -1883,7 +1906,11 @@ class DecorrelateSubqueryStrategy(OptimizationStrategy):
                 (_filter_find_in, _decorrelate_in),
                 (_filter_find_subquery, _decorrelate),
             ):
-                while filter_nid in plan and finder(plan[filter_nid].condition)[0] is not None:
+                while (
+                    filter_nid in plan
+                    and plan[filter_nid].node_type == LogicalPlanStepType.Filter
+                    and finder(plan[filter_nid].condition)[0] is not None
+                ):
                     plan = rewrite(plan, filter_nid, self.telemetry)
         return plan
 
@@ -1966,7 +1993,7 @@ def _relation_node_supplying(inner_plan: LogicalPlan, expression):
             continue
         seen.add(nid)
         node = inner_plan[nid]
-        schema = node.schema
+        schema = node.schema if node.node_type in steps_with("schema") else None
         if schema is not None and identities <= {column.identity for column in schema.columns}:
             deepest = nid
         # A Subquery is a NAMING boundary, not a pass-through: a column projected
@@ -2391,7 +2418,7 @@ def _build_filter_join(
             conjunction.right = equals
             on_condition = conjunction
 
-    join = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+    join = JoinStep()
     # The SEMI→INNER conversion for deferred correlations (see above). With no
     # local key at all the converted join has nothing to hash on, and the engine
     # admits zero-key joins only as CROSS — which is the correct semantics here:
@@ -2525,11 +2552,7 @@ def _synthesize_count_aggregate(inner_plan: LogicalPlan, groups: list):
     # No groups is an UNGROUPED aggregate, a different node type — and the one
     # whose exactly-one-row property is structural, which is what lets the
     # SELECT-list caller cross join to it without a cardinality guard.
-    aggregate = LogicalPlanNode(
-        node_type=LogicalPlanStepType.AggregateAndGroup
-        if groups
-        else LogicalPlanStepType.Aggregate
-    )
+    aggregate = AggregateAndGroupStep() if groups else AggregateStep()
     aggregate.aggregates = [count_node]
     aggregate.groups = groups
     aggregate.projection = [count_node] + groups
@@ -2703,7 +2726,7 @@ def _materialize_boolean_value(
         if origin:
             inner_relations.update(origin)
 
-    join = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+    join = JoinStep()
     join.type = "left outer"
     join.on = on_condition
     join.using = None
@@ -3036,7 +3059,9 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
         provider_node = plan[provider]
         if provider_node.node_type == LogicalPlanStepType.Project:
             pre_decorrelation_columns.extend(provider_node.columns or [])
-        provider_schema = provider_node.schema
+        provider_schema = (
+            provider_node.schema if provider_node.node_type in steps_with("schema") else None
+        )
         if provider_schema is not None:
             pre_decorrelation_columns.extend(
                 _reference_to(col) for col in provider_schema.columns
@@ -3088,7 +3113,7 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
             conjunction.right = equals
             on_condition = conjunction
 
-    join = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+    join = JoinStep()
     # No correlation means no key to join on: the subquery is one value attached
     # to every outer row, which is exactly a cross join.
     join.type = "inner" if local_pairs else "cross join"
@@ -3167,7 +3192,7 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
     # (`_carry_column_upward`); this Project is an ordinary Project to that
     # walk and gets widened exactly like one that was already there.
     if pre_decorrelation_columns:
-        narrow_back = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
+        narrow_back = ProjectStep()
         narrow_back.columns = [_local_copy(col) for col in pre_decorrelation_columns]
         narrow_back.passthrough_columns = []
         plan.insert_node_after(random_string(), narrow_back, filter_nid)
@@ -3279,7 +3304,7 @@ def _decorrelate_projection(plan: LogicalPlan, project_nid: str, telemetry) -> L
     inner_relations, inner_schemas = _collect_relations(plan, inner_exit)
     inner_relations.add(scalar_alias)
 
-    join = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+    join = JoinStep()
     # No correlation survives past the check above, so this is always a cross
     # join: one value attached to every outer row.
     join.type = "cross join"

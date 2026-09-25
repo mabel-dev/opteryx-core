@@ -42,13 +42,14 @@ from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.join_helpers import extract_join_fields
 from opteryx.planner.binder.join_helpers import plan_join_key_hoists
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.utils import random_string
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
 from opteryx.compiled.structures.expressions import And
+from opteryx.compiled.structures.plan_steps import ProjectStep
 
 
 def passthrough_column(schema_column, source: Optional[str] = None) -> LogicalColumn:
@@ -101,7 +102,7 @@ def materialize_operand_as_column(
         return None
     project_columns: List[Node] = [passthrough_column(col) for col in columns]
     project_columns.append(expr)
-    project_node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
+    project_node = ProjectStep()
     project_node.columns = project_columns
     project_node.passthrough_columns = []
     plan.insert_node_after(random_string(), project_node, child_id)
@@ -142,7 +143,7 @@ class JoinKeyMaterializationStrategy(OptimizationStrategy):
         join instead of the cartesian product a residual filter would need.
     """
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         return context
 
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:

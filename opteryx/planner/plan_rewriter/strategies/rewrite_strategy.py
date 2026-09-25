@@ -4,7 +4,7 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 
 
 class PlanRewriteContext:
@@ -24,7 +24,7 @@ class PlanRewriteStrategy:
     def should_i_run(self, plan: LogicalPlan) -> bool:
         return True
 
-    def visit(self, node: LogicalPlanNode, context: PlanRewriteContext) -> PlanRewriteContext:
+    def visit(self, node: PlanStep, context: PlanRewriteContext) -> PlanRewriteContext:
         raise NotImplementedError(
             "visit() must be implemented in PlanRewriteStrategy subclasses."
         )

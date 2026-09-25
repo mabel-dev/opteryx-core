@@ -14,7 +14,7 @@ AggregateAndGroup). The rewrite logic is shared with PredicateRewriteStrategy vi
 _rewrite_predicate, which handles both comparison forms and function nodes.
 """
 
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
 from .predicate_rewriter import _rewrite_predicate
@@ -26,7 +26,7 @@ class FunctionRewriteStrategy(OptimizationStrategy):
             return expressions
         return [_rewrite_predicate(expr, self.telemetry) for expr in expressions]
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Project:
             node.columns = self._rewrite_expression_list(node.columns)
             context.optimized_plan[context.node_id] = node

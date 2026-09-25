@@ -10,11 +10,10 @@ import pytest
 
 from opteryx.exceptions import NotSupportedError
 from opteryx.models import QueryProperties
-from opteryx.planner.logical_planner.logical_planner import LogicalPlanNode
-from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.physical_planner import create_physical_plan
 from opteryx.planner.plan_context import PlanContext
 import opteryx.planner.physical_planner as physical_planner
+from opteryx.compiled.structures.plan_steps import JoinStep
 
 
 class _LogicalPlan:
@@ -43,8 +42,7 @@ class _RecordingRegistry:
 
 
 def _inner_join_node():
-    return LogicalPlanNode(
-        node_type=LogicalPlanStepType.Join,
+    return JoinStep(
         type="inner",
         left_columns=[],
         right_columns=[],
@@ -76,7 +74,7 @@ def test_physical_planner_uses_draken_inner_join(monkeypatch):
     assert plan[1].name == "Inner Join"
     # The node's own properties, plus the output-rows estimate the physical planner
     # computes (None: nothing in this PlanContext estimated the join).
-    assert plan[1].parameters == {**node.properties, "join_output_rows_estimate": None}
+    assert plan[1].parameters == {**node.operator_parameters(), "join_output_rows_estimate": None}
 
 
 def test_physical_planner_errors_when_draken_inner_join_not_supported(monkeypatch):

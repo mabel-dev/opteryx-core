@@ -44,7 +44,7 @@ from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.planner.logical_planner.logical_planner import (
     LogicalPlan,
-    LogicalPlanNode,
+    PlanStep,
     LogicalPlanStepType,
 )
 
@@ -67,7 +67,7 @@ def _identifier_source(node: Optional[Node]) -> Optional[str]:
     return None
 
 
-def _is_unconverted_cross_join(node: LogicalPlanNode) -> bool:
+def _is_unconverted_cross_join(node: PlanStep) -> bool:
     # A window join (`agg OVER ()`, window_to_join.py) is a cross join with no ON, so it
     # matches everything below — but it is not part of a `FROM a, b, c` chain and must not
     # be reordered into one. Its legs are labelled and its right leg is a synthetic one-row
@@ -112,14 +112,14 @@ def _subplan_relation_names(
 
 def _collect_chain_top_down(
     plan: LogicalPlan, root_id: str
-) -> List[Tuple[str, LogicalPlanNode]]:
+) -> List[Tuple[str, PlanStep]]:
     """
     Starting at root_id (the topmost cross join), walk down the chain of
     unconverted cross joins where each step has exactly one cross-join child.
     Returns the chain top-down. The bottom join in the returned list has both
     children as leaves.
     """
-    chain: List[Tuple[str, LogicalPlanNode]] = []
+    chain: List[Tuple[str, PlanStep]] = []
     current_id = root_id
     while True:
         node = plan[current_id]
@@ -158,7 +158,7 @@ class _Leaf:
 
 
 def _gather_leaves(
-    plan: LogicalPlan, chain: List[Tuple[str, LogicalPlanNode]]
+    plan: LogicalPlan, chain: List[Tuple[str, PlanStep]]
 ) -> Optional[List[_Leaf]]:
     """
     Walk the chain bottom-up and collect every leaf relation in user-written
@@ -325,7 +325,7 @@ def _choose_order(adj: Dict[int, Set[int]], num_leaves: int) -> List[int]:
 
 def _rewire_chain(
     plan: LogicalPlan,
-    chain: List[Tuple[str, LogicalPlanNode]],
+    chain: List[Tuple[str, PlanStep]],
     leaves: List[_Leaf],
     new_order: List[int],
 ) -> None:
@@ -521,7 +521,7 @@ class CrossJoinChainReorderStrategy(OptimizationStrategy):
     every cross join in the reordered chain to an inner join.
     """
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         return context
 
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:

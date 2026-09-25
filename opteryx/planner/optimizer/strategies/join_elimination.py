@@ -26,7 +26,7 @@ execution engine to short-circuit after the first match per probe row.
 """
 
 from opteryx.expression import NodeType, get_all_nodes_of_type
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext, get_nodes_of_type_from_logical_plan
 
@@ -132,7 +132,7 @@ def _right_is_provably_unique(plan: LogicalPlan, join_nid: str, right_relations:
 
 
 class JoinEliminationStrategy(OptimizationStrategy):
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if (
             node.node_type == LogicalPlanStepType.Join
             and node.type == "inner"

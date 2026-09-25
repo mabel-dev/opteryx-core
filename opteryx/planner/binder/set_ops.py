@@ -14,12 +14,13 @@ from opteryx.planner.binder.binder import (
     merge_schemas,
 )
 from opteryx.planner.binder.binding_context import BindingContext
-from opteryx.planner.logical_planner import LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory, ColumnType, find_compatible_type
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import ConstantColumn, SchemaColumn, RelationSchema, mint_column_identity
 from opteryx.compiled.structures.expressions import And
 from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.plan_steps import JoinStep
 
 
 def visit_set(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
@@ -248,7 +249,7 @@ def _rewrite_setop_to_join(self, node: Node, context: BindingContext, join_type:
     if len(left_columns) != len(right_columns):
         return None
 
-    join_node = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+    join_node = JoinStep()
     join_node.type = join_type
     join_node.on = _positional_setop_on_condition(left_columns, right_columns)
     join_node.using = None

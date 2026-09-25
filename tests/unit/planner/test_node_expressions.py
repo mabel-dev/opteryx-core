@@ -21,6 +21,11 @@ from types import SimpleNamespace
 from opteryx.compiled.structures.expressions import Aggregator
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
+from opteryx.compiled.structures.plan_steps import AggregateAndGroupStep
+from opteryx.compiled.structures.plan_steps import FilterStep
+from opteryx.compiled.structures.plan_steps import FunctionDatasetStep
+from opteryx.compiled.structures.plan_steps import OrderStep
+from opteryx.compiled.structures.plan_steps import ScanStep
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
@@ -30,7 +35,6 @@ from opteryx.expression import NodeType
 from opteryx.models import ExecutionContext, QueryTelemetry
 from opteryx.planner.ast_rewriter import do_ast_rewriter
 from opteryx.planner.binder import do_bind_phase
-from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.logical_planner import do_logical_planning_phase
 from opteryx.planner.logical_planner.node_expressions import expression_roots
@@ -54,7 +58,7 @@ def _ident(identity: str) -> Node:
 
 def test_single_expression_field():
     cmp = Comparison(left=_ident("a"), right=_ident("b"), value="Gt")
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.Filter, condition=cmp)
+    node = FilterStep(condition=cmp)
     assert expression_roots(node) == [cmp]
     assert referenced_identities(node) == {"a", "b"}
 
@@ -62,8 +66,7 @@ def test_single_expression_field():
 def test_order_by_tuple_shape():
     # Order/HeapSort hold a list of (expression, ascending) tuples — the
     # accessor must descend the tuple and ignore the bool.
-    node = LogicalPlanNode(
-        node_type=LogicalPlanStepType.Order,
+    node = OrderStep(
         order_by=[(_ident("c"), True), (_ident("d"), False)],
     )
     assert referenced_identities(node) == {"c", "d"}
@@ -72,8 +75,7 @@ def test_order_by_tuple_shape():
 def test_multiple_list_and_single_fields():
     having = Comparison(left=_ident("h"), right=_ident("k"), value="Gt")
     agg = Aggregator(value="SUM", parameters=[_ident("s")])
-    node = LogicalPlanNode(
-        node_type=LogicalPlanStepType.AggregateAndGroup,
+    node = AggregateAndGroupStep(
         groups=[_ident("g")],
         aggregates=[agg],
         having_condition=having,
@@ -87,15 +89,14 @@ def test_nested_container_descent():
         [Literal(value=1), Literal(value=2)],
         [Literal(value=3)],
     ]
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.FunctionDataset, values=lits)
+    node = FunctionDatasetStep(values=lits)
     assert len(expression_roots(node)) == 3
     assert referenced_identities(node) == set()
 
 
 def test_non_expression_properties_ignored():
     # strings, ints, opaque objects and bare-string lists are not expressions.
-    node = LogicalPlanNode(
-        node_type=LogicalPlanStepType.Scan,
+    node = ScanStep(
         relation="testdata.t",
         connector=object(),
         schema=SimpleNamespace(columns=[1, 2, 3]),

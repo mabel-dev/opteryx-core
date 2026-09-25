@@ -38,7 +38,7 @@ from opteryx.expression.formatter import ExpressionColumn
 from opteryx.models import Node
 from opteryx.models import is_expression
 from opteryx.planner.binder.common import extract_join_fields
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory, ColumnType, BOOLEAN as _CT_BOOLEAN
 from opteryx.types.logical_type import LogicalCategory as LC
 from opteryx.utils import random_string
@@ -49,6 +49,8 @@ from opteryx.compiled.structures.expressions import And
 from opteryx.compiled.structures.expressions import Not
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
+from opteryx.compiled.structures.plan_steps import steps_with
+from opteryx.compiled.structures.plan_steps import FilterStep
 
 # Comparison ops that rewrite_date_trunc_to_range (predicate_rewriter.py) knows how
 # to turn into a raw-column range/literal — the set of ops the TRUNC-alias inline
@@ -180,14 +182,19 @@ def _subtree_relation_names(plan, nid, memo):
     memo[nid] = frozenset()  # cycle guard
     node = plan[nid]
     names = set()
-    for name in (node.relation, node.alias, node.unnest_alias):
-        if name:
-            names.add(name)
-    for name_list in (node.left_relation_names, node.right_relation_names):
-        if name_list:
-            names.update(name_list)
+    if node.node_type in steps_with("relation") and node.relation:
+        names.add(node.relation)
+    if node.node_type in steps_with("alias") and node.alias:
+        names.add(node.alias)
+    if node.node_type in steps_with("left_relation_names"):
+        for name_list in (node.left_relation_names, node.right_relation_names):
+            if name_list:
+                names.update(name_list)
+    if node.node_type == LogicalPlanStepType.Unnest and node.unnest_alias:
+        names.add(node.unnest_alias)
     if (
-        node.unnest_column is not None
+        node.node_type == LogicalPlanStepType.Unnest
+        and node.unnest_column is not None
         and node.unnest_column.node_type == NodeType.IDENTIFIER
         and node.unnest_column.source
     ):
@@ -666,10 +673,9 @@ def _normalize_col_op_lit(condition):
 
 
 def _make_implied_filter(op, target_col, lit_node):
-    """Build a Filter LogicalPlanNode applying op between target_col and lit_node."""
+    """Build a Filter PlanStep applying op between target_col and lit_node."""
     new_cond = Comparison(value=op, left=target_col, right=lit_node)
-    return LogicalPlanNode(
-        node_type=LogicalPlanStepType.Filter,
+    return FilterStep(
         condition=new_cond,
         columns=[target_col],
         relations={target_col.source},
@@ -834,7 +840,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
 
         return not config.features.disable_predicate_pushdown
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type in (
             LogicalPlanStepType.Scan,
             LogicalPlanStepType.FunctionDataset,
@@ -849,7 +855,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         ):
             # Handle predicates specific to node types
             context = self._handle_predicates(node, context)
-            context.optimized_plan.add_node(context.node_id, LogicalPlanNode(**node.properties))
+            context.optimized_plan.add_node(context.node_id, node.shallow_copy())
             if context.last_nid:
                 context.optimized_plan.add_edge(context.node_id, context.last_nid)
 
@@ -1235,17 +1241,17 @@ class PredicatePushdownStrategy(OptimizationStrategy):
 
                 # Every aggregator the condition reads is already one of this node's
                 # (the ownership gate above), so there is nothing to add.
-                node_properties = dict(node.properties)
-                node_properties["having_condition"] = combined
+                with_having = node.shallow_copy()
+                with_having.having_condition = combined
 
-                context.optimized_plan.add_node(context.node_id, LogicalPlanNode(**node_properties))
+                context.optimized_plan.add_node(context.node_id, with_having)
 
                 # Remove the Filter nodes from the plan
                 for predicate in having_predicates:
                     context.optimized_plan.remove_node(context.collected_nids[id(predicate)], heal=True)
                     self.telemetry.optimization_predicate_pushdown += 1
             else:
-                context.optimized_plan.add_node(context.node_id, LogicalPlanNode(**node.properties))
+                context.optimized_plan.add_node(context.node_id, node.shallow_copy())
 
             # Non-HAVING predicates left in remaining_predicates are simply left
             # to keep flowing in collected_predicates, exactly as before this
@@ -1349,8 +1355,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 new_predicates, node.on = _inner(node.on)
                 self.telemetry.optimization_predicate_pushdown_into_join += 1
                 on_filters = [
-                    LogicalPlanNode(
-                        LogicalPlanStepType.Filter,
+                    FilterStep(
                         condition=node,
                         relations={
                             n.source for n in get_all_nodes_of_type(node, (NodeType.IDENTIFIER,))
@@ -1734,7 +1739,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         return context.optimized_plan
 
     def _handle_predicates(
-        self, node: LogicalPlanNode, context: OptimizerContext
+        self, node: PlanStep, context: OptimizerContext
     ) -> OptimizerContext:
         # Two-pass: classify pushable predicates as selective (comparison-style) vs.
         # metadata-only (UNARY_OPERATOR), then commit both unconditionally. Whether a
@@ -1770,7 +1775,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 remaining_predicates.append(predicate)
                 continue
 
-            if not node.connector:
+            if node.node_type not in steps_with("connector") or not node.connector:
                 not_pushable.append(predicate)
                 continue
 
@@ -1841,7 +1846,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         return context
 
     def _inline_project_alias_predicates(
-        self, node: LogicalPlanNode, context: OptimizerContext
+        self, node: PlanStep, context: OptimizerContext
     ) -> None:
         """Inline simple project aliases referenced by a filter so the predicate can be
         pushed below the projection."""
@@ -2038,7 +2043,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
 
     def _inline_trunc_alias_between(
         self,
-        node: LogicalPlanNode,
+        node: PlanStep,
         condition: Node,
         alias_expressions: dict,
         alias_chain: set,
@@ -2150,7 +2155,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
 
     def _inline_trunc_alias_predicate(
         self,
-        node: LogicalPlanNode,
+        node: PlanStep,
         condition: Node,
         alias_expressions: dict,
         alias_chain: set,

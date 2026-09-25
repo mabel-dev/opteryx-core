@@ -56,7 +56,7 @@ UNNEST and CROSS joins have no ON in this sense and are left alone.
 
 from opteryx.exceptions import UnsupportedSyntaxError, compose, md_code, md_syntax
 from opteryx.expression import NodeType, format_expression, get_all_nodes_of_type
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.utils import random_string
 
 from .disjunction_simplification import _build_and, _split_and
@@ -66,6 +66,7 @@ from .optimization_strategy import (
     filter_referenced_columns,
     get_nodes_of_type_from_logical_plan,
 )
+from opteryx.compiled.structures.plan_steps import FilterStep
 
 # Which leg(s) an outer/anti join PRESERVES — rows from that leg surface even with
 # no match, so a filter on it cannot be applied before OR after the join.
@@ -124,7 +125,7 @@ def _refuse_two_sided(conjunct, join_type: str):
 
 
 class JoinConditionHoistStrategy(OptimizationStrategy):
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if (
             node.node_type != LogicalPlanStepType.Join
             or node.type not in _HANDLED_TYPES
@@ -189,7 +190,7 @@ class JoinConditionHoistStrategy(OptimizationStrategy):
         context.optimized_plan[context.node_id] = node
 
         condition = _build_and(hoisted)
-        filter_node = LogicalPlanNode(node_type=LogicalPlanStepType.Filter)
+        filter_node = FilterStep()
         filter_node.condition = condition
         filter_node.columns = filter_referenced_columns(condition)
         relations = set()

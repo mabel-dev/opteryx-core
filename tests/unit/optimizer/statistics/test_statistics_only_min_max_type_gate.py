@@ -36,6 +36,7 @@ import os
 import sys
 from opteryx.compiled.structures.expressions import Aggregator
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.compiled.structures.plan_steps import AggregateStep
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
@@ -44,7 +45,6 @@ import pytest
 from opteryx.planner.optimizer.strategies.statistics_only_response import is_simple_aggregate
 from opteryx.expression import NodeType
 from opteryx.models import Node
-from opteryx.planner.logical_planner import LogicalPlanNode, LogicalPlanStepType
 from opteryx.types.logical_type import (
     DATE,
     FLOAT32,
@@ -84,8 +84,7 @@ def _aggregate(func, category):
 
 
 def _agg_node(func, category):
-    return LogicalPlanNode(
-        node_type=LogicalPlanStepType.Aggregate,
+    return AggregateStep(
         aggregates=[_aggregate(func, category)],
         groups=None,
     )

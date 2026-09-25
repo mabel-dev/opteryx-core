@@ -48,7 +48,7 @@ from typing import Tuple
 from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import ConstantColumn
@@ -308,7 +308,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         Output: FALSE (contradiction)
     """
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         """Collect filter predicates for later analysis."""
         if node.node_type != LogicalPlanStepType.Filter:
             return context
@@ -699,7 +699,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         candidates = get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Filter,))
         return len(candidates) > 0
 
-    def _extract_and_predicates(self, node: LogicalPlanNode) -> list:
+    def _extract_and_predicates(self, node: PlanStep) -> list:
         """
         Extract all AND-ed predicates from an expression.
 
@@ -715,7 +715,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         right = self._extract_and_predicates(node.right)
         return left + right
 
-    def _extract_comparison_info(self, node: LogicalPlanNode) -> Optional[Tuple[str, str, any]]:
+    def _extract_comparison_info(self, node: PlanStep) -> Optional[Tuple[str, str, any]]:
         """
         Extract column ID, operator, and value from a comparison node.
 
@@ -1037,7 +1037,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         cnf.parameters = new_nodes
         return cnf
 
-    def _rebuild_filter(self, predicates: list) -> LogicalPlanNode:
+    def _rebuild_filter(self, predicates: list) -> PlanStep:
         """
         Rebuild filter expression from a list of predicates.
 

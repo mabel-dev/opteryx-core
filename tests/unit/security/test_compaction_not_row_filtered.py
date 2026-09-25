@@ -17,13 +17,15 @@ import os
 import sys
 
 import pytest
+from opteryx.compiled.structures.plan_steps import CompactionCommitStep
+from opteryx.compiled.structures.plan_steps import ExitStep
+from opteryx.compiled.structures.plan_steps import ScanStep
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.exceptions import PermissionsError
 from opteryx.models import QueryTelemetry
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.logical_planner import apply_visibility_filters
 
@@ -31,14 +33,11 @@ from opteryx.planner.logical_planner import apply_visibility_filters
 def _plan(relation: str, *, compaction: bool) -> LogicalPlan:
     """A one-scan plan, optionally under a compaction sink."""
     plan = LogicalPlan()
-    scan = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    scan = ScanStep()
     scan.relation = relation
     plan.add_node("scan", scan)
 
-    head_type = (
-        LogicalPlanStepType.CompactionCommit if compaction else LogicalPlanStepType.Exit
-    )
-    head = LogicalPlanNode(node_type=head_type)
+    head = CompactionCommitStep() if compaction else ExitStep()
     head.relation_name = relation
     plan.add_node("head", head)
     plan.add_edge("scan", "head")

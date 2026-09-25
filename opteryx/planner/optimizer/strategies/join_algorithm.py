@@ -74,7 +74,7 @@ from opteryx.expression import NodeType, binary_operands
 from opteryx.planner.binder.join_helpers import band_operand_leg
 from opteryx.planner.cost_estimation import composite_key_ndv
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.plan_context import PlanContext
 
@@ -477,7 +477,7 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
     optimization_technique = "cost"
     requires = ("joins-planned",)
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Join and node.type == "cross join":
             # 1438
             pass

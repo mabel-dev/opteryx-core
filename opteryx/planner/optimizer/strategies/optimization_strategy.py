@@ -10,7 +10,7 @@ from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.formatter import format_expression
 from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.plan_context import PlanContext
 
@@ -318,7 +318,7 @@ class OptimizationStrategy:
         """
         self.telemetry.add_decision(label, detail)
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         """
         Visit a node in the logical plan
         """

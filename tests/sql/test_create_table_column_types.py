@@ -24,6 +24,7 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", ".."))
 import pytest
 
 from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.logical_planner import do_logical_planning_phase
 from opteryx.planner.sql_rewriter import do_sql_rewrite
 from opteryx.third_party.sqloxide import parse_sql
@@ -36,8 +37,8 @@ def _declared(decl: str):
         rewritten = rewritten[0]
     plan, _, _ = do_logical_planning_phase(parse_sql(rewritten, "mysql")[0])
     for _, node in plan.nodes(True):
-        if getattr(node, "columns", None):
-            return node.columns[0].column_type
+        if node.node_type == LogicalPlanStepType.CreateRelation:
+            return node.schema.columns[0].column_type
     raise AssertionError(f"no columns planned for {decl}")
 
 
@@ -60,8 +61,8 @@ def test_the_reported_syslog_schema_plans():
     plan, _, _ = do_logical_planning_phase(parse_sql(rewritten, "mysql")[0])
     resolved = None
     for _, node in plan.nodes(True):
-        if getattr(node, "columns", None):
-            resolved = {c.name: str(c.column_type) for c in node.columns}
+        if node.node_type == LogicalPlanStepType.CreateRelation:
+            resolved = {c.name: str(c.column_type) for c in node.schema.columns}
     assert resolved == {
         "ingest_time": "TIMESTAMP[us]",
         "event_time": "TIMESTAMP[us]",

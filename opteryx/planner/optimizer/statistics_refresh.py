@@ -65,7 +65,7 @@ from typing import Optional
 from typing import Tuple
 
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.cost_estimation import KeyStats
 from opteryx.planner.cost_estimation import NdvProvenance
@@ -79,6 +79,7 @@ from opteryx.planner.optimizer.statistics import ColumnRange
 from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.planner.plan_context import PlanContext
+from opteryx.compiled.structures.plan_steps import steps_with
 
 # Fallback row count when a Scan has no manifest and no schema row estimate.
 # Picked to be obviously synthetic but non-zero so downstream estimators don't
@@ -336,7 +337,7 @@ def _predicate_note(nid, node_type, relation, condition, selectivity, stats=None
     }
 
 
-def _referenced_scan_identities(node: LogicalPlanNode):
+def _referenced_scan_identities(node: PlanStep):
     """The column identities this query can consult on this scan: the scan's
     own (pushdown-pruned) output columns plus any column its pushed predicates
     read. Everything downstream of the scan — filter selectivity, join-key
@@ -371,7 +372,7 @@ def _referenced_scan_identities(node: LogicalPlanNode):
     return frozenset(wanted) if wanted else None
 
 
-def _scan_base_stats(node: LogicalPlanNode, wanted=None) -> RelationStatistics:
+def _scan_base_stats(node: PlanStep, wanted=None) -> RelationStatistics:
     """The manifest/schema-derived statistics of a scan, BEFORE any predicate
     narrowing — a per-column walk of the manifest (cardinality, distogram,
     value range, null fraction, char-class, ordinal/length bounds, bytes).
@@ -581,7 +582,7 @@ def _scan_base_stats(node: LogicalPlanNode, wanted=None) -> RelationStatistics:
 
 
 def scan_base_statistics(
-    node: LogicalPlanNode, base_stats_cache: Optional[dict] = None
+    node: PlanStep, base_stats_cache: Optional[dict] = None
 ) -> RelationStatistics:
     """A scan's statistics BEFORE any predicate/limit narrowing, memoized.
 
@@ -593,7 +594,7 @@ def scan_base_statistics(
 
     Memoization: the base depends only on the scan's schema and manifest. Both
     are shared by reference across plan copies and the node's uuid is preserved
-    by LogicalPlanNode.copy, so within one query the base is memoizable — keyed
+    by PlanStep.copy, so within one query the base is memoizable — keyed
     by object identity. Manifests are immutable by contract: every prune
     (ManifestPruning/TopNManifestPruning/LimitFilesPruning/
     statistics_only_response) is copy-on-write and assigns a NEW Manifest to
@@ -619,7 +620,7 @@ def scan_base_statistics(
 
 
 def _scan_stats(
-    node: LogicalPlanNode,
+    node: PlanStep,
     plan: Optional["LogicalPlan"] = None,
     nid: Optional[str] = None,
     predicate_notes: Optional[list] = None,
@@ -807,7 +808,7 @@ def _scan_stats(
 
 
 def _filter_stats(
-    node: LogicalPlanNode,
+    node: PlanStep,
     child_stats: List[Tuple[Optional[RelationStatistics], str]],
     plan: LogicalPlan,
     nid: str,
@@ -1099,7 +1100,7 @@ def _equi_key_classes(
 
 
 def _join_stats(
-    node: LogicalPlanNode,
+    node: PlanStep,
     child_stats: List[Tuple[Optional[RelationStatistics], str]],
     nid: Optional[str] = None,
     join_notes: Optional[list] = None,
@@ -1345,7 +1346,7 @@ def _intersect_join_keys(
 
 
 def _aggregate_stats(
-    node: LogicalPlanNode,
+    node: PlanStep,
     child_stats: List[Tuple[Optional[RelationStatistics], str]],
 ) -> RelationStatistics:
     base = _first_child_stats(child_stats) or _empty_stats()
@@ -1399,7 +1400,7 @@ def _aggregate_stats(
 
 
 def _limit_stats(
-    node: LogicalPlanNode,
+    node: PlanStep,
     child_stats: List[Tuple[Optional[RelationStatistics], str]],
 ) -> RelationStatistics:
     base = _first_child_stats(child_stats) or _empty_stats()
@@ -1525,7 +1526,7 @@ def _cast_preserves_distinctness(cast_node) -> bool:
 
 
 def _project_stats(
-    node: LogicalPlanNode,
+    node: PlanStep,
     child_stats: List[Tuple[Optional[RelationStatistics], str]],
 ) -> RelationStatistics:
     """Pass the child's statistics through, and give derived columns whose
@@ -1611,7 +1612,7 @@ def _project_stats(
 
 
 def _distinct_stats(
-    node: LogicalPlanNode,
+    node: PlanStep,
     child_stats: List[Tuple[Optional[RelationStatistics], str]],
     plan: Optional["LogicalPlan"] = None,
     nid: Optional[str] = None,
@@ -1721,7 +1722,7 @@ def _max_or_none(a, b):
 
 
 def _set_op_stats(
-    node: LogicalPlanNode,
+    node: PlanStep,
     child_stats: List[Tuple[Optional[RelationStatistics], str]],
 ) -> RelationStatistics:
     """INTERSECT / EXCEPT — bounded by the left input; a bound is an estimate."""
@@ -2176,7 +2177,7 @@ class StatisticsRefreshVisitor:
             row_counts.append({
                 "nid": nid,
                 "node_type": node.node_type.name,
-                "relation": node.relation,
+                "relation": node.relation if node.node_type in steps_with("relation") else None,
                 "row_count": stats.row_count,
                 # Provenance, following the metric/estimate lingo on
                 # RelationStatistics: "metric" is a number we claim to KNOW,
@@ -2195,7 +2196,7 @@ class StatisticsRefreshVisitor:
             total_bytes_by_node.append({
                 "nid": nid,
                 "node_type": node.node_type.name,
-                "relation": node.relation,
+                "relation": node.relation if node.node_type in steps_with("relation") else None,
                 "total_bytes": sum(known) if known else None,
             })
         self.telemetry._reading["estimated_row_counts"] = row_counts
@@ -2221,7 +2222,7 @@ class StatisticsRefreshVisitor:
 
     def _compute(
         self,
-        node: LogicalPlanNode,
+        node: PlanStep,
         child_stats: List[Tuple[Optional[RelationStatistics], str]],
         nid: str,
     ) -> RelationStatistics:

@@ -24,18 +24,19 @@ from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import LogicalColumn
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
+from opteryx.compiled.structures.plan_steps import steps_with
 
 
 class ProjectionPushdownStrategy(OptimizationStrategy):
     rebuilds_plan = True  # rebuilds the whole plan into an empty working plan
     provides = ("projection-pushed",)
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         """
         Optimize the given node by pushing projections down in the plan.
 
@@ -138,7 +139,9 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
                 )
                 or is_pushable_function_dataset
             )
-            and getattr(node.schema, "columns", None) is not None
+            and node.node_type in steps_with("schema")
+            and node.schema is not None
+            and node.schema.columns is not None
         ):
             # Push all of the projections
             node_columns = [
@@ -272,7 +275,7 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
             # Update the node with the pushed columns
             node.columns = node_columns
 
-        context.optimized_plan.add_node(context.node_id, LogicalPlanNode(**node.properties))
+        context.optimized_plan.add_node(context.node_id, node.shallow_copy())
         if context.parent_nid:
             # Re-adding the edge must preserve its relationship: a join leg label
             # records which side of the parent join this branch feeds. Read it from
@@ -290,7 +293,7 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
         # No finalization needed for this strategy
         return plan
 
-    def collect_columns(self, node: LogicalPlanNode) -> Set[str]:
+    def collect_columns(self, node: PlanStep) -> Set[str]:
         """
         Collect and return the set of column identities from the given node.
 

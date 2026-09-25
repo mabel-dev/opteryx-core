@@ -585,7 +585,8 @@ def bind_correlated_subquery(node: Node, context: Any) -> Tuple[Node, Dict]:
     # the same one CROSS JOIN UNNEST's source column has. Registered on the CALLER's
     # context, which is the scope that has to keep the column alive.
     for _nid, subnode in bound_subplan.nodes(True):
-        for expression in list(subnode.columns or []) + [subnode.condition]:
+        conditions = [subnode.condition] if subnode.node_type == LogicalPlanStepType.Filter else []
+        for expression in list(subnode.columns or []) + conditions:
             for identifier in get_all_nodes_of_type(expression, (NodeType.IDENTIFIER,)):
                 if identifier.is_outer_reference and identifier.schema_column is not None:
                     context.retained_columns.add(identifier.schema_column.identity)

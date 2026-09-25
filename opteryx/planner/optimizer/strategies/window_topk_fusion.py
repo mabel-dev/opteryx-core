@@ -47,7 +47,7 @@ Scope of this first cut (deliberately narrow):
 from opteryx.expression import NodeType, binary_operands
 from opteryx.operators.window.helpers import RANK_VALUED
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
@@ -113,7 +113,7 @@ class WindowTopKFusionStrategy(OptimizationStrategy):
     def should_i_run(self, plan: LogicalPlan) -> bool:
         return len(get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Window,))) > 0
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type != LogicalPlanStepType.Window:
             return context
 

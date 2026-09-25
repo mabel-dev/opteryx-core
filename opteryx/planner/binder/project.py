@@ -14,6 +14,7 @@ from opteryx.planner.binder.binder import inner_binder, merge_schemas
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.types.schema import RelationSchema
 from opteryx.models import current_name_of
+from opteryx.compiled.structures.plan_steps import steps_with
 
 
 def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
@@ -46,7 +47,9 @@ def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     # hoist in logical_planner). They are minted, random per execution, and no reader
     # named them; a wildcard expands the relations in scope, and the Window node's
     # output relation is one of them, so without this they rode out to the caller.
-    hidden_columns = set(node.hidden_columns or ())
+    hidden_columns = (
+        set(node.hidden_columns or ()) if node.node_type in steps_with("hidden_columns") else set()
+    )
 
     for column in node.columns:
         if column.node_type == NodeType.WILDCARD:
@@ -161,7 +164,9 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
     # visit_exit. A bare `SELECT *` builds no Project at all (see logical_planner),
     # so this branch is reached only via `SELECT * EXCEPT (...)`, which leaks the
     # same column by the same route.
-    hidden_columns = set(node.hidden_columns or ())
+    hidden_columns = (
+        set(node.hidden_columns or ()) if node.node_type in steps_with("hidden_columns") else set()
+    )
 
     # Handle wildcards, including qualified wildcards.
     for column in list(node.columns):
@@ -302,7 +307,8 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
         )
 
     # Bind the local columns to physical columns
-    node.columns, group_contexts = zip(*(inner_binder(col, context) for col in columns))
+    bound_columns, group_contexts = zip(*(inner_binder(col, context) for col in columns))
+    node.columns = list(bound_columns)
     bound_columns = list(node.columns)
     node.columns = list(bound_columns[:projected_column_count])
     node.passthrough_columns = list(bound_columns[projected_column_count:])

@@ -77,7 +77,7 @@ from draken.draken_native import DrakenType
 
 from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.logical_planner.node_expressions import expression_roots
 
@@ -165,10 +165,10 @@ class LengthOnlyColumnStrategy(OptimizationStrategy):
     requires = ("projection-pushed",)
     provides = ("length-only-analysed",)
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node is None:
             return context
-        context.optimized_plan.add_node(context.node_id, LogicalPlanNode(**node.properties))
+        context.optimized_plan.add_node(context.node_id, node.shallow_copy())
         if context.parent_nid:
             # Re-adding the edge must preserve its relationship: a join leg label
             # records which side of the parent join this branch feeds.
@@ -191,7 +191,7 @@ class LengthOnlyColumnStrategy(OptimizationStrategy):
                 # pushed top-N spec) are real uses and must be classified, so
                 # they are reached through expression_roots rather than by
                 # naming predicates directly.
-                exclude = ("columns",)
+                include_columns = False
             elif node.node_type in (
                 LogicalPlanStepType.AggregateAndGroup,
                 LogicalPlanStepType.Aggregate,
@@ -199,10 +199,10 @@ class LengthOnlyColumnStrategy(OptimizationStrategy):
                 # An aggregate's `columns` is a derived input-column list
                 # (redundant with groups/aggregates); it lists the column as a
                 # bare identifier, which is read bookkeeping, not a raw use.
-                exclude = ("columns",)
+                include_columns = False
             else:
-                exclude = ()
-            for root in expression_roots(node, exclude=exclude):
+                include_columns = True
+            for root in expression_roots(node, include_columns=include_columns):
                 _classify(root, needs, raw)
 
         eligible = {

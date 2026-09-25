@@ -28,7 +28,7 @@ Same ordering as AggregateScanPushdownStrategy, for the same reasons.
 """
 
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
@@ -40,7 +40,7 @@ class DistinctScanPushdownStrategy(OptimizationStrategy):
     requires = ("projection-pushed", "predicates-pushed", "project-fused")
     provides = ("distinct-pushed",)
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type != LogicalPlanStepType.Distinct or node.on:
             return context
 

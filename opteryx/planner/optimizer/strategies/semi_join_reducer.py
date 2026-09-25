@@ -49,7 +49,7 @@ BUILD over a large relation, or a GROUP BY over one, disappears as a result.
 from opteryx.expression import NodeType
 from opteryx.planner.binder.join_helpers import extract_join_fields
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.plan_context import PlanContext
 from opteryx.utils import random_string
@@ -58,6 +58,8 @@ from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
 from opteryx.compiled.structures.expressions import And
 from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.plan_steps import steps_with
+from opteryx.compiled.structures.plan_steps import JoinStep
 
 # The join types whose RIGHT leg is the build side and is therefore the expensive
 # one. compiler.py pins this: "LEFT OUTER / SEMI / ANTI: the LEFT leg is the
@@ -139,9 +141,11 @@ def _collect_relations(plan: LogicalPlan, root_nid: str):
             continue
         seen.add(nid)
         node = plan[nid]
-        schema = node.schema
+        schema = node.schema if node.node_type in steps_with("schema") else None
         if schema is not None:
-            name = node.alias or node.relation or schema.name
+            alias = node.alias if node.node_type in steps_with("alias") else None
+            relation = node.relation if node.node_type in steps_with("relation") else None
+            name = alias or relation or schema.name
             schemas[name] = schema
             relations.add(name)
         for child, _target, _relation in plan.ingoing_edges(nid):
@@ -247,7 +251,7 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
                 return True
         return False
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         return context
 
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:
@@ -397,7 +401,7 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
         # supported" rather than as the declined optimization it actually is.
         source_relations, source_schemas = _collect_relations(reducer_source, reducer_exit)
 
-        reducer = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+        reducer = JoinStep()
         reducer.type = "left semi"
         # This node is itself a `left semi` join, so without the stamp the next pass
         # picks it up as a target and reduces the reducer, recursively.

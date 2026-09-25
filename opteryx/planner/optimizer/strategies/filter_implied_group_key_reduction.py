@@ -28,11 +28,12 @@ AggregateAndGroup semantics (empty input → zero output rows, not one).
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn
 from opteryx.models import Node
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.utils import random_string
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
 from opteryx.compiled.structures.expressions import Literal
+from opteryx.compiled.structures.plan_steps import ProjectStep
 
 _STOP_TYPES = frozenset(
     {
@@ -129,7 +130,7 @@ def _make_constant_literal(original: Node, value) -> Node:
 
 
 class FilterImpliedGroupKeyReductionStrategy(OptimizationStrategy):
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type != LogicalPlanStepType.AggregateAndGroup:
             return context
 
@@ -179,7 +180,7 @@ class FilterImpliedGroupKeyReductionStrategy(OptimizationStrategy):
         for agg in aggregates:
             project_columns.append(_make_passthrough(agg))
 
-        project_node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
+        project_node = ProjectStep()
         project_node.columns = project_columns
         project_node.passthrough_columns = []
 

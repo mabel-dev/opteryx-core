@@ -60,7 +60,7 @@ import struct
 from opteryx.expression import NodeType
 from opteryx.expression.intervals import MICROSECONDS_PER_DAY
 from opteryx.planner import build_literal_node
-from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.planner.optimizer.statistics import ColumnRange
 from opteryx.types.logical_type import INTERVAL
 from opteryx.types.logical_type import DrakenType
@@ -75,6 +75,7 @@ from .optimization_strategy import (
     get_nodes_of_type_from_logical_plan,
 )
 from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.plan_steps import FilterStep
 
 
 def _phys_identity(col):
@@ -736,7 +737,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
     optimization_technique = "cost"
     requires = ("predicates-pushed",)
 
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type != LogicalPlanStepType.Join:
             return context
 
@@ -939,8 +940,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
                 # Fallback for non-pushdown connectors: a Filter node still
                 # filters at execution, just without row-group pruning.
                 for condition in conditions:
-                    filter_node = LogicalPlanNode(
-                        node_type=LogicalPlanStepType.Filter,
+                    filter_node = FilterStep(
                         condition=condition,
                         columns=[target_col],
                         relations={target_relation},

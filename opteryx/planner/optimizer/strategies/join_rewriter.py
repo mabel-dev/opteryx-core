@@ -44,7 +44,7 @@ a cost heuristic — it always applies, regardless of join size.
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .join_elimination import _right_columns_used_above
@@ -97,7 +97,7 @@ def _is_isnull(node):
 
 
 class JoinRewriteStrategy(OptimizationStrategy):
-    def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
+    def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Filter and node.condition is not None:
             conjuncts = _split_and(node.condition)
             if any(_is_isnull(c) for c in conjuncts):

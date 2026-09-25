@@ -31,6 +31,7 @@ import os
 import sys
 
 import pytest
+from opteryx.compiled.structures.plan_steps import ScanStep
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
@@ -144,14 +145,10 @@ def test_limit_of_zero_disables_enforcement():
 # ── the conditional: unknown statistics must not produce a false rejection ──────
 
 def test_gate_is_disabled_when_an_input_has_no_row_count():
-    from opteryx.planner.logical_planner.logical_planner import (
-        LogicalPlanStepType,
-        LogicalPlanNode,
-    )
     from opteryx.third_party.travers import Graph
 
     plan = Graph()
-    scan = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    scan = ScanStep()
     scan.relation = "unknowable"
     plan.add_node("s", scan)
     # No manifest and no schema -> no declared count -> the plan-time gate must
