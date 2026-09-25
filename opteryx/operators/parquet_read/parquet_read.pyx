@@ -766,10 +766,12 @@ cdef class ParquetReadNode(ReaderNode):
     # decoder skips long-value byte copies for these.
     cdef public object _length_only_columns
 
-    def __init__(self, properties: QueryProperties, **parameters) -> None:
-        ReaderNode.__init__(self, properties=properties, **parameters)
-        self.predicates = parameters.get("predicates")
-        self.scan_overrides = parameters.get("scan_overrides")
+    def __init__(self, properties: QueryProperties, step, scan_overrides=None) -> None:
+        """`scan_overrides`: the validated per-scan `WITH(name = value)` settings
+        (the physical planner gates them), or None."""
+        ReaderNode.__init__(self, properties, step)
+        self.predicates = step.predicates
+        self.scan_overrides = scan_overrides
         self._parquet_files_seen = set()
         self._records_to_read = 0
         self._records_unlimited = True
@@ -802,10 +804,13 @@ cdef class ParquetReadNode(ReaderNode):
         self.scan_readings = ScanReadings()
         # WP-2: physical sort column name, direction, and N. None unless the
         # optimizer matched ORDER BY <physical col> LIMIT n directly over this scan.
-        self._topn_sort_name = parameters.get("topn_sort_name")
-        self._topn_descending = bool(parameters.get("topn_descending", False))
-        self._topn_limit = parameters.get("topn_limit")
-        self._length_only_columns = parameters.get("length_only_columns")
+        # A pushed top-N and the length-only column set are a Scan step's only
+        # (READ_PARQUET arrives as a FunctionDataset step).
+        is_scan_step = step.node_type in steps_with("topn_sort_name")
+        self._topn_sort_name = step.topn_sort_name if is_scan_step else None
+        self._topn_descending = bool(step.topn_descending) if is_scan_step else False
+        self._topn_limit = step.topn_limit if is_scan_step else None
+        self._length_only_columns = step.length_only_columns if is_scan_step else None
         self._scan_mtx = new cpp_mutex()
 
     def __dealloc__(self):
@@ -908,12 +913,12 @@ cdef class ParquetReadNode(ReaderNode):
         for predicate in predicates:
             identifiers = get_all_nodes_of_type(predicate, select_nodes=(NodeType.IDENTIFIER,))
             for identifier in identifiers:
-                schema_column = getattr(identifier, "schema_column", None)
-                identity = getattr(schema_column, "identity", None)
+                schema_column = identifier.schema_column
+                identity = schema_column.identity if schema_column is not None else None
                 if identity is not None:
                     identities.add(identity)
                     continue
-                name = getattr(schema_column, "name", None) or getattr(identifier, "source_column", None)
+                name = (schema_column.name if schema_column is not None else None) or identifier.source_column
                 if name:
                     names.add(name)
         return identities, names
@@ -1332,7 +1337,7 @@ cdef class ParquetReadNode(ReaderNode):
             return
         self._scan_started = True
 
-        base_schema = self.parameters["schema"]
+        base_schema = self.schema
 
         # Per-column typed NULL-fill factories, keyed by physical name. Used to
         # materialize a column a given file lacks (schema evolution) so the scan
@@ -1567,7 +1572,7 @@ cdef class ParquetReadNode(ReaderNode):
                 # built without a session (EXPLAIN-only, direct-construction tests).
                 or _selectivity_estimate <= _resolve_var(
                     "parquet_late_materialization_max_selectivity",
-                    getattr(self.properties, "variables", None),
+                    self.properties.variables,
                     config.PARQUET_LATE_MATERIALIZATION_MAX_SELECTIVITY,
                 )
             )
@@ -1677,7 +1682,7 @@ cdef class ParquetReadNode(ReaderNode):
             else:
                 self._sp_coerce_ops.append((0, None))
         self._sp_needs_coerce = any(op[0] != 0 for op in self._sp_coerce_ops)
-        self._sp_query_id = getattr(self.properties, "query_id", None)
+        self._sp_query_id = self.properties.query_id
 
         self._decode_start_ns = <int64_t>time.monotonic_ns()
         self._total_rows_before_filter = 0
@@ -1685,11 +1690,11 @@ cdef class ParquetReadNode(ReaderNode):
         # Resolved ONCE per scan and used by every pass: pass-2 used to take no width
         # and fell back to `cpu - 2` from the whole host, local or remote alike.
         self._sp_decode_workers = _resolve_var(
-            "parquet_gcs_io_workers", getattr(self.properties, "variables", None),
+            "parquet_gcs_io_workers", self.properties.variables,
             config.PARQUET_GCS_IO_WORKERS,
         ) if connector_type in ("GCS", "GS", "S3") else config.resolve_parquet_local_io_workers(
             _resolve_var(
-                "parquet_local_io_workers", getattr(self.properties, "variables", None),
+                "parquet_local_io_workers", self.properties.variables,
                 config.PARQUET_LOCAL_IO_WORKERS,
             ),
         )
@@ -1712,14 +1717,14 @@ cdef class ParquetReadNode(ReaderNode):
                 footer_bytes_cache=_FOOTER_CACHE,
                 null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass1_column_names],
                 string_types=[self._sp_string_type_by_name[c] for c in self._sp_pass1_column_names],
-                http_tuning=_rt_http(getattr(self.properties, "variables", None), self.scan_overrides),
-                in_flight_limit_override=<int>_rt_in_flight(getattr(self.properties, "variables", None), self.scan_overrides),
-                coalesce_tuning=_rt_coalesce(getattr(self.properties, "variables", None), self.scan_overrides),
-                fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None), self.scan_overrides),
+                http_tuning=_rt_http(self.properties.variables, self.scan_overrides),
+                in_flight_limit_override=<int>_rt_in_flight(self.properties.variables, self.scan_overrides),
+                coalesce_tuning=_rt_coalesce(self.properties.variables, self.scan_overrides),
+                fetch_ahead=_resolve_fetch_ahead(self.properties.variables, self.scan_overrides),
                 fetch_ahead_min_blocks=_resolve_fetch_ahead_gate(
-                    getattr(self.properties, "variables", None), self.scan_overrides),
+                    self.properties.variables, self.scan_overrides),
                 memory_budget=_resolve_memory_budget(
-                    getattr(self.properties, "variables", None), self.scan_overrides),
+                    self.properties.variables, self.scan_overrides),
             )
             # Q24 latmat: push the pass-1 predicate to the decode workers so the match
             # runs in parallel there (nogil), not serially on this thread. Only when the
@@ -1777,14 +1782,14 @@ cdef class ParquetReadNode(ReaderNode):
             null_fillers=[self._sp_null_filler_by_name[c] for c in column_names],
             string_types=[self._sp_string_type_by_name[c] for c in column_names],
             limit=self.limit if (not has_predicates and not self._sp_delete_positions) else None,
-            http_tuning=_rt_http(getattr(self.properties, "variables", None), self.scan_overrides),
-            in_flight_limit_override=<int>_rt_in_flight(getattr(self.properties, "variables", None), self.scan_overrides),
-            coalesce_tuning=_rt_coalesce(getattr(self.properties, "variables", None), self.scan_overrides),
-            fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None), self.scan_overrides),
+            http_tuning=_rt_http(self.properties.variables, self.scan_overrides),
+            in_flight_limit_override=<int>_rt_in_flight(self.properties.variables, self.scan_overrides),
+            coalesce_tuning=_rt_coalesce(self.properties.variables, self.scan_overrides),
+            fetch_ahead=_resolve_fetch_ahead(self.properties.variables, self.scan_overrides),
             fetch_ahead_min_blocks=_resolve_fetch_ahead_gate(
-                getattr(self.properties, "variables", None), self.scan_overrides),
+                self.properties.variables, self.scan_overrides),
             memory_budget=_resolve_memory_budget(
-                getattr(self.properties, "variables", None), self.scan_overrides),
+                self.properties.variables, self.scan_overrides),
         )
 
     cdef void _coerce_vectors(self, list vectors):
@@ -2213,14 +2218,14 @@ cdef class ParquetReadNode(ReaderNode):
             footer_bytes_cache=_FOOTER_CACHE,
             null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass2_column_names],
             string_types=[self._sp_string_type_by_name[c] for c in self._sp_pass2_column_names],
-            http_tuning=_rt_http(getattr(self.properties, "variables", None), self.scan_overrides),
-            in_flight_limit_override=<int>_rt_in_flight(getattr(self.properties, "variables", None), self.scan_overrides),
-            coalesce_tuning=_rt_coalesce(getattr(self.properties, "variables", None), self.scan_overrides),
-            fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None), self.scan_overrides),
+            http_tuning=_rt_http(self.properties.variables, self.scan_overrides),
+            in_flight_limit_override=<int>_rt_in_flight(self.properties.variables, self.scan_overrides),
+            coalesce_tuning=_rt_coalesce(self.properties.variables, self.scan_overrides),
+            fetch_ahead=_resolve_fetch_ahead(self.properties.variables, self.scan_overrides),
             fetch_ahead_min_blocks=_resolve_fetch_ahead_gate(
-                getattr(self.properties, "variables", None), self.scan_overrides),
+                self.properties.variables, self.scan_overrides),
             memory_budget=_resolve_memory_budget(
-                getattr(self.properties, "variables", None), self.scan_overrides),
+                self.properties.variables, self.scan_overrides),
         )
         self._lm_pass1_done = True
 
@@ -2306,14 +2311,14 @@ cdef class ParquetReadNode(ReaderNode):
             footer_bytes_cache=_FOOTER_CACHE,
             null_fillers=[self._sp_null_filler_by_name[c] for c in self._sp_pass2_column_names],
             string_types=[self._sp_string_type_by_name[c] for c in self._sp_pass2_column_names],
-            http_tuning=_rt_http(getattr(self.properties, "variables", None), self.scan_overrides),
-            in_flight_limit_override=<int>_rt_in_flight(getattr(self.properties, "variables", None), self.scan_overrides),
-            coalesce_tuning=_rt_coalesce(getattr(self.properties, "variables", None), self.scan_overrides),
-            fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None), self.scan_overrides),
+            http_tuning=_rt_http(self.properties.variables, self.scan_overrides),
+            in_flight_limit_override=<int>_rt_in_flight(self.properties.variables, self.scan_overrides),
+            coalesce_tuning=_rt_coalesce(self.properties.variables, self.scan_overrides),
+            fetch_ahead=_resolve_fetch_ahead(self.properties.variables, self.scan_overrides),
             fetch_ahead_min_blocks=_resolve_fetch_ahead_gate(
-                getattr(self.properties, "variables", None), self.scan_overrides),
+                self.properties.variables, self.scan_overrides),
             memory_budget=_resolve_memory_budget(
-                getattr(self.properties, "variables", None), self.scan_overrides),
+                self.properties.variables, self.scan_overrides),
         )
         try:
             while True:
@@ -2364,7 +2369,7 @@ cdef class ParquetReadNode(ReaderNode):
         cdef Py_ssize_t consecutive_full_pass = 0
         cdef Py_ssize_t abandon_after = _resolve_var(
             "parquet_late_materialization_abandon_after",
-            getattr(self.properties, "variables", None),
+            self.properties.variables,
             config.PARQUET_LATE_MATERIALIZATION_ABANDON_AFTER,
         )
         cdef bint abandoned = False

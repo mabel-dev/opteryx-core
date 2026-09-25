@@ -56,8 +56,8 @@ from opteryx.compiled.structures.expressions import And
 
 
 def _column_identity(node):
-    schema_column = getattr(node, "schema_column", None)
-    return getattr(schema_column, "identity", None) if schema_column is not None else None
+    schema_column = node.schema_column
+    return schema_column.identity if schema_column is not None else None
 
 
 def _split_and(node):
@@ -143,7 +143,7 @@ class JoinRewriteStrategy(OptimizationStrategy):
                 col = c.centre
                 if col is None or col.node_type != NodeType.IDENTIFIER:
                     continue
-                if getattr(col, "source", None) not in non_preserved_relations:
+                if col.source not in non_preserved_relations:
                     continue
                 if _column_identity(col) not in join_key_identities:
                     continue
@@ -172,8 +172,8 @@ class JoinRewriteStrategy(OptimizationStrategy):
                     join_node.right_columns,
                     join_node.left_columns,
                 )
-                left_readers = getattr(join_node, "left_readers", None)
-                right_readers = getattr(join_node, "right_readers", None)
+                left_readers = join_node.left_readers
+                right_readers = join_node.right_readers
                 join_node.left_readers, join_node.right_readers = right_readers, left_readers
                 flip_join_leg_labels(plan, join_nid)
 
@@ -214,8 +214,8 @@ class JoinRewriteStrategy(OptimizationStrategy):
                 join_node.right_columns,
                 join_node.left_columns,
             )
-            left_readers = getattr(join_node, "left_readers", None)
-            right_readers = getattr(join_node, "right_readers", None)
+            left_readers = join_node.left_readers
+            right_readers = join_node.right_readers
             join_node.left_readers, join_node.right_readers = right_readers, left_readers
             flip_join_leg_labels(plan, join_nid)
             plan[join_nid] = join_node

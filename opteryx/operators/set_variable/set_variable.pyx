@@ -28,12 +28,12 @@ from opteryx.models import QueryProperties
 
 
 class SetVariableNode(BasePlanNode):
-    def __init__(self, properties: QueryProperties, **parameters):
-        BasePlanNode.__init__(self, properties=properties, **parameters)
+    def __init__(self, properties: QueryProperties, step):
+        BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
 
-        self.variable = parameters.get("variable")
-        self.value = parameters.get("value")
-        self.variables = parameters.get("variables")
+        self.variable = step.variable
+        self.value = step.value
+        self.variables = step.variables
 
     @property
     def name(self):  # pragma: no cover

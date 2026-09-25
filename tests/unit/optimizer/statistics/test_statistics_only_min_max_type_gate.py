@@ -44,9 +44,12 @@ import pytest
 
 from opteryx.planner.optimizer.strategies.statistics_only_response import is_simple_aggregate
 from opteryx.expression import NodeType
-from opteryx.models import Node
+from opteryx.types.schema import SchemaColumn
 from opteryx.types.logical_type import (
     DATE,
+    DECIMAL,
+    VARBINARY,
+    VARCHAR,
     FLOAT32,
     FLOAT64,
     INT64,
@@ -69,9 +72,22 @@ ADMITTED_TYPES = {
 }
 
 
+# A column type of each category a test names — a schema column's category is
+# derived from its type.
+_COLUMN_TYPE_OF = {
+    LogicalCategory.DATE: DATE,
+    LogicalCategory.INTEGER: INT64,
+    LogicalCategory.TIMESTAMP: TIMESTAMP(),
+    LogicalCategory.FLOAT: FLOAT64,
+    LogicalCategory.VARCHAR: VARCHAR,
+    LogicalCategory.VARBINARY: VARBINARY,
+    LogicalCategory.DECIMAL: DECIMAL(10, 2),
+}
+
+
 def _aggregate(func, category):
     """An AGGREGATOR node over one column of `category`."""
-    schema_column = Node(NodeType.IDENTIFIER, name="c", category=category)
+    schema_column = SchemaColumn(name="c", identity=b"tes_c_0000000001", column_type=_COLUMN_TYPE_OF[category])
     return Aggregator(
         value=func,
         duplicate_treatment=None,

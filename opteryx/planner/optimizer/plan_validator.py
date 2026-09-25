@@ -87,5 +87,5 @@ def validate_plan(plan: LogicalPlan, where: str = "") -> None:
         except Exception as render_error:
             raise InvalidInternalStateError(
                 f"{prefix}node '{nid}' "
-                f"({getattr(node, 'node_type', None)}) failed to render: {render_error}"
+                f"({node.node_type}) failed to render: {render_error}"
             ) from render_error

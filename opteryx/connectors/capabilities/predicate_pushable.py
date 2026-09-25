@@ -18,9 +18,9 @@ accept filters and others don't so we 'fake' the read-time filtering.
 import datetime
 from typing import Dict
 
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.exceptions import NotSupportedError
 from opteryx.expression import NodeType, get_all_nodes_of_type
-from opteryx.models import Node
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.utils import single_item_cache
 
@@ -80,7 +80,7 @@ class PredicatePushable:
     # has nowhere to go.
     PUSHABLE_SCALAR_FUNCTIONS: bool = False
 
-    def can_push(self, operator: Node, types: set = None) -> bool:
+    def can_push(self, operator: Expression, types: set = None) -> bool:
         condition = operator.condition
         # Boolean-returning functions are their own predicate (LIKE lowers to
         # _STARTS_WITH / InStr / ... this way). They still have to satisfy the node

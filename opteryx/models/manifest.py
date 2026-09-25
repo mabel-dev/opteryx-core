@@ -388,7 +388,7 @@ class Manifest:
                 or predicate.right.node_type != NodeType.LITERAL
             ):
                 return False
-            literal_types = (getattr(predicate.right, "type", None),)
+            literal_types = (predicate.right.type,)
         elif predicate.node_type == NodeType.BETWEEN:
             if (
                 predicate.left.node_type != NodeType.IDENTIFIER
@@ -397,16 +397,16 @@ class Manifest:
             ):
                 return False
             literal_types = (
-                getattr(predicate.right, "type", None),
-                getattr(predicate.centre, "type", None),
+                predicate.right.type,
+                predicate.centre.type,
             )
         else:
             return False
 
         column_type = self._column_type(predicate.left.source_column)
         if column_type is None:
-            schema_column = getattr(predicate.left, "schema_column", None)
-            column_type = getattr(schema_column, "column_type", None)
+            schema_column = predicate.left.schema_column
+            column_type = schema_column.column_type if schema_column is not None else None
 
         return any(
             _temporal_domain_mismatch(column_type, literal_type) for literal_type in literal_types
@@ -1123,8 +1123,8 @@ class Manifest:
         # the bound identifier's identity, never by name.
         columns: dict = {}
         for col in self.schema.columns:
-            col_name = getattr(col, "name", None)
-            identity = getattr(col, "identity", None)
+            col_name = col.name
+            identity = col.identity
             if not col_name or not isinstance(identity, bytes):
                 continue
             null_fraction = None
@@ -1138,7 +1138,7 @@ class Manifest:
                 distinct_count = self.estimate_range_cardinality(col_name)
             columns[identity] = ColumnStatistics(
                 column_name=col_name,
-                data_type=str(getattr(col, "type", "")),
+                data_type="",
                 distinct_count=distinct_count,
                 value_range=ColumnRange(),
                 histogram=self.get_distogram(col_name),
@@ -2271,7 +2271,7 @@ class Manifest:
         # Note: This assumes schema has field_id information
         # May need adjustment based on actual schema structure
         for column in self.schema.columns:
-            if getattr(column, "field_id", None) is not None:
+            if column.field_id is not None:
                 field_id = column.field_id
                 self._field_id_to_name[field_id] = column.name
                 self._name_to_field_id[column.name] = field_id

@@ -45,15 +45,13 @@ cdef class NullReaderNode(BasePlanNode):  # pragma: no cover
     Used when contradictory predicates make the result empty.
     """
     # `columns` is a BasePlanNode field; only the scan-specific extras here.
-    cdef public object relations
     cdef public object schema
 
-    def __init__(self, properties, **parameters):
-        """Initialize NullReaderNode."""
-        BasePlanNode.__init__(self, properties=properties, **parameters)
-        self.columns = parameters.get("columns", [])
-        self.relations = parameters.get("relations", [])
-        self.schema = parameters.get("schema")
+    def __init__(self, properties, step):
+        """A Scan step proven empty (contradictory predicates), or one kept only
+        to bind a relation whose history — not its rows — is the answer."""
+        BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
+        self.schema = step.schema
 
     def read_morsels(self):
         """Source-side iterator: yields a single empty morsel with the correct schema."""

@@ -40,24 +40,24 @@ from opteryx.models import rows_message
 # so staying within one row group keeps catalog pruning working unchanged.
 # Move this together with rugo's default if that ever changes.
 class InsertNode(BasePlanNode):
-    def __init__(self, properties: QueryProperties, **parameters):
-        BasePlanNode.__init__(self, properties=properties, **parameters)
-        self.relation_name: str = parameters.get("relation_name")
-        self.connector = parameters.get("connector")
-        self.target_schema = parameters.get("target_schema")
-        self.column_mapping = parameters.get("column_mapping")
-        self.target_column_names = parameters.get("target_column_names")
+    def __init__(self, properties: QueryProperties, step):
+        BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
+        self.relation_name: str = step.relation_name
+        self.connector = step.connector
+        self.target_schema = step.target_schema
+        self.column_mapping = step.column_mapping
+        self.target_column_names = step.target_column_names
 
-        self.create_target = parameters.get("create_target", False)
-        self.is_replace = parameters.get("is_replace", False)
-        self.is_noop = parameters.get("is_noop", False)
+        self.create_target = bool(step.create_target)
+        self.is_replace = bool(step.is_replace)
+        self.is_noop = bool(step.is_noop)
 
         # CREATE MATERIALIZED VIEW: after the CTAS write commits, the target
         # is registered as an MV with its defining SQL (re-rendered from the
         # stashed AST) and the source tables the binder extracted.
-        self.is_materialized_view = parameters.get("is_materialized_view", False)
-        self.defining_query = parameters.get("defining_query")
-        self.source_tables = parameters.get("source_tables")
+        self.is_materialized_view = bool(step.is_materialized_view)
+        self.defining_query = step.defining_query
+        self.source_tables = step.source_tables
 
         # REFRESH MATERIALIZED VIEW desugars to a CoRTAS carrying this flag. It
         # is what lets the operator stamp the view's refresh state on success:
@@ -65,15 +65,15 @@ class InsertNode(BasePlanNode):
         # manual refresh - the documented recovery path after a failed one -
         # would succeed while leaving `last-refreshed-at-ms` reading as though
         # it had never run.
-        self.is_refresh = parameters.get("is_refresh", False)
+        self.is_refresh = bool(step.is_refresh)
 
         # The provenance receipt and its producer, settled by the binder off
         # the bound Scan nodes (see `_read_sources` there). Passed to the
         # connector beside `author`; the connector decides what the store
         # accepts. `[]` here is an assertion the statement read no catalog
         # relation, and only the binder's walk may make it.
-        self.read_sources = parameters.get("read_sources")
-        self.produced_by = parameters.get("produced_by")
+        self.read_sources = step.read_sources
+        self.produced_by = step.produced_by
 
         self._total_rows = 0
         self.result: Optional[NonTabularResult] = None
@@ -83,8 +83,7 @@ class InsertNode(BasePlanNode):
         self._stream = DataFileStream(
             self.connector,
             self.relation_name,
-            coalesce_rows=parameters.get("write_coalesce_rows"),
-            target_file_bytes=parameters.get("target_file_bytes"),
+            coalesce_rows=step.write_coalesce_rows,
             # A CTAS creating a relation that does not exist yet is the one
             # write whose target the store cannot look up while the files are
             # streaming - `create_relation` below runs only once they are all

@@ -205,6 +205,10 @@ struct MorselRef {
     uint64_t decode_ns = 0;
     std::string error;
     bool success = false;
+    // The failure was FETCHING the bytes (the store refused or dropped the
+    // request), not decoding them. Lets the consumer report a storage read
+    // error rather than an internal fault. Meaningful only when !success.
+    bool read_failed = false;
     // Phase 2: this row group yields zero rows (a pushed-conjunct equality
     // column's dictionary lacked every needle). The consumer skips it entirely.
     bool empty_filtered = false;
@@ -2824,8 +2828,10 @@ class ParquetIOPipeline {
                 if (!item.block)
                     throw std::logic_error("remote row group submitted without a fetch block");
                 const FetchBlock& blk = *item.block;
-                if (blk.error)
+                if (blk.error) {
+                    result.read_failed = true;
                     std::rethrow_exception(blk.error);
+                }
                 if (!blk.fetched)
                     throw std::logic_error("remote row group decoded before its block was fetched");
                 const RemotePlan& plan = blk.plan;

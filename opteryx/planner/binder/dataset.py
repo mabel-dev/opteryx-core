@@ -8,6 +8,7 @@ from typing import Tuple
 
 from draken.draken_native import DrakenType
 
+from opteryx.compiled.structures.plan_steps import PlanStep
 from opteryx.exceptions import (
     AmbiguousDatasetError,
     InvalidFunctionParameterError,
@@ -20,7 +21,7 @@ from opteryx.exceptions import (
     md_table,
 )
 from opteryx.expression import NodeType
-from opteryx.models import LogicalColumn, Node
+from opteryx.models import LogicalColumn
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.types.logical_type import (
     LogicalCategory,
@@ -219,7 +220,7 @@ _UNNEST_REMEDY = (
 )
 
 
-def _validate_unnest_argument(node: Node) -> None:
+def _validate_unnest_argument(node: PlanStep) -> None:
     """`FROM UNNEST(...)` builds a relation out of a literal array -- nothing else.
 
     It is a SOURCE: there is no input stream here to resolve a column reference, a
@@ -259,8 +260,8 @@ def _validate_unnest_argument(node: Node) -> None:
 
 
 def visit_function_dataset(
-    self, node: Node, context: BindingContext
-) -> Tuple[Node, BindingContext]:
+    self, node: PlanStep, context: BindingContext
+) -> Tuple[PlanStep, BindingContext]:
     # We need to build the schema and add it to the schema collection.
     # Default: no connector, so predicate_pushdown's FunctionDataset sink treats
     # this node as not-predicate-pushable (`if not node.connector`). Overridden
@@ -281,8 +282,8 @@ def visit_function_dataset(
                     if _val_cat in (LogicalCategory.ARRAY, LogicalCategory.VECTOR):
                         _elem = value.type.element if isinstance(value.type, ColumnType) else None
                         if _elem is None:
-                            schema_column = getattr(value, "schema_column", None)
-                            if schema_column is not None and isinstance(getattr(schema_column, "column_type", None), ColumnType):
+                            schema_column = value.schema_column
+                            if schema_column is not None and isinstance(schema_column.column_type, ColumnType):
                                 _elem = schema_column.column_type.element
                         element_types[column] = _elem
         def _build_value_column(column):
@@ -525,6 +526,19 @@ def visit_function_dataset(
             )
 
             filesystem = anonymous_gcs_filesystem()
+        elif protocol == "s3":
+            # SECURITY: the S3 twin of the gs:// branch above, for the same reason -
+            # create_filesystem("s3") signs with this process's own AWS credential
+            # chain. See anonymous_s3_filesystem's docstring.
+            if is_glob:
+                raise NotSupportedError(
+                    f"READ_JSONL('{path}'): glob patterns are not supported for s3:// paths. Name the file exactly, or read the whole prefix without a wildcard."
+                )
+            from opteryx.connectors.io_systems.anonymous_s3_filesystem import (
+                anonymous_s3_filesystem,
+            )
+
+            filesystem = anonymous_s3_filesystem()
         else:
             filesystem = create_filesystem(protocol)
 
@@ -778,6 +792,20 @@ def visit_function_dataset(
 
             filesystem = anonymous_gcs_filesystem()
             storage_type = "GCS"
+        elif protocol == "s3":
+            # SECURITY: the S3 twin of the gs:// branch above, for the same reason -
+            # create_filesystem("s3") signs with this process's own AWS credential
+            # chain. See anonymous_s3_filesystem's docstring.
+            if is_glob:
+                raise NotSupportedError(
+                    f"READ_PARQUET('{path}'): glob patterns are not supported for s3:// paths. Name the file exactly, or read the whole prefix without a wildcard."
+                )
+            from opteryx.connectors.io_systems.anonymous_s3_filesystem import (
+                anonymous_s3_filesystem,
+            )
+
+            filesystem = anonymous_s3_filesystem()
+            storage_type = "S3"
         else:
             filesystem = create_filesystem(protocol)
             storage_type = {"http": "HTTP", "https": "HTTP"}.get(protocol, "LOCAL")
@@ -987,6 +1015,19 @@ def visit_function_dataset(
             )
 
             filesystem = anonymous_gcs_filesystem()
+        elif protocol == "s3":
+            # SECURITY: the S3 twin of the gs:// branch above, for the same reason -
+            # create_filesystem("s3") signs with this process's own AWS credential
+            # chain. See anonymous_s3_filesystem's docstring.
+            if is_glob:
+                raise NotSupportedError(
+                    f"READ_CSV('{path}'): glob patterns are not supported for s3:// paths. Name the file exactly, or read the whole prefix without a wildcard."
+                )
+            from opteryx.connectors.io_systems.anonymous_s3_filesystem import (
+                anonymous_s3_filesystem,
+            )
+
+            filesystem = anonymous_s3_filesystem()
         else:
             filesystem = create_filesystem(protocol)
 
@@ -1116,7 +1157,7 @@ def visit_function_dataset(
     return node, context
 
 
-def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     import time as _bind_time
 
     from opteryx.connectors import connector_factory
@@ -1205,7 +1246,7 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
 
     # Reuse the dataset resolved by the catalog resolution step, if present, so
     # table_engine doesn't re-read the catalog. Absent → normal binding path.
-    resolved_dataset = getattr(node, "resolved_dataset", None)
+    resolved_dataset = node.resolved_dataset
     if resolved_dataset is not None:
         engine_kwargs["prefetched_table"] = resolved_dataset
 
@@ -1228,7 +1269,7 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             # refused can be one the caller never wrote. Name the view they did
             # write, or the refusal reads as being about a table they have never
             # heard of - see relation_resolver, which stamps `via_view`.
-            via_view = getattr(node, "via_view", None)
+            via_view = node.via_view
             if via_view:
                 raise PermissionError(
                     f"View {via_view} reads {node.relation}, which the user does not "
@@ -1240,7 +1281,7 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     # than READ, and independent of self_governs_permissions (no connector
     # self-governs manifest access the way information_schema self-governs
     # per-row READ).
-    if getattr(node, "for_manifest_only", False):
+    if node.for_manifest_only:
         if not can_perform_action(context.execution_context, node.relation, action="MANIFEST"):
             raise PermissionError(
                 f"User does not have permission to view the manifest for {node.relation}"
@@ -1259,7 +1300,7 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     # therefore refuse every caller - including owners - until every deployed
     # capability shipped it. Splitting them later is a capability change, not
     # an engine one.
-    if getattr(node, "history_view", None) == "snapshots_all":
+    if node.history_view == "snapshots_all":
         if not can_perform_action(context.execution_context, node.relation, action="MANIFEST"):
             raise PermissionError(
                 f"User does not have permission to view expired snapshots for {node.relation}"
@@ -1348,7 +1389,7 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
         # the data file - the scan synthesizes them (see constants/row_identity).
         # Appended before origin stamping below so they carry the alias like any
         # other column and resolve through the ordinary identifier path.
-        if getattr(node, "emit_row_identity", False):
+        if node.emit_row_identity:
             from opteryx.constants.row_identity import ROW_IDENTITY_FILE
             from opteryx.constants.row_identity import ROW_IDENTITY_ORDINAL
 

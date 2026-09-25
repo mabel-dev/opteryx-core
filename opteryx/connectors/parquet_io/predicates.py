@@ -104,9 +104,9 @@ def _temporal_domain_mismatch(col_node, literal_node) -> bool:
     """
     _temporal_physicals()
 
-    col_sc = getattr(col_node, "schema_column", None)
-    col_ct = getattr(col_sc, "column_type", None)
-    lit_ct = getattr(literal_node, "type", None)
+    col_sc = col_node.schema_column
+    col_ct = col_sc.column_type if col_sc is not None else None
+    lit_ct = literal_node.type
     # An IN-list literal is typed as the ARRAY of its elements
     # (ARRAY<TIMESTAMP[us]>, stamped by the binder / predicate rewriter); the
     # domain question is about the ELEMENT, so unwrap it — the ARRAY wrapper's
@@ -154,8 +154,8 @@ def _nan_invisible_to_bounds(col_node, op: str) -> bool:
 
         _FLOAT_PHYSICALS = frozenset({DrakenType.FLOAT32, DrakenType.FLOAT64})
 
-    col_sc = getattr(col_node, "schema_column", None)
-    col_ct = getattr(col_sc, "column_type", None)
+    col_sc = col_node.schema_column
+    col_ct = col_sc.column_type if col_sc is not None else None
     if col_ct is None:
         return True  # type unreadable — cannot prove the column is NaN-free
     return col_ct.physical in _FLOAT_PHYSICALS
@@ -251,22 +251,22 @@ def _try_extract_str_func(node) -> Optional[Tuple[str, str, Any]]:
     # `dict_preds_` guard) permanently disarmed — an optimization that looked
     # wired end-to-end but could never fire.
     if node.node_type == NodeType.FUNCTION:
-        params = getattr(node, "parameters", None)
+        params = node.parameters
         if not params or len(params) != 2:
             return None
         col_node, pat_node = params[0], params[1]
     elif node.node_type == NodeType.COMPARISON_OPERATOR:
-        col_node, pat_node = getattr(node, "left", None), getattr(node, "right", None)
+        col_node, pat_node = node.left, node.right
         if col_node is None or pat_node is None:
             return None
     else:
         return None
     if col_node.node_type != NodeType.IDENTIFIER or pat_node.node_type != NodeType.LITERAL:
         return None
-    col_sc = getattr(col_node, "schema_column", None)
+    col_sc = col_node.schema_column
     if col_sc is None:
         return None
-    col_name = getattr(col_sc, "name", None)
+    col_name = col_sc.name
     if not col_name:
         return None
     return (col_name, node.value, pat_node.value)
@@ -296,10 +296,10 @@ def _try_extract_in(node) -> Optional[Tuple[str, str, Any]]:
     if left.node_type != NodeType.IDENTIFIER or right.node_type != NodeType.LITERAL:
         return None
 
-    col_sc = getattr(left, "schema_column", None)
+    col_sc = left.schema_column
     if col_sc is None:
         return None
-    col_name = getattr(col_sc, "name", None)
+    col_name = col_sc.name
     if not col_name:
         return None
 
@@ -314,9 +314,9 @@ def _try_extract_in(node) -> Optional[Tuple[str, str, Any]]:
     # _temporal_domain_mismatch cannot cover this: it answers False when either
     # side's type is missing, which is right for its Eq/BETWEEN callers (their
     # scalar literals always carry a type) but not for a membership list.
-    col_ct = getattr(col_sc, "column_type", None)
+    col_ct = col_sc.column_type
     if col_ct is not None and col_ct.physical in _temporal_physicals():
-        lit_ct = getattr(right, "type", None)
+        lit_ct = right.type
         elem_ct = getattr(lit_ct, "element", None) if lit_ct is not None else None
         if elem_ct is None or elem_ct.physical not in _temporal_physicals():
             return None
@@ -357,10 +357,10 @@ def _try_extract_between(node) -> List[Tuple[str, str, Any]]:
     if node.right.node_type != NodeType.LITERAL or node.centre.node_type != NodeType.LITERAL:
         return []
 
-    col_sc = getattr(node.left, "schema_column", None)
+    col_sc = node.left.schema_column
     if col_sc is None:
         return []
-    col_name = getattr(col_sc, "name", None)
+    col_name = col_sc.name
     if not col_name:
         return []
 
@@ -427,10 +427,10 @@ def _try_extract(node) -> Optional[Tuple[str, str, Any]]:
     else:
         return None  # not a col-op-literal — skip
 
-    col_sc = getattr(left, "schema_column", None)
+    col_sc = left.schema_column
     if col_sc is None:
         return None
-    col_name = getattr(col_sc, "name", None)
+    col_name = col_sc.name
     if not col_name:
         return None
 

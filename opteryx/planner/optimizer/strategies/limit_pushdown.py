@@ -113,7 +113,7 @@ class LimitPushdownStrategy(OptimizationStrategy):
 
     @staticmethod
     def _collect_relations(node: PlanStep) -> Set[str]:
-        relations = getattr(node, "all_relations", None)
+        relations = node.all_relations
         if relations:
             return set(relations)
         return set()
@@ -134,12 +134,12 @@ class LimitPushdownStrategy(OptimizationStrategy):
         context: OptimizerContext,
     ) -> Optional[bool]:
         targets: Set[str] = context.limit_targets[id(limit_node)]
-        relation_names = {scan_node.relation, getattr(scan_node, "alias", None)}
+        relation_names = {scan_node.relation, scan_node.alias}
         if targets and targets.isdisjoint({name for name in relation_names if name}):
             return None
 
-        connector = getattr(scan_node, "connector", None)
-        if getattr(scan_node, "predicates", None) and not (
+        connector = scan_node.connector
+        if scan_node.predicates and not (
             connector and connector.supports_filtered_limit_pushdown
         ):
             # A predicate has been pushed into this scan (predicate pushdown removes the
@@ -152,7 +152,7 @@ class LimitPushdownStrategy(OptimizationStrategy):
             return False
 
         if connector and connector.supports_limit_pushdown:
-            current_limit = getattr(scan_node, "limit", None)
+            current_limit = scan_node.limit
             scan_node.limit = (
                 limit_node.limit if current_limit is None else min(current_limit, limit_node.limit)
             )

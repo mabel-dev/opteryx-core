@@ -19,9 +19,9 @@ leaves within the expression resolve to a single base column already in the GROU
 as a bare IDENTIFIER.
 """
 
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import LogicalColumn
-from opteryx.models import Node
 from opteryx.planner.expression_traits import has_volatile_function
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.utils import random_string
@@ -52,7 +52,7 @@ def _is_reducible(expr, bare_key_names: set) -> bool:
     return identifiers.issubset(bare_key_names)
 
 
-def _make_passthrough(original: Node) -> Node:
+def _make_passthrough(original: Expression) -> Expression:
     """Create an IDENTIFIER node that passes through an already-computed column."""
     return LogicalColumn(
         node_type=NodeType.IDENTIFIER,
@@ -68,7 +68,7 @@ class GroupKeyReductionStrategy(OptimizationStrategy):
         if node.node_type != LogicalPlanStepType.AggregateAndGroup:
             return context
 
-        groups = getattr(node, "groups", None)
+        groups = node.groups
         if not groups or len(groups) < 2:
             return context
 
@@ -85,7 +85,7 @@ class GroupKeyReductionStrategy(OptimizationStrategy):
         for g in bare_keys + reducible:
             if g.schema_column is None:
                 return context
-        aggregates = getattr(node, "aggregates", None) or []
+        aggregates = node.aggregates or []
         for agg in aggregates:
             if agg.schema_column is None:
                 return context

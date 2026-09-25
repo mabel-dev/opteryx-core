@@ -184,10 +184,10 @@ def _identifier_sources(node):
 def _scan_relation_names(scan_node):
     """Names by which identifiers can refer to this scan: relation + alias."""
     names = set()
-    rel = getattr(scan_node, "relation", None)
+    rel = scan_node.relation
     if rel:
         names.add(rel)
-    alias = getattr(scan_node, "alias", None)
+    alias = scan_node.alias
     if alias:
         names.add(alias)
     return names
@@ -213,7 +213,7 @@ def _is_upward_transparent(node) -> bool:
     if nt in _UPWARD_TRANSPARENT_TYPES:
         return True
     # Unconverted cross joins are transparent for filter-binding purposes.
-    if nt == LogicalPlanStepType.Join and getattr(node, "type", None) == "cross join":
+    if nt == LogicalPlanStepType.Join and node.type == "cross join":
         return True
     return False
 
@@ -238,7 +238,7 @@ def _collect_leaf_local_conjuncts(plan, scan_id, scan_names):
             if not _is_upward_transparent(parent):
                 continue  # do not recurse past this branch
             if parent.node_type == LogicalPlanStepType.Filter:
-                cond = getattr(parent, "condition", None)
+                cond = parent.condition
                 if cond is not None:
                     for conj in _split_and_conjuncts(cond):
                         sources = _identifier_sources(conj)
@@ -276,13 +276,10 @@ def _column_identity(col) -> Optional[bytes]:
         return None
     if isinstance(col, bytes):
         return col
-    schema_column = getattr(col, "schema_column", None)
-    if schema_column is not None:
-        identity = getattr(schema_column, "identity", None)
-        if isinstance(identity, bytes):
-            return identity
-    identity = getattr(col, "identity", None)
-    return identity if isinstance(identity, bytes) else None
+    schema_column = col.schema_column
+    if schema_column is not None and isinstance(schema_column.identity, bytes):
+        return schema_column.identity
+    return None
 
 
 def _predicate_note(nid, node_type, relation, condition, selectivity, stats=None) -> dict:
@@ -665,7 +662,7 @@ def _scan_stats(
                     if predicate_notes is not None:
                         predicate_notes.append(
                             _predicate_note(
-                                nid, "Scan", getattr(node, "relation", None), conj, s, base
+                                nid, "Scan", node.relation, conj, s, base
                             )
                         )
                     # Tighten column value_ranges from the filter's bounds so
@@ -705,7 +702,7 @@ def _scan_stats(
     # `row_count` to above (min/max skipping whole row-groups) -- that pruning
     # says nothing about the match rate *within* a retained row-group, so it is
     # not a substitute for statistical selectivity, only a head start on it.
-    scan_predicates = getattr(node, "predicates", None)
+    scan_predicates = node.predicates
     if scan_predicates:
         from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
 
@@ -720,7 +717,7 @@ def _scan_stats(
             if predicate_notes is not None:
                 predicate_notes.append(
                     _predicate_note(
-                        nid, "Scan", getattr(node, "relation", None), condition, s, base
+                        nid, "Scan", node.relation, condition, s, base
                     )
                 )
             narrowed_columns = _narrow_filter_columns(narrowed_columns, condition)
@@ -752,12 +749,12 @@ def _scan_stats(
     # apply _aggregate_stats / _distinct_stats) changes what this scan EMITS:
     # one row for an ungrouped aggregate, one row per group otherwise. Without
     # this the join above a pushed COUNT(*) is costed against the base table.
-    pushed_aggregates = getattr(node, "pushed_aggregates", None)
-    if pushed_aggregates is not None or getattr(node, "pushed_distinct", False):
+    pushed_aggregates = node.pushed_aggregates
+    if pushed_aggregates is not None or node.pushed_distinct:
         keys = (
-            getattr(node, "pushed_groups", None)
+            node.pushed_groups
             if pushed_aggregates is not None
-            else getattr(node, "columns", None)
+            else node.columns
         ) or []
         key_ids = [k for k in (_column_identity(g) for g in keys) if k]
         if not key_ids:
@@ -780,7 +777,7 @@ def _scan_stats(
     # now sit on a scan that already carries predicates
     # (supports_filtered_limit_pushdown), and min(filtered, limit) is the
     # count either way.
-    scan_limit = getattr(node, "limit", None)
+    scan_limit = node.limit
     if scan_limit is not None and int(scan_limit) >= 0:
         capped_rows = min(int(base.row_count), int(scan_limit))
         if capped_rows != base.row_count:
@@ -831,7 +828,7 @@ def _filter_stats(
     selectivity applied here.
     """
     base = _first_child_stats(child_stats) or _empty_stats()
-    condition = getattr(node, "condition", None)
+    condition = node.condition
     if condition is None:
         return base
 
@@ -1109,7 +1106,7 @@ def _join_stats(
     left = left or _empty_stats()
     right = right or _empty_stats()
 
-    join_type = getattr(node, "type", "inner")
+    join_type = node.type
 
     if join_type == "cross join" or join_type is None:
         out_rows = max(1, min(_INT64_MAX, left.row_count * right.row_count))
@@ -1145,8 +1142,8 @@ def _join_stats(
         # -- asserting that a join whose whole purpose is to reduce reduces
         # nothing. See docs/SEMI_ANTI_CARDINALITY_DESIGN.md.
         estimator_type = _SEMI_ANTI_ESTIMATOR[join_type]
-        left_keys = _join_key_identities(getattr(node, "left_columns", None))
-        right_keys = _join_key_identities(getattr(node, "right_columns", None))
+        left_keys = _join_key_identities(node.left_columns)
+        right_keys = _join_key_identities(node.right_columns)
         columns = left.columns
         if not left_keys or not right_keys:
             # No usable equi key: nothing to measure a match fraction with. The
@@ -1214,8 +1211,8 @@ def _join_stats(
             columns=_cap_ndvs(merged, out_rows), row_count_estimate=out_rows
         )
 
-    left_keys = _join_key_identities(getattr(node, "left_columns", None))
-    right_keys = _join_key_identities(getattr(node, "right_columns", None))
+    left_keys = _join_key_identities(node.left_columns)
+    right_keys = _join_key_identities(node.right_columns)
 
     if not left_keys or not right_keys:
         # Without a usable equi key, fall back to a cross-product upper bound;
@@ -1350,7 +1347,7 @@ def _aggregate_stats(
     child_stats: List[Tuple[Optional[RelationStatistics], str]],
 ) -> RelationStatistics:
     base = _first_child_stats(child_stats) or _empty_stats()
-    groups = getattr(node, "groups", None) or []
+    groups = node.groups or []
     group_keys = [k for k in (_column_identity(g) for g in groups) if k]
     if not group_keys:
         # No group keys → exactly one output row, whatever the input. Metric.
@@ -1404,8 +1401,9 @@ def _limit_stats(
     child_stats: List[Tuple[Optional[RelationStatistics], str]],
 ) -> RelationStatistics:
     base = _first_child_stats(child_stats) or _empty_stats()
-    limit = getattr(node, "limit", None)
-    offset = getattr(node, "offset", None)
+    limit = node.limit
+    # A sort & limit (HeapSort) has no OFFSET.
+    offset = node.offset if node.node_type == LogicalPlanStepType.Limit else None
     if limit is None and offset is None:
         return base
     try:
@@ -1446,7 +1444,7 @@ def _child_output_identities(plan: Optional["LogicalPlan"], nid: Optional[str]) 
     if len(edges) != 1:
         return None
     child = plan[edges[0][0]]
-    columns = getattr(child, "columns", None)
+    columns = child.columns
     if not columns:
         return None
     out = {identity for identity in (_column_identity(c) for c in columns) if identity}
@@ -1493,10 +1491,10 @@ _DISTINCTNESS_PRESERVING_WIDENING: Dict[str, frozenset] = {
 
 def _physical_type_name(expression) -> str:
     """Physical DrakenType name bound to an expression, or '' when untyped."""
-    schema_column = getattr(expression, "schema_column", None)
-    column_type = getattr(schema_column, "column_type", None)
-    physical = getattr(column_type, "physical", None)
-    return getattr(physical, "name", "") or ""
+    schema_column = expression.schema_column
+    if schema_column is None or schema_column.column_type is None:
+        return ""
+    return schema_column.column_type.physical.name
 
 
 def _cast_preserves_distinctness(cast_node) -> bool:
@@ -1506,12 +1504,12 @@ def _cast_preserves_distinctness(cast_node) -> bool:
     NDV equals the input's, so that a counted distinct_count stays a counted
     distinct_count on the far side.
     """
-    target_name = (getattr(cast_node, "value", "") or "").upper()
+    target_name = (cast_node.value or "").upper()
     if target_name.startswith("TRY_"):
         return False  # TRY_ exists precisely to collapse failures onto NULL
-    if getattr(cast_node, "format", None) is not None:
+    if cast_node.format is not None:
         return False  # a FORMAT pattern can render two values identically
-    source = getattr(cast_node, "left", None)
+    source = cast_node.left
     if source is None:
         return False
     source_physical = _physical_type_name(source)
@@ -1560,7 +1558,7 @@ def _project_stats(
     from opteryx.expression import NodeType
 
     base = _first_child_stats(child_stats) or _empty_stats()
-    columns = getattr(node, "columns", None)
+    columns = node.columns
     if not columns or not base.columns:
         return base
 
@@ -1573,7 +1571,7 @@ def _project_stats(
         # re-exposed (an alias does not mint a new identity); leave it alone.
         if identity is None or identity in base.columns or identity in derived:
             continue
-        source_identity = _column_identity(getattr(column, "left", None))
+        source_identity = _column_identity(column.left)
         if source_identity is None:
             continue
         source_stats = base.columns.get(source_identity)
@@ -1581,9 +1579,8 @@ def _project_stats(
             continue
         if not _cast_preserves_distinctness(column):
             continue
-        schema_column = getattr(column, "schema_column", None)
         derived[identity] = ColumnStatistics(
-            column_name=getattr(schema_column, "name", "") or "",
+            column_name=column.schema_column.name or "",
             data_type=_physical_type_name(column),
             distinct_count=source_stats.distinct_count,
             null_fraction=source_stats.null_fraction,
@@ -1960,7 +1957,7 @@ def _collect_range_constraints(
 
     if node is None:
         return
-    nt = getattr(node, "node_type", None)
+    nt = node.node_type
     if nt == NodeType.AND:
         _collect_range_constraints(node.left, sink)
         _collect_range_constraints(node.right, sink)
@@ -1975,8 +1972,8 @@ def _collect_range_constraints(
         # BETWEEN ranges live on .right (lower) / .right.right? — manifest does
         # ``a = node.right; b = ...``; we read whichever attributes carry the
         # literals.
-        a = _orderable_bound(_literal_value(getattr(node, "right", None)))
-        b = _orderable_bound(_literal_value(getattr(node, "centre", None)))
+        a = _orderable_bound(_literal_value(node.right))
+        b = _orderable_bound(_literal_value(node.centre))
         if a is None or b is None:
             return
         lo, hi = (a, b) if a <= b else (b, a)
@@ -1984,7 +1981,7 @@ def _collect_range_constraints(
         return
 
     if nt == NodeType.COMPARISON_OPERATOR:
-        op = getattr(node, "value", None)
+        op = node.value
         identity = _identifier_identity(node.left)
         literal = node.right
         if identity is None:
@@ -2069,19 +2066,19 @@ def _identifier_identity(node) -> Optional[bytes]:
     """
     from opteryx.expression import NodeType
 
-    if node is None or getattr(node, "node_type", None) != NodeType.IDENTIFIER:
+    if node is None or node.node_type != NodeType.IDENTIFIER:
         return None
-    schema_column = getattr(node, "schema_column", None)
-    identity = getattr(schema_column, "identity", None) if schema_column is not None else None
+    schema_column = node.schema_column
+    identity = schema_column.identity if schema_column is not None else None
     return identity if isinstance(identity, bytes) else None
 
 
 def _literal_value(node):
     from opteryx.expression import NodeType
 
-    if node is None or getattr(node, "node_type", None) != NodeType.LITERAL:
+    if node is None or node.node_type != NodeType.LITERAL:
         return None
-    value = getattr(node, "value", None)
+    value = node.value
     if getattr(value, "item", None) is not None:
         try:
             return value.item()
@@ -2090,20 +2087,12 @@ def _literal_value(node):
     return value
 
 
-def _in_list_values(node) -> List:
-    """Best-effort extraction of literal values from an IN list expression."""
-    if node is None:
-        return []
-    value = getattr(node, "value", None)
+def _in_list_values(literal) -> List:
+    """The values of an IN list's literal (the caller has proven it a LITERAL)."""
+    value = literal.value
     if isinstance(value, (list, tuple, set, frozenset)):
         return list(value)
-    parameters = getattr(node, "parameters", None) or []
-    out = []
-    for p in parameters:
-        v = _literal_value(p)
-        if v is not None:
-            out.append(v)
-    return out
+    return []
 
 
 def _merge_constraint(

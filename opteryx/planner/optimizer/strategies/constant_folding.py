@@ -21,11 +21,12 @@ we've rewritten expressions at part of other optimizations which can be folded.
 
 from draken.draken_native import LogicalKind
 from draken.draken_native import vector_attach_logical_type
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.compiled.expression.compiled_expression import build_bytecode, lower
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.expression.evaluator import execute_bytecode
 from opteryx.managers.virtual_datasets import one_row_data
-from opteryx.models import Node, QueryTelemetry
+from opteryx.models import QueryTelemetry
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.types.logical_type import BOOLEAN, LogicalCategory
@@ -79,7 +80,7 @@ def _desugar_rewrite_only(node, telemetry: QueryTelemetry):
     return node
 
 
-def _build_if_not_null_node(root, value, value_if_not_null) -> Node:
+def _build_if_not_null_node(root, value, value_if_not_null) -> Expression:
     from opteryx.expression.functions import get_catalog
 
     node = Function()
@@ -136,7 +137,7 @@ def _keeps_result_type(root, operand) -> bool:
     )
 
 
-def _build_transparent_node(root, value, telemetry) -> Node:
+def _build_transparent_node(root, value, telemetry) -> Expression:
     # An algebraic reduction (x * 1 -> x, TRUE AND x -> x) must keep the folded
     # expression's output identity — downstream references root's schema_column,
     # not the operand's. NESTED is the planner's transparent wrapper: it lowers
@@ -192,8 +193,8 @@ def _canonical_predicate_key(node):
         return f"~lit[{type_name}]{_literal_key(node.value)}"
 
     if node_type == NodeType.IDENTIFIER:
-        schema_column = getattr(node, "schema_column", None)
-        identity = getattr(schema_column, "identity", None)
+        schema_column = node.schema_column
+        identity = schema_column.identity if schema_column is not None else None
         # Identity, not name: two different columns can share a name across relations.
         return None if identity is None else f"~col[{identity}]"
 
@@ -270,7 +271,7 @@ _PARAMETER_CARRIERS = frozenset(
 )
 
 
-def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
+def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
     if root.node_type == NodeType.LITERAL:
         # if we're already a literal (constant), we can't fold
         return root
@@ -502,7 +503,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
             root.parameters[i] = fold_constants(param, telemetry)
 
     _root_ct = (
-        getattr(root.schema_column, "column_type", None) if root.schema_column is not None else None
+        root.schema_column.column_type if root.schema_column is not None else None
     )
     _root_cat = _root_ct.category if _root_ct is not None else None
     if (
@@ -593,7 +594,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
     return root
 
 
-def _fold(expression: Node, telemetry: QueryTelemetry) -> Node:
+def _fold(expression: Expression, telemetry: QueryTelemetry) -> Expression:
     """fold_constants, skipping trees this strategy has already folded.
 
     The strategy deliberately runs TWICE (early, then after the rewrite

@@ -79,7 +79,7 @@ class OperatorFusionStrategy(OptimizationStrategy):
                     # above it reads. The ORDER's set, not the LIMIT's: the fused node
                     # emits what the Order emitted, and a LIMIT adds no columns of its
                     # own so the two sets are the same set anyway.
-                    new_node.pre_update_columns = getattr(node, "pre_update_columns", None)
+                    new_node.pre_update_columns = node.pre_update_columns
                     new_node.vector_topk_candidate = self._is_vector_topk_candidate(node.order_by)
                     context.optimized_plan[next_node_id] = new_node
                     context.optimized_plan.remove_node(context.node_id, heal=True)

@@ -34,30 +34,31 @@ from opteryx.exceptions import md_code
 
 
 class CompactionCommitNode(BasePlanNode):
-    def __init__(self, properties: QueryProperties, **parameters):
-        BasePlanNode.__init__(self, properties=properties, **parameters)
-        self.relation_name: str = parameters.get("relation_name")
-        self.connector = parameters.get("connector")
+    def __init__(self, properties: QueryProperties, step, target_file_bytes=None):
+        """`target_file_bytes`: the size output files roll at; None takes the
+        stream's own target (the planner never sets it)."""
+        BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
+        self.relation_name: str = step.relation_name
+        self.connector = step.connector
         # Manifest paths this pass replaces, stamped on the node by
         # CompactionPlanningStrategy. Empty means selection found nothing to do,
         # which is a successful no-op rather than a commit of nothing.
-        self.retired_files = list(parameters.get("retired_files") or [])
+        self.retired_files = list(step.retired_files or [])
         # The snapshot selection was planned against. The catalog refuses the
         # commit if the relation has moved since, so a concurrent writer's work
         # is never erased by a pass that started before it landed.
-        self.baseline_snapshot_id = parameters.get("baseline_snapshot_id")
+        self.baseline_snapshot_id = step.baseline_snapshot_id
         # The ordering claim written into every output row group - the primary
         # sort column for a sort-aware plan, None for a brute one. Stamped by
         # CompactionPlanningStrategy, which is the only thing that knows which
         # rule fired.
-        self.sorted_by: Optional[str] = parameters.get("sorted_by")
+        self.sorted_by: Optional[str] = step.sorted_by
         self.result: Optional[NonTabularResult] = None
 
         self._stream = DataFileStream(
             self.connector,
             self.relation_name,
-            coalesce_rows=parameters.get("write_coalesce_rows"),
-            target_file_bytes=parameters.get("target_file_bytes"),
+            target_file_bytes=target_file_bytes,
             sorted_by=self.sorted_by,
             write_profile="storage",
         )

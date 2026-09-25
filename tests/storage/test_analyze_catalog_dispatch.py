@@ -34,6 +34,7 @@ import pytest
 
 from opteryx.connectors.opteryx_connector import OpteryxTable
 from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.compiled.structures.plan_steps import AnalyzeStep
 from opteryx.models import QueryProperties
 from opteryx.operators.table_management import TableManagementNode
 from opteryx.operators.table_management._analyze import analyze_table
@@ -61,9 +62,7 @@ def _run_node(action, variables, columns=None):
 
     node = TableManagementNode(
         QueryProperties(query_id="test-qid", variables=variables),
-        action=action,
-        table_name="namespace.table",
-        analyze_columns=columns,
+        AnalyzeStep(action=action, table_name="namespace.table", analyze_columns=columns),
     )
     with patch("opteryx.connectors.connector_factory", return_value=connector):
         result = node()

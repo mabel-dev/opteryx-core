@@ -49,12 +49,12 @@ def _declared_row_count(node) -> Optional[int]:
     fallback WOULD have been used, which is information the statistics themselves
     no longer carry once it has been applied.
     """
-    manifest = getattr(node, "manifest", None)
+    manifest = node.manifest
     if manifest is not None:
         count = manifest.get_record_count()
         if count is not None and count > 0:
             return count
-    schema = getattr(node, "schema", None)
+    schema = node.schema
     if schema is not None:
         count = schema.row_count_metric or schema.row_count_estimate
         if count is not None and count > 0:

@@ -89,7 +89,7 @@ def _eliminate_redundant_casts(node, telemetry, value_context=False):
     # match — the FORMAT still drives a real parse/format kernel (or, for an
     # unsupported pairing, a deliberate fail-loud error at compile time). Eliding
     # the node here would silently swallow both.
-    if getattr(node, "format", None) is not None:
+    if node.format is not None:
         return node
 
     source_type = operand.schema_column.column_type

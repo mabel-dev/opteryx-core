@@ -5,15 +5,16 @@
 
 from typing import Tuple
 
+from opteryx.compiled.structures.expressions import Expression
+from opteryx.compiled.structures.plan_steps import PlanStep
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn
-from opteryx.models import Node
 from opteryx.planner.binder.binder import inner_binder
 from opteryx.planner.binder.binding_context import BindingContext
 
 
-def _resolve_wildcard_order_position(node: Node, context: BindingContext) -> Node:
+def _resolve_wildcard_order_position(node: Expression, context: BindingContext) -> Expression:
     """Resolve an ORDER BY position logical_planner deferred over a bare `SELECT *`.
 
     `SELECT *` has no fixed column list at plan time -- it is one WILDCARD
@@ -53,7 +54,7 @@ def _resolve_wildcard_order_position(node: Node, context: BindingContext) -> Nod
     )
 
 
-def visit_order(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_order(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     order_by = []
     columns = []
     for column, ascending in node.order_by:

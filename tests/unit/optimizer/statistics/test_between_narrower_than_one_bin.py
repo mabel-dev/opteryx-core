@@ -37,6 +37,7 @@ hold.
 
 import os
 import sys
+from opteryx.types.schema import SchemaColumn
 from opteryx.compiled.structures.expressions import Between
 from opteryx.compiled.structures.expressions import Literal
 
@@ -48,7 +49,6 @@ import pytest
 import opteryx.planner.optimizer  # noqa: F401
 
 from opteryx.expression import NodeType
-from opteryx.models import Node
 from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
 from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
@@ -93,7 +93,7 @@ def _stats(histogram):
 
 def _identifier():
     node = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="src_addr")
-    node.schema_column = Node(NodeType.IDENTIFIER, identity=_SRC)
+    node.schema_column = SchemaColumn(name="col", identity=_SRC)
     return node
 
 

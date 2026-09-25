@@ -9,6 +9,7 @@ import decimal
 from contextlib import suppress
 from typing import Any, Dict, Optional, Tuple
 
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.exceptions import (
     AmbiguousIdentifierError,
     ColumnNotFoundError,
@@ -20,7 +21,6 @@ from opteryx.exceptions import (
 from opteryx.expression import NodeType
 from opteryx.expression.functions import get_catalog as _get_function_catalog
 from opteryx.expression.functions.registrar import fixed_value_function
-from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.join_helpers import get_mismatched_condition_column_types
 from opteryx.planner.binder.operator_map import determine_type
@@ -242,7 +242,7 @@ def _bound_cast_node(source, target):
         left=source,
         value=value,
         parameters=parameters,
-        alias=getattr(source, "alias", None),
+        alias=source.alias,
         schema_column=ExpressionColumn(name="", column_type=target),
     )
 
@@ -265,7 +265,7 @@ def _operand_column_type(operand):
     from opteryx.types.logical_type import ColumnType
 
     # Prefer the bound schema_column's column_type (single source of truth).
-    sc = getattr(operand, "schema_column", None)
+    sc = operand.schema_column
     if sc is not None and sc.column_type is not None:
         ct = sc.column_type
         cat = ct.category
@@ -278,33 +278,28 @@ def _operand_column_type(operand):
         # Other categories aren't handled by _decimal_result; return None.
         return None
 
-    # LITERAL fallback: operand carries .type/.precision/.scale directly.
+    # LITERAL fallback: operand carries .type directly (a LITERAL declares no
+    # precision/scale of its own, so a DECIMAL literal takes the defaults).
     if operand.node_type == NodeType.LITERAL:
-        op_type = getattr(operand, "type", None)
+        op_type = operand.type
         if op_type == LogicalCategory.DECIMAL:
-            op_p = getattr(operand, "precision", None)
-            op_s = getattr(operand, "scale", None)
-            p = op_p if op_p is not None else 18
-            s = op_s if op_s is not None else 6
-            if s > p:
-                s = p
-            return lt.DECIMAL(p, s)
+            return lt.DECIMAL(18, 6)
         if op_type == LogicalCategory.INTEGER:
             return ColumnType(DrakenType.INT64)
     return None
 
 
-def _aggregate_operand_type(node: Node) -> Optional[_ColumnType]:
+def _aggregate_operand_type(node: Expression) -> Optional[_ColumnType]:
     """The bound ColumnType of an aggregate's first operand, or None when it is
     unknown (no operand, an unbound expression, or a NULL-typed operand)."""
     if not node.parameters:
         return None
     param = node.parameters[0]
-    sc = getattr(param, "schema_column", None)
+    sc = param.schema_column
     if sc is not None:
         param_type = sc.column_type  # ColumnType or None
     elif param.node_type == NodeType.LITERAL:
-        param_type = getattr(param, "type", None)  # ColumnType from Phase 2
+        param_type = param.type  # ColumnType from Phase 2
     else:
         param_type = None
     if param_type is None or param_type.category in (None, LogicalCategory.NULL):
@@ -312,7 +307,7 @@ def _aggregate_operand_type(node: Node) -> Optional[_ColumnType]:
     return param_type
 
 
-def _aggregate_return_type(node: Node) -> Optional[_ColumnType]:
+def _aggregate_return_type(node: Expression) -> Optional[_ColumnType]:
     """Best-effort result-type inference for aggregate functions.
 
     Returns ColumnType or None (never LogicalCategory — callers use the result
@@ -361,7 +356,7 @@ def _aggregate_return_type(node: Node) -> Optional[_ColumnType]:
     return None
 
 
-def _bind_function_reference(node: Node, context: Any):
+def _bind_function_reference(node: Expression, context: Any):
     """Resolve a FUNCTION node against the catalog and attach what execution needs.
 
     The catalog owns type reasoning, so this is also where the overload — and with
@@ -532,7 +527,7 @@ def locate_identifier_in_loaded_schemas(
     return column, found_source_relation
 
 
-def bind_correlated_subquery(node: Node, context: Any) -> Tuple[Node, Dict]:
+def bind_correlated_subquery(node: Expression, context: Any) -> Tuple[Expression, Dict]:
     """
     Bind the plan of a subquery that appears inside an expression.
 
@@ -628,7 +623,7 @@ def bind_correlated_subquery(node: Node, context: Any) -> Tuple[Node, Dict]:
     return node, context
 
 
-def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
+def locate_identifier(node: Expression, context: Any) -> Tuple[Expression, Dict]:
     """
     Locate which schema the identifier is defined in. We return a populated node
     and the context.
@@ -648,7 +643,7 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
     """
     from opteryx.planner.binder import BindingContext
 
-    def create_variable_node(node: Node, context: BindingContext) -> Node:
+    def create_variable_node(node: Expression, context: BindingContext) -> Expression:
         """Populates a Node object for a variable.
 
         The lookup key is `source_column` — the `@@name` exactly as written. It is
@@ -836,8 +831,8 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
 
 
 def traversive_recursive_bind(
-    node: Node, context: Any, format_cache: Optional[dict] = None
-) -> Tuple[Node, Any]:
+    node: Expression, context: Any, format_cache: Optional[dict] = None
+) -> Tuple[Expression, Any]:
     # Bind every child first, threading the context through them in their declared
     # order. (List fields were once bound "in parallel" from one context and the
     # results merged — but binding mutates the one shared `schemas` dict in place,
@@ -852,8 +847,8 @@ def traversive_recursive_bind(
 
 
 def inner_binder(
-    node: Node, context: BindingContext, format_cache: Optional[dict] = None
-) -> Tuple[Node, Any]:
+    node: Expression, context: BindingContext, format_cache: Optional[dict] = None
+) -> Tuple[Expression, Any]:
     """
     Note, this is a tree within a tree. This function represents a single step in the execution
     plan (associated with the relational algebra) which may itself be an evaluation plan
@@ -1192,7 +1187,7 @@ def inner_binder(
                     _params = list(node.parameters)
                     for _i in range(_value_arg_start, len(_params)):
                         _arg = _params[_i]
-                        _arg_sc = getattr(_arg, "schema_column", None)
+                        _arg_sc = _arg.schema_column
                         if _arg_sc is None or _arg_sc.column_type is None:
                             continue
                         _arg_ct = _arg_sc.column_type
@@ -1230,9 +1225,9 @@ def inner_binder(
             if node.else_result is not None:
                 branch_nodes.append(node.else_result)
             typed_branches = [
-                (branch, getattr(branch, "schema_column", None).column_type)
+                (branch, branch.schema_column.column_type)
                 for branch in branch_nodes
-                if getattr(branch, "schema_column", None) is not None
+                if branch.schema_column is not None
                 and branch.schema_column.column_type is not None
                 and branch.schema_column.column_type != _CT_NULL
             ]
@@ -1290,7 +1285,7 @@ def inner_binder(
                 def _coerce_case_branch(branch):
                     if branch is None:
                         return branch
-                    sc = getattr(branch, "schema_column", None)
+                    sc = branch.schema_column
                     if sc is None or sc.column_type is None or sc.column_type == _CT_NULL:
                         return branch
                     if branch.node_type == NodeType.LITERAL and branch.value is not None:
@@ -1527,8 +1522,10 @@ def inner_binder(
                 }
 
                 def _coerce_literal(literal_node, other_node):
-                    other_type = getattr(
-                        getattr(other_node, "schema_column", None), "category", None
+                    other_type = (
+                        other_node.schema_column.category
+                        if other_node.schema_column is not None
+                        else None
                     )
                     coerce = _COERCE.get(other_type)
                     if coerce is None:
@@ -1597,8 +1594,8 @@ def inner_binder(
                 _result_cat == LogicalCategory.DECIMAL
                 and node_type == NodeType.BINARY_OPERATOR
                 and node.value in ("Plus", "Minus", "Multiply", "Divide")
-                and getattr(node, "left", None) is not None
-                and getattr(node, "right", None) is not None
+                and node.left is not None
+                and node.right is not None
             ):
                 left_ct = _operand_column_type(node.left)
                 right_ct = _operand_column_type(node.right)
@@ -1611,8 +1608,8 @@ def inner_binder(
             elif _result_cat == LogicalCategory.DECIMAL and node_type == NodeType.NESTED:
                 # NESTED is a parenthesised expression wrapping `node.centre`.
                 # Inherit the centre's column_type directly (single source of truth).
-                centre = getattr(node, "centre", None)
-                centre_sc = getattr(centre, "schema_column", None) if centre else None
+                centre = node.centre
+                centre_sc = centre.schema_column if centre else None
                 if centre_sc is not None and centre_sc.column_type is not None:
                     result_ct_final = centre_sc.column_type
 

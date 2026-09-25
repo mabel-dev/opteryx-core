@@ -20,6 +20,8 @@ handed. What is under test is the receipt, not the rows.
 import datetime
 from types import SimpleNamespace
 
+from opteryx.compiled.structures.plan_steps import InsertStep
+
 import pytest
 
 import opteryx
@@ -329,15 +331,15 @@ def test_a_hand_run_statement_has_no_producer(workspace):
 def test_the_binder_names_the_task_an_execute_expanded():
     from opteryx.planner.binder.relation import _produced_by
 
-    assert _produced_by(SimpleNamespace(executing_task="ops.t", relation_name="ops.sink")) == "task:ops.t"
+    assert _produced_by(InsertStep(executing_task="ops.t", relation_name="ops.sink")) == "task:ops.t"
 
 
 def test_the_binder_names_the_view_a_refresh_populates():
     from opteryx.planner.binder.relation import _produced_by
 
-    node = SimpleNamespace(is_refresh=True, relation_name="cat.mart.v")
+    node = InsertStep(is_refresh=True, relation_name="cat.mart.v")
     assert _produced_by(node) == "view:cat.mart.v"
-    node = SimpleNamespace(is_materialized_view=True, relation_name="cat.mart.v")
+    node = InsertStep(is_materialized_view=True, relation_name="cat.mart.v")
     assert _produced_by(node) == "view:cat.mart.v"
 
 
@@ -346,7 +348,7 @@ def test_a_task_outranks_the_view_flags_as_producer():
     person can point at, and its `reads` is what the receipt is checked against."""
     from opteryx.planner.binder.relation import _produced_by
 
-    node = SimpleNamespace(executing_task="ops.t", is_refresh=True, relation_name="cat.mart.v")
+    node = InsertStep(executing_task="ops.t", is_refresh=True, relation_name="cat.mart.v")
     assert _produced_by(node) == "task:ops.t"
 
 

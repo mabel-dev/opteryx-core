@@ -32,11 +32,11 @@ class FunctionRewriteStrategy(OptimizationStrategy):
             context.optimized_plan[context.node_id] = node
 
         if node.node_type in {LogicalPlanStepType.Aggregate, LogicalPlanStepType.AggregateAndGroup}:
-            if getattr(node, "groups", None):
+            if node.groups:
                 node.groups = self._rewrite_expression_list(node.groups)
-            if getattr(node, "aggregates", None):
+            if node.aggregates:
                 node.aggregates = self._rewrite_expression_list(node.aggregates)
-            if getattr(node, "projection", None):
+            if node.projection:
                 node.projection = self._rewrite_expression_list(node.projection)
             context.optimized_plan[context.node_id] = node
 

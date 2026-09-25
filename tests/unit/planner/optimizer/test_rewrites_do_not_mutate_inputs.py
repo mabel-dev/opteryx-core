@@ -24,7 +24,8 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 import pytest
 
 import opteryx
-from opteryx.models import LogicalColumn, Node
+from opteryx.compiled.structures.expressions import is_expression
+from opteryx.models import LogicalColumn
 from opteryx.types.schema import ConstantColumn
 import opteryx.planner.optimizer.strategies.cross_join_filter_pushdown as cross_join
 import opteryx.planner.optimizer.strategies.join_key_materialization as join_keys
@@ -36,27 +37,37 @@ import opteryx.planner.optimizer.strategies.split_conjunctive_predicates as spli
 TABLE = "testdata.fuzzing.mixed"
 
 
+def _fields(obj):
+    """Every declared field of a typed expression, read through its properties."""
+    names = set()
+    for cls in type(obj).__mro__:
+        for name, member in vars(cls).items():
+            if not name.startswith("_") and type(member).__name__ in ("getset_descriptor", "property"):
+                names.add(name)
+    return {name: getattr(obj, name) for name in sorted(names)}
+
+
 def _snapshot(*roots):
     """Every field of every expression object reachable from `roots`."""
     snap = {}
 
     def rep(value):
-        if isinstance(value, (Node, LogicalColumn)):
+        if is_expression(value):
             return ("node", id(value))
         if isinstance(value, (list, tuple)):
             return tuple(rep(item) for item in value)
         return repr(value)[:200]
 
     def walk(obj):
-        if not isinstance(obj, (Node, LogicalColumn)) or id(obj) in snap:
+        if not is_expression(obj) or id(obj) in snap:
             return
         if isinstance(obj, LogicalColumn):
             snap[id(obj)] = ("column", obj.current_name)
             return
-        properties = obj.properties
-        column = properties.get("schema_column")
+        fields = _fields(obj)
+        column = fields.pop("schema_column", None)
         snap[id(obj)] = (
-            tuple(sorted((k, rep(v)) for k, v in properties.items() if k != "schema_column")),
+            tuple(sorted((k, rep(v)) for k, v in fields.items())),
             None
             if column is None
             else (
@@ -66,8 +77,8 @@ def _snapshot(*roots):
                 repr(column.value)[:200] if isinstance(column, ConstantColumn) else None,
             ),
         )
-        for value in properties.values():
-            if isinstance(value, (Node, LogicalColumn)):
+        for value in fields.values():
+            if is_expression(value):
                 walk(value)
             elif isinstance(value, (list, tuple)):
                 for item in value:
@@ -75,6 +86,7 @@ def _snapshot(*roots):
 
     for root in roots:
         walk(root)
+    assert snap or not roots, "the snapshot saw none of its roots - the check is blind"
     return snap
 
 

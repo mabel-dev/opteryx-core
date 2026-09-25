@@ -289,8 +289,8 @@ def _extract_key_predicate(condition, allowed_columns: frozenset):
     else:
         return None
 
-    column = getattr(ident, "schema_column", None)
-    col_name = getattr(column, "name", None)
+    column = ident.schema_column
+    col_name = column.name if column is not None else None
     if col_name not in allowed_columns:
         return None
 

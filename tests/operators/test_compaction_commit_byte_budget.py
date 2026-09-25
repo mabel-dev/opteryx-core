@@ -32,6 +32,7 @@ import draken.draken_native as dn
 import pytest
 from draken.morsels.morsel import MORSEL_MAX_ARENA_BYTES, Morsel, MorselBatcher
 
+from opteryx.compiled.structures.plan_steps import CompactionCommitStep
 from opteryx.models import QueryProperties
 from opteryx.models.file_entry import FileEntry
 from opteryx.operators._operators import CompactionCommitNode, DataFileStream
@@ -122,12 +123,13 @@ def _wide_morsel(seed):
 
 def _sink(budget, target=None, retired=("old_1.parquet",), sorted_by=None, rows=None):
     node = CompactionCommitNode(
-        properties=QueryProperties("test-query", {}),
-        relation_name="test.relation",
-        connector=_RecordingConnector(),
-        retired_files=list(retired),
-        baseline_snapshot_id=None,
-        sorted_by=sorted_by,
+        QueryProperties("test-query", {}),
+        CompactionCommitStep(
+            relation_name="test.relation",
+            connector=_RecordingConnector(),
+            retired_files=list(retired),
+            sorted_by=sorted_by,
+        ),
         target_file_bytes=target,
     )
     # Same construction the stream does, with a budget a test can reach.

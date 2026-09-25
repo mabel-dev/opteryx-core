@@ -30,6 +30,7 @@ _logger = logging.getLogger(__name__)
 from collections import defaultdict
 from typing import Generator
 
+from opteryx.compiled.structures.plan_steps import steps_with
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import QueryProperties
@@ -110,19 +111,20 @@ cdef class ReaderNode(BasePlanNode):
     cdef public object limit
     cdef public object schema
 
-    def __init__(self, properties: QueryProperties, **parameters):
-        """Initialize ReaderNode."""
-        BasePlanNode.__init__(self, properties=properties, **parameters)
-        self.alias = parameters.get("alias")
-        self.dataset = parameters.get("dataset")
-        # Only set for a plain Scan (catalog/filesystem table) -- READ_JSONL/
-        # READ_PARQUET FunctionDataset nodes carry the source path in `dataset`
-        # instead and never set `relation`.
-        self.relation = parameters.get("relation")
-        self.connector = parameters.get("connector")
-        self.predicates = parameters.get("predicates", [])
-        self.limit = parameters.get("limit")
-        self.schema = parameters.get("schema")
+    def __init__(self, properties: QueryProperties, step):
+        """A reader over a Scan step or a FunctionDataset step."""
+        BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
+        step_type = step.node_type
+        self.alias = step.alias
+        # Only a FunctionDataset (READ_JSONL / READ_PARQUET / READ_CSV) carries its
+        # source path in `dataset`; a plain Scan names a `relation`.
+        self.dataset = step.dataset if step_type in steps_with("dataset") else None
+        self.relation = step.relation
+        self.connector = step.connector
+        self.predicates = step.predicates or []
+        # A LIMIT pushed into the scan — a Scan step's only.
+        self.limit = step.limit if step_type in steps_with("limit") else None
+        self.schema = step.schema
 
     def to_mermaid(self, nid):
         """

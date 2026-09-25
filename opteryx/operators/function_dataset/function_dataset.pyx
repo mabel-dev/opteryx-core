@@ -149,27 +149,26 @@ def _restore_temporal_series_args(args):
     return restored_args
 
 
-def _generate_series(**kwargs):
-    column_names, column_types = _column_metadata(kwargs["columns"])
-    value_array = _as_list(series.generate_series(*_restore_temporal_series_args(kwargs["args"])))
+def _generate_series(step):
+    column_names, column_types = _column_metadata(step.columns)
+    value_array = _as_list(series.generate_series(*_restore_temporal_series_args(step.args)))
     return _build_morsel_from_columns(column_names, column_types, [value_array])
 
 
-def _unnest(**kwargs):
+def _unnest(step):
     """unnest converts an list into rows"""
-    if kwargs["args"][0].node_type == NodeType.NESTED:
-        list_items = [kwargs["args"][0].centre.value]
+    if step.args[0].node_type == NodeType.NESTED:
+        list_items = [step.args[0].centre.value]
     else:
-        list_items = kwargs["args"][0].value
+        list_items = step.args[0].value
 
-    column_names, column_types = _column_metadata(kwargs["columns"])
+    column_names, column_types = _column_metadata(step.columns)
     return _build_morsel_from_columns(column_names, column_types, [_as_list(list_items)])
 
 
-def _values(**parameters):
-    values_array = parameters["values"]
-    rows = [tuple(value.value for value in values) for values in values_array]
-    return _build_morsel_from_rows(parameters["columns"], rows)
+def _values(step):
+    rows = [tuple(value.value for value in values) for values in step.values]
+    return _build_morsel_from_rows(step.columns, rows)
 
 
 
@@ -182,21 +181,15 @@ DATASET_FUNCTIONS = {
 
 
 cdef class FunctionDatasetNode(ReaderNode):
-    # `alias` is a ReaderNode field; `columns`/`parameters` are BasePlanNode fields.
+    # `alias` is a ReaderNode field; `columns`/`step` are BasePlanNode fields.
     cdef public object function
     cdef public object args
 
-    def __init__(self, properties: QueryProperties, **parameters):
-        """
-        The Blob Reader Node is responsible for reading the relevant blobs
-        and returning a Table/Relation.
-        """
-        ReaderNode.__init__(self, properties=properties, **parameters)
-        self.alias = parameters.get("alias")
-        self.function = parameters["function"]
-        self.parameters = parameters
-        self.columns = parameters.get("columns", [])
-        self.args = parameters.get("args", [])
+    def __init__(self, properties: QueryProperties, step):
+        """A FunctionDataset step (VALUES / UNNEST / GENERATE_SERIES)."""
+        ReaderNode.__init__(self, properties, step)
+        self.function = step.function
+        self.args = step.args or []
 
     @property
     def config(self):  # pragma: no cover
@@ -205,9 +198,9 @@ cdef class FunctionDatasetNode(ReaderNode):
         if self.function == "GENERATE_SERIES":
             return f"GENERATE SERIES ({', '.join(format_expression(arg) for arg in self.args)}){' AS ' + self.alias if self.alias else ''}"
         if self.function == "VALUES":
-            return f"VALUES (({', '.join([str(c) for c in self.columns])}) x {self.parameters.get('values', 0)} AS {self.alias})"
+            return f"VALUES (({', '.join([str(c) for c in self.columns])}) x {0 if self.step.values is None else self.step.values} AS {self.alias})"
         if self.function == "UNNEST":
-            return f"UNNEST ({', '.join(format_expression(arg) for arg in self.args)}{' AS ' + self.parameters.get('unnest_target', '')})"
+            return f"UNNEST ({', '.join(format_expression(arg) for arg in self.args)}{' AS ' + (self.step.unnest_target or '')})"
 
     @property
     def name(self):  # pragma: no cover
@@ -220,7 +213,7 @@ cdef class FunctionDatasetNode(ReaderNode):
     def read_morsels(self):
         """Source-side morsel iterator driven by the push pipeline engine."""
         start_time = time.time_ns()
-        result_morsel = DATASET_FUNCTIONS[self.function](**self.parameters)  # type: ignore
+        result_morsel = DATASET_FUNCTIONS[self.function](self.step)
         self.readings["time_evaluate_dataset"] += time.time_ns() - start_time
 
         self.readings["columns_read"] += len(result_morsel.column_names)

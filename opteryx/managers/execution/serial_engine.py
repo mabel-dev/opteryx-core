@@ -17,7 +17,7 @@ quota is reached; the scan loop checks `ctx.is_terminated()` between morsels
 and breaks promptly, dropping the scan iterator (which closes the underlying
 I/O).
 
-Special operators (Explain, SetVariable, ShowValue, ShowCreate, ShowColumns,
+Special operators (Explain, SetVariable, ShowCreate, ShowColumns,
 Insert, ViewManagement, TableManagement, RelationManagement) do not enter the
 push pipeline — they're invoked directly via their `__call__` interface.
 """
@@ -45,7 +45,6 @@ def _special_op_types():
     from opteryx.operators.show_lineage import ShowLineageNode
     from opteryx.operators.show_sources import ShowSourcesNode
     from opteryx.operators.show_create import ShowCreateNode
-    from opteryx.operators.show_value import ShowValueNode
     from opteryx.operators.table_management import TableManagementNode
     from opteryx.operators.view_management import ViewManagementNode
     from opteryx.operators.relation_management import RelationManagementNode
@@ -63,7 +62,6 @@ def _special_op_types():
         ShowLineageNode,
         ShowSourcesNode,
         ShowCreateNode,
-        ShowValueNode,
         TableManagementNode,
         ViewManagementNode,
         RelationManagementNode,
@@ -93,7 +91,6 @@ def execute(
     from opteryx.operators.show_lineage import ShowLineageNode
     from opteryx.operators.show_sources import ShowSourcesNode
     from opteryx.operators.show_create import ShowCreateNode
-    from opteryx.operators.show_value import ShowValueNode
     from opteryx.operators.table_management import TableManagementNode
     from opteryx.operators.view_management import ViewManagementNode
     from opteryx.operators.relation_management import RelationManagementNode
@@ -190,7 +187,6 @@ def execute(
     if isinstance(
         head_node,
         (
-            ShowValueNode,
             ShowCreateNode,
             ShowColumnsNode,
             ShowGrantsNode,

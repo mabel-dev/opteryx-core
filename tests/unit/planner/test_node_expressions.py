@@ -29,7 +29,7 @@ from opteryx.compiled.structures.plan_steps import ScanStep
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.expression import Node
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.planner.plan_context import PlanContext
 from opteryx.expression import NodeType
 from opteryx.models import ExecutionContext, QueryTelemetry
@@ -47,7 +47,7 @@ from opteryx.third_party import sqloxide
 from opteryx.compiled.structures.expressions import LogicalColumn
 
 
-def _ident(identity: str) -> Node:
+def _ident(identity: str) -> Expression:
     return LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=None, schema_column=SimpleNamespace(identity=identity))
 
 

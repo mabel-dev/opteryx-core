@@ -127,6 +127,31 @@ def split_path(path: str) -> Tuple[str, str]:
     return bucket, key
 
 
+def endpoint_parts(bucket: str, endpoint: str, region: str) -> Tuple[str, str, str]:
+    """(scheme, host, path prefix) for a bucket.
+
+    Virtual-hosted addressing (``bucket.s3.region.amazonaws.com``) is the
+    default and the only style AWS still adds features to. Two cases fall
+    back to path-style: an explicit endpoint override, and a bucket whose
+    name contains a dot - the latter because the wildcard certificate
+    covers one label only, so ``my.bucket.s3...`` fails TLS verification
+    rather than returning data.
+
+    Module-level so the signed filesystem and the anonymous one used by bare
+    dataset functions (anonymous_s3_filesystem) address a bucket identically.
+    """
+    if endpoint:
+        parts = urllib.parse.urlsplit(endpoint)
+        scheme = parts.scheme or "https"
+        host = parts.netloc or parts.path
+        return scheme, host, f"/{bucket}"
+
+    if "." in bucket:
+        return "https", f"s3.{region}.amazonaws.com", f"/{bucket}"
+
+    return "https", f"{bucket}.s3.{region}.amazonaws.com", ""
+
+
 def _quote_key(key: str) -> str:
     """Percent-encode an object key for the canonical URI.
 
@@ -623,25 +648,8 @@ class OpteryxS3FileSystem:
     # ── URL construction ────────────────────────────────────────────────────
 
     def _endpoint_parts(self, bucket: str) -> Tuple[str, str, str]:
-        """(scheme, host, path prefix) for a bucket.
-
-        Virtual-hosted addressing (``bucket.s3.region.amazonaws.com``) is the
-        default and the only style AWS still adds features to. Two cases fall
-        back to path-style: an explicit endpoint override, and a bucket whose
-        name contains a dot - the latter because the wildcard certificate
-        covers one label only, so ``my.bucket.s3...`` fails TLS verification
-        rather than returning data.
-        """
-        if self.endpoint:
-            parts = urllib.parse.urlsplit(self.endpoint)
-            scheme = parts.scheme or "https"
-            host = parts.netloc or parts.path
-            return scheme, host, f"/{bucket}"
-
-        if "." in bucket:
-            return "https", f"s3.{self.region}.amazonaws.com", f"/{bucket}"
-
-        return "https", f"{bucket}.s3.{self.region}.amazonaws.com", ""
+        """(scheme, host, path prefix) for a bucket - see `endpoint_parts`."""
+        return endpoint_parts(bucket, self.endpoint, self.region)
 
     def presign(
         self,

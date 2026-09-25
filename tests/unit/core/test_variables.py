@@ -4,10 +4,10 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import pytest
+from opteryx.compiled.structures.expressions import Literal
 from opteryx.types.logical_type import VARCHAR
 
 from opteryx.exceptions import PermissionsError
-from opteryx.models import Node
 from opteryx.variables import (
     SYSTEM_VARIABLES_DEFAULTS,
     SystemVariables,
@@ -38,14 +38,13 @@ def test_variables_permissions():
     # a USER-owned session snapshot, so neither may write it.
     server_var = _a_variable_owned_by(VariableOwner.SERVER)
     with pytest.raises(PermissionsError):
-        SystemVariables[server_var] = Node(node_type="VARIABLE", type=VARCHAR, value="system")
+        SystemVariables[server_var] = Literal(type=VARCHAR, value="system")
     with pytest.raises(PermissionsError):
-        connection_vars[server_var] = Node(node_type="VARIABLE", type=VARCHAR, value="system")
+        connection_vars[server_var] = Literal(type=VARCHAR, value="system")
 
     # we shouldn't be able to set the user
     with pytest.raises(PermissionsError):
-        connection_vars["external_user"] = Node(
-            node_type="VARIABLE", type=VARCHAR, value="user"
+        connection_vars["external_user"] = Literal(type=VARCHAR, value="user"
         )
 
 
@@ -59,8 +58,7 @@ def test_restricted_variable_needs_entitlement_even_when_owner_allows():
         VARCHAR, "", VariableOwner.USER, Visibility.RESTRICTED,
     )
     with pytest.raises(PermissionsError):
-        session_vars["a_restricted_knob"] = Node(
-            node_type="VARIABLE", type=VARCHAR, value="anything"
+        session_vars["a_restricted_knob"] = Literal(type=VARCHAR, value="anything"
         )
 
 

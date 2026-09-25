@@ -175,11 +175,11 @@ def _scan_relation(node) -> Optional[str]:
     statement with no FROM clause, not a relation anyone named — the same
     reason the meter bills it zero.
     """
-    relation = getattr(node, "relation", None)
+    relation = node.relation
     if not relation or relation == _ONE_ROW:
         return None
 
-    connector = getattr(node, "connector", None)
+    connector = node.connector
     workspace = getattr(connector, "workspace", None)
     dataset = getattr(connector, "dataset", None)
     if workspace and dataset:

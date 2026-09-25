@@ -106,7 +106,7 @@ class RedundantOperationsStrategy(OptimizationStrategy):
                     my_columns = {
                         c.schema_column.identity
                         for c in list(node.columns)
-                        + list(getattr(node, "passthrough_columns", None) or [])
+                        + list(node.passthrough_columns or [])
                     }
                     if provider_columns == my_columns:
                         # we need to ensure we keep some of the context if not the step

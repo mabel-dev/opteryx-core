@@ -34,9 +34,9 @@ from opteryx.models import QueryProperties
 
 
 class ShowSourcesNode(BasePlanNode):
-    def __init__(self, properties: QueryProperties, **parameters):
-        BasePlanNode.__init__(self, properties=properties, **parameters)
-        self._sources = parameters.get("sources")
+    def __init__(self, properties: QueryProperties, step):
+        BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
+        self._sources = step.sources
         self.seen = False
 
     @property

@@ -37,8 +37,9 @@ WHAT IT DOES NOT DO
 
 from typing import List, Optional
 
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.expression import NodeType, get_all_nodes_of_type
-from opteryx.models import LogicalColumn, Node
+from opteryx.models import LogicalColumn
 from opteryx.planner.binder.join_helpers import extract_join_fields
 from opteryx.planner.binder.join_helpers import plan_join_key_hoists
 from opteryx.planner.logical_planner import LogicalPlan
@@ -50,6 +51,7 @@ from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
 from opteryx.compiled.structures.expressions import And
 from opteryx.compiled.structures.plan_steps import ProjectStep
+from opteryx.compiled.structures.plan_steps import steps_with
 
 
 def passthrough_column(schema_column, source: Optional[str] = None) -> LogicalColumn:
@@ -67,14 +69,14 @@ def passthrough_column(schema_column, source: Optional[str] = None) -> LogicalCo
         source_column=schema_column.name,
         source=source
         if source is not None
-        else (schema_column.origin[0] if getattr(schema_column, "origin", None) else None),
+        else (schema_column.origin[0] if schema_column.origin else None),
         schema_column=schema_column,
     )
 
 
 def materialize_operand_as_column(
-    plan: LogicalPlan, child_id: str, expr: Node, relation_names: List[str]
-) -> Optional[Node]:
+    plan: LogicalPlan, child_id: str, expr: Expression, relation_names: List[str]
+) -> Optional[Expression]:
     """Insert a Project above `child_id` that emits everything it already
     emits PLUS `expr` as a new column. Returns a passthrough IDENTIFIER
     referencing that new column, or None if `child_id`'s output schema
@@ -96,11 +98,12 @@ def materialize_operand_as_column(
     the worked example; it tests the identity against the scan's own output schema
     rather than trusting the relation name.
     """
-    schema = getattr(plan[child_id], "schema", None)
+    child = plan[child_id]
+    schema = child.schema if child.node_type in steps_with("schema") else None
     columns = getattr(schema, "columns", None)
     if not columns or not relation_names:
         return None
-    project_columns: List[Node] = [passthrough_column(col) for col in columns]
+    project_columns: List[Expression] = [passthrough_column(col) for col in columns]
     project_columns.append(expr)
     project_node = ProjectStep()
     project_node.columns = project_columns
@@ -109,7 +112,7 @@ def materialize_operand_as_column(
     return passthrough_column(expr.schema_column, source=relation_names[0])
 
 
-def split_and_conditions(node: Optional[Node]) -> List[Node]:
+def split_and_conditions(node: Optional[Expression]) -> List[Expression]:
     """Flatten an ON tree's AND spine into its leaf conjuncts.
 
     Only the AND spine is walked: an OR anywhere in an ON clause is ONE leaf here

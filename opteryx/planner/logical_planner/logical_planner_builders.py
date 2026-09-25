@@ -17,6 +17,7 @@ from draken.draken_native import LogicalKind
 from draken.draken_native import ipv4_format
 from draken.draken_native import ipv4_parse
 
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.compiled.expression.compiled_expression import _BOP_CODE
 from opteryx.exceptions import (
     ArrayWithMixedTypesError,
@@ -43,7 +44,7 @@ from opteryx.expression.intervals import (
 )
 from opteryx.expression.operator_catalog import get_operator_for_sql_symbol
 from opteryx.expression.operator_catalog import get_operator_node_type
-from opteryx.models import LogicalColumn, Node
+from opteryx.models import LogicalColumn
 from opteryx.operators.aggregate.helpers import DISTINCT_SPELLINGS, aggregator_names, is_aggregator
 from opteryx.operators.window.helpers import GATHERED_FUNCTIONS
 from opteryx.operators.window.helpers import NAVIGATION_FUNCTIONS
@@ -2897,7 +2898,7 @@ def literal_null(branch=None, alias: Optional[List[str]] = None, key=None):
     return Literal(type=_CT_NULL, alias=alias)
 
 
-def integer_literal_node(value: int, alias: Optional[List[str]] = None) -> Node:
+def integer_literal_node(value: int, alias: Optional[List[str]] = None) -> Expression:
     """Build a LITERAL node for an exact integer, choosing the narrowest native tier
     that holds it. The SINGLE place integer literal typing is decided, so the type tag
     and the value can never disagree — the failure mode that motivated it is a fold

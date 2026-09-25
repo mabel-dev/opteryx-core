@@ -3,7 +3,6 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-from opteryx.compiled.structures.node import Node
 from opteryx.models.execution_context import ExecutionContext
 from opteryx.models.file_entry import FileEntry
 from opteryx.compiled.structures.expressions import LogicalColumn
@@ -25,7 +24,6 @@ __all__ = (
     "FileEntry",
     "LogicalColumn",
     "Manifest",
-    "Node",
     "NonTabularResult",
     "object_message",
     "row_count_phrase",

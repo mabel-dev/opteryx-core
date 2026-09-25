@@ -5,10 +5,10 @@
 
 from typing import Tuple
 
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.expression.formatter import format_expression
-from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -35,7 +35,7 @@ see `filter_referenced_columns`. Exported so a strategy filtering an ALREADY-BUI
 of hand-rolling `column.node_type == NodeType.IDENTIFIER`."""
 
 
-def filter_referenced_columns(condition: Node) -> list:
+def filter_referenced_columns(condition: Expression) -> list:
     """The atomic, already-resolved column references a Filter's condition reads.
 
     THE ONE DEFINITION for rebuilding a Filter node's `.columns` from its
@@ -49,7 +49,7 @@ def filter_referenced_columns(condition: Node) -> list:
     return get_all_nodes_of_type(condition, FILTER_REFERENCED_NODE_TYPES)
 
 
-def predicate_key(pred: Node) -> str:
+def predicate_key(pred: Expression) -> str:
     """Canonical dedup/factoring key for one predicate.
 
     This is the only sanctioned way to ask "are these two predicates the same

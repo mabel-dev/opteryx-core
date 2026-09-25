@@ -30,7 +30,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "..", "..", "..", ".."))
 import pytest
 
 from opteryx.expression import NodeType
-from opteryx.models import Node
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.planner.cost_estimation import plan_adapter
 from opteryx.planner.cost_estimation import JoinVertex
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan
@@ -87,12 +87,12 @@ def _make_scan(
     return scan, columns
 
 
-def _identifier(source: str, schema_column: SchemaColumn) -> Node:
+def _identifier(source: str, schema_column: SchemaColumn) -> Expression:
     """A bound identifier — carries ``schema_column`` as the binder leaves it."""
     return LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=schema_column.name, source=source, schema_column=schema_column)
 
 
-def _eq_predicate(left: Node, right: Node) -> Node:
+def _eq_predicate(left: Expression, right: Expression) -> Expression:
     return Comparison(value="Eq", left=left, right=right)
 
 

@@ -64,7 +64,7 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
-from opteryx.compiled.structures.node import Node
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.expression import NodeType
 from opteryx.planner import build_literal_node
 from opteryx.types.logical_type import LogicalCategory
@@ -125,8 +125,8 @@ def _column_type_of(identifier, column_type_for):
         resolved = column_type_for(identifier.source_column)
     if resolved is not None:
         return resolved
-    schema_column = getattr(identifier, "schema_column", None)
-    return getattr(schema_column, "column_type", None)
+    schema_column = identifier.schema_column
+    return schema_column.column_type if schema_column is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +134,7 @@ def _column_type_of(identifier, column_type_for):
 # ---------------------------------------------------------------------------
 
 
-def _comparison_node(identifier, operator: str, value, literal_type) -> Node:
+def _comparison_node(identifier, operator: str, value, literal_type) -> Expression:
     """A fully-bound `identifier <operator> literal` node.
 
     Fully bound is not optional: `prune_files` reads `left.source_column` to
@@ -149,7 +149,7 @@ def _comparison_node(identifier, operator: str, value, literal_type) -> Node:
     )
 
 
-def _emit(identifier, interval: Interval, literal_type) -> List[Node]:
+def _emit(identifier, interval: Interval, literal_type) -> List[Expression]:
     """Canonical conjuncts for `identifier`'s value lying in `interval`."""
     lower, lower_closed, upper, upper_closed = interval
 
@@ -905,8 +905,8 @@ def _identity_key(identifier):
     `n1.name` and `n2.name` must never be hulled together); the source column
     name is the fallback for a node the binder left without a schema_column.
     """
-    schema_column = getattr(identifier, "schema_column", None)
-    identity = getattr(schema_column, "identity", None)
+    schema_column = identifier.schema_column
+    identity = schema_column.identity if schema_column is not None else None
     return identity if identity is not None else identifier.source_column
 
 
@@ -918,7 +918,7 @@ def _in_list_interval(node) -> Optional[Interval]:
     engine's. The binder rejects mixed IN lists anyway — this is the second
     line, not the first.
     """
-    values = node.right.value
+    values = _unwrap(node.right).value
     if not isinstance(values, (list, tuple, set, frozenset)):
         return None
     members = [_scalar(value) for value in values]
@@ -947,7 +947,7 @@ def _like_interval(node) -> Optional[Interval]:
     decides where the prefix ENDS, and getting that wrong shortens the prefix
     (harmless) or lengthens it (drops rows).
     """
-    pattern = _scalar(node.right.value)
+    pattern = _scalar(_unwrap(node.right).value)
     text = _decode_ascii(pattern)
     if text is None or "\\" in text:
         return None

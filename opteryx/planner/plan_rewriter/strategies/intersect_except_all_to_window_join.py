@@ -34,8 +34,9 @@ INTERSECT ALL / EXCEPT ALL with wildcard or unresolvable column names are left f
 a later stage (the column names are needed to build the partition / join keys).
 """
 
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.expression import NodeType
-from opteryx.models import LogicalColumn, Node
+from opteryx.models import LogicalColumn
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -55,7 +56,7 @@ from opteryx.compiled.structures.plan_steps import WindowStep
 _ROW_NUMBER_NAME = "$row_number"
 
 
-def _and(conditions: list) -> Node:
+def _and(conditions: list) -> Expression:
     """Left-deep AND tree over a non-empty list of conditions."""
     node = conditions[0]
     for cond in conditions[1:]:
@@ -66,7 +67,7 @@ def _and(conditions: list) -> Node:
     return node
 
 
-def _eq(left_rel: str, left_col: str, right_rel: str, right_col: str) -> Node:
+def _eq(left_rel: str, left_col: str, right_rel: str, right_col: str) -> Expression:
     eq = Comparison(value="Eq", do_not_create_column=True)
     eq.left = LogicalColumn(
         node_type=NodeType.IDENTIFIER, source=left_rel, source_column=left_col

@@ -21,7 +21,6 @@ import pytest
 from opteryx.connectors.capabilities.eidetic import ViewDefinition
 from opteryx.expression import NodeType
 from opteryx.managers import views as views_module
-from opteryx.models import Node
 from opteryx.planner import execute_logical_plan
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.utils import random_string

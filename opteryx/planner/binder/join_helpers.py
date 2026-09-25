@@ -12,6 +12,8 @@ and join.py (which needs these functions from common.py).
 
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
+from opteryx.compiled.structures.expressions import Expression
+from opteryx.compiled.structures.expressions import expressions_with
 from opteryx.exceptions import (
     AmbiguousIdentifierError,
     ColumnNotFoundError,
@@ -23,7 +25,7 @@ from opteryx.exceptions import (
 )
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.expression.formatter import format_expression
-from opteryx.models import LogicalColumn, Node
+from opteryx.models import LogicalColumn
 from opteryx.planner.expression_traits import has_volatile_function
 from opteryx.types.logical_type import (
     LogicalCategory, _NUMERIC_TYPES, _TEMPORAL_TYPES, _LARGE_OBJECT_TYPES, _STRING_TYPES,
@@ -55,7 +57,7 @@ def _is_numeric_join_coercible(left_type, right_type) -> bool:
 
 
 def get_mismatched_condition_column_types(
-    node: Node, relaxed: bool = False, allow_numeric_join_coercion: bool = False
+    node: Expression, relaxed: bool = False, allow_numeric_join_coercion: bool = False
 ) -> dict:
     """
     Checks that the types of the fields involved a comparison are the same on both sides.
@@ -101,7 +103,7 @@ def get_mismatched_condition_column_types(
             # kernel strictness deep in execution (see the architect's report:
             # rewrite_in_to_eq's single-member IN retype is the only remaining
             # guard, and a looser kernel would turn this into silent wrong rows).
-            right_ct = getattr(node.right, "type", None)
+            right_ct = node.right.type if type(node.right) in expressions_with("type") else None
             right_type = right_ct.element.category if right_ct is not None and right_ct.element is not None else None
             right_display_ct = right_ct.element if right_ct is not None else None
         else:
@@ -159,10 +161,10 @@ def get_mismatched_condition_column_types(
 
 
 def extract_join_fields(
-    condition_node: Node,
+    condition_node: Expression,
     left_relation_names: List[str],
     right_relation_names: List[str],
-) -> Tuple[List, List, List[Node]]:
+) -> Tuple[List, List, List[Expression]]:
     """
     Extracts join fields from a condition node that may have multiple ANDed conditions.
 
@@ -193,7 +195,7 @@ def extract_join_fields(
     """
     left_fields = []
     right_fields = []
-    unkeyed: List[Node] = []
+    unkeyed: List[Expression] = []
 
     if condition_node.node_type == NodeType.AND:
         left_fields_1, right_fields_1, unkeyed_1 = extract_join_fields(
@@ -250,7 +252,7 @@ def _operand_label(operand) -> str:
 
 
 def _identifier_leg(
-    identifier: Node, left_relation_names: List[str], right_relation_names: List[str]
+    identifier: Expression, left_relation_names: List[str], right_relation_names: List[str]
 ) -> Optional[str]:
     """Which join leg a bound IDENTIFIER belongs to, or None if neither.
 
@@ -263,7 +265,7 @@ def _identifier_leg(
     if identifier.source is not None:
         candidates.add(identifier.source)
     schema_column = identifier.schema_column
-    origin = getattr(schema_column, "origin", None) if schema_column is not None else None
+    origin = schema_column.origin if schema_column is not None else None
     if origin:
         candidates.update(origin)
     if not candidates:
@@ -276,7 +278,7 @@ def _identifier_leg(
 
 
 def hoistable_operand_leg(
-    expression: Node, left_relation_names: List[str], right_relation_names: List[str]
+    expression: Expression, left_relation_names: List[str], right_relation_names: List[str]
 ) -> Optional[str]:
     """The join leg `expression` could be materialised on as a column, or None.
 
@@ -316,7 +318,7 @@ def hoistable_operand_leg(
 
 
 def band_operand_leg(
-    expression: Node, left_relation_names: List[str], right_relation_names: List[str]
+    expression: Expression, left_relation_names: List[str], right_relation_names: List[str]
 ) -> Optional[str]:
     """The single join leg `expression` reads from, or None if it is not exactly one.
 
@@ -354,8 +356,8 @@ def band_operand_leg(
 
 
 def plan_join_key_hoists(
-    conjunct: Node, left_relation_names: List[str], right_relation_names: List[str]
-) -> Optional[List[Tuple[Node, str]]]:
+    conjunct: Expression, left_relation_names: List[str], right_relation_names: List[str]
+) -> Optional[List[Tuple[Expression, str]]]:
     """How an Eq conjunct carrying expression operand(s) could become an equi-join key.
 
     Returns the (expression, leg) pairs to materialise — one entry when a single
@@ -373,7 +375,7 @@ def plan_join_key_hoists(
         return None
 
     legs: List[str] = []
-    hoists: List[Tuple[Node, str]] = []
+    hoists: List[Tuple[Expression, str]] = []
     for operand in (conjunct.left, conjunct.right):
         if operand.node_type == NodeType.IDENTIFIER:
             leg = _identifier_leg(operand, left_relation_names, right_relation_names)
@@ -393,7 +395,7 @@ def plan_join_key_hoists(
 
 
 def reject_unhoistable_join_operands(
-    unkeyed: List[Node], left_relation_names: List[str], right_relation_names: List[str]
+    unkeyed: List[Expression], left_relation_names: List[str], right_relation_names: List[str]
 ) -> None:
     """Raise for any Eq conjunct in `unkeyed` that no projection can turn into a key.
 
@@ -538,7 +540,7 @@ def convert_using_to_on(
     left_relation_names: List[str],
     right_relation_names: List[str],
     schemas: Dict[str, "RelationSchema"],
-) -> Node:
+) -> Expression:
     """
     Converts USING fields to the equivalent ON condition.
 

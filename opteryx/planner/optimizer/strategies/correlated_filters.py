@@ -75,7 +75,9 @@ from .optimization_strategy import (
     get_nodes_of_type_from_logical_plan,
 )
 from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import expressions_with
 from opteryx.compiled.structures.plan_steps import FilterStep
+from opteryx.compiled.structures.plan_steps import steps_with
 
 
 def _phys_identity(col):
@@ -85,8 +87,8 @@ def _phys_identity(col):
     silently return an unrelated relation's range."""
     if isinstance(col, bytes):
         return col
-    schema_column = getattr(col, "schema_column", None)
-    identity = getattr(schema_column, "identity", None) if schema_column is not None else None
+    schema_column = col.schema_column
+    identity = schema_column.identity if schema_column is not None else None
     return identity if isinstance(identity, bytes) else None
 
 
@@ -189,8 +191,8 @@ def _split_offset(operand):
         return (operand, [])
     if operand.node_type != NodeType.BINARY_OPERATOR or operand.value not in ("Plus", "Minus"):
         return None
-    left = _unwrap_nested(getattr(operand, "left", None))
-    right = _unwrap_nested(getattr(operand, "right", None))
+    left = _unwrap_nested(operand.left)
+    right = _unwrap_nested(operand.right)
     if left is None or right is None:
         return None
     if left.node_type == NodeType.IDENTIFIER and right.node_type == NodeType.LITERAL:
@@ -226,8 +228,8 @@ def _correlated_join_predicates(on_node):
     sides = _TRANSPORTED_BOUNDS.get(on_node.value)
     if sides is None:
         return []
-    left = _split_offset(getattr(on_node, "left", None))
-    right = _split_offset(getattr(on_node, "right", None))
+    left = _split_offset(on_node.left)
+    right = _split_offset(on_node.right)
     if left is None or right is None:
         return []
     left_col, left_offset = left
@@ -521,8 +523,8 @@ def _shifted(value_range, offset, keep):
 
 def _column_type(col):
     """The bound ColumnType behind an identifier node, or None."""
-    schema_column = getattr(col, "schema_column", None)
-    return getattr(schema_column, "column_type", None) if schema_column is not None else None
+    schema_column = col.schema_column
+    return schema_column.column_type if schema_column is not None else None
 
 
 def _comparable_encoding(source_type, target_type) -> bool:
@@ -603,7 +605,7 @@ def _constant_literal_for(plan, start_nid, identity):
         if node.node_type in _SET_OPERATIONS:
             continue
         if node.node_type == LogicalPlanStepType.Project:
-            for column in getattr(node, "columns", None) or []:
+            for column in node.columns or []:
                 if (
                     column.node_type == NodeType.LITERAL
                     and _phys_identity(column) == identity
@@ -705,7 +707,7 @@ _CONSTANT_RECEIVING_LEGS = {
 
 def _leg_of(join_node, target_col):
     """"left" / "right" for the leg *target_col* comes from, else None."""
-    target_relation = getattr(target_col, "source", None)
+    target_relation = target_col.source
     if target_relation is None:
         return None
     if target_relation in (join_node.left_relation_names or []):
@@ -717,14 +719,22 @@ def _leg_of(join_node, target_col):
 
 def _predicate_already_present(predicates, condition):
     """True if *predicates* already contains an equivalent (op, column, literal)."""
-    op = getattr(condition, "value", None)
-    col = getattr(getattr(condition, "left", None), "value", None)
-    lit = getattr(getattr(condition, "right", None), "value", None)
+    op = condition.value
+    col = condition.left.value
+    lit = condition.right.value
     for existing in predicates:
+        existing_left = existing.left if type(existing) in expressions_with("left") else None
+        existing_right = existing.right if type(existing) in expressions_with("right") else None
         if (
-            getattr(existing, "value", None) == op
-            and getattr(getattr(existing, "left", None), "value", None) == col
-            and getattr(getattr(existing, "right", None), "value", None) == lit
+            (existing.value if type(existing) in expressions_with("value") else None) == op
+            and (
+                existing_left.value if type(existing_left) in expressions_with("value") else None
+            )
+            == col
+            and (
+                existing_right.value if type(existing_right) in expressions_with("value") else None
+            )
+            == lit
         ):
             return True
     return False
@@ -755,7 +765,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
         uuid_to_nid = {}
         for nid in list(context.optimized_plan.nodes()):
             plan_node = context.optimized_plan[nid]
-            node_uuid = getattr(plan_node, "uuid", None) if plan_node is not None else None
+            node_uuid = plan_node.uuid if plan_node is not None else None
             if node_uuid:
                 uuid_to_nid[node_uuid] = nid
 
@@ -785,7 +795,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
         """Push `target = <literal>` for equi-join operands whose partner is a
         statically known constant."""
         receivable = _CONSTANT_RECEIVING_LEGS[join_node.type]
-        join_nid = uuid_to_nid.get(getattr(join_node, "uuid", None))
+        join_nid = uuid_to_nid.get(join_node.uuid)
         if join_nid is None:
             return
 
@@ -883,7 +893,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
         leg = _leg_of(join_node, target_col)
         if leg is None:
             return
-        target_relation = getattr(target_col, "source", None)
+        target_relation = target_col.source
         readers = (join_node.left_readers if leg == "left" else join_node.right_readers) or []
 
         for reader_uuid in readers:
@@ -901,7 +911,10 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
             # not produce it — the scan's predicate resolver then dies with a
             # KeyError on the unresolvable identity. Only push onto the reader that
             # IS the target column's relation.
-            scan_names = {getattr(scan, "alias", None), getattr(scan, "relation", None)}
+            scan_names = {
+                scan.alias if scan.node_type in steps_with("alias") else None,
+                scan.relation if scan.node_type in steps_with("relation") else None,
+            }
             if target_relation not in scan_names:
                 continue
 
@@ -918,7 +931,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
             # just not reachable through a relation-name mismatch. Scan
             # output is the ground truth of what a scan can filter on.
             target_identity = _phys_identity(target_col)
-            scan_schema = getattr(scan, "schema", None)
+            scan_schema = scan.schema if scan.node_type in steps_with("schema") else None
             scan_identities = (
                 {c.identity for c in scan_schema.columns} if scan_schema is not None else set()
             )
@@ -928,7 +941,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
             if skip_scan is not None and skip_scan(scan):
                 continue
 
-            connector = getattr(scan, "connector", None)
+            connector = scan.connector if scan.node_type in steps_with("connector") else None
             if connector is not None and getattr(connector, "supports_predicate_pushdown", False):
                 if not scan.predicates:
                     scan.predicates = []

@@ -9,7 +9,6 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
-from opteryx.models import Node
 from opteryx.planner.logical_planner.logical_planner_builders import binary_op
 from opteryx.planner.binder.operator_map import determine_type
 from opteryx.types.logical_type import INT64

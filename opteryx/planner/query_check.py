@@ -245,7 +245,7 @@ def _output_columns(bound_plan) -> Tuple[CheckedColumn, ...]:
     if not heads:
         return ()
     head = bound_plan[heads[0]]
-    columns = getattr(head, "columns", None)
+    columns = head.columns
     if not columns:
         return ()
 
@@ -254,12 +254,12 @@ def _output_columns(bound_plan) -> Tuple[CheckedColumn, ...]:
         name = _column_name(column)
         if name is None:
             continue
-        schema_column = getattr(column, "schema_column", None)
+        schema_column = column.schema_column
         checked.append(
             _checked_column(
                 name,
                 None if schema_column is None else schema_column.column_type,
-                None if schema_column is None else getattr(schema_column, "nullable", None),
+                None if schema_column is None else schema_column.nullable,
             )
         )
     return tuple(checked)
@@ -321,7 +321,7 @@ def _in_scope_relations(bound_plan) -> Tuple[CheckedRelation, ...]:
                 relation=None if node.relation is None else str(node.relation),
                 columns=tuple(
                     _checked_column(
-                        column.name, column.column_type, getattr(column, "nullable", None)
+                        column.name, column.column_type, column.nullable
                     )
                     for column in columns
                 ),
@@ -349,6 +349,8 @@ def _expression_roots(node):
 
 def _walk_expression(root, seen):
     """Yield an expression node and everything below it, once each."""
+    from opteryx.compiled.structures.expressions import expressions_with
+
     stack = [root]
     while stack:
         node = stack.pop()
@@ -356,11 +358,13 @@ def _walk_expression(root, seen):
             continue
         seen.add(id(node))
         yield node
-        for attr in ("left", "right", "centre"):
-            child = getattr(node, attr, None)
-            if child is not None:
-                stack.append(child)
-        parameters = getattr(node, "parameters", None)
+        if type(node) in expressions_with("left") and node.left is not None:
+            stack.append(node.left)
+        if type(node) in expressions_with("right") and node.right is not None:
+            stack.append(node.right)
+        if type(node) in expressions_with("centre") and node.centre is not None:
+            stack.append(node.centre)
+        parameters = node.parameters if type(node) in expressions_with("parameters") else None
         if isinstance(parameters, (list, tuple)):
             stack.extend(p for p in parameters if p is not None)
 
@@ -421,7 +425,7 @@ def _identities(bound_plan) -> Tuple[CheckedIdentity, ...]:
         if nid == head_id or node.node_type in scan_types:
             continue
         for root in _expression_roots(node):
-            schema_column = getattr(root, "schema_column", None)
+            schema_column = root.schema_column
             if schema_column is None or schema_column.identity in definitions:
                 continue
             if root.node_type == NodeType.IDENTIFIER:
@@ -457,7 +461,7 @@ def _identities(bound_plan) -> Tuple[CheckedIdentity, ...]:
                 name = _column_name(expression)
                 if name is None:
                     continue
-                schema_column = getattr(expression, "schema_column", None)
+                schema_column = expression.schema_column
                 if schema_column is None:
                     # Unresolved - the binder never reached it, or it is the very name
                     # that broke the statement. `SELECT nam FROM t` would otherwise

@@ -146,7 +146,7 @@ class ManifestPruningStrategy(OptimizationStrategy):
             parent = plan[parents[0]]
             if parent.node_type != LogicalPlanStepType.Filter:
                 break
-            condition = getattr(parent, "condition", None)
+            condition = parent.condition
             if condition is not None:
                 referenced = get_all_nodes_of_type(condition, (NodeType.IDENTIFIER,))
                 if referenced and all(

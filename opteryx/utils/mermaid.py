@@ -33,12 +33,12 @@ def _get_logical_node_type(node):
             return category_map.get(category)
 
         # Fall back to name-based heuristics for operators not in catalog
-        if getattr(node, "is_scan", False):
+        if node.is_scan:
             return "ReadRel"
-        if getattr(node, "is_join", False):
+        if node.is_join:
             return "JoinRel"
 
-        candidate = getattr(node, "name", None) or getattr(node, "node_type", None)
+        candidate = node.name or node.node_type
         if candidate is None:
             return None
         s = str(candidate).lower()
@@ -78,10 +78,26 @@ def _node_predicates(node):
     """
     if node.kind == "FilterNode":
         return _split_conjuncts(node.step.condition)
-    predicates = getattr(node, "predicates", None)
+    predicates = _reader_predicates(node)
     if predicates:
         return list(predicates)
     return []
+
+
+def _reader_predicates(node):
+    """A read node's pushed-down predicates, or None for any other node.
+
+    Read from the node's Scan / FunctionDataset step, which is where the reader
+    copies them from. A NullReaderNode keeps none of its own, so its step's are
+    not reported.
+    """
+    if (
+        node.is_scan
+        and node.kind != "NullReaderNode"
+        and node.step.node_type in steps_with("predicates")
+    ):
+        return node.step.predicates
+    return None
 
 
 def _split_conjuncts(expression):
@@ -106,7 +122,7 @@ def _split_conjuncts(expression):
         # whole: it is one term, and splitting it would misrepresent a
         # disjunction as a conjunction.
         if expression.node_type == NodeType.DNF:
-            return list(getattr(expression, "parameters", None) or [expression])
+            return list(expression.parameters or [expression])
         return _inner_split(expression)
     except Exception:  # pragma: no cover - never let telemetry break the query
         # Unsplit is still correct, just one long term instead of several.
@@ -249,12 +265,9 @@ def _describe_columns(node):
         # `column_type` is the attribute on both SchemaColumn (a plain
         # identifier) and ExpressionColumn (a computed column), and its str()
         # is the display form a reader expects — "VARCHAR", or a fully
-        # parameterised "DECIMAL(22, 1)". `type` is checked as a fallback for
-        # any column class that names it that way instead.
-        schema_column = getattr(column, "schema_column", None)
-        column_type = getattr(schema_column, "column_type", None)
-        if column_type is None:
-            column_type = getattr(schema_column, "type", None)
+        # parameterised "DECIMAL(22, 1)".
+        schema_column = column.schema_column
+        column_type = schema_column.column_type if schema_column is not None else None
         if column_type is not None:
             detail["type"] = str(column_type)
         details.append(detail)
@@ -434,7 +447,7 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
 
                     read_set = {
                         col.schema_column.identity
-                        for col in (getattr(node, "columns", None) or [])
+                        for col in (node.columns or [])
                         if col.schema_column is not None
                     }
                     for predicate in _node_predicates(node):
@@ -506,7 +519,7 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
                 node_stat["config"] = str(config)
 
             # Add node-specific attributes
-            if getattr(node, "columns", None):
+            if node.columns:
                 node_stat["columns"] = len(node.columns)
             # Only Project nodes: every operator has a column list, but this is
             # the one whose whole job is choosing and shaping them, and emitting
@@ -520,7 +533,7 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
             limit = _limit_of(node)
             if limit is not None:
                 node_stat["limit"] = limit
-            if getattr(node, "predicates", None):
+            if _reader_predicates(node):
                 node_stat["has_filters"] = True
             # `has_filters` says only that a predicate exists; this says what
             # it is, one entry per ANDed term. Emitted for every node that
@@ -591,7 +604,7 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
                 # relation has, so a reader can see the projection pushdown as
                 # a ratio ("2 of 13") rather than a bare count that could mean
                 # anything without knowing the table's width.
-                schema = node.step.schema if node.kind == "CteRefNode" else getattr(node, "schema", None)
+                schema = node.step.schema if node.step.node_type in steps_with("schema") else None
                 schema_columns = getattr(schema, "columns", None)
                 if schema_columns:
                     node_stat["columns_total"] = len(schema_columns)
@@ -772,7 +785,7 @@ def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
             telemetry_rows = getattr(source_node.telemetry, "rows_read", None)
             if (
                 (records is None or records == 0)
-                and getattr(source_node, "is_scan", False)
+                and source_node.is_scan
                 and telemetry_rows not in (None, 0)
             ):
                 records = telemetry_rows
@@ -795,7 +808,7 @@ def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
         # own bytes_out.
         final_rows = getattr(exit_node.telemetry, "rows_read", None) or exit_node.records_out
         final_bytes = exit_node.bytes_out
-        final_columns = len(exit_node.columns) if getattr(exit_node, "columns", None) is not None else 0
+        final_columns = len(exit_node.columns) if exit_node.columns is not None else 0
 
         builder += f'  NODE_TERMINUS(["{final_rows} rows<br />{final_columns} columns<br />({total_duration:,.2f}ms)"])\n'
 

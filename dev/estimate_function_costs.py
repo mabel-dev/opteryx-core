@@ -61,7 +61,10 @@ from opteryx.compiled.expression.compiled_expression import build_bytecode, lowe
 from opteryx.expression import NodeType
 from opteryx.expression.evaluator import execute_bytecode
 from opteryx.expression.functions import get_catalog
-from opteryx.models import Node
+from opteryx.compiled.structures.expressions import Expression
+from opteryx.compiled.structures.expressions import Function
+from opteryx.compiled.structures.expressions import Literal
+from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.types.logical_type import (
     ARRAY,
     BOOLEAN,
@@ -228,12 +231,12 @@ class CostBench:
         self._columns["_char1"] = (char_ident, VARCHAR)
         return Morsel.from_vectors(names, vectors)
 
-    def _identifier_node(self, family: str) -> Node:
+    def _identifier_node(self, family: str) -> Expression:
         ident, column_type = self._columns[family]
         sc = SchemaColumn(name=family, identity=ident, column_type=column_type)
-        return Node(NodeType.IDENTIFIER, schema_column=sc, value=ident)
+        return LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=family, schema_column=sc)
 
-    def _literal_node(self, family: str, param_name: Optional[str] = None) -> Node:
+    def _literal_node(self, family: str, param_name: Optional[str] = None) -> Expression:
         spec = FAMILIES[family]
         value = spec.literal
         if param_name is not None and param_name.lower() in CONST_PARAM_TOKENS:
@@ -241,11 +244,11 @@ class CostBench:
         # VARCHAR/binary sequence edge is bytes-only; encode str literals.
         if isinstance(value, str):
             value = value.encode("utf-8")
-        n = Node(NodeType.LITERAL, value=value)
-        n.type = spec.column_type
-        n.physical_type = spec.column_type.physical.value
-        n.schema_column = ConstantColumn(name="lit", column_type=spec.column_type, value=value)
-        return n
+        return Literal(
+            value=value,
+            type=spec.column_type,
+            schema_column=ConstantColumn(name="lit", column_type=spec.column_type, value=value),
+        )
 
     def _baseline_bytecode(self):
         # Bare column load + return: the per-call VM + load/return overhead we
@@ -253,8 +256,8 @@ class CostBench:
         return build_bytecode(lower(self._identifier_node("string")))
 
     # -- node construction ----------------------------------------------
-    def _param_nodes(self, overload) -> List[Node]:
-        nodes: List[Node] = []
+    def _param_nodes(self, overload) -> List[Expression]:
+        nodes: List[Expression] = []
         for p in overload.parameters:
             family = p.type_family
             if family not in FAMILIES:
@@ -276,10 +279,13 @@ class CostBench:
         resolved = self.catalog.resolve(func_name, params)
         if resolved is None:
             raise Unsupported("catalog.resolve returned None")
-        fn = Node(NodeType.FUNCTION, value=func_name, parameters=params)
-        fn.function_ref = resolved
-        fn.schema_column = FunctionColumn(
-            name=f"{func_name.lower()}_r", column_type=resolved.inferred_return_type
+        fn = Function(
+            value=func_name,
+            parameters=params,
+            function_ref=resolved,
+            schema_column=FunctionColumn(
+                name=f"{func_name.lower()}_r", column_type=resolved.inferred_return_type
+            ),
         )
         return build_bytecode(lower(fn)), resolved
 

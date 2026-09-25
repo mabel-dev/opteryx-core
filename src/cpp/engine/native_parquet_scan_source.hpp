@@ -1074,7 +1074,7 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                 return SourceResult::FINISHED;
             }
             if (!result.success) {
-                err.code = 1;
+                err.code = result.read_failed ? kErrCodeReadError : 1;
                 if (result.error.empty()) {
                     err.msg = "NativeParquetScanSource: parquet pipeline decode error";
                 } else {

@@ -27,6 +27,7 @@ survive at the set-op node: it drops any relation consumed by a set operation or
 semi/anti join that lives *below* the node in that branch.
 """
 
+from opteryx.compiled.structures.expressions import expressions_with
 from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -46,7 +47,7 @@ def column_names(columns) -> list | None:
         return None
     names = []
     for col in columns:
-        name = getattr(col, "source_column", None)
+        name = col.source_column if type(col) in expressions_with("source_column") else None
         if name is None:
             return None
         names.append(name)

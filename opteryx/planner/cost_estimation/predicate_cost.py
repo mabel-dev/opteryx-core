@@ -17,6 +17,7 @@ telemetry -- callers outside that one strategy should read the cost model
 from here, not from strategy internals.
 """
 
+from opteryx.compiled.structures.expressions import expressions_with
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.types.logical_type import LogicalCategory
 
@@ -61,11 +62,11 @@ _UNKNOWN_FUNCTION_COST = 100.0
 
 def base_cost(condition) -> float:
     """Relative per-row evaluation cost for a simple (non-function) comparison."""
-    op = getattr(condition, "value", None)
+    op = condition.value if type(condition) in expressions_with("value") else None
     if op in OPERATION_COSTS:
         return OPERATION_COSTS[op]
-    col = getattr(condition, "left", None)
-    col_type = getattr(col, "schema_column", None)
+    col = condition.left if type(condition) in expressions_with("left") else None
+    col_type = col.schema_column if col is not None else None
     if col_type is None:
         return 10.0
     return BASIC_COMPARISON_COSTS.get(col_type.category, 10.0)

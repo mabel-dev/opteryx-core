@@ -69,7 +69,7 @@ class AggregateScanPushdownStrategy(OptimizationStrategy):
         scan = context.optimized_plan[scan_nid]
         if scan is None or scan.node_type != LogicalPlanStepType.Scan:
             return context
-        connector = getattr(scan, "connector", None)
+        connector = scan.connector
         if connector is None or not connector.supports_aggregate_pushdown:
             return context
         if (

@@ -334,18 +334,6 @@ cdef class PlanStep:
             setattr(new, name, value)
         return new
 
-    def operator_parameters(self):
-        """TRANSITIONAL (stage 3A → 3B): the keyword arguments the physical planner
-        splats into an operator descriptor, exactly as the attribute-bag Node's
-        `properties` gave them — node_type, uuid and every field that is set (an
-        unset field was ABSENT from the bag, never None). Deleted when the
-        descriptors are retired and the compiler reads the step itself."""
-        cdef dict out = {"node_type": self.node_type, "uuid": self.uuid}
-        for name, value in self.field_values().items():
-            if value is not None:
-                out[name] = value
-        return out
-
     def __str__(self):  # pragma: no cover
         from opteryx.planner.logical_planner.logical_planner_renderers import _render_registry
 
@@ -2257,16 +2245,26 @@ cdef class CloneCollectionStep(PlanStep):
 cdef class CloneRelationStep(PlanStep):
     """The CloneRelation logical plan step."""
 
+    cdef object _connector
     cdef object _if_not_exists
     cdef str _relation_name
     cdef str _source_relation
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, if_not_exists=None, relation_name=None, source_relation=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, if_not_exists=None, relation_name=None, source_relation=None):
         self.node_type = _step_types().CloneRelation
         self._init_common(columns, all_relations, pre_update_columns, uuid)
+        self.connector = connector
         self.if_not_exists = if_not_exists
         self.relation_name = relation_name
         self.source_relation = source_relation
+
+    @property
+    def connector(self):
+        return self._connector
+
+    @connector.setter
+    def connector(self, value):
+        self._connector = value
 
     @property
     def if_not_exists(self):
@@ -2304,6 +2302,7 @@ cdef class CloneRelationStep(PlanStep):
 
     cpdef dict field_values(self):
         cdef dict out = self._common_values()
+        out["connector"] = self._connector
         out["if_not_exists"] = self._if_not_exists
         out["relation_name"] = self._relation_name
         out["source_relation"] = self._source_relation
@@ -2319,6 +2318,7 @@ cdef class CloneRelationStep(PlanStep):
         new.node_type = self.node_type
         memo[id(self)] = new
         self._copy_common_into(new, memo)
+        new._connector = _copy_field(self._connector, memo)
         new._if_not_exists = _copy_field(self._if_not_exists, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
         new._source_relation = _copy_field(self._source_relation, memo)
@@ -2328,6 +2328,7 @@ cdef class CloneRelationStep(PlanStep):
         cdef CloneRelationStep new = CloneRelationStep.__new__(CloneRelationStep)
         new.node_type = self.node_type
         self._share_common_into(new)
+        new._connector = self._connector
         new._if_not_exists = self._if_not_exists
         new._relation_name = self._relation_name
         new._source_relation = self._source_relation
@@ -2748,18 +2749,28 @@ cdef class CreateRelationStep(PlanStep):
 cdef class CreateTagStep(PlanStep):
     """The CreateTag logical plan step."""
 
+    cdef object _connector
     cdef object _if_exists
     cdef str _relation_name
     cdef str _tag_name
     cdef str _version_spec
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, if_exists=None, relation_name=None, tag_name=None, version_spec=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, if_exists=None, relation_name=None, tag_name=None, version_spec=None):
         self.node_type = _step_types().CreateTag
         self._init_common(columns, all_relations, pre_update_columns, uuid)
+        self.connector = connector
         self.if_exists = if_exists
         self.relation_name = relation_name
         self.tag_name = tag_name
         self.version_spec = version_spec
+
+    @property
+    def connector(self):
+        return self._connector
+
+    @connector.setter
+    def connector(self, value):
+        self._connector = value
 
     @property
     def if_exists(self):
@@ -2805,6 +2816,7 @@ cdef class CreateTagStep(PlanStep):
 
     cpdef dict field_values(self):
         cdef dict out = self._common_values()
+        out["connector"] = self._connector
         out["if_exists"] = self._if_exists
         out["relation_name"] = self._relation_name
         out["tag_name"] = self._tag_name
@@ -2821,6 +2833,7 @@ cdef class CreateTagStep(PlanStep):
         new.node_type = self.node_type
         memo[id(self)] = new
         self._copy_common_into(new, memo)
+        new._connector = _copy_field(self._connector, memo)
         new._if_exists = _copy_field(self._if_exists, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
         new._tag_name = _copy_field(self._tag_name, memo)
@@ -2831,6 +2844,7 @@ cdef class CreateTagStep(PlanStep):
         cdef CreateTagStep new = CreateTagStep.__new__(CreateTagStep)
         new.node_type = self.node_type
         self._share_common_into(new)
+        new._connector = self._connector
         new._if_exists = self._if_exists
         new._relation_name = self._relation_name
         new._tag_name = self._tag_name
@@ -3292,12 +3306,22 @@ cdef class CreateViewStep(PlanStep):
 cdef class DetachRelationStep(PlanStep):
     """The DetachRelation logical plan step."""
 
+    cdef object _connector
     cdef str _relation_name
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, relation_name=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, relation_name=None):
         self.node_type = _step_types().DetachRelation
         self._init_common(columns, all_relations, pre_update_columns, uuid)
+        self.connector = connector
         self.relation_name = relation_name
+
+    @property
+    def connector(self):
+        return self._connector
+
+    @connector.setter
+    def connector(self, value):
+        self._connector = value
 
     @property
     def relation_name(self):
@@ -3318,6 +3342,7 @@ cdef class DetachRelationStep(PlanStep):
 
     cpdef dict field_values(self):
         cdef dict out = self._common_values()
+        out["connector"] = self._connector
         out["relation_name"] = self._relation_name
         return out
 
@@ -3331,6 +3356,7 @@ cdef class DetachRelationStep(PlanStep):
         new.node_type = self.node_type
         memo[id(self)] = new
         self._copy_common_into(new, memo)
+        new._connector = _copy_field(self._connector, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
         return new
 
@@ -3338,6 +3364,7 @@ cdef class DetachRelationStep(PlanStep):
         cdef DetachRelationStep new = DetachRelationStep.__new__(DetachRelationStep)
         new.node_type = self.node_type
         self._share_common_into(new)
+        new._connector = self._connector
         new._relation_name = self._relation_name
         return new
 
@@ -3814,16 +3841,26 @@ cdef class DropRelationshipStep(PlanStep):
 cdef class DropTagStep(PlanStep):
     """The DropTag logical plan step."""
 
+    cdef object _connector
     cdef object _if_exists
     cdef str _relation_name
     cdef str _tag_name
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, if_exists=None, relation_name=None, tag_name=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, if_exists=None, relation_name=None, tag_name=None):
         self.node_type = _step_types().DropTag
         self._init_common(columns, all_relations, pre_update_columns, uuid)
+        self.connector = connector
         self.if_exists = if_exists
         self.relation_name = relation_name
         self.tag_name = tag_name
+
+    @property
+    def connector(self):
+        return self._connector
+
+    @connector.setter
+    def connector(self, value):
+        self._connector = value
 
     @property
     def if_exists(self):
@@ -3861,6 +3898,7 @@ cdef class DropTagStep(PlanStep):
 
     cpdef dict field_values(self):
         cdef dict out = self._common_values()
+        out["connector"] = self._connector
         out["if_exists"] = self._if_exists
         out["relation_name"] = self._relation_name
         out["tag_name"] = self._tag_name
@@ -3876,6 +3914,7 @@ cdef class DropTagStep(PlanStep):
         new.node_type = self.node_type
         memo[id(self)] = new
         self._copy_common_into(new, memo)
+        new._connector = _copy_field(self._connector, memo)
         new._if_exists = _copy_field(self._if_exists, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
         new._tag_name = _copy_field(self._tag_name, memo)
@@ -3885,6 +3924,7 @@ cdef class DropTagStep(PlanStep):
         cdef DropTagStep new = DropTagStep.__new__(DropTagStep)
         new.node_type = self.node_type
         self._share_common_into(new)
+        new._connector = self._connector
         new._if_exists = self._if_exists
         new._relation_name = self._relation_name
         new._tag_name = self._tag_name
@@ -6439,8 +6479,9 @@ cdef class MaterializedCteRefStep(PlanStep):
     cdef list _hints
     cdef str _relation
     cdef object _schema
+    cdef list _unpruned_columns
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, cte_column_map=None, cte_key=None, cte_name=None, hint_settings=None, hints=None, relation=None, schema=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, cte_column_map=None, cte_key=None, cte_name=None, hint_settings=None, hints=None, relation=None, schema=None, unpruned_columns=None):
         self.node_type = _step_types().MaterializedCteRef
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.alias = alias
@@ -6451,6 +6492,7 @@ cdef class MaterializedCteRefStep(PlanStep):
         self.hints = hints
         self.relation = relation
         self.schema = schema
+        self.unpruned_columns = unpruned_columns
 
     @property
     def alias(self):
@@ -6516,6 +6558,14 @@ cdef class MaterializedCteRefStep(PlanStep):
     def schema(self, value):
         self._schema = value
 
+    @property
+    def unpruned_columns(self):
+        return self._unpruned_columns
+
+    @unpruned_columns.setter
+    def unpruned_columns(self, value):
+        self._unpruned_columns = value
+
     cpdef tuple expressions(self, bint include_columns=True):
         cdef list out = []
         if include_columns:
@@ -6537,6 +6587,7 @@ cdef class MaterializedCteRefStep(PlanStep):
         out["hints"] = self._hints
         out["relation"] = self._relation
         out["schema"] = self._schema
+        out["unpruned_columns"] = self._unpruned_columns
         return out
 
     cpdef PlanStep copy(self, dict memo=None):
@@ -6557,6 +6608,7 @@ cdef class MaterializedCteRefStep(PlanStep):
         new._hints = _copy_field(self._hints, memo)
         new._relation = _copy_field(self._relation, memo)
         new._schema = _copy_field(self._schema, memo)
+        new._unpruned_columns = _copy_field(self._unpruned_columns, memo)
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -6571,6 +6623,7 @@ cdef class MaterializedCteRefStep(PlanStep):
         new._hints = self._hints
         new._relation = self._relation
         new._schema = self._schema
+        new._unpruned_columns = self._unpruned_columns
         return new
 
 
@@ -7178,14 +7231,24 @@ cdef class RenameRelationStep(PlanStep):
 cdef class ResyncRelationStep(PlanStep):
     """The ResyncRelation logical plan step."""
 
+    cdef object _connector
     cdef object _force
     cdef str _relation_name
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, force=None, relation_name=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, force=None, relation_name=None):
         self.node_type = _step_types().ResyncRelation
         self._init_common(columns, all_relations, pre_update_columns, uuid)
+        self.connector = connector
         self.force = force
         self.relation_name = relation_name
+
+    @property
+    def connector(self):
+        return self._connector
+
+    @connector.setter
+    def connector(self, value):
+        self._connector = value
 
     @property
     def force(self):
@@ -7215,6 +7278,7 @@ cdef class ResyncRelationStep(PlanStep):
 
     cpdef dict field_values(self):
         cdef dict out = self._common_values()
+        out["connector"] = self._connector
         out["force"] = self._force
         out["relation_name"] = self._relation_name
         return out
@@ -7229,6 +7293,7 @@ cdef class ResyncRelationStep(PlanStep):
         new.node_type = self.node_type
         memo[id(self)] = new
         self._copy_common_into(new, memo)
+        new._connector = _copy_field(self._connector, memo)
         new._force = _copy_field(self._force, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
         return new
@@ -7237,6 +7302,7 @@ cdef class ResyncRelationStep(PlanStep):
         cdef ResyncRelationStep new = ResyncRelationStep.__new__(ResyncRelationStep)
         new.node_type = self.node_type
         self._share_common_into(new)
+        new._connector = self._connector
         new._force = self._force
         new._relation_name = self._relation_name
         return new
@@ -7363,16 +7429,26 @@ cdef class RevokeAccessStep(PlanStep):
 cdef class RollbackRelationStep(PlanStep):
     """The RollbackRelation logical plan step."""
 
+    cdef object _connector
     cdef object _if_exists
     cdef str _relation_name
     cdef str _version_spec
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, if_exists=None, relation_name=None, version_spec=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, if_exists=None, relation_name=None, version_spec=None):
         self.node_type = _step_types().RollbackRelation
         self._init_common(columns, all_relations, pre_update_columns, uuid)
+        self.connector = connector
         self.if_exists = if_exists
         self.relation_name = relation_name
         self.version_spec = version_spec
+
+    @property
+    def connector(self):
+        return self._connector
+
+    @connector.setter
+    def connector(self, value):
+        self._connector = value
 
     @property
     def if_exists(self):
@@ -7410,6 +7486,7 @@ cdef class RollbackRelationStep(PlanStep):
 
     cpdef dict field_values(self):
         cdef dict out = self._common_values()
+        out["connector"] = self._connector
         out["if_exists"] = self._if_exists
         out["relation_name"] = self._relation_name
         out["version_spec"] = self._version_spec
@@ -7425,6 +7502,7 @@ cdef class RollbackRelationStep(PlanStep):
         new.node_type = self.node_type
         memo[id(self)] = new
         self._copy_common_into(new, memo)
+        new._connector = _copy_field(self._connector, memo)
         new._if_exists = _copy_field(self._if_exists, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
         new._version_spec = _copy_field(self._version_spec, memo)
@@ -7434,6 +7512,7 @@ cdef class RollbackRelationStep(PlanStep):
         cdef RollbackRelationStep new = RollbackRelationStep.__new__(RollbackRelationStep)
         new.node_type = self.node_type
         self._share_common_into(new)
+        new._connector = self._connector
         new._if_exists = self._if_exists
         new._relation_name = self._relation_name
         new._version_spec = self._version_spec
@@ -9588,7 +9667,7 @@ cpdef frozenset steps_with(str field):
             "columns": frozenset({T.AddColumn, T.AddRelationship, T.Aggregate, T.AggregateAndGroup, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CallProcedure, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.Distinct, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropWorkspace, T.Except, T.Exit, T.Explain, T.Filter, T.FramedWindow, T.FunctionDataset, T.GrantAccess, T.HeapSort, T.Insert, T.Intersect, T.Join, T.Limit, T.Listen, T.MaterializedCteRef, T.Merge, T.Order, T.Project, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RevokeAccess, T.RollbackRelation, T.ScalarSubqueryGuard, T.Scan, T.Set, T.Show, T.ShowColumns, T.ShowEffectiveGrantsOn, T.ShowGrantsOn, T.ShowLineage, T.ShowManifest, T.ShowSnapshots, T.ShowSources, T.Subquery, T.TruncateRelation, T.Union, T.Unlisten, T.Unnest, T.Window}),
             "comment": frozenset({T.Comment}),
             "condition": frozenset({T.Filter}),
-            "connector": frozenset({T.AddColumn, T.AddRelationship, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CloneCollection, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTask, T.CreateTrigger, T.CreateView, T.DropColumn, T.DropRelationship, T.DropTask, T.DropTrigger, T.DropWorkspace, T.FunctionDataset, T.Insert, T.Listen, T.Merge, T.RenameColumn, T.RenameRelation, T.Scan, T.Show, T.TruncateRelation, T.Unlisten}),
+            "connector": frozenset({T.AddColumn, T.AddRelationship, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.DropColumn, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropWorkspace, T.FunctionDataset, T.Insert, T.Listen, T.Merge, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RollbackRelation, T.Scan, T.Show, T.TruncateRelation, T.Unlisten}),
             "connectors": frozenset({T.DropCollection, T.DropRelation, T.DropView}),
             "constraint_if_exists": frozenset({T.DropRelationship}),
             "constraint_name": frozenset({T.AddRelationship, T.DropRelationship}),
@@ -9765,7 +9844,7 @@ cpdef frozenset steps_with(str field):
             "unnest_column": frozenset({T.Unnest}),
             "unnest_function": frozenset({T.Unnest}),
             "unnest_target": frozenset({T.FunctionDataset, T.Unnest}),
-            "unpruned_columns": frozenset({T.Scan, T.Subquery}),
+            "unpruned_columns": frozenset({T.MaterializedCteRef, T.Scan, T.Subquery}),
             "using": frozenset({T.Join}),
             "using_merged": frozenset({T.Join}),
             "value": frozenset({T.Set}),

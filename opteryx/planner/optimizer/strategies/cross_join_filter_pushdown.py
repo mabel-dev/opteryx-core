@@ -19,8 +19,8 @@ intermediate materialization of the full cross product.
 
 from typing import Dict, List, Optional, Set, Tuple
 
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.expression import NodeType, get_all_nodes_of_type
-from opteryx.models import Node
 from opteryx.planner.binder.common import extract_join_fields
 from opteryx.planner.optimizer.strategies.join_key_materialization import (
     materialize_operand_as_column,
@@ -29,6 +29,7 @@ from opteryx.planner.optimizer.strategies.join_key_materialization import (
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.planner.optimizer.strategies.optimization_strategy import OptimizerContext, OptimizationStrategy
 from opteryx.compiled.structures.expressions import And
+from opteryx.compiled.structures.plan_steps import steps_with
 
 # Arithmetic operators an equi-join key is allowed to be hoisted through, e.g.
 # `a.x = b.y - 53` (TPC-DS Q02's `d_week_seq1 = d_week_seq2 - 53`). Restricted
@@ -37,7 +38,7 @@ from opteryx.compiled.structures.expressions import And
 _HOISTABLE_ARITH_OPS = {"Plus", "Minus", "Multiply", "Divide"}
 
 
-def _build_and_condition_tree(predicates: List[Node]) -> Optional[Node]:
+def _build_and_condition_tree(predicates: List[Expression]) -> Optional[Expression]:
     """Build AND tree from list of predicates."""
     if not predicates:
         return None
@@ -54,10 +55,10 @@ def _build_and_condition_tree(predicates: List[Node]) -> Optional[Node]:
 
 
 def _extract_join_predicates(
-    where_condition: Optional[Node],
+    where_condition: Optional[Expression],
     left_relations: List[str],
     right_relations: List[str],
-) -> Tuple[List[Node], List[Node]]:
+) -> Tuple[List[Expression], List[Expression]]:
     """
     Extract join predicates (equalities spanning both sides) from WHERE conditions.
 
@@ -103,7 +104,7 @@ def _extract_join_predicates(
     return join_preds, remaining
 
 
-def _get_table_from_identifier(node: Optional[Node]) -> Optional[str]:
+def _get_table_from_identifier(node: Optional[Expression]) -> Optional[str]:
     """Extract table name from an identifier node."""
     if node is None:
         return None
@@ -113,7 +114,7 @@ def _get_table_from_identifier(node: Optional[Node]) -> Optional[str]:
     return None
 
 
-def _affine_hoist_target(expr: Optional[Node], relations: List[str]) -> bool:
+def _affine_hoist_target(expr: Optional[Expression], relations: List[str]) -> bool:
     """True if `expr` is `IDENTIFIER <op> LITERAL` (or the mirror), the
     identifier bound entirely to one of `relations`, and `expr` isn't itself
     a bare identifier (nothing to hoist then -- the ordinary equi-join path
@@ -142,8 +143,8 @@ def _affine_hoist_target(expr: Optional[Node], relations: List[str]) -> bool:
 
 
 def _hoist_arithmetic_join_key(
-    plan: LogicalPlan, join_id: str, join_node: PlanStep, pred: Node
-) -> Optional[Node]:
+    plan: LogicalPlan, join_id: str, join_node: PlanStep, pred: Expression
+) -> Optional[Expression]:
     """Rewrite `identifier = affine_expr(other_identifier, literal)` (or the
     mirror) into a NEW `identifier = new_identifier`, materialising the affine
     expression as a genuine column above the side it's bound to.
@@ -211,7 +212,7 @@ def _collect_scan_uuids(plan: LogicalPlan, root_id: str) -> List[str]:
             continue
         visited.add(nid)
         node = plan[nid]
-        uuid = getattr(node, "uuid", None)
+        uuid = node.uuid
         if node.node_type == LogicalPlanStepType.Scan and uuid is not None:
             uuids.append(uuid)
         for child_id, _, _ in plan.ingoing_edges(nid):
@@ -229,9 +230,9 @@ def _is_unconverted_cross_join(node: PlanStep) -> bool:
     return (
         node.node_type == LogicalPlanStepType.Join
         and node.type == "cross join"
-        and not getattr(node, "on", None)
-        and not getattr(node, "using", None)
-        and not getattr(node, "is_window_join", False)
+        and not node.on
+        and not node.using
+        and not node.is_window_join
     )
 
 
@@ -245,7 +246,7 @@ def _subplan_relation_names(
     visited.add(root_id)
     node = plan[root_id]
     names: Set[str] = set()
-    alias = getattr(node, "alias", None)
+    alias = node.alias if node.node_type in steps_with("alias") else None
     if alias:
         names.add(alias)
     if node.node_type == LogicalPlanStepType.Subquery:
@@ -317,8 +318,8 @@ def _try_dissolve_cross_join_in_inner_join(
     if len(on_conditions) < 2:
         return False
 
-    left_preds: List[Node] = []
-    right_preds: List[Node] = []
+    left_preds: List[Expression] = []
+    right_preds: List[Expression] = []
 
     for cond in on_conditions:
         if cond.node_type != NodeType.COMPARISON_OPERATOR or cond.value != "Eq":
@@ -401,7 +402,7 @@ def _try_dissolve_cross_join_in_inner_join(
     inner_join_node.right_readers = _collect_scan_uuids(plan, cross_right_id)
 
     # Update formerly-cross-join node: now INNER JOIN (A ⋈ C)
-    master_schemas: Dict = dict(getattr(inner_join_node, "schemas", None) or {})
+    master_schemas: Dict = dict(inner_join_node.schemas or {})
     cross_join_node.type = "inner"
     cross_join_node.on = left_on
     cross_join_node.right_relation_names = list(other_rels)
@@ -456,8 +457,8 @@ def _collect_cross_joins(
         if (
             child_node.node_type == LogicalPlanStepType.Join
             and child_node.type == "cross join"
-            and not getattr(child_node, "on", None)
-            and not getattr(child_node, "using", None)
+            and not child_node.on
+            and not child_node.using
         ):
             result.append((child_id, child_node))
         _collect_cross_joins(plan, child_id, result, visited)
@@ -579,7 +580,7 @@ class CrossJoinFilterPushdownStrategy(OptimizationStrategy):
             if (
                 node.node_type == LogicalPlanStepType.Join
                 and node.type == "cross join"
-                and not getattr(node, "on", None)
+                and not node.on
             ):
                 return True
         return False

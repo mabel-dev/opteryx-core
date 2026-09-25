@@ -29,7 +29,7 @@ from opteryx.exceptions import (
     UnsupportedSyntaxError,
 )
 from opteryx.expression.operations import filter_operations
-from opteryx.models import LogicalColumn, Node
+from opteryx.models import LogicalColumn
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.timestamps._datetime_conversion import date_to_int64_days, timestamp_to_int64_us
 from opteryx.utils import random_string

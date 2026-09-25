@@ -138,7 +138,7 @@ def _collect_scan_uuids(plan, root_nid):
             continue
         visited.add(nid)
         node = plan[nid]
-        uuid = getattr(node, "uuid", None)
+        uuid = node.uuid
         if node.node_type == LogicalPlanStepType.Scan and uuid is not None:
             uuids.append(uuid)
         for child, _target, _relation in plan.ingoing_edges(nid):
@@ -252,17 +252,17 @@ class SemiJoinPushdownStrategy(OptimizationStrategy):
         # probe side names the probe key, whichever names its partner shares —
         # and residual references must classify unambiguously or the push is
         # refused.
-        pairs = _equi_pairs(getattr(join, "on", None))
+        pairs = _equi_pairs(join.on)
         if not pairs:
             return None
         left_names = set(join.left_relation_names or [])
         right_names = set(join.right_relation_names or [])
         probe_keys = []
         for first, second in pairs:
-            first_left = getattr(first, "source", None) in left_names
-            second_left = getattr(second, "source", None) in left_names
-            first_right = getattr(first, "source", None) in right_names
-            second_right = getattr(second, "source", None) in right_names
+            first_left = first.source in left_names
+            second_left = second.source in left_names
+            first_right = first.source in right_names
+            second_right = second.source in right_names
             if first_left and second_right and not (first_right and second_left):
                 probe_keys.append(first)
             elif second_left and first_right and not (second_right and first_left):
@@ -280,7 +280,7 @@ class SemiJoinPushdownStrategy(OptimizationStrategy):
         for identifier in get_all_nodes_of_type(join.on, (NodeType.IDENTIFIER,)):
             if id(identifier) in pair_member_ids:
                 continue
-            source = getattr(identifier, "source", None)
+            source = identifier.source
             in_left = source in left_names
             in_right = source in right_names
             if in_left and in_right:
@@ -363,7 +363,7 @@ class SemiJoinPushdownStrategy(OptimizationStrategy):
         }
         join.left_columns = left_columns
         join.right_columns = right_columns
-        if getattr(join, "left_readers", None):
+        if join.left_readers:
             join.left_readers = _collect_scan_uuids(plan, target_root)
         plan[join_nid] = join
 

@@ -84,10 +84,10 @@ def compile_pipeline(plan: PhysicalPlan):
     # crashed on any pushed-down scan predicate. One lowering, one rewrite chain,
     # reused here rather than re-implemented.
     for _nid, node in flat:
-        if not getattr(node, "is_scan", False):
+        if node.kind != "ParquetReadNode":
             continue
-        predicates = getattr(node, "predicates", None)
-        if not predicates or getattr(node, "compiled_predicate", None) is not None:
+        predicates = node.predicates
+        if not predicates or node.compiled_predicate is not None:
             continue
         from opteryx.managers.execution.compiler import _Compiler
 
@@ -122,7 +122,7 @@ def compile_pipeline(plan: PhysicalPlan):
     # immediately downstream of the scan.
     chains: List[Tuple[BasePlanNode, BasePlanNode]] = []
     for nid, node in flat:
-        if not getattr(node, "is_scan", False):
+        if not node.is_scan:
             continue
         child_id = _outgoing_node(plan, nid)
         if child_id is None:

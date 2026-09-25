@@ -47,16 +47,16 @@ from opteryx.models import QueryProperties
 
 
 class ShowGrantsNode(BasePlanNode):
-    def __init__(self, properties: QueryProperties, **parameters):
-        BasePlanNode.__init__(self, properties=properties, **parameters)
-        self.pattern = parameters.get("pattern")
-        self.object_kind = parameters.get("object_kind")
-        self.object_name = parameters.get("object_name")
+    def __init__(self, properties: QueryProperties, step):
+        BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
+        self.pattern = step.pattern
+        self.object_kind = step.object_kind
+        self.object_name = step.object_name
         # Which of the two listings this is; set by the logical planner.
-        self.effective = bool(parameters.get("effective"))
+        self.effective = bool(step.effective)
         # Stashed by the binder (visit_show_grants_on): the capability needs
         # the acting identity, and there is no BindingContext here.
-        self.execution_context = parameters.get("execution_context")
+        self.execution_context = step.execution_context
         self.seen = False
 
     @property

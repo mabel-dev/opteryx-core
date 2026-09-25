@@ -24,7 +24,7 @@ import pytest
 # tests/unit/planner/cost_estimation/test_char_class_selectivity.py).
 import opteryx.planner.optimizer  # noqa: F401
 from opteryx.expression import NodeType
-from opteryx.models import Node
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import INT64, VARCHAR
@@ -102,7 +102,7 @@ def _min_k_vector(per_file_hashes: List[List[List[int]]]):
     )
 
 
-def _identifier(name: str) -> Node:
+def _identifier(name: str) -> Expression:
     # A bound identifier carries its schema column — that is where the identity
     # used to look statistics up comes from.
     return LogicalColumn(
@@ -112,13 +112,13 @@ def _identifier(name: str) -> Node:
     )
 
 
-def _literal(value) -> Node:
+def _literal(value) -> Expression:
     n = Literal()
     n.value = value
     return n
 
 
-def _cmp(op: str, col: str, value) -> Node:
+def _cmp(op: str, col: str, value) -> Expression:
     n = Comparison()
     n.value = op
     n.left = _identifier(col)
@@ -126,7 +126,7 @@ def _cmp(op: str, col: str, value) -> Node:
     return n
 
 
-def _between(col: str, low, high) -> Node:
+def _between(col: str, low, high) -> Expression:
     n = Between()
     n.left = _identifier(col)
     # Mirror manifest.prune_files convention: right=lower, centre=upper.
@@ -135,28 +135,28 @@ def _between(col: str, low, high) -> Node:
     return n
 
 
-def _unary(op: str, col: str) -> Node:
+def _unary(op: str, col: str) -> Expression:
     n = UnaryOperator()
     n.value = op
     n.centre = _identifier(col)
     return n
 
 
-def _and(a: Node, b: Node) -> Node:
+def _and(a: Expression, b: Expression) -> Expression:
     n = And()
     n.left = a
     n.right = b
     return n
 
 
-def _or(a: Node, b: Node) -> Node:
+def _or(a: Expression, b: Expression) -> Expression:
     n = Or()
     n.left = a
     n.right = b
     return n
 
 
-def _not(inner: Node) -> Node:
+def _not(inner: Expression) -> Expression:
     n = Not()
     n.centre = inner
     return n
@@ -382,7 +382,7 @@ def _varchar_schema(*names: str) -> RelationSchema:
     )
 
 
-def _varchar_identifier(name: str) -> Node:
+def _varchar_identifier(name: str) -> Expression:
     return LogicalColumn(
         node_type=NodeType.IDENTIFIER,
         source_column=name,
@@ -390,7 +390,7 @@ def _varchar_identifier(name: str) -> Node:
     )
 
 
-def _starts_with(op: str, col: str, prefix: bytes) -> Node:
+def _starts_with(op: str, col: str, prefix: bytes) -> Expression:
     n = Function()
     n.value = op
     n.parameters = [_varchar_identifier(col), _literal(prefix)]

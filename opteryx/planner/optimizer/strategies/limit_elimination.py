@@ -143,8 +143,8 @@ class LimitEliminationStrategy(OptimizationStrategy):
         manifest_row_count = None
         if row_count_bound_to_scan:
             scan_node = scan_nodes[0][1]
-            one_row_scan = getattr(scan_node, "relation", None) == "$one_row"
-            manifest = getattr(scan_node, "manifest", None)
+            one_row_scan = scan_node.relation == "$one_row"
+            manifest = scan_node.manifest
             # LAW: removing the LIMIT returns the WHOLE relation. A stale
             # count that under-reports turns `LIMIT 10` into an unbounded scan.
             manifest_row_count = (

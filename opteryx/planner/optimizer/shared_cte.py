@@ -164,8 +164,8 @@ def _canonical_key(condition, mapping: Dict[bytes, bytes]):
         NodeType.AGGREGATOR,
         NodeType.EVALUATED,
     ):
-        schema_column = getattr(condition, "schema_column", None)
-        identity = getattr(schema_column, "identity", None)
+        schema_column = condition.schema_column
+        identity = schema_column.identity if schema_column is not None else None
         body_identity = mapping.get(identity)
         if body_identity is None:
             return None

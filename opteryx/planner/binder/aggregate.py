@@ -7,13 +7,15 @@ from typing import Tuple
 
 from draken.draken_native import DrakenType
 
+from opteryx.compiled.structures.expressions import expressions_with
+from opteryx.compiled.structures.plan_steps import PlanStep
+from opteryx.compiled.structures.plan_steps import steps_with
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.exceptions import VariantKeyError
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.managers.virtual_datasets import derived
 from opteryx.models import LogicalColumn
-from opteryx.models import Node
 from opteryx.planner.binder.binder import inner_binder
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.models import current_name_of
@@ -26,18 +28,18 @@ def _reject_variant_key(what: str, expr) -> None:
     not a coverage gap — catching it here, before the optimizer or native compiler
     do any work, is strictly earlier than the native compiler's own backstop check
     (managers/execution/compiler.py's _check_key_type)."""
-    sc = getattr(expr, "schema_column", None)
-    ct = getattr(sc, "column_type", None) if sc is not None else None
+    sc = expr.schema_column
+    ct = sc.column_type if sc is not None else None
     if ct is not None and ct.physical == DrakenType.VARIANT:
         from opteryx.expression import format_expression
 
-        name = getattr(sc, "name", None) or format_expression(expr)
+        name = sc.name or format_expression(expr)
         raise VariantKeyError(what, name)
 
 
 def visit_aggregate_and_group(
-    self, node: Node, context: BindingContext
-) -> Tuple[Node, BindingContext]:
+    self, node: PlanStep, context: BindingContext
+) -> Tuple[PlanStep, BindingContext]:
     """
     Handles the binding logic for aggregate and group nodes.
 
@@ -92,7 +94,11 @@ def visit_aggregate_and_group(
     # a lookup it has no way to resolve.
     _grouping_calls = [agg for agg in node.aggregates if agg.value == "GROUPING"]
     if _grouping_calls:
-        if not node.groups or getattr(node, "grouping_sets", None) is None:
+        if (
+            not node.groups
+            or node.node_type not in steps_with("grouping_sets")
+            or node.grouping_sets is None
+        ):
             raise UnsupportedSyntaxError(
                 "**GROUPING**() requires **GROUP BY ROLLUP** (or **CUBE** / **GROUPING "
                 "SETS**) — a plain **GROUP BY** has one grouping set, so no key is ever "
@@ -100,8 +106,8 @@ def visit_aggregate_and_group(
             )
         for _call in _grouping_calls:
             _operand = _call.parameters[0]
-            _operand_sc = getattr(_operand, "schema_column", None)
-            _identity = getattr(_operand_sc, "identity", None) if _operand_sc is not None else None
+            _operand_sc = _operand.schema_column
+            _identity = _operand_sc.identity if _operand_sc is not None else None
             if _identity is None or _identity not in columns_to_keep:
                 from opteryx.expression import format_expression
 
@@ -124,7 +130,8 @@ def visit_aggregate_and_group(
     # expansion): one bound IDENTIFIER per schema column, deduped by identity.
     if any(
         agg.value == "COUNT"
-        and getattr(agg, "duplicate_treatment", None) == "Distinct"
+        and type(agg) in expressions_with("duplicate_treatment")
+        and agg.duplicate_treatment == "Distinct"
         and agg.parameters
         and agg.parameters[0].node_type == NodeType.WILDCARD
         for agg in node.aggregates
@@ -207,7 +214,7 @@ def visit_aggregate_and_group(
 visit_aggregate = visit_aggregate_and_group
 
 
-def visit_distinct(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_distinct(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     node.columns = []
     if node.on:
         # Bind the local columns to physical columns

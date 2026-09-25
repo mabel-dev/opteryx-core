@@ -73,144 +73,12 @@ def _trigger_event(node) -> str:
 
 
 class RelationManagementNode(BasePlanNode):
-    def __init__(self, properties: QueryProperties, **parameters):
-        BasePlanNode.__init__(self, properties=properties, **parameters)
-        self.action: str = parameters.get("action")
-
-        # CREATE
-        self.relation_name: Optional[str] = parameters.get("relation_name")
-        self.schema = parameters.get("schema")
-        self.if_not_exists: bool = parameters.get("if_not_exists", False)
-
-        # DROP
-        self.relation_names = parameters.get("relation_names")
-        self.connectors = parameters.get("connectors")
-        self.if_exists: bool = parameters.get("if_exists", False)
-        # DROP MATERIALIZED VIEW arrives as a flagged drop_relation
-        self.is_materialized_view: bool = parameters.get("is_materialized_view", False)
-
-        # CREATE COLLECTION
-        self.collection_name: Optional[str] = parameters.get("collection_name")
-
-        # CLONE / RESYNC / DETACH. `relation_name` above is the target of all
-        # three - the fork - because that is the only dataset any of them
-        # writes to; `source_relation` is the upstream a CLONE reads, and
-        # RESYNC and DETACH need no such field because a fork already records
-        # its own upstream.
-        self.source_relation: Optional[str] = parameters.get("source_relation")
-        self.source_collection: Optional[str] = parameters.get("source_collection")
-        self.force: bool = parameters.get("force", False)
-
-        # DROP COLLECTION
-        self.collection_names = parameters.get("collection_names")
-
-        # ALTER ... CLUSTER BY
-        self.cluster_columns = parameters.get("cluster_columns")
-
-        # ALTER ... RENAME TO
-        self.new_relation_name: Optional[str] = parameters.get("new_relation_name")
-
-        # ADD / DROP / RENAME COLUMN, ALTER COLUMN ... TYPE
-        self.column_name: Optional[str] = parameters.get("column_name")
-        self.column_type = parameters.get("column_type")
-        self.column_nullable: bool = parameters.get("nullable", True)
-        self.column_default = parameters.get("default")
-        self.column_if_not_exists: bool = parameters.get("if_not_exists", False)
-        self.column_if_exists: bool = parameters.get("column_if_exists", False)
-        self.new_column_name: Optional[str] = parameters.get("new_column_name")
-        self.new_column_type = parameters.get("new_column_type")
-
-        # ADD / DROP CONSTRAINT (declared column relationships)
-        self.constraint_name: Optional[str] = parameters.get("constraint_name")
-        self.constraint_if_exists: bool = parameters.get("constraint_if_exists", False)
-        # Split parts, never a dotted string - see opteryx.managers.relationships.
-        self.relation_parts = parameters.get("relation_parts")
-        self.references_relation_name: Optional[str] = parameters.get("references_relation_name")
-        self.references_relation_parts = parameters.get("references_relation_parts")
-        self.references_column_name: Optional[str] = parameters.get("references_column_name")
-        self.cardinality: Optional[str] = parameters.get("cardinality")
-
-        # CREATE / DROP TAG, ROLLBACK TO VERSION
-        self.tag_name: Optional[str] = parameters.get("tag_name")
-        # "current" | "previous" | a tag name | a snapshot id as text. Left as the
-        # reader wrote it: resolving any of the first three is a catalog read,
-        # and the connector is what holds the catalog.
-        self.version_spec: Optional[str] = parameters.get("version_spec")
-
-        # CREATE / ALTER / DROP TRIGGER. `table_name` is the HOLDER the trigger
-        # hangs off: the dataset whose commits fire it, or - for a schedule or
-        # signal trigger, which has no source dataset - the task it fires.
-        self.trigger_name: Optional[str] = parameters.get("trigger_name")
-        self.table_name: Optional[str] = parameters.get("table_name")
-        # CREATE TRIGGER's event: "commit" | "schedule" | "signal", and the
-        # clauses that describe a clock or a signal. All None for a commit
-        # trigger, whose event is the commit itself.
-        self.event_kind: str = parameters.get("event_kind") or "commit"
-        self.schedule: Optional[str] = parameters.get("schedule")
-        self.time_zone: Optional[str] = parameters.get("time_zone")
-        self.window_source: Optional[str] = parameters.get("window_source")
-
-        # CREATE TASK / DROP TASK. `statement` carries the task's SQL with its
-        # `:name` placeholders intact - they are bound when it is EXECUTEd, not
-        # when it is defined.
-        self.task_name: Optional[str] = parameters.get("task_name")
-        # CREATE TASK ... ON <table>: the dataset whose commits fire it. The
-        # trigger is created alongside the task, so one statement leaves nothing
-        # half-wired.
-        self.on_table: Optional[str] = parameters.get("on_table")
-        # ALTER TASK ... OWNER TO. `resolved_owner` is the binder's answer, with
-        # CURRENT_USER already turned into the principal it names.
-        self.resolved_owner: Optional[str] = parameters.get("resolved_owner")
-        self.statement: Optional[str] = parameters.get("statement")
-        self.or_replace: bool = parameters.get("or_replace", False)
-        # What the task's statement WRITES, derived from its own AST by
-        # `plan_create_task` and recorded so a pipeline can be followed THROUGH a
-        # task rather than ending at it. A list because TRUNCATE names several;
-        # empty for a task that reads and writes nothing back.
-        self.target_tables: list = parameters.get("target_tables") or []
-        self.source_tables: list = parameters.get("source_tables") or []
-
-        # LISTEN TO / UNLISTEN. The subscriber is never carried: it is always
-        # the session user, taken from the execution context below, because
-        # there is no syntax that names a principal.
-        self.outcome: Optional[str] = parameters.get("outcome")
-
-        # ALTER MATERIALIZED VIEW ... OWNER TO
-        self.new_owner: Optional[str] = parameters.get("new_owner")
-        self.owner_is_current_user: bool = parameters.get("owner_is_current_user", False)
-        self.suspended = parameters.get("suspended")
-        self.minimum_interval_seconds = parameters.get("minimum_interval_seconds")
-
-        # ALTER WORKSPACE ... SET
-        self.workspace_name: Optional[str] = parameters.get("workspace_name")
-        self.property_name: Optional[str] = parameters.get("property_name")
-        self.property_value = parameters.get("property_value")
-        # ALTER WORKSPACE ... SET SECURE <object> TO <ws>[, ...] | DROP SECURE <object>.
-        # `secure_destinations` is None for DROP - the sanction is withdrawn.
-        self.secure_object: Optional[str] = parameters.get("secure_object")
-        self.secure_destinations = parameters.get("secure_destinations")
-
-        # GRANT / REVOKE
-        self.pattern: Optional[str] = parameters.get("pattern")
-        self.role: Optional[str] = parameters.get("role")
-        self.principal: Optional[str] = parameters.get("principal")
-        self.object_kind: Optional[str] = parameters.get("object_kind")
-        self.object_name: Optional[str] = parameters.get("object_name")
-        # Stashed by the binder (visit_grant_access/visit_revoke_access): the
-        # capability needs the acting identity at execution time, where there
-        # is no BindingContext to read it from.
-        self.execution_context = parameters.get("execution_context")
-
-        # CALL <procedure>(...)
-        self.procedure_name: Optional[str] = parameters.get("procedure_name")
-        self.arguments: Optional[list] = parameters.get("arguments")
-
-        # CREATE TABLE ... CONSTRAINT - the relationships the statement declared,
-        # validated by the logical planner and authorized by the binder.
-        self.relationships = parameters.get("relationships")
-
-        # CREATE / TRUNCATE / ALTER
-        self.connector = parameters.get("connector")
+    def __init__(self, properties: QueryProperties, step, str action):
+        """`step` is the statement's typed plan step; every field an action reads
+        is read off it, so an action can only read what its statement declares.
+        `action` names which statement this is (the physical planner's dispatch)."""
+        BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
+        self.action = action
 
     @property
     def name(self):
@@ -219,93 +87,93 @@ class RelationManagementNode(BasePlanNode):
     @property
     def config(self):
         if self.action == "drop_relation":
-            return f"drop {', '.join(self.relation_names or [])}"
-        if self.action == "create_relation" and self.relationships:
+            return f"drop {', '.join(self.step.relation_names or [])}"
+        if self.action == "create_relation" and self.step.relationships:
             return (
-                f"create {self.relation_name} with "
-                f"{len(self.relationships)} declared relationship(s)"
+                f"create {self.step.relation_name} with "
+                f"{len(self.step.relationships)} declared relationship(s)"
             )
         if self.action == "create_collection":
-            return f"create collection {self.collection_name}"
+            return f"create collection {self.step.collection_name}"
         if self.action == "clone_collection":
-            return f"clone collection {self.source_collection} into {self.collection_name}"
+            return f"clone collection {self.step.source_collection} into {self.step.collection_name}"
         if self.action == "clone_relation":
-            return f"clone {self.source_relation} into {self.relation_name}"
+            return f"clone {self.step.source_relation} into {self.step.relation_name}"
         if self.action == "resync_relation":
-            return f"resync {self.relation_name}" + (" (force)" if self.force else "")
+            return f"resync {self.step.relation_name}" + (" (force)" if self.step.force else "")
         if self.action == "detach_relation":
-            return f"detach {self.relation_name}"
+            return f"detach {self.step.relation_name}"
         if self.action == "drop_collection":
-            return f"drop collection {', '.join(self.collection_names or [])}"
+            return f"drop collection {', '.join(self.step.collection_names or [])}"
         if self.action == "cluster_by":
-            return f"cluster {self.relation_name} by ({', '.join(self.cluster_columns or [])})"
+            return f"cluster {self.step.relation_name} by ({', '.join(self.step.cluster_columns or [])})"
         if self.action == "rename_relation":
-            return f"rename {self.relation_name} to {self.new_relation_name}"
+            return f"rename {self.step.relation_name} to {self.step.new_relation_name}"
         if self.action == "add_column":
-            return f"add column {self.column_name} to {self.relation_name}"
+            return f"add column {self.step.column_name} to {self.step.relation_name}"
         if self.action == "drop_column":
-            return f"drop column {self.column_name} from {self.relation_name}"
+            return f"drop column {self.step.column_name} from {self.step.relation_name}"
         if self.action == "rename_column":
-            return f"rename column {self.column_name} to {self.new_column_name} on {self.relation_name}"
+            return f"rename column {self.step.column_name} to {self.step.new_column_name} on {self.step.relation_name}"
         if self.action == "alter_column_type":
-            return f"alter column {self.column_name} on {self.relation_name} to {self.new_column_type}"
+            return f"alter column {self.step.column_name} on {self.step.relation_name} to {self.step.new_column_type}"
         if self.action == "add_relationship":
             return (
-                f"add constraint {self.constraint_name} on {self.relation_name} "
-                f"({self.column_name}) references {self.references_relation_name} "
-                f"({self.references_column_name}) not enforced"
+                f"add constraint {self.step.constraint_name} on {self.step.relation_name} "
+                f"({self.step.column_name}) references {self.step.references_relation_name} "
+                f"({self.step.references_column_name}) not enforced"
             )
         if self.action == "drop_relationship":
-            return f"drop constraint {self.constraint_name} on {self.relation_name}"
+            return f"drop constraint {self.step.constraint_name} on {self.step.relation_name}"
         if self.action == "alter_workspace":
-            return f"alter workspace {self.workspace_name} set {self.property_name} = {self.property_value}"
+            return f"alter workspace {self.step.workspace_name} set {self.step.property_name} = {self.step.property_value}"
         if self.action == "alter_workspace_secure":
-            if self.secure_destinations is None:
-                return f"alter workspace {self.workspace_name} drop secure {self.secure_object}"
-            return f"alter workspace {self.workspace_name} set secure {self.secure_object} to {', '.join(self.secure_destinations)}"
+            if self.step.secure_destinations is None:
+                return f"alter workspace {self.step.workspace_name} drop secure {self.step.secure_object}"
+            return f"alter workspace {self.step.workspace_name} set secure {self.step.secure_object} to {', '.join(self.step.secure_destinations)}"
         if self.action == "drop_workspace":
-            return f"drop workspace {self.workspace_name}"
+            return f"drop workspace {self.step.workspace_name}"
         if self.action == "create_tag":
-            return f"create tag {self.tag_name} on {self.relation_name} as of {self.version_spec}"
+            return f"create tag {self.step.tag_name} on {self.step.relation_name} as of {self.step.version_spec}"
         if self.action == "drop_tag":
-            return f"drop tag {self.tag_name} on {self.relation_name}"
+            return f"drop tag {self.step.tag_name} on {self.step.relation_name}"
         if self.action == "rollback_relation":
-            return f"rollback {self.relation_name} to version {self.version_spec}"
+            return f"rollback {self.step.relation_name} to version {self.step.version_spec}"
         if self.action == "drop_trigger":
-            return f"drop trigger {self.trigger_name} on {self.table_name}"
+            return f"drop trigger {self.step.trigger_name} on {self.step.table_name}"
         if self.action == "create_task":
-            on = f" on {self.on_table}" if self.on_table else ""
-            return f"create task {self.task_name}{on}"
+            on = f" on {self.step.on_table}" if self.step.on_table else ""
+            return f"create task {self.step.task_name}{on}"
         if self.action == "create_trigger":
-            return f"create trigger {self.trigger_name} on {_trigger_event(self)} execute {self.task_name}"
+            return f"create trigger {self.step.trigger_name} on {_trigger_event(self.step)} execute {self.step.task_name}"
         if self.action == "alter_trigger_suspended":
-            return f"alter trigger {self.trigger_name} on {self.table_name} {'suspend' if self.suspended else 'resume'}"
+            return f"alter trigger {self.step.trigger_name} on {self.step.table_name} {'suspend' if self.step.suspended else 'resume'}"
         if self.action == "alter_trigger_minimum_interval":
-            return f"alter trigger {self.trigger_name} on {self.table_name} set minimum interval to {self.minimum_interval_seconds} seconds"
+            return f"alter trigger {self.step.trigger_name} on {self.step.table_name} set minimum interval to {self.step.minimum_interval_seconds} seconds"
         if self.action == "drop_task":
-            return f"drop task {self.task_name}"
+            return f"drop task {self.step.task_name}"
         if self.action == "alter_task":
-            return f"alter task {self.task_name} (redefine statement)"
+            return f"alter task {self.step.task_name} (redefine statement)"
         if self.action == "listen":
-            return f"listen to {self.task_name} for {self.outcome.lower()}"
+            return f"listen to {self.step.task_name} for {self.step.outcome.lower()}"
         if self.action == "unlisten":
-            return f"unlisten {self.task_name}"
+            return f"unlisten {self.step.task_name}"
         if self.action == "alter_trigger_owner":
-            return f"alter trigger {self.trigger_name} on {self.table_name} owner to {'CURRENT_USER' if self.owner_is_current_user else self.new_owner}"
+            return f"alter trigger {self.step.trigger_name} on {self.step.table_name} owner to {'CURRENT_USER' if self.step.owner_is_current_user else self.step.new_owner}"
         if self.action == "alter_materialized_view_suspended":
-            return f"alter materialized view {self.relation_name} {'suspend' if self.suspended else 'resume'}"
+            return f"alter materialized view {self.step.relation_name} {'suspend' if self.step.suspended else 'resume'}"
         if self.action == "alter_materialized_view_owner":
-            return f"alter materialized view {self.relation_name} owner to {'CURRENT_USER' if self.owner_is_current_user else self.new_owner}"
+            return f"alter materialized view {self.step.relation_name} owner to {'CURRENT_USER' if self.step.owner_is_current_user else self.step.new_owner}"
         if self.action == "grant_access":
-            return f"grant {self.role} on {self.object_kind} {self.object_name} to user {self.principal}"
+            return f"grant {self.step.role} on {self.step.object_kind} {self.step.object_name} to user {self.step.principal}"
         if self.action == "revoke_access":
-            return f"revoke {self.role} on {self.object_kind} {self.object_name} from user {self.principal}"
+            return f"revoke {self.step.role} on {self.step.object_kind} {self.step.object_name} from user {self.step.principal}"
         if self.action == "call_procedure":
             # The ARGUMENT VALUES are not rendered. They are whatever the caller wrote
             # - a message body, a recipient - and this string reaches EXPLAIN output
             # and the query log, so the name is shown and the payload is not.
-            return f"call {self.procedure_name} ({len(self.arguments or [])} argument(s))"
-        return f"{self.action} {self.relation_name}"
+            return f"call {self.step.procedure_name} ({len(self.step.arguments or [])} argument(s))"
+        return f"{self.action} {self.step.relation_name}"
 
     @property
     def _author(self):
@@ -327,7 +195,7 @@ class RelationManagementNode(BasePlanNode):
         identity, which would be a subscription nobody could ever see or
         remove.
         """
-        user = self.execution_context.user if self.execution_context else None
+        user = self.step.execution_context.user if self.step.execution_context else None
         if not user:
             raise PermissionError(
                 "**LISTEN** and **UNLISTEN** need an authenticated user: a "
@@ -366,226 +234,226 @@ class RelationManagementNode(BasePlanNode):
 
         if action == "create_relation":
             if not count:
-                return object_message("table", "", self.relation_name, "already exists, nothing created")
-            return object_message("created", "table", self.relation_name)
+                return object_message("table", "", self.step.relation_name, "already exists, nothing created")
+            return object_message("created", "table", self.step.relation_name)
 
         if action == "drop_relation":
-            kind = "materialized view(s)" if self.is_materialized_view else "table(s)"
+            kind = "materialized view(s)" if self.step.is_materialized_view else "table(s)"
             if not count:
                 return f"no {kind} dropped"
-            return f"dropped {count:,} {kind}: {_names(self.relation_names)}"
+            return f"dropped {count:,} {kind}: {_names(self.step.relation_names)}"
 
         if action == "create_collection":
-            return object_message("created", "collection", self.collection_name)
+            return object_message("created", "collection", self.step.collection_name)
 
         if action == "clone_collection":
             return (
-                f"cloned collection {md_code(self.source_collection)} to "
-                f"{md_code(self.collection_name)} ({count:,} relation(s))"
+                f"cloned collection {md_code(self.step.source_collection)} to "
+                f"{md_code(self.step.collection_name)} ({count:,} relation(s))"
             )
 
         if action == "clone_relation":
-            return f"cloned {md_code(self.source_relation)} to {md_code(self.relation_name)}"
+            return f"cloned {md_code(self.step.source_relation)} to {md_code(self.step.relation_name)}"
 
         if action == "resync_relation":
-            return f"resynced {md_code(self.relation_name)} with its upstream"
+            return f"resynced {md_code(self.step.relation_name)} with its upstream"
 
         if action == "detach_relation":
             return (
-                f"detached {md_code(self.relation_name)} "
+                f"detached {md_code(self.step.relation_name)} "
                 f"({count:,} borrowed file(s) materialized)"
             )
 
         if action == "drop_collection":
             if not count:
                 return "no collection(s) dropped"
-            return f"dropped {count:,} collection(s): {_names(self.collection_names)}"
+            return f"dropped {count:,} collection(s): {_names(self.step.collection_names)}"
 
         if action == "truncate_relation":
-            return object_message("truncated", "", self.relation_name)
+            return object_message("truncated", "", self.step.relation_name)
 
         if action == "cluster_by":
             if not count:
-                return _absent(self.relation_name)
-            return f"set cluster by on {md_code(self.relation_name)}"
+                return _absent(self.step.relation_name)
+            return f"set cluster by on {md_code(self.step.relation_name)}"
 
         if action == "rename_relation":
             if not count:
-                return _absent(self.relation_name)
-            return f"renamed {md_code(self.relation_name)} to {md_code(self.new_relation_name)}"
+                return _absent(self.step.relation_name)
+            return f"renamed {md_code(self.step.relation_name)} to {md_code(self.step.new_relation_name)}"
 
         if action == "add_column":
             if not count:
-                return _absent(self.relation_name)
-            return f"added column {md_column(self.column_name)} to {md_code(self.relation_name)}"
+                return _absent(self.step.relation_name)
+            return f"added column {md_column(self.step.column_name)} to {md_code(self.step.relation_name)}"
 
         if action == "drop_column":
             if not count:
-                return _absent(self.relation_name)
-            return f"dropped column {md_column(self.column_name)} from {md_code(self.relation_name)}"
+                return _absent(self.step.relation_name)
+            return f"dropped column {md_column(self.step.column_name)} from {md_code(self.step.relation_name)}"
 
         if action == "rename_column":
             if not count:
-                return _absent(self.relation_name)
+                return _absent(self.step.relation_name)
             return (
-                f"renamed column {md_column(self.column_name)} to "
-                f"{md_column(self.new_column_name)} in {md_code(self.relation_name)}"
+                f"renamed column {md_column(self.step.column_name)} to "
+                f"{md_column(self.step.new_column_name)} in {md_code(self.step.relation_name)}"
             )
 
         if action == "alter_column_type":
             if not count:
-                return _absent(self.relation_name)
+                return _absent(self.step.relation_name)
             return (
-                f"changed the type of column {md_column(self.column_name)} in "
-                f"{md_code(self.relation_name)}"
+                f"changed the type of column {md_column(self.step.column_name)} in "
+                f"{md_code(self.step.relation_name)}"
             )
 
         if action == "add_relationship":
             if not count:
-                return _absent(self.relation_name)
+                return _absent(self.step.relation_name)
             return (
-                f"added constraint {md_code(self.constraint_name)} on "
-                f"{md_code(self.relation_name)}"
+                f"added constraint {md_code(self.step.constraint_name)} on "
+                f"{md_code(self.step.relation_name)}"
             )
 
         if action == "drop_relationship":
             if not count:
                 return (
-                    f"constraint {md_code(self.constraint_name)} not found on "
-                    f"{md_code(self.relation_name)}, nothing dropped"
+                    f"constraint {md_code(self.step.constraint_name)} not found on "
+                    f"{md_code(self.step.relation_name)}, nothing dropped"
                 )
             return (
-                f"dropped constraint {md_code(self.constraint_name)} on "
-                f"{md_code(self.relation_name)}"
+                f"dropped constraint {md_code(self.step.constraint_name)} on "
+                f"{md_code(self.step.relation_name)}"
             )
 
         if action == "create_task":
             if not count:
-                return object_message("task", "", self.task_name, "already exists, nothing created")
-            if self.on_table:
+                return object_message("task", "", self.step.task_name, "already exists, nothing created")
+            if self.step.on_table:
                 return (
-                    f"created task {md_code(self.task_name)}, fired by commits to "
-                    f"{md_code(self.on_table)}"
+                    f"created task {md_code(self.step.task_name)}, fired by commits to "
+                    f"{md_code(self.step.on_table)}"
                 )
-            return object_message("created", "task", self.task_name)
+            return object_message("created", "task", self.step.task_name)
 
         if action == "create_trigger":
             if not count:
                 return object_message(
-                    "trigger", "", self.trigger_name, "already exists, nothing created"
+                    "trigger", "", self.step.trigger_name, "already exists, nothing created"
                 )
             return (
-                f"created trigger {md_code(self.trigger_name)} on "
-                f"{md_code(_trigger_event(self))}"
+                f"created trigger {md_code(self.step.trigger_name)} on "
+                f"{md_code(_trigger_event(self.step))}"
             )
 
         if action == "alter_trigger_suspended":
-            state = "suspended" if self.suspended else "resumed"
-            return f"{state} trigger {md_code(self.trigger_name)} on {md_code(self.table_name)}"
+            state = "suspended" if self.step.suspended else "resumed"
+            return f"{state} trigger {md_code(self.step.trigger_name)} on {md_code(self.step.table_name)}"
 
         if action == "alter_trigger_minimum_interval":
             return (
-                f"set the minimum interval of trigger {md_code(self.trigger_name)} on "
-                f"{md_code(self.table_name)} to {self.minimum_interval_seconds:,} second(s)"
+                f"set the minimum interval of trigger {md_code(self.step.trigger_name)} on "
+                f"{md_code(self.step.table_name)} to {self.step.minimum_interval_seconds:,} second(s)"
             )
 
         if action == "alter_trigger_owner":
             return (
-                f"trigger {md_code(self.trigger_name)} on {md_code(self.table_name)} now "
-                f"runs as {md_code(self.resolved_owner)}"
+                f"trigger {md_code(self.step.trigger_name)} on {md_code(self.step.table_name)} now "
+                f"runs as {md_code(self.step.resolved_owner)}"
             )
 
         if action == "drop_task":
-            return object_message("dropped", "task", self.task_name)
+            return object_message("dropped", "task", self.step.task_name)
 
         if action == "alter_task":
-            return f"redefined the statement of task {md_code(self.task_name)}"
+            return f"redefined the statement of task {md_code(self.step.task_name)}"
 
         if action == "listen":
-            return f"listening to task {md_code(self.task_name)}"
+            return f"listening to task {md_code(self.step.task_name)}"
 
         if action == "unlisten":
-            return f"no longer listening to task {md_code(self.task_name)}"
+            return f"no longer listening to task {md_code(self.step.task_name)}"
 
         if action == "drop_trigger":
             return (
-                f"dropped trigger {md_code(self.trigger_name)} on {md_code(self.table_name)}"
+                f"dropped trigger {md_code(self.step.trigger_name)} on {md_code(self.step.table_name)}"
             )
 
         if action == "create_tag":
             return (
-                f"created tag {md_code(self.tag_name)} on {md_code(self.relation_name)} "
-                f"at {md_code(self.version_spec)}"
+                f"created tag {md_code(self.step.tag_name)} on {md_code(self.step.relation_name)} "
+                f"at {md_code(self.step.version_spec)}"
             )
 
         if action == "drop_tag":
-            return f"dropped tag {md_code(self.tag_name)} on {md_code(self.relation_name)}"
+            return f"dropped tag {md_code(self.step.tag_name)} on {md_code(self.step.relation_name)}"
 
         if action == "rollback_relation":
             return (
-                f"rolled {md_code(self.relation_name)} back to "
-                f"{md_code(self.version_spec)}"
+                f"rolled {md_code(self.step.relation_name)} back to "
+                f"{md_code(self.step.version_spec)}"
             )
 
         if action == "alter_materialized_view_owner":
-            return f"changed the owner of materialized view {md_code(self.relation_name)}"
+            return f"changed the owner of materialized view {md_code(self.step.relation_name)}"
 
         if action == "alter_materialized_view_suspended":
-            state = "suspended" if self.suspended else "resumed"
-            return f"{state} refreshes of materialized view {md_code(self.relation_name)}"
+            state = "suspended" if self.step.suspended else "resumed"
+            return f"{state} refreshes of materialized view {md_code(self.step.relation_name)}"
 
         if action == "alter_workspace":
             return (
-                f"set {md_column(self.property_name)} on workspace "
-                f"{md_code(self.workspace_name)}"
+                f"set {md_column(self.step.property_name)} on workspace "
+                f"{md_code(self.step.workspace_name)}"
             )
 
         if action == "alter_workspace_secure":
-            if self.secure_destinations is None:
+            if self.step.secure_destinations is None:
                 return (
-                    f"cleared the secure sanction on {md_code(self.secure_object)} in "
-                    f"workspace {md_code(self.workspace_name)}"
+                    f"cleared the secure sanction on {md_code(self.step.secure_object)} in "
+                    f"workspace {md_code(self.step.workspace_name)}"
                 )
             return (
-                f"marked {md_code(self.secure_object)} secure to "
-                f"{len(self.secure_destinations):,} destination(s): "
-                f"{_names(self.secure_destinations)}"
+                f"marked {md_code(self.step.secure_object)} secure to "
+                f"{len(self.step.secure_destinations):,} destination(s): "
+                f"{_names(self.step.secure_destinations)}"
             )
 
         if action == "drop_workspace":
-            return object_message("dropped", "workspace", self.workspace_name)
+            return object_message("dropped", "workspace", self.step.workspace_name)
 
         if action == "grant_access":
             return (
-                f"granted {md_column(self.role)} on {md_code(self.pattern)} to "
-                f"{md_code(self.principal)}"
+                f"granted {md_column(self.step.role)} on {md_code(self.step.pattern)} to "
+                f"{md_code(self.step.principal)}"
             )
 
         if action == "revoke_access":
             return (
-                f"revoked {md_column(self.role)} on {md_code(self.pattern)} from "
-                f"{md_code(self.principal)}"
+                f"revoked {md_column(self.step.role)} on {md_code(self.step.pattern)} from "
+                f"{md_code(self.step.principal)}"
             )
 
         if action == "call_procedure":
-            return object_message("called", "procedure", self.procedure_name)
+            return object_message("called", "procedure", self.step.procedure_name)
 
         raise InvalidInternalStateError(f"no receipt wording for relation action: {action}")
 
     def _apply(self, morsel=None, **kwargs) -> NonTabularResult:
         if self.action == "create_relation":
-            if self.connector.relation_exists(self.relation_name):
-                if self.if_not_exists:
+            if self.step.connector.relation_exists(self.step.relation_name):
+                if self.step.if_not_exists:
                     return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
-                raise ValueError(f"relation already exists: {self.relation_name}")
-            self.connector.create_relation(self.relation_name, self.schema, author=self._author)
+                raise ValueError(f"relation already exists: {self.step.relation_name}")
+            self.step.connector.create_relation(self.step.relation_name, self.step.schema, author=self._author)
             # CREATE TABLE ... CONSTRAINT. Written after the relation exists,
             # because the store is a subcollection on the dataset document and
             # there is nothing to hang one on before that. The binder has
             # already authorized every far end and checked both columns, so
             # what is left here is the write.
-            for relationship in self.relationships or []:
-                self.connector.declare_relationship(
+            for relationship in self.step.relationships or []:
+                self.step.connector.declare_relationship(
                     relation_parts=relationship["relation_parts"],
                     column_name=relationship["column_name"],
                     references_relation_parts=relationship["references_relation_parts"],
@@ -598,24 +466,24 @@ class RelationManagementNode(BasePlanNode):
 
         elif self.action == "drop_relation":
             dropped = 0
-            for relation_name in self.relation_names:
-                connector = self.connectors[relation_name]
+            for relation_name in self.step.relation_names:
+                connector = self.step.connectors[relation_name]
                 if not connector.relation_exists(relation_name):
-                    if self.if_exists:
+                    if self.step.if_exists:
                         continue
                     raise DatasetNotFoundError(connector=connector, dataset=relation_name)
                 # Type guard in both directions: a materialized view's backing
                 # store is a dataset, so DROP TABLE would "work" on it - but
                 # would strand its refresh triggers on every source table.
                 target_is_mv = connector.is_materialized_view(relation_name)
-                if self.is_materialized_view:
+                if self.step.is_materialized_view:
                     if not target_is_mv:
                         raise ValueError(
                             f"{relation_name} is not a materialized view; "
                             "use DROP TABLE or DROP VIEW"
                         )
                     connector.drop_materialized_view(
-                        relation_name, if_exists=self.if_exists, author=self._author
+                        relation_name, if_exists=bool(self.step.if_exists), author=self._author
                     )
                 else:
                     if target_is_mv:
@@ -624,7 +492,7 @@ class RelationManagementNode(BasePlanNode):
                             "use DROP MATERIALIZED VIEW"
                         )
                     connector.drop_relation(
-                        relation_name, if_exists=self.if_exists, author=self._author
+                        relation_name, if_exists=bool(self.step.if_exists), author=self._author
                     )
                 dropped += 1
             return NonTabularResult(record_count=dropped, status=QueryStatus.SQL_SUCCESS)
@@ -635,8 +503,8 @@ class RelationManagementNode(BasePlanNode):
             # checking and creating. The cost is that IF NOT EXISTS cannot report
             # 0-vs-1 for "already there" - the count is 1 for "the collection now
             # exists", not "a collection was created this instant".
-            self.connector.create_collection(
-                self.collection_name, if_not_exists=self.if_not_exists, author=self._author
+            self.step.connector.create_collection(
+                self.step.collection_name, if_not_exists=bool(self.step.if_not_exists), author=self._author
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
@@ -644,8 +512,8 @@ class RelationManagementNode(BasePlanNode):
             # One statement, one refusal: the connector checks every target
             # name before it forks anything, because a half-cloned collection
             # is the state nobody can act on.
-            cloned = self.connector.clone_collection(
-                self.collection_name, self.source_collection, author=self._author
+            cloned = self.step.connector.clone_collection(
+                self.step.collection_name, self.step.source_collection, author=self._author
             )
             return NonTabularResult(record_count=cloned, status=QueryStatus.SQL_SUCCESS)
 
@@ -654,9 +522,9 @@ class RelationManagementNode(BasePlanNode):
             # files. The record count is 1 - the dataset created - rather than
             # a row count, which would be the upstream's and would read as
             # though this statement had written those rows.
-            self.connector.clone_relation(
-                self.relation_name,
-                self.source_relation,
+            self.step.connector.clone_relation(
+                self.step.relation_name,
+                self.step.source_relation,
                 author=self._author,
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
@@ -666,8 +534,8 @@ class RelationManagementNode(BasePlanNode):
             # and whether FORCE was needed - all three are facts about two
             # datasets' current snapshots, and none of them survives being
             # decided earlier.
-            self.connector.resync_relation(
-                self.relation_name, author=self._author, force=self.force
+            self.step.connector.resync_relation(
+                self.step.relation_name, author=self._author, force=bool(self.step.force)
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
@@ -675,69 +543,69 @@ class RelationManagementNode(BasePlanNode):
             # The one fork statement that copies. The count is the number of
             # borrowed files materialised, which is what the caller is now
             # storing and being billed for.
-            copied = self.connector.detach_relation(self.relation_name, author=self._author)
+            copied = self.step.connector.detach_relation(self.step.relation_name, author=self._author)
             return NonTabularResult(record_count=copied, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "drop_collection":
             dropped = 0
-            for collection_name in self.collection_names:
-                connector = self.connectors[collection_name]
+            for collection_name in self.step.collection_names:
+                connector = self.step.connectors[collection_name]
                 if not connector.collection_exists(collection_name):
-                    if self.if_exists:
+                    if self.step.if_exists:
                         continue
                     raise DatasetNotFoundError(connector=connector, dataset=collection_name)
                 connector.drop_collection(
-                    collection_name, if_exists=self.if_exists, author=self._author
+                    collection_name, if_exists=bool(self.step.if_exists), author=self._author
                 )
                 dropped += 1
             return NonTabularResult(record_count=dropped, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "truncate_relation":
-            if not self.connector.relation_exists(self.relation_name):
-                raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
-            self.connector.truncate_relation(self.relation_name, author=self._author)
+            if not self.step.connector.relation_exists(self.step.relation_name):
+                raise DatasetNotFoundError(connector=self.step.connector, dataset=self.step.relation_name)
+            self.step.connector.truncate_relation(self.step.relation_name, author=self._author)
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "cluster_by":
-            if not self.connector.relation_exists(self.relation_name):
-                if self.if_exists:
+            if not self.step.connector.relation_exists(self.step.relation_name):
+                if self.step.if_exists:
                     return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
-                raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
+                raise DatasetNotFoundError(connector=self.step.connector, dataset=self.step.relation_name)
             # Declared on the Writable mixin, and visit_alter_relation has
             # already rejected a non-Writable connector.
-            self.connector.set_cluster_by(
-                self.relation_name, self.cluster_columns, author=self._author
+            self.step.connector.set_cluster_by(
+                self.step.relation_name, self.step.cluster_columns, author=self._author
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "add_relationship":
-            if not self.connector.relation_exists(self.relation_name):
-                if self.if_exists:
+            if not self.step.connector.relation_exists(self.step.relation_name):
+                if self.step.if_exists:
                     return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
-                raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
+                raise DatasetNotFoundError(connector=self.step.connector, dataset=self.step.relation_name)
             # The workspace's own store, not the relation's catalog entry -
             # see Writable.declare_relationship. Both ends are in this
             # workspace; the logical planner refused the statement otherwise.
-            self.connector.declare_relationship(
-                relation_parts=self.relation_parts,
-                column_name=self.column_name,
-                references_relation_parts=self.references_relation_parts,
-                references_column_name=self.references_column_name,
-                constraint_name=self.constraint_name,
-                cardinality=self.cardinality,
+            self.step.connector.declare_relationship(
+                relation_parts=self.step.relation_parts,
+                column_name=self.step.column_name,
+                references_relation_parts=self.step.references_relation_parts,
+                references_column_name=self.step.references_column_name,
+                constraint_name=self.step.constraint_name,
+                cardinality=self.step.cardinality,
                 author=self._author,
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "drop_relationship":
-            if not self.connector.relation_exists(self.relation_name):
-                if self.if_exists:
+            if not self.step.connector.relation_exists(self.step.relation_name):
+                if self.step.if_exists:
                     return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
-                raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
-            removed = self.connector.drop_relationship(
-                relation_parts=self.relation_parts,
-                constraint_name=self.constraint_name,
-                if_exists=self.constraint_if_exists,
+                raise DatasetNotFoundError(connector=self.step.connector, dataset=self.step.relation_name)
+            removed = self.step.connector.drop_relationship(
+                relation_parts=self.step.relation_parts,
+                constraint_name=self.step.constraint_name,
+                if_exists=bool(self.step.constraint_if_exists),
                 author=self._author,
             )
             return NonTabularResult(
@@ -745,144 +613,144 @@ class RelationManagementNode(BasePlanNode):
             )
 
         elif self.action == "rename_relation":
-            if not self.connector.relation_exists(self.relation_name):
-                if self.if_exists:
+            if not self.step.connector.relation_exists(self.step.relation_name):
+                if self.step.if_exists:
                     return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
-                raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
+                raise DatasetNotFoundError(connector=self.step.connector, dataset=self.step.relation_name)
             # A rename must never absorb an existing relation - that would
             # destroy the target's data and history with no DROP in the SQL.
-            if self.connector.relation_exists(self.new_relation_name):
-                raise ValueError(f"relation already exists: {self.new_relation_name}")
-            self.connector.rename_relation(
-                self.relation_name, self.new_relation_name, author=self._author
+            if self.step.connector.relation_exists(self.step.new_relation_name):
+                raise ValueError(f"relation already exists: {self.step.new_relation_name}")
+            self.step.connector.rename_relation(
+                self.step.relation_name, self.step.new_relation_name, author=self._author
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "add_column":
-            if not self.connector.relation_exists(self.relation_name):
-                if self.if_exists:
+            if not self.step.connector.relation_exists(self.step.relation_name):
+                if self.step.if_exists:
                     return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
-                raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
-            self.connector.add_column(
-                self.relation_name,
-                self.column_name,
-                self.column_type,
-                nullable=self.column_nullable,
-                default=self.column_default,
-                if_not_exists=self.column_if_not_exists,
+                raise DatasetNotFoundError(connector=self.step.connector, dataset=self.step.relation_name)
+            self.step.connector.add_column(
+                self.step.relation_name,
+                self.step.column_name,
+                self.step.column_type,
+                nullable=True if self.step.nullable is None else self.step.nullable,
+                default=self.step.default,
+                if_not_exists=bool(self.step.if_not_exists),
                 author=self._author,
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "drop_column":
-            if not self.connector.relation_exists(self.relation_name):
-                if self.if_exists:
+            if not self.step.connector.relation_exists(self.step.relation_name):
+                if self.step.if_exists:
                     return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
-                raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
-            self.connector.drop_column(
-                self.relation_name,
-                self.column_name,
-                if_exists=self.column_if_exists,
+                raise DatasetNotFoundError(connector=self.step.connector, dataset=self.step.relation_name)
+            self.step.connector.drop_column(
+                self.step.relation_name,
+                self.step.column_name,
+                if_exists=bool(self.step.column_if_exists),
                 author=self._author,
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "rename_column":
-            if not self.connector.relation_exists(self.relation_name):
-                if self.if_exists:
+            if not self.step.connector.relation_exists(self.step.relation_name):
+                if self.step.if_exists:
                     return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
-                raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
-            self.connector.rename_column(
-                self.relation_name, self.column_name, self.new_column_name, author=self._author
+                raise DatasetNotFoundError(connector=self.step.connector, dataset=self.step.relation_name)
+            self.step.connector.rename_column(
+                self.step.relation_name, self.step.column_name, self.step.new_column_name, author=self._author
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "alter_column_type":
-            if not self.connector.relation_exists(self.relation_name):
-                if self.if_exists:
+            if not self.step.connector.relation_exists(self.step.relation_name):
+                if self.step.if_exists:
                     return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
-                raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
-            self.connector.alter_column_type(
-                self.relation_name, self.column_name, self.new_column_type, author=self._author
+                raise DatasetNotFoundError(connector=self.step.connector, dataset=self.step.relation_name)
+            self.step.connector.alter_column_type(
+                self.step.relation_name, self.step.column_name, self.step.new_column_type, author=self._author
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "create_task":
-            if self.if_not_exists and self.connector.is_task(self.task_name):
+            if self.step.if_not_exists and self.step.connector.is_task(self.step.task_name):
                 # The whole statement, including its ON <table> trigger arm, is
                 # a no-op: a task that already exists keeps its existing trigger
                 # too, matching CREATE VIEW IF NOT EXISTS.
                 return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
-            self.connector.create_task(
-                self.task_name,
-                self.statement,
+            self.step.connector.create_task(
+                self.step.task_name,
+                self.step.statement,
                 author=self._author,
-                or_replace=self.or_replace,
-                writes=self.target_tables,
-                reads=self.source_tables,
+                or_replace=bool(self.step.or_replace),
+                writes=self.step.target_tables or [],
+                reads=self.step.source_tables or [],
             )
-            if self.on_table:
+            if self.step.on_table:
                 # Derived, not authored: the statement declared the dependency,
                 # so the trigger that implements it is this statement's to make -
                 # the same bargain CREATE MATERIALIZED VIEW strikes. `or_replace`
                 # is passed so re-running the statement repoints its own trigger
                 # rather than colliding with it.
-                if not self.connector.relation_exists(self.on_table):
-                    raise DatasetNotFoundError(connector=self.connector, dataset=self.on_table)
-                self.connector.create_trigger(
-                    self.on_table,
-                    f"task__{self.task_name.replace('.', '__')}",
-                    self.task_name,
+                if not self.step.connector.relation_exists(self.step.on_table):
+                    raise DatasetNotFoundError(connector=self.step.connector, dataset=self.step.on_table)
+                self.step.connector.create_trigger(
+                    self.step.on_table,
+                    f"task__{self.step.task_name.replace('.', '__')}",
+                    self.step.task_name,
                     author=self._author,
                     or_replace=True,
                 )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "create_trigger":
-            if self.if_not_exists and any(
-                t.get("name") == self.trigger_name
-                for t in self.connector.list_triggers(self.table_name)
+            if self.step.if_not_exists and any(
+                t.get("name") == self.step.trigger_name
+                for t in self.step.connector.list_triggers(self.step.table_name)
             ):
                 return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
-            if self.event_kind == "commit":
-                if not self.connector.relation_exists(self.table_name):
-                    raise DatasetNotFoundError(connector=self.connector, dataset=self.table_name)
+            if (self.step.event_kind or "commit") == "commit":
+                if not self.step.connector.relation_exists(self.step.table_name):
+                    raise DatasetNotFoundError(connector=self.step.connector, dataset=self.step.table_name)
                 # The call a commit trigger has always made, with no event
                 # keywords: a connector (or a catalog behind one) that predates
                 # the other two events keeps working unchanged.
-                self.connector.create_trigger(
-                    self.table_name,
-                    self.trigger_name,
-                    self.task_name,
+                self.step.connector.create_trigger(
+                    self.step.table_name,
+                    self.step.trigger_name,
+                    self.step.task_name,
                     author=self._author,
-                    or_replace=self.or_replace,
+                    or_replace=bool(self.step.or_replace),
                 )
             else:
                 # A clock or a signal has no source dataset: the holder is the
                 # task, so it is the task whose existence is checked - a dataset
                 # of that name would be the wrong kind of thing to hang it off.
-                if not self.connector.is_task(self.table_name):
-                    raise DatasetNotFoundError(connector=self.connector, dataset=self.table_name)
-                self.connector.create_trigger(
-                    self.table_name,
-                    self.trigger_name,
-                    self.task_name,
+                if not self.step.connector.is_task(self.step.table_name):
+                    raise DatasetNotFoundError(connector=self.step.connector, dataset=self.step.table_name)
+                self.step.connector.create_trigger(
+                    self.step.table_name,
+                    self.step.trigger_name,
+                    self.step.task_name,
                     author=self._author,
-                    or_replace=self.or_replace,
-                    event_kind=self.event_kind,
-                    schedule=self.schedule,
-                    time_zone=self.time_zone,
-                    window_source=self.window_source,
+                    or_replace=bool(self.step.or_replace),
+                    event_kind=self.step.event_kind or "commit",
+                    schedule=self.step.schedule,
+                    time_zone=self.step.time_zone,
+                    window_source=self.step.window_source,
                 )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "alter_trigger_suspended":
-            if not _trigger_holder_exists(self.connector, self.table_name):
-                raise DatasetNotFoundError(connector=self.connector, dataset=self.table_name)
-            self.connector.set_trigger_suspended(
-                self.table_name,
-                self.trigger_name,
-                self.suspended,
+            if not _trigger_holder_exists(self.step.connector, self.step.table_name):
+                raise DatasetNotFoundError(connector=self.step.connector, dataset=self.step.table_name)
+            self.step.connector.set_trigger_suspended(
+                self.step.table_name,
+                self.step.trigger_name,
+                self.step.suspended,
                 author=self._author,
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
@@ -890,12 +758,12 @@ class RelationManagementNode(BasePlanNode):
         elif self.action == "alter_trigger_minimum_interval":
             # Pre-parse reduced the value to whole seconds; the store records
             # it and the catalog enforces it at fire time.
-            if not self.connector.relation_exists(self.table_name):
-                raise DatasetNotFoundError(connector=self.connector, dataset=self.table_name)
-            self.connector.set_trigger_minimum_interval(
-                self.table_name,
-                self.trigger_name,
-                self.minimum_interval_seconds,
+            if not self.step.connector.relation_exists(self.step.table_name):
+                raise DatasetNotFoundError(connector=self.step.connector, dataset=self.step.table_name)
+            self.step.connector.set_trigger_minimum_interval(
+                self.step.table_name,
+                self.step.trigger_name,
+                self.step.minimum_interval_seconds,
                 author=self._author,
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
@@ -903,17 +771,17 @@ class RelationManagementNode(BasePlanNode):
         elif self.action == "alter_trigger_owner":
             # The binder resolved CURRENT_USER to the session identity and proved
             # that principal can be billed; this records the transfer.
-            if not _trigger_holder_exists(self.connector, self.table_name):
-                raise DatasetNotFoundError(connector=self.connector, dataset=self.table_name)
-            self.connector.set_trigger_owner(
-                self.table_name, self.trigger_name, self.resolved_owner, author=self._author
+            if not _trigger_holder_exists(self.step.connector, self.step.table_name):
+                raise DatasetNotFoundError(connector=self.step.connector, dataset=self.step.table_name)
+            self.step.connector.set_trigger_owner(
+                self.step.table_name, self.step.trigger_name, self.step.resolved_owner, author=self._author
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "drop_task":
-            self.connector.drop_task(
-                self.task_name,
-                if_exists=self.if_exists,
+            self.step.connector.drop_task(
+                self.step.task_name,
+                if_exists=bool(self.step.if_exists),
                 author=self._author,
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
@@ -922,14 +790,14 @@ class RelationManagementNode(BasePlanNode):
             # Defense in depth: the binder already checked. Redefines the
             # statement (and what it reads/writes) only - never the trigger,
             # never the schedule.
-            if not self.connector.is_task(self.task_name):
-                raise DatasetNotFoundError(connector=self.connector, dataset=self.task_name)
-            self.connector.alter_task_statement(
-                self.task_name,
-                self.statement,
+            if not self.step.connector.is_task(self.step.task_name):
+                raise DatasetNotFoundError(connector=self.step.connector, dataset=self.step.task_name)
+            self.step.connector.alter_task_statement(
+                self.step.task_name,
+                self.step.statement,
                 author=self._author,
-                writes=self.target_tables,
-                reads=self.source_tables,
+                writes=self.step.target_tables or [],
+                reads=self.step.source_tables or [],
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
@@ -939,58 +807,58 @@ class RelationManagementNode(BasePlanNode):
             # "who is this write attributed to" - a different question that
             # happens to have the same answer, and one whose None means
             # "unattributed" rather than "nobody to subscribe".
-            self.connector.add_listener(
-                self.task_name,
+            self.step.connector.add_listener(
+                self.step.task_name,
                 user=self._subscriber,
-                outcome=self.outcome,
+                outcome=self.step.outcome,
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "unlisten":
-            self.connector.drop_listener(self.task_name, user=self._subscriber)
+            self.step.connector.drop_listener(self.step.task_name, user=self._subscriber)
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "drop_trigger":
             # The holder must exist regardless of IF EXISTS - that modifier
             # speaks about the trigger, not the table or task it hangs off.
-            if not _trigger_holder_exists(self.connector, self.table_name):
-                raise DatasetNotFoundError(connector=self.connector, dataset=self.table_name)
-            self.connector.drop_trigger(
-                self.table_name,
-                self.trigger_name,
+            if not _trigger_holder_exists(self.step.connector, self.step.table_name):
+                raise DatasetNotFoundError(connector=self.step.connector, dataset=self.step.table_name)
+            self.step.connector.drop_trigger(
+                self.step.table_name,
+                self.step.trigger_name,
                 author=self._author,
-                missing_ok=self.if_exists,
+                missing_ok=bool(self.step.if_exists),
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "create_tag":
-            self.connector.create_tag(
-                self.relation_name,
-                self.tag_name,
-                self.version_spec,
+            self.step.connector.create_tag(
+                self.step.relation_name,
+                self.step.tag_name,
+                self.step.version_spec,
                 author=self._author,
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "drop_tag":
-            self.connector.drop_tag(
-                self.relation_name,
-                self.tag_name,
+            self.step.connector.drop_tag(
+                self.step.relation_name,
+                self.step.tag_name,
                 author=self._author,
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "rollback_relation":
-            self.connector.rollback_relation(
-                self.relation_name,
-                self.version_spec,
+            self.step.connector.rollback_relation(
+                self.step.relation_name,
+                self.step.version_spec,
                 author=self._author,
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "alter_materialized_view_owner":
-            new_owner = self.new_owner
-            if self.owner_is_current_user:
+            new_owner = self.step.new_owner
+            if self.step.owner_is_current_user:
                 # Resolved here rather than at plan time so it is the identity
                 # that actually ran the statement, not one captured earlier.
                 new_owner = self._author
@@ -999,14 +867,14 @@ class RelationManagementNode(BasePlanNode):
                         "OWNER TO CURRENT_USER needs an authenticated session; "
                         "this one has no user to assign the view to."
                     )
-            self.connector.set_materialized_view_owner(
-                self.relation_name, new_owner, author=self._author
+            self.step.connector.set_materialized_view_owner(
+                self.step.relation_name, new_owner, author=self._author
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "alter_materialized_view_suspended":
-            self.connector.set_materialized_view_suspended(
-                self.relation_name, self.suspended, author=self._author
+            self.step.connector.set_materialized_view_suspended(
+                self.step.relation_name, self.step.suspended, author=self._author
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
@@ -1022,18 +890,18 @@ class RelationManagementNode(BasePlanNode):
             # below does not decide who may grant: the capability holds the
             # name, and an engine with none registered refuses rather than
             # reporting a success that granted nothing.
-            if self.property_name == "maintenance":
+            if self.step.property_name == "maintenance":
                 from opteryx.managers.permissions import set_workspace_maintenance
 
                 set_workspace_maintenance(
-                    self.execution_context, self.workspace_name, self.property_value
+                    self.step.execution_context, self.step.workspace_name, self.step.property_value
                 )
                 return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
-            self.connector.set_workspace_property(
-                self.workspace_name,
-                self.property_name,
-                self.property_value,
+            self.step.connector.set_workspace_property(
+                self.step.workspace_name,
+                self.step.property_name,
+                self.step.property_value,
                 author=self._author,
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
@@ -1042,21 +910,21 @@ class RelationManagementNode(BasePlanNode):
             # The SOURCE workspace's record. The binder required ownership of it,
             # and the connector writes only that workspace's own entry - so the
             # destination cannot sanction a copy into itself from here or anywhere.
-            if self.secure_destinations is None:
-                self.connector.clear_workspace_secure(
-                    self.workspace_name, self.secure_object, author=self._author
+            if self.step.secure_destinations is None:
+                self.step.connector.clear_workspace_secure(
+                    self.step.workspace_name, self.step.secure_object, author=self._author
                 )
             else:
-                self.connector.mark_workspace_secure(
-                    self.workspace_name,
-                    self.secure_object,
-                    list(self.secure_destinations),
+                self.step.connector.mark_workspace_secure(
+                    self.step.workspace_name,
+                    self.step.secure_object,
+                    list(self.step.secure_destinations),
                     author=self._author,
                 )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "drop_workspace":
-            self.connector.drop_workspace(self.workspace_name, author=self._author)
+            self.step.connector.drop_workspace(self.step.workspace_name, author=self._author)
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "grant_access":
@@ -1067,7 +935,7 @@ class RelationManagementNode(BasePlanNode):
             # existing grant is REVOKE then GRANT, by the caller.
             from opteryx.managers.permissions import apply_grant
 
-            apply_grant(self.execution_context, self.pattern, self.role, self.principal)
+            apply_grant(self.step.execution_context, self.step.pattern, self.step.role, self.step.principal)
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "revoke_access":
@@ -1076,7 +944,7 @@ class RelationManagementNode(BasePlanNode):
             # naming that policy — never narrowed, never a silent no-op.
             from opteryx.managers.permissions import apply_revoke
 
-            apply_revoke(self.execution_context, self.pattern, self.role, self.principal)
+            apply_revoke(self.step.execution_context, self.step.pattern, self.step.role, self.step.principal)
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "call_procedure":
@@ -1087,9 +955,9 @@ class RelationManagementNode(BasePlanNode):
             # an error and not a no-op.
             from opteryx.procedures import get_procedure
 
-            procedure = get_procedure(self.procedure_name)
+            procedure = get_procedure(self.step.procedure_name)
             if procedure is None:
-                raise ValueError(f"procedure is no longer registered: {self.procedure_name}")
+                raise ValueError(f"procedure is no longer registered: {self.step.procedure_name}")
 
             # Who is calling. Built here rather than captured at registration because
             # the registry is process-global: one registration serves every session, so
@@ -1111,7 +979,7 @@ class RelationManagementNode(BasePlanNode):
             # worked: there is no success value to inspect, so a failure raises and the
             # statement fails with it. Nothing is caught here - swallowing the
             # exception would report SQL_SUCCESS for a notification that never sent.
-            procedure.handler(context, *(self.arguments or []))
+            procedure.handler(context, *(self.step.arguments or []))
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         else:

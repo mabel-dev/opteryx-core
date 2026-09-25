@@ -73,8 +73,8 @@ condition to be OR-rooted.
 
 from typing import Dict, List, Optional, Set, Tuple
 
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.expression import ExpressionColumn, NodeType, get_all_nodes_of_type
-from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.types.logical_type import ARRAY as _CT_ARRAY
 from opteryx.types.logical_type import BOOLEAN as _CT_BOOLEAN
@@ -87,10 +87,10 @@ from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 
 # (value, inclusive, literal_node)
-_Bound = Tuple[object, bool, Node]
+_Bound = Tuple[object, bool, Expression]
 
 
-def _classify_leaf(leaf: Node) -> Optional[Tuple[str, Node, str, tuple]]:
+def _classify_leaf(leaf: Expression) -> Optional[Tuple[str, Expression, str, tuple]]:
     """Classify one AND-conjunct leaf as a point or range constraint on a column.
 
     Returns (column_identity, identifier_node, kind, payload) or None if the
@@ -161,7 +161,7 @@ def _looser(a: _Bound, b: _Bound, is_lower: bool) -> _Bound:
     return a if (smaller if is_lower else not smaller) else b
 
 
-def _branch_column_domains(branch: Node) -> Dict[str, tuple]:
+def _branch_column_domains(branch: Expression) -> Dict[str, tuple]:
     """Reduce one OR-branch to {column_identity: (identifier, kind, payload)},
     AND-narrowing multiple same-column leaves within the branch. A column with
     both point and range leaves in the same branch is dropped (out of scope)."""
@@ -244,7 +244,7 @@ def _domain_for_column(branch_domains: List[Dict[str, tuple]], identity: str) ->
     return ident, "range", (lo, hi)
 
 
-def _literal_node(value, column_type) -> Node:
+def _literal_node(value, column_type) -> Expression:
     """A synthesized LITERAL carrying BOTH its `.type` and a matching
     `schema_column`.
 
@@ -263,7 +263,7 @@ def _literal_node(value, column_type) -> Node:
     return lit
 
 
-def _comparison_node(op: str, ident: Node, lit: Node) -> Node:
+def _comparison_node(op: str, ident: Expression, lit: Expression) -> Expression:
     """A synthesized COMPARISON_OPERATOR, stamped BOOL like a bound one. Same
     half-bound hazard as `_literal_node` — a comparison is an expression, and
     a consumer reading its result type off `schema_column` must not find None."""
@@ -275,7 +275,7 @@ def _comparison_node(op: str, ident: Node, lit: Node) -> Node:
     )
 
 
-def _build_points_node(ident: Node, values: Set, element_type) -> Node:
+def _build_points_node(ident: Expression, values: Set, element_type) -> Expression:
     ordered = sorted(values, key=str)
     if len(ordered) == 1:
         return _comparison_node("Eq", ident, _literal_node(ordered[0], element_type))
@@ -284,7 +284,7 @@ def _build_points_node(ident: Node, values: Set, element_type) -> Node:
     )
 
 
-def _build_range_nodes(ident: Node, lo: Optional[_Bound], hi: Optional[_Bound]) -> List[Node]:
+def _build_range_nodes(ident: Expression, lo: Optional[_Bound], hi: Optional[_Bound]) -> List[Expression]:
     """1 or 2 leaf comparisons. PredicateCompactionStrategy (later in the
     pipeline) recombines a lo+hi pair on the same column into one BETWEEN, so
     there's no need to build that node shape here."""
@@ -300,7 +300,7 @@ def _build_range_nodes(ident: Node, lo: Optional[_Bound], hi: Optional[_Bound]) 
     return nodes
 
 
-def _derive_domain_predicates(condition: Node) -> Tuple[List[Node], bool]:
+def _derive_domain_predicates(condition: Expression) -> Tuple[List[Expression], bool]:
     """(derived predicates, exact).
 
     `exact` is True when the derived predicate is not merely IMPLIED by the OR but
@@ -322,7 +322,7 @@ def _derive_domain_predicates(condition: Node) -> Tuple[List[Node], bool]:
     if not candidate_identities:
         return [], False
 
-    derived: List[Node] = []
+    derived: List[Expression] = []
     exact = False
     for identity in sorted(candidate_identities):
         domain = _domain_for_column(branch_domains, identity)
@@ -354,8 +354,8 @@ class DisjunctiveDomainPushdownStrategy(OptimizationStrategy):
 
     def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Filter and node.condition is not None:
-            conjuncts: List[Node] = []
-            derived: List[Node] = []
+            conjuncts: List[Expression] = []
+            derived: List[Expression] = []
             changed = False
             for conjunct in _split_and(node.condition):
                 unwrapped = conjunct

@@ -160,8 +160,8 @@ cdef _validate_temporal_comparison(left_node, right_node, op):
     When comparing temporal and non-temporal operands, literals must be explicitly cast.
     Temporal columns do not require casting. Both operands must have temporal types.
     """
-    left_sc = getattr(left_node, "schema_column", None)
-    right_sc = getattr(right_node, "schema_column", None)
+    left_sc = left_node.schema_column
+    right_sc = right_node.schema_column
     left_type = left_sc.column_type if left_sc is not None else None
     right_type = right_sc.column_type if right_sc is not None else None
 

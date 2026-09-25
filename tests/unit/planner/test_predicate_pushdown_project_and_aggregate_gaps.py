@@ -28,7 +28,7 @@ import opteryx
 def _find_node_by_class_fragment(plan, fragment: str):
     """Return the nid of the first node whose class name contains `fragment`."""
     for nid in plan.nodes():
-        if fragment in type(plan[nid]).__name__:
+        if fragment in plan[nid].kind:
             return nid
     return None
 
@@ -69,9 +69,9 @@ def test_passthrough_filter_reaches_scan_through_nested_aggregate_and_project():
     outgoing = list(plan.outgoing_edges(reader_nid))
     assert len(outgoing) == 1, f"expected the reader to feed exactly one consumer, got {outgoing}"
     consumer_nid = outgoing[0][1]
-    assert "Filter" in type(plan[consumer_nid]).__name__, (
+    assert "Filter" in plan[consumer_nid].kind, (
         f"expected a Filter directly above the Scan, found "
-        f"{type(plan[consumer_nid]).__name__}"
+        f"{plan[consumer_nid].kind}"
     )
 
 
@@ -169,7 +169,7 @@ def test_trunc_alias_predicate_pushes_through_project_to_scan():
         assert reader_nid is not None
         outgoing = list(plan.outgoing_edges(reader_nid))
         assert len(outgoing) == 1
-        assert "Filter" in type(plan[outgoing[0][1]]).__name__, (
+        assert "Filter" in plan[outgoing[0][1]].kind, (
             "expected the TRUNC-alias predicate to be rewritten onto the raw "
             "column and pushed directly above the Scan"
         )
@@ -219,7 +219,7 @@ def test_trunc_alias_range_pushes_below_nested_aggregate():
         # provider is a Filter.
         plan = session._plan
         inner_aggs = [
-            nid for nid in plan.nodes() if "Aggregate" in type(plan[nid]).__name__
+            nid for nid in plan.nodes() if "Aggregate" in plan[nid].kind
         ]
         assert inner_aggs, "expected at least one aggregate in the plan"
         # The deepest aggregate (closest to the reader) is the inner one.
@@ -246,9 +246,9 @@ def test_trunc_alias_range_pushes_below_nested_aggregate():
         inner_agg = min(inner_aggs, key=_depth_from_reader)
         provider = list(plan.ingoing_edges(inner_agg))
         assert len(provider) == 1
-        assert "Filter" in type(plan[provider[0][0]]).__name__, (
+        assert "Filter" in plan[provider[0][0]].kind, (
             "expected the rewritten date-range filter directly below the inner "
-            f"aggregate, found {type(plan[provider[0][0]]).__name__}"
+            f"aggregate, found {plan[provider[0][0]].kind}"
         )
     finally:
         session.close()

@@ -1024,7 +1024,6 @@ cdef class BasePlanNode:
     # Construction-time configuration (Python objects, not on the hot path).
     cdef public object properties
     cdef public object telemetry
-    cdef public dict parameters
     cdef public list columns
     # The ACTIVE COLUMN SET at this node — every identity something above it still
     # reads. projection_pushdown records it on every logical node (its `visit` writes
@@ -1036,7 +1035,6 @@ cdef class BasePlanNode:
     cdef public object pre_update_columns
     cdef public str identity
     cdef public object _empty_morsel_cache
-    cdef public str _time_stat_key
     cdef public object readings   # defaultdict(int); operators use `+= 1` patterns
     # Cached iterator backing the default `next_morsel` implementation —
     # lazy-initialised on first call from drive_scan.
@@ -1073,15 +1071,18 @@ cdef class BasePlanNode:
             free(self._trace_buf)
             self._trace_buf = NULL
 
-    def __init__(self, properties=None, **parameters):
+    def __init__(self, properties, step, columns=None, pre_update_columns=None):
+        """`step` is the typed logical plan step this operator was planned from;
+        `columns` / `pre_update_columns` are the output columns and the liveness
+        set the operator works to (None: none / unknown)."""
         from collections import defaultdict
         from opteryx.models import QueryTelemetry
         from opteryx.operators.catalog import get_registry
         from opteryx.utils import random_string
 
         self.properties = properties
+        self.step = step
         self.telemetry = QueryTelemetry(properties.query_id)
-        self.parameters = parameters
         self.execution_time = 0
         self.downstream_time = 0
         self.identity = random_string()
@@ -1090,10 +1091,9 @@ cdef class BasePlanNode:
         self.bytes_in = 0
         self.records_out = 0
         self.bytes_out = 0
-        self.columns = parameters.get("columns") or []
-        self.pre_update_columns = parameters.get("pre_update_columns") or set()
+        self.columns = columns or []
+        self.pre_update_columns = pre_update_columns or set()
 
-        self._time_stat_key = f"time_{self.name.lower().replace(' ', '_')}"
         self._empty_morsel_cache = None
         self.readings = defaultdict(int)
 
@@ -1139,7 +1139,7 @@ cdef class BasePlanNode:
 
     def __call__(self, morsel):
         """Legacy direct invocation for operators that don't enter the push
-        pipeline (ShowValue, SetVariable, ShowCreate, ViewManagement,
+        pipeline (SetVariable, ShowCreate, ViewManagement,
         TableManagement, RelationManagement, Insert, Explain, ShowColumns).
         These all retain a `def execute(self, morsel)` generator method;
         this wrapper yields from it without any per-morsel telemetry.
@@ -3797,6 +3797,12 @@ def build_terminal_exc(NativePlan nplan, NativeErrorSlot errslot):
     if errslot.code == 2:
         from opteryx.exceptions import DataError
         return DataError(errslot.message() or "unknown data error")
+    # Code 3 (kErrCodeReadError, operator.hpp) marks a STORAGE read failure - a scan
+    # could not fetch bytes it was planned to read. Raised as DatasetReadError, the
+    # class every non-native read path raises for the same failure.
+    if errslot.code == 3:
+        from opteryx.exceptions import DatasetReadError
+        return DatasetReadError(errslot.message() or "unknown read error")
     return RuntimeError(
         "[%d]: %s" % (errslot.code, errslot.message() or "unknown")
     )
@@ -3970,7 +3976,7 @@ _DRAKEN_CMP_OP_FLIPPED[18] = -1
 # Include order: base classes / shared types before their consumers.
 # -----------------------------------------------------------------------------
 
-# ReaderNode is subclassed by function_dataset, parquet_read, show_value
+# ReaderNode is subclassed by the scan readers and function_dataset
 include "read/read.pyx"
 
 include "cross_join/cross_join.pyx"
@@ -3992,7 +3998,6 @@ include "show_snapshots/show_snapshots.pyx"
 include "show_lineage/show_lineage.pyx"
 include "show_sources/show_sources.pyx"
 include "show_create/show_create.pyx"
-include "show_value/show_value.pyx"
 include "table_management/table_management.pyx"
 include "relation_management/relation_management.pyx"
 include "insert/insert.pyx"

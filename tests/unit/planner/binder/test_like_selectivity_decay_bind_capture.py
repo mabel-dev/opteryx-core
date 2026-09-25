@@ -127,11 +127,9 @@ def test_set_after_bind_does_not_retroactively_change_an_already_bound_plan():
 
 
 def test_unset_decay_is_none_not_a_default_guess():
-    # Node.__getattr__ returns None for any never-set attribute -- confirms
-    # the estimator's fallback trigger (decay is None -> flat constant) is
+    # A comparison nothing captured a decay onto reads None -- confirms the
+    # estimator's fallback trigger (decay is None -> flat constant) is
     # reachable, not just theoretical.
-    from opteryx.models import Node
-
     fresh_node = Comparison(value="InStr")
     assert fresh_node.like_selectivity_decay is None
 

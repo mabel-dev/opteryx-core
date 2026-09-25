@@ -298,7 +298,7 @@ def _type_name(schema_column, physical=None) -> str:
     INCLUDING any parameters (`DECIMAL(10, 2)`, `TIMESTAMP[ms]`), so it is preferred;
     the physical tag's own name is the fallback when no ColumnType is in hand.
     """
-    column_type = getattr(schema_column, "column_type", None)
+    column_type = schema_column.column_type if schema_column is not None else None
     if column_type is not None:
         # ColumnType's __str__ IS the canonical SQL type name - it delegates to
         # draken, which owns that mapping (see logical_type.py).
@@ -433,7 +433,7 @@ _INT_KIND_TYPES = frozenset((
 
 
 def _physical_type(schema_column):
-    ct = getattr(schema_column, "column_type", None)
+    ct = schema_column.column_type if schema_column is not None else None
     return ct.physical if ct is not None else None
 
 
@@ -454,7 +454,7 @@ def _computed_array_subexpression(node, _depth=0):
     if node.node_type not in (
         NodeType.IDENTIFIER, NodeType.EVALUATED, NodeType.AGGREGATOR, NodeType.LITERAL
     ):
-        sc = getattr(node, "schema_column", None)
+        sc = node.schema_column
         if sc is not None and _physical_type(sc) == DrakenType.ARRAY:
             return node
     for child in node.children():
@@ -816,6 +816,8 @@ class _Compiler:
         # as columns enter the layout (_remember_types, _add_computed).
         self._types: dict = {}
         self._cts: dict = {}
+        self._names: dict = {}
+        self._hash_key_ids_cache = None
         # WP-INSTR (instrument 2): per-scan Source-type selection, keyed by scan
         # node identity. "NativeParquetScanSource" == zero-Python native pull;
         # "StreamingScanSource" == the GIL trampoline. Later work packages assert
@@ -889,7 +891,7 @@ class _Compiler:
 
         _first_nid = next(iter(plan.nodes()), None)
         _variables = (
-            getattr(plan[_first_nid].properties, "variables", None)
+            plan[_first_nid].properties.variables
             if _first_nid is not None
             else None
         )
@@ -921,7 +923,7 @@ class _Compiler:
         carrying the seed for computed keys is the string-kernel step (E37 step 2).
         A bare `SELECT DISTINCT` (no ON list, dedup over all columns) is
         left unmarked here — correct but unoptimized, refined later."""
-        ids = getattr(self, "_hash_key_ids_cache", None)
+        ids = self._hash_key_ids_cache
         if ids is not None:
             return ids
         ids = set()
@@ -967,11 +969,11 @@ class _Compiler:
             results = [self._rewrite_case(r) for r in expr.results]
             els = (self._rewrite_case(expr.else_result)
                    if expr.else_result is not None else None)
-            sc = getattr(expr, "schema_column", None)
-            out_ct = getattr(sc, "column_type", None)
+            sc = expr.schema_column
+            out_ct = sc.column_type if sc is not None else None
 
             def _coerce(r):
-                if out_ct is None or getattr(r, "node_type", None) != NodeType.LITERAL:
+                if out_ct is None or r.node_type != NodeType.LITERAL:
                     return r
                 v = r.value
                 phys = getattr(out_ct.physical, "name", "")
@@ -1015,9 +1017,9 @@ class _Compiler:
             if (out_ct is not None and out_ct.logical is not None
                     and getattr(out_ct.physical, "name", "") in ("DECIMAL", "DECIMAL128")):
                 for br in list(results) + ([els] if els is not None else []):
-                    if getattr(br, "node_type", None) == NodeType.LITERAL:
+                    if br.node_type == NodeType.LITERAL:
                         continue
-                    br_ct = getattr(getattr(br, "schema_column", None), "column_type", None)
+                    br_ct = br.schema_column.column_type if br.schema_column is not None else None
                     if (br_ct is not None and br_ct.logical is not None
                             and getattr(br_ct.physical, "name", "") in ("DECIMAL", "DECIMAL128")
                             and int(br_ct.logical.scale) != int(out_ct.logical.scale)):
@@ -1030,7 +1032,7 @@ class _Compiler:
                          parameters=[cond, _coerce(res), acc])
                 acc = f
             acc.schema_column = sc
-            acc.alias = getattr(expr, "alias", None)
+            acc.alias = expr.alias
             return acc
         return rewrite_children(expr, self._rewrite_case)
 
@@ -1051,16 +1053,13 @@ class _Compiler:
             return expr
         if expr.node_type == NodeType.COMPARISON_OPERATOR:
             new = None
-            for a, b in (("left", "right"), ("right", "left")):
-                col = getattr(expr, a)
-                lit = getattr(expr, b)
-                # duck-typed: identifiers may not be compiled-Node instances
+            for a, col, lit in (("left", expr.left, expr.right), ("right", expr.right, expr.left)):
                 if col is None or lit is None:
                     continue
-                if getattr(lit, "node_type", None) != NodeType.LITERAL:
+                if lit.node_type != NodeType.LITERAL:
                     continue
-                sc = getattr(col, "schema_column", None)
-                ct = getattr(sc, "column_type", None) if sc is not None else None
+                sc = col.schema_column
+                ct = sc.column_type if sc is not None else None
                 if (ct is None or ct.logical is None
                         or getattr(ct.physical, "name", "") != "DECIMAL"):
                     continue
@@ -1135,7 +1134,11 @@ class _Compiler:
                 nl.type = _lit_type
                 if new is None:
                     new = expr.copy()
-                setattr(new, b, nl)
+                # The literal is the side opposite the column.
+                if a == "left":
+                    new.right = nl
+                else:
+                    new.left = nl
             return new if new is not None else expr
         return rewrite_children(expr, self._rewrite_decimal_compares)
 
@@ -1409,7 +1412,7 @@ class _Compiler:
         Same shape as _project_agg_operands, which hoists SUM(a * b) for the same
         reason: the consumer takes a column, so give it one."""
         for node_ in eval_nodes or []:
-            sc = getattr(node_, "schema_column", None)
+            sc = node_.schema_column
             if sc is not None and sc.identity is not None and sc.identity in layout:
                 # Already a materialized column in the incoming stream — e.g. a
                 # GROUP BY ALL key expression re-read in the final projection, which
@@ -1435,7 +1438,7 @@ class _Compiler:
             side = self._ARRAY_CONSUMING_COMPARISONS.get(node.value)
             if side is None:
                 return None
-            operand = getattr(node, side)
+            operand = node.left if side == "left" else node.right
             # A LITERAL array is not a per-row array and has no column to become:
             # `x = ANY([1,2,3])` lowers to draken_in_list, and a fully-literal
             # comparison constant-folds. Hoisting either would replace a bind-time
@@ -1469,7 +1472,7 @@ class _Compiler:
             NodeType.IDENTIFIER, NodeType.EVALUATED, NodeType.AGGREGATOR
         ):
             return layout   # already lowers to BC_LOAD_COL — nothing to hoist
-        sc = getattr(operand, "schema_column", None)
+        sc = operand.schema_column
         if sc is None or sc.identity is None:
             return layout   # unbound: leave it for the gate to reject, don't guess
         if _physical_type(sc) != DrakenType.ARRAY:
@@ -1513,13 +1516,13 @@ class _Compiler:
             NodeType.IDENTIFIER, NodeType.EVALUATED, NodeType.AGGREGATOR
         ):
             return   # not a plain column — nothing to share a parse against
-        src_sc = getattr(left, "schema_column", None)
+        src_sc = left.schema_column
         if src_sc is None or src_sc.identity is None or src_sc.identity not in layout:
             return
         if _physical_type(src_sc) not in self._JSON_SOURCE_TYPES:
             return   # binder should have rejected this; don't guess, just don't fuse
 
-        out_sc = getattr(node, "schema_column", None)
+        out_sc = node.schema_column
         if out_sc is None or out_sc.identity is None:
             return   # unbound — leave it for the normal path to handle or reject
         if node.right is None or node.right.value is None:
@@ -1634,9 +1637,9 @@ class _Compiler:
         ct_by_identity = {}
         node_by_identity = {}
         for node_ in eval_nodes:
-            sc = getattr(node_, "schema_column", None)
+            sc = node_.schema_column
             if sc is not None and sc.identity is not None:
-                ct_by_identity[sc.identity] = getattr(sc, "column_type", None)
+                ct_by_identity[sc.identity] = sc.column_type
                 node_by_identity[sc.identity] = node_
 
         layout = list(layout)
@@ -1660,8 +1663,8 @@ class _Compiler:
         for node_ in eval_nodes:
             if not should_evaluate(node_):
                 continue
-            sc = getattr(node_, "schema_column", None)
-            identity = getattr(sc, "identity", None) if sc is not None else None
+            sc = node_.schema_column
+            identity = sc.identity if sc is not None else None
             if identity is None or identity not in layout:
                 pending.append(node_)
                 continue
@@ -1677,15 +1680,15 @@ class _Compiler:
             declared = ct_by_identity.get(identity)
             stream_lt = self._layout_type(None, identity)
             if declared is not None and stream_lt is not None:
-                declared_pt = getattr(declared, "physical", None)
+                declared_pt = declared.physical
                 if declared_pt is not None and declared_pt != stream_lt:
                     _unsupported(
                         "a computed column whose identity collides with a "
                         "differently-typed stream column (binder identity reuse)")
-            declared_lg = getattr(declared, "logical", None) if declared is not None else None
-            stream_ct = (getattr(self, "_cts", None) or {}).get(identity)
+            declared_lg = declared.logical if declared is not None else None
+            stream_ct = self._cts.get(identity)
             if declared_lg is not None and stream_ct is not None:
-                stream_lg = getattr(stream_ct, "logical", None)
+                stream_lg = stream_ct.logical
                 if stream_lg is not None and str(stream_lg) != str(declared_lg):
                     _unsupported(
                         "a computed column whose identity collides with a "
@@ -1726,7 +1729,6 @@ class _Compiler:
                            int(lg.precision), int(lg.scale),
                            int(getattr(lg, "dimension", 0) or 0))
             if ct is not None:
-                self._types = getattr(self, "_types", None) or {}
                 self._types[identity] = ct.physical
             self.nplan.add_expr_project(p, bc, layout, identity, logical,
                                         preserve_shape=preserve_shape)
@@ -1826,20 +1828,20 @@ class _Compiler:
         No memory guard travels in the spec: ARRAY_AGG's retained bytes are bounded by
         a global budget the sink owns natively (kArrayAggBudgetBytes), not by anything
         planning decides per query."""
-        order = getattr(agg, "order", None)
+        order = agg.order
         descending = False
         if order:
             if len(order) != 1:
                 _unsupported("ARRAY_AGG ordered by more than one column")
             # order entries are (node, ascending: bool)
             descending = not bool(order[0][1])
-        limit = getattr(agg, "limit", None)
+        limit = agg.limit
         if limit is not None:
             limit = int(limit)
             if limit < 0:
                 _unsupported("ARRAY_AGG with a negative LIMIT")
         return {
-            "distinct": getattr(agg, "duplicate_treatment", None) == "Distinct",
+            "distinct": agg.duplicate_treatment == "Distinct",
             "ordered": bool(order),
             "descending": descending,
             "limit": limit,
@@ -1850,7 +1852,7 @@ class _Compiler:
         ExprProject columns first; the sink then aggregates a plain column."""
         computed = []
         for agg in aggregates:
-            params = getattr(agg, "parameters", None) or []
+            params = agg.parameters or []
             if agg.value == "APPROX_PERCENTILE":
                 # 2 params: the column expression + a percentile literal —
                 # only params[0] is a projectable operand.
@@ -1870,7 +1872,7 @@ class _Compiler:
             for operand in operands:
                 if operand.node_type in (NodeType.WILDCARD, NodeType.IDENTIFIER):
                     continue
-                sc = getattr(operand, "schema_column", None)
+                sc = operand.schema_column
                 if sc is not None and sc.identity is not None and sc.identity not in layout:
                     computed.append(operand)
         if computed:
@@ -1892,7 +1894,7 @@ class _Compiler:
                 _unsupported("an aggregate without a bound schema column")
             if func not in self._AGG_FNS:
                 _unsupported(f"the aggregate function {func}")
-            params = getattr(agg, "parameters", None) or []
+            params = agg.parameters or []
             percentile = None
             if func == "APPROX_PERCENTILE":
                 # APPROX_PERCENTILE(expr, percentile) — a second, query-time-
@@ -1918,7 +1920,7 @@ class _Compiler:
             elif len(params) != 1:
                 _unsupported(f"{func} with {len(params)} parameters")
             operand = params[0]
-            distinct = getattr(agg, "duplicate_treatment", None) == "Distinct"
+            distinct = agg.duplicate_treatment == "Distinct"
             if distinct and func in self._DISTINCT_INVARIANT_FUNCS:
                 # Duplicates cannot change the answer — lower as the plain aggregate.
                 distinct = False
@@ -1939,7 +1941,7 @@ class _Compiler:
                     continue
                 specs.append((sc.identity, "CountStar", self._AGG_NO_OPERAND))
                 continue
-            psc = getattr(operand, "schema_column", None)
+            psc = operand.schema_column
             if psc is None:
                 _unsupported(f"{func} over an unbound operand")
             if psc.identity not in layout:
@@ -2008,7 +2010,7 @@ class _Compiler:
                         _NUMERIC_ONLY,
                     )
                 operand2 = params[1]
-                psc2 = getattr(operand2, "schema_column", None)
+                psc2 = operand2.schema_column
                 if psc2 is None:
                     _unsupported("CORR over an unbound operand")
                 if psc2.identity not in layout:
@@ -2242,10 +2244,10 @@ class _Compiler:
             computed_keys = []
             group_key_names = {}
             for grp in step.groups:
-                sc = getattr(grp, "schema_column", None)
+                sc = grp.schema_column
                 if sc is not None and sc.identity is not None:
-                    group_key_names[sc.identity] = getattr(sc, "name", None)
-                if getattr(grp, "node_type", None) in (None, NodeType.IDENTIFIER,
+                    group_key_names[sc.identity] = sc.name
+                if grp.node_type in (NodeType.IDENTIFIER,
                                                        NodeType.WILDCARD):
                     continue
                 if sc is not None and sc.identity is not None and sc.identity not in layout:
@@ -2288,7 +2290,7 @@ class _Compiler:
                         "been refused at bind time."
                     )
                 operand = call.parameters[0]
-                identity = getattr(getattr(operand, "schema_column", None), "identity", None)
+                identity = operand.schema_column.identity if operand.schema_column is not None else None
                 if identity is None or identity not in group_cols:
                     _unsupported(
                         "GROUPING() over a column that is not a GROUP BY key of "
@@ -2398,9 +2400,9 @@ class _Compiler:
             # it a computed key falls back to its opaque internal identity.
             on_key_names = {}
             for expr in on_exprs:
-                sc = getattr(expr, "schema_column", None)
+                sc = expr.schema_column
                 if sc is not None and sc.identity is not None:
-                    on_key_names[sc.identity] = getattr(sc, "name", None)
+                    on_key_names[sc.identity] = sc.name
             if on:
                 # DISTINCT ON over a computed expression (e.g. `payload->'x'`,
                 # `UPPER(url)`): project the key expression to a stream column
@@ -2408,8 +2410,8 @@ class _Compiler:
                 # computed_keys handling above.
                 computed_keys = []
                 for expr in on_exprs:
-                    sc = getattr(expr, "schema_column", None)
-                    if getattr(expr, "node_type", None) in (None, NodeType.IDENTIFIER,
+                    sc = expr.schema_column
+                    if expr.node_type in (NodeType.IDENTIFIER,
                                                              NodeType.WILDCARD):
                         continue
                     if sc is not None and sc.identity is not None and sc.identity not in layout:
@@ -2650,8 +2652,6 @@ class _Compiler:
             # into the same identity -> (physical type, ColumnType) tracking every
             # other branch uses (`_layout_type`/`self._cts`), rather than a
             # bespoke lookup just for this node.
-            self._types = getattr(self, "_types", None) or {}
-            self._cts = getattr(self, "_cts", None) or {}
             for _kind, sc, _params, _frame in step.outputs or []:
                 if sc.column_type is not None:
                     self._types[sc.identity] = sc.column_type.physical
@@ -2929,7 +2929,7 @@ class _Compiler:
             if identity not in layout:
                 _unsupported("an ORDER BY key the engine could not resolve here")
             self._check_key_type(
-                "ORDER BY", getattr(col.schema_column, "name", None) or identity,
+                "ORDER BY", col.schema_column.name or identity,
                 self._layout_type(None, identity))
             spec.append((layout.index(identity), bool(ascending)))
         return spec, layout
@@ -3098,8 +3098,8 @@ class _Compiler:
         from opteryx.operators._operators import SkeneScanPlan
         from opteryx.connectors.skene_io import resolve_skene_coalesce_tuning
 
-        read_columns = getattr(scan, "skene_read_schema_columns", None) or []
-        predicates = list(getattr(scan, "predicates", None) or [])
+        read_columns = scan.skene_read_schema_columns or []
+        predicates = list(scan.predicates or [])
         if not read_columns:
             # No projection AND no predicate columns == bare COUNT(*). A pushed
             # predicate always contributes its columns to the read set, so this
@@ -3132,7 +3132,7 @@ class _Compiler:
             # row, so a term this cannot express costs a decode and never an
             # answer. Absent for a manifest whose bounds are not ordinal — and a
             # skene manifest's always are (FileSystemConnector's SKENE branch).
-            manifest = getattr(scan, "manifest", None)
+            manifest = scan.manifest
             if manifest is not None:
                 # By PHYSICAL name: the Source matches these against each file's
                 # own footer schema, which is file-named. `sc.name` is the same
@@ -3147,7 +3147,7 @@ class _Compiler:
         # never decoded, never copied and never faulted in. No kill switch of its
         # own: FEATURE_DISABLE_LENGTH_ONLY_COLUMN unregisters the strategy, so the
         # annotation is simply absent and this list is all zeros.
-        _length_only_ids = getattr(scan, "_length_only_columns", None) or frozenset()
+        _length_only_ids = scan._length_only_columns or frozenset()
         length_only = [1 if sc.identity in _length_only_ids else 0 for sc in read_columns]
         splan = SkeneScanPlan(
             list(scan.skene_files),
@@ -3271,16 +3271,16 @@ class _Compiler:
 
         if not config.features.skene_late_materialization:
             return None
-        read_columns = getattr(scan, "skene_read_schema_columns", None) or []
+        read_columns = scan.skene_read_schema_columns or []
         if not read_columns:
             # Zero-projection (COUNT(*)) — nothing to defer, and it needs the
             # materialized path's genuine zero-column morsel anyway.
             return None
-        manifest = getattr(scan, "manifest", None)
+        manifest = scan.manifest
         if manifest is None or manifest.get_file_count() == 0:
             return None
 
-        pushed = list(getattr(scan, "predicates", None) or [])
+        pushed = list(scan.predicates or [])
         shape = self._skene_latmat_consumers(nid, bool(pushed))
         if shape is None:
             return None
@@ -3296,7 +3296,7 @@ class _Compiler:
         sort_expression, ascending = order_by[0]
         if sort_expression.node_type != NodeType.IDENTIFIER:
             return None
-        sort_sc = getattr(sort_expression, "schema_column", None)
+        sort_sc = sort_expression.schema_column
         if sort_sc is None:
             return None
         read_by_identity = {sc.identity: sc for sc in read_columns}
@@ -3321,7 +3321,7 @@ class _Compiler:
             for reference in get_all_nodes_of_type(
                 pred, (NodeType.IDENTIFIER, NodeType.EVALUATED)
             ):
-                referenced_sc = getattr(reference, "schema_column", None)
+                referenced_sc = reference.schema_column
                 if referenced_sc is None or referenced_sc.identity not in read_by_identity:
                     return None
 
@@ -3354,7 +3354,7 @@ class _Compiler:
         pred_col_to_p1 = [p1_index_by_name[name] for name in resolver.col_names]
 
         # ── the gates ──────────────────────────────────────────────────────────────
-        query_variables = getattr(scan.properties, "variables", None)
+        query_variables = scan.properties.variables
         deferred = [sc for sc in read_columns if sc.name not in p1_index_by_name]
         min_deferred = int(_resolve_var(
             "skene_late_materialization_min_deferred_columns",
@@ -3417,7 +3417,7 @@ class _Compiler:
         #
         # No kill switch of its own: FEATURE_DISABLE_LENGTH_ONLY_COLUMN unregisters
         # the strategy, so the annotation is simply absent and both lists are zeros.
-        _length_only_ids = getattr(scan, "_length_only_columns", None) or frozenset()
+        _length_only_ids = scan._length_only_columns or frozenset()
         p1_length_only = [1 if sc.identity in _length_only_ids else 0 for sc in p1_scs]
         out_length_only = [
             1 if sc.identity in _length_only_ids else 0 for sc in read_columns
@@ -3509,7 +3509,7 @@ class _Compiler:
         from opteryx.operators._operators import bytecode_is_all_c_native
         from opteryx.variables import resolve as _resolve_var
 
-        if not scan.columns and not getattr(scan, "predicates", None):
+        if not scan.columns and not scan.predicates:
             # R1: zero-projection, no predicate — a bare COUNT(*) shape with
             # nothing to read and no filter to relocate. Note: this is NOT the
             # common bare-`SELECT COUNT(*) FROM t` form — that short-circuits to
@@ -3557,7 +3557,7 @@ class _Compiler:
         # either (no pass-2-only columns, or the manifest selectivity estimate
         # says the predicate does not prune enough) — for those a single-pass
         # native scan is the same work the trampoline would have done.
-        manifest = getattr(scan, "manifest", None)
+        manifest = scan.manifest
         if manifest is None:
             # R7a: no manifest at all. Structurally defensive — a bind that never
             # read one (see the schema_only bind, which sets manifest=None ON
@@ -3585,7 +3585,7 @@ class _Compiler:
         # Before that no battery query could prune this hard and the conflation was
         # unreachable, which is why it survived this long.
 
-        predicates = getattr(scan, "predicates", None)
+        predicates = scan.predicates
 
         # WP-02 fail-closed gate: lower the AND-composed pushed predicate to a
         # c-native span (the VERBATIM tree the trampoline lowers). Not lowerable →
@@ -3612,7 +3612,7 @@ class _Compiler:
         if predicates:
             for pred in predicates:
                 for ident in get_all_nodes_of_type(pred, select_nodes=(NodeType.IDENTIFIER,)):
-                    sc = getattr(ident, "schema_column", None)
+                    sc = ident.schema_column
                     if sc is None:
                         continue
                     # NOTE (was "R5 / WP-11 fail-closed"): a BOOL column used as a
@@ -3664,7 +3664,7 @@ class _Compiler:
         # Parallel to read_scs; all-zero when nothing qualifies. This is the
         # identity -> positional translation point (identities do not cross the
         # native boundary), mirroring hash_key_columns above.
-        _length_only_ids = getattr(scan, "_length_only_columns", None) or frozenset()
+        _length_only_ids = scan._length_only_columns or frozenset()
         length_only_columns = [1 if sc.identity in _length_only_ids else 0 for sc in read_scs]
         paths = manifest.get_file_paths()
         names = [sc.name for sc in read_scs]
@@ -3697,8 +3697,8 @@ class _Compiler:
         # This relation's validated `WITH(name = value)` settings (None when it
         # carries none) and the session's variables — the two layers the IO
         # resolvers below merge, hint first.
-        _scan_vars = getattr(scan.properties, "variables", None)
-        _scan_overrides = getattr(scan, "scan_overrides", None)
+        _scan_vars = scan.properties.variables
+        _scan_overrides = scan.scan_overrides
         splan = open_native_scan_plan(
             paths,
             names,
@@ -3707,12 +3707,12 @@ class _Compiler:
             # does — a remote scan (GCS, S3) is latency-bound and wants the wider budget.
             decode_workers=_resolve_var(
                 "parquet_gcs_io_workers",
-                getattr(scan.properties, "variables", None),
+                scan.properties.variables,
                 config.PARQUET_GCS_IO_WORKERS,
             ) if connector_type in ("GCS", "GS", "S3") else config.resolve_parquet_local_io_workers(
                 _resolve_var(
                     "parquet_local_io_workers",
-                    getattr(scan.properties, "variables", None),
+                    scan.properties.variables,
                     config.PARQUET_LOCAL_IO_WORKERS,
                 ),
             ),
@@ -3831,14 +3831,14 @@ class _Compiler:
         from opteryx.operators._operators import scan_footer_bytes_cache
         from opteryx.variables import resolve as _resolve_var
 
-        sort_name = getattr(scan, "_topn_sort_name", None)
-        topn_limit = getattr(scan, "_topn_limit", None)
-        predicates = getattr(scan, "predicates", None)
+        sort_name = scan._topn_sort_name
+        topn_limit = scan._topn_limit
+        predicates = scan.predicates
         if sort_name is None or topn_limit is None or not predicates:
             return None
         if not config.features.parquet_late_materialization:
             return None
-        manifest = getattr(scan, "manifest", None)
+        manifest = scan.manifest
         if manifest is None or manifest.get_file_count() == 0:
             return None
         if not scan.columns:
@@ -3864,7 +3864,7 @@ class _Compiler:
         p1_seen = set()
         for pred in predicates:
             for ident in get_all_nodes_of_type(pred, select_nodes=(NodeType.IDENTIFIER,)):
-                sc = getattr(ident, "schema_column", None)
+                sc = ident.schema_column
                 if sc is None or sc.name in p1_seen:
                     continue
                 p1_seen.add(sc.name)
@@ -3891,7 +3891,7 @@ class _Compiler:
             selectivity *= manifest.estimate_selectivity(pred)
         if selectivity > _resolve_var(
             "parquet_late_materialization_max_selectivity",
-            getattr(scan.properties, "variables", None),
+            scan.properties.variables,
             config.PARQUET_LATE_MATERIALIZATION_MAX_SELECTIVITY,
         ):
             return None
@@ -3937,12 +3937,12 @@ class _Compiler:
 
         decode_workers = _resolve_var(
             "parquet_gcs_io_workers",
-            getattr(scan.properties, "variables", None),
+            scan.properties.variables,
             config.PARQUET_GCS_IO_WORKERS,
         ) if connector_type in ("GCS", "GS", "S3") else config.resolve_parquet_local_io_workers(
             _resolve_var(
                 "parquet_local_io_workers",
-                getattr(scan.properties, "variables", None),
+                scan.properties.variables,
                 config.PARQUET_LOCAL_IO_WORKERS,
             ),
         )
@@ -3950,8 +3950,8 @@ class _Compiler:
         # two plans for one scan cannot disagree about how to fetch.
         # `_scan_overrides` is this relation's validated `WITH(name = value)`
         # settings and outranks the session's SET.
-        _scan_vars = getattr(scan.properties, "variables", None)
-        _scan_overrides = getattr(scan, "scan_overrides", None)
+        _scan_vars = scan.properties.variables
+        _scan_overrides = scan.scan_overrides
         fetch_ahead = resolve_fetch_ahead(_scan_vars, _scan_overrides)
         fetch_ahead_gate = resolve_fetch_ahead_gate(_scan_vars, _scan_overrides)
         in_flight_override = resolve_in_flight_limit(_scan_vars, _scan_overrides)
@@ -3979,7 +3979,7 @@ class _Compiler:
                 logical_coerce=coerce,
                 hash_key_columns=[1 if sc.identity in _key_ids else 0 for sc in scs],
                 length_only_columns=[
-                    1 if sc.identity in (getattr(scan, "_length_only_columns", None)
+                    1 if sc.identity in (scan._length_only_columns
                                          or frozenset()) else 0 for sc in scs],
                 pool=None,
                 fetch_ahead=fetch_ahead,
@@ -4038,7 +4038,7 @@ class _Compiler:
         emit_ids = [sc.identity for sc in projected_scs]
         return (p1_plan, p2_plan, resolver, pred_col_to_p1,
                 p1_index_by_name[sort_name],
-                not bool(getattr(scan, "_topn_descending", False)),
+                not bool(scan._topn_descending),
                 int(topn_limit), out_from_p1, out_from_p2, emit_ids)
 
     def _compile_scan(self, scan, kind, nid):
@@ -4074,7 +4074,7 @@ class _Compiler:
                 (lat_plan, resolver, sort_p1_index, sort_ascending, topn_limit,
                  p1_column_count) = lat
                 self.scan_sources[scan.identity] = "NativeSkeneLatmatScanSource"
-                manifest = getattr(scan, "manifest", None)
+                manifest = scan.manifest
                 file_count = manifest.get_file_count() if manifest is not None else 0
                 row_group_count = _skene_row_group_count(manifest, file_count)
                 record_count = (
@@ -4130,7 +4130,7 @@ class _Compiler:
             if plan is not None:
                 splan, filter_bc, read_layout, emit_ids = plan
                 self.scan_sources[scan.identity] = "NativeSkeneScanSource"
-                manifest = getattr(scan, "manifest", None)
+                manifest = scan.manifest
                 file_count = manifest.get_file_count() if manifest is not None else 0
                 record_count = (
                     manifest.get_record_count() if manifest is not None else None
@@ -4203,7 +4203,7 @@ class _Compiler:
         # ParquetReadNode subtracts each file's delete vector per row group
         # (see _apply_delete_filter). The fast paths can learn deletes later;
         # a dataset with no delete debt — the overwhelming case — is untouched.
-        _scan_manifest = getattr(scan, "manifest", None)
+        _scan_manifest = scan.manifest
         _scan_has_deletes = _scan_manifest is not None and _scan_manifest.has_deletes()
         lat = None if _scan_has_deletes else self._latmat_scan_plan(scan)
         if lat is not None:
@@ -4211,7 +4211,7 @@ class _Compiler:
              topn_limit, out_from_p1, out_from_p2, emit_ids) = lat
             from opteryx.expression.evaluator.evaluation import get_pass1_eval_fn_ptr
             self.scan_sources[scan.identity] = "LatmatScanSource"
-            manifest = getattr(scan, "manifest", None)
+            manifest = scan.manifest
             self.scan_facts[scan.identity] = {
                 "files_read": manifest.get_file_count() if manifest is not None else 0,
                 "row_groups_read": p1_plan.row_group_count,
@@ -4236,7 +4236,7 @@ class _Compiler:
             # the rugo IO pipeline (no GIL trampoline, no per-morsel attach).
             # Same emit order and layout contract as the trampoline path below.
             self.scan_sources[scan.identity] = "NativeParquetScanSource"
-            manifest = getattr(scan, "manifest", None)
+            manifest = scan.manifest
             reloc = self._relocated_scan_filters.get(scan.identity)
             self.scan_facts[scan.identity] = {
                 "files_read": manifest.get_file_count() if manifest is not None else 0,
@@ -4257,7 +4257,7 @@ class _Compiler:
             # removes the Limit node from the plan when it pushes (limit_pushdown.py
             # `_apply_to_scan`), so no downstream LimitOperator truncates. Pushdown
             # only fires with no pushed predicate and no OFFSET.
-            self.nplan.set_native_scan_source(p, splan, getattr(scan, "limit", None))
+            self.nplan.set_native_scan_source(p, splan, scan.limit)
             # RUNTIME MIN/MAX JOIN FILTER (parquet): same record, same purpose and
             # same refusal semantics as skene_scan_pipelines above. The projection
             # is the right key set: a probe-side join key must be emitted by the
@@ -4291,7 +4291,7 @@ class _Compiler:
         # compare reached the c-native kernel with an off-scale literal, violating
         # its same-type/same-scale contract and silently dropping rows
         # (`d > 1.49` lost `1.50`). One lowering, one rewrite chain.
-        if getattr(scan, "predicates", None):
+        if scan.predicates:
             scan.compiled_predicate = self._lower_scan_predicate(scan.predicates)
         p = self.nplan.new_pipeline()
         # A scan that is not concurrent-pull safe (two-pass latmat, fallback
@@ -4912,7 +4912,7 @@ class _Compiler:
             for side in (comparison.left, comparison.right):
                 if side is None or side.node_type != NodeType.IDENTIFIER:
                     continue
-                schema_column = getattr(side, "schema_column", None)
+                schema_column = side.schema_column
                 if schema_column is not None:
                     by_identity[schema_column.identity] = side
 
@@ -4988,8 +4988,7 @@ class _Compiler:
         right_identity = node.step.asof_right_column
         if left_identity is None or right_identity is None:
             return {}
-        cts = getattr(self, "_cts", None) or {}
-        left_ct, right_ct = cts.get(left_identity), cts.get(right_identity)
+        left_ct, right_ct = self._cts.get(left_identity), self._cts.get(right_identity)
         if left_ct is None or right_ct is None:
             return {}
         if left_ct.physical == right_ct.physical:
@@ -5031,7 +5030,7 @@ class _Compiler:
                 % (left_category.name, right_category.name)
             )
 
-        names = getattr(self, "_names", None) or {}
+        names = self._names
         coercions = {}
         for identity, column_type in ((left_identity, left_ct), (right_identity, right_ct)):
             if column_type.physical == target.physical:
@@ -5134,7 +5133,7 @@ class _Compiler:
         if source.node_type == NodeType.LITERAL:
             return self._compile_unnest_literal(in_edges, node, source, target_identity)
 
-        source_sc = getattr(source, "schema_column", None)
+        source_sc = source.schema_column
         if source_sc is None:
             _unsupported("a CROSS JOIN UNNEST source column without a bound identity")
 
@@ -5279,7 +5278,7 @@ class _Compiler:
         the IPV4 descriptor — so the column would DECLARE IPV4 while carrying a
         bare integer vector, render as numbers, and be refused by CIDR_AGG.
         """
-        source_sc = getattr(source, "schema_column", None)
+        source_sc = source.schema_column
         if source_sc is None:
             _unsupported("a CROSS JOIN CIDR_UNNEST source without a bound identity")
 
@@ -5489,7 +5488,7 @@ class _Compiler:
         bound_layout = list(playout)
         bound_idx = []
         for bound in (band_lower, band_upper):
-            schema_column = getattr(bound, "schema_column", None)
+            schema_column = bound.schema_column
             if schema_column is None:
                 _unsupported("a band bound the compiler cannot identify")
             identity = schema_column.identity
@@ -5721,9 +5720,8 @@ class _Compiler:
         Refusing costs a read; it never costs an answer."""
         from opteryx.types.logical_type import DrakenType
 
-        cts = getattr(self, "_cts", None) or {}
-        build_ct = cts.get(build_identity)
-        probe_ct = cts.get(probe_identity)
+        build_ct = self._cts.get(build_identity)
+        probe_ct = self._cts.get(probe_identity)
         if build_ct is None or probe_ct is None:
             return False
         build_pt = build_ct.physical
@@ -5821,26 +5819,13 @@ class _Compiler:
         return wired
 
     def _remember_types(self, columns):
-        types = getattr(self, "_types", None)
-        if types is None:
-            types = self._types = {}
-        cts = getattr(self, "_cts", None)
-        if cts is None:
-            cts = self._cts = {}
-        names = getattr(self, "_names", None)
-        if names is None:
-            names = self._names = {}
         for col in columns or []:
             sc = col.schema_column
-            pt = _physical_type(sc)
-            if pt is not None:
-                types[sc.identity] = pt
-            ct = getattr(sc, "column_type", None)
-            if ct is not None:
-                cts[sc.identity] = ct
-            name = getattr(sc, "name", None)
-            if name is not None:
-                names[sc.identity] = name
+            if sc.column_type is not None:
+                self._types[sc.identity] = sc.column_type.physical
+                self._cts[sc.identity] = sc.column_type
+            if sc.name is not None:
+                self._names[sc.identity] = sc.name
 
     def _payload_types(self, node_id, layout):
         """Physical DrakenType (int) + logical tuple + ARRAY element chain for each
@@ -5856,16 +5841,13 @@ class _Compiler:
         OUTER tail's probe half, which retains no probe morsel to learn from."""
         node = self.plan[node_id]
         by_identity = {}
-        for col in getattr(node, "columns", None) or []:
-            sc = getattr(col, "schema_column", None)
-            if sc is not None:
-                by_identity[sc.identity] = getattr(sc, "column_type", None)
-        cts = getattr(self, "_cts", None) or {}
-        types_map = getattr(self, "_types", None) or {}
+        for col in node.columns:
+            if col.schema_column is not None:
+                by_identity[col.schema_column.identity] = col.schema_column.column_type
         types, logical, element = [], [], []
         for identity in layout:
-            ct = by_identity.get(identity) or cts.get(identity)
-            pt = ct.physical if ct is not None else types_map.get(identity)
+            ct = by_identity.get(identity) or self._cts.get(identity)
+            pt = ct.physical if ct is not None else self._types.get(identity)
             # When a build-payload column's type is unresolvable here (e.g. an
             # aggregate output whose result type the binder never threaded into the
             # compiler's type maps), the value defaults to VARCHAR. The native build
@@ -5878,14 +5860,14 @@ class _Compiler:
         return types, logical, element
 
     def _layout_type(self, node, identity):
-        types = getattr(self, "_types", None) or {}
-        if identity in types:
-            return types[identity]
+        if identity in self._types:
+            return self._types[identity]
         # Fall back to the node's own column bindings.
-        for col in getattr(node, "columns", None) or []:
-            sc = getattr(col, "schema_column", None)
-            if sc is not None and sc.identity == identity:
-                return _physical_type(sc)
+        if node is not None:
+            for col in node.columns:
+                sc = col.schema_column
+                if sc is not None and sc.identity == identity:
+                    return _physical_type(sc)
         return None
 
     def _layout_name(self, identity):
@@ -5893,8 +5875,7 @@ class _Compiler:
         the offending column in a plan-time NotSupportedError; falls back to the
         (opaque) identity when no scan/materialized-source column recorded a name
         for it (e.g. a computed key with no simple source column)."""
-        names = getattr(self, "_names", None) or {}
-        return names.get(identity, identity)
+        return self._names.get(identity, identity)
 
 
 def compile_to_native(plan, pool=None):
@@ -6034,7 +6015,7 @@ def compile_to_native(plan, pool=None):
     final_types = []
     final_logical = []
     for col in exit_node.columns:
-        ct = getattr(col.schema_column, "column_type", None)
+        ct = col.schema_column.column_type
         pt = ct.physical if ct is not None else None
         final_types.append(pt.value if pt is not None else DrakenType.VARCHAR.value)
         final_logical.append(_logical_tuple(ct))
@@ -6073,7 +6054,7 @@ def execute_native(plan, telemetry=None, trace_sink=None):
     # query's resolved session variables. `plan.nodes()` yields ids; take the first.
     _first_nid = next(iter(plan.nodes()), None)
     _query_variables = (
-        getattr(plan[_first_nid].properties, "variables", None) if _first_nid is not None else None
+        plan[_first_nid].properties.variables if _first_nid is not None else None
     )
     dop = resolve_worker_count(
         _resolve_var("max_execution_workers", _query_variables, config.MAX_EXECUTION_WORKERS)

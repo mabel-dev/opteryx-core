@@ -59,7 +59,7 @@ def _contains_function(node):
 def _estimate_selectivity(condition):
     """Conservative selectivity using defaults when no distribution is available."""
 
-    op = getattr(condition, "value", None)
+    op = condition.value
     return DEFAULT_SELECTIVITY.get(op, 0.5)
 
 
@@ -246,7 +246,7 @@ def order_predicates(predicates: list, telemetry, relation_stats=None) -> list:
     complex_preds = []
 
     for pred in predicates:
-        cond = getattr(pred, "condition", None)
+        cond = pred.condition
         if cond is None or cond.node_type != NodeType.COMPARISON_OPERATOR:
             complex_preds.append(pred)
             continue

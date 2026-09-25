@@ -30,8 +30,9 @@ column through and only appends the row-number column.
 
 from typing import Tuple
 
+from opteryx.compiled.structures.plan_steps import PlanStep
 from opteryx.expression import NodeType
-from opteryx.models import LogicalColumn, Node
+from opteryx.models import LogicalColumn
 from opteryx.planner.binder.binder import inner_binder
 from opteryx.operators.window.helpers import FLOAT_VALUED
 from opteryx.operators.window.helpers import GATHERED_FUNCTIONS
@@ -40,7 +41,7 @@ from opteryx.types import logical_type as _plt
 from opteryx.types.schema import RelationSchema
 
 
-def visit_window(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_window(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     # Bind the partition-by expressions against the input relations.
     bound_partitions = []
     for col in node.partition_by or []:

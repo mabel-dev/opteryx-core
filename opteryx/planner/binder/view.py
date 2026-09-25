@@ -5,16 +5,16 @@
 
 from typing import Tuple
 
+from opteryx.compiled.structures.plan_steps import PlanStep
 from opteryx.exceptions import SqlError
 from opteryx.exceptions import md_table
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn
-from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.models import current_name_of
 
 
-def visit_show_columns(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_show_columns(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     node.schema = context.schemas[node.relation]
     node.columns = []
     for schema_column in node.schema.columns:
@@ -28,7 +28,7 @@ def visit_show_columns(self, node: Node, context: BindingContext) -> Tuple[Node,
     return node, context
 
 
-def visit_show_manifest(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_show_manifest(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind SHOW MANIFEST FOR: consume the Manifest the Scan below already
     loaded (visit_scan populates context.manifests, gated on the owner-only
     MANIFEST permission — see dataset.py's for_manifest_only check) and fix
@@ -71,7 +71,7 @@ def visit_show_manifest(self, node: Node, context: BindingContext) -> Tuple[Node
     return node, context
 
 
-def visit_show_snapshots(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_show_snapshots(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind SHOW [ALL] SNAPSHOTS FOR: consume the commit history the Scan below
     already fetched (visit_scan populates context.snapshots for a
     `for_snapshots_only` Scan, gated at READ — or at MANIFEST for the ALL form,
@@ -85,7 +85,7 @@ def visit_show_snapshots(self, node: Node, context: BindingContext) -> Tuple[Nod
     from opteryx.exceptions import UnsupportedSyntaxError
     from opteryx.models.snapshot_history import snapshots_output_schema
 
-    include_expiry = getattr(node, "history_view", None) == "snapshots_all"
+    include_expiry = node.history_view == "snapshots_all"
 
     if context.schema_only:
         # The history IS this statement's result, and a schema-only bind
@@ -117,7 +117,7 @@ def visit_show_snapshots(self, node: Node, context: BindingContext) -> Tuple[Nod
     return node, context
 
 
-def visit_show_lineage(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_show_lineage(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind SHOW LINEAGE FOR: consume the receipts the Scan below already
     fetched (visit_scan populates context.snapshots for a `for_snapshots_only`
     Scan whose `history_view` is "lineage", gated at READ on the relation) and
@@ -160,7 +160,7 @@ def visit_show_lineage(self, node: Node, context: BindingContext) -> Tuple[Node,
     return node, context
 
 
-def visit_show_sources(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_show_sources(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind SHOW SOURCES FOR: consume the standing source list the Scan below
     already read off the dataset (visit_scan, `history_view` "sources") and
     fix the output to the source-list shape. Every source is named, as for
@@ -206,7 +206,7 @@ _SHOW_CREATE_ACTIONS = {
 }
 
 
-def visit_show(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_show(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind SHOW CREATE.
 
     Gated per object type, at the tier of whoever authors that kind of thing -
@@ -396,7 +396,7 @@ def _assert_name_free_in_source(view_name: str, context: BindingContext) -> None
     )
 
 
-def visit_create_view(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_create_view(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the CREATE VIEW node to determine which connector should handle
     storing the view definition.
@@ -432,7 +432,7 @@ def visit_create_view(self, node: Node, context: BindingContext) -> Tuple[Node, 
     return node, context
 
 
-def visit_alter_view(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_alter_view(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the ALTER VIEW node to determine which connector should handle
     updating the view definition.
@@ -462,7 +462,7 @@ def visit_alter_view(self, node: Node, context: BindingContext) -> Tuple[Node, B
     return node, context
 
 
-def visit_drop_view(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_drop_view(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the DROP VIEW node to determine which connector should handle
     removing the view definition(s).

@@ -6,10 +6,12 @@
 import copy
 from typing import Tuple
 
+from opteryx.compiled.structures.expressions import Expression
+from opteryx.compiled.structures.expressions import expressions_with
+from opteryx.compiled.structures.plan_steps import PlanStep
 from opteryx.exceptions import InvalidInternalStateError, UnsupportedSyntaxError
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import LogicalColumn
-from opteryx.models import Node
 from opteryx.planner.binder.binder import inner_binder
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.join_helpers import (
@@ -52,8 +54,8 @@ def _pop_using_column(
 
 
 def _bind_on_condition_split(
-    on_node: Node, left_context: BindingContext, right_context: BindingContext, right_set: set
-) -> Node:
+    on_node: Expression, left_context: BindingContext, right_context: BindingContext, right_set: set
+) -> Expression:
     """
     Bind each side of an AND-tree of comparisons using a split context.
 
@@ -80,8 +82,12 @@ def _bind_on_condition_split(
         return on_node
 
     if on_node.node_type == NodeType.COMPARISON_OPERATOR:
-        right_source = getattr(on_node.right, "source", None)
-        left_source = getattr(on_node.left, "source", None)
+        right_source = (
+            on_node.right.source if type(on_node.right) in expressions_with("source") else None
+        )
+        left_source = (
+            on_node.left.source if type(on_node.left) in expressions_with("source") else None
+        )
 
         if right_source in right_set:
             on_node.right, _ = inner_binder(on_node.right, right_context)
@@ -97,7 +103,7 @@ def _bind_on_condition_split(
     return on_node
 
 
-def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_join(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Visits a JOIN node and handles different types of joins.
 
@@ -269,7 +275,7 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
         # residual (decorrelate_subquery, post-bind; TPC-H Q21). It spans both legs exactly like
         # the ON condition, so it binds the same way — including the split-context path,
         # since outer and inner can share a column name (`l1.l_suppkey` / `l2.l_suppkey`).
-        residual = getattr(node, "residual", None)
+        residual = node.residual
         if residual is not None:
             if not node.right_relation_names:
                 raise InvalidInternalStateError(
@@ -357,7 +363,7 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     # Both schemas would otherwise contain e.g. "group", triggering AmbiguousIdentifierError
     # when the outer Project binds it. Remove the subquery's copies — only the outer scan's
     # copy should be visible downstream.
-    if getattr(node, "is_window_join", False) and node.on and node.right_relation_names:
+    if node.is_window_join and node.on and node.right_relation_names:
         right_set = set(node.right_relation_names)
         partition_col_names = {
             n.schema_column.name

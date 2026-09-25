@@ -413,8 +413,10 @@ def _unwrap(node):
 
 
 def _column_identity(node):
-    schema_column = getattr(node, "schema_column", None)
-    return getattr(schema_column, "identity", None)
+    if node is None:
+        return None
+    schema_column = node.schema_column
+    return schema_column.identity if schema_column is not None else None
 
 
 def _match_null_safe_eq(condition):
@@ -1444,6 +1446,17 @@ _SUBQUERY_BEARING_ATTRS = {
 }
 
 
+def _owned_list(node, attribute):
+    """The expression list a `_SUBQUERY_BEARING_ATTRS` entry names on `node`."""
+    if attribute == "columns":
+        return node.columns
+    if attribute == "aggregates":
+        return node.aggregates
+    if attribute == "groups":
+        return node.groups
+    raise InvalidInternalStateError(f"'{attribute}' is not a subquery-bearing expression list")
+
+
 def _find_subquery_in_node(node):
     """
     Locate the first scalar subquery this node owns, as (node, replace_fn).
@@ -1451,7 +1464,7 @@ def _find_subquery_in_node(node):
     See `_SUBQUERY_BEARING_ATTRS` for which lists each node type owns.
     """
     for attribute in _SUBQUERY_BEARING_ATTRS.get(node.node_type, ()):
-        found, replace = _find_subquery_in_columns(getattr(node, attribute))
+        found, replace = _find_subquery_in_columns(_owned_list(node, attribute))
         if found is not None:
             return found, replace
     return None, None
@@ -1495,7 +1508,7 @@ def _find_existence_in_node(node):
     and the join has to go BELOW it.
     """
     for attribute in _SUBQUERY_BEARING_ATTRS.get(node.node_type, ()):
-        columns = getattr(node, attribute)
+        columns = _owned_list(node, attribute)
         for index, column in enumerate(columns or []):
             found, replace_child = _find_existence(column)
             if found is not None:
@@ -1697,7 +1710,7 @@ def _graft_existence_join(
     plan += inner_plan
     inner_relations, inner_schemas = _collect_relations(plan, inner_exit)
     for inner_key, _outer_key in key_pairs:
-        origin = getattr(inner_key.schema_column, "origin", None)
+        origin = inner_key.schema_column.origin if inner_key.schema_column is not None else None
         if origin:
             inner_relations.update(origin)
 
@@ -1877,8 +1890,12 @@ class DecorrelateSubqueryStrategy(OptimizationStrategy):
             # here rather than reaching the compiler.
             _expressions = [
                 expression
-                for attribute in ("columns", "aggregates", "groups")
-                for expression in (getattr(node, attribute, None) or [])
+                for expressions in (
+                    node.columns,
+                    node.aggregates if node.node_type in steps_with("aggregates") else None,
+                    node.groups if node.node_type in steps_with("groups") else None,
+                )
+                for expression in (expressions or [])
             ]
             if node.node_type in _SUBQUERY_BEARING_ATTRS and get_all_nodes_of_type(
                 _expressions, select_nodes=(NodeType.SUBQUERY,)
@@ -2367,7 +2384,7 @@ def _build_filter_join(
     # Any relation named by a key that this leg supplies must be known as one of
     # its names, or the key resolves to neither side (see the `$in-` stamp above).
     for inner_key, _outer_key in key_pairs:
-        origin = getattr(inner_key.schema_column, "origin", None)
+        origin = inner_key.schema_column.origin if inner_key.schema_column is not None else None
         if origin:
             inner_relations.update(origin)
 
@@ -2722,7 +2739,7 @@ def _materialize_boolean_value(
     # column of a scanned relation — that origin has to be a known name of this
     # leg too, or the key resolves to neither side (mirrors `_build_filter_join`).
     for inner_key, _outer_key in key_pairs:
-        origin = getattr(inner_key.schema_column, "origin", None)
+        origin = inner_key.schema_column.origin if inner_key.schema_column is not None else None
         if origin:
             inner_relations.update(origin)
 
@@ -2762,8 +2779,8 @@ def _materialize_boolean_value(
     substituted.value = "IsNull" if negated else "IsNotNull"
     substituted.schema_column = remove.schema_column
     substituted.centre = _count_reference()
-    substituted.query_column = getattr(remove, "query_column", None)
-    substituted.alias = getattr(remove, "alias", None)
+    substituted.query_column = remove.query_column
+    substituted.alias = remove.alias
 
     filter_node.condition = replace_fn(substituted)
     filter_node.columns = [
@@ -3283,7 +3300,7 @@ def _decorrelate_projection(plan: LogicalPlan, project_nid: str, telemetry) -> L
 
     # --- the subquery's value becomes an ordinary column ----------------------
     for attribute in _SUBQUERY_BEARING_ATTRS.get(project_node.node_type, ()):
-        expressions = getattr(project_node, attribute)
+        expressions = _owned_list(project_node, attribute)
         for index, expression in enumerate(expressions or []):
             expressions[index] = _replace_every(
                 expression, subquery, lambda: _reference_to(value_column)

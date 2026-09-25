@@ -87,8 +87,8 @@ class TopNManifestPruningStrategy(OptimizationStrategy):
         if node.node_type != LogicalPlanStepType.Scan:
             return context
 
-        sort_name = getattr(node, "topn_sort_name", None)
-        limit = getattr(node, "topn_limit", None)
+        sort_name = node.topn_sort_name
+        limit = node.topn_limit
         # LAW: prune_files_for_topn drops files by their bounds; stale bounds
         # would drop the rows the top-N actually wanted.
         if node.manifest is None or not node.manifest.stats_are_authoritative:
@@ -111,7 +111,7 @@ class TopNManifestPruningStrategy(OptimizationStrategy):
             # Non-zero or unknown NULL count - out of v1 scope, see module docstring.
             return context
 
-        descending = bool(getattr(node, "topn_descending", False))
+        descending = bool(node.topn_descending)
 
         original_count = node.manifest.get_file_count()
         # Copy-on-write: a real prune hands back a NEW Manifest (same object
@@ -132,6 +132,6 @@ class TopNManifestPruningStrategy(OptimizationStrategy):
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
         for _, node in get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Scan,)):
-            if getattr(node, "topn_limit", None) and node.manifest is not None:
+            if node.topn_limit and node.manifest is not None:
                 return True
         return False

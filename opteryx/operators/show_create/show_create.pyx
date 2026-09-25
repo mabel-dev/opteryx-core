@@ -27,18 +27,18 @@ from opteryx.models import QueryProperties
 
 
 class ShowCreateNode(BasePlanNode):
-    def __init__(self, properties: QueryProperties, **parameters):
-        BasePlanNode.__init__(self, properties=properties, **parameters)
+    def __init__(self, properties: QueryProperties, step):
+        BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
 
-        self.object_type = parameters.get("object_type")
-        self.object_name = parameters.get("object_name")
+        self.object_type = step.object_type
+        self.object_name = step.object_name
         # SHOW CREATE TRIGGER only: object_name is the HOLDER (the table), and
         # trigger_name is the trigger itself - a trigger name is only unique
         # per holder.
-        self.trigger_name = parameters.get("trigger_name")
+        self.trigger_name = step.trigger_name
         # Bound by visit_show, which authorizes the read first. Never derived
         # here - deriving it locally is what let this run unauthorized.
-        self.connector = parameters.get("connector")
+        self.connector = step.connector
 
     @property
     def name(self):  # pragma: no cover

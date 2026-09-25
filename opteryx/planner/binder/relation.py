@@ -6,13 +6,14 @@
 from typing import Optional
 from typing import Tuple
 
+from opteryx.compiled.structures.plan_steps import PlanStep
+from opteryx.compiled.structures.plan_steps import steps_with
 from opteryx.exceptions import ColumnNotFoundError
-from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.utils import suggest_alternative
 
 
-def visit_create_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_create_relation(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the CREATE TABLE node to determine which connector should handle
     storing the table.
@@ -75,7 +76,7 @@ def visit_create_relation(self, node: Node, context: BindingContext) -> Tuple[No
     return node, context
 
 
-def visit_clone_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_clone_relation(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind CREATE TABLE <target> CLONE <upstream>.
 
@@ -154,7 +155,7 @@ def visit_clone_relation(self, node: Node, context: BindingContext) -> Tuple[Nod
     return node, context
 
 
-def visit_clone_collection(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_clone_collection(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind CREATE COLLECTION <target> CLONE <source>.
 
@@ -213,7 +214,7 @@ def visit_clone_collection(self, node: Node, context: BindingContext) -> Tuple[N
     return node, context
 
 
-def visit_resync_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_resync_relation(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind ALTER TABLE <fork> RESYNC [FORCE].
 
@@ -248,7 +249,7 @@ def visit_resync_relation(self, node: Node, context: BindingContext) -> Tuple[No
     return node, context
 
 
-def visit_detach_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_detach_relation(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind ALTER TABLE <fork> DETACH.
 
@@ -279,7 +280,7 @@ def visit_detach_relation(self, node: Node, context: BindingContext) -> Tuple[No
     return node, context
 
 
-def visit_drop_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_drop_relation(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the DROP TABLE node to determine which connectors should handle
     removing the tables.
@@ -308,8 +309,8 @@ def visit_drop_relation(self, node: Node, context: BindingContext) -> Tuple[Node
 
 
 def visit_create_collection(
-    self, node: Node, context: BindingContext
-) -> Tuple[Node, BindingContext]:
+    self, node: PlanStep, context: BindingContext
+) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the CREATE COLLECTION node to determine which connector should handle
     creating the collection.
@@ -338,7 +339,7 @@ def visit_create_collection(
     return node, context
 
 
-def visit_drop_collection(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_drop_collection(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the DROP COLLECTION node to determine which connectors should handle
     removing the collections.
@@ -372,7 +373,7 @@ def visit_drop_collection(self, node: Node, context: BindingContext) -> Tuple[No
     return node, context
 
 
-def visit_alter_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_alter_relation(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the ALTER TABLE ... CLUSTER BY node to determine which connector
     should handle persisting the new sort order.
@@ -401,7 +402,7 @@ def visit_alter_relation(self, node: Node, context: BindingContext) -> Tuple[Nod
     return node, context
 
 
-def visit_rename_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_rename_relation(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the ALTER TABLE ... RENAME TO node to determine which connector should
     handle moving the relation.
@@ -438,7 +439,7 @@ def visit_rename_relation(self, node: Node, context: BindingContext) -> Tuple[No
     return node, context
 
 
-def visit_add_column(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_add_column(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the ALTER TABLE ... ADD COLUMN node to determine which connector
     should handle adding the column.
@@ -468,7 +469,7 @@ def visit_add_column(self, node: Node, context: BindingContext) -> Tuple[Node, B
     return node, context
 
 
-def visit_drop_column(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_drop_column(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the ALTER TABLE ... DROP COLUMN node to determine which connector
     should handle removing the column.
@@ -496,7 +497,7 @@ def visit_drop_column(self, node: Node, context: BindingContext) -> Tuple[Node, 
     return node, context
 
 
-def visit_rename_column(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_rename_column(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the ALTER TABLE ... RENAME COLUMN node to determine which connector
     should handle renaming the column.
@@ -523,7 +524,7 @@ def visit_rename_column(self, node: Node, context: BindingContext) -> Tuple[Node
     return node, context
 
 
-def visit_add_relationship(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_add_relationship(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY ... NOT ENFORCED`.
 
     This is the first statement in the engine that names two datasets, so it is
@@ -601,8 +602,8 @@ def visit_add_relationship(self, node: Node, context: BindingContext) -> Tuple[N
 
 
 def visit_drop_relationship(
-    self, node: Node, context: BindingContext
-) -> Tuple[Node, BindingContext]:
+    self, node: PlanStep, context: BindingContext
+) -> Tuple[PlanStep, BindingContext]:
     """Bind `ALTER TABLE ... DROP CONSTRAINT`.
 
     One end only: the constraint is named, not the dataset it referenced, and
@@ -643,8 +644,8 @@ def _require_column(connector, relation_name: str, column_name: str) -> None:
 
 
 def visit_alter_column_type(
-    self, node: Node, context: BindingContext
-) -> Tuple[Node, BindingContext]:
+    self, node: PlanStep, context: BindingContext
+) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the ALTER TABLE ... ALTER COLUMN ... TYPE node: resolve the connector,
     and reject an illegal type change before anything is written.
@@ -689,7 +690,7 @@ def visit_alter_column_type(
     return node, context
 
 
-def visit_analyze(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_analyze(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the ANALYZE TABLE / DROP STATISTICS node.
 
@@ -718,8 +719,8 @@ def visit_analyze(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
 
 
 def visit_alter_materialized_view_owner(
-    self, node: Node, context: BindingContext
-) -> Tuple[Node, BindingContext]:
+    self, node: PlanStep, context: BindingContext
+) -> Tuple[PlanStep, BindingContext]:
     """Bind ALTER MATERIALIZED VIEW ... OWNER TO ...
 
     Two identities decide a materialized view, and this statement moves one of
@@ -843,8 +844,8 @@ def visit_alter_materialized_view_owner(
 
 
 def visit_alter_materialized_view_suspended(
-    self, node: Node, context: BindingContext
-) -> Tuple[Node, BindingContext]:
+    self, node: PlanStep, context: BindingContext
+) -> Tuple[PlanStep, BindingContext]:
     """Bind ALTER MATERIALIZED VIEW ... SUSPEND | RESUME.
 
     AUTOMATE on the view. Suspending borrows nobody's authority, but whether a
@@ -874,7 +875,7 @@ def visit_alter_materialized_view_suspended(
     return node, context
 
 
-def visit_create_task(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_create_task(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind CREATE TASK.
 
     A task is stored SQL and nothing more - it carries NO identity. A person
@@ -967,7 +968,7 @@ def visit_create_task(self, node: Node, context: BindingContext) -> Tuple[Node, 
     # carry THIS author's identity - so it takes both of CREATE TRIGGER's gates:
     # AUTOMATE on the table, and an author who can be billed. One statement must
     # not do by implication what the explicit statement would refuse.
-    if getattr(node, "on_table", None):
+    if node.on_table:
         if not can_perform_action(context.execution_context, node.on_table, action="AUTOMATE"):
             raise PermissionError(
                 f"User does not have permission to create a trigger on table "
@@ -985,7 +986,7 @@ def visit_create_task(self, node: Node, context: BindingContext) -> Tuple[Node, 
     return node, context
 
 
-def visit_alter_task(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_alter_task(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind ALTER TASK <name> AS <statement>.
 
     Same authoring bound as CREATE TASK (see visit_create_task) - an author
@@ -1092,8 +1093,8 @@ def _trigger_work_relations(visitor, connector, trigger: dict, context) -> Tuple
 
 
 def visit_alter_trigger_owner(
-    self, node: Node, context: BindingContext
-) -> Tuple[Node, BindingContext]:
+    self, node: PlanStep, context: BindingContext
+) -> Tuple[PlanStep, BindingContext]:
     """Bind ALTER TRIGGER ... OWNER TO.
 
     The owner is the identity an UNATTENDED run carries. A person running
@@ -1201,7 +1202,7 @@ def visit_alter_trigger_owner(
     return node, context
 
 
-def visit_drop_task(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_drop_task(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind DROP TASK.
 
     Gated at AUTOMATE on the task itself, symmetric with creation. Not the DROP
@@ -1229,7 +1230,7 @@ def visit_drop_task(self, node: Node, context: BindingContext) -> Tuple[Node, Bi
     return node, context
 
 
-def _bind_subscription(node: Node, context: BindingContext, statement: str) -> Node:
+def _bind_subscription(node: PlanStep, context: BindingContext, statement: str) -> PlanStep:
     """Shared binding for LISTEN TO and UNLISTEN.
 
     **LISTEN is a READ activity** (architect ruling 2026-09-02). The gate is
@@ -1330,12 +1331,12 @@ def _bind_subscription(node: Node, context: BindingContext, statement: str) -> N
     return node
 
 
-def visit_listen(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_listen(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind LISTEN TO <object> [FOR ...]. READ-gated on what the object writes."""
     return _bind_subscription(node, context, "LISTEN TO"), context
 
 
-def visit_unlisten(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_unlisten(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind UNLISTEN <task>.
 
     Identically gated to LISTEN. Not weakened to "anyone may stop listening":
@@ -1348,7 +1349,7 @@ def visit_unlisten(self, node: Node, context: BindingContext) -> Tuple[Node, Bin
     return _bind_subscription(node, context, "UNLISTEN"), context
 
 
-def visit_create_trigger(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_create_trigger(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind CREATE TRIGGER.
 
     Two gates. AUTOMATE on the HOLDER the trigger hangs off - the table whose
@@ -1379,7 +1380,7 @@ def visit_create_trigger(self, node: Node, context: BindingContext) -> Tuple[Nod
     from opteryx.managers.permissions import can_perform_action
     from opteryx.managers.permissions import can_principal_own_materialized_view
 
-    event_kind = getattr(node, "event_kind", None) or "commit"
+    event_kind = node.event_kind or "commit"
     holder_noun = "table" if event_kind == "commit" else "task"
 
     node.connector = connector_factory(node.table_name, telemetry=context.telemetry)
@@ -1409,7 +1410,7 @@ def visit_create_trigger(self, node: Node, context: BindingContext) -> Tuple[Nod
     return node, context
 
 
-def _bind_task_held_trigger(node: Node, event_kind: str) -> None:
+def _bind_task_held_trigger(node: PlanStep, event_kind: str) -> None:
     """The checks a schedule or signal trigger takes beyond a commit trigger's.
 
     The holder is the task (`node.table_name` and `node.task_name` are the same
@@ -1441,7 +1442,7 @@ def _bind_task_held_trigger(node: Node, event_kind: str) -> None:
             "under it, so **EXECUTE** must name one."
         )
 
-    window_source = getattr(node, "window_source", None)
+    window_source = node.window_source
     if window_source:
         task_workspace = task.partition(".")[0]
         source_workspace = window_source.partition(".")[0]
@@ -1480,8 +1481,8 @@ def _bind_task_held_trigger(node: Node, event_kind: str) -> None:
 
 
 def visit_alter_trigger_suspended(
-    self, node: Node, context: BindingContext
-) -> Tuple[Node, BindingContext]:
+    self, node: PlanStep, context: BindingContext
+) -> Tuple[PlanStep, BindingContext]:
     """Bind ALTER TRIGGER ... SUSPEND|RESUME. Same tier as creating one: AUTOMATE
     on the holder - the table for a commit trigger, the task for a schedule or
     signal trigger, which share a namespace and so a grant."""
@@ -1507,8 +1508,8 @@ def visit_alter_trigger_suspended(
 
 
 def visit_alter_trigger_minimum_interval(
-    self, node: Node, context: BindingContext
-) -> Tuple[Node, BindingContext]:
+    self, node: PlanStep, context: BindingContext
+) -> Tuple[PlanStep, BindingContext]:
     """Bind ALTER TRIGGER ... SET MINIMUM INTERVAL TO. Same tier as suspending
     one: AUTOMATE on the table, because how often unattended work may run is a
     decision about what the table does to the world, not about what is in it."""
@@ -1533,7 +1534,7 @@ def visit_alter_trigger_minimum_interval(
     return node, context
 
 
-def visit_drop_trigger(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_drop_trigger(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the DROP TRIGGER node to determine which connector should handle
     removing the trigger. `table_name` is the holder: a table for a commit
@@ -1564,7 +1565,7 @@ def visit_drop_trigger(self, node: Node, context: BindingContext) -> Tuple[Node,
     return node, context
 
 
-def _bind_snapshot_ddl(self, node: Node, context: BindingContext, statement: str):
+def _bind_snapshot_ddl(self, node: PlanStep, context: BindingContext, statement: str):
     """Shared binding for CREATE TAG, DROP TAG and ROLLBACK TO VERSION.
 
     All three are ALTER TABLE statements about one relation, and all three are
@@ -1603,24 +1604,24 @@ def _bind_snapshot_ddl(self, node: Node, context: BindingContext, statement: str
     return node, context
 
 
-def visit_create_tag(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_create_tag(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind ALTER TABLE ... CREATE TAG."""
     return _bind_snapshot_ddl(self, node, context, "**ALTER TABLE ... CREATE TAG**")
 
 
-def visit_drop_tag(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_drop_tag(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind ALTER TABLE ... DROP TAG."""
     return _bind_snapshot_ddl(self, node, context, "**ALTER TABLE ... DROP TAG**")
 
 
 def visit_rollback_relation(
-    self, node: Node, context: BindingContext
-) -> Tuple[Node, BindingContext]:
+    self, node: PlanStep, context: BindingContext
+) -> Tuple[PlanStep, BindingContext]:
     """Bind ALTER TABLE ... ROLLBACK TO VERSION."""
     return _bind_snapshot_ddl(self, node, context, "**ALTER TABLE ... ROLLBACK TO VERSION**")
 
 
-def visit_alter_workspace(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_alter_workspace(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the ALTER WORKSPACE ... SET node to determine which connector should
     handle persisting the workspace property.
@@ -1661,8 +1662,8 @@ def visit_alter_workspace(self, node: Node, context: BindingContext) -> Tuple[No
 
 
 def visit_alter_workspace_secure(
-    self, node: Node, context: BindingContext
-) -> Tuple[Node, BindingContext]:
+    self, node: PlanStep, context: BindingContext
+) -> Tuple[PlanStep, BindingContext]:
     """
     Bind ALTER WORKSPACE <source> SET SECURE ... | DROP SECURE ...
 
@@ -1699,7 +1700,7 @@ def visit_alter_workspace_secure(
     return node, context
 
 
-def visit_drop_workspace(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_drop_workspace(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the DROP WORKSPACE node to determine which connector should handle
     the drop, same shape as visit_alter_workspace.
@@ -1734,7 +1735,7 @@ def visit_drop_workspace(self, node: Node, context: BindingContext) -> Tuple[Nod
     return node, context
 
 
-def visit_truncate_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_truncate_relation(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the TRUNCATE TABLE node to determine which connector should handle
     truncating the table.
@@ -1762,7 +1763,7 @@ def visit_truncate_relation(self, node: Node, context: BindingContext) -> Tuple[
     return node, context
 
 
-def visit_compaction_commit(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_compaction_commit(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind the compaction sink.
 
     The read half - which relation, what schema, which files - was desugared
@@ -2042,7 +2043,7 @@ def _read_sources(visitor, context) -> list:
             return
         for _, plan_node in graph.nodes(True):
             if plan_node.node_type == LogicalPlanStepType.Scan:
-                table = getattr(plan_node, "connector", None)
+                table = plan_node.connector
                 if isinstance(table, OpteryxTable):
                     name = f"{table.workspace}.{table.dataset}"
                     key = (name, table.snapshot_id)
@@ -2068,10 +2069,12 @@ def _produced_by(node) -> Optional[str]:
     MATERIALIZED VIEW / REFRESH is populating. None for a hand-run statement -
     the one provenance field where absent is a state, not a bug. The connector
     qualifies the name; the binder only knows it as written."""
-    task = getattr(node, "executing_task", None)
+    task = node.executing_task if node.node_type in steps_with("executing_task") else None
     if task:
         return f"task:{task}"
-    if getattr(node, "is_refresh", False) or getattr(node, "is_materialized_view", False):
+    if (node.node_type in steps_with("is_refresh") and node.is_refresh) or (
+        node.node_type in steps_with("is_materialized_view") and node.is_materialized_view
+    ):
         return f"view:{node.relation_name}"
     return None
 
@@ -2122,7 +2125,7 @@ def _enforce_egress(visitor, node, context) -> None:
     # what a source workspace can have marked SECURE. A statement typed by hand
     # names nothing, so None - the exemption is object-level on purpose.
     refusals = node.connector.egress_verdict(
-        node.relation_name, sources, secured=getattr(node, "executing_task", None)
+        node.relation_name, sources, secured=node.executing_task
     )
     if not refusals:
         return
@@ -2142,7 +2145,7 @@ def _enforce_egress(visitor, node, context) -> None:
     )
 
 
-def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_insert(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the INSERT node:
     - resolve target connector, must be Writable
@@ -2181,10 +2184,10 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     node.read_sources = _read_sources(self, context)
     node.produced_by = _produced_by(node)
 
-    create_target = getattr(node, "create_target", False)
-    if_not_exists = getattr(node, "if_not_exists", False)
-    or_replace = getattr(node, "or_replace", False)
-    is_materialized_view = getattr(node, "is_materialized_view", False)
+    create_target = node.create_target
+    if_not_exists = node.if_not_exists
+    or_replace = node.or_replace
+    is_materialized_view = node.is_materialized_view
 
     # Bind-time capture, same reasoning as match_threshold: the InsertNode reads
     # this once from its own parameters rather than the native write path
@@ -2255,7 +2258,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     # REFRESH MATERIALIZED VIEW, which reaches the binder as a CTAS carrying
     # `is_refresh`. Everything else - plain CTAS, CREATE OR REPLACE TABLE,
     # INSERT - is refused, whether or not the target exists yet.
-    if not is_materialized_view and not getattr(node, "is_refresh", False):
+    if not is_materialized_view and not node.is_refresh:
         _reject_materialized_view_target(
             node, "**CREATE TABLE ... AS SELECT**" if create_target else "**INSERT**"
         )
@@ -2287,7 +2290,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
             # nothing is lost by not asking DROP as well), and REFRESH
             # MATERIALIZED VIEW arrives here carrying `is_refresh` and takes the
             # lower REFRESH tier.
-            if getattr(node, "is_refresh", False):
+            if node.is_refresh:
                 if not can_perform_action(
                     context.execution_context, node.relation_name, action="REFRESH"
                 ):
@@ -2324,7 +2327,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
                 "visit_insert: CTAS requires graph and source_tail_id"
             )
         feeder = self.graph[node.source_tail_id]
-        if not getattr(feeder, "columns", None):
+        if not feeder.columns:
             raise InvalidInternalStateError(
                 "visit_insert: CTAS source feeder has no bound columns"
             )
@@ -2357,8 +2360,8 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
             flat = SchemaColumn(
                 name=target_name,
                 column_type=sc.column_type,
-                nullable=getattr(sc, "nullable", True),
-                identity=mint_column_identity(getattr(node, "relation_name", None), target_name),
+                nullable=sc.nullable,
+                identity=mint_column_identity(node.relation_name, target_name),
             )
             target_columns.append(flat)
 
@@ -2448,7 +2451,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
                 "visit_insert: SELECT path requires graph and source_tail_id"
             )
         feeder = self.graph[node.source_tail_id]
-        if not getattr(feeder, "columns", None):
+        if not feeder.columns:
             raise InvalidInternalStateError(
                 "visit_insert: source feeder has no bound columns"
             )
@@ -2456,7 +2459,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
         source_types = [c.schema_column.category for c in feeder.columns]
 
     # ---- 2. Target column order (schema order, or explicit list order) ----
-    explicit_columns = getattr(node, "explicit_columns", None)
+    explicit_columns = node.explicit_columns
     if explicit_columns is None:
         target_columns_in_order = list(target_schema.columns)
     else:
@@ -2527,7 +2530,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     return node, context
 
 
-def visit_merge(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_merge(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind the MERGE node.
 
     The join, the action chain and the blended columns were already desugared
@@ -2597,7 +2600,7 @@ def visit_merge(self, node: Node, context: BindingContext) -> Tuple[Node, Bindin
     # rather than by name. Verify that here: a drift between the desugar and the
     # sink would write the right values into the wrong columns.
     feeder = self.graph[node.source_tail_id]
-    if not getattr(feeder, "columns", None):
+    if not feeder.columns:
         raise InvalidInternalStateError("visit_merge: source feeder has no bound columns")
 
     # `column.alias` is the output name — the same field ExitNode derives its
@@ -2633,7 +2636,7 @@ def visit_merge(self, node: Node, context: BindingContext) -> Tuple[Node, Bindin
     return node, context
 
 
-def _bind_grant_administration(node: Node, context: BindingContext, action: str) -> Node:
+def _bind_grant_administration(node: PlanStep, context: BindingContext, action: str) -> PlanStep:
     """Shared binding for GRANT, REVOKE and SHOW GRANTS ON.
 
     The bind-time gate is the same question the capability's apply/list path
@@ -2676,17 +2679,17 @@ def _bind_grant_administration(node: Node, context: BindingContext, action: str)
     return node
 
 
-def visit_grant_access(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_grant_access(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind GRANT <role> ON <kind> <object> TO USER <user>. Owner-gated."""
     return _bind_grant_administration(node, context, "GRANT"), context
 
 
-def visit_revoke_access(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_revoke_access(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind REVOKE <role> ON <kind> <object> FROM USER <user>. Owner-gated."""
     return _bind_grant_administration(node, context, "REVOKE"), context
 
 
-def visit_show_grants_on(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_show_grants_on(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind SHOW GRANTS ON <kind> <object>.
 
     Gated at GRANT — the same authority a mutation needs, deliberately: who
@@ -2698,8 +2701,8 @@ def visit_show_grants_on(self, node: Node, context: BindingContext) -> Tuple[Nod
 
 
 def visit_show_effective_grants_on(
-    self, node: Node, context: BindingContext
-) -> Tuple[Node, BindingContext]:
+    self, node: PlanStep, context: BindingContext
+) -> Tuple[PlanStep, BindingContext]:
     """Bind SHOW EFFECTIVE GRANTS ON <kind> <object>.
 
     Identically gated to SHOW GRANTS ON, and not weakened because it reports

@@ -25,6 +25,8 @@ rows match, which is the correct deduplication behaviour.  It also allows the
 execution engine to short-circuit after the first match per probe row.
 """
 
+from opteryx.compiled.structures.expressions import expressions_with
+from opteryx.compiled.structures.plan_steps import steps_with
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 
@@ -45,8 +47,12 @@ def _right_columns_used_above(plan: LogicalPlan, join_nid: str, right_relations:
         # `on` covers Join consumers — projection_pushdown rewrites Join.columns to
         # only the passthrough projection set, dropping the join keys themselves, so
         # we must inspect the consumer's join condition explicitly.
-        for attr in ("condition", "order_by", "groups", "having", "on"):
-            expr = getattr(node, attr, None)
+        for expr in (
+            node.condition if node.node_type in steps_with("condition") else None,
+            node.order_by if node.node_type in steps_with("order_by") else None,
+            node.groups if node.node_type in steps_with("groups") else None,
+            node.on if node.node_type in steps_with("on") else None,
+        ):
             if expr is None:
                 continue
             exprs = expr if isinstance(expr, list) else [expr]
@@ -55,11 +61,11 @@ def _right_columns_used_above(plan: LogicalPlan, join_nid: str, right_relations:
                 if isinstance(e, tuple):
                     e = e[0]
                 for ident in get_all_nodes_of_type(e, (NodeType.IDENTIFIER,)):
-                    if getattr(ident, "source", None) in right_relations:
+                    if ident.source in right_relations:
                         return True
 
         for col in node.columns or []:
-            if getattr(col, "source", None) in right_relations:
+            if (col.source if type(col) in expressions_with("source") else None) in right_relations:
                 return True
 
         queue.extend(plan.outgoing_edges(consumer_nid))
@@ -90,7 +96,9 @@ def _subtree_covers_relations(plan: LogicalPlan, nid: str, relations: set) -> bo
             continue
         seen.add(cur)
         node = plan[cur]
-        if getattr(node, "alias", None) in relations or getattr(node, "relation", None) in relations:
+        if (node.alias if node.node_type in steps_with("alias") else None) in relations or (
+            node.relation if node.node_type in steps_with("relation") else None
+        ) in relations:
             return True
         queue.extend(src for src, _, _ in plan.ingoing_edges(cur))
     return False
@@ -136,8 +144,8 @@ class JoinEliminationStrategy(OptimizationStrategy):
         if (
             node.node_type == LogicalPlanStepType.Join
             and node.type == "inner"
-            and not getattr(node, "using", None)
-            and getattr(node, "left_columns", None)
+            and not node.using
+            and node.left_columns
         ):
             context.collected_joins.append((context.node_id, node))
 

@@ -170,7 +170,7 @@ def _render_bare_reader(node: PlanStep, label: str, auto_alias_prefix: str) -> s
     """
     from opteryx.expression import NodeType, get_all_nodes_of_type
 
-    dataset = getattr(node, "dataset", None)
+    dataset = node.dataset
     path = f" ('{dataset}')" if dataset else ""
 
     # node.alias is never None by render time (opteryx.planner.binder.dataset always
@@ -179,7 +179,7 @@ def _render_bare_reader(node: PlanStep, label: str, auto_alias_prefix: str) -> s
     # isn't shown as if the user had written it. AS alias(col1, col2, ...) is not
     # supported (rejected at bind time), so alias is always a plain relation name,
     # never a column-rename list.
-    node_alias = getattr(node, "alias", None)
+    node_alias = node.alias
     alias = f" AS {node_alias}" if node_alias and not node_alias.startswith(auto_alias_prefix) else ""
 
     proj_names = [c.source_column for c in node.columns] if node.columns else []
@@ -194,7 +194,7 @@ def _render_bare_reader(node: PlanStep, label: str, auto_alias_prefix: str) -> s
     if node.predicates:
         for pred in node.predicates:
             for ident in get_all_nodes_of_type(pred, (NodeType.IDENTIFIER,)):
-                name = getattr(ident, "source_column", None) or getattr(ident, "value", None)
+                name = ident.source_column or ident.value
                 if name and name not in proj_set and name not in filter_only_names:
                     filter_only_names.append(name)
 
@@ -215,7 +215,7 @@ def render_heapsort(node: PlanStep) -> str:
         format_expression(expr) + ("" if ascending else " DESC")
         for expr, ascending in node.order_by
     )
-    qualifier = " VECTOR TOPK" if getattr(node, "vector_topk_candidate", False) else ""
+    qualifier = " VECTOR TOPK" if node.vector_topk_candidate else ""
     return f"HEAP SORT{qualifier} (LIMIT {node.limit}, ORDER BY [{order}])"
 
 
@@ -265,7 +265,7 @@ def render_scan(node: PlanStep) -> str:
     if node.predicates:
         for pred in node.predicates:
             for ident in get_all_nodes_of_type(pred, (NodeType.IDENTIFIER,)):
-                name = getattr(ident, "source_column", None) or getattr(ident, "value", None)
+                name = ident.source_column or ident.value
                 if name and name not in proj_set and name not in filter_only_names:
                     filter_only_names.append(name)
 
@@ -312,8 +312,6 @@ def render_set(node: PlanStep) -> str:
 
 @register_render(LogicalPlanStepType.Show)
 def render_show(node: PlanStep) -> str:
-    if node.object_type == "VARIABLE":
-        return f"SHOW ({' '.join(node.items)})"
     if node.object_type == "VIEW":
         return f"SHOW (CREATE VIEW {node.object_name})"
     return "SHOW"
@@ -335,7 +333,7 @@ def render_show_manifest(node: PlanStep) -> str:
 def render_show_snapshots(node: PlanStep) -> str:
     # The ALL form reads a wider history under a stricter gate, so an EXPLAIN
     # that called it plain SHOW SNAPSHOTS would name a statement that was not run.
-    if getattr(node, "history_view", None) == "snapshots_all":
+    if node.history_view == "snapshots_all":
         return f"SHOW ALL SNAPSHOTS FOR ({node.relation})"
     return f"SHOW SNAPSHOTS FOR ({node.relation})"
 
@@ -417,7 +415,7 @@ def render_clone_collection(node: PlanStep) -> str:
 
 @register_render(LogicalPlanStepType.ResyncRelation)
 def render_resync_relation(node: PlanStep) -> str:
-    force = " FORCE" if getattr(node, "force", False) else ""
+    force = " FORCE" if node.force else ""
     return f"RESYNC ({node.relation_name}){force}"
 
 
@@ -434,16 +432,16 @@ def render_analyze(node: PlanStep) -> str:
 @register_render(LogicalPlanStepType.CreateTrigger)
 def render_create_trigger(node: PlanStep) -> str:
     or_replace = "OR REPLACE " if node.or_replace else ""
-    event_kind = getattr(node, "event_kind", None) or "commit"
+    event_kind = node.event_kind or "commit"
     if event_kind == "schedule":
         event = f"ON SCHEDULE ('{node.schedule}')"
-        if getattr(node, "time_zone", None):
+        if node.time_zone:
             event += f" AT TIME ZONE ('{node.time_zone}')"
     elif event_kind == "signal":
         event = "ON SIGNAL"
     else:
         event = f"ON ({node.table_name})"
-    if getattr(node, "window_source", None):
+    if node.window_source:
         event += f" OVER ({node.window_source})"
     return f"CREATE {or_replace}TRIGGER ({node.trigger_name}) {event} EXECUTE ({node.task_name})"
 

@@ -28,8 +28,8 @@ products.
 
 from typing import Dict, FrozenSet, List, Optional
 
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.expression import NodeType, get_all_nodes_of_type
-from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext, predicate_key
@@ -38,7 +38,7 @@ from opteryx.compiled.structures.expressions import Cnf
 from opteryx.compiled.structures.expressions import Or
 
 
-def _split_or(node: Optional[Node]) -> List[Node]:
+def _split_or(node: Optional[Expression]) -> List[Expression]:
     """Recursively split OR (and NESTED-OR) nodes into a flat list of branches."""
     if node is None:
         return []
@@ -49,7 +49,7 @@ def _split_or(node: Optional[Node]) -> List[Node]:
     return _split_or(node.left) + _split_or(node.right)
 
 
-def _split_and(node: Optional[Node]) -> List[Node]:
+def _split_and(node: Optional[Expression]) -> List[Expression]:
     """Recursively split AND (and NESTED-AND) nodes into a flat list of predicates."""
     if node is None:
         return []
@@ -60,7 +60,7 @@ def _split_and(node: Optional[Node]) -> List[Node]:
     return _split_and(node.left) + _split_and(node.right)
 
 
-def _build_and(predicates: List[Node]) -> Optional[Node]:
+def _build_and(predicates: List[Expression]) -> Optional[Expression]:
     if not predicates:
         return None
     result = predicates[0]
@@ -72,7 +72,7 @@ def _build_and(predicates: List[Node]) -> Optional[Node]:
     return result
 
 
-def _build_or(predicates: List[Node]) -> Optional[Node]:
+def _build_or(predicates: List[Expression]) -> Optional[Expression]:
     if not predicates:
         return None
     result = predicates[0]
@@ -84,7 +84,7 @@ def _build_or(predicates: List[Node]) -> Optional[Node]:
     return result
 
 
-def _simplify_disjunction(condition: Node) -> Optional[Node]:
+def _simplify_disjunction(condition: Expression) -> Optional[Expression]:
     """
     Apply DNF simplification to an OR-rooted condition. Returns a new condition
     if any rewrite occurred, or None if the condition is already in simplest form.
@@ -95,9 +95,9 @@ def _simplify_disjunction(condition: Node) -> Optional[Node]:
 
     # Decompose each branch into AND-conjuncts keyed by canonical string.
     # Within-clause dedup happens implicitly via the dict.
-    branch_clauses: List[Dict[str, Node]] = []
+    branch_clauses: List[Dict[str, Expression]] = []
     for branch in branches:
-        clause: Dict[str, Node] = {}
+        clause: Dict[str, Expression] = {}
         for pred in _split_and(branch):
             clause[predicate_key(pred)] = pred
         if clause:
@@ -108,7 +108,7 @@ def _simplify_disjunction(condition: Node) -> Optional[Node]:
 
     # Cross-clause dedup: drop OR-branches with an identical key set.
     seen: List[FrozenSet[str]] = []
-    deduped: List[Dict[str, Node]] = []
+    deduped: List[Dict[str, Expression]] = []
     for clause in branch_clauses:
         key = frozenset(clause.keys())
         if key in seen:
@@ -146,7 +146,7 @@ def _simplify_disjunction(condition: Node) -> Optional[Node]:
         # If any branch is exactly the common keys, the per-branch remainder is
         # empty: `J AND (... OR TRUE OR ...)` collapses to `J`.
         common_preds = [branch_clauses[0][k] for k in sorted(common_keys)]
-        remainder_nodes: List[Node] = []
+        remainder_nodes: List[Expression] = []
         any_empty_remainder = False
         for clause in branch_clauses:
             rem = [v for k, v in clause.items() if k not in common_keys]
@@ -174,13 +174,13 @@ def _simplify_disjunction(condition: Node) -> Optional[Node]:
     return _build_or(rebuilt_branches)
 
 
-def _unwrap_nested(node: Optional[Node]) -> Optional[Node]:
+def _unwrap_nested(node: Optional[Expression]) -> Optional[Expression]:
     while node is not None and node.node_type == NodeType.NESTED:
         node = node.centre
     return node
 
 
-def _simplify_or_conjunct(condition: Node) -> Optional[Node]:
+def _simplify_or_conjunct(condition: Expression) -> Optional[Expression]:
     """`_simplify_disjunction`, plus the CNF-flattening fallback `visit` used to
     apply only at the top level. Returns None if nothing changed."""
     simplified = _simplify_disjunction(condition)
@@ -219,7 +219,7 @@ class DisjunctionSimplificationStrategy(OptimizationStrategy):
         if node.node_type == LogicalPlanStepType.Filter and node.condition is not None:
             conjuncts = _split_and(node.condition)
             changed = False
-            new_conjuncts: List[Node] = []
+            new_conjuncts: List[Expression] = []
             for conjunct in conjuncts:
                 unwrapped = _unwrap_nested(conjunct)
                 if unwrapped is not None and unwrapped.node_type == NodeType.OR:

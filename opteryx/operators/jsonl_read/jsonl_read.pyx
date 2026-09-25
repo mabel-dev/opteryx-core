@@ -79,17 +79,32 @@ cdef class JsonlReadNode(ReaderNode):
     cdef public long long jsonl_infer_sample_size
     cdef object _filesystem
 
-    def __init__(self, properties: QueryProperties, **parameters) -> None:
-        ReaderNode.__init__(self, properties=properties, **parameters)
-        self.jsonl_files = list(parameters.get("jsonl_files") or [])
-        self.jsonl_physical_columns = list(parameters.get("jsonl_physical_columns") or [])
-        self.jsonl_predicates = list(parameters.get("jsonl_predicates") or [])
-        jsonl_fail_on_error = parameters.get("jsonl_fail_on_error")
-        self.jsonl_fail_on_error = True if jsonl_fail_on_error is None else jsonl_fail_on_error
-        jsonl_infer_schema = parameters.get("jsonl_infer_schema")
-        self.jsonl_infer_schema = True if jsonl_infer_schema is None else jsonl_infer_schema
-        jsonl_infer_sample_size = parameters.get("jsonl_infer_sample_size")
-        self.jsonl_infer_sample_size = 5 if jsonl_infer_sample_size is None else jsonl_infer_sample_size
+    def __init__(
+        self,
+        properties: QueryProperties,
+        step,
+        list jsonl_files,
+        list jsonl_physical_columns,
+        list jsonl_predicates,
+    ) -> None:
+        """A READ_JSONL FunctionDataset step, or a manifest-backed Scan of a JSONL
+        dataset. The file list, the pushed-down projection (pre-alias physical
+        names) and the predicates as rugo tuples are the physical planner's
+        translation of either. Only READ_JSONL carries decode options."""
+        ReaderNode.__init__(self, properties, step)
+        self.jsonl_files = jsonl_files
+        self.jsonl_physical_columns = jsonl_physical_columns
+        self.jsonl_predicates = jsonl_predicates
+        self.jsonl_fail_on_error = True
+        self.jsonl_infer_schema = True
+        self.jsonl_infer_sample_size = 5
+        if step.node_type in steps_with("jsonl_fail_on_error"):
+            if step.jsonl_fail_on_error is not None:
+                self.jsonl_fail_on_error = step.jsonl_fail_on_error
+            if step.jsonl_infer_schema is not None:
+                self.jsonl_infer_schema = step.jsonl_infer_schema
+            if step.jsonl_infer_sample_size is not None:
+                self.jsonl_infer_sample_size = step.jsonl_infer_sample_size
         self._filesystem = None
 
     @property
@@ -124,6 +139,15 @@ cdef class JsonlReadNode(ReaderNode):
                 )
 
                 self._filesystem = anonymous_gcs_filesystem()
+            elif protocol == "s3":
+                # SECURITY: mirrors the bind-time s3:// branch in opteryx.planner.
+                # binder.dataset's READ_JSONL branch - never this process's AWS credentials
+                # for a user-supplied path. See anonymous_s3_filesystem's docstring.
+                from opteryx.connectors.io_systems.anonymous_s3_filesystem import (
+                    anonymous_s3_filesystem,
+                )
+
+                self._filesystem = anonymous_s3_filesystem()
             else:
                 from opteryx.connectors.io_systems import create_filesystem
 

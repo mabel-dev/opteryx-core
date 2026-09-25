@@ -22,23 +22,19 @@ NUMERIC_VECTOR_ELEMENT_TYPES = frozenset(
 
 def resolve_node_type(node) -> tuple[Optional[LogicalCategory], Optional[LogicalCategory]]:
     """Return the logical type and element type carried by a node."""
+    from opteryx.compiled.structures.expressions import expressions_with
     from opteryx.types.logical_type import ColumnType
 
-    schema_column = getattr(node, "schema_column", None)
+    schema_column = node.schema_column
 
-    if schema_column is not None and getattr(schema_column, "category", None) is not None:
-        node_type = getattr(schema_column, "category", None)
+    if schema_column is not None and schema_column.category is not None:
+        node_type = schema_column.category
     else:
-        _raw_type = getattr(node, "type", None)
+        _raw_type = node.type if type(node) in expressions_with("type") else None
         # Phase 2: node.type is ColumnType; extract category for LogicalCategory callers.
         node_type = _raw_type.category if isinstance(_raw_type, ColumnType) else _raw_type
 
-    if schema_column is not None and getattr(schema_column, "element_type", None) is not None:
-        element_type = getattr(schema_column, "element_type", None)
-    else:
-        element_type = getattr(node, "element_type", None)
-
-    return node_type, element_type
+    return node_type, None
 
 
 def is_numeric_vector_type(
@@ -61,11 +57,11 @@ def node_is_literal_numeric_vector(node) -> bool:
     if node is None or node.node_type != NodeType.LITERAL:
         return False
     from opteryx.types.logical_type import ColumnType as _ColumnType
-    _ntype = getattr(node, "type", None)
+    _ntype = node.type
     _ncat = _ntype.category if isinstance(_ntype, _ColumnType) else _ntype
     if _ncat == LogicalCategory.VECTOR:
         return True
-    value = getattr(node, "value", None)
+    value = node.value
 
     # Check if value is a sequence type (list, tuple, or array-like)
     # Handle numpy arrays without importing numpy by checking class name
@@ -98,7 +94,7 @@ def node_is_constant_embed_call(node) -> bool:
 
     if node is None or node.node_type != NodeType.FUNCTION or node.value != "EMBED":
         return False
-    parameters = getattr(node, "parameters", ())
+    parameters = node.parameters
     if len(parameters) != 1:
         return False
     argument = parameters[0]
@@ -106,7 +102,7 @@ def node_is_constant_embed_call(node) -> bool:
         return False
     arg_type, _ = resolve_node_type(argument)
     return arg_type in (LogicalCategory.VARCHAR, LogicalCategory.VARBINARY) or isinstance(
-        getattr(argument, "value", None), (str, bytes, bytearray)
+        argument.value, (str, bytes, bytearray)
     )
 
 
@@ -129,8 +125,8 @@ def get_vector_source_identifier(node):
         return node
     if (
         node.node_type == NodeType.CAST
-        and getattr(node, "value", None) in {"VECTOR", "TRY_VECTOR"}
-        and getattr(node, "left", None) is not None
+        and node.value in {"VECTOR", "TRY_VECTOR"}
+        and node.left is not None
         and node.left.node_type == NodeType.IDENTIFIER
     ):
         return node.left

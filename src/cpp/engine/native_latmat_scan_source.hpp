@@ -311,7 +311,7 @@ struct LatmatScanSource : Source {
             }
             received += 1;
             if (!result.success) {
-                err.code = 1;
+                err.code = result.read_failed ? kErrCodeReadError : 1;
                 static thread_local std::string p1_err_buf;
                 p1_err_buf = "LatmatScanSource (pass 1): " +
                              (result.error.empty() ? std::string("parquet decode error")
@@ -555,7 +555,7 @@ struct LatmatScanSource : Source {
                 return SourceResult::FINISHED;
             }
             if (!result.success) {
-                err.code = 1;
+                err.code = result.read_failed ? kErrCodeReadError : 1;
                 static thread_local std::string p2_err_buf;
                 p2_err_buf = "LatmatScanSource (pass 2): " +
                              (result.error.empty() ? std::string("parquet decode error")

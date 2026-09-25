@@ -5,15 +5,16 @@
 
 from typing import Tuple
 
+from opteryx.compiled.structures.expressions import expressions_with
+from opteryx.compiled.structures.plan_steps import PlanStep
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType, get_all_nodes_of_type
-from opteryx.models import Node
 from opteryx.planner.binder.binder import inner_binder
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.types.logical_type import LogicalCategory
 
 
-def visit_filter(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_filter(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     # We don't update the context, otherwise we'd be adding the predicates as columns
     original_context = context.copy()
     node.condition, context = inner_binder(node.condition, context)
@@ -36,11 +37,11 @@ def visit_filter(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
 
     # Verify the predicate evaluates to a boolean — non-boolean expressions (e.g.
     # bitwise arithmetic) are not valid WHERE conditions without an explicit comparison.
-    _condition_sc = getattr(node.condition, "schema_column", None)
+    _condition_sc = node.condition.schema_column
     if _condition_sc is not None:
         _condition_type = _condition_sc.category
     else:
-        _ct = getattr(node.condition, "type", None)
+        _ct = node.condition.type if type(node.condition) in expressions_with("type") else None
         _condition_type = _ct.category if _ct is not None else None
     if _condition_type not in (
         None,

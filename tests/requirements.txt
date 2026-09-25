@@ -18,6 +18,10 @@ protobuf
 # different storage providers
 google-cloud-storage
 minio
+# hadro's server dependencies; hadro itself is installed --no-deps by CI
+# (see regression_suite.yaml) so its rugo pin cannot shadow the in-tree rugo.
+fastapi
+uvicorn
 openpyxl
 
 # The catalog the engine talks to. Test-only here: opteryx/ imports it lazily

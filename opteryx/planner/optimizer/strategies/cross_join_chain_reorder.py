@@ -40,8 +40,9 @@ narrowing or widening the walk.
 
 from typing import Dict, List, Optional, Set, Tuple
 
+from opteryx.compiled.structures.expressions import Expression
+from opteryx.compiled.structures.plan_steps import steps_with
 from opteryx.expression import NodeType
-from opteryx.models import Node
 from opteryx.planner.logical_planner.logical_planner import (
     LogicalPlan,
     PlanStep,
@@ -51,7 +52,7 @@ from opteryx.planner.logical_planner.logical_planner import (
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
 
 
-def _split_and_conditions(node: Optional[Node]) -> List[Node]:
+def _split_and_conditions(node: Optional[Expression]) -> List[Expression]:
     if node is None:
         return []
     if node.node_type != NodeType.AND:
@@ -59,7 +60,7 @@ def _split_and_conditions(node: Optional[Node]) -> List[Node]:
     return _split_and_conditions(node.left) + _split_and_conditions(node.right)
 
 
-def _identifier_source(node: Optional[Node]) -> Optional[str]:
+def _identifier_source(node: Optional[Expression]) -> Optional[str]:
     if node is None:
         return None
     if node.node_type == NodeType.IDENTIFIER:
@@ -76,9 +77,9 @@ def _is_unconverted_cross_join(node: PlanStep) -> bool:
     return (
         node.node_type == LogicalPlanStepType.Join
         and node.type == "cross join"
-        and not getattr(node, "on", None)
-        and not getattr(node, "using", None)
-        and not getattr(node, "is_window_join", False)
+        and not node.on
+        and not node.using
+        and not node.is_window_join
     )
 
 
@@ -98,7 +99,7 @@ def _subplan_relation_names(
 
     node = plan[root_id]
     names: Set[str] = set()
-    alias = getattr(node, "alias", None)
+    alias = node.alias if node.node_type in steps_with("alias") else None
     if alias:
         names.add(alias)
 
@@ -249,7 +250,7 @@ def _gather_leaves(
 
 
 def _build_join_graph(
-    where_predicates: List[Node], leaves: List[_Leaf]
+    where_predicates: List[Expression], leaves: List[_Leaf]
 ) -> Dict[int, Set[int]]:
     """
     Build an undirected adjacency map keyed by leaf index.
@@ -344,7 +345,7 @@ def _rewire_chain(
     # chain. We use it as the master schema map so that bottom-up rebuilds get
     # the correct {relation_name: schema} entries even after rearrangement.
     top_node = chain[0][1]
-    master_schemas = dict(getattr(top_node, "schemas", None) or {})
+    master_schemas = dict(top_node.schemas or {})
 
     def _schemas_for(rel_names: List[str]) -> dict:
         # Preserve any non-relation entries (e.g. "$derived") on every join in
@@ -410,7 +411,7 @@ def _rewire_chain(
         leaf_cursor += 1
 
 
-def _collect_predicates_above(plan: LogicalPlan, chain_top_id: str) -> List[Node]:
+def _collect_predicates_above(plan: LogicalPlan, chain_top_id: str) -> List[Expression]:
     """
     Walk up from chain_top_id collecting predicates from every Filter node that
     sits above the chain, traversing THROUGH Join parents on the way. Stops at
@@ -472,7 +473,7 @@ def _collect_predicates_above(plan: LogicalPlan, chain_top_id: str) -> List[Node
     never re-parented, re-typed or moved — a semi/anti join above the chain
     stays exactly where it is.
     """
-    predicates: List[Node] = []
+    predicates: List[Expression] = []
     seen: Set[str] = set()
     frontier = [chain_top_id]
 

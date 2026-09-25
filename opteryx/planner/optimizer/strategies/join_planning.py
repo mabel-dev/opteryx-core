@@ -92,7 +92,7 @@ def _apply_join_tree(
     # was bound with the full set of relation schemas underneath, so binder
     # / projection follow-ups expect the same shape on every internal node.
     top_node = chain[0][1]
-    master_schemas = dict(getattr(top_node, "schemas", None) or {})
+    master_schemas = dict(top_node.schemas or {})
 
     def _schemas_for(rel_names: List[str]) -> dict:
         out = {

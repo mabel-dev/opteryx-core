@@ -33,7 +33,7 @@ import pytest
 import opteryx.planner.optimizer  # noqa: F401
 from opteryx.planner.plan_context import PlanContext
 from opteryx.expression import NodeType
-from opteryx.models import Node
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
 from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
@@ -43,13 +43,13 @@ _X = b"tes_x_00000001"
 _Y = b"tes_y_00000002"
 
 
-def _identifier(identity: bytes) -> Node:
+def _identifier(identity: bytes) -> Expression:
     return LogicalColumn(
         node_type=NodeType.IDENTIFIER, source_column=None, schema_column=type("_S", (), {"identity": identity})()
     )
 
 
-def _cmp(op: str, left_identity: bytes, right_identity: bytes) -> Node:
+def _cmp(op: str, left_identity: bytes, right_identity: bytes) -> Expression:
     n = Comparison()
     n.value = op
     n.left = _identifier(left_identity)

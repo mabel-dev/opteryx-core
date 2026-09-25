@@ -33,9 +33,9 @@ from opteryx.models import QueryProperties
 
 
 class ShowSnapshotsNode(BasePlanNode):
-    def __init__(self, properties: QueryProperties, **parameters):
-        BasePlanNode.__init__(self, properties=properties, **parameters)
-        self._snapshots = parameters.get("snapshots")
+    def __init__(self, properties: QueryProperties, step):
+        BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
+        self._snapshots = step.snapshots
         self.seen = False
 
     @property

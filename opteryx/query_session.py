@@ -57,6 +57,20 @@ from opteryx.utils import sql
 
 _CAMEL_SPLIT_RE = re.compile(r"[A-Z][a-z]*|[0-9]+")
 
+# The operator kinds implemented by ReaderNode (opteryx/operators/read/read.pyx)
+# and its subclasses — the only physical nodes with a `plan_config()`.
+_READER_KINDS = frozenset(
+    {
+        "ReaderNode",
+        "ParquetReadNode",
+        "JsonlReadNode",
+        "SkeneReadNode",
+        "PostgresReadNode",
+        "CsvReadNode",
+        "FunctionDatasetNode",
+    }
+)
+
 
 class Session(DataFrame):
     """Session is the canonical execution object, and replaces Connection+Cursor.
@@ -498,12 +512,12 @@ class Session(DataFrame):
             # friendly/logical type: prefer Substrait-like names for common kinds
             def _logical_rel_name(node):
                 try:
-                    if getattr(node, "is_scan", False):
+                    if node.is_scan:
                         return "ReadRel"
-                    if getattr(node, "is_join", False):
+                    if node.is_join:
                         return "JoinRel"
                     # fall back to name-based heuristics
-                    candidate = getattr(node, "name", None) or getattr(node, "node_type", None)
+                    candidate = node.name or node.node_type
                     if candidate is None:
                         return None
                     s = str(candidate).lower()
@@ -551,14 +565,14 @@ class Session(DataFrame):
             try:
                 config_val = (
                     node.plan_config()
-                    if getattr(node, "plan_config", None) is not None
-                    else getattr(node, "config", None)
+                    if node.kind in _READER_KINDS
+                    else node.config
                 )
             except (AttributeError, TypeError, ValueError) as err:
                 logger.debug(f"plan_config() failed, attempting fallback: {err}")
                 # Fallback: try direct config attribute
                 try:
-                    cfg_str = getattr(node, "config", None)
+                    cfg_str = node.config
                 except Exception as fallback_err:
                     logger.debug(f"Fallback config extraction also failed: {fallback_err}")
                     cfg_str = None
@@ -566,7 +580,7 @@ class Session(DataFrame):
             except Exception as err:
                 logger.warning(f"Unexpected error extracting config: {err}")
                 try:
-                    cfg_str = getattr(node, "config", None)
+                    cfg_str = node.config
                 except Exception as fallback_err:
                     logger.debug(f"Fallback config extraction failed: {fallback_err}")
                     cfg_str = None
@@ -642,7 +656,7 @@ class Session(DataFrame):
                     None,
                     None,
                     None,
-                    getattr(column, "nullable", None),
+                    column.nullable,
                 )
             )
         return tuple(description)

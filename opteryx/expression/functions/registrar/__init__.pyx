@@ -177,7 +177,7 @@ def _coalesce_return_type(arg_nodes, func_name="COALESCE"):
     branches = [
         (n, n.schema_column.column_type)
         for n in arg_nodes
-        if getattr(n, "schema_column", None) is not None
+        if n.schema_column is not None
         and n.schema_column.column_type is not None
         and n.schema_column.column_type.category not in (LogicalCategory.NULL, None)
     ]

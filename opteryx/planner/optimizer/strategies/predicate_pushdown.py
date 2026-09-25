@@ -24,6 +24,7 @@ after a join, we add conditions to the JOIN.
 
 from draken.draken_native import TimestampUnit
 
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import UnsupportedSyntaxError
@@ -35,7 +36,6 @@ from opteryx.expression import (
     get_all_nodes_of_type,
 )
 from opteryx.expression.formatter import ExpressionColumn
-from opteryx.models import Node
 from opteryx.models import is_expression
 from opteryx.planner.binder.common import extract_join_fields
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
@@ -49,6 +49,7 @@ from opteryx.compiled.structures.expressions import And
 from opteryx.compiled.structures.expressions import Not
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
+from opteryx.compiled.structures.expressions import expressions_with
 from opteryx.compiled.structures.plan_steps import steps_with
 from opteryx.compiled.structures.plan_steps import FilterStep
 
@@ -84,7 +85,7 @@ def _emitted_identities(plan, nid, memo):
         sch = node.schema
         ids = frozenset(c.identity for c in sch.columns) if sch is not None else frozenset()
     elif nt == LogicalPlanStepType.Project:
-        cols = list(node.columns or []) + list(getattr(node, "passthrough_columns", None) or [])
+        cols = list(node.columns or []) + list(node.passthrough_columns or [])
         ids = frozenset(c.schema_column.identity for c in cols if c.schema_column is not None)
     elif nt in (LogicalPlanStepType.Aggregate, LogicalPlanStepType.AggregateAndGroup):
         cols = list(node.aggregates or []) + list(node.groups or [])
@@ -106,10 +107,14 @@ def _predicate_column_ids(predicate):
     `COUNT(*)` invisible, so `HAVING COUNT(*) > (SELECT MIN(..) ..)` looked like it
     read only the subquery's value - the ungrouped aggregate on the subquery's leg
     emits that, and the HAVING filter was placed there, away from the COUNT."""
-    cond = predicate.condition if getattr(predicate, "condition", None) is not None else predicate
+    cond = (
+        predicate.condition
+        if predicate.node_type in steps_with("condition") and predicate.condition is not None
+        else predicate
+    )
     out = set()
     for ident in get_all_nodes_of_type(cond, (NodeType.IDENTIFIER, NodeType.AGGREGATOR)):
-        sc = getattr(ident, "schema_column", None)
+        sc = ident.schema_column
         if sc is not None and sc.identity is not None:
             out.add(sc.identity)
     return out
@@ -146,7 +151,11 @@ def _outside_aggregate_column_ids(predicate, emitted=None):
     Omitting `emitted` keeps the old leaf-only behaviour, for callers asking the
     question of no particular stream.
     """
-    cond = predicate.condition if getattr(predicate, "condition", None) is not None else predicate
+    cond = (
+        predicate.condition
+        if predicate.node_type in steps_with("condition") and predicate.condition is not None
+        else predicate
+    )
     out: set = set()
     stack = [cond] if cond is not None else []
     while stack:
@@ -359,7 +368,9 @@ def _stamp_inlined_predicate(node, condition, identifiers, target) -> None:
     node.condition = condition
     node.columns = identifiers
     node.relations = {
-        identifier.source for identifier in identifiers if getattr(identifier, "source", None)
+        identifier.source
+        for identifier in identifiers
+        if type(identifier) in expressions_with("source") and identifier.source
     }
     node.deep_restore_target = target
 
@@ -596,8 +607,8 @@ def _get_equi_join_pairs(on_node):
     if (
         on_node.node_type == NodeType.COMPARISON_OPERATOR
         and on_node.value == "Eq"
-        and getattr(on_node, "left", None) is not None
-        and getattr(on_node, "right", None) is not None
+        and on_node.left is not None
+        and on_node.right is not None
         and on_node.left.node_type == NodeType.IDENTIFIER
         and on_node.right.node_type == NodeType.IDENTIFIER
     ):
@@ -635,8 +646,8 @@ def _is_pushable_condition_shape(condition) -> bool:
         return True
     if node_type == NodeType.FUNCTION:
         return (
-            getattr(getattr(condition, "schema_column", None), "category", None)
-            == LogicalCategory.BOOLEAN
+            condition.schema_column is not None
+            and condition.schema_column.category == LogicalCategory.BOOLEAN
         )
     if node_type == NodeType.NOT:
         return _is_pushable_condition_shape(condition.centre)
@@ -659,8 +670,8 @@ def _normalize_col_op_lit(condition):
         return None, None, None
     if condition.value not in _SIMPLE_COMPARISON_OPS:
         return None, None, None
-    left = getattr(condition, "left", None)
-    right = getattr(condition, "right", None)
+    left = condition.left
+    right = condition.right
     if left is None or right is None:
         return None, None, None
     if get_all_nodes_of_type(condition, (NodeType.FUNCTION, NodeType.CAST, NodeType.AGGREGATOR)):
@@ -684,7 +695,7 @@ def _make_implied_filter(op, target_col, lit_node):
 
 
 
-def _try_normalize_cast_predicate(condition: Node):
+def _try_normalize_cast_predicate(condition: Expression):
     """Strip CAST from CAST(IDENTIFIER) op LITERAL predicates and rescale the literal.
 
     Converts ``CAST(col, T) op literal`` into the equivalent cast-free
@@ -718,12 +729,12 @@ def _try_normalize_cast_predicate(condition: Node):
     else:
         return None
 
-    identifier = getattr(cast_node, "left", None)
+    identifier = cast_node.left
     if identifier is None or identifier.node_type != NodeType.IDENTIFIER:
         return None
 
-    col_sc = getattr(identifier, "schema_column", None)
-    cast_sc = getattr(cast_node, "schema_column", None)
+    col_sc = identifier.schema_column
+    cast_sc = cast_node.schema_column
     if col_sc is None or cast_sc is None:
         return None
 
@@ -1023,8 +1034,8 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             # this node's CURRENT outgoing edge mid-traversal, which is unsafe
             # when that edge is shared/aliased with a not-yet-visited ancestor
             # (e.g. an outer GROUP BY ALL reusing the SELECT list's expression
-            # node -- see the copy-memo comment in
-            # opteryx/compiled/structures/node.pyx) -- confirmed by a real
+            # node -- see `_copy_field` in
+            # opteryx/compiled/structures/plan_steps.pyx) -- confirmed by a real
             # crash repro (a TRUNC() re-application above an aggregate lost its
             # function_ref) that reproduced ONLY with the eager insert_node_after,
             # not with the passive fallback below. complete() already restores
@@ -1148,12 +1159,12 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 # child vector to mask; its elements are generated. Folding is an
                 # UNNEST-over-ARRAY optimization and says so.
                 if (
-                    getattr(node, "unnest_function", "UNNEST") == "UNNEST"
+                    node.unnest_function == "UNNEST"
                     and node.unnest_target.schema_column.identity in known_columns
                     and known_columns == {node.unnest_target.schema_column.identity}
                     and predicate.condition is not None
                 ):
-                    folded = list(getattr(node, "filter_conditions", None) or [])
+                    folded = list(node.filter_conditions or [])
                     folded.append(predicate.condition)
                     node.filter_conditions = folded
                     context.optimized_plan[context.node_id] = node
@@ -1269,8 +1280,8 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             # outgoing edge mid-traversal, which is unsafe when the edge (or the
             # predicate's own expression tree) is shared/aliased with a
             # not-yet-visited ancestor (e.g. an outer GROUP BY ALL reusing the
-            # SELECT list's expression node -- see the copy-memo comment in
-            # opteryx/compiled/structures/node.pyx). Confirmed by a real crash
+            # SELECT list's expression node -- see `_copy_field` in
+            # opteryx/compiled/structures/plan_steps.pyx). Confirmed by a real crash
             # repro (a TRUNC() re-applied above this aggregate lost its
             # function_ref) that reproduced ONLY with the eager
             # insert_node_after and disappeared entirely once removed --
@@ -1289,7 +1300,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 touches_left = False
                 touches_right = False
                 for ident in get_all_nodes_of_type(predicate, (NodeType.IDENTIFIER,)):
-                    src = getattr(ident, "source", None)
+                    src = ident.source
                     if src in join_left_rels:
                         touches_left = True
                     if src in join_right_rels:
@@ -1300,15 +1311,15 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 """Flatten an AND tree into a list of leaf predicates."""
                 if node is None:
                     return []
+                # Parentheses are not semantic: `(a > b)` must split like `a > b`.
+                while node.node_type == NodeType.NESTED:
+                    node = node.centre
                 if node.node_type == NodeType.AND:
                     return _flatten_and(node.left) + _flatten_and(node.right)
                 return [node]
 
             def _and_chain(leaves):
                 """Rebuild a left-leaning AND tree from leaves; None if empty."""
-                # Local import: a function-scoped `from opteryx.models import Node`
-                # elsewhere in `visit` makes Node a local variable for the whole
-                # method, so the module-level import isn't visible to closures.
                 if not leaves:
                     return None
                 result = leaves[0]
@@ -1318,10 +1329,14 @@ class PredicatePushdownStrategy(OptimizationStrategy):
 
             def _is_collectable(predicate):
                 """True if this predicate should be pulled out of the ON clause."""
-                # Literal-on-one-side predicates: collectable as filters.
-                if len(get_all_nodes_of_type(predicate.left, (NodeType.IDENTIFIER,))) == 0:
+                # Literal-on-one-side predicates: collectable as filters. Leaves
+                # with no left/right (NOT, IS NULL, Nested, CASE, functions) are
+                # collectable too.
+                left = getattr(predicate, "left", None)
+                right = getattr(predicate, "right", None)
+                if len(get_all_nodes_of_type(left, (NodeType.IDENTIFIER,))) == 0:
                     return True
-                if len(get_all_nodes_of_type(predicate.right, (NodeType.IDENTIFIER,))) == 0:
+                if len(get_all_nodes_of_type(right, (NodeType.IDENTIFIER,))) == 0:
                     return True
                 # Single-side predicates in the ON clause (e.g.
                 # `JOIN ... ON a.x = b.x AND a.y > a.z`) belong to that side
@@ -1411,7 +1426,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     on_clause_build_filters = [
                         p
                         for p in context.collected_predicates
-                        if getattr(p, "from_join_on", False)
+                        if p.from_join_on
                         and all(
                             i.source in node.right_relation_names
                             for i in get_all_nodes_of_type(p.condition, (NodeType.IDENTIFIER,))
@@ -1456,7 +1471,10 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                             and predicate.relations.issubset(all_join_rels)
                         ):
                             # This predicate references both sides of the join
-                            if predicate.condition.value == "Eq":
+                            if (
+                                predicate.condition.node_type == NodeType.COMPARISON_OPERATOR
+                                and predicate.condition.value == "Eq"
+                            ):
                                 # Only convert when the predicate can be represented as join fields.
                                 # Expressions like `s = e + INTERVAL '1' MONTH` must stay as filters.
                                 _l, _r, unkeyed = extract_join_fields(
@@ -1601,7 +1619,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                         if not spans_join:
                             remaining_predicates.append(predicate)
                             continue
-                        if condition.value == "Eq":
+                        if condition.node_type == NodeType.COMPARISON_OPERATOR and condition.value == "Eq":
                             # Only fold when the equality is representable as join
                             # fields; expressions like `s = e + INTERVAL '1' MONTH`
                             # must stay as filters.
@@ -1650,18 +1668,18 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                         existing_keys: set = set()
                         for p in context.collected_predicates:
                             ident, op, lit = _normalize_col_op_lit(p.condition)
-                            if ident is not None and getattr(ident, "schema_column", None) is not None:
+                            if ident is not None and ident.schema_column is not None:
                                 existing_keys.add((ident.schema_column.identity, op, str(lit.value)))
 
                         derived = []
                         for predicate in context.collected_predicates:
                             ident, op, lit = _normalize_col_op_lit(predicate.condition)
-                            if ident is None or getattr(ident, "schema_column", None) is None:
+                            if ident is None or ident.schema_column is None:
                                 continue
                             col_id = ident.schema_column.identity
                             for left_col, right_col in equi_pairs:
-                                lsc = getattr(left_col, "schema_column", None)
-                                rsc = getattr(right_col, "schema_column", None)
+                                lsc = left_col.schema_column
+                                rsc = right_col.schema_column
                                 if lsc is None or rsc is None:
                                     continue
                                 if lsc.identity == col_id:
@@ -1670,7 +1688,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                                     target_col = left_col
                                 else:
                                     continue
-                                tsc = getattr(target_col, "schema_column", None)
+                                tsc = target_col.schema_column
                                 if tsc is None:
                                     continue
                                 dedup_key = (tsc.identity, op, str(lit.value))
@@ -1866,7 +1884,9 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             parent_nid = incoming[0][0]
             parent_node = context.pre_optimized_tree[parent_nid]
 
-            node_alias = getattr(parent_node, "alias", None)
+            node_alias = (
+                parent_node.alias if parent_node.node_type in steps_with("alias") else None
+            )
             if node_alias:
                 alias_chain.add(node_alias)
 
@@ -1900,7 +1920,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
 
         alias_expressions = {}
         for column in project_node.columns or []:
-            query_column = getattr(column, "query_column", None)
+            query_column = column.query_column if is_expression(column) else None
             if not query_column:
                 continue
 
@@ -2018,7 +2038,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 rewritten_ids = {
                     sc.identity
                     for ident in identifiers
-                    for sc in (getattr(ident, "schema_column", None),)
+                    for sc in (ident.schema_column,)
                     if sc is not None and sc.identity is not None
                 }
                 target = (
@@ -2044,7 +2064,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
     def _inline_trunc_alias_between(
         self,
         node: PlanStep,
-        condition: Node,
+        condition: Expression,
         alias_expressions: dict,
         alias_chain: set,
         plan: LogicalPlan,
@@ -2133,11 +2153,13 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         rewritten_ids = {
             sc.identity
             for ident in identifiers
-            for sc in (getattr(ident, "schema_column", None),)
+            for sc in (ident.schema_column,)
             if sc is not None and sc.identity is not None
         }
-        group_key_identity = getattr(
-            getattr(alias_candidate, "schema_column", None), "identity", None
+        group_key_identity = (
+            alias_candidate.schema_column.identity
+            if alias_candidate.schema_column is not None
+            else None
         )
         target = (
             _deep_pushdown_target(plan, descent_start_nid, rewritten_ids, group_key_identity, emit_memo)
@@ -2156,7 +2178,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
     def _inline_trunc_alias_predicate(
         self,
         node: PlanStep,
-        condition: Node,
+        condition: Expression,
         alias_expressions: dict,
         alias_chain: set,
         plan: LogicalPlan,
@@ -2269,11 +2291,13 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             rewritten_ids = {
                 sc.identity
                 for ident in identifiers
-                for sc in (getattr(ident, "schema_column", None),)
+                for sc in (ident.schema_column,)
                 if sc is not None and sc.identity is not None
             }
-            group_key_identity = getattr(
-                getattr(alias_candidate, "schema_column", None), "identity", None
+            group_key_identity = (
+                alias_candidate.schema_column.identity
+                if alias_candidate.schema_column is not None
+                else None
             )
             target = (
                 _deep_pushdown_target(

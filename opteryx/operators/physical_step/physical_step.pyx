@@ -181,15 +181,12 @@ cdef class PhysicalStep(BasePlanNode):
     ):
         if kind not in _NAMES:
             raise InvalidInternalStateError(f"'{kind}' is not a physical step kind")
-        # Set before the base initialiser, which reads `kind` and `name`.
+        # Set before the base initialiser, which reads `kind`.
         self._kind = kind
-        self.step = step
         self.join_type = join_type
         self.join_output_rows_estimate = join_output_rows_estimate
         self.group_count_estimate = group_count_estimate
-        BasePlanNode.__init__(
-            self, properties=properties, columns=columns, pre_update_columns=pre_update_columns
-        )
+        BasePlanNode.__init__(self, properties, step, columns, pre_update_columns)
 
     @property
     def kind(self) -> str:

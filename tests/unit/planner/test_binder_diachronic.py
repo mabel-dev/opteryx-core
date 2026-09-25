@@ -1,7 +1,7 @@
 import datetime
 
 from opteryx.connectors.capabilities import Diachronic
-from opteryx.models import Node
+from opteryx.compiled.structures.plan_steps import ScanStep
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.common import BinderVisitor
 from opteryx.types.logical_type import INT64
@@ -26,7 +26,7 @@ class FakeConnector(Diachronic):
 
 def test_binder_sets_diachronic_dates():
     visitor = BinderVisitor()
-    node = Node(node_type=None)
+    node = ScanStep()
     node.relation = "fake"
     node.alias = "fake"
     node.start_date = datetime.datetime(2021, 1, 1)

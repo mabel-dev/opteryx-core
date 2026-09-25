@@ -24,13 +24,40 @@ Run as a script (CLAUDE.md §10) or under pytest.
 
 import os
 import sys
-from opteryx.compiled.structures.expressions import Literal
 
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.expression import BINARY_NODE_TYPES, NodeType, binary_operands
-from opteryx.models import Node
+from opteryx.compiled.structures.expressions import (
+    Aggregator,
+    And,
+    BinaryOperator,
+    Case,
+    Cast,
+    Cnf,
+    Comparison,
+    Dnf,
+    Function,
+    Literal,
+    LogicalColumn,
+    Nested,
+    Not,
+    Or,
+    Subquery,
+    UnaryOperator,
+    Wildcard,
+    Xor,
+)
+
+# The expression class for each node type these tests build.
+_CLASS_OF = {
+    NodeType.AND: And,
+    NodeType.OR: Or,
+    NodeType.XOR: Xor,
+    NodeType.COMPARISON_OPERATOR: Comparison,
+    NodeType.BINARY_OPERATOR: BinaryOperator,
+}
 
 
 def _literal(value):
@@ -38,12 +65,10 @@ def _literal(value):
 
 
 def _binary(node_type, left=True, right=True):
-    node = Node(node_type=node_type, value="Eq", do_not_create_column=True)
-    if left:
-        node.left = _literal(1)
-    if right:
-        node.right = _literal(2)
-    return node
+    return _CLASS_OF[node_type](
+        left=_literal(1) if left else None,
+        right=_literal(2) if right else None,
+    )
 
 
 def test_returns_both_operands():
@@ -64,22 +89,22 @@ def test_rejects_node_types_with_no_operand_pair():
     FUNCTION is the one that caused the original crash (an anchored LIKE lowers
     to `_ENDS_WITH`); NOT and UNARY_OPERATOR carry their operand on `.centre`.
     """
-    for node_type in (
-        NodeType.FUNCTION,
-        NodeType.NOT,
-        NodeType.UNARY_OPERATOR,
-        NodeType.IDENTIFIER,
-        NodeType.LITERAL,
-        NodeType.CAST,
-        NodeType.NESTED,
-        NodeType.DNF,
-        NodeType.CNF,
-        NodeType.CASE,
-        NodeType.SUBQUERY,
-        NodeType.AGGREGATOR,
-        NodeType.WILDCARD,
+    for node in (
+        Function(value="x"),
+        Not(),
+        UnaryOperator(value="x"),
+        LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="x"),
+        Literal(value="x"),
+        Cast(),
+        Nested(),
+        Dnf(),
+        Cnf(),
+        Case(),
+        Subquery(),
+        Aggregator(value="x"),
+        Wildcard(),
     ):
-        node = Node(node_type=node_type, value="x", do_not_create_column=True)
+        node_type = node.node_type
         try:
             binary_operands(node)
         except InvalidInternalStateError as err:

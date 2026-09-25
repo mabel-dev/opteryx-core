@@ -94,7 +94,7 @@ def _is_restricted(plan: LogicalPlan) -> bool:
                 narrowed = True
         elif node.node_type == LogicalPlanStepType.Filter:
             narrowed = True
-        elif node.node_type == LogicalPlanStepType.Scan and getattr(node, "predicates", None):
+        elif node.node_type == LogicalPlanStepType.Scan and node.predicates:
             # ⛔ A pushed predicate narrows just as much as a Filter node, and by this
             # position most of them ARE pushed. Testing only for a Filter made firing
             # depend on whether the connector accepted the predicate: TPC-H Q17 kept a
@@ -243,7 +243,7 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
         for _nid, node in plan.nodes(True):
             if node.node_type != LogicalPlanStepType.Join:
                 continue
-            if getattr(node, "reducer_applied", False):
+            if node.reducer_applied:
                 continue
             if node.type in _BUILD_SIDE_IS_RIGHT:
                 return True
@@ -261,7 +261,7 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
             for nid, node in plan.nodes(True)
             if node.node_type == LogicalPlanStepType.Join
             and node.type in _BUILD_SIDE_IS_RIGHT + ("inner",)
-            and not getattr(node, "reducer_applied", False)
+            and not node.reducer_applied
         ]
         for join_nid in targets:
             plan = self._reduce_build_side(plan, join_nid, context.plan_context)
@@ -284,7 +284,7 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
         # below preserve the sides: the re-added edge lands last again.
         (left_root, _lt, _lr), (right_root, _rt, right_rel) = in_edges[0], in_edges[1]
 
-        pairs = _equi_pairs(getattr(join, "on", None))
+        pairs = _equi_pairs(join.on)
         if not pairs:
             return plan
 
@@ -300,7 +300,7 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
             if aggregate_nid is None:
                 return plan
             group_ids = {
-                getattr(getattr(g, "schema_column", None), "identity", None)
+                g.schema_column.identity if g.schema_column is not None else None
                 for g in (aggregate.groups or [])
             }
             # Every join key on the aggregate's side must be a GROUP key. Reducing on a
@@ -308,8 +308,8 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
             # contribute to a surviving group — a wrong answer, not a slower one.
             right_names = set(join.right_relation_names or [])
             for first, second in pairs:
-                key = first if getattr(first, "source", None) in right_names else second
-                identity = getattr(getattr(key, "schema_column", None), "identity", None)
+                key = first if first.source in right_names else second
+                identity = key.schema_column.identity if key.schema_column is not None else None
                 if identity is None or identity not in group_ids:
                     return plan
             agg_providers = plan.ingoing_edges(aggregate_nid)
@@ -324,8 +324,8 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
         left_names = set(join.left_relation_names or [])
         key_relations = set()
         for first, second in pairs:
-            side = first if getattr(first, "source", None) in left_names else second
-            source_name = getattr(side, "source", None)
+            side = first if first.source in left_names else second
+            source_name = side.source
             if source_name is None:
                 return plan
             key_relations.add(source_name)
@@ -367,9 +367,9 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
         for first, second in pairs:
             # Orient the pair: one side belongs to the outer join's LEFT leg (the one
             # being copied), the other to its RIGHT leg (the one being reduced).
-            if getattr(first, "source", None) in left_names:
+            if first.source in left_names:
                 source_col, target_col = first, second
-            elif getattr(second, "source", None) in left_names:
+            elif second.source in left_names:
                 source_col, target_col = second, first
             else:
                 return plan

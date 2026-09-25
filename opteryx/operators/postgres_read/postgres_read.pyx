@@ -44,14 +44,14 @@ cdef class PostgresReadNode(ReaderNode):
     cdef public object pushed_aggregates
     cdef public bint pushed_distinct
 
-    def __init__(self, properties: QueryProperties, **parameters) -> None:
-        ReaderNode.__init__(self, properties=properties, **parameters)
+    def __init__(self, properties: QueryProperties, step) -> None:
+        ReaderNode.__init__(self, properties, step)
         self.scan_plan = None
-        self.topn_order_by = parameters.get("topn_order_by")
-        self.topn_limit = parameters.get("topn_limit")
-        self.pushed_groups = parameters.get("pushed_groups")
-        self.pushed_aggregates = parameters.get("pushed_aggregates")
-        self.pushed_distinct = bool(parameters.get("pushed_distinct", False))
+        self.topn_order_by = step.topn_order_by
+        self.topn_limit = step.topn_limit
+        self.pushed_groups = step.pushed_groups
+        self.pushed_aggregates = step.pushed_aggregates
+        self.pushed_distinct = bool(step.pushed_distinct)
 
     @property
     def name(self) -> str:  # pragma: no cover

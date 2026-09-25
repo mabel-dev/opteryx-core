@@ -29,18 +29,14 @@ from opteryx.models import QueryProperties
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
 
 class TableManagementNode(BasePlanNode):
-    def __init__(self, properties: QueryProperties, **parameters):
-        BasePlanNode.__init__(self, properties=properties, **parameters)
+    def __init__(self, properties: QueryProperties, step):
+        # ANALYZE / DROP STATISTICS — the FOR COLUMNS scope is this node's
+        # `columns` ([] = whole table).
+        BasePlanNode.__init__(self, properties, step, step.analyze_columns, step.pre_update_columns)
 
-        # Action should be one of: 'create_view', 'alter_view', 'drop_view',
-        # 'analyze_table', 'drop_statistics'
-        self.action: str = parameters.get("action")
-
-        # CREATE / ALTER
-        self.table_name: str = parameters.get("table_name")
-
-        # ANALYZE / DROP STATISTICS — FOR COLUMNS scope ([] = whole table)
-        self.columns: list = parameters.get("analyze_columns") or []
+        # 'analyze_table' or 'drop_statistics'
+        self.action: str = step.action
+        self.table_name: str = step.table_name
 
     @property
     def name(self):  # pragma: no cover - simple string

@@ -44,7 +44,7 @@ from opteryx.compiled.structures.plan_steps import ProjectStep
 
 
 def _identity_of(node):
-    sc = getattr(node, "schema_column", None)
+    sc = node.schema_column
     return sc.identity if sc is not None else None
 
 
@@ -86,7 +86,7 @@ def _substitute_column(col, inline_map):
             nested.centre = inline_map[ident].copy()
             nested.schema_column = col.schema_column
             nested.alias = col.alias
-            nested.query_column = getattr(col, "query_column", None)
+            nested.query_column = col.query_column
             return nested
         return col
     return _substitute_tree(col, inline_map)
@@ -118,7 +118,7 @@ class ProjectFusionStrategy(OptimizationStrategy):
     def _try_fuse(lower: PlanStep, upper: PlanStep):
         """Build a fused Project node, or return None if the pair can't be fused
         safely (see module docstring — no partial fusion)."""
-        lower_cols = list(lower.columns or []) + list(getattr(lower, "passthrough_columns", None) or [])
+        lower_cols = list(lower.columns or []) + list(lower.passthrough_columns or [])
         lower_map = {}
         for col in lower_cols:
             if col.node_type == NodeType.WILDCARD:
@@ -129,7 +129,7 @@ class ProjectFusionStrategy(OptimizationStrategy):
             lower_map[ident] = col
 
         upper_cols = list(upper.columns or [])
-        upper_order = list(getattr(upper, "passthrough_columns", None) or [])
+        upper_order = list(upper.passthrough_columns or [])
         upper_exprs = upper_cols + upper_order
         if not upper_exprs:
             return None
@@ -140,7 +140,7 @@ class ProjectFusionStrategy(OptimizationStrategy):
         # reference to one of those identities is satisfied by `upper` itself, not
         # by `lower`, and must not be treated as an unresolved reference.
         upper_hoisted_identities = {
-            _identity_of(c) for c in getattr(upper, "hoisted_columns", None) or []
+            _identity_of(c) for c in upper.hoisted_columns or []
         }
 
         # Count references upper makes into lower's identity space; also validate
@@ -150,7 +150,7 @@ class ProjectFusionStrategy(OptimizationStrategy):
             if expr is None:
                 return None
             for ident_node in get_all_nodes_of_type(expr, (NodeType.IDENTIFIER,)):
-                sc = getattr(ident_node, "schema_column", None)
+                sc = ident_node.schema_column
                 if sc is None or sc.identity is None:
                     return None  # unbound — don't guess
                 if sc.identity in upper_hoisted_identities:
@@ -173,6 +173,6 @@ class ProjectFusionStrategy(OptimizationStrategy):
         fused.passthrough_columns = [_substitute_column(c, inline_map) for c in upper_order]
         # Carry forward any hoisted columns `upper` already had (a prior fusion
         # earlier in the same chain) alongside the ones this fusion just hoisted.
-        fused.hoisted_columns = list(getattr(upper, "hoisted_columns", None) or []) + hoisted
-        fused.except_columns = getattr(upper, "except_columns", None)
+        fused.hoisted_columns = list(upper.hoisted_columns or []) + hoisted
+        fused.except_columns = upper.except_columns
         return fused

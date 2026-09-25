@@ -38,6 +38,7 @@ from .optimization_strategy import (
     OptimizerContext,
     get_nodes_of_type_from_logical_plan,
 )
+from opteryx.compiled.structures.expressions import expressions_with
 from opteryx.compiled.structures.plan_steps import ProjectStep
 
 
@@ -111,7 +112,7 @@ def is_simple_aggregate(aggregate_node) -> bool:
         if aggregate.node_type != NodeType.AGGREGATOR:
             return False
 
-        agg_func = getattr(aggregate, "value", "").upper()
+        agg_func = aggregate.value.upper()
 
         # COUNT(*) or COUNT(col) - must not be DISTINCT/FILTER.
         # COUNT(*) reads from manifest record count.
@@ -121,18 +122,18 @@ def is_simple_aggregate(aggregate_node) -> bool:
             if aggregate.duplicate_treatment == "Distinct":
                 return False
 
-            parameters = getattr(aggregate, "parameters", None)
+            parameters = aggregate.parameters
             if not parameters or len(parameters) != 1:
                 return False
 
             param = parameters[0]
-            param_kind = getattr(param, "node_type", None)
+            param_kind = param.node_type
             if param_kind == NodeType.WILDCARD:
                 continue
             # Column reference: must carry a resolvable schema column with a name
-            if getattr(param, "schema_column", None) is None:
+            if param.schema_column is None:
                 return False
-            if not getattr(param, "source_column", None):
+            if type(param) not in expressions_with("source_column") or not param.source_column:
                 return False
             continue
 
@@ -144,7 +145,7 @@ def is_simple_aggregate(aggregate_node) -> bool:
             expr = aggregate.parameters[0]
             if expr.schema_column is None:
                 return False
-            col_type = getattr(expr.schema_column, "category", None)
+            col_type = expr.schema_column.category
             if col_type is None:
                 return False
             # This allowlist is the ONLY thing standing between `MIN`/`MAX` and a
@@ -349,17 +350,17 @@ def extract_alias_by_identity(logical_plan) -> dict:
     the Exit node's column order need not match aggregate_node.aggregates order.
     """
     exit_node = find_exit_node(logical_plan)
-    if not exit_node or not getattr(exit_node, "columns", None):
+    if not exit_node or not exit_node.columns:
         return {}
 
     mapping = {}
     for column in exit_node.columns:
-        identity = getattr(getattr(column, "schema_column", None), "identity", None)
+        identity = column.schema_column.identity if column.schema_column is not None else None
         if identity is None:
             continue
-        if getattr(column, "alias", None):
+        if column.alias:
             mapping[identity] = column.alias
-        elif getattr(column, "source_column", None):
+        elif type(column) in expressions_with("source_column") and column.source_column:
             mapping[identity] = column.source_column
     return mapping
 
@@ -377,7 +378,7 @@ def _replace_nested_aggregators(node, agg_identity_to_literal: dict):
         return node
 
     if node.node_type == NodeType.AGGREGATOR:
-        agg_id = getattr(getattr(node, "schema_column", None), "identity", None)
+        agg_id = node.schema_column.identity if node.schema_column is not None else None
         return agg_identity_to_literal.get(agg_id, node)
 
     node.map_children(lambda child: _replace_nested_aggregators(child, agg_identity_to_literal))
@@ -448,17 +449,23 @@ def get_all_aggregate_metadata(aggregate_node) -> list:
 
     metadata = []
     for agg in aggregate_node.aggregates:
-        agg_func = getattr(agg, "value", "").upper()
+        agg_func = agg.value.upper()
 
         if agg_func == "COUNT":
             param = agg.parameters[0] if agg.parameters else None
-            if param is not None and getattr(param, "node_type", None) != NodeType.WILDCARD:
-                column_name = getattr(param, "source_column", "") or ""
+            if param is not None and param.node_type != NodeType.WILDCARD:
+                column_name = (
+                    param.source_column if type(param) in expressions_with("source_column") else ""
+                ) or ""
             else:
                 column_name = ""
         elif agg_func in ("MIN", "MAX"):
             param = agg.parameters[0] if agg.parameters else None
-            column_name = getattr(param, "source_column", "") if param else ""
+            column_name = (
+                (param.source_column if type(param) in expressions_with("source_column") else "")
+                if param
+                else ""
+            )
         else:
             column_name = ""
 
@@ -601,7 +608,7 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
             return plan
 
         # We only act when we have manifest-based statistics
-        manifest = getattr(scan_node, "manifest", None)
+        manifest = scan_node.manifest
         if manifest is None:
             return plan
 
@@ -617,7 +624,7 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         alias_by_identity = extract_alias_by_identity(plan)
         column_aliases = []
         for idx, (agg_func, column_name, agg_node) in enumerate(agg_metadata):
-            agg_id = getattr(getattr(agg_node, "schema_column", None), "identity", None)
+            agg_id = agg_node.schema_column.identity if agg_node.schema_column is not None else None
             column_aliases.append(alias_by_identity.get(agg_id, f"agg_{idx}"))
 
         # Merge-on-read deletes make PER-COLUMN statistics one-sided: min/max
@@ -704,7 +711,7 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         # Build a mapping from aggregator schema identity to replacement literal
         agg_identity_to_literal = {}
         for agg_node, literal in zip(aggregate_node.aggregates, literals):
-            agg_id = getattr(getattr(agg_node, "schema_column", None), "identity", None)
+            agg_id = agg_node.schema_column.identity if agg_node.schema_column is not None else None
             if agg_id is not None:
                 agg_identity_to_literal[agg_id] = literal
 
@@ -714,20 +721,20 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
             alias_to_literal[alias] = literal
 
         for nid, n in plan.nodes(data=True):
-            cols = getattr(n, "columns", None)
+            cols = n.columns
             if not cols:
                 continue
             changed = False
             new_cols = []
             for c in cols:
                 # Try to match by schema identity first
-                expr_id = getattr(getattr(c, "schema_column", None), "identity", None)
+                expr_id = c.schema_column.identity if c.schema_column is not None else None
                 replacement = None
 
                 if expr_id in agg_identity_to_literal:
                     replacement = agg_identity_to_literal[expr_id]
-                elif getattr(c, "alias", None) in alias_to_literal:
-                    replacement = alias_to_literal[getattr(c, "alias", None)]
+                elif c.alias in alias_to_literal:
+                    replacement = alias_to_literal[c.alias]
 
                 if replacement is not None:
                     new_cols.append(replacement)
@@ -739,7 +746,7 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
                     # nested AGGREGATOR still references a replaced identity.
                     nested_aggs = get_all_nodes_of_type(c, (NodeType.AGGREGATOR,))
                     if any(
-                        getattr(getattr(a, "schema_column", None), "identity", None)
+                        (a.schema_column.identity if a.schema_column is not None else None)
                         in agg_identity_to_literal
                         for a in nested_aggs
                     ):
@@ -759,13 +766,13 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         # order — without this, multi-aggregate results come out permuted
         # (e.g. MIN(a), MAX(b) returned swapped).
         literal_by_identity = {
-            getattr(getattr(lit, "schema_column", None), "identity", None): lit
+            (lit.schema_column.identity if lit.schema_column is not None else None): lit
             for lit in literals
         }
         ordered_literals = []
         matched_ids = set()
-        for col in getattr(exit_node, "columns", None) or []:
-            ident = getattr(getattr(col, "schema_column", None), "identity", None)
+        for col in (exit_node.columns if exit_node is not None else None) or []:
+            ident = col.schema_column.identity if col.schema_column is not None else None
             lit = literal_by_identity.get(ident)
             if lit is not None and ident not in matched_ids:
                 ordered_literals.append(lit)
@@ -773,7 +780,7 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         # Append any literals not matched to an Exit column (defensive; should be
         # none for a statistics-only query whose Exit columns are the aggregates).
         for lit in literals:
-            ident = getattr(getattr(lit, "schema_column", None), "identity", None)
+            ident = lit.schema_column.identity if lit.schema_column is not None else None
             if ident not in matched_ids:
                 ordered_literals.append(lit)
         if len(ordered_literals) == len(literals):
@@ -862,7 +869,7 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
                 plan[nid] = n
 
         # Record connector assignment status on the plan for diagnostic purposes
-        plan._stats_assigned_connector_type = getattr(scan_node, "connector", None) and getattr(
+        plan._stats_assigned_connector_type = scan_node.connector and getattr(
             scan_node.connector, "__type__", None
         )
 

@@ -25,9 +25,9 @@ Safety: if stripping would leave zero group keys, keep one to preserve the
 AggregateAndGroup semantics (empty input → zero output rows, not one).
 """
 
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn
-from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.utils import random_string
 
@@ -72,7 +72,7 @@ def _extract_equalities(expr, equalities: dict) -> None:
                 stack.append(n.right)
             continue
         if nt == NodeType.DNF:
-            for sub in getattr(n, "parameters", None) or []:
+            for sub in n.parameters or []:
                 if sub is not None:
                     stack.append(sub)
             continue
@@ -87,7 +87,7 @@ def _extract_equalities(expr, equalities: dict) -> None:
             ident, lit = right, left
         else:
             continue
-        qn = getattr(ident, "qualified_name", None)
+        qn = ident.qualified_name
         if qn is None:
             continue
         val = lit.value
@@ -111,17 +111,17 @@ def _collect_equality_predicates(plan: LogicalPlan, start_nid) -> dict:
     return equalities
 
 
-def _make_passthrough(original: Node) -> Node:
+def _make_passthrough(original: Expression) -> Expression:
     return LogicalColumn(
         node_type=NodeType.IDENTIFIER,
         source_column=(
-            original.schema_column.name if original.schema_column else original.value
+            original.schema_column.name if original.schema_column else getattr(original, "value", None)
         ),
         schema_column=original.schema_column,
     )
 
 
-def _make_constant_literal(original: Node, value) -> Node:
+def _make_constant_literal(original: Expression, value) -> Expression:
     """Create a LITERAL node that emits value under the original column's schema identity."""
     lit = Literal()
     lit.value = value
@@ -134,7 +134,7 @@ class FilterImpliedGroupKeyReductionStrategy(OptimizationStrategy):
         if node.node_type != LogicalPlanStepType.AggregateAndGroup:
             return context
 
-        groups = getattr(node, "groups", None)
+        groups = node.groups
         if not groups:
             return context
 
@@ -154,7 +154,7 @@ class FilterImpliedGroupKeyReductionStrategy(OptimizationStrategy):
         for g in groups:
             if g.schema_column is None:
                 return context
-        aggregates = getattr(node, "aggregates", None) or []
+        aggregates = node.aggregates or []
         for agg in aggregates:
             if agg.schema_column is None:
                 return context

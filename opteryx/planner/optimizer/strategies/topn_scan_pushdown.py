@@ -61,8 +61,8 @@ class TopNScanPushdownStrategy(OptimizationStrategy):
         if node.node_type != LogicalPlanStepType.HeapSort:
             return context
 
-        limit = getattr(node, "limit", None)
-        order_by = getattr(node, "order_by", None)
+        limit = node.limit
+        order_by = node.order_by
         if not limit or limit <= 0 or not order_by:
             return context
 
@@ -80,7 +80,7 @@ class TopNScanPushdownStrategy(OptimizationStrategy):
         if source_node.pushed_aggregates is not None or source_node.pushed_distinct:
             return context
 
-        connector = getattr(source_node, "connector", None)
+        connector = source_node.connector
         if connector is None or not connector.supports_topn_pushdown:
             return context
         if not connector.can_push_topn(order_by):

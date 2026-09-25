@@ -36,9 +36,9 @@ from opteryx.models import QueryProperties
 
 
 class ShowLineageNode(BasePlanNode):
-    def __init__(self, properties: QueryProperties, **parameters):
-        BasePlanNode.__init__(self, properties=properties, **parameters)
-        self._lineage = parameters.get("lineage")
+    def __init__(self, properties: QueryProperties, step):
+        BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
+        self._lineage = step.lineage
         self.seen = False
 
     @property

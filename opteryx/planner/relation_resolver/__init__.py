@@ -299,8 +299,9 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX):
             new_rel = f"{node.output_relation.rsplit('-', 1)[0]}-{random_string(6)}"
             node.output_relation = new_rel
             # REPLACE the SchemaColumns rather than mutating them: copy_sub_plan's
-            # node copy shares any non-Node property object between the copy and
-            # its source (see _inner_copy in compiled/structures/node.pyx), so an
+            # step copy shares any field value that is not an expression or a
+            # container of them between the copy and its source (see `_copy_field`
+            # in compiled/structures/plan_steps.pyx), so an
             # in-place identity write would hit the CTE template and every other
             # copy of it too — the very sharing this re-mint exists to break.
             node.outputs = [

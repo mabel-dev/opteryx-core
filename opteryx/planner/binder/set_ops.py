@@ -6,8 +6,12 @@
 from copy import copy
 from typing import List, Tuple
 
+from opteryx.compiled.structures.expressions import Expression
+from opteryx.compiled.structures.expressions import expressions_with
+from opteryx.compiled.structures.plan_steps import PlanStep
+from opteryx.compiled.structures.plan_steps import steps_with
 from opteryx.expression import ExpressionColumn, NodeType, get_all_nodes_of_type
-from opteryx.models import LogicalColumn, Node
+from opteryx.models import LogicalColumn
 from opteryx.planner.binder.binder import (
     _bound_cast_node,
     _descriptor_carries_meaning,
@@ -23,7 +27,7 @@ from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.plan_steps import JoinStep
 
 
-def visit_set(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_set(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     node.variables = context.execution_context.variables
     node.columns = []
     return node, context
@@ -40,7 +44,7 @@ _PROJECTING_STEPS = (
 )
 
 
-def _setop_leg_columns(self, node: Node, relation_names: List[str], context: BindingContext):
+def _setop_leg_columns(self, node: PlanStep, relation_names: List[str], context: BindingContext):
     """One set-op leg's OUTPUT columns, in order, as (relation, SchemaColumn) pairs.
 
     THE ONE DEFINITION of what a leg produces. INTERSECT and EXCEPT match their legs
@@ -93,20 +97,24 @@ def _setop_leg_columns(self, node: Node, relation_names: List[str], context: Bin
             # exports (see `_rewrite_setop_to_join`). Read it rather than
             # re-deriving: the rewritten node is a Join, whose `.columns` are the
             # identifiers of its ON condition - both legs' keys, not an output list.
-            carried = getattr(branch_node, "setop_leg_columns", None)
+            carried = (
+                branch_node.setop_leg_columns
+                if branch_node.node_type in steps_with("setop_leg_columns")
+                else None
+            )
             if carried is not None:
                 return carried
 
             if branch_node.node_type in _PROJECTING_STEPS and branch_node.columns:
                 leg_columns = []
                 for column in branch_node.columns:
-                    schema_column = getattr(column, "schema_column", None)
+                    schema_column = column.schema_column
                     if schema_column is None:
                         # An unexpanded wildcard, or anything else not yet bound to
                         # a column: this IS the leg's projection, so there is
                         # nothing further down to consult.
                         return None
-                    source = getattr(column, "source", None)
+                    source = column.source if type(column) in expressions_with("source") else None
                     if source not in names:
                         # A column can reach the projection without its `source`
                         # set (`SELECT id` over a single relation); its origin
@@ -126,7 +134,7 @@ def _setop_leg_columns(self, node: Node, relation_names: List[str], context: Bin
                         # identifiers) leaves it empty, and a genuinely cross-relation
                         # computed column leaves it ambiguous; both must still decline
                         # rather than guess.
-                        relations = [r for r in (getattr(column, "relations", None) or ()) if r in names]
+                        relations = [r for r in (column.relations or ()) if r in names]
                         source = relations[0] if len(relations) == 1 else None
                     if source is None:
                         return None
@@ -158,14 +166,17 @@ def _branch_owns_a_relation(graph, start_nid: str, relation_names: set) -> bool:
         if current in seen:
             continue
         seen.add(current)
-        if getattr(graph[current], "alias", None) in relation_names:
+        current_node = graph[current]
+        if (
+            current_node.alias if current_node.node_type in steps_with("alias") else None
+        ) in relation_names:
             return True
         for upstream_nid, _, _ in graph.ingoing_edges(current):
             stack.append(upstream_nid)
     return False
 
 
-def _positional_setop_on_condition(left_columns, right_columns) -> Node:
+def _positional_setop_on_condition(left_columns, right_columns) -> Expression:
     """AND-tree of `left[i] = right[i]`, one equality per output position.
 
     The identifiers are handed over ALREADY BOUND - `inner_binder` returns early on
@@ -215,7 +226,7 @@ def _positional_setop_on_condition(left_columns, right_columns) -> Node:
     return conditions[0]
 
 
-def _rewrite_setop_to_join(self, node: Node, context: BindingContext, join_type: str):
+def _rewrite_setop_to_join(self, node: PlanStep, context: BindingContext, join_type: str):
     """Convert an INTERSECT/EXCEPT node to a `left semi` / `left anti` Join.
 
     THE set-op -> join rewrite, and the only one for the DISTINCT forms. It lives at
@@ -269,7 +280,7 @@ def _rewrite_setop_to_join(self, node: Node, context: BindingContext, join_type:
 
 def _columns_for_side(
     self,
-    node: Node,
+    node: PlanStep,
     relation_names: List[str],
     context: BindingContext,
 ):
@@ -344,7 +355,7 @@ def _columns_for_side(
     raise KeyError(relation_names)
 
 
-def _branch_project_columns(self, node: Node, relation_names: List[str], context: BindingContext):
+def _branch_project_columns(self, node: PlanStep, relation_names: List[str], context: BindingContext):
     """Find a set-op branch's own bound Project columns by walking the graph.
 
     Returns None if the branch (or a Project within it) cannot be located —
@@ -383,7 +394,11 @@ def _branch_project_columns(self, node: Node, relation_names: List[str], context
                 # `.columns` are the identifiers of its ON condition — BOTH legs'
                 # keys — so reading them here counts a two-column output for a
                 # one-column set operation.
-                carried = getattr(cur_node, "setop_leg_columns", None)
+                carried = (
+                    cur_node.setop_leg_columns
+                    if cur_node.node_type in steps_with("setop_leg_columns")
+                    else None
+                )
                 if carried is not None:
                     return [schema_column for _, schema_column in carried]
                 # Only a node that STATES a projection counts — same restriction
@@ -396,7 +411,7 @@ def _branch_project_columns(self, node: Node, relation_names: List[str], context
                 if cur_node.node_type in _PROJECTING_STEPS:
                     branch_columns = []
                     for col in (cur_node.columns or []):
-                        schema_column = getattr(col, "schema_column", None)
+                        schema_column = col.schema_column
                         if schema_column is not None:
                             branch_columns.append(schema_column)
                     if branch_columns:
@@ -407,7 +422,7 @@ def _branch_project_columns(self, node: Node, relation_names: List[str], context
     return None
 
 
-def _branch_project_node(self, node: Node, relation_names: List[str]):
+def _branch_project_node(self, node: PlanStep, relation_names: List[str]):
     """Find a set-op branch's own Project (or Project-like) node by walking the graph.
 
     Same matching/descent as `_branch_project_columns`, but returns the actual
@@ -441,7 +456,7 @@ def _branch_project_node(self, node: Node, relation_names: List[str]):
                 # Join's `.columns` are its ON condition's identifiers, so it is
                 # never the node whose column list a caller wants to read or cast.
                 if cur_node.node_type != LogicalPlanStepType.Join and any(
-                    getattr(col, "schema_column", None) is not None for col in (cur_node.columns or [])
+                    col.schema_column is not None for col in (cur_node.columns or [])
                 ):
                     return cur_node
                 for upstream_nid, _, _ in graph.ingoing_edges(cur):
@@ -450,7 +465,7 @@ def _branch_project_node(self, node: Node, relation_names: List[str]):
     return None
 
 
-def _cast_leg_columns_to(columns: List[Node], coerced_types: List[ColumnType]) -> None:
+def _cast_leg_columns_to(columns: List[Expression], coerced_types: List[ColumnType]) -> None:
     """Wrap each of a UNION leg's bound columns in a CAST when it doesn't already
     match the position's coerced (unified-across-both-legs) type.
 
@@ -479,7 +494,7 @@ def _cast_leg_columns_to(columns: List[Node], coerced_types: List[ColumnType]) -
         target = coerced_types[i]
         if target is None:
             continue
-        schema_column = getattr(col, "schema_column", None)
+        schema_column = col.schema_column
         if schema_column is None:
             continue
         current_type = schema_column.column_type
@@ -516,7 +531,7 @@ _SET_OP_STEP_TYPES = (
 )
 
 
-def _retype_declared_columns(columns: List[Node], context: BindingContext, coerced_types) -> None:
+def _retype_declared_columns(columns: List[Expression], context: BindingContext, coerced_types) -> None:
     """Point a set-op node's DECLARED output columns at the types its legs were just
     coerced to, in `columns` and in `context.schemas` alike.
 
@@ -563,7 +578,7 @@ def _retype_declared_columns(columns: List[Node], context: BindingContext, coerc
     claimed_identities = set()
     for i, column in enumerate(columns):
         target = coerced_types[i]
-        schema_column = getattr(column, "schema_column", None)
+        schema_column = column.schema_column
         if target is None or schema_column is None:
             continue
         identity = schema_column.identity
@@ -604,7 +619,7 @@ def _retype_declared_columns(columns: List[Node], context: BindingContext, coerc
                 schema.columns[position] = replacement
 
 
-def _publish_declared_columns(bound_columns: List[Node], exit_columns: List[Node]) -> None:
+def _publish_declared_columns(bound_columns: List[Expression], exit_columns: List[Expression]) -> None:
     """Make the query's EXIT read this set operation's settled output columns.
 
     A set operation's output IS the query's output, and logical_planner says so by
@@ -635,7 +650,7 @@ def _publish_declared_columns(bound_columns: List[Node], exit_columns: List[Node
         exit_columns[position] = bound_column
 
 
-def _coerce_branch_to(self, branch: Node, context: BindingContext, coerced_types) -> None:
+def _coerce_branch_to(self, branch: PlanStep, context: BindingContext, coerced_types) -> None:
     """Make one side of a set operation actually produce `coerced_types`.
 
     For an ordinary leg this is `_cast_leg_columns_to` on its Project.
@@ -685,7 +700,7 @@ def _set_op_common_type(left_type, right_type):
 
 def _validate_set_operation_types(
     self,
-    node: Node,
+    node: PlanStep,
     context: BindingContext,
     operation_name: str = "SET OPERATION",
 ) -> None:
@@ -705,7 +720,7 @@ def _validate_set_operation_types(
         )
 
 
-def visit_union(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_union(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     _validate_set_operation_types(self, node, context, "UNION")
 
     # The list object this node's columns live in is SHARED with the query's EXIT node
@@ -743,8 +758,8 @@ def visit_union(self, node: Node, context: BindingContext) -> Tuple[Node, Bindin
         if len(left_cols) == len(right_cols):
             leg_coerced_types = []
             for left_col, right_col in zip(left_cols, right_cols):
-                left_sc = getattr(left_col, "schema_column", None)
-                right_sc = getattr(right_col, "schema_column", None)
+                left_sc = left_col.schema_column
+                right_sc = right_col.schema_column
                 left_type = left_sc.column_type if left_sc is not None else None
                 right_type = right_sc.column_type if right_sc is not None else None
                 leg_coerced_types.append(_set_op_common_type(left_type, right_type))
@@ -784,7 +799,7 @@ def visit_union(self, node: Node, context: BindingContext) -> Tuple[Node, Bindin
     return node, context
 
 
-def visit_intersect(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_intersect(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     # Every non-ALL INTERSECT is a semi join, and the rewrite runs here rather than
     # pre-bind because the ON condition pairs the legs' output columns positionally
     # — see `_rewrite_setop_to_join`. The wildcard case is not special any more; it
@@ -832,7 +847,7 @@ def visit_intersect(self, node: Node, context: BindingContext) -> Tuple[Node, Bi
     return node, context
 
 
-def visit_except(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_except(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     # See the matching comment in visit_intersect — same reasoning, and the same
     # ordering ahead of the count check. "left anti" instead of "left semi", and
     # EXCEPT ALL falls through for the same reason INTERSECT ALL does.
@@ -892,7 +907,7 @@ def _literal_array_element_type(values):
     return _lt.VARIANT
 
 
-def visit_unnest(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_unnest(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     node.columns = []
 
     # we create a new schema for the unnested column

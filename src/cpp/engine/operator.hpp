@@ -38,6 +38,13 @@ using MorselPtr = std::shared_ptr<CxxMorsel>;
 // channel exists.
 inline constexpr int kErrCodeDataError = 2;
 
+// kErrCodeReadError: the STORAGE is what failed - a scan could not fetch bytes
+// it was planned to read (the store refused the request, the object is gone).
+// build_terminal_exc raises it as opteryx DatasetReadError, the same class a
+// read failure raises on every non-native path, so a caller's handling does not
+// depend on which reader happened to run.
+inline constexpr int kErrCodeReadError = 3;
+
 // ---- Per-operator telemetry (basic, always-on) -----------------------------------
 // One Source/Operator/Sink instance serves EVERY worker thread, so these counters are
 // shared and therefore atomic. Accumulation is PER-MORSEL (never per-row): the atomic

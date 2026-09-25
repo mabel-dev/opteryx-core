@@ -67,8 +67,8 @@ _MAX_HOPS = 8
 def _identity_of(node) -> str:
     if node.node_type != NodeType.IDENTIFIER:
         return None
-    schema_column = getattr(node, "schema_column", None)
-    return getattr(schema_column, "identity", None) if schema_column is not None else None
+    schema_column = node.schema_column
+    return schema_column.identity if schema_column is not None else None
 
 
 def _int_literal_of(node):
@@ -117,15 +117,15 @@ class WindowTopKFusionStrategy(OptimizationStrategy):
         if node.node_type != LogicalPlanStepType.Window:
             return context
 
-        outputs = getattr(node, "outputs", None)
-        order_by = getattr(node, "order_by", None)
+        outputs = node.outputs
+        order_by = node.order_by
         if not outputs or not order_by or len(outputs) != 1:
             # No `outputs` = an aggregate window (already lowered to a join by the
             # plan rewriter); no `order_by` = the internal streaming ROW_NUMBER
             # path (INTERSECT/EXCEPT ALL rewrite), which has no outer SQL filter
             # to fuse; more than one output = ambiguous which one a filter targets.
             return context
-        if getattr(node, "top_k", None) is not None:
+        if node.top_k is not None:
             return context  # already fused
         if outputs[0][0] not in RANK_VALUED:
             # LAG/LEAD outputs are VALUES from another row, not ranks — a

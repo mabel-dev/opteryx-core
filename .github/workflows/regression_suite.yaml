@@ -50,6 +50,11 @@ jobs:
           python -m uv pip install --upgrade numpy cython setuptools-rust
           python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/tests/requirements.txt
           python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/pyproject.toml
+          # hadro is the S3 server tests/integration/test_s3_hadro.py reads from.
+          # --no-deps: it depends on the published rugo wheel, which would
+          # shadow the in-tree rugo built by `make compile`. Its server
+          # dependencies (fastapi, uvicorn) come from tests/requirements.txt.
+          python -m uv pip install --upgrade --no-deps hadro
 
       # The catalog-backed tests skip themselves when opteryx_catalog is absent
       # (dev machines legitimately have none). That skip must never be how CI
@@ -58,6 +63,12 @@ jobs:
       - name: Verify opteryx_catalog is installed
         run: |
           python -c "import opteryx_catalog, importlib.metadata as m; print('opteryx-catalog', m.version('opteryx-catalog'))"
+
+      # Same reasoning for the S3 end-to-end tests: skipping is for dev machines
+      # without hadro, never how CI passes.
+      - name: Verify hadro is installed
+        run: |
+          python -c "import hadro, fastapi, uvicorn, importlib.metadata as m; print('hadro', m.version('hadro'))"
 
       - name: Report Tool Versions
         run: |

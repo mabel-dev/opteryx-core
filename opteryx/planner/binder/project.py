@@ -6,10 +6,12 @@
 from collections import Counter
 from typing import Tuple
 
+from opteryx.compiled.structures.expressions import expressions_with
+from opteryx.compiled.structures.plan_steps import PlanStep
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.managers.virtual_datasets import derived
-from opteryx.models import LogicalColumn, Node
+from opteryx.models import LogicalColumn
 from opteryx.planner.binder.binder import inner_binder, merge_schemas
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.types.schema import RelationSchema
@@ -17,7 +19,7 @@ from opteryx.models import current_name_of
 from opteryx.compiled.structures.plan_steps import steps_with
 
 
-def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_exit(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     # The derived schema is cleared at the END of this visitor, not the start.
     #
     # It used to be popped here, before the columns below were bound. That is exactly the
@@ -156,7 +158,7 @@ def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     return node, context
 
 
-def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_project(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     columns = []
     projected_column_count = 0
 
@@ -321,7 +323,7 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
     # to the same `n_name` identity. We compare on (identity, lower(name)) so
     # case-variant references like `SELECT id, ID` are still flagged.
     def _output_key(c):
-        name = c.alias or getattr(c, "value", None)
+        name = c.alias or (c.value if type(c) in expressions_with("value") else None)
         if isinstance(name, str):
             name = name.lower()
         elif isinstance(name, (list, dict, set)):
@@ -360,7 +362,8 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
         # `TypeError: sequence item 0: expected str instance` — the ambiguity
         # error replaced by a crash that names no column at all.
         matches = sorted(
-            {str(c.alias or getattr(c, "value", None)) for c in node.columns
+            {str(c.alias or (c.value if type(c) in expressions_with("value") else None))
+             for c in node.columns
              if _output_key(c) in duplicates}
         )
         raise AmbiguousIdentifierError(

@@ -23,8 +23,9 @@ from typing import Optional
 from typing import Set
 from typing import Tuple
 
+from opteryx.compiled.structures.expressions import Expression
+from opteryx.compiled.structures.expressions import expressions_with
 from opteryx.expression import NodeType
-from opteryx.models import Node
 from opteryx.compiled.planner.join_estimator import JoinEdge
 from opteryx.compiled.planner.join_estimator import JoinGraph
 from opteryx.compiled.planner.join_estimator import JoinVertex
@@ -36,13 +37,13 @@ from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.plan_context import PlanContext
 
 
-def _identifier_source(expr: Optional[Node]) -> Optional[str]:
+def _identifier_source(expr: Optional[Expression]) -> Optional[str]:
     if expr is None or expr.node_type != NodeType.IDENTIFIER:
         return None
     return expr.source
 
 
-def _identifier_identity(expr: Optional[Node]) -> Optional[bytes]:
+def _identifier_identity(expr: Optional[Expression]) -> Optional[bytes]:
     """Identity of an identifier's bound column, matching how
     ``RelationStatistics.columns`` is keyed (see that class's docstring and
     ``join_algorithm._join_key_identity``).
@@ -54,10 +55,10 @@ def _identifier_identity(expr: Optional[Node]) -> Optional[bytes]:
     """
     if expr is None or expr.node_type != NodeType.IDENTIFIER:
         return None
-    schema_column = getattr(expr, "schema_column", None)
+    schema_column = expr.schema_column
     if schema_column is None:
         return None
-    identity = getattr(schema_column, "identity", None)
+    identity = schema_column.identity
     return identity if isinstance(identity, bytes) else None
 
 
@@ -88,8 +89,8 @@ def _find_scan_for_relation(
     for _, node in _walk_subplan(plan, subplan_id):
         if node.node_type != LogicalPlanStepType.Scan:
             continue
-        rel = getattr(node, "relation", None)
-        alias = getattr(node, "alias", None)
+        rel = node.relation
+        alias = node.alias
         if rel == relation_name or alias == relation_name:
             return node
     return None
@@ -137,12 +138,12 @@ def _subtree_sources_are_backed(plan: LogicalPlan, root_id: str) -> bool:
         if node.node_type not in (LogicalPlanStepType.Scan, LogicalPlanStepType.FunctionDataset):
             continue
         saw_a_source = True
-        manifest = getattr(node, "manifest", None)
+        manifest = node.manifest
         if manifest is not None:
             count = manifest.get_record_count()
             if count is not None and count > 0:
                 continue
-        schema = getattr(node, "schema", None)
+        schema = node.schema
         count = None
         if schema is not None:
             count = schema.row_count_metric or schema.row_count_estimate
@@ -242,7 +243,7 @@ def _leaf_domain_row_count(
 
 
 def _classify_predicate(
-    pred: Node, rel_to_leaf: Dict[str, int]
+    pred: Expression, rel_to_leaf: Dict[str, int]
 ) -> Tuple[Optional[int], Optional[int], bool]:
     """Return ``(left_leaf, right_leaf, is_equality)`` for a predicate.
 
@@ -263,7 +264,7 @@ def _classify_predicate(
 
 
 def _group_equivalence_classes(
-    cross_equi: List[Tuple[int, int, Node]],
+    cross_equi: List[Tuple[int, int, Expression]],
 ) -> List[List[Tuple[int, bytes]]]:
     """Partition (leaf_idx, column_identity) key references into equivalence
     classes.
@@ -380,7 +381,7 @@ def _build_equiv_tdoms(
 def build_join_graph(
     plan: LogicalPlan,
     leaves: List[Any],
-    predicates: List[Node],
+    predicates: List[Expression],
     plan_context: PlanContext,
 ) -> Tuple[Optional[JoinGraph], Optional[str]]:
     """Build a JoinGraph from a leaf list and the predicates above the chain.
@@ -429,7 +430,7 @@ def build_join_graph(
     # Partition predicates: cross-leaf-equi only. Single-relation predicates
     # are no longer routed here — refresh has already folded their
     # selectivity into the Scan's estimated row_count.
-    cross_equi: List[Tuple[int, int, Node]] = []
+    cross_equi: List[Tuple[int, int, Expression]] = []
     for pred in predicates:
         l, r, is_eq = _classify_predicate(pred, rel_to_leaf)
         if l is None or r is None:
@@ -457,8 +458,8 @@ def build_join_graph(
                 src
                 for pred in predicates
                 for src in (
-                    _identifier_source(getattr(pred, "left", None)),
-                    _identifier_source(getattr(pred, "right", None)),
+                    _identifier_source(pred.left if type(pred) in expressions_with("left") else None),
+                    _identifier_source(pred.right if type(pred) in expressions_with("right") else None),
                 )
                 if src is not None and src not in rel_to_leaf
             }

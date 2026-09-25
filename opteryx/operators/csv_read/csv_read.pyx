@@ -63,19 +63,19 @@ cdef class CsvReadNode(ReaderNode):
     cdef public long long csv_infer_sample_size
     cdef object _filesystem
 
-    def __init__(self, properties: QueryProperties, **parameters) -> None:
-        ReaderNode.__init__(self, properties=properties, **parameters)
-        self.csv_files = list(parameters.get("csv_files") or [])
-        self.csv_physical_columns = list(parameters.get("csv_physical_columns") or [])
-        self.csv_predicates = list(parameters.get("csv_predicates") or [])
-        csv_separator = parameters.get("csv_separator")
-        self.csv_separator = "," if csv_separator is None else csv_separator
-        csv_has_header_row = parameters.get("csv_has_header_row")
-        self.csv_has_header_row = True if csv_has_header_row is None else csv_has_header_row
-        csv_fail_on_error = parameters.get("csv_fail_on_error")
-        self.csv_fail_on_error = True if csv_fail_on_error is None else csv_fail_on_error
-        csv_infer_sample_size = parameters.get("csv_infer_sample_size")
-        self.csv_infer_sample_size = 5 if csv_infer_sample_size is None else csv_infer_sample_size
+    def __init__(self, properties: QueryProperties, step, list csv_physical_columns, list csv_predicates) -> None:
+        """A READ_CSV FunctionDataset step. `csv_physical_columns` (the pushed-down
+        projection, pre-alias physical names) and `csv_predicates` (rugo tuples)
+        are the physical planner's translation of the step's columns and
+        predicates."""
+        ReaderNode.__init__(self, properties, step)
+        self.csv_files = list(step.csv_files or [])
+        self.csv_physical_columns = csv_physical_columns
+        self.csv_predicates = csv_predicates
+        self.csv_separator = "," if step.csv_separator is None else step.csv_separator
+        self.csv_has_header_row = True if step.csv_has_header_row is None else step.csv_has_header_row
+        self.csv_fail_on_error = True if step.csv_fail_on_error is None else step.csv_fail_on_error
+        self.csv_infer_sample_size = 5 if step.csv_infer_sample_size is None else step.csv_infer_sample_size
         self._filesystem = None
 
     @property
@@ -102,6 +102,15 @@ cdef class CsvReadNode(ReaderNode):
                 )
 
                 self._filesystem = anonymous_gcs_filesystem()
+            elif protocol == "s3":
+                # SECURITY: mirrors the bind-time s3:// branch in opteryx.planner.
+                # binder.dataset's READ_CSV branch - never this process's AWS credentials
+                # for a user-supplied path. See anonymous_s3_filesystem's docstring.
+                from opteryx.connectors.io_systems.anonymous_s3_filesystem import (
+                    anonymous_s3_filesystem,
+                )
+
+                self._filesystem = anonymous_s3_filesystem()
             else:
                 from opteryx.connectors.io_systems import create_filesystem
 

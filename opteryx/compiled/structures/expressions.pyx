@@ -1932,6 +1932,30 @@ cdef class Evaluated(Expression):
 
 EXPRESSION_TYPES = frozenset({LogicalColumn, Literal, Comparison, BinaryOperator, UnaryOperator, ExtractionOperator, And, Or, Xor, Not, Dnf, Cnf, Between, Case, Cast, Function, Aggregator, Nested, Subquery, Wildcard, Evaluated})
 
+# The expression classes that declare each field — for the generic walkers that
+# read one field off expressions of any type (`type(expr) in
+# expressions_with("left")`). Mirrors plan_steps.steps_with. Built once from the
+# classes' own declared attributes (cdef public/readonly fields and properties,
+# which are the only attributes an expression has); an unknown field name is a
+# KeyError, never an empty set, so a misspelt field cannot read as "declared by
+# nothing".
+cdef dict _EXPRESSIONS_WITH = None
+cdef tuple _FIELD_DESCRIPTORS = (type(Expression.uuid), property)
+
+
+cpdef frozenset expressions_with(str field):
+    global _EXPRESSIONS_WITH
+    cdef dict by_field
+    if _EXPRESSIONS_WITH is None:
+        by_field = {}
+        for cls in EXPRESSION_TYPES:
+            for ancestor in cls.__mro__:
+                for name, member in vars(ancestor).items():
+                    if name[0] != "_" and type(member) in _FIELD_DESCRIPTORS:
+                        by_field.setdefault(name, set()).add(cls)
+        _EXPRESSIONS_WITH = {name: frozenset(classes) for name, classes in by_field.items()}
+    return _EXPRESSIONS_WITH[field]
+
 
 
 cpdef object current_name_of(object node):

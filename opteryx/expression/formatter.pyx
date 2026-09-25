@@ -317,7 +317,12 @@ def _format_expression_inner(root, qualify, cache):
             order = ""
             if root.order:
                 order = " ORDER BY " + ", ".join(
-                    item[0].value + (" DESC" if not item[1] else "")
+                    (
+                        item[0].value
+                        if item[0].node_type == NodeType.IDENTIFIER
+                        else format_expression(item[0], qualify_b, cache)
+                    )
+                    + (" DESC" if not item[1] else "")
                     for item in (root.order or [])
                 )
             if root.value == "ARRAY_AGG":

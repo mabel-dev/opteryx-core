@@ -48,9 +48,9 @@ def _collector(manifest):
 
 
 class ShowManifestNode(BasePlanNode):
-    def __init__(self, properties: QueryProperties, **parameters):
-        BasePlanNode.__init__(self, properties=properties, **parameters)
-        self._manifest = parameters.get("manifest")
+    def __init__(self, properties: QueryProperties, step):
+        BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
+        self._manifest = step.manifest
         self.seen = False
 
     @property

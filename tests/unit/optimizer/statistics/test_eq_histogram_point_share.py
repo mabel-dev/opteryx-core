@@ -34,7 +34,7 @@ import pytest
 import opteryx.planner.optimizer  # noqa: F401
 
 from opteryx.expression import NodeType
-from opteryx.models import Node
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
 from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
@@ -79,13 +79,13 @@ def _stats(histogram, ndv: int) -> RelationStatistics:
     return RelationStatistics(row_count_estimate=_ROWS, columns={_COL: col})
 
 
-def _identifier() -> Node:
+def _identifier() -> Expression:
     return LogicalColumn(
         node_type=NodeType.IDENTIFIER, source_column=None, schema_column=type("_S", (), {"identity": _COL})()
     )
 
 
-def _eq(value) -> Node:
+def _eq(value) -> Expression:
     n = Comparison()
     n.value = "Eq"
     n.left = _identifier()
@@ -93,7 +93,7 @@ def _eq(value) -> Node:
     return n
 
 
-def _in_list(values) -> Node:
+def _in_list(values) -> Expression:
     n = Comparison()
     n.value = "InList"
     n.left = _identifier()

@@ -75,29 +75,28 @@ cdef class _MergeAddresses:
 
 
 class MergeNode(BasePlanNode):
-    def __init__(self, properties: QueryProperties, **parameters):
+    def __init__(self, properties: QueryProperties, step):
         # The statement this sink is serving. UPDATE and DELETE are MERGE with a
         # degenerate source and reuse this node whole, so every message it
-        # raises must name the SQL the user actually wrote. Set BEFORE the base
-        # initialiser, which reads `name` to build its timing stat key.
-        self.statement_name: str = parameters.get("statement_name") or "MERGE INTO"
-        BasePlanNode.__init__(self, properties=properties, **parameters)
-        self.relation_name: str = parameters.get("relation_name")
+        # raises must name the SQL the user actually wrote.
+        self.statement_name: str = step.statement_name or "MERGE INTO"
+        BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
+        self.relation_name: str = step.relation_name
         # What the catalog records this commit AS. The three statements are one
         # physical operation, so without it the snapshot log and the audit trail
         # could not say which one a reader is looking at.
-        self.operation: str = parameters.get("operation") or "merge"
-        self.connector = parameters.get("connector")
-        self.target_schema = parameters.get("target_schema")
-        self.target_column_names = parameters.get("target_column_names")
+        self.operation: str = step.operation or "merge"
+        self.connector = step.connector
+        self.target_schema = step.target_schema
+        self.target_column_names = step.target_column_names
         # Ordered data-file paths, positionally indexed by `$merge_file`. The
         # scan carries an INDEX rather than a path per row: the list is already
         # held, so the index is exact and free where a per-row string would be
         # dragged through the join for no information gain.
-        self.file_paths = parameters.get("file_paths")
+        self.file_paths = step.file_paths
         # The provenance receipt and its producer - see InsertNode.
-        self.read_sources = parameters.get("read_sources")
-        self.produced_by = parameters.get("produced_by")
+        self.read_sources = step.read_sources
+        self.produced_by = step.produced_by
 
         # Every acted-on address lives in NATIVE state for the whole statement
         # (native_merge_sink.hpp) and becomes Python exactly once, at EOS. It
@@ -110,12 +109,7 @@ class MergeNode(BasePlanNode):
 
         # Appended rows become row groups of streaming, target-sized files -
         # see DataFileStream for the shape and for why never a file per batch.
-        self._stream = DataFileStream(
-            self.connector,
-            self.relation_name,
-            coalesce_rows=parameters.get("write_coalesce_rows"),
-            target_file_bytes=parameters.get("target_file_bytes"),
-        )
+        self._stream = DataFileStream(self.connector, self.relation_name)
 
     @property
     def name(self):

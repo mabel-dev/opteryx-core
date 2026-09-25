@@ -50,7 +50,15 @@ def _dedup_key(aggregate):
         tuple(format_expression(p, True) for p in aggregate.parameters[1:]),
         aggregate.duplicate_treatment,
         aggregate.null_treatment,
-        tuple((item[0].value, item[1]) for item in (aggregate.order or [])),
+        tuple(
+            (
+                item[0].value
+                if item[0].node_type == NodeType.IDENTIFIER
+                else format_expression(item[0], True),
+                item[1],
+            )
+            for item in (aggregate.order or [])
+        ),
         aggregate.limit,
     )
 

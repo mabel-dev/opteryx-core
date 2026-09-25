@@ -33,35 +33,11 @@ from opteryx.models import object_message
 
 
 class ViewManagementNode(BasePlanNode):
-    def __init__(self, properties: QueryProperties, **parameters):
-        BasePlanNode.__init__(self, properties=properties, **parameters)
-
-        # Action should be one of: 'create_view', 'alter_view', 'drop_view', 'comment'
-        self.action: str = parameters.get("action")
-
-        # CREATE / ALTER
-        self.view_name: Optional[str] = parameters.get("view_name")
-        self.query = parameters.get("query")
-        # Both are the binder's: it renders the defining SQL and binds it to
-        # derive the view's output schema, so the text stored and the schema
-        # describing it come from one place. See `_view_output_schema`.
-        self.view_sql = parameters.get("view_sql")
-        self.view_schema = parameters.get("view_schema")
-        self.or_replace = parameters.get("or_replace", False)
-        self.if_not_exists = parameters.get("if_not_exists", False)
-
-        # DROP
-        self.view_names = parameters.get("view_names")
-        # Binder supplies a mapping of view_name -> connector for drops
-        self.connectors = parameters.get("connectors")
-
-        # COMMENT
-        self.object_name: Optional[str] = parameters.get("object_name")
-        self.comment: Optional[str] = parameters.get("comment")
-        self.if_exists: bool = parameters.get("if_exists", False)
-
-        # Single connector (create/alter/comment)
-        self.connector = parameters.get("connector")
+    def __init__(self, properties: QueryProperties, step, str action):
+        """`step` is the statement's typed plan step, read directly by each
+        action. `action`: 'create_view', 'alter_view', 'drop_view' or 'comment'."""
+        BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
+        self.action: str = action
 
     @property
     def name(self):  # pragma: no cover - simple string
@@ -70,10 +46,10 @@ class ViewManagementNode(BasePlanNode):
     @property
     def config(self):  # pragma: no cover - simple string
         if self.action == "drop_view":
-            return f"drop {', '.join(self.view_names or [])}"
+            return f"drop {', '.join(self.step.view_names or [])}"
         elif self.action == "comment":
-            return f"comment on {self.object_name}"
-        return f"{self.action} {self.view_name}"
+            return f"comment on {self.step.object_name}"
+        return f"{self.action} {self.step.view_name}"
 
     @property
     def _author(self):
@@ -90,7 +66,7 @@ class ViewManagementNode(BasePlanNode):
         # Perform the action and return a NonTabularResult object
 
         if self.action in ("create_view", "alter_view"):
-            if not self.connector:
+            if not self.step.connector:
                 # The binder resolves the VIEW STORE and nothing else may: a
                 # lazy connector_factory() here would re-derive the workspace's
                 # DATA binding and write the definition to a source we do not
@@ -99,26 +75,27 @@ class ViewManagementNode(BasePlanNode):
                     f"{self.action} reached execution without a bound view store"
                 )
 
-            if self.action == "create_view" and self.if_not_exists:
-                existing_type, _ = self.connector.locate_object(self.view_name)
+            if self.action == "create_view" and self.step.if_not_exists:
+                existing_type, _ = self.step.connector.locate_object(self.step.view_name)
                 if existing_type == TableType.View:
                     return NonTabularResult(
                         record_count=0,
                         status=QueryStatus.SQL_SUCCESS,
                         message=object_message(
-                            "view", "", self.view_name, "already exists, nothing created"
+                            "view", "", self.step.view_name, "already exists, nothing created"
                         ),
                     )
 
             # The session user, not a fixed literal - attributing every view to
             # "opteryx" made the stored owner useless for telling authors apart.
-            update_if_exists = self.or_replace or self.action == "alter_view"
-            self.connector.create_view(
-                self.view_name,
-                self.view_sql,
+            # ALTER VIEW replaces by definition; CREATE only under OR REPLACE.
+            update_if_exists = self.action == "alter_view" or bool(self.step.or_replace)
+            self.step.connector.create_view(
+                self.step.view_name,
+                self.step.view_sql,
                 update_if_exists=update_if_exists,
                 owner=self._author,
-                schema=self.view_schema,
+                schema=self.step.view_schema,
             )
 
             # `update_if_exists` is what the store DID, so it is what the
@@ -128,24 +105,24 @@ class ViewManagementNode(BasePlanNode):
             return NonTabularResult(
                 record_count=1,
                 status=QueryStatus.SQL_SUCCESS,
-                message=object_message(verb, "view", self.view_name),
+                message=object_message(verb, "view", self.step.view_name),
             )
 
         elif self.action == "drop_view":
-            if not self.view_names:
+            if not self.step.view_names:
                 raise ValueError("No view names supplied for DROP VIEW")
 
             dropped = 0
-            for vn in self.view_names:
+            for vn in self.step.view_names:
                 # Bound by the binder, from the VIEW STORE - see create_view.
-                if not self.connectors or vn not in self.connectors:
+                if not self.step.connectors or vn not in self.step.connectors:
                     raise InvalidInternalStateError(
                         f"drop_view reached execution without a bound view store for {vn}"
                     )
-                connector = self.connectors[vn]
+                connector = self.step.connectors[vn]
 
                 if connector.locate_object(vn)[0] != TableType.View:
-                    if self.if_exists:
+                    if self.step.if_exists:
                         continue
                     raise DatasetNotFoundError(connector=connector, dataset=vn)
 
@@ -155,38 +132,38 @@ class ViewManagementNode(BasePlanNode):
             return NonTabularResult(
                 record_count=dropped,
                 status=QueryStatus.SQL_SUCCESS,
-                message=f"dropped {dropped:,} view(s): {', '.join(md_code(v) for v in self.view_names)}",
+                message=f"dropped {dropped:,} view(s): {', '.join(md_code(v) for v in self.step.view_names)}",
             )
 
         elif self.action == "comment":
             # COMMENT ON VIEW/TABLE/EXTENSION
-            if not self.object_name:
+            if not self.step.object_name:
                 raise ValueError("No object name supplied for COMMENT")
 
-            if not self.connector:
+            if not self.step.connector:
                 # visit_comment resolves this, choosing the view store or the
                 # data binding by what the name holds; re-deriving one of them
                 # here would comment on the wrong object's behalf.
                 raise InvalidInternalStateError(
-                    f"comment reached execution without a bound connector for {self.object_name}"
+                    f"comment reached execution without a bound connector for {self.step.object_name}"
                 )
 
             # Try to locate the object to verify it exists (unless IF EXISTS is specified)
-            object_type, _ = self.connector.locate_object(self.object_name)
+            object_type, _ = self.step.connector.locate_object(self.step.object_name)
             if object_type not in (TableType.View, TableType.Table):
-                raise DatasetNotFoundError(connector=self.connector, dataset=self.object_name)
+                raise DatasetNotFoundError(connector=self.step.connector, dataset=self.step.object_name)
 
             # Declared on the Writable mixin, and visit_comment has already
             # rejected a non-Writable connector.
             # The session user, not a fixed literal - every other DDL path here
             # attributes to _author, and recording "system" made the stored
             # describer useless for telling authors apart.
-            self.connector.set_comment(self.object_name, self.comment, describer=self._author)
+            self.step.connector.set_comment(self.step.object_name, self.step.comment, describer=self._author)
 
             return NonTabularResult(
                 record_count=1,
                 status=QueryStatus.SQL_SUCCESS,
-                message=object_message("commented on", "", self.object_name),
+                message=object_message("commented on", "", self.step.object_name),
             )
 
         else:

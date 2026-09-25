@@ -993,7 +993,7 @@ def rewrite_string_empty_compare(predicate, telemetry):
             ident = literal = None
 
         if ident is not None:
-            col_type = getattr(getattr(ident, "schema_column", None), "category", None)
+            col_type = ident.schema_column.category if ident.schema_column is not None else None
             val = literal.value
             if (
                 col_type in {LogicalCategory.VARCHAR, LogicalCategory.VARBINARY}
@@ -1030,7 +1030,7 @@ def rewrite_string_empty_compare(predicate, telemetry):
     inner = func_node.parameters[0]
     if inner.node_type != NodeType.IDENTIFIER:
         return predicate
-    col_type = getattr(getattr(inner, "schema_column", None), "category", None)
+    col_type = inner.schema_column.category if inner.schema_column is not None else None
     if col_type not in {LogicalCategory.VARCHAR, LogicalCategory.VARBINARY}:
         return predicate
 
@@ -1141,7 +1141,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
     # the whole rewrite. Convert an integer temporal literal by its own type
     # first, falling back to parse_iso for strings / datetimes.
     literal_value = literal_node.value
-    literal_cat = getattr(getattr(literal_node, "type", None), "category", None)
+    literal_cat = getattr(literal_node.type, "category", None)
     if (
         isinstance(literal_value, int)
         and not isinstance(literal_value, bool)
@@ -1317,7 +1317,7 @@ def _unwrap_ipv4_retag(addr_node):
     if operand is None:
         return addr_node
 
-    operand_type = getattr(getattr(operand, "schema_column", None), "column_type", None)
+    operand_type = operand.schema_column.column_type if operand.schema_column is not None else None
     if operand_type is None or operand_type.physical != _DrakenType.UINT32:
         return addr_node
 
@@ -1394,7 +1394,7 @@ def rewrite_cidr_to_range(predicate, telemetry: QueryTelemetry):
     # runs first and only admits that pairing, but the range is only equivalent
     # to the mask-and-compare for an integer, so it is checked rather than
     # assumed — the cost is one comparison at plan time.
-    addr_cat = getattr(getattr(addr_node, "schema_column", None), "category", None)
+    addr_cat = addr_node.schema_column.category if addr_node.schema_column is not None else None
     if addr_cat != LogicalCategory.INTEGER:
         return predicate
 
@@ -1475,7 +1475,7 @@ def rewrite_int_vs_fractional_const(predicate, telemetry: QueryTelemetry):
     else:
         return predicate
 
-    col_cat = getattr(getattr(col_node, "schema_column", None), "category", None)
+    col_cat = col_node.schema_column.category if col_node.schema_column is not None else None
     if col_cat != LogicalCategory.INTEGER:
         return predicate
 
@@ -1648,7 +1648,9 @@ def _rebind_function_node(function_node, origin: str = None):
     except IncompatibleTypesError as err:
         if origin is None:
             raise
-        column = function_node.alias or getattr(function_node.schema_column, "name", None)
+        column = function_node.alias or (
+            function_node.schema_column.name if function_node.schema_column is not None else None
+        )
         where = f" (column '{column}')" if column else ""
         raise IncompatibleTypesError(
             message=f"{err} [the optimizer rewrote a {origin} expression{where} into {function_node.value}]"
@@ -1700,20 +1702,20 @@ _NULL_PRESERVING_WIDENING: Dict[str, frozenset] = {
 
 def _physical_name(expression) -> str:
     """Physical DrakenType name bound to an expression, or '' when untyped."""
-    schema_column = getattr(expression, "schema_column", None)
-    column_type = getattr(schema_column, "column_type", None)
+    schema_column = expression.schema_column
+    column_type = schema_column.column_type if schema_column is not None else None
     physical = getattr(column_type, "physical", None)
     return getattr(physical, "name", "") or ""
 
 
 def _is_null_preserving_cast(cast_node) -> bool:
     """True iff this CAST cannot turn a non-NULL value into NULL."""
-    target_name = (getattr(cast_node, "value", "") or "").upper()
+    target_name = (cast_node.value or "").upper()
     if target_name.startswith("TRY_"):
         return False  # TRY_ exists precisely to yield NULL on failure
-    if getattr(cast_node, "format", None) is not None:
+    if cast_node.format is not None:
         return False  # a FORMAT-driven parse can fail on a non-NULL input
-    source = getattr(cast_node, "left", None)
+    source = cast_node.left
     if source is None:
         return False
     source_physical = _physical_name(source)
@@ -1751,7 +1753,10 @@ def _identity_through_transparent(expression):
             expression = expression.left
             continue
         break
-    return getattr(getattr(expression, "schema_column", None), "identity", None)
+    if expression is None:
+        return None
+    schema_column = expression.schema_column
+    return schema_column.identity if schema_column is not None else None
 
 
 def _rewrite_case_node(node, telemetry: QueryTelemetry):
@@ -1989,6 +1994,10 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
                 _rebind_function_node(fn_node)
                 predicate = _like_as_function(predicate, fn_node, negated)
 
+        # Transformed to a FUNCTION or NOT node: nothing below applies to it.
+        if predicate.node_type in {NodeType.FUNCTION, NodeType.NOT}:
+            return predicate
+
     if predicate.value == "AnyOpEq":
         if predicate.right.node_type == NodeType.LITERAL:
             telemetry.optimization_predicate_rewriter_any_to_inlist += 1
@@ -2054,7 +2063,7 @@ def _stringify_for_concat(node):
     short-circuits `x || NULL` to NULL via the dedicated NULL-operand rule in
     operator_map.determine_type, so no cast is needed to make it type-check.
 
-    Built directly (Node(NodeType.CAST, ...) with a synthesized
+    Built directly (a `Cast` with a synthesized
     schema_column) rather than through the binder — this rewrite runs POST-bind,
     so there is no second binder pass to fill one in. This is the same pattern
     the StringConcat wrapper nodes in this function already use for their own
@@ -2146,7 +2155,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
         if resolved is None:
             raise ValueError(f"Unable to resolve rewritten function '{function.value}'")
         function.function_ref = resolved
-        if getattr(function, "schema_column", None) is not None and resolved.inferred_return_type:
+        if function.schema_column is not None and resolved.inferred_return_type:
             # Phase 5: inferred_return_type is ColumnType — use directly.
             function.schema_column.column_type = resolved.inferred_return_type
 
@@ -2222,6 +2231,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
     if (
         function.value == "SUBSTRING"
         and len(function.parameters) == 3
+        and function.parameters[1].node_type == NodeType.LITERAL
         and function.parameters[1].value == 1
     ):
         telemetry.optimization_predicate_rewriter_substring_to_left += 1

@@ -29,11 +29,10 @@ from opteryx.models import QueryProperties
 
 class ExplainNode(BasePlanNode):
 
-    def __init__(self, properties: QueryProperties, **parameters):
-        BasePlanNode.__init__(self, properties=properties, **parameters)
-        self._query_plan = parameters.get("query_plan")
-        self.analyze = parameters.get("analyze", False)
-        self.format = parameters.get("format", "TEXT")
+    def __init__(self, properties: QueryProperties, step):
+        BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
+        self.analyze = bool(step.analyze)
+        self.format = step.format or "TEXT"
 
     @property
     def name(self):  # pragma: no cover
@@ -43,6 +42,3 @@ class ExplainNode(BasePlanNode):
     def config(self):
         return ""
 
-    def execute(self, morsel):
-        if self._query_plan:
-            yield self._query_plan.explain(self.analyze)

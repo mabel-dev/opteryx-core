@@ -65,13 +65,11 @@ class DistinctPushdownStrategy(OptimizationStrategy):
         Returns False when anything is unknown — no manifest, no KMV stats, no record
         count, an unresolvable column name. False means "arm the fold", which is the
         intended default; this gate can only ever veto on evidence."""
-        source = getattr(node, "unnest_column", None)
-        schema_column = getattr(source, "schema_column", None)
+        source = node.unnest_column
+        schema_column = source.schema_column if source is not None else None
         if schema_column is None:
             return False
-        column_name = getattr(schema_column, "name", None) or getattr(
-            schema_column, "source_column", None
-        )
+        column_name = schema_column.name
         if not column_name:
             return False
 
@@ -86,7 +84,7 @@ class DistinctPushdownStrategy(OptimizationStrategy):
         rows = 0
         ndv = 0
         for scan in scans:
-            manifest = getattr(scan, "manifest", None)
+            manifest = scan.manifest
             if manifest is None:
                 return False
             try:
@@ -139,7 +137,7 @@ class DistinctPushdownStrategy(OptimizationStrategy):
         if (
             node.node_type == LogicalPlanStepType.Unnest
             and context.collected_distincts
-            and getattr(node, "unnest_function", "UNNEST") == "UNNEST"
+            and node.unnest_function == "UNNEST"
             and node.unnest_target is not None
             and not self._wrapper_ndv_is_degenerate(
                 context.optimized_plan, context.node_id, node

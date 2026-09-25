@@ -15,6 +15,8 @@ import time
 from enum import Enum, auto
 from typing import List, Optional, Tuple
 
+from opteryx.compiled.structures.expressions import Expression
+from opteryx.compiled.structures.expressions import expressions_with
 from opteryx.exceptions import (
     InvalidInternalStateError,
     NotSupportedError,
@@ -29,7 +31,7 @@ from opteryx.exceptions import (
     md_syntax,
 )
 from opteryx.expression import NodeType, format_expression, get_all_nodes_of_type
-from opteryx.models import LogicalColumn, Node
+from opteryx.models import LogicalColumn
 from opteryx.models import is_expression
 from opteryx.compiled.structures.expressions import And
 from opteryx.compiled.structures.expressions import Or
@@ -588,7 +590,7 @@ def extract_simple_filter(filters, identifier: str = "Name"):
         return root
 
 
-def _is_vector_order_expression(node: Node) -> bool:
+def _is_vector_order_expression(node: Expression) -> bool:
     source_identifier = (
         _get_vector_order_source_identifier(node.parameters[0])
         if (node.node_type == NodeType.FUNCTION and len(node.parameters) == 2)
@@ -603,7 +605,7 @@ def _is_vector_order_expression(node: Node) -> bool:
     )
 
 
-def _get_vector_order_source_identifier(node: Node):
+def _get_vector_order_source_identifier(node: Expression):
     source_identifier = get_vector_source_identifier(node)
     if source_identifier is not None:
         return source_identifier
@@ -611,8 +613,8 @@ def _get_vector_order_source_identifier(node: Node):
         return node
     if (
         node.node_type == NodeType.CAST
-        and getattr(node, "value", None) in {"VECTOR", "TRY_VECTOR"}
-        and getattr(node, "left", None) is not None
+        and node.value in {"VECTOR", "TRY_VECTOR"}
+        and node.left is not None
         and node.left.node_type == NodeType.IDENTIFIER
     ):
         return node.left
@@ -725,7 +727,7 @@ def _expand_grouping_elements(elements: list):
 
 
 def _validate_where_clause_expression(
-    node: Node,
+    node: Expression,
     clause_label: str = "WHERE clause",
     example_prefix: str = "WHERE ",
     *,
@@ -996,7 +998,7 @@ def _rendered_window(window) -> str:
     if window.alias:
         return window.alias
     for _nested in get_all_nodes_of_type(window, select_nodes=(NodeType.AGGREGATOR,)):
-        if _nested is window or getattr(_nested, "over", None) is None:
+        if _nested is window or _nested.over is None:
             continue
         _nested_display = _rendered_window(_nested)
         _nested_ref = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=_nested_display)
@@ -1028,7 +1030,7 @@ def _refuse_nested_window(tree, window) -> None:
     _display_ref.query_column = _window_display
     _replace_node(_enclosing, window, _display_ref)
 
-    if getattr(_enclosing, "over", None) is None:
+    if _enclosing.over is None:
         raise UnsupportedSyntaxError(
             compose(
                 f"Window function {md_code(_window_display)} cannot appear inside the "
@@ -1073,7 +1075,7 @@ def _refuse_window_in_window_spec(spec_nodes: list, clause: str) -> None:
     """
     for _spec_node in spec_nodes:
         for _node in get_all_nodes_of_type(_spec_node, select_nodes=(NodeType.AGGREGATOR,)):
-            if getattr(_node, "over", None) is None:
+            if _node.over is None:
                 continue
             raise UnsupportedSyntaxError(
                 compose(
@@ -1297,7 +1299,7 @@ def _refuse_window_in_having(having) -> None:
     not — rather than being given an `OVER ()` the caller did not type.
     """
     for _node in get_all_nodes_of_type(having, select_nodes=(NodeType.AGGREGATOR,)):
-        _is_window = getattr(_node, "over", None) is not None
+        _is_window = _node.over is not None
         if not _is_window and _node.value not in _RANKING_FUNCTIONS:
             continue
         _display = _rendered_window(_node) if _is_window else format_expression(_node)
@@ -1394,7 +1396,7 @@ def _refuse_window_group_key(key, window_outputs: set, position: int = 0) -> Non
         )
 
     for _node in get_all_nodes_of_type(key, select_nodes=(NodeType.AGGREGATOR,)):
-        _is_window = getattr(_node, "over", None) is not None
+        _is_window = _node.over is not None
         if not _is_window and _node.value not in _RANKING_FUNCTIONS:
             continue
         # Rendered as WRITTEN — with its spec if it has one, bare if it does not —
@@ -1660,7 +1662,7 @@ def _hoist_windows(
     _windows = [
         _node
         for _node in get_all_nodes_of_type(item, select_nodes=(NodeType.AGGREGATOR,))
-        if getattr(_node, "over", None) is not None or _node.value in _RANKING_FUNCTIONS
+        if _node.over is not None or _node.value in _RANKING_FUNCTIONS
     ]
     if not _windows:
         return item
@@ -1682,7 +1684,7 @@ def _hoist_windows(
     # expression has been rendered — see the naming note at the end of this function.
     _hoisted: list = []
     for _window in _windows:
-        _over = getattr(_window, "over", None)
+        _over = _window.over
         _user_alias = _window.alias
         _is_ranking = _window.value in _RANKING_FUNCTIONS
         if _is_ranking:
@@ -2086,6 +2088,18 @@ def _parse_table_hints(with_hints: list, relation_name: str) -> tuple:
     return hints, settings
 
 
+def _limit_value(ast, clause: str):
+    """LIMIT/OFFSET value from its AST: a literal, optionally parenthesised."""
+    if ast is None:
+        return None
+    node = logical_planner_builders.build(ast)
+    while node.node_type == NodeType.NESTED:
+        node = node.centre
+    if node.node_type != NodeType.LITERAL:
+        raise UnsupportedSyntaxError(f"{clause} must be a literal value.")
+    return node.value
+
+
 def _projection_except_columns(projection):
     """`SELECT * EXCEPT (...)`: the EXCEPT list rides on a leading WILDCARD, the only
     expression that has one."""
@@ -2267,7 +2281,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         _qualify_windows = [
             _node
             for _node in get_all_nodes_of_type(_qualify, select_nodes=(NodeType.AGGREGATOR,))
-            if getattr(_node, "over", None) is not None
+            if _node.over is not None
         ]
         if not _qualify_windows:
             raise UnsupportedSyntaxError(
@@ -2989,8 +3003,8 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             _by_partition: dict = {}
             for _agg_node, _partition_by in _unframed_specs:
                 _key = tuple(
-                    getattr(pb, "source_column", None)
-                    or getattr(pb, "value", None)
+                    (pb.source_column if type(pb) in expressions_with("source_column") else None)
+                    or (pb.value if type(pb) in expressions_with("value") else None)
                     or format_expression(pb)
                     for pb in _partition_by
                 )
@@ -3289,7 +3303,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                     _order_by_columns_not_in_projection = [
                         ord_col
                         for ord_col in _order_by_columns_not_in_projection
-                        if (ord_col.source or "").lower() != (proj_col.value[0] or "").lower()
+                        if (getattr(ord_col, "source", None) or "").lower() != (proj_col.value[0] or "").lower()
                     ]
 
             for ord_col in _order_by_columns:
@@ -3303,11 +3317,15 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                 source_column = _get_vector_order_source_identifier(ord_col.parameters[0])
                 if source_column is None:
                     continue
-                source_identity = getattr(source_column.schema_column, "identity", None)
+                source_identity = (
+                    source_column.schema_column.identity
+                    if source_column.schema_column is not None
+                    else None
+                )
                 existing_projection_identities = {
-                    getattr(col.schema_column, "identity", None)
+                    col.schema_column.identity
                     for col in list(_projection) + list(_order_by_columns_not_in_projection)
-                    if getattr(col, "schema_column", None) is not None
+                    if col.schema_column is not None
                 }
                 if source_identity in existing_projection_identities:
                     continue
@@ -3397,10 +3415,8 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     _offset = ast_branch.get("offset")
     if _limit or _offset:
         limit_step = LimitStep()
-        limit_step.limit = None if _limit is None else logical_planner_builders.build(_limit).value
-        limit_step.offset = (
-            None if _offset is None else logical_planner_builders.build(_offset).value
-        )
+        limit_step.limit = _limit_value(_limit, "LIMIT")
+        limit_step.offset = _limit_value(_offset, "OFFSET")
         previous_step_id, step_id = step_id, random_string()
         inner_plan.add_node(step_id, limit_step)
         if previous_step_id is not None:
@@ -3498,7 +3514,7 @@ def process_join_tree(join: dict) -> PlanStep:
 
         return join_on, join_using
 
-    def create_unnest_node(join: dict, join_step: Node, function: str = "UNNEST") -> Node:
+    def create_unnest_node(join: dict, join_step: PlanStep, function: str = "UNNEST") -> PlanStep:
         """
         Extracts information for an UNNEST dataset from the AST node representing the join.
 
@@ -3941,12 +3957,8 @@ def plan_query(statement: dict) -> LogicalPlan:
                 _offset = _offset.get("value")
             if _limit or _offset:
                 limit_step = LimitStep()
-                limit_step.limit = (
-                    None if _limit is None else logical_planner_builders.build(_limit).value
-                )
-                limit_step.offset = (
-                    None if _offset is None else logical_planner_builders.build(_offset).value
-                )
+                limit_step.limit = _limit_value(_limit, "LIMIT")
+                limit_step.offset = _limit_value(_offset, "OFFSET")
                 head_nid, step_id = step_id, random_string()
                 plan.add_node(step_id, limit_step)
                 if head_nid is not None:

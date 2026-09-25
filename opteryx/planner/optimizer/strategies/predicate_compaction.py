@@ -45,8 +45,8 @@ from typing import Optional
 from typing import Set
 from typing import Tuple
 
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.expression import NodeType
-from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -205,7 +205,7 @@ def _literal_domain_key(literal_node) -> Any:
             }
         )
 
-    literal_type = getattr(literal_node, "type", None)
+    literal_type = literal_node.type
     if literal_type is None:
         return None
     if literal_type.element is not None:
@@ -223,7 +223,7 @@ class PredicateOccurrence:
     """Record of a predicate instance within the logical plan."""
 
     filter_nid: str
-    predicate: Node
+    predicate: Expression
     operator: str
     value: Any
     domain: Any = None  # `_literal_domain_key` of the literal bound
@@ -251,7 +251,7 @@ class ColumnAnalysisResult:
 
     status: str
     required: List[PredicateOccurrence] = field(default_factory=list)
-    replacements: List[Node] = field(default_factory=list)
+    replacements: List[Expression] = field(default_factory=list)
 
 
 _RANGE_OPS = frozenset({"Gt", "GtEq", "Lt", "LtEq"})
@@ -284,7 +284,7 @@ def _within(value, value_range: ValueRange) -> bool:
     return True
 
 
-def _retype_literal(literal: Node, column_type, value) -> None:
+def _retype_literal(literal: Expression, column_type, value) -> None:
     """Stamp a literal with a new value AND matching type — `.type` and
     `schema_column` are read by different consumers (row-group pruner vs the
     bytecode compiler), so both must agree or the node is half-bound."""
@@ -391,7 +391,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
 
         drop_keys: Set[Tuple[str, int]] = set()
         filters_to_false: Set[str] = set()
-        replacements: Dict[str, List[Node]] = {}
+        replacements: Dict[str, List[Expression]] = {}
 
         for occurrences in column_occurrences.values():
             analysis = self._analyze_column_predicates(occurrences)
@@ -435,8 +435,8 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
                 optimized_plan[filter_nid] = filter_node
                 continue
 
-            predicates: List[Node] = filter_info.get("predicates", [])
-            new_predicates: List[Node] = []
+            predicates: List[Expression] = filter_info.get("predicates", [])
+            new_predicates: List[Expression] = []
             for predicate in predicates:
                 key = (filter_nid, id(predicate))
                 if key in drop_keys:
@@ -466,8 +466,8 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
             for identifier in identifiers:
                 if identifier.node_type == NodeType.IDENTIFIER and identifier.source:
                     relations.add(identifier.source)
-                schema_column = getattr(identifier, "schema_column", None)
-                if schema_column and getattr(schema_column, "origin", None):
+                schema_column = identifier.schema_column
+                if schema_column and schema_column.origin:
                     relations.update(schema_column.origin)
             filter_node.relations = relations
 
@@ -585,7 +585,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
             return ColumnAnalysisResult(status="rewritten", replacements=[replacement])
 
         required: List[PredicateOccurrence] = []
-        replacements: List[Node] = []
+        replacements: List[Expression] = []
 
         if best_lower and best_upper:
             # Both bounds: ONE BETWEEN stands in for every range predicate on the
@@ -643,7 +643,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
                 return literal_type.element
         return None
 
-    def _build_points_node(self, points: List[PredicateOccurrence], surviving: Set) -> Optional[Node]:
+    def _build_points_node(self, points: List[PredicateOccurrence], surviving: Set) -> Optional[Expression]:
         """`col = v` for one surviving point, `col IN (..)` for several."""
         element_type = self._point_element_type(points)
         if element_type is None:
@@ -658,7 +658,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
             _retype_literal(node.right, _lt.ARRAY(element_type), ordered)
         return node
 
-    def _build_not_in_list_node(self, exclusions: List[PredicateOccurrence]) -> Optional[Node]:
+    def _build_not_in_list_node(self, exclusions: List[PredicateOccurrence]) -> Optional[Expression]:
         """`col NOT IN (..)` standing in for a chain of `col != v` conjuncts."""
         element_type = exclusions[0].predicate.right.type
         if not isinstance(element_type, _lt.ColumnType):
@@ -772,7 +772,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
     # across predicates ANDed together (`ValueRange`); this reuses the same
     # machinery per OR-branch, then merges the resulting ranges.
 
-    def _split_or_unwrap(self, node: Optional[Node]) -> list:
+    def _split_or_unwrap(self, node: Optional[Expression]) -> list:
         """Split an OR (and NESTED-OR) node into its flat list of branches."""
         if node is None:
             return []
@@ -782,7 +782,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
             return [node]
         return self._split_or_unwrap(node.left) + self._split_or_unwrap(node.right)
 
-    def _split_and_unwrap(self, node: Optional[Node]) -> list:
+    def _split_and_unwrap(self, node: Optional[Expression]) -> list:
         """Split an AND (and NESTED-AND) node into its flat list of conjuncts.
 
         Distinct from `_extract_and_predicates`: that one is only ever handed the
@@ -799,7 +799,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
             return [node]
         return self._split_and_unwrap(node.left) + self._split_and_unwrap(node.right)
 
-    def _branch_range(self, branch: Node) -> Dict[str, Any]:
+    def _branch_range(self, branch: Expression) -> Dict[str, Any]:
         """Reduce one OR-branch to a range on a single column.
 
         Returns a dict with "status" of:
@@ -912,12 +912,12 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
 
     def _build_range_node(
         self,
-        col_node: Node,
+        col_node: Expression,
         lower: Optional[Limit],
-        lower_node: Optional[Node],
+        lower_node: Optional[Expression],
         upper: Optional[Limit],
-        upper_node: Optional[Node],
-    ) -> Node:
+        upper_node: Optional[Expression],
+    ) -> Expression:
         """Build a comparison or BETWEEN node from a merged (lower, upper) range.
 
         Caller guarantees not both bounds are None (see `_try_collapse_or_range`).
@@ -938,7 +938,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
             value=(lower.inclusive, upper.inclusive),
         )
 
-    def _try_collapse_or_range(self, node: Node) -> Optional[Node]:
+    def _try_collapse_or_range(self, node: Expression) -> Optional[Expression]:
         """Collapse an OR of same-column ranges into a single range predicate (or
         a smaller OR of disjoint ranges), when every branch is a clean range on
         the same column in the same numeric domain.

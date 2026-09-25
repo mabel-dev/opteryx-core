@@ -28,6 +28,7 @@ now delegates here via a thin shim.
 import math
 from typing import Optional
 
+from opteryx.compiled.structures.expressions import expressions_with
 from opteryx.expression import NodeType
 
 # Textbook constant fallbacks are defined ONCE in fallback_selectivity (shared
@@ -77,7 +78,7 @@ def estimate_selectivity(predicate, stats: RelationStatistics) -> float:
 def _selectivity(node, stats: RelationStatistics) -> float:
     if node is None:
         return 1.0
-    nt = getattr(node, "node_type", None)
+    nt = node.node_type
 
     if nt == NodeType.AND:
         return _selectivity(node.left, stats) * _selectivity(node.right, stats)
@@ -474,15 +475,15 @@ def _identifier_identity(node) -> Optional[bytes]:
     relation's histogram/NDV and silently mis-estimate. Returns None when no
     identity is resolvable; callers then fall back to a constant.
     """
-    if node is None or getattr(node, "node_type", None) != NodeType.IDENTIFIER:
+    if node is None or node.node_type != NodeType.IDENTIFIER:
         return None
-    schema_column = getattr(node, "schema_column", None)
-    identity = getattr(schema_column, "identity", None) if schema_column is not None else None
+    schema_column = node.schema_column
+    identity = schema_column.identity if schema_column is not None else None
     return identity if isinstance(identity, bytes) else None
 
 
 def _literal_scalar(node):
-    value = getattr(node, "value", None)
+    value = node.value
     if getattr(value, "item", None) is not None and not isinstance(value, (list, tuple, set, frozenset)):
         try:
             return value.item()
@@ -735,7 +736,7 @@ def predicate_estimator_tag(predicate, stats: RelationStatistics) -> Optional[st
     above _selectivity_ends_with), None for every other predicate kind —
     other predicate kinds have no estimator tiers worth surfacing yet.
     """
-    if getattr(predicate, "node_type", None) == NodeType.FUNCTION:
+    if predicate.node_type == NodeType.FUNCTION:
         if predicate.value == "_STARTS_WITH":
             operands = _two_operand_function_operands(predicate)
             if operands is None:
@@ -779,7 +780,7 @@ def predicate_estimator_tag(predicate, stats: RelationStatistics) -> Optional[st
             return "flat_fallback"
         return None
 
-    if getattr(predicate, "node_type", None) != NodeType.COMPARISON_OPERATOR:
+    if predicate.node_type != NodeType.COMPARISON_OPERATOR:
         return None
     op = predicate.value
     if op not in ("InStr", "IInStr", "NotInStr", "NotIInStr"):
@@ -812,9 +813,8 @@ def predicate_estimator_tag(predicate, stats: RelationStatistics) -> Optional[st
 def _selectivity_instr(identity: bytes, literal_value, node, stats: RelationStatistics) -> float:
     col = stats.columns.get(identity)
     needle = _like_needle_str(literal_value)
-    decay = node.like_selectivity_decay  # plain attribute access — Node.__getattr__
-    # returns None for any never-set attribute; bind-time capture is Part D
-    # (opteryx/planner/binder/binder.py), not this module's concern.
+    # None unless the binder captured it (opteryx/planner/binder/binder.py).
+    decay = node.like_selectivity_decay
     if needle is not None:
         # Hard guard first: node is the full comparison (InStr/IInStr), not a
         # FUNCTION node's isolated column parameter -- resolve whichever side
@@ -889,8 +889,8 @@ def _physical_type(column_node):
     `_STARTS_WITH`/`_CI_STARTS_WITH` FUNCTION node, so `schema_column` (and
     its `column_type`) is already populated from bind time.
     """
-    schema_column = getattr(column_node, "schema_column", None)
-    column_type = getattr(schema_column, "column_type", None) if schema_column is not None else None
+    schema_column = column_node.schema_column
+    column_type = schema_column.column_type if schema_column is not None else None
     return getattr(column_type, "physical", None) if column_type is not None else None
 
 
@@ -939,14 +939,14 @@ def _two_operand_function_operands(node):
     it correctly (empty needle / full-span ordinal range), so it is not
     rejected here.
     """
-    params = getattr(node, "parameters", None)
+    params = node.parameters
     if not params or len(params) != 2:
         return None
     column_node, literal_node = params[0], params[1]
     identity = _identifier_identity(column_node)
     if identity is None:
         return None
-    literal_bytes = getattr(literal_node, "value", None)
+    literal_bytes = literal_node.value if type(literal_node) in expressions_with("value") else None
     if isinstance(literal_bytes, str):
         literal_bytes = literal_bytes.encode("utf-8")
     if not isinstance(literal_bytes, bytes):

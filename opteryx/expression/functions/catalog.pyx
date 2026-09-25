@@ -6,11 +6,12 @@ from dataclasses import dataclass
 from itertools import permutations
 from typing import Any, Callable, Dict, Literal, Optional, Tuple
 
+from opteryx.compiled.structures.expressions import Expression
+from opteryx.compiled.structures.expressions import expressions_with
 from opteryx.exceptions import compose, did_you_mean, md_code, md_syntax
 from opteryx.types.logical_type import LogicalCategory, _NUMERIC_TYPES, _TEMPORAL_TYPES
 from opteryx.types.vectors.vector_types import is_numeric_vector_type, resolve_node_type
 
-Node = Any  # AST node type (duck-typed; no import to avoid circular deps)
 
 #: Largest arity the transposed-argument check will permute. The search is
 #: factorial, so it is bounded rather than trusted to stay small; 5 is 120
@@ -76,7 +77,7 @@ class ParameterSpec:
 class ResolvedArg:
     """Result of resolving one argument node during binding."""
 
-    node: Node
+    node: Expression
     inferred_type: Any  # ColumnType or None
     coercion_cost: float = 0.0
 
@@ -223,7 +224,7 @@ class FunctionCatalog:
     def resolve(
         self,
         name: str,
-        arg_nodes: list[Node],
+        arg_nodes: list[Expression],
         context: Optional[FunctionResolutionContext] = None,
     ) -> Optional[ResolvedFunction]:
         """Resolve a function call to a specific overload with inferred return type.
@@ -420,9 +421,10 @@ class FunctionCatalog:
                 (`'hour'`, `TIMESTAMP '2020-01-01T00:00:00.000000'`), so one
                 accessor covers both columns and constants.
                 """
-                return getattr(
-                    getattr(node, "schema_column", None), "name", None
-                ) or getattr(node, "value", f"arg{index + 1}")
+                name = node.schema_column.name if node.schema_column is not None else None
+                if name:
+                    return name
+                return node.value if type(node) in expressions_with("value") else f"arg{index + 1}"
 
             def _type_name(node) -> str:
                 node_type, _ = resolve_node_type(node)
@@ -510,7 +512,7 @@ class FunctionCatalog:
                 for o in tied
             )
             raise TypeError(
-                f"Ambiguous function call: {canonical}({', '.join(str(getattr(n, 'type', '?')) for n in arg_nodes)}) matches:\n  {options}\n"
+                f"Ambiguous function call: {canonical}({', '.join(str(n.type if type(n) in expressions_with('type') else '?') for n in arg_nodes)}) matches:\n  {options}\n"
                 "Please use explicit CAST to disambiguate."
             )
 
@@ -521,10 +523,11 @@ class FunctionCatalog:
         # over node.type (set at parse time; may be None for identifiers until bound).
         def _node_type(node):
             # Returns ColumnType (Phase 5: lifted from LogicalCategory).
-            sc = getattr(node, "schema_column", None)
+            sc = node.schema_column
             if sc is not None:
                 return sc.column_type  # ColumnType or None
-            return getattr(node, "type", None)  # ColumnType from Phase 2, or None
+            # Only a literal carries a parse-time type; anything else is unbound.
+            return node.type if type(node) in expressions_with("type") else None
 
         return_spec = selected.return_spec
         resolved_args = {

@@ -64,11 +64,11 @@ def _simple_collector(schema):
 
 
 class ShowColumnsNode(BasePlanNode):
-    def __init__(self, properties: QueryProperties, **parameters):
-        BasePlanNode.__init__(self, properties=properties, **parameters)
-        self._full = parameters.get("full")
-        self._extended = parameters.get("extended")
-        self._schema = parameters.get("schema")
+    def __init__(self, properties: QueryProperties, step):
+        BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
+        self._full = step.full
+        self._extended = step.extended
+        self._schema = step.schema
         self.collector = None
         self.seen = False
 

@@ -99,11 +99,15 @@ cdef class SkeneReadNode(ReaderNode):
     cdef public object _length_only_columns
     cdef object _filesystem
 
-    def __init__(self, properties: QueryProperties, **parameters) -> None:
-        ReaderNode.__init__(self, properties=properties, **parameters)
-        self.skene_files = list(parameters.get("skene_files") or [])
-        self.skene_read_schema_columns = list(parameters.get("skene_read_schema_columns") or [])
-        self._length_only_columns = parameters.get("length_only_columns")
+    def __init__(
+        self, properties: QueryProperties, step, list skene_files, list skene_read_schema_columns
+    ) -> None:
+        """A manifest-backed Scan of a skene dataset; the file list and the columns
+        to decode are the physical planner's translation of it."""
+        ReaderNode.__init__(self, properties, step)
+        self.skene_files = skene_files
+        self.skene_read_schema_columns = skene_read_schema_columns
+        self._length_only_columns = step.length_only_columns
         self._filesystem = None
 
     @property

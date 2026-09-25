@@ -406,8 +406,8 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
         VARIANT would be a lie that also strands the result (VARIANT has no
         gather/compare path, so it could not survive an ORDER BY or join).
         """
-        sc = getattr(arg_nodes[0], "schema_column", None) if arg_nodes else None
-        elem = getattr(sc, "column_type", None) if sc is not None else None
+        sc = arg_nodes[0].schema_column if arg_nodes else None
+        elem = sc.column_type if sc is not None else None
         if elem is None:
             # Unbound/unknown operand — the kernel still emits the input's type, but
             # the binder cannot name it here. VARCHAR is the only string type a

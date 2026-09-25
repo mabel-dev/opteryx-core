@@ -28,8 +28,8 @@ import pytest
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
+from opteryx.compiled.structures.expressions import Literal
 from opteryx.exceptions import PermissionsError, UnsupportedSyntaxError
-from opteryx.models import Node
 from opteryx.types.logical_type import ARRAY, BOOLEAN, VARIANT
 from opteryx.variables import (
     PLATFORM_ADMIN_ENTITLEMENT,
@@ -152,19 +152,19 @@ def test_restricted_user_owned_variable_requires_admin_to_set():
     # "hidden", while staying freely changeable by anyone who knows the name.
     container = _container_with_restricted_var()
     with pytest.raises(PermissionsError):
-        container["a_restricted_knob"] = Node(node_type="VARIABLE", type=BOOLEAN, value=True)
+        container["a_restricted_knob"] = Literal(type=BOOLEAN, value=True)
 
 
 def test_restricted_user_owned_variable_settable_by_admin():
     container = _container_with_restricted_var(entitlements=ADMIN)
-    container["a_restricted_knob"] = Node(node_type="VARIABLE", type=BOOLEAN, value=True)
+    container["a_restricted_knob"] = Literal(type=BOOLEAN, value=True)
     assert container["a_restricted_knob"] is True
 
 
 def test_wrong_entitlement_cannot_set_restricted_variable():
     container = _container_with_restricted_var(entitlements=["data_admin"])
     with pytest.raises(PermissionsError):
-        container["a_restricted_knob"] = Node(node_type="VARIABLE", type=BOOLEAN, value=True)
+        container["a_restricted_knob"] = Literal(type=BOOLEAN, value=True)
 
 
 def test_informational_variables_declare_system_behaviour():

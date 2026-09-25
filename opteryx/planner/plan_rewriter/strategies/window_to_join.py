@@ -57,10 +57,12 @@ Limitations (Phase 1):
 - NULL partition keys: uses Eq (= not IS NOT DISTINCT FROM); NULL partitions are excluded.
 """
 
+from opteryx.compiled.structures.expressions import Expression
+from opteryx.compiled.structures.expressions import expressions_with
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
-from opteryx.models import LogicalColumn, Node
+from opteryx.models import LogicalColumn
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.planner.plan_rewriter.strategies.rewrite_strategy import (
     PlanRewriteContext,
@@ -112,14 +114,14 @@ def _source_relation(plan: LogicalPlan) -> PlanStep:
         nid = below[0][0]
 
 
-def _build_eq_condition(left_col: Node, right_col: Node) -> Node:
+def _build_eq_condition(left_col: Expression, right_col: Expression) -> Expression:
     eq = Comparison(value="Eq", do_not_create_column=True)
     eq.left = left_col
     eq.right = right_col
     return eq
 
 
-def _and_conditions(conditions: list) -> Node:
+def _and_conditions(conditions: list) -> Expression:
     result = conditions[0]
     for cond in conditions[1:]:
         and_node = And(do_not_create_column=True)
@@ -175,7 +177,9 @@ def _build_window_cte(
     # These carry cte_src_alias so the binder resolves them within the CTE scope.
     inner_partition_by = []
     for pb in partition_by:
-        col_name = getattr(pb, "source_column", None) or getattr(pb, "value", None)
+        col_name = (pb.source_column if type(pb) in expressions_with("source_column") else None) or (
+            pb.value if type(pb) in expressions_with("value") else None
+        )
         inner_pb = LogicalColumn(
             node_type=NodeType.IDENTIFIER,
             source=cte_src_alias,
@@ -312,7 +316,9 @@ def _replace_window_with_join(
     # matched — the earlier joins added window results, they did not rename anything.
     on_parts = []
     for pb in partition_by:
-        col_name = getattr(pb, "source_column", None) or getattr(pb, "value", None)
+        col_name = (pb.source_column if type(pb) in expressions_with("source_column") else None) or (
+            pb.value if type(pb) in expressions_with("value") else None
+        )
         outer_col = LogicalColumn(
             node_type=NodeType.IDENTIFIER,
             source=source_alias,
@@ -431,7 +437,7 @@ def _is_aggregate_window(node: PlanStep) -> bool:
     """
     return (
         node.node_type == LogicalPlanStepType.Window
-        and getattr(node, "outputs", None) is None
+        and node.outputs is None
     )
 
 

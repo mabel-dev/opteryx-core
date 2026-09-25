@@ -47,7 +47,7 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
 
         Phase 5: returns ColumnType directly. NULL ColumnType when element is unknown.
         """
-        sc = getattr(arg_nodes[0], "schema_column", None)
+        sc = arg_nodes[0].schema_column
         if sc is None or sc.column_type is None or sc.column_type.element is None:
             return _CT_NULL
         return sc.column_type.element  # ColumnType

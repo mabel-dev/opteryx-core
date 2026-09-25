@@ -385,6 +385,24 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         from skene import SkeneError
         from skene import read_metadata as _skene_read_metadata
 
+        # Same contract as the parquet path: the parsed footer (an owned dict,
+        # no buffer views) is cached by (path, size, mtime) in
+        # _FOOTER_METADATA_CACHE; the RelationSchema is rebuilt fresh per query.
+        # Uncached, every skene query paid an mmap of the first file plus a full
+        # footer parse (~16ms on the ClickBench mirror) at bind time.
+        info = self.filesystem.get_file_info([blob_name])[0]
+        cache_key = (
+            blob_name,
+            getattr(info, "size", None),
+            getattr(info, "mtime", None),
+        )
+        metadata = _FOOTER_METADATA_CACHE.get(cache_key)
+        if metadata is not None:
+            # Refresh LRU position.
+            _FOOTER_METADATA_CACHE.pop(cache_key, None)
+            _FOOTER_METADATA_CACHE[cache_key] = metadata
+            return skene_metadata_to_schema(metadata, self.dataset)
+
         file_obj = self.filesystem.open_input_file(blob_name)
         try:
             metadata = _skene_read_metadata(file_obj.memoryview)
@@ -392,6 +410,9 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
             raise DataError(f"The skene file {md_code(blob_name)} could not be read. {md_cause(err)}") from err
         finally:
             file_obj.close()
+        if len(_FOOTER_METADATA_CACHE) >= _FOOTER_METADATA_CACHE_MAX:
+            _FOOTER_METADATA_CACHE.pop(next(iter(_FOOTER_METADATA_CACHE)), None)
+        _FOOTER_METADATA_CACHE[cache_key] = metadata
         return skene_metadata_to_schema(metadata, self.dataset)
 
     def _infer_jsonl_schema(self, blob_names: list) -> RelationSchema:

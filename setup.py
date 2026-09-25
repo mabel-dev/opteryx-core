@@ -651,12 +651,6 @@ extensions = [
         extra_compile_args=C_FLAGS,
     ),
     Extension(
-        "opteryx.compiled.structures.node",
-        sources=["opteryx/compiled/structures/node.pyx"],
-        include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
-    ),
-    Extension(
         "opteryx.compiled.structures.perfect_hash_set",
         sources=["opteryx/compiled/structures/perfect_hash_set.pyx"],
         include_dirs=include_dirs,

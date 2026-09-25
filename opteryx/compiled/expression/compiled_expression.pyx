@@ -9,7 +9,7 @@
 """C++ CompiledExpression arena + typed bytecode builder.
 
 Two public entry points:
-  lower(node)            — lower a Python Node tree into a CompiledExpressionHandle
+  lower(node)            — lower an expression tree into a CompiledExpressionHandle
   build_bytecode(handle) — linearise the arena tree into a typed CompiledBytecode
 
 CompiledBytecode is consumed by execute_bytecode() in the evaluator package.
@@ -1348,7 +1348,7 @@ cdef Py_ssize_t _linearize(
                 # union leg of a rewritten FULL OUTER JOIN depends on it.
                 if isinstance(value_obj, _decimal.Decimal) or value_obj is None:
                     _lit_py_node = <object>node.source_node
-                    _lit_ct = getattr(_lit_py_node, "type", None)
+                    _lit_ct = _lit_py_node.type
                     _lit_lg = getattr(_lit_ct, "logical", None) if _lit_ct is not None else None
                     if _lit_lg is not None and getattr(_lit_lg, "precision", None):
                         const_lit = _materialise_constant_literal(
@@ -2289,7 +2289,7 @@ cdef Py_ssize_t _linearize(
             # against None, never fires, and leaves the capability silently off.
             _ensure_sql_types()
             _ite_py_node = <object>node.source_node
-            _ite_sc = getattr(_ite_py_node, "schema_column", None)
+            _ite_sc = _ite_py_node.schema_column
             _ite_ct = _ite_sc.column_type if _ite_sc is not None else None
             if _ite_ct is not None and _ite_ct.category is _LogicalCategory_BOOLEAN:
                 slot.flags |= BC_RESULT_WRAP_AS_BOOL
@@ -2299,7 +2299,7 @@ cdef Py_ssize_t _linearize(
         n = <Py_ssize_t>node.parameters.size()
         func_ref_obj = <object>node.source_node
         func_py_node = func_ref_obj
-        func_ref_meta = getattr(func_py_node, "function_ref", None)
+        func_ref_meta = func_py_node.function_ref
         if func_ref_meta is None:
             raise ValueError(
                 f"compiled_expression: FUNCTION '{func_val}' has no function_ref — not bound"
@@ -2493,8 +2493,8 @@ cdef Py_ssize_t _linearize(
                     and node.parameters[_tr_operand] != NULL \
                     and node.parameters[_tr_operand].schema_column != NULL:
                 _tr_sc = <object>node.parameters[_tr_operand].schema_column
-                _tr_ct = getattr(_tr_sc, "column_type", None)
-                _tr_phys = getattr(getattr(_tr_ct, "physical", None), "name", "")
+                _tr_ct = (_tr_sc.column_type if _tr_sc is not None else None)
+                _tr_phys = (_tr_ct.physical.name if _tr_ct is not None else "")
                 if _tr_phys == "TIMESTAMP64" and _tr_ct.logical is not None:
                     _tr_uv = int(_tr_ct.logical.unit.value)
                     from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _tr_alloc
@@ -2549,7 +2549,7 @@ cdef Py_ssize_t _linearize(
             # reads an unscaled int64 otherwise. Same ctx, second field.
             _hz_scale = 0
             if node.parameters[0] != NULL and node.parameters[0].schema_column != NULL:
-                _hz_ct = getattr(<object>node.parameters[0].schema_column, "column_type", None)
+                _hz_ct = (<object>node.parameters[0].schema_column).column_type
                 if (_hz_ct is not None and _hz_ct.logical is not None
                         and getattr(_hz_ct.physical, "name", "") == "DECIMAL"):
                     _hz_scale = _binop_dec_scale(_hz_ct)
@@ -2592,8 +2592,8 @@ cdef Py_ssize_t _linearize(
         if _dp_part != 0 and node.parameters[_dp_operand] != NULL \
                 and node.parameters[_dp_operand].schema_column != NULL:
             _dp_sc = <object>node.parameters[_dp_operand].schema_column
-            _dp_ct = getattr(_dp_sc, "column_type", None)
-            _dp_phys = getattr(getattr(_dp_ct, "physical", None), "name", "")
+            _dp_ct = (_dp_sc.column_type if _dp_sc is not None else None)
+            _dp_phys = (_dp_ct.physical.name if _dp_ct is not None else "")
             if _dp_phys in ("DATE32", "TIMESTAMP64"):
                 _dp_unit = 0
                 if _dp_phys == "TIMESTAMP64" and _dp_ct.logical is not None:
@@ -2635,10 +2635,10 @@ cdef Py_ssize_t _linearize(
             _dd_kind = _DIFF_PARTS.get(str(_dd_part_val).upper(), -1) if isinstance(_dd_part_val, str) else -1
             _dd_s_sc = <object>node.parameters[1].schema_column
             _dd_e_sc = <object>node.parameters[2].schema_column
-            _dd_s_ct = getattr(_dd_s_sc, "column_type", None)
-            _dd_e_ct = getattr(_dd_e_sc, "column_type", None)
-            _dd_s_phys = getattr(getattr(_dd_s_ct, "physical", None), "name", "")
-            _dd_e_phys = getattr(getattr(_dd_e_ct, "physical", None), "name", "")
+            _dd_s_ct = (_dd_s_sc.column_type if _dd_s_sc is not None else None)
+            _dd_e_ct = (_dd_e_sc.column_type if _dd_e_sc is not None else None)
+            _dd_s_phys = (_dd_s_ct.physical.name if _dd_s_ct is not None else "")
+            _dd_e_phys = (_dd_e_ct.physical.name if _dd_e_ct is not None else "")
             if _dd_kind >= 0 and _dd_s_phys in ("DATE32", "TIMESTAMP64") \
                     and _dd_e_phys in ("DATE32", "TIMESTAMP64"):
                 _dd_lu = _binop_ts_unit(_dd_s_ct)
@@ -2670,10 +2670,10 @@ cdef Py_ssize_t _linearize(
                 and node.parameters[1].schema_column != NULL:
             _td_1_sc = <object>node.parameters[0].schema_column
             _td_2_sc = <object>node.parameters[1].schema_column
-            _td_1_ct = getattr(_td_1_sc, "column_type", None)
-            _td_2_ct = getattr(_td_2_sc, "column_type", None)
-            _td_1_phys = getattr(getattr(_td_1_ct, "physical", None), "name", "")
-            _td_2_phys = getattr(getattr(_td_2_ct, "physical", None), "name", "")
+            _td_1_ct = (_td_1_sc.column_type if _td_1_sc is not None else None)
+            _td_2_ct = (_td_2_sc.column_type if _td_2_sc is not None else None)
+            _td_1_phys = (_td_1_ct.physical.name if _td_1_ct is not None else "")
+            _td_2_phys = (_td_2_ct.physical.name if _td_2_ct is not None else "")
             if _td_1_phys in ("DATE32", "TIMESTAMP64") and _td_2_phys in ("DATE32", "TIMESTAMP64"):
                 _td_lu = _binop_ts_unit(_td_1_ct)
                 _td_ru = _binop_ts_unit(_td_2_ct)
@@ -2702,8 +2702,8 @@ cdef Py_ssize_t _linearize(
         if _ut_func == "UNIXTIME" and n == 1 \
                 and node.parameters[0] != NULL and node.parameters[0].schema_column != NULL:
             _ut_sc = <object>node.parameters[0].schema_column
-            _ut_ct = getattr(_ut_sc, "column_type", None)
-            _ut_phys = getattr(getattr(_ut_ct, "physical", None), "name", "")
+            _ut_ct = (_ut_sc.column_type if _ut_sc is not None else None)
+            _ut_phys = (_ut_ct.physical.name if _ut_ct is not None else "")
             if _ut_phys in ("DATE32", "TIMESTAMP64"):
                 _ut_unit = _binop_ts_unit(_ut_ct)
                 from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _ut_alloc
@@ -2751,8 +2751,8 @@ cdef Py_ssize_t _linearize(
                         if isinstance(_tb_units_val, str) else 0)
             if _tb_mag_ok and int(_tb_mag_val) > 0 and _tb_kind != 0:
                 _tb_sc = <object>node.parameters[2].schema_column
-                _tb_ct = getattr(_tb_sc, "column_type", None)
-                _tb_phys = getattr(getattr(_tb_ct, "physical", None), "name", "")
+                _tb_ct = (_tb_sc.column_type if _tb_sc is not None else None)
+                _tb_phys = (_tb_ct.physical.name if _tb_ct is not None else "")
                 # TIMESTAMP64 carries a logical unit; DATE32 has none and is
                 # worked in microseconds by the kernel (ts_unit=2 is a placeholder
                 # the DATE32 path ignores). Any other physical type is not lowered.
@@ -2795,8 +2795,8 @@ cdef Py_ssize_t _linearize(
                 _fmt_pat_val = _fmt_pat_val.encode("utf-8")
             if isinstance(_fmt_pat_val, bytes):
                 _fmt_sc = <object>node.parameters[1].schema_column
-                _fmt_ct = getattr(_fmt_sc, "column_type", None)
-                _fmt_phys = getattr(getattr(_fmt_ct, "physical", None), "name", "")
+                _fmt_ct = (_fmt_sc.column_type if _fmt_sc is not None else None)
+                _fmt_phys = (_fmt_ct.physical.name if _fmt_ct is not None else "")
                 if _fmt_phys in ("DATE32", "TIMESTAMP64"):
                     _fmt_unit = _binop_ts_unit(_fmt_ct)
                     from draken.ops.kernels._kernel_registry import alloc_format_ctx as _fmt_alloc
@@ -2884,7 +2884,7 @@ cdef Py_ssize_t _linearize(
                     and node.parameters[0] != NULL \
                     and node.parameters[0].schema_column != NULL:
                 _fn_p0_sc = <object>node.parameters[0].schema_column
-                _fn_p0_ct = getattr(_fn_p0_sc, "column_type", None)
+                _fn_p0_ct = (_fn_p0_sc.column_type if _fn_p0_sc is not None else None)
                 if (_fn_p0_ct is not None and _fn_p0_ct.logical is not None
                         and getattr(_fn_p0_ct.physical, "name", "") == "DECIMAL"):
                     from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx
@@ -2958,8 +2958,7 @@ cdef Py_ssize_t _linearize(
             # the temporal binops use. Element type comes from the schema
             # (ARRAY<TIMESTAMP> since the _rugo_schema container fix).
             if _reduce_child_eligible and node.parameters[0].schema_column != NULL:
-                _sort_p0_ct = getattr(
-                    <object>node.parameters[0].schema_column, "column_type", None)
+                _sort_p0_ct = (<object>node.parameters[0].schema_column).column_type
                 _sort_el = getattr(_sort_p0_ct, "element", None) if _sort_p0_ct is not None else None
                 if (_sort_el is not None
                         and getattr(getattr(_sort_el, "physical", None), "name", "") == "TIMESTAMP64"
@@ -2988,8 +2987,7 @@ cdef Py_ssize_t _linearize(
                             or node.parameters[_cos_i].schema_column == NULL:
                         _cos_dims = []
                         break
-                    _cos_ct = getattr(
-                        <object>node.parameters[_cos_i].schema_column, "column_type", None)
+                    _cos_ct = (<object>node.parameters[_cos_i].schema_column).column_type
                     _cos_lg = getattr(_cos_ct, "logical", None) if _cos_ct is not None else None
                     _cos_d = getattr(_cos_lg, "dimension", None) if _cos_lg is not None else None
                     if _cos_d is None or int(_cos_d) < 1:
@@ -3042,7 +3040,7 @@ cdef Py_ssize_t _linearize(
                     raise ValueError(
                         "compiled_expression: draken_embed is not registered — "
                         "MATCH cannot be lowered")
-                _match_thresh = getattr(func_py_node, "match_threshold", None)
+                _match_thresh = func_py_node.match_threshold
                 if _match_thresh is None:
                     # The binder stamps this on every bound _MATCH_AGAINST. Missing means
                     # the node reached here unbound, not that MATCH is unsupported —
@@ -3235,11 +3233,8 @@ cdef Py_ssize_t _linearize(
         #   returns_raw  → kernel yields a raw nanobind Vector; executor wraps it.
         #   needs_nb_input → kernel wants a raw nanobind Vector; executor unwraps the
         #                    Cython shim to ._nb before the call (slot.bool_value flag).
-        cast_target_sql = getattr(cast_py_node, "inferred_type", None)
         if _cast_returns_raw:
             slot.flags |= BC_RESULT_NEEDS_NB_WRAP
-        if cast_target_sql is _LogicalCategory_BOOLEAN:
-            slot.flags |= BC_RESULT_WRAP_AS_BOOL
         slot.bool_value = 1 if _cast_needs_nb_input else 0
 
         # Y (executor flip): resolve the C-native kernel for this pair. When one
@@ -3259,7 +3254,7 @@ cdef Py_ssize_t _linearize(
         # safe=True, by design — see its docstring), so FORMAT is not yet
         # supported combined with TRY_CAST/SAFE_CAST; call that out specifically
         # rather than reporting it as an unsupported (source, target) pairing.
-        if getattr(cast_py_node, "format", None) is not None and (
+        if cast_py_node.format is not None and (
             _cn is None or _cn[0] not in _CAST_FORMAT_AWARE_KERNELS
         ):
             if cast_is_try:
@@ -3288,8 +3283,8 @@ cdef Py_ssize_t _linearize(
                 from draken.ops.kernels._kernel_registry import alloc_cast_timestamp_ctx as _cn_alloc
                 _cn_arg = _cn_unit_map.get(cast_unit, 2)
                 if cast_unit != "days":
-                    _cn_res_sc = getattr(cast_py_node, "schema_column", None)
-                    _cn_res_ct = getattr(_cn_res_sc, "column_type", None) if _cn_res_sc is not None else None
+                    _cn_res_sc = cast_py_node.schema_column
+                    _cn_res_ct = _cn_res_sc.column_type if _cn_res_sc is not None else None
                     if _cn_res_ct is not None and _cn_res_ct.logical is not None:
                         # TimestampUnit (0=s,1=ms,2=us,3=ns) -> cast_timestamp_ctx
                         # numbering (4=s,3=ms,2=us,1=ns).
@@ -3317,8 +3312,8 @@ cdef Py_ssize_t _linearize(
                 if source_sql is not None and source_sql.logical is not None:
                     _cn_src_unit = int(source_sql.logical.unit.value)
                 _cn_dst_unit = 2   # binder's canonical default
-                _cn_res_sc = getattr(cast_py_node, "schema_column", None)
-                _cn_res_ct = getattr(_cn_res_sc, "column_type", None) if _cn_res_sc is not None else None
+                _cn_res_sc = cast_py_node.schema_column
+                _cn_res_ct = _cn_res_sc.column_type if _cn_res_sc is not None else None
                 if _cn_res_ct is not None and _cn_res_ct.logical is not None:
                     _cn_dst_unit = int(_cn_res_ct.logical.unit.value)
                 from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _cn_alloc
@@ -3358,8 +3353,8 @@ cdef Py_ssize_t _linearize(
                 # resolved `ARRAY<VARCHAR>` to ColumnType(ARRAY, element=VARCHAR),
                 # and re-parsing would be a second, driftable resolution of the
                 # same thing.
-                _cn_res_sc = getattr(cast_py_node, "schema_column", None)
-                _cn_res_ct = getattr(_cn_res_sc, "column_type", None) if _cn_res_sc is not None else None
+                _cn_res_sc = cast_py_node.schema_column
+                _cn_res_ct = _cn_res_sc.column_type if _cn_res_sc is not None else None
                 _cn_elem = _cn_res_ct.element if _cn_res_ct is not None else None
                 if _cn_elem is None:
                     raise ValueError(
@@ -3398,7 +3393,7 @@ cdef Py_ssize_t _linearize(
                 # carries the source's TimestampUnit, which the raw int64 payload's
                 # scale depends on — a null ctx previously meant "always treat as
                 # microseconds", silently wrong for non-us TIMESTAMP64 columns.
-                _fc_fmt_node = getattr(cast_py_node, "format", None)
+                _fc_fmt_node = cast_py_node.format
                 _fc_fmt_bytes = b""
                 if _fc_fmt_node is not None:
                     _fc_fmt_val = _fc_fmt_node.value
@@ -3486,8 +3481,8 @@ cdef Py_ssize_t _linearize(
             # boundary reads off the root instruction to size the result copy). The
             # binder guarantees it: a bare VECTOR never reaches here.
             _cv_dim = 0
-            _cv_sc = getattr(cast_py_node, "schema_column", None)
-            _cv_ct = getattr(_cv_sc, "column_type", None) if _cv_sc is not None else None
+            _cv_sc = cast_py_node.schema_column
+            _cv_ct = _cv_sc.column_type if _cv_sc is not None else None
             _cv_lg = getattr(_cv_ct, "logical", None) if _cv_ct is not None else None
             if _cv_lg is not None and getattr(_cv_lg, "dimension", None):
                 _cv_dim = int(_cv_lg.dimension)
@@ -3689,8 +3684,8 @@ cdef Py_ssize_t _linearize(
         # type — see binder.py NodeType.CASE). That is the authoritative
         # output type and the source of truth for kernel selection.
         #
-        # `src.inferred_type` is never populated on a CASE node (Node.__getattr__
-        # returns None for unset attributes), so relying on it left kernel_type
+        # A CASE node has no `inferred_type`; the retired attribute-bag Node read
+        # it as None, so relying on it left kernel_type
         # at the -1 runtime-dispatch sentinel for EVERY case. Runtime dispatch
         # picks the kernel from the first non-None branch result vector, which is
         # wrong when the first branch is a typed-NULL: a string CASE whose first
@@ -3698,11 +3693,9 @@ cdef Py_ssize_t _linearize(
         # dispatched to the FIXED kernel, producing a fixed-width vector mislabelled
         # as the string output column — a heap-corrupting type confusion downstream.
         _ensure_sql_types()
-        case_inferred_type = getattr(src, "inferred_type", None)
-        if case_inferred_type is None:
-            _case_sc = getattr(src, "schema_column", None)
-            _case_ct = _case_sc.column_type if _case_sc is not None else None
-            case_inferred_type = _case_ct.category if _case_ct is not None else None
+        _case_sc = src.schema_column
+        _case_ct = _case_sc.column_type if _case_sc is not None else None
+        case_inferred_type = _case_ct.category if _case_ct is not None else None
 
         # Select the assembly kernel based on the inferred result type.
         # All THEN/ELSE branches must agree on type (enforced by binder).
@@ -3733,7 +3726,7 @@ cdef Py_ssize_t _linearize(
         # place that still knows the scale.
         _case_dec_p = -1
         _case_dec_s = -1
-        _case_sc = getattr(src, "schema_column", None)
+        _case_sc = src.schema_column
         _case_ct = _case_sc.column_type if _case_sc is not None else None
         if _case_ct is not None and _case_ct.logical is not None and \
                 getattr(_case_ct.physical, "name", "") in ("DECIMAL", "DECIMAL128"):
@@ -3854,7 +3847,7 @@ def expand_between(node):
     and from the plan-time rewrite chain (`_rewrite_decimal_compares` must see
     the expanded compares to rescale decimal bounds). Idempotent: a tree with no
     BETWEEN is returned unchanged. Non-mutating — parents of a changed child are
-    rebuilt via Node.copy()."""
+    rebuilt as new nodes."""
     from opteryx.compiled.structures.expressions import And
     from opteryx.compiled.structures.expressions import Comparison
     from opteryx.compiled.structures.expressions import is_expression
@@ -3875,7 +3868,7 @@ def expand_between(node):
 
 
 def lower(node):
-    """Lower an opteryx Node tree into a CompiledExpressionHandle.
+    """Lower an expression tree into a CompiledExpressionHandle.
 
     BETWEEN is expanded to a pair of compares FIRST — see `expand_between`. This
     is the single entry point that builds the C node tree, so no consumer can

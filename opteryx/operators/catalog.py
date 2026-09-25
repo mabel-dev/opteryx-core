@@ -23,7 +23,7 @@ Usage:
     registry = get_registry()
     metadata = registry.get_by_kind("FilterNode")
     node = registry.create_step("Filter", query_properties, logical_step)
-    node = registry.create("Parquet Reader", query_properties, **config)
+    node = registry.create("Parquet Reader", query_properties, scan_step)
 """
 
 from dataclasses import dataclass
@@ -179,12 +179,13 @@ class OperatorRegistry:
             raise KeyError(f"No operator registered with name '{name}'")
         return meta
 
-    def create(self, name: str, properties, **kwargs):
-        """Instantiate an operator CLASS by its registered name."""
+    def create(self, name: str, properties, step, **physical):
+        """Instantiate an operator CLASS by its registered name, from its typed
+        logical step plus the physical planner's own inputs (`physical`)."""
         meta = self._metadata_named(name)
         if meta.operator_class is None:
             raise TypeError(f"'{name}' is a PhysicalStep kind; build it with create_step")
-        return meta.operator_class(properties, **kwargs)
+        return meta.operator_class(properties, step, **physical)
 
     def create_step(self, name: str, properties, step, **physical):
         """Build the PhysicalStep for a registered kind from its typed logical
@@ -231,7 +232,6 @@ def _build_registry() -> OperatorRegistry:
     from opteryx.operators.show_lineage import ShowLineageNode
     from opteryx.operators.show_sources import ShowSourcesNode
     from opteryx.operators.show_create import ShowCreateNode
-    from opteryx.operators.show_value import ShowValueNode
     from opteryx.operators.table_management import TableManagementNode
     from opteryx.operators.view_management import ViewManagementNode
     from opteryx.operators.relation_management import RelationManagementNode
@@ -529,12 +529,6 @@ def _build_registry() -> OperatorRegistry:
     r.register(
         ShowCreateNode,
         name="Show Create",
-        category=OperatorCategory.DDL,
-        is_not_explained=True,
-    )
-    r.register(
-        ShowValueNode,
-        name="Show Value",
         category=OperatorCategory.DDL,
         is_not_explained=True,
     )

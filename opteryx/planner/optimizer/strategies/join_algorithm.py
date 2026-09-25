@@ -69,6 +69,7 @@ old calibrated window showed no measurable difference) — so the heuristic
 was removed rather than re-tuned.
 """
 
+from opteryx.compiled.structures.expressions import expressions_with
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.expression import NodeType, binary_operands
 from opteryx.planner.binder.join_helpers import band_operand_leg
@@ -88,7 +89,7 @@ _NON_EQUI_COMPARATORS = ("NotEq", "Lt", "Gt", "LtEq", "GtEq")
 
 def _col_value(col):
     """Return the underlying column identifier regardless of object shape."""
-    return getattr(col, "value", col)
+    return col.value if type(col) in expressions_with("value") else col
 
 
 def _contains_non_equi_comparator(condition) -> bool:
@@ -100,7 +101,7 @@ def _contains_non_equi_comparator(condition) -> bool:
     loop (keyed build when an equi conjunct exists, cartesian otherwise, always
     with the residual filter) is the only correct strategy — not a cost-based
     choice, so this must never be gated by row-count."""
-    if getattr(condition, "node_type", None) == NodeType.AND:
+    if condition is not None and condition.node_type == NodeType.AND:
         left, right = binary_operands(condition)
         return _contains_non_equi_comparator(left) or _contains_non_equi_comparator(right)
     return _col_value(condition) in _NON_EQUI_COMPARATORS
@@ -155,7 +156,7 @@ def _and_conjuncts(condition):
     """Flatten an ON tree's AND spine. An OR is one leaf and carries no band."""
     if condition is None:
         return []
-    if getattr(condition, "node_type", None) == NodeType.AND:
+    if condition.node_type == NodeType.AND:
         left, right = binary_operands(condition)
         return _and_conjuncts(left) + _and_conjuncts(right)
     return [condition]
@@ -270,15 +271,14 @@ def _join_key_identity(col):
     go unknown). Never falls back to the column *name* — names are not unique
     across a plan, so a name lookup can silently return another relation's
     statistics."""
+    if col is None:
+        return None
     if isinstance(col, bytes):
         return col
-    schema_column = getattr(col, "schema_column", None)
-    if schema_column is not None:
-        identity = getattr(schema_column, "identity", None)
-        if isinstance(identity, bytes):
-            return identity
-    identity = getattr(col, "identity", None)
-    return identity if isinstance(identity, bytes) else None
+    schema_column = col.schema_column
+    if schema_column is not None and isinstance(schema_column.identity, bytes):
+        return schema_column.identity
+    return None
 
 
 # Which rule in _decide_swap_reasoned produced the answer. Reported verbatim in the

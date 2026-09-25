@@ -41,11 +41,11 @@ import decimal
 import time
 from typing import Any, Dict, Generator, Iterable, Optional, Union
 
+from opteryx.compiled.structures.expressions import Expression
 from opteryx.exceptions import SqlError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.expression.intervals import normalize_interval_value
-from opteryx.models import Node
 from opteryx.types.logical_type import (
     ARRAY,
     BOOLEAN,
@@ -102,7 +102,7 @@ def _infer_collection_literal(value: Any):
     return ARRAY(element_ct), None
 
 
-def build_literal_node(value: Any, identity_of: Optional[Node] = None, suggested_type=None):
+def build_literal_node(value: Any, identity_of: Optional[Expression] = None, suggested_type=None):
     """
     Build a NEW literal node with the appropriate type based on the value.
 
@@ -607,7 +607,7 @@ def query_planner(
         from opteryx.planner.logical_planner import LogicalPlanStepType as _LPST
 
         if getattr(optimized_plan, "statistics_are_stale", True) and any(
-            node.node_type == _LPST.Explain and getattr(node, "analyze", False)
+            node.node_type == _LPST.Explain and node.analyze
             for _, node in optimized_plan.nodes(True)
         ):
             from opteryx.planner.optimizer.statistics_refresh import refresh_statistics

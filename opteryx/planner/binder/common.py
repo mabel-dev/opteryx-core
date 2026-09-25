@@ -9,7 +9,7 @@ import re
 from functools import lru_cache
 from typing import Tuple
 
-from opteryx.models import Node
+from opteryx.compiled.structures.plan_steps import PlanStep
 from opteryx.planner.binder.aggregate import visit_aggregate_and_group, visit_distinct
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.dataset import visit_function_dataset, visit_scan
@@ -127,7 +127,7 @@ class BinderVisitor:
 
     """
 
-    def visit_node(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    def visit_node(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
         """
         Visits a given node and returns a new node and context after binding catalog information.
 
@@ -158,342 +158,342 @@ class BinderVisitor:
         return visit_method(node, context)
 
     def visit_aggregate_and_group(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_aggregate_and_group(self, node, context)
 
     # Aggregate nodes without grouping delegate to the group handler
     visit_aggregate = visit_aggregate_and_group
 
     def visit_distinct(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_distinct(self, node, context)
 
-    def visit_filter(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    def visit_filter(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
         return visit_filter(self, node, context)
 
-    def visit_order(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    def visit_order(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
         return visit_order(self, node, context)
 
-    def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    def visit_join(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
         return visit_join(self, node, context)
 
-    def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    def visit_exit(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
         return visit_exit(self, node, context)
 
     def visit_project(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_project(self, node, context)
 
-    def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
         return visit_scan(self, node, context)
 
     def visit_function_dataset(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_function_dataset(self, node, context)
 
-    def visit_set(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    def visit_set(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
         return visit_set(self, node, context)
 
-    def visit_union(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    def visit_union(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
         return visit_union(self, node, context)
 
     def visit_intersect(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_intersect(self, node, context)
 
-    def visit_except(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    def visit_except(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
         return visit_except(self, node, context)
 
-    def visit_unnest(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    def visit_unnest(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
         return visit_unnest(self, node, context)
 
-    def visit_window(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    def visit_window(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
         return visit_window(self, node, context)
 
-    def visit_framed_window(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    def visit_framed_window(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
         return _visit_framed_window(self, node, context)
 
-    def visit_show(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    def visit_show(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
         return visit_show(self, node, context)
 
-    def visit_analyze(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    def visit_analyze(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
         return visit_analyze(self, node, context)
 
     def visit_show_columns(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_show_columns(self, node, context)
 
     def visit_show_manifest(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_show_manifest(self, node, context)
 
     def visit_show_snapshots(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_show_snapshots(self, node, context)
 
     def visit_show_lineage(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_show_lineage(self, node, context)
 
     def visit_show_sources(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_show_sources(self, node, context)
 
     def visit_create_view(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_create_view(self, node, context)
 
     def visit_alter_view(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_alter_view(self, node, context)
 
     def visit_drop_view(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_drop_view(self, node, context)
 
     def visit_create_relation(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_create_relation(self, node, context)
 
     def visit_drop_relation(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_drop_relation(self, node, context)
 
     def visit_clone_relation(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_clone_relation(self, node, context)
 
     def visit_clone_collection(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_clone_collection(self, node, context)
 
     def visit_resync_relation(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_resync_relation(self, node, context)
 
     def visit_detach_relation(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_detach_relation(self, node, context)
 
     def visit_create_collection(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_create_collection(self, node, context)
 
     def visit_drop_collection(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_drop_collection(self, node, context)
 
     def visit_drop_trigger(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_drop_trigger(self, node, context)
 
     def visit_create_trigger(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_create_trigger(self, node, context)
 
     def visit_alter_trigger_suspended(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_alter_trigger_suspended(self, node, context)
 
     def visit_alter_trigger_minimum_interval(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_alter_trigger_minimum_interval(self, node, context)
 
     def visit_create_task(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_create_task(self, node, context)
 
     def visit_alter_task(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_alter_task(self, node, context)
 
     def visit_alter_trigger_owner(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_alter_trigger_owner(self, node, context)
 
     def visit_drop_task(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_drop_task(self, node, context)
 
-    def visit_listen(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    def visit_listen(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
         return visit_listen(self, node, context)
 
-    def visit_unlisten(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    def visit_unlisten(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
         return visit_unlisten(self, node, context)
 
     def visit_create_tag(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_create_tag(self, node, context)
 
     def visit_drop_tag(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_drop_tag(self, node, context)
 
     def visit_rollback_relation(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_rollback_relation(self, node, context)
 
     def visit_alter_materialized_view_owner(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_alter_materialized_view_owner(self, node, context)
 
     def visit_alter_materialized_view_suspended(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_alter_materialized_view_suspended(self, node, context)
 
     def visit_grant_access(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_grant_access(self, node, context)
 
     def visit_revoke_access(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_revoke_access(self, node, context)
 
     def visit_show_grants_on(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_show_grants_on(self, node, context)
 
     def visit_show_effective_grants_on(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_show_effective_grants_on(self, node, context)
 
     def visit_truncate_relation(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_truncate_relation(self, node, context)
 
     def visit_alter_relation(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_alter_relation(self, node, context)
 
     def visit_rename_relation(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_rename_relation(self, node, context)
 
     def visit_add_column(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_add_column(self, node, context)
 
     def visit_drop_column(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_drop_column(self, node, context)
 
     def visit_rename_column(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_rename_column(self, node, context)
 
     def visit_add_relationship(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_add_relationship(self, node, context)
 
     def visit_drop_relationship(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_drop_relationship(self, node, context)
 
     def visit_alter_column_type(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_alter_column_type(self, node, context)
 
     def visit_compaction_commit(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_compaction_commit(self, node, context)
 
     def visit_alter_workspace(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_alter_workspace(self, node, context)
 
     def visit_alter_workspace_secure(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_alter_workspace_secure(self, node, context)
 
     def visit_drop_workspace(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_drop_workspace(self, node, context)
 
     def visit_insert(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_insert(self, node, context)
 
     def visit_merge(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_merge(self, node, context)
 
     def visit_comment(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_comment(self, node, context)
 
     def visit_materialized_cte_ref(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_materialized_cte_ref(self, node, context)
 
     def visit_subquery(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         return visit_subquery(self, node, context)
 
     def visit_dependent_join(
-        self, node: Node, context: BindingContext
-    ) -> Tuple[Node, BindingContext]:
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
         raise InvalidInternalStateError(
             "DependentJoin reached the Binder — correlated subquery was not decorrelated. "
             "This is a bug in the Plan Rewriter."
         )
 
     def traverse(
-        self, graph: LogicalPlan, node: Node, context: BindingContext
+        self, graph: LogicalPlan, node: str, context: BindingContext
     ) -> Tuple[LogicalPlan, BindingContext]:
         return traverse(self, graph, node, context)

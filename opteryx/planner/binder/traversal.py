@@ -6,7 +6,6 @@
 from typing import Tuple
 
 from opteryx.exceptions import AmbiguousDatasetError
-from opteryx.models import Node
 from opteryx.planner.binder.binder import merge_schemas
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.logical_planner import LogicalPlan
@@ -46,7 +45,7 @@ def post_bind(self, node, context):
 
 
 def traverse(
-    self, graph: LogicalPlan, node: Node, context: BindingContext
+    self, graph: LogicalPlan, node: str, context: BindingContext
 ) -> Tuple[LogicalPlan, BindingContext]:
     """
     Traverses the given graph starting at the given node and calling the

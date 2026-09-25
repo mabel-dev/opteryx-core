@@ -6,14 +6,14 @@
 import copy
 from typing import Tuple
 
+from opteryx.compiled.structures.plan_steps import PlanStep
 from opteryx.managers.virtual_datasets import derived
-from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.types.schema import RelationSchema
 from opteryx.models import current_name_of
 
 
-def visit_comment(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_comment(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the COMMENT node to determine which connector should handle
     storing the comment on the view/table.
@@ -60,8 +60,8 @@ def visit_comment(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
 
 
 def visit_materialized_cte_ref(
-    self, node: Node, context: BindingContext
-) -> Tuple[Node, BindingContext]:
+    self, node: PlanStep, context: BindingContext
+) -> Tuple[PlanStep, BindingContext]:
     """A reference to a shared, materialize-once CTE body.
 
     The body was bound BEFORE the main plan (see do_bind_phase), and its boundary
@@ -124,7 +124,7 @@ def visit_materialized_cte_ref(
     return node, context
 
 
-def visit_subquery(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+def visit_subquery(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     from opteryx.planner.binder.project import visit_exit
 
     node, context = visit_exit(self, node, context)

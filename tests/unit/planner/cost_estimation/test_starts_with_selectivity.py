@@ -22,6 +22,7 @@ ordinalized-bounds-through-get_distogram coverage).
 
 import os
 import sys
+from opteryx.types.schema import SchemaColumn
 from opteryx.compiled.structures.expressions import Function
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import Not
@@ -34,7 +35,6 @@ import pytest
 # cost_estimation.selectivity import cycle first.
 import opteryx.planner.optimizer  # noqa: F401
 from opteryx.expression import NodeType
-from opteryx.models import Node
 from opteryx.planner.cost_estimation.selectivity import (
     _LIKE_PREFIX_SELECTIVITY,
     _ci_char_probability,
@@ -65,7 +65,7 @@ _UNIFORM_PROPORTIONS = {
 
 def _column_node(identity=_IDENTITY, column_type=VARCHAR):
     identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col")
-    identifier.schema_column = Node(NodeType.IDENTIFIER, identity=identity, column_type=column_type)
+    identifier.schema_column = SchemaColumn(name="col", identity=identity, column_type=column_type)
     return identifier
 
 
