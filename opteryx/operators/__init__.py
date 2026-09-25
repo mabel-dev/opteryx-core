@@ -17,9 +17,7 @@ import opteryx.connectors.parquet_io  # noqa: F401
 from .catalog import OperatorCategory, OperatorParallelism, ParallelStrategy, get_registry
 from ._operators import (
     BasePlanNode,
-    JoinNode,
-    JoinLeftAdapter,
-    JoinRightAdapter,
+    PhysicalStep,
     PipelineContext,
 )
 from .read import ReaderNode
@@ -27,9 +25,7 @@ from .postgres_read import PostgresReadNode
 
 __all__ = [
     "BasePlanNode",
-    "JoinNode",
-    "JoinLeftAdapter",
-    "JoinRightAdapter",
+    "PhysicalStep",
     "PipelineContext",
     "OperatorCategory",
     "OperatorParallelism",

@@ -84,10 +84,10 @@ def test_multiple_list_and_single_fields():
 
 
 def test_nested_container_descent():
-    # FunctionDataset VALUES rows are a list-of-lists of expressions.
+    # FunctionDataset VALUES rows are a list of tuples of expressions.
     lits = [
-        [Literal(value=1), Literal(value=2)],
-        [Literal(value=3)],
+        (Literal(value=1), Literal(value=2)),
+        (Literal(value=3),),
     ]
     node = FunctionDatasetStep(values=lits)
     assert len(expression_roots(node)) == 3

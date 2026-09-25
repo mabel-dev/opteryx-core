@@ -1,3 +1,3 @@
-from opteryx.operators._operators import CrossJoinNode
+from opteryx.operators._operators import build_cartesian_indices
 
-__all__ = ["CrossJoinNode"]
+__all__ = ["build_cartesian_indices"]

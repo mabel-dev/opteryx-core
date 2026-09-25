@@ -654,6 +654,107 @@ def _wp11_logical_coerce(sc, pt):
     return None
 
 
+def _join_numeric_target_type(left_type, right_type):
+    """The common type two DIFFERENT numeric join-key categories are compared in,
+    or None when no coercion applies (same category, or not both numeric)."""
+    from opteryx.types.logical_type import LogicalCategory, find_compatible_type
+
+    numeric_types = (LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.DECIMAL)
+    if left_type not in numeric_types or right_type not in numeric_types:
+        return None
+    if left_type == right_type:
+        return None
+    return find_compatible_type([left_type, right_type])
+
+
+def _constant_replacements(condition):
+    """Find IDENTIFIER == LITERAL predicates that force a column to be constant
+    in every row surviving the filter.
+
+    Descends through AND, NESTED and DNF only — OR, NOT, function calls, etc.
+    terminate the walk on that branch. Returns a list of (identity, value) pairs;
+    the identity is the morsel column key."""
+    preds = []
+    stack = [condition]
+    while stack:
+        n = stack.pop()
+        nt = n.node_type
+        if nt == NodeType.NESTED:
+            if n.centre is not None:
+                stack.append(n.centre)
+            continue
+        if nt == NodeType.AND:
+            if n.left is not None:
+                stack.append(n.left)
+            if n.right is not None:
+                stack.append(n.right)
+            continue
+        if nt == NodeType.DNF:
+            # Despite the name, DNF here is a flat AND-list of sub-predicates
+            # (each parameter is combined via and_vector) — the planner's
+            # normalized form for multi-predicate filters.
+            for sub in n.parameters or []:
+                if sub is not None:
+                    stack.append(sub)
+            continue
+        if nt != NodeType.COMPARISON_OPERATOR or n.value != "Eq":
+            continue
+        left = n.left
+        right = n.right
+        if left is None or right is None:
+            continue
+        if left.node_type == NodeType.IDENTIFIER and right.node_type == NodeType.LITERAL:
+            ident_node, lit_node = left, right
+        elif right.node_type == NodeType.IDENTIFIER and left.node_type == NodeType.LITERAL:
+            ident_node, lit_node = right, left
+        else:
+            continue
+        sc = ident_node.schema_column
+        if sc is None:
+            continue
+        if lit_node.value is None:
+            continue
+        preds.append((sc.identity, lit_node.value))
+    return preds
+
+
+def _group_by_identities(step):
+    """A grouped aggregate's key identities: its GROUP BY expressions' identities,
+    duplicates removed, in GROUP BY order. The native sink keys on them in this
+    order, and GROUPING SETS masks number their bits by it."""
+    return list(dict.fromkeys(group.schema_column.identity for group in step.groups))
+
+
+def _grouping_set_masks(step, group_cols):
+    """GROUP BY ROLLUP(...): one bitmask per grouping set over `group_cols`, bit k
+    SET meaning key k is rolled up (NULL) in that set. None for a plain GROUP BY.
+
+    The binder resolved the sets to key IDENTITIES. A key a set does not name is
+    rolled up — including a key the set named that de-duplication collapsed away,
+    which is why membership is tested by identity and not by position."""
+    grouping_sets = step.grouping_set_identities
+    if grouping_sets is None:
+        return None
+    masks = []
+    for one_set in grouping_sets:
+        named = set(one_set)
+        masks.append(
+            sum(
+                1 << position
+                for position, identity in enumerate(group_cols)
+                if identity not in named
+            )
+        )
+    return masks
+
+
+def _distinct_on_identities(step):
+    """DISTINCT ON's key identities, or None for a plain DISTINCT (every column)."""
+    if not step.on:
+        return None
+    return [expression.schema_column.identity for expression in step.on]
+
+
 def _const_scalar_vector(dtype, value):
     """Build a length-1 constant-encoded Vector for an `IDENTIFIER = LITERAL`
     const-replacement column (see the FilterNode branch below). Returns None for a
@@ -818,21 +919,21 @@ class _Compiler:
         A TRANSFORMED key (e.g. GROUP BY UPPER(url)) keys on the UPPER *output*
         identity, not the scan column — so the scan column is correctly NOT marked;
         carrying the seed for computed keys is the string-kernel step (E37 step 2).
-        A bare `SELECT DISTINCT` (empty `_distinct_on`, dedup over all columns) is
+        A bare `SELECT DISTINCT` (no ON list, dedup over all columns) is
         left unmarked here — correct but unoptimized, refined later."""
         ids = getattr(self, "_hash_key_ids_cache", None)
         if ids is not None:
             return ids
         ids = set()
         for _, node in self.plan.nodes(True):
-            for ident in (getattr(node, "group_by_columns", None) or []):
-                ids.add(ident)
-            for ident in (getattr(node, "left_columns", None) or []):
-                ids.add(ident)
-            for ident in (getattr(node, "right_columns", None) or []):
-                ids.add(ident)
-            for ident in (getattr(node, "_distinct_on", None) or []):
-                ids.add(ident)
+            kind = node.kind
+            if kind == "GroupedAggregateHashedNode":
+                ids.update(_group_by_identities(node.step))
+            elif kind == "DistinctNode":
+                ids.update(_distinct_on_identities(node.step) or [])
+            elif node.is_join and kind != "UnnestJoinNode":
+                ids.update(node.step.left_columns or [])
+                ids.update(node.step.right_columns or [])
         self._hash_key_ids_cache = ids
         return ids
 
@@ -1228,11 +1329,9 @@ class _Compiler:
             )
         return root
 
-    def _resolve_const_replacements(self, node, layout):
-        """Resolve a FilterNode's `IDENTIFIER = LITERAL` const-replacements (already
-        extracted at plan-node construction time — see
-        opteryx/operators/filter/filter.pyx's `_extract_constant_replacements`,
-        which populates `node._const_replacements`) against this pipeline's layout.
+    def _resolve_const_replacements(self, condition, layout):
+        """Resolve a filter condition's `IDENTIFIER = LITERAL` const-replacements
+        (see `_constant_replacements`) against this pipeline's layout.
 
         Returns parallel (const_col_idx, const_scalar_vecs) lists for
         NativePlan.add_expr_filter: a column proven constant on every surviving row
@@ -1241,7 +1340,7 @@ class _Compiler:
         same answer, just without the optimization) when its column isn't in this
         layout or `_const_scalar_vector` doesn't support the concrete
         type/literal combination (temporal, decimal, etc.)."""
-        replacements = getattr(node, "_const_replacements", None)
+        replacements = _constant_replacements(condition)
         if not replacements:
             return [], []
         const_col_idx = []
@@ -1249,7 +1348,7 @@ class _Compiler:
         for identity, value in replacements:
             if identity not in layout:
                 continue
-            dtype = self._layout_type(node, identity)
+            dtype = self._layout_type(None, identity)
             if dtype is None:
                 continue
             vec = _const_scalar_vector(dtype, value)
@@ -1746,11 +1845,11 @@ class _Compiler:
             "limit": limit,
         }
 
-    def _project_agg_operands(self, p, node, layout):
+    def _project_agg_operands(self, p, aggregates, layout):
         """Aggregate operands that are computed expressions (SUM(a * b)) become
         ExprProject columns first; the sink then aggregates a plain column."""
         computed = []
-        for agg in getattr(node, "aggregates", None) or []:
+        for agg in aggregates:
             params = getattr(agg, "parameters", None) or []
             if agg.value == "APPROX_PERCENTILE":
                 # 2 params: the column expression + a percentile literal —
@@ -2012,7 +2111,7 @@ class _Compiler:
             _unsupported(
                 "a query shape that feeds one intermediate result into more than one place"
             )
-        kind = type(node).__name__
+        kind = node.kind
 
         if kind == "CteRefNode":
             # One reference to a shared CTE: a pipeline over the body's result
@@ -2022,13 +2121,14 @@ class _Compiler:
             # — BufferSource claims morsels per-run (its cursor lives in the
             # pipeline run's GlobalSourceState), so N references read the one
             # materialized result N times without re-executing the body.
-            entry = self.cte_buffers.get(node.cte_key)
+            step = node.step
+            entry = self.cte_buffers.get(step.cte_key)
             if entry is None:
                 _unsupported(
-                    f"a CTE reference ({node.cte_name}) whose shared body was not compiled"
+                    f"a CTE reference ({step.cte_name}) whose shared body was not compiled"
                 )
             buf, body_layout = entry
-            mapping = node.cte_column_map or {}
+            mapping = step.cte_column_map or {}
             out_ids = []
             indices = []
             for col in node.columns or []:
@@ -2048,7 +2148,7 @@ class _Compiler:
             self._remember_types(node.columns)
             return p, out_ids
 
-        if getattr(node, "is_scan", False):
+        if node.is_scan:
             # `nid` so a scan can inspect what CONSUMES it — the skene two-pass path
             # reads its predicate and top-n spec off the Filter/HeapSort above,
             # because unlike parquet a skene scan carries no pushed predicate. See
@@ -2064,7 +2164,8 @@ class _Compiler:
             # _hoist_array_operands. Narrow back to the original layout afterward: the
             # hoisted column is a filter-internal helper, not something anything above
             # the filter asked for.
-            hoisted_layout = self._hoist_array_operands(p, [node.filter], list(layout))
+            condition = node.step.condition
+            hoisted_layout = self._hoist_array_operands(p, [condition], list(layout))
             # A predicate with 2+ `->`/`->>` on one column (the shape jsonbench Q3/Q4/Q5
             # have) parses each document once per extraction. Fuse them to one parse;
             # the narrow-back below drops the helper columns again, so nothing above
@@ -2080,13 +2181,13 @@ class _Compiler:
             # back without re-measuring at the dop we actually run at — the kernel
             # being 2.6x faster in isolation is NOT sufficient evidence, and was
             # exactly what made the projection version look like a free win.
-            hoisted_layout = self._fuse_json_extractions(p, [node.filter], hoisted_layout)
+            hoisted_layout = self._fuse_json_extractions(p, [condition], hoisted_layout)
             # Anything the stream already carries is LOADED, not recomputed — see
             # _bind_precomputed_subexpressions. Last, so it sees the columns the two
             # hoists above added as well as the ones the child produced.
-            predicate = self._bind_precomputed_subexpressions(node.filter, hoisted_layout)
+            predicate = self._bind_precomputed_subexpressions(condition, hoisted_layout)
             bc = self._lower_expression(predicate, "a filter predicate")
-            const_col_idx, const_scalar_vecs = self._resolve_const_replacements(node, hoisted_layout)
+            const_col_idx, const_scalar_vecs = self._resolve_const_replacements(condition, hoisted_layout)
             self.nplan.add_expr_filter(p, bc, hoisted_layout, const_col_idx, const_scalar_vecs)
             if hoisted_layout != layout:
                 indices = [hoisted_layout.index(identity) for identity in layout]
@@ -2100,17 +2201,16 @@ class _Compiler:
             # once and referenced by 2+ of this node's own columns — see
             # project_fusion.py) first so dependents can load them, then the SELECT
             # columns, then any ORDER BY keys the planner routed through this node
-            # (mirrors ProjectionNode.__init__'s own eval-node derivation).
-            proj_exprs = (
-                list(node.parameters.get("hoisted_columns") or [])
-                + list(node.parameters.get("projection") or [])
-                + list(node.parameters.get("passthrough_columns") or [])
-            )
+            # (`passthrough_columns`: computed and emitted for a consumer above, then
+            # dropped at the Exit).
+            step = node.step
+            emitted = list(step.columns or []) + list(step.passthrough_columns or [])
+            proj_exprs = list(step.hoisted_columns or []) + emitted
             eval_nodes = [col for col in proj_exprs
                           if col.node_type != NodeType.IDENTIFIER]
             if eval_nodes:
                 layout = self._add_computed(p, eval_nodes, layout)
-            out_ids = list(node.projection)
+            out_ids = [col.schema_column.identity for col in emitted]
             for identity in out_ids:
                 if identity not in layout:
                     _unsupported("projecting a column the engine could not resolve here")
@@ -2120,27 +2220,28 @@ class _Compiler:
 
         if kind == "UngroupedAggregateNode":
             (p, layout) = self._compile_only_child(in_edges, kind, node)
-            layout = self._project_agg_operands(p, node, layout)
-            specs = self._parse_aggregates(
-                getattr(node, "aggregates", None) or [], layout, grouped=False)
+            aggregates = node.step.aggregates or []
+            layout = self._project_agg_operands(p, aggregates, layout)
+            specs = self._parse_aggregates(aggregates, layout, grouped=False)
             buf = self.nplan.new_buffer()
             self.nplan.set_agg_sink(p, specs, buf)
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             out_layout = [spec[0] for spec in specs]
-            self._apply_having(p2, node, out_layout)
             return p2, out_layout
 
         if kind == "GroupedAggregateHashedNode":
             (p, layout) = self._compile_only_child(in_edges, kind, node)
-            group_cols = getattr(node, "group_by_columns", None) or []
+            step = node.step
+            group_cols = _group_by_identities(step)
+            having = step.having_condition
             if not group_cols:
                 _unsupported("a GROUP BY with no keys")
             # GROUP BY over a computed key (SUBSTRING(...), REGEXP_REPLACE(...)):
             # project the key expression to a stream column first, then group on it.
             computed_keys = []
             group_key_names = {}
-            for grp in getattr(node, "groups", None) or []:
+            for grp in step.groups:
                 sc = getattr(grp, "schema_column", None)
                 if sc is not None and sc.identity is not None:
                     group_key_names[sc.identity] = getattr(sc, "name", None)
@@ -2166,16 +2267,16 @@ class _Compiler:
                 key_idx.append(layout.index(key_identity))
             # GROUP BY with NO aggregate functions is a DISTINCT over the keys —
             # route to the DistinctSink (emits the distinct key rows unchanged).
-            raw_aggs = getattr(node, "aggregates", None) or []
-            set_masks = getattr(node, "grouping_set_masks", None)
+            raw_aggs = step.aggregates or []
+            set_masks = _grouping_set_masks(step, group_cols)
             # GROUPING(col) is not a per-group REDUCTION (it has no entry in
             # AGGREGATORS / _AGG_FNS) — it is a lookup against the grouping set
             # that produced the row, so it is split out here and lowered
             # separately below, once grouping_id is known to be emitted.
             # `group_cols` (unmutated at this point) is the SAME list, in the
-            # SAME order, _grouped_agg.pyx used to build grouping_set_masks's
-            # bits — see the comment there — so a key's position in it here IS
-            # its bit position in every entry of set_masks.
+            # SAME order, _grouping_set_masks built the masks' bits from, so a
+            # key's position in it here IS its bit position in every entry of
+            # set_masks.
             grouping_calls = [agg for agg in raw_aggs if agg.value == "GROUPING"]
             aggs = [agg for agg in raw_aggs if agg.value != "GROUPING"]
             grouping_bits = []
@@ -2219,24 +2320,24 @@ class _Compiler:
                         "GROUP BY ROLLUP with no aggregate function",
                         "add an aggregate, or list the grouping columns without ROLLUP",
                     )
-                if getattr(node, "_having_condition", None) is not None:
+                if having is not None:
                     _unsupported("a HAVING on a no-aggregate GROUP BY")
                 buf = self.nplan.new_buffer()
                 # No-aggregate GROUP BY routes to the DistinctSink — the group
                 # count estimate is the distinct-count estimate here.
-                ndv_estimate = getattr(node, "groupby_ndv_estimate", None)
+                ndv_estimate = node.group_count_estimate
                 self.nplan.set_distinct_sink(
                     p, key_idx, buf,
                     _estimate_to_int64(ndv_estimate, "group-count estimate for GROUP BY"))
                 p2 = self.nplan.new_pipeline()
                 self.nplan.set_buffer_source(p2, buf)
                 return p2, list(layout)
-            layout = self._project_agg_operands(p, node, layout)
+            layout = self._project_agg_operands(p, raw_aggs, layout)
             specs = self._parse_aggregates(aggs, layout)
-            key_emit = self._group_key_emit(node, group_cols)
+            key_emit = self._group_key_emit(node, group_cols, having)
             # Planner NDV estimate for the grouped keys (physical planner, execution_estimates.py);
             # -1 = unknown. Gates the sink's per-partition parvi front maps.
-            ndv_estimate = getattr(node, "groupby_ndv_estimate", None)
+            ndv_estimate = node.group_count_estimate
             if set_masks:
                 # GROUP BY ROLLUP(...): expand each morsel into one morsel per grouping
                 # set — keys the set does not name masked to NULL, plus the grouping_id
@@ -2285,13 +2386,13 @@ class _Compiler:
                        if identity != _GROUPING_ID_IDENTITY]
                 self.nplan.add_select(p2, keep, [out_layout[i] for i in keep])
                 out_layout = [out_layout[i] for i in keep]
-            self._apply_having(p2, node, out_layout)
+            self._apply_having(p2, having, out_layout)
             return p2, out_layout
 
         if kind == "DistinctNode":
             (p, layout) = self._compile_only_child(in_edges, kind, node)
-            on = getattr(node, "_distinct_on", None)
-            on_exprs = getattr(node, "_distinct_on_exprs", None) or []
+            on = _distinct_on_identities(node.step)
+            on_exprs = node.step.on or []
             # Friendly name per key identity (e.g. "payload -> status_code") for
             # error messages — mirrors GROUP BY's group_key_names above; without
             # it a computed key falls back to its opaque internal identity.
@@ -2338,7 +2439,7 @@ class _Compiler:
             buf = self.nplan.new_buffer()
             # Planner NDV estimate for the dedup keys (physical planner, execution_estimates.py);
             # -1 = unknown. Gates the sink's parvi front set.
-            ndv_estimate = getattr(node, "distinct_ndv_estimate", None)
+            ndv_estimate = node.group_count_estimate
             self.nplan.set_distinct_sink(
                 p, on_idx, buf,
                 _estimate_to_int64(ndv_estimate, "distinct-count estimate for DISTINCT"))
@@ -2348,7 +2449,7 @@ class _Compiler:
 
         if kind == "SortNode":
             (p, layout) = self._compile_only_child(in_edges, kind, node)
-            spec, sink_layout = self._sort_spec(p, node.order_by, layout)
+            spec, sink_layout = self._sort_spec(p, node.step.order_by, layout)
             emit, layout = self._emit_subset(node, sink_layout)
             spec, emit, _ = self._narrow_sink_input(p, sink_layout, spec, emit)
             buf = self.nplan.new_buffer()
@@ -2362,10 +2463,10 @@ class _Compiler:
 
         if kind == "HeapSortNode":
             (p, layout) = self._compile_only_child(in_edges, kind, node)
-            limit = getattr(node, "limit", None)
+            limit = node.step.limit
             if limit is None or int(limit) < 0:
                 _unsupported("a HeapSort without a positive LIMIT")
-            spec, sink_layout = self._sort_spec(p, node.order_by, layout)
+            spec, sink_layout = self._sort_spec(p, node.step.order_by, layout)
             emit, layout = self._emit_subset(node, sink_layout)
             spec, emit, _ = self._narrow_sink_input(p, sink_layout, spec, emit)
             buf = self.nplan.new_buffer()
@@ -2377,22 +2478,34 @@ class _Compiler:
 
         if kind == "WindowNode":
             (p, layout) = self._compile_only_child(in_edges, kind, node)
-            part_cols = list(getattr(node, "_partition_columns", None) or [])
-            order_cols = list(getattr(node, "_order_columns", None) or [])
-            order_asc = list(getattr(node, "_order_ascending", None) or [])
-            funcs = list(getattr(node, "_functions", None) or [])
+            step = node.step
+            partition_by = list(step.partition_by or [])
+            order_by = list(step.order_by or [])
+            window_fn_nodes = list(step.window_functions or [])
+            part_cols = [col.schema_column.identity for col in partition_by]
+            order_cols = [col.schema_column.identity for col, _asc in order_by]
+            order_asc = [bool(asc) for _col, asc in order_by]
+            # (kind code, output identity, argument identity or None, offset). The
+            # argument is set only for the kinds that read a value from another row
+            # (GATHERED_FUNCTIONS); `offset` is the kind's single constant integer
+            # parameter — LAG/LEAD's row shift, NTILE's bucket count, NTH_VALUE's
+            # 1-based position — and unused otherwise.
+            funcs = [
+                (
+                    WINDOW_FUNCTIONS[fn_kind],
+                    output_identity,
+                    None if arg is None else arg.schema_column.identity,
+                    int(offset),
+                )
+                for fn_kind, output_identity, arg, offset in window_fn_nodes
+            ]
             if not funcs:
                 _unsupported("a window node with no functions")
             # PARTITION BY / ORDER BY over a computed key (CAST(...), arithmetic,
             # etc.), and a window-function ARGUMENT that is itself an expression: project
             # each to a stream column first, then resolve by identity — mirrors
             # GroupedAggregateHashedNode's computed_keys and _sort_spec's
-            # `computed` handling above. The bound argument NODES live in
-            # node.parameters["window_functions"]; `funcs` (from the plan-time
-            # WindowNode) carries their identities.
-            partition_by = list(node.parameters.get("partition_by") or [])
-            order_by = list(node.parameters.get("order_by") or [])
-            window_fn_nodes = list(node.parameters.get("window_functions") or [])
+            # `computed` handling above.
             computed = [col for col in partition_by
                         if col.node_type != NodeType.IDENTIFIER]
             computed += [col for col, _asc in order_by
@@ -2433,7 +2546,8 @@ class _Compiler:
                     if arg_identity not in layout:
                         _unsupported("a window function argument the engine could not resolve here")
                     fn_args.append(layout.index(arg_identity))
-            top_k = int(getattr(node, "_top_k", -1))
+            # Set only by WindowTopKFusionStrategy — a fused `WHERE <rank> <= K`.
+            top_k = -1 if step.top_k is None else int(step.top_k)
 
             # WindowTopKFusionStrategy's fused `rank <= K`, restricted to the shape
             # WindowTopKSink actually implements: a single ROW_NUMBER (not RANK/
@@ -2483,10 +2597,19 @@ class _Compiler:
 
         if kind == "FramedWindowNode":
             (p, layout) = self._compile_only_child(in_edges, kind, node)
-            part_cols = list(getattr(node, "_partition_columns", None) or [])
-            order_cols = list(getattr(node, "_order_columns", None) or [])
-            order_asc = list(getattr(node, "_order_ascending", None) or [])
-            funcs = list(getattr(node, "_functions", None) or [])
+            step = node.step
+            partition_by = list(step.partition_by or [])
+            order_by = list(step.order_by or [])
+            part_cols = [col.schema_column.identity for col in partition_by]
+            order_cols = [col.schema_column.identity for col, _asc in order_by]
+            order_asc = [bool(asc) for _col, asc in order_by]
+            # (kind code, output identity, argument expression or None, frame). The
+            # argument stays an EXPRESSION: a computed one is projected to a stream
+            # column below, same as the ranking window's navigation argument.
+            funcs = [
+                (FRAMED_AGGREGATE_FUNCTIONS[fn_kind], output_identity, arg, frame)
+                for fn_kind, output_identity, arg, frame in step.window_functions or []
+            ]
             if not funcs:
                 _unsupported("a framed window node with no functions")
             if not order_cols:
@@ -2495,8 +2618,6 @@ class _Compiler:
             # PARTITION BY / ORDER BY over a computed key, and a computed function
             # ARGUMENT (`SUM(a + b) OVER (...)`): project each to a stream column
             # first, then resolve by identity — mirrors WindowNode's identical need.
-            partition_by = list(node.parameters.get("partition_by") or [])
-            order_by = list(node.parameters.get("order_by") or [])
             computed = [col for col in partition_by if col.node_type != NodeType.IDENTIFIER]
             computed += [col for col, _asc in order_by if col.node_type != NodeType.IDENTIFIER]
             computed += [
@@ -2524,14 +2645,14 @@ class _Compiler:
 
             # Each function's OUTPUT identity was pre-minted at plan time and its
             # true ColumnType resolved at bind time (`_aggregate_return_type`, off
-            # the bound argument) — carried on `node.parameters["outputs"]`'s
+            # the bound argument) — carried on the step's `outputs`
             # SchemaColumns (`window_functions` only has the bare identity). Folded
             # into the same identity -> (physical type, ColumnType) tracking every
             # other branch uses (`_layout_type`/`self._cts`), rather than a
             # bespoke lookup just for this node.
             self._types = getattr(self, "_types", None) or {}
             self._cts = getattr(self, "_cts", None) or {}
-            for _kind, sc, _params, _frame in node.parameters.get("outputs") or []:
+            for _kind, sc, _params, _frame in step.outputs or []:
                 if sc.column_type is not None:
                     self._types[sc.identity] = sc.column_type.physical
                     self._cts[sc.identity] = sc.column_type
@@ -2614,7 +2735,7 @@ class _Compiler:
             types, logical, element = self._payload_types(in_edges[0][0], layout)
             p2 = self.nplan.new_pipeline()
             self.nplan.set_current_identity(node.identity)
-            self.nplan.set_current_display_name(type(node).__name__)
+            self.nplan.set_current_display_name(node.kind)
             self.nplan.set_scalar_guard_source(p2, buf, list(layout),
                                                types, logical, element)
             # At most one row can flow — nothing to parallelise.
@@ -2627,19 +2748,21 @@ class _Compiler:
             # morsels in stream order — LIMIT pins its pipeline to dop 1 (halt stops
             # the source early, so this is bounded work, not a full serial scan).
             self.nplan.set_pipeline_dop(p, 1)
-            limit = getattr(node, "limit", None)
-            if limit is not None:
-                # The planner encodes "no limit" (OFFSET-only) as float('inf').
-                limit = None if limit == float("inf") else int(limit)
-            offset = getattr(node, "offset", None)
-            self.nplan.add_limit(p, None if offset is None else int(offset), limit)
+            # No limit (OFFSET-only) and no offset are both None.
+            limit = node.step.limit
+            offset = node.step.offset
+            self.nplan.add_limit(
+                p,
+                None if offset is None else int(offset),
+                None if limit is None else int(limit),
+            )
             return p, layout
 
         if kind == "UnionNode":
             # Positional alignment (mirrors UnionNode._push_impl): each leg's first
             # N columns become the union's column_ids; legs stream into ONE shared
             # buffer (UNION ALL — any DISTINCT sits above as its own node).
-            ids = list(node.column_ids)
+            ids = [column.schema_column.identity for column in node.columns]
             if not ids:
                 _unsupported("a UNION with no output columns")
             buf = self.nplan.new_buffer()
@@ -2652,11 +2775,11 @@ class _Compiler:
                 # The per-leg align/append is this UNION's plumbing — attribute it here,
                 # not to the leg whose identity compile_node just left current.
                 self.nplan.set_current_identity(node.identity)
-                self.nplan.set_current_display_name(type(node).__name__)
+                self.nplan.set_current_display_name(node.kind)
                 self.nplan.add_select(lp, list(range(len(ids))), ids)
                 self.nplan.set_buffer_append_sink(lp, buf)
             self.nplan.set_current_identity(node.identity)
-            self.nplan.set_current_display_name(type(node).__name__)
+            self.nplan.set_current_display_name(node.kind)
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             return p2, ids
@@ -2664,12 +2787,12 @@ class _Compiler:
         if kind == "UnnestJoinNode":
             return self._compile_unnest(in_edges, node)
 
-        if getattr(node, "is_join", False):
+        if node.is_join:
             return self._compile_join(nid, node, in_edges)
 
         _unsupported(f"the {kind} operator")
 
-    def _group_key_emit(self, node, group_cols):
+    def _group_key_emit(self, node, group_cols, having):
         """One flag per GROUP BY key: does anything above the aggregate read its VALUES?
 
         Grouping identity in the native sink is the 64-bit key hash — the same contract
@@ -2691,10 +2814,9 @@ class _Compiler:
         """
         from opteryx.expression import get_all_nodes_of_type
 
-        live = set(getattr(node, "pre_update_columns", None) or ())
+        live = set(node.pre_update_columns)
         if not live:
             return [True] * len(group_cols)
-        having = getattr(node, "_having_condition", None)
         if having is not None:
             live.update(
                 reference.schema_column.identity
@@ -2704,13 +2826,12 @@ class _Compiler:
         emitted = set(_live_positions(group_cols, live))
         return [position in emitted for position in range(len(group_cols))]
 
-    def _apply_having(self, p, node, layout):
-        """HAVING rides ON the aggregate plan node (`_having_condition` — the old
-        operator applied it internally via `_apply_having_filter`; there is NO
-        separate FilterNode in the plan). Silently ignoring it returned UNFILTERED
-        groups — a wrong answer. Lower it as a post-aggregate c-native filter over
-        the aggregate's output layout (group keys + agg result columns)."""
-        having = getattr(node, "_having_condition", None)
+    def _apply_having(self, p, having, layout):
+        """HAVING rides ON the grouped aggregate step (`having_condition` — there
+        is NO separate FilterNode in the plan). Silently ignoring it returned
+        UNFILTERED groups — a wrong answer. Lower it as a post-aggregate c-native
+        filter over the aggregate's output layout (group keys + agg result
+        columns)."""
         if having is None:
             return
         # Same computed-ARRAY-operand hoist as the FilterNode branch (see
@@ -2746,7 +2867,7 @@ class _Compiler:
         An empty `pre_update_columns` means UNKNOWN, not "nothing is wanted", so it
         keeps every column. An empty RESULT is different and is honoured: a
         `COUNT(*)` over an ordered subquery genuinely wants zero columns out."""
-        live = getattr(node, "pre_update_columns", None) or set()
+        live = node.pre_update_columns
         if not live:
             return None, layout
         emit = _live_positions(layout, live)
@@ -2820,7 +2941,7 @@ class _Compiler:
         # The child's own compile stamped ITS identity as current; restore this node's
         # so the operators/sink this branch is about to build are attributed here.
         self.nplan.set_current_identity(node.identity)
-        self.nplan.set_current_display_name(type(node).__name__)
+        self.nplan.set_current_display_name(node.kind)
         return result
 
     def _classify_scan_columns(self, read_scs):
@@ -3078,7 +3199,7 @@ class _Compiler:
             consumer = self.plan[node_id]
             if consumer is None:
                 return None
-            consumer_kind = type(consumer).__name__
+            consumer_kind = consumer.kind
             if consumer_kind == "FilterNode":
                 filters.append(consumer)
                 continue
@@ -3168,8 +3289,8 @@ class _Compiler:
         # ── the top-n spec, read off the HeapSort ──────────────────────────────────
         # Same deliberately narrow scope as TopNScanPushdownStrategy: one ORDER BY
         # key, and it must be a plain column reference this scan emits.
-        limit = getattr(heapsort, "limit", None)
-        order_by = getattr(heapsort, "order_by", None) or []
+        limit = heapsort.step.limit
+        order_by = heapsort.step.order_by or []
         if limit is None or int(limit) <= 0 or len(order_by) != 1:
             return None
         sort_expression, ascending = order_by[0]
@@ -3190,7 +3311,7 @@ class _Compiler:
         # ── the predicate ──────────────────────────────────────────────────────────
         # Pushed conjuncts FIRST (they have no Filter left to fall back on), then
         # whatever the connector declined and is still a Filter node above.
-        predicates = pushed + [node.filter for node in filter_nodes]
+        predicates = pushed + [node.step.condition for node in filter_nodes]
         # Every column the predicate touches must be a column this scan reads —
         # otherwise pass 1 cannot evaluate it (a hoisted/computed operand lands as an
         # EVALUATED node referring to a column that only exists above the scan).
@@ -3924,7 +4045,7 @@ class _Compiler:
         # Tag the scan Source (and any materialized buffer source) with the scan node's
         # identity so its per-operator readings attribute back to the ReadRel node.
         self.nplan.set_current_identity(scan.identity)
-        self.nplan.set_current_display_name(type(scan).__name__)
+        self.nplan.set_current_display_name(scan.kind)
         # ReaderNode = the generic non-parquet connector scan ($planets and the other
         # sample/virtual/in-memory relations). Its content is fully read either way
         # (no native streaming exists for it); materializing at plan time keeps
@@ -4199,7 +4320,7 @@ class _Compiler:
         buffer, the engine's UNION plumbing. CROSS = a zero-key inner join (every
         build row shares one empty key → cartesian). nested_loop = an equi-join
         with a residual `on` predicate applied as a post-join filter."""
-        join_type = getattr(node, "join_type", None)
+        join_type = node.join_type
         if join_type == "asof":
             return self._compile_asof_join(node, in_edges)
         if join_type == "band":
@@ -4241,14 +4362,14 @@ class _Compiler:
         # The existence flag's output identity — the BOOL column the probe appends
         # after the emitted probe columns, which the projection above reads. None for
         # every filtering mode.
-        existence_column = getattr(node, "existence_column", None) \
+        existence_column = node.step.existence_column \
             if join_type in ("left existence", "left existence anti") else None
         if join_type in ("left existence", "left existence anti") and existence_column is None:
             _unsupported("an existence join with no output column to flag into")
         existence_name = existence_column.schema_column.identity \
             if existence_column is not None else None
         # UNKNOWN is a NULL in the flag (projected IN / NOT IN); EXISTS is two-valued.
-        existence_three_valued = bool(getattr(node, "existence_three_valued", False))
+        existence_three_valued = bool(node.step.existence_three_valued)
         is_cross = join_type == "cross"
         legs = {}
         for idx, (provider, _target, label) in enumerate(in_edges):
@@ -4258,8 +4379,8 @@ class _Compiler:
         if "left" not in legs or "right" not in legs:
             _unsupported("a join without labelled left/right legs")
 
-        left_cols = list(getattr(node, "left_columns", None) or [])
-        right_cols = list(getattr(node, "right_columns", None) or [])
+        left_cols = list(node.step.left_columns or [])
+        right_cols = list(node.step.right_columns or [])
         # A pure theta nested_loop join (e.g. `ON a > b`, no equi conjunct at all) has
         # no columns to key on — extract_join_fields only ever populates left_columns/
         # right_columns from Eq conjuncts (opteryx/planner/binder/join_helpers.py), so
@@ -4289,10 +4410,10 @@ class _Compiler:
         # A conjunct is dropped ONLY if it is exactly the shape `extract_join_fields`
         # turns into a key pair. An Eq with an expression operand is NOT keyed (it
         # comes back as `unkeyed`) and must stay, or the join silently widens.
-        residual = getattr(node, "on", None) if join_type == "nested_loop" else None
+        residual = node.step.on if join_type == "nested_loop" else None
         if residual is not None and left_cols and right_cols:
             residual = _residual_without_keyed_equalities(
-                residual, node.left_relation_names, node.right_relation_names
+                residual, node.step.left_relation_names or [], node.step.right_relation_names or []
             )
 
         # A SEMI/ANTI node may carry a CORRELATED NON-EQUALITY residual, split off the
@@ -4301,7 +4422,7 @@ class _Compiler:
         # collapsed to existence, so the predicate has to gate the existence test
         # inside the probe. It therefore needs the build payload the plain SEMI/ANTI
         # path deliberately drops.
-        filter_residual = getattr(node, "residual", None) if mode in semi_anti_modes else None
+        filter_residual = node.step.residual if mode in semi_anti_modes else None
 
         # Every conjunct of the ON clause must be evaluated by SOMETHING.
         #
@@ -4327,7 +4448,7 @@ class _Compiler:
         # |planets|). Per architect ruling only INNER supports a theta conjunct; the
         # rest refuse. A bare theta ON already refused here ("aligned key lists") — the
         # loud path and the silent one sat next to each other.
-        on_condition = getattr(node, "on", None)
+        on_condition = node.step.on
         if on_condition is not None and residual is None and filter_residual is None:
             unkeyed = len(_and_conjuncts(on_condition)) - len(left_cols)
             if unkeyed > 0:
@@ -4356,7 +4477,7 @@ class _Compiler:
         # flag is a value ON the probe leg's rows. Exchanging the legs would emit the
         # wrong relation entirely, not merely a different plan for the same answer.
         if mode in (2, 4) and existence_name is None \
-                and getattr(node, "swap_build_side", False):
+                and node.step.swap_build_side:
             return self._compile_swapped_semi_anti(
                 node, legs, mode, left_cols, right_cols, filter_residual
             )
@@ -4375,7 +4496,7 @@ class _Compiler:
         # the flag is granted for, and this is the second lock on it.
         swap_left_outer = (
             mode == 1
-            and getattr(node, "swap_build_side", False)
+            and bool(node.step.swap_build_side)
             and residual is None
             and bool(left_cols)
         )
@@ -4408,7 +4529,7 @@ class _Compiler:
         # Resolved from the PRE-coercion key lists — the merged column carries the
         # key's own value, never a synthetic CAST.
         merged_specs = []   # (merged identity, build key identity, probe key identity)
-        for merged_identity, key_a, key_b in (getattr(node, "using_merged", None) or []):
+        for merged_identity, key_a, key_b in (node.step.using_merged or []):
             if mode not in (0, 1, 5, 8):
                 _unsupported("a merged USING column on a join that does not emit rows "
                              "from both sides")
@@ -4426,7 +4547,7 @@ class _Compiler:
 
         bp, blayout = self.compile_node(build_id)
         self.nplan.set_current_identity(node.identity)  # own the build sink + probe below
-        self.nplan.set_current_display_name(type(node).__name__)
+        self.nplan.set_current_display_name(node.kind)
         # `blayout` is the leg's real output; `bkeyout` may carry extra synthetic cast
         # columns at the end. Payload/output use the former, key indices the latter.
         bkeyout, build_keys = self._coerce_join_keys(bp, blayout, build_keys, build_coercions)
@@ -4469,7 +4590,7 @@ class _Compiler:
         # surviving payload keeps `prune_payload` False either way) — do not re-test
         # it on such a query and conclude it is dead, which is a mistake already made
         # once here.
-        live = getattr(node, "pre_update_columns", None) or set()
+        live = node.pre_update_columns
         # ⛔ UNION, not replacement: a residual operand that nothing above the join
         # wants is still read PER PAIR, so dropping it would be a compile failure at
         # best and the wrong column at worst.
@@ -4512,7 +4633,7 @@ class _Compiler:
         # itself when it decides whether consolidating its retained payload beats
         # re-copying it per output row. -1 means unknown, which keeps the sink on its
         # existing gather; never fabricate a number here.
-        est_rows = getattr(node, "join_output_rows_estimate", None)
+        est_rows = node.join_output_rows_estimate
         # The set-operation key rule has to be given to BOTH halves. The probe derives
         # it from `mode`, but the build sink never sees the mode — and it is the build
         # side that decides whether a NULL-keyed row enters the table at all. Passing
@@ -4530,7 +4651,7 @@ class _Compiler:
 
         pp, playout = self.compile_node(probe_id)
         self.nplan.set_current_identity(node.identity)  # probe op belongs to the join
-        self.nplan.set_current_display_name(type(node).__name__)
+        self.nplan.set_current_display_name(node.kind)
         pkeyout, probe_keys = self._coerce_join_keys(pp, playout, probe_keys, probe_coercions)
         probe_key_idx = []
         for identity in probe_keys:
@@ -4628,7 +4749,7 @@ class _Compiler:
             self.nplan.set_buffer_append_sink(pp, buf)
             tail = self.nplan.new_pipeline()
             self.nplan.set_current_identity(node.identity)
-            self.nplan.set_current_display_name(type(node).__name__)
+            self.nplan.set_current_display_name(node.kind)
             self.nplan.set_unmatched_build_source(tail, ref, probe_types, probe_logical,
                                                   probe_element, fill_from_build)
             self.nplan.set_buffer_append_sink(tail, buf)
@@ -4662,7 +4783,7 @@ class _Compiler:
             node, build_keys, probe_keys)
         bp, blayout = self.compile_node(build_id)
         self.nplan.set_current_identity(node.identity)
-        self.nplan.set_current_display_name(type(node).__name__)
+        self.nplan.set_current_display_name(node.kind)
         bkeyout, build_keys = self._coerce_join_keys(bp, blayout, build_keys, build_coercions)
         build_key_idx = []
         for identity in build_keys:
@@ -4691,7 +4812,7 @@ class _Compiler:
 
         sp, playout = self.compile_node(probe_id)
         self.nplan.set_current_identity(node.identity)
-        self.nplan.set_current_display_name(type(node).__name__)
+        self.nplan.set_current_display_name(node.kind)
         pkeyout, probe_keys = self._coerce_join_keys(sp, playout, probe_keys, probe_coercions)
         probe_key_idx = []
         for identity in probe_keys:
@@ -4724,7 +4845,7 @@ class _Compiler:
 
         ep = self.nplan.new_pipeline()
         self.nplan.set_current_identity(node.identity)
-        self.nplan.set_current_display_name(type(node).__name__)
+        self.nplan.set_current_display_name(node.kind)
         # SEMI emits the build rows that were matched; ANTI the ones that were not.
         self.nplan.set_semi_anti_build_source(ep, ref, mode == 2)
         return ep, list(blayout)
@@ -4775,13 +4896,12 @@ class _Compiler:
         leaked onto the INT-vs-INT pair too, which then hashed FLOAT64 against INT64,
         matched nothing, and returned zero rows."""
         from opteryx.expression import NodeType, get_all_nodes_of_type
-        from opteryx.operators._operators import JoinNode
         from opteryx.types.logical_type import LogicalCategory
         from opteryx.types.logical_type import find_compatible_type as _lt_find_compatible
 
         build_coercions = [None] * len(build_keys)
         probe_coercions = [None] * len(probe_keys)
-        on = getattr(node, "on", None)
+        on = node.step.on
         if on is None or not build_keys:
             return build_coercions, probe_coercions
 
@@ -4820,7 +4940,7 @@ class _Compiler:
                 # narrow side is promoted rather than the wide one truncated.
                 target = _lt_find_compatible([build_category, probe_category])
             else:
-                target = JoinNode._join_numeric_target_type(build_category, probe_category)
+                target = _join_numeric_target_type(build_category, probe_category)
             if target is None:
                 continue
             target_name = self._JOIN_CAST_TARGETS.get(target.category.name)
@@ -4864,8 +4984,8 @@ class _Compiler:
         from opteryx.types.logical_type import LogicalCategory
         from opteryx.types.schema import SchemaColumn
 
-        left_identity = getattr(node, "asof_left_column", None)
-        right_identity = getattr(node, "asof_right_column", None)
+        left_identity = node.step.asof_left_column
+        right_identity = node.step.asof_right_column
         if left_identity is None or right_identity is None:
             return {}
         cts = getattr(self, "_cts", None) or {}
@@ -4896,13 +5016,12 @@ class _Compiler:
             # them, exactly as the equi-key hash does.
             return {}
 
-        from opteryx.operators._operators import JoinNode
         from opteryx.types.logical_type import find_compatible_type as _lt_find_compatible
 
         if left_category == right_category:
             target = _lt_find_compatible([left_category, right_category])
         else:
-            target = JoinNode._join_numeric_target_type(left_category, right_category)
+            target = _join_numeric_target_type(left_category, right_category)
         if target is None:
             return {}
         target_name = self._JOIN_CAST_TARGETS.get(target.category.name)
@@ -4999,25 +5118,17 @@ class _Compiler:
 
         Row-count semantics (NULL/empty arrays, INNER vs OUTER) are draken's rule,
         stated in full above cxx_unnest in draken/draken_native.cpp. This compiler
-        does not restate it and must not encode an assumption about it.
-
-        A pushed value-filter (`WHERE unnested IN (...)`, folded to `node.filters` by
-        predicate_pushdown) or pushed DISTINCT (`node.distinct`) are NOT yet folded
-        into the native operator — the optimizer is configured to leave them as
-        standalone FilterNode/DistinctNode operators after the unnest, which compile
-        natively already. If one is present here the plan is inconsistent; fail loud
-        rather than silently drop the filter/dedup."""
-        if getattr(node, "_filters", None):
-            _unsupported("a CROSS JOIN UNNEST with a value filter folded into the node")
-        if getattr(node, "_distinct", False):
-            _unsupported("a CROSS JOIN UNNEST with DISTINCT folded into the node")
-
-        source = node._unnest_column
+        does not restate it and must not encode an assumption about it."""
+        step = node.step
+        source = step.unnest_column
         if source is None:
             _unsupported("a CROSS JOIN UNNEST without a source")
-        target_identity = node._unnest_target.identity
+        # The unnested column may arrive parenthesised.
+        if source.node_type == NodeType.NESTED:
+            source = source.centre
+        target_identity = step.unnest_target.schema_column.identity
 
-        if getattr(node, "_unnest_function", "UNNEST") == "CIDR_UNNEST":
+        if step.unnest_function == "CIDR_UNNEST":
             return self._compile_cidr_unnest(in_edges, node, source, target_identity)
 
         if source.node_type == NodeType.LITERAL:
@@ -5057,7 +5168,7 @@ class _Compiler:
         # Dropping matters: a replicated ARRAY column cannot pass through a
         # downstream gather_rows join/sort. Keeping it is required by `SELECT *`.
         # An empty/absent liveness set means "unknown" — keep, never lose a column.
-        needed = getattr(node, "pre_update_columns", None) or set()
+        needed = node.pre_update_columns
         drop_source = bool(needed) and array_identity not in needed
 
         # A WHERE on the unnested column, folded here by predicate_pushdown. The
@@ -5070,7 +5181,7 @@ class _Compiler:
         # only folds predicates reading nothing but the target, so nothing else can
         # need resolving; if that ever changes, _resolve_bc_for_layout fails loudly on
         # the unresolvable identity rather than reading a wrong column.
-        folded = list(getattr(node, "filter_conditions", None) or [])
+        folded = list(step.filter_conditions or [])
         bytecode = None
         if folded:
 
@@ -5103,7 +5214,7 @@ class _Compiler:
         # shrinks what the DistinctSink has to dedup; only the sink dedups ACROSS
         # workers.
         distinct_target = (
-            bool(getattr(node, "distinct_target", False))
+            bool(step.distinct_target)
             and len(new_layout) == 1
             and new_layout[0] == target_identity
         )
@@ -5144,7 +5255,7 @@ class _Compiler:
 
         An empty `pre_update_columns` means UNKNOWN, not "nothing is wanted", so it
         keeps every column — never lose a column to an assumption."""
-        live = getattr(node, "pre_update_columns", None) or set()
+        live = node.pre_update_columns
         if not live:
             return layout
         keep = [
@@ -5190,7 +5301,7 @@ class _Compiler:
         # Same liveness rule as the array form: drop the consumed source only when
         # projection_pushdown proves nothing above reads it. Absent set == unknown,
         # so keep it — never lose a column to an assumption.
-        needed = getattr(node, "pre_update_columns", None) or set()
+        needed = node.pre_update_columns
         drop_source = bool(needed) and cidr_identity not in needed
 
         self.nplan.add_cidr_unnest(p, cidr_idx, target_identity, drop_source)
@@ -5211,9 +5322,9 @@ class _Compiler:
         from draken.interop.vector_sequence import vector_from_sequence
         from draken.morsels.morsel import Morsel
 
-        # UnnestJoinNode.__init__ has already wrapped a bare scalar into a tuple.
-        values = list(source.value)
-        physical = _physical_type(node._unnest_target)
+        # A bare scalar is a one-element array.
+        values = list(source.value) if type(source.value) is tuple else [source.value]
+        physical = _physical_type(node.step.unnest_target.schema_column)
         if physical is None or physical == DrakenType.VARIANT:
             _unsupported("a CROSS JOIN UNNEST over a literal array of untyped elements")
 
@@ -5236,14 +5347,14 @@ class _Compiler:
         within optional USING equi partitions (mirrors the legacy operator's bisect
         semantics). LEFT leg = probe/preserved, RIGHT leg = build; per probe row
         exactly one build match (or NULL build payload)."""
-        asof_left = getattr(node, "asof_left_column", None)
-        asof_right = getattr(node, "asof_right_column", None)
-        asof_op = getattr(node, "asof_op", None)
+        asof_left = node.step.asof_left_column
+        asof_right = node.step.asof_right_column
+        asof_op = node.step.asof_op
         op_codes = {"GtEq": 0, "Gt": 1, "LtEq": 2, "Lt": 3}
         if asof_left is None or asof_right is None or asof_op not in op_codes:
             _unsupported("an ASOF join without a supported MATCH_CONDITION")
-        left_cols = list(getattr(node, "left_columns", None) or [])
-        right_cols = list(getattr(node, "right_columns", None) or [])
+        left_cols = list(node.step.left_columns or [])
+        right_cols = list(node.step.right_columns or [])
         if len(left_cols) != len(right_cols):
             _unsupported("an ASOF join with unaligned USING key lists")
         legs = {}
@@ -5289,7 +5400,7 @@ class _Compiler:
 
         ref = self.nplan.new_join2_ref()
         self.nplan.set_current_identity(node.identity)  # own the asof build sink + probe
-        self.nplan.set_current_display_name(type(node).__name__)
+        self.nplan.set_current_display_name(node.kind)
         # `blayout` is the leg's REAL output; `bmatchout` may carry a synthetic cast
         # column at the end. Payload and output use the former — letting the cast
         # column into the payload would emit a column the declared output layout does
@@ -5304,7 +5415,7 @@ class _Compiler:
         asof_type = self._layout_type(self.plan[legs["right"]], asof_right)
         if asof_type is None:
             _unsupported("an ASOF match column whose type the compiler cannot resolve")
-        asof_est_rows = getattr(node, "join_output_rows_estimate", None)
+        asof_est_rows = node.join_output_rows_estimate
         self.nplan.set_asof_build_sink(bp, build_key_idx, list(range(len(blayout))),
                                        bmatchout.index(asof_right), ref,
                                        build_types, build_logical, build_element,
@@ -5313,7 +5424,7 @@ class _Compiler:
                                            asof_est_rows,
                                            "output-row estimate for the asof join"))
         self.nplan.set_current_identity(node.identity)  # probe op belongs to the join
-        self.nplan.set_current_display_name(type(node).__name__)
+        self.nplan.set_current_display_name(node.kind)
         self.nplan.add_asof_probe(pp, ref, probe_key_idx, list(range(len(playout))),
                                   pmatchout.index(asof_left), op_codes[asof_op])
         # AsofProbeOperator emits build payload columns first, then probe payload —
@@ -5334,13 +5445,13 @@ class _Compiler:
         per-equi-group order key is the same job for both — so everything specific to
         the band is on the probe.
         """
-        band_column = getattr(node, "band_column", None)
-        band_lower = getattr(node, "band_lower", None)
-        band_upper = getattr(node, "band_upper", None)
+        band_column = node.step.band_column
+        band_lower = node.step.band_lower
+        band_upper = node.step.band_upper
         if band_column is None or band_lower is None or band_upper is None:
             _unsupported("a band join without a complete band descriptor")
-        left_cols = list(getattr(node, "left_columns", None) or [])
-        right_cols = list(getattr(node, "right_columns", None) or [])
+        left_cols = list(node.step.left_columns or [])
+        right_cols = list(node.step.right_columns or [])
         if not left_cols or len(left_cols) != len(right_cols):
             _unsupported("a band join without aligned equi-key lists")
 
@@ -5394,7 +5505,7 @@ class _Compiler:
 
         ref = self.nplan.new_join2_ref()
         self.nplan.set_current_identity(node.identity)  # own the build sink + probe
-        self.nplan.set_current_display_name(type(node).__name__)
+        self.nplan.set_current_display_name(node.kind)
         build_types, build_logical, build_element = self._payload_types(
             legs["left"], blayout)
         self.nplan.set_asof_build_sink(bp, build_key_idx, list(range(len(blayout))),
@@ -5402,15 +5513,14 @@ class _Compiler:
                                        build_types, build_logical, build_element,
                                        band_type.value,
                                        _estimate_to_int64(
-                                           getattr(node, "join_output_rows_estimate",
-                                                   None),
+                                           node.join_output_rows_estimate,
                                            "output-row estimate for the band join"))
         self.nplan.set_current_identity(node.identity)  # probe op belongs to the join
-        self.nplan.set_current_display_name(type(node).__name__)
+        self.nplan.set_current_display_name(node.kind)
         self.nplan.add_band_probe(pp, ref, probe_key_idx, list(range(len(playout))),
                                   bound_idx[0], bound_idx[1],
-                                  bool(getattr(node, "band_lower_closed", False)),
-                                  bool(getattr(node, "band_upper_closed", False)))
+                                  bool(node.step.band_lower_closed),
+                                  bool(node.step.band_upper_closed))
         # Build payload first, then probe payload — the same emit order every
         # Join2ProbeOperator uses. The synthetic bound columns are in neither.
         return pp, list(blayout) + list(playout)
@@ -5806,8 +5916,8 @@ def compile_to_native(plan, pool=None):
         _unsupported(f"a plan with {len(heads)} heads")
     exit_id = heads[0]
     exit_node = plan[exit_id]
-    if type(exit_node).__name__ != "ExitNode":
-        _unsupported(f"a plan headed by {type(exit_node).__name__}")
+    if exit_node.kind != "ExitNode":
+        _unsupported(f"a plan headed by {exit_node.kind}")
 
     nplan = NativePlan()
     compiler = _Compiler(plan, nplan, pool=pool)
@@ -5905,15 +6015,18 @@ def compile_to_native(plan, pool=None):
         _unsupported(f"an Exit with {len(in_edges)} inputs")
     p, layout = compiler.compile_node(in_edges[0][0])
     nplan.set_current_identity(exit_node.identity)  # exit select + queue sink
-    nplan.set_current_display_name(type(exit_node).__name__)
+    nplan.set_current_display_name(exit_node.kind)
 
-    # Exit semantics: select final_columns (identities) in order, rename to final_names.
+    # Exit semantics: select the output columns (identities) in order, renamed to
+    # their output names (aliases).
+    final_names = [column.alias for column in exit_node.columns]
     indices = []
-    for identity in exit_node.final_columns:
+    for column in exit_node.columns:
+        identity = column.schema_column.identity
         if identity not in layout:
             _unsupported("an output column the engine could not resolve here")
         indices.append(layout.index(identity))
-    nplan.add_select(p, indices, list(exit_node.final_names))
+    nplan.add_select(p, indices, final_names)
 
     out_q = PyMorselQueue(_QUEUE_DEPTH)
     nplan.set_queue_sink(p, out_q)
@@ -5925,7 +6038,7 @@ def compile_to_native(plan, pool=None):
         pt = ct.physical if ct is not None else None
         final_types.append(pt.value if pt is not None else DrakenType.VARCHAR.value)
         final_logical.append(_logical_tuple(ct))
-    nplan.set_final_schema(list(exit_node.final_names), final_types, final_logical)
+    nplan.set_final_schema(final_names, final_types, final_logical)
     return (nplan, out_q, compiler.scan_sources, compiler.scan_facts,
             compiler.scan_residual_reasons, compiler.footer_fetch_ns,
             compiler.runtime_bounds_wired)

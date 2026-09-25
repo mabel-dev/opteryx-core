@@ -10,19 +10,18 @@ LogicalPlan into a PhysicalPlan whose nodes are concrete execution operators.
 Input:  optimized LogicalPlan + QueryProperties
 Output: PhysicalPlan — a graph of operator instances ready for the execution engine
 
-For each logical node the planner selects the appropriate physical operator from the
-operator registry based on the node type and its properties:
+For each logical node the planner selects the physical operator from the operator
+registry, based on the node type and its properties. An operator that does real work
+(a scan reader, the function dataset, a DDL or write sink) is built as its own class;
+every other operator is a PhysicalStep — the typed logical step plus the planner's
+physical decisions (operator kind, join mode, sizing estimates):
 
 - Scan         → ParquetReadNode (all-parquet manifests), Reader (internal datasets),
                  NullReaderNode (empty-result scans with contradictory predicates)
-- Join         → DrakenInnerJoinNode, OuterJoinNode, FilterJoinNode (semi/anti),
-                 ExistenceJoinNode (SELECT-list EXISTS / IN),
-                 CrossJoinNode, NestedLoopJoinNode, AsofJoinNode
-- Aggregate    → Aggregate or AggregateAndGroupNode
-- Project      → ProjectionNode
-- Filter       → FilterNode
-- Order/Limit  → SortNode / HeapSortNode / LimitNode
-- Set ops      → UnionNode (others are rewritten to joins by the plan rewriter)
+- Join         → the inner / outer / filter (semi, anti) / existence / cross /
+                 nested loop / ASOF / band join kinds
+- Aggregate    → the ungrouped or grouped (hashed) aggregate kinds
+- Project, Filter, Order, Limit, Union, Window, Exit → their kinds
 - DDL          → ViewManagementNode, TableManagementNode
 
 Edge topology from the logical plan is copied directly into the physical plan — no
@@ -31,6 +30,9 @@ structural changes occur at this stage.
 The Physical Planner does NOT optimize, bind, or rewrite the plan.
 """
 
+from collections import Counter
+
+from opteryx.exceptions import AmbiguousIdentifierError
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import PermissionsError
 from opteryx.exceptions import NotSupportedError
@@ -46,7 +48,8 @@ from opteryx.models.dataset_format import PARQUET
 from opteryx.models.dataset_format import SCAN_READERS
 from opteryx.models.dataset_format import manifest_format
 from opteryx.operators.catalog import get_registry
-from opteryx.operators.hashed_inner_join import DrakenInnerJoinNode
+from opteryx.operators.window.helpers import FRAMED_AGGREGATE_FUNCTIONS
+from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.physical_planner.execution_estimates import group_count_estimate
 from opteryx.planner.physical_planner.execution_estimates import join_output_rows_estimate
@@ -205,76 +208,98 @@ def _scan_reader_for_manifest(manifest, dataset: str) -> str:
 
 
 def _create_aggregate_node(logical_node, query_properties, registry):
-    node_config = logical_node.operator_parameters()
-    return registry.create(
-        "Aggregate",
-        query_properties,
-        **{k: v for k, v in node_config.items() if k in ("aggregates", "all_relations")},
-    )
+    return registry.create_step("Aggregate", query_properties, logical_node)
 
 
 def _create_aggregate_and_group_node(logical_node, query_properties, registry, group_count_estimate):
-    node_config = logical_node.operator_parameters()
-    return registry.create(
+    # pre_update_columns: a GROUP BY key that nothing above reads still has to be
+    # HASHED to separate the groups, but its values never have to be stored — the
+    # grouping contract is 64-bit hash identity. Carrying the set here is what lets
+    # the sink kill the key once it is hashed.
+    return registry.create_step(
         "Aggregate and Group",
         query_properties,
-        # pre_update_columns: a GROUP BY key that nothing above reads still has to be
-        # HASHED to separate the groups, but its values never have to be stored — the
-        # grouping contract is 64-bit hash identity. Carrying the set here is what lets
-        # the sink kill the key once it is hashed.
-        # grouping_set_identities: GROUP BY ROLLUP's sets, as key identities (the binder
-        # resolved them from the planner's positions). Absent for a plain GROUP BY.
-        **{k: v for k, v in node_config.items() if k in ("aggregates", "groups", "projection", "all_relations", "having_condition", "pre_update_columns", "grouping_set_identities")},
-        groupby_ndv_estimate=group_count_estimate,
+        logical_node,
+        pre_update_columns=logical_node.pre_update_columns,
+        group_count_estimate=group_count_estimate,
     )
 
 
 def _create_distinct_node(logical_node, query_properties, registry, group_count_estimate):
-    node_config = logical_node.operator_parameters()
-    return registry.create(
-        "Distinct",
-        query_properties,
-        **{k: v for k, v in node_config.items() if k in ("on",)},
-        distinct_ndv_estimate=group_count_estimate,
+    return registry.create_step(
+        "Distinct", query_properties, logical_node, group_count_estimate=group_count_estimate
     )
 
 
 def _create_window_node(logical_node, query_properties, registry):
-    node_config = logical_node.operator_parameters()
-    return registry.create(
-        "Window",
-        query_properties,
-        **{
-            k: v
-            for k, v in node_config.items()
-            # pre_update_columns: same reason as the sort — the PARTITION BY / ORDER BY
-            # keys are not in it, so it is the set the window must still emit.
-            if k in ("partition_by", "order_by", "window_functions", "top_k",
-                     "pre_update_columns")
-        },
+    functions = logical_node.window_functions or []
+    for kind, _output_identity, _arg, _offset in functions:
+        if kind not in WINDOW_FUNCTIONS:
+            # The supported set is listed FROM the registry, so this message
+            # cannot drift out of date the way a hand-written list did.
+            supported = ", ".join(f"**{name}**" for name in sorted(WINDOW_FUNCTIONS))
+            raise UnsupportedSyntaxError(
+                f"Unsupported window function '{kind}'. The supported window functions are {supported}."
+            )
+    if not logical_node.order_by:
+        # The no-ORDER-BY shape is only produced by the INTERSECT/EXCEPT ALL
+        # rewrite: a single ROW_NUMBER over a partition.
+        if not logical_node.partition_by:
+            raise UnsupportedSyntaxError(
+                "ROW_NUMBER without **ORDER BY** requires a **PARTITION BY**. Add one, or give the window an **ORDER BY**."
+            )
+        if len(functions) != 1 or functions[0][0] != "ROW_NUMBER":
+            raise UnsupportedSyntaxError(
+                "Only ROW_NUMBER() **OVER** (**PARTITION BY** ...) is supported without **ORDER BY**."
+            )
+    # pre_update_columns: same reason as the sort — the PARTITION BY / ORDER BY
+    # keys are not in it, so it is the set the window must still emit.
+    return registry.create_step(
+        "Window", query_properties, logical_node, pre_update_columns=logical_node.pre_update_columns
     )
 
 
 def _create_framed_window_node(logical_node, query_properties, registry):
-    node_config = logical_node.operator_parameters()
-    return registry.create(
+    if not logical_node.order_by:
+        raise UnsupportedSyntaxError(
+            "A window **FRAME** (ROWS/RANGE BETWEEN ...) requires an **ORDER BY** in its **OVER** (...) clause."
+        )
+    functions = logical_node.window_functions or []
+    for kind, _output_identity, _arg, _frame in functions:
+        if kind not in FRAMED_AGGREGATE_FUNCTIONS:
+            raise UnsupportedSyntaxError(
+                f"Unsupported framed window function '{kind}'. **SUM**, **COUNT**, **AVG**, **MIN** and **MAX** are the supported window aggregate functions."
+            )
+    if not functions:
+        raise UnsupportedSyntaxError("a framed window node with no functions")
+    return registry.create_step(
         "Framed Window",
         query_properties,
-        **{
-            k: v
-            for k, v in node_config.items()
-            # `outputs` carries the bound SchemaColumn per function (the compiler
-            # needs its ColumnType to type each output column — window_functions
-            # only carries the identity) alongside window_functions and
-            # partition_by/order_by, which are unpacked into per-function
-            # config (`_functions`/`_partition_columns`/etc.) by FramedWindowNode.
-            if k in ("partition_by", "order_by", "window_functions", "outputs", "pre_update_columns")
-        },
+        logical_node,
+        pre_update_columns=logical_node.pre_update_columns,
     )
 
 
 def _create_exit_node(logical_node, query_properties, registry):
-    return registry.create("Exit", query_properties, **logical_node.operator_parameters())
+    # A result with two columns sharing an output name is ambiguous — reject it.
+    # `SELECT *` over a join does not reach this: the binder's wildcard expansion
+    # names each colliding column by its relation (`a.id`, `b.id`), as an explicit
+    # qualified reference is named (binder/project.py, visit_exit). What still
+    # reaches it is two explicit outputs given the same name (`SELECT a.id AS x,
+    # b.id AS x`), which is refused rather than emitted with duplicate names.
+    names = Counter(column.alias for column in logical_node.columns or [])
+    duplicates = [name for name, count in names.items() if count > 1]
+    if duplicates:
+        raise AmbiguousIdentifierError(
+            message=f"Query result contains multiple instances of the same column(s) - `{'`, `'.join(duplicates)}`"
+        )
+    return registry.create_step(
+        "Exit",
+        query_properties,
+        logical_node,
+        columns=logical_node.columns,
+        pre_update_columns=logical_node.pre_update_columns,
+    )
 
 
 def _create_explain_node(logical_node, query_properties, registry):
@@ -282,12 +307,8 @@ def _create_explain_node(logical_node, query_properties, registry):
 
 
 def _create_filter_node(logical_node, query_properties, registry):
-    node_config = logical_node.operator_parameters()
-    return registry.create(
-        "Filter",
-        query_properties,
-        filter=node_config["condition"],
-        **{k: v for k, v in node_config.items() if k in ("all_relations", "pre_update_columns")},
+    return registry.create_step(
+        "Filter", query_properties, logical_node, pre_update_columns=logical_node.pre_update_columns
     )
 
 
@@ -339,19 +360,86 @@ def _create_function_dataset_node(logical_node, query_properties, registry):
 
 
 def _create_heap_sort_node(logical_node, query_properties, registry):
-    return registry.create("Heap Sort", query_properties, **logical_node.operator_parameters())
+    return registry.create_step(
+        "Heap Sort",
+        query_properties,
+        logical_node,
+        columns=logical_node.columns,
+        pre_update_columns=logical_node.pre_update_columns,
+    )
+
+
+def _inner_join_supported(join) -> bool:
+    """Whether the native inner join has a plan for this join's shape: no ON at
+    all, or an ON made only of `left column = right column` equalities, each
+    across the two legs.
+
+    A mixed-numeric key pair (INTEGER vs FLOAT vs DECIMAL) is supported: the
+    compiler materializes a CAST column on the narrower side and keys on that, so
+    both sides hash the same representation (_join_key_coercions in
+    opteryx/managers/execution/compiler.py)."""
+    if join.on is None:
+        return True
+    left_relation_names = set(join.left_relation_names or [])
+    right_relation_names = set(join.right_relation_names or [])
+    comparisons = get_all_nodes_of_type(join.on, (NodeType.COMPARISON_OPERATOR,))
+    if not comparisons:
+        return False
+    for comparison in comparisons:
+        if comparison.value != "Eq":
+            return False
+        left, right = comparison.left, comparison.right
+        if left is None or right is None:
+            return False
+        if left.node_type != NodeType.IDENTIFIER or right.node_type != NodeType.IDENTIFIER:
+            return False
+        if not left.schema_column or not right.schema_column:
+            return False
+        if not (
+            (left.source in left_relation_names and right.source in right_relation_names)
+            or (left.source in right_relation_names and right.source in left_relation_names)
+        ):
+            return False
+    return True
+
+
+# Logical join type -> (registered operator, the physical join mode it runs).
+# The modes the planner names by the logical type itself are listed with None.
+_JOIN_OPERATORS = {
+    "inner": ("Inner Join", "inner"),
+    "nested loop": ("Nested Loop Join", "nested_loop"),
+    "left outer": ("Outer Join", None),
+    "full outer": ("Outer Join", None),
+    "right outer": ("Outer Join", None),
+    "cross join": ("Cross Join", "cross"),
+    # LEFT SEMI, LEFT ANTI, LEFT ANTI NULL-AWARE (NOT IN), and the two
+    # not-distinct forms (INTERSECT / EXCEPT, where NULL equals NULL)
+    "left anti": ("Filter Join", None),
+    "left semi": ("Filter Join", None),
+    "left anti null-aware": ("Filter Join", None),
+    "left semi not-distinct": ("Filter Join", None),
+    "left anti not-distinct": ("Filter Join", None),
+    # The same existence test as the filter joins above, EMITTED as a BOOL
+    # column instead of applied — what a SELECT-list EXISTS / IN reads.
+    "left existence": ("Existence Join", None),
+    "left existence anti": ("Existence Join", None),
+    # ASOF JOIN — nearest-neighbour time-series join
+    "asof": ("ASOF Join", "asof"),
+    # BAND JOIN — an equi-join whose ON also closes a range on one build-side
+    # column, executed as a bisect into sorted per-equi-group runs instead of a
+    # full equi fan-out with the range filtered off the top.
+    "band": ("Band Join", "band"),
+}
 
 
 def _create_join_node(logical_node, query_properties, registry, output_rows_estimate):
-    # The join's expected output rows sizes the native build sink (see
-    # execution_estimates); None for join types with no build payload.
-    node_config = {**logical_node.operator_parameters(), "join_output_rows_estimate": output_rows_estimate}
-    join_type = node_config.get("type")
-
-    if join_type == "inner":
-        # INNER JOIN, NATURAL JOIN
-        if DrakenInnerJoinNode.supports(**node_config):
-            return registry.create("Inner Join", query_properties, **node_config)
+    join_type = logical_node.type
+    operator = _JOIN_OPERATORS.get(join_type)
+    if operator is None:
+        # We don't support other JOIN types, e.g. RIGHT SEMI, RIGHT ANTI
+        raise InvalidInternalStateError(f"Unsupported JOIN type '{join_type}'")
+    name, mode = operator
+    if join_type == "inner" and not _inner_join_supported(logical_node):
         # NotSupportedError, not UnsupportedSyntaxError: the statement parsed and bound
         # fine, so nothing about the SQL is wrong - the engine's inner-join operator
         # simply has no plan for this shape. Naming Draken told the reader about a
@@ -361,87 +449,58 @@ def _create_join_node(logical_node, query_properties, registry, output_rows_esti
             "shape of this query - rewriting the join conditions, or joining the "
             "relations in a different order, may let it run."
         )
-    elif join_type == "nested loop":
-        # NESTED LOOP JOIN (INNER JOIN)
-        return registry.create("Nested Loop Join", query_properties, **node_config)
-    elif join_type in ("left outer", "full outer", "right outer"):
-        # LEFT JOIN, RIGHT JOIN, FULL JOIN
-        return registry.create("Outer Join", query_properties, **node_config)
-    elif join_type == "cross join":
-        # CROSS JOIN, CROSS JOIN UNNEST
-        return registry.create("Cross Join", query_properties, **node_config)
-    elif join_type in (
-        "left anti",
-        "left semi",
-        "left anti null-aware",
-        "left semi not-distinct",
-        "left anti not-distinct",
+    if join_type == "asof" and not (
+        logical_node.asof_left_column and logical_node.asof_right_column and logical_node.asof_op
     ):
-        # LEFT SEMI, LEFT ANTI, LEFT ANTI NULL-AWARE (NOT IN), and the two
-        # not-distinct forms (INTERSECT / EXCEPT, where NULL equals NULL) JOIN
-        return registry.create("Filter Join", query_properties, **node_config)
-    elif join_type in ("left existence", "left existence anti"):
-        # The same existence test as the filter joins above, EMITTED as a BOOL
-        # column instead of applied — what a SELECT-list EXISTS / IN reads.
-        return registry.create("Existence Join", query_properties, **node_config)
-    elif join_type == "asof":
-        # ASOF JOIN — nearest-neighbour time-series join
-        return registry.create("ASOF Join", query_properties, **node_config)
-    elif join_type == "band":
-        # BAND JOIN — an equi-join whose ON also closes a range on one build-side
-        # column, executed as a bisect into sorted per-equi-group runs instead of a
-        # full equi fan-out with the range filtered off the top.
-        return registry.create("Band Join", query_properties, **node_config)
-    else:
-        # We don't support other JOIN types, e.g. RIGHT SEMI, RIGHT ANTI
-        raise InvalidInternalStateError(f"Unsupported JOIN type '{join_type}'")
+        raise InvalidInternalStateError(
+            "An ASOF join requires asof_left_column, asof_right_column, and asof_op"
+        )
+    if join_type == "band":
+        if (
+            logical_node.band_column is None
+            or logical_node.band_lower is None
+            or logical_node.band_upper is None
+        ):
+            raise InvalidInternalStateError(
+                "A band join requires band_column and both band_lower and band_upper"
+            )
+        if not logical_node.left_columns or not logical_node.right_columns:
+            raise InvalidInternalStateError("A band join requires equi-join keys on both legs")
+    # The join's expected output rows sizes the native build sink (see
+    # execution_estimates); None for join types with no build payload.
+    return registry.create_step(
+        name,
+        query_properties,
+        logical_node,
+        columns=logical_node.columns,
+        pre_update_columns=logical_node.pre_update_columns,
+        join_type=join_type if mode is None else mode,
+        join_output_rows_estimate=output_rows_estimate,
+    )
 
 
 def _create_scalar_guard_node(logical_node, query_properties, registry):
-    node_config = logical_node.operator_parameters()
-    return registry.create(
-        "Scalar Guard",
-        query_properties,
-        **{k: v for k, v in node_config.items() if k in ("all_relations",)},
-    )
+    return registry.create_step("Scalar Guard", query_properties, logical_node)
 
 
 def _create_limit_node(logical_node, query_properties, registry):
-    node_config = logical_node.operator_parameters()
-    return registry.create(
-        "Limit",
-        query_properties,
-        **{k: v for k, v in node_config.items() if k in ("limit", "offset", "all_relations")},
-    )
+    return registry.create_step("Limit", query_properties, logical_node)
 
 
 def _create_order_node(logical_node, query_properties, registry):
-    node_config = logical_node.operator_parameters()
-    return registry.create(
-        "Sort",
-        query_properties,
-        **{
-            k: v
-            for k, v in node_config.items()
-            # pre_update_columns: the sort's ORDER BY keys are not in it (it is
-            # snapshotted before the node's own columns are collected), so it is
-            # precisely the set the sort must still emit — what lets the sink drop a
-            # key column once the sort keys are built instead of gathering it into
-            # every output row and having the Exit select throw it away.
-            if k in ("order_by", "all_relations", "pre_update_columns")
-        },
+    # pre_update_columns: the sort's ORDER BY keys are not in it (it is
+    # snapshotted before the node's own columns are collected), so it is
+    # precisely the set the sort must still emit — what lets the sink drop a
+    # key column once the sort keys are built instead of gathering it into
+    # every output row and having the Exit select throw it away.
+    return registry.create_step(
+        "Sort", query_properties, logical_node, pre_update_columns=logical_node.pre_update_columns
     )
 
 
 def _create_project_node(logical_node, query_properties, registry):
-    node_config = logical_node.operator_parameters()
-    return registry.create(
-        "Projection",
-        query_properties,
-        projection=logical_node.columns,
-        passthrough_columns=getattr(logical_node, "passthrough_columns", []),
-        hoisted_columns=getattr(logical_node, "hoisted_columns", []),
-        **{k: v for k, v in node_config.items() if k in ("projection", "all_relations")},
+    return registry.create_step(
+        "Projection", query_properties, logical_node, columns=logical_node.columns
     )
 
 
@@ -560,7 +619,13 @@ def _build_scan_node(logical_node, query_properties, registry):
 
 
 def _create_materialized_cte_ref_node(logical_node, query_properties, registry):
-    return registry.create("CTE Reference", query_properties, **logical_node.operator_parameters())
+    return registry.create_step(
+        "CTE Reference",
+        query_properties,
+        logical_node,
+        columns=logical_node.columns,
+        pre_update_columns=logical_node.pre_update_columns,
+    )
 
 
 def _create_set_node(logical_node, query_properties, registry):
@@ -612,11 +677,23 @@ def _create_show_sources_node(logical_node, query_properties, registry):
 
 
 def _create_union_node(logical_node, query_properties, registry):
-    return registry.create("Union", query_properties, **logical_node.operator_parameters())
+    return registry.create_step(
+        "Union",
+        query_properties,
+        logical_node,
+        columns=logical_node.columns,
+        pre_update_columns=logical_node.pre_update_columns,
+    )
 
 
 def _create_unnest_node(logical_node, query_properties, registry):
-    return registry.create("Unnest Join", query_properties, **logical_node.operator_parameters())
+    return registry.create_step(
+        "Unnest Join",
+        query_properties,
+        logical_node,
+        columns=logical_node.columns,
+        pre_update_columns=logical_node.pre_update_columns,
+    )
 
 
 def _create_analyze_node(logical_node, query_properties, registry):
@@ -917,6 +994,7 @@ def create_physical_plan(
         if logical_node.node_type in steps_with("manifest"):
             node.manifest = logical_node.manifest
         node.uuid = logical_node.uuid
+        node.step = logical_node
 
         plan.add_node(nid, node)
 

@@ -1044,6 +1044,10 @@ cdef class BasePlanNode:
     # Optimizer/binder-attached metadata copied from the logical plan
     cdef public object manifest
     cdef public object uuid
+    # The typed logical plan step this operator was planned from. Every physical
+    # node carries it: plan-level consumers (EXPLAIN, telemetry, join-leg
+    # labelling) read the logical configuration from here, uniformly.
+    cdef public object step
     # Carrier-flip error stash (per-node fallback). Bodies normally stash on the
     # shared PipelineContext (`_ctx._exc`); this node-local slot is the fallback
     # for nodes with no context (e.g. direct-push unit tests). The driver
@@ -1098,7 +1102,7 @@ cdef class BasePlanNode:
         self.is_join = False
         self.is_stateless = False
         self.is_not_explained = False
-        _meta = get_registry().get(self.__class__)
+        _meta = get_registry().get_by_kind(self.kind)
         if _meta is not None:
             self.is_scan = bool(_meta.is_scan)
             self.is_join = bool(_meta.is_join)
@@ -1117,6 +1121,13 @@ cdef class BasePlanNode:
     @property
     def node_type(self) -> str:
         return self.name
+
+    @property
+    def kind(self) -> str:
+        """The operator kind the compiler dispatches on and the native engine
+        reports (see opteryx.operators.catalog) — the class name for an operator
+        with a class of its own."""
+        return type(self).__name__
 
     def to_mermaid(self, nid):
         mermaid = f'NODE_{nid}["**{self.node_type.upper()}**<br />'
@@ -1268,9 +1279,9 @@ cdef class BasePlanNode:
         WP-INSTR: this is an execution-time GIL body entered once per morsel per
         operator, so when the engine instrumentation is armed it is bracketed and
         reported as the `_dispatch_push` site. A subclass that overrides this
-        method at C level (JoinLeftAdapter/JoinRightAdapter) never runs this body
-        and so records nothing — that absence IS the measurement, exactly as it is
-        for the native scan Sources."""
+        method at C level never runs this body and so records nothing — that
+        absence IS the measurement, exactly as it is for the native scan
+        Sources."""
         cdef CxxMorsel* raw = m.get()
         cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
         cdef long long _t0
@@ -1467,182 +1478,6 @@ cdef class BasePlanNode:
                 "produced_output": bool(self._trace_buf[i].produced_output),
             })
         return events
-
-
-cdef class JoinNode(BasePlanNode):
-    """Base class for joins. Two input sides — one feeds build, the other feeds
-    probe (build is the LEFT side for every join except FilterJoinNode, which
-    builds from the RIGHT). Subclasses override `push_left` and `push_right`
-    instead of `_push_impl`. The single `_push_impl` is never called on a
-    JoinNode directly; the pipeline compiler routes inputs through adapter nodes.
-
-    Build-before-probe invariant: the engine must fully drain the build-side
-    input (including its EOS) before any probe-side morsel arrives. Subclasses
-    set `_build_complete = True` on build-side EOS (even when the build side is
-    empty) and call `_require_build_complete()` on every probe-side push. A
-    probe arriving early is a scheduler bug and raises rather than silently
-    probing an absent or partial build table."""
-    cdef public object left_readers
-    cdef public object right_readers
-    cdef public list left_relation_names
-    cdef public list right_relation_names
-    cdef public object on
-    cdef public object _join_key_cast_plan
-    cdef public bint _build_complete
-    # Estimated rows this join will EMIT, computed by the physical planner (None =
-    # unknown). Read by the compiler and handed to the native Join2BuildSink,
-    # which weighs it against the REAL size of its retained build payload to
-    # decide whether consolidating that payload costs less than re-copying it
-    # once per output row. Unknown keeps today's behaviour — never fabricated.
-    cdef public object join_output_rows_estimate
-
-    def __init__(self, properties=None, **parameters):
-        BasePlanNode.__init__(self, properties=properties, **parameters)
-        self.is_join = True
-        self.left_readers = parameters.get("left_readers")
-        self.right_readers = parameters.get("right_readers")
-        self.left_relation_names = parameters.get("left_relation_names") or []
-        self.right_relation_names = parameters.get("right_relation_names") or []
-        self.on = parameters.get("on")
-        self.join_output_rows_estimate = parameters.get("join_output_rows_estimate")
-        self._join_key_cast_plan = None
-        self._build_complete = False
-
-    cdef inline void _require_build_complete(self) except *:
-        if not self._build_complete:
-            from opteryx.exceptions import InvalidInternalStateError
-            raise InvalidInternalStateError(
-                f"{self.name}: probe-side input arrived before the build side "
-                "completed - build-before-probe ordering invariant violated."
-            )
-
-    cdef int push_left(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
-        """Build-side input over the C++ carrier. Subclasses override. MUST NOT
-        emit EOS — build-side EOS finalises internal state only."""
-        return err.code if err != NULL else 0
-
-    cdef int push_right(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
-        """Probe-side input over the C++ carrier. Subclasses override. On EOS,
-        call self.emit(EOS) to terminate the downstream chain."""
-        return err.code if err != NULL else 0
-
-    cdef inline void _account_input(self, shared_ptr[CxxMorsel] m, uint64_t dur_ns) noexcept nogil:
-        """Roll one adapter-driven input push into the join's own counters.
-        Joins are driven via JoinLeft/RightAdapter calling push_left/push_right
-        directly (not the join's push()), so without this the join reports 0ms.
-        Both adapters call this, so records_in/bytes_in/calls/execution_time
-        accumulate the join's TOTAL input work (left build + right probe)."""
-        cdef CxxMorsel* raw = m.get()
-        cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
-        if (not is_eos) and raw != NULL:
-            self.records_in += raw.num_rows()
-            self.bytes_in += <uint64_t>raw.num_rows() * <uint64_t>raw.num_columns() * <uint64_t>8
-        self.calls += 1
-        self.execution_time += dur_ns
-
-    @staticmethod
-    def _join_numeric_target_type(left_type, right_type):
-        from opteryx.types.logical_type import LogicalCategory, find_compatible_type
-        numeric_types = (LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.DECIMAL)
-        if left_type not in numeric_types or right_type not in numeric_types:
-            return None
-        if left_type == right_type:
-            return None
-        return find_compatible_type([left_type, right_type])
-
-    def _build_join_key_cast_plan(self):
-        from opteryx.expression import NodeType, get_all_nodes_of_type
-        if self._join_key_cast_plan is not None:
-            return
-        self._join_key_cast_plan = []
-        if not self.on:
-            return
-        comparisons = get_all_nodes_of_type(self.on, (NodeType.COMPARISON_OPERATOR,))
-        seen = set()
-        for comparison in comparisons:
-            if comparison.value != "Eq":
-                continue
-            left = comparison.left
-            right = comparison.right
-            if not left or not right:
-                continue
-            if left.node_type != NodeType.IDENTIFIER or right.node_type != NodeType.IDENTIFIER:
-                continue
-            if not left.schema_column or not right.schema_column:
-                continue
-            left_rel = left.source
-            right_rel = right.source
-            left_identity = left.schema_column.identity
-            right_identity = right.schema_column.identity
-            left_type = left.schema_column.category
-            right_type = right.schema_column.category
-            if left_rel in self.left_relation_names and right_rel in self.right_relation_names:
-                left_column, right_column = left_identity, right_identity
-            elif left_rel in self.right_relation_names and right_rel in self.left_relation_names:
-                left_column, right_column = right_identity, left_identity
-                left_type, right_type = right_type, left_type
-            else:
-                continue
-            target_type = JoinNode._join_numeric_target_type(left_type, right_type)
-            if target_type is None:
-                continue
-            signature = (left_column, right_column, target_type)
-            if signature in seen:
-                continue
-            seen.add(signature)
-            self._join_key_cast_plan.append({
-                "left_column": left_column,
-                "right_column": right_column,
-                "target_type": target_type,
-            })
-
-    def _apply_join_key_casts(self, morsel, *, is_left: bool):
-        from opteryx.types.logical_type import LogicalCategory, ColumnType
-        if morsel is None or morsel is _EOS_SENTINEL:
-            return morsel
-        self._build_join_key_cast_plan()
-        if not self._join_key_cast_plan:
-            return morsel
-        from draken.morsels.morsel import Morsel as _Morsel
-        from opteryx.expression.casts import resolve_cast
-        from draken.vectors.vector import Vector
-        names = list(morsel.column_names)
-        vectors = [morsel.column(n) for n in names]
-        changed = False
-        for cast_rule in self._join_key_cast_plan:
-            column_name = cast_rule["left_column"] if is_left else cast_rule["right_column"]
-            if column_name not in names:
-                continue
-            idx = names.index(column_name)
-            target_type = cast_rule["target_type"]
-            # Phase 2: target_type is ColumnType; compare via .category
-            target_cat = target_type.category if isinstance(target_type, ColumnType) else target_type
-            _join_tgt = None
-            if target_cat == LogicalCategory.FLOAT:
-                _join_tgt = "DOUBLE"
-            elif target_cat == LogicalCategory.INTEGER:
-                _join_tgt = "INTEGER"
-            if _join_tgt is not None:
-                # Resolve the exact native kernel from the column's physical type
-                # (bind-style, once per join build — not per row), then apply it the
-                # same way the bytecode executor does (input/result handling).
-                v = vectors[idx]
-                kern, needs_nb, returns_raw = resolve_cast(v.type.name, _join_tgt, (), None)
-                inp = v._nb if (needs_nb and isinstance(v, Vector)) else v
-                res = kern(inp)
-                vectors[idx] = Vector(res) if returns_raw else res
-                changed = True
-            if changed:
-                self.readings["feature_implicit_join_key_cast"] = \
-                    self.readings.get("feature_implicit_join_key_cast", 0) + 1
-        if not changed:
-            return morsel
-        return _Morsel.from_vectors(names, vectors)
-
-    def to_mermaid(self, nid):
-        mermaid = f'NODE_{nid}["**JOIN ({self.join_type.upper()})**<br />'
-        mermaid += f"({self.execution_time / 1_000_000:,.2f}ms)"
-        return mermaid + '"]'
 
 
 def drive_scan(BasePlanNode scan, BasePlanNode chain_head, exit_node, PipelineContext ctx):
@@ -1944,38 +1779,6 @@ cpdef object pull_one(BasePlanNode scan):
     if cxm.get() == NULL:
         return None
     return cxx_to_morsel(cxm)
-
-
-cpdef void push_left_one(JoinNode join, object morsel) except *:
-    """Python-callable driver for a join's build-side input (see push_one)."""
-    cdef shared_ptr[CxxMorsel] cxm = _carrier_from_py(morsel)
-    cdef ErrCtx err
-    cdef object _exc
-    if cxm.get() == NULL:
-        return
-    err.code = 0
-    err.msg = NULL
-    with nogil:
-        join.push_left(cxm, &err)
-    if err.code != 0:
-        _exc = join._take_exc()
-        raise _exc if _exc is not None else RuntimeError("pipeline push failed")
-
-
-cpdef void push_right_one(JoinNode join, object morsel) except *:
-    """Python-callable driver for a join's probe-side input (see push_one)."""
-    cdef shared_ptr[CxxMorsel] cxm = _carrier_from_py(morsel)
-    cdef ErrCtx err
-    cdef object _exc
-    if cxm.get() == NULL:
-        return
-    err.code = 0
-    err.msg = NULL
-    with nogil:
-        join.push_right(cxm, &err)
-    if err.code != 0:
-        _exc = join._take_exc()
-        raise _exc if _exc is not None else RuntimeError("pipeline push failed")
 
 
 # =====================================================================================
@@ -4084,100 +3887,6 @@ def native_plan_execute(CppThreadPool pool, NativePlan nplan, int dop,
     return handle
 
 
-cdef class JoinLeftAdapter(BasePlanNode):
-    """Terminal node of a join's left-input chain. Forwards every morsel to
-    the join's `push_left`. Has no downstream of its own — left-side EOS
-    finalises build state in the JoinNode without propagating downstream."""
-    cdef JoinNode _join
-
-    def __init__(self, JoinNode join, *, properties=None):
-        # Skip BasePlanNode.__init__ heavy machinery — adapters are wiring nodes
-        # not catalogued operators. We still need counters/identity for explain.
-        from collections import defaultdict
-        from opteryx.utils import random_string
-        self.identity = random_string()
-        self.parameters = {}
-        self.columns = []
-        self.readings = defaultdict(int)
-        self._time_stat_key = "time_join_left_adapter"
-        self.properties = properties
-        self.is_scan = False
-        self.is_join = False
-        self.is_stateless = True
-        self.is_not_explained = True
-        self._empty_morsel_cache = None
-        self._join = join
-
-    @property
-    def name(self) -> str:
-        return "JoinLeftAdapter"
-
-    cdef int push(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
-        # Attribute the build-side push time to the JOIN, not this hidden
-        # adapter, so the join shows real time in EXPLAIN ANALYZE.
-        cdef timespec ts_start, ts_end
-        if self._ctx is not None and self._ctx._terminated:
-            return 0
-        clock_gettime(CLOCK_MONOTONIC, &ts_start)
-        self._dispatch_push(m, err)
-        clock_gettime(CLOCK_MONOTONIC, &ts_end)
-        self._join._account_input(
-            m,
-            (<uint64_t>(ts_end.tv_sec - ts_start.tv_sec)) * <uint64_t>1000000000
-            + <uint64_t>(ts_end.tv_nsec - ts_start.tv_nsec),
-        )
-        return err.code if err != NULL else 0
-
-    cdef int _dispatch_push(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
-        return self._join.push_left(m, err)
-
-
-cdef class JoinRightAdapter(BasePlanNode):
-    """Terminal node of a join's right-input chain. Forwards every morsel to
-    the join's `push_right`. On EOS the JoinNode itself calls emit(EOS) to
-    terminate the downstream chain."""
-    cdef JoinNode _join
-
-    def __init__(self, JoinNode join, *, properties=None):
-        from collections import defaultdict
-        from opteryx.utils import random_string
-        self.identity = random_string()
-        self.parameters = {}
-        self.columns = []
-        self.readings = defaultdict(int)
-        self._time_stat_key = "time_join_right_adapter"
-        self.properties = properties
-        self.is_scan = False
-        self.is_join = False
-        self.is_stateless = True
-        self.is_not_explained = True
-        self._empty_morsel_cache = None
-        self._join = join
-
-    @property
-    def name(self) -> str:
-        return "JoinRightAdapter"
-
-    cdef int push(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
-        # Attribute the probe-side push time to the JOIN, not this hidden
-        # adapter (see JoinLeftAdapter.push).
-        cdef timespec ts_start, ts_end
-        if self._ctx is not None and self._ctx._terminated:
-            return 0
-        clock_gettime(CLOCK_MONOTONIC, &ts_start)
-        self._dispatch_push(m, err)
-        clock_gettime(CLOCK_MONOTONIC, &ts_end)
-        self._join._account_input(
-            m,
-            (<uint64_t>(ts_end.tv_sec - ts_start.tv_sec)) * <uint64_t>1000000000
-            + <uint64_t>(ts_end.tv_nsec - ts_start.tv_nsec),
-        )
-        return err.code if err != NULL else 0
-
-    cdef int _dispatch_push(self, shared_ptr[CxxMorsel] m, ErrCtx* err) noexcept nogil:
-        return self._join.push_right(m, err)
-
-
 # -----------------------------------------------------------------------------
 # Expression evaluator — included here so all operator modules can call
 # evaluation functions directly at C level (no .so boundary, no Python dispatch).
@@ -4264,33 +3973,17 @@ _DRAKEN_CMP_OP_FLIPPED[18] = -1
 # ReaderNode is subclassed by function_dataset, parquet_read, show_value
 include "read/read.pyx"
 
-include "asof_join/asof_join.pyx"
-include "band_join/band_join.pyx"
 include "cross_join/cross_join.pyx"
 include "data_file_stream/data_file_stream.pyx"
 include "compaction_commit/compaction_commit.pyx"
-include "cte_ref/cte_ref.pyx"
 include "csv_read/csv_read.pyx"
-include "distinct/distinct.pyx"
-include "hashed_inner_join/hashed_inner_join.pyx"
-include "exit/exit.pyx"
 include "explain/explain.pyx"
-include "existence_join/existence_join.pyx"
-include "filter_join/filter_join.pyx"
-include "filter/filter.pyx"
 include "function_dataset/function_dataset.pyx"
-include "heap_sort/heap_sort.pyx"
 include "jsonl_read/jsonl_read.pyx"
 include "skene_read/skene_read.pyx"
 include "postgres_read/postgres_read.pyx"
-include "limit/limit.pyx"
-include "scalar_guard/scalar_guard.pyx"
-include "window/window_node.pyx"
-include "nested_loop_join/nested_loop_join.pyx"
 include "null_reader/null_reader.pyx"
-include "outer_join/outer_join.pyx"
 include "parquet_read/parquet_read.pyx"
-include "projection/projection.pyx"
 include "set_variable/set_variable.pyx"
 include "show_columns/show_columns.pyx"
 include "show_grants/show_grants.pyx"
@@ -4300,17 +3993,11 @@ include "show_lineage/show_lineage.pyx"
 include "show_sources/show_sources.pyx"
 include "show_create/show_create.pyx"
 include "show_value/show_value.pyx"
-include "sort/sort.pyx"
 include "table_management/table_management.pyx"
 include "relation_management/relation_management.pyx"
 include "insert/insert.pyx"
 include "merge/merge.pyx"
-include "union/union.pyx"
-include "unnest_join/unnest_join.pyx"
 include "view_management/view_management.pyx"
 
-# Aggregate
-include "aggregate/aggregate_node.pyx"
-
-# Grouped aggregate (self-contained via .pxi includes inside _grouped_agg.pyx)
-include "grouped_aggregate_hashed/_grouped_agg.pyx"
+# The generic plan operator for every kind without a class of its own.
+include "physical_step/physical_step.pyx"

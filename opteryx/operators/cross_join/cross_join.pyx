@@ -14,17 +14,9 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Cross Join Node
-
-This is a SQL Query Execution Plan Node.
-
-Execution is 100% native (see opteryx/managers/execution/compiler.py's
-_compile_join, which treats CROSS as a zero-key inner join keyed only on the
-class-level `join_type = "cross"`). This class is plan-time config only.
-
-`build_cartesian_indices` below is a standalone Draken-native utility (not
-execution-path config) and is kept — it builds Cartesian-product row indices
-independent of this Node's (removed) push execution.
+`build_cartesian_indices` — a standalone Draken-native utility that builds
+Cartesian-product row indices. CROSS JOIN itself is a PhysicalStep the native
+compiler lowers as a zero-key inner join; it has no operator class.
 """
 
 from libc.stdint cimport int64_t, uint32_t
@@ -36,9 +28,6 @@ from draken.core.buffers cimport DRAKEN_INT64
 cdef extern from "core/alloc.h" nogil:
     void* draken_malloc(size_t n) nogil
     void  draken_free(void* p) nogil
-
-# BasePlanNode/JoinNode in scope via _operators.pyx include.
-
 
 cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
     """
@@ -101,30 +90,3 @@ cpdef tuple build_cartesian_indices(int64_t left_rows, int64_t right_rows):
     )
 
     return (left_vec, right_vec)
-
-
-cdef class CrossJoinNode(JoinNode):
-    """
-    Implements a SQL CROSS JOIN (plan-time config only — see module docstring).
-    """
-
-    join_type = "cross"
-
-    def __init__(self, properties=None, **parameters):
-        JoinNode.__init__(self, properties=properties, **parameters)
-
-        # JoinNode expects these to be set for label_join_legs (called for
-        # every query — opteryx/managers/execution/__init__.py — regardless
-        # of which execution path runs).
-        self.left_readers = parameters.get("left_readers")
-        self.right_readers = parameters.get("right_readers")
-        self.left_relation_names = parameters.get("left_relation_names") or []
-        self.right_relation_names = parameters.get("right_relation_names") or []
-
-    @property
-    def name(self):  # pragma: no cover
-        return "Cross Join"
-
-    @property
-    def config(self):  # pragma: no cover
-        return f"CROSS JOIN"

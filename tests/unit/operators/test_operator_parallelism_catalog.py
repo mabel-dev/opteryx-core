@@ -23,7 +23,7 @@ from opteryx.operators import OperatorParallelism, get_registry
 
 def _by_name():
     reg = get_registry()
-    return {meta.name: meta for meta in (reg.get(c) for c in reg.list())}
+    return {meta.name: meta for meta in reg.list()}
 
 
 def test_every_operator_has_a_valid_parallelism_class():

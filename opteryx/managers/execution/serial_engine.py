@@ -135,9 +135,9 @@ def execute(
         subplan = plan.copy()
         subplan.remove_node(head_nodes[0], heal=True)
         new_head = subplan[subplan.get_exit_points()[0]]
-        if type(new_head).__name__ != "ExitNode":
+        if new_head.kind != "ExitNode":
             raise InvalidInternalStateError(
-                f"{type(head_node).__name__} sub-plan is not Exit-headed; it cannot "
+                f"{head_node.kind} sub-plan is not Exit-headed; it cannot "
                 "run on the native engine"
             )
         from opteryx.managers.execution.compiler import execute_native
@@ -148,7 +148,7 @@ def execute(
         head_node._push_impl(EOS)
         if head_node.result is None:
             raise InvalidInternalStateError(
-                f"{type(head_node).__name__} did not produce a result"
+                f"{head_node.kind} did not produce a result"
             )
         return head_node.result, ResultType.NON_TABULAR
     if isinstance(head_node, InsertNode):
@@ -163,7 +163,7 @@ def execute(
         subplan = plan.copy()
         subplan.remove_node(head_nodes[0], heal=True)
         new_head = subplan[subplan.get_exit_points()[0]]
-        if type(new_head).__name__ == "ExitNode":
+        if new_head.kind == "ExitNode":
             # Drive InsertNode's existing, tested write/commit logic directly
             # from the native generator's morsels. This keeps a Python-driven
             # per-morsel loop calling into `_push_impl` — interim debt per
@@ -208,7 +208,7 @@ def execute(
     # that (CLAUDE.md §1/§9: no fallbacks, no hidden behaviour, fail fast). The
     # native engine (compiler.execute_native) owns ALL data-pipeline execution.
     raise InvalidInternalStateError(
-        f"serial_engine received a data-pipeline head ({type(head_node).__name__}); "
+        f"serial_engine received a data-pipeline head ({head_node.kind}); "
         "SELECT/data plans must run on the native engine, not here."
     )
 
@@ -244,15 +244,13 @@ def explain(
     telemetry: QueryTelemetry = None,
 ) -> Generator[Morsel, None, None]:
     from opteryx.operators import BasePlanNode
-    from opteryx.operators.exit import ExitNode
-    from opteryx.operators.explain import ExplainNode
 
     # Record stream consumed by the MERMAID renderer (one dict per operator).
     def _inner_explain(node, depth):
         incoming_operators = plan.ingoing_edges(node)
         for operator_name in incoming_operators:
             operator = plan[operator_name[0]]
-            if isinstance(operator, (ExitNode, ExplainNode)):
+            if operator.kind in ("ExitNode", "ExplainNode"):
                 yield from _inner_explain(operator_name[0], depth)
                 continue
             elif isinstance(operator, BasePlanNode):
@@ -291,7 +289,7 @@ def explain(
         for edge in edges:
             child_id = edge[0]
             child = plan[child_id]
-            if isinstance(child, (ExitNode, ExplainNode)):
+            if child.kind in ("ExitNode", "ExplainNode"):
                 kids.extend(_real_children(child_id))
             elif isinstance(child, BasePlanNode):
                 kids.append(child_id)
@@ -300,7 +298,7 @@ def explain(
     # Build the indented operator tree (label, details, operator) bottom-up.
     def _tree_rows(node_id, prefix, is_last, is_root, out):
         operator = plan[node_id]
-        name = operator.name or type(operator).__name__
+        name = operator.name or operator.kind
         if is_root:
             label = name
             child_prefix = ""
@@ -524,7 +522,7 @@ def explain(
 
         def _graph_tree_rows(graph, node_id, prefix, is_last, out):
             operator = graph[node_id]
-            name = operator.name or type(operator).__name__
+            name = operator.name or operator.kind
             label = prefix + ("└─ " if is_last else "├─ ") + name
             child_prefix = prefix + ("   " if is_last else "│  ")
             out.append((label, str(operator.config) if operator.config else "", node_id))

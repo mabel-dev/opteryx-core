@@ -4490,9 +4490,11 @@ def test_length_only_decode_sees_column_uses_inside_case():
     complete = length_only_columns.LengthOnlyColumnStrategy.complete
 
     def _recording(self, plan, context):
+        from opteryx.planner.logical_planner import LogicalPlanStepType
+
         result = complete(self, plan, context)
         for _, node in result.nodes(True):
-            if node.length_only_columns:
+            if node.node_type == LogicalPlanStepType.Scan and node.length_only_columns:
                 annotated.extend(
                     column.name
                     for column in node.schema.columns

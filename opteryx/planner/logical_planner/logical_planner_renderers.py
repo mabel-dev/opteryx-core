@@ -63,7 +63,7 @@ def render_distinct(node: PlanStep) -> str:
 
 @register_render(LogicalPlanStepType.Project)
 def render_project(node: PlanStep) -> str:
-    cols = ", ".join(format_expression(col) for col in node.columns)
+    cols = ", ".join(format_expression(col) for col in node.columns or ())
     order_by = (
         f" + ({', '.join(format_expression(col) for col in node.passthrough_columns)})"
         if node.passthrough_columns
@@ -76,7 +76,7 @@ def render_project(node: PlanStep) -> str:
     )
     hoisted = (
         f" (hoisted: {', '.join(format_expression(col) for col in node.hoisted_columns)})"
-        if getattr(node, "hoisted_columns", None)
+        if node.hoisted_columns
         else ""
     )
     return f"PROJECT [{cols}]{except_cols}{order_by}{hoisted}"

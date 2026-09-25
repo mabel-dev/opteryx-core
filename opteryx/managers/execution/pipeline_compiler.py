@@ -9,9 +9,11 @@ Pipeline compiler — translates a PhysicalPlan into a wired push pipeline.
 Runs once per query. Walks the plan graph and:
   - Sets `_downstream` on every operator (typed Cython pointer)
   - Allocates and attaches a shared `PipelineContext` (for LIMIT short-circuit)
-  - For each join node, inserts `JoinLeftAdapter` / `JoinRightAdapter` at the
-    terminal of the join's left / right input chains
   - Returns the scan-to-chain-head map plus the terminal exit node
+
+Only INSERT ... VALUES still runs here (a function dataset pushed into the insert
+sink) — interim debt per CLAUDE.md §2. Every data pipeline runs on the native
+engine, and no operator on this path has two inputs.
 
 After compilation the engine drives scans directly:
     for scan, chain_head in chains:
@@ -28,9 +30,6 @@ from typing import List, Optional, Tuple
 from opteryx.models import PhysicalPlan
 from opteryx.operators import (
     BasePlanNode,
-    JoinLeftAdapter,
-    JoinNode,
-    JoinRightAdapter,
     PipelineContext,
 )
 
@@ -63,22 +62,6 @@ def compile_pipeline(plan: PhysicalPlan):
     """
     ctx = PipelineContext()
 
-    # Build a per-join edge-label map. `plan.label_join_legs()` covers joins
-    # that have populated left_readers/right_readers UUIDs (most cases), but
-    # joins synthesised from INTERSECT/EXCEPT/IN-subquery may have those
-    # fields unset — for those we fall back to incoming-edge insertion order
-    # (first edge = left, second edge = right). This mirrors the fallback
-    # already present at the tail of PhysicalPlan.label_join_legs.
-    join_edge_labels: dict = {}
-    for nid in plan.nodes():
-        node = plan[nid]
-        if not getattr(node, "is_join", False):
-            continue
-        for idx, (provider, _target, label) in enumerate(plan.ingoing_edges(nid)):
-            if not label:
-                label = "left" if idx == 0 else "right"
-            join_edge_labels[(provider, nid)] = label
-
     # Walk the plan in DFS left-before-right order — same ordering the legacy
     # engine used for sequential scan driving and join build-before-probe.
     flat = plan.depth_first_search_flat()
@@ -88,9 +71,8 @@ def compile_pipeline(plan: PhysicalPlan):
     exit_node = None
     if flat:
         candidate = flat[0][1]
-        # ExitNode is the terminal formatter; identify by class name to avoid
-        # a hard import dependency here.
-        if candidate.__class__.__name__ == "ExitNode":
+        # ExitNode is the terminal formatter.
+        if candidate.kind == "ExitNode":
             exit_node = candidate
 
     # Lower and bind each ParquetReadNode's pushed-down predicate, exactly as
@@ -118,8 +100,6 @@ def compile_pipeline(plan: PhysicalPlan):
     # Stamp each operator with the number of upstream input chains feeding it
     # (incoming-edge count) so multi-input operators (e.g. Union) gate their
     # downstream EOS on all legs closing instead of hardcoding the leg count.
-    # Joins route their two inputs through adapters and handle EOS in
-    # push_left/push_right, so the stamped count is inert for them.
     for nid, node in flat:
         if isinstance(node, BasePlanNode):
             node.set_context(ctx)
@@ -127,10 +107,8 @@ def compile_pipeline(plan: PhysicalPlan):
             if incoming > 1:
                 node.set_expected_input_closes(incoming)
 
-    # Wire downstream pointers — for each non-join operator, _downstream is
-    # the (single) outgoing edge's target. For joins we keep the join's
-    # downstream as the operator that follows it; the join's two inputs are
-    # adapted below.
+    # Wire downstream pointers — each operator's _downstream is the (single)
+    # outgoing edge's target.
     for nid, node in flat:
         if not isinstance(node, BasePlanNode):
             continue
@@ -138,23 +116,10 @@ def compile_pipeline(plan: PhysicalPlan):
         if child_id is None:
             # Sink (exit node, or insert / management nodes off-pipeline)
             continue
-        child = plan[child_id]
-        if isinstance(child, JoinNode):
-            # Insert an adapter so this operator pushes into the correct
-            # side of the join. Determine which leg by looking at the edge
-            # label between `nid` and `child_id`.
-            label = _edge_label(plan, nid, child_id, join_edge_labels)
-            adapter = _make_join_adapter(child, label)
-            adapter.set_context(ctx)
-            node.set_downstream(adapter)
-            # Adapters themselves have no downstream — the join routes its
-            # own output via its _downstream pointer.
-        else:
-            node.set_downstream(child)
+        node.set_downstream(plan[child_id])
 
     # Identify the scan-to-chain-head mapping. A "chain head" is the operator
-    # immediately downstream of the scan (or, if the scan feeds directly
-    # into a join leg, the adapter for that leg).
+    # immediately downstream of the scan.
     chains: List[Tuple[BasePlanNode, BasePlanNode]] = []
     for nid, node in flat:
         if not getattr(node, "is_scan", False):
@@ -163,36 +128,6 @@ def compile_pipeline(plan: PhysicalPlan):
         if child_id is None:
             # Scan with no downstream — degenerate plan, skip.
             continue
-        child = plan[child_id]
-        if isinstance(child, JoinNode):
-            label = _edge_label(plan, nid, child_id, join_edge_labels)
-            head = _make_join_adapter(child, label)
-            head.set_context(ctx)
-        else:
-            head = child
-        chains.append((node, head))
+        chains.append((node, plan[child_id]))
 
     return chains, exit_node, ctx
-
-
-def _edge_label(plan: PhysicalPlan, source: str, target: str, fallback_map: dict = None) -> str:
-    """Return the edge label between `source` and `target` (e.g. 'left',
-    'right', or ''). Falls back to the precomputed positional map (built
-    above) when the graph edge itself has no label."""
-    for s, t, label in plan.outgoing_edges(source):
-        if t == target:
-            if label:
-                return label
-            break
-    if fallback_map is not None:
-        return fallback_map.get((source, target), "")
-    return ""
-
-
-def _make_join_adapter(join: JoinNode, label: str):
-    """Build the appropriate adapter for a join input leg. Falls back to
-    'left' if the label is missing — joins that don't use traditional
-    left/right routing (e.g. UnnestJoinNode) are excluded by the caller."""
-    if label == "right":
-        return JoinRightAdapter(join)
-    return JoinLeftAdapter(join)

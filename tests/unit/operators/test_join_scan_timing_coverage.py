@@ -3,13 +3,6 @@ they reported 0ms in EXPLAIN ANALYZE.
 
   * Scans are driven via drive_scan -> scan.next_morsel(); drive_scan now times
     that call into the scan's execution_time.
-
-(Join timing-attribution coverage — JoinLeft/RightAdapter calling
-push_left/push_right and attributing time to the join, not the adapter — was
-dropped with CrossJoinNode's push_left/push_right execution body, which is
-dead in production: the native engine never drives it. push_left/push_right
-are `cdef` methods, so a lightweight Python-level synthetic JoinNode subclass
-can't override them the way `_Scan`/`_Sink` below override plain methods.)
 """
 
 import os

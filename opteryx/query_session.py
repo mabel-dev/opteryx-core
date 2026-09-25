@@ -535,9 +535,9 @@ class Session(DataFrame):
 
             logical_type = _logical_rel_name(node)
 
-            # physical implementation type (class name -> human readable)
+            # physical implementation type (operator kind -> human readable)
             try:
-                class_name = node.__class__.__name__
+                class_name = node.kind
                 physical_type = _humanize_physical_type(class_name)
             except (AttributeError, TypeError) as err:
                 logger.debug(f"Could not determine physical type, falling back to __class__: {err}")

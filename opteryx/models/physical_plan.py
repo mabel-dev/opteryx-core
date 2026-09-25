@@ -9,6 +9,7 @@ The Physical Plan is a tree of nodes that represent the execution plan for a que
 
 from typing import Optional
 
+from opteryx.compiled.structures.plan_steps import steps_with
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.third_party.travers import Graph
 
@@ -17,6 +18,13 @@ from opteryx.third_party.travers import Graph
 # traversed before its right leg.
 _LEG_ORDER = {"left": 0, "right": 1}
 _UNLABELLED_ORDER = 2
+
+
+def _scan_alias(node):
+    """The relation alias a scan reads under; None for anything not a scan."""
+    if node.is_scan and node.step.node_type in steps_with("alias"):
+        return node.step.alias
+    return None
 
 
 class PhysicalPlan(Graph):
@@ -91,6 +99,9 @@ class PhysicalPlan(Graph):
         """
         joins = ((nid, node) for nid, node in self.nodes(True) if node.is_join)
         for nid, join in joins:
+            # A CROSS JOIN UNNEST has one input leg, so there is nothing to label.
+            if join.kind == "UnnestJoinNode":
+                continue
             ingoing = list(self.ingoing_edges(nid))
             assignments: list = [
                 relation if relation in ("left", "right") else None
@@ -98,12 +109,11 @@ class PhysicalPlan(Graph):
             ]
 
             if any(side is None for side in assignments):
-                if join.left_readers is None:
+                if join.step.left_readers is None:
                     # No reader UUIDs. Joins synthesised from INTERSECT/EXCEPT/IN-
                     # subquery rewrites still carry left/right relation names — resolve
-                    # each leg by the scan aliases reachable from it. UnnestJoinNode has
-                    # neither readers nor relation names, and only one leg → leave it.
-                    if not (join.left_relation_names and join.right_relation_names):
+                    # each leg by the scan aliases reachable from it.
+                    if not (join.step.left_relation_names and join.step.right_relation_names):
                         continue
                     self._assign_legs_by_relation(nid, join, ingoing, assignments)
                 else:
@@ -133,10 +143,10 @@ class PhysicalPlan(Graph):
                 uuid = self[source].uuid
                 if uuid is None:
                     continue
-                if uuid in join.left_readers:
+                if uuid in join.step.left_readers:
                     assignments[idx] = "left"
                     break
-                if uuid in join.right_readers:
+                if uuid in join.step.right_readers:
                     assignments[idx] = "right"
                     break
 
@@ -148,16 +158,14 @@ class PhysicalPlan(Graph):
         branch reaches. Each branch is expected to reach exactly one side's
         relations; branches that hit both or neither stay unresolved.
         """
-        left_rel = set(join.left_relation_names)
-        right_rel = set(join.right_relation_names)
+        left_rel = set(join.step.left_relation_names)
+        right_rel = set(join.step.right_relation_names)
         for idx, (provider, _target, _relation) in enumerate(ingoing):
             if assignments[idx] is not None:
                 continue
-            # `alias` is declared by individual operators, not by BasePlanNode,
-            # so it is genuinely absent on most nodes rather than None.
-            aliases = {getattr(self[provider], "alias", None)}
+            aliases = {_scan_alias(self[provider])}
             for source, _t, _r in self.breadth_first_search(provider, reverse=True):
-                aliases.add(getattr(self[source], "alias", None))
+                aliases.add(_scan_alias(self[source]))
             aliases.discard(None)
 
             hits_left = bool(aliases & left_rel)

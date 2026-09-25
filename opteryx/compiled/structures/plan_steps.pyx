@@ -2447,15 +2447,17 @@ cdef class CompactionCommitStep(PlanStep):
     cdef object _connector
     cdef str _relation_name
     cdef list _retired_files
+    cdef object _sorted_by
     cdef str _source_tail_id
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, baseline_snapshot_id=None, connector=None, relation_name=None, retired_files=None, source_tail_id=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, baseline_snapshot_id=None, connector=None, relation_name=None, retired_files=None, sorted_by=None, source_tail_id=None):
         self.node_type = _step_types().CompactionCommit
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.baseline_snapshot_id = baseline_snapshot_id
         self.connector = connector
         self.relation_name = relation_name
         self.retired_files = retired_files
+        self.sorted_by = sorted_by
         self.source_tail_id = source_tail_id
 
     @property
@@ -2492,6 +2494,14 @@ cdef class CompactionCommitStep(PlanStep):
         self._retired_files = value
 
     @property
+    def sorted_by(self):
+        return self._sorted_by
+
+    @sorted_by.setter
+    def sorted_by(self, value):
+        self._sorted_by = value
+
+    @property
     def source_tail_id(self):
         return self._source_tail_id
 
@@ -2514,6 +2524,7 @@ cdef class CompactionCommitStep(PlanStep):
         out["connector"] = self._connector
         out["relation_name"] = self._relation_name
         out["retired_files"] = self._retired_files
+        out["sorted_by"] = self._sorted_by
         out["source_tail_id"] = self._source_tail_id
         return out
 
@@ -2531,6 +2542,7 @@ cdef class CompactionCommitStep(PlanStep):
         new._connector = _copy_field(self._connector, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
         new._retired_files = _copy_field(self._retired_files, memo)
+        new._sorted_by = _copy_field(self._sorted_by, memo)
         new._source_tail_id = _copy_field(self._source_tail_id, memo)
         return new
 
@@ -2542,6 +2554,7 @@ cdef class CompactionCommitStep(PlanStep):
         new._connector = self._connector
         new._relation_name = self._relation_name
         new._retired_files = self._retired_files
+        new._sorted_by = self._sorted_by
         new._source_tail_id = self._source_tail_id
         return new
 
@@ -6567,6 +6580,7 @@ cdef class MergeStep(PlanStep):
     cdef object _connector
     cdef list _file_paths
     cdef str _operation
+    cdef str _produced_by
     cdef list _read_sources
     cdef str _relation_name
     cdef str _source_tail_id
@@ -6575,12 +6589,13 @@ cdef class MergeStep(PlanStep):
     cdef tuple _target_column_names
     cdef object _target_schema
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, file_paths=None, operation=None, read_sources=None, relation_name=None, source_tail_id=None, statement_name=None, target_alias=None, target_column_names=None, target_schema=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, file_paths=None, operation=None, produced_by=None, read_sources=None, relation_name=None, source_tail_id=None, statement_name=None, target_alias=None, target_column_names=None, target_schema=None):
         self.node_type = _step_types().Merge
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.connector = connector
         self.file_paths = file_paths
         self.operation = operation
+        self.produced_by = produced_by
         self.read_sources = read_sources
         self.relation_name = relation_name
         self.source_tail_id = source_tail_id
@@ -6612,6 +6627,14 @@ cdef class MergeStep(PlanStep):
     @operation.setter
     def operation(self, value):
         self._operation = value
+
+    @property
+    def produced_by(self):
+        return self._produced_by
+
+    @produced_by.setter
+    def produced_by(self, value):
+        self._produced_by = value
 
     @property
     def read_sources(self):
@@ -6683,6 +6706,7 @@ cdef class MergeStep(PlanStep):
         out["connector"] = self._connector
         out["file_paths"] = self._file_paths
         out["operation"] = self._operation
+        out["produced_by"] = self._produced_by
         out["read_sources"] = self._read_sources
         out["relation_name"] = self._relation_name
         out["source_tail_id"] = self._source_tail_id
@@ -6705,6 +6729,7 @@ cdef class MergeStep(PlanStep):
         new._connector = _copy_field(self._connector, memo)
         new._file_paths = _copy_field(self._file_paths, memo)
         new._operation = _copy_field(self._operation, memo)
+        new._produced_by = _copy_field(self._produced_by, memo)
         new._read_sources = _copy_field(self._read_sources, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
         new._source_tail_id = _copy_field(self._source_tail_id, memo)
@@ -6721,6 +6746,7 @@ cdef class MergeStep(PlanStep):
         new._connector = self._connector
         new._file_paths = self._file_paths
         new._operation = self._operation
+        new._produced_by = self._produced_by
         new._read_sources = self._read_sources
         new._relation_name = self._relation_name
         new._source_tail_id = self._source_tail_id
@@ -9669,7 +9695,7 @@ cpdef frozenset steps_with(str field):
             "predicates": frozenset({T.FunctionDataset, T.Scan}),
             "principal": frozenset({T.GrantAccess, T.RevokeAccess}),
             "procedure_name": frozenset({T.CallProcedure}),
-            "produced_by": frozenset({T.Insert}),
+            "produced_by": frozenset({T.Insert, T.Merge}),
             "projection": frozenset({T.Aggregate, T.AggregateAndGroup}),
             "property_name": frozenset({T.AlterWorkspace}),
             "property_value": frozenset({T.AlterWorkspace}),
@@ -9706,6 +9732,7 @@ cpdef frozenset steps_with(str field):
             "series_column": frozenset({T.FunctionDataset}),
             "setop_leg_columns": frozenset({T.Join}),
             "snapshots": frozenset({T.ShowSnapshots}),
+            "sorted_by": frozenset({T.CompactionCommit}),
             "source": frozenset({T.Scan}),
             "source_collection": frozenset({T.CloneCollection}),
             "source_relation": frozenset({T.CloneRelation}),

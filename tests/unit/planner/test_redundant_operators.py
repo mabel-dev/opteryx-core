@@ -34,7 +34,7 @@ def _physical_node_types(sql: str):
     """Execute SQL through a session and return the physical plan node type names."""
     session = opteryx.session()
     list(session.execute_to_morsels(sql))
-    return [type(session._plan[nid]).__name__ for nid in session._plan.nodes()]
+    return [session._plan[nid].kind for nid in session._plan.nodes()]
 
 
 def _column(name):

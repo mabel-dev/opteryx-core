@@ -7,21 +7,29 @@
 Operator catalog — centralized registry of static metadata for relational operators.
 
 All operator metadata (category, parallelism strategy, dispatch mapping, etc.) lives
-here. Operator classes themselves remain clean — they only carry the runtime flags
-needed directly by the engine (is_scan, is_join, is_stateless, is_not_explained).
+here, keyed by the operator's KIND — the name the compiler dispatches on and the
+native engine reports ("FilterNode", "ParquetReadNode"). Two sorts of operator are
+registered:
+
+  * a PhysicalStep kind — an operator with no behaviour of its own, which the
+    native compiler lowers straight from its typed logical step. It has no class:
+    `create_step` builds the one generic PhysicalStep for it.
+  * an operator CLASS — one that does real work (a scan reader, the function
+    dataset, a DDL or write sink). Its kind is its class name; `create` builds it.
 
 Usage:
     from opteryx.operators.catalog import get_registry, OperatorCategory
 
     registry = get_registry()
-    metadata = registry.get(FilterNode)
-    node = registry.create('Filter', query_properties, **config)
+    metadata = registry.get_by_kind("FilterNode")
+    node = registry.create_step("Filter", query_properties, logical_step)
+    node = registry.create("Parquet Reader", query_properties, **config)
 """
 
 from dataclasses import dataclass
 from enum import Enum
 from threading import RLock
-from typing import Dict  # noqa: F401 (Optional used in get() return type)
+from typing import Dict
 from typing import Optional
 from typing import Type
 
@@ -76,10 +84,13 @@ class OperatorParallelism(Enum):
 
 @dataclass(frozen=True)
 class OperatorMetadata:
-    """Static metadata about an operator class."""
+    """Static metadata about an operator kind."""
 
     name: str
-    operator_class: Type
+    # The operator's kind (see the module docstring).
+    kind: str
+    # The class that implements it, or None for a PhysicalStep kind.
+    operator_class: Optional[Type]
     category: OperatorCategory
     parallel_strategy: ParallelStrategy = ParallelStrategy.SINGLE_THREAD
     parallelism: OperatorParallelism = OperatorParallelism.STATEFUL_SERIAL
@@ -99,13 +110,22 @@ class OperatorRegistry:
     """Thread-safe registry of operator metadata."""
 
     def __init__(self):
-        self._metadata: Dict[Type, OperatorMetadata] = {}
+        self._by_kind: Dict[str, OperatorMetadata] = {}
         self._by_name: Dict[str, OperatorMetadata] = {}
         self._lock = RLock()
 
-    def register(
+    def register(self, operator_class: Type, **metadata) -> None:
+        """Register an operator CLASS; its kind is its class name."""
+        self._register(operator_class.__name__, operator_class, **metadata)
+
+    def register_step(self, kind: str, **metadata) -> None:
+        """Register a PhysicalStep kind — an operator with no class of its own."""
+        self._register(kind, None, **metadata)
+
+    def _register(
         self,
-        operator_class: Type,
+        kind: str,
+        operator_class: Optional[Type],
         *,
         name: str,
         category: OperatorCategory,
@@ -120,10 +140,12 @@ class OperatorRegistry:
         target_queue_depth: int = 0,
         batch_size: int = 2048,
     ) -> None:
-        """Register an operator class with its metadata."""
         with self._lock:
+            if kind in self._by_kind or name in self._by_name:
+                raise ValueError(f"Operator {kind!r} / {name!r} is already registered")
             metadata = OperatorMetadata(
                 name=name,
+                kind=kind,
                 operator_class=operator_class,
                 category=category,
                 parallel_strategy=parallel_strategy,
@@ -137,31 +159,47 @@ class OperatorRegistry:
                 target_queue_depth=target_queue_depth,
                 batch_size=batch_size,
             )
-            self._metadata[operator_class] = metadata
+            self._by_kind[kind] = metadata
             self._by_name[name] = metadata
 
-    def get(self, operator_class: Type) -> Optional[OperatorMetadata]:
-        """Get metadata for an operator class."""
+    def get_by_kind(self, kind: str) -> Optional[OperatorMetadata]:
+        """Get metadata by operator kind."""
         with self._lock:
-            return self._metadata.get(operator_class)
+            return self._by_kind.get(kind)
 
     def get_by_name(self, name: str) -> Optional[OperatorMetadata]:
         """Get metadata by registered name."""
         with self._lock:
             return self._by_name.get(name)
 
-    def create(self, name: str, properties, **kwargs):
-        """Instantiate an operator by its registered name."""
+    def _metadata_named(self, name: str) -> OperatorMetadata:
         with self._lock:
             meta = self._by_name.get(name)
         if meta is None:
             raise KeyError(f"No operator registered with name '{name}'")
+        return meta
+
+    def create(self, name: str, properties, **kwargs):
+        """Instantiate an operator CLASS by its registered name."""
+        meta = self._metadata_named(name)
+        if meta.operator_class is None:
+            raise TypeError(f"'{name}' is a PhysicalStep kind; build it with create_step")
         return meta.operator_class(properties, **kwargs)
 
+    def create_step(self, name: str, properties, step, **physical):
+        """Build the PhysicalStep for a registered kind from its typed logical
+        step, plus the physical planner's own decisions (`physical`)."""
+        from opteryx.operators._operators import PhysicalStep
+
+        meta = self._metadata_named(name)
+        if meta.operator_class is not None:
+            raise TypeError(f"'{name}' is an operator class; build it with create")
+        return PhysicalStep(properties, meta.kind, step, **physical)
+
     def list(self) -> list:
-        """List all registered operator classes."""
+        """Metadata for every registered operator."""
         with self._lock:
-            return list(self._metadata.keys())
+            return list(self._by_kind.values())
 
 
 # ---------------------------------------------------------------------------
@@ -175,37 +213,15 @@ _registry_lock = RLock()
 def _build_registry() -> OperatorRegistry:
     """Explicitly register every operator with its metadata. No magic."""
     # Local imports to avoid circular dependencies at module load time.
-    from opteryx.operators.aggregate import UngroupedAggregateNode
-    from opteryx.operators.asof_join import AsofJoinNode
-    from opteryx.operators.band_join import BandJoinNode
-    from opteryx.operators.cross_join import CrossJoinNode
     from opteryx.operators.compaction_commit import CompactionCommitNode
-    from opteryx.operators.cte_ref import CteRefNode
     from opteryx.operators.csv_read import CsvReadNode
-    from opteryx.operators.distinct import DistinctNode
-    from opteryx.operators.hashed_inner_join import DrakenInnerJoinNode
-    from opteryx.operators.exit import ExitNode
     from opteryx.operators.explain import ExplainNode
-    from opteryx.operators.existence_join import ExistenceJoinNode
-    from opteryx.operators.filter_join import FilterJoinNode
-    from opteryx.operators.filter import FilterNode
     from opteryx.operators.function_dataset import FunctionDatasetNode
-    from opteryx.operators.grouped_aggregate_hashed import (
-        GroupedAggregateHashedNode as DrakenAggregateAndGroupNode,
-    )
-    from opteryx.operators.heap_sort import HeapSortNode
     from opteryx.operators.jsonl_read import JsonlReadNode
     from opteryx.operators.skene_read import SkeneReadNode
     from opteryx.operators.postgres_read import PostgresReadNode
-    from opteryx.operators.limit import LimitNode
-    from opteryx.operators.scalar_guard import ScalarGuardNode
-    from opteryx.operators.window import FramedWindowNode
-    from opteryx.operators.window import WindowNode
-    from opteryx.operators.nested_loop_join import NestedLoopJoinNode
     from opteryx.operators.null_reader import NullReaderNode
-    from opteryx.operators.outer_join import OuterJoinNode
     from opteryx.operators.parquet_read import ParquetReadNode
-    from opteryx.operators.projection import ProjectionNode
     from opteryx.operators.read import ReaderNode
     from opteryx.operators.set_variable import SetVariableNode
     from opteryx.operators.show_columns import ShowColumnsNode
@@ -216,10 +232,7 @@ def _build_registry() -> OperatorRegistry:
     from opteryx.operators.show_sources import ShowSourcesNode
     from opteryx.operators.show_create import ShowCreateNode
     from opteryx.operators.show_value import ShowValueNode
-    from opteryx.operators.sort import SortNode
     from opteryx.operators.table_management import TableManagementNode
-    from opteryx.operators.union import UnionNode
-    from opteryx.operators.unnest_join import UnnestJoinNode
     from opteryx.operators.view_management import ViewManagementNode
     from opteryx.operators.relation_management import RelationManagementNode
     from opteryx.operators.insert import InsertNode
@@ -251,8 +264,8 @@ def _build_registry() -> OperatorRegistry:
         parallelism=OperatorParallelism.STATELESS,
         is_scan=True,
     )
-    r.register(
-        CteRefNode,
+    r.register_step(
+        "CteRefNode",
         name="CTE Reference",
         category=OperatorCategory.SCAN,
         parallelism=OperatorParallelism.STATELESS,
@@ -301,24 +314,24 @@ def _build_registry() -> OperatorRegistry:
     )
 
     # -- Filter / project operators -------------------------------------------
-    r.register(
-        FilterNode,
+    r.register_step(
+        "FilterNode",
         name="Filter",
         category=OperatorCategory.FILTER,
         parallelism=OperatorParallelism.STATELESS,
         parallel_strategy=ParallelStrategy.MULTI_THREAD,
         is_stateless=True,
     )
-    r.register(
-        ProjectionNode,
+    r.register_step(
+        "ProjectionNode",
         name="Projection",
         category=OperatorCategory.PROJECT,
         parallelism=OperatorParallelism.STATELESS,
         parallel_strategy=ParallelStrategy.MULTI_THREAD,
         is_stateless=True,
     )
-    r.register(
-        DistinctNode,
+    r.register_step(
+        "DistinctNode",
         name="Distinct",
         category=OperatorCategory.SET_OP,
         parallelism=OperatorParallelism.STATEFUL_MERGEABLE,
@@ -326,15 +339,15 @@ def _build_registry() -> OperatorRegistry:
     )
 
     # -- Aggregate operators --------------------------------------------------
-    r.register(
-        UngroupedAggregateNode,
+    r.register_step(
+        "UngroupedAggregateNode",
         name="Aggregate",
         category=OperatorCategory.AGGREGATE,
         parallelism=OperatorParallelism.STATEFUL_MERGEABLE,
         is_pipeline_breaking=True,
     )
-    r.register(
-        DrakenAggregateAndGroupNode,
+    r.register_step(
+        "GroupedAggregateHashedNode",
         name="Aggregate and Group",
         category=OperatorCategory.AGGREGATE,
         parallelism=OperatorParallelism.STATEFUL_MERGEABLE,
@@ -342,20 +355,20 @@ def _build_registry() -> OperatorRegistry:
     )
 
     # -- Sort / limit operators -----------------------------------------------
-    r.register(
-        SortNode,
+    r.register_step(
+        "SortNode",
         name="Sort",
         category=OperatorCategory.SORT,
         is_pipeline_breaking=True,
     )
-    r.register(
-        HeapSortNode,
+    r.register_step(
+        "HeapSortNode",
         name="Heap Sort",
         category=OperatorCategory.SORT,
         is_pipeline_breaking=True,
     )
-    r.register(
-        LimitNode,
+    r.register_step(
+        "LimitNode",
         name="Limit",
         category=OperatorCategory.LIMIT,
     )
@@ -363,8 +376,8 @@ def _build_registry() -> OperatorRegistry:
     # could not statically prove single-row — buffers the subquery result and
     # enforces SQL's "one row or NULL" at the materialization boundary
     # (native_scalar_guard.hpp).
-    r.register(
-        ScalarGuardNode,
+    r.register_step(
+        "ScalarGuardNode",
         name="Scalar Guard",
         category=OperatorCategory.LIMIT,
         is_pipeline_breaking=True,
@@ -372,22 +385,22 @@ def _build_registry() -> OperatorRegistry:
 
     # -- Window operators -----------------------------------------------------
     # ROW_NUMBER() OVER (PARTITION BY ...) — streaming per-partition counter.
-    r.register(
-        WindowNode,
+    r.register_step(
+        "WindowNode",
         name="Window",
         category=OperatorCategory.PROJECT,
     )
     # SUM/COUNT/AVG/MIN/MAX OVER (... ROWS/RANGE BETWEEN ...) — sliding-window
     # aggregate. A separate node/sink from Window — see native_window_frame.hpp.
-    r.register(
-        FramedWindowNode,
+    r.register_step(
+        "FramedWindowNode",
         name="Framed Window",
         category=OperatorCategory.PROJECT,
     )
 
     # -- Set operations -------------------------------------------------------
-    r.register(
-        UnionNode,
+    r.register_step(
+        "UnionNode",
         name="Union",
         category=OperatorCategory.SET_OP,
         parallelism=OperatorParallelism.SINGLETON,
@@ -395,72 +408,72 @@ def _build_registry() -> OperatorRegistry:
     )
 
     # -- Join operators -------------------------------------------------------
-    r.register(
-        AsofJoinNode,
+    r.register_step(
+        "AsofJoinNode",
         name="ASOF Join",
         category=OperatorCategory.JOIN,
         is_join=True,
         is_pipeline_breaking=True,
     )
-    r.register(
-        BandJoinNode,
+    r.register_step(
+        "BandJoinNode",
         name="Band Join",
         category=OperatorCategory.JOIN,
         is_join=True,
         is_pipeline_breaking=True,
     )
-    r.register(
-        DrakenInnerJoinNode,
+    r.register_step(
+        "DrakenInnerJoinNode",
         name="Inner Join",
         category=OperatorCategory.JOIN,
         is_join=True,
         is_pipeline_breaking=True,
     )
-    r.register(
-        OuterJoinNode,
+    r.register_step(
+        "OuterJoinNode",
         name="Outer Join",
         category=OperatorCategory.JOIN,
         is_join=True,
         is_pipeline_breaking=True,
     )
-    r.register(
-        CrossJoinNode,
+    r.register_step(
+        "CrossJoinNode",
         name="Cross Join",
         category=OperatorCategory.JOIN,
         is_join=True,
         is_pipeline_breaking=True,
     )
-    r.register(
-        NestedLoopJoinNode,
+    r.register_step(
+        "NestedLoopJoinNode",
         name="Nested Loop Join",
         category=OperatorCategory.JOIN,
         is_join=True,
         is_pipeline_breaking=True,
     )
-    r.register(
-        FilterJoinNode,
+    r.register_step(
+        "FilterJoinNode",
         name="Filter Join",
         category=OperatorCategory.JOIN,
         is_join=True,
         is_pipeline_breaking=True,
     )
-    r.register(
-        ExistenceJoinNode,
+    r.register_step(
+        "ExistenceJoinNode",
         name="Existence Join",
         category=OperatorCategory.JOIN,
         is_join=True,
         is_pipeline_breaking=True,
     )
-    r.register(
-        UnnestJoinNode,
+    r.register_step(
+        "UnnestJoinNode",
         name="Unnest Join",
         category=OperatorCategory.JOIN,
         is_join=True,
     )
 
     # -- DDL / control operators ----------------------------------------------
-    r.register(
-        ExitNode,
+    r.register_step(
+        "ExitNode",
         name="Exit",
         category=OperatorCategory.IO,
         parallelism=OperatorParallelism.SINGLETON,

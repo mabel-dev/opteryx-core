@@ -1,4 +1,5 @@
 from opteryx.models import PhysicalPlan
+from opteryx.compiled.structures.plan_steps import steps_with
 from opteryx.operators.catalog import OperatorCategory, get_registry
 
 
@@ -7,7 +8,7 @@ def _get_logical_node_type(node):
     try:
         # First, try to use catalog metadata for reliable type detection
         registry = get_registry()
-        metadata = registry.get(node.__class__)
+        metadata = registry.get_by_kind(node.kind)
         if metadata:
             # Some operators share the SET_OP category but represent
             # different logical relations. Distinct is semantically an
@@ -69,17 +70,18 @@ def _node_predicates(node):
 
     The two node kinds that filter store it differently: a read node carries
     pushed-down predicates in `predicates`, already split into terms by the
-    planner, while a FILTER carries a single expression tree in `filter` that
-    may itself be a conjunction. Splitting the latter with the planner's own
-    splitter — rather than a second implementation here — means both arrive
-    downstream in the same shape, and a nested `(a AND b)` is unwrapped the
-    way the planner unwraps it.
+    planner, while a FILTER carries a single expression tree (its step's
+    `condition`) that may itself be a conjunction. Splitting the latter with the
+    planner's own splitter — rather than a second implementation here — means
+    both arrive downstream in the same shape, and a nested `(a AND b)` is
+    unwrapped the way the planner unwraps it.
     """
+    if node.kind == "FilterNode":
+        return _split_conjuncts(node.step.condition)
     predicates = getattr(node, "predicates", None)
     if predicates:
         return list(predicates)
-
-    return _split_conjuncts(getattr(node, "filter", None))
+    return []
 
 
 def _split_conjuncts(expression):
@@ -122,12 +124,19 @@ def _join_condition(node):
     """
     from opteryx.expression import format_expression
 
-    terms = _format_expressions(_split_conjuncts(getattr(node, "on", None)))
+    # A CROSS JOIN UNNEST has one input and no condition.
+    if node.kind == "UnnestJoinNode":
+        return []
+    step = node.step
+    terms = _format_expressions(_split_conjuncts(step.on))
     if terms:
         return terms
+    # A cross join has no key columns to pair.
+    if node.kind == "CrossJoinNode":
+        return []
 
-    left = list(getattr(node, "left_columns", None) or [])
-    right = list(getattr(node, "right_columns", None) or [])
+    left = list(step.left_columns or [])
+    right = list(step.right_columns or [])
     if not left or len(left) != len(right):
         return []
     return [
@@ -143,12 +152,12 @@ def _join_condition(node):
 # by silence than by a guess, since naming the wrong leg inverts the reading.
 def _join_legs(node):
     """(build_leg, probe_leg) as "left"/"right", or None when not determined."""
-    class_name = node.__class__.__name__
-    join_type = str(getattr(node, "join_type", "") or "")
+    kind = node.kind
+    join_type = str(node.join_type or "")
 
     # ASOF and band joins sort and materialise the LEFT leg; a cross join
     # builds the RIGHT one (the scalar side).
-    if class_name in ("AsofJoinNode", "BandJoinNode"):
+    if kind in ("AsofJoinNode", "BandJoinNode"):
         return "left", "right"
     if join_type == "cross":
         return "right", "left"
@@ -157,10 +166,22 @@ def _join_legs(node):
     # SEMI / ANTI normally build the right leg like every other filtering join,
     # but JoinAlgorithmStrategy can swap them to build the left instead — and
     # then the compiler runs a different pipeline shape entirely.
-    if join_type in ("left semi", "left anti") and getattr(node, "swap_build_side", False):
+    if join_type in ("left semi", "left anti") and node.step.swap_build_side:
         return "left", "right"
     if join_type.startswith("left ") or join_type.endswith(" outer"):
         return "right", "left"
+    return None
+
+
+def _limit_of(node):
+    """The row limit an operator reports: a LIMIT's (infinite when OFFSET-only),
+    a sort & limit's, or a scan's pushed limit."""
+    if node.kind == "LimitNode":
+        return float("inf") if node.step.limit is None else node.step.limit
+    if node.kind == "HeapSortNode":
+        return -1 if node.step.limit is None else node.step.limit
+    if node.is_scan and node.step.node_type in steps_with("limit"):
+        return node.step.limit
     return None
 
 
@@ -207,15 +228,15 @@ def _describe_columns(node):
     ``hoisted_columns`` are deliberately excluded: those are computed for
     this node's own internal use and never emitted at all.
 
-    Pass-through columns are read from ``node.parameters`` because
-    ProjectionNode.columns deliberately holds only the output projection
-    (see projection.pyx).
+    Pass-through columns are read from the Project step, because the node's
+    `columns` deliberately hold only the output projection.
     """
     from opteryx.expression import format_expression
 
-    parameters = getattr(node, "parameters", None) or {}
-    projection = list(getattr(node, "columns", None) or [])
-    passthrough = list(parameters.get("passthrough_columns") or [])
+    projection = list(node.columns)
+    passthrough = []
+    if node.kind == "ProjectionNode":
+        passthrough = list(node.step.passthrough_columns or [])
     if not projection and not passthrough:
         return []
 
@@ -306,7 +327,7 @@ _EXISTENCE_JOIN_DIRECTIONS = {
 
 
 def _get_operator_label(node):
-    class_name = node.__class__.__name__
+    class_name = node.kind
     if class_name == "OuterJoinNode":
         direction = _OUTER_JOIN_DIRECTIONS.get(node.join_type, node.join_type)
         return f"OUTER JOIN ({direction})"
@@ -496,8 +517,9 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
                 column_details = _describe_columns(node)
                 if column_details:
                     node_stat["column_details"] = column_details
-            if getattr(node, "limit", None) is not None:
-                node_stat["limit"] = node.limit
+            limit = _limit_of(node)
+            if limit is not None:
+                node_stat["limit"] = limit
             if getattr(node, "predicates", None):
                 node_stat["has_filters"] = True
             # `has_filters` says only that a predicate exists; this says what
@@ -516,25 +538,29 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
             # above; this is its other half. Emitted even when zero, so the
             # absence of an offset is stated rather than inferred from a
             # missing key.
-            if getattr(node, "offset", None) is not None:
-                node_stat["offset"] = node.offset
+            if node.kind == "LimitNode":
+                node_stat["offset"] = 0 if node.step.offset is None else node.step.offset
             # An aggregate's two lists, kept apart: the functions it computes
             # and the keys it groups by are different things, and its
             # `config` ("AGGREGATE (...) GROUP BY (...)") runs them together
             # into one string. Absent on an ungrouped aggregate, which has
             # functions but no keys.
-            aggregates = _format_expressions(getattr(node, "aggregates", None) or [])
-            if aggregates:
-                node_stat["aggregates"] = aggregates
-            groups = _format_expressions(getattr(node, "groups", None) or [])
-            if groups:
-                node_stat["groups"] = groups
+            if node.kind in ("UngroupedAggregateNode", "GroupedAggregateHashedNode"):
+                aggregates = _format_expressions(node.step.aggregates or [])
+                if aggregates:
+                    node_stat["aggregates"] = aggregates
+            if node.kind == "GroupedAggregateHashedNode":
+                groups = _format_expressions(node.step.groups)
+                if groups:
+                    node_stat["groups"] = groups
             # A sort's keys, one entry per key with its direction — the same
             # split-them-out reasoning as the aggregate's two lists above. The
             # `config` string ("ORDER = a DESC, b ASC") runs them together, and
             # a key can itself contain a comma (a two-argument function call),
             # so it cannot be split back apart reliably.
-            order_by = getattr(node, "order_by", None) or []
+            order_by = []
+            if node.kind in ("SortNode", "HeapSortNode"):
+                order_by = node.step.order_by or []
             if order_by:
                 from opteryx.expression import format_expression
 
@@ -565,7 +591,8 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
                 # relation has, so a reader can see the projection pushdown as
                 # a ratio ("2 of 13") rather than a bare count that could mean
                 # anything without knowing the table's width.
-                schema_columns = getattr(getattr(node, "schema", None), "columns", None)
+                schema = node.step.schema if node.kind == "CteRefNode" else getattr(node, "schema", None)
+                schema_columns = getattr(schema, "columns", None)
                 if schema_columns:
                     node_stat["columns_total"] = len(schema_columns)
             if getattr(node, "at_date", None):
@@ -638,7 +665,7 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
     # emitting it for every consumer to filter back out. This is scoped to
     # telemetry.operations/.edges only — plan_to_mermaid's own diagram string
     # (EXPLAIN) still draws it, unchanged, via node_stats/excluded_nodes below.
-    exit_nids = {nid for nid, node in plan.nodes(True) if node.__class__.__name__ == "ExitNode"}
+    exit_nids = {nid for nid, node in plan.nodes(True) if node.kind == "ExitNode"}
 
     # Planner row-count estimates, recorded by StatisticsRefreshVisitor.
     # _record_telemetry against the LOGICAL plan's nids — the physical plan is
