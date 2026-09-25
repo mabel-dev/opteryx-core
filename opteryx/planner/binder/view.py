@@ -11,6 +11,7 @@ from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
+from opteryx.models import current_name_of
 
 
 def visit_show_columns(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
@@ -320,11 +321,9 @@ def _view_output_schema(node, context: BindingContext):
         # when one expression was named more than once - the reader sees the
         # first. This is the name the view answers to, which is not necessarily
         # the bound column's own name.
-        name = column.current_name
+        name = current_name_of(column)
         if isinstance(name, (list, tuple)):
             name = name[0] if name else None
-        if name is None:
-            name = column.source_column
         name = str(name)
         columns.append(
             SchemaColumn(

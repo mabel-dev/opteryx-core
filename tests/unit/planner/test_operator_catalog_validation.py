@@ -2,6 +2,8 @@ import os
 import sys
 
 import pytest
+from opteryx.compiled.structures.expressions import BinaryOperator
+from opteryx.compiled.structures.expressions import Literal
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
@@ -14,11 +16,10 @@ from opteryx.types.logical_type import INT64
 
 
 def test_binder_rejects_operators_not_in_catalog():
-    node = Node(
-        NodeType.BINARY_OPERATOR,
+    node = BinaryOperator(
         value="TotallyUnsupported",
-        left=Node(NodeType.LITERAL, type=INT64, value=1),
-        right=Node(NodeType.LITERAL, type=INT64, value=2),
+        left=Literal(type=INT64, value=1),
+        right=Literal(type=INT64, value=2),
     )
 
     with pytest.raises(UnsupportedSyntaxError, match="Unsupported operator 'TotallyUnsupported'"):

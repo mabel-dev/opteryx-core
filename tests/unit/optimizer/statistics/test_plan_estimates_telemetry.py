@@ -34,6 +34,7 @@ import pytest
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
 import opteryx
+from opteryx.planner.plan_context import PlanContext
 
 
 def _build_optimized_and_refreshed_plan_with_telemetry(sql):
@@ -59,8 +60,9 @@ def _build_optimized_and_refreshed_plan_with_telemetry(sql):
     plan = do_resolve_relations(plan, ctes, telemetry)
     plan = do_plan_rewrite(plan, telemetry)
     bound = do_bind_phase(plan, execution_context=ctx, query_id=query_id, telemetry=telemetry)
-    optimized = do_optimizer(bound, telemetry)
-    refresh_statistics(optimized, telemetry=telemetry)
+    plan_context = PlanContext()
+    optimized = do_optimizer(bound, telemetry, plan_context)
+    refresh_statistics(optimized, plan_context, telemetry=telemetry)
     return telemetry
 
 
@@ -95,12 +97,13 @@ def test_omitting_telemetry_does_not_change_the_computed_statistics():
     plan = do_resolve_relations(plan, ctes, telemetry)
     plan = do_plan_rewrite(plan, telemetry)
     bound = do_bind_phase(plan, execution_context=ctx, query_id=str(uuid.uuid4()), telemetry=telemetry)
-    optimized = do_optimizer(bound, telemetry)
-    refresh_statistics(optimized)  # no telemetry argument at all
+    plan_context = PlanContext()
+    optimized = do_optimizer(bound, telemetry, plan_context)
+    refresh_statistics(optimized, plan_context)  # no telemetry argument at all
 
     for _nid, node in optimized.nodes(True):
         if node.node_type == LogicalPlanStepType.Scan:
-            assert node.statistics.row_count == 2
+            assert plan_context.statistics(node).row_count == 2
     assert telemetry._reading.get("estimated_row_counts", 0) == 0, (
         "estimated_row_counts must not appear when telemetry isn't passed to refresh_statistics"
     )

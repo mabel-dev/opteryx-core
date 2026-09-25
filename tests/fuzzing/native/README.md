@@ -62,7 +62,10 @@ ending the run.
 ## Corpus
 
 `corpus/<target>/` holds seed inputs, currently small real files from
-`testdata/`. libFuzzer writes new interesting inputs back into the same
+`testdata/`. The skene seeds are format v3 (the only version the writer
+produces): `nation` and `region` from the TPC-H SF1 mirror, and a five-row-group
+`$planets` file in blocks of two with nulls, strings and an ARRAY column, so the
+multi-block directory and block-extent checks are reachable. libFuzzer writes new interesting inputs back into the same
 directory, and writes any crashing input there too (`-artifact_prefix`).
 
 **Commit a crashing input.** That is what turns a one-off discovery into a
@@ -70,10 +73,9 @@ permanent regression case, because `make replay` runs everything in `corpus/`.
 
 ## Getting past skene's checksums
 
-skene verifies a file-footer checksum, then the row group footer's checksum (as
-recorded in the file footer's row group directory), then a per-section checksum
-before each section is used — three levels since row groups were packed into
-files. A mutated byte fails validation long before reaching the structural checks
+skene verifies a file-footer checksum, then each column's directory-block
+checksum (as recorded in that column's summary in the file footer), then a
+per-section checksum before each section is used — three levels. A mutated byte fails validation long before reaching the structural checks
 and buffer building — which is where the memory-safety risk
 actually lives. Measured: 300 random mutations of a real `.skene` file were all
 rejected cleanly, and none reached the interesting code.
@@ -91,8 +93,10 @@ comparison models the attacker rather than the disk error.
 
 It paid for itself immediately: with the flag on, 12 of 500 mutations crashed —
 three distinct ASan signatures (BUS, heap-buffer-overflow, heap-use-after-free)
-at one site in `build_column`. Those inputs are in `corpus/skene/` as
-`crash-build_column-*.skene`.
+at one site in `build_column`. Those inputs were format v1 files; v3 dropped v1
+support, so they are refused at the version check and were removed from the
+corpus. The site they found is the shared chunk decoder that v2 and v3 both
+read through.
 
 Parquet is less affected (its structural fields are not checksum-protected) and
 the JSONL and CSV scanners are not affected at all.

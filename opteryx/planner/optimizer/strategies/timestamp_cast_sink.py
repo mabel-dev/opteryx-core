@@ -60,8 +60,6 @@ from draken.draken_native import TimestampUnit
 
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
-from opteryx.models import LogicalColumn
-from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -112,25 +110,15 @@ def _classify(expr, casted: dict, raw: set) -> None:
         raw.add(expr.schema_column.identity)
         return
 
-    # A LogicalColumn is a leaf: the IDENTIFIER case above, or unbound.
-    if not isinstance(expr, Node):
-        return
-
-    # Every expression-valued property, not a hand-picked field list: CASE keeps
-    # its operands in `conditions` / `results` / `else_result`, which a
-    # left/centre/right/parameters walk never visited. A raw use inside a CASE was
-    # therefore missed, the scan column was retyped to TIMESTAMP underneath it, and
+    # Every child, not a hand-picked field list: CASE keeps its operands in
+    # `conditions` / `results` / `else_result`, which a left/centre/right/parameters
+    # walk never visited. A raw use inside a CASE was therefore missed, the scan
+    # column was retyped to TIMESTAMP underneath it, and
     # `SELECT i::TIMESTAMP[s], CASE WHEN ... THEN i ELSE 0 END` failed with
     # "branch types differ". Over-counting only forgoes the retag; under-counting
-    # mistypes a column. Column references are LogicalColumn, not Node, so both
-    # are children (the pair get_all_nodes_of_type descends into).
-    for value in expr.properties.values():
-        if isinstance(value, (Node, LogicalColumn)):
-            _classify(value, casted, raw)
-        elif isinstance(value, (list, tuple)):
-            for item in value:
-                if isinstance(item, (Node, LogicalColumn)):
-                    _classify(item, casted, raw)
+    # mistypes a column.
+    for child in expr.children():
+        _classify(child, casted, raw)
 
 
 class TimestampCastSinkStrategy(OptimizationStrategy):

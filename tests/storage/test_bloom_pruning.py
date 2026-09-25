@@ -38,7 +38,10 @@ def _write_dataset(folder: str, bloom: bool):
     os.makedirs(folder, exist_ok=True)
     morsel = Morsel.from_vectors(["i"], [Vector(dn.vector_int64_from_sequence(_VALUES))])
     with open(os.path.join(folder, "part.parquet"), "wb") as fh:
-        fh.write(write_parquet(morsel, bloom_filters=bloom, dictionary=False))
+        # One row group, so min/max spans every value and only the bloom can prune.
+        fh.write(
+            write_parquet(morsel, bloom_filters=bloom, dictionary=False, max_rows_per_row_group=0)
+        )
 
 
 def _scan_stats(dataset: str, sql_value: int):

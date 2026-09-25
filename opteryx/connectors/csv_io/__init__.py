@@ -102,17 +102,22 @@ def read_csv_file(
     pre-alias names) and predicate tuples for this scan. ``delimiter``/
     ``has_header``/``fail_on_error``/``infer_sample_size`` are READ_CSV's
     resolved options (see opteryx.planner.binder.dataset), forwarded
-    unchanged to rugo. Always returns a Morsel (possibly zero rows, and
-    possibly zero COLUMNS -- rugo reports a record-less file that way) --
-    unlike JSONL's decode_chunk, there is no "every row filtered out of this
-    chunk" ambiguity to signal with None, because CSV reads the whole file
-    in one pass rather than chunk by chunk.
+    unchanged to rugo. Always returns a Morsel with every projected column the
+    file has (possibly zero rows, never zero columns) -- unlike JSONL's
+    decode_chunk, there is no "every row filtered out of this chunk" ambiguity
+    to signal with None, because CSV reads the whole file in one pass rather
+    than chunk by chunk.
 
-    rugo.csv yields exactly one morsel for any input, including a zero-byte
-    buffer, so the `None` branch below is unreachable today. It is a loud
-    guard rather than a bare `next(iter(reader))` so that a future rugo that
-    yields nothing surfaces as a named error instead of leaking StopIteration
-    into whatever generator happens to be on the stack (PEP 479).
+    rugo.csv raises ValueError for a zero-byte buffer (no header, so no
+    columns), for a projection naming none of the file's columns, and for a
+    predicate literal that does not fit its column. A caller that treats an
+    empty file as an empty relation checks for it before calling.
+
+    rugo.csv yields exactly one morsel for any input it accepts, so the
+    `None` branch below is unreachable today. It is a loud guard rather than a
+    bare `next(iter(reader))` so that a future rugo that yields nothing
+    surfaces as a named error instead of leaking StopIteration into whatever
+    generator happens to be on the stack (PEP 479).
     """
     with _rugo_read_csv(
         data,
@@ -127,6 +132,6 @@ def read_csv_file(
     if morsel is None:
         raise InvalidInternalStateError(
             "rugo.csv.read_csv yielded no morsel; it is contracted to yield exactly "
-            "one morsel for any input, including an empty buffer."
+            "one morsel for any input it accepts."
         )
     return morsel

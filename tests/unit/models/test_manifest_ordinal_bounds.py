@@ -33,11 +33,14 @@ from __future__ import annotations
 import datetime
 
 from opteryx.expression import NodeType
-from opteryx.models import Node
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import FLOAT64, INT64, TIMESTAMP, VARCHAR
 from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.compiled.structures.expressions import Between
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 
 def _schema(column_type, name="value"):
@@ -52,18 +55,17 @@ def _schema(column_type, name="value"):
 
 
 def _comparison(column_name, op, value):
-    identifier = Node(NodeType.IDENTIFIER, source_column=column_name)
-    literal = Node(NodeType.LITERAL, value=value)
-    return Node(NodeType.COMPARISON_OPERATOR, value=op, left=identifier, right=literal)
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name)
+    literal = Literal(value=value)
+    return Comparison(value=op, left=identifier, right=literal)
 
 
 def _between(column_name, lower, upper):
-    identifier = Node(NodeType.IDENTIFIER, source_column=column_name)
-    return Node(
-        NodeType.BETWEEN,
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name)
+    return Between(
         left=identifier,
-        right=Node(NodeType.LITERAL, value=lower),
-        centre=Node(NodeType.LITERAL, value=upper),
+        right=Literal(value=lower),
+        centre=Literal(value=upper),
     )
 
 

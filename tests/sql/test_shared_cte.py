@@ -111,6 +111,21 @@ def test_asymmetric_predicate_stays_with_its_reference():
     assert result == [(5, 1), (6, 2), (7, 3), (8, 4), (9, 5)], result
 
 
+def test_different_case_predicates_are_different_filters():
+    # Two references filtered by DIFFERENT CASE predicates. The filter-sharing key
+    # was built from left/centre/right/parameters only, which a CASE has none of, so
+    # every CASE predicate got the SAME key: both references were treated as sharing
+    # one filter and `b` returned ids 4-7 that `id > 7` excludes (36 rows, not 12).
+    result = rows(
+        "WITH c AS (SELECT id FROM $planets) "
+        "SELECT a.id, b.id FROM "
+        "(SELECT id FROM c WHERE CASE WHEN id > 3 THEN TRUE ELSE FALSE END) AS a "
+        "CROSS JOIN (SELECT id FROM c WHERE CASE WHEN id > 7 THEN TRUE ELSE FALSE END) AS b "
+        "ORDER BY a.id, b.id"
+    )
+    assert result == [(a, b) for a in range(4, 10) for b in (8, 9)], result
+
+
 def test_single_reference_cte_still_inlines():
     result = rows(
         "WITH c AS (SELECT id, name FROM $planets WHERE id > 3) "

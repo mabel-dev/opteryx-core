@@ -555,6 +555,7 @@ def read_rowgroup_stats(data):
 
     Returns a list with one entry per row group:
         {"num_rows": int,
+         "file_offset": int|None, "total_compressed_size": int|None,
          "columns": [
              {"name": str, "physical_type": str, "logical_type": str,
               "min": bytes|None, "max": bytes|None, "null_count": int,
@@ -615,7 +616,20 @@ def read_rowgroup_stats(data):
                 "sort_descending": fs.row_groups[rg_i].columns[c_i].sort_descending,
                 "sort_nulls_first": fs.row_groups[rg_i].columns[c_i].sort_nulls_first,
             })
-        row_groups.append({"num_rows": fs.row_groups[rg_i].num_rows, "columns": cols})
+        row_groups.append({
+            "num_rows": fs.row_groups[rg_i].num_rows,
+            # RowGroup.file_offset / total_compressed_size as the footer states
+            # them (None when the writer omitted the optional fields). rugo
+            # writes the row group's FIRST byte and the SUM of its chunks; under
+            # its grouped layout the pair brackets more than the row group's
+            # own bytes, so this is a statement about the footer, not a fetch
+            # range — see metadata.hpp.
+            "file_offset": (fs.row_groups[rg_i].file_offset
+                            if fs.row_groups[rg_i].file_offset >= 0 else None),
+            "total_compressed_size": (fs.row_groups[rg_i].total_compressed_size
+                                      if fs.row_groups[rg_i].total_compressed_size >= 0 else None),
+            "columns": cols,
+        })
     return row_groups
 
 
@@ -671,8 +685,8 @@ def bloom_filter_bytes_maybe_contains(const uint8_t[::1] data, bytes value):
     the raw PLAIN-encoded candidate bytes (same encoding contract as
     bloom_filter_maybe_contains). Returns False only if DEFINITELY absent.
 
-    This is the exact probe the remote decode-skip runs on the bloom bytes it
-    fetches contiguously in front of a column chunk.
+    The in-memory form of the file probe, over bloom bytes a caller already
+    holds (the `bloom_length` bytes at the footer's `bloom_offset`).
     """
     cdef parquet_reader.string c_value = value
     if data.shape[0] == 0:

@@ -8,6 +8,7 @@ from typing import Callable
 
 from opteryx.expression import format_expression
 from opteryx.planner.logical_planner import LogicalPlanNode, LogicalPlanStepType
+from opteryx.models import current_name_of
 
 _render_registry: dict[LogicalPlanStepType, Callable[["LogicalPlanNode"], str]] = {}
 
@@ -122,7 +123,7 @@ def render_join(node: LogicalPlanNode) -> str:
 def render_unnest(node: LogicalPlanNode) -> str:
     distinct = "DISTINCT " if node.distinct else ""
     filters = f" FILTER ({', '.join(node.filters)})" if node.filters else ""
-    return f"CROSS JOIN UNNEST ({distinct}{node.unnest_column.current_name}) AS {node.unnest_alias}{filters}"
+    return f"CROSS JOIN UNNEST ({distinct}{current_name_of(node.unnest_column)}) AS {node.unnest_alias}{filters}"
 
 
 @register_render(LogicalPlanStepType.AggregateAndGroup)

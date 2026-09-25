@@ -68,6 +68,8 @@ from opteryx.compiled.structures.node import Node
 from opteryx.expression import NodeType
 from opteryx.planner import build_literal_node
 from opteryx.types.logical_type import LogicalCategory
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
 
 # (lower, lower_is_closed, upper, upper_is_closed); a None bound is unbounded on
 # that side and its flag is meaningless. Closed/open is tracked rather than
@@ -140,8 +142,7 @@ def _comparison_node(identifier, operator: str, value, literal_type) -> Node:
     half-built node either prunes nothing or — worse — prunes against the wrong
     column's bounds.
     """
-    return Node(
-        NodeType.COMPARISON_OPERATOR,
+    return Comparison(
         value=operator,
         left=identifier,
         right=build_literal_node(value, suggested_type=literal_type),
@@ -1322,13 +1323,13 @@ def derive_case_fold_conjuncts(
                 and right.node_type == NodeType.LITERAL
                 and _is_ascii_text(_scalar(right.value))
             ):
-                folded_pattern = Node(
-                    NodeType.LITERAL, value=_scalar(right.value).lower(), type=right.type
+                folded_pattern = Literal(
+                    value=_scalar(right.value).lower(), type=right.type
                 )
                 identifier = left
                 fold = "LOWER"
                 interval = _like_interval(
-                    Node(NodeType.COMPARISON_OPERATOR, value="Like", left=left, right=folded_pattern)
+                    Comparison(value="Like", left=left, right=folded_pattern)
                 )
 
         elif conjunct.node_type == NodeType.COMPARISON_OPERATOR:

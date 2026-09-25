@@ -705,6 +705,11 @@ struct NativeParquetScanGlobal : GlobalSourceState {
     // size 0 with `pruned_applied` set. Read-only after make_global.
     std::vector<int> kept;
     bool pruned_applied = false;
+    // Fetch-block id of every work item (parallel to `work_items`), inferred per
+    // file from the chunk offsets (rugo::ParquetIOPipeline::infer_fetch_blocks):
+    // consecutive submittable units with the same path and block id are one
+    // pipeline submission, fetched together. Computed once in make_global.
+    std::vector<int32_t> block_id;
 
     // Work-item index for the i-th submittable unit.
     int item_index(int i) const {
@@ -844,7 +849,43 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
         // every bound this reads is either filled or honestly invalid.
         apply_runtime_bounds(*g);
         g->submit_cap = limit_submit_cap(*g);
+        assign_fetch_blocks(*g);
         return g;
+    }
+
+    // Fetch-block ids for every work item, per file, from the footer's chunk
+    // offsets over THIS scan's projection. A file whose footer is missing here
+    // gets one block per row group (submit_one fails loud on it anyway).
+    void assign_fetch_blocks(NativeParquetScanGlobal& g) const {
+        const size_t n = work_items->size();
+        g.block_id.assign(n, 0);
+        if (footer_map == nullptr) {
+            for (size_t i = 0; i < n; ++i) g.block_id[i] = static_cast<int32_t>(i);
+            return;
+        }
+        std::unordered_map<std::string, std::vector<int32_t>> per_file;
+        for (size_t i = 0; i < n; ++i) {
+            const std::string& path = (*work_items)[i].first;
+            auto pit = per_file.find(path);
+            if (pit == per_file.end()) {
+                auto fit = footer_map->find(path);
+                std::vector<int32_t> ids;
+                if (fit != footer_map->end())
+                    ids = rugo::ParquetIOPipeline::infer_fetch_blocks(fit->second, *column_names);
+                pit = per_file.emplace(path, std::move(ids)).first;
+            }
+            const size_t rg = static_cast<size_t>((*work_items)[i].second);
+            g.block_id[i] = rg < pit->second.size() ? pit->second[rg]
+                                                    : static_cast<int32_t>(-1 - static_cast<int32_t>(i));
+        }
+    }
+
+    // Do submittable units a and b (a < b, consecutive) belong to one fetch block?
+    bool same_block(const NativeParquetScanGlobal& g, int a, int b) const {
+        const int ia = g.item_index(a), ib = g.item_index(b);
+        return (*work_items)[static_cast<size_t>(ia)].first ==
+                   (*work_items)[static_cast<size_t>(ib)].first &&
+               g.block_id[static_cast<size_t>(ia)] == g.block_id[static_cast<size_t>(ib)];
     }
 
     // Drop work items whose row-group statistics prove the bound cannot match.
@@ -909,42 +950,51 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
         return std::make_unique<LocalSourceState>();
     }
 
-    // Mirrors CppIOPipeline.submit_work_native (pool_reader.pyx) exactly, over
-    // plain C++ containers instead of Python list/dict — same parallel-arrays
-    // contract (col_names_vec/col_stats_vec built strictly in lockstep so a
-    // column absent from this row group's stats is simply skipped, not padded).
-    void submit_one(size_t idx, ErrCtx& err) {
-        const std::string& path = (*work_items)[idx].first;
-        int rg_idx = (*work_items)[idx].second;
+    // Submit the submittable units [first, last) — one fetch block of one file —
+    // as ONE pipeline submission. Mirrors CppIOPipeline.submit_work_native
+    // (pool_reader.pyx) over plain C++ containers — same parallel-arrays contract
+    // (col_names_vec/col_stats_vec built strictly in lockstep so a column absent
+    // from this row group's stats is simply skipped, not padded), per member.
+    void submit_block(const NativeParquetScanGlobal& g, int first, int last, ErrCtx& err) {
+        const size_t idx0 = static_cast<size_t>(g.item_index(first));
+        const std::string& path = (*work_items)[idx0].first;
         auto fit = footer_map->find(path);
         if (fit == footer_map->end()) {
             err.code = 1;
             err.msg = "NativeParquetScanSource: work item path missing from footer_map";
             return;
         }
-        const RowGroupStats& rg = fit->second.row_groups[static_cast<size_t>(rg_idx)];
-        std::vector<std::string> col_names_vec;
-        std::vector<ColumnStats> col_stats_vec;
-        col_names_vec.reserve(column_names->size());
-        col_stats_vec.reserve(column_names->size());
-        for (const std::string& want : *column_names) {
-            for (const ColumnStats& cs : rg.columns) {
-                if (cs.name == want) {
-                    col_names_vec.push_back(want);
-                    col_stats_vec.push_back(cs);
-                    break;
+        std::vector<int> rg_idxs;
+        std::vector<std::vector<ColumnStats>> stats;
+        rg_idxs.reserve(static_cast<size_t>(last - first));
+        stats.reserve(static_cast<size_t>(last - first));
+        for (int u = first; u < last; ++u) {
+            const size_t idx = static_cast<size_t>(g.item_index(u));
+            const int rg_idx = (*work_items)[idx].second;
+            const RowGroupStats& rg = fit->second.row_groups[static_cast<size_t>(rg_idx)];
+            std::vector<ColumnStats> col_stats_vec;
+            col_stats_vec.reserve(column_names->size());
+            for (const std::string& want : *column_names) {
+                for (const ColumnStats& cs : rg.columns) {
+                    if (cs.name == want) {
+                        col_stats_vec.push_back(cs);
+                        break;
+                    }
                 }
             }
+            if (col_stats_vec.size() != column_names->size()) {
+                // Schema evolution (a projected column absent from this row group)
+                // is out of scope for this first landing — fail loud, no NULL-fill
+                // guess.
+                err.code = 1;
+                err.msg = "NativeParquetScanSource: row group is missing a projected "
+                          "column (schema evolution is not supported on this path)";
+                return;
+            }
+            rg_idxs.push_back(rg_idx);
+            stats.push_back(std::move(col_stats_vec));
         }
-        if (col_names_vec.size() != column_names->size()) {
-            // Schema evolution (a projected column absent from this row group) is
-            // out of scope for this first landing — fail loud, no NULL-fill guess.
-            err.code = 1;
-            err.msg = "NativeParquetScanSource: row group is missing a projected "
-                      "column (schema evolution is not supported on this path)";
-            return;
-        }
-        pipeline->submit_row_group(path, rg_idx, col_names_vec, col_stats_vec);
+        pipeline->submit_block(path, rg_idxs, *column_names, stats);
     }
 
     SourceResult get_morsel(GlobalSourceState& gs, LocalSourceState&, MorselPtr& out,
@@ -969,9 +1019,17 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                 // abandon the pipeline with results outstanding, so the bounded
                 // in-flight window is the (intended, small) overshoot.
                 const bool limit_met = (row_limit >= 0 && g.rows_emitted >= row_limit);
+                // The window advances a whole FETCH BLOCK at a time — the kept row
+                // groups of one block are one pipeline submission, so a column's
+                // chunks over the block coalesce into one range GET. A block that
+                // straddles the window overshoots it by at most (block - 1) row
+                // groups; the frontier (n_items) is never crossed, so a LIMIT-capped
+                // or pruned block is submitted partially, still as one fetch.
                 while (!limit_met && submit_end < n_items &&
                        (submit_end - g.results_received) < in_flight_limit) {
-                    submit_end += 1;
+                    int e = submit_end + 1;
+                    while (e < n_items && same_block(g, e - 1, e)) ++e;
+                    submit_end = e;
                 }
                 g.next_to_submit = submit_end;
                 // Done when every row group we actually submitted has been
@@ -984,11 +1042,16 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                 g.results_received += 1;
             }
 
-            for (int idx = submit_start; idx < submit_end; ++idx) {
-                // `idx` counts submittable units; the runtime bound may have
-                // removed work items between them, so resolve to the real index.
-                submit_one(static_cast<size_t>(g.item_index(idx)), err);
+            // Units count submittable row groups; the runtime bound may have
+            // removed work items between them, so submit_block resolves each to
+            // its real index. Consecutive units of one block go as one submission.
+            int b = submit_start;
+            while (b < submit_end) {
+                int e = b + 1;
+                while (e < submit_end && same_block(g, e - 1, e)) ++e;
+                submit_block(g, b, e, err);
                 if (err.code != 0) return SourceResult::FINISHED;
+                b = e;
             }
 
             rugo::MorselRef result;

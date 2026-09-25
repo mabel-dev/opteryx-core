@@ -27,6 +27,8 @@ from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.utils import random_string
+from opteryx.compiled.structures.expressions import Aggregator
+from opteryx.compiled.structures.expressions import Wildcard
 
 # A view whose body carries an IN-subquery — the shape the plan rewriter lowers to a
 # LEFT SEMI join, and the shape a real semi-join view (e.g. exploited_vulnerabilities) has.
@@ -67,8 +69,8 @@ def odata_style_count_plan(relation):
     scan_id = random_string()
     plan.add_node(scan_id, scan)
 
-    count = Node(
-        node_type=NodeType.AGGREGATOR, value="COUNT", parameters=[Node(node_type=NodeType.WILDCARD)]
+    count = Aggregator(
+        value="COUNT", parameters=[Wildcard()]
     )
     count.alias = "count"
     aggregate = LogicalPlanNode(node_type=LogicalPlanStepType.Aggregate)
@@ -117,7 +119,7 @@ def test_view_rows_still_read(view_in_catalog):
     plan.add_node(scan_id, scan)
 
     exit_node = LogicalPlanNode(node_type=LogicalPlanStepType.Exit)
-    exit_node.columns = [Node(node_type=NodeType.WILDCARD)]
+    exit_node.columns = [Wildcard()]
     exit_id = random_string()
     plan.add_node(exit_id, exit_node)
     plan.add_edge(scan_id, exit_id)

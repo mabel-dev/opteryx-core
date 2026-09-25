@@ -30,6 +30,12 @@ from opteryx.exceptions import (
 )
 from opteryx.expression import NodeType, format_expression, get_all_nodes_of_type
 from opteryx.models import LogicalColumn, Node
+from opteryx.models import is_expression
+from opteryx.compiled.structures.expressions import And
+from opteryx.compiled.structures.expressions import Or
+from opteryx.compiled.structures.expressions import Wildcard
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
 from opteryx.operators.window.helpers import FRAME_BOUND_KIND
 from opteryx.operators.window.helpers import FRAME_UNITS
 from opteryx.operators.window.helpers import FRAMED_AGGREGATE_FUNCTIONS
@@ -526,10 +532,9 @@ def extract_variable(clause):
 
 def extract_simple_filter(filters, identifier: str = "Name"):
     if "Like" in filters:
-        left = Node(NodeType.IDENTIFIER, value=identifier)
-        right = Node(NodeType.LITERAL, type=_plt.VARCHAR, value=filters["Like"])
-        root = Node(
-            NodeType.COMPARISON_OPERATOR,
+        left = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=identifier)
+        right = Literal(type=_plt.VARCHAR, value=filters["Like"])
+        root = Comparison(
             value="ILike",  # we're case insensitive for SHOW filters
             left=left,
             right=right,
@@ -616,7 +621,7 @@ def _strip_outer_nesting(node):
     `'NoneType' object has no attribute 'lower'`, and `JOIN ... ON (a = b)`
     reported "INNER JOIN has no valid conditions, did you mean CROSS JOIN?".
     """
-    if not isinstance(node, Node):
+    if not is_expression(node):
         return node
     while node.node_type == NodeType.NESTED and node.centre is not None:
         centre = node.centre
@@ -880,30 +885,6 @@ def _find_base_scan(plan: LogicalPlan) -> "LogicalPlanNode":
     return scans[0]
 
 
-def _expression_children(tree) -> list:
-    """Every child expression of `tree`, in the shape the expression walkers agree on.
-
-    `get_all_nodes_of_type`, `_replace_node` and the walks below all have to reach the
-    same set of children, or a node one of them can find is a node another silently
-    walks past. Held in one place so they cannot drift.
-    """
-    children: list = []
-    if tree.parameters:
-        children.extend(p for p in tree.parameters if isinstance(p, (Node, LogicalColumn)))
-    for _side in ("left", "centre", "right"):
-        _child = getattr(tree, _side, None)
-        if isinstance(_child, (Node, LogicalColumn)):
-            children.append(_child)
-    if tree.node_type == NodeType.CASE:
-        if tree.conditions:
-            children.extend(c for c in tree.conditions if isinstance(c, (Node, LogicalColumn)))
-        if tree.results:
-            children.extend(r for r in tree.results if isinstance(r, (Node, LogicalColumn)))
-        if isinstance(tree.else_result, (Node, LogicalColumn)):
-            children.append(tree.else_result)
-    return children
-
-
 def _enclosing_aggregator(tree, target, nearest=None):
     """The aggregate or window call `target` is written INSIDE, or None.
 
@@ -943,7 +924,7 @@ def _enclosing_aggregator(tree, target, nearest=None):
     if tree.node_type == NodeType.AGGREGATOR:
         nearest = tree
 
-    for _child in _expression_children(tree):
+    for _child in tree.children():
         found = _enclosing_aggregator(_child, target, nearest)
         if found is not None:
             return found
@@ -1393,34 +1374,16 @@ def _replace_node(tree, target, replacement):
 
     Matching on identity rather than on value is deliberate: a query may filter on
     two window functions that render identically, and a value-based match would
-    rewrite whichever came first for both. The walk mirrors
-    `get_all_nodes_of_type` — parameters, left/centre/right, and CASE's
-    conditions/results/else_result — so any shape that walker can reach, this one
-    can rewrite.
+    rewrite whichever came first for both. It walks every child, the same set
+    `get_all_nodes_of_type` walks, so any node that walker can reach, this one can
+    rewrite.
     """
     if tree is None:
         return None
     if tree is target:
         return replacement
 
-    if tree.parameters:
-        tree.parameters = [
-            _replace_node(param, target, replacement)
-            if isinstance(param, (Node, LogicalColumn))
-            else param
-            for param in tree.parameters
-        ]
-    for _side in ("left", "centre", "right"):
-        _child = getattr(tree, _side, None)
-        if isinstance(_child, (Node, LogicalColumn)):
-            setattr(tree, _side, _replace_node(_child, target, replacement))
-    if tree.node_type == NodeType.CASE:
-        if tree.conditions:
-            tree.conditions = [_replace_node(c, target, replacement) for c in tree.conditions]
-        if tree.results:
-            tree.results = [_replace_node(r, target, replacement) for r in tree.results]
-        if isinstance(tree.else_result, (Node, LogicalColumn)):
-            tree.else_result = _replace_node(tree.else_result, target, replacement)
+    tree.map_children(lambda child: _replace_node(child, target, replacement))
     return tree
 
 
@@ -1779,6 +1742,27 @@ def _hoist_windows(
 GROUPED_AGGREGATE_ALIAS_PREFIX = "$grouped-"
 
 
+def _qualified_name(node):
+    """`source.name` for the expressions that carry one (a column reference, a
+    function or aggregate call), else None."""
+    if node.node_type in _QUALIFIED_NAME_TYPES:
+        return node.qualified_name
+    return None
+
+
+_QUALIFIED_NAME_TYPES = frozenset({NodeType.IDENTIFIER, NodeType.FUNCTION, NodeType.AGGREGATOR})
+
+
+def _source_column(node):
+    """The column a column reference names, else None."""
+    if node.node_type == NodeType.IDENTIFIER:
+        return node.source_column
+    return None
+
+# The expression types that record where they were written (`span`).
+_SPANNED_NODE_TYPES = frozenset({NodeType.IDENTIFIER, NodeType.FUNCTION, NodeType.AGGREGATOR})
+
+
 def _outermost_aggregates(tree) -> list:
     """Every aggregate call in `tree` that is NOT written inside another aggregate.
 
@@ -1788,12 +1772,12 @@ def _outermost_aggregates(tree) -> list:
     those group results, so registering both would compute `SUM(x)` twice and give
     the second copy no meaning.
     """
-    if tree is None or not isinstance(tree, (Node, LogicalColumn)):
+    if not is_expression(tree):
         return []
     if tree.node_type == NodeType.AGGREGATOR:
         return [tree]
     found: list = []
-    for _child in _expression_children(tree):
+    for _child in tree.children():
         found.extend(_outermost_aggregates(_child))
     return found
 
@@ -1885,7 +1869,7 @@ def _rebase_over_aggregate(tree, names: dict, skipped: set, passthrough: set, me
     pass-through list — is rewritten to the SAME reference object in both, as it was
     the same object before.
     """
-    if tree is None or not isinstance(tree, (Node, LogicalColumn)):
+    if not is_expression(tree):
         return tree
     if id(tree) in skipped:
         return tree
@@ -1904,7 +1888,7 @@ def _rebase_over_aggregate(tree, names: dict, skipped: set, passthrough: set, me
             node_type=NodeType.IDENTIFIER,
             source_column=_name,
             alias=tree.alias,
-            span=tree.span,
+            span=tree.span if tree.node_type in _SPANNED_NODE_TYPES else None,
         )
         # The name the CALLER sees is the expression they wrote, not the grouped
         # relation's internal column name — `SELECT SUM(x)` answers `SUM(x)` whether or
@@ -1930,32 +1914,9 @@ def _rebase_over_aggregate(tree, names: dict, skipped: set, passthrough: set, me
             return tree
         _refuse_ungrouped_column(tree)
 
-    if tree.parameters:
-        tree.parameters = [
-            _rebase_over_aggregate(_parameter, names, skipped, passthrough, memo)
-            if isinstance(_parameter, (Node, LogicalColumn))
-            else _parameter
-            for _parameter in tree.parameters
-        ]
-    for _side in ("left", "centre", "right"):
-        _child = getattr(tree, _side, None)
-        if isinstance(_child, (Node, LogicalColumn)):
-            setattr(tree, _side, _rebase_over_aggregate(_child, names, skipped, passthrough, memo))
-    if tree.node_type == NodeType.CASE:
-        if tree.conditions:
-            tree.conditions = [
-                _rebase_over_aggregate(_condition, names, skipped, passthrough, memo)
-                for _condition in tree.conditions
-            ]
-        if tree.results:
-            tree.results = [
-                _rebase_over_aggregate(_result, names, skipped, passthrough, memo)
-                for _result in tree.results
-            ]
-        if isinstance(tree.else_result, (Node, LogicalColumn)):
-            tree.else_result = _rebase_over_aggregate(
-                tree.else_result, names, skipped, passthrough, memo
-            )
+    tree.map_children(
+        lambda _child: _rebase_over_aggregate(_child, names, skipped, passthrough, memo)
+    )
     memo[id(tree)] = tree
     return tree
 
@@ -2082,6 +2043,15 @@ def _parse_table_hints(with_hints: list, relation_name: str) -> tuple:
     return hints, settings
 
 
+def _projection_except_columns(projection):
+    """`SELECT * EXCEPT (...)`: the EXCEPT list rides on a leading WILDCARD, the only
+    expression that has one."""
+    head = projection[0]
+    if head.node_type != NodeType.WILDCARD:
+        return None
+    return head.except_columns
+
+
 def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     if "Query" in ast_branch:
         # Sometimes we get a full query plan here (e.g. when queries in set
@@ -2190,7 +2160,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         for p in (logical_planner_builders.build(ast_branch["Select"].get("projection")) or [])
     ]
     if len(_projection) > 1 and any(
-        p.node_type == NodeType.WILDCARD for p in _projection if p.value is None
+        p.node_type == NodeType.WILDCARD and p.value is None for p in _projection
     ):
         from opteryx.exceptions import SqlError
 
@@ -2557,7 +2527,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         _projection_aliases = {p.alias.lower() for p in _projection if p.alias}
         _seen_expressions = {format_expression(p).lower() for p in _projection}
         _seen_expressions.update(
-            p.qualified_name.lower() for p in _projection if p.qualified_name
+            _qualified_name(p).lower() for p in _projection if _qualified_name(p)
         )
 
         _having_aggregates = get_all_nodes_of_type(
@@ -2634,41 +2604,18 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         _matched_keys: list = []
 
         def _substitute_group_keys(_node):
-            if _node is None or not isinstance(_node, (Node, LogicalColumn)):
+            if not is_expression(_node):
                 return _node
             _rendering = format_expression(_node).lower()
             _key_node = _group_key_renderings.get(_rendering)
             if _key_node is not None:
                 _matched_keys.append((_rendering, _key_node))
                 return _key_node
-            # The child set is `get_all_nodes_of_type`'s, exactly: parameters, CASE's
-            # conditions/results/else_result, and left/right/centre. A walker that knows
-            # a smaller set silently stops matching inside whatever it skips — a CASE
-            # branch here would have left its `UPPER(name)` unresolved and then had the
-            # leaf rejected as ungrouped, which is a WRONG error on a legal query.
-            if _node.parameters:
-                _node.parameters = [
-                    _substitute_group_keys(_child) if isinstance(_child, (Node, LogicalColumn))
-                    else _child
-                    for _child in _node.parameters
-                ]
-            if _node.node_type == NodeType.CASE:
-                if _node.conditions:
-                    _node.conditions = [
-                        _substitute_group_keys(_c) if isinstance(_c, (Node, LogicalColumn)) else _c
-                        for _c in _node.conditions
-                    ]
-                if _node.results:
-                    _node.results = [
-                        _substitute_group_keys(_r) if isinstance(_r, (Node, LogicalColumn)) else _r
-                        for _r in _node.results
-                    ]
-                if isinstance(_node.else_result, (Node, LogicalColumn)):
-                    _node.else_result = _substitute_group_keys(_node.else_result)
-            for _attr in ("left", "right", "centre"):
-                _child = getattr(_node, _attr, None)
-                if _child is not None:
-                    setattr(_node, _attr, _substitute_group_keys(_child))
+            # Every child, the same set `get_all_nodes_of_type` walks: a walker that
+            # knows a smaller set silently stops matching inside whatever it skips — a
+            # CASE branch here would have left its `UPPER(name)` unresolved and then had
+            # the leaf rejected as ungrouped, which is a WRONG error on a legal query.
+            _node.map_children(_substitute_group_keys)
             return _node
 
         _having = _substitute_group_keys(_having)
@@ -2877,8 +2824,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             _order_by_columns = [_item[0] for _item in _order_by]
         for _index, (_agg_node, _partition_by, _wob, _frame) in enumerate(_window_specs):
             _agg_node.parameters = [
-                _rebase(_parameter) if isinstance(_parameter, (Node, LogicalColumn)) else _parameter
-                for _parameter in (_agg_node.parameters or [])
+                _rebase(_parameter) for _parameter in (_agg_node.parameters or [])
             ]
             _rebased_wob = (
                 [(_rebase(_column), _ascending) for _column, _ascending in _wob] if _wob else _wob
@@ -2955,7 +2901,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
 
         _grouped_relation = LogicalPlanNode(node_type=LogicalPlanStepType.Subquery)
         _grouped_relation.alias = f"{GROUPED_AGGREGATE_ALIAS_PREFIX}{random_string(6)}"
-        _grouped_relation.columns = [Node(node_type=NodeType.WILDCARD)]
+        _grouped_relation.columns = [Wildcard()]
         previous_step_id, step_id = step_id, random_string()
         inner_plan.add_node(step_id, _grouped_relation)
         inner_plan.add_edge(previous_step_id, step_id)
@@ -3260,7 +3206,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         if _order_by_columns:
             # Collect qualified names and aliases from projection columns
             projection_qualified_names = {
-                proj_col.qualified_name for proj_col in _projection if proj_col.qualified_name
+                _qualified_name(proj_col) for proj_col in _projection if _qualified_name(proj_col)
             }.union({f".{proj_col.alias}" for proj_col in _projection if proj_col.alias})
 
             # Compare projection and ORDER BY identifiers case-insensitively
@@ -3275,9 +3221,9 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
 
             # Collect source column names from projection (lowercased)
             projection_source_columns_lower = {
-                f".{proj_col.source_column}".lower()
+                f".{_source_column(proj_col)}".lower()
                 for proj_col in _projection
-                if getattr(proj_col, "source_column", None)
+                if _source_column(proj_col)
             }
 
             # Remove columns from ORDER BY that are directly in the projection, aliased, or have the same expression
@@ -3285,17 +3231,17 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                 ord_col
                 for ord_col in _order_by_columns
                 if (
-                    (ord_col.qualified_name or "").lower() not in projection_qualified_names_lower
-                    and f".{(ord_col.source_column or '')}".lower()
+                    (_qualified_name(ord_col) or "").lower() not in projection_qualified_names_lower
+                    and f".{(_source_column(ord_col) or '')}".lower()
                     not in projection_qualified_names_lower
-                    and f".{(ord_col.source_column or '')}".lower()
+                    and f".{(_source_column(ord_col) or '')}".lower()
                     not in projection_source_columns_lower
                     and format_expression(ord_col).lower() not in projection_expressions_lower
                 )
             ]
 
             # Remove columns from ORDER BY that match the source of a wildcard in the projection
-            if _projection[0].except_columns is None:
+            if _projection_except_columns(_projection) is None:
                 for proj_col in [pc for pc in _projection if pc.node_type == NodeType.WILDCARD]:
                     _order_by_columns_not_in_projection = [
                         ord_col
@@ -3327,7 +3273,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         project_step = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
         project_step.columns = _projection
         project_step.passthrough_columns = _order_by_columns_not_in_projection
-        project_step.except_columns = _projection[0].except_columns
+        project_step.except_columns = _projection_except_columns(_projection)
         project_step.hidden_columns = _hidden_window_columns
         previous_step_id, step_id = step_id, random_string()
         inner_plan.add_node(step_id, project_step)
@@ -3980,7 +3926,7 @@ def plan_query(statement: dict) -> LogicalPlan:
         # origin matches `value[0]` — `(None,)` matches no relation, so the EXIT bound
         # to zero columns and the set operation failed with that same misleading error.
         # Reached when the left leg declares no columns at all.
-        columns = _set_operation_leg_columns(left_plan) or [LogicalPlanNode(NodeType.WILDCARD)]
+        columns = _set_operation_leg_columns(left_plan) or [Wildcard()]
         exit_node.columns = columns
         head_nid, step_id = step_id, random_string()
         plan.add_node(step_id, exit_node)
@@ -4081,7 +4027,7 @@ def _plan_virtual_dataset_scan(relation: str, internal_relation: bool) -> Logica
     # A BARE wildcard: `value` must be None. A non-None `value` marks a QUALIFIED
     # wildcard (`rel.*`) and binder.visit_exit then expands only columns whose
     # origin matches `value[0]` — so `(None,)` silently expands to nothing.
-    exit_node.columns = [LogicalPlanNode(NodeType.WILDCARD)]
+    exit_node.columns = [Wildcard()]
     previous_step_id, step_id = step_id, random_string()
     plan.add_node(step_id, exit_node)
     plan.add_edge(previous_step_id, step_id)
@@ -4248,7 +4194,7 @@ def _plan_show_triggers(table_name: str) -> LogicalPlan:
     plan.add_edge(previous_step_id, step_id)
 
     exit_node = LogicalPlanNode(node_type=LogicalPlanStepType.Exit)
-    exit_node.columns = [LogicalPlanNode(NodeType.WILDCARD)]
+    exit_node.columns = [Wildcard()]
     previous_step_id, step_id = step_id, random_string()
     plan.add_node(step_id, exit_node)
     plan.add_edge(previous_step_id, step_id)
@@ -7253,7 +7199,7 @@ def build_expression_tree(relation, dnf_list):
         common_clause, or_clauses = dnf_list
         left = build_expression_tree(relation, common_clause)
         right = build_expression_tree(relation, or_clauses)
-        return Node(node_type=NodeType.AND, left=left, right=right)
+        return And(left=left, right=right)
 
     # --- Case: flat clause (AND of tuples) ---
     if all(isinstance(x, tuple) for x in dnf_list):
@@ -7265,8 +7211,7 @@ def build_expression_tree(relation, dnf_list):
                 left_node = LogicalColumn(
                     NodeType.IDENTIFIER, source_column=identifier, source=relation
                 )
-            comparison_node = Node(
-                node_type=NodeType.COMPARISON_OPERATOR,
+            comparison_node = Comparison(
                 value=operator,
                 left=left_node,
                 right=build_literal_node(value),
@@ -7279,7 +7224,7 @@ def build_expression_tree(relation, dnf_list):
             and_node = (
                 comparison_node
                 if and_node is None
-                else Node(node_type=NodeType.AND, left=and_node, right=comparison_node)
+                else And(left=and_node, right=comparison_node)
             )
         return and_node
 
@@ -7291,7 +7236,7 @@ def build_expression_tree(relation, dnf_list):
             or_node = (
                 clause_node
                 if or_node is None
-                else Node(node_type=NodeType.OR, left=or_node, right=clause_node)
+                else Or(left=or_node, right=clause_node)
             )
         return or_node
 
@@ -7301,7 +7246,7 @@ def build_expression_tree(relation, dnf_list):
         subgroups = [x for x in dnf_list if isinstance(x, list)]
         left = build_expression_tree(relation, flat_preds)
         right = build_expression_tree(relation, subgroups)
-        return Node(node_type=NodeType.AND, left=left, right=right)
+        return And(left=left, right=right)
 
     # --- Case: fallback, treat as OR of subgroups ---
     if isinstance(dnf_list, list):
@@ -7311,7 +7256,7 @@ def build_expression_tree(relation, dnf_list):
             or_node = (
                 subgroup_node
                 if or_node is None
-                else Node(node_type=NodeType.OR, left=or_node, right=subgroup_node)
+                else Or(left=or_node, right=subgroup_node)
             )
         return or_node
 
@@ -7573,8 +7518,7 @@ def _insert_visibility_filter(logical_plan, nid, node, filter_dnf, telemetry) ->
     if filter_dnf == []:
         # TODO: This is a hack to make sure that an empty list of filters
         # means that the relation should not be visible
-        expression_tree = Node(
-            node_type=NodeType.COMPARISON_OPERATOR,
+        expression_tree = Comparison(
             value="Eq",
             left=build_literal_node(True),
             right=build_literal_node(False),

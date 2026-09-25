@@ -20,12 +20,14 @@ estimate.
 import os
 import sys
 import uuid
+from opteryx.compiled.structures.expressions import Comparison
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
 import pytest
 
 import opteryx
+from opteryx.planner.plan_context import PlanContext
 from opteryx.expression import NodeType
 
 
@@ -55,7 +57,7 @@ def _bind(sql, ctx, run_optimizer=True):
         plan, execution_context=ctx, query_id=str(uuid.uuid4()), telemetry=telemetry
     )
     if run_optimizer:
-        bound = do_optimizer(bound, telemetry)
+        bound = do_optimizer(bound, telemetry, PlanContext())
     return bound
 
 
@@ -130,7 +132,7 @@ def test_unset_decay_is_none_not_a_default_guess():
     # reachable, not just theoretical.
     from opteryx.models import Node
 
-    fresh_node = Node(NodeType.COMPARISON_OPERATOR, value="InStr")
+    fresh_node = Comparison(value="InStr")
     assert fresh_node.like_selectivity_decay is None
 
 

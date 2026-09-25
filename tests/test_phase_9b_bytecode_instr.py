@@ -68,10 +68,11 @@ class TestByteCodeInstrPhase9b(unittest.TestCase):
         self.assertGreater(fn_ptr, 0)
 
     def test_resolve_kernel_not_found(self):
-        """Test that resolving a non-existent kernel raises ValueError."""
-        with self.assertRaises(ValueError) as ctx:
-            _resolve_kernel_and_context("draken_nonexistent_kernel", None, None)
-        self.assertIn("not found in registry", str(ctx.exception))
+        """An unknown kernel resolves to (None, None): the lowering probes for a
+        native kernel and takes its next route when there is none."""
+        self.assertEqual(
+            _resolve_kernel_and_context("draken_nonexistent_kernel", None, None), (None, None)
+        )
 
 
 if __name__ == "__main__":

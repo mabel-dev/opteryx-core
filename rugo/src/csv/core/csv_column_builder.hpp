@@ -54,13 +54,13 @@ struct StreamResult {
 };
 
 // ---------------------------------------------------------------------------
-// Unescape a quoted field value in-place into `out`.
-// Handles both \" and "" escape sequences.
+// Unescape a quoted field value into `out` (capacity >= len).
+// RFC 4180: "" is the only escape; backslash is literal.
 // Returns the number of bytes written (always <= len).
 // ---------------------------------------------------------------------------
 uint32_t unescape_csv_field(
     const uint8_t* src,
-    uint16_t       len,
+    uint32_t       len,
     uint8_t*       out) noexcept;
 
 // ---------------------------------------------------------------------------

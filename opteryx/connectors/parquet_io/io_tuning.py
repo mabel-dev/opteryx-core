@@ -66,7 +66,7 @@ PER_SCAN_VARIABLES = frozenset({
     "parquet_io_coalesce_max_bytes",
     "parquet_io_coalesce_waste_ratio",
     "parquet_io_fetch_ahead",
-    "parquet_io_fetch_ahead_min_row_groups",
+    "parquet_io_fetch_ahead_min_blocks",
     "parquet_io_in_flight_limit",
     "parquet_io_memory_budget_bytes",
 })
@@ -145,13 +145,14 @@ def resolve_fetch_ahead(variables, overrides=None) -> int:
 
 
 def resolve_fetch_ahead_gate(variables, overrides=None) -> int:
-    """Minimum REMOTE row groups (post-pruning) before the depth above is armed;
-    0 = no minimum. A knob of its own, not derived from the depth or the worker
-    count — tuning either through the other is what made the worker/window sweep
+    """Minimum REMOTE fetch blocks (post-pruning; the kept row groups of one
+    block of one file are one fetch) before the depth above is armed; 0 = no
+    minimum. A knob of its own, not derived from the depth or the worker count —
+    tuning either through the other is what made the worker/window sweep
     unattributable."""
     return int(_value(
-        "parquet_io_fetch_ahead_min_row_groups", variables,
-        config.PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS, overrides))
+        "parquet_io_fetch_ahead_min_blocks", variables,
+        config.PARQUET_IO_FETCH_AHEAD_MIN_BLOCKS, overrides))
 
 
 # The auto budget's share of the container's (or host's) memory. Half: the scan

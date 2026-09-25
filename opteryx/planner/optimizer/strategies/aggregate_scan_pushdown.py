@@ -36,8 +36,7 @@ Declined by shape here, before the connector is asked:
 Ordering: after PredicatePushdown (the Filter is absorbed into the scan and
 HAVING has been folded into `having_condition`) and ProjectionPushdown; after
 ProjectFusion/RedundantOperations so the Project the planner leaves between the
-aggregate and the Exit is already gone; before HashMapVariantStrategy, which
-annotates the Aggregate node this strategy removes.
+aggregate and the Exit is already gone.
 """
 
 from opteryx.planner.logical_planner import LogicalPlan

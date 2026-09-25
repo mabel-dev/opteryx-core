@@ -1,8 +1,8 @@
 #pragma once
 // skene/reader.h — read a .skene file back into a CxxMorsel.
 //
-// Versioned from v1. A build reads at most two versions (the one it writes and
-// its predecessor) and dispatches on the file's version; migration needs the
+// Versioned. A build reads at most two versions (the one it writes and its
+// predecessor — v2 and v3 here) and dispatches on the file's version; migration needs the
 // older reader present in the SOURCE, not merely in a released binary, so the
 // per-version split exists from the start rather than being retrofitted when it
 // is first needed.
@@ -13,6 +13,7 @@
 // wrong answer.
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -90,13 +91,6 @@ struct ColumnMetadata {
 
     bool             has_statistics = false;
     ColumnStatistics statistics{};
-    // KMV min-hashes read from the tail of the statistics blob, ascending;
-    // empty when the writer stored none. MERGEABLE — union two sketches by
-    // taking the K smallest of their combined hashes. Only ever with ANOTHER
-    // SKENE sketch: these are skene's XXH3 dedup hashes, not draken's
-    // Vector.hash(), so they do not mix with ANALYZE/catalog sketches
-    // (format.h, ColumnSketchHeader).
-    std::vector<uint64_t> sketch;
     ZoneMap          zone_map;
 
     // Serialized bloom filter, empty when the column has none. Probe it with
@@ -124,13 +118,23 @@ struct ColumnSchema {
 struct RowGroupColumnStatistics {
     bool             present = false;
     ColumnStatistics statistics{};
-    // KMV min-hashes read from the tail of the statistics blob, ascending;
-    // empty when the writer stored none. MERGEABLE — union two sketches by
-    // taking the K smallest of their combined hashes. Only ever with ANOTHER
-    // SKENE sketch: these are skene's XXH3 dedup hashes, not draken's
-    // Vector.hash(), so they do not mix with ANALYZE/catalog sketches
-    // (format.h, ColumnSketchHeader).
-    std::vector<uint64_t> sketch;
+};
+
+// One column node's KMV sketch over the WHOLE FILE (FORMAT.md §8.1).
+//
+// `hash_family` says which hash produced the values, and is a correctness
+// discriminant, not a label: two sketches union only when their families are
+// equal (draken/core/kmv_sketch.h). A v3 file's sketches are
+// kSketchFamilyDrakenVectorHash — unionable with catalog and ANALYZE sketches.
+// A v2 file stored per-row-group sketches in skene's own XXH3 family; the v2
+// reader reports their exact union as the file sketch, family
+// kSketchFamilyXxh3Value, and reports NONE when any row group lacked one.
+struct ColumnSketch {
+    uint8_t               hash_family = kSketchFamilyNone;  // None == not tracked
+    uint32_t              k = 0;
+    std::vector<uint64_t> hashes;   // ascending, distinct, at most k
+
+    bool present() const noexcept { return hash_family != kSketchFamilyNone; }
 };
 
 // One row group as the FILE FOOTER describes it.
@@ -141,14 +145,6 @@ struct RowGroupColumnStatistics {
 struct RowGroupSummary {
     uint64_t row_count = 0;
     uint64_t first_row = 0;      // this row group's first row, in file row order
-
-    // The row group's DATA + INDEX extent — everything but its footer.
-    uint64_t byte_offset = 0;
-    uint64_t byte_bytes  = 0;
-
-    // Its own footer, which is where its column and section directories live.
-    uint64_t footer_offset = 0;
-    uint32_t footer_bytes  = 0;
 
     // Depth-first over FileMetadata::columns, ARRAY children included — the same
     // order the schema directory is written in, so index i means the same column
@@ -165,10 +161,17 @@ struct FileMetadata {
     std::vector<ColumnSchema>    columns;
     std::vector<RowGroupSummary> row_groups;
 
-    // v2: the sort keys the file's rows are GLOBALLY ordered by, verified by
-    // the writer over the actual rows. Empty means unclustered — which is what
-    // every v1 file reports, since v1 had no way to say otherwise.
+    // The sort keys the file's rows are GLOBALLY ordered by, verified by the
+    // writer over the actual rows. Empty means unclustered.
     std::vector<SortKey> cluster_keys;
+
+    // v3: row groups per fetch block (G, FORMAT.md §3.2). 0 for a v2 file,
+    // which recorded none — never inferred.
+    uint32_t block_row_groups = 0;
+
+    // One per column NODE, depth first over `columns` (ARRAY children
+    // included), parallel to each RowGroupSummary::column_statistics.
+    std::vector<ColumnSketch> sketches;
 };
 
 // One row group in full, from its own footer.
@@ -262,5 +265,146 @@ inline Status read_morsel(const void* file, size_t file_bytes, uint32_t row_grou
                           CxxMorsel* out) {
     return read_morsel(file, file_bytes, row_group, ReadOptions(), out);
 }
+
+// ─── Repeated reads of one file ─────────────────────────────────────────────
+
+// A .skene file opened for reading row group after row group.
+//
+// read_morsel(file, file_bytes, row_group, ...) above re-validates the framing
+// and re-parses the whole footer on every call — O(row groups in the file) per
+// read, so a scan of a packed file pays O(n²). open_reader() does that work
+// ONCE; read_morsel(const FileReader&, ...) then pays only for the row group it
+// reads.
+//
+// Two ways to open one:
+//
+//   WHOLE BUFFER — open_reader(file, bytes). The caller holds every byte (an
+//   mmap, a spill buffer). For a v3 file every column's directory block is
+//   parsed at open. Reads take no range list.
+//
+//   RANGED (v3 only) — open_reader_ranged(tail, footer, ...). The caller holds
+//   only the tail and the footer, and fetches everything else itself:
+//     1. plan_directory_fetch()  the directory blocks of the columns it reads
+//     2. attach_directories()    verify and parse them into the reader
+//     3. plan_fetch()            the chunk ranges for some row groups
+//     4. read_morsel(reader, rg, options, ranges, out)
+//   A v2 file cannot be opened ranged — its decode metadata lives in per-row-
+//   group footers — and asking is refused, naming the migration route.
+//
+// The trust chain is unchanged: a directory block is verified against the
+// checksum recorded in a checksum-verified footer, and every section against its
+// own checksum before use.
+//
+// BORROWS the file bytes (whole-buffer) or nothing (ranged). Immutable once
+// opened and attached, so concurrent read_morsel calls are safe; attach is not
+// concurrent with reads.
+class FileReader;
+
+Status open_reader(const void* file, size_t file_bytes, FileReader* out);
+Status read_morsel(const FileReader& reader, uint32_t row_group,
+                   const ReadOptions& options, CxxMorsel* out);
+
+// One contiguous byte range of the file, absolute offsets.
+struct ByteRange {
+    uint64_t offset = 0;
+    uint64_t bytes  = 0;
+};
+
+// A range the caller has fetched: `data` holds exactly `bytes` bytes of the
+// file starting at `offset`, and must stay valid for the read that uses it.
+struct FetchedRange {
+    uint64_t       offset = 0;
+    uint64_t       bytes  = 0;
+    const uint8_t* data   = nullptr;
+};
+
+// How aggressively plan_fetch merges ranges into fewer requests — the same rule
+// as the parquet remote coalescer, with skene's own knobs (design R12): ranges
+// are sorted by offset and a run is merged while its cumulative gap bytes stay
+// <= waste_ratio * useful bytes AND its span stays <= max_bytes (0 = no cap).
+// waste_ratio == 0 merges only ranges that touch — byte-neutral by construction.
+struct FetchPolicy {
+    double   waste_ratio = 0.0;
+    uint64_t max_bytes   = 0;
+};
+
+// Opens a v3 file from its last kFileTailBytes and its footer (located with
+// footer_extent()). `footer_offset` is where the footer starts in the file.
+Status open_reader_ranged(const void* tail, size_t tail_bytes,
+                          const void* footer, size_t footer_bytes,
+                          uint64_t footer_offset, uint64_t file_bytes,
+                          FileReader* out);
+
+// The byte ranges holding the directory blocks of `columns` (top-level names;
+// an ARRAY column brings its child) that are not attached yet, coalesced by
+// `policy`. Empty `columns` means every column.
+//
+// `through_first_block` extends each directory's range to the end of its
+// column's block 0 (FORMAT.md §5.3 block extents). A column's directory block
+// sits immediately before its chunk for row group 0, so this is one request
+// for a column's decode metadata AND its first block's data, at no waste
+// beyond alignment padding — the fetch the layout was designed for (design
+// §3.1). A caller that asks for it holds block 0's chunks once the ranges are
+// fetched, and needs no plan_fetch for block 0's row groups.
+Status plan_directory_fetch(const FileReader& reader,
+                            const std::vector<std::string>& columns,
+                            bool through_first_block, const FetchPolicy& policy,
+                            std::vector<ByteRange>* out);
+
+// Verifies each directory block of `columns` against the checksum the footer
+// recorded, then parses it into the reader. Every directory named must be
+// covered by `ranges` — a missing one is an error, never a skipped column.
+Status attach_directories(FileReader* reader, const std::vector<std::string>& columns,
+                          const std::vector<FetchedRange>& ranges);
+
+// The byte ranges holding the chunks of `columns` for `row_groups` (ascending,
+// distinct), coalesced by `policy`. Directories for `columns` must be attached.
+// Empty `columns` means every column.
+Status plan_fetch(const FileReader& reader, const std::vector<std::string>& columns,
+                  const std::vector<uint32_t>& row_groups, const FetchPolicy& policy,
+                  std::vector<ByteRange>* out);
+
+// Reads one row group from fetched ranges. Every section the read needs must lie
+// inside one of `ranges`; a section outside all of them fails loud.
+Status read_morsel(const FileReader& reader, uint32_t row_group,
+                   const ReadOptions& options, const std::vector<FetchedRange>& ranges,
+                   CxxMorsel* out);
+
+namespace v2 { struct ReaderState; }
+namespace v3 { struct ReaderState; }
+
+class FileReader {
+  public:
+    // Everything read_metadata() returns, from the same single parse — pruning
+    // and reading share one pass over the footer.
+    const FileMetadata& metadata() const noexcept { return metadata_; }
+    uint16_t version() const noexcept { return version_; }
+    bool ranged() const noexcept { return file_ == nullptr; }
+
+  private:
+    friend Status open_reader(const void* file, size_t file_bytes, FileReader* out);
+    friend Status read_row_group_metadata(const void*, size_t, uint32_t,
+                                          RowGroupMetadata*);
+    friend Status open_reader_ranged(const void*, size_t, const void*, size_t,
+                                     uint64_t, uint64_t, FileReader*);
+    friend Status read_morsel(const FileReader&, uint32_t, const ReadOptions&,
+                              CxxMorsel*);
+    friend Status read_morsel(const FileReader&, uint32_t, const ReadOptions&,
+                              const std::vector<FetchedRange>&, CxxMorsel*);
+    friend Status plan_directory_fetch(const FileReader&, const std::vector<std::string>&,
+                                       bool, const FetchPolicy&, std::vector<ByteRange>*);
+    friend Status attach_directories(FileReader*, const std::vector<std::string>&,
+                                     const std::vector<FetchedRange>&);
+    friend Status plan_fetch(const FileReader&, const std::vector<std::string>&,
+                             const std::vector<uint32_t>&, const FetchPolicy&,
+                             std::vector<ByteRange>*);
+
+    const uint8_t* file_ = nullptr;   // borrowed; null when ranged or unopened
+    size_t         file_bytes_ = 0;
+    uint16_t       version_ = 0;      // 0 until opened
+    FileMetadata   metadata_;
+    std::shared_ptr<v2::ReaderState> v2_;
+    std::shared_ptr<v3::ReaderState> v3_;
+};
 
 }  // namespace skene

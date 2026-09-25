@@ -25,13 +25,15 @@ from typing import Tuple
 
 from opteryx.expression import NodeType
 from opteryx.models import Node
-from opteryx.planner.cost_estimation.join_cardinality import KeyStats
-from opteryx.planner.cost_estimation.join_cardinality import NdvProvenance
-from opteryx.planner.cost_estimation.join_graph import JoinEdge
-from opteryx.planner.cost_estimation.join_graph import JoinGraph
-from opteryx.planner.cost_estimation.join_graph import JoinVertex
+from opteryx.compiled.planner.join_estimator import JoinEdge
+from opteryx.compiled.planner.join_estimator import JoinGraph
+from opteryx.compiled.planner.join_estimator import JoinVertex
+from opteryx.compiled.planner.join_estimator import MAX_GRAPH_VERTICES
+from opteryx.compiled.planner.join_estimator import KeyStats
+from opteryx.compiled.planner.join_estimator import NdvProvenance
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
+from opteryx.planner.plan_context import PlanContext
 
 
 def _identifier_source(expr: Optional[Node]) -> Optional[str]:
@@ -125,7 +127,7 @@ def _subtree_sources_are_backed(plan: LogicalPlan, root_id: str) -> bool:
 
     Mirrors `result_size_guard._declared_row_count`'s precedence, which
     exists for exactly this reason: once `_UNKNOWN_ROW_COUNT` is folded into
-    `.statistics.row_count`, nothing about that attribute distinguishes a
+    the estimated `row_count`, nothing about that number distinguishes a
     real count from a fabricated one -- this must be checked against the
     same raw manifest/schema fields the guard reads, before that fold.
     False when no source at all is found (an empty subtree proves nothing).
@@ -149,7 +151,7 @@ def _subtree_sources_are_backed(plan: LogicalPlan, root_id: str) -> bool:
     return saw_a_source
 
 
-def _key_stats(scan_node, column_identity: Optional[bytes]) -> KeyStats:
+def _key_stats(scan_node, column_identity: Optional[bytes], plan_context: PlanContext) -> KeyStats:
     """Resolve KeyStats for a column by reading the refreshed Scan stats.
 
     ``column_identity`` is the ``SchemaColumn.identity`` bytes the statistics
@@ -157,7 +159,7 @@ def _key_stats(scan_node, column_identity: Optional[bytes]) -> KeyStats:
     """
     if scan_node is None or column_identity is None:
         return KeyStats(ndv=None, null_fraction=None)
-    stats = getattr(scan_node, "statistics", None)
+    stats = plan_context.statistics(scan_node)
     if stats is None:
         return KeyStats(ndv=None, null_fraction=None)
     col = stats.columns.get(column_identity)
@@ -190,10 +192,12 @@ def _leaf_relation_to_scan(
     return out
 
 
-def _leaf_row_count(plan: LogicalPlan, leaf_subplan_id: str) -> Optional[int]:
+def _leaf_row_count(
+    plan: LogicalPlan, leaf_subplan_id: str, plan_context: PlanContext
+) -> Optional[int]:
     """Estimate row count for a leaf by reading ITS OWN refreshed statistics.
 
-    Reads ``plan[leaf_subplan_id].statistics.row_count`` directly rather than
+    Reads the leaf's own estimated ``row_count`` from the PlanContext rather than
     summing per-relation Scan stats. A leaf is not always a single bare Scan
     -- a CTE or subquery reference used inside a cross-join chain (e.g.
     ``cs_ui`` in TPC-DS Q64) is ONE leaf whose recorded relation names
@@ -212,13 +216,15 @@ def _leaf_row_count(plan: LogicalPlan, leaf_subplan_id: str) -> Optional[int]:
     """
     if not _subtree_sources_are_backed(plan, leaf_subplan_id):
         return None
-    stats = getattr(plan[leaf_subplan_id], "statistics", None)
+    stats = plan_context.statistics(plan[leaf_subplan_id])
     if stats is None:
         return None
     return max(1, int(stats.row_count))
 
 
-def _leaf_domain_row_count(plan: LogicalPlan, leaf_subplan_id: str) -> Optional[int]:
+def _leaf_domain_row_count(
+    plan: LogicalPlan, leaf_subplan_id: str, plan_context: PlanContext
+) -> Optional[int]:
     """PRE-filter row count for a leaf — the ``_leaf_row_count`` counterpart.
 
     Reads ``RelationStatistics.domain_row_count`` (the base count refresh
@@ -229,7 +235,7 @@ def _leaf_domain_row_count(plan: LogicalPlan, leaf_subplan_id: str) -> Optional[
     """
     if not _subtree_sources_are_backed(plan, leaf_subplan_id):
         return None
-    stats = getattr(plan[leaf_subplan_id], "statistics", None)
+    stats = plan_context.statistics(plan[leaf_subplan_id])
     if stats is None:
         return None
     return max(1, int(stats.domain_row_count))
@@ -243,7 +249,7 @@ def _classify_predicate(
     ``left_leaf`` / ``right_leaf`` are leaf indices, or None if either side
     isn't a simple identifier bound to a tracked relation. Single-relation
     predicates (column op literal) return (None, None, False) — their
-    selectivity is already folded into Scan.statistics by the refresh pass.
+    selectivity is already folded into the Scan's estimate by the refresh pass.
     """
     if pred.node_type != NodeType.COMPARISON_OPERATOR:
         return None, None, False
@@ -307,6 +313,7 @@ def _build_equiv_tdoms(
     equivalence_classes: List[List[Tuple[int, bytes]]],
     per_leaf_scans: List[Dict[str, Any]],
     vertices: List[JoinVertex],
+    plan_context: PlanContext,
 ) -> Dict[Tuple[int, bytes], int]:
     """Compute tdom for each join column using equivalence sets (Ebergen 2022 §3.2).
 
@@ -344,7 +351,7 @@ def _build_equiv_tdoms(
         for leaf_idx, col_identity in members:
             leaf_set.add(leaf_idx)
             for scan in per_leaf_scans[leaf_idx].values():
-                stats = getattr(scan, "statistics", None)
+                stats = plan_context.statistics(scan)
                 if stats is None:
                     continue
                 col_stat = stats.columns.get(col_identity)
@@ -374,6 +381,7 @@ def build_join_graph(
     plan: LogicalPlan,
     leaves: List[Any],
     predicates: List[Node],
+    plan_context: PlanContext,
 ) -> Tuple[Optional[JoinGraph], Optional[str]]:
     """Build a JoinGraph from a leaf list and the predicates above the chain.
 
@@ -403,6 +411,15 @@ def build_join_graph(
     """
     if not leaves:
         return None, "no leaves"
+    # The native JoinGraph keys vertex sets on 64-bit bitsets. The Python
+    # enumerator it replaced had no ceiling (its greedy path ordered any
+    # count); this is a new, explicit one, refused like every other cause here
+    # so the chain keeps its written order rather than failing the query.
+    if len(leaves) > MAX_GRAPH_VERTICES:
+        return None, (
+            f"too many leaves: {len(leaves)} exceeds the join graph's"
+            f" {MAX_GRAPH_VERTICES}-vertex limit"
+        )
 
     rel_to_leaf: Dict[str, int] = {}
     for i, leaf in enumerate(leaves):
@@ -411,7 +428,7 @@ def build_join_graph(
 
     # Partition predicates: cross-leaf-equi only. Single-relation predicates
     # are no longer routed here — refresh has already folded their
-    # selectivity into Scan.statistics.row_count.
+    # selectivity into the Scan's estimated row_count.
     cross_equi: List[Tuple[int, int, Node]] = []
     for pred in predicates:
         l, r, is_eq = _classify_predicate(pred, rel_to_leaf)
@@ -464,7 +481,7 @@ def build_join_graph(
     vertices: List[JoinVertex] = []
     unbacked: List[str] = []
     for i, leaf in enumerate(leaves):
-        rows = _leaf_row_count(plan, leaf.subplan_id)
+        rows = _leaf_row_count(plan, leaf.subplan_id, plan_context)
         name = leaf.rel_names[0] if leaf.rel_names else f"leaf_{i}"
         if rows is None:
             unbacked.append(name)
@@ -475,7 +492,7 @@ def build_join_graph(
                 name=name,
                 row_count=rows,
                 payload=leaf,
-                base_row_count=_leaf_domain_row_count(plan, leaf.subplan_id),
+                base_row_count=_leaf_domain_row_count(plan, leaf.subplan_id, plan_context),
             )
         )
 
@@ -492,7 +509,7 @@ def build_join_graph(
     # than the flat 0.1 constant used by _key_selectivity. See Ebergen (2022)
     # §3.2, and _build_equiv_tdoms on why that is the PRE-filter count.
     equivalence_classes = _group_equivalence_classes(cross_equi)
-    equiv_tdoms = _build_equiv_tdoms(equivalence_classes, per_leaf_scans, vertices)
+    equiv_tdoms = _build_equiv_tdoms(equivalence_classes, per_leaf_scans, vertices, plan_context)
     # Reverse lookup so edges can be tagged with the class they belong to —
     # DPccp/_combine uses this to dedupe redundant transitive-equality edges
     # when a chain of joins closes a cycle (see dpccp._combine).
@@ -503,7 +520,7 @@ def build_join_graph(
     }
 
     def _key_stats_with_tdom(scan_node, col_identity: Optional[bytes], leaf_idx: int) -> KeyStats:
-        ks = _key_stats(scan_node, col_identity)
+        ks = _key_stats(scan_node, col_identity, plan_context)
         if ks.ndv is None and col_identity is not None:
             tdom = equiv_tdoms.get((leaf_idx, col_identity))
             if tdom is not None:

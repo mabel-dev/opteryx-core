@@ -95,14 +95,15 @@ exact match; under a semantic capability (MiniLM) 0.5 separates related from unr
 text. Tune per embedder with `SET match_threshold`.
 """
 
-WRITE_COALESCE_ROWS: int = int(get("WRITE_COALESCE_ROWS", 262144))
-"""Row-count target the INSERT/CTAS/RMV sink coalesces small morsels up to
-before writing a Parquet file, cutting down the small-file count that a
-streaming per-morsel write would otherwise produce. Clamped in the sink to
-rugo's `max_rows_per_row_group` default (also 262144) so a flushed file never
-spans more than one row group - write_parquet_with_bounds only populates
-FileEntry bounds for single-row-group files, and this keeps that path
-unchanged. Tune per workload with `SET write_coalesce_rows`."""
+WRITE_COALESCE_ROWS: int = int(get("WRITE_COALESCE_ROWS", 65536))
+"""Row-count target the INSERT/CTAS/RMV/OPTIMIZE sink (DataFileStream)
+coalesces arriving morsels up to before writing each parquet ROW GROUP of the
+open data file. One batch is one row group, so this IS the written row-group
+size; the writer then groups row groups into column-major blocks of 4
+(docs/PARQUET_GROUPED_COLUMN_MAJOR_DESIGN.md). Clamped in the sink to rugo's
+`DEFAULT_ROWS_PER_ROW_GROUP` (65536, the engine's measured best morsel size),
+so a SET past the ceiling gets the ceiling. Tune per workload with
+`SET write_coalesce_rows`."""
 
 LIKE_SELECTIVITY_DECAY: float = float(get("LIKE_SELECTIVITY_DECAY", 0.7))
 """Geometric decay applied per-position when estimating infix `LIKE '%needle%'`
@@ -218,7 +219,7 @@ PARQUET_LOCAL_IO_WORKERS: int = (
 
 **Softcoded by default**: unset / "auto" / an impossible value (0 or less) is stored as
 0 here, and `resolve_parquet_local_io_workers` derives the effective width at CALL time
-as 80% of the host, overlapping the execution width. **An explicit positive integer is HONOURED
+as the larger of `cpu - 2` and 80% of the host, overlapping the execution width. **An explicit positive integer is HONOURED
 EXACTLY.**
 
 Override via the env var to tune per deployment, or SET `parquet_local_io_workers` per
@@ -227,13 +228,13 @@ query; either is taken as-is."""
 
 def resolve_parquet_local_io_workers(requested: Optional[int] = None) -> int:
     """Effective local-Parquet IO width. Unset/"auto"/<=0 is softcoded as
-    ``max(4, floor(0.8 * cpu))``; an explicit positive request is HONOURED EXACTLY.
+    ``max(4, cpu - 2, floor(0.8 * cpu))``; an explicit positive request is HONOURED EXACTLY.
 
-    Same fraction as the execution width (`resolve_max_execution_workers`), and the two
-    OVERLAP by design (architect ruling 2026-09-23): each pool takes 80% of the host, so
-    ~60% of the cores are shared by both and ~20% are left to each — rather than a fixed
-    reserve of two cores, which is a large share of a small host and nothing on a
-    192-vCPU one. Replaces ``min(16, max(4, cpu - 2))``; there is no cap.
+    Same derivation as the execution width (`resolve_max_execution_workers`), and the two
+    OVERLAP by design (architect ruling 2026-09-23). The reserve is two cores, shrunk to
+    20% of the host below 10 vCPU where two cores would be too large a share (architect
+    ruling 2026-09-25: plain 80% measured ~7% slower on the 16-vCPU wrenchy-bench box,
+    parallel utilisation 11.6 -> 10.7 cores at unchanged CPU-seconds). There is no cap.
 
     The floor is 4 (architect, 2026-08-28), NOT the historic 8: that floor previously held
     a <=8 vCPU host at 8 IO threads while execution collapsed to 1 — the exact
@@ -248,7 +249,8 @@ def resolve_parquet_local_io_workers(requested: Optional[int] = None) -> int:
         requested = PARQUET_LOCAL_IO_WORKERS
     requested = int(requested)
     if requested <= 0:
-        return max(4, ((_os.cpu_count() or 1) * 4) // 5)
+        cpu = _os.cpu_count() or 1
+        return max(4, cpu - 2, (cpu * 4) // 5)
     return requested
 
 
@@ -356,6 +358,22 @@ row group's column chunks are contiguous — merging them wastes nothing.
 Unbounded wins on an UNCAPPED link (0.60s vs 0.90s) but is 2x worse here, so
 the default is bounded until production tells us which regime it is in."""
 
+SKENE_IO_COALESCE_WASTE_RATIO: float = float(get("SKENE_IO_COALESCE_WASTE_RATIO", 0.10))
+"""Skene's own range coalescer (design R12, docs/SKENE_V3_FORMAT_DESIGN.md): merge
+a v3 scan's planned ranges while the bytes THROWN AWAY stay within this fraction of
+the bytes needed.
+
+A v3 file is column-major, so one column over one block of row groups is already
+ONE range; this decides whether ranges of DIFFERENT columns (separated by a
+directory block or an unread column) or of row groups split by pruning are merged
+too. The same rule as the parquet coalescer, with its own knob because the two
+formats' layouts leave different gaps. 0.0 = merge only ranges that touch
+(byte-neutral). Default: parquet's measured value."""
+
+SKENE_IO_COALESCE_MAX_BYTES: int = int(get("SKENE_IO_COALESCE_MAX_BYTES", 8 * 1024 * 1024))
+"""Ceiling on one merged skene range; 0 = unbounded. Default: parquet's measured
+8 MB — one huge request serialises what were concurrent transfers."""
+
 PARQUET_IO_IN_FLIGHT_LIMIT: int = int(get("PARQUET_IO_IN_FLIGHT_LIMIT", 0))
 """ABSOLUTE cap on row groups submitted but not yet consumed. 0 = auto
 (`workers + 2`, the historical formula).
@@ -402,13 +420,22 @@ The pipeline reports the depth it actually runs as `fetch_ahead_depth` and the
 bytes a cancel threw away as `prefetch_discarded_bytes` (io_scan_diagnostics).
 
 This is the DEPTH only. Whether a given scan is big enough to arm it is
-`PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS` below, a separate knob — so a scan whose
+`PARQUET_IO_FETCH_AHEAD_MIN_BLOCKS` below, a separate knob — so a scan whose
 `fetch_ahead_depth` reads 0 with a non-zero depth set here was gated, not
 ignored."""
 
-PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS: int = int(
-    get("PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS", 48)
-)
+PARQUET_IO_FETCH_AHEAD_MIN_BLOCKS: int = int(get("PARQUET_IO_FETCH_AHEAD_MIN_BLOCKS", 48))
+"""Minimum number of REMOTE fetch blocks a scan must have (after pruning)
+before `PARQUET_IO_FETCH_AHEAD` is armed; 0 = no minimum.
+
+A fetch block is the unit the fetch stage issues — the kept row groups of one
+block of one file, fetched as one coalesced batch
+(docs/PARQUET_GROUPED_COLUMN_MAJOR_DESIGN.md). The production sweep that put the
+optimum at 48-64 was made when a fetch unit was one 256k-row row group; counting
+blocks keeps that calibration on files written with 64k row groups in blocks of
+four (which have four times the row groups for the same data). On a row-major
+file every row group is its own block, so the count is unchanged there. Tune
+per session with `SET parquet_io_fetch_ahead_min_blocks`."""
 
 PARQUET_IO_MEMORY_BUDGET_BYTES: int = int(get("PARQUET_IO_MEMORY_BUDGET_BYTES", 0))
 """Memory admission budget for one parquet scan's IO pipeline, in BYTES.
@@ -470,7 +497,7 @@ MAX_EXECUTION_WORKERS: int = (
 """Central parallel execution scheduler width (M4). **Softcoded by default**:
 unset / "auto" / an impossible value (0 or less) is stored as 0 here, and
 resolve_worker_count derives the effective width from the core count,
-max(2, floor(0.8 * cpu)). **An explicit positive integer is HONOURED EXACTLY** — never
+max(2, cpu - 2, floor(0.8 * cpu)). **An explicit positive integer is HONOURED EXACTLY** — never
 clamped, never silently overridden, not even to the physical core count; set 128 and
 you get 128 workers (oversubscription is warned once, not reduced). Worker count is
 degree-of-parallelism only — it never selects a code path (W=1 is one worker, not the
@@ -481,13 +508,13 @@ the only grouped strategy."""
 def resolve_max_execution_workers(requested: Optional[int] = None) -> int:
     """Effective execution width. The SINGLE derivation of the auto branch.
 
-    Unset/"auto"/<=0 derives ``max(2, floor(0.8 * cpu))``; an explicit positive request
-    is HONOURED EXACTLY. Architect ruling 2026-09-23, replacing ``min(16, max(2,
-    cpu - 2))``: a fixed reserve of two cores is a large share of a small host and
-    nothing on a 192-vCPU one, and the cap of 16 held a 192-vCPU ClickBench box to the
-    throughput of a 16-vCPU one. There is no cap. The local Parquet decode pool takes
-    the same 80% (`resolve_parquet_local_io_workers`) — the two overlap on ~60% of the
-    cores, leaving ~20% to each.
+    Unset/"auto"/<=0 derives ``max(2, cpu - 2, floor(0.8 * cpu))``; an explicit positive request
+    is HONOURED EXACTLY. There is no cap: the old cap of 16 held a 192-vCPU ClickBench
+    box to the throughput of a 16-vCPU one (architect ruling 2026-09-23). The reserve is
+    two cores, shrunk to 20% of the host below 10 vCPU where two cores would be too large
+    a share (architect ruling 2026-09-25: plain 80% measured ~7% slower on the 16-vCPU
+    wrenchy-bench box — 12 workers instead of 14). The local Parquet decode pool takes
+    the same derivation (`resolve_parquet_local_io_workers`) and the two overlap.
 
     The floor is 2, not 1, so a 2-vCPU host stays parallel at all.
 
@@ -501,7 +528,8 @@ def resolve_max_execution_workers(requested: Optional[int] = None) -> int:
         requested = MAX_EXECUTION_WORKERS
     requested = int(requested)
     if requested <= 0:
-        return max(2, ((_os.cpu_count() or 1) * 4) // 5)
+        cpu = _os.cpu_count() or 1
+        return max(2, cpu - 2, (cpu * 4) // 5)
     return requested
 
 if environ.get("FEATURE_DRAKEN_DICT_EXPR_STRICT") is not None:
@@ -619,9 +647,7 @@ class Features:
     disable_filter_implied_group_key_reduction = get_bool("FEATURE_DISABLE_FILTER_IMPLIED_GROUP_KEY_REDUCTION", False)
     disable_function_rewrite = get_bool("FEATURE_DISABLE_FUNCTION_REWRITE", False)
     disable_group_key_reduction = get_bool("FEATURE_DISABLE_GROUP_KEY_REDUCTION", False)
-    disable_hash_map_variant = get_bool("FEATURE_DISABLE_HASH_MAP_VARIANT", False)
     disable_join_algorithm = get_bool("FEATURE_DISABLE_JOIN_ALGORITHM", False)
-    disable_join_build_shape = get_bool("FEATURE_DISABLE_JOIN_BUILD_SHAPE", False)
     disable_join_condition_hoist = get_bool("FEATURE_DISABLE_JOIN_CONDITION_HOIST", False)
     disable_join_elimination = get_bool("FEATURE_DISABLE_JOIN_ELIMINATION", False)
     disable_join_key_materialization = get_bool(

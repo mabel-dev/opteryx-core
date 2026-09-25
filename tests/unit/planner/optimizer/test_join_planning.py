@@ -210,7 +210,7 @@ def test_bushy_tree_for_partitioned_predicates():
     assert captured
     tree = captured[0]
     # Bushy: root's right child is itself a JoinTreeNode, not a leaf.
-    from opteryx.planner.cost_estimation.dpccp import JoinTreeLeaf, JoinTreeNode
+    from opteryx.planner.cost_estimation import JoinTreeLeaf, JoinTreeNode
     assert isinstance(tree, JoinTreeNode)
     is_left_deep = isinstance(tree.right, JoinTreeLeaf) and (
         isinstance(tree.left, JoinTreeLeaf)

@@ -15,12 +15,14 @@ from opteryx.connectors.local_store_connector import LocalStoreConnector
 from opteryx.exceptions import ConcurrentModificationError
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.expression import NodeType
-from opteryx.models import Node
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.models.manifest_io import read_manifest_file_entries
 from opteryx.types.logical_type import INT64, TIMESTAMP, VARCHAR
 from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 
 @pytest.fixture
@@ -316,9 +318,9 @@ def test_local_store_bounds_prune_correctly_as_real_values_not_ordinal(connector
     assert manifest.bounds_are_ordinal is False
 
     def _comparison(column_name, op, value):
-        identifier = Node(NodeType.IDENTIFIER, source_column=column_name)
-        literal = Node(NodeType.LITERAL, value=value)
-        return Node(NodeType.COMPARISON_OPERATOR, value=op, left=identifier, right=literal)
+        identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name)
+        literal = Literal(value=value)
+        return Comparison(value=op, left=identifier, right=literal)
 
     # id's real range is [5, 95] — 1000 is out of range and must prune.
     manifest = manifest.prune_files([_comparison("id", "Gt", 1000)])

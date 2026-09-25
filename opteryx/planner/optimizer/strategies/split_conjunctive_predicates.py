@@ -87,7 +87,7 @@ class SplitConjunctivePredicatesStrategy(OptimizationStrategy):
 
                 sources = []
                 for col in new_node.columns:
-                    if col.source is not None:
+                    if col.node_type == NodeType.IDENTIFIER and col.source is not None:
                         sources.append(col.source)
                     if col.schema_column is not None:
                         sources.extend(col.schema_column.origin or [])

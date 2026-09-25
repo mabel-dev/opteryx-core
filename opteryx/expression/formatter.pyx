@@ -11,6 +11,7 @@ from draken.draken_native import DrakenType
 from draken.draken_native import LogicalKind
 from draken.draken_native import ipv4_format
 
+from opteryx.compiled.structures.expressions import current_name_of
 from opteryx.types.logical_type import ColumnType
 from opteryx.types.schema import SchemaColumn
 from opteryx.utils import random_string
@@ -18,8 +19,6 @@ from opteryx.utils import random_string
 
 @dataclass
 class ExpressionColumn(SchemaColumn):
-    expression: object = None
-
     def __post_init__(self):
         # Expression/predicate columns are computed, not relation-sourced; mint a
         # unique `$derived_` identity rather than hitting the base-class raise.
@@ -245,6 +244,11 @@ def format_expression(root, qualify=False, cache=None):
     return result
 
 
+# The expression types with both a left and a right operand (built on first use:
+# NodeType is imported lazily, see _format_expression_inner).
+cdef object _LEFT_RIGHT_TYPES = None
+
+
 def _format_expression_inner(root, qualify, cache):
     # Lazy: opteryx.expression imports format_expression at module load,
     # and opteryx.expression.operator_catalog imports from .expression — a
@@ -256,16 +260,34 @@ def _format_expression_inner(root, qualify, cache):
         return "null"
 
     cdef bint qualify_b = qualify
-    if not qualify_b and root.left and root.right:
-        # Force qualification when both sides render identically.
-        qualify_b = (root.left.current_name == root.right.current_name) and (
-            root.right.current_name is not None
-        )
-
     if type(root) is list:
         return [format_expression(item, qualify_b, cache) for item in root]
 
     node_type = root.node_type
+    global _LEFT_RIGHT_TYPES
+    if _LEFT_RIGHT_TYPES is None:
+        _LEFT_RIGHT_TYPES = frozenset(
+            {
+                NodeType.COMPARISON_OPERATOR,
+                NodeType.BINARY_OPERATOR,
+                NodeType.EXTRACTION_OPERATOR,
+                NodeType.AND,
+                NodeType.OR,
+                NodeType.XOR,
+                NodeType.BETWEEN,
+            }
+        )
+    if not qualify_b and node_type in _LEFT_RIGHT_TYPES:
+        # Force qualification when both sides are the same-named column.
+        left = root.left
+        right = root.right
+        qualify_b = (
+            left is not None
+            and right is not None
+            and left.node_type == NodeType.IDENTIFIER
+            and right.node_type == NodeType.IDENTIFIER
+            and left.current_name == right.current_name
+        )
     cdef dict _map
 
     # LITERALS
@@ -285,7 +307,12 @@ def _format_expression_inner(root, qualify, cache):
         return f"CASE {parts}{else_part}END"
 
     if node_type & INTERNAL_TYPE == INTERNAL_TYPE:
-        if node_type == NodeType.FUNCTION or node_type == NodeType.AGGREGATOR:
+        if node_type == NodeType.FUNCTION:
+            params = ",".join(
+                [format_expression(e, qualify_b, cache) for e in root.parameters]
+            )
+            return f"{root.value.upper()}({params})"
+        if node_type == NodeType.AGGREGATOR:
             distinct = "DISTINCT " if root.duplicate_treatment else ""
             order = ""
             if root.order:
@@ -297,7 +324,7 @@ def _format_expression_inner(root, qualify, cache):
                 limit = f" LIMIT {root.limit}" if root.limit else ""
                 return (
                     f"{root.value.upper()}({distinct}"
-                    f"{root.parameters[0].current_name}{order}{limit})"
+                    f"{current_name_of(root.parameters[0])}{order}{limit})"
                 )
             params = ",".join(
                 [format_expression(e, qualify_b, cache) for e in root.parameters]

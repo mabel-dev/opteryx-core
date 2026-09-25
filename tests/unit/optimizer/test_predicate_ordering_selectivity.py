@@ -18,6 +18,8 @@ import array
 import os
 import sys
 from types import SimpleNamespace
+from opteryx.compiled.structures.expressions import Function
+from opteryx.compiled.structures.expressions import Literal
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
@@ -34,6 +36,7 @@ from opteryx.planner.optimizer.strategies.predicate_ordering import _order_simpl
 from opteryx.planner.optimizer.strategies.predicate_ordering import _resolve_predicate_stats
 from opteryx.third_party.maki_nage.distogram import load_counts_i64
 from opteryx.types.logical_type import VARCHAR
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 
 # RelationStatistics is keyed by column identity, never by name — a name is not
@@ -141,15 +144,15 @@ _SW_IDENTITY = b"tes_sw_000000001"
 
 
 def _varchar_identifier(col_identity, col_name="col"):
-    n = Node(NodeType.IDENTIFIER, source_column=col_name)
+    n = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=col_name)
     n.schema_column = Node(NodeType.IDENTIFIER, identity=col_identity, column_type=VARCHAR)
     return n
 
 
 def _starts_with_pred(prefix: bytes, col_identity=_SW_IDENTITY):
-    literal = Node(NodeType.LITERAL, value=prefix)
-    condition = Node(
-        NodeType.FUNCTION, value="_STARTS_WITH", parameters=[_varchar_identifier(col_identity), literal]
+    literal = Literal(value=prefix)
+    condition = Function(
+        value="_STARTS_WITH", parameters=[_varchar_identifier(col_identity), literal]
     )
     return _pred(condition)
 
@@ -159,9 +162,9 @@ def _cheap_no_model_func_pred(col_identity=_LOW):
     # so estimate_selectivity falls through to 1.0 -- and its real catalog
     # cost is far below _STARTS_WITH's, so pre-change cost-only ordering
     # would always place it first.
-    identifier = Node(NodeType.IDENTIFIER, source_column="col2")
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col2")
     identifier.schema_column = Node(NodeType.IDENTIFIER, identity=col_identity)
-    condition = Node(NodeType.FUNCTION, value="LENGTH", parameters=[identifier])
+    condition = Function(value="LENGTH", parameters=[identifier])
     return _pred(condition)
 
 
@@ -204,10 +207,9 @@ def test_complex_ordering_no_model_predicates_keep_cost_order_even_with_statisti
     # not disturb the cost-only tie-break among them.
     stats = _sw_stats()
     a = _cheap_no_model_func_pred(col_identity=_LOW)
-    b_condition = Node(
-        NodeType.FUNCTION,
+    b_condition = Function(
         value="UPPER",
-        parameters=[Node(NodeType.IDENTIFIER, source_column="col3", schema_column=Node(NodeType.IDENTIFIER, identity=_HIGH))],
+        parameters=[LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col3", schema_column=Node(NodeType.IDENTIFIER, identity=_HIGH))],
     )
     b = _pred(b_condition)
     telemetry = QueryTelemetry.detached()

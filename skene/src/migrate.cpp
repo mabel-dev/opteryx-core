@@ -61,8 +61,11 @@ Status migrate_file(const void* file, size_t file_bytes,
         return Status(Code::kUnsupportedVersion, advice);
     }
 
-    FileMetadata metadata;
-    SKENE_RETURN_IF_ERROR(read_metadata(file, file_bytes, &metadata));
+    // Opened once: the source's footer is parsed a single time, not per row
+    // group. The retained reader for the source's version does the reading.
+    FileReader reader;
+    SKENE_RETURN_IF_ERROR(open_reader(file, file_bytes, &reader));
+    const FileMetadata& metadata = reader.metadata();
 
     WriteOptions options = posture;
     options.created_at_unix_us = metadata.created_at_unix_us;
@@ -76,8 +79,7 @@ Status migrate_file(const void* file, size_t file_bytes,
     SKENE_RETURN_IF_ERROR(writer.begin(options, out));
     for (uint32_t rg = 0; rg < metadata.row_groups.size(); ++rg) {
         CxxMorsel morsel;
-        SKENE_RETURN_IF_ERROR(
-            read_morsel(file, file_bytes, rg, ReadOptions(), &morsel));
+        SKENE_RETURN_IF_ERROR(read_morsel(reader, rg, ReadOptions(), &morsel));
         SKENE_RETURN_IF_ERROR(writer.add_row_group(morsel));
     }
     return writer.finish();

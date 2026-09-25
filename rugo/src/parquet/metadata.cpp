@@ -776,6 +776,12 @@ static void ParseRowGroup(TInput &in, RowGroupStats &rg,
     case 3:
       rg.num_rows = ReadI64(in);
       break;
+    case 5:
+      rg.file_offset = ReadI64(in);
+      break;
+    case 6:
+      rg.total_compressed_size = ReadI64(in);
+      break;
     case 4: { // sorting_columns: list<SortingColumn>
       auto lh = ReadListHeader(in);
       raw_sorting_columns.reserve(lh.size);

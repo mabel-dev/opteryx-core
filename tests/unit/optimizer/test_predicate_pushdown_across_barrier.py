@@ -31,6 +31,8 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
+from opteryx.planner.plan_context import PlanContext
+
 DATASET = "testdata.tpcds_1_skene"
 
 _QUERY = """
@@ -90,8 +92,9 @@ def _scan_estimates(sql):
     plan = do_resolve_relations(plan, ctes, telemetry)
     plan = do_plan_rewrite(plan, telemetry)
     bound = do_bind_phase(plan, execution_context=ctx, query_id=query_id, telemetry=telemetry)
-    optimized = do_optimizer(bound, telemetry)
-    refresh_statistics(optimized, telemetry=telemetry)
+    plan_context = PlanContext()
+    optimized = do_optimizer(bound, telemetry, plan_context)
+    refresh_statistics(optimized, plan_context, telemetry=telemetry)
 
     estimates = {
         row["relation"]: row["row_count"]

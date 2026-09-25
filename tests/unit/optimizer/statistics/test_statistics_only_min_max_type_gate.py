@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import os
 import sys
+from opteryx.compiled.structures.expressions import Aggregator
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
@@ -70,12 +72,14 @@ ADMITTED_TYPES = {
 def _aggregate(func, category):
     """An AGGREGATOR node over one column of `category`."""
     schema_column = Node(NodeType.IDENTIFIER, name="c", category=category)
-    return Node(
-        NodeType.AGGREGATOR,
+    return Aggregator(
         value=func,
         duplicate_treatment=None,
-        condition=None,
-        parameters=[Node(NodeType.IDENTIFIER, schema_column=schema_column, source_column="c")],
+        parameters=[
+            LogicalColumn(
+                node_type=NodeType.IDENTIFIER, schema_column=schema_column, source_column="c"
+            )
+        ],
     )
 
 

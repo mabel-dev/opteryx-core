@@ -11,7 +11,8 @@ Perform some plan rewriting at the logical planning stage.
 """
 
 from opteryx.expression import NodeType
-from opteryx.models import Node
+from opteryx.compiled.structures.expressions import BinaryOperator
+from opteryx.compiled.structures.expressions import Aggregator
 
 
 def _dedup_key(aggregate):
@@ -26,12 +27,11 @@ def _dedup_key(aggregate):
     projection then asked for a column nothing computed and the query died at
     compile time with "projecting a column the engine could not resolve".
 
-    The filter, ORDER BY and LIMIT ride in the key for the same reason. They
-    cannot reach here today with distinct results — `format_expression` renders
-    `COUNT(x WHERE ...)` identically to `COUNT(x)`, so such a pair is
-    rejected upstream as an ambiguous output name — but keying on them costs
-    nothing and means a dedup here can never be the thing that silently loses an
-    aggregate.
+    ORDER BY and LIMIT ride in the key for the same reason, though they cannot reach
+    here today with distinct results — keying on them costs nothing and means a
+    dedup here can never be the thing that silently loses an aggregate. (A FILTER
+    is lowered into the argument, `AGG(IIF(p, x, NULL))`, before this runs, so the
+    argument carries it.)
 
     The arguments AFTER the operand are part of the key for the same reason again,
     and this one was live: an aggregate is not identified by its operand alone.
@@ -50,7 +50,6 @@ def _dedup_key(aggregate):
         tuple(format_expression(p, True) for p in aggregate.parameters[1:]),
         aggregate.duplicate_treatment,
         aggregate.null_treatment,
-        None if aggregate.condition is None else format_expression(aggregate.condition),
         tuple((item[0].value, item[1]) for item in (aggregate.order or [])),
         aggregate.limit,
     )
@@ -90,16 +89,15 @@ def decompose_aggregates(aggregates, projection):
                 continue
 
             if f"{aggregate.value}_{identifier.qualified_name}" not in aggregate_set:
-                minmax_node = Node(
-                    node_type=NodeType.AGGREGATOR, value=aggregate.value, parameters=[identifier]
+                minmax_node = Aggregator(
+                    value=aggregate.value, parameters=[identifier]
                 )
                 result_aggregates.append(minmax_node)
                 aggregate_set[f"{aggregate.value}_{identifier.qualified_name}"] = minmax_node
             else:
                 minmax_node = aggregate_set[f"{aggregate.value}_{identifier.qualified_name}"]
 
-            calculation_node = Node(
-                node_type=NodeType.BINARY_OPERATOR,
+            calculation_node = BinaryOperator(
                 value=operator,
                 left=minmax_node,
                 right=literal,
@@ -125,26 +123,25 @@ def decompose_aggregates(aggregates, projection):
                 continue
 
             if f"SUM_{identifier.qualified_name}" not in aggregate_set:
-                sum_node = Node(node_type=NodeType.AGGREGATOR, value="SUM", parameters=[identifier])
+                sum_node = Aggregator(value="SUM", parameters=[identifier])
                 result_aggregates.append(sum_node)
                 aggregate_set[f"SUM_{identifier.qualified_name}"] = sum_node
             else:
                 sum_node = aggregate_set[f"SUM_{identifier.qualified_name}"]
 
             if f"COUNT_{identifier.qualified_name}" not in aggregate_set:
-                count_node = Node(
-                    node_type=NodeType.AGGREGATOR, value="COUNT", parameters=[identifier]
+                count_node = Aggregator(
+                    value="COUNT", parameters=[identifier]
                 )
                 result_aggregates.append(count_node)
                 aggregate_set[f"COUNT_{identifier.qualified_name}"] = count_node
             else:
                 count_node = aggregate_set[f"COUNT_{identifier.qualified_name}"]
 
-            scaling_node = Node(
-                node_type=NodeType.BINARY_OPERATOR, value="Multiply", left=count_node, right=literal
+            scaling_node = BinaryOperator(
+                value="Multiply", left=count_node, right=literal
             )
-            calculation_node = Node(
-                node_type=NodeType.BINARY_OPERATOR,
+            calculation_node = BinaryOperator(
                 value=operator,
                 left=sum_node,
                 right=scaling_node,

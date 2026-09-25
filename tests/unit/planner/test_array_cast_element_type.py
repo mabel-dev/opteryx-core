@@ -155,7 +155,7 @@ def test_folded_literal_carries_the_element_type_in_its_type(sql):
     [
         ("SELECT name::ARRAY<INTEGER> AS v FROM $planets", "ARRAY<INT64>"),
         ("SELECT name::ARRAY<DOUBLE> AS v FROM $planets", "ARRAY<FLOAT64>"),
-        ("SELECT name::ARRAY<BOOLEAN> AS v FROM $planets", "ARRAY<BOOLEAN>"),
+        ("SELECT name::ARRAY<BOOLEAN> AS v FROM $planets", "ARRAY<BOOL>"),
     ],
 )
 def test_element_type_is_read_not_defaulted(sql, expected):

@@ -21,8 +21,10 @@ the bottom of the cost-estimation dependency graph.
 
 # Equality when NDV is unknown for every relevant side. Shared by the literal
 # (`col = X`) and column-vs-column (`col = col`) paths in selectivity.py and by
-# the equi-join key fallback in join_cardinality._key_selectivity.
-EQ_UNKNOWN_NDV_FALLBACK = 0.1
+# the equi-join key fallback in the native join estimator, which DECLARES it
+# (src/cpp/planner/join_estimator.hpp, kEqUnknownNdvFallback) — read back from
+# there so there is one value, not two copies that can drift.
+from opteryx.compiled.planner.join_estimator import EQ_UNKNOWN_NDV_FALLBACK
 
 # Unbounded range comparison (`col < X`) with no histogram or value range, and
 # the BETWEEN fallback (a range predicate). Textbook constant (Selinger et al.).

@@ -35,7 +35,8 @@ from opteryx.expression import (
     get_all_nodes_of_type,
 )
 from opteryx.expression.formatter import ExpressionColumn
-from opteryx.models import LogicalColumn, Node
+from opteryx.models import Node
+from opteryx.models import is_expression
 from opteryx.planner.binder.common import extract_join_fields
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory, ColumnType, BOOLEAN as _CT_BOOLEAN
@@ -44,6 +45,10 @@ from opteryx.utils import random_string
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
 from .predicate_rewriter import rewrite_date_trunc_to_range
+from opteryx.compiled.structures.expressions import And
+from opteryx.compiled.structures.expressions import Not
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
 
 # Comparison ops that rewrite_date_trunc_to_range (predicate_rewriter.py) knows how
 # to turn into a raw-column range/literal — the set of ops the TRUNC-alias inline
@@ -155,22 +160,7 @@ def _outside_aggregate_column_ids(predicate, emitted=None):
             sc = node.schema_column
             if sc is not None and sc.identity is not None:
                 out.add(sc.identity)
-        if node.parameters:
-            stack.extend(
-                param for param in node.parameters if isinstance(param, (Node, LogicalColumn))
-            )
-        if node.node_type == NodeType.CASE:
-            if node.conditions:
-                stack.extend(c for c in node.conditions if isinstance(c, (Node, LogicalColumn)))
-            if node.results:
-                stack.extend(r for r in node.results if isinstance(r, (Node, LogicalColumn)))
-            if node.else_result is not None and isinstance(
-                node.else_result, (Node, LogicalColumn)
-            ):
-                stack.append(node.else_result)
-        for child in (node.right, node.centre, node.left):
-            if child is not None:
-                stack.append(child)
+        stack.extend(node.children())
     return out
 
 
@@ -196,7 +186,11 @@ def _subtree_relation_names(plan, nid, memo):
     for name_list in (node.left_relation_names, node.right_relation_names):
         if name_list:
             names.update(name_list)
-    if node.unnest_column is not None and node.unnest_column.source:
+    if (
+        node.unnest_column is not None
+        and node.unnest_column.node_type == NodeType.IDENTIFIER
+        and node.unnest_column.source
+    ):
         names.add(node.unnest_column.source)
     for child, _, _ in plan.ingoing_edges(nid):
         names |= _subtree_relation_names(plan, child, memo)
@@ -260,7 +254,7 @@ def _retainable_past_barrier(predicate, emitted, subtree_names) -> bool:
     return True
 
 
-def _restore_at_original_position(plan, predicate) -> bool:
+def _restore_at_original_position(plan, predicate, predicate_nid: str, plan_path: list) -> bool:
     """Put an unplaced predicate back where it was collected, via its plan_path.
 
     `plan_path[i]` is the chain of nodes that sat ABOVE the predicate's Filter;
@@ -286,12 +280,12 @@ def _restore_at_original_position(plan, predicate) -> bool:
 
     Returns False when no node on the path survives.
     """
-    for nid in predicate.plan_path:
+    for nid in plan_path:
         if nid not in plan:
             continue
         incoming = plan.ingoing_edges(nid)
         if len(incoming) <= 1:
-            plan.insert_node_before(predicate.nid, predicate, nid)
+            plan.insert_node_before(predicate_nid, predicate, nid)
             return True
 
         needed = _predicate_column_ids(predicate)
@@ -308,10 +302,10 @@ def _restore_at_original_position(plan, predicate) -> bool:
                 f"inputs carry the columns the filter reads, and exactly one must."
             )
         source, relationship = legs[0]
-        plan.add_node(predicate.nid, predicate)
+        plan.add_node(predicate_nid, predicate)
         plan.remove_edge(source, nid, relationship)
-        plan.add_edge(source, predicate.nid)
-        plan.add_edge(predicate.nid, nid, relationship)
+        plan.add_edge(source, predicate_nid)
+        plan.add_edge(predicate_nid, nid, relationship)
         return True
     return False
 
@@ -479,7 +473,7 @@ def _is_absorbable_theta(condition) -> bool:
 def _add_condition(existing_condition, new_condition):
     if not existing_condition:
         return new_condition
-    _and = Node(node_type=NodeType.AND)
+    _and = And()
     _and.left = new_condition
     _and.right = existing_condition
     return _and
@@ -496,10 +490,28 @@ def _unwrap_nested(expression):
     `node_type == FUNCTION and value == "TRUNC"`, which a NESTED wrapper fails
     even though its `.centre` is exactly that FUNCTION node — unwrap first so
     fusion doesn't silently starve this rewrite."""
-    while isinstance(expression, Node) and expression.node_type == NodeType.NESTED:
+    while is_expression(expression) and expression.node_type == NodeType.NESTED:
         expression = expression.centre
     return expression
 
+
+# The expression types with both a `left` and a `right` operand.
+_LEFT_RIGHT_NODE_TYPES = frozenset(
+    {
+        NodeType.COMPARISON_OPERATOR,
+        NodeType.BINARY_OPERATOR,
+        NodeType.EXTRACTION_OPERATOR,
+        NodeType.AND,
+        NodeType.OR,
+        NodeType.XOR,
+        NodeType.BETWEEN,
+    }
+)
+
+# The expression types with a `centre` operand.
+_CENTRE_NODE_TYPES = frozenset(
+    {NodeType.UNARY_OPERATOR, NodeType.NOT, NodeType.NESTED, NodeType.BETWEEN}
+)
 
 _DAYS_US = 86_400_000_000
 
@@ -655,14 +667,13 @@ def _normalize_col_op_lit(condition):
 
 def _make_implied_filter(op, target_col, lit_node):
     """Build a Filter LogicalPlanNode applying op between target_col and lit_node."""
-    new_cond = Node(NodeType.COMPARISON_OPERATOR, value=op, left=target_col, right=lit_node)
+    new_cond = Comparison(value=op, left=target_col, right=lit_node)
     return LogicalPlanNode(
         node_type=LogicalPlanStepType.Filter,
         condition=new_cond,
         columns=[target_col],
         relations={target_col.source},
         all_relations={target_col.source},
-        nid=random_string(),
     )
 
 
@@ -793,7 +804,7 @@ def _try_normalize_cast_predicate(condition: Node):
         else:
             return None
 
-    new_literal = Node(node_type=NodeType.LITERAL)
+    new_literal = Literal()
     new_literal.value = rescaled
     new_literal.schema_column = col_sc
     # The rescaled value is expressed in the COLUMN's own units, so the column's
@@ -807,7 +818,7 @@ def _try_normalize_cast_predicate(condition: Node):
     # accept (err_op=11), it is a dead query.
     new_literal.type = col_sc.column_type
 
-    new_condition = Node(node_type=NodeType.COMPARISON_OPERATOR)
+    new_condition = Comparison()
     new_condition.value = adjusted_op
     new_condition.left = identifier
     new_condition.right = new_literal
@@ -926,9 +937,14 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     context.optimized_plan.insert_node_after(
                         random_string(), predicate, context.node_id
                     )
-                elif predicate.plan_path is not None:
+                elif id(predicate) in context.predicate_paths:
                     self.telemetry.optimization_predicate_pushdown_unplaced += 1
-                    _restore_at_original_position(context.optimized_plan, predicate)
+                    _restore_at_original_position(
+                        context.optimized_plan,
+                        predicate,
+                        context.collected_nids[id(predicate)],
+                        context.predicate_paths[id(predicate)],
+                    )
             context.collected_predicates = retained_predicates
 
         elif node.node_type == LogicalPlanStepType.Filter:
@@ -965,8 +981,10 @@ class PredicatePushdownStrategy(OptimizationStrategy):
 
             if is_having_predicate or is_regular_pushable:
                 # record where the node was, so we can put it back
-                node.nid = context.node_id
-                node.plan_path = context.optimized_plan.trace_to_root(context.node_id)
+                context.collected_nids[id(node)] = context.node_id
+                context.predicate_paths[id(node)] = context.optimized_plan.trace_to_root(
+                    context.node_id
+                )
 
                 context.collected_predicates.append(node)
                 context.optimized_plan.remove_node(context.node_id, heal=True)
@@ -1051,7 +1069,10 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             ) | {node.unnest_target.schema_column.identity}
             for predicate in context.collected_predicates:
                 # NOT conditions don't have a left/right so need special handling
-                if predicate.condition.centre is not None:
+                if (
+                    predicate.condition.node_type in _CENTRE_NODE_TYPES
+                    and predicate.condition.centre is not None
+                ):
                     remaining_predicates.append(predicate)
                     continue
                 known_columns = set(col.schema_column.identity for col in predicate.columns)
@@ -1092,7 +1113,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 ):
                     self.telemetry.optimization_predicate_pushdown += 1
                     context.optimized_plan.insert_node_before(
-                        predicate.nid, predicate, context.node_id
+                        context.collected_nids[id(predicate)], predicate, context.node_id
                     )
                     continue
 
@@ -1147,7 +1168,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 ):
                     self.telemetry.optimization_predicate_pushdown += 1
                     context.optimized_plan.insert_node_after(
-                        predicate.nid, predicate, context.node_id
+                        context.collected_nids[id(predicate)], predicate, context.node_id
                     )
                 else:
                     remaining_predicates.append(predicate)
@@ -1206,9 +1227,8 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 # Combine multiple HAVING conditions with AND
                 combined = conditions[0]
                 for cond in conditions[1:]:
-                    from opteryx.models import Node
 
-                    and_node = Node(node_type=NodeType.AND)
+                    and_node = And()
                     and_node.left = combined
                     and_node.right = cond
                     combined = and_node
@@ -1222,7 +1242,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
 
                 # Remove the Filter nodes from the plan
                 for predicate in having_predicates:
-                    context.optimized_plan.remove_node(predicate.nid, heal=True)
+                    context.optimized_plan.remove_node(context.collected_nids[id(predicate)], heal=True)
                     self.telemetry.optimization_predicate_pushdown += 1
             else:
                 context.optimized_plan.add_node(context.node_id, LogicalPlanNode(**node.properties))
@@ -1283,16 +1303,11 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 # Local import: a function-scoped `from opteryx.models import Node`
                 # elsewhere in `visit` makes Node a local variable for the whole
                 # method, so the module-level import isn't visible to closures.
-                from opteryx.models import Node as _Node
-
                 if not leaves:
                     return None
                 result = leaves[0]
                 for leaf in leaves[1:]:
-                    and_node = _Node(node_type=NodeType.AND)
-                    and_node.left = result
-                    and_node.right = leaf
-                    result = and_node
+                    result = And(left=result, right=leaf)
                 return result
 
             def _is_collectable(predicate):
@@ -1333,11 +1348,10 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             if node.on:
                 new_predicates, node.on = _inner(node.on)
                 self.telemetry.optimization_predicate_pushdown_into_join += 1
-                context.collected_predicates.extend(
+                on_filters = [
                     LogicalPlanNode(
                         LogicalPlanStepType.Filter,
                         condition=node,
-                        nid=random_string(),
                         relations={
                             n.source for n in get_all_nodes_of_type(node, (NodeType.IDENTIFIER,))
                         },
@@ -1354,7 +1368,10 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                         from_join_on=True,
                     )
                     for node in new_predicates
-                )
+                ]
+                for on_filter in on_filters:
+                    context.collected_nids[id(on_filter)] = random_string()
+                context.collected_predicates.extend(on_filters)
 
             if context.collected_predicates:
                 # push predicates which reference multiple relations here
@@ -1371,7 +1388,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     ):
                         self.telemetry.optimization_predicate_pushdown += 1
                         context.optimized_plan.insert_node_after(
-                            predicate.nid, predicate, context.node_id
+                            context.collected_nids[id(predicate)], predicate, context.node_id
                         )
                         return True
                     return False
@@ -1450,7 +1467,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                                     # clauses, and this predicate is not one yet.
                                     self.telemetry.optimization_predicate_pushdown_declined += 1
                                     context.optimized_plan.insert_node_after(
-                                        predicate.nid, predicate, context.node_id
+                                        context.collected_nids[id(predicate)], predicate, context.node_id
                                     )
                                     continue
                                 # Convert to inner join
@@ -1484,7 +1501,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                                 # above the join rather than into it.
                                 self.telemetry.optimization_predicate_pushdown_declined += 1
                                 context.optimized_plan.insert_node_after(
-                                    predicate.nid, predicate, context.node_id
+                                    context.collected_nids[id(predicate)], predicate, context.node_id
                                 )
                         elif predicate.relations.intersection(all_join_rels) and not predicate.relations.issubset(all_join_rels):
                             # Looks like it references something outside this join. But
@@ -1655,7 +1672,9 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                                 if dedup_key in existing_keys:
                                     continue
                                 existing_keys.add(dedup_key)
-                                derived.append(_make_implied_filter(op, target_col, lit))
+                                implied = _make_implied_filter(op, target_col, lit)
+                                context.collected_nids[id(implied)] = random_string()
+                                derived.append(implied)
                                 self.telemetry.optimization_predicate_pullup_implied += 1
                         context.collected_predicates.extend(derived)
 
@@ -1694,7 +1713,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 <= _emitted_identities(context.optimized_plan, target, _memo)
             ):
                 self.telemetry.optimization_predicate_pushdown_deep_restore += 1
-                context.optimized_plan.insert_node_after(predicate.nid, predicate, target)
+                context.optimized_plan.insert_node_after(context.collected_nids[id(predicate)], predicate, target)
                 continue
 
             # The target was refused (gone, or no longer emitting what the
@@ -1705,8 +1724,11 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             if _revert_inlined_predicate(predicate):
                 self.telemetry.optimization_predicate_pushdown_inline_reverted += 1
 
-            if predicate.plan_path is not None and _restore_at_original_position(
-                context.optimized_plan, predicate
+            if id(predicate) in context.predicate_paths and _restore_at_original_position(
+                context.optimized_plan,
+                predicate,
+                context.collected_nids[id(predicate)],
+                context.predicate_paths[id(predicate)],
             ):
                 self.telemetry.optimization_predicate_pushdown_unplaced += 1
         return context.optimized_plan
@@ -1770,7 +1792,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             if predicate.condition.node_type == NodeType.UNARY_OPERATOR:
                 if predicate.condition.centre and predicate.condition.centre.schema_column:
                     types.add(predicate.condition.centre.schema_column.category)
-            else:
+            elif predicate.condition.node_type in _LEFT_RIGHT_NODE_TYPES:
                 if predicate.condition.left and predicate.condition.left.schema_column:
                     types.add(predicate.condition.left.schema_column.category)
                 # For InList/NotInList the right side is always an ARRAY literal; its type
@@ -1813,7 +1835,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             # the scan. Counted separately from a push — conflating the two makes the
             # telemetry unable to answer "did pushdown help?".
             self.telemetry.optimization_predicate_pushdown_declined += 1
-            context.optimized_plan.insert_node_after(predicate.nid, predicate, context.node_id)
+            context.optimized_plan.insert_node_after(context.collected_nids[id(predicate)], predicate, context.node_id)
 
         context.collected_predicates = remaining_predicates
         return context
@@ -1877,9 +1899,10 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             if not query_column:
                 continue
 
-            expression = column if isinstance(column, Node) else getattr(column, "expression", None)
-            if expression is None:
+            # A bare column reference has no expression to substitute.
+            if not is_expression(column) or column.node_type == NodeType.IDENTIFIER:
                 continue
+            expression = column
 
             alias_expressions[query_column] = (column, expression)
 
@@ -1937,7 +1960,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
 
                 _, expression_template = alias_expressions[alias_candidate.source_column]
 
-                if isinstance(expression_template, Node) and get_all_nodes_of_type(
+                if is_expression(expression_template) and get_all_nodes_of_type(
                     expression_template, (NodeType.AGGREGATOR,)
                 ):
                     continue
@@ -1946,7 +1969,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 # one, and the fields below must never be cleared on the template.
                 expression = expression_template.copy()
 
-                if isinstance(expression, Node):
+                if is_expression(expression):
                     expression.alias = None
                     expression.query_column = None
                 _detach_aliases(expression)
@@ -1960,12 +1983,11 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 negate = (not literal_is_true) if condition.value == "Eq" else literal_is_true
 
                 if negate:
-                    new_condition = Node(NodeType.NOT, centre=expression)
+                    new_condition = Not(centre=expression)
                     expr_name = f"NOT {format_expression(expression)}"
                     new_condition.schema_column = ExpressionColumn(
                         name=expr_name,
                         column_type=_CT_BOOLEAN,
-                        expression=expr_name,
                     )
                 else:
                     new_condition = expression
@@ -2051,7 +2073,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         _, expression_template = alias_expressions[alias_candidate.source_column]
         expression_template = _unwrap_nested(expression_template)
         if (
-            not isinstance(expression_template, Node)
+            not is_expression(expression_template)
             or expression_template.node_type != NodeType.FUNCTION
             or expression_template.value != "TRUNC"
         ):
@@ -2067,8 +2089,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             trunc_expression.alias = None
             trunc_expression.query_column = None
             _detach_aliases(trunc_expression)
-            side_condition = Node(
-                node_type=NodeType.COMPARISON_OPERATOR,
+            side_condition = Comparison(
                 value=op,
                 left=trunc_expression,
                 right=literal,
@@ -2101,7 +2122,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             self.telemetry.optimization_predicate_pushdown_trunc_alias_inline_declined += 1
             return False
 
-        combined = Node(node_type=NodeType.AND, left=rewritten_lower, right=rewritten_upper)
+        combined = And(left=rewritten_lower, right=rewritten_upper)
 
         identifiers = get_all_nodes_of_type(combined, (NodeType.IDENTIFIER,))
         rewritten_ids = {
@@ -2201,7 +2222,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             _, expression_template = alias_expressions[alias_candidate.source_column]
             expression_template = _unwrap_nested(expression_template)
             if (
-                not isinstance(expression_template, Node)
+                not is_expression(expression_template)
                 or expression_template.node_type != NodeType.FUNCTION
                 or expression_template.value != "TRUNC"
             ):
@@ -2214,8 +2235,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             trunc_expression.query_column = None
             _detach_aliases(trunc_expression)
 
-            new_condition = Node(
-                node_type=NodeType.COMPARISON_OPERATOR,
+            new_condition = Comparison(
                 value=op_with_alias_on_left,
                 left=trunc_expression,
                 right=literal_candidate,

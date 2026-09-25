@@ -216,32 +216,6 @@ REGISTER: List[RegisteredDefect] = [
             "points back here."
         ),
     ),
-    RegisteredDefect(
-        id="rlike-in-a-three-term-disjunction",
-        repro=(
-            "SELECT COUNT(*) FROM testdata.astronauts "
-            "WHERE name RLIKE 'A' OR year = 1963 OR gender = 'Male'"
-        ),
-        error_type="RuntimeError",
-        signature="draken_rlike: pattern operand must be a compiled DFA blob",
-        detail=(
-            "NOT THIS FUZZER'S DEFECT — reported separately and owned elsewhere; "
-            "registered here only so it stops blocking join fuzzing.\n"
-            "An RLIKE inside a THREE-term OR fails at execution; the same predicate "
-            "with two terms runs:\n"
-            "  WHERE name RLIKE 'A' OR year = 1963                      -> 68 rows\n"
-            "  WHERE name RLIKE 'A' OR year = 1963 OR gender = 'Male'   -> raises\n"
-            "The RLIKE may be in any position, and NOT RLIKE behaves the same. LIKE "
-            "in the identical shape is unaffected (307 rows). The join fuzzer reaches "
-            "it because its WHERE generator chains disjuncts, e.g.\n"
-            "  WHERE missions.Location NOT RLIKE 'B9d3' OR astronauts.name RLIKE "
-            "'4hqK' OR astronauts.status != 'djjC'\n"
-            "Same family as the single-table register's "
-            "rlike-outside-top-level-predicate-position: RLIKE evaluates correctly "
-            "only as a whole predicate or as a direct child of one connective, and "
-            "the pattern reaches the kernel un-compiled once it is nested deeper."
-        ),
-    ),
 ]
 
 _BY_ID = {defect.id: defect for defect in REGISTER}

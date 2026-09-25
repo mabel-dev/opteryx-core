@@ -16,6 +16,7 @@ from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.planner.binder.binder import inner_binder
 from opteryx.planner.binder.binding_context import BindingContext
+from opteryx.models import current_name_of
 
 
 def _reject_variant_key(what: str, expr) -> None:
@@ -65,10 +66,6 @@ def visit_aggregate_and_group(
             if agg.schema_column.identity is not None
         }
         node.aggregates = list(aggregates_by_identity.values())
-
-    for agg in node.aggregates:
-        if agg.condition:
-            agg.condition, context = inner_binder(agg.condition, context)
 
     # We're going to trim down the schemas to just the columns used in the GROUP BY.
     # 1) the easy one - the columns explictly in the GROUP BY
@@ -187,7 +184,7 @@ def visit_aggregate_and_group(
         if array_agg.order:
             if len(array_agg.order) > 1:
                 raise UnsupportedSyntaxError("ARRAY_AGG can only **ORDER BY** the aggregated column.")
-            if array_agg.order[0][0].current_name != array_agg.parameters[0].current_name:
+            if current_name_of(array_agg.order[0][0]) != current_name_of(array_agg.parameters[0]):
                 raise UnsupportedSyntaxError("ARRAY_AGG can only **ORDER BY** the aggregated column.")
 
     for any_value in [agg for agg in tmp_aggregates if agg.value == "ANY_VALUE"]:

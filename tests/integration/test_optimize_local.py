@@ -262,8 +262,9 @@ def test_optimize_writes_one_file_of_many_row_groups_and_never_reads_it_back(opt
     assert list(out["min_values"]) == [0] and list(out["max_values"]) == [total - 1]
     assert out["uncompressed_size_in_bytes"] > 0
 
-    # 360,000 rows at 262,144 per row group is two row groups of ONE file.
-    assert _row_group_count(out["file_path"]) == 2
+    # 360,000 rows at 65,536 per row group (the sink's batch = row group, capped at
+    # rugo's DEFAULT_ROWS_PER_ROW_GROUP) is six row groups of ONE file.
+    assert _row_group_count(out["file_path"]) == 6
 
     # The output was described as it was written, never downloaded to be read.
     assert out["file_path"] not in disk_io.reads

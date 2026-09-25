@@ -33,18 +33,21 @@ from __future__ import annotations
 
 import os
 import sys
+from opteryx.compiled.structures.expressions import Between
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import pytest
 
 from opteryx.expression import NodeType
-from opteryx.models import Node
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from draken.draken_native import TimestampUnit
 from opteryx.types.logical_type import DATE, INT64, TIME, TIMESTAMP, VARCHAR
 from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 US_PER_DAY = 86_400_000_000
 
@@ -82,20 +85,18 @@ def _file(lower, upper, path="f1", record_count=10):
 
 
 def _comparison(op, value, literal_type=None, column_name="value"):
-    return Node(
-        NodeType.COMPARISON_OPERATOR,
+    return Comparison(
         value=op,
-        left=Node(NodeType.IDENTIFIER, source_column=column_name),
-        right=Node(NodeType.LITERAL, type=literal_type, value=value),
+        left=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name),
+        right=Literal(type=literal_type, value=value),
     )
 
 
 def _between(lower, upper, literal_type=None, column_name="value"):
-    return Node(
-        NodeType.BETWEEN,
-        left=Node(NodeType.IDENTIFIER, source_column=column_name),
-        right=Node(NodeType.LITERAL, type=literal_type, value=lower),
-        centre=Node(NodeType.LITERAL, type=literal_type, value=upper),
+    return Between(
+        left=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name),
+        right=Literal(type=literal_type, value=lower),
+        centre=Literal(type=literal_type, value=upper),
     )
 
 

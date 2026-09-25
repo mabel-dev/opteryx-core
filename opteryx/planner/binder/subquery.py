@@ -10,6 +10,7 @@ from opteryx.managers.virtual_datasets import derived
 from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.types.schema import RelationSchema
+from opteryx.models import current_name_of
 
 
 def visit_comment(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
@@ -129,7 +130,7 @@ def visit_subquery(self, node: Node, context: BindingContext) -> Tuple[Node, Bin
     node, context = visit_exit(self, node, context)
 
     # Extract the column names to check for duplicates
-    column_names = (n.current_name for n in node.columns)
+    column_names = (current_name_of(n) for n in node.columns)
     seen = set()
     duplicates = [name for name in column_names if name in seen or seen.add(name)]  # type: ignore
 

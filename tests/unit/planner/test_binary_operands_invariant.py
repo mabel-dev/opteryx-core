@@ -24,6 +24,7 @@ Run as a script (CLAUDE.md §10) or under pytest.
 
 import os
 import sys
+from opteryx.compiled.structures.expressions import Literal
 
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
@@ -33,7 +34,7 @@ from opteryx.models import Node
 
 
 def _literal(value):
-    return Node(node_type=NodeType.LITERAL, value=value)
+    return Literal(value=value)
 
 
 def _binary(node_type, left=True, right=True):

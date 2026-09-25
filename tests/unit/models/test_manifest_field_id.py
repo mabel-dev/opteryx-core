@@ -14,7 +14,6 @@ positional `min_values`/`max_values` lists by that id.
 from __future__ import annotations
 
 from opteryx.expression import NodeType
-from opteryx.models import Node
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.planner.optimizer.strategies.statistics_only_response import (
@@ -22,6 +21,9 @@ from opteryx.planner.optimizer.strategies.statistics_only_response import (
 )
 from opteryx.types.logical_type import INT64
 from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 
 def _schema_with_field_ids(names_and_ids):
@@ -80,7 +82,7 @@ def test_get_min_max_from_manifest_reads_correct_column_via_field_id():
         upper_bounds={1: 999, 5: 42},  # tweet_id max=999, followers max=42
     )
 
-    manifest = Manifest(files=[file_entry], schema=schema)
+    manifest = Manifest(files=[file_entry], schema=schema, stats_are_authoritative=True)
 
     assert get_min_max_from_manifest(manifest, "followers", "MIN") == 7
     assert get_min_max_from_manifest(manifest, "followers", "MAX") == 42
@@ -106,7 +108,7 @@ def test_get_min_max_from_manifest_does_not_use_positional_min_values_when_field
         max_values=[999],
     )
 
-    manifest = Manifest(files=[file_entry], schema=schema)
+    manifest = Manifest(files=[file_entry], schema=schema, stats_are_authoritative=True)
 
     assert get_min_max_from_manifest(manifest, "followers", "MIN") == 7
     assert get_min_max_from_manifest(manifest, "followers", "MAX") == 42
@@ -132,9 +134,9 @@ def test_prune_files_resolves_field_id_after_projection_pushdown():
     # `followers > 100` should prune the file (max is 42), not silently read
     # field_id=0 (which doesn't exist in lower_bounds/upper_bounds) and skip
     # pruning.
-    identifier = Node(NodeType.IDENTIFIER, source_column="followers")
-    literal = Node(NodeType.LITERAL, type=INT64, value=100)
-    predicate = Node(NodeType.COMPARISON_OPERATOR, value="Gt", left=identifier, right=literal)
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="followers")
+    literal = Literal(type=INT64, value=100)
+    predicate = Comparison(value="Gt", left=identifier, right=literal)
 
     manifest = manifest.prune_files([predicate])
 

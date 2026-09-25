@@ -22,6 +22,8 @@ result, not merely a slower plan.
 
 import os
 import sys
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
@@ -30,11 +32,11 @@ import pytest
 import opteryx.planner.optimizer  # noqa: F401  (resolves the optimizer import cycle)
 from draken.draken_native import DrakenType
 from opteryx.expression import NodeType
-from opteryx.models import Node
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import DATE, DECIMAL, FLOAT64, INT64, TIMESTAMP, VARCHAR
 from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 
 def _manifest(column_type, ordinal_min, ordinal_max, *, bounds_are_ordinal=True):
@@ -63,9 +65,9 @@ def _manifest(column_type, ordinal_min, ordinal_max, *, bounds_are_ordinal=True)
 
 
 def _predicate(op, value, column_type):
-    identifier = Node(NodeType.IDENTIFIER, source_column="c")
-    literal = Node(NodeType.LITERAL, type=column_type, value=value)
-    return Node(NodeType.COMPARISON_OPERATOR, value=op, left=identifier, right=literal)
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="c")
+    literal = Literal(type=column_type, value=value)
+    return Comparison(value=op, left=identifier, right=literal)
 
 
 def _survives(manifest, op, value, column_type):

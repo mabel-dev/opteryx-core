@@ -2,14 +2,19 @@
 
 #include <algorithm>
 #include <cstdarg>
+#include <memory>
+#include <string>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <type_traits>
 
 #include "skene/checksum.h"
 #include "skene/format.h"
 #include "bloom.h"
 #include "encoding.h"
+#include "sketch.h"
+#include "staging.h"
 #include "statistics.h"
 #include "value_order.h"
 
@@ -24,14 +29,9 @@ namespace {
 
 // ─── Byte assembly ──────────────────────────────────────────────────────────
 //
-// Appends to a growable buffer while tracking absolute position, so a section's
-// offset is recorded as it is written rather than predicted by a separate sizing
-// pass that could drift from the writing pass.
-//
-// The whole file is assembled in memory. That is right for both current
-// callers — job-result parts are size-bounded and spill blocks are chunked at
-// the sink's threshold — and a streaming sink can replace this without touching
-// the layout, since every offset is absolute and the footer is written last.
+// Appends to a growable buffer. Used for the records finish() assembles in
+// memory before handing them to the sink — directory blocks and the footer —
+// which are small against the data and must be checksummed whole.
 class ByteWriter {
   public:
     explicit ByteWriter(std::vector<uint8_t>* out) : out_(out) {}
@@ -143,9 +143,16 @@ bool type_requires_logical_type(DrakenType t) {
 
 // ─── Per-column serialization ───────────────────────────────────────────────
 
+// Where one column node's sections go while a row group is encoded. v3 writes
+// in TWO PASSES (design R9): pass 1 stages each section's stored bytes, pass 2
+// (finish) lays the file out column-major. So a SectionEntry's `offset` here is
+// a STAGING offset, rewritten to the final absolute offset in finish(), and no
+// alignment padding exists yet — finish() places every body on kSectionAlign.
 struct WriteContext {
-    ByteWriter*                writer;
-    std::vector<SectionEntry>* sections;
+    Stage*                     stage = nullptr;
+    uint32_t                   node = 0;          // column node, depth first
+    bool                       index = false;     // staging the node's OPTIONAL sections
+    std::vector<SectionEntry>* sections = nullptr;// the node's section list
     SectionCodec               codec = SectionCodec::kNone;
     int                        zstd_level = 0;
 };
@@ -153,31 +160,22 @@ struct WriteContext {
 // The checksum covers the STORED bytes, so it is computed after both stages —
 // a reader verifies what it is about to decode, not what the writer started
 // from.
-void emit_raw(WriteContext& ctx, SectionKind kind, Encoding encoding,
-              SectionCodec codec, const void* stored, size_t stored_bytes,
-              size_t encoded_bytes, size_t plain_bytes) {
-    // v2 alignment: pad with zeros so the body starts at a kSectionAlign
-    // multiple. The padding belongs to no section and is counted in nothing —
-    // offsets are absolute, so readers never compute with it.
-    {
-        const uint64_t at = ctx.writer->position();
-        const uint64_t misaligned = at % kSectionAlign;
-        if (misaligned != 0)
-            ctx.writer->zeros(static_cast<size_t>(kSectionAlign - misaligned));
-    }
-
+Status emit_raw(WriteContext& ctx, SectionKind kind, Encoding encoding,
+                SectionCodec codec, const void* stored, size_t stored_bytes,
+                size_t encoded_bytes, size_t plain_bytes) {
     SectionEntry entry;
     entry.kind          = static_cast<uint16_t>(kind);
     entry.encoding      = static_cast<uint8_t>(encoding);
     entry.codec         = static_cast<uint8_t>(codec);
     entry.reserved      = 0;
-    entry.offset        = ctx.writer->position();
     entry.stored_bytes  = stored_bytes;
     entry.encoded_bytes = encoded_bytes;
     entry.plain_bytes   = plain_bytes;
     entry.checksum      = checksum_xxh3_64(stored, stored_bytes);
-    ctx.writer->bytes(stored, stored_bytes);
+    SKENE_RETURN_IF_ERROR(
+        ctx.stage->append(ctx.node, ctx.index, stored, stored_bytes, &entry.offset));
     ctx.sections->push_back(entry);
+    return Status::ok();
 }
 
 // True when every bit in [0, length) is set. The bits above `length` in the
@@ -211,8 +209,8 @@ bool bitmap_is_all_set(const uint8_t* bits, uint32_t length) {
 //           A STACKED body (codec over bitpack/delta) pays a second decode
 //           stage per read, so it must clear kStackFloorPercent instead of
 //           merely shaving a byte.
-void emit_encoded(WriteContext& ctx, SectionKind kind, Encoding encoding,
-                  const void* body, size_t body_bytes, size_t plain_bytes) {
+Status emit_encoded(WriteContext& ctx, SectionKind kind, Encoding encoding,
+                    const void* body, size_t body_bytes, size_t plain_bytes) {
     if (ctx.codec != SectionCodec::kNone
             && body_bytes >= kCompressMinBytes
             && kind_is_compressible(static_cast<uint16_t>(kind))) {
@@ -231,50 +229,45 @@ void emit_encoded(WriteContext& ctx, SectionKind kind, Encoding encoding,
         if (worthwhile && encoding != Encoding::kPlain
                 && packed.size() * 100u > body_bytes * kStackFloorPercent)
             worthwhile = false;
-        if (worthwhile) {
-            emit_raw(ctx, kind, encoding, ctx.codec, packed.data(),
-                     packed.size(), body_bytes, plain_bytes);
-            return;
-        }
+        if (worthwhile)
+            return emit_raw(ctx, kind, encoding, ctx.codec, packed.data(),
+                            packed.size(), body_bytes, plain_bytes);
     }
-    emit_raw(ctx, kind, encoding, SectionCodec::kNone, body, body_bytes,
-             body_bytes, plain_bytes);
+    return emit_raw(ctx, kind, encoding, SectionCodec::kNone, body, body_bytes,
+                    body_bytes, plain_bytes);
 }
 
-void emit_section(WriteContext& ctx, SectionKind kind, const void* data, size_t bytes) {
-    emit_encoded(ctx, kind, Encoding::kPlain, data, bytes, bytes);
+Status emit_section(WriteContext& ctx, SectionKind kind, const void* data, size_t bytes) {
+    return emit_encoded(ctx, kind, Encoding::kPlain, data, bytes, bytes);
 }
 
 // Selection codes, bit-packed to the width data_length implies. This is where
 // the bytes are: under value ordering every non-degenerate column stores one
 // code per row, so a column with <= 256 distinct values drops from 4 bytes per
 // row to 1, and <= 16 distinct to a half.
-void emit_selection(WriteContext& ctx, const uint32_t* codes, uint32_t length,
-                    uint32_t data_length) {
+Status emit_selection(WriteContext& ctx, const uint32_t* codes, uint32_t length,
+                      uint32_t data_length) {
     const size_t plain = static_cast<size_t>(length) * sizeof(uint32_t);
     std::vector<uint8_t> packed;
     if (bitpack_encode_codes(codes, length, data_length, &packed))
-        emit_encoded(ctx, SectionKind::kSelection, Encoding::kBitpack,
-                     packed.data(), packed.size(), plain);
-    else
-        emit_section(ctx, SectionKind::kSelection, codes, plain);
+        return emit_encoded(ctx, SectionKind::kSelection, Encoding::kBitpack,
+                            packed.data(), packed.size(), plain);
+    return emit_section(ctx, SectionKind::kSelection, codes, plain);
 }
 
 // Fixed-width data. Delta+bitpack applies ONLY to a value-ordered column, where
 // ascending order is established by construction — never assumed from a flag or
 // from the data happening to look sorted.
-void emit_fixed_data(WriteContext& ctx, const void* data, uint32_t data_length,
-                     size_t itemsize, DrakenType type, bool ascending) {
+Status emit_fixed_data(WriteContext& ctx, const void* data, uint32_t data_length,
+                       size_t itemsize, DrakenType type, bool ascending) {
     const size_t plain = static_cast<size_t>(data_length) * itemsize;
     if (ascending && type_supports_delta(type)) {
         std::vector<uint8_t> encoded;
-        if (delta_bitpack_encode(data, data_length, itemsize, &encoded)) {
-            emit_encoded(ctx, SectionKind::kData, Encoding::kDeltaBitpack,
-                         encoded.data(), encoded.size(), plain);
-            return;
-        }
+        if (delta_bitpack_encode(data, data_length, itemsize, &encoded))
+            return emit_encoded(ctx, SectionKind::kData, Encoding::kDeltaBitpack,
+                                encoded.data(), encoded.size(), plain);
     }
-    emit_section(ctx, SectionKind::kData, data, plain);
+    return emit_section(ctx, SectionKind::kData, data, plain);
 }
 
 // v2: the 16-byte slot array, stored as four u32 lanes (format.h SectionKind).
@@ -300,8 +293,8 @@ void emit_fixed_data(WriteContext& ctx, const void* data, uint32_t data_length,
 // FINAL stored size — encoding alone, and encoding+codec where the codec
 // clears its gate — and the smallest wins; ties go to the fewest decode
 // stages.
-void emit_slot_lane(WriteContext& ctx, SectionKind kind,
-                    const std::vector<uint32_t>& lane) {
+Status emit_slot_lane(WriteContext& ctx, SectionKind kind,
+                      const std::vector<uint32_t>& lane) {
     const uint32_t count = static_cast<uint32_t>(lane.size());
     const size_t   plain = static_cast<size_t>(count) * sizeof(uint32_t);
 
@@ -356,15 +349,14 @@ void emit_slot_lane(WriteContext& ctx, SectionKind kind,
     const size_t body_bytes = winner.encoding == Encoding::kPlain
         ? plain : winner.body.size();
     if (!winner.packed.empty())
-        emit_raw(ctx, kind, winner.encoding, ctx.codec, winner.packed.data(),
-                 winner.packed.size(), body_bytes, plain);
-    else
-        emit_raw(ctx, kind, winner.encoding, SectionCodec::kNone, body,
-                 body_bytes, body_bytes, plain);
+        return emit_raw(ctx, kind, winner.encoding, ctx.codec, winner.packed.data(),
+                        winner.packed.size(), body_bytes, plain);
+    return emit_raw(ctx, kind, winner.encoding, SectionCodec::kNone, body,
+                    body_bytes, body_bytes, plain);
 }
 
-void emit_slot_lanes(WriteContext& ctx, const DrakenStringSlot* slots,
-                     uint64_t slot_count) {
+Status emit_slot_lanes(WriteContext& ctx, const DrakenStringSlot* slots,
+                       uint64_t slot_count) {
     const size_t n = static_cast<size_t>(slot_count);
     std::vector<uint32_t> lanes[4];
     for (int k = 0; k < 4; ++k) lanes[k].resize(n);
@@ -375,44 +367,58 @@ void emit_slot_lanes(WriteContext& ctx, const DrakenStringSlot* slots,
         lanes[2][i] = words[i * 4 + 2];
         lanes[3][i] = words[i * 4 + 3];
     }
-    emit_slot_lane(ctx, SectionKind::kSlotLane0, lanes[0]);
-    emit_slot_lane(ctx, SectionKind::kSlotLane1, lanes[1]);
-    emit_slot_lane(ctx, SectionKind::kSlotLane2, lanes[2]);
-    emit_slot_lane(ctx, SectionKind::kSlotLane3, lanes[3]);
+    SKENE_RETURN_IF_ERROR(emit_slot_lane(ctx, SectionKind::kSlotLane0, lanes[0]));
+    SKENE_RETURN_IF_ERROR(emit_slot_lane(ctx, SectionKind::kSlotLane1, lanes[1]));
+    SKENE_RETURN_IF_ERROR(emit_slot_lane(ctx, SectionKind::kSlotLane2, lanes[2]));
+    return emit_slot_lane(ctx, SectionKind::kSlotLane3, lanes[3]);
 }
 
-// Everything the footer needs to describe one column, gathered while its data
-// sections are written. ARRAY children nest, so this is a tree.
-// An optional section body, held back until every column's required sections
-// have been written, so all of them land contiguously in the index region.
+// An optional section body, built alongside the column and staged as the
+// node's INDEX sections once its required ones are written.
 struct PendingIndex {
     SectionKind          kind;
     std::vector<uint8_t> body;
 };
 
+// One column node's facts for one row group — what becomes its ChunkRecord and
+// its statistics, plus the identity checked against the file's schema.
+struct PlanHead {
+    uint32_t field_id = 0;
+    uint32_t type = 0;
+    uint8_t  logical_present = 0;
+    uint8_t  vector_flags = 0;
+    uint8_t  selection_kind = 0;
+    uint8_t  value_order = 0;
+    uint32_t length = 0;
+    uint32_t data_length = 0;
+    uint32_t child_count = 0;
+    uint32_t section_index = 0;
+    uint32_t section_count = 0;
+    uint32_t index_section_index = 0;
+    uint32_t index_section_count = 0;
+    uint64_t string_slot_count = 0;
+    uint64_t string_arena_used = 0;
+    uint64_t string_arena_cap = 0;
+    uint8_t  string_payloads_elided = 0;
+};
+
+// Everything the footer and directory need about one column node in one row
+// group, gathered while its sections are staged. ARRAY children nest.
 struct ColumnPlan {
-    ColumnEntryHead           head{};
+    uint32_t                  node = 0;          // depth-first node ordinal
+    PlanHead                  head{};
     std::string               name;
     LogicalTypeDescriptor     logical{};
     ColumnStatistics          statistics{};
     bool                      has_statistics = false;
-    // KMV min-hashes appended after `statistics` in the blob (format.h,
-    // ColumnSketchHeader). Empty means no sketch, and kStatSketch stays clear.
-    std::vector<uint64_t>     sketch;
     std::vector<PendingIndex> index_sections;
     std::vector<ColumnPlan>   children;
 };
 
-// Defined with the other footer writers below; declared here because the
-// statistics are sized where they are computed, far above that point.
-uint32_t statistics_blob_bytes(const std::vector<uint64_t>& sketch);
 
-// Per-chunk code bounds, for skipping byte ranges WITHIN a column.
-//
-// Only meaningful on a value-ordered column: there, `data` is ascending, so a
-// predicate resolves to a contiguous CODE interval and a chunk whose codes miss
-// that interval provably contains no matching row. Without ordering the codes
-// carry no order at all and the bounds would be noise.
+// Per-row-chunk VALUE ORDINAL bounds (ZoneMapEntry), for skipping rows within
+// one row group — built for every orderable column with more than one row
+// chunk, whatever its encoding shape or ordering (format.h, ZoneMapEntry).
 inline bool row_is_valid(const DrakenVector& v, uint32_t row) {
     if (v.validity == nullptr) return true;
     return (v.validity[row >> 3] & (1u << (row & 7u))) != 0;
@@ -461,11 +467,51 @@ void build_zone_map(const DrakenVector& v, const LogicalType* logical,
 }
 
 
-// `allow_value_order` is false for ARRAY children — see the call site.
-Status write_column_data(WriteContext& ctx, const CxxColumn& column,
-                         const std::string& name, uint32_t field_id,
-                         const WriteOptions& options, bool allow_value_order,
-                         ColumnPlan* plan);
+
+// ─── Column nodes across row groups ─────────────────────────────────────────
+
+// One column's statistics in one row group. `present` is not derivable from the
+// blob — an all-zero ColumnStatistics is a legal tracked value — so absence is
+// written as an explicit zero length rather than inferred.
+struct StatSlot {
+    bool             present = false;
+    ColumnStatistics statistics{};
+};
+
+// Everything the file accumulates about one column node, row group by row
+// group, until finish() lays it out: its staged sections, one chunk record and
+// one statistics slot per row group, and its whole-file sketch.
+struct NodeAccum {
+    std::vector<SectionEntry> sections;   // `offset` is a STAGING offset until finish()
+    std::vector<ChunkRecord>  chunks;     // one per row group
+    std::vector<StatSlot>     stats;      // one per row group
+    FileSketch                sketch;
+    bool                      sketch_void = false;
+};
+
+// Hands out depth-first node ordinals while a row group is written. Row group 0
+// creates the nodes; every later row group must produce exactly the same ones —
+// the schema check that follows names any divergence, this only stops a row
+// group from addressing a node the file does not have.
+struct NodeCursor {
+    std::deque<NodeAccum>& nodes;
+    uint32_t               next = 0;
+    bool                   create = false;
+    uint32_t               row_group = 0;
+
+    Status acquire(const char* column_name, uint32_t* out) {
+        if (next >= nodes.size()) {
+            if (!create)
+                return fail(Code::kMalformed,
+                            "row group %u has more column nodes than the file's "
+                            "schema (at column '%s') — every row group in a file "
+                            "must share one schema", row_group, column_name);
+            nodes.emplace_back();
+        }
+        *out = next++;
+        return Status::ok();
+    }
+};
 
 // The string family is the sharpest edge in the format: DrakenStringArena's
 // `slots` and `arena` are ABSOLUTE POINTERS and are never written. The scalar
@@ -524,20 +570,21 @@ Status write_string_column(WriteContext& ctx, const DrakenVector& v,
     plan->head.string_arena_cap       = sa->arena_cap;
     plan->head.string_payloads_elided = sa->payloads_elided;
 
-    emit_slot_lanes(ctx, sa->slots, sa->length);
+    SKENE_RETURN_IF_ERROR(emit_slot_lanes(ctx, sa->slots, sa->length));
 
     if (sa->arena_used > 0) {
         if (sa->arena == nullptr)
             return fail(Code::kMalformed,
                         "column '%s': arena_used is %llu but the arena is null",
                         name, static_cast<unsigned long long>(sa->arena_used));
-        emit_section(ctx, SectionKind::kStringArena, sa->arena,
-                     static_cast<size_t>(sa->arena_used));
+        SKENE_RETURN_IF_ERROR(emit_section(ctx, SectionKind::kStringArena, sa->arena,
+                                           static_cast<size_t>(sa->arena_used)));
     }
     return Status::ok();
 }
 
-Status write_column_data(WriteContext& ctx, const CxxColumn& column,
+Status write_column_data(const WriteContext& base, NodeCursor& cursor,
+                         const CxxColumn& column,
                          const std::string& name, uint32_t field_id,
                          const WriteOptions& options, bool allow_value_order,
                          ColumnPlan* plan) {
@@ -545,9 +592,16 @@ Status write_column_data(WriteContext& ctx, const CxxColumn& column,
     const VectorOwner*  own = column.own.get();
     const char*         cname = name.c_str();
 
+    // This column's node: its own section list, staging stream and sketch.
+    SKENE_RETURN_IF_ERROR(cursor.acquire(cname, &plan->node));
+    NodeAccum& node = cursor.nodes[plan->node];
+    WriteContext ctx = base;
+    ctx.node     = plan->node;
+    ctx.index    = false;
+    ctx.sections = &node.sections;
+
     plan->name = name;
     plan->head.field_id    = field_id;
-    plan->head.name_bytes  = static_cast<uint32_t>(name.size());
     plan->head.type        = static_cast<uint32_t>(v.type);
     plan->head.vector_flags = v.flags;   // VERBATIM — re-deriving hints is what
                                          // disqualified Parquet.
@@ -622,17 +676,16 @@ Status write_column_data(WriteContext& ctx, const CxxColumn& column,
             plan->statistics.flags |= kStatNdv;
         }
 
-        // v2 sketch: the MERGEABLE form of the same fact. Written alongside an
-        // exact `ndv` rather than instead of it — the exact count describes this
-        // ROW GROUP, and a reader combining row groups or files needs the
-        // hashes, not the total (format.h, ColumnSketchHeader).
-        if (!ordered.min_hashes.empty()) {
-            plan->sketch = ordered.min_hashes;
-            plan->statistics.flags |= kStatSketch;
-        }
-
-        // Set LAST: the declared length must cover whatever was appended above.
-        plan->head.stats_bytes = statistics_blob_bytes(plan->sketch);
+        // v3 sketch: ONE per column node per FILE, in draken's Vector.hash()
+        // family, so it unions with catalog and ANALYZE sketches (FORMAT.md
+        // §8.1). Every row group adds its rows; a row group that cannot be
+        // hashed (a length-only string chunk) voids the node's sketch, because
+        // a union missing a contributor under-counts with nothing to say so.
+        // Hashed from the ORIGINAL vector: ordering preserves every row's value.
+        if (sketch_supported(v))
+            SKENE_RETURN_IF_ERROR(sketch_add_rows(v, &node.sketch));
+        else
+            node.sketch_void = true;
     }
 
     SelectionKind selection_kind;
@@ -649,25 +702,27 @@ Status write_column_data(WriteContext& ctx, const CxxColumn& column,
             plan->head.string_arena_used      = ordered.arena_used;
             plan->head.string_arena_cap       = ordered.arena_used;
             plan->head.string_payloads_elided = 0;  // elided columns are never ordered
-            emit_slot_lanes(ctx,
-                            reinterpret_cast<const DrakenStringSlot*>(
-                                ordered.data.get()),
-                            ordered.slot_count);
+            SKENE_RETURN_IF_ERROR(emit_slot_lanes(
+                ctx, reinterpret_cast<const DrakenStringSlot*>(ordered.data.get()),
+                ordered.slot_count));
             if (ordered.arena_used > 0)
-                emit_section(ctx, SectionKind::kStringArena, ordered.arena.get(),
-                             static_cast<size_t>(ordered.arena_used));
+                SKENE_RETURN_IF_ERROR(emit_section(
+                    ctx, SectionKind::kStringArena, ordered.arena.get(),
+                    static_cast<size_t>(ordered.arena_used)));
         } else {
             SKENE_RETURN_IF_ERROR(write_string_column(ctx, v, cname, plan));
         }
     } else if (v.type == DRAKEN_BOOL) {
         // BOOL is never value-ordered (bit-packed; codes would inflate it ~32x).
-        emit_section(ctx, SectionKind::kData, v.data,
-                     (static_cast<size_t>(v.data_length) + 7u) / 8u);
+        SKENE_RETURN_IF_ERROR(emit_section(
+            ctx, SectionKind::kData, v.data,
+            (static_cast<size_t>(v.data_length) + 7u) / 8u));
     } else if (v.type == DRAKEN_ARRAY) {
         // Offsets are sized by the LOGICAL row count, not data_length: arrays
         // are stored dense (draken_native.cpp D.13). Never value-ordered.
-        emit_section(ctx, SectionKind::kData, v.data,
-                     (static_cast<size_t>(v.length) + 1u) * sizeof(int32_t));
+        SKENE_RETURN_IF_ERROR(emit_section(
+            ctx, SectionKind::kData, v.data,
+            (static_cast<size_t>(v.length) + 1u) * sizeof(int32_t)));
     } else if (v.type == DRAKEN_NULL) {
         // Self-describing: type == NULL means every row is null. No data, no
         // validity, nothing to write.
@@ -677,8 +732,9 @@ Status write_column_data(WriteContext& ctx, const CxxColumn& column,
             return fail(Code::kUnsupportedType,
                         "column '%s': no fixed item width for physical type %u",
                         cname, static_cast<unsigned>(v.type));
-        emit_fixed_data(ctx, ordered.applied ? ordered.data.get() : v.data,
-                        data_length, itemsize, v.type, ordered.applied);
+        SKENE_RETURN_IF_ERROR(
+            emit_fixed_data(ctx, ordered.applied ? ordered.data.get() : v.data,
+                            data_length, itemsize, v.type, ordered.applied));
     }
 
     // An ABSENT validity section already means "every row is valid", so writing
@@ -691,13 +747,14 @@ Status write_column_data(WriteContext& ctx, const CxxColumn& column,
     // The scan is over the bitmap, not the rows, so it is length/8 bytes.
     if (v.validity != nullptr && v.type != DRAKEN_NULL
             && !bitmap_is_all_set(v.validity, v.length))
-        emit_section(ctx, SectionKind::kValidity, v.validity,
-                     (static_cast<size_t>(v.length) + 7u) / 8u);
+        SKENE_RETURN_IF_ERROR(emit_section(
+            ctx, SectionKind::kValidity, v.validity,
+            (static_cast<size_t>(v.length) + 7u) / 8u));
 
     // Identity and constant selections store NO section — the reader attaches
     // the shared global. Only genuinely owned codes are written.
     if (selection_kind == SelectionKind::kStored)
-        emit_selection(ctx, codes, v.length, data_length);
+        SKENE_RETURN_IF_ERROR(emit_selection(ctx, codes, v.length, data_length));
 
     // Zone maps on EVERY column of an orderable type — not only ordered ones,
     // and not only dictionary-encoded ones.
@@ -750,6 +807,22 @@ Status write_column_data(WriteContext& ctx, const CxxColumn& column,
     plan->head.section_count =
         static_cast<uint32_t>(ctx.sections->size()) - first_section;
 
+    // The node's OPTIONAL sections, staged apart from its required ones: the
+    // required ones are laid out in the node's DATA run and these in the INDEX
+    // region (FORMAT.md §3), and the two slices of the chunk record say which
+    // is which.
+    {
+        WriteContext index_ctx = ctx;
+        index_ctx.index = true;
+        plan->head.index_section_index = static_cast<uint32_t>(ctx.sections->size());
+        for (const PendingIndex& pending : plan->index_sections)
+            SKENE_RETURN_IF_ERROR(emit_section(index_ctx, pending.kind,
+                                               pending.body.data(), pending.body.size()));
+        plan->head.index_section_count =
+            static_cast<uint32_t>(ctx.sections->size()) - plan->head.index_section_index;
+        plan->index_sections.clear();
+    }
+
     // ── ARRAY child, recursively ──
     if (v.type == DRAKEN_ARRAY) {
         if (own == nullptr || !own->child_owner)
@@ -776,7 +849,8 @@ Status write_column_data(WriteContext& ctx, const CxxColumn& column,
         // the engine a shape it has never run, so this stays off until there is
         // a measured reason to turn it on.
         plan->children.emplace_back();
-        SKENE_RETURN_IF_ERROR(write_column_data(ctx, child_column, name + ".element",
+        SKENE_RETURN_IF_ERROR(write_column_data(base, cursor, child_column,
+                                                name + ".element",
                                                 field_id, options,
                                                 /*allow_value_order=*/false,
                                                 &plan->children.back()));
@@ -983,63 +1057,7 @@ Status verify_cluster_order(const CxxMorsel& morsel,
     return Status::ok();
 }
 
-// ─── Footer ─────────────────────────────────────────────────────────────────
-
-void write_column_entry(ByteWriter& w, const ColumnPlan& plan) {
-    w.pod(plan.head);
-    w.bytes(plan.name.data(), plan.name.size());
-    if (plan.head.logical_present) w.pod(plan.logical);
-    for (const ColumnPlan& child : plan.children) write_column_entry(w, child);
-}
-
-// Writes every column's optional sections, depth first, into one contiguous
-// region immediately before the footer — so a pruning reader gets the footer and
-// every index in a single range request.
-void emit_index_sections(WriteContext& ctx, ColumnPlan* plan) {
-    plan->head.index_section_index = static_cast<uint32_t>(ctx.sections->size());
-    for (const PendingIndex& pending : plan->index_sections)
-        emit_section(ctx, pending.kind, pending.body.data(), pending.body.size());
-    plan->head.index_section_count =
-        static_cast<uint32_t>(ctx.sections->size()) - plan->head.index_section_index;
-
-    for (ColumnPlan& child : plan->children) emit_index_sections(ctx, &child);
-}
-
-// Bytes one statistics blob occupies: the fixed struct, plus the sketch when
-// there is one. ONE definition, used by both the size calculation and both
-// writers — a blob whose declared length disagreed with its contents would
-// desynchronise every following column in the footer.
-uint32_t statistics_blob_bytes(const std::vector<uint64_t>& sketch) {
-    uint32_t bytes = static_cast<uint32_t>(sizeof(ColumnStatistics));
-    if (!sketch.empty())
-        bytes += static_cast<uint32_t>(sizeof(ColumnSketchHeader)
-                                       + sketch.size() * sizeof(uint64_t));
-    return bytes;
-}
-
-void write_statistics_blob(ByteWriter& w, const ColumnStatistics& statistics,
-                           const std::vector<uint64_t>& sketch) {
-    w.pod(statistics);
-    if (sketch.empty()) return;
-    ColumnSketchHeader header;
-    header.k     = kSketchK;
-    header.count = static_cast<uint32_t>(sketch.size());
-    w.pod(header);
-    for (uint64_t hash : sketch) w.u64(hash);
-}
-
-void write_statistics(ByteWriter& w, const ColumnPlan& plan) {
-    if (plan.has_statistics) write_statistics_blob(w, plan.statistics, plan.sketch);
-    for (const ColumnPlan& child : plan.children) write_statistics(w, child);
-}
-
-uint32_t count_sections(const ColumnPlan& plan) {
-    uint32_t total = plan.head.section_count + plan.head.index_section_count;
-    for (const ColumnPlan& child : plan.children) total += count_sections(child);
-    return total;
-}
-
-// ─── File footer ────────────────────────────────────────────────────────────
+// ─── Schema ─────────────────────────────────────────────────────────────────
 
 // The invariant half of a column: what the FILE says about it, as against what
 // one row group says. Captured from the first row group and then ENFORCED on
@@ -1051,16 +1069,6 @@ struct SchemaNode {
     bool                    logical_present = false;
     LogicalTypeDescriptor   logical{};
     std::vector<SchemaNode> children;
-};
-
-// One column's statistics in one row group. `present` is not derivable from the
-// blob — an all-zero ColumnStatistics is a legal tracked value (flags 0 means
-// nothing tracked, but a min of 0 with kStatMin set is ordinary) — so absence is
-// written as an explicit zero length rather than inferred.
-struct StatSlot {
-    bool                  present = false;
-    ColumnStatistics      statistics{};
-    std::vector<uint64_t> sketch;
 };
 
 SchemaNode schema_from_plan(const ColumnPlan& plan) {
@@ -1077,8 +1085,8 @@ SchemaNode schema_from_plan(const ColumnPlan& plan) {
 }
 
 // Every field a reader would use to decide "this is the same column". A
-// divergence here means the file footer's schema directory does not describe
-// this row group, which a reader cannot detect and would silently mis-type.
+// divergence here means the footer's schema directory does not describe this
+// row group, which a reader cannot detect and would silently mis-type.
 Status check_schema_matches(const SchemaNode& expected, const ColumnPlan& plan,
                             uint32_t row_group) {
     if (plan.name != expected.name)
@@ -1120,13 +1128,34 @@ Status check_schema_matches(const SchemaNode& expected, const ColumnPlan& plan,
     return Status::ok();
 }
 
-void collect_statistics(const ColumnPlan& plan, std::vector<StatSlot>* out) {
+// Records one row group's plan into its nodes: the chunk record and the
+// statistics slot. Depth first, the same order the node ordinals were issued.
+void record_plan(const ColumnPlan& plan, std::deque<NodeAccum>* nodes) {
+    NodeAccum& node = (*nodes)[plan.node];
+    ChunkRecord record{};
+    record.length                 = plan.head.length;
+    record.data_length            = plan.head.data_length;
+    record.vector_flags           = plan.head.vector_flags;
+    record.selection_kind         = plan.head.selection_kind;
+    record.value_order            = plan.head.value_order;
+    record.string_payloads_elided = plan.head.string_payloads_elided;
+    record.section_index          = plan.head.section_index;
+    record.section_count          = plan.head.section_count;
+    record.index_section_index    = plan.head.index_section_index;
+    record.index_section_count    = plan.head.index_section_count;
+    record.reserved0              = 0;
+    record.string_slot_count      = plan.head.string_slot_count;
+    record.string_arena_used      = plan.head.string_arena_used;
+    record.string_arena_cap       = plan.head.string_arena_cap;
+    record.reserved1              = 0;
+    node.chunks.push_back(record);
+
     StatSlot slot;
     slot.present    = plan.has_statistics;
     slot.statistics = plan.statistics;
-    slot.sketch     = plan.sketch;
-    out->push_back(slot);
-    for (const ColumnPlan& child : plan.children) collect_statistics(child, out);
+    node.stats.push_back(slot);
+
+    for (const ColumnPlan& child : plan.children) record_plan(child, nodes);
 }
 
 void write_schema_entry(ByteWriter& w, const SchemaNode& node) {
@@ -1142,6 +1171,12 @@ void write_schema_entry(ByteWriter& w, const SchemaNode& node) {
     w.bytes(node.name.data(), node.name.size());
     if (node.logical_present) w.pod(node.logical);
     for (const SchemaNode& child : node.children) write_schema_entry(w, child);
+}
+
+// child_count per node, depth first — the order the nodes were issued in.
+void collect_child_counts(const SchemaNode& node, std::vector<uint32_t>* out) {
+    out->push_back(static_cast<uint32_t>(node.children.size()));
+    for (const SchemaNode& child : node.children) collect_child_counts(child, out);
 }
 
 Status validate_cluster_keys(const WriteOptions& options) {
@@ -1167,6 +1202,9 @@ Status validate_cluster_keys(const WriteOptions& options) {
 
 Status validate_options(const WriteOptions& options) {
     SKENE_RETURN_IF_ERROR(validate_cluster_keys(options));
+    if (options.block_row_groups == 0)
+        return fail(Code::kMalformed,
+                    "block_row_groups is 0 — a block holds at least one row group");
     // `codec` and `zstd_level` describe one setting between them, so a
     // combination that means two different things is rejected rather than
     // resolved. A caller who sets a level and gets no zstd — or selects zstd and
@@ -1193,23 +1231,50 @@ Status validate_options(const WriteOptions& options) {
     }
 }
 
+uint64_t align_up(uint64_t at) {
+    const uint64_t misaligned = at % kSectionAlign;
+    return misaligned == 0 ? at : at + (kSectionAlign - misaligned);
+}
+
+// Where finish() puts one column node, computed in full before a byte is
+// written — directory blocks precede the chunks they describe, so every final
+// offset must be known first.
+struct NodeLayout {
+    uint64_t                 directory_offset = 0;
+    uint32_t                 directory_bytes = 0;
+    uint64_t                 data_offset = 0;
+    uint64_t                 data_bytes = 0;
+    uint64_t                 index_offset = 0;
+    uint64_t                 index_bytes = 0;
+    uint64_t                 directory_checksum = 0;   // set when the block is emitted
+    std::vector<uint64_t>    final_offset;   // parallel to NodeAccum::sections
+    std::vector<BlockExtent> blocks;
+};
+
 }  // namespace
 
 // ─── FileWriter ─────────────────────────────────────────────────────────────
 
 struct FileWriter::State {
     WriteOptions          options;
-    std::vector<uint8_t>* out = nullptr;
     bool                  began = false;
     bool                  finished = false;
+    // Set by any failed add_row_group. Pass 1 stages sections as it goes, so a
+    // row group that failed half way has left sections no chunk record claims;
+    // finishing would describe a file other than the one written.
+    bool                  failed = false;
+
+    Stage stage;
+    Sink  sink;
 
     std::vector<RowGroupEntry> row_groups;
     uint64_t                   total_rows = 0;
 
     // Captured from row group 0 and enforced on every later one.
     std::vector<SchemaNode> schema;
-    // One entry per row group; each is the depth-first column order.
-    std::vector<std::vector<StatSlot>> statistics;
+    // Depth-first column nodes. A deque, because write_column_data holds a
+    // reference to a node while its ARRAY child adds the next one.
+    std::deque<NodeAccum>   nodes;
     // The previous row group's final key values, so the cluster order is
     // verified ACROSS row groups, not merely within each.
     std::vector<SeamKeyValue> cluster_seam;
@@ -1222,29 +1287,57 @@ uint32_t FileWriter::row_group_count() const {
     return static_cast<uint32_t>(state_->row_groups.size());
 }
 
-Status FileWriter::begin(const WriteOptions& options, std::vector<uint8_t>* out) {
-    if (out == nullptr) return fail(Code::kMalformed, "FileWriter::begin: out is null");
-    if (state_->began)
-        return fail(Code::kMalformed, "FileWriter::begin called twice");
+uint64_t FileWriter::staged_bytes() const { return state_->stage.staged_bytes(); }
 
-    SKENE_RETURN_IF_ERROR(validate_options(options));
+namespace {
 
-    state_->options = options;
-    state_->out     = out;
-    state_->began   = true;
-
-    out->clear();
-    ByteWriter w(out);
-
+Status write_head(Sink* sink) {
     FileHead head{};
     head.magic              = kMagic;
     head.version            = kVersion;
     head.endianness         = static_cast<uint8_t>(Endianness::kLittle);
     head.checksum_algorithm = static_cast<uint8_t>(ChecksumAlgorithm::kXxh3_64);
     head.reserved           = 0;
-    w.pod(head);
+    return sink->write(&head, sizeof(head));
+}
 
-    return Status::ok();
+}  // namespace
+
+Status FileWriter::begin(const WriteOptions& options, std::vector<uint8_t>* out) {
+    if (out == nullptr) return fail(Code::kMalformed, "FileWriter::begin: out is null");
+    if (state_->began)
+        return fail(Code::kMalformed, "FileWriter::begin called twice");
+    SKENE_RETURN_IF_ERROR(validate_options(options));
+    if (!options.scratch_path.empty())
+        return fail(Code::kMalformed,
+                    "scratch_path is set but the output is a buffer — buffer "
+                    "output stages in memory; a scratch file is for path output");
+
+    state_->options = options;
+    state_->began   = true;
+    out->clear();
+    state_->stage.open_memory();
+    state_->sink.open_memory(out);
+    return write_head(&state_->sink);
+}
+
+Status FileWriter::begin(const WriteOptions& options, const std::string& path) {
+    if (state_->began)
+        return fail(Code::kMalformed, "FileWriter::begin called twice");
+    SKENE_RETURN_IF_ERROR(validate_options(options));
+    if (options.scratch_path.empty())
+        return fail(Code::kMalformed,
+                    "writing to a path stages sections in a scratch file, and "
+                    "scratch_path names none — say where the writer may stage");
+    if (options.scratch_path == path)
+        return fail(Code::kMalformed,
+                    "scratch_path and the output path are both '%s'", path.c_str());
+
+    state_->options = options;
+    state_->began   = true;
+    SKENE_RETURN_IF_ERROR(state_->stage.open_file(options.scratch_path));
+    SKENE_RETURN_IF_ERROR(state_->sink.open_file(path));
+    return write_head(&state_->sink);
 }
 
 Status FileWriter::add_row_group(const CxxMorsel& morsel) {
@@ -1254,6 +1347,10 @@ Status FileWriter::add_row_group(const CxxMorsel& morsel) {
     if (state_->finished)
         return fail(Code::kMalformed,
                     "FileWriter::add_row_group after finish()");
+    if (state_->failed)
+        return fail(Code::kMalformed,
+                    "FileWriter::add_row_group after an earlier row group failed; "
+                    "this writer's staged state no longer describes a file");
 
     const WriteOptions& options = state_->options;
     const size_t column_count = morsel.columns.size();
@@ -1268,104 +1365,74 @@ Status FileWriter::add_row_group(const CxxMorsel& morsel) {
 
     const uint32_t index = static_cast<uint32_t>(state_->row_groups.size());
 
-    // Cluster order is proved BEFORE a byte of this row group is written: a
-    // violation must leave the buffer untouched, not half a row group deep.
+    // Every column holds the row group's rows. A morsel whose columns disagree
+    // would write a chunk whose length is not its row group's — a file the
+    // reader rejects (FORMAT.md §5.10), so it is refused here, at its source.
+    const uint64_t rows = morsel.num_rows();
+    for (size_t i = 0; i < column_count; ++i)
+        if (morsel.columns[i].view.length != rows)
+            return fail(Code::kMalformed,
+                        "column '%s' has %u rows but the row group has %llu — every "
+                        "column of a row group holds the same rows",
+                        morsel.names[i].c_str(), morsel.columns[i].view.length,
+                        static_cast<unsigned long long>(rows));
+
+    // Cluster order is proved BEFORE anything is staged: a violation leaves the
+    // writer exactly as it was.
     if (!options.cluster_keys.empty())
         SKENE_RETURN_IF_ERROR(verify_cluster_order(morsel, options.cluster_keys,
                                                    index, &state_->cluster_seam));
 
-    ByteWriter w(state_->out);
+    // From here a failure leaves staged sections behind: poison the writer.
+    Status status = [&]() -> Status {
+        NodeCursor cursor{state_->nodes, 0u, index == 0, index};
+        WriteContext base;
+        base.stage      = &state_->stage;
+        base.codec      = options.codec;
+        base.zstd_level = options.zstd_level;
 
-    RowGroupEntry entry{};
-    entry.row_count   = morsel.num_rows();
-    entry.first_row   = state_->total_rows;
-    entry.data_offset = w.position();
-
-    // ── DATA region ──
-    std::vector<SectionEntry> sections;
-    std::vector<ColumnPlan>   plans(column_count);
-    WriteContext ctx{&w, &sections, options.codec, options.zstd_level};
-
-    for (size_t i = 0; i < column_count; ++i) {
-        const uint32_t field_id = options.field_ids.empty() ? 0u : options.field_ids[i];
-        SKENE_RETURN_IF_ERROR(write_column_data(ctx, morsel.columns[i],
-                                                morsel.names[i], field_id,
-                                                options, /*allow_value_order=*/true,
-                                                &plans[i]));
-    }
-
-    // ── INDEX region ──
-    for (ColumnPlan& plan : plans) emit_index_sections(ctx, &plan);
-
-    entry.data_bytes = w.position() - entry.data_offset;
-
-    // ── Schema: capture once, enforce thereafter ──
-    if (index == 0) {
-        state_->schema.reserve(plans.size());
-        for (const ColumnPlan& plan : plans)
-            state_->schema.push_back(schema_from_plan(plan));
-    } else {
-        if (plans.size() != state_->schema.size())
+        std::vector<ColumnPlan> plans(column_count);
+        for (size_t i = 0; i < column_count; ++i) {
+            const uint32_t field_id =
+                options.field_ids.empty() ? 0u : options.field_ids[i];
+            SKENE_RETURN_IF_ERROR(write_column_data(base, cursor, morsel.columns[i],
+                                                    morsel.names[i], field_id, options,
+                                                    /*allow_value_order=*/true,
+                                                    &plans[i]));
+        }
+        if (cursor.next != state_->nodes.size())
             return fail(Code::kMalformed,
-                        "row group %u has %zu columns but the file's schema has "
-                        "%zu — every row group in a file must share one schema",
-                        index, plans.size(), state_->schema.size());
-        for (size_t i = 0; i < plans.size(); ++i)
-            SKENE_RETURN_IF_ERROR(
-                check_schema_matches(state_->schema[i], plans[i], index));
-    }
+                        "row group %u has %u column nodes but the file's schema "
+                        "has %zu — every row group in a file must share one schema",
+                        index, cursor.next, state_->nodes.size());
 
-    // ── ROW GROUP FOOTER ──
-    entry.footer_offset = w.position();
+        // ── Schema: capture once, enforce thereafter ──
+        if (index == 0) {
+            state_->schema.reserve(plans.size());
+            for (const ColumnPlan& plan : plans)
+                state_->schema.push_back(schema_from_plan(plan));
+        } else {
+            if (plans.size() != state_->schema.size())
+                return fail(Code::kMalformed,
+                            "row group %u has %zu columns but the file's schema "
+                            "has %zu — every row group in a file must share one "
+                            "schema", index, plans.size(), state_->schema.size());
+            for (size_t i = 0; i < plans.size(); ++i)
+                SKENE_RETURN_IF_ERROR(
+                    check_schema_matches(state_->schema[i], plans[i], index));
+        }
 
-    RowGroupFooterHeader fh{};
-    fh.row_count          = morsel.num_rows();
-    fh.column_count       = static_cast<uint32_t>(column_count);
-    fh.section_count      = static_cast<uint32_t>(sections.size());
-    fh.created_at_unix_us = options.created_at_unix_us;
-    fh.writer_tag_bytes   = static_cast<uint32_t>(options.writer_tag.size());
-    fh.file_flags         = 0;
-    std::memcpy(fh.file_uuid, options.file_uuid, sizeof(fh.file_uuid));
-    w.pod(fh);
-    w.bytes(options.writer_tag.data(), options.writer_tag.size());
+        for (const ColumnPlan& plan : plans) record_plan(plan, &state_->nodes);
 
-    for (const ColumnPlan& plan : plans) write_column_entry(w, plan);
-    for (const SectionEntry& section : sections) w.pod(section);
-    // Statistics blobs, in the SAME depth-first order as the column directory,
-    // skipping columns with stats_bytes == 0. Located by order rather than by an
-    // offset, so a future longer blob is read prefix-first and the remainder
-    // skipped -- which is what lets statistics grow with no version bump.
-    for (const ColumnPlan& plan : plans) write_statistics(w, plan);
-
-    const uint64_t footer_bytes = w.position() - entry.footer_offset;
-    if (footer_bytes > UINT32_MAX)
-        return fail(Code::kMalformed,
-                    "row group %u footer is %llu bytes, which exceeds the "
-                    "32-bit footer_bytes field", index,
-                    static_cast<unsigned long long>(footer_bytes));
-    entry.footer_bytes    = static_cast<uint32_t>(footer_bytes);
-    entry.footer_checksum = checksum_xxh3_64(
-        state_->out->data() + entry.footer_offset, static_cast<size_t>(footer_bytes));
-    entry.reserved = 0;
-
-    // Sanity: the section count recorded in the row group footer must match what
-    // the column tree actually claims, or a reader walking either path sees a
-    // different row group.
-    uint32_t claimed = 0;
-    for (const ColumnPlan& plan : plans) claimed += count_sections(plan);
-    if (claimed != sections.size())
-        return fail(Code::kMalformed,
-                    "internal: row group %u's column tree claims %u sections but "
-                    "%zu were written", index, claimed, sections.size());
-
-    // ── File-level bookkeeping ──
-    state_->statistics.emplace_back();
-    std::vector<StatSlot>& slots = state_->statistics.back();
-    for (const ColumnPlan& plan : plans) collect_statistics(plan, &slots);
-
-    state_->total_rows += entry.row_count;
-    state_->row_groups.push_back(entry);
-    return Status::ok();
+        RowGroupEntry entry{};
+        entry.row_count = morsel.num_rows();
+        entry.first_row = state_->total_rows;
+        state_->total_rows += entry.row_count;
+        state_->row_groups.push_back(entry);
+        return Status::ok();
+    }();
+    if (!status.is_ok()) state_->failed = true;
+    return status;
 }
 
 Status FileWriter::finish() {
@@ -1373,6 +1440,10 @@ Status FileWriter::finish() {
         return fail(Code::kMalformed, "FileWriter::finish before begin()");
     if (state_->finished)
         return fail(Code::kMalformed, "FileWriter::finish called twice");
+    if (state_->failed)
+        return fail(Code::kMalformed,
+                    "FileWriter::finish after a row group failed; refusing to "
+                    "write a file its staged state does not describe");
     if (state_->row_groups.empty())
         return fail(Code::kMalformed,
                     "FileWriter::finish with no row groups — a .skene file with "
@@ -1380,21 +1451,163 @@ Status FileWriter::finish() {
                     "schema-less object");
 
     const WriteOptions& options = state_->options;
-    ByteWriter w(state_->out);
+    Sink& sink = state_->sink;
+    std::deque<NodeAccum>& nodes = state_->nodes;
+    const uint32_t row_groups = static_cast<uint32_t>(state_->row_groups.size());
+    const uint32_t G = options.block_row_groups;
+    const uint32_t block_count = (row_groups + G - 1u) / G;
 
-    // ── FILE FOOTER ──
-    const uint64_t footer_start = w.position();
+    // ── Layout: every final offset, before anything is written ──
+    std::vector<NodeLayout> layout(nodes.size());
+    uint64_t at = sink.position();   // just past the head
+    for (size_t n = 0; n < nodes.size(); ++n) {
+        const NodeAccum& node = nodes[n];
+        NodeLayout& L = layout[n];
+        if (node.chunks.size() != row_groups)
+            return fail(Code::kMalformed,
+                        "internal: column node %zu has %zu chunk records for %u "
+                        "row groups", n, node.chunks.size(), row_groups);
+        const uint64_t directory_bytes =
+            sizeof(DirectoryBlockHeader)
+            + static_cast<uint64_t>(row_groups) * sizeof(ChunkRecord)
+            + static_cast<uint64_t>(node.sections.size()) * sizeof(SectionEntry);
+        if (directory_bytes > UINT32_MAX)
+            return fail(Code::kMalformed,
+                        "column node %zu's directory block is %llu bytes, which "
+                        "exceeds the 32-bit directory_bytes field", n,
+                        static_cast<unsigned long long>(directory_bytes));
+        L.directory_offset = at;
+        L.directory_bytes  = static_cast<uint32_t>(directory_bytes);
+        at += directory_bytes;
+
+        L.final_offset.assign(node.sections.size(), 0);
+        L.blocks.assign(block_count, BlockExtent{0, 0});
+        uint64_t begin = UINT64_MAX, end = 0;
+        for (uint32_t g = 0; g < row_groups; ++g) {
+            const ChunkRecord& chunk = node.chunks[g];
+            BlockExtent& block = L.blocks[g / G];
+            for (uint32_t s = 0; s < chunk.section_count; ++s) {
+                const uint32_t i = chunk.section_index + s;
+                at = align_up(at);
+                L.final_offset[i] = at;
+                // A block extent covers the sections that HOLD bytes; a block
+                // of empty sections (zero-row chunks) is {0, 0} (FORMAT.md §5.6).
+                if (node.sections[i].stored_bytes > 0 && block.bytes == 0)
+                    block.offset = at;
+                at += node.sections[i].stored_bytes;
+                if (node.sections[i].stored_bytes > 0) block.bytes = at - block.offset;
+                if (begin == UINT64_MAX) begin = L.final_offset[i];
+                end = at;
+            }
+        }
+        if (begin == UINT64_MAX) {
+            L.data_offset = L.directory_offset + L.directory_bytes;
+            L.data_bytes  = 0;
+        } else {
+            L.data_offset = begin;
+            L.data_bytes  = end - begin;
+        }
+    }
+    for (size_t n = 0; n < nodes.size(); ++n) {
+        const NodeAccum& node = nodes[n];
+        NodeLayout& L = layout[n];
+        uint64_t begin = UINT64_MAX, end = 0;
+        for (uint32_t g = 0; g < row_groups; ++g) {
+            const ChunkRecord& chunk = node.chunks[g];
+            for (uint32_t s = 0; s < chunk.index_section_count; ++s) {
+                const uint32_t i = chunk.index_section_index + s;
+                at = align_up(at);
+                L.final_offset[i] = at;
+                at += node.sections[i].stored_bytes;
+                if (begin == UINT64_MAX) begin = L.final_offset[i];
+                end = at;
+            }
+        }
+        if (begin != UINT64_MAX) {
+            L.index_offset = begin;
+            L.index_bytes  = end - begin;
+        }
+    }
+    const uint64_t footer_offset = at;
+
+    // ── DATA region: per node, its directory block then its chunks ──
+    for (size_t n = 0; n < nodes.size(); ++n) {
+        const NodeAccum& node = nodes[n];
+        NodeLayout& L = layout[n];
+
+        std::vector<uint8_t> block;
+        block.reserve(L.directory_bytes);
+        ByteWriter w(&block);
+        DirectoryBlockHeader header{};
+        header.directory_magic = kDirectoryMagic;
+        header.node_ordinal    = static_cast<uint32_t>(n);
+        header.chunk_count     = row_groups;
+        header.section_count   = static_cast<uint32_t>(node.sections.size());
+        w.pod(header);
+        for (const ChunkRecord& chunk : node.chunks) w.pod(chunk);
+        for (size_t i = 0; i < node.sections.size(); ++i) {
+            SectionEntry entry = node.sections[i];
+            entry.offset = L.final_offset[i];
+            w.pod(entry);
+        }
+        if (block.size() != L.directory_bytes || sink.position() != L.directory_offset)
+            return fail(Code::kMalformed,
+                        "internal: column node %zu's directory block does not "
+                        "land where the layout put it", n);
+        L.directory_checksum = checksum_xxh3_64(block.data(), block.size());
+        SKENE_RETURN_IF_ERROR(sink.write(block.data(), block.size()));
+
+        for (const ChunkRecord& chunk : node.chunks) {
+            for (uint32_t s = 0; s < chunk.section_count; ++s) {
+                const uint32_t i = chunk.section_index + s;
+                SKENE_RETURN_IF_ERROR(sink.zeros(
+                    static_cast<size_t>(L.final_offset[i] - sink.position())));
+                SKENE_RETURN_IF_ERROR(state_->stage.copy_to(
+                    static_cast<uint32_t>(n), false, node.sections[i].offset,
+                    node.sections[i].stored_bytes, &sink));
+            }
+        }
+        state_->stage.release(static_cast<uint32_t>(n), false);
+    }
+
+    // ── INDEX region ──
+    for (size_t n = 0; n < nodes.size(); ++n) {
+        const NodeAccum& node = nodes[n];
+        const NodeLayout& L = layout[n];
+        for (const ChunkRecord& chunk : node.chunks) {
+            for (uint32_t s = 0; s < chunk.index_section_count; ++s) {
+                const uint32_t i = chunk.index_section_index + s;
+                SKENE_RETURN_IF_ERROR(sink.zeros(
+                    static_cast<size_t>(L.final_offset[i] - sink.position())));
+                SKENE_RETURN_IF_ERROR(state_->stage.copy_to(
+                    static_cast<uint32_t>(n), true, node.sections[i].offset,
+                    node.sections[i].stored_bytes, &sink));
+            }
+        }
+        state_->stage.release(static_cast<uint32_t>(n), true);
+    }
+    if (sink.position() != footer_offset)
+        return fail(Code::kMalformed,
+                    "internal: the data and index regions end at %llu but the "
+                    "layout put the footer at %llu",
+                    static_cast<unsigned long long>(sink.position()),
+                    static_cast<unsigned long long>(footer_offset));
+
+    // ── FOOTER ──
+    std::vector<uint8_t> footer;
+    ByteWriter w(&footer);
 
     FileFooterHeader fh{};
     fh.footer_magic       = kFileFooterMagic;
     fh.footer_version     = kFileFooterVersion;
     fh.reserved           = 0;
     fh.row_count          = state_->total_rows;
-    fh.row_group_count    = static_cast<uint32_t>(state_->row_groups.size());
+    fh.row_group_count    = row_groups;
     fh.column_count       = static_cast<uint32_t>(state_->schema.size());
     fh.created_at_unix_us = options.created_at_unix_us;
     fh.writer_tag_bytes   = static_cast<uint32_t>(options.writer_tag.size());
-    fh.file_flags         = 0;
+    fh.block_row_groups   = G;
+    fh.data_region_bytes  = footer_offset - kFileHeadBytes;
     std::memcpy(fh.file_uuid, options.file_uuid, sizeof(fh.file_uuid));
     w.pod(fh);
     w.bytes(options.writer_tag.data(), options.writer_tag.size());
@@ -1402,13 +1615,8 @@ Status FileWriter::finish() {
     for (const RowGroupEntry& entry : state_->row_groups) w.pod(entry);
     for (const SchemaNode& node : state_->schema) write_schema_entry(w, node);
 
-    // ── Cluster spec (v2) ── between the schema and the statistics, so a
-    // pruning reader has the file's declared order from the file footer alone.
-    // Zero keys is the ordinary case and writes just the 4-byte header. The
-    // ordinals were verified against every row group's columns as they arrived;
-    // this checks them against the schema width once more because the spec is
-    // written against the SCHEMA's order, and an ordinal past it would be a
-    // record no reader could resolve.
+    // Cluster spec: written against the SCHEMA's top-level order, so an ordinal
+    // past it would be a record no reader could resolve.
     {
         if (options.cluster_keys.size() > UINT16_MAX)
             return fail(Code::kMalformed, "%zu cluster keys exceed the 16-bit "
@@ -1426,42 +1634,74 @@ Status FileWriter::finish() {
         for (const SortKey& key : options.cluster_keys) w.pod(key);
     }
 
-    // Per-row-group statistics: row group major, then the schema's depth-first
-    // column order. Each blob carries its own length, so a reader that knows a
-    // shorter ColumnStatistics reads the prefix and skips the rest — the same
-    // growth rule the row group footers' blobs follow.
-    //
-    // THIS is what keeps row group pruning alive once manifest bounds coarsen to
-    // the union over a file. It is reachable from the file footer alone: a
-    // pruning reader never opens a row group footer to decide which row groups
-    // to read.
-    for (const std::vector<StatSlot>& row_group : state_->statistics) {
-        for (const StatSlot& slot : row_group) {
+    // Column summaries, depth first. Emitting them in node order IS the nested
+    // shape: each head's child_count says its child's summary follows.
+    std::vector<uint32_t> child_counts;
+    for (const SchemaNode& node : state_->schema) collect_child_counts(node, &child_counts);
+    if (child_counts.size() != nodes.size())
+        return fail(Code::kMalformed,
+                    "internal: the schema describes %zu column nodes but %zu were "
+                    "written", child_counts.size(), nodes.size());
+    for (size_t n = 0; n < nodes.size(); ++n) {
+        const NodeAccum& node = nodes[n];
+        const NodeLayout& L = layout[n];
+        ColumnSummaryHead head{};
+        head.directory_offset   = L.directory_offset;
+        head.directory_bytes    = L.directory_bytes;
+        head.reserved0          = 0;
+        head.directory_checksum = L.directory_checksum;
+        head.data_offset        = L.data_offset;
+        head.data_bytes         = L.data_bytes;
+        head.index_offset       = L.index_offset;
+        head.index_bytes        = L.index_bytes;
+        head.block_count        = block_count;
+        head.child_count        = child_counts[n];
+        w.pod(head);
+        for (const BlockExtent& block : L.blocks) w.pod(block);
+
+        SketchRecordHeader sketch{};
+        const bool tracked = options.read_acceleration && !node.sketch_void
+                             && node.sketch.size() > 0;
+        if (tracked) {
+            sketch.hash_family = kSketchFamilyDrakenVectorHash;
+            sketch.k           = static_cast<uint16_t>(kSketchK);
+            sketch.count       = static_cast<uint32_t>(node.sketch.size());
+        }
+        w.pod(sketch);
+        if (tracked)
+            for (uint64_t hash : node.sketch.hashes()) w.u64(hash);
+    }
+
+    // Per-row-group statistics, column-node major then row group (FORMAT.md
+    // §5.8) — reachable from the footer alone, which is what keeps row group
+    // pruning alive once manifest bounds coarsen to the union over a file.
+    for (const NodeAccum& node : nodes) {
+        for (const StatSlot& slot : node.stats) {
             if (!slot.present) { w.u32(0); continue; }
-            w.u32(statistics_blob_bytes(slot.sketch));
-            write_statistics_blob(w, slot.statistics, slot.sketch);
+            w.u32(static_cast<uint32_t>(sizeof(ColumnStatistics)));
+            w.pod(slot.statistics);
         }
     }
 
-    const uint64_t footer_bytes = w.position() - footer_start;
-    if (footer_bytes > UINT32_MAX)
+    if (footer.size() > UINT32_MAX)
         return fail(Code::kMalformed,
-                    "file footer is %llu bytes, which exceeds the 32-bit "
-                    "footer_bytes field",
-                    static_cast<unsigned long long>(footer_bytes));
+                    "footer is %zu bytes, which exceeds the 32-bit footer_bytes "
+                    "field", footer.size());
+    SKENE_RETURN_IF_ERROR(sink.write(footer.data(), footer.size()));
 
     // ── TAIL ──
     FileTail tail{};
-    tail.footer_bytes       = static_cast<uint32_t>(footer_bytes);
-    tail.footer_checksum    = checksum_xxh3_64(state_->out->data() + footer_start,
-                                               static_cast<size_t>(footer_bytes));
+    tail.footer_bytes       = static_cast<uint32_t>(footer.size());
+    tail.footer_checksum    = checksum_xxh3_64(footer.data(), footer.size());
     tail.version            = kVersion;
     tail.endianness         = static_cast<uint8_t>(Endianness::kLittle);
     tail.checksum_algorithm = static_cast<uint8_t>(ChecksumAlgorithm::kXxh3_64);
     tail.reserved           = 0;
     tail.magic              = kMagic;
-    w.pod(tail);
+    SKENE_RETURN_IF_ERROR(sink.write(&tail, sizeof(tail)));
 
+    SKENE_RETURN_IF_ERROR(sink.commit());
+    state_->stage.close();
     state_->finished = true;
     return Status::ok();
 }
@@ -1469,10 +1709,6 @@ Status FileWriter::finish() {
 Status write_morsel(const CxxMorsel& morsel, const WriteOptions& options,
                     std::vector<uint8_t>* out) {
     // The one-row-group case IS FileWriter, not a parallel implementation of it.
-    // A second path would be a second set of framing, offset and footer rules to
-    // keep in step, and the single-row-group file is exactly the shape most
-    // tests exercise — so a divergence there would be invisible until it reached
-    // a multi-row-group file in production.
     FileWriter writer;
     SKENE_RETURN_IF_ERROR(writer.begin(options, out));
     SKENE_RETURN_IF_ERROR(writer.add_row_group(morsel));

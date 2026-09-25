@@ -63,8 +63,14 @@ LZ4_DIR   := $(ROOT)/third_party/lz4
 
 SKENE_INC  := -I$(ROOT)/skene/include -I$(ROOT)/skene/src -I$(ZSTD_DIR) \
               -I$(LZ4_DIR) $(DRAKEN_INC)
+# The file sketch hashes with draken's Vector.hash() family
+# (src/sketch.cpp -> draken/ops/hash.h -> simd_hash_i64), and simd_hash.cpp
+# needs simd_env/cpu_features — the same three TUs skene/Makefile links.
 SKENE_SRCS := $(wildcard $(ROOT)/skene/src/*.cpp) \
               $(ROOT)/draken/core/vector_alloc.cpp \
+              $(ROOT)/draken/simd/simd_hash.cpp \
+              $(ROOT)/draken/simd/simd_env.cpp \
+              $(ROOT)/draken/simd/cpu_features.cpp \
               $(LZ4_DIR)/lz4.c \
               $(ZSTD_SRCS)
 # skene_native.cpp is the Cython shim and needs Python; the format code does not.

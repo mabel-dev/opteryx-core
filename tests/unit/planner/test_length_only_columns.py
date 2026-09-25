@@ -22,6 +22,7 @@ import uuid
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.models import ExecutionContext, QueryTelemetry
+from opteryx.planner.plan_context import PlanContext
 from opteryx.planner.ast_rewriter import do_ast_rewriter
 from opteryx.planner.binder import do_bind_phase
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -44,7 +45,7 @@ def _optimized_plan(sql: str):
     plan = do_resolve_relations(plan, ctes, telemetry)
     plan = do_plan_rewrite(plan, telemetry)
     bound = do_bind_phase(plan, execution_context=ctx, query_id=query_id, telemetry=telemetry)
-    return do_optimizer(bound, telemetry)
+    return do_optimizer(bound, telemetry, PlanContext())
 
 
 def _length_only_names(sql: str) -> set:

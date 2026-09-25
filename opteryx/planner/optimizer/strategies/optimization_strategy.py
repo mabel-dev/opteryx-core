@@ -12,6 +12,7 @@ from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.planner.plan_context import PlanContext
 
 
 # A Filter's `.columns` is documented elsewhere (set_ops.py, projection_pushdown.py)
@@ -212,7 +213,9 @@ class CopyOnWritePlan:
 class OptimizerContext:
     """Context object to carry state"""
 
-    def __init__(self, tree: LogicalPlan):
+    def __init__(self, tree: LogicalPlan, plan_context: PlanContext):
+        self.plan_context = plan_context
+        """The query's estimates (PlanContext.statistics) — never read off nodes."""
         self.node_id = None
         self.parent_nid = None
         self.last_nid = None
@@ -230,6 +233,15 @@ class OptimizerContext:
         self.collected_predicates: list = []
         """We collect predicates we should be able to push to reads and joins"""
 
+        self.collected_nids: dict = {}
+        """id(collected node) -> its node id, for passes that must find a node they
+        collected (a Filter, a Limit) again — never stamped on the node itself"""
+
+        self.predicate_paths: dict = {}
+        """id(collected Filter node) -> the node ids that sat above it when it was
+        collected (trace_to_root), so predicate pushdown can restore a filter it
+        could not place; absent for filters the pass created itself"""
+
         self.collected_decorrelations: list = []
         """Filter nodes holding a scalar subquery, decorrelated in complete()"""
 
@@ -238,6 +250,9 @@ class OptimizerContext:
 
         self.collected_distincts: list = []
         """We collect distincts to try to eliminate rows earlier"""
+
+        self.limit_targets: dict = {}
+        """id(collected Limit node) -> the relations limit pushdown may push it to"""
 
         self.collected_limits: list = []
         """We collect limits to to to eliminate rows earlier"""
@@ -298,7 +313,7 @@ class OptimizationStrategy:
         outcome WITH the numbers it was decided on — "pushed: input est 601M >
         leg base 150M", "declined: 1.6M < 380M" — never a bare "applied". A
         cost function here may read only trusted statistics (manifest base
-        counts, or ``node.statistics`` estimates the strategy documents as safe
+        counts, or ``PlanContext.statistics`` estimates the strategy documents as safe
         for its decision), and any missing statistic means "keep today's plan".
         """
         self.telemetry.add_decision(label, detail)

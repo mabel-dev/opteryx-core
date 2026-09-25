@@ -34,6 +34,10 @@ inline std::atomic<long long> parvi_promotes {0};  // partition's parvi front ma
 inline std::atomic<long long> mid_promotes {0};    // partition outgrew the bounded mid tier -> carchar
 inline std::atomic<long long> distinct_parvi_sinks    {0};  // DistinctSink locals armed with a parvi front set
 inline std::atomic<long long> distinct_parvi_promotes {0};  // front set overflowed (estimate misfire)
+// Adaptive raw mode and the radix-partitioned merge (per-event, never per-row):
+inline std::atomic<long long> raw_switches {0};     // worker stopped probing its local tables
+inline std::atomic<long long> merge_bucketed {0};   // partitions merged through radix buckets
+inline std::atomic<long long> merge_buckets {0};    // buckets those partitions were split into
 
 inline void reset() {
     hash_ns.store(0, std::memory_order_relaxed);
@@ -45,6 +49,9 @@ inline void reset() {
     mid_promotes.store(0, std::memory_order_relaxed);
     distinct_parvi_sinks.store(0, std::memory_order_relaxed);
     distinct_parvi_promotes.store(0, std::memory_order_relaxed);
+    raw_switches.store(0, std::memory_order_relaxed);
+    merge_bucketed.store(0, std::memory_order_relaxed);
+    merge_buckets.store(0, std::memory_order_relaxed);
 }
 
 using Clock = std::chrono::steady_clock;
@@ -66,6 +73,9 @@ inline long long parvi_promotes_count() { return parvi_promotes.load(std::memory
 inline long long mid_promotes_count()   { return mid_promotes.load(std::memory_order_relaxed); }
 inline long long distinct_parvi_sinks_count()    { return distinct_parvi_sinks.load(std::memory_order_relaxed); }
 inline long long distinct_parvi_promotes_count() { return distinct_parvi_promotes.load(std::memory_order_relaxed); }
+inline long long raw_switches_count()   { return raw_switches.load(std::memory_order_relaxed); }
+inline long long merge_bucketed_count() { return merge_bucketed.load(std::memory_order_relaxed); }
+inline long long merge_buckets_count()  { return merge_buckets.load(std::memory_order_relaxed); }
 
 }  // namespace opteryx::engine::groupby_tel
 

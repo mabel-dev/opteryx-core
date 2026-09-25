@@ -37,6 +37,7 @@ raw Python version.
 from cpython.dict cimport PyDict_Copy
 from cpython cimport dict
 from opteryx.compiled.functions.random_helper import random_string_c
+from opteryx.compiled.structures.expressions import EXPRESSION_TYPES
 
 
 cdef inline object _inner_copy(object obj, dict memo):
@@ -58,6 +59,9 @@ cdef inline object _inner_copy(object obj, dict memo):
     # looking unbound. Route through the memo so both slots land on one copy.
     if isinstance(obj, Node):
         return (<Node>obj).copy(memo)
+    # A typed expression, for the same reason: through the memo.
+    if obj_type in EXPRESSION_TYPES:
+        return obj.copy(memo)
     # hasattr is intentional here: _inner_copy handles arbitrary user objects
     # stored in node properties that implement .copy() (e.g. custom attribute types).
     # No known type can be checked statically, so this is an approved exception to §9.

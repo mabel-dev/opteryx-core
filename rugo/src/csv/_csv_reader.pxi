@@ -39,6 +39,7 @@ cdef extern from "core/csv_parse_context.hpp" namespace "rugo::_csv":
         string column
         uint8_t op
         string value
+        uint8_t kind
 
     struct CsvParseContext:
         uint8_t delimiter
@@ -73,7 +74,9 @@ cdef extern from "core/csv_column_builder.hpp" namespace "rugo::_csv":
     # except + : commit_row throws std::runtime_error -- translated by Cython to a
     # Python RuntimeError -- on a post-sniff type mismatch (ignore_errors=false) and
     # on ANY value that does not fit an explicit_schema-declared type (where
-    # ignore_errors does not apply at all). See csv_column_builder.cpp.
+    # ignore_errors does not apply at all). A predicate literal that does not fit
+    # its column's type throws std::invalid_argument -- a Python ValueError -- before
+    # any row is filtered (predicate_literal.hpp). See csv_column_builder.cpp.
     StreamResult build_columns_streaming(
         const uint8_t*          buffer,
         size_t                  length,
@@ -91,7 +94,7 @@ cdef extern from "core/csv_column_builder.hpp" namespace "rugo::_csv":
 
 # Op code mapping: 0=EQ 1=NE 2=LT 3=LE 4=GT 5=GE
 cdef int _csv_parse_op(str op) except -1:
-    if   op == '==': return 0
+    if   op == '==' or op == '=': return 0
     elif op == '!=': return 1
     elif op == '<':  return 2
     elif op == '<=': return 3
@@ -119,10 +122,20 @@ def read_csv(
     data : bytes, buffer-like, or str
         Raw CSV bytes or a file path string.
     columns : list[str] | None
-        Column names to extract (None = all columns).
+        Column names to extract (None = all columns). A name the file does not
+        have is dropped from the result; if NONE of them exist, ValueError.
+        An empty input (no header row) raises ValueError too.
     predicates : list[tuple] | None
         Filter predicates as (column, op, value) tuples.
         op must be one of: '==' '!=' '<' '<=' '>' '>='
+        The value must be of the column's type, and is never coerced: a
+        VARCHAR column takes str/bytes, an INT64/FLOAT64 (or declared
+        integer/float) column takes int/float, a declared BOOL column takes
+        bool. Anything else -- None, a type mismatch, a column that is not in
+        the file -- raises ValueError naming the column. Columns of other
+        declared types (DATE, TIMESTAMP, DECIMAL, IPV4) keep the original
+        comparison: numeric when the value and the field both parse as
+        numbers, byte-wise otherwise.
     delimiter : str
         Single-character field separator (default ','; use '\\t' for TSV).
     has_header : bool
@@ -239,12 +252,7 @@ def read_csv(
         for col, op, val in predicates:
             pred_cpp.column = col.encode('utf-8')
             pred_cpp.op     = <uint8_t>_csv_parse_op(op)
-            # val is bytes for every real Opteryx-pushed VARCHAR literal (its VARCHAR
-            # storage is byte-based, not str) -- str(b'foo') == "b'foo'", the Python repr,
-            # not the string's own bytes. Same bug/fix as rugo/src/jsonl/_jsonl_reader.pxi's
-            # predicate-value encoding. CSV never produces a BOOL column (see
-            # opteryx/planner/binder/dataset.py's _CSV_SUPPORTED_TYPES), so no bool case here.
-            pred_cpp.value  = val if isinstance(val, bytes) else str(val).encode('utf-8')
+            pred_cpp.kind, pred_cpp.value = _predicate_literal(col, op, val)
             ctx.predicates.push_back(pred_cpp)
 
     # ---- Load buffer ----
@@ -256,9 +264,11 @@ def read_csv(
     else:
         buf = bytes(data)
 
+    # No bytes means no header, so no columns: there is no relation to return, and a
+    # zero-column result would pass for one. A caller that treats an empty file as an
+    # empty relation decides that itself, before calling.
     if len(buf) == 0:
-        result['success'] = True
-        return result
+        raise ValueError("read_csv: the input is empty; a CSV needs at least a header row")
 
     buf_ptr = <const uint8_t*>buf
     buf_len = len(buf)
@@ -270,8 +280,7 @@ def read_csv(
         )
 
     if num_cols == 0:
-        result['success'] = True
-        return result
+        raise ValueError("read_csv: no header row could be read; the input has no columns")
 
     # ---- Resolve column names and ordinals ----
     name_to_ord = {}
@@ -289,23 +298,27 @@ def read_csv(
         proj_names = [column_names_cpp[i].decode('utf-8')
                       for i in range(<int>column_names_cpp.size())]
 
+    # A predicate column the file does not have is an error: ignoring the predicate
+    # returned every row unfiltered. (A projected column the file does not have is
+    # dropped from the output — see test_projection_unknown_column_ignored — unless
+    # NONE of them exist, which raises below.)
+    for name in predicate_col_names:
+        if name not in name_to_ord:
+            raise ValueError(
+                f"read_csv: predicate on column {name!r}, which is not in this CSV; "
+                f"its columns are {list(name_to_ord)}"
+            )
+
     # Build sorted request_ordinals (projected ∪ predicate columns)
     ord_set = set()
     for name in proj_names:
         if name in name_to_ord:
             ord_set.add(name_to_ord[name])
     for name in predicate_col_names:
-        if name in name_to_ord:
-            ord_set.add(name_to_ord[name])
+        ord_set.add(name_to_ord[name])
 
     for o in sorted(ord_set):
         request_ordinals.push_back(<uint32_t>o)
-
-    if request_ordinals.empty():
-        result['success'] = True
-        result['column_names'] = proj_names
-        result['num_rows'] = 0
-        return result
 
     # Build proj_indices: for each projected name, its index in request_ordinals
     ord_to_req_idx = {}
@@ -315,16 +328,16 @@ def read_csv(
     output_col_names = []
     for name in proj_names:
         if name in name_to_ord:
-            col_ord = <uint32_t>name_to_ord[name]
-            if <int>col_ord in ord_to_req_idx:
-                proj_indices.push_back(<size_t>ord_to_req_idx[<int>col_ord])
-                output_col_names.append(name)
+            proj_indices.push_back(<size_t>ord_to_req_idx[name_to_ord[name]])
+            output_col_names.append(name)
 
     if proj_indices.empty():
-        result['success'] = True
-        result['column_names'] = output_col_names
-        result['num_rows'] = 0
-        return result
+        # Every projected column is absent. Dropping them all would return a
+        # zero-column result that passes for an empty relation.
+        raise ValueError(
+            f"read_csv: none of the requested columns {proj_names} are in this CSV; "
+            f"its columns are {list(name_to_ord)}"
+        )
 
     # ---- Phase 2: streaming build (split-find + sniff + parallel scan) ----
     n_threads = 0 if use_threads else 1
@@ -336,12 +349,8 @@ def read_csv(
             ctx, n_threads
         )
 
-    if stream_result.num_rows == 0:
-        result['success']      = True
-        result['column_names'] = output_col_names
-        result['num_rows']     = 0
-        return result
-
+    # Zero surviving rows still wraps every column: a filtered-to-nothing (or
+    # header-only) read is a typed, zero-row result, never a zero-column one.
     # ---- Wrap columns under GIL ----
     draken_vectors = []
     for i in range(stream_result.columns.size()):

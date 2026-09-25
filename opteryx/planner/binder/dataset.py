@@ -1010,22 +1010,23 @@ def visit_function_dataset(
         # to read instead. The same file is read again at execution time by
         # CsvReadNode; this double-read is an accepted v1 cost, not an oversight.
         #
-        # rugo.csv reports a record-less file (zero bytes, whitespace only, or a
-        # header with no data rows) as a morsel with ZERO COLUMNS -- it does not
-        # even carry the header names through. Such a file has no schema to give,
-        # so it is skipped as a schema source for the same reason READ_JSONL skips
-        # its record-less files: binding zero columns off an empty FIRST file would
-        # make a glob silently return column-less rows for every other matched
-        # file, because the zero-column branch in CsvReadNode.read_morsels
-        # deliberately suppresses the cross-file drift check.
+        # A record-less file has no schema to give: a zero-byte file has no columns
+        # at all (rugo refuses it, so it is skipped before the decode), and a
+        # header-only file has names but no values, so its types are only the
+        # sniffer's defaults. Either is skipped as a schema source for the same
+        # reason READ_JSONL skips its record-less files: binding off an empty FIRST
+        # file would give every other matched file the wrong schema.
         sample_morsel = None
         schema_source_path = csv_files[0]
 
         for candidate_path in csv_files:
             file_obj = filesystem.open_input_file(candidate_path)
             try:
+                candidate_data = file_obj.memoryview
+                if len(candidate_data) == 0:
+                    continue
                 candidate_morsel = read_csv_file(
-                    file_obj.memoryview,
+                    candidate_data,
                     delimiter=separator,
                     has_header=has_header_row,
                     fail_on_error=fail_on_error,
@@ -1036,7 +1037,7 @@ def visit_function_dataset(
             finally:
                 file_obj.close()
 
-            if len(candidate_morsel.column_names) > 0:
+            if candidate_morsel.num_rows > 0:
                 sample_morsel = candidate_morsel
                 schema_source_path = candidate_path
                 break

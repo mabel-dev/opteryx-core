@@ -44,14 +44,16 @@
 //
 //   * nulls — draken's Vector.hash() emits a NULL_HASH sentinel per null row,
 //     a real point in the hash space that can land in the bottom-K and add one
-//     to the count. skene's sketch never sees a null row at all.
+//     to the count. A skene v2 sketch never sees a null row at all.
 //   * canonicalization — Vector.hash() deliberately collides an int64-decimal
 //     with the DECIMAL128 of equal value, and canonicalizes fp16 bit patterns.
-//     skene hashes raw bits, so those are distinct values to it.
+//     skene v2 hashes raw bits, so those are distinct values to it.
 //
-// So a cross-family union is not an approximation, it is a number with no
-// meaning. Architect ruling 2026-08-21, recorded in skene/include/skene/format.h
-// (ColumnSketchHeader). Encoding the family in the TYPE makes `merge` across
+// The families are skene v2's (family 1, XXH3 over value bytes — still read,
+// never written) and draken's Vector.hash() (family 2), which ANALYZE and every
+// skene v3 file use. So a cross-family union is not an approximation, it is a
+// number with no meaning. Architect rulings 2026-08-21 and 2026-09-24, recorded
+// in skene/FORMAT.md §8 (SketchRecordHeader.hash_family). Encoding the family in the TYPE makes `merge` across
 // families a compile error and makes every declaration state which corpus it
 // belongs to. It cannot stop raw hashes from the wrong source being handed to
 // `add` — nothing in a uint64 says where it came from.

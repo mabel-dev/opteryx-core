@@ -273,21 +273,17 @@ void test_sections_start_aligned_by_default() {
     std::vector<uint8_t> bytes;
     CHECK(write_morsel(m, WriteOptions::for_spill(), &bytes).is_ok());
 
-    size_t footer_at = 0, footer_len = 0;
-    CHECK(row_group_footer_extent(bytes, 0, &footer_at, &footer_len));
-    RowGroupFooterHeader fh;
-    std::memcpy(&fh, bytes.data() + footer_at, sizeof(fh));
-    const size_t sections_at = footer_at + footer_len
-        - static_cast<size_t>(fh.section_count) * sizeof(SectionEntry);
-    for (uint32_t i = 0; i < fh.section_count; ++i) {
-        SectionEntry entry;
-        std::memcpy(&entry, bytes.data() + sections_at + i * sizeof(entry),
-                    sizeof(entry));
-        ++skene_test::g_checks;
-        if (entry.offset % kSectionAlign != 0)
-            skene_test::report(__FILE__, __LINE__, "section offset misaligned",
-                               "kind " + std::to_string(entry.kind) + " at "
-                                   + std::to_string(entry.offset));
+    // v3: every column node's sections, from its directory block.
+    for (uint32_t node = 0; node < 2; ++node) {
+        skene_test::DirectoryBlock dir;
+        CHECK(skene_test::directory_block(bytes, node, &dir));
+        for (const SectionEntry& entry : dir.sections) {
+            ++skene_test::g_checks;
+            if (entry.offset % kSectionAlign != 0)
+                skene_test::report(__FILE__, __LINE__, "section offset misaligned",
+                                   "kind " + std::to_string(entry.kind) + " at "
+                                       + std::to_string(entry.offset));
+        }
     }
 
     CxxMorsel out;

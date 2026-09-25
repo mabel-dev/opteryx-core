@@ -27,6 +27,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import pytest
 
 from opteryx.models import ExecutionContext, QueryTelemetry
+from opteryx.planner.plan_context import PlanContext
 from opteryx.planner.ast_rewriter import do_ast_rewriter
 from opteryx.planner.binder import do_bind_phase
 from opteryx.planner.logical_planner import do_logical_planning_phase
@@ -65,7 +66,7 @@ def _optimized_plan(sql: str):
         query_id=query_id,
         telemetry=telemetry,
     )
-    return do_optimizer(bound, telemetry)
+    return do_optimizer(bound, telemetry, PlanContext())
 
 
 def _nodes(plan, step_type):

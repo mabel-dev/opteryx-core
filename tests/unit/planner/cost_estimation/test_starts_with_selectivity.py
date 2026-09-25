@@ -22,6 +22,9 @@ ordinalized-bounds-through-get_distogram coverage).
 
 import os
 import sys
+from opteryx.compiled.structures.expressions import Function
+from opteryx.compiled.structures.expressions import Literal
+from opteryx.compiled.structures.expressions import Not
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
@@ -44,6 +47,7 @@ from opteryx.planner.cost_estimation.selectivity import (
 from opteryx.planner.optimizer.statistics import ColumnStatistics, RelationStatistics
 from opteryx.third_party.maki_nage.distogram import load_counts_i64
 from opteryx.types.logical_type import NVARCHAR, VARCHAR, DrakenType
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 _IDENTITY = b"tes_col_00000001"
 
@@ -60,14 +64,14 @@ _UNIFORM_PROPORTIONS = {
 
 
 def _column_node(identity=_IDENTITY, column_type=VARCHAR):
-    identifier = Node(NodeType.IDENTIFIER, source_column="col")
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col")
     identifier.schema_column = Node(NodeType.IDENTIFIER, identity=identity, column_type=column_type)
     return identifier
 
 
 def _func_node(prefix, op="_STARTS_WITH", identity=_IDENTITY, column_type=VARCHAR):
-    literal = Node(NodeType.LITERAL, value=prefix)
-    return Node(NodeType.FUNCTION, value=op, parameters=[_column_node(identity, column_type), literal])
+    literal = Literal(value=prefix)
+    return Function(value=op, parameters=[_column_node(identity, column_type), literal])
 
 
 def _distogram_over_values(*values, bin_count=64):
@@ -383,7 +387,7 @@ def test_not_starts_with_is_the_complement():
     dgram = _distogram_over_values(VARCHAR.ordinalize("alpha"), VARCHAR.ordinalize("omega"))
     stats = _stats_with_histogram(dgram)
     inner = _func_node(b"al")
-    not_node = Node(NodeType.NOT, centre=inner)
+    not_node = Not(centre=inner)
     s = estimate_selectivity(inner, stats)
     not_s = estimate_selectivity(not_node, stats)
     assert s == pytest.approx(1.0 - not_s)
@@ -391,7 +395,7 @@ def test_not_starts_with_is_the_complement():
 
 def test_unrecognized_function_still_falls_through_to_one():
     stats = _stats_with_histogram(_distogram_over_values(1, 2))
-    node = Node(NodeType.FUNCTION, value="SOMETHING_ELSE", parameters=[])
+    node = Function(value="SOMETHING_ELSE", parameters=[])
     assert estimate_selectivity(node, stats) == 1.0
 
 
@@ -426,7 +430,7 @@ def test_predicate_estimator_tag_flat_fallback_without_char_class_stats():
 
 def test_predicate_estimator_tag_none_for_unrelated_function():
     stats = _stats_with_char_class()
-    node = Node(NodeType.FUNCTION, value="SOMETHING_ELSE", parameters=[])
+    node = Function(value="SOMETHING_ELSE", parameters=[])
     assert predicate_estimator_tag(node, stats) is None
 
 

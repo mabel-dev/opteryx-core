@@ -9,6 +9,7 @@
 #include <utility>
 #include <thread>
 #include <future>
+#include <exception>
 #include "BS_thread_pool.hpp"
 
 namespace rugo::_jsonl {
@@ -176,7 +177,9 @@ static void finalize_records(
         bool passes = true;
         for (size_t i = 0; i < predicates.size(); ++i) {
             const FieldSpan* f = find(rec, pcols[i]);
-            if (f == nullptr || !evaluate_predicate(buffer_data, *f, predicates[i])) {
+            // An absent key is a NULL cell: it passes only the predicates that accept NULL.
+            if (f == nullptr ? !predicate_accepts_absent(predicates[i])
+                             : !evaluate_predicate(buffer_data, *f, predicates[i])) {
                 passes = false;
                 break;
             }
@@ -219,6 +222,7 @@ InterpreterResult interpret_jsonl(
     // Minimal-extent projection: when columns/predicates are named, build the map for ONLY
     // the projected ∪ predicate columns (exact bytes, no hashing) and stop scanning each
     // record once they are found. With nothing named, build the full data-blind map.
+    // Predicates with no projection keep every field (MapProjection::keep_unwanted).
     // Predicate filtering and final column ordering happen afterwards in finalize_records.
     std::vector<WantedColumn> wanted_cols;
     MapProjection projbundle;
@@ -269,6 +273,8 @@ InterpreterResult interpret_jsonl(
             projbundle.columns    = &wanted_cols;
             projbundle.num_wanted = wanted_cols.size();
             projbundle.predicates = &prepared_predicates;
+            // No projection = every column: predicates-only must not narrow the map.
+            projbundle.keep_unwanted = context.projected_columns.empty();
             proj_ptr = &projbundle;
         }
     }
@@ -403,7 +409,19 @@ InterpreterResult interpret_jsonl_threaded(
                 partial[c] = interpret_jsonl(buffer_data, buffer_length, markers, context, local_pred);
             }));
         }
-        for (auto& f : futs) f.get();
+        // Drain EVERY future before propagating: a range can throw (a predicate literal
+        // that does not fit a value — evaluate_predicate), and rethrowing on the first
+        // while other ranges still run would leave them reading this frame's locals
+        // (ranges, partial, context) after it unwinds.
+        std::exception_ptr first_exc;
+        for (auto& f : futs) {
+            try {
+                f.get();
+            } catch (...) {
+                if (!first_exc) first_exc = std::current_exception();
+            }
+        }
+        if (first_exc) std::rethrow_exception(first_exc);
     }
 
     // Merge in chunk order: concatenate each range's flat arena (offsets rebased).

@@ -39,6 +39,12 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 from opteryx.shared import MemoryPool
 from opteryx.utils import random_string
 
+# Tests whose segment LAYOUT matters scale every size by S. The pool hands a
+# commit the whole free block when the split remainder would be under 256 bytes
+# (kMinSplitRemainder, src/cpp/memory_pool.hpp), so with every size a multiple of
+# 256 each remainder is 0 or >= 256 and the layout is exactly the unscaled one.
+S = 256
+
 
 def test_commit_and_read():
     mp = MemoryPool(size=100)
@@ -90,61 +96,61 @@ def test_compaction():
 
 
 def test_multiple_commits_and_reads():
-    mp = MemoryPool(size=50)
-    ref1 = mp.py_commit(b"First")
-    ref2 = mp.py_commit(b"Second")
-    assert mp.py_read(ref1, False) == b"First"
-    assert mp.py_read(ref2, False) == b"Second"
+    mp = MemoryPool(size=50 * S)
+    ref1 = mp.py_commit(b"First" * S)
+    ref2 = mp.py_commit(b"Second" * S)
+    assert mp.py_read(ref1, False) == b"First" * S
+    assert mp.py_read(ref2, False) == b"Second" * S
 
 
 def test_overlapping_writes():
-    mp = MemoryPool(size=20)
-    ref1 = mp.py_commit(b"12345")
-    ref2 = mp.py_commit(b"abcde")
+    mp = MemoryPool(size=20 * S)
+    ref1 = mp.py_commit(b"12345" * S)
+    ref2 = mp.py_commit(b"abcde" * S)
     mp.py_release(ref1)
-    ref3 = mp.py_commit(b"XYZ")
+    ref3 = mp.py_commit(b"XYZ" * S)
     # Test if the new write overlaps correctly and does not corrupt other data
-    assert mp.py_read(ref2, False) == b"abcde"
-    assert mp.py_read(ref3, False) == b"XYZ"
+    assert mp.py_read(ref2, False) == b"abcde" * S
+    assert mp.py_read(ref3, False) == b"XYZ" * S
 
 
 def test_overlapping_writes_memcopy():
-    mp = MemoryPool(size=20)
-    ref1 = mp.py_commit(b"12345")
-    ref2 = mp.py_commit(b"abcde")
+    mp = MemoryPool(size=20 * S)
+    ref1 = mp.py_commit(b"12345" * S)
+    ref2 = mp.py_commit(b"abcde" * S)
     mp.py_release(ref1)
-    ref3 = mp.py_commit(b"XYZ")
+    ref3 = mp.py_commit(b"XYZ" * S)
     # Test if the new write overlaps correctly and does not corrupt other data
     r2_memcopy = bytes(mp.py_read(ref2, True))
     r2_no_memcopy = mp.py_read(ref2, False)
     r3_memcopy = bytes(mp.py_read(ref3, True))
     r3_no_memcopy = mp.py_read(ref3, False)
 
-    assert r2_memcopy == r2_no_memcopy == b"abcde", f"{r2_memcopy} / {r2_no_memcopy} / abcde"
-    assert r3_memcopy == r3_no_memcopy == b"XYZ", f"{r3_memcopy} / {r3_no_memcopy} / XYZ"
+    assert r2_memcopy == r2_no_memcopy == b"abcde" * S, f"{r2_memcopy} / {r2_no_memcopy} / abcde"
+    assert r3_memcopy == r3_no_memcopy == b"XYZ" * S, f"{r3_memcopy} / {r3_no_memcopy} / XYZ"
 
 
 def test_zero_copy_vs_copy_reads():
-    mp = MemoryPool(size=30)
+    mp = MemoryPool(size=30 * S)
 
     # Initial commits
-    ref1 = mp.py_commit(b"12345")
-    ref2 = mp.py_commit(b"abcde")
-    ref3 = mp.py_commit(b"ABCDE")
+    ref1 = mp.py_commit(b"12345" * S)
+    ref2 = mp.py_commit(b"abcde" * S)
+    ref3 = mp.py_commit(b"ABCDE" * S)
 
     # Release one segment to create free space
     mp.py_release(ref1)
 
     # Commit more data to fill the pool
-    ref4 = mp.py_commit(b"XYZ")
-    ref5 = mp.py_commit(b"7890")
+    ref4 = mp.py_commit(b"XYZ" * S)
+    ref5 = mp.py_commit(b"7890" * S)
 
     # Additional activity
-    ref6 = mp.py_commit(b"LMNOP")
+    ref6 = mp.py_commit(b"LMNOP" * S)
     mp.py_release(ref3)
-    ref7 = mp.py_commit(b"qrst")
+    ref7 = mp.py_commit(b"qrst" * S)
     mp.py_release(ref2)
-    ref8 = mp.py_commit(b"uvwxyz")
+    ref8 = mp.py_commit(b"uvwxyz" * S)
 
     # Reading segments with and without zero-copy
     r4_memcopy = bytes(mp.py_read(ref4, True))
@@ -158,58 +164,39 @@ def test_zero_copy_vs_copy_reads():
     r8_memcopy = bytes(mp.py_read(ref8, True))
     r8_no_memcopy = mp.py_read(ref8, False)
 
-    assert r4_memcopy == r4_no_memcopy == b"XYZ", f"{r4_memcopy} / {r4_no_memcopy} / XYZ"
-    assert r5_memcopy == r5_no_memcopy == b"7890", f"{r5_memcopy} / {r5_no_memcopy} / 7890"
-    assert r6_memcopy == r6_no_memcopy == b"LMNOP", f"{r6_memcopy} / {r6_no_memcopy} / LMNOP"
-    assert r7_memcopy == r7_no_memcopy == b"qrst", f"{r7_memcopy} / {r7_no_memcopy} / qrst"
-    assert r8_memcopy == r8_no_memcopy == b"uvwxyz", f"{r8_memcopy} / {r8_no_memcopy} / uvwxyz"
+    assert r4_memcopy == r4_no_memcopy == b"XYZ" * S, f"{r4_memcopy} / {r4_no_memcopy} / XYZ"
+    assert r5_memcopy == r5_no_memcopy == b"7890" * S, f"{r5_memcopy} / {r5_no_memcopy} / 7890"
+    assert r6_memcopy == r6_no_memcopy == b"LMNOP" * S, f"{r6_memcopy} / {r6_no_memcopy} / LMNOP"
+    assert r7_memcopy == r7_no_memcopy == b"qrst" * S, f"{r7_memcopy} / {r7_no_memcopy} / qrst"
+    assert r8_memcopy == r8_no_memcopy == b"uvwxyz" * S, f"{r8_memcopy} / {r8_no_memcopy} / uvwxyz"
 
 
 def test_pool_exhaustion_and_compaction():
-    mp = MemoryPool(size=20)
-    ref1 = mp.py_commit(b"123456")
-    ref2 = mp.py_commit(b"123456")
-    ref3 = mp.py_commit(b"123456")
+    mp = MemoryPool(size=20 * S)
+    ref1 = mp.py_commit(b"123456" * S)
+    ref2 = mp.py_commit(b"123456" * S)
+    ref3 = mp.py_commit(b"123456" * S)
 
-    ref = mp.py_commit(b"123")
+    ref = mp.py_commit(b"123" * S)
     assert ref == -1  # failed to commit
     mp.py_release(ref1)
-    ref = mp.py_commit(b"123456789")
+    ref = mp.py_commit(b"123456789" * S)
     assert ref == -1  # failed to commit
-    ref4 = mp.py_commit(b"12345678")  # This should succeed because of compaction (L2)
-    assert mp.py_get_stats()['l2_compactions'] > 0, mp.py_get_stats()['l2_compactions']
-
-
-def test_pool_only_l1_compaction():
-    mp = MemoryPool(size=20)
-    ref1 = mp.py_commit(b"12345")
-    ref2 = mp.py_commit(b"12345")
-    ref3 = mp.py_commit(b"1234567890")
-    # this should free up two adjacent 5 byte blocks
-    mp.py_release(ref1)
-    mp.py_release(ref2)
-    # this won't fit in either free block so the adjacent
-    # blocks should be consolidated (L1) but doesn't need
-    # rearranging of blocks (L2)
-    ref4 = mp.py_commit(b"123456")
-
-    # test we've executed L1 at least once, and we haven't
-    # executed L2 compaction every time we executed L1
-    assert mp.py_get_stats()['l1_compactions'] > 0
-    stats = mp.py_get_stats(); assert stats['l2_compactions'] < stats['l1_compactions']
+    ref4 = mp.py_commit(b"12345678" * S)  # This should succeed because of compaction
+    assert mp.py_get_stats()['compactions'] > 0, mp.py_get_stats()['compactions']
 
 
 def test_repeated_commits_and_releases():
-    mp = MemoryPool(size=4000)
+    mp = MemoryPool(size=4000 * S)
     refs = []
     for _ in range(1000):
-        ref = mp.py_commit(b"Data")
+        ref = mp.py_commit(b"Data" * S)
         assert ref != -1
         refs.append(ref)
     for ref in refs:
         mp.py_release(ref)
     # Optional: Check internal state to ensure all resources are available again
-    mp._py_level1_compaction()
+    mp.py_compaction()
 
     assert mp.py_free_segments[0]["length"] == mp.py_size, (
         f"Memory leak detected after repeated commits and releases. {mp.py_free_segments[0]['length']} != {mp.py_size}\n{mp.py_free_segments}"
@@ -257,7 +244,7 @@ def test_stress_with_random_sized_data():
             refs.discard(ref)
 
     # Ensure that the pool or leaking
-    mp._py_level1_compaction()
+    mp.py_compaction()
     assert mp.py_available_space() == mp.py_size, (
         f"Memory fragmentation or leak detected.\n{mp.py_available_space()} != {mp.py_size}\n{mp.py_free_segments}\n{mp.py_used_segments}\nseed:{seed}"
     )
@@ -267,19 +254,20 @@ def test_stress_with_random_sized_data():
 
 
 def test_compaction_effectiveness():
-    mp = MemoryPool(size=15)
+    mp = MemoryPool(size=15 * S)
     # Fill the pool with alternating commitments and releases to create fragmentation
-    ref1 = mp.py_commit(b"AAA")
-    ref2 = mp.py_commit(b"BBBBB")
-    ref3 = mp.py_commit(b"CCCCC")
+    ref1 = mp.py_commit(b"AAA" * S)
+    ref2 = mp.py_commit(b"BBBBB" * S)
+    ref3 = mp.py_commit(b"CCCCC" * S)
     mp.py_release(ref2)
     mp.py_release(ref1)
     # This should trigger a compaction
-    ref4 = mp.py_commit(b"DDDDDDDD")
+    ref4 = mp.py_commit(b"DDDDDDDD" * S)
     assert ref4 != -1, "Compaction failed to consolidate free memory effectively."
     mp.py_release(ref3)
     mp.py_release(ref4)
-    assert mp.py_get_stats()['l1_compactions'] > 0, "Expected L1 compaction did not occur."
+    # Every byte released: the free space is one block again, not fragments.
+    assert mp.py_free_segments == [{"start": 0, "length": 15 * S}], mp.py_free_segments
 
 
 def test_repeated_zero_length_commits():
@@ -405,7 +393,7 @@ def test_concurrent_access():
 
 
 def test_return_types():
-    pool_size = 100
+    pool_size = 100 * S
     memory_pool = MemoryPool(size=pool_size)
     abc = memory_pool.py_commit(b"abc")
 
@@ -555,10 +543,10 @@ def test_release_latched_segment_then_unlatch_is_invalid():
 
 
 def test_compaction_skips_latched_segment():
-    pool = MemoryPool(100)
-    ref1 = pool.py_commit(b"A" * 10)
-    ref2 = pool.py_commit(b"B" * 10)
-    ref3 = pool.py_commit(b"C" * 10)
+    pool = MemoryPool(100 * S)
+    ref1 = pool.py_commit(b"A" * 10 * S)
+    ref2 = pool.py_commit(b"B" * 10 * S)
+    ref3 = pool.py_commit(b"C" * 10 * S)
 
     # Latch ref2 so it can't be moved
     pool.py_read(ref2, latch=1)
@@ -568,11 +556,11 @@ def test_compaction_skips_latched_segment():
     assert pool.py_used_segments[ref2]["latches"] == 1
 
     # This should leave ref2 where it is
-    pool._py_level2_compaction()
+    pool.py_compaction()
 
     # Sanity: ref2 is still valid and still latched
     data = pool.py_read(ref2)
-    assert data == b"B" * 10
+    assert data == b"B" * 10 * S
     assert pool.py_used_segments[ref2]["latches"] == 1
 
 
@@ -624,7 +612,7 @@ def test_aggressive_compaction_respects_latches():
         )
 
     # Run compaction
-    pool._py_level2_compaction()
+    pool.py_compaction()
 
     # Re-check positions and data for latched segments
     for ref in latched_refs:
@@ -654,22 +642,22 @@ def test_aggressive_compaction_respects_latches():
 
 
 def test_latch_blocks_compaction_and_unlatch_allows_it():
-    pool = MemoryPool(100)
-    ref1 = pool.py_commit(b"A" * 10)
-    ref2 = pool.py_commit(b"B" * 10)
+    pool = MemoryPool(100 * S)
+    ref1 = pool.py_commit(b"A" * 10 * S)
+    ref2 = pool.py_commit(b"B" * 10 * S)
     pool.py_read(ref1, latch=1)
 
     pool.py_release(ref2)
 
     old_start = pool.py_used_segments[ref1]["start"]
-    pool._py_level2_compaction()
+    pool.py_compaction()
 
     # Should not move ref1
     assert pool.py_used_segments[ref1]["start"] == old_start
 
     # Now unlatch and compact again
     pool.py_unlatch(ref1)
-    pool._py_level2_compaction()
+    pool.py_compaction()
 
     # Should now move ref1 to 0
     assert pool.py_used_segments[ref1]["start"] == 0
@@ -707,14 +695,14 @@ def test_multiple_commits_and_random_latch_release():
 
 
 def test_multiple_latches_block_compaction_selectively():
-    pool = MemoryPool(200)
+    pool = MemoryPool(200 * S)
 
     refs = [
-        pool.py_commit(b"A" * 10),  # ref0
-        pool.py_commit(b"B" * 10),  # ref1
-        pool.py_commit(b"C" * 10),  # ref2
-        pool.py_commit(b"D" * 10),  # ref3
-        pool.py_commit(b"E" * 10),  # ref4
+        pool.py_commit(b"A" * 10 * S),  # ref0
+        pool.py_commit(b"B" * 10 * S),  # ref1
+        pool.py_commit(b"C" * 10 * S),  # ref2
+        pool.py_commit(b"D" * 10 * S),  # ref3
+        pool.py_commit(b"E" * 10 * S),  # ref4
     ]
 
     pool.py_read(refs[1], latch=1)  # latch ref1
@@ -726,7 +714,7 @@ def test_multiple_latches_block_compaction_selectively():
 
     starts_before = {r: pool.py_used_segments[r]["start"] for r in refs if r in pool.py_used_segments}
 
-    pool._py_level2_compaction()
+    pool.py_compaction()
 
     # latched refs should not move
     assert pool.py_used_segments[refs[1]]["start"] == starts_before[refs[1]]
@@ -739,34 +727,34 @@ def test_multiple_latches_block_compaction_selectively():
 
 
 def test_latch_causes_persistent_fragmentation():
-    pool = MemoryPool(100)
+    pool = MemoryPool(100 * S)
 
-    ref1 = pool.py_commit(b"A" * 30)
-    ref2 = pool.py_commit(b"B" * 30)
-    ref3 = pool.py_commit(b"C" * 30)
+    ref1 = pool.py_commit(b"A" * 30 * S)
+    ref2 = pool.py_commit(b"B" * 30 * S)
+    ref3 = pool.py_commit(b"C" * 30 * S)
 
     pool.py_read(ref2, latch=1)
     pool.py_release(ref1)
     pool.py_release(ref3)
 
     # Now, available space is 60 (30 + 30 + 10), but fragmented around latched ref2
-    assert pool.py_available_space() == 70
-    pool._py_level2_compaction()
+    assert pool.py_available_space() == 70 * S
+    pool.py_compaction()
     # The fragmentation remains because ref2 is latched
     # So no new allocation of 60 should not be possible
-    ref4 = pool.py_commit(b"X" * 60)
+    ref4 = pool.py_commit(b"X" * 60 * S)
     assert ref4 == -1  # Should fail to commit due to fragmentation
 
     # Unlatch ref2 and try again
     pool.py_unlatch(ref2)
-    pool._py_level2_compaction()
-    ref4 = pool.py_commit(b"X" * 60)
+    pool.py_compaction()
+    ref4 = pool.py_commit(b"X" * 60 * S)
     assert ref4 != -1, "Failed to allocate after unlatching and compaction"
 
 
 def test_staggered_latch_unlatch_compaction():
-    pool = MemoryPool(300)
-    refs = [pool.py_commit(bytes([i]) * 30) for i in range(6)]  # Fill the pool with 6 segments
+    pool = MemoryPool(300 * S)
+    refs = [pool.py_commit(bytes([i]) * 30 * S) for i in range(6)]  # Fill the pool with 6 segments
 
     # Latch alternating segments
     for i, ref in enumerate(refs):
@@ -780,7 +768,7 @@ def test_staggered_latch_unlatch_compaction():
 
     # Compaction shouldn't move latched segments
     starts = {ref: pool.py_used_segments[ref]["start"] for ref in refs if ref in pool.py_used_segments}
-    pool._py_level2_compaction()
+    pool.py_compaction()
 
     for ref in refs:
         if ref in pool.py_used_segments and pool.py_used_segments[ref]["latches"] == 1:
@@ -792,12 +780,12 @@ def test_staggered_latch_unlatch_compaction():
             pool.py_unlatch(ref)
 
     # Compaction should now move everything to front
-    pool._py_level2_compaction()
+    pool.py_compaction()
     sorted_refs = sorted(
         (r for r in refs if r in pool.py_used_segments), key=lambda r: pool.py_used_segments[r]["start"]
     )
     for i, ref in enumerate(sorted_refs):
-        assert pool.py_used_segments[ref]["start"] == i * 30
+        assert pool.py_used_segments[ref]["start"] == i * 30 * S
 
 
 def test_repeated_latch_compact_unlatch_cycles():
@@ -858,7 +846,7 @@ def test_repeated_latch_compact_unlatch_cycles():
             released_refs.add(ref)
 
         # Phase 4: compact while some are latched
-        pool._py_level2_compaction()
+        pool.py_compaction()
         validate_integrity()
 
         # Phase 5: write more data to force fragmentation
@@ -877,7 +865,7 @@ def test_repeated_latch_compact_unlatch_cycles():
                 latched_refs.remove(ref)
 
         # Phase 7: final compaction
-        pool._py_level2_compaction()
+        pool.py_compaction()
         validate_integrity()
 
     # Sanity check: all remaining latched data is intact

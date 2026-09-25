@@ -57,6 +57,12 @@ from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
 from .optimization_strategy import filter_referenced_columns
 from .optimization_strategy import get_nodes_of_type_from_logical_plan
+from opteryx.compiled.structures.expressions import And
+from opteryx.compiled.structures.expressions import Between
+from opteryx.compiled.structures.expressions import Cnf
+from opteryx.compiled.structures.expressions import Or
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
 
 
 @dataclass
@@ -284,7 +290,7 @@ def _retype_literal(literal: Node, column_type, value) -> None:
     bytecode compiler), so both must agree or the node is half-bound."""
     literal.value = value
     literal.type = column_type
-    literal.schema_column = ConstantColumn(name=literal.name or "", column_type=column_type, value=value)
+    literal.schema_column = ConstantColumn(name="", column_type=column_type, value=value)
 
 
 class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
@@ -423,7 +429,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
 
             if filter_nid in filters_to_false:
                 filter_node = optimized_plan[filter_nid]
-                filter_node.condition = Node(NodeType.LITERAL, value=False)
+                filter_node.condition = Literal(value=False)
                 filter_node.columns = []
                 filter_node.relations = set()
                 optimized_plan[filter_nid] = filter_node
@@ -458,7 +464,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
 
             relations: Set[str] = set()
             for identifier in identifiers:
-                if identifier.source:
+                if identifier.node_type == NodeType.IDENTIFIER and identifier.source:
                     relations.add(identifier.source)
                 schema_column = getattr(identifier, "schema_column", None)
                 if schema_column and getattr(schema_column, "origin", None):
@@ -587,8 +593,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
             # is one comparison pass, not two).
             column_node = best_lower.occurrence.predicate.left
             replacements.append(
-                Node(
-                    NodeType.BETWEEN,
+                Between(
                     left=column_node.copy(),
                     right=best_lower.occurrence.predicate.right.copy(),
                     centre=best_upper.occurrence.predicate.right.copy(),
@@ -820,7 +825,13 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
                 return {"status": "unsupported"}
             p_col_id, operator, value, p_domain = info
             if col_id is None:
-                col_id, domain, col_node = p_col_id, p_domain, predicate.left
+                # A null test (UNARY) has no column node to carry here.
+                col_node = (
+                    predicate.left
+                    if predicate.node_type == NodeType.COMPARISON_OPERATOR
+                    else None
+                )
+                col_id, domain = p_col_id, p_domain
             elif p_col_id != col_id or p_domain != domain:
                 return {"status": "unsupported"}
 
@@ -913,15 +924,14 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         """
         col = col_node.copy()
         if lower is not None and upper is not None and lower.value == upper.value:
-            return Node(NodeType.COMPARISON_OPERATOR, value="Eq", left=col, right=lower_node.copy())
+            return Comparison(value="Eq", left=col, right=lower_node.copy())
         if lower is None:
             op = "LtEq" if upper.inclusive else "Lt"
-            return Node(NodeType.COMPARISON_OPERATOR, value=op, left=col, right=upper_node.copy())
+            return Comparison(value=op, left=col, right=upper_node.copy())
         if upper is None:
             op = "GtEq" if lower.inclusive else "Gt"
-            return Node(NodeType.COMPARISON_OPERATOR, value=op, left=col, right=lower_node.copy())
-        return Node(
-            NodeType.BETWEEN,
+            return Comparison(value=op, left=col, right=lower_node.copy())
+        return Between(
             left=col,
             right=lower_node.copy(),
             centre=upper_node.copy(),
@@ -1019,11 +1029,11 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         if len(new_nodes) == 1:
             return new_nodes[0]
         if len(new_nodes) == 2:
-            return Node(NodeType.OR, left=new_nodes[0], right=new_nodes[1])
+            return Or(left=new_nodes[0], right=new_nodes[1])
 
         # 3+ surviving branches: match DisjunctionSimplificationStrategy's
         # flattened n-ary representation rather than a nested binary OR tree.
-        cnf = Node(node_type=NodeType.CNF)
+        cnf = Cnf()
         cnf.parameters = new_nodes
         return cnf
 
@@ -1044,5 +1054,5 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
 
         result = predicates[0]
         for pred in predicates[1:]:
-            result = Node(NodeType.AND, left=result, right=pred)
+            result = And(left=result, right=pred)
         return result

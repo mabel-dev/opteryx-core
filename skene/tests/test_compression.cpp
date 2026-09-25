@@ -245,7 +245,17 @@ static void test_corrupt_compressed_section_is_rejected(const Posture& posture) 
     // in less predictable ways than a plain memcpy. (What happens when the
     // checksum is repaired too, so the codec itself is the only thing left to
     // catch it, is test_reader_rejects' territory.)
-    packed[kFileHeadBytes + 64] ^= 0xFF;
+    // v3: the DATA region opens with column 0's directory block; the first
+    // section body follows it, at the offset the directory records.
+    // Corrupt the first section the codec actually took.
+    skene_test::DirectoryBlock dir;
+    CHECK(skene_test::directory_block(packed, 0, &dir));
+    const SectionEntry* compressed = nullptr;
+    for (const SectionEntry& entry : dir.sections)
+        if (entry.codec == static_cast<uint8_t>(posture.codec)) { compressed = &entry; break; }
+    CHECK(compressed != nullptr);
+    if (compressed == nullptr) return;
+    packed[static_cast<size_t>(compressed->offset) + compressed->stored_bytes / 2] ^= 0xFF;
     CxxMorsel out;
     Status st = read_morsel(packed.data(), packed.size(), 0, &out);
     CHECK(!st.is_ok());
@@ -258,27 +268,17 @@ static void test_corrupt_compressed_section_is_rejected(const Posture& posture) 
 // file that never compressed anything matches it perfectly.
 static void test_the_selected_codec_is_the_one_recorded(const Posture& posture) {
     auto in = morsel_of({{"comment", string_column(comment_like(20000))}});
-    // Written WITHOUT read acceleration so the section directory ends exactly at
-    // the tail: statistics blobs follow it in the footer (FORMAT.md §5), and
-    // walking back from the tail by section_count entries only lands on the
-    // directory when there are none. Compression is independent of acceleration.
+    // Compression is independent of acceleration; written without it so the
+    // column's sections are only the ones the codec was offered.
     const auto packed = write_with(in, posture, /*acceleration=*/false);
 
-    // The section directory now ends at the end of the ROW GROUP's own footer,
-    // not at the tail — the tail points at the file index, which sits after
-    // every row group footer.
-    size_t rg_footer_at = 0, rg_footer_bytes = 0;
-    CHECK(skene_test::row_group_footer_extent(packed, 0, &rg_footer_at, &rg_footer_bytes));
-    RowGroupFooterHeader fh;
-    std::memcpy(&fh, packed.data() + rg_footer_at, sizeof(fh));
-    const size_t sections_at = rg_footer_at + rg_footer_bytes
-                             - static_cast<size_t>(fh.section_count) * sizeof(SectionEntry);
+    // v3: a column's section entries live in its directory block (FORMAT.md
+    // §5.9), located from the footer's column summary.
+    skene_test::DirectoryBlock dir;
+    CHECK(skene_test::directory_block(packed, 0, &dir));
 
     size_t compressed_sections = 0;
-    for (uint32_t i = 0; i < fh.section_count; ++i) {
-        SectionEntry entry;
-        std::memcpy(&entry, packed.data() + sections_at + i * sizeof(SectionEntry),
-                    sizeof(entry));
+    for (const SectionEntry& entry : dir.sections) {
         // No section may carry the OTHER codec's tag: the writer offers one.
         // (v2: the codec is SectionEntry.codec, no longer an Encoding value.)
         for (const Posture& other : kCodecs) {

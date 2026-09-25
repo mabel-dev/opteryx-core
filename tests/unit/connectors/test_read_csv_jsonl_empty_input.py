@@ -194,6 +194,25 @@ def test_csv_glob_with_an_empty_file_after_the_schema_source(tmp_path):
     assert _values(f"SELECT a, b FROM READ_CSV('{tmp_path}/*.csv')") == [1, 2]
 
 
+def test_csv_glob_skips_a_header_only_first_file_for_the_schema(tmp_path):
+    """A header-only file has column NAMES but no values, so its types are only
+    the sniffer's defaults (INT64) -- binding off it would make `b` INT64 and fail
+    the real file's VARCHAR `b` as drift."""
+    (tmp_path / "a_header.csv").write_text("a,b\n")
+    (tmp_path / "b_data.csv").write_text("a,b\n1,x\n2,y\n")
+
+    assert _values(f"SELECT a, b FROM READ_CSV('{tmp_path}/*.csv')") == [1, 2, "x", "y"]
+
+
+def test_csv_glob_with_a_header_only_file_after_the_schema_source(tmp_path):
+    """The header-only file contributes no rows, so only its column names are
+    checked -- not its default types."""
+    (tmp_path / "a_data.csv").write_text("a,b\n1,x\n2,y\n")
+    (tmp_path / "z_header.csv").write_text("a,b\n")
+
+    assert _values(f"SELECT a, b FROM READ_CSV('{tmp_path}/*.csv')") == [1, 2, "x", "y"]
+
+
 def test_jsonl_glob_of_only_record_less_files(tmp_path):
     """No matched file holds a record -- the relation is empty, with no columns."""
     (tmp_path / "a.jsonl").write_text(EMPTY)

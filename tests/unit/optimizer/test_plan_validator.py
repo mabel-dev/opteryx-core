@@ -19,6 +19,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import pytest
 
 from opteryx.exceptions import InvalidInternalStateError
+from opteryx.planner.plan_context import PlanContext
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
@@ -129,7 +130,7 @@ def test_real_optimized_plan_is_valid():
             query_id=str(uuid.uuid4()),
             telemetry=telemetry,
         )
-        optimized = do_optimizer(bound, telemetry)
+        optimized = do_optimizer(bound, telemetry, PlanContext())
         validate_plan(optimized, where="end-to-end")  # must not raise
 
 

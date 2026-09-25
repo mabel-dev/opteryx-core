@@ -37,14 +37,12 @@ from typing import Tuple
 
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
-from opteryx.models import LogicalColumn
-from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.relation_resolver import iter_plan_forest
 
-__all__ = ["coordinate_shared_cte", "strip_body_boundary", "stamp_reference_estimates"]
+__all__ = ["coordinate_shared_cte", "strip_body_boundary"]
 
 
 def _refs_of(plans: List[LogicalPlan], cte_key: str):
@@ -147,6 +145,12 @@ def _narrow_body_projection(body: LogicalPlan, refs, telemetry) -> None:
         body[project_nid] = project
 
 
+# The expression types with no `value` of their own.
+_VALUELESS_NODE_TYPES = frozenset(
+    {NodeType.NOT, NodeType.DNF, NodeType.CNF, NodeType.CASE, NodeType.NESTED}
+)
+
+
 def _canonical_key(condition, mapping: Dict[bytes, bytes]):
     """A structural key for a predicate, with each reference-local column
     identity translated to the body identity it maps to. Two references' filters
@@ -155,7 +159,7 @@ def _canonical_key(condition, mapping: Dict[bytes, bytes]):
     mapped reference column (it then belongs to that reference alone)."""
     if condition is None:
         return None
-    if isinstance(condition, (LogicalColumn,)) or condition.node_type in (
+    if condition.node_type in (
         NodeType.IDENTIFIER,
         NodeType.AGGREGATOR,
         NodeType.EVALUATED,
@@ -168,26 +172,18 @@ def _canonical_key(condition, mapping: Dict[bytes, bytes]):
         return ("col", body_identity)
     if condition.node_type == NodeType.LITERAL:
         return ("lit", str(condition.type), repr(condition.value))
+    # Every child, in the type's declared order: a key built from a hand-picked
+    # field list gave two CASE predicates with different branches the SAME key.
     children = []
-    for child in (condition.left, condition.centre, condition.right):
-        if child is None:
-            children.append(None)
-            continue
+    for child in condition.children():
         child_key = _canonical_key(child, mapping)
         if child_key is None:
             return None
         children.append(child_key)
-    parameters = []
-    for parameter in condition.parameters or []:
-        parameter_key = _canonical_key(parameter, mapping)
-        if parameter_key is None:
-            return None
-        parameters.append(parameter_key)
     return (
         str(condition.node_type),
-        str(condition.value),
+        None if condition.node_type in _VALUELESS_NODE_TYPES else str(condition.value),
         tuple(children),
-        tuple(parameters),
     )
 
 
@@ -285,11 +281,3 @@ def coordinate_shared_cte(
         _narrow_body_projection(body, refs, telemetry)
     return body
 
-
-def stamp_reference_estimates(consumer_plans: List[LogicalPlan], cte_key: str, body_statistics):
-    """Attach the body's output estimate to each reference leaf, so the main
-    plan's cost-based strategies (join ordering, build-shape) see a real
-    cardinality instead of an unknown. See statistics_refresh's
-    MaterializedCteRef branch."""
-    for _plan, _nid, node in _refs_of(consumer_plans, cte_key):
-        node.cte_statistics = body_statistics

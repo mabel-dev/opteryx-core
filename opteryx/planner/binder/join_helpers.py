@@ -28,6 +28,8 @@ from opteryx.planner.expression_traits import has_volatile_function
 from opteryx.types.logical_type import (
     LogicalCategory, _NUMERIC_TYPES, _TEMPORAL_TYPES, _LARGE_OBJECT_TYPES, _STRING_TYPES,
 )
+from opteryx.compiled.structures.expressions import And
+from opteryx.compiled.structures.expressions import Comparison
 
 # Node types that can never be materialised as a column on ONE join leg, whatever
 # the relation-name arithmetic says: an aggregate is not a per-row value, a
@@ -143,10 +145,10 @@ def get_mismatched_condition_column_types(
             # by a logical descriptor, so its category alone under-reports the
             # type and misleads the user about what column they're looking at.
             return {
-                "left_column": f"{node.left.source}.{node.left.value}",
+                "left_column": _operand_label(node.left),
                 "left_type": str(left_display_ct) if left_display_ct is not None else left_type.name,
                 "left_node": node.left,
-                "right_column": f"{node.right.source}.{node.right.value}",
+                "right_column": _operand_label(node.right),
                 "right_type": str(right_display_ct)
                 if right_display_ct is not None
                 else right_type.name,
@@ -218,20 +220,33 @@ def extract_join_fields(
             ]
         ):
             return left_fields, right_fields, [condition_node]
+        # A key pairs two column references; a literal side names no relation.
         if (
-            condition_node.left.source in left_relation_names
-            and condition_node.right.source in right_relation_names
+            condition_node.left.node_type == NodeType.IDENTIFIER
+            and condition_node.right.node_type == NodeType.IDENTIFIER
         ):
-            left_fields.append(condition_node.left.schema_column.identity)
-            right_fields.append(condition_node.right.schema_column.identity)
-        elif (
-            condition_node.left.source in right_relation_names
-            and condition_node.right.source in left_relation_names
-        ):
-            right_fields.append(condition_node.left.schema_column.identity)
-            left_fields.append(condition_node.right.schema_column.identity)
+            if (
+                condition_node.left.source in left_relation_names
+                and condition_node.right.source in right_relation_names
+            ):
+                left_fields.append(condition_node.left.schema_column.identity)
+                right_fields.append(condition_node.right.schema_column.identity)
+            elif (
+                condition_node.left.source in right_relation_names
+                and condition_node.right.source in left_relation_names
+            ):
+                right_fields.append(condition_node.left.schema_column.identity)
+                left_fields.append(condition_node.right.schema_column.identity)
 
     return left_fields, right_fields, unkeyed
+
+
+def _operand_label(operand) -> str:
+    """How a type-mismatch message names one side of a comparison: `source.name`
+    for a column reference, the expression itself for anything else."""
+    if operand.node_type == NodeType.IDENTIFIER:
+        return f"{operand.source}.{operand.value}"
+    return format_expression(operand)
 
 
 def _identifier_leg(
@@ -573,8 +588,7 @@ def convert_using_to_on(
     # set of strings does not iterate in a stable order between runs.
     conditions = []
     for field in sorted(using_fields):
-        condition = Node(
-            node_type=NodeType.COMPARISON_OPERATOR,
+        condition = Comparison(
             value="Eq",
             do_not_create_column=True,
         )
@@ -600,7 +614,7 @@ def convert_using_to_on(
         folded = []
         for i in range(0, len(conditions), 2):
             if i + 1 < len(conditions):
-                and_node = Node(node_type=NodeType.AND, do_not_create_column=True)
+                and_node = And(do_not_create_column=True)
                 and_node.left = conditions[i]
                 and_node.right = conditions[i + 1]
                 folded.append(and_node)

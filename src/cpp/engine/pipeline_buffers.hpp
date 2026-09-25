@@ -177,20 +177,28 @@ struct MorselBuffer {
         const SpillUnit& unit = units_[u];
         const uint32_t rg = static_cast<uint32_t>(idx - unit.claim_base);
 
-        std::shared_ptr<SpillFileMapping> map;
+        std::shared_ptr<SpillUnitReader> map;
         {
             std::lock_guard<std::mutex> lk(map_mtx_);
             map = maps_[u].lock();
             if (!map) {
-                map = std::make_shared<SpillFileMapping>(unit.path);
-                if (!map->ok())
+                auto opened = std::make_shared<SpillUnitReader>(unit.path);
+                if (!opened->mapping.ok())
                     return fail_("cannot map spill unit '" + unit.path + "'");
+                // Opened ONCE per unit: a v3 whole-buffer open verifies the
+                // footer and every column's directory block, which a per-row-
+                // group read_morsel(bytes, ...) would redo on every call.
+                skene::Status opened_status = skene::open_reader(
+                    opened->mapping.data(), opened->mapping.size(), &opened->reader);
+                if (!opened_status.is_ok())
+                    return fail_("unit '" + unit.path + "': " + opened_status.message());
+                map = std::move(opened);
                 maps_[u] = map;
             }
         }
         auto morsel = std::make_shared<CxxMorsel>();
-        skene::Status status = skene::read_morsel(map->data(), map->size(), rg,
-                                                  skene::ReadOptions(), morsel.get());
+        skene::Status status = skene::read_morsel(map->reader, rg, skene::ReadOptions(),
+                                                  morsel.get());
         if (!status.is_ok())
             return fail_("unit '" + unit.path + "' row group " + std::to_string(rg) +
                          ": " + status.message());
@@ -418,7 +426,14 @@ struct MorselBuffer {
     std::vector<MorselPtr> resident_;
     size_t resident_bytes_ = 0;
     std::vector<SpillUnit> units_;
-    std::vector<std::weak_ptr<SpillFileMapping>> maps_;
+    // A spill unit's mapping and the reader opened over it, cached together:
+    // the reader borrows the mapping's bytes, so the two live and die as one.
+    struct SpillUnitReader {
+        explicit SpillUnitReader(const std::string& path) : mapping(path) {}
+        SpillFileMapping  mapping;
+        skene::FileReader reader;
+    };
+    std::vector<std::weak_ptr<SpillUnitReader>> maps_;
     size_t claims_ = 0;
     bool sealed_ = false;
     bool flush_active_ = false;

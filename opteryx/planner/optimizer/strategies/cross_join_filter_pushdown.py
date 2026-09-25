@@ -28,7 +28,7 @@ from opteryx.planner.optimizer.strategies.join_key_materialization import (
 )
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.planner.optimizer.strategies.optimization_strategy import OptimizerContext, OptimizationStrategy
-from opteryx.planner.optimizer.strategies.predicate_rewriter import _shallow
+from opteryx.compiled.structures.expressions import And
 
 # Arithmetic operators an equi-join key is allowed to be hoisted through, e.g.
 # `a.x = b.y - 53` (TPC-DS Q02's `d_week_seq1 = d_week_seq2 - 53`). Restricted
@@ -46,7 +46,7 @@ def _build_and_condition_tree(predicates: List[Node]) -> Optional[Node]:
 
     result = predicates[0]
     for pred in predicates[1:]:
-        and_node = Node(node_type=NodeType.AND)
+        and_node = And()
         and_node.left = result
         and_node.right = pred
         result = and_node
@@ -196,7 +196,7 @@ def _hoist_arithmetic_join_key(
         new_ref = materialize_operand_as_column(plan, target_child_id, other, expr_relations)
         if new_ref is None:
             return None
-        return _shallow(pred, **{other_attr: new_ref})
+        return pred.replace(**{other_attr: new_ref})
     return None
 
 

@@ -23,12 +23,13 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.planner.optimizer.statistics_refresh import _UNKNOWN_ROW_COUNT
 from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
+from opteryx.planner.plan_context import PlanContext
 
 _BIG_ROW_COUNT = 5_000_000
 
 
-def _plan_with_unstamped_ref_joined_to_big_relation() -> LogicalPlan:
-    """(unstamped MaterializedCteRef) JOIN (5M-row relation) -> Exit.
+def _plan_with_unstamped_ref_joined_to_big_relation():
+    """(plan, plan_context): (unstamped MaterializedCteRef) JOIN (5M-row relation) -> Exit.
 
     Both leaves are MaterializedCteRef so the plan needs no manifest
     resolution; the "big relation" is simply a stamped ref. The join carries
@@ -36,11 +37,16 @@ def _plan_with_unstamped_ref_joined_to_big_relation() -> LogicalPlan:
     max(1, left * right) — exactly the shape a 0-row side collapses to 1.
     """
     plan = LogicalPlan()
+    plan_context = PlanContext()
 
     unstamped = LogicalPlanNode(node_type=LogicalPlanStepType.MaterializedCteRef)
+    unstamped.cte_key = "unstamped"
 
     big = LogicalPlanNode(node_type=LogicalPlanStepType.MaterializedCteRef)
-    big.cte_statistics = RelationStatistics(columns={}, row_count_metric=_BIG_ROW_COUNT)
+    big.cte_key = "big"
+    plan_context.set_cte_statistics(
+        "big", RelationStatistics(columns={}, row_count_metric=_BIG_ROW_COUNT)
+    )
 
     join = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
     join.type = "inner"
@@ -54,20 +60,25 @@ def _plan_with_unstamped_ref_joined_to_big_relation() -> LogicalPlan:
     plan.add_edge("unstamped_ref", "join", "left")
     plan.add_edge("big_relation", "join", "right")
     plan.add_edge("join", "exit")
-    return plan
+    return plan, plan_context
+
+
+def _refreshed():
+    plan, plan_context = _plan_with_unstamped_ref_joined_to_big_relation()
+    return refresh_statistics(plan, plan_context), plan_context
 
 
 def test_unstamped_cte_ref_estimates_as_unknown_not_zero():
-    plan = refresh_statistics(_plan_with_unstamped_ref_joined_to_big_relation())
-    stats = plan["unstamped_ref"].statistics
+    plan, plan_context = _refreshed()
+    stats = plan_context.statistics(plan["unstamped_ref"])
     assert stats.row_count == _UNKNOWN_ROW_COUNT
     assert not stats.row_count_is_metric  # a stand-in is never exact knowledge
 
 
 def test_join_against_unstamped_cte_ref_is_not_collapsed_to_one_row():
     """The regression: 0 * 5_000_000 -> max(1, 0) -> 1-row join estimate."""
-    plan = refresh_statistics(_plan_with_unstamped_ref_joined_to_big_relation())
-    join_stats = plan["join"].statistics
+    plan, plan_context = _refreshed()
+    join_stats = plan_context.statistics(plan["join"])
     assert join_stats.row_count >= _BIG_ROW_COUNT, (
         f"join estimate collapsed to {join_stats.row_count} rows — the "
         "unstamped CTE ref is propagating as a multiplicative zero"
@@ -75,8 +86,8 @@ def test_join_against_unstamped_cte_ref_is_not_collapsed_to_one_row():
 
 
 def test_stamped_cte_ref_still_returns_the_stamp_verbatim():
-    plan = refresh_statistics(_plan_with_unstamped_ref_joined_to_big_relation())
-    stats = plan["big_relation"].statistics
+    plan, plan_context = _refreshed()
+    stats = plan_context.statistics(plan["big_relation"])
     assert stats.row_count == _BIG_ROW_COUNT
     assert stats.row_count_is_metric
 

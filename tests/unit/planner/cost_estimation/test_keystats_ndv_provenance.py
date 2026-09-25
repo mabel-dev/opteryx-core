@@ -23,7 +23,7 @@ import pytest
 
 from opteryx.planner.cost_estimation import KeyStats
 from opteryx.planner.cost_estimation import apply_occupancy_bound
-from opteryx.planner.cost_estimation.join_cardinality import NdvProvenance
+from opteryx.planner.cost_estimation import NdvProvenance
 
 
 def _measured(ndv, null_fraction=None):
@@ -124,10 +124,12 @@ def test_plan_adapter_tdom_fallback_is_marked_as_a_standin():
     """End to end through the site the defect lives at."""
     from opteryx.planner.cost_estimation import plan_adapter
 
-    class _NoStatsScan:
-        statistics = None
+    from opteryx.planner.plan_context import PlanContext
 
-    stats = plan_adapter._key_stats(_NoStatsScan(), b"k")
+    class _NoStatsScan:
+        """A scan the statistics refresh never reached: nothing recorded."""
+
+    stats = plan_adapter._key_stats(_NoStatsScan(), b"k", PlanContext())
     assert stats.ndv is None
     assert stats.ndv_provenance is NdvProvenance.UNKNOWN
 

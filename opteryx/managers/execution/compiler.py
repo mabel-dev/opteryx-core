@@ -38,6 +38,8 @@ from opteryx.exceptions import md_code
 from opteryx.exceptions import md_column
 from opteryx.exceptions import md_syntax
 from opteryx.expression import NodeType
+from opteryx.models import is_expression
+from opteryx.models import rewrite_children
 from opteryx.operators.window.helpers import FRAMED_AGGREGATE_FUNCTIONS
 from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
 
@@ -46,6 +48,10 @@ from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
 # caller actually wrote, and a new framed aggregate cannot drift out of this mapping.
 _FRAMED_KIND_NAMES = {code: name for name, code in FRAMED_AGGREGATE_FUNCTIONS.items()}
 from opteryx.types.logical_type import rescale_decimal_literal as _rescale_decimal_literal
+from opteryx.compiled.structures.expressions import And
+from opteryx.compiled.structures.expressions import Cast
+from opteryx.compiled.structures.expressions import Literal
+from opteryx.compiled.structures.expressions import Function
 
 _QUEUE_DEPTH = 4
 
@@ -95,7 +101,7 @@ _oversubscribe_warned = False
 
 def resolve_worker_count(requested) -> int:
     """Effective degree of parallelism. Unset/"auto" is softcoded — `max(2,
-    floor(0.8 * cpu))`, derived by `config.resolve_max_execution_workers` — while an
+    cpu - 2, floor(0.8 * cpu))`, derived by `config.resolve_max_execution_workers` — while an
     explicit positive request is HONOURED EXACTLY (warned if oversubscribed, never
     silently reduced). DOP is a number, never a code-path selector. There is no cap
     (architect, 2026-09-23).
@@ -193,6 +199,17 @@ def _fold_skene_scan_facts(nplan, telemetry) -> None:
     ]
     if claimed:
         telemetry._reading["io_bytes_claimed"] = sum(claimed)
+
+    # v3 skene reads are planned positional reads, so these are REAL counts:
+    # chunk range requests, metadata requests (tail, footer, directory blocks),
+    # and the bytes of both. The request count is what the column-major layout
+    # exists to reduce (docs/SKENE_V3_FORMAT_DESIGN.md §12). A plan that never
+    # ran reports None and contributes nothing.
+    io_counts = [plan.io_counts for plan in plans if plan.io_counts is not None]
+    if io_counts:
+        telemetry._reading["io_skene_requests"] = sum(c[0] for c in io_counts)
+        telemetry._reading["io_skene_metadata_requests"] = sum(c[1] for c in io_counts)
+        telemetry._reading["io_skene_bytes_fetched"] = sum(c[2] for c in io_counts)
 
     facts = telemetry._reading.get("native_scan_facts")
     if not facts:
@@ -306,7 +323,6 @@ def _residual_without_keyed_equalities(on_condition, left_relation_names,
     operand is an EXPRESSION is returned as `unkeyed` by that function and keys
     nothing, so dropping it would widen the join to the equi-only answer.
     """
-    from opteryx.compiled.structures.node import Node
     from opteryx.planner.binder.join_helpers import extract_join_fields
 
     remaining = []
@@ -322,7 +338,7 @@ def _residual_without_keyed_equalities(on_condition, left_relation_names,
         return None
     combined = remaining[0]
     for conjunct in remaining[1:]:
-        combined = Node(NodeType.AND, left=combined, right=conjunct)
+        combined = And(left=combined, right=conjunct)
     return combined
 
 
@@ -441,14 +457,8 @@ def _computed_array_subexpression(node, _depth=0):
         sc = getattr(node, "schema_column", None)
         if sc is not None and _physical_type(sc) == DrakenType.ARRAY:
             return node
-    for child in (getattr(node, "parameters", None) or []):
+    for child in node.children():
         found = _computed_array_subexpression(child, _depth + 1)
-        if found is not None:
-            return found
-    # `centre` too: a unary operator (IS NULL / IS NOT NULL / NOT) holds its
-    # operand there, and a refusal under one still needs the array named.
-    for attr in ("left", "right", "centre"):
-        found = _computed_array_subexpression(getattr(node, attr, None), _depth + 1)
         if found is not None:
             return found
     return None
@@ -701,6 +711,10 @@ class _Compiler:
         # to its own self-constructed pool, unchanged behaviour (EXPLAIN, tests that
         # compile a plan directly, any caller outside execute_native).
         self._pool = pool
+        # Stream column types by identity (physical, and the full ColumnType), filled
+        # as columns enter the layout (_remember_types, _add_computed).
+        self._types: dict = {}
+        self._cts: dict = {}
         # WP-INSTR (instrument 2): per-scan Source-type selection, keyed by scan
         # node identity. "NativeParquetScanSource" == zero-Python native pull;
         # "StreamingScanSource" == the GIL trampoline. Later work packages assert
@@ -844,9 +858,8 @@ class _Compiler:
         schema_column so downstream identity references still resolve."""
         import decimal as _dec
 
-        from opteryx.compiled.structures.node import Node
 
-        if not isinstance(expr, Node):
+        if not is_expression(expr):
             return expr
         if expr.node_type == NodeType.CASE:
             conditions = [self._rewrite_case(c) for c in expr.conditions]
@@ -862,7 +875,7 @@ class _Compiler:
                 v = r.value
                 phys = getattr(out_ct.physical, "name", "")
                 if v is None:
-                    nl = Node(NodeType.LITERAL, value=None)
+                    nl = Literal(value=None)
                     nl.type = out_ct
                     return nl
                 if isinstance(v, bool) or not isinstance(v, (int, float, _dec.Decimal)):
@@ -873,7 +886,7 @@ class _Compiler:
                     rescaled = q.quantize(_dec.Decimal(1).scaleb(-scale))
                     if rescaled != q:
                         return r   # inexact — leave it, kernel fails loud
-                    nl = Node(NodeType.LITERAL, value=rescaled)
+                    nl = Literal(value=rescaled)
                     # The literal carries the CASE's own declared type, both tiers
                     # alike. It used to be pinned to an int64-tier DECIMAL(18, scale)
                     # for a DECIMAL128 target, on the grounds that a DECIMAL128
@@ -889,7 +902,7 @@ class _Compiler:
                     nl.type = out_ct
                     return nl
                 if phys in ("FLOAT64", "FLOAT32"):
-                    nl = Node(NodeType.LITERAL, value=float(v))
+                    nl = Literal(value=float(v))
                     nl.type = out_ct
                     return nl
                 return r
@@ -910,32 +923,15 @@ class _Compiler:
                         return expr
 
             acc = _coerce(els) if els is not None else _coerce(
-                Node(NodeType.LITERAL, value=None))
+                Literal(value=None))
             for cond, res in zip(reversed(conditions), reversed(results)):
-                f = Node(NodeType.FUNCTION, value="IF_THEN_ELSE",
+                f = Function(value="IF_THEN_ELSE",
                          parameters=[cond, _coerce(res), acc])
                 acc = f
             acc.schema_column = sc
             acc.alias = getattr(expr, "alias", None)
             return acc
-        rebuilt = None
-        for attr in ("left", "right", "centre"):
-            child = getattr(expr, attr)
-            if isinstance(child, Node):
-                new_child = self._rewrite_case(child)
-                if new_child is not child:
-                    if rebuilt is None:
-                        rebuilt = expr.copy()
-                    setattr(rebuilt, attr, new_child)
-        params = expr.parameters
-        if isinstance(params, list):
-            new_params = [self._rewrite_case(c) if isinstance(c, Node) else c
-                          for c in params]
-            if any(x is not y for x, y in zip(new_params, params)):
-                if rebuilt is None:
-                    rebuilt = expr.copy()
-                rebuilt.parameters = new_params
-        return rebuilt if rebuilt is not None else expr
+        return rewrite_children(expr, self._rewrite_case)
 
     def _rewrite_decimal_compares(self, expr):
         """PLAN-TIME literal rescale: `decimal_col <op> numeric_literal` becomes a
@@ -949,9 +945,8 @@ class _Compiler:
         materialize at the int64 tier)."""
         import decimal as _dec
 
-        from opteryx.compiled.structures.node import Node
 
-        if not isinstance(expr, Node):
+        if not is_expression(expr):
             return expr
         if expr.node_type == NodeType.COMPARISON_OPERATOR:
             new = None
@@ -1035,30 +1030,13 @@ class _Compiler:
                     _lit_type = _lt.DECIMAL(_needed_p, _scale)
                 else:
                     continue
-                nl = Node(NodeType.LITERAL, value=rescaled)
+                nl = Literal(value=rescaled)
                 nl.type = _lit_type
                 if new is None:
                     new = expr.copy()
                 setattr(new, b, nl)
             return new if new is not None else expr
-        rebuilt = None
-        for attr in ("left", "right", "centre"):
-            child = getattr(expr, attr)
-            if isinstance(child, Node):
-                new_child = self._rewrite_decimal_compares(child)
-                if new_child is not child:
-                    if rebuilt is None:
-                        rebuilt = expr.copy()
-                    setattr(rebuilt, attr, new_child)
-        params = expr.parameters
-        if isinstance(params, list):
-            new_params = [self._rewrite_decimal_compares(c) if isinstance(c, Node) else c
-                          for c in params]
-            if any(x is not y for x, y in zip(new_params, params)):
-                if rebuilt is None:
-                    rebuilt = expr.copy()
-                rebuilt.parameters = new_params
-        return rebuilt if rebuilt is not None else expr
+        return rewrite_children(expr, self._rewrite_decimal_compares)
 
     def _bind_precomputed_subexpressions(self, expr, layout):
         """Return `expr` with every sub-expression the stream ALREADY CARRIES replaced
@@ -1073,70 +1051,67 @@ class _Compiler:
         aggregate, but not a CASE) asked to rebuild it from a `name` the aggregate had
         legitimately dropped — "references a column the stream does not carry".
 
-        EVALUATED is the node type that lowers to BC_LOAD_COL against a node's own
-        already-bound identity, which is exactly what _hoist_array_in_tree flips an
-        operand to once it has materialized it. The difference here is that nothing
-        needs materializing: the column exists, so only the reference has to change.
+        This is THE rule for "this expression is now a column" (architect ruling
+        2026-09-25): the array hoist and the JSON-extraction fusion materialize an
+        operand and simply grow the layout; every lowering against that layout then
+        reads the column instead of recomputing it. The reference is an EVALUATED
+        node — the type that lowers to BC_LOAD_COL against its own identity.
 
-        COPIED, not mutated in place: the group key, the projection's copy of the same
+        A NEW node, never a mutation: the group key, the projection's copy of the same
         expression and this predicate can be ONE object (the logical planner shares them
         deliberately), and stamping EVALUATED onto it would tell the Project that
         computes the column to load a column that does not exist yet.
 
+        Substituted only when the stream column is the expression's own TYPE. An
+        identity in the layout is not always the same value: the binder reuses a raw
+        column's identity for some casts (`EventTime::TIMESTAMP[s]`, see
+        _add_computed), and loading the raw column there would answer wrongly.
+        Computing is always correct, so a type mismatch just keeps the computation.
+
         Identifiers and already-EVALUATED nodes are left alone — they lower to a column
         load already — and so is anything not in the layout.
         """
-        from opteryx.compiled.structures.node import Node
-
-        if not isinstance(expr, Node):
+        if not is_expression(expr):
             return expr
         if expr.node_type in (
             NodeType.IDENTIFIER, NodeType.EVALUATED, NodeType.AGGREGATOR, NodeType.LITERAL
         ):
             return expr
-        sc = getattr(expr, "schema_column", None)
-        if sc is not None and sc.identity is not None and sc.identity in layout:
-            reference = expr.copy()
-            reference.node_type = NodeType.EVALUATED
-            return reference
+        sc = expr.schema_column
+        if (
+            sc is not None
+            and sc.identity is not None
+            and sc.identity in layout
+            and self._stream_type_matches(sc)
+        ):
+            from opteryx.compiled.structures.expressions import Evaluated
+            from opteryx.expression.formatter import format_expression
 
-        rebuilt = None
-        params = expr.parameters
-        if isinstance(params, list):
-            new_params = [self._bind_precomputed_subexpressions(c, layout)
-                          if isinstance(c, Node) else c for c in params]
-            if any(x is not y for x, y in zip(new_params, params)):
-                rebuilt = expr.copy()
-                rebuilt.parameters = new_params
-        if expr.node_type == NodeType.CASE:
-            # CASE holds its branches outside `parameters`; a walk that does not know
-            # that stops matching inside every CASE it meets.
-            for attr in ("conditions", "results"):
-                branch = getattr(expr, attr, None)
-                if not isinstance(branch, list):
-                    continue
-                new_branch = [self._bind_precomputed_subexpressions(c, layout)
-                              if isinstance(c, Node) else c for c in branch]
-                if any(x is not y for x, y in zip(new_branch, branch)):
-                    if rebuilt is None:
-                        rebuilt = expr.copy()
-                    setattr(rebuilt, attr, new_branch)
-            els = getattr(expr, "else_result", None)
-            if isinstance(els, Node):
-                new_els = self._bind_precomputed_subexpressions(els, layout)
-                if new_els is not els:
-                    if rebuilt is None:
-                        rebuilt = expr.copy()
-                    rebuilt.else_result = new_els
-        for attr in ("left", "right", "centre"):
-            child = getattr(expr, attr)
-            if isinstance(child, Node):
-                new_child = self._bind_precomputed_subexpressions(child, layout)
-                if new_child is not child:
-                    if rebuilt is None:
-                        rebuilt = expr.copy()
-                    setattr(rebuilt, attr, new_child)
-        return rebuilt if rebuilt is not None else expr
+            return Evaluated(
+                value=format_expression(expr),
+                schema_column=sc,
+                alias=expr.alias,
+                query_column=expr.query_column,
+            )
+
+        return rewrite_children(
+            expr, lambda child: self._bind_precomputed_subexpressions(child, layout)
+        )
+
+    def _stream_type_matches(self, schema_column):
+        """Whether the stream's column under `schema_column.identity` carries the
+        declared type (physical and logical) — unknown on either side counts as a
+        match, the same test _add_computed applies to a colliding identity."""
+        declared = schema_column.column_type
+        if declared is None:
+            return True
+        stream_pt = self._layout_type(None, schema_column.identity)
+        if stream_pt is not None and declared.physical is not None and declared.physical != stream_pt:
+            return False
+        stream_ct = self._cts.get(schema_column.identity)
+        if stream_ct is not None and declared.logical is not None and stream_ct.logical is not None:
+            return str(stream_ct.logical) == str(declared.logical)
+        return True
 
     def _lower_bytecode(self, expr):
         """Lower `expr` to a `CompiledBytecode` through the standard plan-time
@@ -1239,18 +1214,17 @@ class _Compiler:
         the predicate itself at execute() time, skipping the rewrite chain — which
         silently returned wrong rows for off-scale decimal compares. `predicates`
         is non-empty (the caller guards)."""
-        from opteryx.compiled.structures.node import Node
-        from opteryx.utils import random_string
+        from opteryx.expression.formatter import ExpressionColumn
+        from opteryx.types import logical_type as _lt
 
         nodes = [p.copy() for p in predicates if p is not None]
         root = nodes.pop()
         while nodes:
             right = nodes.pop()
-            root = Node(
-                NodeType.AND,
+            root = And(
                 left=root,
                 right=right,
-                schema_column=Node("schema_column", identity=random_string()),
+                schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN),
             )
         return root
 
@@ -1352,7 +1326,7 @@ class _Compiler:
     def _array_operand_of(self, node):
         """The ARRAY-typed operand this node consumes, or None if it consumes none."""
         if node.node_type == NodeType.FUNCTION:
-            params = getattr(node, "parameters", None) or []
+            params = node.parameters or []
             if (node.value or "").upper() in self._ARRAY_CONSUMING_FNS and len(params) == 1:
                 return params[0]
             return None
@@ -1386,10 +1360,8 @@ class _Compiler:
         at err_op=-97 on the stale out_child this hoist exists to prevent."""
         if node is None:
             return layout
-        for child in (getattr(node, "parameters", None) or []):
+        for child in node.children():
             layout = self._hoist_array_in_tree(p, child, layout)
-        for attr in ("left", "right", "centre"):
-            layout = self._hoist_array_in_tree(p, getattr(node, attr, None), layout)
 
         operand = self._array_operand_of(node)
         if operand is None:
@@ -1407,10 +1379,8 @@ class _Compiler:
 
         if sc.identity not in layout:
             layout = self._add_computed(p, [operand], layout)
-        # Compiled and projected under its own identity, so reading it as a column is
-        # now the truth rather than a rewrite — anything else pointing at this node
-        # wants the projected column too.
-        operand.node_type = NodeType.EVALUATED
+        # Projected under its own identity: every lowering against this layout now
+        # reads it as a column (_bind_precomputed_subexpressions).
         return layout
 
     # `->` and `->>`. MapAccess is excluded: it is INTEGER-keyed subscripting, not a
@@ -1431,12 +1401,8 @@ class _Compiler:
         half is skipped this pass: its operand is not in `layout` yet."""
         if node is None:
             return
-        for child in (getattr(node, "parameters", None) or []):
+        for child in node.children():
             self._collect_json_extractions(child, layout, groups)
-        # `centre` included so extractions under a unary operator (`x->>'a' IS NOT
-        # NULL`) still join the shared-parse group rather than each parsing again.
-        for attr in ("left", "right", "centre"):
-            self._collect_json_extractions(getattr(node, attr, None), layout, groups)
 
         if node.node_type != NodeType.EXTRACTION_OPERATOR:
             return
@@ -1529,12 +1495,9 @@ class _Compiler:
             )
             layout.extend(names)
 
-            # Compiled and projected under their own identities, so reading them as
-            # columns is now the truth rather than a rewrite — same handover
-            # _hoist_array_in_tree performs for a materialized ARRAY operand.
-            for _out_id, info in fusable:
-                for n_ in info["nodes"]:
-                    n_.node_type = NodeType.EVALUATED
+            # Projected under their own identities: the predicate's lowering reads
+            # them as columns (_bind_precomputed_subexpressions), the same handover a
+            # materialized ARRAY operand gets.
 
         return layout
 
@@ -1630,6 +1593,15 @@ class _Compiler:
                         "same-physical, different-descriptor stream column "
                         "(binder identity reuse)")
 
+        # Anything the stream already carries — an ARRAY operand hoisted above, an
+        # earlier program's output — is read as that column, not recomputed. The
+        # roots themselves are not in the layout (settled just above).
+        pending = [
+            rewrite_children(
+                node_, lambda child: self._bind_precomputed_subexpressions(child, layout)
+            )
+            for node_ in pending
+        ]
         for identity, bc in compile_eval_nodes(pending):
             if not bytecode_ops_all_c_native(bc):
                 # Name the expression AND the operation inside it. The refusal is
@@ -2262,7 +2234,7 @@ class _Compiler:
             layout = self._project_agg_operands(p, node, layout)
             specs = self._parse_aggregates(aggs, layout)
             key_emit = self._group_key_emit(node, group_cols)
-            # Planner NDV estimate for the grouped keys (hash_map_variant strategy);
+            # Planner NDV estimate for the grouped keys (physical planner, execution_estimates.py);
             # -1 = unknown. Gates the sink's per-partition parvi front maps.
             ndv_estimate = getattr(node, "groupby_ndv_estimate", None)
             if set_masks:
@@ -2364,7 +2336,7 @@ class _Compiler:
                         "DISTINCT", self._layout_name(identity),
                         self._layout_type(None, identity))
             buf = self.nplan.new_buffer()
-            # Planner NDV estimate for the dedup keys (hash_map_variant strategy);
+            # Planner NDV estimate for the dedup keys (physical planner, execution_estimates.py);
             # -1 = unknown. Gates the sink's parvi front set.
             ndv_estimate = getattr(node, "distinct_ndv_estimate", None)
             self.nplan.set_distinct_sink(
@@ -3003,6 +2975,7 @@ class _Compiler:
         retag and keep failing loud on every other mismatch.
         """
         from opteryx.operators._operators import SkeneScanPlan
+        from opteryx.connectors.skene_io import resolve_skene_coalesce_tuning
 
         read_columns = getattr(scan, "skene_read_schema_columns", None) or []
         predicates = list(getattr(scan, "predicates", None) or [])
@@ -3067,6 +3040,7 @@ class _Compiler:
             emit_indices,
             zone_terms,
             length_only,
+            resolve_skene_coalesce_tuning(scan.properties.variables),
         )
         splan.scan_identity = scan.identity
         return splan, filter_bc, read_layout, emit_ids
@@ -3167,6 +3141,7 @@ class _Compiler:
         from opteryx.expression import get_all_nodes_of_type
         from opteryx.expression.evaluator.evaluation import Pass1PredResolver
         from opteryx.operators._operators import SkeneLatmatScanPlan
+        from opteryx.connectors.skene_io import resolve_skene_coalesce_tuning
         from opteryx.operators._operators import bytecode_is_all_c_native
         from opteryx.planner.optimizer.strategies.split_conjunctive_predicates import (
             _inner_split,
@@ -3347,6 +3322,7 @@ class _Compiler:
             p1_length_only,
             out_length_only,
             p1_index_by_name[sort_sc.name],
+            resolve_skene_coalesce_tuning(scan.properties.variables),
         )
         splan.scan_identity = scan.identity
         return (splan, resolver, p1_index_by_name[sort_sc.name], bool(ascending),
@@ -3654,10 +3630,10 @@ class _Compiler:
             # A/B needs no redeploy; the plan reports the depth it actually runs
             # in io_scan_diagnostics (`fetch_ahead_depth`).
             fetch_ahead=resolve_fetch_ahead(_scan_vars, _scan_overrides),
-            # How many remote row groups this scan must submit before that depth is
-            # armed at all — a separate knob from the depth, so either can be swept
-            # without moving the other.
-            fetch_ahead_min_row_groups=resolve_fetch_ahead_gate(
+            # How many remote FETCH BLOCKS this scan must submit before that depth
+            # is armed at all — a separate knob from the depth, so either can be
+            # swept without moving the other.
+            fetch_ahead_min_blocks=resolve_fetch_ahead_gate(
                 _scan_vars, _scan_overrides),
             # Memory admission budget (bytes; 0 = off): what this scan's pipeline
             # may hold in decoded + prefetched bytes. Read back as
@@ -3886,7 +3862,7 @@ class _Compiler:
                                          or frozenset()) else 0 for sc in scs],
                 pool=None,
                 fetch_ahead=fetch_ahead,
-                fetch_ahead_min_row_groups=fetch_ahead_gate,
+                fetch_ahead_min_blocks=fetch_ahead_gate,
                 in_flight_limit_override=in_flight_override,
                 http_tuning=http_tuning,
                 coalesce_tuning=coalesce_tuning,
@@ -4531,7 +4507,7 @@ class _Compiler:
                     build_payload.append(position)
                     build_types, build_logical, build_element = self._payload_types(
                         build_id, [blayout[i] for i in build_payload])
-        # `join_output_rows_estimate` (JoinBuildShapeStrategy) is how many rows this
+        # `join_output_rows_estimate` (physical planner, execution_estimates.py) is how many rows this
         # join is expected to EMIT — the one number the build sink cannot measure for
         # itself when it decides whether consolidating its retained payload beats
         # re-copying it per output row. -1 means unknown, which keeps the sink on its
@@ -4883,7 +4859,8 @@ class _Compiler:
         (`node.on` is None for ASOF) — but they carry the real identity and the real
         ColumnType, which is all the lowering resolves against.
         """
-        from opteryx.expression import Node, NodeType
+        from opteryx.compiled.structures.expressions import LogicalColumn
+        from opteryx.expression import NodeType
         from opteryx.types.logical_type import LogicalCategory
         from opteryx.types.schema import SchemaColumn
 
@@ -4940,9 +4917,9 @@ class _Compiler:
         for identity, column_type in ((left_identity, left_ct), (right_identity, right_ct)):
             if column_type.physical == target.physical:
                 continue
-            key_node = Node(
+            key_node = LogicalColumn(
                 NodeType.IDENTIFIER,
-                value=names.get(identity, identity),
+                names.get(identity),
                 schema_column=SchemaColumn(
                     name=names.get(identity, "asof key"),
                     identity=identity,
@@ -4966,7 +4943,7 @@ class _Compiler:
             )
         if not any(coercions):
             return layout, keys
-        from opteryx.expression import Node, NodeType
+        from opteryx.expression import NodeType
         from opteryx.planner import build_literal_node
         from opteryx.types.schema import FunctionColumn
 
@@ -5001,8 +4978,7 @@ class _Compiler:
                     build_literal_node(int(target_ct.logical.precision)),
                     build_literal_node(int(target_ct.logical.scale)),
                 ]
-            cast_node = Node(
-                NodeType.CAST,
+            cast_node = Cast(
                 value=target_name,
                 left=key_node,
                 parameters=cast_parameters,
@@ -5097,11 +5073,10 @@ class _Compiler:
         folded = list(getattr(node, "filter_conditions", None) or [])
         bytecode = None
         if folded:
-            from opteryx.compiled.structures.node import Node
 
             condition = folded[0]
             for extra in folded[1:]:
-                conjunction = Node(NodeType.AND)
+                conjunction = And()
                 conjunction.left = condition
                 conjunction.right = extra
                 condition = conjunction

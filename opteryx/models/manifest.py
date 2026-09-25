@@ -1568,15 +1568,39 @@ class Manifest:
             return None
 
         sketches = []
+        families = set()
         for file in self.files:
             sketch = (file.distinct_sketches or {}).get(field_id)
             if sketch is None:
                 return None
             sketches.append(sketch)
+            families.add(file.distinct_sketch_family)
+
+        # Sketches union only within ONE hash family: a v2 file's (skene XXH3)
+        # and a v3 file's (draken Vector.hash) disagree about what a distinct
+        # value is, so a relation mixing them has no sketch answer.
+        if len(families) != 1:
+            return None
+        (family,) = families
 
         from opteryx.utils.kmv import estimate_from_min_k, merge_min_k
 
         count, exact = estimate_from_min_k(merge_min_k(sketches))
+
+        # A family-2 sketch holds the null row's hash once when the column has a
+        # null (skene FORMAT.md §8.1). This count is of NON-NULL values, so that
+        # one hash comes out — which needs every file's null count; without them
+        # the correction cannot be made and there is no honest answer.
+        if family == 2:
+            has_null = False
+            for file in self.files:
+                nulls = (file.null_value_counts or {}).get(field_id)
+                if nulls is None:
+                    return None
+                if nulls > 0:
+                    has_null = True
+            if has_null and count > 0:
+                count -= 1
 
         if not exact:
             # Floor the estimate with what the footers PROVE. A file whose own

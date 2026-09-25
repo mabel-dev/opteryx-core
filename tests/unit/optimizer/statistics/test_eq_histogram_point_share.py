@@ -23,6 +23,8 @@ must not be handed its whole bin.
 
 import os
 import sys
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
@@ -37,6 +39,7 @@ from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
 from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.third_party.maki_nage import distogram as dg
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 _COL = b"tes_col_00000001"
 
@@ -77,24 +80,24 @@ def _stats(histogram, ndv: int) -> RelationStatistics:
 
 
 def _identifier() -> Node:
-    n = Node(node_type=NodeType.IDENTIFIER)
-    n.schema_column = type("_S", (), {"identity": _COL})()
-    return n
+    return LogicalColumn(
+        node_type=NodeType.IDENTIFIER, source_column=None, schema_column=type("_S", (), {"identity": _COL})()
+    )
 
 
 def _eq(value) -> Node:
-    n = Node(node_type=NodeType.COMPARISON_OPERATOR)
+    n = Comparison()
     n.value = "Eq"
     n.left = _identifier()
-    n.right = Node(NodeType.LITERAL, value=value)
+    n.right = Literal(value=value)
     return n
 
 
 def _in_list(values) -> Node:
-    n = Node(node_type=NodeType.COMPARISON_OPERATOR)
+    n = Comparison()
     n.value = "InList"
     n.left = _identifier()
-    n.right = Node(NodeType.LITERAL, value=tuple(values))
+    n.right = Literal(value=tuple(values))
     return n
 
 

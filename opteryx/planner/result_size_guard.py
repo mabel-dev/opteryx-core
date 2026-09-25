@@ -38,6 +38,7 @@ from typing import Optional
 
 from opteryx.exceptions import ResultTooLargeError
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
+from opteryx.planner.plan_context import PlanContext
 
 
 def _declared_row_count(node) -> Optional[int]:
@@ -74,7 +75,7 @@ def every_input_has_row_counts(plan) -> bool:
     return saw_a_scan
 
 
-def check_estimated_result_size(plan, limit: int, telemetry=None, scan_stats_cache=None):
+def check_estimated_result_size(plan, limit: int, plan_context: PlanContext, telemetry=None):
     """Raise ResultTooLargeError when the plan's estimated result exceeds `limit`.
 
     No-op (returns the plan unchanged) when the limit is not positive, when any
@@ -102,11 +103,11 @@ def check_estimated_result_size(plan, limit: int, telemetry=None, scan_stats_cac
     # Refresh only now that the inputs are known to be trustworthy — this is the
     # one place that pays for it, and only for plans it can actually act on. This
     # runs even for EXPLAIN (where enforcement below is skipped): EXPLAIN's own
-    # `est_rows` column reads these same `.statistics` attachments.
+    # `est_rows` column reads the estimate telemetry this refresh records.
     from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
 
     if getattr(plan, "statistics_are_stale", True):
-        plan = refresh_statistics(plan, telemetry=telemetry, scan_stats_cache=scan_stats_cache)
+        plan = refresh_statistics(plan, plan_context, telemetry=telemetry)
 
     exit_points = plan.get_exit_points()
     if len(exit_points) != 1 or plan[exit_points[0]].node_type != LogicalPlanStepType.Exit:
@@ -115,9 +116,8 @@ def check_estimated_result_size(plan, limit: int, telemetry=None, scan_stats_cac
     # Enforce ONLY on a metric terminal count — `row_count_metric` is None
     # whenever the number is an estimate, so estimates fall through to the
     # runtime counter without a special case here.
-    estimate = getattr(
-        getattr(plan[exit_points[0]], "statistics", None), "row_count_metric", None
-    )
+    exit_statistics = plan_context.statistics(plan[exit_points[0]])
+    estimate = None if exit_statistics is None else exit_statistics.row_count_metric
 
     if estimate is not None and estimate > limit:
         if telemetry is not None:

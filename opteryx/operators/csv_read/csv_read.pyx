@@ -132,8 +132,14 @@ cdef class CsvReadNode(ReaderNode):
         for path in self.csv_files:
             file_obj = filesystem.open_input_file(path)
             try:
+                data = file_obj.memoryview
+                # A zero-byte file is an EMPTY RELATION: it contributes no rows. rugo
+                # refuses an empty buffer (there is no header to read columns from), so
+                # that decision is made here, explicitly, before the decode.
+                if len(data) == 0:
+                    continue
                 morsel = read_csv_file(
-                    file_obj.memoryview,
+                    data,
                     columns=expected_physical_names,
                     predicates=predicates,
                     delimiter=self.csv_separator,
@@ -141,7 +147,9 @@ cdef class CsvReadNode(ReaderNode):
                     fail_on_error=self.csv_fail_on_error,
                     infer_sample_size=self.csv_infer_sample_size,
                 )
-            except RuntimeError as err:
+            except (RuntimeError, ValueError) as err:
+                # ValueError: a pushed predicate literal that does not fit its column,
+                # or a file holding none of the projected columns (schema drift).
                 raise DatasetReadError(f"READ_CSV('{path}'): {err}") from err
             finally:
                 file_obj.close()
@@ -183,57 +191,6 @@ cdef class CsvReadNode(ReaderNode):
                 for n in morsel.column_names
             }
 
-            if not file_names:
-                # rugo.csv collapses THREE distinct situations into the same
-                # zero-column morsel, and the decode's return value alone cannot
-                # tell them apart:
-                #   (a) the file is RECORD-LESS -- zero bytes, whitespace only,
-                #       or a header with no data rows. An empty relation, not an
-                #       error; it contributes no rows.
-                #   (b) `predicates` matched NO ROW in this file. Also a
-                #       legitimate zero-row result -- rugo drops the columns
-                #       along with the rows, so this is indistinguishable from
-                #       (a) and (c) by shape alone.
-                #   (c) the file HAS records but not the expected columns --
-                #       genuine schema drift across a glob's matched files,
-                #       which must fail loud.
-                # One projection-free, predicate-free re-read of the same file
-                # separates them: it returns whatever columns the file actually
-                # has, so an empty result means (a), a result missing an expected
-                # column means (c), and anything else means (b).
-                #
-                # Before this branch existed, all three raised the drift error
-                # below -- so an ordinary `WHERE col = <no match>` over a CSV
-                # failed the query instead of returning zero rows.
-                probe_obj = filesystem.open_input_file(path)
-                try:
-                    probe_morsel = read_csv_file(
-                        probe_obj.memoryview,
-                        delimiter=self.csv_separator,
-                        has_header=self.csv_has_header_row,
-                        fail_on_error=self.csv_fail_on_error,
-                        infer_sample_size=self.csv_infer_sample_size,
-                    )
-                except RuntimeError as err:
-                    raise DatasetReadError(f"READ_CSV('{path}'): {err}") from err
-                finally:
-                    probe_obj.close()
-
-                probe_names = {
-                    n.decode("utf-8") if isinstance(n, bytes) else n
-                    for n in probe_morsel.column_names
-                }
-                missing = set(expected_physical_names) - probe_names
-                if probe_names and missing:
-                    raise DatasetReadError(
-                        f"READ_CSV('{path}'): this file's columns {sorted(probe_names)} "
-                        f"do not match the expected {sorted(expected_physical_names)} from "
-                        "the bind-time schema (resolved from the first file in this glob's "
-                        "matched-file set)."
-                    )
-                # (a) or (b): a legitimate zero-row contribution from this file.
-                continue
-
             if file_names != set(expected_physical_names):
                 raise DatasetReadError(
                     f"READ_CSV('{path}'): this file's columns {sorted(file_names)} "
@@ -241,6 +198,12 @@ cdef class CsvReadNode(ReaderNode):
                     "the bind-time schema (resolved from the first file in this glob's "
                     "matched-file set)."
                 )
+
+            if morsel.num_rows == 0:
+                # Nothing from this file reaches the result, so only its column NAMES
+                # are checked (above). Its column TYPES are not evidence: a header-only
+                # file's are the sniffer's defaults for a column with no values.
+                continue
 
             names = []
             vectors = []

@@ -21,7 +21,7 @@ import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
-from opteryx.planner.cost_estimation.join_cardinality import surviving_distinct_count
+from opteryx.planner.cost_estimation import surviving_distinct_count
 from opteryx.planner.optimizer.statistics import ColumnRange
 from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics

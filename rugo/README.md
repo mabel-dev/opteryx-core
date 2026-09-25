@@ -380,7 +380,8 @@ data = write_jsonl(morsel)
 read_jsonl(
     data,                        # file path (str) or buffer (bytes/bytearray/memoryview)
     columns=None,                # list[str] to project, or None for all
-    predicates=None,             # list[(column, op, value)]; op in ==, !=, <, <=, >, >=
+    predicates=None,             # list[(column, op, value)]; op in ==, !=, <, <=, >, >=,
+                                 #   in, not in (value: list/tuple/set), is null, is not null (value: None)
     explicit_schema=None,        # provide a schema dict instead of inferring
     infer_schema=True,
     infer_sample_size=5,         # rows sampled for type inference

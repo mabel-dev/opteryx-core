@@ -8,9 +8,11 @@ optimizer coordinates shared bodies those side plans have not yet been spliced
 into the main graph. The flat scan therefore yielded NOTHING for the TPC-DS Q14
 shape, and both consumers of `_refs_of` silently no-opped:
 
-  - `stamp_reference_estimates` stamped no `cte_statistics`, so every reference
-    fell back to statistics_refresh's UNKNOWN stand-in (1,000,000 rows) and that
-    stand-in multiplied through the joins above it;
+  - the body's estimate reached no reference, so every reference fell back to
+    statistics_refresh's UNKNOWN stand-in (1,000,000 rows) and that stand-in
+    multiplied through the joins above it. (The estimate now lives in the
+    PlanContext keyed by `cte_key`, so a reference anywhere in the forest reads
+    it; this test still pins that every reference's CTE has one.);
   - `coordinate_shared_cte` gates on `if refs:`, so shared-body predicate
     pushdown and projection narrowing were skipped entirely.
 
@@ -33,6 +35,7 @@ from opteryx.models import ExecutionContext
 from opteryx.models import QueryTelemetry
 from opteryx.planner import bind_statement
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.planner.plan_context import PlanContext
 from opteryx.planner.optimizer import do_optimizer
 from opteryx.planner.relation_resolver import iter_plan_forest
 from opteryx.utils import random_string
@@ -67,7 +70,7 @@ SELECT 'w', COUNT(*) FROM $planets p
 
 
 def _optimized(sql):
-    """(plan, shared_ctes) for `sql`, taken through bind and the optimizer —
+    """(plan, shared_ctes, plan_context) for `sql`, taken through bind and the optimizer —
     the same two calls `query_planner` makes, stopping before physical planning
     because the property under test lives on the logical reference node."""
     query_id = random_string(32)
@@ -81,8 +84,9 @@ def _optimized(sql):
         telemetry=telemetry,
     )
     shared = getattr(bound, "shared_ctes", None) or {}
-    plan = do_optimizer(bound, telemetry, scan_stats_cache={}, shared_ctes=shared)
-    return plan, (getattr(plan, "shared_ctes", None) or shared)
+    plan_context = PlanContext()
+    plan = do_optimizer(bound, telemetry, plan_context, shared_ctes=shared)
+    return plan, (getattr(plan, "shared_ctes", None) or shared), plan_context
 
 
 def _references(plan, shared):
@@ -103,7 +107,7 @@ def _references(plan, shared):
     ids=["scalar_select_list", "or_exists", "q14_shape"],
 )
 def test_every_nested_cte_reference_is_stamped(sql, expected_bodies, expected_refs):
-    plan, shared = _optimized(sql)
+    plan, shared, plan_context = _optimized(sql)
     assert len(shared) == expected_bodies, (
         f"expected {expected_bodies} shared CTE bodies, got {sorted(shared)} — the "
         "shape under test no longer shares its CTEs, so it no longer covers the defect"
@@ -112,9 +116,9 @@ def test_every_nested_cte_reference_is_stamped(sql, expected_bodies, expected_re
     assert len(references) == expected_refs, (
         f"expected {expected_refs} MaterializedCteRef leaves, got {len(references)}"
     )
-    unstamped = [n for n in references if n.properties.get("cte_statistics") is None]
+    unstamped = [n for n in references if plan_context.cte_statistics(n.cte_key) is None]
     assert not unstamped, (
-        f"{len(unstamped)} of {len(references)} references carry no cte_statistics — "
+        f"{len(unstamped)} of {len(references)} references have no CTE estimate — "
         "_refs_of is not reaching references held in embedded (expression-subquery) "
         "plans, so every one of them falls to the 1,000,000-row UNKNOWN stand-in"
     )

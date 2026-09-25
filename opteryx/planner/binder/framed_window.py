@@ -29,6 +29,7 @@ from opteryx.planner.binder.binder import _aggregate_return_type
 from opteryx.planner.binder.binder import inner_binder
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.types.schema import RelationSchema
+from opteryx.compiled.structures.expressions import Aggregator
 
 
 def visit_framed_window(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
@@ -58,8 +59,7 @@ def visit_framed_window(self, node: Node, context: BindingContext) -> Tuple[Node
         arg_node = None
         if params and params[0].node_type != NodeType.WILDCARD:
             arg_node, context = inner_binder(params[0], context)
-        _probe = Node(
-            node_type=NodeType.AGGREGATOR,
+        _probe = Aggregator(
             value=kind,
             parameters=[arg_node] if arg_node is not None else [],
         )

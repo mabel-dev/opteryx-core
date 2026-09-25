@@ -13,6 +13,7 @@ struct CsvPredicate {
     std::string column;   // column name (matched against header)
     uint8_t     op;       // comparison operator
     std::string value;    // raw comparison value as a byte string
+    uint8_t     kind;     // rugo::LiteralKind — the literal's Python type (predicate_literal.hpp)
 };
 
 // Per-reader configuration. Construct once; treat as immutable after construction.
@@ -24,7 +25,11 @@ struct CsvParseContext {
     // ---------------------------------------------------------------------------
 
     // Field separator byte. Comma by default; set to '\t' for TSV.
-    // Must not be '"' or '\\' — those are reserved structural bytes.
+    // Must not be '"' — that is a reserved structural byte.
+    //
+    // Quoting follows RFC 4180: inside a quoted field the ONLY escape is a
+    // doubled quote (""). Backslash is an ordinary byte everywhere — this
+    // matches rugo's CSV writer, so rugo always reads back what it wrote.
     uint8_t delimiter = ',';
 
     // If true, the first row is a header; column names are taken from it.
@@ -100,7 +105,6 @@ struct CsvParseContext {
         lut[static_cast<uint8_t>('\r')]      = 2;  // CR
         lut[static_cast<uint8_t>(delimiter)] = 3;  // DELIMITER
         lut[static_cast<uint8_t>('"')]       = 4;  // QUOTE
-        lut[static_cast<uint8_t>('\\')]      = 5;  // BACKSLASH
     }
 };
 
@@ -110,7 +114,6 @@ enum class CsvMarkerType : uint8_t {
     CR        = 1,
     DELIMITER = 2,
     QUOTE     = 3,
-    BACKSLASH = 4,
 };
 
 struct CsvMarkerPosition {

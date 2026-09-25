@@ -35,11 +35,11 @@ partial/best-effort fusion.
 """
 
 from opteryx.expression import NodeType, get_all_nodes_of_type
-from opteryx.models import Node
+from opteryx.models import rewrite_children
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
-from .predicate_rewriter import _shallow
+from opteryx.compiled.structures.expressions import Nested
 
 
 def _identity_of(node):
@@ -58,7 +58,7 @@ def _substitute_tree(node, inline_map):
     only valid directly above the lower Project - anywhere else the columns it
     reads do not exist - so it must not leak into those holders. Only the nodes on
     the path from a substituted identifier to the root are rebuilt (keeping their
-    identity via `_shallow`); every untouched subtree is the original object.
+    identity via `replace`); every untouched subtree is the original object.
     """
     if node is None:
         return None
@@ -69,30 +69,7 @@ def _substitute_tree(node, inline_map):
             return inline_map[ident].copy()
         return node
 
-    changes = {}
-    for attr in ("left", "right", "centre"):
-        child = node.get(attr)
-        if child is not None:
-            rebuilt = _substitute_tree(child, inline_map)
-            if rebuilt is not child:
-                changes[attr] = rebuilt
-
-    attributes = ["parameters"]
-    if node.node_type == NodeType.CASE:
-        attributes += ["conditions", "results"]
-        if node.else_result is not None:
-            rebuilt = _substitute_tree(node.else_result, inline_map)
-            if rebuilt is not node.else_result:
-                changes["else_result"] = rebuilt
-    for attr in attributes:
-        children = node.get(attr)
-        if not children:
-            continue
-        rebuilt = [_substitute_tree(child, inline_map) for child in children]
-        if any(new is not old for new, old in zip(rebuilt, children)):
-            changes[attr] = rebuilt
-
-    return _shallow(node, **changes) if changes else node
+    return rewrite_children(node, lambda child: _substitute_tree(child, inline_map), share=True)
 
 
 def _substitute_column(col, inline_map):
@@ -104,7 +81,7 @@ def _substitute_column(col, inline_map):
     if col.node_type == NodeType.IDENTIFIER:
         ident = _identity_of(col)
         if ident in inline_map:
-            nested = Node(node_type=NodeType.NESTED)
+            nested = Nested()
             nested.centre = inline_map[ident].copy()
             nested.schema_column = col.schema_column
             nested.alias = col.alias

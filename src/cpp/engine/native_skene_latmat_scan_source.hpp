@@ -120,7 +120,7 @@
 #include <string>
 #include <vector>
 
-#include "native_skene_scan_source.hpp"  // SkeneFileMapping, skene_map_decoded_columns
+#include "native_skene_scan_source.hpp"  // SkeneClaimSet, skene_map_decoded_columns
 #include "native_sort.hpp"               // build_sort_keys / SortKeyCmp / gather_rows
 #include "operator.hpp"
 
@@ -138,17 +138,23 @@ namespace opteryx::engine {
 // and that pointer cross the boundary.
 using SkeneLatmatPredFn = int (*)(void*, DrakenVector**, int, uint32_t, uint8_t*);
 
-// One ROW GROUP's pass-1 survivors. The unit is (file, row group) throughout —
-// see SkeneClaim in native_skene_scan_source.hpp for why a file is too coarse.
+// One row group of one file — the unit both passes work in. See SkeneClaim in
+// native_skene_scan_source.hpp for why a file is too coarse.
+struct SkeneRowGroupRef {
+    uint32_t file_idx;
+    uint32_t row_group;
+};
+
+// One ROW GROUP's pass-1 survivors.
 struct SkeneLatmatCandidates {
-    SkeneClaim            claim{0, 0};
+    SkeneRowGroupRef      claim{0, 0};
     std::vector<uint32_t> positions;   // ascending ORIGINAL row indices of survivors
     MorselPtr             key;         // ONE column: the sort key, gathered to `positions`
 };
 
 // A row group that also survived the top-n reduction.
 struct SkeneLatmatPass2Item {
-    SkeneClaim            claim{0, 0};
+    SkeneRowGroupRef      claim{0, 0};
     std::vector<uint32_t> rows;        // ascending ORIGINAL row indices to materialize
 };
 
@@ -204,7 +210,8 @@ class NativeSkeneLatmatScanSource : public Source {
                                 SkeneZoneMap zone,
                                 int64_t* row_groups_total,
                                 int64_t* row_groups_pruned,
-                                int64_t* bytes_claimed = nullptr)
+                                int64_t* bytes_claimed,
+                                SkeneIo* io)
         : files_(files),
           p1_column_names_(p1_column_names),
           p1_column_types_(p1_column_types),
@@ -230,7 +237,8 @@ class NativeSkeneLatmatScanSource : public Source {
           zone_(zone),
           row_groups_total_(row_groups_total),
           row_groups_pruned_(row_groups_pruned),
-          bytes_claimed_(bytes_claimed) {}
+          bytes_claimed_(bytes_claimed),
+          io_(io) {}
 
     std::unique_ptr<GlobalSourceState> make_global() override {
         return std::make_unique<SkeneLatmatGlobal>();
@@ -247,9 +255,16 @@ class NativeSkeneLatmatScanSource : public Source {
         // by whichever worker arrives first; a failure here is recorded like any
         // pass-1 failure so the barrier is released rather than parked on.
         std::call_once(g.init, [&g, this] {
-            g.init_ok = g.work_set.build(*files_, zone_, row_groups_total_,
-                                         row_groups_pruned_, g.init_err,
-                                         0, nullptr, bytes_claimed_);
+            // Directories are attached for every column EITHER pass decodes;
+            // each pass then plans and fetches exactly its own columns.
+            std::vector<std::string> read_columns = *p1_column_names_;
+            for (const std::string& name : *out_column_names_)
+                if (std::find(read_columns.begin(), read_columns.end(), name)
+                        == read_columns.end())
+                    read_columns.push_back(name);
+            g.init_ok = g.work_set.build(*files_, read_columns, zone_, row_groups_total_,
+                                         row_groups_pruned_, g.init_err, 0, nullptr,
+                                         bytes_claimed_, io_, /*per_row_group=*/true);
         });
         if (!g.init_ok) {
             {
@@ -307,19 +322,19 @@ class NativeSkeneLatmatScanSource : public Source {
     // ── PASS 1 ────────────────────────────────────────────────────────────────────
     // Decode one file's pass-1 columns, evaluate the predicate, and keep the
     // survivors' sort key. Runs on a worker thread with nothing shared.
-    bool pass1_row_group(SkeneLatmatGlobal& g, SkeneClaim claim,
+    bool pass1_row_group(SkeneLatmatGlobal& g, SkeneRowGroupRef claim,
                          SkeneLatmatCandidates& out, ErrCtx& err,
                          std::string& err_buf) {
         const std::string& path = (*files_)[claim.file_idx];
-        const SkeneFileMapping& mapping = g.work_set.mapping(claim.file_idx);
         skene::ReadOptions options;
         options.columns = *p1_column_names_;
         options.length_only = p1_length_only_;
 
         auto m = std::make_shared<CxxMorsel>();
-        skene::Status status =
-            skene::read_morsel(mapping.data(), mapping.size(), claim.row_group,
-                               options, m.get());
+        std::string read_err;
+        skene::Status status = g.work_set.read_row_group(claim.file_idx, claim.row_group,
+                                                         options, nullptr, m.get(),
+                                                         read_err);
         if (!status.is_ok()) {
             err.code = 1;
             err_buf = "NativeSkeneLatmatScanSource (pass 1): '" + path +
@@ -432,7 +447,8 @@ class NativeSkeneLatmatScanSource : public Source {
             SkeneLatmatCandidates cand;
             ErrCtx ferr;
             std::string ferr_buf;
-            const bool ok = pass1_row_group(g, claims[idx], cand, ferr, ferr_buf);
+            const SkeneRowGroupRef ref{claims[idx].file_idx, claims[idx].row_groups.front()};
+            const bool ok = pass1_row_group(g, ref, cand, ferr, ferr_buf);
             {
                 std::lock_guard<std::mutex> lock(g.mtx);
                 if (!ok) {
@@ -552,15 +568,15 @@ class NativeSkeneLatmatScanSource : public Source {
         // every worker streams pass 2 at once. Same device as LatmatScanSource's.
         static thread_local std::string err_msg_;
         const std::string& path = (*files_)[item.claim.file_idx];
-        const SkeneFileMapping& mapping = g.work_set.mapping(item.claim.file_idx);
         skene::ReadOptions options;
         options.columns = *out_column_names_;
         options.length_only = out_length_only_;
 
         auto m = std::make_shared<CxxMorsel>();
-        skene::Status status =
-            skene::read_morsel(mapping.data(), mapping.size(), item.claim.row_group,
-                               options, m.get());
+        std::string read_err;
+        skene::Status status = g.work_set.read_row_group(item.claim.file_idx,
+                                                         item.claim.row_group, options,
+                                                         nullptr, m.get(), read_err);
         if (!status.is_ok()) {
             err.code = 1;
             err_msg_ = "NativeSkeneLatmatScanSource (pass 2): '" + path +
@@ -649,6 +665,8 @@ class NativeSkeneLatmatScanSource : public Source {
     // On-disk extent of the CLAIMED row groups — see SkeneClaimSet::build. Claim
     // time covers BOTH passes, since pass 2 draws from pass 1's survivors.
     int64_t* bytes_claimed_;
+    // IO knobs and counters, owned by the plan (see SkeneIo).
+    SkeneIo* io_;
 };
 
 }  // namespace opteryx::engine

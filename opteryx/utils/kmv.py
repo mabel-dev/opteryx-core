@@ -16,13 +16,14 @@ the canonical catalog stats engine uses, so sketches produced here are
 interchangeable with catalog-produced statistics. Hashing happens in C over the
 whole column — never per-value in Python.
 
-⛔ Every input to ``merge_min_k`` must come from the SAME hash function. skene's
-stored sketches are XXH3 over value bytes; these are ``Vector.hash()``. The two
-disagree about nulls (``Vector.hash()`` emits a NULL_HASH sentinel per null row;
-skene's sketch never sees one) and about decimal identity (``Vector.hash()``
-collides an int64-decimal with the DECIMAL128 of equal value; skene hashes raw
-bits), so merging across them produces a number with no meaning — see skene
-``format.h``, ``ColumnSketchHeader``, architect ruling 2026-08-21.
+⛔ Every input to ``merge_min_k`` must come from the SAME hash family. A skene v3
+file's sketches are family 2 — ``Vector.hash()``, a null row contributing
+NULL_HASH once — so they ARE this family and union with these. A skene v2 file's
+are family 1, XXH3 over value bytes, and disagree about nulls (never seen) and
+about decimal identity (raw bits, where ``Vector.hash()`` collides an
+int64-decimal with the DECIMAL128 of equal value), so merging a v2 sketch with
+these produces a number with no meaning — see skene ``FORMAT.md`` §8 and
+``SketchRecordHeader.hash_family``, architect rulings 2026-08-21 and 2026-09-24.
 
 **This module holds no implementation.** The sketch is ``draken/core/kmv_sketch.h``
 — one C++ class shared with skene's value-ordering decline and rugo's

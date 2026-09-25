@@ -431,7 +431,7 @@ static void test_ipv4_survives_typed_and_renders() {
     // CROSS-TRANSLATION-UNIT LINKAGE GUARD.
     //
     // `interned` was produced by logical_type_intern in THIS translation unit;
-    // owner->logical_type by the same function in reader_v1.cpp. Pointer
+    // owner->logical_type by the same function in chunk_decode.cpp. Pointer
     // equality across those two TUs is exactly the identity guarantee
     // draken/logical_type.h states, and it holds only because the function has
     // EXTERNAL linkage — plain `inline`, never `static inline`.

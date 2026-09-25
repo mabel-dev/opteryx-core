@@ -98,7 +98,17 @@ def read_csv(
     """Open a CSV file or buffer for reading.
 
     Returns a context manager that yields one Morsel of the (projected, filtered) result.
-    predicates: list of (column, op, value); op in ==, !=, <, <=, >, >=.
+    predicates: list of (column, op, value); op in ==, = (alias of ==), !=, <, <=, >, >=; a NULL (empty) field satisfies none of them.
+        The value must match the column's type and is never coerced: a VARCHAR column
+        takes str/bytes, an INT64/FLOAT64 (or declared integer/float) column takes
+        int/float, a declared BOOL column takes bool. A mismatch, None, or a column the
+        file does not have raises ValueError naming the column — checked against the
+        sniffed/declared types before any row is filtered. Columns of other declared
+        types (DATE, TIMESTAMP, DECIMAL, IPV4) keep the original comparison. A read that
+        filters every row out still yields one Morsel with every column, typed, zero rows.
+    columns: a requested column the file does not have is dropped from the result; if
+        NONE of them exist, ValueError. An empty input (no header row) is ValueError too —
+        the reader never yields a zero-column Morsel.
     infer_sample_size: non-null values per projected column sampled to sniff its type.
     fail_on_error: True (default) raises RuntimeError on a post-sample-window value that
     doesn't fit its column's sniffed type; False treats that value as NULL instead. It

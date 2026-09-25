@@ -634,6 +634,14 @@ extensions = [
             "third_party/mabel/carchar/carchar_simd.hpp",
         ],
     ),
+    # Expression nodes with fixed, declared, enforced attributes (one class per
+    # expression NodeType) — replaces the attribute-bag Node for expressions.
+    Extension(
+        "opteryx.compiled.structures.expressions",
+        sources=["opteryx/compiled/structures/expressions.pyx"],
+        include_dirs=include_dirs,
+        extra_compile_args=C_FLAGS,
+    ),
     Extension(
         "opteryx.compiled.structures.node",
         sources=["opteryx/compiled/structures/node.pyx"],
@@ -788,6 +796,16 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
+    # Planner join estimator: join cardinality + DPccp/greedy join enumeration.
+    # Header-only native core (src/cpp/planner/join_estimator.hpp); the pyx is
+    # the conversion boundary the planner calls.
+    Extension(
+        "opteryx.compiled.planner.join_estimator",
+        sources=["opteryx/compiled/planner/join_estimator.pyx"],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
     # Helpers for relation statistics
     Extension(
         "opteryx.compiled.structures.relation_statistics",
@@ -851,8 +869,15 @@ extensions = [
             "skene/src/checksum.cpp",
             "skene/src/probe.cpp",
             "skene/src/reader.cpp",
-            "skene/src/reader_v1.cpp",
             "skene/src/reader_v2.cpp",
+            "skene/src/reader_v3.cpp",
+            "skene/src/chunk_decode.cpp",
+            "skene/src/footer_common.cpp",
+            # The writer's per-file sketch (draken Vector.hash) and its staging.
+            # simd_hash_i64 resolves from draken_native at load, like every
+            # other draken symbol this extension uses (dynamic lookup below).
+            "skene/src/sketch.cpp",
+            "skene/src/staging.cpp",
             "skene/src/encoding.cpp",
             "skene/src/statistics.cpp",
             "skene/src/value_order.cpp",
@@ -896,7 +921,7 @@ extensions = [
         + [
             "opteryx/operators/aggregate",
             "skene/include",   # skene/reader.h etc (NativeSkeneScanSource)
-            "skene/src",       # skene's internal headers (reader_v1.h, encoding.h, ...)
+            "skene/src",       # skene's internal headers (reader_v3.h, encoding.h, ...)
             "third_party/zstd",          # skene's per-section codecs
             "third_party/zstd/common",
             "third_party/zstd/decompress",

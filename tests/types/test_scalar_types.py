@@ -102,14 +102,6 @@ class TestClassifyScalar:
         td64 = np.timedelta64(5, "D")
         assert classify_scalar(td64) == ScalarType.TIMEDELTA64
 
-    def test_pyarrow_types(self):
-        """Test pyarrow scalar classification (if pyarrow available)."""
-        pytest.importorskip("pyarrow")
-        import pyarrow as pa
-
-        scalar = pa.scalar(42, type=pa.int64())
-        assert classify_scalar(scalar) == ScalarType.PYARROW_SCALAR
-
 
 class TestIsScalar:
     """Test is_scalar() function."""
@@ -223,16 +215,6 @@ class TestExtractPythonScalar:
         extracted = extract_python_scalar(np_float)
         assert extracted == 3.14
         assert isinstance(extracted, float)
-
-    def test_pyarrow_scalar_extraction(self):
-        """Test pyarrow scalar extraction (if pyarrow available)."""
-        pytest.importorskip("pyarrow")
-        import pyarrow as pa
-
-        pa_scalar = pa.scalar(42, type=pa.int64())
-        extracted = extract_python_scalar(pa_scalar)
-        assert extracted == 42
-        assert isinstance(extracted, int)
 
 
 class TestUnwrapScalar:

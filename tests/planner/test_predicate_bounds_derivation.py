@@ -28,10 +28,17 @@ import datetime
 import os
 import random
 import sys
+from opteryx.compiled.structures.expressions import And
+from opteryx.compiled.structures.expressions import Between
+from opteryx.compiled.structures.expressions import BinaryOperator
+from opteryx.compiled.structures.expressions import Cnf
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Function
+from opteryx.compiled.structures.expressions import Or
+from opteryx.compiled.structures.expressions import UnaryOperator
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from opteryx.compiled.structures.node import Node
 from opteryx.expression import NodeType
 from opteryx.planner import build_literal_node
 from opteryx.planner.optimizer.predicate_bounds import derive_bound_conjuncts
@@ -42,6 +49,7 @@ from opteryx.types.logical_type import FLOAT64
 from opteryx.types.logical_type import INT64
 from opteryx.types.logical_type import TIMESTAMP
 from opteryx.types.logical_type import VARCHAR
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 # ---------------------------------------------------------------------------
 # Node builders — the shapes the binder produces, built by hand so a test can
@@ -50,7 +58,7 @@ from opteryx.types.logical_type import VARCHAR
 
 
 def ident(name="col"):
-    return Node(NodeType.IDENTIFIER, source_column=name, value=name)
+    return LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=name)
 
 
 def lit(value, column_type=None):
@@ -58,15 +66,15 @@ def lit(value, column_type=None):
 
 
 def compare(left, operator, right):
-    return Node(NodeType.COMPARISON_OPERATOR, value=operator, left=left, right=right)
+    return Comparison(value=operator, left=left, right=right)
 
 
 def function(name, *parameters):
-    return Node(NodeType.FUNCTION, value=name, parameters=list(parameters))
+    return Function(value=name, parameters=list(parameters))
 
 
 def arithmetic(left, operator, right):
-    return Node(NodeType.BINARY_OPERATOR, value=operator, left=left, right=right)
+    return BinaryOperator(value=operator, left=left, right=right)
 
 
 def types_of(**mapping):
@@ -154,7 +162,7 @@ def test_canonical_comparison_is_not_re_derived():
 def test_and_tree_is_split():
     left = compare(ident("a"), "Gt", lit(5))
     right = compare(ident("b"), "Lt", lit(9))
-    produced = derive_bound_conjuncts([Node(NodeType.AND, left=left, right=right)])
+    produced = derive_bound_conjuncts([And(left=left, right=right)])
     assert left in produced and right in produced
 
 
@@ -269,8 +277,7 @@ def test_not_like_is_not_derived():
 
 
 def test_same_column_or_derives_the_hull():
-    arms = Node(
-        NodeType.OR,
+    arms = Or(
         left=compare(ident("a"), "Eq", lit(3)),
         right=compare(ident("a"), "Eq", lit(9)),
     )
@@ -283,8 +290,7 @@ def test_same_column_or_derives_the_hull():
 
 def test_or_over_different_columns_declines():
     """A row satisfying the `b` arm can hold ANY value of `a`."""
-    arms = Node(
-        NodeType.OR,
+    arms = Or(
         left=compare(ident("a"), "Eq", lit(3)),
         right=compare(ident("b"), "Eq", lit(9)),
     )
@@ -292,8 +298,7 @@ def test_or_over_different_columns_declines():
 
 
 def test_or_with_an_unbounded_arm_loses_that_side():
-    arms = Node(
-        NodeType.OR,
+    arms = Or(
         left=compare(ident("a"), "Gt", lit(100)),
         right=compare(ident("a"), "Eq", lit(3)),
     )
@@ -304,8 +309,7 @@ def test_or_with_an_unbounded_arm_loses_that_side():
 
 
 def test_or_with_an_unevaluable_arm_declines():
-    arms = Node(
-        NodeType.OR,
+    arms = Or(
         left=compare(ident("a"), "Eq", lit(3)),
         right=compare(ident("a"), "NotEq", lit(9)),
     )
@@ -313,8 +317,7 @@ def test_or_with_an_unevaluable_arm_declines():
 
 
 def test_nary_or_derives_the_hull():
-    arms = Node(
-        NodeType.CNF,
+    arms = Cnf(
         parameters=[
             compare(ident("a"), "Eq", lit(5)),
             compare(ident("a"), "Eq", lit(1)),
@@ -790,8 +793,7 @@ def test_an_inverted_interval_is_declined_not_emitted():
     """A lower above the upper says the predicate is unsatisfiable — which may be
     true, but is also exactly what a derivation BUG looks like. Proving a
     predicate false is constant folding's job; a bounds bug drops rows."""
-    conjunct = Node(
-        NodeType.BETWEEN,
+    conjunct = Between(
         value=(True, True),
         left=arithmetic(ident(), "Plus", lit(1)),
         right=lit(100),
@@ -801,8 +803,7 @@ def test_an_inverted_interval_is_declined_not_emitted():
 
 
 def test_between_over_a_transform_derives_both_ends():
-    conjunct = Node(
-        NodeType.BETWEEN,
+    conjunct = Between(
         value=(True, True),
         left=arithmetic(ident(), "Plus", lit(10)),
         right=lit(20),
@@ -818,24 +819,24 @@ def test_unknown_functions_decline():
 
 
 def test_null_terms_are_extracted():
-    is_null = Node(NodeType.UNARY_OPERATOR, value="IsNull", centre=ident("a"))
-    is_not_null = Node(NodeType.UNARY_OPERATOR, value="IsNotNull", centre=ident("b"))
+    is_null = UnaryOperator(value="IsNull", centre=ident("a"))
+    is_not_null = UnaryOperator(value="IsNotNull", centre=ident("b"))
     assert derive_null_terms([is_null, is_not_null]) == [("a", True), ("b", False)]
 
 
 def test_null_terms_ignore_expressions():
     """`f(col) IS NULL` is not a statement about col's null count — a strict
     function is null for a null input, but so is a failing cast."""
-    wrapped = Node(
-        NodeType.UNARY_OPERATOR, value="IsNull", centre=function("ABS", ident("a"))
+    wrapped = UnaryOperator(
+        value="IsNull", centre=function("ABS", ident("a"))
     )
     assert derive_null_terms([wrapped]) == []
 
 
 def test_null_terms_are_found_inside_a_conjunction():
-    is_null = Node(NodeType.UNARY_OPERATOR, value="IsNull", centre=ident("a"))
+    is_null = UnaryOperator(value="IsNull", centre=ident("a"))
     other = compare(ident("b"), "Gt", lit(1))
-    assert derive_null_terms([Node(NodeType.AND, left=is_null, right=other)]) == [("a", True)]
+    assert derive_null_terms([And(left=is_null, right=other)]) == [("a", True)]
 
 
 def test_no_predicates_derives_nothing():
@@ -951,8 +952,7 @@ def test_row_group_zone_terms_gain_the_same_shapes_as_file_pruning():
     scaled = compare(arithmetic(ident("seq"), "Multiply", lit(2)), "GtEq", lit(42))
     assert manifest.ordinal_zone_map_terms([scaled]) == [("seq", gt_eq, 21)]
 
-    disjunction = Node(
-        NodeType.OR,
+    disjunction = Or(
         left=compare(ident("seq"), "Eq", lit(3)),
         right=compare(ident("seq"), "Eq", lit(9)),
     )

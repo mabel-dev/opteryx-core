@@ -133,8 +133,9 @@ class FileEntry:
     # leaves this None. None means NOT TRACKED for the whole file; a column
     # absent from the dict means not tracked for that column.
     distinct_value_counts: Optional[Dict[int, Tuple[int, bool]]] = None
-    # Per-column KMV min-hash sketch, field_id-keyed — this FILE's union of its
-    # row groups' stored sketches (skene format.h, ColumnSketchHeader).
+    # Per-column KMV min-hash sketch, field_id-keyed — this FILE's sketch as its
+    # skene footer carries it (skene FORMAT.md §8.1; for a v2 file, the union of
+    # its row groups' sketches).
     #
     # Carried as well as the count above because a count cannot be merged and
     # these can: unioning two files' sketches gives the K smallest of the
@@ -142,9 +143,18 @@ class FileEntry:
     # overlap between files instead of guessing it from min/max. Fewer than K
     # hashes means the union holds every distinct value, so the answer is exact.
     #
-    # ⛔ skene's XXH3 value hashes. NEVER merge with ANALYZE's sketches
-    # (`Manifest._min_k_vector`), which are draken `Vector.hash()`.
+    # ⛔ Which HASH produced them is `distinct_sketch_family`, and sketches union
+    # only within one family: 2 is draken's `Vector.hash()` (skene v3, and what
+    # ANALYZE and the catalog sketch with), 1 is skene v2's own XXH3.
     distinct_sketches: Optional[Dict[int, list]] = None
+    # The hash family of every sketch in `distinct_sketches` (draken
+    # KmvHashFamily values). None exactly when there are no sketches.
+    #
+    # Family 2 sketches include the null row's hash once when the column has a
+    # null (FORMAT.md §8.1) — the catalog's notion of the column. A NON-NULL
+    # distinct count taken from one must drop that hash; see
+    # `Manifest._cardinality_from_sketches`.
+    distinct_sketch_family: Optional[int] = None
     # Largest EXACT per-row-group distinct count in this file, field_id-keyed.
     #
     # A PROVEN LOWER BOUND, kept apart from `distinct_value_counts` because it is

@@ -289,12 +289,14 @@ def test_a_refused_commit_removes_the_outputs_and_raises():
 def test_stream_defaults_to_the_fixed_arena_ceiling_and_the_selection_target():
     """The budget is a property of the uint32 arena offset, not configuration;
     the target is the constant selection measures files against; the row
-    ceiling is one parquet row group."""
+    ceiling is one parquet row group (rugo's DEFAULT_ROWS_PER_ROW_GROUP, the
+    engine's measured best morsel size)."""
     from opteryx.planner.compaction.constants import TARGET_SIZE_BYTES
+    from rugo.parquet import DEFAULT_ROWS_PER_ROW_GROUP
 
     node = _sink(MORSEL_MAX_ARENA_BYTES)
     assert node._stream.target_file_bytes == TARGET_SIZE_BYTES
-    assert node._stream.coalesce_rows == 262144
+    assert node._stream.coalesce_rows == DEFAULT_ROWS_PER_ROW_GROUP == 65536
     node._stream.push(_wide_morsel(0))
     node._stream.finish()
     assert len(node.connector.closed) == 1  # nowhere near 1 GiB or 4 GB
@@ -302,7 +304,7 @@ def test_stream_defaults_to_the_fixed_arena_ceiling_and_the_selection_target():
         MorselBatcher(1000, max_arena_bytes=MORSEL_MAX_ARENA_BYTES + 1)
     with pytest.raises(ValueError, match="positive"):
         _sink(MORSEL_MAX_ARENA_BYTES, target=0)
-    assert DataFileStream(_RecordingConnector(), "r", coalesce_rows=10**9).coalesce_rows == 262144
+    assert DataFileStream(_RecordingConnector(), "r", coalesce_rows=10**9).coalesce_rows == 65536
 
 
 if __name__ == "__main__":  # pragma: no cover

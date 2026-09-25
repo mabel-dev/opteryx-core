@@ -12,8 +12,9 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
+from opteryx.planner.plan_context import PlanContext
 from opteryx.expression import NodeType
-from opteryx.models import Node, QueryTelemetry
+from opteryx.models import QueryTelemetry
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
@@ -24,6 +25,7 @@ from opteryx.planner.optimizer.strategies.optimization_strategy import Optimizer
 from opteryx.types.logical_type import INT64
 from opteryx.types.schema import SchemaColumn
 from tests.helpers import execute_and_get_rowcount
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 
 def _physical_node_types(sql: str):
@@ -36,7 +38,7 @@ def _physical_node_types(sql: str):
 def _column(name):
     """Build an IDENTIFIER Node with a SchemaColumn whose identity is its name."""
     schema_column = SchemaColumn(name=name, column_type=INT64, identity=name)
-    return Node(NodeType.IDENTIFIER, schema_column=schema_column)
+    return LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=None, schema_column=schema_column)
 
 
 def _scan(columns):
@@ -77,7 +79,7 @@ def _build_plan(provider_node, project_node, exit_node=None):
 def _run_strategy(plan):
     telemetry = QueryTelemetry("test_redundant_operators")
     strategy = RedundantOperationsStrategy(telemetry=telemetry)
-    context = OptimizerContext(plan)
+    context = OptimizerContext(plan, PlanContext())
 
     # Walk from the exit/root toward the leaves so the strategy sees the
     # Project node — mirrors the OptimizerVisitor traversal.

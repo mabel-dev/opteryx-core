@@ -13,15 +13,14 @@ def test_local_filesystem_list(tmp_path):
     fs = OpteryxLocalFileSystem()
     selector = FileSelector(str(base), recursive=True)
     infos = fs.get_file_info(selector)
-    paths = set([info.path for info in infos if info.type.name == 'File'])
+    paths = set(info.path for info in infos)
 
-    assert str(base / "a.txt") in paths
-    assert str(base / "sub" / "b.txt") in paths
+    # Listing yields files only - never the directory itself.
+    assert paths == {str(base / "a.txt"), str(base / "sub" / "b.txt")}
 
     # non-recursive
     selector_nr = FileSelector(str(base), recursive=False)
     infos_nr = fs.get_file_info(selector_nr)
-    paths_nr = set([info.path for info in infos_nr if info.type.name == 'File'])
+    paths_nr = set(info.path for info in infos_nr)
 
-    assert str(base / "a.txt") in paths_nr
-    assert not any(str(base / "sub" / "b.txt") == p for p in paths_nr)
+    assert paths_nr == {str(base / "a.txt")}

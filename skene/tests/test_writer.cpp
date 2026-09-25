@@ -24,65 +24,125 @@ using namespace skene;
 using namespace skene_test;
 
 // ─── Independent footer parser ──────────────────────────────────────────────
+//
+// v3: a column's identity is in the footer's schema directory and its
+// per-row-group facts in its directory block (FORMAT.md §5.4, §5.9-5.10). This
+// joins the two for one row group, reached the way the specification says:
+// tail -> footer -> schema -> column summary -> directory block.
+
+// The per-row-group view of one column node: identity from the schema entry,
+// shape from the chunk record.
+struct ColumnView {
+    uint32_t field_id = 0;
+    uint8_t  value_order = 0;
+    uint32_t stats_bytes = 0;      // this row group's statistics blob; 0 == not tracked
+    uint32_t type = 0;
+    uint8_t  logical_present = 0;
+    uint32_t child_count = 0;
+    uint8_t  vector_flags = 0;
+    uint8_t  selection_kind = 0;
+    uint32_t length = 0;
+    uint32_t data_length = 0;
+    uint32_t section_index = 0;
+    uint32_t section_count = 0;
+    uint64_t string_slot_count = 0;
+    uint64_t string_arena_used = 0;
+    uint8_t  string_payloads_elided = 0;
+};
 
 struct ParsedColumn {
-    ColumnEntryHead       head;
-    std::string           name;
-    LogicalTypeDescriptor logical;
+    ColumnView                head;
+    std::string               name;
+    LogicalTypeDescriptor     logical;
+    std::vector<SectionEntry> sections;   // the NODE's section list
     std::vector<ParsedColumn> children;
 };
 
 struct ParsedFile {
     FileHead                  head;
     FileTail                  tail;
-    RowGroupFooterHeader      file_header;   // row group 0's
+    FileFooterHeader          file_header;
     std::vector<ParsedColumn> columns;
-    std::vector<SectionEntry> sections;
 };
 
-static const uint8_t* read_column(const uint8_t* p, ParsedColumn* out) {
-    std::memcpy(&out->head, p, sizeof(ColumnEntryHead));
-    p += sizeof(ColumnEntryHead);
-    out->name.assign(reinterpret_cast<const char*>(p), out->head.name_bytes);
-    p += out->head.name_bytes;
-    if (out->head.logical_present) {
+// The length prefix of node `node`'s statistics blob for `row_group`: the
+// statistics are column-node major (FORMAT.md §5.8).
+static uint32_t stats_length(const std::vector<uint8_t>& bytes, uint32_t node,
+                             uint32_t row_group, uint32_t row_groups) {
+    size_t at = 0;
+    if (!skene_test::statistics_at(bytes, &at)) return UINT32_MAX;
+    const uint32_t target = node * row_groups + row_group;
+    for (uint32_t i = 0; i <= target; ++i) {
+        uint32_t length = 0;
+        std::memcpy(&length, bytes.data() + at, sizeof(length));
+        if (i == target) return length;
+        at += sizeof(length) + length;
+    }
+    return UINT32_MAX;
+}
+
+static const uint8_t* read_column(const std::vector<uint8_t>& bytes, const uint8_t* p,
+                                  uint32_t row_group, uint32_t* node, ParsedColumn* out,
+                                  bool* ok) {
+    SchemaEntryHead schema;
+    std::memcpy(&schema, p, sizeof(schema));
+    p += sizeof(schema);
+    out->name.assign(reinterpret_cast<const char*>(p), schema.name_bytes);
+    p += schema.name_bytes;
+    if (schema.logical_present) {
         std::memcpy(&out->logical, p, sizeof(LogicalTypeDescriptor));
         p += sizeof(LogicalTypeDescriptor);
     }
-    out->children.resize(out->head.child_count);
-    for (uint32_t i = 0; i < out->head.child_count; ++i)
-        p = read_column(p, &out->children[i]);
+    skene_test::DirectoryBlock dir;
+    if (!skene_test::directory_block(bytes, *node, &dir)
+            || row_group >= dir.chunks.size()) {
+        *ok = false;
+        return p;
+    }
+    const ChunkRecord& c = dir.chunks[row_group];
+    out->head.field_id               = schema.field_id;
+    out->head.value_order            = c.value_order;
+    out->head.stats_bytes            = stats_length(bytes, *node, row_group,
+                                                    static_cast<uint32_t>(dir.chunks.size()));
+    ++*node;
+    out->head.type                   = schema.type;
+    out->head.logical_present        = schema.logical_present;
+    out->head.child_count            = schema.child_count;
+    out->head.vector_flags           = c.vector_flags;
+    out->head.selection_kind         = c.selection_kind;
+    out->head.length                 = c.length;
+    out->head.data_length            = c.data_length;
+    out->head.section_index          = c.section_index;
+    out->head.section_count          = c.section_count;
+    out->head.string_slot_count      = c.string_slot_count;
+    out->head.string_arena_used      = c.string_arena_used;
+    out->head.string_payloads_elided = c.string_payloads_elided;
+    out->sections = dir.sections;
+    out->children.resize(schema.child_count);
+    for (uint32_t i = 0; i < schema.child_count; ++i)
+        p = read_column(bytes, p, row_group, node, &out->children[i], ok);
     return p;
 }
 
-// Parses row group `index`'s footer, reached the way the specification says:
-// tail -> file footer -> row group directory -> that row group's own footer.
 static bool parse_row_group(const std::vector<uint8_t>& bytes, uint32_t index,
                             ParsedFile* out) {
     if (bytes.size() < kMinFileBytes) return false;
     std::memcpy(&out->head, bytes.data(), sizeof(FileHead));
     std::memcpy(&out->tail, bytes.data() + bytes.size() - kFileTailBytes,
                 sizeof(FileTail));
+    if (!skene_test::file_footer_header(bytes, &out->file_header)) return false;
+    if (index >= out->file_header.row_group_count) return false;
 
-    size_t footer_start = 0, footer_bytes = 0;
-    if (!skene_test::row_group_footer_extent(bytes, index, &footer_start, &footer_bytes))
-        return false;
-    const size_t footer_end = footer_start + footer_bytes;
-    const uint8_t* p = bytes.data() + footer_start;
-
-    std::memcpy(&out->file_header, p, sizeof(RowGroupFooterHeader));
-    p += sizeof(RowGroupFooterHeader) + out->file_header.writer_tag_bytes;
-
+    size_t at = 0;
+    if (!skene_test::row_group_table_at(bytes, &at)) return false;
+    at += static_cast<size_t>(out->file_header.row_group_count) * sizeof(RowGroupEntry);
+    const uint8_t* p = bytes.data() + at;
+    uint32_t node = 0;
+    bool ok = true;
     out->columns.resize(out->file_header.column_count);
     for (uint32_t i = 0; i < out->file_header.column_count; ++i)
-        p = read_column(p, &out->columns[i]);
-
-    out->sections.resize(out->file_header.section_count);
-    for (uint32_t i = 0; i < out->file_header.section_count; ++i) {
-        std::memcpy(&out->sections[i], p, sizeof(SectionEntry));
-        p += sizeof(SectionEntry);
-    }
-    return p == bytes.data() + footer_end;
+        p = read_column(bytes, p, index, &node, &out->columns[i], &ok);
+    return ok;
 }
 
 static bool parse(const std::vector<uint8_t>& bytes, ParsedFile* out) {
@@ -90,11 +150,11 @@ static bool parse(const std::vector<uint8_t>& bytes, ParsedFile* out) {
 }
 
 // Sections belonging to one column, keyed by kind.
-static std::map<uint16_t, SectionEntry> sections_of(const ParsedFile& f,
+static std::map<uint16_t, SectionEntry> sections_of(const ParsedFile& /*f*/,
                                                     const ParsedColumn& c) {
     std::map<uint16_t, SectionEntry> by_kind;
     for (uint32_t i = 0; i < c.head.section_count; ++i) {
-        const SectionEntry& e = f.sections[c.head.section_index + i];
+        const SectionEntry& e = c.sections[c.head.section_index + i];
         by_kind[e.kind] = e;
     }
     return by_kind;
@@ -187,11 +247,18 @@ static void test_framing_and_checksums() {
              f.tail.footer_checksum);
 
     // Every section must lie inside the data region and match its own checksum.
-    for (const SectionEntry& e : f.sections) {
-        CHECK(e.offset >= kFileHeadBytes);
-        CHECK(e.offset + e.stored_bytes <= footer_start);
-        CHECK_EQ(checksum_xxh3_64(bytes.data() + e.offset, e.stored_bytes),
-                 e.checksum);
+    std::vector<const ParsedColumn*> pending;
+    for (const ParsedColumn& c : f.columns) pending.push_back(&c);
+    while (!pending.empty()) {
+        const ParsedColumn* c = pending.back();
+        pending.pop_back();
+        for (const ParsedColumn& child : c->children) pending.push_back(&child);
+        for (const SectionEntry& e : c->sections) {
+            CHECK(e.offset >= kFileHeadBytes);
+            CHECK(e.offset + e.stored_bytes <= footer_start);
+            CHECK_EQ(checksum_xxh3_64(bytes.data() + e.offset, e.stored_bytes),
+                     e.checksum);
+        }
     }
 }
 

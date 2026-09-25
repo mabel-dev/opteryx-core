@@ -24,6 +24,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import pytest
 
 import opteryx
+from opteryx.planner.plan_context import PlanContext
 
 
 def _optimized_plan(sql):
@@ -51,7 +52,7 @@ def _optimized_plan(sql):
         query_id=str(uuid.uuid4()),
         telemetry=telemetry,
     )
-    return do_optimizer(bound, telemetry)
+    return do_optimizer(bound, telemetry, PlanContext())
 
 
 def _scan_predicate_ops(plan, relation):
@@ -155,12 +156,13 @@ def test_pushed_range_preserves_results():
 
 
 def _column(column_type):
-    from opteryx.models import Node
+    from opteryx.expression import NodeType
+    from opteryx.models import LogicalColumn
     from opteryx.types.schema import FunctionColumn
 
-    return Node(
-        node_type=None,
-        value="k",
+    return LogicalColumn(
+        node_type=NodeType.IDENTIFIER,
+        source_column="k",
         schema_column=FunctionColumn(name="k", column_type=column_type, aliases=[]),
     )
 

@@ -8,6 +8,7 @@ from typing import Tuple
 
 from opteryx.exceptions import InvalidInternalStateError, UnsupportedSyntaxError
 from opteryx.expression import NodeType, get_all_nodes_of_type
+from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.planner.binder.binder import inner_binder
 from opteryx.planner.binder.binding_context import BindingContext
@@ -205,7 +206,11 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             for relation_name in node.right_relation_names
             for col in context.schemas[relation_name].column_names
         ]
-        node.using = [Node("temp", value=n) for n in set(left_columns).intersection(right_columns)]
+        # The same column references an explicit USING (...) builds.
+        node.using = [
+            LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=n)
+            for n in set(left_columns).intersection(right_columns)
+        ]
         node.type = "inner"
     # Handle 'using' by converting to a an 'on'
     if node.using:
@@ -388,24 +393,6 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             if right_rel in context.schemas:
                 schema = context.schemas[right_rel]
                 schema.columns = [c for c in schema.columns if c.name not in partition_col_names]
-
-    # This is very much not how we want to do this, but let's start somewhere
-    # we're estimating the size of each side of the join, but here all we're doing is
-    # using the row estimates for each table, ignoring any filtering etc.
-    node.left_size = sum(
-        context.schemas[relation_name].row_count_metric
-        or context.schemas[relation_name].row_count_estimate
-        or float("inf")
-        for relation_name in node.left_relation_names
-        if relation_name in context.schemas
-    )
-    node.right_size = sum(
-        context.schemas[relation_name].row_count_metric
-        or context.schemas[relation_name].row_count_estimate
-        or float("inf")
-        for relation_name in node.right_relation_names
-        if relation_name in context.schemas
-    )
 
     if node.type == "inner" and node.on is None:
         from opteryx.exceptions import SqlError, compose, md_syntax

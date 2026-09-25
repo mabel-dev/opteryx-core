@@ -127,28 +127,27 @@ def section_roundtrip() -> bytes:
 def section_metadata(buf: bytes) -> None:
     banner("2. read_metadata / read_row_group_metadata: two levels of footer")
 
-    # read_metadata parses the FILE footer only: schema, the row group
-    # directory, and every row group's per-column statistics. No row group
-    # footer and no section directory is touched, which is what makes it the
-    # call a pruning reader makes. Section 6 shows what that means remotely.
+    # read_metadata parses the footer only: schema, the row group table, every
+    # column's whole-file sketch, and every row group's per-column statistics.
+    # No directory block is touched, which is what makes it the call a pruning
+    # reader makes. Section 6 shows what that means remotely.
 
     print(f"probe_version(first 8 bytes) = {skene.probe_version(buf[:8])}")
 
     meta = skene.read_metadata(buf)
     print(f"version={meta['version']}  rows={meta['row_count']}  "
           f"row_groups={len(meta['row_groups'])}  "
+          f"block={meta['block_row_groups']} row groups  "
           f"writer_tag={meta['writer_tag']!r}")
     print(f"file_uuid={meta['file_uuid'].hex()}  created_at_unix_us={meta['created_at_unix_us']}")
 
     for index, group in enumerate(meta["row_groups"]):
         print(f"\n  row group {index}: rows={group['row_count']} "
-              f"first_row={group['first_row']} "
-              f"data=[{group['byte_offset']}, +{group['byte_bytes']}) "
-              f"footer=[{group['footer_offset']}, +{group['footer_bytes']})")
+              f"first_row={group['first_row']}")
 
-    # The per-column detail is per ROW GROUP and costs a row group footer parse,
-    # so it is a separate call — a reader that pruned a row group away never
-    # pays for it.
+    # The per-column detail comes from each column's DIRECTORY BLOCK, which sits
+    # with its data (v3 is column-major), so it is a separate call — a reader
+    # fetches it only for the columns it reads.
     detail = skene.read_row_group_metadata(buf, 0)
     stats_slots = meta["row_groups"][0]["column_statistics"]
 
@@ -254,21 +253,16 @@ def section_remote(buf: bytes) -> None:
     print(f"{tracked} per-row-group column bound(s) came with it — enough to rule "
           f"row groups out\nbefore any of their directories is fetched")
 
-    # Request 3 (per SURVIVING row group only): its own footer, whose offset and
-    # length the row group directory just gave us, plus its index region, which
-    # is contiguous with it. A row group ruled out above is never fetched at all.
-    for index, group in enumerate(meta["row_groups"]):
-        print(f"  row group {index}: footer [{group['footer_offset']:,}, "
-              f"+{group['footer_bytes']:,}) = {human_bytes(group['footer_bytes'])}; "
-              f"its data is [{group['byte_offset']:,}, +{group['byte_bytes']:,})")
-
+    # Request 3 (per column READ): its directory block and its chunks — one
+    # contiguous range, because v3 lays each column's row groups side by side.
+    # A column the query does not read is never fetched at all.
     detail = skene.read_row_group_metadata(buf, 0)
     blooms = sum(1 for c in detail["columns"] if c["has_bloom"])
-    print(f"row group 0's directory carries {len(detail['columns'])} column extents "
+    print(f"row group 0 has {len(detail['columns'])} column extents "
           f"and {blooms} bloom filter(s)")
-    print("\n  That is the staged read the two footer levels exist for: a small")
-    print("  always-fetched index, then per-row-group directories paid for only by")
-    print("  the row groups that survived pruning.")
+    print("\n  That is the staged read the layout exists for: one small, always-")
+    print("  fetched footer that decides the whole file, then one range per column")
+    print("  read, holding its directory and its chunks for every surviving row group.")
 
 
 # ─── 4. Parquet in, skene out ───────────────────────────────────────────────

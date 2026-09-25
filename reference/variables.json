@@ -510,8 +510,8 @@
         "default_source": "environment",
         "environment_key": "PARQUET_IO_FETCH_AHEAD"
     },
-    "parquet_io_fetch_ahead_min_row_groups": {
-        "name": "parquet_io_fetch_ahead_min_row_groups",
+    "parquet_io_fetch_ahead_min_blocks": {
+        "name": "parquet_io_fetch_ahead_min_blocks",
         "type": "INT64",
         "owner": "USER",
         "visibility": "RESTRICTED",
@@ -520,7 +520,7 @@
         "set_by": "platform_admin only",
         "default": null,
         "default_source": "environment",
-        "environment_key": "PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS"
+        "environment_key": "PARQUET_IO_FETCH_AHEAD_MIN_BLOCKS"
     },
     "parquet_io_in_flight_limit": {
         "name": "parquet_io_in_flight_limit",
@@ -614,6 +614,30 @@
         "set_by": "not settable via SQL",
         "default": 10,
         "default_source": "literal"
+    },
+    "skene_io_coalesce_max_bytes": {
+        "name": "skene_io_coalesce_max_bytes",
+        "type": "INT64",
+        "owner": "USER",
+        "visibility": "RESTRICTED",
+        "settable": true,
+        "requires_entitlement": "platform_admin",
+        "set_by": "platform_admin only",
+        "default": null,
+        "default_source": "environment",
+        "environment_key": "SKENE_IO_COALESCE_MAX_BYTES"
+    },
+    "skene_io_coalesce_waste_ratio": {
+        "name": "skene_io_coalesce_waste_ratio",
+        "type": "FLOAT64",
+        "owner": "USER",
+        "visibility": "RESTRICTED",
+        "settable": true,
+        "requires_entitlement": "platform_admin",
+        "set_by": "platform_admin only",
+        "default": null,
+        "default_source": "environment",
+        "environment_key": "SKENE_IO_COALESCE_WASTE_RATIO"
     },
     "skene_late_materialization_max_selectivity": {
         "name": "skene_late_materialization_max_selectivity",

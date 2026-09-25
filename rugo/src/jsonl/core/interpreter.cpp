@@ -1,9 +1,14 @@
 #include "interpreter.hpp"
 #include "field_span.hpp"
 #include "value_parser.hpp"   // evaluate_predicate (inline filter pushdown)
+#include "predicate_literal.hpp" // check_predicate_literals: literal vs column type contract
+#include "declared_type.hpp"     // check_predicate_literals: declared column types
+#include "structural_scan.hpp" // scan_structural_markers (discover_column_names)
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cstring>
+#include <stdexcept>
 #include <string_view>
 #include <unordered_set>
 #include <utility>
@@ -451,7 +456,9 @@ struct MapBuilder {
     uint32_t resync_from = NO_RESYNC;
 
     MapBuilder(const uint8_t* buf, uint32_t buf_len, const MapProjection* p)
-        : buffer(buf), buffer_length(buf_len), proj(p), num_wanted(p ? p->num_wanted : 0) {
+        : buffer(buf), buffer_length(buf_len), proj(p),
+          // keep_unwanted: the whole row is wanted, so `found` must never reach the stop.
+          num_wanted(p ? (p->keep_unwanted ? SIZE_MAX : p->num_wanted) : 0) {
         rs.offsets.push_back(0);
     }
 
@@ -593,7 +600,7 @@ struct MapBuilder {
             if (proj) {
                 // Exact match against the wanted set — length + first-byte reject, then
                 // memcmp. No hashing.
-                cur_wanted = false; cur_pred_idx = -1; cur_col = nullptr;
+                cur_wanted = proj->keep_unwanted; cur_pred_idx = -1; cur_col = nullptr;
                 const uint8_t first = buffer[key_start];
                 for (const WantedColumn& w : *proj->columns) {
                     if (key_width == w.len && first == w.first &&
@@ -771,6 +778,87 @@ std::vector<std::string> sample_record_keys(
         }
     }
     return keys;
+}
+
+// The unprojected, unfiltered map of the input's head: grown by physical lines until
+// it banks `want` records (blank and malformed lines bank none) or covers the whole
+// buffer. The head always ends just after a newline (or at the buffer end), so no
+// record in it is cut short. May hold more than `want` records; callers take the first
+// `want`.
+static RecordSet build_head(const uint8_t* buffer, size_t buffer_length, size_t want) {
+    for (size_t lines = want; ; lines *= 2) {
+        size_t end = 0;
+        for (size_t seen = 0; seen < lines && end < buffer_length; ++seen) {
+            const void* nl = std::memchr(buffer + end, '\n', buffer_length - end);
+            end = nl ? static_cast<size_t>(static_cast<const uint8_t*>(nl) - buffer) + 1
+                     : buffer_length;
+        }
+        const auto markers = scan_structural_markers(buffer, end);
+        RecordSet head = build_map(buffer, end, markers, nullptr);
+        if (head.num_records() >= want || end == buffer_length) return head;
+    }
+}
+
+std::vector<std::string> discover_column_names(
+    const uint8_t* buffer, size_t buffer_length, const ParseContext& context) {
+    const size_t want = context.infer_sample_size;
+    const RecordSet head = build_head(buffer, buffer_length, want);
+    std::vector<std::string> keys = sample_record_keys(head, buffer, want);
+    if (context.projected_columns.empty()) return keys;
+
+    std::vector<std::string> projected;
+    projected.reserve(context.projected_columns.size());
+    for (const auto& c : context.projected_columns)
+        if (std::find(keys.begin(), keys.end(), c) != keys.end() &&
+            std::find(projected.begin(), projected.end(), c) == projected.end())
+            projected.push_back(c);
+    return projected;
+}
+
+void check_predicate_literals(
+    const uint8_t* buffer, size_t buffer_length, const ParseContext& context) {
+    // The scalar comparisons to check: ops 0-5 themselves, IN / NOT IN via their
+    // members. IS [NOT] NULL carries no literal.
+    std::vector<const Predicate*> scalars;
+    for (const auto& p : context.predicates) {
+        if (p.op <= 5) scalars.push_back(&p);
+        else if (p.op == 6 || p.op == 7)
+            for (const auto& m : p.members) scalars.push_back(&m);
+    }
+    if (scalars.empty()) return;
+
+    // A DECLARED column's type is known before any byte is read.
+    for (const Predicate* p : scalars) {
+        const auto it = context.explicit_schema.find(p->column);
+        if (it == context.explicit_schema.end()) continue;
+        rugo::DeclaredType dt;
+        if (!rugo::parse_declared_type(it->second, &dt)) continue;  // the Cython edge refuses it first
+        if (!rugo::literal_fits_type(dt.type, dt.logical_kind, p->kind))
+            throw std::invalid_argument(
+                rugo::literal_mismatch_message(p->column, it->second, p->kind, p->value));
+    }
+
+    // Every other column: the non-null values in the head sample — the records the
+    // reader infers the column's type from — before a single row is filtered, so the
+    // check does not depend on which rows the predicates keep, or in what order they
+    // are evaluated.
+    if (buffer_length == 0) return;
+    const size_t want = context.infer_sample_size;
+    const RecordSet head = build_head(buffer, buffer_length, want);
+    const size_t limit = std::min(want, head.num_records());
+    for (size_t r = 0; r < limit; ++r) {
+        for (const FieldSpan& f : head[r]) {
+            if (is_null(buffer, f.value_start, f.value_start + f.value_width - 1)) continue;
+            for (const Predicate* p : scalars) {
+                if (p->column.size() != f.key_width ||
+                    std::memcmp(p->column.data(), buffer + f.key_start, f.key_width) != 0)
+                    continue;
+                if (!literal_fits_json_value(f.type, p->kind))
+                    throw std::invalid_argument(rugo::literal_mismatch_message(
+                        p->column, json_value_kind_name(f.type), p->kind, p->value));
+            }
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------

@@ -8,15 +8,37 @@
 // column reads back typed IPV4, not bare UINT32), DrakenVector.flags verbatim,
 // and the dictionary selection RESTORED rather than re-derived.
 //
-// ─── Layout ──────────────────────────────────────────────────────────────────
+// ─── Layout (v3) ─────────────────────────────────────────────────────────────
 //   HEAD             16 bytes, magic first
-//   per row group, in order:
-//     DATA region    per column, all its sections contiguous (one range GET/column)
-//     INDEX region   optional sections; adjacent to the RG FOOTER, one GET takes both
-//     RG FOOTER      row group header + column directory + section directory + stats
-//   FILE FOOTER      file index: schema + row group directory + cluster spec
-//                    + per-RG statistics
+//   DATA region      per COLUMN NODE, depth-first: its directory block, then its
+//                    chunks for EVERY row group, in row group order — one
+//                    projected column is one contiguous range for the whole file
+//   INDEX region     optional sections, same column-major order
+//   FILE FOOTER      the only footer: header + row group table + schema +
+//                    cluster spec + column summaries (extents, block extents,
+//                    file-level sketch) + per-(column, row group) statistics
 //   TAIL             24 bytes, fixed, magic last
+//
+// The v2 layout (row-major, one footer per row group) is frozen in
+// skene/FORMAT_v2.md and in src/format_v2.h, which the retained v2 reader uses.
+//
+// ─── What changed in v3 (ruled 2026-09-24) ───────────────────────────────────
+// Rationale and measurements: docs/SKENE_V3_FORMAT_DESIGN.md. One bump:
+//
+//  1. WHOLE-FILE COLUMN-MAJOR. A column's chunks for every row group are
+//     byte-adjacent, so the fetch unit (a range) and the decode unit (a row
+//     group) are independent. The production floor is GCS round-trips, not
+//     bytes; this is what lets 64k-row row groups cost no more requests.
+//  2. ONE FOOTER. Row group footers are gone. Pruning inputs (per-(column,
+//     row group) statistics) are in the file footer; decode metadata (chunk
+//     records, section entries) sits in a DIRECTORY BLOCK before each column
+//     node's chunks, checksummed from the footer.
+//  3. BLOCK SIZE G (block_row_groups) recorded in the footer: the fetch unit a
+//     reader plans with. Immutable, never inferred.
+//  4. ONE KMV SKETCH PER COLUMN NODE PER FILE, in draken's Vector.hash() family
+//     and tagged with it, so it unions with catalog and ANALYZE sketches.
+//     Per-row-group sketches (v2's kStatSketch) are gone.
+//  5. Reader window [2, 3]; v1 is no longer readable.
 //
 // ─── What changed in v2 (2026-08-20) ────────────────────────────────────────
 // One bump, four changes, each measured before it was committed:
@@ -25,7 +47,7 @@
 //     field could not spell "bit-packed AND THEN lz4'd", and the gate that
 //     followed from that declined 137.3 MB of a 572.7 MB ClickBench file (24%)
 //     recoverable at 3.48x — all BITPACK selections on high-NDV string columns
-//     (dev/skene_section_census.cpp, 2026-08-20). v2 stores encoding and codec
+//     (per-section census of the v1 mirrors, 2026-08-20). v2 stores encoding and codec
 //     as separate fields and adds `encoded_bytes`, the size between the two
 //     stages, which the codec decode needs as its exact destination capacity.
 //
@@ -99,8 +121,11 @@ inline constexpr uint32_t kMagic = 0x4E454B53u;
 //
 // v2 (2026-08-20): SectionEntry layout (codec axis + encoded_bytes), string
 // slot lanes replacing kStringSlots, 64-byte section alignment, cluster spec
-// in the file footer. See the changelog block at the top of this file.
-inline constexpr uint16_t kVersion = 2u;
+// in the file footer.
+// v3 (2026-09-24): whole-file column-major layout, one footer, directory
+// blocks, block size G, per-file draken-family sketches. See the changelog
+// block at the top of this file.
+inline constexpr uint16_t kVersion = 3u;
 
 // Byte order of every multi-byte field and every memcpy'd buffer. A file
 // outliving the fleet must make a big-endian reader FAIL LOUD, not read garbage.
@@ -160,14 +185,15 @@ static_assert(sizeof(FileTail) == kFileTailBytes, "FileTail layout drift");
 inline constexpr uint32_t kFileFooterMagic = 0x494E4B53u;  // "SKNI"
 
 // Versions the FILE FOOTER's own layout, independently of kVersion. They are
-// separate fields because the file index and the row group layout are
-// separately extensible.
+// separate fields because the file index and the column layout are separately
+// extensible; they move together in practice, and each reader states its own
+// requirement (reader_v2 requires 2, reader_v3 requires 3).
 //
-// v2 inserts the CLUSTER SPEC record between the schema directory and the
-// per-row-group statistics. Readers of v1 files (reader_v1) require footer
-// version 1; reader_v2 requires 2 — the file version and the footer version
-// move together in practice, but each reader states its own requirement.
-inline constexpr uint16_t kFileFooterVersion = 2u;
+// v3: the footer is the ONLY footer. It gained block_row_groups and
+// data_region_bytes, lost file_flags, and its row group directory shrank to a
+// row count table (a row group is no longer contiguous, so it has no extent).
+// The column summaries and the column-major statistics follow the cluster spec.
+inline constexpr uint16_t kFileFooterVersion = 3u;
 
 #pragma pack(push, 1)
 
@@ -175,43 +201,34 @@ inline constexpr uint16_t kFileFooterVersion = 2u;
 struct FileFooterHeader {
     uint32_t footer_magic;       // kFileFooterMagic
     uint16_t footer_version;     // kFileFooterVersion
-    uint16_t reserved;           // 0
+    uint16_t reserved;           // 0, checked
     uint64_t row_count;          // TOTAL logical rows, summed over row groups
     uint32_t row_group_count;    // >= 1
     uint32_t column_count;       // top-level schema columns; children nested
     uint8_t  file_uuid[16];      // all-zero means unset
     uint64_t created_at_unix_us; // provenance only, NEVER load-bearing
     uint32_t writer_tag_bytes;   // followed by writer_tag_bytes; provenance only
-    uint32_t file_flags;         // 0; reserved
+    uint32_t block_row_groups;   // G: row groups per fetch block, 1..row_group_count
+    uint64_t data_region_bytes;  // bytes from offset 16 to the footer; checked
 };
 
-// One entry of the row group directory. Everything needed to read a row group
-// without parsing any other one: where its bytes are, where its footer is, and
-// whether that footer is intact.
-//
-// footer_checksum is here rather than beside the footer because the file footer
-// is the only thing a ranged reader has fetched at the point it decides which
-// row group footers to request — a checksum stored next to the bytes it covers
-// would have to be fetched with them, and could not be validated against
-// anything the reader already trusts.
+// One entry of the row group table. v3 row groups are not contiguous — their
+// bytes are located per column node — so all a row group has at file level is
+// its place in row order.
 struct RowGroupEntry {
-    uint64_t row_count;       // logical rows in this row group
-    uint64_t first_row;       // this row group's first row, in file row order
-    uint64_t data_offset;     // absolute; start of its DATA region
-    uint64_t data_bytes;      // its DATA + INDEX regions, up to its footer
-    uint64_t footer_offset;   // absolute; start of its own footer
-    uint64_t footer_checksum; // over exactly footer_bytes at footer_offset
-    uint32_t footer_bytes;
-    uint32_t reserved;        // 0
+    uint64_t row_count;          // logical rows in this row group
+    uint64_t first_row;          // its first row, in file row order
 };
 
 #pragma pack(pop)
 
-static_assert(sizeof(FileFooterHeader) == 56u, "FileFooterHeader layout drift");
-static_assert(sizeof(RowGroupEntry) == 56u, "RowGroupEntry layout drift");
+static_assert(sizeof(FileFooterHeader) == 64u, "FileFooterHeader layout drift");
+static_assert(sizeof(RowGroupEntry) == 16u, "RowGroupEntry layout drift");
 
 // Smallest possible well-formed file: head + tail + a file footer that at least
-// holds its own header. A file with no row groups at all is rejected separately;
+// holds its own header. Sized on the v3 header (64 bytes); a well-formed v2 file
+// is always larger than this too — its footer carries at least one 56-byte row
+// group entry after its 56-byte header. A file with no row groups at all is rejected separately;
 // this bound only makes the framing arithmetic safe.
 inline constexpr size_t kMinFileBytes =
     kFileHeadBytes + sizeof(FileFooterHeader) + kFileTailBytes;
@@ -237,8 +254,9 @@ enum class SectionKind : uint16_t {
                         // DRAKEN_NULL: empty.
     kSelection    = 2,  // length uint32 codes; present iff selection_kind==kStored
     kValidity     = 3,  // (length+7)/8 bytes; absent => all rows valid
-    kStringSlots  = 4,  // v1 ONLY: slot_count * 16 bytes, verbatim. v2 files
-                        // never carry it — reader_v2 rejects it as malformed.
+    kStringSlots  = 4,  // v1 ONLY: slot_count * 16 bytes, verbatim. v2 and v3
+                        // files never carry it — both readers reject it as
+                        // malformed. Reserved; never reused.
     kStringArena  = 5,  // arena_used bytes, verbatim
 
     // v2: the 16-byte DrakenStringSlot, stored as four u32 lanes so each lane
@@ -311,9 +329,10 @@ enum class Encoding : uint16_t {
                         // (DeltaBitpackHeader)
 
     // v1-ONLY SPELLINGS. In v1 the codec was crammed into this enum because
-    // SectionEntry had no codec field; v2 stores the codec in its own field and
-    // REJECTS these two values in `encoding` — one fact, one spelling. They
-    // stay declared because reader_v1 still decodes them from v1 files.
+    // SectionEntry had no codec field; v2 and v3 store the codec in its own
+    // field and REJECTS these two values in `encoding` — one fact, one
+    // spelling. Reserved and never reused; v1 files, the only ones that carry
+    // them, are outside the v3 read window.
     kZstd         = 3,  // v1: zstd frame; plain_bytes is the decoded size
     kLz4          = 4,  // v1: LZ4 BLOCK (not frame); plain_bytes is the decoded
                         // size. The block format carries no length of its own,
@@ -354,7 +373,7 @@ enum class SectionCodec : uint8_t {
 inline constexpr uint64_t kCompressMinBytes = 10240u;
 
 // Whether a section kind is worth OFFERING to the codec. Measured, not assumed
-// (BENCHMARKS.md; dev/skene_section_census.cpp 2026-08-20):
+// (BENCHMARKS.md; per-section census of the v1 mirrors, 2026-08-20):
 //
 //   STRING_ARENA   0.25x — text keeps nearly all its redundancy after the other
 //                          encodings, and is the bulk of a real table
@@ -412,7 +431,8 @@ inline constexpr uint64_t kSectionAlign = 64u;
 // One entry of the section directory. Absolute offsets, so a section is a
 // range request with no further arithmetic.
 //
-// v2 layout (48 bytes; v1's 36-byte form is frozen in reader_v1.h). A body is
+// v2 layout (48 bytes; unchanged in v3 — v1's 36-byte form left the source
+// with the v1 reader at the v3 bump). A body is
 // produced in two stages — ENCODING first (bitpack/delta/plain), then CODEC
 // (zstd/lz4/none) — and decoded in reverse. The three sizes name the three
 // states:
@@ -494,8 +514,10 @@ enum StatFlag : uint32_t {
     kStatNdvExact  = 1u << 7,  // ...and it is EXACT (value ordering deduplicated
                                // the column), not a sketch estimate. Never set
                                // without kStatNdv.
-    kStatSketch    = 1u << 8,  // a KMV min-hash sketch follows ColumnStatistics
-                               // inside this blob — see ColumnSketchHeader.
+    kStatSketch    = 1u << 8,  // v2 ONLY: a per-row-group KMV sketch followed
+                               // ColumnStatistics inside the blob (format_v2.h).
+                               // v3 sketches are per FILE, in the column summary;
+                               // a v3 blob that sets this bit is rejected.
 };
 
 #pragma pack(push, 1)
@@ -557,18 +579,23 @@ static_assert(sizeof(ColumnStatistics) == 56u, "ColumnStatistics layout drift");
 // smallest of their combined hashes, exactly. So the sketch is stored and the
 // merge becomes arithmetic instead of guesswork.
 //
-// Appended AFTER ColumnStatistics inside the same length-prefixed blob, which
-// is why it needed no version bump: an older reader takes the 56-byte prefix it
-// understands and skips the rest, losing an estimate and nothing else.
+// v3: ONE sketch per column node per FILE, in the column summary (not per
+// row group in the statistics blob, as v2 had it). A KMV union is exact, so the
+// file sketch is the same answer a reader got by merging v2's row group sketches
+// — at one row group's worth of footer bytes instead of hundreds.
 //
-// ⛔ HASH IDENTITY. The hashes are `XXH3_64bits` over string CONTENT bytes, or
-// over the raw BIT PATTERN for fixed width — skene's own dedup hash (see
-// ValueKey in value_order.cpp), chosen so the sketch and the deduplication it
-// gates cannot disagree about what "distinct" means. This is NOT draken's
-// `Vector.hash()`, which is what ANALYZE and the catalog stats engine sketch
-// with. Min-hashes only union if they came from the same hash function, so a
-// skene sketch may be merged with another skene sketch and NEVER with an
-// ANALYZE/catalog one. Architect ruling 2026-08-21.
+// ⛔ HASH IDENTITY (v3). The hashes are draken's `Vector.hash()` — draken_hash,
+// per-type seed then draken's mix (draken/ops/hash.h, draken/simd/simd_hash.h)
+// — over every row of the column, so a null row contributes NULL_HASH (mixed)
+// exactly once, as the catalog's and ANALYZE's sketches do. That is family
+// kSketchFamilyDrakenVectorHash, and it is what lets a skene sketch union with
+// theirs at plan time (architect ruling 2026-09-24, reversing 2026-08-21).
+// v2 sketches were skene's own XXH3 dedup hash (family kSketchFamilyXxh3Value,
+// src/format_v2.h); the two MUST NOT be merged.
+//
+// ⛔ A PERSISTED CONTRACT. Stored family-2 sketches bind Vector.hash()'s output
+// for every type they cover. Changing draken's hash for any type invalidates
+// them; such a change introduces a NEW family value, never reuses 2.
 //
 // EXACT below K: a column with at most K distinct values has all of them in the
 // sketch, and `count` IS the answer. Above K it is the standard KMV estimator,
@@ -576,17 +603,28 @@ static_assert(sizeof(ColumnStatistics) == 56u, "ColumnStatistics layout drift");
 // assumed so a future width change stays readable.
 inline constexpr uint32_t kSketchK = 32u;
 
+// Values of SketchRecordHeader::hash_family — draken::KmvHashFamily's values,
+// restated here because this header is plain POD with no draken dependency;
+// the writer static_asserts the two agree.
+inline constexpr uint8_t kSketchFamilyNone             = 0u;  // no sketch
+inline constexpr uint8_t kSketchFamilyXxh3Value        = 1u;  // v2 files only
+inline constexpr uint8_t kSketchFamilyDrakenVectorHash = 2u;  // v3
+
 #pragma pack(push, 1)
 
-struct ColumnSketchHeader {
-    uint32_t k;      // the K this sketch was built at
-    uint32_t count;  // min-hashes that follow, 0..k
-    // uint64_t hashes[count] — ASCENDING, distinct
+// Heads a column summary's sketch (FORMAT.md §5.7), followed by `count` u64
+// hashes, ASCENDING and distinct. count == 0 means NOT TRACKED, and then
+// hash_family and k are 0 as well.
+struct SketchRecordHeader {
+    uint8_t  hash_family;  // kSketchFamilyDrakenVectorHash, or 0 when absent
+    uint8_t  reserved;     // 0, checked
+    uint16_t k;            // the K the sketch was built at; 0 when absent
+    uint32_t count;        // hashes that follow, 0..k
 };
 
 #pragma pack(pop)
 
-static_assert(sizeof(ColumnSketchHeader) == 8u, "ColumnSketchHeader layout drift");
+static_assert(sizeof(SketchRecordHeader) == 8u, "SketchRecordHeader layout drift");
 
 // A signed 128-bit sum cannot overflow at any row count this format can
 // address: the worst case is INT64_MIN summed 2^32 times, |2^63 * 2^32| == 2^95,
@@ -595,13 +633,12 @@ static_assert(sizeof(uint32_t) == 4u && sizeof(uint64_t) == 8u, "fixed-width dri
 
 // ─── Zone map ───────────────────────────────────────────────────────────────
 
-// Intra-column skipping (design §10.2b). One row group means a predicate would
-// otherwise read a whole column or none of it. With value ordering a predicate
-// resolves to a CODE interval, so per-chunk min/max CODES are enough to skip
-// row chunks — and the reader fetches only the surviving byte ranges of the
-// selection section. Parquet's page index, without pages.
+// Intra-row-group skipping (design §10.2b): per-row-chunk VALUE ORDINAL bounds,
+// so a predicate can rule out row chunks within one row group. Parquet's page
+// index, without pages. Written for every orderable column with more than one
+// row chunk of rows (see ZoneMapEntry for why ordinals, not codes).
 //
-// 8 bytes per chunk: ~1 KB for a million rows.
+// 16 bytes per chunk: ~2 KB for a million rows.
 inline constexpr uint32_t kZoneMapDefaultChunkRows = 8192u;
 
 #pragma pack(push, 1)
@@ -609,7 +646,8 @@ inline constexpr uint32_t kZoneMapDefaultChunkRows = 8192u;
 struct ZoneMapHeader {
     uint32_t chunk_rows;
     uint32_t chunk_count;
-    // Followed by chunk_count * { uint32 min_code; uint32 max_code; }
+    // Followed by chunk_count * ZoneMapEntry — 16 bytes each, i64 ORDINALS
+    // (not codes; see below).
 };
 
 // Value bounds for one chunk of rows, as ordinals from draken's ordinalize
@@ -736,60 +774,81 @@ struct LogicalTypeDescriptor {
 
 static_assert(sizeof(LogicalTypeDescriptor) == 12u, "LogicalTypeDescriptor layout drift");
 
-// ─── Column directory ───────────────────────────────────────────────────────
-
-// Fixed-size head of a column directory entry, PER ROW GROUP: one of these per
-// column per row group, in that row group's own footer. Its identity/type half
-// necessarily repeats the file's SchemaEntryHead; everything else (length,
-// data_length, selection_kind, value_order, the section slices, the string arena
-// counts) describes this row group only and exists nowhere else.
+// ─── Column summaries (FILE FOOTER) and directory blocks (DATA region) ──────
 //
-// The variable-size parts (name bytes, the optional LogicalTypeDescriptor, and
-// child entries for ARRAY) follow in the footer stream. Every variable-length
-// field carries an explicit length and is bounds-checked against the footer
-// extent before it is read.
+// A COLUMN NODE is one entry of the depth-first schema: every top-level column
+// and the element child of each ARRAY. Every node has a summary in the footer
+// (what a reader needs to ADDRESS it and to plan fetches without reading
+// anything else) and a directory block at the head of its run in the DATA
+// region (what DECODE needs). Pruning never needs a directory block.
 #pragma pack(push, 1)
 
-struct ColumnEntryHead {
-    uint32_t field_id;        // stable identity across schema evolution. The
-                              // catalog assigns these; the format only
-                              // guarantees the slot exists and round-trips.
-                              // Matching columns by NAME breaks on rename —
-                              // the lesson Parquet and Iceberg both learned late.
-    uint32_t name_bytes;      // followed by name_bytes of column identity
-    uint32_t type;            // DrakenType, verbatim
-    uint8_t  vector_flags;    // DrakenVector.flags, VERBATIM — layout hints must
-                              // survive; re-deriving them is what disqualified
-                              // Parquet.
-    uint8_t  logical_present; // 0/1 — a LogicalTypeDescriptor follows the name
-    uint8_t  selection_kind;  // SelectionKind
-    uint8_t  value_order;     // ValueOrder
-    uint32_t length;          // logical row count
-    uint32_t data_length;     // physical value count
-    uint32_t child_count;     // 0 except DRAKEN_ARRAY
-    uint32_t section_index;   // first REQUIRED-section entry in the directory
-    uint32_t section_count;   // how many belong to this column
-    uint32_t stats_bytes;     // 0 == no statistics tracked for this column
+// Fixed head of a column summary (FORMAT.md §5.6). Followed by block_count
+// BlockExtents, one SketchRecordHeader + hashes, then child_count child
+// summaries, depth first.
+struct ColumnSummaryHead {
+    uint64_t directory_offset;   // absolute; the node's directory block
+    uint32_t directory_bytes;    // > 0
+    uint32_t reserved0;          // 0, checked
+    uint64_t directory_checksum; // XXH3-64 over the directory block — recorded
+                                 // here because the footer is the only trusted
+                                 // thing a ranged reader holds when it decides
+                                 // to fetch a directory
+    uint64_t data_offset;        // first required section, or directory end
+    uint64_t data_bytes;         // through the last required section; 0 if none
+    uint64_t index_offset;       // first optional section; 0 if none
+    uint64_t index_bytes;        // through the last optional section; 0 if none
+    uint32_t block_count;        // ceil(row_group_count / block_row_groups)
+    uint32_t child_count;        // == the schema entry's child_count
+};
+
+// The byte range of one block's chunks for one column node: every required
+// section of every chunk in rows [k*G, min((k+1)*G, row_group_count)). Derived
+// from the directory block and checked against it; stored so a fetch can be
+// planned from the footer alone. {0, 0} when the block's chunks are empty.
+struct BlockExtent {
+    uint64_t offset;
+    uint64_t bytes;
+};
+
+// First record of a column node's directory block (FORMAT.md §5.9). Followed by
+// chunk_count ChunkRecords, then section_count SectionEntries; the block ends
+// exactly there.
+inline constexpr uint32_t kDirectoryMagic = 0x434E4B53u;  // "SKNC"
+
+struct DirectoryBlockHeader {
+    uint32_t directory_magic;    // kDirectoryMagic
+    uint32_t node_ordinal;       // depth-first index of this node
+    uint32_t chunk_count;        // == row_group_count
+    uint32_t section_count;      // SectionEntries that follow the chunk records
+};
+
+// One column node in one row group (FORMAT.md §5.10) — v2's per-row-group
+// column directory entry less the identity the schema directory carries once.
+struct ChunkRecord {
+    uint32_t length;             // logical rows
+    uint32_t data_length;        // physical values
+    uint8_t  vector_flags;       // DrakenVector.flags, VERBATIM
+    uint8_t  selection_kind;     // SelectionKind
+    uint8_t  value_order;        // ValueOrder
+    uint8_t  string_payloads_elided;  // string family only — see below
+    uint32_t section_index;      // first REQUIRED entry of this chunk
+    uint32_t section_count;      // required entries of this chunk
+    uint32_t index_section_index;// first OPTIONAL entry of this chunk
+    uint32_t index_section_count;// optional entries of this chunk
+    uint32_t reserved0;          // 0, checked
     uint64_t string_slot_count;  // string family only; 0 otherwise
     uint64_t string_arena_used;  // string family only
     uint64_t string_arena_cap;   // string family only
-    uint8_t  string_payloads_elided;  // string family only — see below
-    uint8_t  pad[3];
-    // Optional sections live in their OWN directory slice, because they live in
-    // their own REGION: every column's required sections sit in the data region
-    // and its optional ones in the index region next to the footer. A pruning
-    // reader therefore fetches the footer and every filter and index in ONE
-    // range request, and only then decides which column extents to read. One
-    // slice for both would force the two to interleave, and an index scattered
-    // through the data region is an index you have to read the data to reach.
-    uint32_t index_section_index;
-    uint32_t index_section_count;
-    uint32_t reserved;
+    uint64_t reserved1;          // 0, checked
 };
 
 #pragma pack(pop)
 
-static_assert(sizeof(ColumnEntryHead) == 80u, "ColumnEntryHead layout drift");
+static_assert(sizeof(ColumnSummaryHead) == 64u, "ColumnSummaryHead layout drift");
+static_assert(sizeof(BlockExtent) == 16u, "BlockExtent layout drift");
+static_assert(sizeof(DirectoryBlockHeader) == 16u, "DirectoryBlockHeader layout drift");
+static_assert(sizeof(ChunkRecord) == 64u, "ChunkRecord layout drift");
 
 // string_payloads_elided is not a hint and not cosmetic. A length-only column
 // has a NULL arena and every long slot stamped STR_ELIDED_PAYLOAD_OFFSET
@@ -809,7 +868,7 @@ static_assert(sizeof(ColumnEntryHead) == 80u, "ColumnEntryHead layout drift");
 // The part of a column that CANNOT vary between row groups: its identity and its
 // type. Everything else about a column — length, data_length, selection kind,
 // value order, section extents, string arena counts — is a property of one row
-// group and lives in that row group's ColumnEntryHead.
+// group and lives in that row group's ChunkRecord.
 //
 // It exists so the FILE FOOTER alone answers "what columns does this file have,
 // and what types are they" and gives the per-row-group statistics block a
@@ -831,36 +890,12 @@ struct SchemaEntryHead {
     uint16_t reserved1;       // 0
     uint32_t child_count;     // 0 except DRAKEN_ARRAY, which has 1
     // Followed by name_bytes, the optional LogicalTypeDescriptor, then children
-    // depth first — the same shape and the same order as the column directory.
+    // depth first — the same shape and the same order as the column summaries.
 };
 
 #pragma pack(pop)
 
 static_assert(sizeof(SchemaEntryHead) == 20u, "SchemaEntryHead layout drift");
-
-// ─── Row group header (first record of a ROW GROUP footer) ──────────────────
-
-// Named for what it heads: one row group, not the file. The file-level
-// equivalents (total row count, lineage, provenance) live in FileFooterHeader
-// and are NOT repeated per row group — the two fields that look duplicated
-// (file_uuid, created_at_unix_us) are carried here as well so that a row group
-// footer extracted on its own still names the file it came from.
-#pragma pack(push, 1)
-
-struct RowGroupFooterHeader {
-    uint64_t row_count;         // logical rows in THIS row group
-    uint32_t column_count;      // top-level columns; ARRAY children are nested
-    uint32_t section_count;
-    uint8_t  file_uuid[16];     // lineage and manifest dedup
-    uint64_t created_at_unix_us;// provenance only, NEVER load-bearing
-    uint32_t writer_tag_bytes;  // followed by writer_tag_bytes; provenance only
-    uint32_t file_flags;
-};
-
-#pragma pack(pop)
-
-static_assert(sizeof(RowGroupFooterHeader) == 48u,
-              "RowGroupFooterHeader layout drift");
 
 // ─── Version support window ─────────────────────────────────────────────────
 
@@ -877,7 +912,7 @@ static_assert(sizeof(RowGroupFooterHeader) == 48u,
 //
 //  1. The N-1 READER MUST BE RETAINED IN THE SOURCE, not just in a released
 //     binary — migrate needs it to read its input. So reader code is versioned
-//     from v1 onward (reader_v1.cpp, reader_v2.cpp, …) and dispatched on the
+//     per version (reader_v2.cpp, reader_v3.cpp, …) and dispatched on the
 //     file's version. Deleting an old reader without first deleting its version
 //     from the migrate chain breaks the chain silently.
 //

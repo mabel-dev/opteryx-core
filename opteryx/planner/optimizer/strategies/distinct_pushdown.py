@@ -59,7 +59,7 @@ class DistinctPushdownStrategy(OptimizationStrategy):
     requires = ("projection-pushed",)
 
     @staticmethod
-    def _wrapper_ndv_is_degenerate(plan, node) -> bool:
+    def _wrapper_ndv_is_degenerate(plan, nid: str, node) -> bool:
         """True only on POSITIVE evidence that the source array is unique per row.
 
         Returns False when anything is unknown — no manifest, no KMV stats, no record
@@ -73,15 +73,6 @@ class DistinctPushdownStrategy(OptimizationStrategy):
             schema_column, "source_column", None
         )
         if not column_name:
-            return False
-
-        nid = getattr(node, "nid", None)
-        if nid is None:
-            for candidate_nid, candidate in plan.nodes(True):
-                if candidate is node:
-                    nid = candidate_nid
-                    break
-        if nid is None:
             return False
 
         scans = [
@@ -116,7 +107,6 @@ class DistinctPushdownStrategy(OptimizationStrategy):
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         if (node.node_type == LogicalPlanStepType.Distinct) and node.on is None:
-            node.nid = context.node_id
             context.collected_distincts.append(node)
             return context
 
@@ -152,7 +142,7 @@ class DistinctPushdownStrategy(OptimizationStrategy):
             and getattr(node, "unnest_function", "UNNEST") == "UNNEST"
             and node.unnest_target is not None
             and not self._wrapper_ndv_is_degenerate(
-                context.optimized_plan, node
+                context.optimized_plan, context.node_id, node
             )
         ):
             node.distinct_target = True

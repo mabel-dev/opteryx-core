@@ -1,4 +1,4 @@
-"""Unit tests for opteryx.planner.cost_estimation.join_graph."""
+"""Unit tests for the native JoinGraph (opteryx.compiled.planner.join_estimator)."""
 
 import os
 import sys

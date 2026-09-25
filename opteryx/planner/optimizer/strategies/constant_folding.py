@@ -32,6 +32,9 @@ from opteryx.types.logical_type import BOOLEAN, LogicalCategory
 from opteryx.types.logical_type import LogicalCategory as LC
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
+from opteryx.compiled.structures.expressions import Nested
+from opteryx.compiled.structures.expressions import UnaryOperator
+from opteryx.compiled.structures.expressions import Function
 
 
 def _is_rewrite_only(node) -> bool:
@@ -70,17 +73,7 @@ def _desugar_rewrite_only(node, telemetry: QueryTelemetry):
     """
     from .predicate_rewriter import _rewrite_function
 
-    if isinstance(node.left, Node):
-        node.left = _desugar_rewrite_only(node.left, telemetry)
-    if isinstance(node.centre, Node):
-        node.centre = _desugar_rewrite_only(node.centre, telemetry)
-    if isinstance(node.right, Node):
-        node.right = _desugar_rewrite_only(node.right, telemetry)
-    if node.parameters:
-        node.parameters = [
-            _desugar_rewrite_only(param, telemetry) if isinstance(param, Node) else param
-            for param in node.parameters
-        ]
+    node.map_children(lambda child: _desugar_rewrite_only(child, telemetry))
     if _is_rewrite_only(node):
         return _rewrite_function(node, telemetry)
     return node
@@ -89,7 +82,7 @@ def _desugar_rewrite_only(node, telemetry: QueryTelemetry):
 def _build_if_not_null_node(root, value, value_if_not_null) -> Node:
     from opteryx.expression.functions import get_catalog
 
-    node = Node(node_type=NodeType.FUNCTION)
+    node = Function()
     node.value = "IFNOTNULL"
     node.parameters = [value, value_if_not_null]
     node.schema_column = root.schema_column
@@ -150,7 +143,7 @@ def _build_transparent_node(root, value, telemetry) -> Node:
     # to its centre at compile time and every predicate strategy sees through it,
     # so the identity survives with no runtime cost (same mechanism as
     # redundant_cast's identity-context rewrite).
-    node = Node(node_type=NodeType.NESTED)
+    node = Nested()
     node.centre = value
     node.schema_column = root.schema_column
     node.query_column = root.query_column
@@ -269,6 +262,12 @@ def _dedupe_branches(parameters: list, telemetry) -> list:
             seen.add(key)
         unique.append(parameter)
     return unique
+
+
+# The expression types that carry a `parameters` list.
+_PARAMETER_CARRIERS = frozenset(
+    {NodeType.FUNCTION, NodeType.AGGREGATOR, NodeType.CAST, NodeType.DNF, NodeType.CNF}
+)
 
 
 def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
@@ -391,8 +390,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 and root.right.value == "%"
             ):
                 # column LIKE '%' is True
-                node = Node(node_type=NodeType.UNARY_OPERATOR)
-                node.type = BOOLEAN
+                node = UnaryOperator()
                 node.value = "IsNotNull"
                 node.schema_column = root.schema_column
                 node.centre = root.left
@@ -483,7 +481,6 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
             ):
                 # anything AND True is anything (except NULL)
                 node = _build_transparent_node(root, root.left, telemetry)
-                node.type = BOOLEAN
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
 
@@ -498,7 +495,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         return root
 
     # fold costants in function parameters - this is generally aggregations we're affecting here
-    if root.parameters:
+    if root.node_type in _PARAMETER_CARRIERS and root.parameters:
         if isinstance(root.parameters, tuple):
             root.parameters = list(root.parameters)
         for i, param in enumerate(root.parameters):
@@ -591,7 +588,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                     vector_attach_logical_type(result_vector._nb, target_ct.logical)
         result = result_vector[0] if isinstance(result_vector, list) else result_vector.to_pylist()[0]
         telemetry.optimization_constant_fold_expression += 1
-        return build_literal_node(result, root, target_ct)
+        return build_literal_node(result, identity_of=root, suggested_type=target_ct)
 
     return root
 

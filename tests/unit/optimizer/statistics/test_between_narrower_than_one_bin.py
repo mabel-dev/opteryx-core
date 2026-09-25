@@ -37,6 +37,8 @@ hold.
 
 import os
 import sys
+from opteryx.compiled.structures.expressions import Between
+from opteryx.compiled.structures.expressions import Literal
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
@@ -51,6 +53,7 @@ from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
 from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.third_party.maki_nage import distogram as dg
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 _SRC = b"net_src_kNjxTk2T"
 
@@ -89,7 +92,7 @@ def _stats(histogram):
 
 
 def _identifier():
-    node = Node(NodeType.IDENTIFIER, source_column="src_addr")
+    node = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="src_addr")
     node.schema_column = Node(NodeType.IDENTIFIER, identity=_SRC)
     return node
 
@@ -97,11 +100,10 @@ def _identifier():
 def _between(lo, hi):
     # BETWEEN carries its bounds as `right` (low) and `centre` (high) -- see
     # `_selectivity_between`. `centre` is a real operand here, not decoration.
-    return Node(
-        NodeType.BETWEEN,
+    return Between(
         left=_identifier(),
-        right=Node(NodeType.LITERAL, value=lo),
-        centre=Node(NodeType.LITERAL, value=hi),
+        right=Literal(value=lo),
+        centre=Literal(value=hi),
     )
 
 

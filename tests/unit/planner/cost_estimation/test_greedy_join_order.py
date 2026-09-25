@@ -1,4 +1,4 @@
-"""Unit tests for opteryx.planner.cost_estimation.greedy_join_order."""
+"""Unit tests for the native greedy join enumerator (opteryx.compiled.planner.join_estimator)."""
 
 import os
 import sys

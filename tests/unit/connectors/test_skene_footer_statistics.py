@@ -29,12 +29,10 @@ K_STAT_MAX = 0x2
 K_STAT_NULL_COUNT = 0x4
 K_STAT_NDV = 0x40
 K_STAT_NDV_EXACT = 0x80
-K_STAT_SKETCH = 0x100
 
 TPCH_SKENE = os.path.join("testdata", "tpch_1_skene")
 TPCDS_SKENE = os.path.join("testdata", "tpcds_1_skene")
-JOB_SKENE = os.path.join("testdata", "job_skene")
-V1_FIXTURE = os.path.join("skene", "tests", "fixtures", "v1", "v1_accel_none.skene")
+V2_FIXTURE = os.path.join("skene", "tests", "fixtures", "v2", "v2_accel_none.skene")
 
 # The big fixtures are not populated everywhere — same convention as
 # tests/unit/optimizer/test_predicate_pushdown_across_barrier.py.
@@ -42,10 +40,9 @@ needs_tpch = pytest.mark.skipif(not os.path.isdir(TPCH_SKENE), reason=f"{TPCH_SK
 needs_tpcds = pytest.mark.skipif(
     not os.path.isdir(TPCDS_SKENE), reason=f"{TPCDS_SKENE} not populated"
 )
-needs_job = pytest.mark.skipif(not os.path.isdir(JOB_SKENE), reason=f"{JOB_SKENE} not populated")
 
 
-def _blob(*, flags, lo=0, hi=0, nulls=0, ndv=None, ndv_exact=None, sketch=None):
+def _blob(*, flags, lo=0, hi=0, nulls=0, ndv=None, ndv_exact=None):
     """One statistics blob in the shape skene.read_metadata() emits."""
     return {
         "flags": flags,
@@ -55,8 +52,15 @@ def _blob(*, flags, lo=0, hi=0, nulls=0, ndv=None, ndv_exact=None, sketch=None):
         "sum": 0,
         "ndv": ndv,
         "ndv_exact": ndv_exact,
-        "sketch": sketch,
     }
+
+
+def aggregate(row_groups, positions, sketches=None):
+    """The aggregation with no file sketches unless a test supplies them — the
+    footer carries one sketch per column node, parallel to `positions`."""
+    if sketches is None:
+        sketches = [None] * len(positions)
+    return skene_aggregate_row_group_statistics(row_groups, positions, sketches)
 
 
 def _row_groups(*blobs):
@@ -80,16 +84,14 @@ def _read_footer(path):
 # ── Task A: the native emitter ───────────────────────────────────────────────
 
 
-def test_ndv_is_gated_on_its_flag_not_on_the_bytes():
-    """`ndv` is a v2 growth field; kStatNdv is the only honest reader of it.
-
-    A v1 blob is a 48-byte PREFIX of ColumnStatistics and the reader memcpy's
-    only the bytes it was given, so the `ndv` slot on a v1 blob was never
-    written. Reading it as a number would report 0 distinct values for every
-    column of every v1 file — a fabricated statistic, not a missing one.
-    """
-    footer = _read_footer(V1_FIXTURE)
-    assert footer["version"] == 1, "fixture is meant to be the golden v1 file"
+def test_v2_fixture_reads_through_the_retained_reader():
+    """A v2 file — the golden fixture the last v2 writer wrote — reads through the
+    retained v2 reader: its per-row-group statistics are intact, and its
+    per-row-group sketches arrive as ONE file sketch per column, their exact
+    union, tagged hash family 1 (skene v2's own XXH3), never family 2."""
+    footer = _read_footer(V2_FIXTURE)
+    assert footer["version"] == 2, "fixture is meant to be the golden v2 file"
+    assert footer["block_row_groups"] == 0  # v2 recorded none
 
     seen = 0
     for row_group in footer["row_groups"]:
@@ -97,10 +99,14 @@ def test_ndv_is_gated_on_its_flag_not_on_the_bytes():
             if statistics is None:
                 continue
             seen += 1
-            assert statistics["flags"] & K_STAT_NDV == 0
-            assert statistics["ndv"] is None
-            assert statistics["ndv_exact"] is None
+            if statistics["flags"] & K_STAT_NDV:
+                assert statistics["ndv"] is not None
+            else:
+                assert statistics["ndv"] is None
     assert seen > 0, "fixture carried no statistics blobs at all"
+
+    families = {s["hash_family"] for s in footer["sketches"] if s is not None}
+    assert families == {1}
 
 
 @needs_tpch
@@ -113,7 +119,7 @@ def test_exact_and_sketched_ndv_are_told_apart():
     and the flag that produced it travel together and stay consistent.
     """
     footer = _read_footer(os.path.join(TPCH_SKENE, "part"))
-    assert footer["version"] == 2
+    assert footer["version"] == 3
 
     exact_seen = sketched_seen = 0
     for row_group in footer["row_groups"]:
@@ -140,27 +146,25 @@ def test_exact_ndv_is_the_true_distinct_count():
     """An exact NDV claims to be a bound, so check it against known truth.
 
     p_mfgr/p_brand/p_type/p_size/p_container are TPC-H generator constants at
-    any scale factor, and `part` is a single-row-group fixture, so the file
-    NDV is that row group's NDV with no merge in between.
+    any scale factor, drawn uniformly per row. The exact count is per ROW GROUP,
+    and every row group of `part` — the short last one (3,392 rows at SF1)
+    included — holds every constant, so each row group's NDV is the truth.
     """
     footer = _read_footer(os.path.join(TPCH_SKENE, "part"))
-    assert len(footer["row_groups"]) == 1
+    assert len(footer["row_groups"]) > 1, "the per-row-group claim needs several"
 
-    by_name = dict(
-        zip(
-            [column["name"] for column in footer["columns"]],
-            footer["row_groups"][0]["column_statistics"],
-        )
-    )
-    for name, truth in (
-        ("p_mfgr", 5),
-        ("p_brand", 25),
-        ("p_type", 150),
-        ("p_size", 50),
-        ("p_container", 40),
-    ):
-        assert by_name[name]["ndv_exact"] is True, name
-        assert by_name[name]["ndv"] == truth, name
+    names = [column["name"] for column in footer["columns"]]
+    for row_group in footer["row_groups"]:
+        by_name = dict(zip(names, row_group["column_statistics"]))
+        for name, truth in (
+            ("p_mfgr", 5),
+            ("p_brand", 25),
+            ("p_type", 150),
+            ("p_size", 50),
+            ("p_container", 40),
+        ):
+            assert by_name[name]["ndv_exact"] is True, name
+            assert by_name[name]["ndv"] == truth, name
 
 
 # ── Task B: row group -> file aggregation ────────────────────────────────────
@@ -169,7 +173,7 @@ def test_exact_ndv_is_the_true_distinct_count():
 def test_null_counts_sum_across_row_groups():
     """A row belongs to exactly one row group, so the file total is the sum."""
     flags = K_STAT_NULL_COUNT
-    *_, nulls, _, _, _ = skene_aggregate_row_group_statistics(
+    *_, nulls, _, _, _, _ = aggregate(
         _row_groups(
             _blob(flags=flags, nulls=3),
             _blob(flags=flags, nulls=4),
@@ -184,7 +188,7 @@ def test_one_row_group_without_a_null_count_makes_the_file_unknown():
     """A partial sum UNDERSTATES nulls, and TopN manifest pruning reads a total
     of 0 as "provably no nulls" — an understated total is a wrong answer, not a
     worse estimate."""
-    *_, nulls, _, _, _ = skene_aggregate_row_group_statistics(
+    *_, nulls, _, _, _, _ = aggregate(
         _row_groups(
             _blob(flags=K_STAT_NULL_COUNT, nulls=3),
             _blob(flags=0),
@@ -198,7 +202,7 @@ def test_ndv_sums_only_when_the_row_group_ranges_are_disjoint():
     """Disjoint ordinal ranges hold disjoint values, so the counts add — and a
     sum of exact counts over disjoint ranges is still exact."""
     flags = K_STAT_MIN | K_STAT_MAX | K_STAT_NDV | K_STAT_NDV_EXACT
-    *_, distincts, _, _ = skene_aggregate_row_group_statistics(
+    *_, distincts, _, _, _ = aggregate(
         _row_groups(
             _blob(flags=flags, lo=0, hi=9, ndv=10, ndv_exact=True),
             _blob(flags=flags, lo=10, hi=19, ndv=10, ndv_exact=True),
@@ -213,7 +217,7 @@ def test_ndv_takes_the_max_when_the_ranges_overlap():
     column's cardinality. MAX is the safe floor — and a floor is an estimate
     however exact each contributor was."""
     flags = K_STAT_MIN | K_STAT_MAX | K_STAT_NDV | K_STAT_NDV_EXACT
-    *_, distincts, _, _ = skene_aggregate_row_group_statistics(
+    *_, distincts, _, _, _ = aggregate(
         _row_groups(
             _blob(flags=flags, lo=0, hi=99, ndv=10, ndv_exact=True),
             _blob(flags=flags, lo=50, hi=149, ndv=14, ndv_exact=True),
@@ -225,7 +229,7 @@ def test_ndv_takes_the_max_when_the_ranges_overlap():
 
 def test_a_sketched_contributor_taints_an_otherwise_exact_sum():
     flags = K_STAT_MIN | K_STAT_MAX | K_STAT_NDV
-    *_, distincts, _, _ = skene_aggregate_row_group_statistics(
+    *_, distincts, _, _, _ = aggregate(
         _row_groups(
             _blob(flags=flags | K_STAT_NDV_EXACT, lo=0, hi=9, ndv=10, ndv_exact=True),
             _blob(flags=flags, lo=10, hi=19, ndv=9, ndv_exact=False),
@@ -238,7 +242,7 @@ def test_a_sketched_contributor_taints_an_otherwise_exact_sum():
 def test_ndv_without_bounds_cannot_prove_disjointness_and_takes_the_max():
     """No range means no disjointness proof; MAX is the only safe answer."""
     flags = K_STAT_NDV | K_STAT_NDV_EXACT
-    *_, distincts, _, _ = skene_aggregate_row_group_statistics(
+    *_, distincts, _, _, _ = aggregate(
         _row_groups(
             _blob(flags=flags, ndv=10, ndv_exact=True),
             _blob(flags=flags, ndv=7, ndv_exact=True),
@@ -250,7 +254,7 @@ def test_ndv_without_bounds_cannot_prove_disjointness_and_takes_the_max():
 
 def test_one_row_group_without_ndv_makes_the_file_unknown():
     flags = K_STAT_MIN | K_STAT_MAX | K_STAT_NDV | K_STAT_NDV_EXACT
-    *_, distincts, _, _ = skene_aggregate_row_group_statistics(
+    *_, distincts, _, _, _ = aggregate(
         _row_groups(
             _blob(flags=flags, lo=0, hi=9, ndv=10, ndv_exact=True),
             _blob(flags=K_STAT_MIN | K_STAT_MAX, lo=10, hi=19),
@@ -263,7 +267,7 @@ def test_one_row_group_without_ndv_makes_the_file_unknown():
 def test_the_three_aggregations_are_independent():
     """A row group that bounds nothing still carries a usable null count. One
     missing statistic must not discard the other two."""
-    lower, upper, nulls, distincts, _, _ = skene_aggregate_row_group_statistics(
+    lower, upper, nulls, distincts, _, _, _ = aggregate(
         _row_groups(
             _blob(
                 flags=K_STAT_MIN | K_STAT_MAX | K_STAT_NULL_COUNT | K_STAT_NDV,
@@ -288,13 +292,13 @@ def test_array_child_slots_are_skipped():
     is not the array's, and manifest keys are top-level schema positions."""
     blob = _blob(flags=K_STAT_NULL_COUNT | K_STAT_NDV, nulls=1, ndv=3, ndv_exact=False)
     row_groups = [{"column_statistics": [blob, blob, blob]}]
-    _, _, nulls, distincts, _, _ = skene_aggregate_row_group_statistics(row_groups, [0, None, 1])
+    _, _, nulls, distincts, _, _, _ = aggregate(row_groups, [0, None, 1])
     assert sorted(nulls) == [0, 1]
     assert sorted(distincts) == [0, 1]
 
 
 def test_a_row_group_tracking_nothing_voids_every_aggregation():
-    lower, upper, nulls, distincts, _, _ = skene_aggregate_row_group_statistics(
+    lower, upper, nulls, distincts, _, _, _ = aggregate(
         [
             {"column_statistics": [_blob(flags=0x7 | K_STAT_NDV, lo=0, hi=9, ndv=5, ndv_exact=True)]},
             {"column_statistics": [None]},
@@ -330,11 +334,16 @@ def test_skene_varchar_columns_now_have_a_distinct_count():
     _, columns = _relation_statistics(os.path.join(TPCH_SKENE, "part"))
 
     assert columns["p_comment"].distinct_count is not None
-    # p_mfgr/p_brand/p_type/p_container are TPC-H generator constants.
+    # p_mfgr/p_brand/p_type/p_container are TPC-H generator constants. `part`
+    # spans several row groups whose exact counts OVERLAP, so the relation count
+    # comes from the file sketch (K=32): EXACT below K, an estimate above it —
+    # never below the largest exact per-row-group count, which is a floor.
     assert columns["p_mfgr"].distinct_count == 5
     assert columns["p_brand"].distinct_count == 25
-    assert columns["p_type"].distinct_count == 150
-    assert columns["p_container"].distinct_count == 40
+    for name, truth in (("p_type", 150), ("p_container", 40)):
+        estimate = columns[name].distinct_count
+        # ~18% relative error at K=32; 1.5x is ~2.7 standard errors.
+        assert truth <= estimate <= truth * 1.5, (name, estimate)
 
 
 @needs_tpch
@@ -430,18 +439,34 @@ def test_null_counts_match_the_data():
     assert manifest.estimate_null_fraction("cc_closed_date_sk") == 1.0
 
 
-@needs_job
-def test_topn_manifest_pruning_can_now_fire_on_skene():
+@pytest.fixture
+def disjoint_skene_files(tmp_path):
+    """Three skene files, `id` ranges [0, 100) / [100, 200) / [200, 300)."""
+    import skene
+    from draken.draken_native import DrakenType
+    from draken.interop.vector_sequence import vector_from_sequence
+    from draken.morsels.morsel import Morsel
+
+    for part in range(3):
+        ids = vector_from_sequence(list(range(part * 100, part * 100 + 100)), DrakenType.INT64)
+        buf = skene.write_morsel(Morsel.from_vectors(["id"], [ids]), read_acceleration=True)
+        (tmp_path / f"part-{part}.skene").write_bytes(bytes(buf))
+    return tmp_path
+
+
+def test_topn_manifest_pruning_can_now_fire_on_skene(disjoint_skene_files):
     """The null count is a CORRECTNESS precondition, not a cost input.
 
     `prune_files_for_topn` drops whole files and explicitly does not re-check
     nullability — `TopNManifestPruningStrategy` must have proved
     `get_total_null_count(col) == 0` first. That proof was impossible for skene
     (the count was always None), so the strategy could never fire on a skene
-    relation whatever the data looked like. cast_info is 9 files with disjoint
-    `id` ranges, so an `ORDER BY id LIMIT n` needs exactly one of them.
+    relation whatever the data looked like. The fixture is three files with
+    disjoint `id` ranges, so an `ORDER BY id LIMIT n` needs exactly one of them.
+    (Built here: the benchmark mirrors pack a table into as few 4 GiB files as
+    its rows allow, so none of their tables is reliably multi-file.)
     """
-    manifest, _ = _relation_statistics(os.path.join(JOB_SKENE, "cast_info"))
+    manifest, _ = _relation_statistics(str(disjoint_skene_files))
     assert manifest.get_file_count() > 1, "fixture is meant to be multi-file"
 
     # The precondition the strategy gates on — None before this wiring.
@@ -462,8 +487,10 @@ def test_topn_manifest_pruning_can_now_fire_on_skene():
 
 
 def test_sketch_round_trips_and_is_exact_below_k():
-    """A sketch that never filled holds EVERY distinct value, so its length is
-    the exact answer — the regime every low-cardinality column lives in."""
+    """A v3 sketch covers the WHOLE FILE in draken's Vector.hash() family, and one
+    that never filled holds every distinct value — its length is the exact
+    answer. A null row contributes its hash once (FORMAT.md §8.1), so each
+    column here holds 3 values plus the null."""
     import skene
     from draken.draken_native import DrakenType
     from draken.interop.vector_sequence import vector_from_sequence
@@ -475,60 +502,53 @@ def test_sketch_round_trips_and_is_exact_below_k():
         Morsel.from_vectors(["a", "colour"], [ints, strs]), read_acceleration=True
     )
     metadata = skene.read_metadata(buf)
+    assert metadata["version"] == 3
 
     for statistics in metadata["row_groups"][0]["column_statistics"]:
-        assert statistics["sketch"] is not None
-        # Nulls contribute no value, so 3 distinct out of 5 rows with one null.
+        # Nulls contribute no value to the per-row-group count.
         assert statistics["ndv"] == 3
-        assert len(statistics["sketch"]) == 3
-        assert statistics["sketch"] == sorted(statistics["sketch"])
-        assert len(set(statistics["sketch"])) == 3
+    for sketch in metadata["sketches"]:
+        assert sketch is not None
+        assert sketch["hash_family"] == 2
+        assert len(sketch["hashes"]) == 4  # three values + the null row's hash
+        assert sketch["hashes"] == sorted(sketch["hashes"])
+        assert len(set(sketch["hashes"])) == 4
 
 
-def test_pre_sketch_files_read_back_without_one():
-    """The sketch is appended after the fixed struct in the same length-prefixed
-    blob, so older files must still parse — losing an estimate, not erroring."""
-    for path in (V1_FIXTURE, os.path.join(TPCH_SKENE, "nation")):
-        if not os.path.exists(path):
-            continue
-        footer = _read_footer(path)
-        for row_group in footer["row_groups"]:
-            for statistics in row_group["column_statistics"]:
-                if statistics is None:
-                    continue
-                assert statistics["sketch"] is None
-                assert statistics["flags"] & 0x100 == 0  # kStatSketch
+def test_spill_files_carry_no_sketch():
+    """The spill posture tracks nothing: no statistics, no sketch — absent, which
+    is never the same as empty."""
+    import skene
+    from draken.draken_native import DrakenType
+    from draken.interop.vector_sequence import vector_from_sequence
+    from draken.morsels.morsel import Morsel
+
+    ints = vector_from_sequence([5, 3, 3, None, 9], DrakenType.INT64)
+    buf = skene.write_morsel(Morsel.from_vectors(["a"], [ints]))
+    metadata = skene.read_metadata(buf)
+    assert metadata["sketches"] == [None]
+    assert metadata["row_groups"][0]["column_statistics"] == [None]
 
 
-def test_sketches_union_across_row_groups():
-    """The union of KMV sketches is the K smallest of the combined hashes —
-    exact arithmetic, which is the whole reason the hashes are stored rather
-    than the count they imply."""
-    flags = K_STAT_NDV | K_STAT_SKETCH
-    _, _, _, distincts, sketches, _ = skene_aggregate_row_group_statistics(
-        _row_groups(
-            _blob(flags=flags, ndv=3, ndv_exact=False, sketch=[10, 20, 30]),
-            _blob(flags=flags, ndv=3, ndv_exact=False, sketch=[20, 30, 40]),
-        ),
+def test_the_file_sketch_is_carried_with_its_family():
+    """The footer's file sketch reaches the manifest as-is, keyed by schema
+    position, with the family it was hashed in."""
+    _, _, _, _, sketches, family, _ = aggregate(
+        _row_groups(_blob(flags=K_STAT_NDV, ndv=3, ndv_exact=False)),
         [0],
+        [{"hash_family": 2, "k": 32, "hashes": [10, 20, 30]}],
     )
-    # Four distinct hashes across the two, well under K, so the answer is exact.
-    assert sketches == {0: [10, 20, 30, 40]}
-    assert distincts[0] == (3, False)  # the SCALAR merge, kept as a floor source
+    assert sketches == {0: [10, 20, 30]}
+    assert family == 2
 
 
-def test_one_row_group_without_a_sketch_voids_the_union():
-    """A union missing a row group's hashes undercounts, and nothing tells that
-    apart from a genuinely smaller column."""
-    flags = K_STAT_NDV | K_STAT_SKETCH
-    _, _, _, _, sketches, _ = skene_aggregate_row_group_statistics(
-        _row_groups(
-            _blob(flags=flags, ndv=3, ndv_exact=False, sketch=[10, 20, 30]),
-            _blob(flags=K_STAT_NDV, ndv=3, ndv_exact=False),
-        ),
-        [0],
+def test_an_untracked_file_sketch_is_absent():
+    """A column whose footer carries no sketch has none — and no family."""
+    _, _, _, _, sketches, family, _ = aggregate(
+        _row_groups(_blob(flags=K_STAT_NDV, ndv=3, ndv_exact=False)), [0]
     )
     assert sketches == {}
+    assert family is None
 
 
 def test_exact_row_group_counts_are_kept_as_a_proven_floor():
@@ -536,7 +556,7 @@ def test_exact_row_group_counts_are_kept_as_a_proven_floor():
     exceed the file's — a hard lower bound the K=32 estimator must not go under.
     It survives a MAX merge, which is exactly when the estimator needs it."""
     flags = K_STAT_MIN | K_STAT_MAX | K_STAT_NDV | K_STAT_NDV_EXACT
-    _, _, _, distincts, _, floors = skene_aggregate_row_group_statistics(
+    _, _, _, distincts, _, _, floors = aggregate(
         _row_groups(
             _blob(flags=flags, lo=0, hi=99, ndv=2526, ndv_exact=True),
             _blob(flags=flags, lo=50, hi=149, ndv=2400, ndv_exact=True),
@@ -552,7 +572,7 @@ def test_exact_row_group_counts_are_kept_as_a_proven_floor():
 def test_a_sketched_row_group_count_is_not_a_floor():
     """An estimate is not a bound, however close it looks."""
     flags = K_STAT_MIN | K_STAT_MAX | K_STAT_NDV
-    _, _, _, _, _, floors = skene_aggregate_row_group_statistics(
+    _, _, _, _, _, _, floors = aggregate(
         _row_groups(_blob(flags=flags, lo=0, hi=99, ndv=2526, ndv_exact=False)),
         [0],
     )

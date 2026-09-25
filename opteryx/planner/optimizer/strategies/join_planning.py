@@ -238,7 +238,7 @@ class JoinPlanningStrategy(OptimizationStrategy):
                 )
                 continue
 
-            graph, refusal = build_join_graph(plan, leaves, predicates)
+            graph, refusal = build_join_graph(plan, leaves, predicates, context.plan_context)
             if graph is None:
                 # build_join_graph names WHICH of its three refusals fired — no
                 # cross-leaf equi predicate, a leaf with no real row count, or a

@@ -10,8 +10,9 @@
 #include <cstring>
 
 #include "bloom.h"
-#include "reader_v1.h"
+#include "chunk_decode.h"
 #include "reader_v2.h"
+#include "reader_v3.h"
 #include "skene/checksum.h"
 #include "skene/format.h"
 #include "skene/probe.h"
@@ -209,10 +210,14 @@ Status read_metadata(const void* file, size_t file_bytes, FileMetadata* out) {
 
     const uint8_t* bytes = static_cast<const uint8_t*>(file);
     switch (version) {
-        case 1:
-            return v1::read_metadata(bytes, file_bytes, footer_offset, footer_bytes, out);
         case 2:
-            return v2::read_metadata(bytes, file_bytes, footer_offset, footer_bytes, out);
+            return v2::read_metadata(bytes, file_bytes, footer_offset, footer_bytes, out,
+                                     nullptr);
+        case 3: {
+            v3::ReaderState state;
+            return v3::parse_footer(bytes + footer_offset, footer_bytes, footer_offset,
+                                    out, &state);
+        }
         default:
             // Unreachable while open_file enforces the window, but a new version
             // added there and forgotten here must fail loud, not fall through.
@@ -233,12 +238,15 @@ Status read_row_group_metadata(const void* file, size_t file_bytes,
 
     const uint8_t* bytes = static_cast<const uint8_t*>(file);
     switch (version) {
-        case 1:
-            return v1::read_row_group_metadata(bytes, file_bytes, footer_offset,
-                                               footer_bytes, row_group, out);
         case 2:
             return v2::read_row_group_metadata(bytes, file_bytes, footer_offset,
                                                footer_bytes, row_group, out);
+        case 3: {
+            FileReader reader;
+            SKENE_RETURN_IF_ERROR(open_reader(file, file_bytes, &reader));
+            const chunk::ByteSource source({FetchedRange{0, file_bytes, bytes}});
+            return v3::read_row_group_metadata(*reader.v3_, source, row_group, out);
+        }
         default:
             return unsupported_version(version);
     }
@@ -247,6 +255,13 @@ Status read_row_group_metadata(const void* file, size_t file_bytes,
 Status read_morsel(const void* file, size_t file_bytes, uint32_t row_group,
                    const ReadOptions& options, CxxMorsel* out) {
     if (out == nullptr) return fail(Code::kMalformed, "read_morsel: out is null");
+    FileReader reader;
+    SKENE_RETURN_IF_ERROR(open_reader(file, file_bytes, &reader));
+    return read_morsel(reader, row_group, options, out);
+}
+
+Status open_reader(const void* file, size_t file_bytes, FileReader* out) {
+    if (out == nullptr) return fail(Code::kMalformed, "open_reader: out is null");
 
     uint16_t version = 0;
     uint64_t footer_offset = 0;
@@ -254,17 +269,195 @@ Status read_morsel(const void* file, size_t file_bytes, uint32_t row_group,
     SKENE_RETURN_IF_ERROR(
         open_file(file, file_bytes, &version, &footer_offset, &footer_bytes));
 
+    // Built into a local and moved in only on success: a failed open leaves the
+    // caller's reader unopened (version 0), never half-filled.
+    FileReader opened;
     const uint8_t* bytes = static_cast<const uint8_t*>(file);
     switch (version) {
-        case 1:
-            return v1::read_morsel(bytes, file_bytes, footer_offset, footer_bytes,
-                                   row_group, options, out);
-        case 2:
-            return v2::read_morsel(bytes, file_bytes, footer_offset, footer_bytes,
-                                   row_group, options, out);
+        case 2: {
+            auto state = std::make_shared<v2::ReaderState>();
+            SKENE_RETURN_IF_ERROR(v2::read_metadata(bytes, file_bytes, footer_offset,
+                                                    footer_bytes, &opened.metadata_,
+                                                    state.get()));
+            opened.v2_ = std::move(state);
+            break;
+        }
+        case 3: {
+            auto state = std::make_shared<v3::ReaderState>();
+            SKENE_RETURN_IF_ERROR(v3::parse_footer(bytes + footer_offset, footer_bytes,
+                                                   footer_offset, &opened.metadata_,
+                                                   state.get()));
+            // Whole buffer: every column's directory block is here, so attach
+            // them all now. parse_footer bounded each against the data region.
+            for (uint32_t n = 0; n < state->nodes.size(); ++n) {
+                const ColumnSummaryHead& h = state->nodes[n].head;
+                SKENE_RETURN_IF_ERROR(v3::attach_directory(
+                    state.get(), n, bytes + h.directory_offset, h.directory_bytes));
+            }
+            opened.v3_ = std::move(state);
+            break;
+        }
         default:
             return unsupported_version(version);
     }
+    opened.file_       = bytes;
+    opened.file_bytes_ = file_bytes;
+    opened.version_    = version;
+    *out = std::move(opened);
+    return Status::ok();
+}
+
+Status open_reader_ranged(const void* tail_buffer, size_t tail_bytes,
+                          const void* footer, size_t footer_bytes,
+                          uint64_t footer_offset, uint64_t file_bytes,
+                          FileReader* out) {
+    if (out == nullptr) return fail(Code::kMalformed, "open_reader_ranged: out is null");
+    if (tail_buffer == nullptr || tail_bytes < kFileTailBytes || footer == nullptr)
+        return fail(Code::kTruncated,
+                    "open_reader_ranged: need the last %zu bytes and the footer",
+                    kFileTailBytes);
+    if (file_bytes < kMinFileBytes)
+        return fail(Code::kTruncated,
+                    "object is %llu bytes; the smallest well-formed .skene file is %zu",
+                    static_cast<unsigned long long>(file_bytes), kMinFileBytes);
+
+    // A ranged reader never reads byte 0, so the TAIL's copies of version,
+    // endianness and checksum algorithm are what it validates (FORMAT.md §3.1).
+    FileTail tail;
+    std::memcpy(&tail, static_cast<const uint8_t*>(tail_buffer) + tail_bytes
+                           - kFileTailBytes, sizeof(tail));
+    uint64_t expect_offset = 0;
+    SKENE_RETURN_IF_ERROR(validate_tail(tail, file_bytes, &expect_offset));
+    if (footer_offset != expect_offset || footer_bytes != tail.footer_bytes)
+        return fail(Code::kMalformed,
+                    "open_reader_ranged: handed a footer at [%llu, +%zu) but the tail "
+                    "locates it at [%llu, +%u)",
+                    static_cast<unsigned long long>(footer_offset), footer_bytes,
+                    static_cast<unsigned long long>(expect_offset), tail.footer_bytes);
+    if (tail.version != 3u)
+        return fail(Code::kUnsupportedVersion,
+                    "file is v%u; a ranged read needs v3, because a v%u file keeps "
+                    "its decode metadata in per-row-group footers. Read it whole, or "
+                    "migrate it to v3.", static_cast<unsigned>(tail.version),
+                    static_cast<unsigned>(tail.version));
+
+    const uint8_t* footer_bytes_ptr = static_cast<const uint8_t*>(footer);
+    const uint64_t actual = checksum_xxh3_64(footer_bytes_ptr, footer_bytes);
+    if (actual != tail.footer_checksum && checksum_must_match())
+        return fail(Code::kChecksumMismatch,
+                    "footer checksum mismatch: recorded %llu, computed %llu — "
+                    "the directory is corrupt and every offset in it is suspect",
+                    static_cast<unsigned long long>(tail.footer_checksum),
+                    static_cast<unsigned long long>(actual));
+
+    FileReader opened;
+    auto state = std::make_shared<v3::ReaderState>();
+    SKENE_RETURN_IF_ERROR(v3::parse_footer(footer_bytes_ptr, footer_bytes, footer_offset,
+                                           &opened.metadata_, state.get()));
+    opened.v3_         = std::move(state);
+    opened.file_       = nullptr;
+    opened.file_bytes_ = file_bytes;
+    opened.version_    = 3u;
+    *out = std::move(opened);
+    return Status::ok();
+}
+
+namespace {
+
+Status require_open(const FileReader* reader, const char* what) {
+    if (reader->version() == 0)
+        return fail(Code::kMalformed,
+                    "%s: the FileReader was never opened (open_reader failed or was "
+                    "not called)", what);
+    return Status::ok();
+}
+
+Status require_v3(const FileReader* reader, const char* what) {
+    SKENE_RETURN_IF_ERROR(require_open(reader, what));
+    if (reader->version() != 3u)
+        return fail(Code::kUnsupportedVersion,
+                    "%s needs a v3 file; this one is v%u, whose decode metadata lives "
+                    "in per-row-group footers", what,
+                    static_cast<unsigned>(reader->version()));
+    return Status::ok();
+}
+
+}  // namespace
+
+Status read_morsel(const FileReader& reader, uint32_t row_group,
+                   const ReadOptions& options, CxxMorsel* out) {
+    if (out == nullptr) return fail(Code::kMalformed, "read_morsel: out is null");
+    SKENE_RETURN_IF_ERROR(require_open(&reader, "read_morsel"));
+    if (reader.ranged())
+        return fail(Code::kMalformed,
+                    "read_morsel: this reader was opened ranged and holds no file "
+                    "bytes — pass the fetched ranges");
+    switch (reader.version_) {
+        case 2:
+            return v2::read_morsel_at(reader.file_, *reader.v2_, row_group, options, out);
+        case 3: {
+            const chunk::ByteSource source(
+                {FetchedRange{0, reader.file_bytes_, reader.file_}});
+            return v3::read_row_group(*reader.v3_, source, row_group, options, out);
+        }
+        default:
+            return unsupported_version(reader.version_);
+    }
+}
+
+Status read_morsel(const FileReader& reader, uint32_t row_group,
+                   const ReadOptions& options, const std::vector<FetchedRange>& ranges,
+                   CxxMorsel* out) {
+    if (out == nullptr) return fail(Code::kMalformed, "read_morsel: out is null");
+    SKENE_RETURN_IF_ERROR(require_v3(&reader, "read_morsel (ranged)"));
+    const chunk::ByteSource source(ranges);
+    return v3::read_row_group(*reader.v3_, source, row_group, options, out);
+}
+
+Status plan_directory_fetch(const FileReader& reader,
+                            const std::vector<std::string>& columns,
+                            bool through_first_block, const FetchPolicy& policy,
+                            std::vector<ByteRange>* out) {
+    if (out == nullptr) return fail(Code::kMalformed, "plan_directory_fetch: out is null");
+    SKENE_RETURN_IF_ERROR(require_v3(&reader, "plan_directory_fetch"));
+    std::vector<uint32_t> top, all;
+    SKENE_RETURN_IF_ERROR(v3::resolve_columns(*reader.v3_, columns, &top, &all));
+    v3::plan_directories(*reader.v3_, all, through_first_block, policy, out);
+    return Status::ok();
+}
+
+Status attach_directories(FileReader* reader, const std::vector<std::string>& columns,
+                          const std::vector<FetchedRange>& ranges) {
+    if (reader == nullptr) return fail(Code::kMalformed, "attach_directories: null reader");
+    SKENE_RETURN_IF_ERROR(require_v3(reader, "attach_directories"));
+    std::vector<uint32_t> top, all;
+    SKENE_RETURN_IF_ERROR(v3::resolve_columns(*reader->v3_, columns, &top, &all));
+    const chunk::ByteSource source(ranges);
+    for (uint32_t n : all) {
+        v3::Node& node = reader->v3_->nodes[n];
+        if (node.attached) continue;
+        const uint8_t* bytes =
+            source.find(node.head.directory_offset, node.head.directory_bytes);
+        if (bytes == nullptr)
+            return fail(Code::kMalformed,
+                        "attach_directories: column '%s''s directory block [%llu, +%u) "
+                        "lies in no fetched range", node.name.c_str(),
+                        static_cast<unsigned long long>(node.head.directory_offset),
+                        node.head.directory_bytes);
+        SKENE_RETURN_IF_ERROR(
+            v3::attach_directory(reader->v3_.get(), n, bytes, node.head.directory_bytes));
+    }
+    return Status::ok();
+}
+
+Status plan_fetch(const FileReader& reader, const std::vector<std::string>& columns,
+                  const std::vector<uint32_t>& row_groups, const FetchPolicy& policy,
+                  std::vector<ByteRange>* out) {
+    if (out == nullptr) return fail(Code::kMalformed, "plan_fetch: out is null");
+    SKENE_RETURN_IF_ERROR(require_v3(&reader, "plan_fetch"));
+    std::vector<uint32_t> top, all;
+    SKENE_RETURN_IF_ERROR(v3::resolve_columns(*reader.v3_, columns, &top, &all));
+    return v3::plan_chunks(*reader.v3_, all, row_groups, policy, out);
 }
 
 }  // namespace skene

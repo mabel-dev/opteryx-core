@@ -424,25 +424,56 @@ cdef int _validate_fetch_ahead(int decode_workers, int fetch_ahead,
     return 0
 
 
-cdef int _count_remote_items(items) except -1:
-    """How many of this scan's work items are fetched over the wire.
+cdef int _count_remote_fetch_blocks(list work_items, list block_ids) except -1:
+    """How many FETCH BLOCKS of this scan are fetched over the wire.
 
-    The fetch stage dispatches ONE task per remote row group (io_pipeline.hpp
-    submit_row_group), so this is the most concurrency the depth can ever use,
-    and it is what the gate is measured against. Local items never enter the
-    stage — they are mmap'd in decode — so they are not counted. The remote test
-    is `_any_remote_path`'s, character for character, so the count and the
-    arming condition can never disagree about what "remote" means."""
-    cdef int n = 0
-    for p in items:
+    The fetch stage dispatches ONE task per remote fetch block (io_pipeline.hpp
+    submit_block — the kept row groups of one block of one file, one coalesced
+    fetch), so this is the most concurrency the depth can ever use, and it is
+    what the gate is measured against [D-1, ruled 2026-09-24: blocks, so the
+    gate keeps the calibration made on 256k-row fetch units whatever the row-
+    group size]. Local items never enter the stage — they are mmap'd in decode
+    — so they are not counted. The remote test is `_any_remote_path`'s,
+    character for character, so the count and the arming condition can never
+    disagree about what "remote" means."""
+    cdef set seen = set()
+    cdef Py_ssize_t i
+    cdef object p
+    for i in range(len(work_items)):
+        p = work_items[i][0]
         if p.startswith("gs://") or p.startswith("http://") or p.startswith("https://"):
-            n += 1
-    return n
+            seen.add((p, block_ids[i]))
+    return len(seen)
 
 
-cdef int _gated_fetch_ahead(int fetch_ahead, int gate, int remote_items) except -1:
+cdef int _count_remote_fetch_blocks_native(list work_items,
+                                           unordered_map[string, FileStats]* footer_map,
+                                           list column_names) except -1:
+    """`_count_remote_fetch_blocks` for the native plan, whose block ids come
+    straight from the C++ footer map (keyed by the FETCH url, as `work_items`
+    is)."""
+    cdef vector[string] names
+    cdef vector[int32_t] ids
+    cdef dict per_file = {}
+    cdef set seen = set()
+    cdef object p
+    cdef string path_bytes_cpp
+    for c in column_names:
+        names.push_back(c.encode('utf-8'))
+    for p, rg_idx in work_items:
+        if not (p.startswith("gs://") or p.startswith("http://") or p.startswith("https://")):
+            continue
+        if p not in per_file:
+            path_bytes_cpp = p.encode('utf-8')
+            ids = ParquetIOPipeline.infer_fetch_blocks(footer_map[0][path_bytes_cpp], names)
+            per_file[p] = [ids[k] for k in range(ids.size())]
+        seen.add((p, per_file[p][rg_idx]))
+    return len(seen)
+
+
+cdef int _gated_fetch_ahead(int fetch_ahead, int gate, int remote_blocks) except -1:
     """The depth this scan actually runs: the configured depth once the scan has
-    at least ``gate`` remote row groups to fetch, otherwise 0 (coupled path).
+    at least ``gate`` remote fetch blocks to fetch, otherwise 0 (coupled path).
 
     The depth is a THREAD COUNT and `set_fetch_ahead` builds that pool eagerly,
     while the auto window widens to cover it and sizes the IO arena from the
@@ -459,11 +490,11 @@ cdef int _gated_fetch_ahead(int fetch_ahead, int gate, int remote_items) except 
     `_validate_fetch_ahead`; this only ever turns a legal depth off, never on."""
     if gate < 0:
         raise ValueError(
-            f"parquet_io_fetch_ahead_min_row_groups must be >= 0 (0 = no minimum), got {gate}"
+            f"parquet_io_fetch_ahead_min_blocks must be >= 0 (0 = no minimum), got {gate}"
         )
     if fetch_ahead <= 0:
         return 0
-    if remote_items < gate:
+    if remote_blocks < gate:
         return 0
     return fetch_ahead
 
@@ -737,6 +768,60 @@ cdef class CppIOPipeline:
 
         with nogil:
             self.pipeline.submit_row_group(path_str, rg_idx, col_names_vec, col_stats_vec, mask_vec)
+
+    cdef submit_block_native(self, str cpp_path, FileStats* fs, list rg_idxs, list column_names, list row_masks):
+        """Submit the row groups `rg_idxs` of one file as ONE fetch block, using
+        C++ ColumnStats directly. `row_masks` is None (decode every row) or a
+        list parallel to `rg_idxs` of bit-packed pass-1 masks. Same
+        names/stats lockstep as submit_work_native; a projected column absent
+        from ANY member makes the block ineligible for grouping here — the
+        consumer's NULL-fill realignment needs the names per row group — so
+        such a block is refused loud rather than half-filled."""
+        cdef vector[int] idx_vec
+        cdef vector[string] col_names_vec
+        cdef vector[vector[ColumnStats]] stats_vec
+        cdef vector[vector[uint8_t]] masks_vec
+        cdef vector[ColumnStats] one
+        cdef vector[uint8_t] mask_vec
+        cdef string path_str = cpp_path.encode('utf-8')
+        cdef string cpp_col_name
+        cdef size_t i
+        cdef Py_ssize_t r, num_rows, packed_len, k
+        cdef const uint8_t* mask_ptr
+        cdef RowGroupStats* rg
+        for col_name in column_names:
+            col_names_vec.push_back(col_name.encode('utf-8'))
+        for k in range(len(rg_idxs)):
+            rg = &fs.row_groups[<size_t>rg_idxs[k]]
+            one.clear()
+            for cpp_col_name in col_names_vec:
+                for i in range(rg.columns.size()):
+                    if rg.columns[i].name == cpp_col_name:
+                        one.push_back(rg.columns[i])
+                        break
+            if one.size() != col_names_vec.size():
+                raise ValueError(
+                    f"row group {rg_idxs[k]} of {cpp_path} is missing a projected column; "
+                    "a schema-evolved row group cannot share a fetch block"
+                )
+            idx_vec.push_back(<int>rg_idxs[k])
+            stats_vec.push_back(one)
+            if row_masks is not None:
+                num_rows = <Py_ssize_t>rg.num_rows
+                packed_len = (num_rows + 7) >> 3
+                if num_rows > 0 and len(<bytes>row_masks[k]) < packed_len:
+                    raise ValueError(
+                        f"row mask for row group {rg_idxs[k]} is too short: "
+                        f"expected at least {packed_len} packed bytes for {num_rows} rows, "
+                        f"got {len(<bytes>row_masks[k])}"
+                    )
+                mask_ptr = <const uint8_t*><bytes>row_masks[k]
+                mask_vec.resize(num_rows)
+                for r in range(num_rows):
+                    mask_vec[r] = (mask_ptr[r >> 3] >> (r & 7)) & 1
+                masks_vec.push_back(mask_vec)
+        with nogil:
+            self.pipeline.submit_block(path_str, idx_vec, col_names_vec, stats_vec, masks_vec)
 
     def get_result(self):
         cdef MorselRef result
@@ -1203,6 +1288,12 @@ cdef class IpcRowGroupSource:
     cdef int results_received
     cdef bint _closed
     cdef list masks                      # pass-2: bit-packed survival mask per work item (else None)
+    # Fetch-block id per work item (parallel to work_items): consecutive items
+    # with the same path and id are one pipeline submission, fetched together.
+    # Inferred per file from the footer's chunk offsets (infer_fetch_blocks);
+    # an item whose footer is only held as a Python dict (prefetched_footers)
+    # is its own block. Filled by _assign_blocks once work_items is final.
+    cdef list block_ids
     cdef cpp_mutex* _mtx                  # guards the cursor under concurrent pull
     # Footer cache visibility for this scan's telemetry (see `diagnostics`).
     # -1 means "not applicable to this scan" — distinct from 0, which means "applicable,
@@ -1238,6 +1329,7 @@ cdef class IpcRowGroupSource:
         self.n_items = 0
         self.in_flight_limit = 0
         self.masks = None
+        self.block_ids = None
         self._mtx = new cpp_mutex()
         self.footer_cache_hits = -1
         self.footer_cache_misses = -1
@@ -1280,6 +1372,51 @@ cdef class IpcRowGroupSource:
             diag["footer_cache_hits"] = self.footer_cache_hits
             diag["footer_cache_misses"] = self.footer_cache_misses
         return diag
+
+    cdef void _assign_blocks(self):
+        """Fetch-block id for every work item — see `block_ids`."""
+        cdef dict per_file = {}
+        cdef vector[string] names
+        cdef vector[int32_t] ids
+        cdef string path_bytes_cpp
+        cdef Py_ssize_t i
+        cdef object path
+        for c in self.column_names:
+            names.push_back(c.encode('utf-8'))
+        self.block_ids = [0] * len(self.work_items)
+        for i in range(len(self.work_items)):
+            path = self.work_items[i][0]
+            if self.prefetched_footers and path in self.prefetched_footers:
+                self.block_ids[i] = -1 - i          # dict-held footer: its own block
+                continue
+            if path not in per_file:
+                path_bytes_cpp = path.encode('utf-8')
+                ids = ParquetIOPipeline.infer_fetch_blocks(self.footer_map[0][path_bytes_cpp], names)
+                per_file[path] = [ids[k] for k in range(ids.size())]
+            self.block_ids[i] = per_file[path][self.work_items[i][1]]
+
+    cdef bint _same_block(self, int a, int b):
+        return (self.work_items[a][0] == self.work_items[b][0] and
+                self.block_ids[a] == self.block_ids[b])
+
+    cdef void _submit_span(self, int first, int last):
+        """Submit work items [first, last) — consecutive members of one fetch
+        block — as one pipeline submission (fetched together, decoded per row
+        group). Called OUTSIDE the cursor lock, like _submit_one."""
+        cdef object path = self.work_items[first][0]
+        cdef str cpp_path = self.orig_to_cpp.get(path, path)
+        cdef string path_bytes_cpp
+        cdef int idx
+        if last - first == 1 or (self.prefetched_footers and path in self.prefetched_footers):
+            for idx in range(first, last):
+                self._submit_one(idx)
+            return
+        path_bytes_cpp = path.encode('utf-8')
+        self.pipeline.submit_block_native(
+            cpp_path, &self.footer_map[0][path_bytes_cpp],
+            [self.work_items[idx][1] for idx in range(first, last)],
+            self.column_names,
+            None if self.masks is None else [self.masks[idx] for idx in range(first, last)])
 
     cdef void _submit_one(self, int idx):
         """Submit one work item to the C++ pipeline. Called OUTSIDE the cursor
@@ -1356,9 +1493,13 @@ cdef class IpcRowGroupSource:
             self._mtx.lock()
         submit_start = self.next_to_submit
         submit_end = submit_start
+        # The window advances a whole FETCH BLOCK at a time (the kept row groups
+        # of one block are one submission), overshooting by at most block - 1.
         while submit_end < self.n_items and \
                 (submit_end - self.results_received) < self.in_flight_limit:
             submit_end += 1
+            while submit_end < self.n_items and self._same_block(submit_end - 1, submit_end):
+                submit_end += 1
         self.next_to_submit = submit_end
         if self.results_received >= self.n_items:
             self._mtx.unlock()
@@ -1366,9 +1507,15 @@ cdef class IpcRowGroupSource:
         self.results_received += 1
         self._mtx.unlock()
 
-        # ── Submit the claimed range OUTSIDE the lock (queue is thread-safe). ──
-        for idx in range(submit_start, submit_end):
-            self._submit_one(idx)
+        # ── Submit the claimed range OUTSIDE the lock (queue is thread-safe),
+        # one fetch block per submission. ──
+        idx = submit_start
+        while idx < submit_end:
+            k = idx + 1
+            while k < submit_end and self._same_block(k - 1, k):
+                k += 1
+            self._submit_span(idx, k)
+            idx = k
 
         # ── Blocking wait OUTSIDE the lock; the C++ queue hands each concurrent
         # caller a distinct completed result. ──
@@ -1935,7 +2082,7 @@ cpdef IpcRowGroupSource open_ipc_source(
     int in_flight_limit_override=0,
     coalesce_tuning=None,
     int fetch_ahead=0,
-    int fetch_ahead_min_row_groups=0,
+    int fetch_ahead_min_blocks=0,
     int64_t memory_budget=0,
 ):
     """Plan a single-pass scan: fetch footers, prune row groups, size the pool,
@@ -2060,6 +2207,7 @@ cpdef IpcRowGroupSource open_ipc_source(
     src.n_items = len(work_items)
     if src.n_items == 0:
         return src
+    src._assign_blocks()
 
     # ── Footer-derived pool sizing from the largest projected row group. ──
     proj_set = set(column_names)
@@ -2097,8 +2245,8 @@ cpdef IpcRowGroupSource open_ipc_source(
     # rather than only on the ones large enough to reach the fetch pool.
     _validate_fetch_ahead(decode_workers, fetch_ahead, in_flight_limit_override)
     fetch_ahead = _gated_fetch_ahead(
-        fetch_ahead, fetch_ahead_min_row_groups,
-        _count_remote_items([_wi_path for _wi_path, _ in work_items]),
+        fetch_ahead, fetch_ahead_min_blocks,
+        _count_remote_fetch_blocks(work_items, src.block_ids),
     )
     in_flight_limit = _submission_window(decode_workers, fetch_ahead, in_flight_limit_override)
     if in_flight_limit < 1:
@@ -2149,7 +2297,7 @@ cpdef IpcRowGroupSource open_pass2_source(
     int in_flight_limit_override=0,
     coalesce_tuning=None,
     int fetch_ahead=0,
-    int fetch_ahead_min_row_groups=0,
+    int fetch_ahead_min_blocks=0,
     int64_t memory_budget=0,
 ):
     """Pass-2 late-materialization driver: decode only the surviving rows of the
@@ -2212,11 +2360,12 @@ cpdef IpcRowGroupSource open_pass2_source(
     src.n_items = len(wi)
     if src.n_items == 0:
         return src
+    src._assign_blocks()
     # Same order as the single-pass path: validate the configured depth, then gate.
     _validate_fetch_ahead(decode_workers, fetch_ahead, in_flight_limit_override)
     fetch_ahead = _gated_fetch_ahead(
-        fetch_ahead, fetch_ahead_min_row_groups,
-        _count_remote_items([_wi_path for _wi_path, _, _ in work_items]),
+        fetch_ahead, fetch_ahead_min_blocks,
+        _count_remote_fetch_blocks(wi, src.block_ids),
     )
     src.in_flight_limit = max(1, _submission_window(decode_workers, fetch_ahead, in_flight_limit_override))
     src.pipeline = CppIOPipeline(
@@ -2425,7 +2574,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     filesystem=None,
     footer_bytes_cache=None,
     int fetch_ahead=0,
-    int fetch_ahead_min_row_groups=0,
+    int fetch_ahead_min_blocks=0,
     int in_flight_limit_override=0,
     http_tuning=None,
     coalesce_tuning=None,
@@ -2626,15 +2775,35 @@ cpdef NativeScanPlan open_native_scan_plan(
     if plan.n_items == 0:
         return plan
 
-    proj_set_bytes = {name.encode('utf-8') for name in column_names}
+    # Largest projected row group (uncompressed), for the pool sizing below. The
+    # projected columns' chunk INDICES are resolved once per FILE — a parquet
+    # file's row groups all list their chunks in the file's schema leaf order —
+    # and reused for every row group of that file. Matching by name per row
+    # group per column built a Python bytes object for every chunk in the
+    # footer: at 64k row groups over 105 columns that was ~166k allocations
+    # and ~20 ms of the plan time of EVERY query (measured 2026-09-24).
+    cdef vector[string] proj_names
+    cdef dict proj_idx_by_path = {}
+    cdef list proj_idx
+    cdef size_t pk
+    for name in column_names:
+        proj_names.push_back(name.encode('utf-8'))
     max_rg_bytes = 0
     for path, rg_idx in work_items:
         path_bytes_cpp = path.encode('utf-8')
-        rg_bytes = 0
         rgp = &plan.footer_map[0][path_bytes_cpp].row_groups[rg_idx]
-        for ci in range(rgp.columns.size()):
-            if rgp.columns[ci].total_uncompressed_size > 0 and \
-                    bytes(rgp.columns[ci].name) in proj_set_bytes:
+        proj_idx = proj_idx_by_path.get(path)
+        if proj_idx is None:
+            proj_idx = []
+            for pk in range(proj_names.size()):
+                for ci in range(rgp.columns.size()):
+                    if rgp.columns[ci].name == proj_names[pk]:
+                        proj_idx.append(ci)
+                        break
+            proj_idx_by_path[path] = proj_idx
+        rg_bytes = 0
+        for ci in proj_idx:
+            if rgp.columns[ci].total_uncompressed_size > 0:
                 rg_bytes += rgp.columns[ci].total_uncompressed_size
         if rg_bytes > max_rg_bytes:
             max_rg_bytes = rg_bytes
@@ -2645,8 +2814,8 @@ cpdef NativeScanPlan open_native_scan_plan(
     # Same order as the trampoline paths: validate the configured depth, then gate.
     _validate_fetch_ahead(decode_workers, fetch_ahead, 0)
     fetch_ahead = _gated_fetch_ahead(
-        fetch_ahead, fetch_ahead_min_row_groups,
-        _count_remote_items([_wi_path for _wi_path, _ in work_items]),
+        fetch_ahead, fetch_ahead_min_blocks,
+        _count_remote_fetch_blocks_native(work_items, plan.footer_map, list(column_names)),
     )
     plan.in_flight_limit = _submission_window(
         decode_workers, fetch_ahead, in_flight_limit_override)
@@ -2729,8 +2898,8 @@ cpdef NativeScanPlan open_native_scan_plan(
     plan.pipeline_ptr.set_length_only_columns(plan.length_only_columns)
     # Phase 2: pushed per-value predicates → worker dictionary decode-skip, mirroring
     # `open_ipc_source`. Registration is what ARMS the mechanism: `dict_preds_` empty
-    # leaves BOTH guarded blocks in io_pipeline.hpp dead — the per-chunk dictionary
-    # probe AND the adjacent bloom decode-skip — so without this the native path
+    # leaves the guarded per-chunk dictionary probe in io_pipeline.hpp dead — so
+    # without this the native path
     # decodes every data page even when no dictionary value can satisfy the
     # predicate. Plan-time row-group pruning above does NOT cover this: min/max
     # answers ranges and bloom answers equality, neither answers substring
@@ -3065,7 +3234,7 @@ def iter_row_groups_ipc(
     int in_flight_limit_override=0,
     coalesce_tuning=None,
     int fetch_ahead=0,
-    int fetch_ahead_min_row_groups=0,
+    int fetch_ahead_min_blocks=0,
     int64_t memory_budget=0,
 ):
     """
@@ -3090,7 +3259,7 @@ def iter_row_groups_ipc(
         in_flight_limit_override=in_flight_limit_override,
         coalesce_tuning=coalesce_tuning,
         fetch_ahead=fetch_ahead,
-        fetch_ahead_min_row_groups=fetch_ahead_min_row_groups,
+        fetch_ahead_min_blocks=fetch_ahead_min_blocks,
         memory_budget=memory_budget,
     )
     cdef list names = src.column_names_bytes

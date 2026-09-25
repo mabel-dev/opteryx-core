@@ -124,18 +124,14 @@ CompareFn comparator_for(DrakenType type) {
 // preserved there: sorted-array backing, the cached-threshold warm reject, the
 // min_k(k)-narrows-exactly guarantee and the v <= 0 guard in estimate().
 //
-// K=1024, not the kSketchK=32 the stored sketch carries. Those 32 are sized to
-// be STORED per file and unioned across thousands of them, where width costs
-// bytes forever; this one is thrown away at the end of the column and its only
-// cost is 8KB of transient memory, so it buys the accuracy instead (~3% RSE
-// against ~18.9% at K=32) — and the 32 smallest OF the 1024 smallest are the
-// 32 smallest outright, so the stored sketch loses nothing by being taken
-// from it.
-//
-// The family tag is a correctness discriminant, not a label: these hashes are
-// XXH3 over value bytes (ValueKey below), which is NOT draken's Vector.hash()
-// that ANALYZE and the catalog stats engine sketch with. See format.h's
-// ColumnSketchHeader and the header block in kmv_sketch.h.
+// K=1024: this sketch is thrown away at the end of the column and its only
+// cost is 8KB of transient memory, so it buys accuracy (~3% RSE) for the two
+// decisions it feeds — the string-family decline and the per-row-group `ndv`
+// estimate. It is NOT the stored sketch: v3 stores a per-file sketch in
+// draken's Vector.hash() family, built by the writer (sketch.cpp), because only
+// that family unions with catalog and ANALYZE sketches. These hashes are XXH3
+// over value bytes (ValueKey below), so the two must never be mixed — the family
+// tag makes that a compile error (kmv_sketch.h).
 using KmvSketch = draken::KmvSketch<1024u, draken::KmvHashFamily::kXxh3ValueBytes>;
 
 }  // namespace
@@ -264,10 +260,8 @@ Status order_column(const DrakenVector& vector, const LogicalType* logical,
 
     // ── KMV sketch over the column's DISTINCT values ───────────────────────
     //
-    // One pass, for EVERY orderable column — not just the string family, and not
-    // just the decline path. `ndv` is a scalar and scalars do not merge; the
-    // stored min-hashes are what let a reader union row groups and files (see
-    // format.h, ColumnSketchHeader).
+    // One pass, for EVERY orderable column: its estimate feeds the string
+    // decline below and the per-row-group `ndv` the writer records.
     //
     // Iterates REFERENCED CODES rather than rows. The two produce an identical
     // hash set — every valid row's code is referenced and every referenced code
@@ -275,15 +269,10 @@ Status order_column(const DrakenVector& vector, const LogicalType* logical,
     // hashes instead of length. `referenced` already excludes null rows, which
     // is exactly the non-null rule `ndv` is defined by.
     //
-    // K=1024, not kSketchK: the string decline below reads estimate() and needs
-    // its accuracy. The stored sketch is narrowed out of it for free — see the
-    // KmvSketch alias above.
     KmvSketch sketch;
     for (uint32_t code = 0; code < vector.data_length; ++code) {
         if (referenced[code]) sketch.add(static_cast<uint64_t>(key.hash(code)));
     }
-    // Set before the decline returns below, so every exit from here on carries it.
-    out->min_hashes = sketch.min_k(kSketchK);
 
     // ── Pick the deduplication strategy from a SAMPLE ──
     //

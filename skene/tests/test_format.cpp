@@ -7,6 +7,7 @@
 #include "harness.h"
 #include "skene/checksum.h"
 #include "skene/format.h"
+#include "format_v2.h"   // the frozen v2 records the retained reader parses
 
 // skene serializes draken's structures, so it must see draken's ABI exactly as
 // draken pins it. Including this here means draken's own static_asserts
@@ -81,16 +82,27 @@ static void test_version_window() {
 
 static void test_record_layouts() {
     CHECK_EQ(sizeof(SectionEntry), size_t{48});        // v2: codec + encoded_bytes
-    CHECK_EQ(sizeof(ColumnEntryHead), size_t{80});
-    CHECK_EQ(sizeof(RowGroupFooterHeader), size_t{48});
-    CHECK_EQ(sizeof(FileFooterHeader), size_t{56});
-    CHECK_EQ(sizeof(RowGroupEntry), size_t{56});
+    CHECK_EQ(sizeof(FileFooterHeader), size_t{64});    // v3
+    CHECK_EQ(sizeof(RowGroupEntry), size_t{16});       // v3
+    CHECK_EQ(sizeof(ColumnSummaryHead), size_t{64});   // v3
+    CHECK_EQ(sizeof(BlockExtent), size_t{16});         // v3
+    CHECK_EQ(sizeof(SketchRecordHeader), size_t{8});   // v3
+    CHECK_EQ(sizeof(DirectoryBlockHeader), size_t{16});// v3
+    CHECK_EQ(sizeof(ChunkRecord), size_t{64});         // v3
     CHECK_EQ(sizeof(SchemaEntryHead), size_t{20});
     CHECK_EQ(sizeof(ColumnStatistics), size_t{56});    // v2: + ndv
     CHECK_EQ(sizeof(LogicalTypeDescriptor), size_t{12});
     CHECK_EQ(sizeof(ZoneMapEntry), size_t{16});
     CHECK_EQ(sizeof(SortKey), size_t{8});
     CHECK_EQ(sizeof(ClusterSpecHeader), size_t{4});    // v2
+
+    // The FROZEN v2 records: the golden fixtures in tests/fixtures/v2/ were
+    // written at these sizes, and the retained reader must keep parsing them.
+    CHECK_EQ(sizeof(v2::FileFooterHeader), size_t{56});
+    CHECK_EQ(sizeof(v2::RowGroupEntry), size_t{56});
+    CHECK_EQ(sizeof(v2::RowGroupFooterHeader), size_t{48});
+    CHECK_EQ(sizeof(v2::ColumnEntryHead), size_t{80});
+    CHECK_EQ(sizeof(v2::ColumnSketchHeader), size_t{8});
 }
 
 // FORMAT.md documents every field's offset in byte tables, and a spec that
@@ -115,7 +127,7 @@ static void test_offsets_match_the_specification() {
     CHECK_EQ(offsetof(FileTail, reserved), size_t{16});
     CHECK_EQ(offsetof(FileTail, magic), size_t{20});
 
-    // FORMAT.md §5.1 — file footer header
+    // FORMAT.md §5.2 — file footer header (v3)
     CHECK_EQ(offsetof(FileFooterHeader, footer_magic), size_t{0});
     CHECK_EQ(offsetof(FileFooterHeader, footer_version), size_t{4});
     CHECK_EQ(offsetof(FileFooterHeader, reserved), size_t{6});
@@ -125,56 +137,64 @@ static void test_offsets_match_the_specification() {
     CHECK_EQ(offsetof(FileFooterHeader, file_uuid), size_t{24});
     CHECK_EQ(offsetof(FileFooterHeader, created_at_unix_us), size_t{40});
     CHECK_EQ(offsetof(FileFooterHeader, writer_tag_bytes), size_t{48});
-    CHECK_EQ(offsetof(FileFooterHeader, file_flags), size_t{52});
+    CHECK_EQ(offsetof(FileFooterHeader, block_row_groups), size_t{52});
+    CHECK_EQ(offsetof(FileFooterHeader, data_region_bytes), size_t{56});
 
-    // FORMAT.md §5.2 — row group directory entry
+    // FORMAT.md §5.3 — row group table entry
     CHECK_EQ(offsetof(RowGroupEntry, row_count), size_t{0});
     CHECK_EQ(offsetof(RowGroupEntry, first_row), size_t{8});
-    CHECK_EQ(offsetof(RowGroupEntry, data_offset), size_t{16});
-    CHECK_EQ(offsetof(RowGroupEntry, data_bytes), size_t{24});
-    CHECK_EQ(offsetof(RowGroupEntry, footer_offset), size_t{32});
-    CHECK_EQ(offsetof(RowGroupEntry, footer_checksum), size_t{40});
-    CHECK_EQ(offsetof(RowGroupEntry, footer_bytes), size_t{48});
-    CHECK_EQ(offsetof(RowGroupEntry, reserved), size_t{52});
 
-    // FORMAT.md §5.3 — schema directory entry
+    // FORMAT.md §5.4 — schema directory entry
     CHECK_EQ(offsetof(SchemaEntryHead, field_id), size_t{0});
     CHECK_EQ(offsetof(SchemaEntryHead, name_bytes), size_t{4});
     CHECK_EQ(offsetof(SchemaEntryHead, type), size_t{8});
     CHECK_EQ(offsetof(SchemaEntryHead, logical_present), size_t{12});
     CHECK_EQ(offsetof(SchemaEntryHead, child_count), size_t{16});
 
-    // FORMAT.md §5.4 — row group footer header
-    CHECK_EQ(offsetof(RowGroupFooterHeader, row_count), size_t{0});
-    CHECK_EQ(offsetof(RowGroupFooterHeader, column_count), size_t{8});
-    CHECK_EQ(offsetof(RowGroupFooterHeader, section_count), size_t{12});
-    CHECK_EQ(offsetof(RowGroupFooterHeader, file_uuid), size_t{16});
-    CHECK_EQ(offsetof(RowGroupFooterHeader, created_at_unix_us), size_t{32});
-    CHECK_EQ(offsetof(RowGroupFooterHeader, writer_tag_bytes), size_t{40});
-    CHECK_EQ(offsetof(RowGroupFooterHeader, file_flags), size_t{44});
+    // FORMAT.md §5.6 — column summary head, and a block extent
+    CHECK_EQ(offsetof(ColumnSummaryHead, directory_offset), size_t{0});
+    CHECK_EQ(offsetof(ColumnSummaryHead, directory_bytes), size_t{8});
+    CHECK_EQ(offsetof(ColumnSummaryHead, reserved0), size_t{12});
+    CHECK_EQ(offsetof(ColumnSummaryHead, directory_checksum), size_t{16});
+    CHECK_EQ(offsetof(ColumnSummaryHead, data_offset), size_t{24});
+    CHECK_EQ(offsetof(ColumnSummaryHead, data_bytes), size_t{32});
+    CHECK_EQ(offsetof(ColumnSummaryHead, index_offset), size_t{40});
+    CHECK_EQ(offsetof(ColumnSummaryHead, index_bytes), size_t{48});
+    CHECK_EQ(offsetof(ColumnSummaryHead, block_count), size_t{56});
+    CHECK_EQ(offsetof(ColumnSummaryHead, child_count), size_t{60});
+    CHECK_EQ(offsetof(BlockExtent, offset), size_t{0});
+    CHECK_EQ(offsetof(BlockExtent, bytes), size_t{8});
 
-    // FORMAT.md §5.2 — column directory entry
-    CHECK_EQ(offsetof(ColumnEntryHead, field_id), size_t{0});
-    CHECK_EQ(offsetof(ColumnEntryHead, name_bytes), size_t{4});
-    CHECK_EQ(offsetof(ColumnEntryHead, type), size_t{8});
-    CHECK_EQ(offsetof(ColumnEntryHead, vector_flags), size_t{12});
-    CHECK_EQ(offsetof(ColumnEntryHead, logical_present), size_t{13});
-    CHECK_EQ(offsetof(ColumnEntryHead, selection_kind), size_t{14});
-    CHECK_EQ(offsetof(ColumnEntryHead, value_order), size_t{15});
-    CHECK_EQ(offsetof(ColumnEntryHead, length), size_t{16});
-    CHECK_EQ(offsetof(ColumnEntryHead, data_length), size_t{20});
-    CHECK_EQ(offsetof(ColumnEntryHead, child_count), size_t{24});
-    CHECK_EQ(offsetof(ColumnEntryHead, section_index), size_t{28});
-    CHECK_EQ(offsetof(ColumnEntryHead, section_count), size_t{32});
-    CHECK_EQ(offsetof(ColumnEntryHead, stats_bytes), size_t{36});
-    CHECK_EQ(offsetof(ColumnEntryHead, string_slot_count), size_t{40});
-    CHECK_EQ(offsetof(ColumnEntryHead, string_arena_used), size_t{48});
-    CHECK_EQ(offsetof(ColumnEntryHead, string_arena_cap), size_t{56});
-    CHECK_EQ(offsetof(ColumnEntryHead, string_payloads_elided), size_t{64});
-    CHECK_EQ(offsetof(ColumnEntryHead, index_section_index), size_t{68});
-    CHECK_EQ(offsetof(ColumnEntryHead, index_section_count), size_t{72});
+    // FORMAT.md §5.7 — sketch record
+    CHECK_EQ(offsetof(SketchRecordHeader, hash_family), size_t{0});
+    CHECK_EQ(offsetof(SketchRecordHeader, reserved), size_t{1});
+    CHECK_EQ(offsetof(SketchRecordHeader, k), size_t{2});
+    CHECK_EQ(offsetof(SketchRecordHeader, count), size_t{4});
 
-    // FORMAT.md §5.3 — section directory entry (v2 layout)
+    // FORMAT.md §5.9 — directory block header
+    CHECK_EQ(offsetof(DirectoryBlockHeader, directory_magic), size_t{0});
+    CHECK_EQ(offsetof(DirectoryBlockHeader, node_ordinal), size_t{4});
+    CHECK_EQ(offsetof(DirectoryBlockHeader, chunk_count), size_t{8});
+    CHECK_EQ(offsetof(DirectoryBlockHeader, section_count), size_t{12});
+
+    // FORMAT.md §5.10 — chunk record
+    CHECK_EQ(offsetof(ChunkRecord, length), size_t{0});
+    CHECK_EQ(offsetof(ChunkRecord, data_length), size_t{4});
+    CHECK_EQ(offsetof(ChunkRecord, vector_flags), size_t{8});
+    CHECK_EQ(offsetof(ChunkRecord, selection_kind), size_t{9});
+    CHECK_EQ(offsetof(ChunkRecord, value_order), size_t{10});
+    CHECK_EQ(offsetof(ChunkRecord, string_payloads_elided), size_t{11});
+    CHECK_EQ(offsetof(ChunkRecord, section_index), size_t{12});
+    CHECK_EQ(offsetof(ChunkRecord, section_count), size_t{16});
+    CHECK_EQ(offsetof(ChunkRecord, index_section_index), size_t{20});
+    CHECK_EQ(offsetof(ChunkRecord, index_section_count), size_t{24});
+    CHECK_EQ(offsetof(ChunkRecord, reserved0), size_t{28});
+    CHECK_EQ(offsetof(ChunkRecord, string_slot_count), size_t{32});
+    CHECK_EQ(offsetof(ChunkRecord, string_arena_used), size_t{40});
+    CHECK_EQ(offsetof(ChunkRecord, string_arena_cap), size_t{48});
+    CHECK_EQ(offsetof(ChunkRecord, reserved1), size_t{56});
+
+    // FORMAT.md §5.11 — section entry (unchanged from v2)
     CHECK_EQ(offsetof(SectionEntry, kind), size_t{0});
     CHECK_EQ(offsetof(SectionEntry, encoding), size_t{2});
     CHECK_EQ(offsetof(SectionEntry, codec), size_t{3});

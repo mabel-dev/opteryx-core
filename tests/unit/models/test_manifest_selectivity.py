@@ -29,6 +29,15 @@ from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import INT64, VARCHAR
 from opteryx.types.schema import RelationSchema, SchemaColumn
+from opteryx.compiled.structures.expressions import And
+from opteryx.compiled.structures.expressions import Between
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Function
+from opteryx.compiled.structures.expressions import Literal
+from opteryx.compiled.structures.expressions import Not
+from opteryx.compiled.structures.expressions import Or
+from opteryx.compiled.structures.expressions import UnaryOperator
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 
 # ---------------------------------------------------------------------------
@@ -94,23 +103,23 @@ def _min_k_vector(per_file_hashes: List[List[List[int]]]):
 
 
 def _identifier(name: str) -> Node:
-    n = Node(node_type=NodeType.IDENTIFIER)
-    n.value = name
-    n.source_column = name
     # A bound identifier carries its schema column — that is where the identity
     # used to look statistics up comes from.
-    n.schema_column = SchemaColumn(name=name, column_type=INT64, identity=_ident(name))
-    return n
+    return LogicalColumn(
+        node_type=NodeType.IDENTIFIER,
+        source_column=name,
+        schema_column=SchemaColumn(name=name, column_type=INT64, identity=_ident(name)),
+    )
 
 
 def _literal(value) -> Node:
-    n = Node(node_type=NodeType.LITERAL)
+    n = Literal()
     n.value = value
     return n
 
 
 def _cmp(op: str, col: str, value) -> Node:
-    n = Node(node_type=NodeType.COMPARISON_OPERATOR)
+    n = Comparison()
     n.value = op
     n.left = _identifier(col)
     n.right = _literal(value)
@@ -118,7 +127,7 @@ def _cmp(op: str, col: str, value) -> Node:
 
 
 def _between(col: str, low, high) -> Node:
-    n = Node(node_type=NodeType.BETWEEN)
+    n = Between()
     n.left = _identifier(col)
     # Mirror manifest.prune_files convention: right=lower, centre=upper.
     n.right = _literal(low)
@@ -127,28 +136,28 @@ def _between(col: str, low, high) -> Node:
 
 
 def _unary(op: str, col: str) -> Node:
-    n = Node(node_type=NodeType.UNARY_OPERATOR)
+    n = UnaryOperator()
     n.value = op
     n.centre = _identifier(col)
     return n
 
 
 def _and(a: Node, b: Node) -> Node:
-    n = Node(node_type=NodeType.AND)
+    n = And()
     n.left = a
     n.right = b
     return n
 
 
 def _or(a: Node, b: Node) -> Node:
-    n = Node(node_type=NodeType.OR)
+    n = Or()
     n.left = a
     n.right = b
     return n
 
 
 def _not(inner: Node) -> Node:
-    n = Node(node_type=NodeType.NOT)
+    n = Not()
     n.centre = inner
     return n
 
@@ -374,15 +383,15 @@ def _varchar_schema(*names: str) -> RelationSchema:
 
 
 def _varchar_identifier(name: str) -> Node:
-    n = Node(node_type=NodeType.IDENTIFIER)
-    n.value = name
-    n.source_column = name
-    n.schema_column = SchemaColumn(name=name, column_type=VARCHAR, identity=_ident(name))
-    return n
+    return LogicalColumn(
+        node_type=NodeType.IDENTIFIER,
+        source_column=name,
+        schema_column=SchemaColumn(name=name, column_type=VARCHAR, identity=_ident(name)),
+    )
 
 
 def _starts_with(op: str, col: str, prefix: bytes) -> Node:
-    n = Node(node_type=NodeType.FUNCTION)
+    n = Function()
     n.value = op
     n.parameters = [_varchar_identifier(col), _literal(prefix)]
     return n
@@ -515,14 +524,14 @@ class TestCompound:
 class TestDefensive:
     def test_unknown_node_returns_one(self):
         m = _bare_manifest()
-        node = Node(node_type=NodeType.FUNCTION)
+        node = Function()
         node.value = "FOO"
         assert m.estimate_selectivity(node) == 1.0
 
     def test_swapped_operands(self):
         # `1 < x` should be treated like `x > 1` → 0.25 fallback (same as Gt).
         m = _bare_manifest()
-        node = Node(node_type=NodeType.COMPARISON_OPERATOR)
+        node = Comparison()
         node.value = "Lt"
         node.left = _literal(1)
         node.right = _identifier("x")

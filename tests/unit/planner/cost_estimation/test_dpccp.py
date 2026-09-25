@@ -1,4 +1,4 @@
-"""Unit tests for opteryx.planner.cost_estimation.dpccp."""
+"""Unit tests for the native DPccp enumerator (opteryx.compiled.planner.join_estimator)."""
 
 import os
 import random

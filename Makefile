@@ -212,6 +212,8 @@ rugo-floor: ## Run the rugo release floor (oracle + notebook actions + cli) — 
 	@$(PYTEST) tests/rugo/test_oracle_conformance.py -q
 	$(call print_blue,"Running rugo release floor: csv oracle conformance...")
 	@$(PYTEST) tests/rugo/test_csv_oracle_conformance.py -q
+	$(call print_blue,"Running rugo release floor: csv predicate NULL semantics...")
+	@$(PYTEST) tests/rugo/test_csv_predicate_nulls.py -q
 	$(call print_blue,"Running rugo release floor: jsonl oracle conformance...")
 	@$(PYTEST) tests/rugo/test_jsonl_oracle_conformance.py -q
 	$(call print_blue,"Running rugo release floor: notebook actions...")
@@ -477,7 +479,7 @@ json-validate-bench: ## Build + run the draken `IS [NOT] JSON` kernel microbench
 	    -o $(JSON_VALIDATE_BENCH_DIR)/json_validate_bench
 	@cd $(CURDIR) && $(JSON_VALIDATE_BENCH_DIR)/json_validate_bench $(JSON_VALIDATE_BENCH_ARGS)
 
-# === TPC-H (skene v2 mirrors, DuckDB-calibrated) ===
+# === TPC-H (skene v3 mirrors, DuckDB-calibrated) ===
 #
 # Three scales, one body: `make tpch-sf1`, `make tpch-sf10`, `make tpch-sf100`.
 # `make tpch` stays as an alias for tpch-sf10 — that is the scale every number
@@ -503,7 +505,8 @@ json-validate-bench: ## Build + run the draken `IS [NOT] JSON` kernel microbench
 #     different set of objects under different names, and the converter refuses
 #     to write over it. A missing stamp with a populated directory therefore
 #     means "regenerate", which is what the rm does. The stamp is named for the
-#     FORMAT VERSION so a v1 tree can never satisfy a v2 gate.
+#     FORMAT VERSION so an older tree can never satisfy the v3 gate — every
+#     mirror stamped .skene-v2 regenerates as v3 on its next run.
 #
 #  3. CODEC. The `lz4` argument is NOT optional: it is WriteOptions::for_fast_reads,
 #     the local-benchmark posture (architect 2026-08-11) shared with
@@ -531,10 +534,10 @@ define tpch_suite
 		echo "Generating testdata/tpch_$(1) (SF$(1)) via tpchgen-cli..."; \
 		tpchgen-cli -s $(1) --format parquet --parts 16 --output-dir testdata/tpch_$(1); \
 	}
-	@test -f testdata/tpch_$(1)_skene.skene-v2 || { \
+	@test -f testdata/tpch_$(1)_skene.skene-v3 || { \
 		rm -rf testdata/tpch_$(1)_skene && \
 		$(PYTHON) dev/parquet_to_skene.py testdata/tpch_$(1) testdata/tpch_$(1)_skene lz4 && \
-		touch testdata/tpch_$(1)_skene.skene-v2; \
+		touch testdata/tpch_$(1)_skene.skene-v3; \
 	}
 	@test -s tests/performance/tpch/duckdb/results.sf$(1).json || { \
 		echo "ERROR: no DuckDB baseline at tests/performance/tpch/duckdb/results.sf$(1).json"; \
@@ -546,15 +549,15 @@ define tpch_suite
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py --scale $(1) --variant skene
 endef
 
-tpch-sf1: ## Run TPC-H SF1 vs DuckDB on the skene v2 mirror (fast iteration; planning is ~19% of the work at this scale)
+tpch-sf1: ## Run TPC-H SF1 vs DuckDB on the skene v3 mirror (fast iteration; planning is ~19% of the work at this scale)
 	$(call print_blue,Running TPC-H SF1 benchmark vs DuckDB (skene)...)
 	$(call tpch_suite,1)
 
-tpch-sf10: ## Run TPC-H SF10 vs DuckDB on the skene v2 mirror (the quoted scale)
+tpch-sf10: ## Run TPC-H SF10 vs DuckDB on the skene v3 mirror (the quoted scale)
 	$(call print_blue,Running TPC-H SF10 benchmark vs DuckDB (skene)...)
 	$(call tpch_suite,10)
 
-tpch-sf100: ## Run TPC-H SF100 vs DuckDB on the skene v2 mirror (generates the ~39GB parquet source on first run)
+tpch-sf100: ## Run TPC-H SF100 vs DuckDB on the skene v3 mirror (generates the ~39GB parquet source on first run)
 	$(call print_blue,Running TPC-H SF100 benchmark vs DuckDB (skene)...)
 	$(call tpch_suite,100)
 
@@ -628,7 +631,7 @@ clickbench-skene: ## Run ClickBench on the skene mirror of the dataset (generate
 	@# files is a different set of objects under different names, so the old
 	@# stamp must not satisfy this gate and the old tree must go — otherwise the
 	@# converter refuses and the benchmark never runs.
-	@test -f scratch/hits_skene.skene-v2 || { rm -rf scratch/hits_skene scratch/hits_skene.converted && $(PYTHON) dev/parquet_to_skene.py scratch/hits_rugo_262k scratch/hits_skene lz4 && touch scratch/hits_skene.skene-v2; }
+	@test -f scratch/hits_skene.skene-v3 || { rm -rf scratch/hits_skene scratch/hits_skene.converted && $(PYTHON) dev/parquet_to_skene.py scratch/hits_rugo_262k scratch/hits_skene lz4 && touch scratch/hits_skene.skene-v3; }
 	@clear || true
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (skene) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant skene
@@ -644,7 +647,7 @@ jsonbench: ## Run JSONBench (Bluesky NDJSON) vs DuckDB via Opteryx SQL / READ_JS
 	@clear || true
 	@$(PYTHON) tests/performance/jsonbench/runner.py --size $(if $(JSONBENCH_SIZE),$(JSONBENCH_SIZE),10)
 
-# === TPC-DS (skene v2 mirrors) ===
+# === TPC-DS (skene v3 mirrors) ===
 #
 # Scale is in the target name — `make tpcds-sf1`, `make tpcds-sf001` — for the
 # same reason it is on the TPC-H targets: a bare `tpcds` does not say which of
@@ -661,7 +664,7 @@ jsonbench: ## Run JSONBench (Bluesky NDJSON) vs DuckDB via Opteryx SQL / READ_JS
 #     (dev/tpcds/generate_data.py) rather than vendored: 24 tables as
 #     <table>/data.parquet. Regenerate by removing testdata/tpcds_<sf>.
 #
-#  2. SKENE v2 MIRROR — what the suite actually reads. TPC-DS is measured on
+#  2. SKENE v3 MIRROR — what the suite actually reads. TPC-DS is measured on
 #     the same format the engine is measured on everywhere else (TPC-H, JOB,
 #     ClickBench, h2o); a coverage suite reading a format nothing else reads
 #     would certify a path production does not take. Stamped on the FORMAT
@@ -678,20 +681,20 @@ jsonbench: ## Run JSONBench (Bluesky NDJSON) vs DuckDB via Opteryx SQL / READ_JS
 
 define tpcds_suite
 	@test -d testdata/tpcds_$(1) || $(PYTHON) dev/tpcds/generate_data.py --scale $(1)
-	@test -f testdata/tpcds_$(1)_skene.skene-v2 || { \
+	@test -f testdata/tpcds_$(1)_skene.skene-v3 || { \
 		rm -rf testdata/tpcds_$(1)_skene && \
 		$(PYTHON) dev/parquet_to_skene.py testdata/tpcds_$(1) testdata/tpcds_$(1)_skene lz4 && \
-		touch testdata/tpcds_$(1)_skene.skene-v2; \
+		touch testdata/tpcds_$(1)_skene.skene-v3; \
 	}
 	@clear || true
 	@$(PYTHON) tests/performance/tpcds/runner.py --scale $(1) --variant skene
 endef
 
-tpcds-sf1: ## Run the TPC-DS SF1 smoke suite on the skene v2 mirror (coverage, not performance)
+tpcds-sf1: ## Run the TPC-DS SF1 smoke suite on the skene v3 mirror (coverage, not performance)
 	$(call print_blue,Running TPC-DS SF1 smoke suite (skene)...)
 	$(call tpcds_suite,1)
 
-tpcds-sf001: ## Run the TPC-DS SF0.01 smoke suite on the skene v2 mirror (fast iteration; label matches testdata/tpch_001)
+tpcds-sf001: ## Run the TPC-DS SF0.01 smoke suite on the skene v3 mirror (fast iteration; label matches testdata/tpch_001)
 	$(call print_blue,Running TPC-DS SF0.01 smoke suite (skene)...)
 	$(call tpcds_suite,001)
 
@@ -738,7 +741,7 @@ job: ## Run Join Order Benchmark (JOB) on the skene mirror (generates testdata/j
 	@# Gated on a completion stamp rather than on the directory: an interrupted
 	@# conversion leaves a partial tree that `test -d` would accept, silently
 	@# benchmarking a fraction of the dataset.
-	@test -f testdata/job_skene.skene-v2 || { rm -rf testdata/job_skene && $(PYTHON) dev/parquet_to_skene.py testdata/job testdata/job_skene lz4 && touch testdata/job_skene.skene-v2; }
+	@test -f testdata/job_skene.skene-v3 || { rm -rf testdata/job_skene && $(PYTHON) dev/parquet_to_skene.py testdata/job testdata/job_skene lz4 && touch testdata/job_skene.skene-v3; }
 	@clear || true
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/job/runner.py --variant skene
 
@@ -759,7 +762,7 @@ h2o: ## Run H2O db-benchmark on the skene mirror (groupby + join, medium; genera
 	@# one size, so there is no size level to carry. The parquet tree keeps its
 	@# testdata/h2o/<size>/<table> layout.
 	@test -d testdata/h2o/medium || { echo "testdata/h2o/medium not found — generate it with: PYTHONPATH=. $(PYTHON) tests/performance/h2o/generate_data.py --size medium"; exit 1; }
-	@test -f testdata/h2o_skene.skene-v2 || { rm -rf testdata/h2o_skene && $(PYTHON) dev/parquet_to_skene.py testdata/h2o/medium testdata/h2o_skene lz4 && touch testdata/h2o_skene.skene-v2; }
+	@test -f testdata/h2o_skene.skene-v3 || { rm -rf testdata/h2o_skene && $(PYTHON) dev/parquet_to_skene.py testdata/h2o/medium testdata/h2o_skene lz4 && touch testdata/h2o_skene.skene-v3; }
 	@clear || true
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/h2o/runner.py --variant skene --size medium --workload both
 

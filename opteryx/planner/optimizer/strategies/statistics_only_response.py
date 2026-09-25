@@ -120,9 +120,6 @@ def is_simple_aggregate(aggregate_node) -> bool:
             if aggregate.duplicate_treatment == "Distinct":
                 return False
 
-            if aggregate.condition is not None:
-                return False
-
             parameters = getattr(aggregate, "parameters", None)
             if not parameters or len(parameters) != 1:
                 return False
@@ -382,32 +379,7 @@ def _replace_nested_aggregators(node, agg_identity_to_literal: dict):
         agg_id = getattr(getattr(node, "schema_column", None), "identity", None)
         return agg_identity_to_literal.get(agg_id, node)
 
-    if node.parameters:
-        if isinstance(node.parameters, tuple):
-            node.parameters = list(node.parameters)
-        node.parameters = [
-            _replace_nested_aggregators(p, agg_identity_to_literal) for p in node.parameters
-        ]
-
-    # NodeType.CASE uses conditions/results/else_result instead of parameters
-    if node.node_type == NodeType.CASE:
-        if node.conditions:
-            node.conditions = [
-                _replace_nested_aggregators(c, agg_identity_to_literal) for c in node.conditions
-            ]
-        if node.results:
-            node.results = [
-                _replace_nested_aggregators(r, agg_identity_to_literal) for r in node.results
-            ]
-        if node.else_result is not None:
-            node.else_result = _replace_nested_aggregators(node.else_result, agg_identity_to_literal)
-
-    if node.right is not None:
-        node.right = _replace_nested_aggregators(node.right, agg_identity_to_literal)
-    if node.centre is not None:
-        node.centre = _replace_nested_aggregators(node.centre, agg_identity_to_literal)
-    if node.left is not None:
-        node.left = _replace_nested_aggregators(node.left, agg_identity_to_literal)
+    node.map_children(lambda child: _replace_nested_aggregators(child, agg_identity_to_literal))
 
     return node
 

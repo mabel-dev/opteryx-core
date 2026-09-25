@@ -13,6 +13,7 @@ from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.binder import inner_binder, merge_schemas
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.types.schema import RelationSchema
+from opteryx.models import current_name_of
 
 
 def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
@@ -34,8 +35,8 @@ def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             return proj_col.alias
         if proj_col.query_column:
             return str(proj_col.query_column)
-        if proj_col.current_name:
-            return proj_col.current_name
+        if current_name_of(proj_col):
+            return current_name_of(proj_col)
         return schema_col.name
 
     output_columns = []

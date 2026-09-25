@@ -124,49 +124,9 @@ def test_concat_ws_multi_arg_still_works():
     assert out == [f"{n}-{n}" for n in names], out
 
 
-def test_concat_ws_two_arg_non_string_is_stringified():
-    # Non-string operands are now auto-cast to VARCHAR (family-wide fix), so the
-    # 2-arg form stringifies an int column exactly like CAST(id AS VARCHAR) would.
-    out = _col("SELECT CONCAT_WS('-', id) AS x FROM $planets ORDER BY id")
-    ids = _col("SELECT id AS x FROM $planets ORDER BY id")
-    assert out == [str(i) for i in ids], out
-
-
 # --------------------------------------------------------------------------- #
-# CONCAT / CONCAT_WS — family-wide non-string operand coercion
+# CONCAT — NULL operands short-circuit to NULL
 # --------------------------------------------------------------------------- #
-def test_concat_int_and_string_columns():
-    out = _col("SELECT CONCAT(id, name) AS x FROM $planets ORDER BY id")
-    ids = _col("SELECT id AS x FROM $planets ORDER BY id")
-    names = _col("SELECT name AS x FROM $planets ORDER BY id")
-    assert out == [f"{i}{n}" for i, n in zip(ids, names)], out
-
-
-def test_concat_string_and_int_columns_order_matters():
-    out = _col("SELECT CONCAT(name, id) AS x FROM $planets ORDER BY id")
-    ids = _col("SELECT id AS x FROM $planets ORDER BY id")
-    names = _col("SELECT name AS x FROM $planets ORDER BY id")
-    assert out == [f"{n}{i}" for i, n in zip(ids, names)], out
-
-
-def test_concat_ws_three_arg_non_string_first_operand():
-    out = _col("SELECT CONCAT_WS('-', id, name) AS x FROM $planets ORDER BY id")
-    ids = _col("SELECT id AS x FROM $planets ORDER BY id")
-    names = _col("SELECT name AS x FROM $planets ORDER BY id")
-    assert out == [f"{i}-{n}" for i, n in zip(ids, names)], out
-
-
-def test_concat_float_column():
-    out = _col("SELECT CONCAT(name, 3.14) AS x FROM $planets ORDER BY id LIMIT 1")
-    assert out == ["Mercury3.14"], out
-
-
-def test_concat_bool_column():
-    out = _col("SELECT CONCAT(name, id = 1) AS x FROM $planets ORDER BY id")
-    assert out[0] == "Mercurytrue", out
-    assert out[1] == "Venusfalse", out
-
-
 def test_concat_null_row_still_short_circuits():
     # A NULL-valued (but typed) operand must still propagate NULL rather than
     # being stringified to the literal text "None"/"null".

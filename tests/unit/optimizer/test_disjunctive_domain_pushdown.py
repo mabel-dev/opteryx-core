@@ -29,6 +29,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import pytest
 
 import opteryx
+from opteryx.planner.plan_context import PlanContext
 
 
 def _optimized_plan(sql):
@@ -55,7 +56,7 @@ def _optimized_plan(sql):
     plan = do_resolve_relations(plan, ctes, telemetry)
     plan = do_plan_rewrite(plan, telemetry)
     bound = do_bind_phase(plan, execution_context=ctx, query_id=qid, telemetry=telemetry)
-    return do_optimizer(bound, telemetry), telemetry
+    return do_optimizer(bound, telemetry, PlanContext()), telemetry
 
 
 def _scan_predicates(plan, alias):

@@ -32,6 +32,14 @@ namespace skene {
 // caller's choice and is applied — including cluster_keys, which the writer
 // verifies against the actual rows as always.
 //
+// Statistics and sketches are the CURRENT writer's, recomputed from the data
+// under `posture` — never carried. That matters for the v2 -> v3 hop: v2's
+// per-row-group sketches were skene's own XXH3 family, v3's are one per column
+// per file in draken's Vector.hash() family (FORMAT.md §8.1), and the two do
+// not mix. `posture.block_row_groups` sets the new file's block size.
+//
+// The output is a buffer, so the rewrite stages in memory (writer.h).
+//
 // A file already at kVersion is refused (there is nothing to migrate, and
 // silently copying it would misreport what happened). A file below
 // kVersion - 1 is refused with the multi-hop advice.

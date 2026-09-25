@@ -43,10 +43,16 @@ struct WantedColumn {
 // of the tail). Predicate columns are evaluated INLINE the moment their value is emitted —
 // a failing row is dropped and skipped right there, so failing rows never materialize
 // their later columns. Ordinals count every field, so emitted spans carry true positions.
+//
+// keep_unwanted: predicates with NO projection (columns=None means every column). The wanted
+// set is then the predicate columns only, but every other field is still emitted — predicates
+// keep their inline evaluation and failing-row skip, while minimal extent (stop once all
+// wanted are found) is disabled, because the row's tail is part of the result.
 struct MapProjection {
     const std::vector<WantedColumn>* columns;
     size_t                           num_wanted;
     const std::vector<Predicate>*    predicates;
+    bool                             keep_unwanted = false;
 };
 
 // A view over one record's fields inside a RecordSet's flat span arena. Cheap to copy
@@ -135,6 +141,29 @@ RecordSet build_map(
 // homogeneous case and deterministic for the heterogeneous one.
 std::vector<std::string> sample_record_keys(
     const RecordSet& rs, const uint8_t* buffer, size_t sample_records);
+
+// The relation's column names for one read: the keys of the first
+// `context.infer_sample_size` records of the INPUT (sample_record_keys over a head-only,
+// unprojected, unfiltered map), narrowed to `context.projected_columns` in projection order
+// when a projection is given.
+//
+// Discovery must not run over the records that SURVIVED predicates (or the raw prefilter):
+// that makes the column set depend on which rows matched — a key absent from the matching
+// rows vanished from the result instead of coming back all-null, and columns=None with
+// predicates returned fewer columns than without. The head is parsed on its own (growing
+// by line count until it holds `infer_sample_size` records or covers the buffer), so the
+// cost is the sample window, not the input.
+std::vector<std::string> discover_column_names(
+    const uint8_t* buffer, size_t buffer_length, const ParseContext& context);
+
+// Fail loud, BEFORE any row is filtered, on a predicate literal that cannot be compared
+// with its column (predicate_literal.hpp): against a DECLARED column's type, and against
+// every non-null value of the column in the head sample (the same records the reader
+// infers column types from). Throws std::invalid_argument naming the column, its type and
+// the literal. A value past the sample window whose JSON kind conflicts is still caught
+// when the predicate is evaluated on it (evaluate_predicate throws).
+void check_predicate_literals(
+    const uint8_t* buffer, size_t buffer_length, const ParseContext& context);
 
 // Helper for interpreting a single JSON record (deprecated, use build_map)
 class RecordInterpreter {

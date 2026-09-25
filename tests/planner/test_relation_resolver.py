@@ -24,6 +24,7 @@ import pytest
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 import opteryx
+from opteryx.planner.plan_context import PlanContext
 from opteryx.connectors import connector_factory
 from opteryx.connectors import register_workspace
 from opteryx.connectors.base.base_connector import BaseConnector
@@ -73,7 +74,7 @@ def _optimized(sql):
         query_id="test_relation_resolver",
         telemetry=QueryTelemetry.detached(),
     )
-    return do_optimizer(bound, QueryTelemetry.detached())
+    return do_optimizer(bound, QueryTelemetry.detached(), PlanContext())
 
 
 def _surviving_subquery_nodes(plan):
@@ -505,6 +506,8 @@ def test_rename_relations_re_aliases_subquery_nodes():
     # every column reference that named the old alias must have moved with it
     for _nid, node in copy.nodes(True):
         for column in node.columns or []:
+            if column.node_type != NodeType.IDENTIFIER:
+                continue
             assert column.source != "s", (
                 f"a column reference kept the old subquery alias: {column}"
             )

@@ -1798,6 +1798,26 @@ constexpr int64_t kDistinctParviGateNDV = 16;
 // (Q33, 90M groups): 262144 → 2.21s, 131072 → 1.66s, 65536 → 1.62s,
 // 32768 → 1.61s; 65536 picked (flat below it, fewer merge chunks).
 constexpr size_t kGBFlushEntries = 65536;
+// ADAPTIVE RAW MODE (2026-09-25). A worker whose local tables are not deduplicating
+// stops probing them: at a flush, if the partitions hold more than this fraction of
+// the rows sunk since the previous flush (groups / rows > 0.3, i.e. under ~3.3 rows
+// per group), every later row becomes a NEW local group with no probe, and the
+// finalize merge — which dedups anyway — does all of the grouping. Sticky per worker.
+// POC (scratch/gb_merge_poc, 27 scenarios): -19..-71% at high cardinality, within
+// noise (<= +5%) below ~15% distinct; 0.5 missed most of the wins, 0.2 cost more.
+constexpr double kGBRawSwitchRatio = 0.3;
+// RADIX-PARTITIONED MERGE (2026-09-25). A partition whose queued tables hold more
+// than kGBMergeLeaf entries is merged in 2^k buckets of <= ~kGBMergeLeaf entries,
+// chosen by hash bits [kGBMergeBucketShift, +k): pass 1 scatters every queued entry
+// into its bucket (sequential reads, 2^k sequential write streams, no probe); pass 2
+// merges one bucket at a time through a table small enough to stay in cache. The
+// single merged table it replaces held ~1.5M groups on ClickBench Q33 — a DRAM (and
+// TLB) miss per probe. Bits 40.. keep clear of the partition (58..63), the carchar
+// tag (57..63) and slot bits (low bits): taking the bits just below the partition
+// would make every tag in a bucket identical and the SIMD tag filter useless.
+constexpr size_t kGBMergeLeaf = 65536;
+constexpr int kGBMergeBucketShift = 40;
+constexpr size_t kGBMergeMaxBuckets = 4096;
 constexpr size_t kGBArenaChunk = 1u << 20;   // 1 MiB key-arena chunks (string-key mode)
 
 // Combine a group id with a value hash into one 64-bit dedup key. Both the sink
@@ -2805,6 +2825,10 @@ struct GBPartition {
     std::vector<int64_t> grows;       // COUNT(*) rows lane (any Rows spec)
     std::vector<GBLanes> lanes;       // one per spec
     std::vector<GBCountDistinct> cd;  // one per spec (only CountDistinct fills it)
+    // Built in ADAPTIVE RAW MODE: every row appended as its own group, `index` never
+    // populated, so the same hash may appear more than once. Only the radix merge
+    // (which builds fresh tables) may consume it — never as a merge base.
+    bool unindexed = false;
 
     size_t size() const { return hashes.size(); }
 
@@ -2903,6 +2927,9 @@ struct GroupByLocal : LocalSinkState {
     // what made Medius a net +0.4% on the suite. duckdb learns the same way
     // (DecideAdaptation -> SkipLookups, decided once from early rows).
     bool mid_disabled = false;
+    // ADAPTIVE RAW MODE (see kGBRawSwitchRatio): set at a flush, never cleared.
+    bool raw = false;
+    size_t rows_since_flush = 0;      // rows sunk since the last flush
     // per-morsel ingest scratch
     std::vector<uint64_t> mk_hash;    // per row: draken key hash
     std::vector<uint32_t> mk_ent;     // per row: group id within its partition
@@ -3258,12 +3285,46 @@ struct GroupBySink : Sink {
                 if (l.parts[p].use_mid) l.parts[p].promote_mid();
                 g.pending[p].push_back(std::move(l.parts[p]));
                 l.parts[p] = GBPartition();
-                l.parts[p].use_parvi = low_card;        // fresh partition: re-arm the gate
-                l.parts[p].use_mid = !l.mid_disabled;   // ...but never re-arm a lost cause
+                l.parts[p].use_parvi = low_card && !l.raw;        // fresh partition: re-arm the gate
+                l.parts[p].use_mid = !l.mid_disabled && !l.raw;   // ...but never re-arm a lost cause
+                l.parts[p].unindexed = l.raw;           // raw mode: appended, never probed
                 type_keycols(l.parts[p], l.key_meta);   // fresh partition needs key types
             }
         }
+        // Raw mode covers EVERY partition, not only the ones just flushed: a partition
+        // that was empty at the switch was not replaced above, still carries its
+        // indexed flags, and would take raw (unprobed) rows into a table whose index
+        // is empty — then serve as a merge BASE, where a duplicate from another
+        // worker misses the empty index and becomes a second group. (Caught by the
+        // forced-raw stress build: a ROLLUP subtotal split in two.)
+        if (l.raw) {
+            for (size_t p = 0; p < kGBParts; ++p) {
+                l.parts[p].unindexed = true;
+                l.parts[p].use_parvi = false;
+                l.parts[p].use_mid = false;
+            }
+        }
         l.entries_total = 0;
+    }
+
+    // The flush trigger, plus the adaptive raw-mode decision it is the natural point
+    // for: a flush is where the tables' size is compared to the rows that built them.
+    // Groups only — COUNT(DISTINCT) pairs count toward the flush but say nothing
+    // about how well the KEY probe deduplicates. Never in routed mode (its owners
+    // are the only writers of their tables; there is no merge to hand grouping to).
+    void maybe_flush(GroupByGlobal& g, GroupByLocal& l) {
+        if (l.entries_total <= kGBFlushEntries) return;
+        if (!l.raw && !g.routed) {
+            size_t groups = 0;
+            for (size_t p = 0; p < kGBParts; ++p) groups += l.parts[p].size();
+            if (static_cast<double>(groups) >
+                    kGBRawSwitchRatio * static_cast<double>(l.rows_since_flush)) {
+                l.raw = true;
+                groupby_tel::raw_switches.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        flush_locals(g, l);
+        l.rows_since_flush = 0;
     }
 
     SinkResult sink(const MorselPtr& in, GlobalSinkState& gs, LocalSinkState& ls,
@@ -3277,6 +3338,7 @@ struct GroupBySink : Sink {
         uint32_t rows = in->num_rows();
         size_t nspecs = specs.size();
         groupby_tel::calls.fetch_add(1, std::memory_order_relaxed);
+        l.rows_since_flush += rows;
 
         // ---- EXCHANGE (v2, behind OPTERYX_GB_ROUTED=1) -----------------------------
         // Producer materializes per-OWNER partial-aggregate batches while the morsel
@@ -3511,9 +3573,11 @@ struct GroupBySink : Sink {
                 const uint64_t h = skh.hashes[d];
                 const uint8_t pi = static_cast<uint8_t>(h >> kGBPartShift);
                 GBPartition& P = l.parts[pi];
-                int64_t gid;
+                int64_t gid = static_cast<int64_t>(P.hashes.size());
+                // Raw mode: each distinct code of this morsel is its own new group —
+                // the morsel-level dedup the codes give survives, the table probe goes.
                 const bool is_new =
-                    P.find_or_insert_group(h, static_cast<int64_t>(P.hashes.size()), gid);
+                    l.raw || P.find_or_insert_group(h, gid, gid);
                 if (is_new) {
                     P.hashes.push_back(h);
                     for (size_t j = 0; j < store_col_idx.size(); ++j) {
@@ -3548,8 +3612,7 @@ struct GroupBySink : Sink {
                 GROUPBY_TEL_ACCUM(groupby_tel::apply_ns, _gbC_t0);
                 l.entries_total = 0;
                 for (size_t p = 0; p < kGBParts; ++p) l.entries_total += l.parts[p].size();
-                if (l.entries_total > kGBFlushEntries)
-                    flush_locals(static_cast<GroupByGlobal&>(gs), l);
+                maybe_flush(static_cast<GroupByGlobal&>(gs), l);
                 return SinkResult::CONTINUE;
             }
             // Other spec kinds (SUM/AVG/MIN/MAX/CountDistinct) each have their own
@@ -3606,6 +3669,22 @@ struct GroupBySink : Sink {
         // Net negative across a mixed workload: the cache-resident regression is
         // large and reproducible, the high-cardinality gain marginal. The ban now
         // holds on BOTH architectures. Restructure the passes instead.
+        if (l.raw) {
+            // ADAPTIVE RAW MODE: every row is a new group of its partition — no probe.
+            // The finalize (radix) merge groups them; see kGBRawSwitchRatio.
+            for (uint32_t i = 0; i < rows; ++i) {
+                uint64_t h = l.mk_hash[i];
+                GBPartition& P = l.parts[h >> kGBPartShift];
+                const int64_t gid = static_cast<int64_t>(P.hashes.size());
+                P.hashes.push_back(h);
+                for (size_t j = 0; j < store_col_idx.size(); ++j) {
+                    P.keycols[j].append_row(in->columns[store_col_idx[j]].view, i, err,
+                                            "GROUP BY key value");
+                    if (err.code != 0) return SinkResult::CONTINUE;
+                }
+                l.mk_ent[i] = static_cast<uint32_t>(gid);
+            }
+        } else {
         for (uint32_t i = 0; i < rows; ++i) {
             uint64_t h = l.mk_hash[i];
             GBPartition& P = l.parts[h >> kGBPartShift];
@@ -3621,6 +3700,7 @@ struct GroupBySink : Sink {
                 }
             }
             l.mk_ent[i] = static_cast<uint32_t>(gid);
+        }
         }
 
         // Grow lanes ONCE per morsel to each partition's new entry count
@@ -3986,8 +4066,7 @@ struct GroupBySink : Sink {
             for (const GBCountDistinct& d : P.cd) l.entries_total += d.size();
         }
         GROUPBY_TEL_ACCUM(groupby_tel::apply_ns, _gbC_t0);
-        if (l.entries_total > kGBFlushEntries)
-            flush_locals(static_cast<GroupByGlobal&>(gs), l);
+        maybe_flush(static_cast<GroupByGlobal&>(gs), l);
         return SinkResult::CONTINUE;
     }
 
@@ -4017,264 +4096,462 @@ struct GroupBySink : Sink {
         flush_locals(g, l);
     }
 
-    // Merge one partition's queued worker tables into the first, then emit it in
-    // chunk_rows morsels. Partitions are disjoint; runs concurrently across them.
+    // ---- finalize merge -----------------------------------------------------------
+    // Pair selection for COUNT(DISTINCT) / distinct-operand re-keying when only some
+    // of a source's groups are combined (the radix scatter): indices into the
+    // source's cd[s] pairs. Null `psel` = every pair.
+    struct PairSel { const uint32_t* idx = nullptr; size_t n = 0; };
+
+    // An empty partition typed for this sink: key stores, one lane set and one
+    // distinct-pair store per spec. The merge's fresh (indexed) tables and the
+    // scatter's buckets start here.
+    void ready_partition(GroupByGlobal& g, GBPartition& P) {
+        type_keycols(P, g.key_meta);
+        P.lanes.resize(specs.size());
+        P.cd.resize(specs.size());
+    }
+
+    // Size dst's lanes to its group count. New groups are value-initialized, which
+    // is their required starting state (zero sums/counts, no value yet).
+    void grow_lanes(GroupByGlobal& g, GBPartition& dst) {
+        const size_t nspecs = specs.size();
+        const size_t mn = dst.size();
+        if (g.has_rows) dst.grows.resize(mn);
+        if (dst.lanes.size() != nspecs) dst.lanes.resize(nspecs);
+        if (dst.cd.size() != nspecs) dst.cd.resize(nspecs);
+        for (size_t s = 0; s < nspecs; ++s)
+            gb_lanes_resize(dst.lanes[s], g.kinds[s], mn);
+    }
+
+    // Fold source groups into dst: source group e combines into dst group ge[e].
+    // kSel = false: every group of src (n == src.size()). kSel = true: only groups
+    // sel[0..n); ge is read only at those, and COUNT(DISTINCT) pairs come from
+    // psel[s]. The per-kind arms are the merge's own, unchanged — the scatter is a
+    // combine into freshly zeroed groups, which is exactly a copy. Consumes src's
+    // element states where the kind moves them (ArrayAgg, Median, t-digest).
+    template <bool kSel>
+    bool combine_into(GroupByGlobal& g, GBPartition& dst, GBPartition& src,
+                      const uint32_t* ge, const uint32_t* sel, uint32_t n,
+                      const PairSel* psel, ErrCtx& err) {
+        const size_t nspecs = specs.size();
+        auto pick = [sel](uint32_t ii) -> uint32_t {
+            if constexpr (kSel) return sel[ii];
+            else { (void)sel; return ii; }
+        };
+        if (g.has_rows) {
+            for (uint32_t ii = 0; ii < n; ++ii) {
+                const uint32_t e = pick(ii);
+                dst.grows[ge[e]] += src.grows[e];
+            }
+        }
+        for (size_t s = 0; s < nspecs; ++s) {
+            GBKind kind = g.kinds[s];
+            if (kind == GBKind::Rows) continue;
+            if (specs[s].distinct_operand) {
+                // Re-key the worker's distinct (group, value) pairs under the
+                // merged group ids, carrying values; its lanes are still empty
+                // (the fold after this loop fills the merged lanes).
+                GBCountDistinct& SC = src.cd[s];
+                GBCountDistinct& DC = dst.cd[s];
+                const size_t np = psel ? psel[s].n : SC.size();
+                if (!SC.pair_raw128.empty()) {
+                    for (size_t pj = 0; pj < np; ++pj) {
+                        const size_t pi = psel ? psel[s].idx[pj] : pj;
+                        DC.insert_raw128(ge[SC.pair_gid[pi]], SC.pair_vhash[pi],
+                                         SC.pair_raw128[pi]);
+                    }
+                } else {
+                    for (size_t pj = 0; pj < np; ++pj) {
+                        const size_t pi = psel ? psel[s].idx[pj] : pj;
+                        DC.insert_raw(ge[SC.pair_gid[pi]], SC.pair_vhash[pi],
+                                      SC.pair_raw[pi]);
+                    }
+                }
+                continue;
+            }
+            GBLanes& D = dst.lanes[s];
+            const GBLanes& S = src.lanes[s];
+            bool want_max = specs[s].fn == AggFn::Max;
+            switch (kind) {
+                case GBKind::Valid:
+                    for (uint32_t ii = 0; ii < n; ++ii) {
+                        const uint32_t e = pick(ii);
+                        D.valid[ge[e]] += S.valid[e];
+                    }
+                    break;
+                case GBKind::SumI:
+                    for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
+                        uint32_t m = ge[e];
+                        if (__builtin_add_overflow(D.i64[m], S.i64[e],
+                                                   &D.i64[m])) {
+                            err.code = 1;
+                            err.msg = "SUM overflow: exact integer sum exceeds "
+                                      "INT64 — fail loud, never a wrapped answer";
+                            return false;
+                        }
+                        D.valid[m] += S.valid[e];
+                    }
+                    break;
+                case GBKind::AvgI:
+                    for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
+                        uint32_t m = ge[e];
+                        D.i128[m] += S.i128[e];
+                        D.valid[m] += S.valid[e];
+                    }
+                    break;
+                case GBKind::SumF:
+                case GBKind::AvgF:
+                    for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
+                        uint32_t m = ge[e];
+                        D.f64[m] += S.f64[e];
+                        D.valid[m] += S.valid[e];
+                    }
+                    break;
+                case GBKind::Stddev:
+                case GBKind::StddevSamp:
+                case GBKind::VarPop:
+                case GBKind::VarSamp:
+                    for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
+                        uint32_t m = ge[e];
+                        D.f64[m] += S.f64[e];
+                        D.f64sq[m] += S.f64sq[e];
+                        D.valid[m] += S.valid[e];
+                    }
+                    break;
+                case GBKind::Corr:
+                    for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
+                        uint32_t m = ge[e];
+                        D.f64[m]   += S.f64[e];
+                        D.f64sq[m] += S.f64sq[e];
+                        D.f64y[m]  += S.f64y[e];
+                        D.f64yy[m] += S.f64yy[e];
+                        D.f64xy[m] += S.f64xy[e];
+                        D.valid[m] += S.valid[e];
+                    }
+                    break;
+                case GBKind::Median: {
+                    // MedianState has no merge-by-move (unlike ArrayAgg's element
+                    // lists) — append each source value into the dest group's
+                    // state. Total buffered values are budget-bounded (512MB
+                    // global), so this is bounded work, not a hot-path concern.
+                    GBLanes& SL = src.lanes[s];
+                    for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
+                        opteryx::ungrouped::MedianState& src_st = SL.median[e];
+                        opteryx::ungrouped::MedianState& dst_st = D.median[ge[e]];
+                        for (size_t k = 0; k < src_st.size; ++k) {
+                            if (!dst_st.append(src_st.buf[k])) {
+                                err.code = 1;
+                                err.msg = kMedianCapExceededMsg;
+                                return false;
+                            }
+                        }
+                    }
+                    break;
+                }
+                case GBKind::SumD128:
+                case GBKind::AvgD128:
+                    for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
+                        uint32_t m = ge[e];
+                        D.i128[m] += S.i128[e];
+                        D.valid[m] += S.valid[e];
+                    }
+                    break;
+                case GBKind::MinMaxNum:
+                    for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
+                        if (S.valid[e] == 0) continue;
+                        uint32_t m = ge[e];
+                        if (D.valid[m] == 0
+                                || (want_max ? S.mkey[e] > D.mkey[m]
+                                             : S.mkey[e] < D.mkey[m])) {
+                            D.mkey[m] = S.mkey[e];
+                            D.i64[m] = S.i64[e];
+                        }
+                        D.valid[m] += S.valid[e];
+                    }
+                    break;
+                case GBKind::MinMaxD128:
+                    for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
+                        if (S.valid[e] == 0) continue;
+                        uint32_t m = ge[e];
+                        if (D.valid[m] == 0
+                                || (want_max ? S.i128[e] > D.i128[m]
+                                             : S.i128[e] < D.i128[m]))
+                            D.i128[m] = S.i128[e];
+                        D.valid[m] += S.valid[e];
+                    }
+                    break;
+                case GBKind::MinMaxStr:
+                    for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
+                        if (S.valid[e] == 0) continue;
+                        uint32_t m = ge[e];
+                        if (D.valid[m] == 0
+                                || (want_max ? S.sval[e] > D.sval[m]
+                                             : S.sval[e] < D.sval[m]))
+                            D.sval[m] = S.sval[e];
+                        D.valid[m] += S.valid[e];
+                    }
+                    break;
+                case GBKind::ArrayAgg: {
+                    // Concatenate the worker's list onto the merged one. The
+                    // destination's growth is charged against the global byte
+                    // budget here just as it is on append: N workers each holding
+                    // a share of one group can cross the budget on merge even when
+                    // no single worker did.
+                    const AAStore ast = aa_store_of(g.meta[s].type);
+                    // The other arms only read the source, so the loop aliases it
+                    // const. This one drains it: `src` is released right after the
+                    // merge, so its element strings are moved, not copied.
+                    GBLanes& SL = src.lanes[s];
+                    for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
+                        D.aa[ge[e]].append_from(ast, SL.aa[e]);
+                    }
+                    break;
+                }
+                case GBKind::CidrAgg: {
+                    // Union — the set operation, so merging is order- and
+                    // duplication-insensitive and needs no finalize-time
+                    // reconciliation. Two workers that both saw an address
+                    // contribute it once, which is exactly what makes the
+                    // partitioned plan agree with the serial one.
+                    //
+                    // Charged against the state budget the same way an insert
+                    // is: N workers each under the ceiling can still cross it
+                    // combined, and a refusal latches overflowed on the
+                    // destination for emit to raise on.
+                    for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
+                        (void)D.cidr[ge[e]].merge_from(src.lanes[s].cidr[e]);
+                    }
+                    break;
+                }
+                case GBKind::ApproxCountDistinct:
+                    for (uint32_t ii = 0; ii < n; ++ii) { const uint32_t e = pick(ii);
+                        if (!D.hll[ge[e]].merge(S.hll[e])) {
+                            err.code = 1;
+                            err.msg = "APPROX_COUNT_DISTINCT sketch "
+                                      "merge failed (precision mismatch) — "
+                                      "unreachable, every sketch shares one fixed "
+                                      "precision";
+                            return false;
+                        }
+                    }
+                    break;
+                case GBKind::ApproxPercentile: {
+                    // td_merge's `from` isn't const in the vendored C API —
+                    // mutable alias, like Median's src-consuming merge.
+                    GBLanes& SL = src.lanes[s];
+                    for (uint32_t ii = 0; ii < n; ++ii) {
+                        const uint32_t e = pick(ii);
+                        td_merge(D.td[ge[e]].h, SL.td[e].h);
+                    }
+                    break;
+                }
+                case GBKind::CountDistinct: {
+                    // Re-key each distinct (group, value_hash) pair under the
+                    // merged partition's renumbered group ids; the same pair may
+                    // arrive from several workers — only a merged-set MISS counts.
+                    GBCountDistinct& SC = src.cd[s];
+                    GBCountDistinct& DC = dst.cd[s];
+                    const size_t np = psel ? psel[s].n : SC.size();
+                    for (size_t pj = 0; pj < np; ++pj) {
+                        const size_t pi = psel ? psel[s].idx[pj] : pj;
+                        uint32_t m = ge[SC.pair_gid[pi]];
+                        if (DC.insert(m, SC.pair_vhash[pi])) D.valid[m] += 1;
+                    }
+                    break;
+                }
+                case GBKind::Rows:
+                    break;
+            }
+        }
+        return true;
+    }
+
+    // Map every group of src into dst by PROBING dst's index; a new dst group takes
+    // its key values from src. Fills ge[0..src.size()).
+    void map_probe(GBPartition& dst, GBPartition& src, std::vector<uint32_t>& ge) {
+        const uint32_t sn = static_cast<uint32_t>(src.size());
+        ge.resize(sn);
+        for (uint32_t e = 0; e < sn; ++e) {
+            int64_t mg;
+            bool is_new = dst.index.find_or_insert_id(
+                src.hashes[e], static_cast<int64_t>(dst.hashes.size()), mg);
+            if (is_new) {
+                dst.hashes.push_back(src.hashes[e]);
+                for (size_t k = 0; k < dst.keycols.size(); ++k)
+                    dst.keycols[k].append_from(src.keycols[k], e);
+            }
+            ge[e] = static_cast<uint32_t>(mg);
+        }
+    }
+
+    // Probe-merge ALL of src into dst (dst must be indexed; src need not be).
+    bool merge_probe(GroupByGlobal& g, GBPartition& dst, GBPartition& src,
+                     std::vector<uint32_t>& ge, ErrCtx& err) {
+        map_probe(dst, src, ge);
+        grow_lanes(g, dst);
+        return combine_into<false>(g, dst, src, ge.data(), nullptr,
+                                   static_cast<uint32_t>(src.size()), nullptr, err);
+    }
+
+    // Scratch for scatter_into, reused across a partition's sources.
+    struct ScatterScratch {
+        std::vector<uint32_t> bucket;                // per source group
+        std::vector<uint32_t> start;                 // per bucket, +1
+        std::vector<uint32_t> sel;                   // source groups ordered by bucket
+        std::vector<uint32_t> ge;                    // source group -> bucket group
+        std::vector<std::vector<uint32_t>> pairs;    // per spec: pairs ordered by bucket
+        std::vector<std::vector<uint32_t>> pstart;   // per spec, per bucket, +1
+        std::vector<PairSel> psel;                   // per spec, for one bucket
+    };
+
+    // RADIX SCATTER (pass 1): append every group of src, unprobed, to the bucket its
+    // hash bits [kGBMergeBucketShift, +log2 nb) select. Source reads are sequential
+    // and each bucket is written sequentially; no table is touched. A bucket may
+    // then hold the same hash more than once — pass 2 probe-merges it.
+    bool scatter_into(GroupByGlobal& g, GBPartition& src, std::vector<GBPartition>& frag,
+                      size_t nb, ScatterScratch& sc, ErrCtx& err) {
+        const uint32_t sn = static_cast<uint32_t>(src.size());
+        if (sn == 0) return true;
+        const size_t nspecs = specs.size();
+        const uint64_t bmask = static_cast<uint64_t>(nb - 1);
+        sc.bucket.resize(sn);
+        sc.start.assign(nb + 1, 0);
+        for (uint32_t e = 0; e < sn; ++e) {
+            const uint32_t b = static_cast<uint32_t>((src.hashes[e] >> kGBMergeBucketShift) & bmask);
+            sc.bucket[e] = b;
+            sc.start[b + 1] += 1;
+        }
+        for (size_t b = 0; b < nb; ++b) sc.start[b + 1] += sc.start[b];
+        sc.sel.resize(sn);
+        {
+            std::vector<uint32_t> pos(sc.start.begin(), sc.start.end() - 1);
+            for (uint32_t e = 0; e < sn; ++e) sc.sel[pos[sc.bucket[e]]++] = e;
+        }
+        // COUNT(DISTINCT) pairs follow their group's bucket.
+        sc.pairs.resize(nspecs);
+        sc.pstart.resize(nspecs);
+        sc.psel.assign(nspecs, PairSel{});
+        for (size_t s = 0; s < nspecs; ++s) {
+            const size_t np = s < src.cd.size() ? src.cd[s].size() : 0;
+            sc.pstart[s].assign(nb + 1, 0);
+            if (np == 0) { sc.pairs[s].clear(); continue; }
+            const GBCountDistinct& SC = src.cd[s];
+            for (size_t pi = 0; pi < np; ++pi) sc.pstart[s][sc.bucket[SC.pair_gid[pi]] + 1] += 1;
+            for (size_t b = 0; b < nb; ++b) sc.pstart[s][b + 1] += sc.pstart[s][b];
+            sc.pairs[s].resize(np);
+            std::vector<uint32_t> pos(sc.pstart[s].begin(), sc.pstart[s].end() - 1);
+            for (size_t pi = 0; pi < np; ++pi)
+                sc.pairs[s][pos[sc.bucket[SC.pair_gid[pi]]]++] = static_cast<uint32_t>(pi);
+        }
+        sc.ge.resize(sn);
+        for (size_t b = 0; b < nb; ++b) {
+            const uint32_t lo = sc.start[b], hi = sc.start[b + 1];
+            if (lo == hi) continue;
+            GBPartition& D = frag[b];
+            for (uint32_t ii = lo; ii < hi; ++ii) {
+                const uint32_t e = sc.sel[ii];
+                sc.ge[e] = static_cast<uint32_t>(D.hashes.size());
+                D.hashes.push_back(src.hashes[e]);
+                for (size_t k = 0; k < D.keycols.size(); ++k)
+                    D.keycols[k].append_from(src.keycols[k], e);
+            }
+            grow_lanes(g, D);
+            for (size_t s = 0; s < nspecs; ++s) {
+                if (sc.pairs[s].empty()) { sc.psel[s] = PairSel{}; continue; }
+                sc.psel[s] = PairSel{sc.pairs[s].data() + sc.pstart[s][b],
+                                     static_cast<size_t>(sc.pstart[s][b + 1] - sc.pstart[s][b])};
+            }
+            if (!combine_into<true>(g, D, src, sc.ge.data(), sc.sel.data() + lo, hi - lo,
+                                    sc.psel.data(), err))
+                return false;
+        }
+        return true;
+    }
+
+    // Merge one partition's queued worker tables and emit it in chunk_rows morsels.
+    // Partitions are disjoint; runs concurrently across them.
+    //   <= kGBMergeLeaf entries, all tables indexed: fold into the first table (the
+    //      cheap case — its index is small and warm).
+    //   <= kGBMergeLeaf with a raw (unindexed) table: fold into a fresh table.
+    //   larger: RADIX-PARTITIONED — scatter into nb buckets, then merge and emit one
+    //      bucket at a time through a cache-sized table (see kGBMergeLeaf).
     void merge_and_emit_partition(GroupByGlobal& g, size_t p,
                                   std::vector<MorselPtr>& out_morsels,
                                   ErrCtx& err) {
         auto& list = g.pending[p];
         if (list.empty()) return;
-        size_t nspecs = specs.size();
-        GBPartition merged = std::move(list[0]);
-        // Pre-size ONCE to the (known) worst case — geometric growth during the
-        // merge re-inserted every entry ~17 times on 90M-group aggregations.
-        size_t merge_total = merged.size();
-        for (size_t i = 1; i < list.size(); ++i) merge_total += list[i].size();
-        if (merge_total > merged.size()) {
-            merged.index.reserve(merge_total);
-            merged.hashes.reserve(merge_total);
-        }
-        std::vector<uint32_t> ge;
         const bool prof = gb_finalize_prof_on();
-        const uint64_t prof_t0 = prof ? gb_prof_now() : 0;
-        for (size_t i = 1; i < list.size(); ++i) {
-            GBPartition& src = list[i];
-            uint32_t sn = static_cast<uint32_t>(src.size());
-            // Columnar merge: map every src group to its merged group first (hash
-            // identity via CarcharIndex; a new merged group copies its key VALUES
-            // from src), then combine lane by lane (kind dispatched once per spec).
-            ge.resize(sn);
-            for (uint32_t e = 0; e < sn; ++e) {
-                int64_t mg;
-                bool is_new = merged.index.find_or_insert_id(
-                    src.hashes[e], static_cast<int64_t>(merged.hashes.size()), mg);
-                if (is_new) {
-                    merged.hashes.push_back(src.hashes[e]);
-                    for (size_t k = 0; k < merged.keycols.size(); ++k)
-                        merged.keycols[k].append_from(src.keycols[k], e);
-                }
-                ge[e] = static_cast<uint32_t>(mg);
-            }
-            size_t mn = merged.size();
-            if (g.has_rows) merged.grows.resize(mn);
-            if (merged.lanes.size() != nspecs) merged.lanes.resize(nspecs);
-            if (merged.cd.size() != nspecs) merged.cd.resize(nspecs);
-            for (size_t s = 0; s < nspecs; ++s)
-                gb_lanes_resize(merged.lanes[s], g.kinds[s], mn);
-            if (g.has_rows) {
-                for (uint32_t e = 0; e < sn; ++e)
-                    merged.grows[ge[e]] += src.grows[e];
-            }
-            for (size_t s = 0; s < nspecs; ++s) {
-                GBKind kind = g.kinds[s];
-                if (kind == GBKind::Rows) continue;
-                if (specs[s].distinct_operand) {
-                    // Re-key the worker's distinct (group, value) pairs under the
-                    // merged group ids, carrying values; its lanes are still empty
-                    // (the fold after this loop fills the merged lanes).
-                    GBCountDistinct& SC = src.cd[s];
-                    GBCountDistinct& DC = merged.cd[s];
-                    if (!SC.pair_raw128.empty()) {
-                        for (size_t pi = 0; pi < SC.size(); ++pi)
-                            DC.insert_raw128(ge[SC.pair_gid[pi]], SC.pair_vhash[pi],
-                                             SC.pair_raw128[pi]);
-                    } else {
-                        for (size_t pi = 0; pi < SC.size(); ++pi)
-                            DC.insert_raw(ge[SC.pair_gid[pi]], SC.pair_vhash[pi],
-                                          SC.pair_raw[pi]);
-                    }
-                    continue;
-                }
-                GBLanes& D = merged.lanes[s];
-                const GBLanes& S = src.lanes[s];
-                bool want_max = specs[s].fn == AggFn::Max;
-                switch (kind) {
-                    case GBKind::Valid:
-                        for (uint32_t e = 0; e < sn; ++e)
-                            D.valid[ge[e]] += S.valid[e];
-                        break;
-                    case GBKind::SumI:
-                        for (uint32_t e = 0; e < sn; ++e) {
-                            uint32_t m = ge[e];
-                            if (__builtin_add_overflow(D.i64[m], S.i64[e],
-                                                       &D.i64[m])) {
-                                err.code = 1;
-                                err.msg = "SUM overflow: exact integer sum exceeds "
-                                          "INT64 — fail loud, never a wrapped answer";
-                                return;
-                            }
-                            D.valid[m] += S.valid[e];
-                        }
-                        break;
-                    case GBKind::AvgI:
-                        for (uint32_t e = 0; e < sn; ++e) {
-                            uint32_t m = ge[e];
-                            D.i128[m] += S.i128[e];
-                            D.valid[m] += S.valid[e];
-                        }
-                        break;
-                    case GBKind::SumF:
-                    case GBKind::AvgF:
-                        for (uint32_t e = 0; e < sn; ++e) {
-                            uint32_t m = ge[e];
-                            D.f64[m] += S.f64[e];
-                            D.valid[m] += S.valid[e];
-                        }
-                        break;
-                    case GBKind::Stddev:
-                    case GBKind::StddevSamp:
-                    case GBKind::VarPop:
-                    case GBKind::VarSamp:
-                        for (uint32_t e = 0; e < sn; ++e) {
-                            uint32_t m = ge[e];
-                            D.f64[m] += S.f64[e];
-                            D.f64sq[m] += S.f64sq[e];
-                            D.valid[m] += S.valid[e];
-                        }
-                        break;
-                    case GBKind::Corr:
-                        for (uint32_t e = 0; e < sn; ++e) {
-                            uint32_t m = ge[e];
-                            D.f64[m]   += S.f64[e];
-                            D.f64sq[m] += S.f64sq[e];
-                            D.f64y[m]  += S.f64y[e];
-                            D.f64yy[m] += S.f64yy[e];
-                            D.f64xy[m] += S.f64xy[e];
-                            D.valid[m] += S.valid[e];
-                        }
-                        break;
-                    case GBKind::Median: {
-                        // MedianState has no merge-by-move (unlike ArrayAgg's element
-                        // lists) — append each source value into the dest group's
-                        // state. Total buffered values are budget-bounded (512MB
-                        // global), so this is bounded work, not a hot-path concern.
-                        GBLanes& SL = src.lanes[s];
-                        for (uint32_t e = 0; e < sn; ++e) {
-                            opteryx::ungrouped::MedianState& src_st = SL.median[e];
-                            opteryx::ungrouped::MedianState& dst_st = D.median[ge[e]];
-                            for (size_t k = 0; k < src_st.size; ++k) {
-                                if (!dst_st.append(src_st.buf[k])) {
-                                    err.code = 1;
-                                    err.msg = kMedianCapExceededMsg;
-                                    return;
-                                }
-                            }
-                        }
-                        break;
-                    }
-                    case GBKind::SumD128:
-                    case GBKind::AvgD128:
-                        for (uint32_t e = 0; e < sn; ++e) {
-                            uint32_t m = ge[e];
-                            D.i128[m] += S.i128[e];
-                            D.valid[m] += S.valid[e];
-                        }
-                        break;
-                    case GBKind::MinMaxNum:
-                        for (uint32_t e = 0; e < sn; ++e) {
-                            if (S.valid[e] == 0) continue;
-                            uint32_t m = ge[e];
-                            if (D.valid[m] == 0
-                                    || (want_max ? S.mkey[e] > D.mkey[m]
-                                                 : S.mkey[e] < D.mkey[m])) {
-                                D.mkey[m] = S.mkey[e];
-                                D.i64[m] = S.i64[e];
-                            }
-                            D.valid[m] += S.valid[e];
-                        }
-                        break;
-                    case GBKind::MinMaxD128:
-                        for (uint32_t e = 0; e < sn; ++e) {
-                            if (S.valid[e] == 0) continue;
-                            uint32_t m = ge[e];
-                            if (D.valid[m] == 0
-                                    || (want_max ? S.i128[e] > D.i128[m]
-                                                 : S.i128[e] < D.i128[m]))
-                                D.i128[m] = S.i128[e];
-                            D.valid[m] += S.valid[e];
-                        }
-                        break;
-                    case GBKind::MinMaxStr:
-                        for (uint32_t e = 0; e < sn; ++e) {
-                            if (S.valid[e] == 0) continue;
-                            uint32_t m = ge[e];
-                            if (D.valid[m] == 0
-                                    || (want_max ? S.sval[e] > D.sval[m]
-                                                 : S.sval[e] < D.sval[m]))
-                                D.sval[m] = S.sval[e];
-                            D.valid[m] += S.valid[e];
-                        }
-                        break;
-                    case GBKind::ArrayAgg: {
-                        // Concatenate the worker's list onto the merged one. The
-                        // destination's growth is charged against the global byte
-                        // budget here just as it is on append: N workers each holding
-                        // a share of one group can cross the budget on merge even when
-                        // no single worker did.
-                        const AAStore ast = aa_store_of(g.meta[s].type);
-                        // The other arms only read the source, so the loop aliases it
-                        // const. This one drains it: `src` is released right after the
-                        // merge, so its element strings are moved, not copied.
-                        GBLanes& SL = src.lanes[s];
-                        for (uint32_t e = 0; e < sn; ++e) {
-                            D.aa[ge[e]].append_from(ast, SL.aa[e]);
-                        }
-                        break;
-                    }
-                    case GBKind::CidrAgg: {
-                        // Union — the set operation, so merging is order- and
-                        // duplication-insensitive and needs no finalize-time
-                        // reconciliation. Two workers that both saw an address
-                        // contribute it once, which is exactly what makes the
-                        // partitioned plan agree with the serial one.
-                        //
-                        // Charged against the state budget the same way an insert
-                        // is: N workers each under the ceiling can still cross it
-                        // combined, and a refusal latches overflowed on the
-                        // destination for emit to raise on.
-                        for (uint32_t e = 0; e < sn; ++e) {
-                            (void)D.cidr[ge[e]].merge_from(src.lanes[s].cidr[e]);
-                        }
-                        break;
-                    }
-                    case GBKind::ApproxCountDistinct:
-                        for (uint32_t e = 0; e < sn; ++e) {
-                            if (!D.hll[ge[e]].merge(S.hll[e])) {
-                                err.code = 1;
-                                err.msg = "APPROX_COUNT_DISTINCT sketch "
-                                          "merge failed (precision mismatch) — "
-                                          "unreachable, every sketch shares one fixed "
-                                          "precision";
-                                return;
-                            }
-                        }
-                        break;
-                    case GBKind::ApproxPercentile: {
-                        // td_merge's `from` isn't const in the vendored C API —
-                        // mutable alias, like Median's src-consuming merge.
-                        GBLanes& SL = src.lanes[s];
-                        for (uint32_t e = 0; e < sn; ++e)
-                            td_merge(D.td[ge[e]].h, SL.td[e].h);
-                        break;
-                    }
-                    case GBKind::CountDistinct: {
-                        // Re-key each distinct (group, value_hash) pair under the
-                        // merged partition's renumbered group ids; the same pair may
-                        // arrive from several workers — only a merged-set MISS counts.
-                        GBCountDistinct& SC = src.cd[s];
-                        GBCountDistinct& DC = merged.cd[s];
-                        for (size_t pi = 0; pi < SC.size(); ++pi) {
-                            uint32_t m = ge[SC.pair_gid[pi]];
-                            if (DC.insert(m, SC.pair_vhash[pi])) D.valid[m] += 1;
-                        }
-                        break;
-                    }
-                    case GBKind::Rows:
-                        break;
-                }
-            }
-            src = GBPartition();   // release the merged-in worker table
+        uint64_t merge_ns = 0;
+        uint64_t t0 = prof ? gb_prof_now() : 0;
+        size_t merge_total = 0;
+        bool any_unindexed = false;
+        for (const GBPartition& P : list) {
+            merge_total += P.size();
+            any_unindexed = any_unindexed || P.unindexed;
         }
+        size_t nb = 1;
+        while (nb < kGBMergeMaxBuckets && merge_total > nb * kGBMergeLeaf) nb <<= 1;
+        std::vector<uint32_t> ge;
+
+        if (nb == 1) {
+            GBPartition merged;
+            size_t first = 0;
+            if (!any_unindexed) {
+                merged = std::move(list[0]);
+                first = 1;
+            } else {
+                ready_partition(g, merged);
+            }
+            // Pre-size ONCE to the (known) worst case — geometric growth during the
+            // merge re-inserted every entry many times on large aggregations.
+            if (merge_total > merged.size()) {
+                merged.index.reserve(merge_total);
+                merged.hashes.reserve(merge_total);
+            }
+            for (size_t i = first; i < list.size(); ++i) {
+                if (!merge_probe(g, merged, list[i], ge, err)) return;
+                list[i] = GBPartition();   // release the merged-in worker table
+            }
+            list.clear();
+            if (prof) gb_fin_merge_ns.fetch_add(gb_prof_now() - t0, std::memory_order_relaxed);
+            finish_and_emit(g, merged, out_morsels, err);
+            return;
+        }
+
+        groupby_tel::merge_bucketed.fetch_add(1, std::memory_order_relaxed);
+        groupby_tel::merge_buckets.fetch_add(static_cast<long long>(nb), std::memory_order_relaxed);
+        std::vector<GBPartition> frag(nb);
+        for (GBPartition& f : frag) ready_partition(g, f);
+        {
+            ScatterScratch sc;
+            for (size_t i = 0; i < list.size(); ++i) {
+                if (!scatter_into(g, list[i], frag, nb, sc, err)) return;
+                list[i] = GBPartition();   // release as soon as it is scattered
+            }
+        }
+        list.clear();
+        if (prof) merge_ns += gb_prof_now() - t0;
+        for (size_t b = 0; b < nb; ++b) {
+            if (frag[b].size() == 0) continue;
+            if (prof) t0 = gb_prof_now();
+            GBPartition merged;
+            ready_partition(g, merged);
+            merged.index.reserve(frag[b].size());
+            merged.hashes.reserve(frag[b].size());
+            if (!merge_probe(g, merged, frag[b], ge, err)) return;
+            frag[b] = GBPartition();
+            if (prof) merge_ns += gb_prof_now() - t0;
+            finish_and_emit(g, merged, out_morsels, err);
+            if (err.code != 0) return;
+        }
+        if (prof) gb_fin_merge_ns.fetch_add(merge_ns, std::memory_order_relaxed);
+    }
+
+    // Fold the distinct-operand pairs, then emit `merged` in chunk_rows morsels.
+    void finish_and_emit(GroupByGlobal& g, GBPartition& merged,
+                         std::vector<MorselPtr>& out_morsels, ErrCtx& err) {
+        const size_t nspecs = specs.size();
+        const bool prof = gb_finalize_prof_on();
         // SUM/AVG/STDDEV/MEDIAN(DISTINCT): every worker's pairs are merged now, so
         // each distinct (group, value) is present exactly once — fold them in.
         for (size_t s = 0; s < nspecs; ++s) {
@@ -4284,8 +4561,6 @@ struct GroupBySink : Sink {
                 return;
             merged.cd[s] = GBCountDistinct();
         }
-        if (prof) gb_fin_merge_ns.fetch_add(gb_prof_now() - prof_t0,
-                                            std::memory_order_relaxed);
         // Emit chunk_rows-group morsels — lanes are contiguous vectors, so a
         // chunk is a plain slice.
         size_t total = merged.size();

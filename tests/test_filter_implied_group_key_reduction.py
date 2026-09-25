@@ -43,14 +43,14 @@ def _count(sql):
 def test_single_implied_key_count_is_correct():
     rows = _rows("SELECT name, COUNT(*) AS n FROM $planets WHERE name = 'Earth' GROUP BY name")
     assert len(rows) == 1, f"expected 1 row, got {len(rows)}"
-    assert rows[0]["name"] == b"Earth"
+    assert rows[0]["name"] == "Earth"
     assert rows[0]["n"] == 1
 
 
 def test_single_implied_key_string_value_preserved():
     rows = _rows("SELECT name, COUNT(*) AS n FROM $planets WHERE name = 'Mars' GROUP BY name")
     assert len(rows) == 1
-    assert rows[0]["name"] == b"Mars"
+    assert rows[0]["name"] == "Mars"
 
 
 def test_single_implied_key_integer():
@@ -68,7 +68,7 @@ def test_multi_key_partial_reduction_is_correct():
         "SELECT name, id, COUNT(*) AS n FROM $planets WHERE name = 'Earth' GROUP BY name, id"
     )
     assert len(rows) == 1
-    assert rows[0]["name"] == b"Earth"
+    assert rows[0]["name"] == "Earth"
 
 
 def test_multi_key_surviving_key_partitions():
@@ -88,7 +88,7 @@ def test_conjunction_implied_key():
         "WHERE name = 'Earth' AND id = 3 GROUP BY name, id"
     )
     assert len(rows) == 1
-    assert rows[0]["name"] == b"Earth"
+    assert rows[0]["name"] == "Earth"
     assert rows[0]["id"] == 3
 
 
@@ -110,7 +110,7 @@ def test_filter_on_non_group_column_is_noop():
     )
     # id is not a group key; name still partitions normally — one row (Earth, id=3)
     assert len(rows) == 1
-    assert rows[0]["name"] == b"Earth"
+    assert rows[0]["name"] == "Earth"
 
 
 # --- single group key that is constant-implied: keep at least one key ---
@@ -121,7 +121,7 @@ def test_single_group_key_implied_not_collapsed():
     # The result should still be correct.
     rows = _rows("SELECT name, COUNT(*) AS n FROM $planets WHERE name = 'Earth' GROUP BY name")
     assert len(rows) == 1
-    assert rows[0]["name"] == b"Earth"
+    assert rows[0]["name"] == "Earth"
 
 
 # --- empty input: AggregateAndGroup must return zero rows, not one ---

@@ -1,8 +1,8 @@
 {
   "codec": "lz4",
-  "generator": "libskene 0.2.0 / parquet_to_skene (format v2)",
-  "listing_sha256": "4632913c7aedcaa140663fd4e25ddfdd38d9507ea640f87b5ce4df7834f4c191",
+  "generator": "opteryx-core dev/parquet_to_skene.py lz4, skene v3 (first release after 0.9.139), 2026-09-25",
+  "listing_sha256": "9ab4fe1eed9f8e4f5fa364bf27dfaf42fabd77e07a3781298f51350a9cc9ec39",
   "name": "tpch_1_skene",
-  "object_count": 9,
-  "total_bytes": 392623880
+  "object_count": 8,
+  "total_bytes": 396088562
 }

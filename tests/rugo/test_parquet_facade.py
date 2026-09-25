@@ -552,22 +552,130 @@ def test_bool_predicate_rejects_non_bool_values(bad):
             list(r)
 
 
+def _typed_fixture_bytes():
+    """Int, float and text columns with an interior NULL row."""
+    sql = """
+    SELECT * FROM (VALUES
+      (1, 1.5, 'x'), (2, NULL, 'y'), (3, 2.5, NULL)
+    ) AS t(a, f, s)
+    """
+    morsel = next(iter(opteryx.session().execute_to_morsels(sql)))
+    return parquet.write_parquet(morsel)
+
+
+@pytest.mark.parametrize("col,bad,domain", [
+    ("a", "x", "numeric"),
+    ("a", b"x", "numeric"),
+    ("a", [1], "numeric"),
+    ("a", True, "numeric"),     # bool is an int subclass — would mean `a = 1`
+    ("a", False, "numeric"),
+    ("f", "x", "numeric"),
+    ("f", True, "numeric"),
+    ("s", 1, "text"),
+    ("s", 1.5, "text"),
+    ("s", True, "text"),
+])
+@pytest.mark.parametrize("op", ["==", "!=", "<", "in", "not in"])
+@pytest.mark.parametrize("on_disk", [False, True])
+def test_predicate_rejects_value_outside_column_domain(tmp_path, col, bad, domain, op, on_disk):
+    """A value the column's type cannot hold raises ValueError, BEFORE pruning.
+
+    On a memory source a str against an int column reached the compare kernel and
+    died as a bare `RuntimeError: std::bad_cast`. On a FILE source it was worse:
+    the bloom probe for `==` / `in` hashed the str, found nothing, pruned every
+    row group, and the read answered zero rows as if nothing matched.
+    """
+    data = _typed_fixture_bytes()
+    source = data
+    if on_disk:
+        path = tmp_path / "typed.parquet"
+        path.write_bytes(data)
+        source = str(path)
+    value = [bad] if op in ("in", "not in") else bad
+    with pytest.raises(ValueError, match=f"predicate on {domain} column '{col}'"):
+        with parquet.read_parquet(source, predicates=[(col, op, value)]) as r:
+            list(r)
+
+
+@pytest.mark.parametrize("col,value", [
+    ("s", "xy"), ("s", b"xy"), ("s", "x"), ("a", 1), ("a", 1.5), ("s", None),
+])
+@pytest.mark.parametrize("op", ["in", "not in"])
+@pytest.mark.parametrize("on_disk", [False, True])
+def test_membership_requires_a_collection(tmp_path, col, value, op, on_disk):
+    """`in` / `not in` take a list, tuple or set. A bare str was iterated
+    character by character: `s in "xy"` silently ran as `s in ['x', 'y']`."""
+    source = _typed_fixture_bytes()
+    if on_disk:
+        path = tmp_path / "typed.parquet"
+        path.write_bytes(source)
+        source = str(path)
+    with pytest.raises(ValueError, match="takes a list, tuple or set"):
+        with parquet.read_parquet(source, predicates=[(col, op, value)]) as r:
+            list(r)
+
+
+@pytest.mark.parametrize("members", [["x", "y"], ("x", "y"), {"x", "y"}, frozenset(("x", "y"))])
+def test_membership_accepts_every_collection_kind(members):
+    with parquet.read_parquet(_typed_fixture_bytes(), predicates=[("s", "in", members)]) as r:
+        assert sorted(v for m in r for v in m.column(b"s").to_pylist()) == ["x", "y"]
+
+
+@pytest.mark.parametrize("predicate,col,want", [
+    (("a", "==", 1), b"a", [1]),
+    (("a", "in", [1, 3.0]), b"a", [1, 3]),
+    (("a", ">", 1.5), b"a", [2, 3]),
+    (("f", "in", [1, 2.5]), b"f", [2.5]),
+    (("s", "in", ["x", b"y"]), b"s", ["x", "y"]),
+    (("s", "==", b"x"), b"s", ["x"]),
+])
+def test_predicate_accepts_values_inside_column_domain(tmp_path, predicate, col, want):
+    """The domain check refuses only what the column cannot hold: int/float are
+    interchangeable on numeric columns, str/bytes on text ones."""
+    path = tmp_path / "typed.parquet"
+    path.write_bytes(_typed_fixture_bytes())
+    with parquet.read_parquet(str(path), predicates=[predicate]) as r:
+        assert [v for m in r for v in m.column(col).to_pylist()] == want
+
+
+def test_compare_scalar_rejects_non_numeric_scalar_cleanly():
+    """The kernel binding names the problem instead of throwing std::bad_cast."""
+    from rugo import jsonl
+    vec = next(iter(jsonl.read_jsonl(b'{"a":1}\n'))).column(b"a")
+    with pytest.raises(ValueError, match="numeric vector requires an int or float scalar, got str"):
+        vec._compare_scalar("x", 0)
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_compare_scalar_rejects_bool_on_numeric_vector(flag):
+    """bool is an int subclass; accepted, `a = True` would silently mean `a = 1`."""
+    from rugo import jsonl
+    for data in (b'{"a":1}\n', b'{"a":1.5}\n'):
+        vec = next(iter(jsonl.read_jsonl(data))).column(b"a")
+        with pytest.raises(ValueError, match="numeric vector requires an int or float scalar, got bool"):
+            vec._compare_scalar(flag, 0)
+
+
 def test_bool_row_group_pruning():
     """Bool min/max still prunes whole row groups, and the rows that survive
     are exact — an all-TRUE row group cannot hold a FALSE."""
-    import draken.draken_native as dn
+    from draken.draken_native import DrakenType
+    from draken.interop.vector_sequence import vector_from_sequence
     from draken.morsels.morsel import Morsel
-    from draken.vectors.vector import Vector
 
     flags = ([True] * 10_000 + [False] * 10_000 + [True] * 10_000
              + [i % 2 == 0 for i in range(10_000)])
     morsel = Morsel.from_vectors(
         ["b", "i"],
-        [Vector(dn.vector_int64_from_sequence(flags)),
-         Vector(dn.vector_int64_from_sequence(list(range(len(flags)))))],
+        [vector_from_sequence(flags, dtype=DrakenType.BOOL),
+         vector_from_sequence(list(range(len(flags))), dtype=DrakenType.INT64)],
     )
     data = parquet.write_parquet(morsel, max_rows_per_row_group=10_000)
     assert len(parquet._native.read_rowgroup_stats(data)) == 4
+    # The column under test really is BOOLEAN in the file — an int64 column of
+    # 0/1 exercises the numeric path, not the bool one this test is about.
+    schema = {c.name: c.physical_type for c in parquet.read_metadata(data).schema_columns}
+    assert schema["b"] == "boolean"
 
     # the all-FALSE row group is pruned for `= True`, and vice versa
     assert parquet._row_group_mask(data, None, [("b", "=", True)]) == [1, 0, 1, 1]

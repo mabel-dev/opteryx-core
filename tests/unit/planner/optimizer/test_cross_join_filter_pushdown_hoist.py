@@ -29,7 +29,8 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 
 
 def _plan_for(sql: str):
-    """Run `sql` for real and return the fully-optimized logical plan, by
+    """Run `sql` for real and return (the fully-optimized logical plan, its
+    PlanContext), by
     capturing it at the last point the optimizer hands it off -- the
     `result_size_guard` check that runs immediately after optimization. Goes
     through the ordinary `execute_to_morsels` path (not `query_planner`
@@ -40,9 +41,9 @@ def _plan_for(sql: str):
     captured = []
     orig = rsg.check_estimated_result_size
 
-    def patched(plan, limit, telemetry=None):
-        captured.append(plan)
-        return orig(plan, limit, telemetry=telemetry)
+    def patched(plan, limit, plan_context, telemetry=None):
+        captured.append((plan, plan_context))
+        return orig(plan, limit, plan_context, telemetry=telemetry)
 
     rsg.check_estimated_result_size = patched
     try:
@@ -67,7 +68,7 @@ def test_arithmetic_join_key_is_converted_to_inner_join():
     FROM testdata.planets a, testdata.satellites b
     WHERE a.id = b.planetId - 1
     """
-    plan = _plan_for(sql)
+    plan, _plan_context = _plan_for(sql)
     joins = _join_nodes(plan)
     assert joins, "expected at least one Join node in the plan"
     # No join should remain an unconverted cross join -- the arithmetic
@@ -96,12 +97,12 @@ def test_arithmetic_join_key_estimate_is_not_the_naive_cross_product():
     FROM testdata.planets a, testdata.satellites b
     WHERE a.id = b.planetId - 1
     """
-    plan = _plan_for(sql)
-    plan = refresh_statistics(plan)
+    plan, plan_context = _plan_for(sql)
+    plan = refresh_statistics(plan, plan_context)
     joins = _join_nodes(plan)
     inner = [node for _, node in joins if node.type == "inner"]
     assert inner
-    stats = getattr(inner[0], "statistics", None)
+    stats = plan_context.statistics(inner[0])
     assert stats is not None
     assert stats.row_count < 9 * 177
 
@@ -148,7 +149,7 @@ def test_non_hoistable_arithmetic_predicate_is_left_as_a_filter():
     FROM testdata.planets a, testdata.satellites b
     WHERE a.id = b.planetId - b.id
     """
-    plan = _plan_for(sql)
+    plan, _plan_context = _plan_for(sql)
     # Must not raise, and must still produce a valid plan with a Join node.
     joins = _join_nodes(plan)
     assert joins

@@ -68,6 +68,8 @@ cdef extern from "core/parse_context.hpp" namespace "rugo::_jsonl":
         string column
         uint8_t op
         string value
+        uint8_t kind
+        vector[Predicate] members
 
     struct ParseContext:
         vector[string] projected_columns
@@ -108,6 +110,15 @@ cdef extern from "core/interpreter.hpp" namespace "rugo::_jsonl":
     vector[string] sample_record_keys(
         const RecordSet& rs, const uint8_t* buffer, size_t sample_records) nogil
 
+    vector[string] discover_column_names(
+        const uint8_t* buffer, size_t buffer_length, const ParseContext& context) nogil
+
+    # std::invalid_argument (-> ValueError) on a predicate literal that does not fit its
+    # column: its declared type, or a non-null value in the head sample.
+    void check_predicate_literals(
+        const uint8_t* buffer, size_t buffer_length, const ParseContext& context
+    ) except + nogil
+
 
 cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
     struct InterpreterResult:
@@ -118,13 +129,15 @@ cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
     cppclass OrdinalPredictor:
         pass
 
+    # except + : evaluate_predicate throws std::invalid_argument (-> ValueError) on a
+    # value whose JSON kind cannot be compared with the predicate literal's kind.
     InterpreterResult interpret_jsonl(
         const uint8_t* buffer_data,
         size_t buffer_length,
         const vector[MarkerPosition]& markers,
         const ParseContext& context,
         OrdinalPredictor& predictor
-    ) nogil
+    ) except + nogil
 
     InterpreterResult interpret_jsonl_threaded(
         const uint8_t* buffer_data,
@@ -132,7 +145,7 @@ cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
         const ParseContext& context,
         OrdinalPredictor& predictor,
         size_t max_threads
-    ) nogil
+    ) except + nogil
 
 
 
@@ -209,6 +222,11 @@ cdef object _maybe_prefilter(const uint8_t* buf, size_t buf_len, predicates):
     col, op, val = predicates[0]
     if op != "==":
         return None
+    # A string literal only: its needle is the quoted value, which only a JSON string
+    # carries. A non-string literal is a type mismatch against a string column, and
+    # prefiltering on it would drop every record before evaluate_predicate could raise.
+    if not isinstance(val, (str, bytes)):
+        return None
 
     # Probe the first record: only prefilter when `col` is stored as a quoted (string)
     # value. A bare numeric/bool value isn't quoted, so a quoted needle would false-negative.
@@ -227,9 +245,8 @@ cdef object _maybe_prefilter(const uint8_t* buf, size_t buf_len, predicates):
     # val is bytes for every real Opteryx-pushed VARCHAR literal (its VARCHAR storage is
     # byte-based, not str) -- str(b'commit') == "b'commit'", the Python repr, not the
     # string's own bytes, so that needle would never be found and this prefilter would
-    # silently return an empty buffer (0 rows) instead of skipping/no-oping. Same bug and
-    # fix as the predicate-value encoding above.
-    val_bytes = val if isinstance(val, bytes) else str(val).encode("utf-8")
+    # silently return an empty buffer (0 rows) instead of skipping/no-oping.
+    val_bytes = val if isinstance(val, bytes) else val.encode("utf-8")
     needle = b'"' + val_bytes + b'"'
     if len(needle) < 8:                 # short/low-entropy value -> skip won't pay off
         return None
@@ -300,7 +317,9 @@ def read_jsonl(
     Parameters:
       data: bytes or buffer-like (or file path string)
       columns: list of column names to extract (None = all)
-      predicates: list of (column, op, value) tuples; op in ['==', '!=', '<', '<=', '>', '>=']
+      predicates: list of (column, op, value) tuples; op in ['==', '!=', '<', '<=', '>', '>=',
+        'in', 'not in', 'is null', 'is not null']; in/not in take a list/tuple/set,
+        is null/is not null take None. Unknown ops raise ValueError.
 
     Returns:
       dict with keys:
@@ -323,6 +342,7 @@ def read_jsonl(
 
     cdef ParseContext context
     cdef Predicate pred
+    cdef Predicate member
     cdef vector[string] column_names_cpp
     cdef RecordSet records
     cdef size_t total_rows = 0
@@ -367,20 +387,29 @@ def read_jsonl(
     if predicates:
         for col, op, val in predicates:
             pred.column = col.encode('utf-8')
-            pred.op = <uint8_t>_jsonl_parse_op(op)
-            if isinstance(val, bool):
-                # JSON's boolean literals are lowercase ("true"/"false"), not Python's
-                # str(True) == "True" -- evaluate_predicate compares these bytes against
-                # the raw JSON token, so this must match JSON's spelling, not Python's.
-                pred.value = b'true' if val else b'false'
-            elif isinstance(val, bytes):
-                # Opteryx's bound VARCHAR literal values arrive as bytes (its VARCHAR
-                # storage is byte-based, not str). str(b'commit') == "b'commit'" -- the
-                # Python repr, quotes/b-prefix and all -- not the string's own bytes, so
-                # this must pass the bytes through unchanged rather than str()'ing them.
-                pred.value = val
+            pred.op = _jsonl_parse_op(op)
+            pred.value = b''
+            pred.members.clear()
+            if pred.op == _OP_IS_NULL or pred.op == _OP_IS_NOT_NULL:
+                if val is not None:
+                    raise ValueError(
+                        f"predicate {op!r} on {col!r} takes no value (pass None), got {val!r}"
+                    )
+            elif pred.op == _OP_IN or pred.op == _OP_NOT_IN:
+                if not isinstance(val, (list, tuple, set, frozenset)):
+                    raise ValueError(
+                        f"predicate {op!r} on {col!r} takes a list, tuple or set of "
+                        f"values, got {type(val).__name__}"
+                    )
+                # One scalar predicate per member on the same column: EQ for IN (any
+                # passes), NE for NOT IN (all pass). See Predicate::members.
+                member.column = pred.column
+                member.op = _OP_EQ if pred.op == _OP_IN else _OP_NE
+                for m in val:
+                    member.kind, member.value = _predicate_literal(col, op, m)
+                    pred.members.push_back(member)
             else:
-                pred.value = str(val).encode('utf-8')
+                pred.kind, pred.value = _predicate_literal(col, op, val)
             context.predicates.push_back(pred)
 
     if explicit_schema:
@@ -449,6 +478,21 @@ def read_jsonl(
             buf_data = <const uint8_t*>in_memory_data
             buf_len = len(in_memory_data)
 
+        # Predicate literals are checked against their columns BEFORE any row is
+        # filtered — a literal of the wrong type raises instead of answering "no rows"
+        # (see check_predicate_literals). Declared columns are checked even on an empty
+        # buffer.
+        if not context.predicates.empty():
+            with nogil:
+                check_predicate_literals(buf_data, buf_len, context)
+
+        # Column discovery reads the head of the INPUT — before the prefilter drops
+        # records and independent of which records the predicates keep — so the column
+        # set never depends on which rows matched. See discover_column_names.
+        if buf_len > 0:
+            with nogil:
+                column_names_cpp = discover_column_names(buf_data, buf_len, context)
+
         # Sparser-style raw prefilter: for a selective string-equality predicate, drop
         # records that cannot contain the value before any structural parsing. Sound by
         # construction (value-anchored needle), self-disabling on short/non-selective
@@ -486,11 +530,6 @@ def read_jsonl(
                 ))
 
             if interp_result.all_records.num_records() > 0:
-                # Read column names from the sampled records BEFORE moving the
-                # records out (no projection = all columns).
-                column_names_cpp = sample_record_keys(
-                    interp_result.all_records, buf_data, context.infer_sample_size
-                )
                 # A DECLARED column is always built, even when no sampled record carries
                 # it: a schema pinned from another chunk (or file) names columns this
                 # buffer may lack entirely, and the caller relies on getting every
@@ -582,16 +621,36 @@ def benchmark_document_map(
     }
 
 
-cdef uint8_t _jsonl_parse_op(str op):
-    ops = {
-        '==': 0,  # EQ
-        '!=': 1,  # NE
-        '<': 2,   # LT
-        '<=': 3,  # LE
-        '>': 4,   # GT
-        '>=': 5,  # GE
-    }
-    return ops.get(op, 0)
+# Op codes shared with core/parse_context.hpp's Predicate::op.
+cdef enum:
+    _OP_EQ = 0
+    _OP_NE = 1
+    _OP_IN = 6
+    _OP_NOT_IN = 7
+    _OP_IS_NULL = 8
+    _OP_IS_NOT_NULL = 9
+
+_JSONL_OPS = {
+    '==': 0,           # EQ
+    '!=': 1,           # NE
+    '<': 2,            # LT
+    '<=': 3,           # LE
+    '>': 4,            # GT
+    '>=': 5,           # GE
+    'in': 6,           # IN
+    'not in': 7,       # NOT_IN
+    'is null': 8,      # IS_NULL
+    'is not null': 9,  # IS_NOT_NULL
+}
+
+
+cdef uint8_t _jsonl_parse_op(str op) except? 255:
+    # An unknown operator must fail here. Mapping it to a default (the old `ops.get(op, 0)`)
+    # silently evaluated `in [1, 3]` as `== "[1, 3]"` and returned zero rows.
+    code = _JSONL_OPS.get(op)
+    if code is None:
+        raise ValueError(f"Unknown predicate operator: {op!r}")
+    return <uint8_t>code
 
 
 cdef str _jsonl_schema_type_name(DrakenType t):

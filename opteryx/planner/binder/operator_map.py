@@ -465,12 +465,11 @@ def determine_type(node):
         NodeType.NOT,
         NodeType.XOR,
     ):
-        if node.value in (
-            "IsTrue",
-            "IsFalse",
-            "IsNotTrue",
-            "IsNotFalse",
-        ) and node.centre.schema_column.category not in (OT.BOOLEAN, None):
+        if (
+            node.node_type == NodeType.UNARY_OPERATOR
+            and node.value in ("IsTrue", "IsFalse", "IsNotTrue", "IsNotFalse")
+            and node.centre.schema_column.category not in (OT.BOOLEAN, None)
+        ):
             raise IncorrectTypeError(
                 f"Expected a BOOLEAN value for {convert_camel_to_sql_case(node.value)}, but received {node.centre.schema_column.category}."
             )
@@ -488,7 +487,7 @@ def determine_type(node):
                     f"{operand_category}."
                 )
             return BOOLEAN
-        if node.value == "BitwiseNot":
+        if node.node_type == NodeType.UNARY_OPERATOR and node.value == "BitwiseNot":
             operand_type = node.centre.schema_column.category
             if operand_type not in (OT.INTEGER, None):
                 raise IncorrectTypeError(
@@ -505,7 +504,10 @@ def determine_type(node):
     if node.node_type == NodeType.LITERAL:
         return node.type  # ColumnType
 
-    if node.value in ("NotInSubQuery", "InSubQuery"):
+    if node.node_type == NodeType.COMPARISON_OPERATOR and node.value in (
+        "NotInSubQuery",
+        "InSubQuery",
+    ):
         return BOOLEAN
 
     if node.schema_column:

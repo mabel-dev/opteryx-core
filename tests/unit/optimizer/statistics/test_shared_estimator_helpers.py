@@ -44,45 +44,42 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 from opteryx.planner.optimizer import statistics_refresh
 from opteryx.planner.optimizer.strategies import join_algorithm
 from opteryx.planner.optimizer.strategies import predicate_ordering as strategy_predicate_ordering
-import sys as _sys
-
+from opteryx.compiled.planner import join_estimator
+from opteryx.planner import cost_estimation
 from opteryx.planner.cost_estimation import fallback_selectivity
-from opteryx.planner.cost_estimation import join_cardinality
 from opteryx.planner.cost_estimation import selectivity as selectivity_module
 
-# The package __init__ re-exports the dpccp FUNCTION under the module's own
-# name, so attribute access yields the function; fetch the module itself.
-import opteryx.planner.cost_estimation.dpccp  # noqa: F401  (registers the module)
-
-dpccp_module = _sys.modules["opteryx.planner.cost_estimation.dpccp"]
-from opteryx.planner.cost_estimation.join_cardinality import KeyStats
-from opteryx.planner.cost_estimation.join_cardinality import NdvProvenance
-from opteryx.planner.cost_estimation.join_cardinality import apply_occupancy_bound
-from opteryx.planner.cost_estimation.join_cardinality import composite_key_ndv
+from opteryx.planner.cost_estimation import KeyStats
+from opteryx.planner.cost_estimation import NdvProvenance
+from opteryx.planner.cost_estimation import apply_occupancy_bound
+from opteryx.planner.cost_estimation import composite_key_ndv
 
 
 # --- single-source identity ------------------------------------------------
 
 
 def test_composite_key_ndv_is_the_single_composition():
-    """Both consumers bind the ONE helper, not local copies."""
+    """Both consumers bind the ONE (native) helper, not local copies."""
+    assert composite_key_ndv is join_estimator.composite_key_ndv
     assert statistics_refresh.composite_key_ndv is composite_key_ndv
     assert join_algorithm.composite_key_ndv is composite_key_ndv
 
 
 def test_occupancy_bound_is_the_single_function():
-    """dpccp and statistics_refresh call the ONE bound; the local copies are gone."""
-    assert dpccp_module.apply_occupancy_bound is apply_occupancy_bound
+    """statistics_refresh binds the ONE native bound — the same C++ function the
+    native DPccp calls — and no local copy exists."""
+    assert apply_occupancy_bound is join_estimator.apply_occupancy_bound
     assert statistics_refresh.apply_occupancy_bound is apply_occupancy_bound
-    assert "_apply_occupancy_bound" not in vars(dpccp_module)
     assert "_apply_occupancy_bound" not in vars(statistics_refresh)
+    assert "_apply_occupancy_bound" not in vars(cost_estimation)
 
 
 def test_fallback_constants_have_one_definition():
-    """selectivity.py, join_cardinality and the ordering strategy all read
-    fallback_selectivity's values -- no independently declared duplicates."""
+    """selectivity.py, the native join estimator and the ordering strategy all
+    read ONE set of values -- no independently declared duplicates. The
+    equality fallback is declared natively and read back by fallback_selectivity."""
     assert (
-        join_cardinality.EQ_UNKNOWN_NDV_FALLBACK
+        join_estimator.EQ_UNKNOWN_NDV_FALLBACK
         is fallback_selectivity.EQ_UNKNOWN_NDV_FALLBACK
     )
     assert (

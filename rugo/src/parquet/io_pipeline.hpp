@@ -1534,6 +1534,24 @@ class ParquetIOPipeline {
         int64_t bytes_pruned = 0;   // header+payload bytes of those pages
     };
 
+    // ── Remote fetch plan ────────────────────────────────────────────────────
+    // Built ONCE per fetch block over every member's projected columns. A
+    // "slot" is (member, column): slot = member * ncols + col. Column-chunk
+    // extents of every member go through the coalescer together, which is what
+    // turns a column's byte-adjacent chunks over a block (the grouped layout,
+    // docs/PARQUET_GROUPED_COLUMN_MAJOR_DESIGN.md) into ONE range GET.
+    struct RemotePlan {
+        // One byte run to fetch. A slot is one extent (its whole chunk) unless
+        // page pruning split it into the runs that survive.
+        struct Extent { int64_t start, end; size_t slot; };
+        struct Group { int64_t start, end, useful; std::vector<size_t> extents; };
+        std::vector<int64_t> cstart, clen;   // per slot: the chunk frame the decoder sees
+        std::vector<Extent>  extents;
+        std::vector<Group>   groups;
+    };
+
+    struct FetchBlock;   // defined after WorkItem, which it holds
+
     struct WorkItem {
         std::string path;
         int rg_idx;
@@ -1553,30 +1571,56 @@ class ParquetIOPipeline {
         int64_t charged_decoded = 0;
         int64_t charged_compressed = 0;
         // docs/EXECUTION_TRACING_DESIGN.md: 0 unless tracing is armed at enqueue
-        // time (enqueue_pending stamps both together) — decode_row_group treats
+        // time (enqueue_block stamps both together) — decode_row_group treats
         // issued_ns == 0 as "don't record spans for this item", so a query that
         // starts untraced never pays for a corr_id allocation either.
         uint64_t issued_ns = 0;
         uint32_t corr_id = 0;
         uint32_t file_id = 0;  // draken_trace_intern_file(path); 0 == untraced
-        // Fetch-ahead (set_fetch_ahead): bytes fetched by the FETCH stage, indexed
-        // by coalesced group exactly as decode_row_group's local remote_buffers is.
-        // Empty + prefetch_done==false means "decode fetches it itself" (the
-        // coupled path, the default).
-        std::vector<std::vector<uint8_t>> prefetched;
-        bool prefetch_done = false;
-        // A fetch-stage failure travels HERE and is rethrown by decode_row_group
-        // inside its existing catch — one error path, the original message. It is
-        // NOT a signal for decode to re-fetch: that would be a hidden second retry
-        // round on top of HttpClient's own budget, doubling time-to-failure and
-        // burying the first failure.
-        std::exception_ptr prefetch_error;
-        // Nanoseconds the FETCH stage spent on this row group's GETs. Carried so
-        // decode can fold it into the item's read_ns: the bytes still cost what
-        // they cost, and a scan that reported read_ns == 0 because the fetch
-        // moved to another thread would be telemetry that lies about its own IO.
-        uint64_t prefetch_ns = 0;
+        // The fetch block this row group belongs to and its member index in it
+        // (null for a LOCAL file: served by mmap, nothing to fetch). The block
+        // owns the fetched bytes; a fetch failure travels on it and is rethrown
+        // by decode_row_group inside its existing catch — one error path, the
+        // original message. It is NOT a signal for decode to re-fetch: that
+        // would be a hidden second retry round on top of HttpClient's own
+        // budget, doubling time-to-failure and burying the first failure.
+        std::shared_ptr<FetchBlock> block;
+        size_t member = 0;
     };
+
+    // ── Fetch block ──────────────────────────────────────────────────────────
+    // The kept row groups of one block of one REMOTE file, fetched as one unit:
+    // their extents are planned and coalesced together and the resulting range
+    // GETs are issued in one batch. The bytes are SHARED by the block's members
+    // — each member is still its own WorkItem, claimed and decoded on its own,
+    // one result per row group — and are released when the last member drops
+    // its reference. Row-group-major files (every row group its own block) and
+    // single row groups are one-member blocks: there is ONE remote fetch path.
+    //
+    // Two lifecycles, one plan: with a fetch pool (set_fetch_ahead) the fetch
+    // stage fills the block and only then publishes its members as decodable;
+    // on the coupled path the block's LEAD member is published at once and the
+    // worker that claims it fetches the block (ensure_block_fetched), publishes
+    // the followers, then decodes its own row group. A follower therefore never
+    // waits on another worker's IO — it is not claimable until the bytes exist.
+    struct FetchBlock {
+        std::string path;
+        size_t ncols = 0;
+        size_t n_members = 0;
+        // Per member: the chunk-frame geometry the decode of that member reads.
+        std::vector<std::vector<int64_t>> base_offsets;   // [member][col]
+        RemotePlan plan;
+        std::vector<std::vector<uint8_t>> buffers;        // per coalesced group
+        uint64_t fetch_ns = 0;            // folded into the first member's read_ns only
+        std::exception_ptr error;         // a fetch failure, rethrown by every member's decode
+        bool fetched = false;             // coupled path: guarded by `mu`
+        std::mutex mu;
+        // Coupled path only: members held back until the lead's fetch lands.
+        std::vector<WorkItem> followers;
+        // Cancel: the block's bytes are counted as discarded ONCE, not per member.
+        std::atomic<bool> discard_counted{false};
+    };
+
 
     // Priority-capable pool (Gap #3 Phase 2b): same vendored BS::thread_pool template
     // as the plain BS::light_thread_pool this used to be (light_thread_pool IS
@@ -1868,8 +1912,10 @@ class ParquetIOPipeline {
         ledger_charge(held_decoded_, item.charged_decoded);
         // Coupled remote path: the compressed bytes are fetched inside decode and
         // live until it returns, so they are charged here rather than by a fetch
-        // stage that does not exist for this item.
-        if (!item.prefetch_done && !path_is_local(item.path)) {
+        // stage that does not exist for this item. A member whose block was
+        // already fetched (by the fetch stage, or by the lead's decode) was
+        // charged by whoever fetched it.
+        if (item.block && !item.block->fetched && !path_is_local(item.path)) {
             item.charged_compressed = item.est_compressed_bytes;
             ledger_charge(held_prefetch_, item.charged_compressed);
         }
@@ -1960,35 +2006,6 @@ class ParquetIOPipeline {
             base_offsets[i] = base;
         }
         return base_offsets;
-    }
-
-    // Remote bloom decode-skip: for a column carrying a pushed equality/IN
-    // predicate whose bloom filter sits immediately before its column chunk
-    // (adjacent layout), extend that column's fetch backwards to swallow the
-    // bloom bytes. They ride in the same GET we already issue for the chunk,
-    // so testing them costs no extra round trip — a probe that proves the
-    // needle absent lets us skip the whole row group's decode. Gated on the
-    // three conditions: (1) bloom adjacent to the chunk, (2) a pushed =/IN
-    // predicate on the column, (3) the row group survived min/max (implicit —
-    // manifest pruning already dropped the rest). Remote-only: local files
-    // are bloom-pruned at manifest time and never reach here excluded. Not
-    // applied under a row_mask (pass-2 late materialization already has
-    // survivors). bloom_prefix[i] == 0 means "no bloom in column i's fetch".
-    std::vector<int64_t> compute_bloom_prefix(
-            const WorkItem& item, const std::vector<int64_t>& base_offsets) const {
-        std::vector<int64_t> bloom_prefix(item.column_stats.size(), 0);
-        if (path_is_local(item.path) || !item.row_mask.empty() || dict_preds_.empty())
-            return bloom_prefix;
-        for (size_t i = 0; i < item.column_stats.size(); ++i) {
-            const auto& cs = item.column_stats[i];
-            if (cs.bloom_offset < 0 || cs.bloom_length <= 0) continue;
-            if (cs.bloom_offset + cs.bloom_length != base_offsets[i]) continue;  // not adjacent
-            auto it = dict_preds_.find(cs.name);
-            if (it == dict_preds_.end()) continue;
-            if (it->second.kind != 0 && it->second.kind != 1) continue;  // only =/IN
-            bloom_prefix[i] = cs.bloom_length;
-        }
-        return bloom_prefix;
     }
 
     // ── PageIndex page pruning ───────────────────────────────────────────────
@@ -2205,41 +2222,44 @@ class ParquetIOPipeline {
             page_index_row_groups_pruned_.fetch_add(1, std::memory_order_relaxed);
     }
 
-    struct RemotePlan {
-        // One byte run to fetch. A column is one extent (its whole chunk) unless
-        // page pruning split it into the runs that survive.
-        struct Extent { int64_t start, end; size_t col; };
-        struct Group { int64_t start, end, useful; std::vector<size_t> extents; };
-        std::vector<int64_t> cstart, clen;   // per column: the chunk frame the decoder sees
-        std::vector<Extent>  extents;
-        std::vector<Group>   groups;
-    };
-
-    // Coalesce runs of adjacent/near-adjacent column extents into single range
-    // GETs — see set_coalesce_tuning() for the rationale and the measurements
-    // behind both bounds.
-    RemotePlan build_remote_plan(const WorkItem& item,
-                                 const std::vector<int64_t>& base_offsets,
-                                 const std::vector<int64_t>& bloom_prefix) const {
-        RemotePlan plan;
-        const size_t ncols = item.column_stats.size();
-        plan.cstart.resize(ncols);
-        plan.clen.resize(ncols);
-        const PagePrune& pp = item.page_prune;
-        for (size_t i = 0; i < ncols; ++i) {
-            plan.cstart[i] = base_offsets[i] - bloom_prefix[i];
-            plan.clen[i]   = bloom_prefix[i] + item.column_stats[i].total_compressed_size;
-            const bool sparse = pp.active && i < pp.extents.size() && !pp.extents[i].empty();
-            if (!sparse) {
-                plan.extents.push_back(RemotePlan::Extent{plan.cstart[i], plan.cstart[i] + plan.clen[i], i});
-                continue;
-            }
-            for (size_t k = 0; k < pp.extents[i].size(); ++k) {
-                int64_t st = pp.extents[i][k].first;
-                // The adjacent bloom filter rides in front of the chunk: it
-                // belongs to the first run, which starts at the chunk base.
-                if (k == 0) st = std::min(st, plan.cstart[i]);
-                plan.extents.push_back(RemotePlan::Extent{st, pp.extents[i][k].second, i});
+    // Plan one fetch block: every member's page pruning and base offsets
+    // (memoised on the member), then all their extents through the coalescer
+    // TOGETHER. Coalescing merges runs of adjacent/near-adjacent
+    // extents into single range GETs — see set_coalesce_tuning() for the
+    // rationale and the measurements behind both bounds — and, because a
+    // grouped file stores a column's chunks for a block back to back, a
+    // projected column over the block becomes one merged run whatever the
+    // member count. A member every page of which was pruned contributes no
+    // extents (its decode emits empty_filtered from the memoised verdict).
+    void plan_block(FetchBlock& blk, const std::vector<WorkItem*>& members) {
+        blk.n_members = members.size();
+        blk.base_offsets.resize(members.size());
+        RemotePlan& plan = blk.plan;
+        const size_t ncols = blk.ncols;
+        plan.cstart.assign(members.size() * ncols, 0);
+        plan.clen.assign(members.size() * ncols, 0);
+        plan.extents.clear();
+        plan.groups.clear();
+        for (size_t m = 0; m < members.size(); ++m) {
+            WorkItem& item = *members[m];
+            compute_page_prune(item);
+            blk.base_offsets[m] = compute_base_offsets(item);
+            const PagePrune& pp = item.page_prune;
+            const std::vector<int64_t>& base_offsets = blk.base_offsets[m];
+            for (size_t i = 0; i < ncols; ++i) {
+                const size_t slot = m * ncols + i;
+                plan.cstart[slot] = base_offsets[i];
+                plan.clen[slot]   = item.column_stats[i].total_compressed_size;
+                if (pp.active && pp.all_pruned) continue;   // nothing to buy for this member
+                const bool sparse = pp.active && i < pp.extents.size() && !pp.extents[i].empty();
+                if (!sparse) {
+                    plan.extents.push_back(RemotePlan::Extent{
+                        plan.cstart[slot], plan.cstart[slot] + plan.clen[slot], slot});
+                    continue;
+                }
+                for (size_t k = 0; k < pp.extents[i].size(); ++k)
+                    plan.extents.push_back(RemotePlan::Extent{
+                        pp.extents[i][k].first, pp.extents[i][k].second, slot});
             }
         }
         std::vector<size_t> order(plan.extents.size());
@@ -2270,15 +2290,14 @@ class ParquetIOPipeline {
             if (!merged)
                 plan.groups.push_back(RemotePlan::Group{st, e, len, {x}});
         }
-        return plan;
     }
 
 #ifdef RUGO_ENABLE_HTTP
-    // Issue every coalesced range for one row group concurrently. Used by the
+    // Issue every coalesced range for one fetch block concurrently. Used by the
     // decode stage (coupled, default) and by the fetch-ahead stage (decoupled).
     std::vector<std::vector<uint8_t>> fetch_remote_groups(
-            const WorkItem& item, const RemotePlan& plan, uint64_t* out_ns) {
-        const std::string url = fetch_url_for(item.path);
+            const std::string& path, const RemotePlan& plan, uint64_t* out_ns) {
+        const std::string url = fetch_url_for(path);
         std::vector<std::pair<std::string, std::map<std::string, std::string>>> reqs;
         reqs.reserve(plan.groups.size());
         for (const auto& g : plan.groups) {
@@ -2424,158 +2443,189 @@ class ParquetIOPipeline {
     // carried on the item and rethrown by decode_row_group inside its existing
     // catch, so it surfaces with its original message through the one error
     // path. Re-fetching from decode would be a hidden second retry round.
-    void run_one_fetch(WorkItem&& item) {
-        if (!cancelled_.load(std::memory_order_relaxed) &&
-            !path_is_local(item.path) && !item.column_stats.empty()) {
+    // Fetch one block's bytes: plan every member together and issue the merged
+    // ranges in one batch. `charge_members`: the members whose compressed bytes
+    // this fetch buys and must charge on the prefetch ledger (the fetch stage
+    // charges every member after an admission wait; the coupled lead charges
+    // only its followers — its own share was charged when it was claimed).
+    void fetch_block(FetchBlock& blk, const std::vector<WorkItem*>& members,
+                     const std::vector<WorkItem*>& charge_members) {
 #ifdef RUGO_ENABLE_HTTP
-            try {
-                // Memory admission for the compressed bytes this fetch will hold
-                // until decode consumes them. Waits only while an EARLIER fetch's
-                // bytes are still pending a decode (see the ledger comment).
-                if (memory_budget_bytes_ > 0) {
-                    std::unique_lock<std::mutex> lk(queue_mutex_);
-                    auto admissible = [this, &item]() {
-                        if (shutdown_.load(std::memory_order_relaxed) ||
-                            cancelled_.load(std::memory_order_relaxed)) return true;
-                        const int64_t held = held_prefetch_.load(std::memory_order_relaxed);
-                        if (held == 0) return true;
-                        return held + held_decoded_.load(std::memory_order_relaxed) +
-                               item.est_compressed_bytes <= memory_budget_bytes_;
-                    };
-                    if (!admissible()) {
-                        admission_waits_.fetch_add(1, std::memory_order_relaxed);
-                        const auto t0 = std::chrono::steady_clock::now();
-                        queue_cv_.wait(lk, admissible);
-                        admission_blocked_ns_.fetch_add(
-                            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                std::chrono::steady_clock::now() - t0).count(),
-                            std::memory_order_relaxed);
-                    }
-                    item.charged_compressed = item.est_compressed_bytes;
-                    ledger_charge(held_prefetch_, item.charged_compressed);
-                }
-                // Page pruning decides WHICH bytes to fetch, so it runs here,
-                // before the plan; decode reuses the memoised result.
-                compute_page_prune(item);
-                const auto base_offsets = compute_base_offsets(item);
-                const auto bloom_prefix = compute_bloom_prefix(item, base_offsets);
-                if (item.page_prune.active && item.page_prune.all_pruned) {
-                    // Nothing survives: no bytes to buy. decode sees the same
-                    // verdict from the memoised plan and emits empty_filtered.
-                    item.prefetched.clear();
-                } else {
-                    const RemotePlan plan = build_remote_plan(item, base_offsets, bloom_prefix);
-                    item.prefetched = fetch_remote_groups(item, plan, &item.prefetch_ns);
-                }
-                item.prefetch_done = true;
-            } catch (...) {
-                item.prefetched.clear();
-                item.prefetch_done = false;
-                item.prefetch_error = std::current_exception();
+        try {
+            plan_block(blk, members);
+            for (WorkItem* it : charge_members) {
+                it->charged_compressed = it->est_compressed_bytes;
+                ledger_charge(held_prefetch_, it->charged_compressed);
             }
+            if (!blk.plan.groups.empty())
+                blk.buffers = fetch_remote_groups(blk.path, blk.plan, &blk.fetch_ns);
+        } catch (...) {
+            blk.buffers.clear();
+            blk.error = std::current_exception();
+        }
+#else
+        (void)members; (void)charge_members;
+        blk.error = std::make_exception_ptr(std::runtime_error(
+            "remote parquet path requires an HTTP-enabled build: " + blk.path));
 #endif
-        }
-        {
-            std::lock_guard<std::mutex> lk(queue_mutex_);
-            pending_items_.push_back(std::move(item));
-        }
-        queue_cv_.notify_one();   // a helper blocked in wait_and_get_result can now claim it
-        tickets_inflight_.fetch_add(1, std::memory_order_relaxed);   // successor, before we release
-        decode_pool_->detach_task([this]() {
-            run_one_pending();
-            tickets_inflight_.fetch_sub(1, std::memory_order_release);
-        }, BS::pr::high);
+        blk.fetched = true;
     }
 
-    void enqueue_pending(WorkItem&& item) {
-        // docs/EXECUTION_TRACING_DESIGN.md: stamp the gather's issue time (queue-
-        // wait span start) and mint its correlation id here, once, rather than in
-        // every submit_row_group() overload. Skipped entirely when tracing is
-        // off — one relaxed atomic load, no clock read, no counter bump.
-        // corr_id comes from the QUERY-WIDE bridge counter (draken_trace_next_corr_id),
-        // not a pipeline-local one — see trace_node_id_'s comment above for why
-        // that used to collide.
-        if (draken_trace_enabled()) {
-            item.issued_ns = draken_trace_now_ns();
-            item.corr_id = draken_trace_next_corr_id();
-            item.file_id = draken_trace_intern_file(item.path.data(), item.path.size());
+    // Publish items as claimable and dispatch one claiming ticket per item.
+    // Ordering is load-bearing (see enqueue_block): the items are already
+    // counted in pending_work_, and each ticket is counted in tickets_inflight_
+    // BEFORE it is dispatched, so a caller that holds its own ticket can release
+    // it afterwards with the invariant intact.
+    void publish_items(std::vector<WorkItem>&& items) {
+        const size_t n = items.size();
+        if (n == 0) return;
+        {
+            std::lock_guard<std::mutex> lk(queue_mutex_);
+            for (WorkItem& it : items) pending_items_.push_back(std::move(it));
         }
-        pending_work_++;
-        // Fetch-ahead: when the dedicated fetch pool exists, a REMOTE item is
-        // NOT yet decodable — it becomes claimable only once its bytes are in
-        // hand (run_one_fetch publishes it). Local paths skip the stage entirely
-        // (served by mmap in decode); routing them through it would add a
-        // hand-off for no IO.
-        if (fetch_pool_ && !path_is_local(item.path)) {
+        items.clear();
+        // Wake as many helpers blocked in wait_and_get_result as there are new
+        // claimable items: one item, one waiter — waking every puller per item
+        // (notify_all) is a thundering herd on a local scan that publishes one
+        // row group at a time.
+        if (n == 1) queue_cv_.notify_one(); else queue_cv_.notify_all();
+        tickets_inflight_.fetch_add(static_cast<int64_t>(n), std::memory_order_relaxed);
+        for (size_t k = 0; k < n; ++k) {
+            decode_pool_->detach_task([this]() {
+                run_one_pending();
+                tickets_inflight_.fetch_sub(1, std::memory_order_release);
+            }, BS::pr::high);
+        }
+    }
+
+    // Fetch-ahead: the FETCH stage's ticket body. Issues this block's range GETs
+    // on fetch_pool_, parks the bytes on the block, and only THEN publishes its
+    // members as decodable work. Hands its ticket over to the decode tickets
+    // (tickets_inflight_ is incremented for the successors BEFORE this one is
+    // released) so wait_shutdown()'s "0 == nothing will touch `this` again"
+    // invariant holds across the two stages.
+    //
+    // A fetch failure is NOT swallowed and NOT retried here: the exception is
+    // carried on the block and rethrown by every member's decode_row_group
+    // inside its existing catch, so it surfaces with its original message
+    // through the one error path. Re-fetching from decode would be a hidden
+    // second retry round.
+    void run_one_fetch(std::shared_ptr<FetchBlock> blk, std::vector<WorkItem>&& members) {
+        if (!cancelled_.load(std::memory_order_relaxed) && blk->ncols > 0) {
+            // Memory admission for the compressed bytes this fetch will hold
+            // until every member's decode has consumed them. Waits only while an
+            // EARLIER fetch's bytes are still pending a decode (see the ledger
+            // comment).
+            int64_t block_bytes = 0;
+            for (const WorkItem& it : members) block_bytes += it.est_compressed_bytes;
+            if (memory_budget_bytes_ > 0) {
+                std::unique_lock<std::mutex> lk(queue_mutex_);
+                auto admissible = [this, block_bytes]() {
+                    if (shutdown_.load(std::memory_order_relaxed) ||
+                        cancelled_.load(std::memory_order_relaxed)) return true;
+                    const int64_t held = held_prefetch_.load(std::memory_order_relaxed);
+                    if (held == 0) return true;
+                    return held + held_decoded_.load(std::memory_order_relaxed) +
+                           block_bytes <= memory_budget_bytes_;
+                };
+                if (!admissible()) {
+                    admission_waits_.fetch_add(1, std::memory_order_relaxed);
+                    const auto t0 = std::chrono::steady_clock::now();
+                    queue_cv_.wait(lk, admissible);
+                    admission_blocked_ns_.fetch_add(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - t0).count(),
+                        std::memory_order_relaxed);
+                }
+            }
+            std::vector<WorkItem*> ptrs;
+            ptrs.reserve(members.size());
+            for (WorkItem& it : members) ptrs.push_back(&it);
+            // The budget-off case charges nothing (ledger_charge is a no-op on
+            // a zero charge only; guard on the budget itself).
+            fetch_block(*blk, ptrs, memory_budget_bytes_ > 0 ? ptrs : std::vector<WorkItem*>{});
+        } else {
+            blk->fetched = true;   // nothing bought; every member bails or decodes empty
+        }
+        publish_items(std::move(members));
+    }
+
+    // Coupled path (no fetch pool): the block's lead member was published at
+    // submit; the worker that claimed it fetches the block here, then publishes
+    // the followers — claimable only now that their bytes exist — and returns
+    // to decode its own row group. Idempotent: a block is fetched once.
+    void ensure_block_fetched(WorkItem& lead) {
+        FetchBlock& blk = *lead.block;
+        std::vector<WorkItem> followers;
+        {
+            std::lock_guard<std::mutex> lk(blk.mu);
+            if (blk.fetched) return;
+            std::vector<WorkItem*> members;
+            members.reserve(1 + blk.followers.size());
+            members.push_back(&lead);
+            std::vector<WorkItem*> charge;
+            for (WorkItem& f : blk.followers) { members.push_back(&f); charge.push_back(&f); }
+            fetch_block(blk, members, memory_budget_bytes_ > 0 ? charge : std::vector<WorkItem*>{});
+            followers = std::move(blk.followers);
+            blk.followers.clear();
+        }
+        publish_items(std::move(followers));
+    }
+
+    // Enqueue one fetch block's members. Ordering is load-bearing: pending_work_
+    // is advanced by the member count FIRST (before any member is claimable, so
+    // a helper/ticket that grabs one and runs decode_row_group's pending_work_--
+    // can never drive the counter negative), THEN the members are published,
+    // THEN their tickets are counted and dispatched.
+    void enqueue_block(std::shared_ptr<FetchBlock> blk, std::vector<WorkItem>&& members) {
+        // docs/EXECUTION_TRACING_DESIGN.md: stamp each gather's issue time
+        // (queue-wait span start) and mint its correlation id here, once, rather
+        // than in every submit overload. Skipped entirely when tracing is off —
+        // one relaxed atomic load, no clock read, no counter bump. corr_id comes
+        // from the QUERY-WIDE bridge counter (draken_trace_next_corr_id), not a
+        // pipeline-local one — see trace_node_id_'s comment above for why that
+        // used to collide.
+        if (draken_trace_enabled()) {
+            for (WorkItem& item : members) {
+                item.issued_ns = draken_trace_now_ns();
+                item.corr_id = draken_trace_next_corr_id();
+                item.file_id = draken_trace_intern_file(item.path.data(), item.path.size());
+            }
+        }
+        pending_work_ += static_cast<int>(members.size());
+        const bool remote = blk != nullptr;
+        // Fetch-ahead: when the dedicated fetch pool exists, a REMOTE block is
+        // NOT yet decodable — its members become claimable only once the bytes
+        // are in hand (run_one_fetch publishes them). Local paths skip the stage
+        // entirely (served by mmap in decode); routing them through it would add
+        // a hand-off for no IO.
+        if (fetch_pool_ && remote) {
             tickets_inflight_.fetch_add(1, std::memory_order_relaxed);
             fetch_pool_->detach_task(
-                [this, it = std::move(item)]() mutable {
-                    run_one_fetch(std::move(it));
+                [this, blk, ms = std::move(members)]() mutable {
+                    run_one_fetch(blk, std::move(ms));
                     tickets_inflight_.fetch_sub(1, std::memory_order_release);
                 }, BS::pr::high);
             return;
         }
-        {
-            std::lock_guard<std::mutex> lk(queue_mutex_);
-            pending_items_.push_back(std::move(item));
+        if (remote && members.size() > 1) {
+            // Coupled path: only the lead is claimable; the rest ride on the
+            // block until the lead's decode has fetched it.
+            std::vector<WorkItem> lead;
+            lead.push_back(std::move(members.front()));
+            blk->followers.reserve(members.size() - 1);
+            for (size_t k = 1; k < members.size(); ++k)
+                blk->followers.push_back(std::move(members[k]));
+            members.clear();
+            publish_items(std::move(lead));
+            return;
         }
-        queue_cv_.notify_one();  // wake a helper blocked in wait_and_get_result
-        tickets_inflight_.fetch_add(1, std::memory_order_relaxed);
-        decode_pool_->detach_task([this]() {
-            run_one_pending();
-            tickets_inflight_.fetch_sub(1, std::memory_order_release);
-        }, BS::pr::high);
+        publish_items(std::move(members));
     }
 
-    // Probe an in-memory bloom filter for every needle of a pushed equality/IN
-    // predicate. Returns true only when EVERY needle is provably absent — i.e.
-    // this row group cannot match the conjunct, so its decode can be skipped.
-    // `physical_type` encodes the needle bytes identically to the writer's
-    // bloom_hashes (int32=4 LE, int64=8 LE, byte_array=raw). Only kind 0 (int
-    // membership) and kind 1 (str membership) can consult a bloom; LIKE kinds
-    // and unencodable types return false (keep the row group). Any probe error
-    // fails OPEN (false) — a bloom must never drop a live row.
-    static bool bloom_needles_all_absent(
-            const uint8_t* bloom_data, size_t bloom_len, int kind,
-            const std::vector<int64_t>* int_vals,
-            const std::vector<std::string>* str_vals,
-            const std::string& physical_type) {
-        std::string vbytes;
-        try {
-            if (kind == 0 && int_vals != nullptr) {
-                if (int_vals->empty()) return false;
-                for (int64_t v : *int_vals) {
-                    if (physical_type == "int64") {
-                        vbytes.assign(reinterpret_cast<const char*>(&v), 8);
-                    } else if (physical_type == "int32") {
-                        int32_t v32 = static_cast<int32_t>(v);
-                        if (static_cast<int64_t>(v32) != v) return false;
-                        vbytes.assign(reinterpret_cast<const char*>(&v32), 4);
-                    } else {
-                        return false;  // unencodable physical type → keep
-                    }
-                    if (TestBloomFilterBytes(bloom_data, bloom_len, vbytes))
-                        return false;  // may be present → keep
-                }
-                return true;  // every needle provably absent
-            }
-            if (kind == 1 && str_vals != nullptr) {
-                if (str_vals->empty() || physical_type != "byte_array") return false;
-                for (const std::string& s : *str_vals) {
-                    if (TestBloomFilterBytes(bloom_data, bloom_len, s))
-                        return false;
-                }
-                return true;
-            }
-        } catch (...) {
-            return false;  // any parse/probe error → keep the row group
-        }
-        return false;  // LIKE / unknown kind → cannot prune
-    }
-
-    // Non-const: with fetch-ahead the item OWNS its prefetched bytes and decode
-    // moves them out (they are dead the moment decode starts). Both call sites
-    // hold a non-const local WorkItem.
+    // Non-const: decode memoises page pruning on the item and drops its block
+    // reference when done (the bytes are dead for this member the moment its
+    // decode ends). Both call sites hold a non-const local WorkItem.
     void decode_row_group(WorkItem& item) {
         // WP-8 cancel: a queued task whose work is no longer wanted bails here,
         // before any IO / decode / allocation. Nothing was reserved yet, so
@@ -2584,22 +2634,42 @@ class ParquetIOPipeline {
         if (cancelled_.load(std::memory_order_relaxed)) {
             cancelled_skips_.fetch_add(1, std::memory_order_relaxed);
             // Fetch-ahead bought these bytes and nobody will read them: count
-            // them so the waste is a number in telemetry, not an inference.
-            if (item.prefetch_done) {
+            // them so the waste is a number in telemetry, not an inference —
+            // once per block, since its members share them.
+            if (item.block && item.block->fetched &&
+                !item.block->discard_counted.exchange(true, std::memory_order_relaxed)) {
                 uint64_t nb = 0;
-                for (const auto& b : item.prefetched) nb += b.size();
+                for (const auto& b : item.block->buffers) nb += b.size();
                 prefetch_discarded_bytes_.fetch_add(nb, std::memory_order_relaxed);
+            }
+            // A coupled-path lead that never fetched leaves its followers held
+            // on the block: they are cancelled work too, and are balanced here
+            // rather than left unpublished with their pending_work_ counted.
+            if (item.block) {
+                std::vector<WorkItem> held;
+                {
+                    std::lock_guard<std::mutex> lk(item.block->mu);
+                    held = std::move(item.block->followers);
+                    item.block->followers.clear();
+                }
+                for (WorkItem& f : held) {
+                    cancelled_skips_.fetch_add(1, std::memory_order_relaxed);
+                    ledger_release(held_prefetch_, f.charged_compressed);
+                    ledger_release(held_decoded_, f.charged_decoded);
+                    pending_work_--;
+                }
             }
             // Nothing was produced: both ledger charges come back here.
             ledger_release(held_prefetch_, item.charged_compressed);
             ledger_release(held_decoded_, item.charged_decoded);
+            item.block.reset();
             pending_work_--;
-            queue_cv_.notify_one();
+            queue_cv_.notify_all();
             return;
         }
 
         // docs/EXECUTION_TRACING_DESIGN.md: t_dequeue closes the queue-wait span
-        // opened at enqueue_pending's issued_ns — this worker is now actually
+        // opened at enqueue_block's issued_ns — this worker is now actually
         // starting on the item, having claimed it from pending_items_ (whether
         // via a pool ticket's run_one_pending or a blocked puller's inline-help
         // path in wait_and_get_result; both funnel through here). Zero-cost when
@@ -2695,27 +2765,34 @@ class ParquetIOPipeline {
                 std::chrono::steady_clock::now() - t_map).count();
         }
 
-        // Per-column base offset and bloom prefix. Computed once here and reused
-        // for both the remote batch request and the in-loop chunk slicing — via
-        // the same helpers the fetch-ahead stage uses, so the two stages cannot
-        // derive different extents for the same row group.
-        const std::vector<int64_t> base_offsets = compute_base_offsets(item);
-        const std::vector<int64_t> bloom_prefix = compute_bloom_prefix(item, base_offsets);
-
-        // Remote batch prefetch: for HTTP/GCS, fetch every column chunk for
-        // this row group concurrently in a single get_many() call rather than
-        // one blocking GET per column (which serialized C round-trips per row
-        // group). Local files use mmap (above) or per-column pread (in-loop).
-        // The path is already a signed/self-authenticating URL when needed, so
-        // no auth header is attached here.
+        // Remote: the row group's bytes come from its FETCH BLOCK — planned and
+        // fetched once for every kept row group of the block (plan_block), so a
+        // column's chunks over a grouped block arrive in one range. With a fetch
+        // pool the bytes are already here; on the coupled path the first member
+        // claimed fetches for the block (ensure_block_fetched). Local files use
+        // mmap (above) or per-column pread (in-loop). The path is already a
+        // signed/self-authenticating URL when needed, so no auth header is
+        // attached here.
         const bool remote = !is_local;
 #ifndef RUGO_ENABLE_HTTP
         if (remote)
             reject_remote_path(item.path);
 #endif
-        // remote_buffers is indexed by COALESCED GROUP; col_ptr/col_len map each
-        // column onto its slice within one of those group buffers.
-        std::vector<std::vector<uint8_t>> remote_buffers;
+        if (remote && item.block)
+            ensure_block_fetched(item);
+
+        // Per-column base offset — for a remote row group the values the block
+        // plan was built from, so decode and fetch cannot derive different
+        // extents for the same chunk; for a local one computed here (nothing
+        // was planned).
+        std::vector<int64_t> base_offsets;
+        if (remote && item.block && item.block->fetched && !item.block->error)
+            base_offsets = item.block->base_offsets[item.member];
+        else
+            base_offsets = compute_base_offsets(item);
+
+        // col_ptr/col_len map each column onto its slice within one of the
+        // block's coalesced-group buffers.
         std::vector<const uint8_t*>       col_ptr;
         std::vector<size_t>               col_len;
         // Page pruning: a column whose surviving pages arrive as several runs is
@@ -2744,31 +2821,29 @@ class ParquetIOPipeline {
 #ifdef RUGO_ENABLE_HTTP
             if (remote && !item.column_stats.empty() && !result.empty_filtered) {
                 const size_t ncols = item.column_stats.size();
-                const RemotePlan plan =
-                    build_remote_plan(item, base_offsets, bloom_prefix);
+                if (!item.block)
+                    throw std::logic_error("remote row group submitted without a fetch block");
+                const FetchBlock& blk = *item.block;
+                if (blk.error)
+                    std::rethrow_exception(blk.error);
+                if (!blk.fetched)
+                    throw std::logic_error("remote row group decoded before its block was fetched");
+                const RemotePlan& plan = blk.plan;
+                const std::vector<std::vector<uint8_t>>& remote_buffers = blk.buffers;
+                // The block's GETs cost what they cost: folded into the FIRST
+                // member's read_ns, once — a per-member copy would report the
+                // same wait G times.
+                if (item.member == 0) total_read_ns += blk.fetch_ns;
 
-                if (item.prefetch_error)
-                    std::rethrow_exception(item.prefetch_error);
-                if (item.prefetch_done) {
-                    // Fetch-ahead: the bytes are already here. `plan` is rebuilt
-                    // from the same pure helpers the fetch stage used, so the
-                    // group geometry is identical by construction — that is why
-                    // the fetch stage ships raw buffers and no pointers (a
-                    // pointer computed on another thread into a moved vector is
-                    // the bug class this design avoids outright).
-                    remote_buffers = std::move(item.prefetched);
-                    total_read_ns += item.prefetch_ns;
-                } else {
-                    remote_buffers = fetch_remote_groups(item, plan, &total_read_ns);
-                }
-
-                // Point each column at its bytes. A column fetched as ONE extent
-                // is a zero-copy slice of its group buffer; one fetched as several
-                // runs is reassembled into a chunk-sized buffer at each run's own
-                // offset. A short/missing buffer for ANY of a column's runs leaves
-                // the column's view null and is caught at the decode site — a
-                // half-assembled buffer would read a zero hole as end-of-column,
-                // never an error, so it must not reach the decoder.
+                // Point each of THIS member's columns at its bytes. A column
+                // fetched as ONE extent is a zero-copy slice of its group
+                // buffer; one fetched as several runs is reassembled into a
+                // chunk-sized buffer at each run's own offset. A short/missing
+                // buffer for ANY of a column's runs leaves the column's view
+                // null and is caught at the decode site — a half-assembled
+                // buffer would read a zero hole as end-of-column, never an
+                // error, so it must not reach the decoder.
+                const size_t slot0 = item.member * ncols;
                 col_ptr.assign(ncols, nullptr);
                 col_len.assign(ncols, 0);
                 col_fetched.assign(ncols, 0);
@@ -2781,29 +2856,34 @@ class ParquetIOPipeline {
                 // later must still be placed at its own offset in an assembled
                 // buffer, never handed over as if it began the chunk.
                 std::vector<uint8_t> whole(ncols, 0);
-                for (const auto& e : plan.extents) ++n_ext[e.col];
+                auto mine = [&](size_t slot) { return slot >= slot0 && slot < slot0 + ncols; };
+                for (const auto& e : plan.extents) if (mine(e.slot)) ++n_ext[e.slot - slot0];
                 for (const auto& e : plan.extents) {
-                    if (n_ext[e.col] == 1 && e.start == plan.cstart[e.col] &&
-                        e.end == plan.cstart[e.col] + plan.clen[e.col])
-                        whole[e.col] = 1;
+                    if (!mine(e.slot)) continue;
+                    const size_t i = e.slot - slot0;
+                    if (n_ext[i] == 1 && e.start == plan.cstart[e.slot] &&
+                        e.end == plan.cstart[e.slot] + plan.clen[e.slot])
+                        whole[i] = 1;
                 }
                 for (size_t gi = 0; gi < plan.groups.size() && gi < remote_buffers.size(); ++gi) {
                     const RemotePlan::Group& g = plan.groups[gi];
                     const std::vector<uint8_t>& buf = remote_buffers[gi];
                     for (size_t xi : g.extents) {
                         const RemotePlan::Extent& e = plan.extents[xi];
+                        if (!mine(e.slot)) continue;
+                        const size_t i = e.slot - slot0;
                         const size_t off = static_cast<size_t>(e.start - g.start);
                         const size_t len = static_cast<size_t>(e.end - e.start);
                         if (off + len > buf.size()) continue;   // short: column stays null
-                        ++n_ok[e.col];
-                        col_fetched[e.col] += static_cast<int64_t>(len);
-                        if (whole[e.col]) {
-                            col_ptr[e.col] = buf.data() + off;
-                            col_len[e.col] = len;
+                        ++n_ok[i];
+                        col_fetched[i] += static_cast<int64_t>(len);
+                        if (whole[i]) {
+                            col_ptr[i] = buf.data() + off;
+                            col_len[i] = len;
                         } else {
-                            auto& a = assembled[e.col];
-                            if (a.empty()) a.assign(static_cast<size_t>(plan.clen[e.col]), 0);
-                            std::memcpy(a.data() + static_cast<size_t>(e.start - plan.cstart[e.col]),
+                            auto& a = assembled[i];
+                            if (a.empty()) a.assign(static_cast<size_t>(plan.clen[e.slot]), 0);
+                            std::memcpy(a.data() + static_cast<size_t>(e.start - plan.cstart[e.slot]),
                                         buf.data() + off, len);
                         }
                     }
@@ -2938,9 +3018,11 @@ class ParquetIOPipeline {
                     result.bytes_fetched += chunk_size -
                         (jump_ptr != nullptr ? pruned_bytes_of(*jump_ptr) : 0);
                 } else if (remote) {
-                    // Batch-prefetched above: decode straight from the buffer.
-                    // When bloom_prefix[i] > 0 the buffer carries the column's
-                    // adjacent bloom filter in front of the chunk (bpre bytes).
+                    // Fetched with the block: decode straight from the buffer.
+                    // No bloom filter rides here — the writer puts every bloom
+                    // in the file tail (docs/PARQUET_GROUPED_COLUMN_MAJOR_DESIGN.md
+                    // [D-6]: the remote bloom decode-skip was dropped with it;
+                    // bloom pruning is a plan-time, local-footer concern).
                     if (i >= col_ptr.size() || col_ptr[i] == nullptr) {
                         result.success = false;
                         result.error = "coalesced range fetch did not cover column " +
@@ -2949,24 +3031,10 @@ class ParquetIOPipeline {
                     }
                     const uint8_t* raw_data = col_ptr[i];
                     const size_t   raw_size = col_len[i];
-                    const size_t bpre = static_cast<size_t>(bloom_prefix[i]);
                     result.bytes_fetched += col_fetched[i];   // what was actually transferred
-                    // Bloom decode-skip: the adjacent bloom proves this row group
-                    // holds none of the pushed needles → zero surviving rows.
-                    // Skip decode of this and the remaining columns, exactly like
-                    // the dictionary decode-skip (dict_all_filtered) below.
-                    if (bpre > 0 && skip_ptr != nullptr &&
-                        bloom_needles_all_absent(raw_data, bpre, skip.kind,
-                                                 skip.int_vals, skip.str_vals,
-                                                 col_stats.physical_type)) {
-                        result.empty_filtered = true;
-                        result.empty_rows =
-                            col_stats.num_values >= 0 ? col_stats.num_values : 0;
-                        break;
-                    }
                     auto t_dec = std::chrono::steady_clock::now();
                     DecodeColumnFromChunk(scratch,
-                        raw_data + bpre, raw_size - bpre, &adjusted, mask_ptr, prefer_dict, skip_ptr, jump_ptr);
+                        raw_data, raw_size, &adjusted, mask_ptr, prefer_dict, skip_ptr, jump_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                 } else {
@@ -3166,10 +3234,11 @@ class ParquetIOPipeline {
         if (per_rg_mapped)
             munmap(mmap_base, mmap_len);
 
-        // The compressed bytes (prefetched or fetched above) are dead once this
-        // scope ends; release their charge now so a waiting fetch can proceed.
-        remote_buffers.clear();
+        // This row group's share of the block's compressed bytes is dead once
+        // this scope ends (the buffers themselves go when the last member drops
+        // the block); release its charge now so a waiting fetch can proceed.
         assembled.clear();
+        item.block.reset();
         ledger_release(held_prefetch_, item.charged_compressed);
         item.charged_compressed = 0;
 
@@ -3333,7 +3402,7 @@ class ParquetIOPipeline {
     // submission window 6 -> 64 moved nothing, 4.54s -> 4.45s, because a ticket
     // beyond the pool size merely queues). 0 = off = the coupled path, exactly.
     // Set once at plan time, before any submit_row_group — the routing decision
-    // in enqueue_pending reads fetch_pool_ unsynchronised on that promise.
+    // in enqueue_block reads fetch_pool_ unsynchronised on that promise.
     //
     // Depth is bounded by the caller's SUBMISSION window (in_flight_limit):
     // fetch-ahead can only run as far ahead as there are submitted items, so
@@ -3473,45 +3542,123 @@ class ParquetIOPipeline {
     }
     void clear_pass1_predicate() { pass1_pred_.fn = nullptr; pass1_pred_.ctx = nullptr; pass1_pred_.cols.clear(); }
 
+    // Block ids per row group of `fs` for the projected `column_names`: row
+    // group k+1 shares row group k's block when EVERY projected column's chunk
+    // in k+1 starts exactly where its chunk in k ends — the byte adjacency the
+    // grouped writer produces (write_block). Inferred from the chunk offsets,
+    // never from metadata, so a row-major file (rugo's before the grouped
+    // layout, pyarrow's, anyone's) simply reads as one block per row group.
+    // Ids are 0-based and non-decreasing. A projected column missing from a
+    // row group, or no projected column at all, breaks the run: no adjacency
+    // evidence, no block.
+    static std::vector<int32_t> infer_fetch_blocks(
+            const FileStats& fs, const std::vector<std::string>& column_names) {
+        const size_t n = fs.row_groups.size();
+        std::vector<int32_t> ids(n, 0);
+        if (n == 0) return ids;
+        auto chunk_span = [&](const RowGroupStats& rg, const std::string& name,
+                              int64_t& start, int64_t& end) -> bool {
+            for (const ColumnStats& cs : rg.columns) {
+                if (cs.name != name) continue;
+                if (cs.data_page_offset < 0 || cs.total_compressed_size < 0) return false;
+                start = cs.data_page_offset;
+                if (cs.dictionary_page_offset >= 0 && cs.dictionary_page_offset < start)
+                    start = cs.dictionary_page_offset;
+                end = start + cs.total_compressed_size;
+                return true;
+            }
+            return false;
+        };
+        int32_t id = 0;
+        for (size_t k = 1; k < n; ++k) {
+            bool adjacent = !column_names.empty();
+            for (const std::string& name : column_names) {
+                int64_t s0, e0, s1, e1;
+                if (!chunk_span(fs.row_groups[k - 1], name, s0, e0) ||
+                    !chunk_span(fs.row_groups[k], name, s1, e1) || s1 != e0) {
+                    adjacent = false;
+                    break;
+                }
+            }
+            if (!adjacent) ++id;
+            ids[k] = id;
+        }
+        return ids;
+    }
+
     /**
-     * Submit a row group for read + decode + serialize.
+     * Submit one FETCH BLOCK: the kept row groups of one block of one file,
+     * read together — one coalesced fetch for a remote file — and decoded,
+     * claimed and returned one result per row group. `column_stats[m]` carry
+     * absolute file offsets for member m (parallel to `rg_idx`); `row_masks`,
+     * when non-empty, is parallel too, an empty mask meaning "decode all rows".
+     * Which row groups form a block is the caller's decision, made from the
+     * file's chunk offsets (infer_fetch_blocks) — the pipeline plans whatever it
+     * is handed, and a single row group is a one-member block.
+     */
+    void submit_block(const std::string& path, const std::vector<int>& rg_idx,
+                      const std::vector<std::string>& column_names,
+                      const std::vector<std::vector<ColumnStats>>& column_stats,
+                      const std::vector<std::vector<uint8_t>>& row_masks = {}) {
+        if (shutdown_) return;
+        if (rg_idx.empty())
+            throw std::invalid_argument("submit_block: a block needs at least one row group");
+        if (column_stats.size() != rg_idx.size())
+            throw std::invalid_argument("submit_block: column_stats must be parallel to rg_idx");
+        if (!row_masks.empty() && row_masks.size() != rg_idx.size())
+            throw std::invalid_argument("submit_block: row_masks must be parallel to rg_idx");
+        for (const auto& cs : column_stats) {
+            if (cs.size() != column_names.size())
+                throw std::invalid_argument(
+                    "submit_block: every member must carry stats for every projected column");
+        }
+        const bool remote = !path_is_local(path);
+        std::shared_ptr<FetchBlock> blk;
+        if (remote) {
+            blk = std::make_shared<FetchBlock>();
+            blk->path = path;
+            blk->ncols = column_names.size();
+        }
+        std::vector<WorkItem> members;
+        members.reserve(rg_idx.size());
+        for (size_t m = 0; m < rg_idx.size(); ++m) {
+            WorkItem item;
+            item.path = path;
+            item.rg_idx = rg_idx[m];
+            item.column_names = column_names;
+            item.column_stats = column_stats[m];
+            if (!row_masks.empty()) item.row_mask = row_masks[m];
+            item.est_decoded_bytes = sum_column_bytes(column_stats[m], false);
+            item.est_compressed_bytes = sum_column_bytes(column_stats[m], true);
+            item.block = blk;
+            item.member = m;
+            members.push_back(std::move(item));
+        }
+        enqueue_block(std::move(blk), std::move(members));
+    }
+
+    /**
+     * Submit a row group for read + decode + serialize: a one-member block.
      * column_stats carry absolute file offsets — worker adjusts to buffer-relative.
      */
     void submit_row_group(const std::string& path, int rg_idx,
                           const std::vector<std::string>& column_names,
                           const std::vector<ColumnStats>& column_stats) {
-        if (shutdown_) return;
-
-        WorkItem item;
-        item.path = path;
-        item.rg_idx = rg_idx;
-        item.column_names = column_names;
-        item.column_stats = column_stats;
-        item.est_decoded_bytes = sum_column_bytes(column_stats, false);
-        item.est_compressed_bytes = sum_column_bytes(column_stats, true);
-        enqueue_pending(std::move(item));
+        submit_block(path, std::vector<int>{rg_idx}, column_names,
+                     std::vector<std::vector<ColumnStats>>{column_stats});
     }
 
     /**
      * Submit a row group with a per-row mask (1=keep, 0=skip).
      * Workers apply the mask during decode so only surviving rows are serialized.
-     * Default-empty mask in the base overload means existing callers are unaffected.
      */
     void submit_row_group(const std::string& path, int rg_idx,
                           const std::vector<std::string>& column_names,
                           const std::vector<ColumnStats>& column_stats,
                           const std::vector<uint8_t>& row_mask) {
-        if (shutdown_) return;
-
-        WorkItem item;
-        item.path = path;
-        item.rg_idx = rg_idx;
-        item.column_names = column_names;
-        item.column_stats = column_stats;
-        item.row_mask = row_mask;
-        item.est_decoded_bytes = sum_column_bytes(column_stats, false);
-        item.est_compressed_bytes = sum_column_bytes(column_stats, true);
-        enqueue_pending(std::move(item));
+        submit_block(path, std::vector<int>{rg_idx}, column_names,
+                     std::vector<std::vector<ColumnStats>>{column_stats},
+                     std::vector<std::vector<uint8_t>>{row_mask});
     }
 
     bool try_get_result(MorselRef& out) {

@@ -91,17 +91,9 @@ static std::vector<uint8_t> write_row_groups(const std::vector<uint32_t>& sizes,
 
 // ─── 1. Every row group round-trips exactly ─────────────────────────────────
 
-static void check_row_group_contents(const std::vector<uint8_t>& bytes,
-                                     uint32_t index, int seed, uint32_t rows) {
-    CxxMorsel out;
-    Status st = read_morsel(bytes.data(), bytes.size(), index, &out);
-    ++skene_test::g_checks;
-    if (!st.is_ok()) {
-        skene_test::report(__FILE__, __LINE__, "read a row group back",
-                           "row group " + std::to_string(index) + ": " + st.message());
-        return;
-    }
-
+// The value-level assertions, over a morsel from EITHER read path — so the
+// FileReader path is held to exactly the standard the buffer path is.
+static void check_contents(const CxxMorsel& out, int seed, uint32_t rows) {
     CHECK_EQ(out.num_rows(), rows);
     CHECK_EQ(out.num_columns(), size_t{4});
 
@@ -125,6 +117,19 @@ static void check_row_group_contents(const std::vector<uint8_t>& bytes,
     // visible in one value.
     const DrakenVector& k = out.columns[3].view;
     CHECK_EQ(static_cast<const int64_t*>(k.data)[k.selection[0]], static_cast<int64_t>(seed));
+}
+
+static void check_row_group_contents(const std::vector<uint8_t>& bytes,
+                                     uint32_t index, int seed, uint32_t rows) {
+    CxxMorsel out;
+    Status st = read_morsel(bytes.data(), bytes.size(), index, &out);
+    ++skene_test::g_checks;
+    if (!st.is_ok()) {
+        skene_test::report(__FILE__, __LINE__, "read a row group back",
+                           "row group " + std::to_string(index) + ": " + st.message());
+        return;
+    }
+    check_contents(out, seed, rows);
 }
 
 static void test_every_row_group_round_trips() {
@@ -313,23 +318,11 @@ static void test_file_footer_locates_every_row_group_without_opening_one() {
     FileMetadata meta;
     CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
     CHECK_EQ(meta.row_groups.size(), sizes.size());
+    CHECK_EQ(meta.block_row_groups, 4u);   // the writer's default G
 
-    // Row group extents must be disjoint and in order, or "read only the
-    // surviving row groups" fetches somebody else's bytes.
-    uint64_t previous_end = kFileHeadBytes;
-    for (const RowGroupSummary& rg : meta.row_groups) {
-        CHECK(rg.byte_offset >= previous_end);
-        CHECK(rg.byte_bytes > 0);
-        // Its footer follows its data, and both precede the file footer.
-        CHECK(rg.footer_offset >= rg.byte_offset + rg.byte_bytes);
-        CHECK(rg.footer_bytes > 0);
-        CHECK(rg.footer_offset + rg.footer_bytes <= bytes.size() - kFileTailBytes);
-        previous_end = rg.footer_offset + rg.footer_bytes;
-    }
-
-    // The per-row-group statistics are in the FILE footer, so pruning never
-    // opens a row group footer. This is the property that keeps row group
-    // pruning alive once manifest bounds coarsen to the union over a file.
+    // The per-row-group statistics are in the footer, so pruning never opens a
+    // directory block. This is the property that keeps row group pruning alive
+    // once manifest bounds coarsen to the union over a file.
     for (const RowGroupSummary& rg : meta.row_groups) {
         CHECK_EQ(rg.column_statistics.size(), size_t{4});
         // "n" is the seeded INT64 column: min/max are tracked and differ per row
@@ -341,17 +334,85 @@ static void test_file_footer_locates_every_row_group_without_opening_one() {
     CHECK(meta.row_groups[0].column_statistics[0].statistics.max_ordinal
           < meta.row_groups[1].column_statistics[0].statistics.min_ordinal);
 
-    // And the expensive per-column detail is reached one row group at a time.
+    // COLUMN-MAJOR (FORMAT.md §3): each column node's run — directory block,
+    // then every row group's chunk in order — is disjoint from the next node's,
+    // so one column over the whole file is one contiguous range.
+    uint64_t previous_run_end = kFileHeadBytes;
+    for (uint32_t node = 0; node < 4; ++node) {
+        ColumnSummaryHead head;
+        skene_test::DirectoryBlock dir;
+        CHECK(skene_test::column_summary(bytes, node, &head));
+        CHECK(skene_test::directory_block(bytes, node, &dir));
+        CHECK(head.directory_offset >= previous_run_end);
+        CHECK(head.data_offset >= head.directory_offset + head.directory_bytes);
+        CHECK_EQ(dir.header.chunk_count, static_cast<uint32_t>(sizes.size()));
+        uint64_t previous_chunk_end = head.data_offset;
+        for (const ChunkRecord& chunk : dir.chunks) {
+            for (uint32_t s = 0; s < chunk.section_count; ++s) {
+                const SectionEntry& e = dir.sections[chunk.section_index + s];
+                CHECK(e.offset >= previous_chunk_end);
+                CHECK(e.offset + e.stored_bytes <= head.data_offset + head.data_bytes);
+                previous_chunk_end = e.offset + e.stored_bytes;
+            }
+        }
+        previous_run_end = head.data_offset + head.data_bytes;
+    }
+
+    // And the per-column detail of one row group lies inside its column's run.
     RowGroupMetadata detail;
     CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 3, &detail).is_ok());
     CHECK_EQ(detail.row_count, uint64_t{91});
     CHECK_EQ(detail.columns.size(), size_t{4});
-    for (const ColumnMetadata& column : detail.columns) {
+    for (uint32_t c = 0; c < 4; ++c) {
+        ColumnSummaryHead head;
+        CHECK(skene_test::column_summary(bytes, c, &head));
+        const ColumnMetadata& column = detail.columns[c];
         CHECK(column.byte_bytes > 0);
-        CHECK(column.byte_offset >= meta.row_groups[3].byte_offset);
-        CHECK(column.byte_offset + column.byte_bytes
-              <= meta.row_groups[3].byte_offset + meta.row_groups[3].byte_bytes);
+        CHECK(column.byte_offset >= head.data_offset);
+        CHECK(column.byte_offset + column.byte_bytes <= head.data_offset + head.data_bytes);
     }
+}
+
+// A column's chunks for a BLOCK of row groups are one range, and the footer
+// records it (FORMAT.md §3.2, §5.6). That is the fetch unit: planning a block
+// yields one range per column, whatever the block size.
+static void test_blocks_are_one_range_per_column() {
+    std::vector<uint32_t> sizes(10, 200u);
+    WriteOptions options = WriteOptions::for_fast_reads();
+    options.block_row_groups = 4;   // blocks {0-3}, {4-7}, {8-9}
+    const auto bytes = write_row_groups(sizes, options);
+
+    FileReader reader;
+    CHECK(open_reader(bytes.data(), bytes.size(), &reader).is_ok());
+    CHECK_EQ(reader.metadata().block_row_groups, 4u);
+
+    for (uint32_t node = 0; node < 4; ++node) {
+        ColumnSummaryHead head;
+        CHECK(skene_test::column_summary(bytes, node, &head));
+        CHECK_EQ(head.block_count, 3u);
+    }
+
+    // One column, one whole block: exactly one range.
+    std::vector<ByteRange> plan;
+    CHECK(plan_fetch(reader, {"n"}, {4, 5, 6, 7}, FetchPolicy{}, &plan).is_ok());
+    CHECK_EQ(plan.size(), size_t{1});
+
+    // A pruned row group in the middle splits the run; the byte-neutral policy
+    // does not bridge it.
+    CHECK(plan_fetch(reader, {"n"}, {4, 6, 7}, FetchPolicy{}, &plan).is_ok());
+    CHECK_EQ(plan.size(), size_t{2});
+
+    // A generous waste ratio bridges it again, at the cost of the gap's bytes.
+    FetchPolicy bridge;
+    bridge.waste_ratio = 1.0;
+    CHECK(plan_fetch(reader, {"n"}, {4, 6, 7}, bridge, &plan).is_ok());
+    CHECK_EQ(plan.size(), size_t{1});
+
+    // Whole file, every column: one range per column, whatever the row groups.
+    std::vector<uint32_t> all;
+    for (uint32_t g = 0; g < sizes.size(); ++g) all.push_back(g);
+    CHECK(plan_fetch(reader, {}, all, FetchPolicy{}, &plan).is_ok());
+    CHECK_EQ(plan.size(), size_t{4});
 }
 
 // ─── 3. A file that lies about its row groups is rejected ───────────────────
@@ -411,62 +472,45 @@ static void test_more_row_groups_than_the_file_holds() {
     CHECK(st.code() == Code::kMalformed || st.code() == Code::kTruncated);
 }
 
-static void test_row_group_directory_pointing_outside_the_file() {
+static void test_column_summary_pointing_outside_the_file() {
     const auto bytes = write_row_groups({50u, 50u});
 
-    size_t header_at = 0, directory_at = 0;
-    CHECK(file_footer_positions(bytes, &header_at, &directory_at));
-
-    // A footer offset past the end of the object. Unchecked, this is a read of
-    // whatever follows the mapping.
-    {
+    // Rewrites column node 1's summary head, re-seals the footer, and expects
+    // the read to be rejected by the footer's structural checks alone.
+    auto corrupt_summary = [&](const char* what, auto mutate) {
         std::vector<uint8_t> corrupt = bytes;
-        RowGroupEntry entry;
-        std::memcpy(&entry, corrupt.data() + directory_at + sizeof(RowGroupEntry),
-                    sizeof(entry));
-        entry.footer_offset = bytes.size() + 4096;
-        std::memcpy(corrupt.data() + directory_at + sizeof(RowGroupEntry), &entry,
-                    sizeof(entry));
+        ColumnSummaryHead head;
+        size_t at = 0;
+        CHECK(skene_test::column_summary(corrupt, 1, &head, &at));
+        mutate(&head);
+        std::memcpy(corrupt.data() + at, &head, sizeof(head));
         repair_file_footer_checksum(&corrupt);
-        Status st = expect_rejected(corrupt, 1, "row group footer past the object");
-        CHECK(st.code() == Code::kMalformed);
-    }
+        return expect_rejected(corrupt, 0, what);
+    };
 
-    // A data extent that runs past the file footer, so a section resolved inside
-    // it could address the directory that described it.
-    {
-        std::vector<uint8_t> corrupt = bytes;
-        RowGroupEntry entry;
-        std::memcpy(&entry, corrupt.data() + directory_at, sizeof(entry));
-        entry.data_bytes = bytes.size();
-        std::memcpy(corrupt.data() + directory_at, &entry, sizeof(entry));
-        repair_file_footer_checksum(&corrupt);
-        Status st = expect_rejected(corrupt, 0, "row group data past the file footer");
-        CHECK(st.code() == Code::kMalformed);
-    }
+    // A directory block past the end of the object. Unchecked, this is a read
+    // of whatever follows the mapping.
+    Status st = corrupt_summary("directory block past the object",
+        [&](ColumnSummaryHead* h) { h->directory_offset = bytes.size() + 4096; });
+    CHECK(st.code() == Code::kMalformed);
 
-    // A footer length of zero cannot hold even a header.
-    {
-        std::vector<uint8_t> corrupt = bytes;
-        RowGroupEntry entry;
-        std::memcpy(&entry, corrupt.data() + directory_at, sizeof(entry));
-        entry.footer_bytes = 0;
-        std::memcpy(corrupt.data() + directory_at, &entry, sizeof(entry));
-        repair_file_footer_checksum(&corrupt);
-        expect_rejected(corrupt, 0, "zero-byte row group footer");
-    }
+    // A data extent that runs past the footer, so a section resolved inside it
+    // could address the footer that described it.
+    st = corrupt_summary("data extent past the footer",
+        [&](ColumnSummaryHead* h) { h->data_bytes = bytes.size(); });
+    CHECK(st.code() == Code::kMalformed);
 
-    // Reserved bytes are CHECKED, not ignored: an ignored field is one nothing
-    // verifies, and the row group directory is all offsets.
-    {
-        std::vector<uint8_t> corrupt = bytes;
-        RowGroupEntry entry;
-        std::memcpy(&entry, corrupt.data() + directory_at, sizeof(entry));
-        entry.reserved = 1;
-        std::memcpy(corrupt.data() + directory_at, &entry, sizeof(entry));
-        repair_file_footer_checksum(&corrupt);
-        expect_rejected(corrupt, 0, "non-zero row group reserved bytes");
-    }
+    // A zero-byte directory block cannot hold even its header.
+    corrupt_summary("zero-byte directory block",
+        [](ColumnSummaryHead* h) { h->directory_bytes = 0; });
+
+    // Reserved bytes are CHECKED, not ignored.
+    corrupt_summary("non-zero summary reserved bytes",
+        [](ColumnSummaryHead* h) { h->reserved0 = 1; });
+
+    // Runs that overlap: node 1's directory moved back inside node 0's run.
+    corrupt_summary("overlapping column runs",
+        [](ColumnSummaryHead* h) { h->directory_offset = kFileHeadBytes; });
 }
 
 static void test_row_group_row_counts_must_add_up() {
@@ -474,6 +518,7 @@ static void test_row_group_row_counts_must_add_up() {
 
     size_t header_at = 0, directory_at = 0;
     CHECK(file_footer_positions(bytes, &header_at, &directory_at));
+    // directory_at is the v3 row group TABLE (16-byte entries, FORMAT.md §5.3).
 
     // first_row that does not follow the row group before it: a reader using it
     // to place rows in file order would silently duplicate or drop a range.
@@ -510,18 +555,18 @@ static void test_out_of_range_row_group_index() {
     CHECK(st.code() == Code::kMalformed);
 }
 
-// A row group footer whose checksum was recorded in the file footer, then
-// altered. The two live apart precisely so this is detectable.
-static void test_row_group_footer_checksum_is_verified() {
+// A directory block whose checksum was recorded in the footer, then altered.
+// The two live apart precisely so this is detectable.
+static void test_directory_block_checksum_is_verified() {
     auto bytes = write_row_groups({50u, 50u});
 
-    size_t footer_at = 0, footer_len = 0;
-    CHECK(skene_test::row_group_footer_extent(bytes, 1, &footer_at, &footer_len));
-    bytes[footer_at + footer_len - 4] ^= 0xFF;
+    ColumnSummaryHead head;
+    CHECK(skene_test::column_summary(bytes, 1, &head));
+    bytes[head.directory_offset + head.directory_bytes - 4] ^= 0xFF;
 
-    Status st = expect_rejected(bytes, 1, "corrupt row group footer");
+    Status st = expect_rejected(bytes, 1, "corrupt directory block");
     CHECK(st.code() == Code::kChecksumMismatch);
-    check_mentions(st, "row group 1 footer checksum");
+    check_mentions(st, "directory block checksum");
 }
 
 // The guard against the pre-packing layout. Those files are framed identically
@@ -643,6 +688,98 @@ static void test_truncation_of_a_packed_file() {
     CHECK_EQ(accepted, size_t{0});
 }
 
+// ─── 4. FileReader: the file footer once, then any row group ────────────────
+
+// A FileReader must return what the per-call API returns, for every row group,
+// in any order — it only moves WHERE the file footer is verified and parsed.
+static void test_file_reader_reads_every_row_group() {
+    std::vector<uint32_t> sizes(16, 1000u);
+    sizes.back() = 137u;
+    const auto bytes = write_row_groups(sizes);
+
+    FileReader reader;
+    Status st = open_reader(bytes.data(), bytes.size(), &reader);
+    CHECK(st.is_ok());
+    if (!st.is_ok()) return;
+
+    // Its metadata is read_metadata's, from the same single parse.
+    FileMetadata meta;
+    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    CHECK_EQ(reader.metadata().row_groups.size(), meta.row_groups.size());
+    CHECK_EQ(reader.metadata().row_count, meta.row_count);
+    for (size_t i = 0; i < meta.row_groups.size(); ++i) {
+        CHECK_EQ(reader.metadata().row_groups[i].row_count, meta.row_groups[i].row_count);
+        CHECK_EQ(reader.metadata().row_groups[i].first_row, meta.row_groups[i].first_row);
+    }
+
+    // Reverse order, so "read group i" cannot be satisfied by "read the next one".
+    for (uint32_t i = static_cast<uint32_t>(sizes.size()); i-- > 0;) {
+        CxxMorsel out;
+        st = read_morsel(reader, i, ReadOptions(), &out);
+        ++skene_test::g_checks;
+        if (!st.is_ok()) {
+            skene_test::report(__FILE__, __LINE__, "FileReader read",
+                               "row group " + std::to_string(i) + ": " + st.message());
+            continue;
+        }
+        check_contents(out, static_cast<int>(i) + 1, sizes[i]);
+    }
+
+    // A projection goes through the same options path.
+    ReadOptions narrow;
+    narrow.columns = {"k"};
+    CxxMorsel projected;
+    CHECK(read_morsel(reader, 5, narrow, &projected).is_ok());
+    CHECK_EQ(projected.num_columns(), size_t{1});
+    CHECK_EQ(projected.num_rows(), uint32_t{1000});
+}
+
+static void test_file_reader_rejects_what_the_buffer_path_rejects() {
+    // Out of range: the same Malformed, the same wording.
+    const auto bytes = write_row_groups({10u, 10u, 10u});
+    FileReader reader;
+    CHECK(open_reader(bytes.data(), bytes.size(), &reader).is_ok());
+    CxxMorsel out;
+    Status st = read_morsel(reader, 3, ReadOptions(), &out);
+    CHECK(st.code() == Code::kMalformed);
+    check_mentions(st, "row group 3 was requested but this file has 3");
+    st = read_morsel(reader, 0xFFFFFFFFu, ReadOptions(), &out);
+    CHECK(st.code() == Code::kMalformed);
+
+    // A never-opened reader is refused, not read as an empty file.
+    FileReader unopened;
+    st = read_morsel(unopened, 0, ReadOptions(), &out);
+    CHECK(st.code() == Code::kMalformed);
+    check_mentions(st, "never opened");
+
+    // A failed open leaves the reader unopened rather than half-filled.
+    std::vector<uint8_t> junk(bytes.size(), 0xAB);
+    FileReader failed;
+    CHECK(!open_reader(junk.data(), junk.size(), &failed).is_ok());
+    CHECK(read_morsel(failed, 0, ReadOptions(), &out).code() == Code::kMalformed);
+
+    // A corrupt FILE footer is caught at open — the verification moved, it did
+    // not disappear.
+    auto corrupt_file = write_row_groups({50u, 50u});
+    size_t f_at = 0, f_len = 0;
+    CHECK(skene_test::file_footer_extent(corrupt_file, &f_at, &f_len));
+    corrupt_file[f_at + f_len / 2] ^= 0xFF;
+    FileReader bad_footer;
+    st = open_reader(corrupt_file.data(), corrupt_file.size(), &bad_footer);
+    CHECK(st.code() == Code::kChecksumMismatch);
+
+    // A corrupt DIRECTORY BLOCK is caught at a whole-buffer open, which
+    // attaches every column's directory against the checksum the footer holds.
+    auto corrupt_dir = write_row_groups({50u, 50u});
+    ColumnSummaryHead head;
+    CHECK(skene_test::column_summary(corrupt_dir, 1, &head));
+    corrupt_dir[head.directory_offset + head.directory_bytes - 4] ^= 0xFF;
+    FileReader dir_reader;
+    st = open_reader(corrupt_dir.data(), corrupt_dir.size(), &dir_reader);
+    CHECK(st.code() == Code::kChecksumMismatch);
+    check_mentions(st, "directory block checksum");
+}
+
 int main() {
     test_every_row_group_round_trips();
     test_one_row_group_is_a_normal_file();
@@ -651,17 +788,21 @@ int main() {
     test_projection_within_a_row_group();
 
     test_file_footer_locates_every_row_group_without_opening_one();
+    test_blocks_are_one_range_per_column();
 
     test_more_row_groups_than_the_file_holds();
-    test_row_group_directory_pointing_outside_the_file();
+    test_column_summary_pointing_outside_the_file();
     test_row_group_row_counts_must_add_up();
     test_out_of_range_row_group_index();
-    test_row_group_footer_checksum_is_verified();
+    test_directory_block_checksum_is_verified();
     test_pre_packing_layout_is_named_and_refused();
 
     test_row_groups_must_share_a_schema();
     test_writer_call_order_is_enforced();
     test_truncation_of_a_packed_file();
+
+    test_file_reader_reads_every_row_group();
+    test_file_reader_rejects_what_the_buffer_path_rejects();
 
     return skene_test::summary("test_row_groups");
 }

@@ -103,6 +103,17 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
             const vector[ColumnStats]& column_stats,
             const vector[uint8_t]& row_mask,
         ) nogil
+        # One FETCH BLOCK: the kept row groups of one block of one file, fetched
+        # together (their extents coalesce across row groups), decoded and
+        # returned one result per row group. See io_pipeline.hpp.
+        void submit_block(
+            const string& path, const vector[int]& rg_idx,
+            const vector[string]& column_names,
+            const vector[vector[ColumnStats]]& column_stats,
+            const vector[vector[uint8_t]]& row_masks,
+        ) except + nogil
+        @staticmethod
+        vector[int32_t] infer_fetch_blocks(const FileStats& fs, const vector[string]& column_names) nogil
         void add_int_needles(const string& column, const vector[int64_t]& needles) nogil
         void add_str_pred(const string& column, int kind, const vector[string]& vals) nogil
         void set_pass1_predicate(void* fn, void* ctx, const vector[string]& cols) nogil
@@ -155,6 +166,7 @@ cdef class CppIOPipeline:
     cdef public uint64_t committed_bytes
     cdef submit_work_native(self, str cpp_path, int rg_idx, list column_names, RowGroupStats* rg)
     cdef submit_work_native_masked(self, str cpp_path, int rg_idx, list column_names, RowGroupStats* rg, bytes row_mask)
+    cdef submit_block_native(self, str cpp_path, FileStats* fs, list rg_idxs, list column_names, list row_masks)
 
 
 cdef tuple _read_footer_payload(
@@ -249,7 +261,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     filesystem=*,
     footer_bytes_cache=*,
     int fetch_ahead=*,
-    int fetch_ahead_min_row_groups=*,
+    int fetch_ahead_min_blocks=*,
     int in_flight_limit_override=*,
     http_tuning=*,
     coalesce_tuning=*,

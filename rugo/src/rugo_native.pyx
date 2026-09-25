@@ -18,6 +18,7 @@
 cdef int _DRAKEN_LK_IPV4 = 5
 
 include "_text_render.pxi"          # shared descriptor for the CSV / JSONL writers
+include "_predicate_literal.pxi"     # predicate literal kinds for the CSV / JSONL readers
 include "parquet/parquet_reader.pxi"
 include "parquet/parquet_writer.pxi"
 include "jsonl/_jsonl_reader.pxi"

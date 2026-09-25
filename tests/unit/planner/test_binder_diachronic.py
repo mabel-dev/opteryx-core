@@ -38,7 +38,7 @@ def test_binder_sets_diachronic_dates():
     context = BindingContext(
         schemas={},
         query_id="query_id",
-        connection=SimpleNamespace(memberships=["opteryx"]),
+        execution_context=SimpleNamespace(memberships=["opteryx"]),
         relations={},
         telemetry=None,
     )
@@ -53,10 +53,12 @@ def test_binder_sets_diachronic_dates():
 
     connectors_module.connector_factory = fake_factory
 
-    # Call visit_scan directly
-    node, _ = visitor.visit_scan(node, context)
-    # Restore the connector factory
-    connectors_module.connector_factory = original_factory
+    # Restore the connector factory even when visit_scan raises: a leaked fake
+    # factory fails every later test in the process that binds a dataset.
+    try:
+        node, _ = visitor.visit_scan(node, context)
+    finally:
+        connectors_module.connector_factory = original_factory
     assert getattr(node, "connector", None) is not None
     # Ensure Diachronic support results in connector start/ end dates set from node
     assert node.connector.start_date == node.start_date

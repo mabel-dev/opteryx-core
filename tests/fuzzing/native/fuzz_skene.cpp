@@ -15,6 +15,9 @@
 #include <cstddef>
 #include <cstdint>
 
+#include <vector>
+
+#include "skene/format.h"
 #include "skene/reader.h"
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
@@ -41,6 +44,54 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         skene::read_morsel(data, size, g, &other);
         skene::RowGroupMetadata detail;
         skene::read_row_group_metadata(data, size, g, &detail);
+    }
+
+    // The v3 RANGED path the engine runs: open from tail + footer, then the
+    // directory blocks — planned through block 0, as the engine plans them —
+    // then decode from the fetched ranges alone. The directory blocks are parsed
+    // HERE, not at footer parse, so this is the surface a whole-buffer read
+    // never reaches in the same order. Ranges point into the input: a planned
+    // range the input does not hold is skipped, and the reader must then refuse
+    // rather than read past what it was given.
+    uint64_t footer_offset = 0;
+    uint64_t footer_bytes = 0;
+    if (size >= skene::kFileTailBytes &&
+        skene::footer_extent(data + size - skene::kFileTailBytes, skene::kFileTailBytes,
+                             static_cast<uint64_t>(size), &footer_offset, &footer_bytes)
+            .is_ok() &&
+        footer_offset + footer_bytes <= size) {
+        skene::FileReader ranged;
+        if (skene::open_reader_ranged(data + size - skene::kFileTailBytes,
+                                      skene::kFileTailBytes, data + footer_offset,
+                                      static_cast<size_t>(footer_bytes), footer_offset,
+                                      static_cast<uint64_t>(size), &ranged)
+                .is_ok()) {
+            auto to_fetched = [&](const std::vector<skene::ByteRange>& plan,
+                                  std::vector<skene::FetchedRange>* out) {
+                for (const skene::ByteRange& r : plan)
+                    if (r.offset <= size && r.bytes <= size - r.offset)
+                        out->push_back(skene::FetchedRange{r.offset, r.bytes, data + r.offset});
+            };
+            std::vector<skene::ByteRange> plan;
+            std::vector<skene::FetchedRange> fetched;
+            if (skene::plan_directory_fetch(ranged, {}, true, skene::FetchPolicy{}, &plan)
+                    .is_ok()) {
+                to_fetched(plan, &fetched);
+                if (skene::attach_directories(&ranged, {}, fetched).is_ok()) {
+                    const size_t rgs = ranged.metadata().row_groups.size();
+                    const uint32_t reads = rgs < 8 ? static_cast<uint32_t>(rgs) : 8u;
+                    for (uint32_t g = 0; g < reads; ++g) {
+                        std::vector<skene::FetchedRange> ranges = fetched;
+                        if (skene::plan_fetch(ranged, {}, {g}, skene::FetchPolicy{}, &plan)
+                                .is_ok())
+                            to_fetched(plan, &ranges);
+                        CxxMorsel from_ranges;
+                        skene::read_morsel(ranged, g, skene::ReadOptions(), ranges,
+                                           &from_ranges);
+                    }
+                }
+            }
+        }
     }
 
     // The remote-read path: the tail of an object plus a claimed total size.

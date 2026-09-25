@@ -22,7 +22,6 @@ appended after the simple predicates in their original order.
 """
 
 from opteryx.expression import NodeType, get_all_nodes_of_type
-from opteryx.models import Node
 from opteryx.planner.cost_estimation import PredicateStats, order_predicates as _order_predicates
 from opteryx.planner.cost_estimation.predicate_cost import (
     BASIC_COMPARISON_COSTS,
@@ -37,13 +36,12 @@ from opteryx.types.logical_type import LogicalCategory, ColumnType
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import ConstantColumn
 from opteryx.utils import random_string
-
-from .predicate_rewriter import _shallow
 from .optimization_strategy import (
     OptimizationStrategy,
     OptimizerContext,
     get_nodes_of_type_from_logical_plan,
 )
+from opteryx.compiled.structures.expressions import Dnf
 
 # If we have no data, we assume these default selectivities. Defined ONCE in
 # fallback_selectivity, shared with the stats-informed estimator, so the same
@@ -208,18 +206,13 @@ def rewrite_anded_any_eq_to_contains_all(predicate, telemetry):
                 if isinstance(_old_elem_ct_po, ColumnType)
                 else _lt.ARRAY(_lt.VARIANT)
             )
-            values_literal = _shallow(
-                first.left,
+            values_literal = first.left.replace(
                 value=values_set,
                 type=_arr_ct_po,
-                schema_column=ConstantColumn(
-                    name=first.left.name, column_type=_arr_ct_po, value=values_set
-                ),
+                schema_column=ConstantColumn(name=None, column_type=_arr_ct_po, value=values_set),
             )
             # column @>> ARRAY[...] - the column (array) on the left
-            replacements[id(first)] = _shallow(
-                first,
-                node_type=NodeType.COMPARISON_OPERATOR,
+            replacements[id(first)] = first.replace(
                 value="ArrayContainsAll",
                 left=data["column_node"],
                 right=values_literal,
@@ -228,8 +221,7 @@ def rewrite_anded_any_eq_to_contains_all(predicate, telemetry):
 
     if not replacements:
         return predicate
-    return _shallow(
-        predicate,
+    return predicate.replace(
         parameters=[
             replacements.get(id(param), param)
             for param in predicate.parameters
@@ -276,7 +268,7 @@ class PredicateOrderingStrategy(OptimizationStrategy):
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Filter:
-            node.nid = context.node_id
+            context.collected_nids[id(node)] = context.node_id
             context.collected_predicates.append(node)
             return context
 
@@ -286,10 +278,10 @@ class PredicateOrderingStrategy(OptimizationStrategy):
                 return context
 
             new_node = LogicalPlanNode(LogicalPlanStepType.Filter)
-            new_node.condition = Node(node_type=NodeType.DNF)
+            new_node.condition = Dnf()
             # `node` is the node feeding the collected filter chain; its refreshed
             # statistics are the input relation the predicates filter against.
-            relation_stats = getattr(node, "statistics", None)
+            relation_stats = context.plan_context.statistics(node)
             context.collected_predicates = order_predicates(
                 context.collected_predicates, self.telemetry, relation_stats
             )
@@ -303,7 +295,7 @@ class PredicateOrderingStrategy(OptimizationStrategy):
                 new_node.relations.update(predicate.relations)
                 new_node.all_relations.update(predicate.all_relations)
                 self.telemetry.optimization_flatten_filters += 1
-                context.optimized_plan.remove_node(predicate.nid, heal=True)
+                context.optimized_plan.remove_node(context.collected_nids[id(predicate)], heal=True)
 
             new_node.condition = rewrite_anded_any_eq_to_contains_all(
                 new_node.condition, self.telemetry

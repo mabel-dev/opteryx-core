@@ -102,7 +102,22 @@ def read_jsonl(
     """Open a JSONL file or buffer for reading.
 
     Returns a context manager that yields one Morsel of the (projected, filtered) result.
-    predicates: list of (column, op, value); op in ==, !=, <, <=, >, >=.
+    predicates: list of (column, op, value); op in ==, !=, <, <=, >, >=, in, not in,
+        is null, is not null. `in` / `not in` take a list/tuple/set; `is null` /
+        `is not null` take None. SQL three-valued logic: a NULL (or absent) value
+        satisfies only `is null` — and an empty `not in`, which asks no comparison.
+        An unknown operator raises ValueError.
+
+        A value (and every `in` / `not in` member) must be str, bytes, int, float or
+        bool, and must match the column — it is never coerced. A JSON string takes
+        str/bytes, a JSON number takes int/float, a JSON boolean takes bool, and a JSON
+        array or object takes nothing; a DECLARED column takes what its explicit_schema
+        type takes (VARCHAR: str/bytes, integer/float types: int/float, BOOL: bool).
+        A mismatch raises ValueError naming the column, its type and the value — it
+        never answers "no rows". It is checked before any row is filtered against the
+        declared type and against every non-null value in the infer_sample_size head
+        sample, and again against every value a predicate is evaluated on, so a column
+        of mixed JSON kinds raises. None raises (use `is null`).
 
     explicit_schema: optional {column_name: type} dict. The type is a PLATFORM-CANONICAL
         type name — the same string a stored schema holds — so a caller that already knows

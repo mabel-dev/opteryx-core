@@ -32,6 +32,8 @@ class MockManifest:
     def __init__(self, count):
         # mimic Manifest.files list of FileEntry-like objects
         self.files = [__import__("types").SimpleNamespace(record_count=count, file_size_in_bytes=0)]
+        # Commit-written statistics: the only kind the strategy may answer from.
+        self.stats_are_authoritative = True
 
     def get_record_count(self):
         return sum(f.record_count for f in self.files)
@@ -44,6 +46,7 @@ class MockManifest:
         # the selected files, the original untouched.
         clone = MockManifest.__new__(MockManifest)
         clone.files = [self.files[p] for p in positions]
+        clone.stats_are_authoritative = self.stats_are_authoritative
         return clone
 
 

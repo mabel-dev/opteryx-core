@@ -98,6 +98,22 @@ from opteryx.types.logical_type import (
 )
 from opteryx.utils import dates, suggest_alternative
 from opteryx.utils.vector_types import VectorType, get_vector_type
+from opteryx.compiled.structures.expressions import Aggregator
+from opteryx.compiled.structures.expressions import Function
+from opteryx.compiled.structures.expressions import Xor
+from opteryx.compiled.structures.expressions import And
+from opteryx.compiled.structures.expressions import BinaryOperator
+from opteryx.compiled.structures.expressions import Case
+from opteryx.compiled.structures.expressions import ExtractionOperator
+from opteryx.compiled.structures.expressions import Nested
+from opteryx.compiled.structures.expressions import Not
+from opteryx.compiled.structures.expressions import Or
+from opteryx.compiled.structures.expressions import Subquery
+from opteryx.compiled.structures.expressions import UnaryOperator
+from opteryx.compiled.structures.expressions import Wildcard
+from opteryx.compiled.structures.expressions import Cast
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
 
 
 def sort_is_ascending(options: dict) -> bool:
@@ -348,7 +364,7 @@ def _evaluate_timetravel_expression(node, apply_interval_literal_to_now: bool = 
             value, value_type = _evaluate_timetravel_expression(parameter)
             scalar_parameters.append((value, value_type))
             parameter_values.append(_as_function_parameter_array(value, value_type))
-            resolved_parameters.append(Node(NodeType.LITERAL, type=value_type, value=value))
+            resolved_parameters.append(Literal(type=value_type, value=value))
 
         if node.value == "TRUNC" and len(scalar_parameters) == 2:
             trunc_value, trunc_value_type = scalar_parameters[0]
@@ -681,8 +697,7 @@ def extract_timetravel_version(version_clause) -> int:
 
 
 def any_op(branch, alias: Optional[List[str]] = None, key=None):
-    return Node(
-        NodeType.COMPARISON_OPERATOR,
+    return Comparison(
         value="AnyOp" + branch.get("compare_op", "Unsupported"),
         left=build(branch["left"]),
         right=build(branch["right"]),
@@ -690,8 +705,7 @@ def any_op(branch, alias: Optional[List[str]] = None, key=None):
 
 
 def all_op(branch, alias: Optional[List[str]] = None, key=None):
-    return Node(
-        NodeType.COMPARISON_OPERATOR,
+    return Comparison(
         value="AllOp" + branch.get("compare_op", "Unsupported"),
         left=build(branch["left"]),
         right=build(branch["right"]),
@@ -714,10 +728,8 @@ def array(branch, alias: Optional[List[str]] = None, key=None):
         element_ct = _CT_FLOAT64
     literal_type = _CT_ARRAY(element_ct)
 
-    return Node(
-        node_type=NodeType.LITERAL,
+    return Literal(
         type=literal_type,
-        element_type=None,  # element embedded in type
         value=value_list,
     )
 
@@ -735,36 +747,43 @@ def between(branch, alias: Optional[List[str]] = None, key=None):
     if inverted:
         # NOT BETWEEN: expr < low OR expr > high — the negation of the inclusive
         # form below, so the bounds are STRICT here and the connective is OR.
-        left_node = Node(
-            NodeType.COMPARISON_OPERATOR,
+        left_node = Comparison(
             value="Lt",
             left=expr,
             right=low,
         )
-        right_node = Node(
-            NodeType.COMPARISON_OPERATOR,
+        right_node = Comparison(
             value="Gt",
             left=expr,
             right=high,
         )
 
-        return Node(NodeType.OR, left=left_node, right=right_node, alias=alias)
+        return Or(left=left_node, right=right_node, alias=alias)
     else:
         # BETWEEN: expr >= low AND expr <= high — INCLUSIVE at both ends.
-        left_node = Node(
-            NodeType.COMPARISON_OPERATOR,
+        left_node = Comparison(
             value="GtEq",
             left=expr,
             right=low,
         )
-        right_node = Node(
-            NodeType.COMPARISON_OPERATOR,
+        right_node = Comparison(
             value="LtEq",
             left=expr,
             right=high,
         )
 
-        return Node(NodeType.AND, left=left_node, right=right_node, alias=alias)
+        return And(left=left_node, right=right_node, alias=alias)
+
+
+# The typed class for each operator node kind get_operator_node_type answers.
+_OPERATOR_CLASSES = {
+    NodeType.BINARY_OPERATOR: BinaryOperator,
+    NodeType.COMPARISON_OPERATOR: Comparison,
+    NodeType.EXTRACTION_OPERATOR: ExtractionOperator,
+    NodeType.AND: And,
+    NodeType.OR: Or,
+    NodeType.XOR: Xor,
+}
 
 
 def binary_op(branch, alias: Optional[List[str]] = None, key=None):
@@ -790,8 +809,7 @@ def binary_op(branch, alias: Optional[List[str]] = None, key=None):
     if operator_type is None:
         raise UnsupportedSyntaxError(f"Unsupported operator '{operator}'. Check the spelling against the operators the dialect accepts.")
 
-    return Node(
-        operator_type,
+    return _OPERATOR_CLASSES[operator_type](
         value=operator,
         left=left,
         right=right,
@@ -811,8 +829,7 @@ def case_when(value, alias: Optional[List[str]] = None, key=None):
             conditions.append(operand)
         else:
             conditions.append(
-                Node(
-                    NodeType.COMPARISON_OPERATOR,
+                Comparison(
                     value="Eq",
                     left=fixed_operand,
                     right=operand,
@@ -821,8 +838,7 @@ def case_when(value, alias: Optional[List[str]] = None, key=None):
         result = build(condition["result"])
         results.append(result)
 
-    return Node(
-        NodeType.CASE,
+    return Case(
         conditions=conditions,
         results=results,
         else_result=else_result,
@@ -916,7 +932,13 @@ def cast(branch, alias: Optional[List[str]] = None, key=None):
     # second, Python-side implementation of the same token engine (CLAUDE.md §3/§11
     # bans duplicated logic between Python and native).
     _base_target = normalized_type.replace("TRY_", "")
-    _source_category = source_expr.type.category if source_expr.type is not None else None
+    # Only a LITERAL carries a `type` here; the category matters only for the
+    # literal-fold decision below.
+    _source_category = (
+        source_expr.type.category
+        if source_expr.node_type == NodeType.LITERAL and source_expr.type is not None
+        else None
+    )
     if _base_target == "ARRAY":
         _fold_target = _source_category in (LogicalCategory.ARRAY, LogicalCategory.NULL)
     else:
@@ -931,8 +953,7 @@ def cast(branch, alias: Optional[List[str]] = None, key=None):
 
     # For non-literals, return a CAST node that will be evaluated at runtime
     # CAST nodes have the source in 'left', target type in 'value', and optional params in 'parameters'
-    return Node(
-        NodeType.CAST,
+    return Cast(
         left=source_expr,
         value=normalized_type.upper(),
         parameters=cast_parameters,
@@ -1435,7 +1456,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
     # "kernels short-circuit on DRAKEN_NULL" reasoning did not hold for them.
     if _node_cat == LogicalCategory.NULL:
         if target_type.replace("TRY_", "") == "VARCHAR":
-            return Node(NodeType.LITERAL, value=None, type=_CT_VARCHAR, alias=alias)
+            return Literal(value=None, type=_CT_VARCHAR, alias=alias)
         if target_type.replace("TRY_", "") == "ARRAY":
             # CAST(NULL AS ARRAY<E>) is NULL — but a *typed* NULL. The untyped NULL would
             # drop the declared element type, leaving a UNION arm or a projection with
@@ -1444,8 +1465,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
             # and folding is the only way the shape can run.
             from opteryx.types.logical_type import ARRAY as _CT_ARRAY_OF
 
-            return Node(
-                NodeType.LITERAL,
+            return Literal(
                 value=None,
                 type=_CT_ARRAY_OF(_array_element_type(params)),
                 alias=alias,
@@ -1495,8 +1515,8 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
             and _null_ct.category
             in (LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.BOOLEAN)
         ):
-            return Node(NodeType.LITERAL, value=None, type=_null_ct, alias=alias)
-        return Node(NodeType.LITERAL, type=_CT_NULL, alias=alias)
+            return Literal(value=None, type=_null_ct, alias=alias)
+        return Literal(type=_CT_NULL, alias=alias)
 
     # Strip TRY_ prefix for type lookup
     base_type = target_type.replace("TRY_", "")
@@ -1523,16 +1543,16 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
         _source_element = literal_node.type.element if literal_node.type is not None else None
         if _source_element != _element_ct:
             if target_type.startswith("TRY_"):
-                return Node(
-                    NodeType.LITERAL, value=None, type=_CT_ARRAY_OF(_element_ct), alias=alias
+                return Literal(
+                    value=None, type=_CT_ARRAY_OF(_element_ct), alias=alias
                 )
             raise UnsupportedSyntaxError(
                 f"**CAST** ARRAY<{_source_element}> → ARRAY<{_element_ct}>: element does not match "
                 "the declared element type. An array literal is retyped, never converted "
                 "element-by-element — cast the elements at the source, or use **TRY_CAST**."
             )
-        return Node(
-            NodeType.LITERAL, value=list(_vals), type=_CT_ARRAY_OF(_element_ct), alias=alias
+        return Literal(
+            value=list(_vals), type=_CT_ARRAY_OF(_element_ct), alias=alias
         )
 
     if base_type == "VECTOR":
@@ -1562,7 +1582,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
                     "**CAST** to VECTOR expects an array literal of numbers with no nulls."
                 )
             _floats.append(float(_v))
-        return Node(NodeType.LITERAL, value=_floats, type=_CT_VECTOR(_dims), alias=alias)
+        return Literal(value=_floats, type=_CT_VECTOR(_dims), alias=alias)
 
     # Extract unit from internal temporal type forms
     unit = None
@@ -1601,11 +1621,11 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
             )
         except Exception as e:
             if kind in {"TryCast", "SafeCast"}:
-                return Node(NodeType.LITERAL, value=None, type=_CT_NULL, alias=alias)
+                return Literal(value=None, type=_CT_NULL, alias=alias)
             raise SqlError(
                 f"Error casting value '{literal_node.value}' to type '{base_type}': {e}"
             )
-        return Node(NodeType.LITERAL, type=_CT_DATE, value=value, alias=alias)
+        return Literal(type=_CT_DATE, value=value, alias=alias)
     elif base_type == "DATE" and _node_cat == LogicalCategory.TIMESTAMP:
         # TIMESTAMP → DATE: truncate the time component, the same floor-divide by
         # the source unit's ticks-per-day that draken_cast_timestamp_to_date32
@@ -1624,8 +1644,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
         }
         _logical = literal_node.type.logical if literal_node.type is not None else None
         _unit = _logical.unit if _logical is not None else TimestampUnit.MICROSECONDS
-        return Node(
-            NodeType.LITERAL,
+        return Literal(
             type=_CT_DATE,
             value=int(literal_node.value) // _ticks_per_day[_unit],
             alias=alias,
@@ -1652,7 +1671,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
             )
         else:
             value = timestamp_to_int64_us(parse_timestamp_value(int_value))
-        return Node(NodeType.LITERAL, type=_CT_TIMESTAMP(), value=value, alias=alias)
+        return Literal(type=_CT_TIMESTAMP(), value=value, alias=alias)
     else:
         from opteryx.types.logical_type import parse_column_type
 
@@ -1691,8 +1710,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
         ):
             from opteryx.types.scalars.value_parsing import parser_for
 
-            return Node(
-                NodeType.LITERAL,
+            return Literal(
                 type=sql_type,
                 value=parser_for(sql_type.category)(ipv4_format(literal_node.value)),
                 alias=alias,
@@ -1701,24 +1719,24 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
             from opteryx.expression.formatter import _format_timestamp_micros
 
             parsed_value = _format_timestamp_micros(literal_node.value)
-            return Node(NodeType.LITERAL, type=sql_type, value=parsed_value, alias=alias)
+            return Literal(type=sql_type, value=parsed_value, alias=alias)
         if _node_cat == LogicalCategory.DATE and isinstance(literal_node.value, int):
             from opteryx.expression.formatter import _format_date_days
 
             parsed_value = _format_date_days(literal_node.value)
-            return Node(NodeType.LITERAL, type=sql_type, value=parsed_value, alias=alias)
+            return Literal(type=sql_type, value=parsed_value, alias=alias)
         if _node_cat == LogicalCategory.TIME and isinstance(literal_node.value, datetime.time):
             # Matches draken_cast_time_to_string's fixed "HH:MM:SS.ffffff" format
             # (the runtime kernel) rather than Python's str(time), which omits
             # the fractional part when microsecond == 0.
             t = literal_node.value
             parsed_value = f"{t.hour:02d}:{t.minute:02d}:{t.second:02d}.{t.microsecond:06d}"
-            return Node(NodeType.LITERAL, type=sql_type, value=parsed_value, alias=alias)
+            return Literal(type=sql_type, value=parsed_value, alias=alias)
         if _node_cat == LogicalCategory.INTERVAL and isinstance(literal_node.value, tuple):
             from opteryx.expression.formatter import _format_interval_iso8601
 
             parsed_value = _format_interval_iso8601(literal_node.value)
-            return Node(NodeType.LITERAL, type=sql_type, value=parsed_value, alias=alias)
+            return Literal(type=sql_type, value=parsed_value, alias=alias)
 
     # Attempt to parse and cast the literal value
     try:
@@ -1740,8 +1758,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
             # Value AND type together: an int tagged VARCHAR, or dotted-decimal
             # text tagged IPV4, is the literal value/type-tag divergence that
             # silently produces wrong rows downstream.
-            return Node(
-                NodeType.LITERAL,
+            return Literal(
                 type=sql_type,
                 value=ipv4_parse(literal_node.value),
                 alias=alias,
@@ -1774,11 +1791,11 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
                 raise ValueError(
                     f"value {parsed_value} is out of range for {sql_type}"
                 )
-        return Node(NodeType.LITERAL, type=sql_type, value=parsed_value, alias=alias)
+        return Literal(type=sql_type, value=parsed_value, alias=alias)
     except Exception as e:
         # For TRY_CAST/SAFE_CAST, return NULL on failure
         if kind in {"TryCast", "SafeCast"}:
-            return Node(NodeType.LITERAL, type=_CT_NULL, alias=alias)
+            return Literal(type=_CT_NULL, alias=alias)
         # For regular CAST, raise an error
         raise SqlError(f"Error casting value '{literal_node.value}' to type '{base_type}': {e}")
 
@@ -1786,7 +1803,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
 def ceiling(value, alias: Optional[List[str]] = None, key=None):
     data_value = build(value["expr"])
     scale = build(value["field"]["Scale"]) if "Scale" in value["field"] else literal_number([0])
-    return Node(NodeType.FUNCTION, value="CEILING", parameters=[data_value, scale], alias=alias)
+    return Function(value="CEILING", parameters=[data_value, scale], alias=alias)
 
 
 def compound_identifier(branch, alias: Optional[List[str]] = None, key=None):
@@ -1832,7 +1849,7 @@ def scalar_subquery(branch, alias: Optional[List[str]] = None, key=None):
     exit_node = subquery_plan.get_exit_points()[0]
     subquery_plan.remove_node(exit_node, heal=True)
 
-    return Node(NodeType.SUBQUERY, value=subquery_plan, alias=alias)
+    return Subquery(value=subquery_plan, alias=alias)
 
 
 def exists(branch, alias: Optional[List[str]] = None, key=None):
@@ -1843,8 +1860,8 @@ def exists(branch, alias: Optional[List[str]] = None, key=None):
     exit_node = subquery_plan.get_exit_points()[0]
     subquery_plan.remove_node(exit_node, heal=True)
 
-    sub_query = Node(NodeType.SUBQUERY, value=subquery_plan)
-    node = Node(NodeType.UNARY_OPERATOR, value="Exists", alias=alias)
+    sub_query = Subquery(value=subquery_plan)
+    node = UnaryOperator(value="Exists", alias=alias)
     node.parameters = [sub_query]
     node.negated = branch["negated"]
     return node
@@ -1911,7 +1928,7 @@ def extract(branch, alias: Optional[List[str]] = None, key=None):
     datepart_value = branch["field"]
     if isinstance(datepart_value, dict):
         datepart_value = list(datepart_value)[0]
-    datepart = Node(NodeType.LITERAL, type=_CT_VARCHAR, value=datepart_value)
+    datepart = Literal(type=_CT_VARCHAR, value=datepart_value)
     identifier = build(branch["expr"])
 
     # EXTRACT(EPOCH FROM x) -> UNIXTIME(x). `epoch` is not one of the part ids
@@ -1925,15 +1942,13 @@ def extract(branch, alias: Optional[List[str]] = None, key=None):
     # `MAX(EXTRACT(EPOCH FROM ts))` and `ABS(EXTRACT(EPOCH FROM ts))` would still
     # be refused, as would an ORDER BY expression that is not also projected.
     if _literal_word(datepart) == "EPOCH":
-        return Node(
-            NodeType.FUNCTION,
+        return Function(
             value="UNIXTIME",
             parameters=[identifier],
             alias=alias,
         )
 
-    return Node(
-        NodeType.FUNCTION,
+    return Function(
         value="EXTRACT",
         parameters=[datepart, identifier],
         alias=alias,
@@ -1943,7 +1958,7 @@ def extract(branch, alias: Optional[List[str]] = None, key=None):
 def floor(value, alias: Optional[List[str]] = None, key=None):
     data_value = build(value["expr"])
     scale = build(value["field"]["Scale"]) if "Scale" in value["field"] else literal_number([0])
-    return Node(NodeType.FUNCTION, value="FLOOR", parameters=[data_value, scale], alias=alias)
+    return Function(value="FLOOR", parameters=[data_value, scale], alias=alias)
 
 
 def _validate_window_int_literal(func: str, node, role: str, minimum: int) -> None:
@@ -2264,15 +2279,14 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
         if filtered_source.node_type == NodeType.WILDCARD:
             # COUNT(*) counts ROWS, so there is no argument to filter; count a
             # constant instead and let the NULL branch remove the rejected rows.
-            filtered_source = Node(NodeType.LITERAL, type=_CT_INT64, value=1)
+            filtered_source = Literal(type=_CT_INT64, value=1)
         args = [
-            Node(
-                node_type=NodeType.FUNCTION,
+            Function(
                 value="IIF",
                 parameters=[
                     filter_condition,
                     filtered_source,
-                    Node(NodeType.LITERAL, type=_CT_NULL, value=None),
+                    Literal(type=_CT_NULL, value=None),
                 ],
             )
         ]
@@ -2297,10 +2311,8 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
         # As in the NULLIF fold below: without an explicit alias the folded node
         # would name the output column after itself, silently renaming the result.
         folded.alias = alias or format_expression(
-            Node(node_type=NodeType.FUNCTION, value="COALESCE", parameters=[args[0]])
+            Function(value="COALESCE", parameters=[args[0]])
         )
-        if folded.node_type == NodeType.LITERAL:
-            folded.qualified_name = format_expression(folded)
         return folded
 
     # NULLIF(a, b) → IIF(a = b, NULL, a). Lowered to a native comparison + IIF at
@@ -2335,24 +2347,18 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
             # column after itself ("name"), silently renaming the result of a
             # NULLIF. Carry the original spelling so folding stays invisible.
             folded.alias = alias or format_expression(
-                Node(
-                    node_type=NodeType.FUNCTION,
+                Function(
                     value="NULLIF",
                     parameters=[value_node, compare_node],
                 )
             )
-            # LogicalColumn derives qualified_name as a read-only property; only a
-            # plain literal Node carries a settable one.
-            if folded.node_type == NodeType.LITERAL:
-                folded.qualified_name = format_expression(folded)
             return folded
 
-        equality = Node(
-            NodeType.COMPARISON_OPERATOR, value="Eq", left=value_node, right=compare_node
+        equality = Comparison(
+            value="Eq", left=value_node, right=compare_node
         )
-        null_literal = Node(NodeType.LITERAL, type=_CT_NULL, value=None)
-        node = Node(
-            node_type=NodeType.FUNCTION,
+        null_literal = Literal(type=_CT_NULL, value=None)
+        node = Function(
             value="IIF",
             parameters=[equality, null_literal, value_node],
             alias=alias,
@@ -2360,21 +2366,40 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
         node.qualified_name = format_expression(node)
         return node
 
-    node = Node(
-        node_type=node_type,
-        value=func,
-        parameters=args,
-        alias=alias,
-        duplicate_treatment=duplicate_treatment,
-        null_treatment=null_treatment,
-        condition=filter_condition,
-        order=order_by,
-        limit=limit,
-        # Where the name was written. Constant folding resolves this node again later
-        # (`_evaluate_timetravel_expression`) and can reject it there, by which point
-        # the AST branch is long gone - so the position travels with the node.
-        span=name_span,
-    )
+    # `span`: where the name was written. Constant folding resolves this node again
+    # later (`_evaluate_timetravel_expression`) and can reject it there, by which
+    # point the AST branch is long gone - so the position travels with the node.
+    if node_type == NodeType.AGGREGATOR:
+        node = Aggregator(
+            value=func,
+            parameters=args,
+            alias=alias,
+            duplicate_treatment=duplicate_treatment,
+            null_treatment=null_treatment,
+            order=order_by,
+            limit=limit,
+            span=name_span,
+        )
+    else:
+        # DISTINCT / ORDER BY / LIMIT / IGNORE NULLS shape an aggregate's input; a
+        # scalar function has none to shape. They were accepted here and silently
+        # dropped — `UPPER(DISTINCT name)` answered UPPER(name).
+        _clauses = [
+            spelling
+            for spelling, present in (
+                ("DISTINCT", duplicate_treatment is not None),
+                ("ORDER BY", bool(order_by)),
+                ("LIMIT", limit is not None),
+                ("IGNORE/RESPECT NULLS", null_treatment is not None),
+            )
+            if present
+        ]
+        if _clauses:
+            raise UnsupportedSyntaxError(
+                f"**{' / '.join(_clauses)}** inside `{func}(...)` is only meaningful for an "
+                f"aggregate function, and {func} is not one."
+            )
+        node = Function(value=func, parameters=args, alias=alias, span=name_span)
     node.qualified_name = format_expression(node)
 
     over = branch.get("over")
@@ -2434,8 +2459,7 @@ def _inline_filter_spelling(func, args, duplicate_treatment, condition) -> str:
 
 def hex_literal(branch, alias: Optional[List[str]] = None, key=None):
     value = int(branch, 16)
-    return Node(
-        NodeType.LITERAL,
+    return Literal(
         type=_CT_INT64,
         value=value,
         #    alias=alias or f"0x{branch}"
@@ -2495,13 +2519,11 @@ def in_list(branch, alias: Optional[List[str]] = None, key=None):
         raise ArrayWithMixedTypesError("Array in IN condition has values with mixed types. Every element has to share one type; cast them so they match.")
     element_ct = element_ct_set.pop() if element_ct_set else _CT_VARIANT
     operator = "NotInList" if branch["negated"] else "InList"
-    right_node = Node(
-        node_type=NodeType.LITERAL,
+    right_node = Literal(
         type=_CT_ARRAY(element_ct),
         value=[v.value for v in value_nodes],
     )
-    return Node(
-        node_type=NodeType.COMPARISON_OPERATOR,
+    return Comparison(
         value=operator,
         left=left_node,
         right=right_node,
@@ -2518,9 +2540,8 @@ def in_subquery(branch, alias: Optional[List[str]] = None, key=None):
     exit_node = subquery_plan.get_exit_points()[0]
     subquery_plan.remove_node(exit_node, heal=True)
 
-    sub_query = Node(NodeType.SUBQUERY, value=subquery_plan)
-    node = Node(
-        NodeType.COMPARISON_OPERATOR,
+    sub_query = Subquery(value=subquery_plan)
+    node = Comparison(
         value="InSubQuery",
         left=left,
         right=sub_query,
@@ -2538,8 +2559,7 @@ def in_unnest(branch, alias: Optional[List[str]] = None, key=None):
     left_node = build(branch["expr"])
     operator = "AllOpNotEq" if branch["negated"] else "AnyOpEq"
     right_node = build(branch["array_expr"])
-    return Node(
-        node_type=NodeType.COMPARISON_OPERATOR,
+    return Comparison(
         value=operator,
         left=left_node,
         right=right_node,
@@ -2548,8 +2568,8 @@ def in_unnest(branch, alias: Optional[List[str]] = None, key=None):
 
 def _null_test(operand, negated: bool = False):
     """`operand IS NULL` / `operand IS NOT NULL`, as a UNARY_OPERATOR node."""
-    return Node(
-        NodeType.UNARY_OPERATOR, value="IsNotNull" if negated else "IsNull", centre=operand
+    return UnaryOperator(
+        value="IsNotNull" if negated else "IsNull", centre=operand
     )
 
 
@@ -2603,8 +2623,7 @@ def is_json(branch, alias: Optional[List[str]] = None, key=None):
         raise UnsupportedSyntaxError(f"Unrecognized `IS JSON` kind: {kind}")
 
     operator = ("IsNotJson" if branch["negated"] else "IsJson") + _IS_JSON_KINDS[kind]
-    return Node(
-        NodeType.UNARY_OPERATOR,
+    return UnaryOperator(
         value=operator,
         centre=build(branch["expr"]),
         alias=alias,
@@ -2615,7 +2634,7 @@ def _all_of(*conditions):
     """Left-deep AND over `conditions`."""
     combined = conditions[0]
     for condition in conditions[1:]:
-        combined = Node(NodeType.AND, left=combined, right=condition)
+        combined = And(left=combined, right=condition)
     return combined
 
 
@@ -2623,7 +2642,7 @@ def _any_of(*conditions):
     """Left-deep OR over `conditions`."""
     combined = conditions[0]
     for condition in conditions[1:]:
-        combined = Node(NodeType.OR, left=combined, right=condition)
+        combined = Or(left=combined, right=condition)
     return combined
 
 
@@ -2681,8 +2700,7 @@ def distinct_from(branch, alias: Optional[List[str]] = None, key=None):
         return right.copy()
 
     both_known = _all_of(_null_test(_left(), negated=True), _null_test(_right(), negated=True))
-    comparison = Node(
-        NodeType.COMPARISON_OPERATOR,
+    comparison = Comparison(
         value="NotEq" if distinct else "Eq",
         left=left,
         right=right,
@@ -2701,7 +2719,6 @@ def distinct_from(branch, alias: Optional[List[str]] = None, key=None):
         )
 
     node.alias = alias
-    node.qualified_name = format_expression(node)
     return node
 
 
@@ -2724,15 +2741,15 @@ def overlay_string(branch, alias: Optional[List[str]] = None, key=None):
     start = build(branch["overlay_from"])
     length = build(branch.get("overlay_for"))
     if length is None:
-        length = Node(node_type=NodeType.FUNCTION, value="LENGTH", parameters=[replacement])
+        length = Function(value="LENGTH", parameters=[replacement])
 
     def _function(name, *parameters):
-        return Node(node_type=NodeType.FUNCTION, value=name, parameters=list(parameters))
+        return Function(value=name, parameters=list(parameters))
 
     def _arithmetic(operator, left, right):
-        return Node(NodeType.BINARY_OPERATOR, value=operator, left=left, right=right)
+        return BinaryOperator(value=operator, left=left, right=right)
 
-    one = Node(NodeType.LITERAL, type=_CT_INT64, value=1)
+    one = Literal(type=_CT_INT64, value=1)
     head = _function(
         "SUBSTRING", source, one, _arithmetic("Minus", start, one)
     )
@@ -2742,16 +2759,14 @@ def overlay_string(branch, alias: Optional[List[str]] = None, key=None):
         _arithmetic("Plus", start, length),
         _function("LENGTH", source),
     )
-    spliced = Node(
-        NodeType.BINARY_OPERATOR,
+    spliced = BinaryOperator(
         value="StringConcat",
-        left=Node(
-            NodeType.BINARY_OPERATOR, value="StringConcat", left=head, right=replacement
+        left=BinaryOperator(
+            value="StringConcat", left=head, right=replacement
         ),
         right=tail,
     )
     spliced.alias = alias
-    spliced.qualified_name = format_expression(spliced)
     return spliced
 
 
@@ -2760,7 +2775,7 @@ def is_compare(branch, alias: Optional[List[str]] = None, key=None):
     # projection from the OUTERMOST node (`node.alias or <rendered text>`), so
     # dropping it here named `x IS NOT NULL AS y` after its own SQL text.
     centre = build(branch)
-    return Node(NodeType.UNARY_OPERATOR, value=key, centre=centre, alias=alias)
+    return UnaryOperator(value=key, centre=centre, alias=alias)
 
 
 def json_access(branch, alias: Optional[List[str]] = None, key=None):
@@ -2782,8 +2797,7 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
 
     key_value = key_node.value
     identifier_name = format_expression(identifier_node)
-    return Node(
-        NodeType.EXTRACTION_OPERATOR,
+    return ExtractionOperator(
         value="MapAccess",
         left=identifier_node,
         right=key_node,
@@ -2793,7 +2807,7 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
 
 def literal_boolean(branch, alias: Optional[List[str]] = None, key=None):
     """create node for a literal boolean branch"""
-    return Node(NodeType.LITERAL, type=_CT_BOOLEAN, value=branch, alias=alias)
+    return Literal(type=_CT_BOOLEAN, value=branch, alias=alias)
 
 
 def literal_interval(branch, alias: Optional[List[str]] = None, key=None):
@@ -2875,12 +2889,12 @@ def literal_interval(branch, alias: Optional[List[str]] = None, key=None):
 
     interval = (month, microseconds)
 
-    return Node(NodeType.LITERAL, type=_CT_INTERVAL, value=interval, alias=alias)
+    return Literal(type=_CT_INTERVAL, value=interval, alias=alias)
 
 
 def literal_null(branch=None, alias: Optional[List[str]] = None, key=None):
     """create node for a literal null branch"""
-    return Node(NodeType.LITERAL, type=_CT_NULL, alias=alias)
+    return Literal(type=_CT_NULL, alias=alias)
 
 
 def integer_literal_node(value: int, alias: Optional[List[str]] = None) -> Node:
@@ -2901,9 +2915,9 @@ def integer_literal_node(value: int, alias: Optional[List[str]] = None) -> Node:
     and throws std::bad_cast for out-of-range values.
     """
     if -(2**63) <= value <= 2**63 - 1:
-        return Node(NodeType.LITERAL, type=_CT_INT64, value=value, alias=alias)
+        return Literal(type=_CT_INT64, value=value, alias=alias)
     if 0 <= value <= 2**64 - 1:
-        return Node(NodeType.LITERAL, type=_CT_UINT64, value=value, alias=alias)
+        return Literal(type=_CT_UINT64, value=value, alias=alias)
     decimal_value = decimal.Decimal(value)
     precision = len(decimal_value.as_tuple().digits)
     if precision > 38:
@@ -2911,8 +2925,7 @@ def integer_literal_node(value: int, alias: Optional[List[str]] = None) -> Node:
             f"Integer literal {value} has {precision} digits; the maximum "
             "supported precision is 38. Split the value, or carry it as text if it does not need arithmetic."
         )
-    return Node(
-        NodeType.LITERAL,
+    return Literal(
         type=_CT_DECIMAL(precision, 0),
         value=decimal_value,
         alias=alias,
@@ -2930,8 +2943,7 @@ def literal_number(branch, alias: Optional[List[str]] = None, key=None):
     except ValueError:
         # If int conversion fails, try converting to float
         value = float(value)
-        return Node(
-            NodeType.LITERAL,
+        return Literal(
             type=_CT_FLOAT64,
             value=value,
             alias=alias,
@@ -2940,7 +2952,7 @@ def literal_number(branch, alias: Optional[List[str]] = None, key=None):
 
 def literal_string(branch, alias: Optional[List[str]] = None, key=None):
     """create node for a string branch"""
-    return Node(NodeType.LITERAL, type=_CT_VARCHAR, value=branch, alias=alias)
+    return Literal(type=_CT_VARCHAR, value=branch, alias=alias)
 
 
 def match_against(branch, alias: Optional[List[str]] = None, key=None):
@@ -2963,8 +2975,7 @@ def match_against(branch, alias: Optional[List[str]] = None, key=None):
     columns = [identifier(col["Identifier"]) for col in branch["columns"][0]]
     match_to = build(branch["match_value"])
 
-    return Node(
-        NodeType.FUNCTION,
+    return Function(
         value="_MATCH_AGAINST",
         parameters=[columns[0], match_to],
         alias=alias or f"MATCH ({columns[0].value}) AGAINST ({match_to.value})",
@@ -2979,8 +2990,7 @@ def nested(branch, alias: Optional[List[str]] = None, key=None):
     # a name containing quotes and parentheses, so the column was unaddressable
     # downstream, and CREATE TABLE/MATERIALIZED VIEW baked that text into the
     # stored schema.
-    return Node(
-        node_type=NodeType.NESTED,
+    return Nested(
         centre=build(branch),
         alias=alias,
     )
@@ -3104,8 +3114,7 @@ def pattern_match(branch, alias: Optional[List[str]] = None, key=None):
             right.type = _CT_ARRAY(
                 right.type if isinstance(right.type, ColumnType) else _CT_VARCHAR
             )
-    return Node(
-        NodeType.COMPARISON_OPERATOR,
+    return Comparison(
         value=key,
         left=left,
         right=right,
@@ -3122,13 +3131,13 @@ def placeholder(value, alias: Optional[List[str]] = None, key=None):
 def position(value, alias: Optional[List[str]] = None, key=None):
     sub = build(value["expr"])
     string = build(value["in"])
-    return Node(NodeType.FUNCTION, value="POSITION", parameters=[sub, string], alias=alias)
+    return Function(value="POSITION", parameters=[sub, string], alias=alias)
 
 
 def qualified_wildcard(branch, alias: Optional[List[str]] = None, key=None):
     parts = [build(part).value for part in branch[0]["ObjectName"]]
     qualifier = (".".join(parts),)
-    return Node(NodeType.WILDCARD, value=qualifier, alias=alias)
+    return Wildcard(value=qualifier, alias=alias)
 
 
 def substring(branch, alias: Optional[List[str]] = None, key=None):
@@ -3145,15 +3154,14 @@ def substring(branch, alias: Optional[List[str]] = None, key=None):
     is passed through as such.
     """
     string = build(branch["expr"])
-    substring_from = build(branch["substring_from"]) or Node(
-        NodeType.LITERAL, type=_CT_INT64, value=1
+    substring_from = build(branch["substring_from"]) or Literal(
+        type=_CT_INT64, value=1
     )
     substring_for = build(branch["substring_for"])
     parameters = [string, substring_from]
     if substring_for is not None:
         parameters.append(substring_for)
-    return Node(
-        NodeType.FUNCTION,
+    return Function(
         value="SUBSTRING",
         parameters=parameters,
         alias=alias,
@@ -3193,8 +3201,7 @@ def trim_string(branch, alias: Optional[List[str]] = None, key=None):
     for characters in branch["trim_characters"] or []:
         parameters.append(build(characters))
 
-    return Node(
-        NodeType.FUNCTION,
+    return Function(
         value=function,
         parameters=parameters,
         alias=alias,
@@ -3208,7 +3215,7 @@ def tuple_literal(branch, alias: Optional[List[str]] = None, key=None):
     values = [t.value for t in node_values]
 
     # Infer element ColumnType: homogeneous only
-    node_types = {t.type for t in node_values}
+    node_types = {t.type if t.node_type == NodeType.LITERAL else None for t in node_values}
     element_ct = node_types.pop() if len(node_types) == 1 else None
 
     # ALWAYS an ARRAY — a literal is never a VECTOR (architect, 2026-07-16).
@@ -3227,8 +3234,7 @@ def tuple_literal(branch, alias: Optional[List[str]] = None, key=None):
 
     if values and isinstance(values[0], dict):
         values = [build(val["Identifier"]).value for val in values]
-    return Node(
-        NodeType.LITERAL,
+    return Literal(
         type=literal_type,
         value=tuple(values),
         alias=alias,
@@ -3258,7 +3264,7 @@ def unary_op(branch, alias: Optional[List[str]] = None, key=None):
     if branch["op"] == "Not":
         # As in is_compare: the alias names the NOT node, never its operand.
         centre = build(branch["expr"])
-        return Node(node_type=NodeType.NOT, centre=centre, alias=alias)
+        return Not(centre=centre, alias=alias)
     if branch["op"] == "Minus":
         centre = build(branch["expr"], alias=alias)
         # Constant-fold numeric literals (e.g. `-5`). An INTEGER literal must be
@@ -3275,9 +3281,8 @@ def unary_op(branch, alias: Optional[List[str]] = None, key=None):
             # now tagged INT64 rather than keeping the operand's BOOLEAN tag).
             return integer_literal_node(0 - centre.value, alias)
         # General case: lower unary minus on an expression to `0 - expr`.
-        zero = Node(NodeType.LITERAL, type=_CT_INT64, value=0)
-        return Node(
-            get_operator_node_type("Minus"),
+        zero = Literal(type=_CT_INT64, value=0)
+        return BinaryOperator(
             value="Minus",
             left=zero,
             right=centre,
@@ -3287,8 +3292,8 @@ def unary_op(branch, alias: Optional[List[str]] = None, key=None):
         return build(branch["expr"], alias=alias)
     if branch["op"] == "BitwiseNot":
         centre = build(branch["expr"])
-        return Node(
-            node_type=NodeType.UNARY_OPERATOR, value="BitwiseNot", centre=centre, alias=alias
+        return UnaryOperator(
+            value="BitwiseNot", centre=centre, alias=alias
         )
 
 
@@ -3300,7 +3305,7 @@ def wildcard_filter(branch, alias: Optional[List[str]] = None, key=None):
         except_columns.extend(
             [build({"Identifier": e}) for e in branch["opt_except"]["additional_elements"]]
         )
-    return Node(NodeType.WILDCARD, except_columns=except_columns)
+    return Wildcard(except_columns=except_columns)
 
 
 # ----------

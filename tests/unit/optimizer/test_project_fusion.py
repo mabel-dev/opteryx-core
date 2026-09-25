@@ -17,6 +17,7 @@ import uuid
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
+from opteryx.planner.plan_context import PlanContext
 from opteryx.models import ExecutionContext, QueryTelemetry
 from opteryx.planner.ast_rewriter import do_ast_rewriter
 from opteryx.planner.binder import do_bind_phase
@@ -51,7 +52,7 @@ def _optimized_plan(sql: str):
         query_id=query_id,
         telemetry=telemetry,
     )
-    return do_optimizer(bound, telemetry)
+    return do_optimizer(bound, telemetry, PlanContext())
 
 
 def _nodes(plan, step_type):
@@ -189,7 +190,7 @@ def test_fanned_out_project_is_not_fused():
     plan.add_edge("lower", "upper_b")
 
     strategy = ProjectFusionStrategy(QueryTelemetry.detached())
-    context = OptimizerContext(plan)
+    context = OptimizerContext(plan, PlanContext())
     context.optimized_plan = plan.copy()
     context.node_id = "lower"
 

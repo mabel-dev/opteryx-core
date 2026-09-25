@@ -55,6 +55,13 @@ __all__ = [
 
 # Re-export internals used by opteryx's parquet connector
 from rugo.rugo_native import read_metadata_from_memoryview
+# The written layout's shape (docs/PARQUET_GROUPED_COLUMN_MAJOR_DESIGN.md §3):
+# 64k-row row groups in column-major blocks of 4. Defined once, in the native
+# module, and re-exported here so the sinks size their batches from the same
+# numbers the writer defaults to.
+from rugo.rugo_native import DEFAULT_ROWS_PER_ROW_GROUP
+from rugo.rugo_native import DEFAULT_ROW_GROUPS_PER_BLOCK
+from rugo.rugo_native import DEFAULT_BLOCK_ROWS
 from rugo.rugo_native import decode_value
 from rugo.rugo_native import _make_scan_row_group
 
@@ -500,22 +507,35 @@ def _is_date_logical_type(logical_type: str) -> bool:
     return logical_type == "date32[day]" or logical_type == "DATE"
 
 
+# Logical types whose predicate values are checked before pruning, by the value
+# domain they accept. An ALLOWLIST: a column whose type is not named here
+# (temporal, decimal, fixed-width binary, nested, ...) has its own accepted value
+# forms and is left to the compare kernel.
+_NUMERIC_LOGICAL_TYPES = frozenset((
+    "int8", "int16", "int32", "int64",
+    "uint8", "uint16", "uint32", "uint64",
+    "float32", "float64",
+))
+_TEXT_LOGICAL_TYPES = frozenset(("varchar", "binary", "enum"))
+
+
 def _schema_column_maps(source: Source):
-    """({timestamp_col: unit_str}, {date_col}, {boolean_col}) — column names
-    (bytes) keyed by their Parquet schema annotation, read once per
+    """({timestamp_col: unit_str}, {date_col}, {col: value_domain}) — column
+    names (bytes) keyed by their Parquet schema annotation, read once per
     _ParquetReader from the footer metadata.
 
-    The boolean set is not used for coercion; it is what lets a predicate on a
-    BOOLEAN column be type-checked BEFORE row groups are pruned (see
-    _check_predicate_values). Checking it later would be too late: `b = 5`
-    prunes every row group on min/max and returns zero rows without the row
-    filter ever running, so an invalid predicate would answer "no rows"
-    instead of failing.
+    The domain map ("boolean" / "numeric" / "text") is not used for coercion;
+    it is what lets a predicate value be type-checked BEFORE row groups are
+    pruned (see _check_predicate_values). Checking it later would be too late:
+    `b = 5` prunes every row group on min/max, and `a = 'x'` on an int column
+    prunes every row group on its bloom filter — both return zero rows without
+    the row filter ever running, so an invalid predicate would answer "no
+    rows" instead of failing.
     """
     meta = read_metadata(source)
     units = {}
     dates = set()
-    booleans = set()
+    domains = {}
     for col in meta.schema_columns:
         name = col.name.encode("utf-8")
         unit = _parse_timestamp_unit(col.logical_type)
@@ -524,11 +544,15 @@ def _schema_column_maps(source: Source):
         elif _is_date_logical_type(col.logical_type):
             dates.add(name)
         elif col.physical_type == "boolean":
-            booleans.add(name)
-    return units, dates, booleans
+            domains[name] = "boolean"
+        elif col.logical_type in _NUMERIC_LOGICAL_TYPES:
+            domains[name] = "numeric"
+        elif col.physical_type == "byte_array" and col.logical_type in _TEXT_LOGICAL_TYPES:
+            domains[name] = "text"
+    return units, dates, domains
 
 
-def _check_predicate_values(predicates: Sequence[Predicate], booleans) -> None:
+def _check_predicate_values(predicates: Sequence[Predicate], domains) -> None:
     """Reject predicate values no comparison can answer, BEFORE row groups prune.
 
     Two classes, both of which would otherwise answer "no rows" rather than
@@ -539,15 +563,29 @@ def _check_predicate_values(predicates: Sequence[Predicate], booleans) -> None:
     can only ever match nothing. Passed through it reached the compare kernel as
     a raw TypeError. `is null` / `is not null` are how a null test is spelled.
 
-    A BOOLEAN column's value — `bool(value)` would quietly make `b = "false"`
-    mean TRUE, and a bare int would make `b = 5` mean something the column
-    cannot hold. Neither is a guess worth making for the caller.
+    A value outside the column's domain — `bool(value)` would quietly make
+    `b = "false"` mean TRUE on a BOOLEAN column, and a bare int would make
+    `b = 5` mean something the column cannot hold. A str against a numeric
+    column (or a number against a text one) has no comparison at all: the bloom
+    probe hashes it, finds nothing, and prunes the whole file to zero rows —
+    and on a memory source, where there is no bloom stage, the compare kernel
+    failed with a bare `std::bad_cast`. bool is an int subclass, so `a = True`
+    would quietly mean `a = 1` on a numeric column; it is refused there for the
+    same reason an int is refused on a BOOLEAN one. None of these is a guess
+    worth making for the caller.
     """
     for col, op, value in predicates:
         if op in _NULL_OPS:
             continue
+        if op in _MEMBERSHIP_OPS and not isinstance(value, (list, tuple, set, frozenset)):
+            # Iterating a bare str/bytes walks its CHARACTERS: `s in "xy"` ran as
+            # `s in ['x', 'y']` and answered rows that were never asked for.
+            raise ValueError(
+                "predicate %r on %r takes a list, tuple or set of values, got %s"
+                % (op, col, type(value).__name__)
+            )
         name = col.encode("utf-8") if isinstance(col, str) else col
-        is_boolean = name in booleans
+        domain = domains.get(name)
         for member in (value if op in _MEMBERSHIP_OPS else [value]):
             if member is None:
                 raise ValueError(
@@ -555,9 +593,20 @@ def _check_predicate_values(predicates: Sequence[Predicate], booleans) -> None:
                     "NULL matches no row; use 'is null' / 'is not null'"
                     % (op, col)
                 )
-            if is_boolean and not isinstance(member, bool):
+            if domain == "boolean" and not isinstance(member, bool):
                 raise ValueError(
                     "predicate on BOOLEAN column %r needs True or False, "
+                    "got %r (%s)" % (col, member, type(member).__name__)
+                )
+            if domain == "numeric" and (isinstance(member, bool)
+                                        or not isinstance(member, (int, float))):
+                raise ValueError(
+                    "predicate on numeric column %r needs an int or float, "
+                    "got %r (%s)" % (col, member, type(member).__name__)
+                )
+            if domain == "text" and not isinstance(member, (str, bytes)):
+                raise ValueError(
+                    "predicate on text column %r needs a str or bytes, "
                     "got %r (%s)" % (col, member, type(member).__name__)
                 )
 
@@ -644,11 +693,11 @@ class _ParquetReader:
         # streaming implementation behind this class's own "Decode is performed
         # lazily on iteration" claim above.
         source = self._path if self._path is not None else self._data
-        unit_map, date_set, bool_set = _schema_column_maps(source)
+        unit_map, date_set, domains = _schema_column_maps(source)
         if self._predicates:
             # Before pruning: a row group mask built from an invalid predicate
             # can empty the file and never reach the row filter.
-            _check_predicate_values(self._predicates, bool_set)
+            _check_predicate_values(self._predicates, domains)
 
         if self._path is not None:
             if self._predicates:
@@ -726,10 +775,11 @@ def read_metadata(source: Source):
 
 def write_parquet(morsel, compression: str = "zstd", bloom_filters=True,
                   dictionary: bool = True,
-                  max_rows_per_row_group: int = 262144,
+                  max_rows_per_row_group: int = DEFAULT_ROWS_PER_ROW_GROUP,
                   max_page_bytes: int = 0,
                   sorted_by=None, sorted_descending: bool = False,
-                  profile: str = "fast", page_index: bool = True) -> bytes:
+                  profile: str = "fast", page_index: bool = True,
+                  row_groups_per_block: int = DEFAULT_ROW_GROUPS_PER_BLOCK) -> bytes:
     """Serialize a Morsel to Parquet bytes.
 
     compression: "zstd" (default) or "none".
@@ -742,8 +792,18 @@ def write_parquet(morsel, compression: str = "zstd", bloom_filters=True,
         of column names. Split-block bloom filters; floats/bools are excluded.
     dictionary: True (default) dictionary-encodes eligible columns; False
         forces PLAIN everywhere.
-    max_rows_per_row_group: maximum rows per row group (default 2^18 = 262144).
-        Pass 0 to write a single row group regardless of size.
+    max_rows_per_row_group: maximum rows per row group (default 2^16 = 65536,
+        the engine's measured best morsel size). Pass 0 to write a single row
+        group regardless of size.
+    row_groups_per_block: row groups per column-major BLOCK (default 4, so a
+        block is 262144 rows). Within a block every column's chunks for the
+        block's row groups are byte-adjacent, columns in schema order, so a
+        reader projecting a column over the block fetches ONE range instead
+        of one per row group; the last block of a file may be partial. 1 =
+        conventional row-major placement. Bloom filters always go in the
+        file tail after the last block, column-major over the whole file.
+        The row group stays the unit of decode, statistics and pruning. See
+        docs/PARQUET_GROUPED_COLUMN_MAJOR_DESIGN.md.
     max_page_bytes: split each column chunk into multiple data pages once its
         estimated size exceeds this many bytes (default 0 = single page per
         chunk). Independent per column. Dictionary-encoded chunks split on the
@@ -783,19 +843,22 @@ def write_parquet(morsel, compression: str = "zstd", bloom_filters=True,
                                  max_page_bytes=max_page_bytes,
                                  sorted_by=sorted_by,
                                  sorted_descending=sorted_descending,
-                                 profile=profile, page_index=page_index)
+                                 profile=profile, page_index=page_index,
+                                 row_groups_per_block=row_groups_per_block)
 
 
 def write_parquet_with_bounds(morsel, compression: str = "zstd", bloom_filters=True,
                               dictionary: bool = True,
-                              max_rows_per_row_group: int = 262144,
+                              max_rows_per_row_group: int = DEFAULT_ROWS_PER_ROW_GROUP,
                               max_page_bytes: int = 0,
                               sorted_by=None, sorted_descending: bool = False,
-                              profile: str = "fast", page_index: bool = True):
+                              profile: str = "fast", page_index: bool = True,
+                              row_groups_per_block: int = DEFAULT_ROW_GROUPS_PER_BLOCK):
     """Like write_parquet but also returns {col_index: (min, max)} bounds.
 
-    Note: bounds are only populated for single-row-group files.
-    sorted_by / sorted_descending / profile: see write_parquet.
+    The bounds span the whole file (every row group).
+    sorted_by / sorted_descending / profile / row_groups_per_block: see
+    write_parquet.
     """
     return _native.write_parquet_with_bounds(morsel, compression=compression,
                                              bloom_filters=bloom_filters,
@@ -804,24 +867,28 @@ def write_parquet_with_bounds(morsel, compression: str = "zstd", bloom_filters=T
                                              max_page_bytes=max_page_bytes,
                                              sorted_by=sorted_by,
                                              sorted_descending=sorted_descending,
-                                             profile=profile, page_index=page_index)
+                                             profile=profile, page_index=page_index,
+                                             row_groups_per_block=row_groups_per_block)
 
 
 def open_parquet_writer(sink, compression: str = "zstd", bloom_filters=True,
                         dictionary: bool = True, max_page_bytes: int = 0,
                         sorted_by=None, sorted_descending: bool = False,
-                        profile: str = "fast", page_index: bool = True):
-    """Open a streaming, constant-memory Parquet writer.
+                        profile: str = "fast", page_index: bool = True,
+                        row_groups_per_block: int = DEFAULT_ROW_GROUPS_PER_BLOCK):
+    """Open a streaming, bounded-memory Parquet writer.
 
     Unlike write_parquet (whole morsel in, whole file out), this writes one row
-    group per write_row_group(morsel) call, pushing each produced chunk of bytes
-    to `sink` as it goes, so peak memory stays ~one row group regardless of the
-    total file size. The footer/statistics are accumulated incrementally and
-    emitted on close().
+    group per write_row_group(morsel) call and pushes each completed BLOCK of
+    row_groups_per_block row groups (column-major, see write_parquet) to
+    `sink` as it goes, so peak memory stays ~one block plus the file's bloom
+    filters regardless of the total file size. The footer/statistics are
+    accumulated incrementally; the bloom tail, the page index and the footer
+    are emitted on close().
 
     Args:
-        sink: a callable taking bytes. Called with each chunk of the file as row
-            groups are written, and once more with the footer on close. A file
+        sink: a callable taking bytes. Called with each block of the file as it
+            completes, and once more with the tail + footer on close. A file
             object's .write bound method, or a GCS resumable-upload adapter, both
             satisfy this.
         compression: "zstd" (default) or "none".
@@ -831,6 +898,9 @@ def open_parquet_writer(sink, compression: str = "zstd", bloom_filters=True,
             every row group.
         sorted_by / sorted_descending: as write_parquet; applied to every row
             group written by this writer.
+        row_groups_per_block: as write_parquet. The caller controls the
+            row-group size by how much it passes per call
+            (DEFAULT_ROWS_PER_ROW_GROUP is the measured best).
 
     Returns a context manager:
 
@@ -846,20 +916,22 @@ def open_parquet_writer(sink, compression: str = "zstd", bloom_filters=True,
                                        max_page_bytes=max_page_bytes,
                                        sorted_by=sorted_by,
                                        sorted_descending=sorted_descending,
-                                       profile=profile, page_index=page_index)
+                                       profile=profile, page_index=page_index,
+                                       row_groups_per_block=row_groups_per_block)
 
 
 def write_parquet_stream(morsel_iter, sink, compression: str = "zstd",
                          bloom_filters=True, dictionary: bool = True,
                          max_page_bytes: int = 0,
                          sorted_by=None, sorted_descending: bool = False,
-                         profile: str = "fast", page_index: bool = True) -> int:
+                         profile: str = "fast", page_index: bool = True,
+                         row_groups_per_block: int = DEFAULT_ROW_GROUPS_PER_BLOCK) -> int:
     """Stream an iterable of Morsels to a byte-chunk `sink` as one Parquet file.
 
     Thin wrapper over open_parquet_writer: one row group per yielded morsel,
-    constant memory. Empty morsels (no rows) are skipped. Returns the number of
+    bounded memory. Empty morsels (no rows) are skipped. Returns the number of
     row groups written. See open_parquet_writer for the `sink` contract and
-    write_parquet for sorted_by / sorted_descending.
+    write_parquet for sorted_by / sorted_descending / row_groups_per_block.
     """
     return _native.write_parquet_stream(morsel_iter, sink, compression=compression,
                                         bloom_filters=bloom_filters,
@@ -867,7 +939,8 @@ def write_parquet_stream(morsel_iter, sink, compression: str = "zstd",
                                         max_page_bytes=max_page_bytes,
                                         sorted_by=sorted_by,
                                         sorted_descending=sorted_descending,
-                                        profile=profile, page_index=page_index)
+                                        profile=profile, page_index=page_index,
+                                        row_groups_per_block=row_groups_per_block)
 
 
 def patch_columns(source: bytes, drop=None, rename=None, add=None, retype=None) -> bytes:

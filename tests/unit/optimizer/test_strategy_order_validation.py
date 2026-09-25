@@ -19,6 +19,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import pytest
 
 from opteryx.exceptions import InvalidInternalStateError
+from opteryx.planner.plan_context import PlanContext
 from opteryx.models import QueryTelemetry
 from opteryx.planner.optimizer import OptimizerVisitor
 from opteryx.planner.optimizer import _validate_strategy_order
@@ -34,7 +35,7 @@ class _Stub:
 
 def test_real_pipeline_satisfies_ordering_contract():
     # Constructing the visitor runs _validate_strategy_order; must not raise.
-    visitor = OptimizerVisitor(QueryTelemetry.detached())
+    visitor = OptimizerVisitor(QueryTelemetry.detached(), PlanContext())
     assert len(visitor.strategies) > 0
     # And the validator is happy when called directly on the live list.
     _validate_strategy_order(visitor.strategies)

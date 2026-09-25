@@ -12,7 +12,10 @@ from tests.helpers import execute_and_get_arrow
 def test_interval_prefix_literal_still_returns_interval_type():
     arrow_result = execute_and_get_arrow("SELECT INTERVAL '1' MONTH AS iv")
     assert arrow_result.num_rows == 1
-    assert arrow_result.column(0)[0].as_py() == [1, 0]
+    # INTERVAL crosses the Arrow boundary as month_day_nano (draken_to_arrow.h).
+    assert str(arrow_result.schema.field(0).type) == "month_day_nano_interval"
+    interval = arrow_result.column(0)[0].as_py()
+    assert (interval.months, interval.days, interval.nanoseconds) == (1, 0, 0)
 
 
 @pytest.mark.parametrize(

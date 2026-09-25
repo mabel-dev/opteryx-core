@@ -33,7 +33,6 @@ import opteryx
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn
-from opteryx.models import Node
 
 
 def results(sql):
@@ -199,7 +198,7 @@ def test_a_well_formed_projection_passes_the_guard():
     values = LogicalPlanNode(node_type=LogicalPlanStepType.FunctionDataset, function="VALUES")
     values.columns = ("c",)
     wildcard = _boundary_columns(_FakePlan(values), "nid", "brands")
-    assert len(wildcard) == 1 and isinstance(wildcard[0], Node)
+    assert len(wildcard) == 1 and wildcard[0].node_type == NodeType.WILDCARD
 
 
 if __name__ == "__main__":  # pragma: no cover

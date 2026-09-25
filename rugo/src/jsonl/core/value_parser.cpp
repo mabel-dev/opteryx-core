@@ -1,7 +1,9 @@
 #include "value_parser.hpp"
 #include "fast_parsers.hpp"
+#include "predicate_literal.hpp"
 #include <cstring>
 #include <cmath>
+#include <stdexcept>
 
 namespace rugo::_jsonl {
 
@@ -79,116 +81,151 @@ inline bool apply_op_f64(uint8_t op, double a, double b) {
 }
 }  // namespace
 
-void prepare_predicate(Predicate& pred) {
-    if (pred.value.empty()) return;
-    pred.pred_parsed_int = parse_int64(
-        reinterpret_cast<const uint8_t*>(pred.value.c_str()),
-        0,
-        pred.value.length() - 1,
-        pred.pred_int
-    );
-    if (!pred.pred_parsed_int) {
-        pred.pred_parsed_float = parse_float64(
-            reinterpret_cast<const uint8_t*>(pred.value.c_str()),
-            0,
-            pred.value.length() - 1,
-            pred.pred_float
-        );
+const char* json_value_kind_name(uint8_t value_type) {
+    switch (static_cast<ValueType>(value_type)) {
+        case ValueType::Null:    return "JSON null";
+        case ValueType::Boolean: return "JSON boolean";
+        case ValueType::Integer:
+        case ValueType::Double:  return "JSON number";
+        case ValueType::String:  return "JSON string";
+        case ValueType::Array:   return "JSON array";
+        case ValueType::Object:  return "JSON object";
+        default:                 return "unrecognised JSON value";
     }
-    // "true"/"false" never also parses as int64/float64, so this is independent of the
-    // numeric attempts above — a predicate literal is exactly one of int/float/bool/string.
-    pred.pred_parsed_bool = parse_bool(
-        reinterpret_cast<const uint8_t*>(pred.value.c_str()),
-        0,
-        pred.value.length() - 1,
-        pred.pred_bool
-    );
 }
+
+bool literal_fits_json_value(uint8_t value_type, uint8_t kind) {
+    switch (static_cast<ValueType>(value_type)) {
+        case ValueType::String:  return kind == rugo::LITERAL_STRING;
+        case ValueType::Integer:
+        case ValueType::Double:  return kind == rugo::LITERAL_INT || kind == rugo::LITERAL_FLOAT;
+        case ValueType::Boolean: return kind == rugo::LITERAL_BOOL;
+        default:                 return false;   // array / object / unknown: no comparison defined
+    }
+}
+
+void prepare_predicate(Predicate& pred) {
+    for (auto& m : pred.members) prepare_predicate(m);
+    if (pred.op >= 6) return;   // IN / NOT IN (members prepared above), IS [NOT] NULL
+    const uint8_t* v = reinterpret_cast<const uint8_t*>(pred.value.c_str());
+    const uint32_t e = pred.value.empty() ? 0 : static_cast<uint32_t>(pred.value.length() - 1);
+    // Parse ONLY as the literal's kind. Sniffing the text instead is what made the
+    // string '1' compare as a number.
+    switch (pred.kind) {
+        case rugo::LITERAL_INT:
+            pred.pred_parsed_int = !pred.value.empty() && parse_int64(v, 0, e, pred.pred_int);
+            // An int beyond int64 still compares, in the float domain.
+            if (!pred.pred_parsed_int)
+                pred.pred_parsed_float = !pred.value.empty() && parse_float64(v, 0, e, pred.pred_float);
+            break;
+        case rugo::LITERAL_FLOAT:
+            pred.pred_parsed_float = !pred.value.empty() && parse_float64(v, 0, e, pred.pred_float);
+            break;
+        case rugo::LITERAL_BOOL:
+            pred.pred_parsed_bool = !pred.value.empty() && parse_bool(v, 0, e, pred.pred_bool);
+            break;
+        default:
+            return;   // LITERAL_STRING: compared as bytes, nothing to parse
+    }
+    if (!pred.pred_parsed_int && !pred.pred_parsed_float && !pred.pred_parsed_bool)
+        // The Cython edge renders every int/float/bool literal parseably; this is a
+        // backstop for a non-Python caller that set `kind` inconsistently.
+        throw std::invalid_argument(
+            "predicate on column '" + pred.column + "': literal '" + pred.value +
+            "' is marked " + rugo::literal_kind_name(pred.kind) + " but does not parse as one");
+}
+
+namespace {
+// Scalar comparison (ops 0-5) of a NON-null field value against pred's literal. A
+// field whose JSON kind cannot be compared with the literal's kind is an error, not
+// a non-match (predicate_literal.hpp): `s = 1` against a JSON string raises.
+bool evaluate_scalar(
+    const uint8_t* buffer,
+    const FieldSpan& value_span,
+    const Predicate& pred) {
+
+    if (!literal_fits_json_value(value_span.type, pred.kind))
+        throw std::invalid_argument(rugo::literal_mismatch_message(
+            pred.column, json_value_kind_name(value_span.type), pred.kind, pred.value));
+
+    const uint32_t fend = value_span.value_start + value_span.value_width - 1;
+
+    switch (static_cast<ValueType>(value_span.type)) {
+        case ValueType::Integer:
+        case ValueType::Double: {
+            // The structural pass tags every number as Integer from its first byte; a
+            // value like "3.5" only reveals itself as a float on parse. So try int64
+            // first, and compare in the float domain whenever either the field or the
+            // literal is fractional (avoids truncating "3.5" to 3).
+            int64_t val_int;
+            const bool field_is_int = parse_int64(buffer, value_span.value_start, fend, val_int);
+            if (field_is_int && pred.pred_parsed_int)
+                return apply_op_i64(pred.op, val_int, pred.pred_int);  // exact integer comparison
+            double val_float;
+            if (field_is_int) {
+                val_float = static_cast<double>(val_int);
+            } else if (!parse_float64(buffer, value_span.value_start, fend, val_float)) {
+                throw std::invalid_argument(
+                    "predicate on column '" + pred.column + "': JSON number '" +
+                    std::string(reinterpret_cast<const char*>(buffer + value_span.value_start),
+                                value_span.value_width) + "' does not parse");
+            }
+            const double cmp_val = pred.pred_parsed_int ? static_cast<double>(pred.pred_int)
+                                                        : pred.pred_float;
+            return apply_op_f64(pred.op, val_float, cmp_val);
+        }
+        case ValueType::Boolean: {
+            bool field_bool;
+            if (!parse_bool(buffer, value_span.value_start, fend, field_bool))
+                throw std::invalid_argument(
+                    "predicate on column '" + pred.column + "': JSON boolean does not parse");
+            // false=0 < true=1 (SQL boolean ordering) — reuse the int comparator so all
+            // six ops (EQ/NE/LT/LE/GT/GE) behave consistently with numeric predicates.
+            return apply_op_i64(pred.op, field_bool ? 1 : 0, pred.pred_bool ? 1 : 0);
+        }
+        default: {  // String (the only other kind literal_fits_json_value admits)
+            const std::string val_str = extract_string(buffer, value_span.value_start, fend);
+            const int cmp = val_str.compare(pred.value);
+            return apply_op_i64(pred.op, cmp, 0);
+        }
+    }
+}
+}  // namespace
 
 bool evaluate_predicate(
     const uint8_t* buffer,
     const FieldSpan& value_span,
     const Predicate& pred) {
 
-    // Handle NULL values
-    if (is_null(buffer, value_span.value_start, value_span.value_start + value_span.value_width - 1)) {
-        // NULL comparisons: NULL op anything = false (SQL semantics)
-        // except NULL != anything might be true in some systems, but we'll use SQL
+    const bool value_is_null = is_null(
+        buffer, value_span.value_start, value_span.value_start + value_span.value_width - 1);
+
+    switch (pred.op) {
+        case 8: return value_is_null;    // IS NULL
+        case 9: return !value_is_null;   // IS NOT NULL
+        case 7:
+            // `x NOT IN ()` asks no comparison, so it accepts every row, nulls included.
+            if (pred.members.empty()) return true;
+            break;
+        default:
+            break;
+    }
+
+    // NULL op anything is unknown => the row does not pass (SQL semantics) — for the six
+    // comparisons and for a non-empty IN / NOT IN alike.
+    if (value_is_null) return false;
+
+    if (pred.op == 6) {  // IN: any member's EQ passes (empty list => false)
+        for (const auto& m : pred.members)
+            if (evaluate_scalar(buffer, value_span, m)) return true;
         return false;
     }
-
-    // Predicate value's numeric parse is cached on `pred` by prepare_predicate() — read
-    // it here rather than re-parsing pred.value on every row evaluated.
-    const int64_t pred_int = pred.pred_int;
-    const double  pred_float = pred.pred_float;
-    const bool    pred_parsed_int = pred.pred_parsed_int;
-    const bool    pred_parsed_float = pred.pred_parsed_float;
-
-    // Numeric field. The structural pass tags every number as Integer from its
-    // first byte; a value like "3.5" only reveals itself as a float on parse. So
-    // try int64 first, and compare in the float domain whenever either the field
-    // or the predicate is fractional (avoids truncating "3.5" to 3).
-    if (value_span.type == static_cast<uint8_t>(ValueType::Integer) ||
-        value_span.type == static_cast<uint8_t>(ValueType::Double)) {
-
-        if (!pred_parsed_int && !pred_parsed_float) {
-            return false;  // predicate value is not numeric — no ordering against a number
-        }
-
-        const uint32_t fend = value_span.value_start + value_span.value_width - 1;
-        int64_t val_int;
-        const bool field_is_int = parse_int64(buffer, value_span.value_start, fend, val_int);
-
-        if (field_is_int && pred_parsed_int) {
-            return apply_op_i64(pred.op, val_int, pred_int);  // exact integer comparison
-        }
-
-        double val_float;
-        if (field_is_int) {
-            val_float = static_cast<double>(val_int);
-        } else if (!parse_float64(buffer, value_span.value_start, fend, val_float)) {
-            return false;  // field is neither int nor float
-        }
-        const double cmp_val = pred_parsed_float ? pred_float : static_cast<double>(pred_int);
-        return apply_op_f64(pred.op, val_float, cmp_val);
-
-    } else if (value_span.type == static_cast<uint8_t>(ValueType::Boolean)) {
-        if (!pred.pred_parsed_bool) {
-            return false;  // predicate literal is not "true"/"false" — no comparison possible
-        }
-        bool field_bool;
-        const uint32_t fend = value_span.value_start + value_span.value_width - 1;
-        if (!parse_bool(buffer, value_span.value_start, fend, field_bool)) {
-            return false;
-        }
-        // false=0 < true=1 (SQL boolean ordering) — reuse the int comparator so all six
-        // ops (EQ/NE/LT/LE/GT/GE) behave consistently with numeric predicates.
-        return apply_op_i64(pred.op, field_bool ? 1 : 0, pred.pred_bool ? 1 : 0);
-
-    } else if (value_span.type == static_cast<uint8_t>(ValueType::String)) {
-        std::string val_str = extract_string(buffer, value_span.value_start, value_span.value_start + value_span.value_width - 1);
-
-        // String comparison
-        int cmp = val_str.compare(pred.value);
-
-        switch (pred.op) {
-            case 0:
-                return cmp == 0;
-            case 1:
-                return cmp != 0;
-            case 2:
-                return cmp < 0;
-            case 3:
-                return cmp <= 0;
-            case 4:
-                return cmp > 0;
-            case 5:
-                return cmp >= 0;
-        }
+    if (pred.op == 7) {  // NOT IN: every member's NE passes
+        for (const auto& m : pred.members)
+            if (!evaluate_scalar(buffer, value_span, m)) return false;
+        return true;
     }
-
-    // Type mismatch or unsupported type for predicate
-    return false;
+    return evaluate_scalar(buffer, value_span, pred);
 }
 
 }  // namespace rugo::_jsonl

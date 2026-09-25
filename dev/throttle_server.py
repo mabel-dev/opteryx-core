@@ -162,6 +162,13 @@ def serve(root, port, rtt_ms=0.0, bandwidth_mbps=0.0, error_rate=0.0, seed=0):
     """Start the server (blocking). Returns only on shutdown."""
     config = ThrottleConfig(root, rtt_ms, bandwidth_mbps, error_rate, seed)
     handler = type("BoundThrottleHandler", (ThrottleHandler,), {"config": config})
+    # Accept backlog. socketserver's default is 5: a scan fanning out 60+
+    # concurrent range GETs overflowed it, the kernel dropped the SYNs, and the
+    # client's retransmits (1 s, 2 s, 4 s) surfaced as multi-second GETs with
+    # zero retries — a server artefact that made request fan-out look like
+    # latency (measured 2026-09-24: 352 GETs, 0.16 s at ~17 connections vs
+    # 7.8 s at 66). Sized well past any fetch-ahead depth a scan can run.
+    ThreadingHTTPServer.request_queue_size = 1024
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
     # Announce readiness on stdout so a parent process can wait for it.
     sys.stdout.write(f"READY port={server.server_address[1]}\n")

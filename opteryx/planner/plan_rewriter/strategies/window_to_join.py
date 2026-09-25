@@ -67,6 +67,9 @@ from opteryx.planner.plan_rewriter.strategies.rewrite_strategy import (
     PlanRewriteStrategy,
 )
 from opteryx.utils import random_string
+from opteryx.compiled.structures.expressions import And
+from opteryx.compiled.structures.expressions import Wildcard
+from opteryx.compiled.structures.expressions import Comparison
 
 # Alias prefix for the CTE's copy of the window's source relation. Minted, never typed.
 WINDOW_SOURCE_ALIAS_PREFIX = "$win_src-"
@@ -105,7 +108,7 @@ def _source_relation(plan: LogicalPlan) -> LogicalPlanNode:
 
 
 def _build_eq_condition(left_col: Node, right_col: Node) -> Node:
-    eq = Node(node_type=NodeType.COMPARISON_OPERATOR, value="Eq", do_not_create_column=True)
+    eq = Comparison(value="Eq", do_not_create_column=True)
     eq.left = left_col
     eq.right = right_col
     return eq
@@ -114,7 +117,7 @@ def _build_eq_condition(left_col: Node, right_col: Node) -> Node:
 def _and_conditions(conditions: list) -> Node:
     result = conditions[0]
     for cond in conditions[1:]:
-        and_node = Node(node_type=NodeType.AND, do_not_create_column=True)
+        and_node = And(do_not_create_column=True)
         and_node.left = result
         and_node.right = cond
         result = and_node
@@ -211,7 +214,7 @@ def _build_window_cte(
     # Wrap in a Subquery node so the binder treats it as a named relation.
     subquery_wrapper = LogicalPlanNode(node_type=LogicalPlanStepType.Subquery)
     subquery_wrapper.alias = subquery_alias
-    subquery_wrapper.columns = [Node(node_type=NodeType.WILDCARD)]
+    subquery_wrapper.columns = [Wildcard()]
     subquery_wrapper_nid = random_string()
 
     # Merge CTE inner plan into main plan.
@@ -251,7 +254,7 @@ def _rewrite_window_chain(plan: LogicalPlan, chain: list) -> LogicalPlan:
     # of the partition columns are never projected, so the parent sees each name once.
     # ONE Project for the whole chain, not one per join — a second `source.*` expands the
     # source relation a second time, which is the same ambiguity by another route.
-    outer_wildcard = Node(node_type=NodeType.WILDCARD)
+    outer_wildcard = Wildcard()
     outer_wildcard.value = [source_alias]  # qualified wildcard: outer_scan.*
     win_refs = []
 

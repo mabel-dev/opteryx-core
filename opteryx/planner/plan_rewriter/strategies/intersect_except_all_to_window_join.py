@@ -46,6 +46,8 @@ from opteryx.planner.plan_rewriter.strategies.rewrite_strategy import PlanRewrit
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import SchemaColumn, mint_column_identity
 from opteryx.utils import random_string
+from opteryx.compiled.structures.expressions import And
+from opteryx.compiled.structures.expressions import Comparison
 
 _ROW_NUMBER_NAME = "$row_number"
 
@@ -54,7 +56,7 @@ def _and(conditions: list) -> Node:
     """Left-deep AND tree over a non-empty list of conditions."""
     node = conditions[0]
     for cond in conditions[1:]:
-        and_node = Node(node_type=NodeType.AND, do_not_create_column=True)
+        and_node = And(do_not_create_column=True)
         and_node.left = node
         and_node.right = cond
         node = and_node
@@ -62,7 +64,7 @@ def _and(conditions: list) -> Node:
 
 
 def _eq(left_rel: str, left_col: str, right_rel: str, right_col: str) -> Node:
-    eq = Node(node_type=NodeType.COMPARISON_OPERATOR, value="Eq", do_not_create_column=True)
+    eq = Comparison(value="Eq", do_not_create_column=True)
     eq.left = LogicalColumn(
         node_type=NodeType.IDENTIFIER, source=left_rel, source_column=left_col
     )

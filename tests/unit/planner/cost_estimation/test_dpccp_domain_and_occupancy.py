@@ -16,13 +16,12 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
 from opteryx.planner.cost_estimation import JoinEdge
 from opteryx.planner.cost_estimation import JoinGraph
-from opteryx.planner.cost_estimation import JoinTreeLeaf
 from opteryx.planner.cost_estimation import JoinVertex
 from opteryx.planner.cost_estimation import KeyStats
 from opteryx.planner.cost_estimation import NdvProvenance
 from opteryx.planner.cost_estimation import dpccp
-from opteryx.planner.cost_estimation.dpccp import _combine
 from opteryx.planner.cost_estimation.plan_adapter import _build_equiv_tdoms
+from opteryx.planner.plan_context import PlanContext
 
 
 def _ks(ndv):
@@ -33,8 +32,18 @@ def _ks(ndv):
     return KeyStats(ndv=ndv, null_fraction=0.0, ndv_provenance=NdvProvenance.MEASURED)
 
 
-def _leaf(vertex_id, rows, domain_rows=None):
-    return JoinTreeLeaf(vertex_id=vertex_id, estimated_rows=rows, domain_rows=domain_rows)
+def _join(left_rows, right_rows, edges, left_base=None, right_base=None):
+    """The single join DPccp builds over a two-vertex graph — the same combine
+    step (class dedupe, occupancy bound, cost) the enumerator applies at every
+    level, reached through the public entry point."""
+    graph = JoinGraph(
+        vertices=[
+            JoinVertex(id=0, name="left", row_count=left_rows, base_row_count=left_base),
+            JoinVertex(id=1, name="right", row_count=right_rows, base_row_count=right_base),
+        ],
+        edges=list(edges),
+    )
+    return dpccp(graph)
 
 
 def _edge(left, right, ndv, class_id):
@@ -54,11 +63,9 @@ def test_composite_key_domain_is_bounded_by_the_rows_holding_it():
     them. Unbounded that estimates ~30 rows; the true answer is every lineitem
     row. A relation cannot hold more distinct key tuples than it has rows.
     """
-    left = _leaf(0, 8_000_000)  # partsupp
-    right = _leaf(1, 59_986_052)  # lineitem
     edges = (_edge(0, 1, 2_000_000, class_id=0), _edge(0, 1, 100_000, class_id=1))
 
-    node = _combine(left, right, edges)
+    node = _join(8_000_000, 59_986_052, edges)  # partsupp ⋈ lineitem
 
     # Bound is min(domain rows) = 8,000,000, so |L|x|R|/bound == |R|.
     assert node.estimated_rows == 59_986_052
@@ -71,11 +78,9 @@ def test_occupancy_bound_leaves_a_slack_composite_key_alone():
     already under the bound — one divisor of P against N divisors multiplying
     to P — so a composite key with room to spare is untouched.
     """
-    left = _leaf(0, 1_000_000)
-    right = _leaf(1, 1_000_000)
     edges = (_edge(0, 1, 100, class_id=0), _edge(0, 1, 200, class_id=1))
 
-    node = _combine(left, right, edges)
+    node = _join(1_000_000, 1_000_000, edges)
 
     # 100 x 200 = 20,000 <= 1,000,000, so both selectivities still apply.
     assert node.estimated_rows == 1_000_000 * 1_000_000 // (100 * 200)
@@ -87,8 +92,6 @@ def test_unknown_ndv_disables_the_bound_rather_than_inventing_one():
     There is no product to bound in that case, and substituting the occupancy
     bound would silently overwrite the fallback with a made-up domain.
     """
-    left = _leaf(0, 1_000)
-    right = _leaf(1, 1_000)
     known = _edge(0, 1, 10, class_id=0)
     unknown = JoinEdge(
         left=0,
@@ -97,7 +100,7 @@ def test_unknown_ndv_disables_the_bound_rather_than_inventing_one():
         class_id=1,
     )
 
-    node = _combine(left, right, (known, unknown))
+    node = _join(1_000, 1_000, (known, unknown))
 
     # 1000 x 1000 / 10 x the 0.1 equality fallback — bound never applied.
     assert node.estimated_rows == 10_000
@@ -115,9 +118,8 @@ def test_tdom_fallback_uses_pre_filter_rows_so_a_filter_stays_selective():
 
     class _NoStatsScan:
         """A scan whose manifest carried no distinct_count — the common
-        Parquet case, and the only one that reaches the fallback."""
-
-        statistics = None
+        Parquet case, and the only one that reaches the fallback. Nothing is
+        recorded for it in the (empty) PlanContext."""
 
     per_leaf_scans = [{"part": _NoStatsScan()}, {"lineitem": _NoStatsScan()}]
     vertices = [
@@ -126,7 +128,7 @@ def test_tdom_fallback_uses_pre_filter_rows_so_a_filter_stays_selective():
     ]
     classes = [[(0, "p_partkey"), (1, "l_partkey")]]
 
-    tdoms = _build_equiv_tdoms(classes, per_leaf_scans, vertices)
+    tdoms = _build_equiv_tdoms(classes, per_leaf_scans, vertices, PlanContext())
 
     # Pre-filter part, NOT the 200,000 rows that survived the LIKE.
     assert tdoms[(0, "p_partkey")] == 2_000_000
@@ -136,8 +138,7 @@ def test_tdom_fallback_uses_pre_filter_rows_so_a_filter_stays_selective():
 def test_join_subtree_domain_composes_as_max_of_its_sides():
     """Matches ``statistics_refresh._join_stats``, which sets a join's
     base_row_count to ``max(left.domain_row_count, right.domain_row_count)``."""
-    node = _combine(_leaf(0, 200_000, domain_rows=2_000_000), _leaf(1, 59_986_052),
-                    (_edge(0, 1, 2_000_000, class_id=0),))
+    node = _join(200_000, 59_986_052, (_edge(0, 1, 2_000_000, class_id=0),), left_base=2_000_000)
 
     assert node.domain_rows == 59_986_052
 

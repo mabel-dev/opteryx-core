@@ -250,8 +250,8 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # Bind-time only, read by visit_insert into the InsertNode's parameters (see
     # insert.pyx) - same capture-at-bind reasoning as match_threshold. UNRESTRICTED:
     # tuning how your OWN CTAS/INSERT batches its output files is not a data-access
-    # grant. The sink clamps this to rugo's max_rows_per_row_group itself, so a
-    # caller cannot SET this past the row-group ceiling into multi-row-group files.
+    # grant. The sink clamps this to rugo's DEFAULT_ROWS_PER_ROW_GROUP itself, so
+    # a caller cannot SET this past the row-group ceiling.
     "write_coalesce_rows": (
         INT64, FromConfig("WRITE_COALESCE_ROWS"), VariableOwner.USER, Visibility.UNRESTRICTED),
     # Late-materialization tuning is per-QUERY: the right values depend on this
@@ -329,6 +329,12 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
         FLOAT64, FromConfig("PARQUET_IO_COALESCE_WASTE_RATIO"), VariableOwner.USER, Visibility.RESTRICTED),
     "parquet_io_coalesce_max_bytes": (
         INT64, FromConfig("PARQUET_IO_COALESCE_MAX_BYTES"), VariableOwner.USER, Visibility.RESTRICTED),
+    # Skene v3's own range coalescer (design R12) — same rule as parquet's, own
+    # knobs; see SKENE_IO_COALESCE_* in config.py.
+    "skene_io_coalesce_waste_ratio": (
+        FLOAT64, FromConfig("SKENE_IO_COALESCE_WASTE_RATIO"), VariableOwner.USER, Visibility.RESTRICTED),
+    "skene_io_coalesce_max_bytes": (
+        INT64, FromConfig("SKENE_IO_COALESCE_MAX_BYTES"), VariableOwner.USER, Visibility.RESTRICTED),
     "parquet_io_in_flight_limit": (
         INT64, FromConfig("PARQUET_IO_IN_FLIGHT_LIMIT"), VariableOwner.USER, Visibility.RESTRICTED),
     # Remote fetch-ahead depth (0 = off): decouples requests in flight from the
@@ -336,14 +342,14 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # measurements and the two combinations the planner rejects as inert.
     "parquet_io_fetch_ahead": (
         INT64, FromConfig("PARQUET_IO_FETCH_AHEAD"), VariableOwner.USER, Visibility.RESTRICTED),
-    # Minimum REMOTE row groups (post-pruning) before the depth above is armed;
+    # Minimum REMOTE fetch blocks (post-pruning) before the depth above is armed;
     # 0 = no minimum. SET-able SEPARATELY from the depth on purpose: the depth is
     # how wide to fetch, the gate is how big a scan has to be before that width
     # pays, and tuning either through the other is exactly the entanglement that
     # made the worker/window sweep unattributable. See
-    # PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS in config.py.
-    "parquet_io_fetch_ahead_min_row_groups": (
-        INT64, FromConfig("PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS"),
+    # PARQUET_IO_FETCH_AHEAD_MIN_BLOCKS in config.py.
+    "parquet_io_fetch_ahead_min_blocks": (
+        INT64, FromConfig("PARQUET_IO_FETCH_AHEAD_MIN_BLOCKS"),
         VariableOwner.USER, Visibility.RESTRICTED),
     # Memory admission budget for one scan's IO pipeline (bytes; 0 = auto from
     # the cgroup limit / physical RAM, -1 = off). SET-able per scan because the

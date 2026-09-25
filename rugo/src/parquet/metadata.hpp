@@ -109,6 +109,14 @@ struct ColumnStats {
 struct RowGroupStats {
   int64_t num_rows = 0;
   int64_t total_byte_size = 0;
+  // RowGroup.file_offset (5) / total_compressed_size (6), optional: the row
+  // group's first byte and the sum of its chunks' compressed bytes, -1 when
+  // the writer omitted them. Informational — a reader locates every chunk by
+  // its own ColumnChunk offsets, and under rugo's grouped layout a row group's
+  // chunks are interleaved with its block-mates', so [file_offset,
+  // file_offset + total_compressed_size) brackets MORE than the row group.
+  int64_t file_offset = -1;
+  int64_t total_compressed_size = -1;
   std::vector<ColumnStats> columns;
 };
 
@@ -181,8 +189,9 @@ bool TestBloomFilter(const std::string &file_path, int64_t bloom_offset,
 // file. `data`/`len` span exactly the bloom region (the `bloom_length` bytes the
 // footer records). `value` is the PLAIN-encoded needle bytes, encoded identically
 // to the writer's bloom_hashes (int32=4 LE, int64=8 LE, byte_array=raw). Returns
-// true if the value MAY be present, false only if it is provably absent. Used on
-// the remote decode path to skip a row group's decode without a separate fetch.
+// true if the value MAY be present, false only if it is provably absent. Exposed
+// as rugo.rugo_native.bloom_filter_bytes_maybe_contains; the pipeline no longer
+// probes blooms on the remote path (the writer puts them in the file tail).
 bool TestBloomFilterBytes(const uint8_t *data, size_t len,
                           const std::string &value);
 

@@ -3,9 +3,17 @@
 Convert a parquet dataset tree to its skene mirror.
 
 Walks a source tree of `<table>/<file>.parquet` datasets (the testdata TPC-H
-layout) and writes `<table>/<table>-NNNN.skene` into the destination —
-16 ROW GROUPS per file at 262144 rows per row group (architect decision
-2026-08-08), which is ~4.2M rows per file.
+layout) and writes `<table>/<table>-CCC-NNN.skene` into the destination — skene
+v3, 65,536 rows per row group, files closed at a 4 GiB byte target (architect
+ruling 2026-09-24, docs/SKENE_V3_FORMAT_DESIGN.md R10). CCC is the worker chunk
+and NNN the file within it: a byte target makes a chunk's file count unknowable
+up front, so each chunk numbers its own files.
+
+v3 is column-major, so the row group (decode/claim unit) and the fetch block
+(4 row groups, the writer's default) are separate knobs — 64k row groups cost no
+more read requests than 256k ones did. Each file is written in PATH mode: the
+writer stages sections in a scratch file beside the output and streams the
+result, so a 4 GiB file never sits in memory.
 
 WHY THIS IS NOT ONE FILE PER SOURCE ROW GROUP any more: it used to be, because
 one .skene file WAS one row group. The ClickBench mirror was then 396 objects
@@ -14,10 +22,10 @@ for open+mmap and the footer read, tens of milliseconds per GET remotely) is
 paid before a byte of data is read.
 
 WHY THE SOURCE ROW GROUPS ARE RE-CHUNKED rather than passed through: the target
-is 262144 rows per row group, and source row groups are not that size. TPC-H's
-are 41350 and 65536; passing them through would produce 16-row-group files whose
-row groups were a quarter of the intended size, which changes the scan's work
-item size — the thing the row group count exists to control.
+is 65,536 rows per row group, and source row groups are not reliably that size
+(TPC-H's are 41350 and 65536, ClickBench's 262144). Passing them through would
+make the row group — the scan's decode work item — whatever the source happened
+to use, and that is the thing the row group size exists to control.
 
 Written read-first by default: read_acceleration on, compression OFF. Read
 performance is king for LTS writes (architect ruling 2026-08-07), and
@@ -101,14 +109,15 @@ from draken.morsels.morsel import Morsel  # noqa: E402
 from rugo.parquet import read_metadata  # noqa: E402
 from rugo.parquet import read_parquet  # noqa: E402
 
-# Architect decision, 2026-08-08. 262144 rows is where parquet landed too — the
-# balance between amortising remote IO and the cost of processing one unit — and
-# 16 was chosen against measurements of file count against scan parallelism.
+# Architect ruling, 2026-09-24 (docs/SKENE_V3_FORMAT_DESIGN.md R10): 64k-row row
+# groups — the measured engine winner at SF1 and SF10 — in files closed at 4 GiB.
+# With v3's column-major layout the row group size no longer sets the request
+# count; the fetch block (the writer's block_row_groups, 4) does.
 #
 # Neither is a format constant: the format says nothing about how many row groups
 # a file holds or how big they are. They are this tool's policy.
-ROWS_PER_ROW_GROUP = 262_144
-ROW_GROUPS_PER_FILE = 16
+ROWS_PER_ROW_GROUP = 65_536
+FILE_TARGET_BYTES = 4 * 1024 * 1024 * 1024
 
 
 class _Packer:
@@ -119,25 +128,23 @@ class _Packer:
     which is the whole reason the writer streams.
     """
 
-    def __init__(
-        self, out_dir: str, stem: str, codec: str, zstd_level: int, first_index: int = 0
-    ):
+    def __init__(self, out_dir: str, stem: str, codec: str, zstd_level: int, chunk: int = 0):
         self._out_dir = out_dir
         self._stem = stem
         self._codec = codec
         self._zstd_level = zstd_level
+        # This worker's chunk number: part of every output name, so chunks never
+        # need to know how many files another chunk wrote.
+        self._chunk = chunk
 
         self._pending: list = []
         self._pending_rows = 0
         self._writer = None
-        self._row_groups_in_file = 0
+        self._path = None
 
-        # The NAME index and the file COUNT are different numbers once a worker
-        # starts partway through a directory. They were the same variable while
-        # this was serial, which is exactly how a parallel port would silently
-        # write two workers' files over each other.
-        self._next_index = first_index
+        self._next_index = 0
         self.files = 0
+        self.row_groups = 0
         self.rows = 0
         self.nbytes = 0
 
@@ -173,28 +180,34 @@ class _Packer:
 
     def _emit(self, row_group) -> None:
         if self._writer is None:
+            name = f"{self._stem}-{self._chunk:03d}-{self._next_index:03d}.skene"
+            self._path = os.path.join(self._out_dir, name)
+            # PATH mode: sections staged in a scratch file beside the output, the
+            # file streamed column-major at finish(). The scratch file is the
+            # writer's own and is removed when it finishes.
             self._writer = skene.SkeneWriter(
-                read_acceleration=True, codec=self._codec, zstd_level=self._zstd_level
+                read_acceleration=True,
+                codec=self._codec,
+                zstd_level=self._zstd_level,
+                path=self._path,
+                scratch_path=os.path.join(self._out_dir, f".{name}.stage"),
             )
-            self._row_groups_in_file = 0
         self._writer.add_row_group(row_group)
-        self._row_groups_in_file += 1
+        self.row_groups += 1
         self.rows += row_group.num_rows
-        if self._row_groups_in_file >= ROW_GROUPS_PER_FILE:
+        # Staged section bytes: the finished file adds only directories, padding
+        # and the footer, so this is the file's size to within a few percent.
+        if self._writer.nbytes >= FILE_TARGET_BYTES:
             self._close_file()
 
     def _close_file(self) -> None:
         if self._writer is None:
             return
-        path = os.path.join(self._out_dir, f"{self._stem}-{self._next_index:04d}.skene")
-        # write_to() completes the file and writes it with no intermediate copy —
-        # a packed file of a wide schema is hundreds of megabytes and finish()
-        # would double the peak to hand back bytes nobody keeps.
-        self.nbytes += self._writer.write_to(path)
+        self.nbytes += self._writer.finish()
         self._next_index += 1
         self.files += 1
         self._writer = None
-        self._row_groups_in_file = 0
+        self._path = None
 
 
 # How many decoded morsels may sit between the decoder and the packer.
@@ -255,8 +268,8 @@ def convert_dir(
     stem: str,
     codec: str = "none",
     zstd_level: int = 0,
-    first_index: int = 0,
-) -> tuple[int, int, int]:
+    chunk: int = 0,
+) -> tuple[int, int, int, int]:
     """Every parquet file in ONE directory (or one worker's contiguous slice of
     one) -> packed .skene files.
 
@@ -279,7 +292,7 @@ def convert_dir(
     sequence it saw when it pulled the morsels itself — so this is invisible to
     the layout, at every -j including 1.
     """
-    packer = _Packer(out_dir, stem, codec, zstd_level, first_index)
+    packer = _Packer(out_dir, stem, codec, zstd_level, chunk)
     for morsel in _decoded_morsels(parquet_paths):
         packer.add(morsel)
     packer.close()
@@ -287,7 +300,7 @@ def convert_dir(
         raise RuntimeError(
             f"{out_dir}: no row groups read — refusing to write an empty table"
         )
-    return packer.files, packer.rows, packer.nbytes
+    return packer.files, packer.row_groups, packer.rows, packer.nbytes
 
 
 def _default_workers() -> int:
@@ -340,20 +353,7 @@ def _default_workers() -> int:
     return max(1, os.cpu_count() or 1)
 
 
-def _output_files_for(rows: int) -> int:
-    """How many .skene files a chunk of `rows` rows produces.
-
-    Exact, not an estimate, and it has to stay exact: it is what reserves each
-    worker's output index range. The packer emits a full row group whenever it
-    holds one and a short one at close, so the counts are pure ceilings.
-    """
-    if rows == 0:
-        return 0
-    row_groups = -(-rows // ROWS_PER_ROW_GROUP)
-    return -(-row_groups // ROW_GROUPS_PER_FILE)
-
-
-def _plan_chunks(paths: list, row_counts: list, workers: int) -> list:
+def _plan_chunks(paths: list, row_counts: list, workers: int, src_bytes: int) -> list:
     """Split a directory's files into <= `workers` CONTIGUOUS chunks of whole
     files, balanced by ROW COUNT rather than file count — files in a tree are
     not all the same size, and a chunk that is half the rows is half the work.
@@ -366,10 +366,13 @@ def _plan_chunks(paths: list, row_counts: list, workers: int) -> list:
     # across every worker shatters it: TPC-H `supplier` (100k rows) came out as
     # 13 files of 0.9MB with a 7.7k-row row group in each, against one file with
     # one 100k-row row group serially. That is precisely the per-file fixed cost
-    # and undersized work item this tool packs 16 row groups per file to avoid —
+    # and undersized work item this tool packs files to a byte target to avoid —
     # a speedup that destroys the layout is not a speedup.
-    rows_per_file = ROWS_PER_ROW_GROUP * ROW_GROUPS_PER_FILE
-    n = min(workers, len(paths), max(1, total // rows_per_file))
+    #
+    # v3: files close at a BYTE target, so the cap is by bytes — one chunk per
+    # FILE_TARGET_BYTES of source parquet, which a skene file of the same rows is
+    # at least as large as. A table smaller than one target stays one file.
+    n = min(workers, len(paths), max(1, src_bytes // FILE_TARGET_BYTES))
     if n <= 1 or total == 0:
         return [(list(paths), total)]
 
@@ -406,17 +409,17 @@ def _convert_chunk(task: tuple) -> tuple:
     spawn-start platform) re-imports this module in the child. Morsels never
     cross the boundary — only these counts do.
     """
-    paths, out_dir, stem, codec, zstd_level, first_index, expected_rows = task
-    files, rows, nbytes = convert_dir(paths, out_dir, stem, codec, zstd_level, first_index)
+    paths, out_dir, stem, codec, zstd_level, chunk, expected_rows = task
+    files, row_groups, rows, nbytes = convert_dir(paths, out_dir, stem, codec, zstd_level, chunk)
     if rows != expected_rows:
         # The failure this catches destroyed a previous converter quietly: a bad
         # morsel merge dropped 76% of the rows and still produced a plausible,
         # fast, completely wrong dataset. Per chunk, so it names the culprit.
         raise RuntimeError(
-            f"{out_dir}: chunk starting at index {first_index} wrote {rows:,} rows "
+            f"{out_dir}: chunk {chunk} wrote {rows:,} rows "
             f"but its source files hold {expected_rows:,}"
         )
-    return files, rows, nbytes
+    return files, row_groups, rows, nbytes
 
 
 def main() -> int:
@@ -499,8 +502,8 @@ def main() -> int:
         if stale:
             print(
                 f"ERROR: {dst_root} already holds {len(stale)} .skene file(s). This "
-                f"converter packs 16 row groups per file, so its output names do not "
-                f"line up with an older mirror's and writing here would leave BOTH "
+                f"converter's output names are a function of its packing, so they do "
+                f"not line up with an older mirror's and writing here would leave BOTH "
                 f"generations in place.\n       Remove it first:  rm -rf {dst_root}"
             )
             return 1
@@ -508,15 +511,15 @@ def main() -> int:
     described = "zstd-%d" % zstd_level if codec == "zstd" else codec
     print(
         f"codec={described}, read_acceleration=True, "
-        f"{ROW_GROUPS_PER_FILE} row groups/file at {ROWS_PER_ROW_GROUP:,} rows, "
+        f"{ROWS_PER_ROW_GROUP:,} rows/row group, files closed at "
+        f"{FILE_TARGET_BYTES / 2**30:.0f} GiB, "
         f"{workers} worker(s)"
     )
 
     started = time.monotonic()
 
-    # PLAN EVERYTHING FIRST. Every worker's output index range is reserved up
-    # front from the source footers, so no worker ever has to ask another where
-    # to start numbering and the names come out sequential and gapless.
+    # PLAN EVERYTHING FIRST. Each chunk's number is part of its output names, so
+    # no worker ever has to ask another where to start numbering.
     tasks: list = []
     directories: list = []
     for dirpath, _dirnames, filenames in sorted(os.walk(src_root)):
@@ -535,12 +538,10 @@ def main() -> int:
         row_counts = [read_metadata(p).num_rows for p in paths]
 
         first_task = len(tasks)
-        next_index = 0
-        for chunk_paths, chunk_rows in _plan_chunks(paths, row_counts, workers):
-            tasks.append(
-                (chunk_paths, out_dir, stem, codec, zstd_level, next_index, chunk_rows)
-            )
-            next_index += _output_files_for(chunk_rows)
+        for chunk, (chunk_paths, chunk_rows) in enumerate(
+            _plan_chunks(paths, row_counts, workers, src_size)
+        ):
+            tasks.append((chunk_paths, out_dir, stem, codec, zstd_level, chunk, chunk_rows))
         directories.append(
             (rel, len(parquet_files), src_size, sum(row_counts), first_task, len(tasks))
         )
@@ -560,8 +561,9 @@ def main() -> int:
     total_row_groups = 0
     for rel, n_parquet, src_size, expected_rows, first, last in directories:
         files = sum(r[0] for r in results[first:last])
-        rows = sum(r[1] for r in results[first:last])
-        nbytes = sum(r[2] for r in results[first:last])
+        row_groups = sum(r[1] for r in results[first:last])
+        rows = sum(r[2] for r in results[first:last])
+        nbytes = sum(r[3] for r in results[first:last])
         if rows != expected_rows:
             print(
                 f"ERROR: {rel}: wrote {rows:,} rows but the source holds "
@@ -572,9 +574,6 @@ def main() -> int:
         total_files += files
         total_rows += rows
         total_bytes += nbytes
-        # Summed per chunk: with N chunks there are N partial row groups, so the
-        # directory total is NOT ceil(rows / ROWS_PER_ROW_GROUP) any more.
-        row_groups = sum(-(-r[1] // ROWS_PER_ROW_GROUP) for r in results[first:last])
         total_row_groups += row_groups
         print(
             f"  {rel:<20} {n_parquet:>4} parquet -> {files:>4} skene file(s), "

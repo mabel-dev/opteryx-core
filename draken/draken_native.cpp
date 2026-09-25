@@ -8766,6 +8766,18 @@ NB_MODULE(draken_native, m) {
                 return vecresult_to_owner(
                     draken_str_compare_scalar(v.vec, scalar_slot, ubytes, op));
             }
+            // Numeric vectors (everything past this point) take an int or float
+            // scalar. nb::cast<> of anything else throws nb::cast_error, which
+            // surfaces as a bare `RuntimeError: std::bad_cast` naming neither the
+            // vector nor the value — reject it here as the string branch does.
+            // bool is a PyLong subclass: accepted, `x = True` would silently mean
+            // `x = 1`. Refused, mirroring the BOOL branch's refusal of an int.
+            if (PyBool_Check(scalar.ptr())
+                    || (!PyLong_Check(scalar.ptr()) && !PyFloat_Check(scalar.ptr())))
+                throw std::invalid_argument(
+                    std::string("compare_scalar: numeric vector requires an int or "
+                                "float scalar, got ")
+                    + Py_TYPE(scalar.ptr())->tp_name);
             // FLOAT32/64: scalar is Python float (or int coerced to double).
             if (is_float_type(v.vec.type)) {
                 const double s = nb::cast<double>(scalar);

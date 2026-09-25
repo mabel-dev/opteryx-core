@@ -153,7 +153,7 @@ def test_estimate_is_reported_next_to_the_actual_build_size():
 
 
 def test_missing_estimate_is_its_own_reason():
-    """SEMI/ANTI joins are deliberately not tagged by JoinBuildShapeStrategy (they drop
+    """SEMI/ANTI joins deliberately get no output estimate from the physical planner (they drop
     the build payload, so there is no gather to improve). They therefore decline for
     'no estimate' — and that must be spelled differently from a decline that MADE a
     comparison, since only the latter says anything about the byte model."""

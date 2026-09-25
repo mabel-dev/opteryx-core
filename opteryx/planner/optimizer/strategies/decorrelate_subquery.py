@@ -158,14 +158,14 @@ The first two predate this strategy.
 from opteryx.exceptions import InvalidInternalStateError, UnsupportedSyntaxError
 from opteryx.expression import NodeType, binary_operands, get_all_nodes_of_type
 from opteryx.expression.formatter import format_expression
-from opteryx.models import LogicalColumn, Node
+from opteryx.models import LogicalColumn
+from opteryx.models import is_expression
 from opteryx.planner.binder.join_helpers import extract_join_fields
 from opteryx.planner.binder.join_helpers import hoistable_operand_leg
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.planner.optimizer.strategies.join_key_materialization import (
     materialize_operand_as_column,
 )
-from opteryx.planner.optimizer.strategies.predicate_rewriter import _shallow
 from opteryx.planner.optimizer.strategies.optimization_strategy import (
     FILTER_REFERENCED_NODE_TYPES,
     OptimizationStrategy,
@@ -175,6 +175,13 @@ from opteryx.types import logical_type as _lt
 from opteryx.types.schema import RelationSchema
 from opteryx.types.schema import SchemaColumn, mint_column_identity
 from opteryx.utils import random_string
+from opteryx.compiled.structures.expressions import And
+from opteryx.compiled.structures.expressions import Or
+from opteryx.compiled.structures.expressions import UnaryOperator
+from opteryx.compiled.structures.expressions import Wildcard
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
+from opteryx.compiled.structures.expressions import Aggregator
 
 
 def _is_exists(node) -> bool:
@@ -270,10 +277,7 @@ def _find(condition, predicate, into_aggregates: bool = True):
         condition.node_type == NodeType.COMPARISON_OPERATOR
         and isinstance(condition.value, str)
         and (condition.value.startswith("AnyOp") or condition.value.startswith("AllOp"))
-        and any(
-            operand is not None and operand.node_type == NodeType.SUBQUERY
-            for operand in (condition.left, condition.right, condition.centre)
-        )
+        and any(operand.node_type == NodeType.SUBQUERY for operand in condition.children())
     ):
         raise UnsupportedSyntaxError(
             "**ANY**/**ALL** over a subquery is not supported. For `= ANY` use "
@@ -281,65 +285,13 @@ def _find(condition, predicate, into_aggregates: bool = True):
             "aggregate of the subquery instead."
         )
 
-    # Unrolled (not a getattr loop): expression carriers answer .left/.right/
-    # .centre natively, returning None when absent.
-    for attr, child in (
-        ("left", condition.left),
-        ("right", condition.right),
-        ("centre", condition.centre),
-    ):
-        if child is None:
-            continue
+    for child in condition.children():
         found, replace_child = _find(child, predicate, into_aggregates)
         if found is not None:
 
-            def _replace(new, _c=condition, _a=attr, _rc=replace_child):
-                setattr(_c, _a, _rc(new))
-                return _c
-
-            return found, _replace
-
-    # NodeType.CASE uses conditions/results/else_result instead of parameters (see
-    # get_all_nodes_of_type, which walks the same three fields for the same reason).
-    # Q09's shape is exactly this: a scalar subquery in a WHEN test and another in
-    # each of THEN/ELSE — none reachable via left/right/centre/parameters above.
-    if condition.node_type == NodeType.CASE:
-        for index, branch_condition in enumerate(condition.conditions or []):
-            found, replace_child = _find(branch_condition, predicate, into_aggregates)
-            if found is not None:
-
-                def _replace(new, _c=condition, _i=index, _rc=replace_child):
-                    _c.conditions[_i] = _rc(new)
-                    return _c
-
-                return found, _replace
-
-        for index, branch_result in enumerate(condition.results or []):
-            found, replace_child = _find(branch_result, predicate, into_aggregates)
-            if found is not None:
-
-                def _replace(new, _c=condition, _i=index, _rc=replace_child):
-                    _c.results[_i] = _rc(new)
-                    return _c
-
-                return found, _replace
-
-        if condition.else_result is not None:
-            found, replace_child = _find(condition.else_result, predicate, into_aggregates)
-            if found is not None:
-
-                def _replace(new, _c=condition, _rc=replace_child):
-                    _c.else_result = _rc(new)
-                    return _c
-
-                return found, _replace
-
-    for index, param in enumerate(getattr(condition, "parameters", None) or []):
-        found, replace_param = _find(param, predicate, into_aggregates)
-        if found is not None:
-
-            def _replace(new, _c=condition, _i=index, _rc=replace_param):
-                _c.parameters[_i] = _rc(new)
+            def _replace(new, _c=condition, _child=child, _rc=replace_child):
+                replacement = _rc(new)
+                _c.map_children(lambda c: replacement if c is _child else c)
                 return _c
 
             return found, _replace
@@ -389,7 +341,7 @@ def _replace_every(root, target, make_replacement):
 
     def _is_target(node):
         return node is target or (
-            isinstance(node, Node)
+            is_expression(node)
             and node.node_type == NodeType.SUBQUERY
             and node.uuid == target.uuid
         )
@@ -399,38 +351,43 @@ def _replace_every(root, target, make_replacement):
     visited: set = set()
 
     def _walk(node):
-        if not isinstance(node, Node) or id(node) in visited:
+        if not is_expression(node) or id(node) in visited:
             return
         visited.add(id(node))
         if node.node_type == NodeType.SUBQUERY:
             return  # a different subquery's plan is not this rewrite's to touch
-        for attr in ("left", "right", "centre", "else_result"):
-            child = node.get(attr)
-            if _is_target(child):
-                setattr(node, attr, make_replacement())
-            else:
-                _walk(child)
-        for attr in ("parameters", "conditions", "results"):
-            children = node.get(attr)
-            if not children:
-                continue
-            # Rebuilt rather than assigned into: the binder stores `parameters` as a
-            # tuple (it is the output of a zip).
-            replaced = []
-            for child in children:
-                if _is_target(child):
-                    replaced.append(make_replacement())
-                else:
-                    _walk(child)
-                    replaced.append(child)
-            setattr(node, attr, type(children)(replaced) if isinstance(children, tuple) else replaced)
+        node.map_children(_visit)
+
+    def _visit(child):
+        if _is_target(child):
+            return make_replacement()
+        _walk(child)
+        return child
 
     _walk(root)
     return root
 
 
+def _key_relation(key):
+    """The relation a correlation key's column comes from; None for a key that is
+    an expression, which names no relation."""
+    if key.node_type == NodeType.IDENTIFIER:
+        return key.source
+    return None
+
+
+def _source_column_or_expression(node) -> str:
+    """How a refusal names a correlation key: its column, or the expression."""
+    if node.node_type == NodeType.IDENTIFIER:
+        return node.source_column
+    return format_expression(node)
+
+
 def _is_outer(node) -> bool:
-    return bool(node is not None and node.is_outer_reference)
+    """A column reference that resolved to an ENCLOSING query's scope."""
+    return bool(
+        node is not None and node.node_type == NodeType.IDENTIFIER and node.is_outer_reference
+    )
 
 
 def _unwrap(node):
@@ -535,7 +492,7 @@ def _split_correlations(condition):
         elif right_rest is None:
             remaining = left_rest
         else:
-            remaining = Node(node_type=NodeType.AND, do_not_create_column=True)
+            remaining = And(do_not_create_column=True)
             remaining.left = left_rest
             remaining.right = right_rest
         return left_corr + right_corr, remaining
@@ -636,7 +593,7 @@ def _factor_common_or_correlation(condition):
             if branch_condition is None:
                 branch_condition = node
             else:
-                joined = Node(node_type=NodeType.AND, do_not_create_column=True)
+                joined = And(do_not_create_column=True)
                 joined.left = node
                 joined.right = branch_condition
                 branch_condition = joined
@@ -650,7 +607,7 @@ def _factor_common_or_correlation(condition):
 
     remaining = new_branches[0]
     for branch in new_branches[1:]:
-        joined = Node(node_type=NodeType.OR, do_not_create_column=True)
+        joined = Or(do_not_create_column=True)
         joined.left = remaining
         joined.right = branch
         remaining = joined
@@ -664,12 +621,8 @@ def _find_outer_reference(node):
         return None
     if _is_outer(node):
         return node
-    for attr in ("left", "right", "centre"):
-        found = _find_outer_reference(getattr(node, attr, None))
-        if found is not None:
-            return found
-    for param in getattr(node, "parameters", None) or []:
-        found = _find_outer_reference(param)
+    for child in node.children():
+        found = _find_outer_reference(child)
         if found is not None:
             return found
     return None
@@ -701,7 +654,7 @@ def _split_outer_referencing(condition):
                 return right
             if right is None:
                 return left
-            joined = Node(node_type=NodeType.AND, do_not_create_column=True)
+            joined = And(do_not_create_column=True)
             joined.left = left
             joined.right = right
             return joined
@@ -909,8 +862,8 @@ def _graft_key_reducer(plan: LogicalPlan, filter_nid, inner_plan, local_pairs, t
     for inner_key, outer_key in local_pairs:
         copied_key = _local_copy(outer_key)
         copied_key.source = alias_map.get(outer_key.source, outer_key.source)
-        equals = Node(
-            node_type=NodeType.COMPARISON_OPERATOR, value="Eq", do_not_create_column=True
+        equals = Comparison(
+            value="Eq", do_not_create_column=True
         )
         equals.left = _local_copy(inner_key)
         equals.right = copied_key
@@ -918,7 +871,7 @@ def _graft_key_reducer(plan: LogicalPlan, filter_nid, inner_plan, local_pairs, t
         if on_condition is None:
             on_condition = equals
         else:
-            conjunction = Node(node_type=NodeType.AND, do_not_create_column=True)
+            conjunction = And(do_not_create_column=True)
             conjunction.left = on_condition
             conjunction.right = equals
             on_condition = conjunction
@@ -1039,14 +992,14 @@ def _carry_column_upward(node, column) -> None:
 def _attach_correlation(join, inner_key, outer_key, carried, outer_on_left: bool) -> None:
     """Bind a deferred correlation onto the ancestor join that owns its outer relation."""
     outer_reference = _local_copy(outer_key)
-    equals = Node(node_type=NodeType.COMPARISON_OPERATOR, value="Eq", do_not_create_column=True)
+    equals = Comparison(value="Eq", do_not_create_column=True)
     equals.left = outer_reference
     equals.right = carried
 
     if join.on is None:
         join.on = equals
     else:
-        conjunction = Node(node_type=NodeType.AND, do_not_create_column=True)
+        conjunction = And(do_not_create_column=True)
         conjunction.left = join.on
         conjunction.right = equals
         join.on = conjunction
@@ -1093,7 +1046,7 @@ def _defer_correlation_to_ancestor(plan: LogicalPlan, from_nid: str, inner_key, 
     the query — a correlation that is carried but never bound is silently wrong.
     """
     carried = _local_copy(inner_key)
-    target_relation = outer_key.source
+    target_relation = _key_relation(outer_key)
     if not target_relation:
         return False
 
@@ -1251,7 +1204,7 @@ def _defer_existence_to_ancestor(plan: LogicalPlan, from_nid: str, inner_key, ou
     silently wrong.
     """
     carried = _local_copy(inner_key)
-    target_relation = outer_key.source
+    target_relation = _key_relation(outer_key)
     if not target_relation:
         return False
 
@@ -1410,8 +1363,9 @@ def _local_copy(column) -> LogicalColumn:
     still pointing out of scope.
     """
     local = column.copy()
-    local.is_outer_reference = False
-    local.outer_relation = None
+    if local.node_type == NodeType.IDENTIFIER:
+        local.is_outer_reference = False
+        local.outer_relation = None
     return local
 
 
@@ -1685,7 +1639,7 @@ def _graft_existence_join(
     # deferral argument (`EXISTS(o: P and EXISTS(l: Q)) == EXISTS((o,l): P and Q)`)
     # is proved for an ancestor that is itself an existence FILTER — it says
     # nothing about one that emits a per-row value.
-    if any(outer_key.source not in outer_relations for _inner_key, outer_key in key_pairs):
+    if any(_key_relation(outer_key) not in outer_relations for _inner_key, outer_key in key_pairs):
         raise refusal
     for column in _all_columns_of(residual):
         if _is_outer(column) and column.source not in outer_relations:
@@ -1693,15 +1647,15 @@ def _graft_existence_join(
 
     on_condition = None
     for inner_key, outer_key in key_pairs:
-        equals = Node(
-            node_type=NodeType.COMPARISON_OPERATOR, value="Eq", do_not_create_column=True
+        equals = Comparison(
+            value="Eq", do_not_create_column=True
         )
         equals.left = _local_copy(outer_key)
         equals.right = _local_copy(inner_key)
         if on_condition is None:
             on_condition = equals
         else:
-            conjunction = Node(node_type=NodeType.AND, do_not_create_column=True)
+            conjunction = And(do_not_create_column=True)
             conjunction.left = on_condition
             conjunction.right = equals
             on_condition = conjunction
@@ -1780,14 +1734,13 @@ def _project_uncorrelated_exists(plan, project_nid, inner_plan, remove, replace_
 
     # `> 0` / `= 0` rather than IsNotNull: a cross join to a one-row count always
     # matches, so there is no NULL to test — the count itself is the answer.
-    comparison = Node(node_type=NodeType.COMPARISON_OPERATOR)
+    comparison = Comparison()
     comparison.value = "Eq" if negated else "Gt"
-    comparison.type = _lt.BOOLEAN
     comparison.schema_column = remove.schema_column
     comparison.query_column = remove.query_column
     comparison.alias = remove.alias
     comparison.left = _count_reference()
-    zero = Node(node_type=NodeType.LITERAL, type=_lt.INT64, value=0)
+    zero = Literal(type=_lt.INT64, value=0)
     zero.schema_column = SchemaColumn(
         name="0",
         column_type=_lt.INT64,
@@ -2376,7 +2329,7 @@ def _build_filter_join(
     local_pairs = []
     deferred_pairs = []
     for inner_key, outer_key in key_pairs:
-        if outer_key.source in outer_relations:
+        if _key_relation(outer_key) in outer_relations:
             local_pairs.append((inner_key, outer_key))
         else:
             deferred_pairs.append((inner_key, outer_key))
@@ -2392,7 +2345,9 @@ def _build_filter_join(
             inner_relations.update(origin)
 
     def _skip_level_refusal(reason: str):
-        names = ", ".join(f"`{outer_key.source_column}`" for _, outer_key in deferred_pairs)
+        names = ", ".join(
+            f"`{_source_column_or_expression(outer_key)}`" for _, outer_key in deferred_pairs
+        )
         return UnsupportedSyntaxError(
             f"A correlated EXISTS/IN subquery correlates on {names}, which belongs to a "
             f"scope further out than the subquery enclosing it; {reason}."
@@ -2423,15 +2378,15 @@ def _build_filter_join(
 
     on_condition = None
     for inner_key, outer_key in local_pairs:
-        equals = Node(
-            node_type=NodeType.COMPARISON_OPERATOR, value="Eq", do_not_create_column=True
+        equals = Comparison(
+            value="Eq", do_not_create_column=True
         )
         equals.left = _local_copy(outer_key)
         equals.right = _local_copy(inner_key)
         if on_condition is None:
             on_condition = equals
         else:
-            conjunction = Node(node_type=NodeType.AND, do_not_create_column=True)
+            conjunction = And(do_not_create_column=True)
             conjunction.left = on_condition
             conjunction.right = equals
             on_condition = conjunction
@@ -2560,10 +2515,9 @@ def _synthesize_count_aggregate(inner_plan: LogicalPlan, groups: list):
             schema_column=count_schema_column,
         )
 
-    count_node = Node(
-        node_type=NodeType.AGGREGATOR,
+    count_node = Aggregator(
         value="COUNT",
-        parameters=[Node(node_type=NodeType.WILDCARD)],
+        parameters=[Wildcard()],
         schema_column=count_schema_column,
         do_not_create_column=True,
     )
@@ -2672,7 +2626,7 @@ def _materialize_boolean_value(
         outer_relations |= found_relations
         outer_schemas.update(found_schemas)
 
-    if any(outer_key.source not in outer_relations for _inner_key, outer_key in key_pairs):
+    if any(_key_relation(outer_key) not in outer_relations for _inner_key, outer_key in key_pairs):
         raise _not_top_level_error(remove)
 
     # The correlation key(s) have to survive the subquery's OWN projection to reach
@@ -2723,15 +2677,15 @@ def _materialize_boolean_value(
     # --- ON condition: every key pair is local by construction (checked above) -
     on_condition = None
     for inner_key, outer_key in key_pairs:
-        equals = Node(
-            node_type=NodeType.COMPARISON_OPERATOR, value="Eq", do_not_create_column=True
+        equals = Comparison(
+            value="Eq", do_not_create_column=True
         )
         equals.left = _local_copy(outer_key)
         equals.right = _local_copy(inner_key)
         if on_condition is None:
             on_condition = equals
         else:
-            conjunction = Node(node_type=NodeType.AND, do_not_create_column=True)
+            conjunction = And(do_not_create_column=True)
             conjunction.left = on_condition
             conjunction.right = equals
             on_condition = conjunction
@@ -2781,8 +2735,7 @@ def _materialize_boolean_value(
     # schema_column rather than minting one: constant_folding.py's `LIKE '%'`
     # -> `IsNotNull` rewrite does the same for the same reason — this node
     # slots into a general boolean expression exactly where `remove` sat.
-    substituted = Node(node_type=NodeType.UNARY_OPERATOR)
-    substituted.type = _lt.BOOLEAN
+    substituted = UnaryOperator()
     substituted.value = "IsNull" if negated else "IsNotNull"
     substituted.schema_column = remove.schema_column
     substituted.centre = _count_reference()
@@ -2870,10 +2823,8 @@ def _all_columns_of(node):
     if node.node_type == NodeType.IDENTIFIER:
         return [node]
     found: list = []
-    for attr in ("left", "right", "centre"):
-        found.extend(_all_columns_of(getattr(node, attr, None)))
-    for param in getattr(node, "parameters", None) or []:
-        found.extend(_all_columns_of(param))
+    for child in node.children():
+        found.extend(_all_columns_of(child))
     return found
 
 
@@ -2884,10 +2835,8 @@ def _inner_columns_of(node):
     if node.node_type == NodeType.IDENTIFIER:
         return [] if _is_outer(node) else [node]
     found: list = []
-    for attr in ("left", "right", "centre"):
-        found.extend(_inner_columns_of(getattr(node, attr, None)))
-    for param in getattr(node, "parameters", None) or []:
-        found.extend(_inner_columns_of(param))
+    for child in node.children():
+        found.extend(_inner_columns_of(child))
     return found
 
 
@@ -2902,13 +2851,7 @@ def _clear_outer_markers(node):
         return None
     if node.node_type == NodeType.IDENTIFIER:
         return _local_copy(node) if _is_outer(node) else node
-    for attr in ("left", "right", "centre"):
-        child = getattr(node, attr, None)
-        if child is not None:
-            setattr(node, attr, _clear_outer_markers(child))
-    parameters = getattr(node, "parameters", None)
-    if parameters:
-        node.parameters = [_clear_outer_markers(p) for p in parameters]
+    node.map_children(_clear_outer_markers)
     return node
 
 
@@ -2980,7 +2923,7 @@ def _split_out(condition, target):
         # pre-optimization plan holds too. Editing it in place removed the conjunct
         # for every holder, leaving a Filter that had silently lost its EXISTS/IN
         # test with no join to replace it.
-        return True, _shallow(condition, left=left, right=right)
+        return True, condition.replace(left=left, right=right)
     return False, condition
 
 
@@ -3107,7 +3050,7 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
     local_pairs = []
     deferred_pairs = []
     for inner_key, outer_key in key_pairs:
-        if outer_key.source in outer_relations:
+        if _key_relation(outer_key) in outer_relations:
             local_pairs.append((inner_key, outer_key))
         else:
             deferred_pairs.append((inner_key, outer_key))
@@ -3132,15 +3075,15 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
 
     on_condition = None
     for inner_key, outer_key in local_pairs:
-        equals = Node(
-            node_type=NodeType.COMPARISON_OPERATOR, value="Eq", do_not_create_column=True
+        equals = Comparison(
+            value="Eq", do_not_create_column=True
         )
         equals.left = _local_copy(outer_key)
         equals.right = _local_copy(inner_key)
         if on_condition is None:
             on_condition = equals
         else:
-            conjunction = Node(node_type=NodeType.AND, do_not_create_column=True)
+            conjunction = And(do_not_create_column=True)
             conjunction.left = on_condition
             conjunction.right = equals
             on_condition = conjunction
@@ -3236,7 +3179,7 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
     for inner_key, outer_key in deferred_pairs:
         if not _defer_correlation_to_ancestor(plan, join_nid, inner_key, outer_key):
             raise UnsupportedSyntaxError(
-                f"A correlated subquery correlates on `{outer_key.source_column}`, which "
+                f"A correlated subquery correlates on `{_source_column_or_expression(outer_key)}`, which "
                 "belongs to a scope further out than the subquery enclosing it, and no "
                 "enclosing join provides that relation. This nesting is not supported."
             )

@@ -53,6 +53,7 @@ from opteryx.planner.binder.join_helpers import extract_join_fields
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.planner.plan_context import PlanContext
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
@@ -84,10 +85,10 @@ def _fmt_rows(value: float) -> str:
     return f"{value:.0f}"
 
 
-def _est_rows(node) -> int:
+def _est_rows(node, plan_context: PlanContext) -> int:
     """Estimated output rows from the refreshed statistics, or None if absent."""
-    stats = getattr(node, "statistics", None)
-    rows = getattr(stats, "row_count", None) if stats is not None else None
+    stats = plan_context.statistics(node)
+    rows = None if stats is None else stats.row_count
     if not rows or rows <= 0:
         return None
     return rows
@@ -181,17 +182,17 @@ class SemiJoinPushdownStrategy(OptimizationStrategy):
             if node.node_type == LogicalPlanStepType.Join and node.type in _PUSHABLE_TYPES
         ]
         for join_nid in targets:
-            self._sink(plan, join_nid)
+            self._sink(plan, join_nid, context.plan_context)
         return plan
 
-    def _sink(self, plan, join_nid: str) -> None:
+    def _sink(self, plan, join_nid: str, plan_context: PlanContext) -> None:
         join = plan[join_nid]
         start_est = None
         final_est = None
         levels = 0
         decline_detail = None
         while levels < _MAX_SINK_LEVELS:
-            step = self._sink_one_level(plan, join_nid, join)
+            step = self._sink_one_level(plan, join_nid, join, plan_context)
             if isinstance(step, str):
                 decline_detail = step
                 break
@@ -216,7 +217,7 @@ class SemiJoinPushdownStrategy(OptimizationStrategy):
             # inner join below it was never a candidate at all.
             self.record_decision("semi join pushdown", decline_detail)
 
-    def _sink_one_level(self, plan, join_nid: str, join):
+    def _sink_one_level(self, plan, join_nid: str, join, plan_context: PlanContext):
         """One sink step. Returns (probe_est, leg_est) on success, a decline
         detail string when the COST gate said no, and None when the shape was
         never a candidate. Every guard runs before the first mutation."""
@@ -303,10 +304,10 @@ class SemiJoinPushdownStrategy(OptimizationStrategy):
 
         # ── The costed pair ─────────────────────────────────────────────────
         # Probe rows where the semi stands now vs probe rows on the leg below.
-        # `node.statistics` estimates, refreshed by the driver before this
+        # `PlanContext.statistics` estimates, refreshed by the driver before this
         # strategy; either one missing is fail-safe: no move.
-        probe_est = _est_rows(below)
-        leg_est = _est_rows(plan[target_root])
+        probe_est = _est_rows(below, plan_context)
+        leg_est = _est_rows(plan[target_root], plan_context)
         if probe_est is None or leg_est is None:
             return None
         if leg_est > probe_est * _SINK_MARGIN:

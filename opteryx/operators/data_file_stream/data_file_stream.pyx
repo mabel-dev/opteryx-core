@@ -12,15 +12,20 @@ Row groups in, target-sized data files out. The one place every writing sink
 (INSERT / CTAS, MERGE, OPTIMIZE) turns a morsel stream into files, so the shape
 of what lands in storage is decided once:
 
-  - the batcher coalesces arriving morsels into 262,144-row, byte-bounded
-    batches (rows AND projected string-arena bytes - a row ceiling alone let a
-    wide-row batch overflow Morsel.combine's uint32 arena in production);
+  - the batcher coalesces arriving morsels into row-group-sized (65,536-row,
+    rugo's DEFAULT_ROWS_PER_ROW_GROUP - the engine's measured best morsel
+    size), byte-bounded batches (rows AND projected string-arena bytes - a row
+    ceiling alone let a wide-row batch overflow Morsel.combine's uint32 arena
+    in production);
   - each batch is ONE parquet row group of the OPEN file, written through the
-    connector's streaming writer;
+    connector's streaming writer, which lays row groups out in column-major
+    blocks of four (docs/PARQUET_GROUPED_COLUMN_MAJOR_DESIGN.md);
   - the file is closed and the next opened once its uncompressed size crosses
     `target_file_bytes` - TARGET_SIZE_BYTES, the size compaction's selection
     measures files against, in the same unit, so what a write produces is what
-    a later OPTIMIZE leaves alone.
+    a later OPTIMIZE leaves alone. A file may therefore end mid-block; a
+    partial last block is legal and costs only a smaller fetch unit for its
+    last rows.
 
 ⛔ Never a file per batch. That is what every sink did before this class: a
 stream of 262,144-row batches through `write_morsel` was a stream of
@@ -35,7 +40,7 @@ best-effort, because the failure that brought the caller here is the one worth
 raising - what survives is an orphan the storage sweep can find.
 """
 
-_MAX_ROWS_PER_ROW_GROUP = 262144
+from rugo.parquet import DEFAULT_ROWS_PER_ROW_GROUP
 
 
 class DataFileStream:
@@ -68,8 +73,11 @@ class DataFileStream:
         self.target_file_bytes = int(target_file_bytes)
         if self.target_file_bytes <= 0:
             raise ValueError("DataFileStream: target_file_bytes must be positive")
-        rows = _MAX_ROWS_PER_ROW_GROUP if coalesce_rows is None else int(coalesce_rows)
-        self.coalesce_rows = min(rows, _MAX_ROWS_PER_ROW_GROUP)
+        # Clamped to the writer's row-group size: a batch IS a row group, and a
+        # larger row group than the measured best is a worse morsel for every
+        # later read, so a SET past the ceiling gets the ceiling.
+        rows = DEFAULT_ROWS_PER_ROW_GROUP if coalesce_rows is None else int(coalesce_rows)
+        self.coalesce_rows = min(rows, DEFAULT_ROWS_PER_ROW_GROUP)
         self._batcher = MorselBatcher(self.coalesce_rows)
         self._writer = None
         self.entries = []

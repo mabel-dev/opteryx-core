@@ -10,10 +10,20 @@ namespace rugo::_jsonl {
 
 // Predicate for filtering records during parsing
 struct Predicate {
-    // Op codes: 0=EQ, 1=NE, 2=LT, 3=LE, 4=GT, 5=GE
+    // Op codes: 0=EQ, 1=NE, 2=LT, 3=LE, 4=GT, 5=GE,
+    //           6=IN, 7=NOT_IN, 8=IS_NULL, 9=IS_NOT_NULL
     std::string column;
-    uint8_t op;  // Op enum value (0-5)
-    std::string value;  // Raw JSON value as string
+    uint8_t op;  // Op enum value (0-9)
+    std::string value;  // Raw JSON value as string (unused for 6-9)
+    // rugo::LiteralKind (predicate_literal.hpp): the literal's Python type, decided at
+    // the Cython edge. `value` is compared as this kind and only this kind — its text
+    // is never re-sniffed. Unused for 6-9 (IN / NOT IN carry it on each member).
+    uint8_t kind = 0;
+
+    // IN / NOT IN only: one scalar predicate per list member, on the same column —
+    // op EQ for IN (row passes if ANY member passes), op NE for NOT IN (row passes if
+    // EVERY member passes, i.e. SQL's `x <> a AND x <> b ...`). Empty for ops 0-5, 8, 9.
+    std::vector<Predicate> members;
 
     // Cached numeric/boolean parse of `value`, populated once by
     // value_parser::prepare_predicate before the per-record evaluation loop starts —

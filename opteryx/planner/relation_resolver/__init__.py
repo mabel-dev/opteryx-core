@@ -54,11 +54,14 @@ from typing import Optional
 from typing import Tuple
 
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.models import LogicalColumn
+from opteryx.expression import NodeType
 from opteryx.models import Node
+from opteryx.models import is_expression
 from opteryx.planner.logical_planner import LogicalPlan
+from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.logical_planner import RecursiveCteDefinition
+from opteryx.compiled.structures.expressions import Wildcard
 
 __all__ = [
     "do_resolve_relations",
@@ -133,7 +136,14 @@ def copy_sub_plan(plan: LogicalPlan) -> LogicalPlan:
             return [_rekey_embedded(v) for v in value]
         if isinstance(value, dict):
             return {k: _rekey_embedded(v) for k, v in value.items()}
-        if isinstance(value, Node):
+        if is_expression(value):
+            # The only plan an expression holds is a SUBQUERY's `value`.
+            if value.node_type == NodeType.SUBQUERY:
+                value.value = _rekey_embedded(value.value)
+            else:
+                value.map_children(_rekey_embedded)
+            return value
+        if type(value) is LogicalPlanNode:
             for prop, val in list(value.properties.items()):
                 replacement = _rekey_embedded(val)
                 if replacement is not val:
@@ -229,7 +239,7 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX):
         plan[nid] = node
 
     def _prop(property):
-        if isinstance(property, LogicalColumn) and property.source is not None:
+        if type(property) is LogicalColumn and property.source is not None:
             mapped = relations.get(property.source.lower())
             if mapped is not None:
                 property.source = mapped
@@ -243,7 +253,7 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX):
         # SELECT name FROM c` died with a raw `ValueError: not enough values to unpack`
         # from the binder's `zip(*...)` over an empty expansion.
         if (
-            isinstance(property, Node)
+            is_expression(property)
             and property.node_type == NodeType.WILDCARD
             and property.value
         ):
@@ -259,7 +269,10 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX):
             return tuple(_prop(p) for p in property)
         if isinstance(property, dict):
             return {k: _prop(v) for k, v in property.items()}
-        if isinstance(property, Node):
+        if is_expression(property):
+            for child in property.children():
+                _prop(child)
+        elif type(property) is LogicalPlanNode:
             for p in property.properties:
                 property.properties[p] = _prop(property.properties[p])
         return property
@@ -472,8 +485,8 @@ def _boundary_columns(sub_plan: LogicalPlan, head_nid: str, relation: str) -> li
     from opteryx.exceptions import InvalidInternalStateError
     from opteryx.expression import NodeType
 
-    columns = _output_columns(sub_plan, head_nid) or [Node(NodeType.WILDCARD)]
-    bad = [column for column in columns if not isinstance(column, (Node, LogicalColumn))]
+    columns = _output_columns(sub_plan, head_nid) or [Wildcard()]
+    bad = [column for column in columns if not is_expression(column)]
     if bad:
         raise InvalidInternalStateError(
             f"Relation '{relation}' produced a projection the binder cannot read: "
@@ -521,10 +534,12 @@ def _expression_subqueries(node) -> list:
     for key, value in node.properties.items():
         if key in ("node_type", "uuid"):
             continue
-        if isinstance(value, (Node, LogicalColumn)):
+        # A plan node held as a property (INSERT's `values_feeder`) is a vertex of
+        # the graph, resolved by the graph walk in its own right — not an expression.
+        if is_expression(value):
             roots.append(value)
         elif isinstance(value, (list, tuple, set)):
-            roots.extend(v for v in value if isinstance(v, (Node, LogicalColumn)))
+            roots.extend(v for v in value if is_expression(v))
 
     return get_all_nodes_of_type(roots, (NodeType.SUBQUERY,))
 
@@ -788,7 +803,14 @@ def _embedded_plans(node) -> list:
         elif isinstance(value, dict):
             for v in value.values():
                 _walk(v)
-        elif isinstance(value, (Node, LogicalColumn)):
+        elif is_expression(value):
+            # The only plan an expression holds is a SUBQUERY's `value`.
+            if value.node_type == NodeType.SUBQUERY:
+                _walk(value.value)
+            else:
+                for child in value.children():
+                    _walk(child)
+        elif type(value) is LogicalPlanNode:
             props = value.properties
             for key, val in (props or {}).items():
                 if key in ("node_type", "uuid"):
@@ -1000,7 +1022,6 @@ def _finalize_cte_sharing(
     # Head each shared body (and each recursive leg) with a Subquery boundary
     # (alias = the CTE's declared name) so binding it standalone produces the
     # body's output schema exactly as visit_subquery does for a derived table.
-    from opteryx.planner.logical_planner import LogicalPlanNode
     from opteryx.utils import random_string
 
     def _add_boundary(body: LogicalPlan, alias: str):

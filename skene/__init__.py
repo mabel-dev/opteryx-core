@@ -7,9 +7,11 @@ skene is for query results, sort spill, and optimised datasets.
 
 Reads are per row group and the row group index is always explicit —
 `read_morsel(buf, row_group)`. Pruning goes through `read_metadata()`, which
-parses only the small file-level index (schema, row group directory, and every
-row group's per-column statistics) and opens no row group footer;
-`read_row_group_metadata()` is the per-row-group detail and costs one.
+parses only the file footer (schema, row group table, block extents, one sketch
+per column, and every row group's per-column statistics) and opens no column
+directory block; `read_row_group_metadata()` is the per-row-group detail and
+reads the directory blocks. Files are v3 (column-major, FORMAT.md); v2 files
+are still read, never written — `migrate()` rewrites one as v3.
 
 Format spec: skene/FORMAT.md. The native core is C++ (skene/src); this
 package is the Python boundary only.

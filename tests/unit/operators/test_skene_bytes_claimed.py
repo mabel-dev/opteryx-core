@@ -1,11 +1,11 @@
 """The skene scan's physical read-volume counter, `io_bytes_claimed`.
 
-Skene mmaps its files whole, so there is NO transfer point to measure and nothing
-answering to parquet's `io_bytes_fetched` (which the rugo IO pipeline counts as
-bytes actually pulled off storage). What this counter reports instead is the
-on-disk DATA+INDEX extent of the row groups the claim builder CLAIMED — what a
-ranged reader would have to fetch — summed from the file footer's row group
-directory, which `SkeneClaimSet::build` has already parsed.
+A v3 file is read by planned positional reads (the actual reads are counted
+separately, as `io_skene_requests` / `io_skene_bytes_fetched`). This counter is
+the PLANNED chunk bytes of the row groups the claim builder CLAIMED, for the
+scan's read set — the ranges `skene::plan_fetch` returns once the read set's
+directory blocks are attached. (For v2 files, which are mapped whole, it is -1:
+not measured.)
 
 Two properties define it, and both are asserted here because each is a way the
 number could silently become useless:
@@ -13,12 +13,11 @@ number could silently become useless:
   * it MOVES with row-group pruning. A counter that reported the whole dataset
     regardless of what was skipped would make a pruning regression invisible,
     which is the entire reason the benchmark series records it.
-  * it is BLIND to projection. The per-column extents live in each row group's
-    OWN footer, and parsing that is precisely the cost the claim builder exists
-    to avoid, so a narrower read set reports the same bytes. That is a known and
-    accepted limit of the cheap measure, not a bug — it is pinned here so that a
-    later change making the number projection-sensitive has to do so knowingly
-    rather than by accident.
+  * it FOLLOWS projection. v3 keeps per-column chunk extents in each column's
+    directory block, which the claim builder attaches for the read set anyway,
+    so the number is the bytes of the columns actually read. (Under v2 it was
+    whole-row-group and blind to projection; that limit was pinned by this test
+    and changed knowingly with the v3 bump, 2026-09-24.)
 
 The fixture is the interleaved two-file packing `test_skene_reader_side_filter`
 uses, for the same reason: consecutive row groups alternate between files, so
@@ -139,15 +138,12 @@ def test_bytes_fall_when_row_groups_are_pruned(dataset):
     )
 
 
-def test_counter_is_blind_to_projection(dataset):
-    """A known, accepted limit — pinned so it cannot change silently.
+def test_counter_follows_projection(dataset):
+    """Widening the projection over the SAME row groups claims MORE bytes.
 
-    The claim builder reads only the FILE footer; per-column extents live in each
-    row group's own footer, which it deliberately does not parse. So widening the
-    projection over the SAME row groups reports the same bytes. If this assertion
-    ever fails, the measure has become projection-sensitive — which may well be
-    an improvement, but it is a different quantity and the benchmark series that
-    records it needs to be told.
+    v3 plans per column (FORMAT.md §5.5 directory blocks), so the claimed bytes
+    are the read set's chunks, not the whole row group. If this ever reports
+    equal bytes, the counter has fallen back to a whole-row-group measure.
     """
     narrow, narrow_facts = _claimed(dataset, "k FROM {DATASET} WHERE bucket = 3")
     wide, wide_facts = _claimed(
@@ -157,7 +153,7 @@ def test_counter_is_blind_to_projection(dataset):
         "the two arms must claim the SAME row groups for this to be a statement "
         "about projection"
     )
-    assert narrow == wide, (
-        "io_bytes_claimed changed with the projection (%d vs %d) — it is "
-        "documented as whole-row-group and blind to the read set" % (narrow, wide)
+    assert 0 < narrow < wide, (
+        "io_bytes_claimed did not grow with the projection (%d vs %d) — it is "
+        "documented as the read set's planned chunk bytes" % (narrow, wide)
     )

@@ -18,6 +18,7 @@ import uuid
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
+from opteryx.planner.plan_context import PlanContext
 from draken.draken_native import DrakenType
 from opteryx.models import ExecutionContext, QueryTelemetry
 from opteryx.planner.ast_rewriter import do_ast_rewriter
@@ -44,7 +45,7 @@ def _scan_physical(sql: str, column: str):
         plan, execution_context=ctx, query_id=str(uuid.uuid4()),
         telemetry=telemetry,
     )
-    opt = do_optimizer(bound, telemetry)
+    opt = do_optimizer(bound, telemetry, PlanContext())
     out = []
     for _, node in opt.nodes(True):
         if node.node_type == LogicalPlanStepType.Scan:

@@ -58,10 +58,10 @@ replace an expression with a transparent `NESTED` wrapper around its operand.
 """
 
 from opteryx.expression import NodeType
-from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
+from opteryx.compiled.structures.expressions import Nested
 
 
 def _eliminate_redundant_casts(node, telemetry, value_context=False):
@@ -76,29 +76,7 @@ def _eliminate_redundant_casts(node, telemetry, value_context=False):
         return node
 
     # Recurse into children first so nested casts collapse bottom-up.
-    if node.left is not None:
-        node.left = _eliminate_redundant_casts(node.left, telemetry, value_context)
-    if node.right is not None:
-        node.right = _eliminate_redundant_casts(node.right, telemetry, value_context)
-    if node.centre is not None:
-        node.centre = _eliminate_redundant_casts(node.centre, telemetry, value_context)
-    if node.parameters:
-        node.parameters = [
-            _eliminate_redundant_casts(p, telemetry, value_context) for p in node.parameters
-        ]
-    if node.node_type == NodeType.CASE:
-        if node.conditions:
-            node.conditions = [
-                _eliminate_redundant_casts(c, telemetry, value_context) for c in node.conditions
-            ]
-        if node.results:
-            node.results = [
-                _eliminate_redundant_casts(r, telemetry, value_context) for r in node.results
-            ]
-        if node.else_result is not None:
-            node.else_result = _eliminate_redundant_casts(
-                node.else_result, telemetry, value_context
-            )
+    node.map_children(lambda child: _eliminate_redundant_casts(child, telemetry, value_context))
 
     if node.node_type != NodeType.CAST:
         return node
@@ -132,7 +110,7 @@ def _eliminate_redundant_casts(node, telemetry, value_context=False):
     # identity, so a transparent NESTED wrapper carries the cast's schema_column (keeping its
     # identity and name) while lowering to just its centre operand — the evaluator aliases
     # the operand's buffer onto the cast column's identity, with no cast kernel.
-    nested = Node(node_type=NodeType.NESTED)
+    nested = Nested()
     nested.centre = operand
     nested.schema_column = node.schema_column
     nested.query_column = node.query_column

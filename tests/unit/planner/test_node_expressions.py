@@ -18,10 +18,14 @@ import os
 import sys
 import uuid
 from types import SimpleNamespace
+from opteryx.compiled.structures.expressions import Aggregator
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.expression import Node
+from opteryx.planner.plan_context import PlanContext
 from opteryx.expression import NodeType
 from opteryx.models import ExecutionContext, QueryTelemetry
 from opteryx.planner.ast_rewriter import do_ast_rewriter
@@ -36,10 +40,11 @@ from opteryx.planner.plan_rewriter import do_plan_rewrite
 from opteryx.planner.relation_resolver import do_resolve_relations
 from opteryx.planner.sql_rewriter import do_sql_rewrite
 from opteryx.third_party import sqloxide
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 
 def _ident(identity: str) -> Node:
-    return Node(node_type=NodeType.IDENTIFIER, schema_column=SimpleNamespace(identity=identity))
+    return LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=None, schema_column=SimpleNamespace(identity=identity))
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +53,7 @@ def _ident(identity: str) -> Node:
 
 
 def test_single_expression_field():
-    cmp = Node(node_type=NodeType.COMPARISON_OPERATOR, left=_ident("a"), right=_ident("b"), value="Gt")
+    cmp = Comparison(left=_ident("a"), right=_ident("b"), value="Gt")
     node = LogicalPlanNode(node_type=LogicalPlanStepType.Filter, condition=cmp)
     assert expression_roots(node) == [cmp]
     assert referenced_identities(node) == {"a", "b"}
@@ -65,8 +70,8 @@ def test_order_by_tuple_shape():
 
 
 def test_multiple_list_and_single_fields():
-    having = Node(node_type=NodeType.COMPARISON_OPERATOR, left=_ident("h"), right=_ident("k"), value="Gt")
-    agg = Node(node_type=NodeType.AGGREGATOR, value="SUM", parameters=[_ident("s")])
+    having = Comparison(left=_ident("h"), right=_ident("k"), value="Gt")
+    agg = Aggregator(value="SUM", parameters=[_ident("s")])
     node = LogicalPlanNode(
         node_type=LogicalPlanStepType.AggregateAndGroup,
         groups=[_ident("g")],
@@ -79,8 +84,8 @@ def test_multiple_list_and_single_fields():
 def test_nested_container_descent():
     # FunctionDataset VALUES rows are a list-of-lists of expressions.
     lits = [
-        [Node(node_type=NodeType.LITERAL, value=1), Node(node_type=NodeType.LITERAL, value=2)],
-        [Node(node_type=NodeType.LITERAL, value=3)],
+        [Literal(value=1), Literal(value=2)],
+        [Literal(value=3)],
     ]
     node = LogicalPlanNode(node_type=LogicalPlanStepType.FunctionDataset, values=lits)
     assert len(expression_roots(node)) == 3
@@ -122,7 +127,7 @@ def _optimized_plan(sql: str):
         query_id=query_id,
         telemetry=telemetry,
     )
-    return do_optimizer(bound, telemetry)
+    return do_optimizer(bound, telemetry, PlanContext())
 
 
 def _nodes(plan, step_type):

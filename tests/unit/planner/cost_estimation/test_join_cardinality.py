@@ -1,4 +1,4 @@
-"""Unit tests for opteryx.planner.cost_estimation.join_cardinality."""
+"""Unit tests for the native join cardinality estimator (opteryx.compiled.planner.join_estimator)."""
 
 import os
 import sys
@@ -368,3 +368,45 @@ if __name__ == "__main__":
     import sys as _sys
 
     _sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# Integer range (architect ruling 2026-09-24)
+# ---------------------------------------------------------------------------
+
+_INT64_MAX = 2**63 - 1
+
+
+def test_estimate_past_int64_is_capped_not_raised():
+    """The native estimator is int64. An estimate at or above 2^63 — which the
+    Python implementation carried as an unbounded int — is CAPPED at INT64_MAX."""
+    assert estimate_join_cardinality(2**62, 2**62, "cross", []) == _INT64_MAX
+
+
+def test_occupancy_bound_composite_domain_is_exact_past_int64():
+    """Three JOB-sized key classes multiply to ~4.7e22, far past int64. The
+    widened bound isqrt(composite * bound) must still be EXACT (128-bit), the
+    value Python's unbounded ints produced."""
+    import math
+
+    from opteryx.planner.cost_estimation import apply_occupancy_bound
+
+    ndvs = (36_244_344, 36_244_343, 35_000_017)
+    keys = [
+        (
+            KeyStats(ndv=n, null_fraction=None, ndv_provenance=NdvProvenance.DOMAIN_STANDIN),
+            KeyStats(ndv=n, null_fraction=None, ndv_provenance=NdvProvenance.DOMAIN_STANDIN),
+        )
+        for n in ndvs
+    ]
+    left_domain, right_domain = 4_523_930, 36_244_344
+    bound = max(1, min(left_domain, right_domain))
+    composite = ndvs[0] * ndvs[1] * ndvs[2]
+    expected = max(bound, math.isqrt(composite * bound))
+
+    (collapsed,) = apply_occupancy_bound(keys, left_domain, right_domain)
+
+    assert composite > 2**64
+    assert collapsed[0].ndv == expected
+    assert collapsed[1].ndv == expected
+    assert collapsed[0].ndv_provenance is NdvProvenance.DOMAIN_STANDIN

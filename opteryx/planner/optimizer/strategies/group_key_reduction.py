@@ -20,6 +20,7 @@ as a bare IDENTIFIER.
 """
 
 from opteryx.expression import NodeType, get_all_nodes_of_type
+from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.planner.expression_traits import has_volatile_function
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
@@ -52,11 +53,13 @@ def _is_reducible(expr, bare_key_names: set) -> bool:
 
 def _make_passthrough(original: Node) -> Node:
     """Create an IDENTIFIER node that passes through an already-computed column."""
-    ref = Node(node_type=NodeType.IDENTIFIER)
-    ref.schema_column = original.schema_column
-    ref.value = original.schema_column.name if original.schema_column else original.value
-    ref.qualified_name = original.qualified_name
-    return ref
+    return LogicalColumn(
+        node_type=NodeType.IDENTIFIER,
+        source_column=(
+            original.schema_column.name if original.schema_column else original.value
+        ),
+        schema_column=original.schema_column,
+    )
 
 
 class GroupKeyReductionStrategy(OptimizationStrategy):

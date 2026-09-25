@@ -121,6 +121,10 @@ struct LatmatScanGlobal : GlobalSourceState {
     std::unordered_map<std::string, size_t> work_index;
     int   next_to_submit = 0;
     int   results_received = 0;
+    // Pass-1 fetch-block id per work item (parallel to `work_items`) and pass-2
+    // block id per `work` entry — see NativeParquetScanGlobal::block_id.
+    std::vector<int32_t> p1_block_id;
+    std::vector<int32_t> p2_block_id;
 };
 
 struct LatmatScanSource : Source {
@@ -159,50 +163,79 @@ struct LatmatScanSource : Source {
     LatmatScanSource() = default;
 
     std::unique_ptr<GlobalSourceState> make_global() override {
-        return std::make_unique<LatmatScanGlobal>();
+        auto g = std::make_unique<LatmatScanGlobal>();
+        g->p1_block_id = fetch_block_ids(*work_items, *p1_column_names);
+        return g;
+    }
+
+    // Fetch-block ids for (path, rg_idx) items, per file, from the footer's chunk
+    // offsets over the given projection (rugo::ParquetIOPipeline::infer_fetch_blocks).
+    std::vector<int32_t> fetch_block_ids(const std::vector<std::pair<std::string, int>>& items,
+                                         const std::vector<std::string>& names) const {
+        std::vector<int32_t> out(items.size(), 0);
+        std::unordered_map<std::string, std::vector<int32_t>> per_file;
+        for (size_t i = 0; i < items.size(); ++i) {
+            auto pit = per_file.find(items[i].first);
+            if (pit == per_file.end()) {
+                auto fit = footer_map->find(items[i].first);
+                std::vector<int32_t> ids;
+                if (fit != footer_map->end())
+                    ids = rugo::ParquetIOPipeline::infer_fetch_blocks(fit->second, names);
+                pit = per_file.emplace(items[i].first, std::move(ids)).first;
+            }
+            const size_t rg = static_cast<size_t>(items[i].second);
+            out[i] = rg < pit->second.size() ? pit->second[rg]
+                                             : static_cast<int32_t>(-1 - static_cast<int32_t>(i));
+        }
+        return out;
+    }
+    static bool same_block(const std::vector<std::pair<std::string, int>>& items,
+                           const std::vector<int32_t>& ids, size_t a, size_t b) {
+        return items[a].first == items[b].first && ids[a] == ids[b];
     }
     std::unique_ptr<LocalSourceState> make_local(GlobalSourceState&) override {
         return std::make_unique<LocalSourceState>();
     }
 
-    // Build the (names, stats) parallel arrays for one row group and hand them to a
-    // pipeline. Same lockstep contract as NativeParquetScanSource::submit_one — a
-    // column missing from this row group's stats means schema evolution, which
+    // Build the stats arrays for the row groups of ONE fetch block of one file and
+    // hand them to a pipeline as one submission (fetched together, decoded per
+    // row group). Same lockstep contract as NativeParquetScanSource::submit_block
+    // — a column missing from a row group's stats means schema evolution, which
     // neither native scan path supports, so it fails loud instead of NULL-filling.
+    // `row_masks` is empty (pass 1) or parallel to `rg_idxs` (pass 2).
     bool submit(rugo::ParquetIOPipeline* pipeline,
                 const std::vector<std::string>& want_names,
-                const std::string& path, int rg_idx,
-                const std::vector<uint8_t>* row_mask, ErrCtx& err) {
+                const std::string& path, const std::vector<int>& rg_idxs,
+                const std::vector<std::vector<uint8_t>>& row_masks, ErrCtx& err) {
         auto fit = footer_map->find(path);
         if (fit == footer_map->end()) {
             err.code = 1;
             err.msg = "LatmatScanSource: work item path missing from footer_map";
             return false;
         }
-        const RowGroupStats& rg = fit->second.row_groups[static_cast<size_t>(rg_idx)];
-        std::vector<std::string> col_names_vec;
-        std::vector<ColumnStats> col_stats_vec;
-        col_names_vec.reserve(want_names.size());
-        col_stats_vec.reserve(want_names.size());
-        for (const std::string& want : want_names) {
-            for (const ColumnStats& cs : rg.columns) {
-                if (cs.name == want) {
-                    col_names_vec.push_back(want);
-                    col_stats_vec.push_back(cs);
-                    break;
+        std::vector<std::vector<ColumnStats>> stats;
+        stats.reserve(rg_idxs.size());
+        for (int rg_idx : rg_idxs) {
+            const RowGroupStats& rg = fit->second.row_groups[static_cast<size_t>(rg_idx)];
+            std::vector<ColumnStats> col_stats_vec;
+            col_stats_vec.reserve(want_names.size());
+            for (const std::string& want : want_names) {
+                for (const ColumnStats& cs : rg.columns) {
+                    if (cs.name == want) {
+                        col_stats_vec.push_back(cs);
+                        break;
+                    }
                 }
             }
+            if (col_stats_vec.size() != want_names.size()) {
+                err.code = 1;
+                err.msg = "LatmatScanSource: row group is missing a projected column "
+                          "(schema evolution is not supported on this path)";
+                return false;
+            }
+            stats.push_back(std::move(col_stats_vec));
         }
-        if (col_names_vec.size() != want_names.size()) {
-            err.code = 1;
-            err.msg = "LatmatScanSource: row group is missing a projected column "
-                      "(schema evolution is not supported on this path)";
-            return false;
-        }
-        if (row_mask == nullptr)
-            pipeline->submit_row_group(path, rg_idx, col_names_vec, col_stats_vec);
-        else
-            pipeline->submit_row_group(path, rg_idx, col_names_vec, col_stats_vec, *row_mask);
+        pipeline->submit_block(path, rg_idxs, want_names, stats, row_masks);
         return true;
     }
 
@@ -243,14 +276,25 @@ struct LatmatScanSource : Source {
     // first, holding g.mtx.
     void run_pass1(std::vector<LatmatRowGroup>& out, ErrCtx& err) {
         const int n_items = static_cast<int>(work_items->size());
+        const std::vector<int32_t> block_ids = fetch_block_ids(*work_items, *p1_column_names);
         int submitted = 0, received = 0;
         while (received < n_items) {
+            // A whole fetch block per submission (see NativeParquetScanSource::
+            // get_morsel): the window may overshoot by at most block - 1 row groups.
             while (submitted < n_items && (submitted - received) < in_flight_limit) {
+                int e = submitted + 1;
+                while (e < n_items &&
+                       same_block(*work_items, block_ids, static_cast<size_t>(e - 1),
+                                  static_cast<size_t>(e)))
+                    ++e;
+                std::vector<int> rg_idxs;
+                for (int u = submitted; u < e; ++u)
+                    rg_idxs.push_back((*work_items)[static_cast<size_t>(u)].second);
                 if (!submit(p1_pipeline, *p1_column_names,
-                            (*work_items)[submitted].first,
-                            (*work_items)[submitted].second, nullptr, err))
+                            (*work_items)[static_cast<size_t>(submitted)].first,
+                            rg_idxs, {}, err))
                     return;
-                submitted += 1;
+                submitted = e;
             }
             rugo::MorselRef result;
             const auto _tr_idx = BS::this_thread::get_index();
@@ -356,6 +400,14 @@ struct LatmatScanSource : Source {
                         std::vector<LatmatPass2Item>& work,
                         std::unordered_map<std::string, size_t>& work_index,
                         ErrCtx& err) {
+        // Pass 1 delivered these in COMPLETION order; pass 2 submits `work` in
+        // this order, so put the row groups back in file order first — the kept
+        // members of one fetch block are then adjacent and go out as one fetch.
+        // The reduction below is order-independent (keep[] follows whatever
+        // order `ms` has) and pass 2 matches results by key, not position.
+        std::sort(rgs.begin(), rgs.end(), [](const LatmatRowGroup& a, const LatmatRowGroup& b) {
+            return a.path < b.path || (a.path == b.path && a.rg_idx < b.rg_idx);
+        });
         std::vector<MorselPtr> ms;
         ms.reserve(rgs.size());
         size_t total = 0;
@@ -441,22 +493,52 @@ struct LatmatScanSource : Source {
                     return SourceResult::FINISHED;
                 }
                 const int n_items = static_cast<int>(g.work.size());
+                if (g.p2_block_id.size() != g.work.size()) {
+                    // Once, by whichever worker first reaches pass 2 (under g.mtx).
+                    std::vector<std::pair<std::string, int>> items;
+                    items.reserve(g.work.size());
+                    for (const LatmatPass2Item& it : g.work) items.emplace_back(it.path, it.rg_idx);
+                    g.p2_block_id = fetch_block_ids(items, *p2_column_names);
+                }
                 submit_start = g.next_to_submit;
                 submit_end = submit_start;
+                // Whole fetch blocks per submission — see NativeParquetScanSource.
                 while (submit_end < n_items &&
                        (submit_end - g.results_received) < in_flight_limit) {
-                    submit_end += 1;
+                    int e = submit_end + 1;
+                    while (e < n_items && g.work[static_cast<size_t>(e - 1)].path ==
+                                              g.work[static_cast<size_t>(e)].path &&
+                           g.p2_block_id[static_cast<size_t>(e - 1)] ==
+                               g.p2_block_id[static_cast<size_t>(e)])
+                        ++e;
+                    submit_end = e;
                 }
                 g.next_to_submit = submit_end;
                 if (g.results_received >= g.next_to_submit) return SourceResult::FINISHED;
                 g.results_received += 1;
             }
 
-            for (int i = submit_start; i < submit_end; ++i) {
-                const LatmatPass2Item& it = g.work[static_cast<size_t>(i)];
-                if (!submit(p2_pipeline, *p2_column_names, it.path, it.rg_idx,
-                            &it.row_mask, err))
-                    return SourceResult::FINISHED;
+            {
+                int b = submit_start;
+                while (b < submit_end) {
+                    int e = b + 1;
+                    while (e < submit_end && g.work[static_cast<size_t>(e - 1)].path ==
+                                                 g.work[static_cast<size_t>(e)].path &&
+                           g.p2_block_id[static_cast<size_t>(e - 1)] ==
+                               g.p2_block_id[static_cast<size_t>(e)])
+                        ++e;
+                    std::vector<int> rg_idxs;
+                    std::vector<std::vector<uint8_t>> masks;
+                    for (int i = b; i < e; ++i) {
+                        const LatmatPass2Item& it = g.work[static_cast<size_t>(i)];
+                        rg_idxs.push_back(it.rg_idx);
+                        masks.push_back(it.row_mask);
+                    }
+                    if (!submit(p2_pipeline, *p2_column_names,
+                                g.work[static_cast<size_t>(b)].path, rg_idxs, masks, err))
+                        return SourceResult::FINISHED;
+                    b = e;
+                }
             }
 
             rugo::MorselRef result;

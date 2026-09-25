@@ -33,6 +33,9 @@ from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext, predicate_key
+from opteryx.compiled.structures.expressions import And
+from opteryx.compiled.structures.expressions import Cnf
+from opteryx.compiled.structures.expressions import Or
 
 
 def _split_or(node: Optional[Node]) -> List[Node]:
@@ -62,7 +65,7 @@ def _build_and(predicates: List[Node]) -> Optional[Node]:
         return None
     result = predicates[0]
     for pred in predicates[1:]:
-        n = Node(node_type=NodeType.AND)
+        n = And()
         n.left = result
         n.right = pred
         result = n
@@ -74,7 +77,7 @@ def _build_or(predicates: List[Node]) -> Optional[Node]:
         return None
     result = predicates[0]
     for pred in predicates[1:]:
-        n = Node(node_type=NodeType.OR)
+        n = Or()
         n.left = result
         n.right = pred
         result = n
@@ -186,7 +189,7 @@ def _simplify_or_conjunct(condition: Node) -> Optional[Node]:
         # when there are 3+ branches for efficient n-ary evaluation.
         branches = _split_or(condition)
         if len(branches) >= 3:
-            cnf = Node(node_type=NodeType.CNF)
+            cnf = Cnf()
             cnf.parameters = branches
             simplified = cnf
     return simplified

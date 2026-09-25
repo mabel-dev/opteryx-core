@@ -2266,33 +2266,59 @@ struct RGMeta {
   }
 };
 
-// Serialise every column chunk of ONE row group into `out`, recording ABSOLUTE
-// file offsets (`base_offset` + position within `out`) into `meta`. `rg_cols`
-// are the already-sliced per-row-group column views; `rg_rows` their row count.
-// This is the shared body of both the one-shot WriteParquet loop and the
-// streaming writer, so the two encode paths cannot drift.
-inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offset,
-                                   const std::vector<ColumnInput> &rg_cols,
-                                   size_t rg_rows, int codec, int profile,
-                                   size_t max_page_bytes, bool want_index,
-                                   RGMeta &meta) {
+// ---- shared row-group encoding and placement ----
+//
+// Encoding and placement are two steps. encode_row_group serialises every
+// column chunk of ONE row group into position-independent buffers; the
+// place_* helpers append those buffers to the file and pin the absolute
+// offsets the footer records. Splitting the two is what lets a file be laid
+// out COLUMN-MAJOR IN BLOCKS (write_block) with every bloom filter in the tail
+// (write_bloom_tail) — the grouped layout of
+// docs/PARQUET_GROUPED_COLUMN_MAJOR_DESIGN.md — while the column patcher keeps
+// its row-major, bloom-before-chunk arrangement through write_row_group_chunks.
+// One encoder feeds both layouts, so the two cannot drift.
+struct EncodedChunk {
+  std::vector<uint8_t> bytes;    // [dictionary page][data pages...], as stored
+  int64_t dict_len = -1;         // bytes of the dictionary page at the front; -1 = none
+  std::vector<PageMeta> pages;   // data pages; file_offset RELATIVE to bytes[0]
+};
+
+struct EncodedRowGroup {
+  size_t rows = 0;
+  std::vector<EncodedChunk> chunks;            // per column, schema order
+  std::vector<std::vector<uint8_t>> blooms;    // per column; empty = no filter
+  RGMeta meta;                                 // offsets are filled by placement
+};
+
+// Encode every column chunk of ONE row group. `rg_cols` are the already-sliced
+// per-row-group column views; `rg_rows` their row count. Nothing here knows
+// where the bytes will land: data_offsets / dict_offsets / bloom_offset and
+// the page offsets are assigned by place_chunk / place_bloom.
+inline EncodedRowGroup encode_row_group(const std::vector<ColumnInput> &rg_cols,
+                                        size_t rg_rows, int codec, int profile,
+                                        size_t max_page_bytes, bool want_index) {
   const size_t ncols = rg_cols.size();
+  EncodedRowGroup erg;
+  erg.rows = rg_rows;
+  erg.chunks.resize(ncols);
+  erg.blooms.resize(ncols);
+  RGMeta &meta = erg.meta;
   meta.row_count = rg_rows;
   meta.init_columns(ncols, codec);
 
-  // Turn per-page sizes into absolute file offsets, now that the chunk's
-  // stored-vs-plain variant is settled. Data pages run contiguously from
-  // meta.data_offsets[i] (which already skips the dictionary page).
-  auto finalize_pages = [&](size_t i, std::vector<PageMeta> pages) {
+  // Settle each page's stored-vs-plain size and its offset RELATIVE to the
+  // chunk's first byte, now that the chunk's variant is decided. Data pages run
+  // contiguously from `first` (0, or the dictionary page's length).
+  auto relativise_pages = [&](size_t i, std::vector<PageMeta> pages, int64_t first) {
     if (pages.empty()) return;
     const bool use_plain = (codec == CODEC_ZSTD && meta.codecs[i] == CODEC_UNCOMPRESSED);
-    int64_t at = meta.data_offsets[i];
+    int64_t at = first;
     for (PageMeta &pm : pages) {
       pm.size = (int64_t)(use_plain ? pm.plain_size : pm.stored_size);
       pm.file_offset = at;
       at += pm.size;
     }
-    meta.pages[i] = std::move(pages);
+    erg.chunks[i].pages = std::move(pages);
   };
 
   // Keep the compressed chunk only when it clears kKeepCompressedFloor. NOT
@@ -2316,15 +2342,13 @@ inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offse
   for (size_t i = 0; i < ncols; i++) {
     const int level = zstd_level_for(rg_cols[i], profile);
     if (rg_cols[i].is_array) {
-      int64_t page_start = base_offset + (int64_t)out.size();
       PageBuild pb = build_array_data_pages(rg_cols[i], codec, level,
                                             rg_rows, max_page_bytes);
       keep_compressed(pb, i);
-      meta.data_offsets[i] = page_start;
       meta.sizes[i]        = pb.bytes.size();
       meta.uncompressed[i] = pb.uncompressed_total;
-      out.insert(out.end(), pb.bytes.begin(), pb.bytes.end());
-      continue;
+      erg.chunks[i].bytes  = std::move(pb.bytes);
+      continue;   // arrays carry no statistics, no bloom and no page index
     }
 
     meta.stats[i] = compute_stats(rg_cols[i], rg_rows);
@@ -2346,8 +2370,6 @@ inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offse
     size_t exact_ndv = 0;
     bool have_exact_ndv = false;
 
-    // Bloom filter immediately before its own data page (single contiguous
-    // range read covers bloom + data). See the one-shot loop for rationale.
     if (rg_cols[i].bloom && have_row_hashes) {
       std::vector<uint64_t> hashes =
           compact_present_hashes(row_hashes, rg_cols[i].validity, rg_rows);
@@ -2358,14 +2380,13 @@ inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offse
         have_exact_ndv = true;
         BloomFilter bf = bloom_build(hashes, ndv, 0.01);
         std::vector<uint8_t> hdr = build_bloom_header((int32_t)bf.bitset.size());
-        meta.bloom_offset[i] = base_offset + (int64_t)out.size();
-        meta.bloom_length[i] = (int32_t)(hdr.size() + bf.bitset.size());
-        out.insert(out.end(), hdr.begin(), hdr.end());
-        out.insert(out.end(), bf.bitset.begin(), bf.bitset.end());
+        std::vector<uint8_t> &bloom = erg.blooms[i];
+        bloom.reserve(hdr.size() + bf.bitset.size());
+        bloom.insert(bloom.end(), hdr.begin(), hdr.end());
+        bloom.insert(bloom.end(), bf.bitset.begin(), bf.bitset.end());
+        meta.bloom_length[i] = (int32_t)bloom.size();
       }
     }
-
-    int64_t page_start = base_offset + (int64_t)out.size();
 
     bool use_dict = false;
     DictColumnBuild dcb;
@@ -2452,26 +2473,181 @@ inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offse
         dcb.dict_page_len = dcb.plain_dict_page_len;
         meta.codecs[i] = CODEC_UNCOMPRESSED;
       }
-      meta.dict_offsets[i] = page_start;
-      meta.data_offsets[i] = page_start + (int64_t)dcb.dict_page_len;
+      erg.chunks[i].dict_len = (int64_t)dcb.dict_page_len;
       meta.sizes[i]        = dcb.bytes.size();
       meta.uncompressed[i] = dcb.uncompressed_total;
-      finalize_pages(i, std::move(dcb.pages));
-      out.insert(out.end(), dcb.bytes.begin(), dcb.bytes.end());
+      relativise_pages(i, std::move(dcb.pages), (int64_t)dcb.dict_page_len);
+      erg.chunks[i].bytes = std::move(dcb.bytes);
     } else {
       PageBuild pb = build_data_pages(rg_cols[i], rg_rows, codec, level,
                                       max_page_bytes, want_index);
       keep_compressed(pb, i);
-      meta.data_offsets[i] = page_start;
       meta.sizes[i]        = pb.bytes.size();
       meta.uncompressed[i] = pb.uncompressed_total;
-      finalize_pages(i, std::move(pb.pages));
-      out.insert(out.end(), pb.bytes.begin(), pb.bytes.end());
+      relativise_pages(i, std::move(pb.pages), 0);
+      erg.chunks[i].bytes = std::move(pb.bytes);
     }
   }
 
   meta.total_byte_size = 0;
   for (size_t s : meta.uncompressed) meta.total_byte_size += s;
+  return erg;
+}
+
+// Append column `i`'s chunk to `out` and pin its absolute offsets (dictionary
+// page, first data page, every indexed page) into erg.meta. `base_offset` is
+// the absolute file position of out[0]. The chunk's bytes are released once
+// copied: a placed chunk is dead weight, and a block writer that kept them
+// would hold two copies of every block.
+inline void place_chunk(std::vector<uint8_t> &out, int64_t base_offset,
+                        EncodedRowGroup &erg, size_t i) {
+  EncodedChunk &ch = erg.chunks[i];
+  const int64_t at = base_offset + (int64_t)out.size();
+  if (ch.dict_len >= 0) {
+    erg.meta.dict_offsets[i] = at;
+    erg.meta.data_offsets[i] = at + ch.dict_len;
+  } else {
+    erg.meta.dict_offsets[i] = -1;
+    erg.meta.data_offsets[i] = at;
+  }
+  for (PageMeta &pm : ch.pages) pm.file_offset += at;
+  erg.meta.pages[i] = std::move(ch.pages);
+  out.insert(out.end(), ch.bytes.begin(), ch.bytes.end());
+  std::vector<uint8_t>().swap(ch.bytes);
+}
+
+// Append one column's bloom filter (if it has one) and pin bloom_offset.
+inline void place_bloom(std::vector<uint8_t> &out, int64_t base_offset,
+                        RGMeta &meta, std::vector<uint8_t> &bloom, size_t i) {
+  if (bloom.empty()) return;
+  meta.bloom_offset[i] = base_offset + (int64_t)out.size();
+  out.insert(out.end(), bloom.begin(), bloom.end());
+  std::vector<uint8_t>().swap(bloom);
+}
+
+// ROW-MAJOR placement of one row group: for each column, its bloom filter then
+// its chunk, in schema order — the arrangement the column patcher appends its
+// synthesised chunks in (the bloom rides in the same range as its chunk). This
+// is NOT the layout WriteParquet / StreamingParquetWriter produce; they place
+// blocks column-major and put every bloom in the file tail (see write_block).
+inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offset,
+                                   const std::vector<ColumnInput> &rg_cols,
+                                   size_t rg_rows, int codec, int profile,
+                                   size_t max_page_bytes, bool want_index,
+                                   RGMeta &meta) {
+  EncodedRowGroup erg = encode_row_group(rg_cols, rg_rows, codec, profile,
+                                         max_page_bytes, want_index);
+  for (size_t i = 0; i < rg_cols.size(); i++) {
+    place_bloom(out, base_offset, erg.meta, erg.blooms[i], i);
+    place_chunk(out, base_offset, erg, i);
+  }
+  meta = std::move(erg.meta);
+}
+
+// COLUMN-MAJOR placement of one block of row groups: every column's chunks for
+// the block's row groups byte-adjacent, columns in schema order —
+//
+//     [rg1.c1 rg2.c1 .. rgG.c1][rg1.c2 rg2.c2 .. rgG.c2] ...
+//
+// so a reader projecting c1 over the block fetches ONE range instead of G. No
+// bloom filter is placed here (they go to the tail, write_bloom_tail): a filter
+// between two chunks of the same column would split that range. The row group
+// stays the unit of decode, statistics and pruning; only the byte order in the
+// file changes, and every chunk is still located by its own footer offsets.
+inline void write_block(std::vector<uint8_t> &out, int64_t base_offset,
+                        std::vector<EncodedRowGroup> &block) {
+  if (block.empty()) return;
+  const size_t ncols = block[0].chunks.size();
+  for (size_t i = 0; i < ncols; i++)
+    for (EncodedRowGroup &erg : block)
+      place_chunk(out, base_offset, erg, i);
+}
+
+// Every bloom filter of the file, after the last block and before the page
+// index. Column-major over the WHOLE file — column c's filter for row group k
+// is immediately followed by its filter for row group k+1 — so one column's
+// filters for any run of row groups (a block, or the entire file) are one
+// contiguous range. `blooms[rg][i]` is consumed (released) as it is written.
+inline void write_bloom_tail(std::vector<uint8_t> &out, int64_t base_offset,
+                             std::vector<RGMeta> &rg_meta,
+                             std::vector<std::vector<std::vector<uint8_t>>> &blooms) {
+  if (rg_meta.empty()) return;
+  const size_t ncols = rg_meta[0].bloom_offset.size();
+  for (size_t i = 0; i < ncols; i++)
+    for (size_t rg = 0; rg < rg_meta.size(); rg++)
+      place_bloom(out, base_offset, rg_meta[rg], blooms[rg][i], i);
+}
+
+// Per-row-group column views of `cols` for rows [rg_start, rg_start + rg_rows):
+// pointers offset, nothing copied. Validity is bit-packed, so rg_start MUST be a
+// multiple of 8 (WriteParquet and the streaming writer round the row-group size
+// up to one) for the byte offset rg_start>>3 to be exact.
+// PRESERVE-dict columns (codes != nullptr): the typed buffers hold dictionary
+// VALUES, not per-row data, so only the codes are offset.
+inline std::vector<ColumnInput> slice_row_group_cols(const std::vector<ColumnInput> &cols,
+                                                     size_t rg_start, size_t rg_rows) {
+  std::vector<ColumnInput> rg_cols(cols.size());
+  for (size_t i = 0; i < cols.size(); i++) {
+    rg_cols[i] = cols[i];
+    if (cols[i].is_array) {
+      // Arrays aren't one-per-row in rep_levels/def_levels/elem_* — slice
+      // via the row->level and row->element offset indexes instead of a
+      // flat rg_start pointer add.
+      const uint32_t lvl_start = cols[i].row_level_offsets[rg_start];
+      const uint32_t lvl_end   = cols[i].row_level_offsets[rg_start + rg_rows];
+      const uint32_t el_start  = cols[i].row_element_offsets[rg_start];
+      const uint32_t el_end    = cols[i].row_element_offsets[rg_start + rg_rows];
+      rg_cols[i].rep_levels  = cols[i].rep_levels + lvl_start;
+      rg_cols[i].def_levels  = cols[i].def_levels + lvl_start;
+      rg_cols[i].num_levels  = lvl_end - lvl_start;
+      rg_cols[i].num_elements = el_end - el_start;
+      if (cols[i].i32)     rg_cols[i].i32     = cols[i].i32     + el_start;
+      if (cols[i].i64)     rg_cols[i].i64     = cols[i].i64     + el_start;
+      if (cols[i].f32)     rg_cols[i].f32     = cols[i].f32     + el_start;
+      if (cols[i].f64)     rg_cols[i].f64     = cols[i].f64     + el_start;
+      if (cols[i].boolean) rg_cols[i].boolean = cols[i].boolean + el_start;
+      if (cols[i].strs)    rg_cols[i].strs    = cols[i].strs    + el_start;
+      // Row-level validity bitmap (outer-list null/not-null) is still one
+      // bit per ROW like any scalar column — same rg_start>>3 slice below.
+    } else if (!cols[i].codes) {
+      if (cols[i].i32)     rg_cols[i].i32     = cols[i].i32     + rg_start;
+      if (cols[i].i64)     rg_cols[i].i64     = cols[i].i64     + rg_start;
+      if (cols[i].f32)     rg_cols[i].f32     = cols[i].f32     + rg_start;
+      if (cols[i].f64)     rg_cols[i].f64     = cols[i].f64     + rg_start;
+      if (cols[i].boolean) rg_cols[i].boolean = cols[i].boolean + rg_start;
+      if (cols[i].strs)    rg_cols[i].strs    = cols[i].strs    + rg_start;
+      if (cols[i].dec_raw) rg_cols[i].dec_raw = cols[i].dec_raw
+                                                 + rg_start * (size_t)cols[i].dec_width;
+    }
+    if (cols[i].validity)
+      rg_cols[i].validity = cols[i].validity + (rg_start >> 3);
+    if (cols[i].codes)
+      rg_cols[i].codes = cols[i].codes + rg_start;
+  }
+  return rg_cols;
+}
+
+// Row-group splitting needs every ARRAY column to be sliceable per row group
+// (see ColumnInput's row_level_offsets / row_element_offsets). Fail loud rather
+// than silently degrading to a single row group: a caller that asked for N-row
+// row groups and got one giant row group with no error is exactly the "hidden
+// behaviour" this project forbids.
+inline void require_array_row_offsets(const std::vector<ColumnInput> &cols,
+                                      const char *who) {
+  for (const auto &c : cols) {
+    if (c.is_array && (!c.row_level_offsets || !c.row_element_offsets)) {
+      throw std::invalid_argument(
+          std::string(who) + ": row-group splitting requires row_level_offsets/"
+          "row_element_offsets on every ARRAY column (needed to slice "
+          "rep/def levels and element values per row group)");
+    }
+  }
+}
+
+// Row-group size as written: rounded UP to a multiple of 8 so validity
+// bit-offsets stay byte-aligned (slice_row_group_cols). 0 = one row group.
+inline size_t aligned_rows_per_row_group(size_t max_rows_per_rg) {
+  return max_rows_per_rg > 0 ? ((max_rows_per_rg + 7) & ~(size_t)7) : 0;
 }
 
 // Emit RowGroup.sorting_columns (field 4): one SortingColumn per schema
@@ -2637,6 +2813,21 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
     fm.writeI64Field(2, (int64_t)meta.total_byte_size); // total_byte_size
     fm.writeI64Field(3, (int64_t)meta.row_count);       // num_rows
     write_sorting_columns(fm, all_rg_cols[rg]);         // sorting_columns (field 4, optional)
+    // file_offset (5) / total_compressed_size (6): the row group's FIRST byte
+    // and the SUM of its chunks' bytes. Honest under the grouped layout too,
+    // where a row group's chunks are not contiguous (write_block interleaves
+    // them with the block's other row groups): the pair then brackets more
+    // than the row group's own bytes, and a reader must locate chunks by their
+    // own ColumnChunk offsets — which every reader tested does (design doc §2).
+    int64_t rg_first = -1, rg_compressed = 0;
+    for (size_t i = 0; i < schema_cols.size(); i++) {
+      const int64_t start = meta.dict_offsets[i] >= 0 ? meta.dict_offsets[i]
+                                                      : meta.data_offsets[i];
+      if (rg_first < 0 || start < rg_first) rg_first = start;
+      rg_compressed += (int64_t)meta.sizes[i];
+    }
+    fm.writeI64Field(5, rg_first);                      // file_offset
+    fm.writeI64Field(6, rg_compressed);                 // total_compressed_size
     fm.structEnd();
   }
   write_draken_logical_kv(fm, schema_cols);        // key_value_metadata (field 5, optional)
@@ -2661,56 +2852,56 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
 // ---- top-level file assembly ----
 //
 // Returns the complete parquet file as bytes. All columns must have the same
-// row count (`num_rows`). max_rows_per_rg controls row group splitting:
-//   0 (default) — single row group (original behaviour).
-//   N > 0       — at most N rows per row group; N is rounded up to the nearest
-//                 multiple of 8 so validity bit-offsets stay byte-aligned.
-//                 Array columns are not supported with splitting; if any column
-//                 has is_array=true the value is ignored and a single row group
-//                 is written.
-// out_stats is filled only for single-row-group files; it is left empty for
-// multi-row-group files.
+// row count (`num_rows`).
+//
+// Layout (docs/PARQUET_GROUPED_COLUMN_MAJOR_DESIGN.md): row groups of at most
+// `max_rows_per_rg` rows, written in BLOCKS of `row_groups_per_block` row
+// groups. Within a block every column's chunks are byte-adjacent, columns in
+// schema order (write_block); every bloom filter goes in the tail after the
+// last block (write_bloom_tail), then the page index, then the footer. The
+// last block of a file may be partial. The row group stays the unit of
+// decode, statistics and pruning; a reader infers the blocks from the chunk
+// offsets, nothing in the footer names them.
+//
+//   max_rows_per_rg      0 = a single row group. N > 0 is rounded up to a
+//                        multiple of 8 so validity bit-offsets stay byte-aligned.
+//   row_groups_per_block G >= 1. 1 = row-major (each row group's chunks
+//                        contiguous, as parquet is conventionally written) —
+//                        still with tail blooms. The defaults (64k rows, 4 per
+//                        block) are the measured values in the design doc §3.
+//
+// out_stats, when given, receives whole-file per-column statistics (min/max/
+// null_count over EVERY row group, computed over the full columns by the same
+// compute_stats the chunks use) — so a bounds caller is not limited to
+// single-row-group files.
 inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
                                          size_t num_rows,
                                          int codec = CODEC_UNCOMPRESSED,
                                          int profile = PROFILE_FAST,
                                          std::vector<ColumnStats> *out_stats =
                                              nullptr,
-                                         size_t max_rows_per_rg = 0,
+                                         size_t max_rows_per_rg = 65536,
                                          size_t max_page_bytes = 0,
-                                         bool page_index = true) {
+                                         bool page_index = true,
+                                         size_t row_groups_per_block = 4) {
+  if (row_groups_per_block == 0)
+    throw std::invalid_argument("WriteParquet: row_groups_per_block must be >= 1");
   // A PageIndex over one page per chunk would describe the granularity the
   // footer's own Statistics already carry, so it rides on page splitting being
   // on — see write_page_index.
   const bool want_index = page_index && max_page_bytes > 0;
-  // Array columns need row_level_offsets/row_element_offsets to be sliceable
-  // per row group (see ColumnInput comment) — the caller must supply them
-  // whenever it wants row-group splitting for a schema containing an ARRAY
-  // column. Fail loud rather than silently degrading to a single row group:
-  // a caller that asked for N-row row groups and got one giant row group
-  // with no error is exactly the "hidden behaviour" this project forbids.
-  if (max_rows_per_rg > 0) {
-    for (const auto &c : cols) {
-      if (c.is_array && (!c.row_level_offsets || !c.row_element_offsets)) {
-        throw std::invalid_argument(
-            "WriteParquet: max_rows_per_rg > 0 requires row_level_offsets/"
-            "row_element_offsets on every ARRAY column (needed to slice "
-            "rep/def levels and element values per row group)");
-      }
-    }
-  }
-  // Round up to nearest multiple of 8 so validity byte offset = start >> 3.
   if (max_rows_per_rg > 0)
-    max_rows_per_rg = (max_rows_per_rg + 7) & ~(size_t)7;
+    require_array_row_offsets(cols, "WriteParquet");
+  max_rows_per_rg = aligned_rows_per_row_group(max_rows_per_rg);
 
   size_t rg_size = (max_rows_per_rg > 0 && max_rows_per_rg < num_rows)
                        ? max_rows_per_rg
                        : num_rows;
   size_t n_rg = (num_rows == 0) ? 1 : (num_rows + rg_size - 1) / rg_size;
 
-  // Per-row-group metadata collected during the write loop (RGMeta is now at
-  // namespace scope, shared with the streaming writer).
+  // Per-row-group metadata and bloom filters, consumed by the tail and footer.
   std::vector<RGMeta> rg_meta(n_rg);
+  std::vector<std::vector<std::vector<uint8_t>>> blooms(n_rg);
   // Per-row-group sliced ColumnInputs must stay alive until the footer is
   // written: for an array column, num_levels/num_elements/rep_levels/
   // def_levels are only correct for THIS row group's slice, not the global
@@ -2722,109 +2913,104 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
   const char *MAGIC = "PAR1";
   file.insert(file.end(), MAGIC, MAGIC + 4);
 
+  // One block of encoded row groups is held at a time; its chunk bytes are
+  // released as the block is placed, so peak memory is the file so far plus
+  // one block plus the file's bloom filters.
+  std::vector<EncodedRowGroup> block;
+  block.reserve(row_groups_per_block);
+  size_t block_first = 0;
+  auto flush_block = [&]() {
+    // base_offset == 0: `file` already starts at absolute 0 and includes the
+    // leading PAR1, so file.size() is the absolute position.
+    write_block(file, /*base_offset=*/0, block);
+    for (size_t k = 0; k < block.size(); k++) {
+      rg_meta[block_first + k] = std::move(block[k].meta);
+      blooms[block_first + k]  = std::move(block[k].blooms);
+    }
+    block_first += block.size();
+    block.clear();
+  };
+
   for (size_t rg = 0; rg < n_rg; rg++) {
     size_t rg_start = rg * rg_size;
     size_t rg_rows  = std::min(rg_size, num_rows - rg_start);
+    all_rg_cols[rg] = slice_row_group_cols(cols, rg_start, rg_rows);
+    block.push_back(encode_row_group(all_rg_cols[rg], rg_rows, codec, profile,
+                                     max_page_bytes, want_index));
+    if (block.size() == row_groups_per_block)
+      flush_block();
+  }
+  if (!block.empty())
+    flush_block();   // the file's last, possibly partial, block
 
-    // Build per-row-group column views by offsetting pointers.
-    // Validity is bit-packed; rg_start is a multiple of 8 by construction so
-    // the byte offset rg_start>>3 is exact.
-    // PRESERVE-dict columns (codes!=nullptr): dict buffers (i32/i64/f32/f64/strs)
-    // point at dictionary values, NOT per-row data — do not offset them.
-    std::vector<ColumnInput> &rg_cols = all_rg_cols[rg];
-    rg_cols.resize(cols.size());
-    for (size_t i = 0; i < cols.size(); i++) {
-      rg_cols[i] = cols[i];
-      if (cols[i].is_array) {
-        // Arrays aren't one-per-row in rep_levels/def_levels/elem_* — slice
-        // via the row->level and row->element offset indexes instead of a
-        // flat rg_start pointer add.
-        const uint32_t lvl_start = cols[i].row_level_offsets[rg_start];
-        const uint32_t lvl_end   = cols[i].row_level_offsets[rg_start + rg_rows];
-        const uint32_t el_start  = cols[i].row_element_offsets[rg_start];
-        const uint32_t el_end    = cols[i].row_element_offsets[rg_start + rg_rows];
-        rg_cols[i].rep_levels  = cols[i].rep_levels + lvl_start;
-        rg_cols[i].def_levels  = cols[i].def_levels + lvl_start;
-        rg_cols[i].num_levels  = lvl_end - lvl_start;
-        rg_cols[i].num_elements = el_end - el_start;
-        if (cols[i].i32)     rg_cols[i].i32     = cols[i].i32     + el_start;
-        if (cols[i].i64)     rg_cols[i].i64     = cols[i].i64     + el_start;
-        if (cols[i].f32)     rg_cols[i].f32     = cols[i].f32     + el_start;
-        if (cols[i].f64)     rg_cols[i].f64     = cols[i].f64     + el_start;
-        if (cols[i].boolean) rg_cols[i].boolean = cols[i].boolean + el_start;
-        if (cols[i].strs)    rg_cols[i].strs    = cols[i].strs    + el_start;
-        // Row-level validity bitmap (outer-list null/not-null) is still one
-        // bit per ROW like any scalar column — same rg_start>>3 slice below.
-      } else if (!cols[i].codes) {
-        if (cols[i].i32)     rg_cols[i].i32     = cols[i].i32     + rg_start;
-        if (cols[i].i64)     rg_cols[i].i64     = cols[i].i64     + rg_start;
-        if (cols[i].f32)     rg_cols[i].f32     = cols[i].f32     + rg_start;
-        if (cols[i].f64)     rg_cols[i].f64     = cols[i].f64     + rg_start;
-        if (cols[i].boolean) rg_cols[i].boolean = cols[i].boolean + rg_start;
-        if (cols[i].strs)    rg_cols[i].strs    = cols[i].strs    + rg_start;
-        if (cols[i].dec_raw) rg_cols[i].dec_raw = cols[i].dec_raw
-                                                   + rg_start * (size_t)cols[i].dec_width;
-      }
-      if (cols[i].validity)
-        rg_cols[i].validity = cols[i].validity + (rg_start >> 3);
-      if (cols[i].codes)
-        rg_cols[i].codes = cols[i].codes + rg_start;
-    }
-
-    // Serialise this row group's column chunks (shared with the streaming
-    // writer). base_offset == 0: `file` already starts at absolute 0 and
-    // includes the leading PAR1, so file.size() is the absolute page offset.
-    write_row_group_chunks(file, /*base_offset=*/0, rg_cols, rg_rows, codec,
-                           profile, max_page_bytes, want_index, rg_meta[rg]);
-  } // end row group loop
-
+  write_bloom_tail(file, /*base_offset=*/0, rg_meta, blooms);
   if (want_index)
     write_page_index(file, /*base_offset=*/0, rg_meta, all_rg_cols);
   write_parquet_footer(file, cols, num_rows, rg_meta, all_rg_cols);
-  // out_stats: only meaningful for single-RG files; unsupported for multi-RG.
-  if (out_stats && n_rg == 1)
-    *out_stats = std::move(rg_meta[0].stats);
+
+  if (out_stats) {
+    out_stats->assign(cols.size(), ColumnStats{});
+    for (size_t i = 0; i < cols.size(); i++)
+      if (!cols[i].is_array)
+        (*out_stats)[i] = compute_stats(cols[i], num_rows);
+  }
   return file;
 }
 
 // ---- streaming file assembly ----
 //
 // StreamingParquetWriter writes a parquet file incrementally, one row group per
-// add_row_group() call, keeping only the current batch's bytes plus the (small,
-// bounded) footer metadata in memory. Each add_row_group serialises the batch
-// fully into an internal buffer; the caller drains that buffer with
-// take_pending() after each call (and once more after finish()) and forwards
-// the bytes to its sink, so peak memory stays ~one row group regardless of the
-// total file size. Absolute page offsets survive draining because `abs_offset_`
-// tracks how many bytes have already been handed out.
+// add_row_group() call, keeping only the current BLOCK's encoded bytes, the
+// file's bloom filters and the (small, bounded) footer metadata in memory. Each
+// call encodes its batch as ONE row group at once; a block is written to the
+// pending buffer as soon as `row_groups_per_block` row groups are held. The
+// caller drains the buffer with take_pending() after each call (and once more
+// after finish()) and forwards the bytes to its sink. Absolute offsets survive
+// draining because `abs_offset_` tracks how many bytes have already been
+// handed out.
 //
 // One add_row_group == one parquet row group: the caller controls row-group
-// sizing by how much it passes. Every batch must share the same column schema
-// (names/types); the schema is captured from the first batch.
+// sizing by how much it passes (the sinks batch to the 64k-row default, see
+// DataFileStream); the writer owns only the grouping of those row groups into
+// column-major blocks.
+//
+// Memory: one block of encoded chunks, plus EVERY bloom filter of the file
+// until finish() (they are written in the tail, after the last block — the
+// ruled placement, see write_bloom_tail). Peak = one block + the file's blooms.
+//
+// Every batch must share the same column schema (names/types); the schema is
+// captured from the first batch.
 class StreamingParquetWriter {
  public:
   StreamingParquetWriter(int codec, int profile, size_t max_page_bytes,
-                         bool page_index)
+                         bool page_index, size_t row_groups_per_block = 4)
       : codec_(codec), profile_(profile), max_page_bytes_(max_page_bytes),
-        want_index_(page_index && max_page_bytes > 0) {
+        want_index_(page_index && max_page_bytes > 0),
+        row_groups_per_block_(row_groups_per_block) {
+    if (row_groups_per_block == 0)
+      throw std::invalid_argument(
+          "StreamingParquetWriter: row_groups_per_block must be >= 1");
     const char *MAGIC = "PAR1";
-    buf_.insert(buf_.end(), MAGIC, MAGIC + 4); // header (drained with row group 1)
+    buf_.insert(buf_.end(), MAGIC, MAGIC + 4); // header (drained with block 1)
+    block_.reserve(row_groups_per_block_);
   }
 
   // Append one row group built from `rg_cols` (the whole batch is one row
-  // group). Data pointers in `rg_cols` need only stay valid for this call.
+  // group). Data pointers in `rg_cols` need only stay valid for this call: the
+  // row group is fully encoded before it returns.
   void add_row_group(const std::vector<ColumnInput> &rg_cols, size_t rg_rows) {
     if (!have_schema_) {
       schema_cols_ = strip_data(rg_cols);
       have_schema_ = true;
     }
-    rg_meta_.emplace_back();
-    write_row_group_chunks(buf_, abs_offset_, rg_cols, rg_rows, codec_,
-                           profile_, max_page_bytes_, want_index_, rg_meta_.back());
+    block_.push_back(encode_row_group(rg_cols, rg_rows, codec_, profile_,
+                                      max_page_bytes_, want_index_));
     // Footer reads only shape fields (never data pointers) from these — store a
     // stripped copy so no per-batch data buffer is retained across row groups.
     all_rg_cols_.push_back(strip_data(rg_cols));
     total_rows_ += rg_rows;
+    if (block_.size() == row_groups_per_block_)
+      flush_block();
   }
 
   // Move out the bytes serialised so far; advance the absolute offset. The
@@ -2837,12 +3023,15 @@ class StreamingParquetWriter {
     return out;
   }
 
-  // Emit the footer, then return all remaining pending bytes (footer + any
-  // row-group bytes not yet drained). After this the writer is complete.
+  // Emit the last (possibly partial) block, the bloom tail, the page index and
+  // the footer, then return all remaining pending bytes. After this the writer
+  // is complete.
   std::vector<uint8_t> finish() {
-    // The index tail goes out AFTER every row group's bytes and BEFORE the
-    // footer; abs_offset_ + buf_.size() is its absolute position whether or not
-    // the caller has been draining as it goes.
+    if (!block_.empty())
+      flush_block();
+    // abs_offset_ + buf_.size() is the absolute position whether or not the
+    // caller has been draining as it goes.
+    write_bloom_tail(buf_, abs_offset_, rg_meta_, blooms_);
     if (want_index_)
       write_page_index(buf_, abs_offset_, rg_meta_, all_rg_cols_);
     write_parquet_footer(buf_, schema_cols_, (size_t)total_rows_, rg_meta_,
@@ -2851,6 +3040,15 @@ class StreamingParquetWriter {
   }
 
  private:
+  void flush_block() {
+    write_block(buf_, abs_offset_, block_);
+    for (EncodedRowGroup &erg : block_) {
+      rg_meta_.push_back(std::move(erg.meta));
+      blooms_.push_back(std::move(erg.blooms));
+    }
+    block_.clear();
+  }
+
   // Copy ColumnInput vector with all data/level/offset pointers nulled — keeps
   // only the shape/schema (name is a self-owning std::string). Used for the
   // footer-side copies so nothing dangles into freed per-batch buffers.
@@ -2871,12 +3069,15 @@ class StreamingParquetWriter {
   int profile_;
   size_t max_page_bytes_;
   bool want_index_;
+  size_t row_groups_per_block_;
   bool have_schema_ = false;
   int64_t abs_offset_ = 0;             // bytes already drained via take_pending
   int64_t total_rows_ = 0;
   std::vector<uint8_t> buf_;           // pending (undrained) bytes
   std::vector<ColumnInput> schema_cols_;
+  std::vector<EncodedRowGroup> block_; // encoded, not yet placed
   std::vector<RGMeta> rg_meta_;
+  std::vector<std::vector<std::vector<uint8_t>>> blooms_;   // [rg][col], until finish()
   std::vector<std::vector<ColumnInput>> all_rg_cols_;
 };
 

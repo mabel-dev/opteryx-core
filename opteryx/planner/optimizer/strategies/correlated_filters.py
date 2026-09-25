@@ -11,7 +11,7 @@ Goal: Reduce Rows / IO
 
 For a join predicate ``a.k <op> b.k + delta`` the matching rows on one side are
 bounded by the realized value range of the correlated column on the other side.
-We read that range from the propagated ``node.statistics`` (post-filter /
+We read that range from the propagated ``PlanContext.statistics`` (post-filter /
 post-join-intersection — see statistics_refresh), SHIFT it by ``delta``, and push
 it onto the opposite leg's scan as a range predicate, so the scan can prune row
 groups and pre-filter rows before the join.
@@ -59,7 +59,6 @@ import struct
 
 from opteryx.expression import NodeType
 from opteryx.expression.intervals import MICROSECONDS_PER_DAY
-from opteryx.models import Node
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.planner.optimizer.statistics import ColumnRange
@@ -75,6 +74,7 @@ from .optimization_strategy import (
     OptimizerContext,
     get_nodes_of_type_from_logical_plan,
 )
+from opteryx.compiled.structures.expressions import Comparison
 
 
 def _phys_identity(col):
@@ -556,8 +556,7 @@ def _range_conditions(target_col, value_range):
         if bound is None or not _representable(bound, target_type):
             continue
         conditions.append(
-            Node(
-                NodeType.COMPARISON_OPERATOR,
+            Comparison(
                 value=operator,
                 left=target_col,
                 right=build_literal_node(bound, suggested_type=target_type),
@@ -678,8 +677,7 @@ def _constant_condition(target_col, literal):
     else:
         return None
 
-    return Node(
-        NodeType.COMPARISON_OPERATOR,
+    return Comparison(
         value="Eq",
         left=target_col,
         right=build_literal_node(value, suggested_type=target_type),
@@ -747,7 +745,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
             return context
 
         ranges_eligible = (
-            node.type in ("inner", "nested loop") and getattr(node, "statistics", None) is not None
+            node.type in ("inner", "nested loop") and context.plan_context.statistics(node) is not None
         )
         constants_eligible = bool(_CONSTANT_RECEIVING_LEGS.get(node.type))
         if not ranges_eligible and not constants_eligible:
@@ -828,7 +826,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
     ):
         """Carry *source_col*'s realized range onto *target_col*, displaced by the
         predicate's offset and narrowed to the bounds *keep* names."""
-        source_range = _key_value_range(getattr(join_node, "statistics", None), source_col)
+        source_range = _key_value_range(context.plan_context.statistics(join_node), source_col)
         if source_range is None:
             return
         target_type = _column_type(target_col)
@@ -859,7 +857,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
             # ranges on the join node with their intersection, so at that level
             # every pair looks identical and nothing would ever push.
             skip_scan=lambda scan: not _tightens(
-                value_range, _key_value_range(getattr(scan, "statistics", None), target_col)
+                value_range, _key_value_range(context.plan_context.statistics(scan), target_col)
             ),
         )
 

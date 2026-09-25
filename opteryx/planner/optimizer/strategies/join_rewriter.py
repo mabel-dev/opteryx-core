@@ -52,6 +52,7 @@ from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
 from .optimization_strategy import flip_join_leg_labels
 from .optimization_strategy import get_nodes_of_type_from_logical_plan
+from opteryx.compiled.structures.expressions import And
 
 
 def _column_identity(node):
@@ -73,7 +74,6 @@ def _split_and(node):
 def _build_and(conjuncts):
     """Rebuild an AND tree from a list of conjuncts; returns None if empty, the
     sole conjunct if exactly one, otherwise a left-deep AND tree."""
-    from opteryx.models import Node
 
     if not conjuncts:
         return None
@@ -81,7 +81,7 @@ def _build_and(conjuncts):
         return conjuncts[0]
     result = conjuncts[0]
     for c in conjuncts[1:]:
-        n = Node(node_type=NodeType.AND)
+        n = And()
         n.left = result
         n.right = c
         result = n

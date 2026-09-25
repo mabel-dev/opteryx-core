@@ -76,8 +76,6 @@ becomes a second annotation when the decode side can honour it.
 from draken.draken_native import DrakenType
 
 from opteryx.expression import NodeType
-from opteryx.models import LogicalColumn
-from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -149,30 +147,16 @@ def _classify(expr, needs: dict, raw: set) -> None:
         raw.add(expr.schema_column.identity)
         return
 
-    # A LogicalColumn is a leaf: it is the IDENTIFIER case above or it is unbound,
-    # and either way it has no children (and no `properties` to walk).
-    if not isinstance(expr, Node):
-        return
-
-    # Descend into EVERY property that holds an expression, not a hand-picked
-    # list of fields. `Node` is a property bag, so any attribute can carry a child:
-    # CASE keeps its operands in `conditions` / `results` / `else_result`, which a
+    # Descend into EVERY child, not a hand-picked list of fields: CASE keeps its
+    # operands in `conditions` / `results` / `else_result`, which a
     # left/centre/right/parameters walk never visited. A column read only inside a
     # CASE was therefore never seen as a raw use, got its payloads elided, and the
     # CASE then read the elided bytes - `CASE WHEN s LIKE 'a%' THEN 1 ELSE 2 END +
-    # LENGTH(s)` segfaulted on the 0xFFFFFFFF sentinel offset. Visiting every
-    # expression-valued property can only over-count (disqualify), which forgoes the
-    # optimisation; it cannot under-count, which is the correctness failure.
-    #
-    # Column references are LogicalColumn, not Node, so both are children - the
-    # same pair get_all_nodes_of_type (opteryx/expression) descends into.
-    for value in expr.properties.values():
-        if isinstance(value, (Node, LogicalColumn)):
-            _classify(value, needs, raw)
-        elif isinstance(value, (list, tuple)):
-            for item in value:
-                if isinstance(item, (Node, LogicalColumn)):
-                    _classify(item, needs, raw)
+    # LENGTH(s)` segfaulted on the 0xFFFFFFFF sentinel offset. Visiting every child
+    # can only over-count (disqualify), which forgoes the optimisation; it cannot
+    # under-count, which is the correctness failure.
+    for child in expr.children():
+        _classify(child, needs, raw)
 
 
 class LengthOnlyColumnStrategy(OptimizationStrategy):

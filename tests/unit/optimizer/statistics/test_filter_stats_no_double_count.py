@@ -1,5 +1,5 @@
 """Phase 6 regression test: _filter_stats does not double-count selectivity
-for conjuncts already folded into Scan.statistics.row_count by Phase 3's
+for conjuncts already folded into the Scan's estimated row_count by Phase 3's
 upward-walk in _scan_stats.
 """
 
@@ -11,9 +11,11 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
+from opteryx.planner.plan_context import PlanContext
+
 
 def _build_refreshed_plan(sql):
-    """Parse SQL through bind phase, run refresh_statistics, return plan."""
+    """Parse SQL through bind phase, run refresh_statistics, return (plan, plan_context)."""
     from opteryx.models import ExecutionContext, QueryTelemetry
     from opteryx.planner.ast_rewriter import do_ast_rewriter
     from opteryx.planner.binder import do_bind_phase
@@ -35,14 +37,15 @@ def _build_refreshed_plan(sql):
     plan = do_resolve_relations(plan, ctes, telemetry)
     plan = do_plan_rewrite(plan, telemetry)
     bound = do_bind_phase(plan, execution_context=ctx, query_id=query_id, telemetry=telemetry)
-    return refresh_statistics(bound)
+    plan_context = PlanContext()
+    return refresh_statistics(bound, plan_context), plan_context
 
 
-def _stats_by_node_type(plan):
-    """Map node_type name -> list of statistics.row_count for that type."""
+def _stats_by_node_type(plan, plan_context):
+    """Map node_type name -> list of estimated row_count for that type."""
     out = {}
     for nid, node in plan.nodes(True):
-        st = getattr(node, "statistics", None)
+        st = plan_context.statistics(node)
         if st is None:
             continue
         out.setdefault(node.node_type.name, []).append(st.row_count)
@@ -56,10 +59,10 @@ def _stats_by_node_type(plan):
 def test_filter_above_scan_does_not_double_count():
     """Filter directly above a Scan with a single-relation predicate must
     not reduce row count below the Scan's filtered row count."""
-    plan = _build_refreshed_plan(
+    plan, plan_context = _build_refreshed_plan(
         "SELECT * FROM testdata.tpch_001.nation WHERE n_regionkey = 1"
     )
-    by_type = _stats_by_node_type(plan)
+    by_type = _stats_by_node_type(plan, plan_context)
     scan_rows = by_type.get("Scan", [])
     filter_rows = by_type.get("Filter", [])
     assert scan_rows, "expected at least one Scan node with statistics"
@@ -84,11 +87,11 @@ def test_filter_above_cross_join_applies_selectivity_once():
     re-derived "already folded" with a downward walk that stopped at ANY
     join, saw nothing folded, and applied the same selectivity a second time.
     """
-    plan = _build_refreshed_plan(
+    plan, plan_context = _build_refreshed_plan(
         "SELECT * FROM testdata.tpch_001.nation, testdata.tpch_001.region "
         "WHERE n_regionkey = 1"
     )
-    by_type = _stats_by_node_type(plan)
+    by_type = _stats_by_node_type(plan, plan_context)
     scan_rows = by_type.get("Scan", [])
     join_rows = by_type.get("Join", [])
     filter_rows = by_type.get("Filter", [])
@@ -117,12 +120,12 @@ def test_self_join_filter_folds_into_one_scan_only():
     and its selectivity was squared. Exactly one Scan may claim the fold; the
     Filter then applies nothing further.
     """
-    plan = _build_refreshed_plan(
+    plan, plan_context = _build_refreshed_plan(
         "SELECT nation.n_name FROM testdata.tpch_001.nation "
         "CROSS JOIN testdata.tpch_001.nation AS n2 "
         "WHERE nation.n_regionkey = 1"
     )
-    by_type = _stats_by_node_type(plan)
+    by_type = _stats_by_node_type(plan, plan_context)
     scan_rows = by_type.get("Scan", [])
     join_rows = by_type.get("Join", [])
     filter_rows = by_type.get("Filter", [])
@@ -148,8 +151,8 @@ def test_self_join_filter_folds_into_one_scan_only():
 def test_no_filter_above_scan_unchanged():
     """Sanity: with no filter, Filter and Scan stats should both equal the
     manifest count (no Filter node may exist; just verify no regression)."""
-    plan = _build_refreshed_plan("SELECT * FROM testdata.tpch_001.nation")
-    by_type = _stats_by_node_type(plan)
+    plan, plan_context = _build_refreshed_plan("SELECT * FROM testdata.tpch_001.nation")
+    by_type = _stats_by_node_type(plan, plan_context)
     scan_rows = by_type.get("Scan", [])
     assert scan_rows, "expected a Scan node with statistics"
     assert min(scan_rows) == 25, f"expected manifest count 25; got {min(scan_rows)}"

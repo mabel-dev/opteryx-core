@@ -4,7 +4,7 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """Phase 3 regression test: refresh applies leaf-local filter selectivity to
-Scan.statistics.row_count.
+the Scan's estimated row_count.
 """
 
 import os
@@ -15,9 +15,11 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
+from opteryx.planner.plan_context import PlanContext
+
 
 def _build_refreshed_plan(sql):
-    """Parse SQL through bind phase, run refresh_statistics, return plan."""
+    """Parse SQL through bind phase, run refresh_statistics, return (plan, plan_context)."""
     import uuid
 
     from opteryx.models import ExecutionContext, QueryTelemetry
@@ -41,12 +43,13 @@ def _build_refreshed_plan(sql):
     plan = do_resolve_relations(plan, ctes, telemetry)
     plan = do_plan_rewrite(plan, telemetry)
     bound = do_bind_phase(plan, execution_context=ctx, query_id=query_id, telemetry=telemetry)
-    return refresh_statistics(bound)
+    plan_context = PlanContext()
+    return refresh_statistics(bound, plan_context), plan_context
 
 
 def _build_optimized_and_refreshed_plan(sql):
     """Parse SQL through the FULL optimizer (including PredicatePushdown), then
-    run refresh_statistics, return plan.
+    run refresh_statistics, return (plan, plan_context).
 
     Unlike `_build_refreshed_plan`, this reaches statistics_refresh the same
     way the real query path does (see planner/__init__.py:
@@ -77,19 +80,20 @@ def _build_optimized_and_refreshed_plan(sql):
     plan = do_resolve_relations(plan, ctes, telemetry)
     plan = do_plan_rewrite(plan, telemetry)
     bound = do_bind_phase(plan, execution_context=ctx, query_id=query_id, telemetry=telemetry)
-    optimized = do_optimizer(bound, telemetry)
-    return refresh_statistics(optimized)
+    plan_context = PlanContext()
+    optimized = do_optimizer(bound, telemetry, plan_context)
+    return refresh_statistics(optimized, plan_context), plan_context
 
 
-def _scan_row_counts(plan):
-    """Map relation_name -> Scan.statistics.row_count for every Scan in plan."""
+def _scan_row_counts(plan, plan_context):
+    """Map relation_name -> the Scan's estimated row_count for every Scan in plan."""
     from opteryx.planner.logical_planner import LogicalPlanStepType
 
     out = {}
     for nid, node in plan.nodes(True):
         if node.node_type == LogicalPlanStepType.Scan:
             rel = getattr(node, "relation", None) or getattr(node, "alias", None)
-            stats = getattr(node, "statistics", None)
+            stats = plan_context.statistics(node)
             if rel and stats is not None:
                 out[rel] = stats.row_count
     return out
@@ -100,10 +104,10 @@ def _scan_row_counts(plan):
     reason="testdata/tpch_001 not populated",
 )
 def test_filter_above_scan_reduces_row_count():
-    plan = _build_refreshed_plan(
+    plan, plan_context = _build_refreshed_plan(
         "SELECT * FROM testdata.tpch_001.nation WHERE n_regionkey = 1"
     )
-    rows = _scan_row_counts(plan)
+    rows = _scan_row_counts(plan, plan_context)
     nation = rows.get("testdata.tpch_001.nation")
     assert nation is not None
     # Manifest count is 25; with a 1/NDV eq selectivity, expect a fraction of 25.
@@ -115,8 +119,8 @@ def test_filter_above_scan_reduces_row_count():
     reason="testdata/tpch_001 not populated",
 )
 def test_no_filter_leaves_row_count_at_manifest():
-    plan = _build_refreshed_plan("SELECT * FROM testdata.tpch_001.nation")
-    rows = _scan_row_counts(plan)
+    plan, plan_context = _build_refreshed_plan("SELECT * FROM testdata.tpch_001.nation")
+    rows = _scan_row_counts(plan, plan_context)
     nation = rows.get("testdata.tpch_001.nation")
     assert nation == 25, f"expected unfiltered manifest count; got {nation}"
 
@@ -145,7 +149,7 @@ def _find_scan(plan):
     reason="testdata/tpch_001 not populated",
 )
 def test_pushed_down_equality_predicate_still_reduces_row_count():
-    plan = _build_optimized_and_refreshed_plan(
+    plan, plan_context = _build_optimized_and_refreshed_plan(
         "SELECT n_name FROM testdata.tpch_001.nation WHERE n_name = 'BRAZIL'"
     )
     scan = _find_scan(plan)
@@ -157,9 +161,9 @@ def test_pushed_down_equality_predicate_still_reduces_row_count():
         "-- if this is empty, the optimizer stopped pushing this predicate and "
         "this test is no longer reproducing the reported bug"
     )
-    assert scan.statistics.row_count < 25, (
+    assert plan_context.statistics(scan).row_count < 25, (
         f"pushed-down equality predicate did not reduce the estimate; "
-        f"got {scan.statistics.row_count} (full manifest count is 25)"
+        f"got {plan_context.statistics(scan).row_count} (full manifest count is 25)"
     )
 
 
@@ -168,7 +172,7 @@ def test_pushed_down_equality_predicate_still_reduces_row_count():
     reason="testdata/tpch_001 not populated",
 )
 def test_distinct_over_pushed_down_predicate_is_not_full_table():
-    plan = _build_optimized_and_refreshed_plan(
+    plan, plan_context = _build_optimized_and_refreshed_plan(
         "SELECT DISTINCT n_name FROM testdata.tpch_001.nation WHERE n_name = 'BRAZIL'"
     )
     from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -176,7 +180,7 @@ def test_distinct_over_pushed_down_predicate_is_not_full_table():
     exit_row_count = None
     for _nid, node in plan.nodes(True):
         if node.node_type == LogicalPlanStepType.Exit:
-            exit_row_count = node.statistics.row_count
+            exit_row_count = plan_context.statistics(node).row_count
     assert exit_row_count is not None, "expected an Exit node with statistics"
     # Only one nation is named BRAZIL; the estimate must reflect that it was
     # filtered before DISTINCT, not the unfiltered 25-row table.
@@ -208,7 +212,7 @@ def test_distinct_ndv_scoped_to_selected_column_not_whole_relation():
     # (near-)unique per row. Distinct-ing on just n_regionkey must not be
     # dragged up towards 25 by n_comment's NDV still sitting in the relation's
     # column stats.
-    plan = _build_optimized_and_refreshed_plan(
+    plan, plan_context = _build_optimized_and_refreshed_plan(
         "SELECT DISTINCT n_regionkey FROM testdata.tpch_001.nation"
     )
     from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -216,7 +220,7 @@ def test_distinct_ndv_scoped_to_selected_column_not_whole_relation():
     exit_row_count = None
     for _nid, node in plan.nodes(True):
         if node.node_type == LogicalPlanStepType.Exit:
-            exit_row_count = node.statistics.row_count
+            exit_row_count = plan_context.statistics(node).row_count
     assert exit_row_count is not None, "expected an Exit node with statistics"
     assert exit_row_count < 25, (
         f"DISTINCT on a single low-cardinality column estimated {exit_row_count} "

@@ -5,6 +5,21 @@
 
 namespace rugo::_csv {
 
+namespace {
+
+// A quote only OPENS a quoted field when it is the field's first byte, i.e. the
+// byte before it is a delimiter or '\n' (or it is the first byte of the body).
+// Anywhere else in an unquoted field it is an ordinary byte. `before_start` is
+// the byte preceding data[0]; pass '\n' when data[0] is the start of a row.
+inline bool quote_opens_field(
+    const uint8_t* data, uint32_t pos, uint8_t before_start, uint8_t delimiter)
+{
+    const uint8_t prev = pos ? data[pos - 1] : before_start;
+    return prev == delimiter || prev == '\n';
+}
+
+}  // anonymous namespace
+
 std::vector<CsvMarkerPosition> scan_csv_markers(
     const uint8_t*        data,
     size_t                length,
@@ -35,7 +50,7 @@ std::vector<uint32_t> find_safe_splits(
 
     std::vector<uint32_t> safe;
 
-    enum class F { UNQUOTED, QUOTED, ESCAPE_IN_QUOTED, DOUBLE_QUOTE_PENDING };
+    enum class F { UNQUOTED, QUOTED, DOUBLE_QUOTE_PENDING };
     F state = F::UNQUOTED;
 
     for (const auto& m : *markers) {
@@ -43,23 +58,18 @@ std::vector<uint32_t> find_safe_splits(
             case F::UNQUOTED:
                 if (m.type == CsvMarkerType::NEWLINE) {
                     safe.push_back(m.position);
-                } else if (m.type == CsvMarkerType::QUOTE) {
+                } else if (m.type == CsvMarkerType::QUOTE &&
+                           quote_opens_field(data, m.position, '\n', ctx.delimiter)) {
                     state = F::QUOTED;
                 }
-                // CR, DELIMITER, BACKSLASH: don't affect quote state in unquoted context
+                // CR, DELIMITER, mid-field QUOTE: don't affect quote state in unquoted context
                 break;
 
             case F::QUOTED:
-                if (m.type == CsvMarkerType::BACKSLASH) {
-                    state = F::ESCAPE_IN_QUOTED;
-                } else if (m.type == CsvMarkerType::QUOTE) {
+                if (m.type == CsvMarkerType::QUOTE) {
                     state = F::DOUBLE_QUOTE_PENDING;
                 }
                 // NEWLINE/DELIMITER inside a quoted field: skip (NOT safe splits)
-                break;
-
-            case F::ESCAPE_IN_QUOTED:
-                state = F::QUOTED;  // next marker was literal; back to quoted
                 break;
 
             case F::DOUBLE_QUOTE_PENDING:
@@ -87,43 +97,49 @@ namespace {
 // FSM state codes
 constexpr uint8_t kUnquoted = 0;
 constexpr uint8_t kQuoted   = 1;
-constexpr uint8_t kEscape   = 2;
-constexpr uint8_t kDqPend   = 3;
+constexpr uint8_t kDqPend   = 2;
+constexpr uint8_t kStates   = 3;
 
 // Transition table [state][marker_type] -> new_state.
-// CsvMarkerType ordinals: NEWLINE=0, CR=1, DELIMITER=2, QUOTE=3, BACKSLASH=4
-constexpr uint8_t kFsmT[4][5] = {
-    // UNQUOTED:  NL         CR         DELIM      QUOTE     BSLASH
+// Columns are CsvMarkerType ordinals (NEWLINE=0, CR=1, DELIMITER=2, QUOTE=3)
+// plus kQuoteMid: a QUOTE that is not a field's first byte. Only UNQUOTED
+// distinguishes the two — there a mid-field quote is an ordinary byte.
+constexpr uint8_t kQuoteMid = 4;
+constexpr uint8_t kFsmT[kStates][5] = {
+    // UNQUOTED:  NL         CR         DELIM      QUOTE      QUOTE_MID
     {kUnquoted, kUnquoted, kUnquoted, kQuoted,   kUnquoted},
-    // QUOTED:    NL         CR         DELIM      QUOTE     BSLASH
-    {kQuoted,   kQuoted,   kQuoted,   kDqPend,   kEscape  },
-    // ESCAPE:    NL         CR         DELIM      QUOTE     BSLASH
-    {kQuoted,   kQuoted,   kQuoted,   kQuoted,   kQuoted  },
-    // DQPEND:    NL         CR         DELIM      QUOTE     BSLASH
-    {kUnquoted, kUnquoted, kUnquoted, kQuoted,   kUnquoted},
+    // QUOTED:    NL         CR         DELIM      QUOTE      QUOTE_MID
+    {kQuoted,   kQuoted,   kQuoted,   kDqPend,   kDqPend  },
+    // DQPEND:    NL         CR         DELIM      QUOTE      QUOTE_MID
+    {kUnquoted, kUnquoted, kUnquoted, kQuoted,   kQuoted  },
 };
 
 // Transfer function for one chunk: for each possible initial state, the final
 // state and the chunk-relative offsets of safe \n positions.
 struct ChunkXfer {
-    uint8_t               end[4];
-    std::vector<uint32_t> safe[4];
+    uint8_t               end[kStates];
+    std::vector<uint32_t> safe[kStates];
 };
 
 static ChunkXfer process_one_chunk(
     const uint8_t*         chunk,
     size_t                 chunk_len,
+    uint8_t                before_start,   // byte preceding chunk[0] ('\n' at body start)
     const CsvParseContext& ctx)
 {
     // Materialise markers (chunk-relative positions)
     std::vector<std::pair<uint32_t, uint8_t>> markers;
     markers.reserve(chunk_len / 32);
     scan_structural_csv(chunk, chunk_len, ctx, [&](uint32_t pos, CsvMarkerType t) {
-        markers.emplace_back(pos, static_cast<uint8_t>(t));
+        uint8_t mt = static_cast<uint8_t>(t);
+        if (t == CsvMarkerType::QUOTE &&
+                !quote_opens_field(chunk, pos, before_start, ctx.delimiter))
+            mt = kQuoteMid;
+        markers.emplace_back(pos, mt);
     });
 
     ChunkXfer x;
-    for (uint8_t s0 = 0; s0 < 4; ++s0) {
+    for (uint8_t s0 = 0; s0 < kStates; ++s0) {
         uint8_t s = s0;
         for (const auto& [pos, mt] : markers) {
             // Emit safe \n before transitioning: both UNQUOTED and DQPEND yield a
@@ -160,7 +176,7 @@ std::vector<uint32_t> find_safe_splits_parallel(
         lens[i]    = std::min(chunk_sz, length - offsets[i]);
     }
 
-    // Parallel: scan + 4-way FSM for every chunk
+    // Parallel: scan + 3-way FSM for every chunk
     std::vector<ChunkXfer> xfers(actual_nt);
     {
         BS::thread_pool<> pool(nt);
@@ -168,7 +184,8 @@ std::vector<uint32_t> find_safe_splits_parallel(
         futs.reserve(actual_nt);
         for (size_t i = 0; i < actual_nt; ++i) {
             futs.push_back(pool.submit_task([&, i]() {
-                xfers[i] = process_one_chunk(data + offsets[i], lens[i], ctx);
+                const uint8_t before = offsets[i] ? data[offsets[i] - 1] : '\n';
+                xfers[i] = process_one_chunk(data + offsets[i], lens[i], before, ctx);
             }));
         }
         for (auto& f : futs) f.get();

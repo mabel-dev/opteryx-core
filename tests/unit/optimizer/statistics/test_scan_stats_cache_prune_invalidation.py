@@ -22,11 +22,12 @@ from __future__ import annotations
 
 import os
 import sys
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
 from opteryx.expression import NodeType
-from opteryx.models import Node
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.planner.logical_planner import LogicalPlanNode
@@ -34,6 +35,7 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.optimizer.statistics_refresh import _scan_stats
 from opteryx.types.logical_type import INT64
 from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 
 def _schema():
@@ -61,9 +63,9 @@ def _file(path, lo, hi, record_count):
 
 
 def _comparison(op, value):
-    identifier = Node(NodeType.IDENTIFIER, source_column="value")
-    literal = Node(NodeType.LITERAL, value=value)
-    return Node(NodeType.COMPARISON_OPERATOR, value=op, left=identifier, right=literal)
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="value")
+    literal = Literal(value=value)
+    return Comparison(value=op, left=identifier, right=literal)
 
 
 def _scan_node(manifest, schema):

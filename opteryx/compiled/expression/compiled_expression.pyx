@@ -3855,44 +3855,23 @@ def expand_between(node):
     the expanded compares to rescale decimal bounds). Idempotent: a tree with no
     BETWEEN is returned unchanged. Non-mutating — parents of a changed child are
     rebuilt via Node.copy()."""
-    from opteryx.compiled.structures.node import Node
+    from opteryx.compiled.structures.expressions import And
+    from opteryx.compiled.structures.expressions import Comparison
+    from opteryx.compiled.structures.expressions import is_expression
+    from opteryx.compiled.structures.expressions import rewrite_children
     from opteryx.expression import NodeType
 
-    if not isinstance(node, Node):
+    if not is_expression(node):
         return node
     if node.node_type == NodeType.BETWEEN:
         lower_incl, upper_incl = node.value
         operand = expand_between(node.left)
-        lo = Node(NodeType.COMPARISON_OPERATOR,
-                  value=("GtEq" if lower_incl else "Gt"))
-        lo.left = operand
-        lo.right = node.right      # lower-bound literal node, reused as-is
-        hi = Node(NodeType.COMPARISON_OPERATOR,
-                  value=("LtEq" if upper_incl else "Lt"))
-        hi.left = operand
-        hi.right = node.centre     # upper-bound literal node
-        both = Node(NodeType.AND)
-        both.left = lo
-        both.right = hi
-        return both
+        # right = the lower-bound literal node, centre = the upper; reused as-is.
+        lo = Comparison(value=("GtEq" if lower_incl else "Gt"), left=operand, right=node.right)
+        hi = Comparison(value=("LtEq" if upper_incl else "Lt"), left=operand, right=node.centre)
+        return And(left=lo, right=hi)
 
-    rebuilt = None
-    for attr in ("left", "right", "centre"):
-        child = getattr(node, attr)
-        if isinstance(child, Node):
-            new_child = expand_between(child)
-            if new_child is not child:
-                if rebuilt is None:
-                    rebuilt = node.copy()
-                setattr(rebuilt, attr, new_child)
-    params = node.parameters
-    if isinstance(params, list):
-        new_params = [expand_between(c) if isinstance(c, Node) else c for c in params]
-        if any(a is not b for a, b in zip(new_params, params)):
-            if rebuilt is None:
-                rebuilt = node.copy()
-            rebuilt.parameters = new_params
-    return rebuilt if rebuilt is not None else node
+    return rewrite_children(node, expand_between)
 
 
 def lower(node):

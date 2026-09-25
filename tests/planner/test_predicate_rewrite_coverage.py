@@ -197,8 +197,8 @@ def test_cnf_inlists_and_literal_left_merge():
 def test_exact_domain_or_is_replaced_not_duplicated_above_a_join():
     sql = SELF_JOIN + " WHERE p.id IN (1, 2) OR p.id IN (3, 4)"
     plan = _plan(sql)
-    # the join's own line is at the top: nothing filters the joined rows again
-    assert plan[0].startswith("Inner Join"), plan
+    # the join sits directly under the projection: nothing filters the joined rows again
+    assert plan[0].startswith("Projection") and plan[1].startswith("Inner Join"), plan
     assert _filter_below_join(plan, "id IN [1, 2, 3, 4]"), plan
     assert _rows(sql) == 4
 

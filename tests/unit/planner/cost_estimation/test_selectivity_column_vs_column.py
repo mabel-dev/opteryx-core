@@ -20,6 +20,7 @@ the correlation between the columns.
 
 import os
 import sys
+from opteryx.compiled.structures.expressions import Comparison
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
@@ -30,24 +31,26 @@ import pytest
 # under this package import `estimate_selectivity` from the selectivity
 # module below, so that module must not be the first thing to touch it.
 import opteryx.planner.optimizer  # noqa: F401
+from opteryx.planner.plan_context import PlanContext
 from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
 from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 _X = b"tes_x_00000001"
 _Y = b"tes_y_00000002"
 
 
 def _identifier(identity: bytes) -> Node:
-    n = Node(node_type=NodeType.IDENTIFIER)
-    n.schema_column = type("_S", (), {"identity": identity})()
-    return n
+    return LogicalColumn(
+        node_type=NodeType.IDENTIFIER, source_column=None, schema_column=type("_S", (), {"identity": identity})()
+    )
 
 
 def _cmp(op: str, left_identity: bytes, right_identity: bytes) -> Node:
-    n = Node(node_type=NodeType.COMPARISON_OPERATOR)
+    n = Comparison()
     n.value = op
     n.left = _identifier(left_identity)
     n.right = _identifier(right_identity)
@@ -152,12 +155,13 @@ def _optimized_and_refreshed_scan_row_count(sql):
     plan = do_resolve_relations(plan, ctes, telemetry)
     plan = do_plan_rewrite(plan, telemetry)
     bound = do_bind_phase(plan, execution_context=ctx, query_id=query_id, telemetry=telemetry)
-    optimized = do_optimizer(bound, telemetry)
-    refreshed = refresh_statistics(optimized)
+    plan_context = PlanContext()
+    optimized = do_optimizer(bound, telemetry, plan_context)
+    refreshed = refresh_statistics(optimized, plan_context)
 
     for _nid, node in refreshed.nodes(True):
         if node.node_type == LogicalPlanStepType.Scan:
-            return node.statistics.row_count, bool(getattr(node, "predicates", None))
+            return plan_context.statistics(node).row_count, bool(getattr(node, "predicates", None))
     return None, False
 
 

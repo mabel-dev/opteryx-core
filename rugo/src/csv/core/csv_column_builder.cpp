@@ -2,6 +2,7 @@
 
 #include "csv_column_builder.hpp"
 #include "../../declared_parse.hpp"   // explicit_schema strict per-value parse (shared with JSONL)
+#include "../../predicate_literal.hpp" // predicate literal vs column type contract (shared with JSONL)
 #include "csv_scan.hpp"
 
 #include <algorithm>
@@ -24,17 +25,14 @@ namespace rugo::_csv {
 
 uint32_t unescape_csv_field(
     const uint8_t* src,
-    uint16_t       len,
+    uint32_t       len,
     uint8_t*       out) noexcept
 {
     uint32_t out_len = 0;
     uint32_t i = 0;
-    while (i < static_cast<uint32_t>(len)) {
+    while (i < len) {
         const uint8_t c = src[i];
-        if (c == '\\' && i + 1 < static_cast<uint32_t>(len)) {
-            out[out_len++] = src[i + 1];
-            i += 2;
-        } else if (c == '"' && i + 1 < static_cast<uint32_t>(len) && src[i + 1] == '"') {
+        if (c == '"' && i + 1 < len && src[i + 1] == '"') {
             out[out_len++] = '"';
             i += 2;
         } else {
@@ -51,62 +49,96 @@ uint32_t unescape_csv_field(
 
 namespace {
 
-// Shared predicate evaluation: returns true if the field passes predicate[pred_i].
-// pred_i64/pred_f64/pred_is_int/pred_is_float are pre-parsed values.
-static bool eval_predicate(
-    uint8_t             op,
-    bool                pred_is_int,
-    bool                pred_is_float,
-    int64_t             pred_i64,
-    double              pred_f64,
-    const std::string&  pred_str,
-    const uint8_t*      fptr,
-    uint32_t            flen,
-    bool                is_null)
-{
-    if (is_null) return (op == 1 /* NE */);
+// How a predicate compares, fixed per predicate once its column's type is known
+// (build_columns_streaming). The literal's kind was checked against that type
+// first (predicate_literal.hpp), so each mode only ever sees a literal it can take.
+enum PredMode : uint8_t {
+    PRED_STRING  = 0,   // string-family column: byte-wise compare, never numeric
+    PRED_NUMERIC = 1,   // numeric column: numeric compare, never byte-wise
+    PRED_BOOL    = 2,   // BOOL column (declared): true/false, false < true
+    PRED_OTHER   = 3,   // type outside the contract (DATE, DECIMAL, IPV4, ...):
+                        // the reader's original compare — numeric when both the
+                        // literal and the field parse as numbers, else byte-wise
+};
 
-    if (pred_is_int) {
-        int64_t fv;
-        if (flen > 0 && rugo::_jsonl::fast_parse_int64(fptr, 0, flen - 1, fv)) {
-            switch (op) {
-                case 0: return fv == pred_i64;
-                case 1: return fv != pred_i64;
-                case 2: return fv <  pred_i64;
-                case 3: return fv <= pred_i64;
-                case 4: return fv >  pred_i64;
-                case 5: return fv >= pred_i64;
-            }
-        }
-    }
-    if (pred_is_int || pred_is_float) {
-        const double cmp = pred_is_int ? static_cast<double>(pred_i64) : pred_f64;
-        double fv;
-        if (flen > 0 && rugo::_jsonl::fast_parse_float64(fptr, 0, flen - 1, fv)) {
-            switch (op) {
-                case 0: return fv == cmp;
-                case 1: return fv != cmp;
-                case 2: return fv <  cmp;
-                case 3: return fv <= cmp;
-                case 4: return fv >  cmp;
-                case 5: return fv >= cmp;
-            }
-        }
-    }
-    // String comparison
-    const int cmp = std::memcmp(fptr, pred_str.data(),
-                                std::min(static_cast<size_t>(flen), pred_str.size()));
-    const int cmp2 = (cmp != 0) ? cmp :
-        (flen < pred_str.size() ? -1 : flen > pred_str.size() ? 1 : 0);
+// One pushed predicate, with its literal pre-parsed ONCE (never per row).
+struct PredEval {
+    uint8_t     op;
+    uint8_t     mode;
+    bool        is_int;    // literal parsed as int64
+    bool        is_float;  // literal parsed as float64 (and not int64)
+    bool        bool_val;
+    int64_t     i64;
+    double      f64;
+    std::string str;
+};
+
+template <typename T>
+static inline bool apply_op(uint8_t op, T a, T b) {
     switch (op) {
-        case 0: return cmp2 == 0;
-        case 1: return cmp2 != 0;
-        case 2: return cmp2 <  0;
-        case 3: return cmp2 <= 0;
-        case 4: return cmp2 >  0;
-        case 5: return cmp2 >= 0;
+        case 0: return a == b;
+        case 1: return a != b;
+        case 2: return a <  b;
+        case 3: return a <= b;
+        case 4: return a >  b;
+        case 5: return a >= b;
     }
     return false;
+}
+
+// Numeric compare of a field against p's literal. Returns false (no match) when
+// the field is not a number: under PRED_NUMERIC such a field is a type mismatch
+// that commit_row reports (or, with ignore_errors, stores as NULL — which matches
+// nothing either).
+static bool eval_numeric(const PredEval& p, const uint8_t* fptr, uint32_t flen) {
+    if (flen == 0) return false;
+    if (p.is_int) {
+        int64_t fv;
+        if (rugo::_jsonl::fast_parse_int64(fptr, 0, flen - 1, fv))
+            return apply_op<int64_t>(p.op, fv, p.i64);
+    }
+    const double cmp = p.is_int ? static_cast<double>(p.i64) : p.f64;
+    double fv;
+    if (rugo::_jsonl::fast_parse_float64(fptr, 0, flen - 1, fv))
+        return apply_op<double>(p.op, fv, cmp);
+    return false;
+}
+
+static bool eval_string(const PredEval& p, const uint8_t* fptr, uint32_t flen) {
+    const int cmp = std::memcmp(fptr, p.str.data(),
+                                std::min(static_cast<size_t>(flen), p.str.size()));
+    const int cmp2 = (cmp != 0) ? cmp :
+        (flen < p.str.size() ? -1 : flen > p.str.size() ? 1 : 0);
+    return apply_op<int>(p.op, cmp2, 0);
+}
+
+// Shared predicate evaluation: returns true if the field passes p.
+static bool eval_predicate(const PredEval& p, const uint8_t* fptr, uint32_t flen, bool is_null)
+{
+    // SQL 3VL: a comparison against NULL is UNKNOWN, which a filter drops --
+    // for every operator, != included.
+    if (is_null) return false;
+
+    switch (p.mode) {
+        case PRED_STRING:
+            return eval_string(p, fptr, flen);
+        case PRED_NUMERIC:
+            return eval_numeric(p, fptr, flen);
+        case PRED_BOOL: {
+            bool fv;
+            // The same strict parser the declared BOOL column is built with.
+            if (!rugo::detail::strict_bool(fptr, flen, &fv)) return false;
+            return apply_op<int>(p.op, fv ? 1 : 0, p.bool_val ? 1 : 0);
+        }
+        default: {  // PRED_OTHER
+            if (p.is_int || p.is_float) {
+                double fv;
+                if (flen > 0 && rugo::_jsonl::fast_parse_float64(fptr, 0, flen - 1, fv))
+                    return eval_numeric(p, fptr, flen);
+            }
+            return eval_string(p, fptr, flen);
+        }
+    }
 }
 
 // Build a draken_malloc'd validity bitmap. Returns nullptr if all rows valid.
@@ -179,7 +211,7 @@ static std::vector<DrakenType> sniff_csv_column_types(
 
     if (np == 0 || body_len == 0) return types;
 
-    uint8_t scratch[UINT16_MAX];
+    std::vector<uint8_t> scratch;
 
     auto widen = [](DrakenType cur, const uint8_t* ptr, uint32_t len) -> DrakenType {
         if (cur == DRAKEN_VARCHAR) return DRAKEN_VARCHAR;
@@ -194,7 +226,7 @@ static std::vector<DrakenType> sniff_csv_column_types(
         return rugo::_jsonl::fast_parse_float64(ptr, 0, len - 1, v) ? DRAKEN_FLOAT64 : DRAKEN_VARCHAR;
     };
 
-    enum class S { FIELD_START, UNQUOTED, QUOTED, ESCAPE_IN_QUOTED, DQ_PENDING };
+    enum class S { FIELD_START, UNQUOTED, QUOTED, DQ_PENDING };
     S        state            = S::FIELD_START;
     uint32_t field_start      = 0;
     bool     was_quoted       = false;
@@ -211,14 +243,14 @@ static std::vector<DrakenType> sniff_csv_column_types(
         if (req_idx < np && proj_ordinals[req_idx] == current_col
                 && !declared[req_idx] && seen[req_idx] < ctx.sniff_sample_size) {
             uint32_t raw_len = (value_end > field_start) ? (value_end - field_start) : 0u;
-            if (raw_len > UINT16_MAX) raw_len = UINT16_MAX;
             const bool is_null = (raw_len == 0 && !was_quoted);
             if (!is_null) {
                 const uint8_t* ptr = body + field_start;
                 uint32_t       len = raw_len;
                 if (has_escape && raw_len > 0) {
-                    len = unescape_csv_field(ptr, static_cast<uint16_t>(raw_len), scratch);
-                    ptr = scratch;
+                    if (scratch.size() < raw_len) scratch.resize(raw_len);
+                    len = unescape_csv_field(ptr, raw_len, scratch.data());
+                    ptr = scratch.data();
                 }
                 types[req_idx] = widen(types[req_idx], ptr, len);
                 ++seen[req_idx];
@@ -292,12 +324,7 @@ static std::vector<DrakenType> sniff_csv_column_types(
                 break;
 
             case S::QUOTED:
-                if (c == '\\') { has_escape = true; state = S::ESCAPE_IN_QUOTED; }
-                else if (c == '"') { quote_close = static_cast<uint32_t>(i); state = S::DQ_PENDING; }
-                break;
-
-            case S::ESCAPE_IN_QUOTED:
-                state = S::QUOTED;
+                if (c == '"') { quote_close = static_cast<uint32_t>(i); state = S::DQ_PENDING; }
                 break;
 
             case S::DQ_PENDING:
@@ -353,15 +380,15 @@ struct ColBuf {
 
     std::vector<uint8_t> null_bm;   // packed LSB-first; grown lazily in commit_row
 
-    std::vector<uint8_t> esc_scratch;  // UINT16_MAX; stable per-row for this column
+    // Unescape target for this column's "" fields; grown to the field's raw
+    // length on demand. Stable for the row: one field per column per row, and
+    // commit_row consumes the pending view before the next row can regrow it.
+    std::vector<uint8_t> esc_scratch;
 
-    explicit ColBuf(DrakenType t) : type(t) {
-        esc_scratch.resize(UINT16_MAX);
-    }
+    explicit ColBuf(DrakenType t) : type(t) {}
 
     ColBuf(DrakenType t, const rugo::DeclaredType& dt, const std::string& spelling)
         : type(t), declared_col(true), declared(dt), declared_name(spelling) {
-        esc_scratch.resize(UINT16_MAX);
         elem = (dt.type == DRAKEN_BOOL) ? 1u : rugo::declared_elem_size(dt.type);
     }
 };
@@ -384,12 +411,8 @@ static void stream_build_range(
     const CsvParseContext&       ctx,
     const std::vector<uint32_t>& req_ords,      // sorted
     const std::vector<int>&      proj_idx_map,  // req_ords[i] → ColBuf index (-1 if not proj)
-    const std::vector<int>&      pred_idx_map,  // req_ords[i] → ctx.predicates index (-1 if none)
-    const std::vector<int64_t>&  pred_i64,
-    const std::vector<double>&   pred_f64,
-    const std::vector<bool>&     pred_is_int,
-    const std::vector<bool>&     pred_is_float,
-    const std::vector<std::string>& pred_values,
+    const std::vector<std::vector<int>>& preds_for_req,  // req_ords[i] → EVERY predicate on that column
+    const std::vector<PredEval>& preds,
     const std::vector<std::string>& proj_col_names,  // ColBuf index -> projected column name
     std::vector<ColBuf>&         bufs)
 {
@@ -401,15 +424,15 @@ static void stream_build_range(
     const uint8_t* chunk     = body + range_start;
     const size_t   chunk_len = range_end - range_start;
 
-    // Shared scratch for predicate-only escaped fields
-    std::vector<uint8_t> pred_scratch(UINT16_MAX);
+    // Shared scratch for predicate-only escaped fields (consumed immediately)
+    std::vector<uint8_t> pred_scratch;
 
     // Per-row pending views (one per projected column)
     std::vector<FieldPend> pending(n_proj, {nullptr, 0, true});
     bool row_pred_ok = true;
 
     // FSM state
-    enum class S { FIELD_START, UNQUOTED, QUOTED, ESCAPE_IN_QUOTED, DQ_PENDING };
+    enum class S { FIELD_START, UNQUOTED, QUOTED, DQ_PENDING };
     S        state            = S::FIELD_START;
     uint32_t field_start      = 0;
     bool     was_quoted       = false;
@@ -530,11 +553,9 @@ static void stream_build_range(
 
         if (req_idx < n_req && req_ords[req_idx] == current_col) {
             const int pi = proj_idx_map[req_idx];
-            const int pd = pred_idx_map[req_idx];
 
             // Get raw field bytes
             uint32_t raw_len = (value_end > field_start) ? (value_end - field_start) : 0u;
-            if (raw_len > UINT16_MAX) raw_len = UINT16_MAX;
             const bool is_null = (raw_len == 0 && !was_quoted);
 
             const uint8_t* fptr = nullptr;
@@ -545,19 +566,18 @@ static void stream_build_range(
                 flen = raw_len;
                 if (has_escape) {
                     // Unescape into stable scratch (proj col scratch or shared pred scratch)
-                    uint8_t* sc = (pi >= 0) ? bufs[pi].esc_scratch.data() : pred_scratch.data();
-                    flen = unescape_csv_field(fptr, static_cast<uint16_t>(raw_len), sc);
-                    fptr = sc;
+                    std::vector<uint8_t>& sc = (pi >= 0) ? bufs[pi].esc_scratch : pred_scratch;
+                    if (sc.size() < raw_len) sc.resize(raw_len);
+                    flen = unescape_csv_field(fptr, raw_len, sc.data());
+                    fptr = sc.data();
                 }
             }
 
-            // Predicate evaluation (short-circuit once failed)
-            if (pd >= 0 && row_pred_ok) {
-                row_pred_ok = eval_predicate(
-                    ctx.predicates[pd].op,
-                    pred_is_int[pd], pred_is_float[pd],
-                    pred_i64[pd], pred_f64[pd], pred_values[pd],
-                    fptr, flen, is_null);
+            // Predicate evaluation (short-circuit once failed). A column may carry
+            // several predicates (`a > 2 AND a < 5`); every one of them must pass.
+            for (const int pd : preds_for_req[req_idx]) {
+                if (!row_pred_ok) break;
+                row_pred_ok = eval_predicate(preds[pd], fptr, flen, is_null);
             }
 
             // Store pending view for projected columns
@@ -576,10 +596,9 @@ static void stream_build_range(
     auto end_row = [&]() {
         // Fill missing trailing requested columns with null
         while (req_idx < n_req) {
-            const int pd = pred_idx_map[req_idx];
             const int pi = proj_idx_map[req_idx];
-            if (pd >= 0 && row_pred_ok)
-                row_pred_ok = (ctx.predicates[pd].op == 1 /* NE */);
+            // Missing field is NULL: UNKNOWN under every comparison operator.
+            if (!preds_for_req[req_idx].empty()) row_pred_ok = false;
             if (pi >= 0) pending[pi] = {nullptr, 0, true};
             ++req_idx;
         }
@@ -609,9 +628,17 @@ static void stream_build_range(
             case S::FIELD_START:
                 switch (type) {
                     case CsvMarkerType::QUOTE:
-                        was_quoted  = true;
-                        field_start = pos + 1;
-                        state = S::QUOTED;
+                        // Non-structural bytes emit no marker, so FIELD_START
+                        // also covers "inside an unquoted field, no marker yet".
+                        // Only a quote at the field's first byte opens a quoted
+                        // field; anywhere else it is an ordinary byte.
+                        if (pos == field_start) {
+                            was_quoted  = true;
+                            field_start = pos + 1;
+                            state = S::QUOTED;
+                        } else {
+                            state = S::UNQUOTED;
+                        }
                         break;
                     case CsvMarkerType::DELIMITER:
                         emit_field(pos);
@@ -627,9 +654,6 @@ static void stream_build_range(
                             emit_field(pos);
                             cr_ended = true;
                         }
-                        break;
-                    case CsvMarkerType::BACKSLASH:
-                        state = S::UNQUOTED;
                         break;
                     default: break;
                 }
@@ -658,20 +682,12 @@ static void stream_build_range(
 
             case S::QUOTED:
                 switch (type) {
-                    case CsvMarkerType::BACKSLASH:
-                        has_escape = true;
-                        state = S::ESCAPE_IN_QUOTED;
-                        break;
                     case CsvMarkerType::QUOTE:
                         quote_close = pos;
                         state = S::DQ_PENDING;
                         break;
                     default: break;
                 }
-                break;
-
-            case S::ESCAPE_IN_QUOTED:
-                state = S::QUOTED;
                 break;
 
             case S::DQ_PENDING:
@@ -890,7 +906,9 @@ StreamResult build_columns_streaming(
     StreamResult result;
     result.num_rows = 0;
 
-    if (length <= header_offset || request_ordinals.empty()) return result;
+    // A header-only buffer (empty body) still runs through: every requested column
+    // comes back typed with zero rows, and every predicate is still type-checked.
+    if (length < header_offset || request_ordinals.empty()) return result;
 
     const uint8_t* body     = buffer + header_offset;
     const size_t   body_len = length - header_offset;
@@ -899,79 +917,121 @@ StreamResult build_columns_streaming(
 
     // Build per-req-ordinal metadata maps
     std::vector<int> proj_idx_map(n_req, -1);
-    std::vector<int> pred_idx_map(n_req, -1);
-
     for (size_t i = 0; i < proj_indices.size(); ++i)
         proj_idx_map[proj_indices[i]] = static_cast<int>(i);
 
-    // Map predicate column names → req_ord indices
-    for (size_t pi = 0; pi < ctx.predicates.size(); ++pi) {
-        for (size_t ci = 0; ci < column_names.size(); ++ci) {
-            if (column_names[ci] == ctx.predicates[pi].column) {
-                for (size_t ri = 0; ri < n_req; ++ri) {
-                    if (request_ordinals[ri] == static_cast<uint32_t>(ci)) {
-                        pred_idx_map[ri] = static_cast<int>(pi);
-                        break;
-                    }
-                }
-                break;
-            }
-        }
+    // Map each predicate to its req_ord index. Every predicate column is in
+    // request_ordinals (the Cython edge refuses a predicate on an unknown column),
+    // so a predicate that finds none here is an internal inconsistency.
+    const size_t n_pred = ctx.predicates.size();
+    std::vector<size_t>           pred_req(n_pred);
+    std::vector<std::vector<int>> preds_for_req(n_req);
+    for (size_t pi = 0; pi < n_pred; ++pi) {
+        size_t found = n_req;
+        for (size_t ri = 0; ri < n_req && found == n_req; ++ri)
+            if (column_names[request_ordinals[ri]] == ctx.predicates[pi].column) found = ri;
+        if (found == n_req)
+            throw std::invalid_argument(
+                "predicate on column '" + ctx.predicates[pi].column +
+                "': no such column in this CSV");
+        pred_req[pi] = found;
+        preds_for_req[found].push_back(static_cast<int>(pi));
     }
 
-    // Sniff column types from first SNIFF_LIMIT non-null values per projected column
-    std::vector<uint32_t> proj_ordinals(n_proj);
-    for (size_t i = 0; i < n_proj; ++i)
-        proj_ordinals[i] = request_ordinals[proj_indices[i]];
-
-    // Resolve ctx.explicit_schema against the projected columns BEFORE sniffing:
-    // a declared column is not sniffed and not widened, it is parsed as stated.
-    std::vector<uint8_t>          is_declared(n_proj, 0);
-    std::vector<rugo::DeclaredType> declared_types(n_proj);
-    std::vector<std::string>      declared_names(n_proj);
-    for (size_t i = 0; i < n_proj; ++i) {
-        const auto it = ctx.explicit_schema.find(column_names[proj_ordinals[i]]);
+    // Resolve ctx.explicit_schema against EVERY requested column (projected and
+    // predicate-only) BEFORE sniffing: a declared column is not sniffed and not
+    // widened, it is parsed as stated.
+    std::vector<uint8_t>            req_declared(n_req, 0);
+    std::vector<rugo::DeclaredType> req_declared_types(n_req);
+    std::vector<std::string>        req_declared_names(n_req);
+    for (size_t r = 0; r < n_req; ++r) {
+        const std::string& name = column_names[request_ordinals[r]];
+        const auto it = ctx.explicit_schema.find(name);
         if (it == ctx.explicit_schema.end()) continue;
-        if (!rugo::parse_declared_type(it->second, &declared_types[i])) {
+        if (!rugo::parse_declared_type(it->second, &req_declared_types[r])) {
             // The Cython edge validates every declared name eagerly through this
             // same parser; this is a backstop for a non-Python caller.
             throw std::runtime_error(
                 "explicit_schema: unsupported type '" + it->second + "' for column '" +
-                column_names[proj_ordinals[i]] + "'; supported types are " +
+                name + "'; supported types are " +
                 std::string(rugo::declared_type_vocabulary()));
         }
-        if (rugo::declared_is_structured(declared_types[i].type)) {
+        if (rugo::declared_is_structured(req_declared_types[r].type)) {
             // Same backstop: ARRAY<T>/VARIANT are read out of JSON structure a CSV
             // field does not have (declared_type.hpp). Refused, never approximated.
             throw std::runtime_error(
                 "explicit_schema: type '" + it->second + "' for column '" +
-                column_names[proj_ordinals[i]] + "' is JSONL-only; a CSV field has no "
+                name + "' is JSONL-only; a CSV field has no "
                 "JSON structure to read an ARRAY or VARIANT from");
         }
-        is_declared[i]    = 1;
-        declared_names[i] = it->second;
+        req_declared[r]       = 1;
+        req_declared_names[r] = it->second;
     }
 
-    std::vector<DrakenType> col_types =
-        sniff_csv_column_types(body, body_len, proj_ordinals, is_declared, ctx);
-    for (size_t i = 0; i < n_proj; ++i)
-        if (is_declared[i]) col_types[i] = declared_types[i].type;
+    // Sniff every requested column — a predicate-only column included, because its
+    // predicate's literal is checked against the type below.
+    std::vector<DrakenType> req_types =
+        sniff_csv_column_types(body, body_len, request_ordinals, req_declared, ctx);
+    for (size_t r = 0; r < n_req; ++r)
+        if (req_declared[r]) req_types[r] = req_declared_types[r].type;
 
-    // Pre-parse predicate comparison values
-    const size_t             n_pred = ctx.predicates.size();
-    std::vector<int64_t>     pred_i64(n_pred);
-    std::vector<double>      pred_f64(n_pred);
-    std::vector<bool>        pred_is_int(n_pred, false);
-    std::vector<bool>        pred_is_float(n_pred, false);
-    std::vector<std::string> pred_values(n_pred);
+    // Projected-column views of the above, in ColBuf order.
+    std::vector<uint8_t>            is_declared(n_proj, 0);
+    std::vector<rugo::DeclaredType> declared_types(n_proj);
+    std::vector<std::string>        declared_names(n_proj);
+    std::vector<DrakenType>         col_types(n_proj);
+    for (size_t i = 0; i < n_proj; ++i) {
+        const size_t r    = proj_indices[i];
+        is_declared[i]    = req_declared[r];
+        declared_types[i] = req_declared_types[r];
+        declared_names[i] = req_declared_names[r];
+        col_types[i]      = req_types[r];
+    }
+
+    // Check each predicate's literal against its column's type (fail loud, before a
+    // single row is filtered — see predicate_literal.hpp), pick its compare mode, and
+    // pre-parse the literal ONCE.
+    std::vector<PredEval> preds(n_pred);
     for (size_t i = 0; i < n_pred; ++i) {
-        pred_values[i] = ctx.predicates[i].value;
-        const uint8_t* pv = reinterpret_cast<const uint8_t*>(pred_values[i].data());
-        const uint32_t pe = pred_values[i].size()
-            ? static_cast<uint32_t>(pred_values[i].size() - 1) : 0;
-        pred_is_int[i]   = rugo::_jsonl::fast_parse_int64(pv, 0, pe, pred_i64[i]);
-        pred_is_float[i] = !pred_is_int[i] && pred_values[i].size() > 0 &&
-                           rugo::_jsonl::fast_parse_float64(pv, 0, pe, pred_f64[i]);
+        const CsvPredicate& cp = ctx.predicates[i];
+        const size_t r = pred_req[i];
+        const DrakenType t = req_types[r];
+        const uint8_t lk = req_declared[r] ? req_declared_types[r].logical_kind : rugo::LK_NONE;
+        if (!rugo::literal_fits_type(t, lk, cp.kind)) {
+            const std::string type_name = req_declared[r] ? req_declared_names[r]
+                : t == DRAKEN_INT64 ? "INT64" : t == DRAKEN_FLOAT64 ? "FLOAT64" : "VARCHAR";
+            throw std::invalid_argument(
+                rugo::literal_mismatch_message(cp.column, type_name, cp.kind, cp.value));
+        }
+        PredEval& p = preds[i];
+        p.op       = cp.op;
+        p.str      = cp.value;
+        p.is_int   = false;
+        p.is_float = false;
+        p.bool_val = false;
+        p.i64      = 0;
+        p.f64      = 0.0;
+        if (!rugo::literal_contract_covers(t, lk))  p.mode = PRED_OTHER;
+        else if (rugo::declared_is_string(t))       p.mode = PRED_STRING;
+        else if (t == DRAKEN_BOOL)                  p.mode = PRED_BOOL;
+        else                                        p.mode = PRED_NUMERIC;
+
+        if (p.mode == PRED_BOOL) {
+            p.bool_val = (cp.value == "true");   // the Cython edge spells a bool true/false
+        } else if (p.mode == PRED_NUMERIC || p.mode == PRED_OTHER) {
+            const uint8_t* pv = reinterpret_cast<const uint8_t*>(p.str.data());
+            const uint32_t pe = p.str.empty() ? 0 : static_cast<uint32_t>(p.str.size() - 1);
+            if (!p.str.empty()) {
+                p.is_int   = rugo::_jsonl::fast_parse_int64(pv, 0, pe, p.i64);
+                p.is_float = !p.is_int && rugo::_jsonl::fast_parse_float64(pv, 0, pe, p.f64);
+            }
+            if (p.mode == PRED_NUMERIC && !p.is_int && !p.is_float)
+                // An int/float literal always renders to a parseable number; this is a
+                // backstop for a non-Python caller that set `kind` inconsistently.
+                throw std::invalid_argument(
+                    "predicate on column '" + cp.column + "': literal '" + cp.value +
+                    "' is marked numeric but does not parse as a number");
+        }
     }
 
     // Find safe row-boundary splits for threading
@@ -1015,13 +1075,12 @@ StreamResult build_columns_streaming(
     // ColBuf index -> projected column name, for type-mismatch error messages.
     std::vector<std::string> proj_col_names(n_proj);
     for (size_t i = 0; i < n_proj; ++i)
-        proj_col_names[i] = column_names[proj_ordinals[i]];
+        proj_col_names[i] = column_names[request_ordinals[proj_indices[i]]];
 
     auto run_thread = [&](size_t t) {
         stream_build_range(
             body, ranges[t].start, ranges[t].end,
-            ctx, request_ordinals, proj_idx_map, pred_idx_map,
-            pred_i64, pred_f64, pred_is_int, pred_is_float, pred_values,
+            ctx, request_ordinals, proj_idx_map, preds_for_req, preds,
             proj_col_names, thread_bufs[t]);
     };
 

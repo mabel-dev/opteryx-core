@@ -99,9 +99,11 @@ def test_rename_is_byte_identical(sample, column):
 
 def test_a_same_length_rename_changes_only_the_name(sample):
     """Not merely the same bytes - the same bytes in the same PLACES. The writer
-    puts each bloom filter immediately before its own data page so a reader can
-    fetch bloom+data in one range read; re-emitting them in column order instead
-    of source order would keep the file correct and quietly destroy that.
+    lays chunks out column-major in blocks and puts every bloom filter in the
+    file tail (docs/PARQUET_GROUPED_COLUMN_MAJOR_DESIGN.md) so a reader can
+    fetch a column's chunks over a block in one range read; re-emitting extents
+    in column order instead of source order would keep the file correct and
+    quietly destroy that.
 
     A same-length new name keeps the footer the same size too, so the whole FILE
     stays the same length and differs only where the name is spelled.
@@ -130,16 +132,26 @@ def test_a_longer_rename_grows_only_the_footer(sample):
 
 def test_drop_last_column_leaves_a_prefix(sample):
     """Dropping the final column of a single-row-group file leaves the earlier
-    chunks exactly where they were, so the new page region is a byte-for-byte
-    PREFIX of the old one. (Only for one row group - with several, the dropped
-    chunks sit in the middle of the file and a prefix is not expected.)"""
+    chunks exactly where they were: the new page region starts with the old
+    one's bytes up to the dropped column's chunk, byte for byte. (Only for one
+    row group - with several, the dropped chunks sit in the middle of the file
+    and a prefix is not expected. The bloom filters sit in the file tail, after
+    every chunk, so the prefix is the chunk region, not the whole page region.)"""
+    import io
+
+    import pyarrow.parquet as pq
+
     _, _, src = sample
 
     out = rp.patch_columns(src, drop=[_NAMES[-1]])
 
     region_before, region_after = _page_region(src), _page_region(out)
     assert len(region_after) < len(region_before)
-    assert region_before.startswith(region_after)
+    last = pq.ParquetFile(io.BytesIO(src)).metadata.row_group(0).column(len(_NAMES) - 1)
+    last_start = (last.dictionary_page_offset if last.has_dictionary_page
+                  else last.data_page_offset) - 4
+    assert last_start > 0
+    assert region_after.startswith(region_before[:last_start])
 
 
 # --- values survive ------------------------------------------------------------

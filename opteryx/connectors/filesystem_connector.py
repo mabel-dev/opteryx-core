@@ -701,7 +701,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         # carries both inside its FileColumnStats object instead.
         skene_null_counts: Dict[str, dict] = {}
         skene_distinct_counts: Dict[str, dict] = {}
-        skene_sketches: Dict[str, dict] = {}
+        skene_sketches: Dict[str, tuple] = {}   # blob -> (sketches, hash family)
         skene_floors: Dict[str, dict] = {}
         if dataset_fmt == SKENE:
             # Skene's footer carries an exact row_count and per-column min/max
@@ -771,8 +771,10 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
                 # null counts (sum) and NDV (disjoint-sum / overlap-max), each
                 # with its own independent "unknown" state. The three rules and
                 # why they differ are in the helper's docstring.
-                lower, upper, nulls, distincts, sketches, floors = (
-                    _skene_aggregate_row_group_statistics(row_groups, positions)
+                lower, upper, nulls, distincts, sketches, sketch_family, floors = (
+                    _skene_aggregate_row_group_statistics(
+                        row_groups, positions, footer["sketches"]
+                    )
                 )
                 if lower:
                     skene_bounds[blob_name] = (lower, upper)
@@ -784,7 +786,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
                 if distincts:
                     skene_distinct_counts[blob_name] = distincts
                 if sketches:
-                    skene_sketches[blob_name] = sketches
+                    skene_sketches[blob_name] = (sketches, sketch_family)
                 if floors:
                     skene_floors[blob_name] = floors
             if skene_bounds:
@@ -861,7 +863,12 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
                         else (analyzed.null_value_counts if analyzed else None)
                     ),
                     distinct_value_counts=skene_distinct_counts.get(blob_name),
-                    distinct_sketches=skene_sketches.get(blob_name),
+                    distinct_sketches=(
+                        skene_sketches[blob_name][0] if blob_name in skene_sketches else None
+                    ),
+                    distinct_sketch_family=(
+                        skene_sketches[blob_name][1] if blob_name in skene_sketches else None
+                    ),
                     distinct_floors=skene_floors.get(blob_name),
                     min_lengths=analyzed.min_lengths if analyzed else None,
                     max_lengths=analyzed.max_lengths if analyzed else None,

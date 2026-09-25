@@ -69,12 +69,14 @@ old calibrated window showed no measurable difference) — so the heuristic
 was removed rather than re-tuned.
 """
 
+from opteryx.exceptions import InvalidInternalStateError
 from opteryx.expression import NodeType, binary_operands
 from opteryx.planner.binder.join_helpers import band_operand_leg
 from opteryx.planner.cost_estimation import composite_key_ndv
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.planner.plan_context import PlanContext
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
@@ -495,10 +497,10 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
             "left anti",
         ):
             left_stats, right_stats = self._side_statistics(
-                context.pre_optimized_tree, context.node_id
+                context.pre_optimized_tree, context.node_id, context.plan_context
             )
-            left_rows = self._side_rows(left_stats, node.left_size)
-            right_rows = self._side_rows(right_stats, node.right_size)
+            left_rows = self._side_rows(left_stats)
+            right_rows = self._side_rows(right_stats)
             # Absent statistics are fail-safe: keep today's shape rather than exchange
             # a join on a fabricated number.
             #
@@ -570,11 +572,12 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
                 node.on
             )
             if not can_exchange:
+                left_rows, right_rows = self._leg_rows(context)
                 self.record_decision(
                     "left outer join exchange",
                     "declined, leg has no reader (synthetic relation): "
-                    f"left {_side_facts(node.left_size)},"
-                    f" right {_side_facts(node.right_size)}",
+                    f"left {_side_facts(left_rows)},"
+                    f" right {_side_facts(right_rows)}",
                 )
             elif not equi_only:
                 self.record_decision(
@@ -584,10 +587,10 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
                 )
             else:
                 left_stats, right_stats = self._side_statistics(
-                    context.pre_optimized_tree, context.node_id
+                    context.pre_optimized_tree, context.node_id, context.plan_context
                 )
-                left_rows = self._side_rows(left_stats, node.left_size)
-                right_rows = self._side_rows(right_stats, node.right_size)
+                left_rows = self._side_rows(left_stats)
+                right_rows = self._side_rows(right_stats)
                 sides = f"left {_side_facts(left_rows)}, right {_side_facts(right_rows)}"
                 # Each decline is recorded apart, for the same reason the SEMI/ANTI
                 # exchange above records its three: they point at different work. No
@@ -652,18 +655,19 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
         # silently reverts the build side (see flip_join_leg_labels' docstring).
         if node.node_type == LogicalPlanStepType.Join and node.type == "full outer":
             if not (node.left_readers and node.right_readers):
+                left_rows, right_rows = self._leg_rows(context)
                 self.record_decision(
                     "full outer join build side",
                     "kept, leg has no reader (synthetic relation): "
-                    f"left {_side_facts(node.left_size)},"
-                    f" right {_side_facts(node.right_size)}",
+                    f"left {_side_facts(left_rows)},"
+                    f" right {_side_facts(right_rows)}",
                 )
             else:
                 left_stats, right_stats = self._side_statistics(
-                    context.pre_optimized_tree, context.node_id
+                    context.pre_optimized_tree, context.node_id, context.plan_context
                 )
-                left_rows = self._side_rows(left_stats, node.left_size)
-                right_rows = self._side_rows(right_stats, node.right_size)
+                left_rows = self._side_rows(left_stats)
+                right_rows = self._side_rows(right_stats)
                 sides = f"left {_side_facts(left_rows)}, right {_side_facts(right_rows)}"
                 # Fail-safe on absent statistics, same posture as every other
                 # cost rule here: keep today's shape rather than exchange a join
@@ -681,7 +685,6 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
                     )
                 else:
                     # fmt:off
-                    node.left_size, node.right_size = node.right_size, node.left_size
                     node.left_columns, node.right_columns = node.right_columns, node.left_columns
                     node.left_column, node.right_column = node.right_column, node.left_column
                     node.left_readers, node.right_readers = node.right_readers, node.left_readers
@@ -717,21 +720,22 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
                 # Not "nothing happened": the swap was skipped, and the reason is a
                 # property of the PLAN (a synthetic leg), not of any statistic. A
                 # reader chasing a bad build side needs to know the rules never ran.
+                left_rows, right_rows = self._leg_rows(context)
                 self.record_decision(
                     "inner join build side",
                     "kept, leg has no reader (synthetic relation): "
-                    f"left {_side_facts(node.left_size)},"
-                    f" right {_side_facts(node.right_size)}",
+                    f"left {_side_facts(left_rows)},"
+                    f" right {_side_facts(right_rows)}",
                 )
             else:
                 # Apply join ordering rules from COST-BASED-OPTIMIZER.md, fed from the
                 # refreshed per-node statistics (post-filter row counts and join-key
                 # NDV/null fractions) rather than the binder's pre-filter size estimate.
                 left_stats, right_stats = self._side_statistics(
-                    context.pre_optimized_tree, context.node_id
+                    context.pre_optimized_tree, context.node_id, context.plan_context
                 )
-                left_rows = self._side_rows(left_stats, node.left_size)
-                right_rows = self._side_rows(right_stats, node.right_size)
+                left_rows = self._side_rows(left_stats)
+                right_rows = self._side_rows(right_stats)
                 left_ndv = self._key_ndv(left_stats, node.left_columns)
                 right_ndv = self._key_ndv(right_stats, node.right_columns)
                 left_null = self._key_null_fraction(left_stats, node.left_columns)
@@ -756,7 +760,6 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
             # Perform the swap if needed
             if should_swap:
                 # fmt:off
-                node.left_size, node.right_size = node.right_size, node.left_size
                 node.left_columns, node.right_columns = node.right_columns, node.left_columns
                 node.left_column, node.right_column = node.right_column, node.left_column
                 node.left_readers, node.right_readers = node.right_readers, node.left_readers
@@ -848,7 +851,7 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
         return len(candidates) > 0
 
     @staticmethod
-    def _side_statistics(plan, join_nid):
+    def _side_statistics(plan, join_nid, plan_context: PlanContext):
         """Return (left_stats, right_stats) RelationStatistics for the join's two
         inputs, identified by the 'left'/'right' edge labels. Either may be None
         when statistics are absent or a side is unlabelled.
@@ -863,7 +866,7 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
         left = right = None
         ordered = []
         for child_nid, _, label in plan.ingoing_edges(join_nid):
-            stats = getattr(plan[child_nid], "statistics", None)
+            stats = plan_context.statistics(plan[child_nid])
             ordered.append(stats)
             if label == "left":
                 left = stats
@@ -876,11 +879,26 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
         return left, right
 
     @staticmethod
-    def _side_rows(stats, fallback):
-        """Post-filter row count for a side, falling back to the binder estimate."""
-        if stats is not None and getattr(stats, "row_count", None) is not None:
-            return stats.row_count
-        return fallback
+    def _side_rows(stats):
+        """Post-filter row count for a side.
+
+        JoinAlgorithmStrategy is cost-typed, so the optimizer refreshes statistics
+        before it runs and every leg has an estimate. A leg without one is a broken
+        invariant, not a case to paper over with some other number.
+        """
+        if stats is None:
+            raise InvalidInternalStateError(
+                "JoinAlgorithmStrategy reached a join leg with no statistics; the "
+                "statistics refresh must run before every cost-based strategy."
+            )
+        return stats.row_count
+
+    def _leg_rows(self, context: OptimizerContext):
+        """(left rows, right rows) for the join being visited."""
+        left_stats, right_stats = self._side_statistics(
+            context.pre_optimized_tree, context.node_id, context.plan_context
+        )
+        return self._side_rows(left_stats), self._side_rows(right_stats)
 
     @staticmethod
     def _key_ndv(stats, key_columns):

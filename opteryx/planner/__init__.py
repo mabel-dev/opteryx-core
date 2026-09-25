@@ -66,6 +66,8 @@ from opteryx.types.logical_type import (
     LogicalCategory,
 )
 from opteryx.types.schema import ConstantColumn
+from opteryx.planner.plan_context import PlanContext
+from opteryx.compiled.structures.expressions import Literal
 
 # Mirrors `GRAMMAR_ERROR_PREFIX` in src/aside/cursor.rs. The aside parser has one
 # error channel to Python - a `ValueError` carrying sqlparser's message - so a
@@ -100,9 +102,15 @@ def _infer_collection_literal(value: Any):
     return ARRAY(element_ct), None
 
 
-def build_literal_node(value: Any, root: Optional[Node] = None, suggested_type=None):
+def build_literal_node(value: Any, identity_of: Optional[Node] = None, suggested_type=None):
     """
-    Build a literal node with the appropriate type based on the value.
+    Build a NEW literal node with the appropriate type based on the value.
+
+    `identity_of`: an expression whose identity the literal takes over — its uuid,
+    alias, query_column, schema_column (retyped to the literal's type) and
+    relations — so references to that expression's bound column resolve to the
+    literal (constant folding). Nothing else of it is carried, and it is not
+    modified (its schema_column object is, being shared).
     """
     # Normalise scalar wrappers to native Python types.
     _PYTHON_NATIVE = (
@@ -125,10 +133,18 @@ def build_literal_node(value: Any, root: Optional[Node] = None, suggested_type=N
     ):
         value = value.item()
 
-    if root is None:
-        root = Node(
-            NodeType.LITERAL,
+    if identity_of is None:
+        root = Literal(
             schema_column=ConstantColumn(name=str(value)),
+        )
+    else:
+        root = Literal(
+            uuid=identity_of.uuid,
+            alias=identity_of.alias,
+            query_column=identity_of.query_column,
+            schema_column=identity_of.schema_column,
+            relations=identity_of.relations,
+            do_not_create_column=identity_of.do_not_create_column is True,
         )
 
     if value is None:
@@ -138,10 +154,7 @@ def build_literal_node(value: Any, root: Optional[Node] = None, suggested_type=N
         # NULL string operand would otherwise be read as a garbage arena. With
         # no suggestion the literal stays untyped NULL.
         root.value = None
-        root.node_type = NodeType.LITERAL
         root.type = suggested_type if suggested_type is not None else NULL
-        root.left = None
-        root.right = None
         if root.schema_column is not None:
             root.schema_column.column_type = root.type
         return root
@@ -179,15 +192,14 @@ def build_literal_node(value: Any, root: Optional[Node] = None, suggested_type=N
 
             value = date_to_int64_days(value)
         root.value = value
-        root.node_type = NodeType.LITERAL
         root.type = suggested_type if suggested_type is not None else type_mapping[value_type]
-        root.left = None
-        root.right = None
         if root.schema_column is not None:
             root.schema_column.column_type = root.type
+        return root
 
-    # DEBUG:log (f"Unable to create literal node for {value}, of type {value_type}")
-    return root
+    # No literal type for this value: nothing is built. The expression it would
+    # have replaced stands.
+    return identity_of if identity_of is not None else root
 
 
 def attach_source_position(error, statement) -> None:
@@ -548,10 +560,10 @@ def query_planner(
         )
 
         start = time.monotonic_ns()
-        # One memo of manifest-derived scan statistics for this query's plan —
-        # shared between the optimizer's refreshes and the result-size guard's,
-        # never across queries. See statistics_refresh._scan_stats.
-        scan_stats_cache: Dict[Any, Any] = {}
+        # The query's planning context: estimates and the scan base-statistics
+        # memo, shared by the optimizer, the result-size guard and the billing
+        # meter, never across queries — and never stored on plan nodes.
+        plan_context = PlanContext()
         # Threaded explicitly from here on: Graph copies do not carry instance
         # attributes, so `shared_ctes` on the plan object would not survive an
         # optimizer strategy handing back a copy.
@@ -560,10 +572,14 @@ def query_planner(
         # entries, this maps each rcte_key to them (docs/RECURSIVE_CTE_DESIGN.md).
         recursive_ctes = getattr(bound_plan, "recursive_ctes", None) or {}
         optimized_plan = do_optimizer(
-            bound_plan, telemetry, scan_stats_cache=scan_stats_cache, shared_ctes=shared_ctes
+            bound_plan, telemetry, plan_context, shared_ctes=shared_ctes
         )
         shared_ctes = getattr(optimized_plan, "shared_ctes", None) or shared_ctes
         telemetry.time_planning_optimizer += time.monotonic_ns() - start
+        # Read BEFORE the guard / EXPLAIN ANALYZE refreshes below, which clear it:
+        # together with the flag after them it says whether either of those
+        # refreshed (and so recorded telemetry for) the final plan.
+        fresh_from_optimizer = not optimized_plan.statistics_are_stale
 
         # Refuse a query whose result is already known to blow the row limit, BEFORE any
         # data is read — an accidental cross join should cost nothing, not an hour of IO.
@@ -574,8 +590,8 @@ def query_planner(
         optimized_plan = check_estimated_result_size(
             optimized_plan,
             _resolve_var("sql_select_limit", execution_context.variables, 0),
+            plan_context,
             telemetry=telemetry,
-            scan_stats_cache=scan_stats_cache,
         )
 
         # EXPLAIN ANALYZE: force the estimate refresh. `refresh_statistics` otherwise
@@ -596,9 +612,31 @@ def query_planner(
         ):
             from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
 
-            optimized_plan = refresh_statistics(
-                optimized_plan, telemetry=telemetry, scan_stats_cache=scan_stats_cache
-            )
+            optimized_plan = refresh_statistics(optimized_plan, plan_context, telemetry=telemetry)
+
+        # Estimate telemetry (estimated_row_counts / predicate_estimates /
+        # join_estimates) describes the FINAL plan — architect ruling 2026-09-24.
+        # The optimizer's own refreshes record none: each was overwritten by the
+        # next, and the survivor could describe an intermediate plan whose nodes
+        # no longer exist. When the optimizer estimated at all and neither refresh
+        # above ran on the final plan (it was fresh already, or is still stale),
+        # this is the one refresh that records it.
+        if optimized_plan.statistics_estimated_by_optimizer and (
+            fresh_from_optimizer or optimized_plan.statistics_are_stale
+        ):
+            from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
+
+            optimized_plan = refresh_statistics(optimized_plan, plan_context, telemetry=telemetry)
+
+        # The physical planner reads each shared CTE body's estimates too (the
+        # execution estimates the native sinks size themselves from). A body gets
+        # no guard or telemetry refresh, so refresh any whose plan changed since
+        # its last one — without telemetry, which describes the main plan.
+        from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
+
+        for body in shared_ctes.values():
+            if body.statistics_are_stale:
+                refresh_statistics(body, plan_context)
 
         # The `data_processed` billing meter, measured on the FINAL logical plan —
         # after manifest pruning, projection pushdown and predicate pushdown, all of
@@ -616,7 +654,7 @@ def query_planner(
 
         telemetry.increase(
             "billing_bytes",
-            measure_data_processed(optimized_plan, scan_stats_cache, shared_ctes),
+            measure_data_processed(optimized_plan, plan_context.scan_stats_cache, shared_ctes),
         )
         # Per-scan breakdown of that same figure, keyed by the `uuid` the physical
         # planner carries from the logical node onto the compiled scan node —
@@ -626,7 +664,7 @@ def query_planner(
         # entries, matching the two nodes EXPLAIN draws and the two `billing_bytes`
         # above counts.
         telemetry._reading["billing_bytes_by_scan"] = data_processed_by_scan(
-            optimized_plan, scan_stats_cache, shared_ctes
+            optimized_plan, plan_context.scan_stats_cache, shared_ctes
         )
         # The relations that figure was measured over, recorded from the SAME plan
         # and the same scan walk. Downstream this is what attributes a query to the
@@ -641,7 +679,9 @@ def query_planner(
         # before we write the new optimizer and execution engine, convert to a V1 plan
         start = time.monotonic_ns()
         query_properties = QueryProperties(query_id=query_id, variables=execution_context.variables)
-        physical_plan = create_physical_plan(optimized_plan, query_properties, shared_ctes=shared_ctes)
+        physical_plan = create_physical_plan(
+            optimized_plan, query_properties, plan_context, shared_ctes=shared_ctes
+        )
         physical_plan.recursive_ctes = recursive_ctes
         telemetry.time_planning_physical_planner += time.monotonic_ns() - start
 
@@ -721,8 +761,17 @@ def execute_logical_plan(
     telemetry.time_planning_binder += time.monotonic_ns() - start
 
     start = time.monotonic_ns()
-    optimized_plan = do_optimizer(bound_plan, telemetry)
+    plan_context = PlanContext()
+    optimized_plan = do_optimizer(bound_plan, telemetry, plan_context)
     telemetry.time_planning_optimizer += time.monotonic_ns() - start
+
+    # Estimate telemetry describes the FINAL plan, as in query_planner. This path
+    # has no result-size guard to have refreshed it, so the optimizer having
+    # estimated at all is the whole condition.
+    if optimized_plan.statistics_estimated_by_optimizer:
+        from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
+
+        optimized_plan = refresh_statistics(optimized_plan, plan_context, telemetry=telemetry)
 
     # The `billing_bytes` meter, same figure `plan_query` records: a query is a
     # query whether it arrived as SQL or as a logical plan, and this path
@@ -746,7 +795,7 @@ def execute_logical_plan(
         variables = {}
 
     query_properties = QueryProperties(query_id=query_id, variables=variables)
-    physical_plan = create_physical_plan(optimized_plan, query_properties)
+    physical_plan = create_physical_plan(optimized_plan, query_properties, plan_context)
     telemetry.time_planning_physical_planner += time.monotonic_ns() - start
 
     # Execute the physical plan and return the executor's generator and ResultType.

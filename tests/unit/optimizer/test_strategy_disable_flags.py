@@ -27,12 +27,13 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import pytest
 
 from opteryx.models import QueryTelemetry
+from opteryx.planner.plan_context import PlanContext
 from opteryx.planner.optimizer import OptimizerVisitor
 from opteryx.planner.optimizer import _STRATEGY_DISABLE_FLAGS
 
 
 def test_every_pipeline_strategy_has_a_flag():
-    visitor = OptimizerVisitor(QueryTelemetry(str(uuid.uuid4())))
+    visitor = OptimizerVisitor(QueryTelemetry(str(uuid.uuid4())), PlanContext())
     names_in_pipeline = {type(s).__name__ for s in visitor.strategies}
     mapped = set(_STRATEGY_DISABLE_FLAGS.keys())
     assert names_in_pipeline == mapped, (

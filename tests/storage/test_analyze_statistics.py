@@ -11,19 +11,21 @@ estimator lights up.
 import glob
 import os
 import sys
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 import opteryx
 from opteryx.connectors import connector_factory
 from opteryx.expression import NodeType
-from opteryx.models import Node
 from opteryx.models.manifest_io import DATASET_MANIFEST_NAME
 from opteryx.models.manifest_io import read_manifest_char_classes
 from opteryx.models.manifest_io import read_manifest_file_entries
 from opteryx.models.manifest_io import read_manifest_histograms
 from opteryx.models.manifest_io import read_manifest_sketches
 from opteryx.types.logical_type import LogicalCategory
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 DATASET = "testdata.satellites"
 _MANIFEST_GLOB = f"testdata/satellites/{DATASET_MANIFEST_NAME}"
@@ -161,9 +163,9 @@ def test_drop_statistics_bad_syntax_fails_loud():
 
 
 def _comparison(column_name, op, value):
-    identifier = Node(NodeType.IDENTIFIER, source_column=column_name)
-    literal = Node(NodeType.LITERAL, value=value)
-    return Node(NodeType.COMPARISON_OPERATOR, value=op, left=identifier, right=literal)
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name)
+    literal = Literal(value=value)
+    return Comparison(value=op, left=identifier, right=literal)
 
 
 # satellites.id ranges [1, 177], gm ranges [0.0, 9887.834], name ranges

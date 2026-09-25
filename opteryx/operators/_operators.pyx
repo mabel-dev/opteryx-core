@@ -180,6 +180,9 @@ cdef extern from "engine/groupby_tel.hpp" namespace "opteryx::engine::groupby_te
     long long gb_tel_mid_promotes "opteryx::engine::groupby_tel::mid_promotes_count" ()
     long long gb_tel_distinct_parvi_sinks "opteryx::engine::groupby_tel::distinct_parvi_sinks_count" ()
     long long gb_tel_distinct_parvi_promotes "opteryx::engine::groupby_tel::distinct_parvi_promotes_count" ()
+    long long gb_tel_raw_switches "opteryx::engine::groupby_tel::raw_switches_count" ()
+    long long gb_tel_merge_bucketed "opteryx::engine::groupby_tel::merge_bucketed_count" ()
+    long long gb_tel_merge_buckets "opteryx::engine::groupby_tel::merge_buckets_count" ()
     void gb_tel_reset "opteryx::engine::groupby_tel::reset" ()
 
 cdef extern from "engine/scan_tel.hpp" namespace "opteryx::engine::scan_tel" nogil:
@@ -265,6 +268,18 @@ cdef extern from "pg/pg_scan_spec.hpp" namespace "opteryx::pg" nogil:
         bint schema_from_catalog
         int64_t rows_read
 
+cdef extern from "engine/native_skene_scan_source.hpp" namespace "opteryx::engine" nogil:
+    # A skene scan's IO knobs (in) and counters (out); the plan owns one and the
+    # Source borrows it for the driver's lifetime. Counters are -1 until the scan
+    # runs. See SkeneIo in native_skene_scan_source.hpp.
+    cdef cppclass SkeneIo:
+        double   waste_ratio
+        uint64_t max_bytes
+        int64_t  requests
+        int64_t  metadata_requests
+        int64_t  bytes_fetched
+
+
 cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
     cdef cppclass OpReading "opteryx::engine::Engine::OpReading":
         string identity
@@ -339,7 +354,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                           int64_t* row_groups_total,
                                           int64_t* row_groups_pruned,
                                           int64_t* row_groups_pruned_runtime,
-                                          int64_t* bytes_claimed)
+                                          int64_t* bytes_claimed,
+                                          SkeneIo* io)
         size_t new_runtime_bound()
         void add_skene_runtime_bound(size_t p, size_t bound_idx, string column)
         void add_parquet_runtime_bound(size_t p, size_t bound_idx, string column,
@@ -365,7 +381,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                           const cppvector[int64_t]* zone_ordinals,
                                           int64_t* row_groups_total,
                                           int64_t* row_groups_pruned,
-                                          int64_t* bytes_claimed)
+                                          int64_t* bytes_claimed,
+                                          SkeneIo* io)
         void set_native_scan_source(size_t p, ParquetIOPipeline* pipeline,
                                     const unordered_map[string, FileStats]* footer_map,
                                     const cppvector[pair[string, int]]* work_items,
@@ -777,6 +794,9 @@ def get_groupby_telemetry():
         "mid_promotes": gb_tel_mid_promotes(),
         "distinct_parvi_sinks":    gb_tel_distinct_parvi_sinks(),
         "distinct_parvi_promotes": gb_tel_distinct_parvi_promotes(),
+        "raw_switches":   gb_tel_raw_switches(),
+        "merge_bucketed": gb_tel_merge_bucketed(),
+        "merge_buckets":  gb_tel_merge_buckets(),
     }
 
 
@@ -1469,7 +1489,7 @@ cdef class JoinNode(BasePlanNode):
     cdef public object on
     cdef public object _join_key_cast_plan
     cdef public bint _build_complete
-    # Estimated rows this join will EMIT, from JoinBuildShapeStrategy (None =
+    # Estimated rows this join will EMIT, computed by the physical planner (None =
     # unknown). Read by the compiler and handed to the native Join2BuildSink,
     # which weighs it against the REAL size of its retained build payload to
     # decide whether consolidating that payload costs less than re-copying it
@@ -2222,6 +2242,27 @@ cdef Py_ssize_t _first_non_c_native(CompiledBytecode bc):
     return -1
 
 
+cdef int _init_skene_io(SkeneIo* io, tuple coalesce) except -1:
+    """A plan's SkeneIo: coalescing knobs from ``coalesce`` =
+    ``(waste_ratio, max_bytes)`` (resolved by the compiler from
+    skene_io_coalesce_*), counters at -1 until the scan runs."""
+    if coalesce is None:
+        raise ValueError("a skene scan plan needs its coalescing policy "
+                         "(skene_io_coalesce_waste_ratio, skene_io_coalesce_max_bytes)")
+    io.waste_ratio = <double>coalesce[0]
+    io.max_bytes = <uint64_t>coalesce[1]
+    io.requests = -1
+    io.metadata_requests = -1
+    io.bytes_fetched = -1
+    return 0
+
+
+cdef object _skene_io_counts(SkeneIo* io):
+    if io.requests < 0:
+        return None
+    return (int(io.requests), int(io.metadata_requests), int(io.bytes_fetched))
+
+
 cdef class SkeneScanPlan:
     """Owns the C++ vectors NativeSkeneScanSource borrows for a skene scan.
 
@@ -2281,13 +2322,16 @@ cdef class SkeneScanPlan:
     # file and row-group pruning and NOT with projection, which is why it is not
     # named for bytes "read" or "processed".
     cdef int64_t bytes_claimed
+    # IO knobs (skene's own coalescer, design R12) and the counters the Source
+    # adds into — see SkeneIo. Owned here for the driver's lifetime.
+    cdef SkeneIo io
     # The plan node this scan belongs to, so the post-run fold can find its
     # scan_facts entry. Set by the compiler; None means "do not report".
     cdef public object scan_identity
 
     def __init__(self, list files, list column_names, list out_identities,
                  list column_types, list retag_units, list emit_indices,
-                 list zone_terms=None, list length_only=None):
+                 list zone_terms=None, list length_only=None, tuple coalesce=None):
         if not (len(column_names) == len(out_identities) == len(column_types)
                 == len(retag_units)):
             raise ValueError(
@@ -2324,6 +2368,7 @@ cdef class SkeneScanPlan:
         self.row_groups_pruned = -1
         self.row_groups_pruned_runtime = -1
         self.bytes_claimed = -1
+        _init_skene_io(&self.io, coalesce)
         self.scan_identity = None
         for zone_term in zone_terms or []:
             zone_name, zone_op, zone_ordinal = zone_term
@@ -2357,17 +2402,24 @@ cdef class SkeneScanPlan:
 
     @property
     def bytes_claimed_on_disk(self):
-        """On-disk DATA+INDEX extent of the row groups this scan claimed, or
-        None before it has run.
+        """Bytes the planned fetches of this scan's claimed row groups cover, or
+        None before it has run — or when a v2 file made it unmeasurable (a v2
+        file keeps per-column extents in per-row-group footers the claim builder
+        does not read).
 
-        WHOLE row groups, every column — the per-column extents live in each row
-        group's own footer, which the claim builder deliberately does not parse.
-        So this tracks file and row-group pruning and is BLIND to projection: a
-        query reading one column of a row group reports the same bytes as one
-        reading all of them."""
+        v3: the read set's chunks for the surviving row groups, coalesced by the
+        scan's policy — projection-aware, unlike the whole-row-group extent this
+        reported for v2."""
         if self.bytes_claimed < 0:
             return None
         return int(self.bytes_claimed)
+
+    @property
+    def io_counts(self):
+        """``(requests, metadata_requests, bytes_fetched)`` after the scan has
+        run, or None before: chunk range reads, tail/footer/directory reads, and
+        the bytes of all of them. Every read is a real positional read."""
+        return _skene_io_counts(&self.io)
 
 
 cdef class SkeneLatmatScanPlan:
@@ -2423,13 +2475,15 @@ cdef class SkeneLatmatScanPlan:
     # passes, so this is the whole scan's figure — see SkeneScanPlan.bytes_claimed
     # for why it is blind to projection.
     cdef int64_t bytes_claimed
+    # IO knobs and counters — see SkeneScanPlan.io.
+    cdef SkeneIo io
     cdef public object scan_identity
 
     def __init__(self, list files, list p1_column_names, list p1_column_types,
                  list p1_retag_units, list out_column_names, list out_identities,
                  list out_column_types, list out_retag_units, list pred_col_to_p1,
                  list zone_terms=None, list p1_length_only=None,
-                 list out_length_only=None, int sort_p1_index=-1):
+                 list out_length_only=None, int sort_p1_index=-1, tuple coalesce=None):
         if not (len(p1_column_names) == len(p1_column_types) == len(p1_retag_units)):
             raise ValueError(
                 "SkeneLatmatScanPlan: p1_column_names/p1_column_types/p1_retag_units "
@@ -2491,6 +2545,7 @@ cdef class SkeneLatmatScanPlan:
         self.row_groups_total = -1
         self.row_groups_pruned = -1
         self.bytes_claimed = -1
+        _init_skene_io(&self.io, coalesce)
         self.scan_identity = None
         for zone_term in zone_terms or []:
             zone_name, zone_op, zone_ordinal = zone_term
@@ -2517,6 +2572,12 @@ cdef class SkeneLatmatScanPlan:
         if self.bytes_claimed < 0:
             return None
         return int(self.bytes_claimed)
+
+    @property
+    def io_counts(self):
+        """``(requests, metadata_requests, bytes_fetched)`` after the scan has
+        run, or None before — see SkeneScanPlan.io_counts."""
+        return _skene_io_counts(&self.io)
 
 
 cdef void _fill_payload_types(list types, object logical, object element,
@@ -2880,7 +2941,7 @@ cdef class NativePlan:
                 &splan.length_only, NULL, 0, col_idx, lit_dv, _expr_filter_tramp,
                 &splan.zone_columns, &splan.zone_ops, &splan.zone_ordinals,
                 &splan.row_groups_total, &splan.row_groups_pruned,
-                &splan.row_groups_pruned_runtime, &splan.bytes_claimed)
+                &splan.row_groups_pruned_runtime, &splan.bytes_claimed, &splan.io)
             return
         if not bytecode_is_c_native_predicate(filter_bc):
             raise ValueError("set_native_skene_scan_source requires a c-native "
@@ -2899,7 +2960,7 @@ cdef class NativePlan:
             _expr_filter_tramp,
             &splan.zone_columns, &splan.zone_ops, &splan.zone_ordinals,
             &splan.row_groups_total, &splan.row_groups_pruned,
-            &splan.row_groups_pruned_runtime, &splan.bytes_claimed)
+            &splan.row_groups_pruned_runtime, &splan.bytes_claimed, &splan.io)
 
     def new_runtime_bound(self):
         """Allocate an UNFILLED runtime min/max bound slot and return its index.
@@ -2965,7 +3026,7 @@ cdef class NativePlan:
             sort_p1_index, sort_ascending, topn_limit,
             &splan.zone_columns, &splan.zone_ops, &splan.zone_ordinals,
             &splan.row_groups_total, &splan.row_groups_pruned,
-            &splan.bytes_claimed)
+            &splan.bytes_claimed, &splan.io)
 
     def set_native_scan_source(self, size_t p, NativeScanPlan splan, object row_limit=None):
         """Source = the fully-native parquet scan (NativeParquetScanSource): workers

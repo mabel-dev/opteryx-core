@@ -7,7 +7,8 @@ Coverage:
   - predicate pushdown (eq, lt, gt)
   - projection + predicate combined
   - quoted fields: embedded delimiter, embedded newline
-  - escape styles: \"  and  ""
+  - RFC 4180 quoting: "" is the only escape, backslash is literal
+  - fields longer than 64 KiB are not truncated
   - CRLF line endings
   - has_header=False  (col_0, col_1 ... names)
   - TSV (tab delimiter)
@@ -60,10 +61,9 @@ def test_basic_no_trailing_newline():
 
 
 def test_empty_input():
-    r = read_csv(b"")
-    assert r["success"]
-    assert r["num_rows"] == 0
-    assert r["columns"] == []
+    # No header means no columns: refused rather than returned as a zero-column result.
+    with pytest.raises(ValueError, match="input is empty"):
+        read_csv(b"")
 
 
 def test_header_only_no_data():
@@ -99,6 +99,11 @@ def test_projection_unknown_column_ignored():
     # only known columns returned
     assert r["column_names"] == ["a"]
     assert r["num_rows"] == 1
+
+
+def test_projection_all_unknown_columns_raises():
+    with pytest.raises(ValueError, match="none of the requested columns"):
+        read_csv(b"a,b\n1,2\n", columns=["x", "y"])
 
 
 # ---------------------------------------------------------------------------
@@ -166,12 +171,123 @@ def test_quoted_field_with_embedded_newline():
     assert notes[1] == "plain"
 
 
-def test_backslash_escape_in_quoted():
-    # \" inside a quoted field → "
-    csv = b'id,val\n1,"say \\"hello\\""\n'
+def test_backslash_is_literal_in_quoted():
+    # RFC 4180: backslash is not an escape. "C:\" is a complete field whose
+    # value is C:\ — the quote after the backslash CLOSES the field.
+    csv = b'a,b,c\n1,"C:\\",2\n3,"x",4\n'
     r = read_csv(csv)
+    assert r["num_rows"] == 2
+    assert _to_list(r["columns"][1]) == ["C:\\", "x"]
+    assert _to_list(r["columns"][2]) == [2, 4]
+
+
+def test_backslash_before_ordinary_byte_is_literal():
+    # \0 inside a quoted field is two literal bytes, not an escape sequence.
+    csv = b'a,b,c\n1,"back\\0slash",2\n'
+    for threads in (False, True):
+        r = read_csv(csv, use_threads=threads)
+        assert r["num_rows"] == 1
+        assert _to_list(r["columns"][1]) == ["back\\0slash"]
+        assert _to_list(r["columns"][2]) == [2]
+
+
+def test_backslash_is_literal_in_quoted_header():
+    r = read_csv(b'"a\\","b"\n1,2\n')
+    assert r["column_names"] == ["a\\", "b"]
     assert r["num_rows"] == 1
-    assert _to_list(r["columns"][1])[0] == 'say "hello"'
+
+
+def test_backslash_is_literal_first_row_count_no_header():
+    r = read_csv(b'"x\\",1\n"y",2\n', has_header=False)
+    assert r["column_names"] == ["col_0", "col_1"]
+    assert _to_list(r["columns"][0]) == ["x\\", "y"]
+
+
+def test_backslash_before_doubled_quote():
+    # \"" inside a quoted field is a literal backslash then an escaped quote.
+    csv = b'id,val\n1,"a\\""b"\n'
+    r = read_csv(csv)
+    assert _to_list(r["columns"][1]) == ['a\\"b']
+
+
+def test_backslash_quote_threaded_matches_python_csv():
+    # Drives the parallel split FSM: quoted fields ending in a backslash, with
+    # embedded newlines, across many chunks. Oracle is the stdlib csv module
+    # (RFC 4180 defaults: doublequote=True, escapechar=None).
+    import csv as _csv
+    import io
+
+    rows = [["id", "path", "n"]]
+    for i in range(20000):
+        rows.append([str(i), f"C:\\dir{i}\\" if i % 3 else f'x"\n\\{i}', str(i * 2)])
+    buf = io.StringIO()
+    _csv.writer(buf, lineterminator="\n").writerows(rows)
+    data = buf.getvalue().encode()
+    expected = list(_csv.reader(io.StringIO(buf.getvalue())))[1:]
+    for threads in (False, True):
+        r = read_csv(data, use_threads=threads)
+        assert r["num_rows"] == len(expected)
+        assert _to_list(r["columns"][1]) == [row[1] for row in expected]
+        assert _to_list(r["columns"][2]) == [int(row[2]) for row in expected]
+
+
+def test_mid_field_quote_is_literal():
+    # A quote only opens a quoted field as the field's first byte.
+    r = read_csv(b'a,b\nab"c,d\n1,2\n')
+    assert r["num_rows"] == 2
+    assert _to_list(r["columns"][0]) == ['ab"c', "1"]
+    assert _to_list(r["columns"][1]) == ["d", "2"]
+
+
+def test_mid_field_quote_no_header_column_count():
+    r = read_csv(b'x"y,2,3\n', has_header=False)
+    assert r["column_names"] == ["col_0", "col_1", "col_2"]
+    assert _to_list(r["columns"][0]) == ['x"y']
+
+
+def test_mid_field_quote_threaded_matches_python_csv():
+    # A stray mid-field quote must not flip the split FSM into "quoted", or a
+    # later real quoted field with an embedded newline gets split mid-field.
+    import csv as _csv
+    import io
+
+    lines = ["id,a,b"]
+    for i in range(20000):
+        if i % 2:
+            lines.append(f'{i},5" pipe,"multi\nline {i}"')
+        else:
+            lines.append(f'{i},plain,"x,{i}"')
+    text = "\n".join(lines) + "\n"
+    expected = list(_csv.reader(io.StringIO(text)))[1:]
+    for threads in (False, True):
+        r = read_csv(text.encode(), use_threads=threads)
+        assert r["num_rows"] == len(expected)
+        assert _to_list(r["columns"][1]) == [row[1] for row in expected]
+        assert _to_list(r["columns"][2]) == [row[2] for row in expected]
+
+
+def test_long_unquoted_field_not_truncated():
+    v = "z" * 70000
+    r = read_csv(f"a,b\n{v},1\n".encode())
+    assert _to_list(r["columns"][0]) == [v]
+
+
+def test_long_quoted_escaped_field_not_truncated():
+    # Exercises the unescape path (sniff + build) past the old uint16 limit.
+    v = '"' + "z" * 70000 + '"'
+    raw = v.replace('"', '""')
+    r = read_csv(f'a,b\n"{raw}",1\n'.encode())
+    assert _to_list(r["columns"][0]) == [v]
+    assert _to_list(r["columns"][1]) == [1]
+
+
+def test_long_escaped_field_under_predicate():
+    # Predicate-only column goes through the shared predicate scratch.
+    v = '"' + "q" * 70000
+    raw = v.replace('"', '""')
+    csv = f'a,b\n"{raw}",1\n"x",2\n'.encode()
+    r = read_csv(csv, columns=["b"], predicates=[("a", "==", v)])
+    assert _to_list(r["columns"][0]) == [1]
 
 
 def test_doubled_quote_escape():

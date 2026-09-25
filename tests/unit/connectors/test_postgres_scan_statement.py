@@ -11,6 +11,10 @@ import decimal
 import os
 import sys
 import types
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Function
+from opteryx.compiled.structures.expressions import Literal
+from opteryx.compiled.structures.expressions import Not
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
@@ -24,11 +28,11 @@ from opteryx.connectors.postgres_connector import build_scan_statement
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import NotSupportedError
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.expression import Node
 from opteryx.expression import NodeType
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import SchemaColumn
 from opteryx.types.schema import mint_column_identity
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 
 class _Node:
@@ -232,18 +236,17 @@ def test_can_push_declines_a_predicate_holding_an_unrenderable_literal():
     # the tree with the engine's own traversal.
     def _predicate(literal):
         return types.SimpleNamespace(
-            condition=Node(
-                NodeType.COMPARISON_OPERATOR,
+            condition=Comparison(
                 value="Gt",
-                left=Node(NodeType.IDENTIFIER, value="id", schema_column=_schema_column("id")),
+                left=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="id", schema_column=_schema_column("id")),
                 right=literal,
             )
         )
 
     table = _table()
     # A pre-1 CE DATE is the shape the builder cannot spell.
-    assert table.can_push(_predicate(Node(NodeType.LITERAL, value=-800000, type=_lt.DATE))) is False
-    assert table.can_push(_predicate(Node(NodeType.LITERAL, value=10470, type=_lt.DATE))) is True
+    assert table.can_push(_predicate(Literal(value=-800000, type=_lt.DATE))) is False
+    assert table.can_push(_predicate(Literal(value=10470, type=_lt.DATE))) is True
 
 
 # ---- relation names ----------------------------------------------------------
@@ -863,49 +866,44 @@ def test_the_gate_admits_exactly_what_the_builder_can_spell():
         return types.SimpleNamespace(condition=condition)
 
     def _rcol(name, column_type=_lt.VARCHAR):
-        return Node(NodeType.IDENTIFIER, value=name, schema_column=_schema_column(name, column_type))
+        return LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=name, schema_column=_schema_column(name, column_type))
 
     def _rlit(value, column_type):
-        return Node(NodeType.LITERAL, value=value, type=column_type)
+        return Literal(value=value, type=column_type)
 
     boolean = _schema_column("", _lt.BOOLEAN)
-    starts_with = Node(
-        NodeType.FUNCTION,
+    starts_with = Function(
         value="_STARTS_WITH",
         parameters=[_rcol("name"), _rlit(b"Ea", _lt.VARBINARY)],
         schema_column=boolean,
     )
-    ci_starts_with = Node(
-        NodeType.FUNCTION,
+    ci_starts_with = Function(
         value="_CI_STARTS_WITH",
         parameters=[_rcol("name"), _rlit(b"ea", _lt.VARBINARY)],
         schema_column=boolean,
     )
-    in_list = Node(
-        NodeType.COMPARISON_OPERATOR,
+    in_list = Comparison(
         value="InList",
         left=_rcol("name"),
         right=_rlit([b"Earth"], _lt.ARRAY(_lt.VARCHAR)),
     )
-    instr = Node(
-        NodeType.COMPARISON_OPERATOR,
+    instr = Comparison(
         value="InStr",
         left=_rcol("name"),
         right=_rlit("art", _lt.VARCHAR),
     )
 
     assert table.can_push(_predicate(starts_with)) is True
-    assert table.can_push(_predicate(Node(NodeType.NOT, centre=starts_with))) is True
+    assert table.can_push(_predicate(Not(centre=starts_with))) is True
     assert table.can_push(_predicate(instr)) is True
     assert table.can_push(_predicate(in_list)) is True
     # ... and the declines.
     assert table.can_push(_predicate(ci_starts_with)) is False
-    assert table.can_push(_predicate(Node(NodeType.NOT, centre=ci_starts_with))) is False
+    assert table.can_push(_predicate(Not(centre=ci_starts_with))) is False
     assert (
         table.can_push(
             _predicate(
-                Node(
-                    NodeType.COMPARISON_OPERATOR,
+                Comparison(
                     value="InList",
                     left=_rcol("name"),
                     right=_rlit([10470, -800000], _lt.ARRAY(_lt.DATE)),
@@ -918,8 +916,7 @@ def test_the_gate_admits_exactly_what_the_builder_can_spell():
     assert (
         table.can_push(
             _predicate(
-                Node(
-                    NodeType.FUNCTION,
+                Function(
                     value="ARRAY_CONTAINS",
                     parameters=[_rcol("name"), _rlit(b"x", _lt.VARBINARY)],
                     schema_column=boolean,

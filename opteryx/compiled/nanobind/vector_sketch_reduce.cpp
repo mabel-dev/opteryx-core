@@ -331,10 +331,11 @@ class ColumnSketch {
 // came from sketch A, it is necessarily among the K smallest of A, so no input
 // can hide a hash the answer needs.
 //
-// ⛔ Every input must come from the SAME hash function. skene's stored sketches
-// are XXH3 over value bytes; ANALYZE's are draken's Vector.hash(). Merging
-// across those two produces a number with no meaning — see skene format.h,
-// ColumnSketchHeader, and the header block in draken/core/kmv_sketch.h.
+// ⛔ Every input must come from the SAME hash family. ANALYZE's sketches and a
+// skene v3 file's are draken's Vector.hash() (family 2); a skene v2 file's are
+// XXH3 over value bytes (family 1). Merging across families produces a number
+// with no meaning — see skene FORMAT.md §8 (SketchRecordHeader.hash_family) and
+// the header block in draken/core/kmv_sketch.h.
 static std::vector<uint64_t> merge_min_k(
         const std::vector<std::vector<uint64_t>>& sketches) {
     ManifestSketch merged;

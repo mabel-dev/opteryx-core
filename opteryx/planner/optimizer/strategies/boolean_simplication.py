@@ -11,7 +11,6 @@ Goal: Preposition for following actions
 """
 
 from opteryx.expression import NodeType
-from opteryx.models import Node
 from opteryx.models import QueryTelemetry
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
@@ -21,6 +20,9 @@ from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
 from .optimization_strategy import get_nodes_of_type_from_logical_plan
 from .optimization_strategy import predicate_key
+from opteryx.compiled.structures.expressions import And
+from opteryx.compiled.structures.expressions import Not
+from opteryx.compiled.structures.expressions import Or
 
 # Operations safe to invert.
 HALF_INVERSIONS: dict = {
@@ -77,13 +79,7 @@ def _inverted(node: LogicalPlanNode) -> LogicalPlanNode:
     expression (`g IS NOT NULL`), and the inverted node computes something else.
     Children are shared, as they are unchanged.
     """
-    properties = {
-        name: value
-        for name, value in node.properties.items()
-        if name not in ("node_type", "uuid", "schema_column")
-    }
-    properties["value"] = INVERSIONS[node.value]
-    return Node(node.node_type, **properties)
+    return node.replace(value=INVERSIONS[node.value], schema_column=None)
 
 
 def _directly_invertible(node: LogicalPlanNode) -> bool:
@@ -208,7 +204,7 @@ def _rebuild_and_chain(conditions: list) -> LogicalPlanNode:
 
     result = conditions[0]
     for condition in conditions[1:]:
-        result = Node(NodeType.AND, left=result, right=condition)
+        result = And(left=result, right=condition)
     return result
 
 
@@ -307,7 +303,7 @@ def _rebuild_or_chain(conditions: list) -> LogicalPlanNode:
 
     result = conditions[0]
     for condition in conditions[1:]:
-        result = Node(NodeType.OR, left=result, right=condition)
+        result = Or(left=result, right=condition)
     return result
 
 
@@ -334,13 +330,13 @@ def update_expression_tree(node: LogicalPlanNode, telemetry: QueryTelemetry):
             if len(or_conditions) >= 2:
                 # Create NOT of each condition
                 not_conditions = [
-                    Node(NodeType.NOT, centre=condition) for condition in or_conditions
+                    Not(centre=condition) for condition in or_conditions
                 ]
 
                 # Rebuild as AND chain (highly pushable!)
                 result = not_conditions[0]
                 for condition in not_conditions[1:]:
-                    result = Node(NodeType.AND, left=result, right=condition)
+                    result = And(left=result, right=condition)
 
                 # Track statistic based on chain length
                 if len(or_conditions) > 2:
@@ -361,7 +357,7 @@ def update_expression_tree(node: LogicalPlanNode, telemetry: QueryTelemetry):
                 _directly_invertible(condition) for condition in and_conditions
             ):
                 not_conditions = [
-                    Node(NodeType.NOT, centre=condition) for condition in and_conditions
+                    Not(centre=condition) for condition in and_conditions
                 ]
                 telemetry.optimization_boolean_rewrite_demorgan_and += 1
                 return update_expression_tree(_rebuild_or_chain(not_conditions), telemetry)
@@ -383,17 +379,5 @@ def update_expression_tree(node: LogicalPlanNode, telemetry: QueryTelemetry):
         return _simplify_and_chain(node, telemetry)
 
     # traverse the expression tree
-    node.left = None if node.left is None else update_expression_tree(node.left, telemetry)
-    node.centre = None if node.centre is None else update_expression_tree(node.centre, telemetry)
-    node.right = None if node.right is None else update_expression_tree(node.right, telemetry)
-    if node.parameters:
-        node.parameters = [
-            (
-                parameter
-                if not isinstance(parameter, Node)
-                else update_expression_tree(parameter, telemetry)
-            )
-            for parameter in node.parameters
-        ]
-
+    node.map_children(lambda child: update_expression_tree(child, telemetry))
     return node

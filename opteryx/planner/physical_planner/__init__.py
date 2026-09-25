@@ -48,6 +48,9 @@ from opteryx.models.dataset_format import manifest_format
 from opteryx.operators.catalog import get_registry
 from opteryx.operators.hashed_inner_join import DrakenInnerJoinNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.planner.physical_planner.execution_estimates import group_count_estimate
+from opteryx.planner.physical_planner.execution_estimates import join_output_rows_estimate
+from opteryx.planner.plan_context import PlanContext
 
 # Inverse of a comparison op, for normalizing `literal OP column` to
 # `column OP literal` (rugo's predicate tuples are always column-relative).
@@ -209,7 +212,7 @@ def _create_aggregate_node(logical_node, query_properties, registry):
     )
 
 
-def _create_aggregate_and_group_node(logical_node, query_properties, registry):
+def _create_aggregate_and_group_node(logical_node, query_properties, registry, group_count_estimate):
     node_config = logical_node.properties
     return registry.create(
         "Aggregate and Group",
@@ -220,16 +223,18 @@ def _create_aggregate_and_group_node(logical_node, query_properties, registry):
         # the sink kill the key once it is hashed.
         # grouping_set_identities: GROUP BY ROLLUP's sets, as key identities (the binder
         # resolved them from the planner's positions). Absent for a plain GROUP BY.
-        **{k: v for k, v in node_config.items() if k in ("aggregates", "groups", "projection", "all_relations", "having_condition", "groupby_ndv_estimate", "pre_update_columns", "grouping_set_identities")},
+        **{k: v for k, v in node_config.items() if k in ("aggregates", "groups", "projection", "all_relations", "having_condition", "pre_update_columns", "grouping_set_identities")},
+        groupby_ndv_estimate=group_count_estimate,
     )
 
 
-def _create_distinct_node(logical_node, query_properties, registry):
+def _create_distinct_node(logical_node, query_properties, registry, group_count_estimate):
     node_config = logical_node.properties
     return registry.create(
         "Distinct",
         query_properties,
-        **{k: v for k, v in node_config.items() if k in ("on", "distinct_ndv_estimate")},
+        **{k: v for k, v in node_config.items() if k in ("on",)},
+        distinct_ndv_estimate=group_count_estimate,
     )
 
 
@@ -336,8 +341,10 @@ def _create_heap_sort_node(logical_node, query_properties, registry):
     return registry.create("Heap Sort", query_properties, **logical_node.properties)
 
 
-def _create_join_node(logical_node, query_properties, registry):
-    node_config = logical_node.properties
+def _create_join_node(logical_node, query_properties, registry, output_rows_estimate):
+    # The join's expected output rows sizes the native build sink (see
+    # execution_estimates); None for join types with no build payload.
+    node_config = {**logical_node.properties, "join_output_rows_estimate": output_rows_estimate}
     join_type = node_config.get("type")
 
     if join_type == "inner":
@@ -873,7 +880,9 @@ _DISPATCH = {
 }
 
 
-def create_physical_plan(logical_plan, query_properties, shared_ctes=None) -> PhysicalPlan:
+def create_physical_plan(
+    logical_plan, query_properties, plan_context: PlanContext, shared_ctes=None
+) -> PhysicalPlan:
     plan = PhysicalPlan()
     registry = get_registry()
 
@@ -883,7 +892,25 @@ def create_physical_plan(logical_plan, query_properties, shared_ctes=None) -> Ph
             raise InvalidInternalStateError(
                 f"Unexpected logical node encountered during physical planning: {logical_node.node_type.name}"
             )
-        node = creator(logical_node, query_properties, registry)
+        # The operators that size themselves from a planner estimate get it
+        # computed here, from the final plan and its PlanContext statistics.
+        node_type = logical_node.node_type
+        if node_type == LogicalPlanStepType.Join:
+            node = creator(
+                logical_node,
+                query_properties,
+                registry,
+                join_output_rows_estimate(logical_node, plan_context),
+            )
+        elif node_type in (LogicalPlanStepType.AggregateAndGroup, LogicalPlanStepType.Distinct):
+            node = creator(
+                logical_node,
+                query_properties,
+                registry,
+                group_count_estimate(logical_plan, nid, logical_node),
+            )
+        else:
+            node = creator(logical_node, query_properties, registry)
 
         # Copy optimizer/binder attached metadata from logical node to physical node
         node.manifest = logical_node.manifest
@@ -900,7 +927,7 @@ def create_physical_plan(logical_plan, query_properties, shared_ctes=None) -> Ph
     # a producer pipeline before any pipeline that reads it). A body has no Exit
     # node: its head feeds a buffer-append sink, not the output queue.
     plan.shared_ctes = {
-        cte_key: create_physical_plan(body, query_properties)
+        cte_key: create_physical_plan(body, query_properties, plan_context)
         for cte_key, body in (shared_ctes or {}).items()
     }
 

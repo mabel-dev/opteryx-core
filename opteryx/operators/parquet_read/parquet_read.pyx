@@ -1716,7 +1716,7 @@ cdef class ParquetReadNode(ReaderNode):
                 in_flight_limit_override=<int>_rt_in_flight(getattr(self.properties, "variables", None), self.scan_overrides),
                 coalesce_tuning=_rt_coalesce(getattr(self.properties, "variables", None), self.scan_overrides),
                 fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None), self.scan_overrides),
-                fetch_ahead_min_row_groups=_resolve_fetch_ahead_gate(
+                fetch_ahead_min_blocks=_resolve_fetch_ahead_gate(
                     getattr(self.properties, "variables", None), self.scan_overrides),
                 memory_budget=_resolve_memory_budget(
                     getattr(self.properties, "variables", None), self.scan_overrides),
@@ -1781,7 +1781,7 @@ cdef class ParquetReadNode(ReaderNode):
             in_flight_limit_override=<int>_rt_in_flight(getattr(self.properties, "variables", None), self.scan_overrides),
             coalesce_tuning=_rt_coalesce(getattr(self.properties, "variables", None), self.scan_overrides),
             fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None), self.scan_overrides),
-            fetch_ahead_min_row_groups=_resolve_fetch_ahead_gate(
+            fetch_ahead_min_blocks=_resolve_fetch_ahead_gate(
                 getattr(self.properties, "variables", None), self.scan_overrides),
             memory_budget=_resolve_memory_budget(
                 getattr(self.properties, "variables", None), self.scan_overrides),
@@ -2217,7 +2217,7 @@ cdef class ParquetReadNode(ReaderNode):
             in_flight_limit_override=<int>_rt_in_flight(getattr(self.properties, "variables", None), self.scan_overrides),
             coalesce_tuning=_rt_coalesce(getattr(self.properties, "variables", None), self.scan_overrides),
             fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None), self.scan_overrides),
-            fetch_ahead_min_row_groups=_resolve_fetch_ahead_gate(
+            fetch_ahead_min_blocks=_resolve_fetch_ahead_gate(
                 getattr(self.properties, "variables", None), self.scan_overrides),
             memory_budget=_resolve_memory_budget(
                 getattr(self.properties, "variables", None), self.scan_overrides),
@@ -2310,7 +2310,7 @@ cdef class ParquetReadNode(ReaderNode):
             in_flight_limit_override=<int>_rt_in_flight(getattr(self.properties, "variables", None), self.scan_overrides),
             coalesce_tuning=_rt_coalesce(getattr(self.properties, "variables", None), self.scan_overrides),
             fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None), self.scan_overrides),
-            fetch_ahead_min_row_groups=_resolve_fetch_ahead_gate(
+            fetch_ahead_min_blocks=_resolve_fetch_ahead_gate(
                 getattr(self.properties, "variables", None), self.scan_overrides),
             memory_budget=_resolve_memory_budget(
                 getattr(self.properties, "variables", None), self.scan_overrides),

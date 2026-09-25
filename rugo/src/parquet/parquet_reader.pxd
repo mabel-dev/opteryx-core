@@ -76,6 +76,8 @@ cdef extern from "metadata.hpp":
     cdef cppclass RowGroupStats:
         long long num_rows
         long long total_byte_size
+        long long file_offset
+        long long total_compressed_size
         vector[ColumnStats] columns
 
     cdef cppclass SchemaElement:

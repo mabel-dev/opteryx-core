@@ -19,6 +19,7 @@
 #include "build_vectors.h"
 #include "skene/reader.h"
 #include "skene/writer.h"
+#include "footer_probe.h"
 #include "harness.h"
 
 using namespace skene;
@@ -63,20 +64,26 @@ std::vector<std::string> column_names(const std::vector<uint8_t>& file) {
     return names;
 }
 
-// Every row group's DATA + INDEX extent concatenated — the encoded sections,
-// and NOT the row group footers.
+// Every column node's encoded bytes — its data extent, then its index extent,
+// node by node — and NOT the directory blocks or the footer.
 //
-// Spanning [head, file footer) instead would sweep the row group footers in
-// too, and those legitimately change on a rename: it is their column directory
-// that carries the name. Comparing that span would report a rename as touching
-// data when it had not.
+// v3 is column-major (FORMAT.md §3), so this is the file's content in column
+// order. Directory blocks are left out because they carry section OFFSETS,
+// which legitimately move when an earlier column is dropped; names live only
+// in the footer, so a rename changes none of this.
 std::vector<uint8_t> data_region(const std::vector<uint8_t>& file) {
-    FileMetadata meta;
-    CHECK(read_metadata(file.data(), file.size(), &meta).is_ok());
+    size_t summaries = 0;
+    uint32_t nodes = 0;
+    CHECK(skene_test::summaries_at(file, &summaries, &nodes));
     std::vector<uint8_t> region;
-    for (const RowGroupSummary& rg : meta.row_groups)
-        region.insert(region.end(), file.begin() + rg.byte_offset,
-                      file.begin() + rg.byte_offset + rg.byte_bytes);
+    for (uint32_t n = 0; n < nodes; ++n) {
+        ColumnSummaryHead head;
+        CHECK(skene_test::column_summary(file, n, &head));
+        region.insert(region.end(), file.begin() + head.data_offset,
+                      file.begin() + head.data_offset + head.data_bytes);
+        region.insert(region.end(), file.begin() + head.index_offset,
+                      file.begin() + head.index_offset + head.index_bytes);
+    }
     return region;
 }
 

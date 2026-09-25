@@ -173,24 +173,40 @@ static void test_rejects_truncation_at_every_length() {
 
 static void test_corrupt_footer_is_caught_before_any_offset_is_followed() {
     auto bytes = good_file();
-    size_t footer_at = 0, footer_len = 0;
-    CHECK(skene_test::row_group_footer_extent(bytes, 0, &footer_at, &footer_len));
 
-    // Flip a byte inside the section directory — the worst place, since every
-    // offset a reader is about to follow lives there.
-    std::vector<uint8_t> corrupt = bytes;
-    corrupt[footer_at + footer_len - 8] ^= 0xFF;
-    Status st = expect_rejected(corrupt, "corrupt footer");
-    CHECK(st.code() == Code::kChecksumMismatch);
-    check_message_mentions(st, "footer checksum", "corrupt footer");
+    // The FOOTER: every summary offset a reader is about to follow lives there.
+    {
+        size_t footer_at = 0, footer_len = 0;
+        CHECK(skene_test::file_footer_extent(bytes, &footer_at, &footer_len));
+        std::vector<uint8_t> corrupt = bytes;
+        corrupt[footer_at + footer_len / 2] ^= 0xFF;
+        Status st = expect_rejected(corrupt, "corrupt footer");
+        CHECK(st.code() == Code::kChecksumMismatch);
+        check_message_mentions(st, "footer checksum", "corrupt footer");
+    }
+
+    // A DIRECTORY BLOCK's section entries — the worst place, since every section
+    // offset the decode follows lives there. Caught against the checksum the
+    // footer recorded for it.
+    {
+        skene_test::DirectoryBlock dir;
+        CHECK(skene_test::directory_block(bytes, 0, &dir));
+        std::vector<uint8_t> corrupt = bytes;
+        corrupt[dir.section_at(0) + 8] ^= 0xFF;
+        Status st = expect_rejected(corrupt, "corrupt directory block");
+        CHECK(st.code() == Code::kChecksumMismatch);
+        check_message_mentions(st, "directory block checksum", "corrupt directory block");
+    }
 }
 
 static void test_corrupt_section_body_is_caught() {
     auto bytes = good_file();
-    // The first section starts at kSectionAlign (v2 aligns section bodies);
-    // a flip just past it is inside the first column's data.
+    // v3: the first section body follows column 0's directory block, at the
+    // offset the directory records.
+    skene_test::DirectoryBlock dir;
+    CHECK(skene_test::directory_block(bytes, 0, &dir));
     std::vector<uint8_t> corrupt = bytes;
-    corrupt[kSectionAlign + 4] ^= 0xFF;
+    corrupt[static_cast<size_t>(dir.sections[0].offset) + 4] ^= 0xFF;
 
     Status st = expect_rejected(corrupt, "corrupt section body");
     CHECK(st.code() == Code::kChecksumMismatch);
@@ -200,9 +216,10 @@ static void test_corrupt_section_body_is_caught() {
 }
 
 // Marks every byte some checksum covers: the head (verified structurally, and
-// any flip there changes magic/version/reserved — all checked), each section's
-// stored bytes, each row group footer, the file footer, and the tail. What is
-// left is v2 alignment padding — zero bytes belonging to no section.
+// any flip there changes magic/version/reserved — all checked), the footer, the
+// tail, every column node's directory block, and every section's stored bytes.
+// What is left is alignment padding — zero bytes belonging to no section and no
+// directory block.
 static std::vector<bool> covered_map(const std::vector<uint8_t>& bytes) {
     std::vector<bool> covered(bytes.size(), false);
     auto mark = [&](uint64_t at, uint64_t n) {
@@ -212,33 +229,20 @@ static std::vector<bool> covered_map(const std::vector<uint8_t>& bytes) {
     mark(0, kFileHeadBytes);
     mark(bytes.size() - kFileTailBytes, kFileTailBytes);
 
-    const size_t tail_at = bytes.size() - kFileTailBytes;
-    FileTail tail;
-    std::memcpy(&tail, bytes.data() + tail_at, sizeof(tail));
-    const size_t file_footer_at = tail_at - tail.footer_bytes;
-    mark(file_footer_at, tail.footer_bytes);
+    size_t footer_at = 0, footer_len = 0;
+    skene_test::file_footer_extent(bytes, &footer_at, &footer_len);
+    mark(footer_at, footer_len);
 
-    FileFooterHeader ffh;
-    std::memcpy(&ffh, bytes.data() + file_footer_at, sizeof(ffh));
-    const size_t directory_at =
-        file_footer_at + sizeof(FileFooterHeader) + ffh.writer_tag_bytes;
-    for (uint32_t g = 0; g < ffh.row_group_count; ++g) {
-        RowGroupEntry group;
-        std::memcpy(&group, bytes.data() + directory_at + g * sizeof(RowGroupEntry),
-                    sizeof(group));
-        mark(group.footer_offset, group.footer_bytes);
-
-        RowGroupFooterHeader fh;
-        std::memcpy(&fh, bytes.data() + group.footer_offset, sizeof(fh));
-        const size_t sections_at =
-            static_cast<size_t>(group.footer_offset) + group.footer_bytes
-            - static_cast<size_t>(fh.section_count) * sizeof(SectionEntry);
-        for (uint32_t i = 0; i < fh.section_count; ++i) {
-            SectionEntry entry;
-            std::memcpy(&entry, bytes.data() + sections_at + i * sizeof(entry),
-                        sizeof(entry));
-            mark(entry.offset, entry.stored_bytes);
-        }
+    size_t summaries = 0;
+    uint32_t nodes = 0;
+    skene_test::summaries_at(bytes, &summaries, &nodes);
+    for (uint32_t n = 0; n < nodes; ++n) {
+        ColumnSummaryHead head;
+        skene_test::DirectoryBlock dir;
+        skene_test::column_summary(bytes, n, &head);
+        skene_test::directory_block(bytes, n, &dir);
+        mark(head.directory_offset, head.directory_bytes);
+        for (const SectionEntry& entry : dir.sections) mark(entry.offset, entry.stored_bytes);
     }
     return covered;
 }
@@ -305,19 +309,11 @@ static void test_structurally_impossible_files_are_rejected() {
     FileMetadata meta;
     CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
 
-    // Find the selection section: it is the last section of the only column.
-    size_t footer_at = 0, footer_len = 0;
-    CHECK(skene_test::row_group_footer_extent(bytes, 0, &footer_at, &footer_len));
+    // Find the selection section in the only column's directory block.
+    skene_test::DirectoryBlock dir;
+    CHECK(skene_test::directory_block(bytes, 0, &dir));
 
-    RowGroupFooterHeader fh;
-    std::memcpy(&fh, bytes.data() + footer_at, sizeof(fh));
-    const size_t sections_at = footer_at + footer_len
-        - static_cast<size_t>(fh.section_count) * sizeof(SectionEntry);
-
-    for (uint32_t i = 0; i < fh.section_count; ++i) {
-        SectionEntry entry;
-        std::memcpy(&entry, bytes.data() + sections_at + i * sizeof(SectionEntry),
-                    sizeof(entry));
+    for (const SectionEntry& entry : dir.sections) {
         if (entry.kind != static_cast<uint16_t>(SectionKind::kSelection)) continue;
 
         // Corrupt the packed BODY, leaving the header intact, so the section
@@ -345,59 +341,49 @@ static void test_structurally_impossible_files_are_rejected() {
 // stands between them and the buffer building.
 static void test_section_slice_must_lie_inside_the_directory() {
     auto bytes = good_file();
-    size_t footer_at = 0, footer_len = 0;
-    CHECK(skene_test::row_group_footer_extent(bytes, 0, &footer_at, &footer_len));
+    skene_test::DirectoryBlock dir;
+    CHECK(skene_test::directory_block(bytes, 0, &dir));
+    const size_t chunk_at = dir.chunk_at(0);
+    const ChunkRecord chunk = dir.chunks[0];
+    const uint32_t section_count = dir.header.section_count;
 
-    RowGroupFooterHeader fh;
-    std::memcpy(&fh, bytes.data() + footer_at, sizeof(fh));
-    const size_t head_at =
-        footer_at + sizeof(RowGroupFooterHeader) + fh.writer_tag_bytes;
-
-    ColumnEntryHead head;
-    std::memcpy(&head, bytes.data() + head_at, sizeof(head));
-
-    // A count that runs off the end of the directory.
-    {
+    auto with_chunk = [&](ChunkRecord bad) {
         std::vector<uint8_t> corrupt = bytes;
-        ColumnEntryHead bad = head;
-        bad.section_count = fh.section_count + 1u;
-        std::memcpy(corrupt.data() + head_at, &bad, sizeof(bad));
+        std::memcpy(corrupt.data() + chunk_at, &bad, sizeof(bad));
         repair_checksums(&corrupt);
+        return corrupt;
+    };
 
-        Status st = expect_rejected(corrupt, "section slice past the directory");
+    // A count that runs off the end of the directory block's section list.
+    {
+        ChunkRecord bad = chunk;
+        bad.section_count = section_count + 1u;
+        Status st = expect_rejected(with_chunk(bad), "section slice past the directory");
         CHECK(st.code() == Code::kMalformed);
-        check_message_mentions(st, "references sections", "over-long section slice");
+        check_message_mentions(st, "names sections past", "over-long section slice");
     }
 
     // An index near UINT32_MAX: the bound must be computed wide, or the slice
     // end wraps and a nonsense slice reads as if it fit.
     {
-        std::vector<uint8_t> corrupt = bytes;
-        ColumnEntryHead bad = head;
+        ChunkRecord bad = chunk;
         bad.section_index = 0xFFFFFFF0u;
         bad.section_count = 0x20u;
-        std::memcpy(corrupt.data() + head_at, &bad, sizeof(bad));
-        repair_checksums(&corrupt);
-
-        Status st = expect_rejected(corrupt, "section slice that wraps uint32");
+        Status st = expect_rejected(with_chunk(bad), "section slice that wraps uint32");
         CHECK(st.code() == Code::kMalformed);
-        check_message_mentions(st, "references sections", "wrapping section slice");
+        check_message_mentions(st, "names sections past", "wrapping section slice");
     }
 
-    // The per-row-group metadata path walks the same slice to compute a column's
-    // byte extent, and a pruning reader calls it on the same untrusted footer.
-    //
-    // read_metadata is deliberately NOT the call under test here: it parses the
-    // FILE footer only and never sees a section directory, which is exactly the
-    // property that makes it cheap. The column-level checks live where the
-    // column-level bytes are read.
+    // The per-row-group metadata path attaches the same directory block, so it
+    // meets the same check on the same untrusted bytes. read_metadata does NOT:
+    // it parses the footer only and never sees a directory block, which is
+    // exactly the property that makes it cheap.
     {
-        std::vector<uint8_t> corrupt = bytes;
-        ColumnEntryHead bad = head;
-        bad.section_count = fh.section_count + 1u;
-        std::memcpy(corrupt.data() + head_at, &bad, sizeof(bad));
-        repair_checksums(&corrupt);
-
+        ChunkRecord bad = chunk;
+        bad.section_count = section_count + 1u;
+        const auto corrupt = with_chunk(bad);
+        FileMetadata footer_only;
+        CHECK(read_metadata(corrupt.data(), corrupt.size(), &footer_only).is_ok());
         RowGroupMetadata meta;
         Status st = read_row_group_metadata(corrupt.data(), corrupt.size(), 0, &meta);
         ++skene_test::g_checks;
@@ -405,27 +391,16 @@ static void test_section_slice_must_lie_inside_the_directory() {
             skene_test::report(__FILE__, __LINE__, "metadata on a bad slice",
                                "read_row_group_metadata SUCCEEDED on an "
                                "out-of-range section slice");
-        check_message_mentions(st, "references sections", "metadata section slice");
+        check_message_mentions(st, "names sections past", "metadata section slice");
     }
 
-    // The index slice, which only the pruning path walks — read_morsel never
-    // touches it, because the index region need not even have been fetched.
+    // The index slice is bounded the same way.
     {
-        std::vector<uint8_t> corrupt = bytes;
-        ColumnEntryHead bad = head;
-        bad.index_section_count = fh.section_count + 1u;
-        std::memcpy(corrupt.data() + head_at, &bad, sizeof(bad));
-        repair_checksums(&corrupt);
-
-        RowGroupMetadata meta;
-        Status st = read_row_group_metadata(corrupt.data(), corrupt.size(), 0, &meta);
-        ++skene_test::g_checks;
-        if (st.is_ok())
-            skene_test::report(__FILE__, __LINE__, "metadata on a bad index slice",
-                               "read_row_group_metadata SUCCEEDED on an "
-                               "out-of-range index section slice");
+        ChunkRecord bad = chunk;
+        bad.index_section_count = section_count + 1u;
+        Status st = expect_rejected(with_chunk(bad), "index slice past the directory");
         CHECK(st.code() == Code::kMalformed);
-        check_message_mentions(st, "references index sections", "over-long index slice");
+        check_message_mentions(st, "names sections past", "over-long index slice");
     }
 }
 
@@ -475,18 +450,13 @@ static std::vector<uint8_t> compressed_file(SectionCodec codec, int level) {
 static void each_section_with_codec(
         const std::vector<uint8_t>& bytes, SectionCodec codec, const char* what,
         void (*mutate)(std::vector<uint8_t>*, SectionEntry*, size_t)) {
-    size_t footer_at = 0, footer_len = 0;
-    CHECK(skene_test::row_group_footer_extent(bytes, 0, &footer_at, &footer_len));
-    RowGroupFooterHeader fh;
-    std::memcpy(&fh, bytes.data() + footer_at, sizeof(fh));
-    const size_t sections_at = footer_at + footer_len
-        - static_cast<size_t>(fh.section_count) * sizeof(SectionEntry);
+    skene_test::DirectoryBlock dir;
+    CHECK(skene_test::directory_block(bytes, 0, &dir));
 
     bool found = false;
-    for (uint32_t i = 0; i < fh.section_count; ++i) {
-        const size_t at = sections_at + i * sizeof(SectionEntry);
-        SectionEntry entry;
-        std::memcpy(&entry, bytes.data() + at, sizeof(entry));
+    for (uint32_t i = 0; i < dir.header.section_count; ++i) {
+        const size_t at = dir.section_at(i);
+        SectionEntry entry = dir.sections[i];
         if (entry.codec != static_cast<uint8_t>(codec)) continue;
         found = true;
 
@@ -511,24 +481,19 @@ static void each_section_with_codec(
 // newer file must say so rather than proceed.
 static void test_unknown_encoding_is_fatal() {
     auto bytes = good_file();
-    size_t footer_at = 0, footer_len = 0;
-    CHECK(skene_test::row_group_footer_extent(bytes, 0, &footer_at, &footer_len));
-    RowGroupFooterHeader fh;
-    std::memcpy(&fh, bytes.data() + footer_at, sizeof(fh));
-    const size_t sections_at = footer_at + footer_len
-        - static_cast<size_t>(fh.section_count) * sizeof(SectionEntry);
+    skene_test::DirectoryBlock dir;
+    CHECK(skene_test::directory_block(bytes, 0, &dir));
 
-    for (uint32_t i = 0; i < fh.section_count; ++i) {
-        const size_t at = sections_at + i * sizeof(SectionEntry);
-        SectionEntry entry;
-        std::memcpy(&entry, bytes.data() + at, sizeof(entry));
+    for (uint32_t i = 0; i < dir.header.section_count; ++i) {
+        SectionEntry entry = dir.sections[i];
         if (entry.kind != static_cast<uint16_t>(SectionKind::kData)) continue;
 
         std::vector<uint8_t> corrupt = bytes;
-        // 4 is kLz4, so 60000 is well past anything this format will assign for
-        // a long time — a value from a future version, not a typo.
-        entry.encoding = 60000u;
-        std::memcpy(corrupt.data() + at, &entry, sizeof(entry));
+        // 4 is kLz4, so 250 is well past anything this format will assign for
+        // a long time — a value from a future version, not a typo. (The field
+        // is one byte: a wider literal would wrap to some other value.)
+        entry.encoding = 250u;
+        std::memcpy(corrupt.data() + dir.section_at(i), &entry, sizeof(entry));
         repair_checksums(&corrupt);
 
         Status st = expect_rejected(corrupt, "an encoding from the future");
@@ -591,53 +556,64 @@ static void test_lz4_sections_reject_malformed_bodies() {
         });
 }
 
-// Recomputes every checksum in the file — section, row group footer, and the
-// file footer — so a deliberately altered file is byte-consistent and only
-// structural validation can reject it.
+// Recomputes everything a structural rule is not under test for — each
+// section's checksum, each column's block extents, each directory block's
+// checksum in its summary, and the footer's checksum — so a deliberately
+// altered file is byte-consistent and only the rule under test can reject it.
 //
-// There are now THREE levels, and skipping any one of them would let a test pass
-// for the wrong reason: the read would fail on a checksum instead of on the
-// structural rule it was written to exercise.
+// Skipping any level would let a test pass for the wrong reason: the read would
+// fail on a checksum (or a block extent that no longer matches its chunks)
+// instead of on the rule it was written to exercise.
 static void repair_checksums(std::vector<uint8_t>* bytes) {
     extern uint64_t skene_test_checksum(const void*, size_t);
-    const size_t tail_at = bytes->size() - kFileTailBytes;
-    FileTail tail;
-    std::memcpy(&tail, bytes->data() + tail_at, sizeof(tail));
-    const size_t file_footer_at = tail_at - tail.footer_bytes;
-
+    size_t summaries = 0;
+    uint32_t nodes = 0;
+    if (!skene_test::summaries_at(*bytes, &summaries, &nodes)) return;
     FileFooterHeader ffh;
-    std::memcpy(&ffh, bytes->data() + file_footer_at, sizeof(ffh));
-    const size_t directory_at =
-        file_footer_at + sizeof(FileFooterHeader) + ffh.writer_tag_bytes;
+    skene_test::file_footer_header(*bytes, &ffh);
+    const uint32_t G = ffh.block_row_groups == 0 ? 1u : ffh.block_row_groups;
 
-    for (uint32_t g = 0; g < ffh.row_group_count; ++g) {
-        const size_t entry_at = directory_at + g * sizeof(RowGroupEntry);
-        RowGroupEntry group;
-        std::memcpy(&group, bytes->data() + entry_at, sizeof(group));
-
-        RowGroupFooterHeader fh;
-        std::memcpy(&fh, bytes->data() + group.footer_offset, sizeof(fh));
-        const size_t sections_at =
-            static_cast<size_t>(group.footer_offset) + group.footer_bytes
-            - static_cast<size_t>(fh.section_count) * sizeof(SectionEntry);
-
-        for (uint32_t i = 0; i < fh.section_count; ++i) {
-            const size_t at = sections_at + i * sizeof(SectionEntry);
-            SectionEntry entry;
-            std::memcpy(&entry, bytes->data() + at, sizeof(entry));
+    for (uint32_t n = 0; n < nodes; ++n) {
+        skene_test::DirectoryBlock dir;
+        if (!skene_test::directory_block(*bytes, n, &dir)) return;
+        for (uint32_t i = 0; i < dir.header.section_count; ++i) {
+            SectionEntry entry = dir.sections[i];
+            if (entry.offset + entry.stored_bytes > bytes->size()) continue;
             entry.checksum = skene_test_checksum(bytes->data() + entry.offset,
                                                  entry.stored_bytes);
-            std::memcpy(bytes->data() + at, &entry, sizeof(entry));
+            std::memcpy(bytes->data() + dir.section_at(i), &entry, sizeof(entry));
+            dir.sections[i] = entry;
         }
 
-        group.footer_checksum = skene_test_checksum(
-            bytes->data() + group.footer_offset, group.footer_bytes);
-        std::memcpy(bytes->data() + entry_at, &group, sizeof(group));
-    }
+        // Block extents, re-derived from the chunks exactly as the writer does.
+        ColumnSummaryHead head;
+        size_t head_at = 0;
+        skene_test::column_summary(*bytes, n, &head, &head_at);
+        std::vector<BlockExtent> blocks(head.block_count, BlockExtent{0, 0});
+        for (uint32_t g = 0; g < dir.chunks.size(); ++g) {
+            const ChunkRecord& c = dir.chunks[g];
+            if (g / G >= blocks.size()) break;
+            BlockExtent& block = blocks[g / G];
+            for (uint32_t s = 0; s < c.section_count; ++s) {
+                const uint64_t index = static_cast<uint64_t>(c.section_index) + s;
+                if (index >= dir.sections.size()) break;
+                const SectionEntry& e = dir.sections[index];
+                if (block.bytes == 0) block.offset = e.offset;
+                if (e.offset + e.stored_bytes > block.offset)
+                    block.bytes = std::max<uint64_t>(block.bytes,
+                                                     e.offset + e.stored_bytes - block.offset);
+            }
+        }
+        for (uint32_t b = 0; b < blocks.size(); ++b)
+            std::memcpy(bytes->data() + head_at + sizeof(ColumnSummaryHead)
+                            + b * sizeof(BlockExtent),
+                        &blocks[b], sizeof(BlockExtent));
 
-    tail.footer_checksum =
-        skene_test_checksum(bytes->data() + file_footer_at, tail.footer_bytes);
-    std::memcpy(bytes->data() + tail_at, &tail, sizeof(tail));
+        head.directory_checksum = skene_test_checksum(
+            bytes->data() + head.directory_offset, head.directory_bytes);
+        std::memcpy(bytes->data() + head_at, &head, sizeof(head));
+    }
+    skene_test::reseal_footer(bytes);
 }
 
 int main() {

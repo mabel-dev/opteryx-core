@@ -830,8 +830,9 @@ public:
                                       const std::vector<int64_t>* zone_ordinals,
                                       int64_t* row_groups_total,
                                       int64_t* row_groups_pruned,
-                                      int64_t* row_groups_pruned_runtime = nullptr,
-                                      int64_t* bytes_claimed = nullptr) {
+                                      int64_t* row_groups_pruned_runtime,
+                                      int64_t* bytes_claimed,
+                                      SkeneIo* io) {
         ExprProgram* program = nullptr;
         if (instrs != nullptr) {
             skene_scan_filters.push_back(std::make_unique<ExprProgram>());
@@ -850,7 +851,7 @@ public:
                            retag_units, emit_indices, length_only,
                            program != nullptr ? fn : nullptr, program, zone,
                            row_groups_total, row_groups_pruned,
-                           row_groups_pruned_runtime, bytes_claimed));
+                           row_groups_pruned_runtime, bytes_claimed, io));
     }
 
     // The two-pass late-materialization skene scan: pass 1 decodes only the
@@ -893,7 +894,8 @@ public:
                                       const std::vector<int64_t>* zone_ordinals,
                                       int64_t* row_groups_total,
                                       int64_t* row_groups_pruned,
-                                      int64_t* bytes_claimed = nullptr) {
+                                      int64_t* bytes_claimed,
+                                      SkeneIo* io) {
         SkeneZoneMap zone;
         zone.columns = zone_columns;
         zone.ops = zone_ops;
@@ -905,7 +907,7 @@ public:
                            reinterpret_cast<SkeneLatmatPredFn>(pred_fn), pred_ctx,
                            pred_col_to_p1, sort_p1_index, sort_ascending, topn_limit,
                            zone, row_groups_total, row_groups_pruned,
-                           bytes_claimed));
+                           bytes_claimed, io));
     }
 
     void set_native_scan_source(size_t p, rugo::ParquetIOPipeline* pipeline,

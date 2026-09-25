@@ -217,11 +217,11 @@ def _column_name(column) -> Optional[str]:
     when the same expression was named more than once - the first is the one the
     reader sees.
     """
-    name = column.current_name
+    from opteryx.models import current_name_of
+
+    name = current_name_of(column)
     if isinstance(name, (list, tuple)):
         name = name[0] if name else None
-    if name is None:
-        name = column.source_column
     return None if name is None else str(name)
 
 
@@ -335,13 +335,12 @@ def _expression_roots(node):
     tuples for ORDER BY - so this looks for them rather than knowing each property's
     shape, which is how a walk stops finding things the day a property changes.
     """
-    from opteryx.models import LogicalColumn
-    from opteryx.models import Node
+    from opteryx.models import is_expression
 
     found = []
 
     def _walk(value):
-        if isinstance(value, (Node, LogicalColumn)):
+        if is_expression(value):
             found.append(value)
         elif isinstance(value, (list, tuple)):
             for item in value:

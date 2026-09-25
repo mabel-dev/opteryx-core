@@ -35,9 +35,10 @@ CXXSTD   ?= -std=c++20
 OPT      ?= -O2
 WARN     := -Wall -Wextra -Wno-unused-parameter
 # draken/simd is draken's shared SIMD layer (simd_hash/simd_env/cpu_features/
-# simd_dispatch — moved out of opteryx's src/cpp 2026-08-07). Four draken op
-# headers include "simd_hash.h"; only declarations are needed, nothing links
-# simd_hash.cpp. skene depends on draken alone.
+# simd_dispatch — moved out of opteryx's src/cpp 2026-08-07). v3 LINKS three of
+# its translation units: the per-file sketch is draken's Vector.hash()
+# (src/sketch.cpp -> draken/ops/hash.h -> simd_hash_i64), and simd_hash.cpp
+# needs simd_env/cpu_features. skene still depends on draken alone.
 INCLUDES := -Iinclude \
             -I$(DRAKEN_ROOT)/third_party/zstd \
             -I$(DRAKEN_ROOT)/third_party/lz4 \
@@ -67,8 +68,16 @@ BUILD := build
 # and each consuming binary is documented as owning its own copy of those
 # globals (draken/core/vector_alloc.cpp header comment), so compiling it in is
 # correct rather than a layering violation.
-LIB_SRCS := src/checksum.cpp src/probe.cpp src/writer.cpp src/reader.cpp src/reader_v1.cpp src/reader_v2.cpp src/migrate.cpp src/value_order.cpp src/statistics.cpp src/encoding.cpp src/bloom.cpp src/file_io.cpp src/patch.cpp $(DRAKEN_ROOT)/draken/core/vector_alloc.cpp
-LIB_OBJS := $(BUILD)/checksum.o $(BUILD)/probe.o $(BUILD)/writer.o $(BUILD)/reader.o $(BUILD)/reader_v1.o $(BUILD)/reader_v2.o $(BUILD)/migrate.o $(BUILD)/value_order.o $(BUILD)/statistics.o $(BUILD)/encoding.o $(BUILD)/bloom.o $(BUILD)/file_io.o $(BUILD)/patch.o $(BUILD)/draken_vector_alloc.o $(BUILD)/lz4.o
+SKENE_SRC_NAMES := checksum probe writer reader reader_v2 reader_v3 chunk_decode \
+                   footer_common sketch staging migrate value_order statistics \
+                   encoding bloom file_io patch
+DRAKEN_SIMD_NAMES := simd_hash simd_env cpu_features
+LIB_SRCS := $(patsubst %,src/%.cpp,$(SKENE_SRC_NAMES)) \
+            $(patsubst %,$(DRAKEN_ROOT)/draken/simd/%.cpp,$(DRAKEN_SIMD_NAMES)) \
+            $(DRAKEN_ROOT)/draken/core/vector_alloc.cpp
+LIB_OBJS := $(patsubst %,$(BUILD)/%.o,$(SKENE_SRC_NAMES)) \
+            $(patsubst %,$(BUILD)/draken_%.o,$(DRAKEN_SIMD_NAMES)) \
+            $(BUILD)/draken_vector_alloc.o $(BUILD)/lz4.o
 
 TEST_SRCS := $(wildcard tests/test_*.cpp)
 TEST_BINS := $(patsubst tests/%.cpp,$(BUILD)/%,$(TEST_SRCS))
@@ -121,44 +130,12 @@ check-draken:
 $(BUILD):
 	@mkdir -p $(BUILD)
 
-$(BUILD)/checksum.o: src/checksum.cpp | $(BUILD)
+# One rule for every skene source: -Isrc for the internal headers.
+$(BUILD)/%.o: src/%.cpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
+
+$(BUILD)/draken_%.o: $(DRAKEN_ROOT)/draken/simd/%.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
-
-$(BUILD)/probe.o: src/probe.cpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -c $< -o $@
-
-$(BUILD)/writer.o: src/writer.cpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
-
-$(BUILD)/reader.o: src/reader.cpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
-
-$(BUILD)/reader_v1.o: src/reader_v1.cpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
-
-$(BUILD)/reader_v2.o: src/reader_v2.cpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
-
-$(BUILD)/migrate.o: src/migrate.cpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
-
-$(BUILD)/value_order.o: src/value_order.cpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
-
-$(BUILD)/statistics.o: src/statistics.cpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
-
-$(BUILD)/file_io.o: src/file_io.cpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -c $< -o $@
-
-$(BUILD)/encoding.o: src/encoding.cpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
-
-$(BUILD)/bloom.o: src/bloom.cpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
-
-$(BUILD)/patch.o: src/patch.cpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
 
 $(BUILD)/draken_vector_alloc.o: $(DRAKEN_ROOT)/draken/core/vector_alloc.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@

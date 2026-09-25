@@ -12,8 +12,6 @@ from .disjunctive_domain_pushdown import DisjunctiveDomainPushdownStrategy
 from .aggregate_scan_pushdown import AggregateScanPushdownStrategy
 from .distinct_pushdown import DistinctPushdownStrategy
 from .distinct_scan_pushdown import DistinctScanPushdownStrategy
-from .hash_map_variant import HashMapVariantStrategy
-from .join_build_shape import JoinBuildShapeStrategy
 from .join_condition_hoist import JoinConditionHoistStrategy
 from .join_elimination import JoinEliminationStrategy
 from .join_key_materialization import JoinKeyMaterializationStrategy
@@ -60,8 +58,6 @@ __all__ = [
     "AggregateScanPushdownStrategy",
     "DistinctPushdownStrategy",
     "DistinctScanPushdownStrategy",
-    "HashMapVariantStrategy",
-    "JoinBuildShapeStrategy",
     "JoinConditionHoistStrategy",
     "JoinEliminationStrategy",
     "JoinAlgorithmStrategy",

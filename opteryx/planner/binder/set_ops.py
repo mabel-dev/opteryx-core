@@ -18,6 +18,8 @@ from opteryx.planner.logical_planner import LogicalPlanNode, LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory, ColumnType, find_compatible_type
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import ConstantColumn, SchemaColumn, RelationSchema, mint_column_identity
+from opteryx.compiled.structures.expressions import And
+from opteryx.compiled.structures.expressions import Comparison
 
 
 def visit_set(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
@@ -179,8 +181,7 @@ def _positional_setop_on_condition(left_columns, right_columns) -> Node:
     for (left_relation, left_column), (right_relation, right_column) in zip(
         left_columns, right_columns
     ):
-        equality = Node(
-            node_type=NodeType.COMPARISON_OPERATOR,
+        equality = Comparison(
             value="Eq",
             do_not_create_column=True,
         )
@@ -202,7 +203,7 @@ def _positional_setop_on_condition(left_columns, right_columns) -> Node:
         paired = []
         for i in range(0, len(conditions), 2):
             if i + 1 < len(conditions):
-                and_node = Node(node_type=NodeType.AND, do_not_create_column=True)
+                and_node = And(do_not_create_column=True)
                 and_node.left = conditions[i]
                 and_node.right = conditions[i + 1]
                 paired.append(and_node)

@@ -24,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 import pyarrow.parquet as pq  # test oracle only
+import pytest
 
 from draken.draken_native import DrakenType, vector_array_from_sequence, VARCHAR
 from draken.interop.vector_sequence import vector_from_sequence
@@ -89,14 +90,26 @@ def test_streaming_is_spec_compliant_multi_row_group():
 
 
 def test_sink_is_flushed_incrementally():
-    # One flush per row group plus one for the footer — never a single whole-file
-    # buffer. This is the constant-memory guarantee.
+    # One flush per completed BLOCK (default: every 4 row groups) plus one for
+    # the tail (blooms + page index + footer) — never a single whole-file
+    # buffer. This is the bounded-memory guarantee: the writer holds one block.
+    # The 4-byte PAR1 header is drained on the first call (before any block is
+    # complete), so 8 row groups make: header, block 1, block 2, tail+footer.
     calls = []
     with open_parquet_writer(calls.append) as w:
+        for lo in range(0, 8000, 1000):
+            w.write_row_group(_make_morsel(lo, lo + 1000))
+    assert len(calls) == 4, [len(c) for c in calls]
+    assert calls[0] == b"PAR1"
+    assert all(isinstance(c, (bytes, bytearray)) for c in calls)
+    # And with row-major placement (one row group per block) every row group
+    # streams out as soon as it is written: header+rg1, rg2, rg3, tail+footer.
+    calls = []
+    with open_parquet_writer(calls.append, row_groups_per_block=1) as w:
         for lo in range(0, 3000, 1000):
             w.write_row_group(_make_morsel(lo, lo + 1000))
-    assert len(calls) == 4  # 3 row groups + footer
-    assert all(isinstance(c, (bytes, bytearray)) for c in calls)
+    assert len(calls) == 4, [len(c) for c in calls]
+    assert calls[0].startswith(b"PAR1") and len(calls[0]) > 4
 
 
 def test_exception_leaves_file_uncapped():
@@ -111,10 +124,13 @@ def test_exception_leaves_file_uncapped():
             raise Boom()
     except Boom:
         pass
-    # The row group was flushed, but no footer was written (no trailing PAR1
-    # capping a partial file).
+    # No footer was written: only the 4-byte header ever reached the sink (the
+    # unfinished block is abandoned with the writer), so the bytes are not a
+    # parquet file — no footer length, no trailing magic after a footer.
     data = b"".join(calls)
-    assert not data.endswith(b"PAR1"), "footer should not be written on exception"
+    assert data == b"PAR1", data[-32:]
+    with pytest.raises(Exception):
+        pq.ParquetFile(io.BytesIO(data))
 
 
 def test_write_parquet_stream_wrapper_skips_empty():

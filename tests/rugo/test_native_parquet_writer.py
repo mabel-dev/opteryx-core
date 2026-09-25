@@ -135,11 +135,13 @@ def test_bloom_probe_roundtrip(tmp_path):
 
 
 def test_bloom_probe_bytes_matches_file(tmp_path):
-    """The in-memory bloom probe (TestBloomFilterBytes, used by the remote
-    decode-skip) is byte-identical to the file-based probe: slice the exact bloom
+    """The in-memory bloom probe (TestBloomFilterBytes) is byte-identical to the
+    file-based probe: slice the exact bloom
     region out of a written file and confirm the bytes-probe agrees on every
-    present and absent candidate. Also confirms the new adjacent layout — the
-    bloom sits immediately before its column's data page."""
+    present and absent candidate. Also confirms the tail placement — the bloom
+    sits AFTER the column data (docs/PARQUET_GROUPED_COLUMN_MAJOR_DESIGN.md §2:
+    every bloom filter goes after the last block, so a bloom between two chunks
+    of one column can never split the block's single range)."""
     from rugo.rugo_native import (
         read_rowgroup_stats,
         bloom_filter_maybe_contains,
@@ -154,11 +156,16 @@ def test_bloom_probe_bytes_matches_file(tmp_path):
     off, length = c0["bloom_offset"], c0["bloom_length"]
     assert off >= 0 and length > 0
 
-    # New layout: the bloom is written immediately after the 4-byte PAR1 magic,
-    # i.e. in front of this (only) column's data — not clustered at the row-group
-    # tail as the old layout did (which would put it at a high offset past the
-    # column data). This is what makes the adjacent single-fetch decode-skip work.
-    assert off == 4, off
+    # Tail layout: this (only) column's data page starts right after the 4-byte
+    # PAR1 magic and the bloom follows the data, never precedes it.
+    import io
+
+    import pyarrow.parquet as pq
+
+    chunk = pq.ParquetFile(io.BytesIO(data)).metadata.row_group(0).column(0)
+    start = chunk.dictionary_page_offset if chunk.has_dictionary_page else chunk.data_page_offset
+    assert start == 4, start
+    assert off == 4 + chunk.total_compressed_size, (off, chunk)
 
     bloom_bytes = data[off:off + length]
 

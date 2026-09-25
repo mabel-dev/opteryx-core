@@ -49,18 +49,6 @@ struct OrderedColumn {
     // the exact count and never write both spellings of the same fact.
     double ndv_estimate = 0.0;
 
-    // v2: the kSketchK smallest value hashes, ASCENDING — the stored, MERGEABLE
-    // form of the distinct count (format.h, ColumnSketchHeader).
-    //
-    // Populated for every ORDERABLE column, whether ordering applied or
-    // declined, because the merge needs it in both cases: `ndv` alone is a
-    // scalar and two row groups' scalars cannot be combined without knowing how
-    // much their value sets overlap. Fewer than kSketchK entries means the
-    // column holds exactly that many distinct values.
-    //
-    // Empty when the column is ineligible for ordering at all (no comparable
-    // value to hash), which is the same set that gets no `ndv`.
-    std::vector<uint64_t> min_hashes;
 };
 
 // Returns OK with out->applied == false when the column is not eligible; that

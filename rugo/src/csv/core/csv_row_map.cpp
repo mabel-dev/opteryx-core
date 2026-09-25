@@ -17,7 +17,7 @@ size_t scan_header_row(
     const CsvParseContext&    ctx,
     std::vector<std::string>& column_names_out)
 {
-    enum class H { START, UNQUOTED, QUOTED, ESCAPE_IN_QUOTED, DQ_PENDING };
+    enum class H { START, UNQUOTED, QUOTED, DQ_PENDING };
     H state = H::START;
     std::string name;
 
@@ -55,12 +55,8 @@ size_t scan_header_row(
                 }
                 break;
             case H::QUOTED:
-                if (c == '\\')  { state = H::ESCAPE_IN_QUOTED; }
-                else if (c == '"') { state = H::DQ_PENDING; }
+                if (c == '"') { state = H::DQ_PENDING; }
                 else { append_name_char(name, c); }
-                break;
-            case H::ESCAPE_IN_QUOTED:
-                append_name_char(name, c); state = H::QUOTED;
                 break;
             case H::DQ_PENDING:
                 if (c == '"') { append_name_char(name, '"'); state = H::QUOTED; }
@@ -84,25 +80,25 @@ size_t scan_header_row(
 uint32_t count_first_row_cols(const uint8_t* data, size_t length, const CsvParseContext& ctx) {
     if (length == 0) return 0;
     uint32_t cols = 1;
-    bool in_quoted = false, escape_next = false, dq_pending = false;
+    bool in_quoted = false, dq_pending = false, at_field_start = true;
     for (size_t i = 0; i < length; ++i) {
         const uint8_t c = data[i];
-        if (escape_next) { escape_next = false; continue; }
         if (dq_pending) {
             if (c == '"')             { dq_pending = false; }
-            else if (c == ctx.delimiter) { dq_pending = false; in_quoted = false; ++cols; }
+            else if (c == ctx.delimiter) { dq_pending = false; in_quoted = false; ++cols; at_field_start = true; }
             else if (c == '\n')       { break; }
             else                      { dq_pending = false; }
             continue;
         }
         if (in_quoted) {
-            if (c == '\\')  escape_next = true;
-            else if (c == '"') dq_pending = true;
+            if (c == '"') dq_pending = true;
         } else {
-            if      (c == '"')           in_quoted = true;
-            else if (c == ctx.delimiter) ++cols;
-            else if (c == '\n')          break;
+            // A quote opens a quoted field only as the field's first byte.
+            if      (c == '"' && at_field_start) in_quoted = true;
+            else if (c == ctx.delimiter)         { ++cols; at_field_start = true; continue; }
+            else if (c == '\n')                  break;
         }
+        at_field_start = false;
     }
     return cols;
 }

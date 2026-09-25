@@ -105,8 +105,9 @@ def test_bind_time_rewrite_produces_integer_bounds():
     assert "id >= 5" in _explain_filter("SELECT id FROM $planets WHERE id >= 4.5")
     assert "id <= 4" in _explain_filter("SELECT id FROM $planets WHERE id < 4.5")
     assert "id <= 4" in _explain_filter("SELECT id FROM $planets WHERE id <= 4.5")
-    # Equality against a fractional value can never hold → constant False.
-    assert "False" in _explain_filter("SELECT id FROM $planets WHERE id = 4.5")
+    # Equality against a fractional value can never hold: FALSE for a non-null id,
+    # NULL for a null one → `id <> id` (see predicate_rewriter._decided_unless_null).
+    assert "$planets.id != $planets.id" in _explain_filter("SELECT id FROM $planets WHERE id = 4.5")
 
 
 if __name__ == "__main__":  # pragma: no cover

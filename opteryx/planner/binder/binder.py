@@ -59,6 +59,8 @@ from opteryx.types.logical_type import (
 from opteryx.types.scalars.value_parsing import parse_value
 from opteryx.types.schema import ConstantColumn, FunctionColumn, RelationSchema, SchemaColumn
 from opteryx.types.type_unification import NOT_LITERAL, compute_selection_result_type
+from opteryx.compiled.structures.expressions import Cast
+from opteryx.compiled.structures.expressions import Literal
 
 # Aggregate return-type inference for the binder. Aggregates are dispatched by
 # the physical aggregate operators (not the function catalog), but the binder
@@ -219,13 +221,13 @@ def _bound_cast_node(source, target):
     """
     from opteryx.expression import ExpressionColumn
 
-    parameters = ()
+    parameters = []
     if target.category == LogicalCategory.DECIMAL:
         value = "DECIMAL"
-        parameters = (
-            Node(node_type=NodeType.LITERAL, value=int(target.logical.precision), type=_lt.INT64),
-            Node(node_type=NodeType.LITERAL, value=int(target.logical.scale), type=_lt.INT64),
-        )
+        parameters = [
+            Literal(value=int(target.logical.precision), type=_lt.INT64),
+            Literal(value=int(target.logical.scale), type=_lt.INT64),
+        ]
     elif target.category in (LogicalCategory.TIMESTAMP, LogicalCategory.TIME):
         # Same rule as DECIMAL above, for the same reason. `str(ColumnType)` now
         # carries the unit ("TIMESTAMP[ms]") so that a PERSISTED type does not
@@ -236,8 +238,7 @@ def _bound_cast_node(source, target):
         value = "TIMESTAMP" if target.category == LogicalCategory.TIMESTAMP else "TIME"
     else:
         value = str(target)
-    return Node(
-        node_type=NodeType.CAST,
+    return Cast(
         left=source,
         value=value,
         parameters=parameters,
@@ -622,7 +623,6 @@ def bind_correlated_subquery(node: Node, context: Any) -> Tuple[Node, Dict]:
     columns = list(top.columns or [])
     if len(columns) == 1 and columns[0].schema_column is not None:
         node.schema_column = columns[0].schema_column
-        node.type = columns[0].schema_column.column_type
 
     return node, context
 
@@ -662,13 +662,12 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
         schema_column = context.execution_context.variables.as_column(node.source_column)
         if node.alias:
             schema_column.aliases = [*(schema_column.aliases or []), node.alias]
-        new_node = Node(
-            node_type=NodeType.LITERAL,
+        new_node = Literal(
             schema_column=schema_column,
             type=schema_column.column_type,
             value=schema_column.value,
             alias=node.alias,
-            relations={},
+            relations=set(),
         )
         return new_node
 
@@ -782,8 +781,7 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
         # A second reference to a variable already bound in this query — it was
         # appended to `$derived` above, so the lookup found it. Same rule as the
         # not-found branch: test the name as written, and keep the alias.
-        new_node = Node(
-            node_type=NodeType.LITERAL,
+        new_node = Literal(
             schema_column=column,
             type=column.column_type,
             value=column.value,
@@ -829,9 +827,6 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
 
     # Update node.schema_column with the found column
     node.schema_column = column
-    node.source_connector = {context.relations.get(a) for a in found_source_relation.aliases} - {
-        None
-    }
     # if may need to map source aliases to the columns if they weren't able to be
     # mapped before now
     if column.origin and len(column.origin) == 1:
@@ -842,35 +837,16 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
 def traversive_recursive_bind(
     node: Node, context: Any, format_cache: Optional[dict] = None
 ) -> Tuple[Node, Any]:
-    # First recurse and do this for all the sub parts of the evaluation plan
-    for attr in ("left", "right", "centre"):
-        if getattr(node, attr) is not None:
-            value, context = inner_binder(getattr(node, attr), context, format_cache)
-            setattr(node, attr, value)
-    if node.parameters:
-        node.parameters, new_contexts = zip(
-            *(inner_binder(parm, context, format_cache) for parm in node.parameters)
-        )
-        merged_schemas = merge_schemas(*[ctx.schemas for ctx in new_contexts])
-        context.schemas = merged_schemas
-    if node.node_type == NodeType.CASE:
-        # NodeType.CASE uses conditions/results/else_result instead of parameters
-        if node.conditions:
-            bound, new_contexts = zip(
-                *(inner_binder(c, context, format_cache) for c in node.conditions)
-            )
-            node.conditions = list(bound)
-            merged_schemas = merge_schemas(*[ctx.schemas for ctx in new_contexts])
-            context.schemas = merged_schemas
-        if node.results:
-            bound, new_contexts = zip(
-                *(inner_binder(r, context, format_cache) for r in node.results)
-            )
-            node.results = list(bound)
-            merged_schemas = merge_schemas(*[ctx.schemas for ctx in new_contexts])
-            context.schemas = merged_schemas
-        if node.else_result is not None:
-            node.else_result, context = inner_binder(node.else_result, context, format_cache)
+    # Bind every child first, threading the context through them in their declared
+    # order. (List fields were once bound "in parallel" from one context and the
+    # results merged — but binding mutates the one shared `schemas` dict in place,
+    # so every sibling already saw the others' additions; threading is the same.)
+    def _bind_child(child):
+        nonlocal context
+        bound, context = inner_binder(child, context, format_cache)
+        return bound
+
+    node.map_children(_bind_child)
     return node, context
 
 
@@ -991,12 +967,20 @@ def inner_binder(
 
             node.schema_column = found_column
             node.query_column = node.alias or column_name
-            node.fully_bound = False
 
             if isinstance(found_column, ConstantColumn):
-                node.node_type = NodeType.LITERAL
-                node.value = found_column.value
-                node.type = found_column.column_type
+                # A repeat of a constant (a nullary constant function — PI(), E() —
+                # folded to its value) IS that constant: a new LITERAL in its place.
+                node = Literal(
+                    value=found_column.value,
+                    type=found_column.column_type,
+                    uuid=node.uuid,
+                    alias=node.alias,
+                    query_column=node.query_column,
+                    schema_column=found_column,
+                    relations=node.relations,
+                )
+            context.reused_expressions[id(node)] = node
 
             # Sharing the schema column is not the same as not needing to be bound.
             # This node keeps its FUNCTION shape, and the expression compiler reads
@@ -1010,8 +994,8 @@ def inner_binder(
             # `CASE WHEN ... THEN UPPER(name) ELSE UPPER(name) END`.
             #
             # Read the node's CURRENT type, not the `node_type` local captured
-            # before this block ran. The ConstantColumn arm above REWRITES the node
-            # into a LITERAL (a nullary constant function — PI(), E() — folds to its
+            # before this block ran. The ConstantColumn arm above REPLACES the node
+            # with a LITERAL (a nullary constant function — PI(), E() — folds to its
             # value), which leaves the local stale and node.value holding a float.
             # Binding a function reference off that called the catalog's
             # `resolve(name: str)` with 3.14159..., and Cython's argument coercion
@@ -1062,9 +1046,15 @@ def inner_binder(
                     value=fixed_function_result,
                     nullable=False,
                 )
-                node.node_type = NodeType.LITERAL
-                node.type = result_type
-                node.value = fixed_function_result
+                # A fixed-value function IS its value: a new LITERAL in its place.
+                node = Literal(
+                    type=result_type,
+                    value=fixed_function_result,
+                    uuid=node.uuid,
+                    alias=node.alias,
+                    query_column=node.query_column,
+                    relations=node.relations,
+                )
             else:
                 element_type = None  # for types with elements (ARRAYs)
                 precision = 38  # Maximum precision for Decimal128
@@ -1230,7 +1220,6 @@ def inner_binder(
                     aliases=aliases,
                 )
             schemas["$derived"].columns.append(schema_column)
-            node.derived_from = []
             node.schema_column = schema_column
             node.query_column = node.alias or column_name
 
@@ -1332,7 +1321,6 @@ def inner_binder(
                 aliases=aliases,
             )
             schemas["$derived"].columns.append(schema_column)
-            node.derived_from = []
             node.schema_column = schema_column
             node.query_column = node.alias or column_name
 
@@ -1453,11 +1441,10 @@ def inner_binder(
             # Expression REUSE is matched by NAME (the `schema.find_column(column_name)`
             # lookup above), never by identity, so minting is safe here.
             schemas["$derived"].columns.append(schema_column)
-            node.derived_from = []
             node.schema_column = schema_column
             node.query_column = node.alias or column_name
 
-        elif node.value and node.value.startswith(
+        elif node_type == NodeType.COMPARISON_OPERATOR and node.value.startswith(
             (
                 "AnyOp",
                 "AllOp",
@@ -1607,6 +1594,7 @@ def inner_binder(
             result_ct_final = None
             if (
                 _result_cat == LogicalCategory.DECIMAL
+                and node_type == NodeType.BINARY_OPERATOR
                 and node.value in ("Plus", "Minus", "Multiply", "Divide")
                 and getattr(node, "left", None) is not None
                 and getattr(node, "right", None) is not None
@@ -1632,7 +1620,6 @@ def inner_binder(
                 name=column_name,
                 column_type=_schema_ct,
                 aliases=[node.alias] if node.alias else [],
-                expression=node.value,
             )
             schemas["$derived"].columns.append(schema_column)
             node.schema_column = schema_column

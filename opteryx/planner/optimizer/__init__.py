@@ -35,6 +35,7 @@ from opteryx import config
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import QueryTelemetry
 from opteryx.planner.logical_planner import LogicalPlan
+from opteryx.planner.plan_context import PlanContext
 from opteryx.planner.optimizer.plan_validator import validate_plan
 from opteryx.planner.optimizer.strategies import (
     BooleanSimplificationStrategy,
@@ -54,8 +55,6 @@ from opteryx.planner.optimizer.strategies import (
     FilterImpliedGroupKeyReductionStrategy,
     FunctionRewriteStrategy,
     GroupKeyReductionStrategy,
-    HashMapVariantStrategy,
-    JoinBuildShapeStrategy,
     JoinConditionHoistStrategy,
     JoinEliminationStrategy,
     JoinKeyMaterializationStrategy,
@@ -115,8 +114,6 @@ _STRATEGY_DISABLE_FLAGS = {
     "FilterImpliedGroupKeyReductionStrategy": "disable_filter_implied_group_key_reduction",
     "FunctionRewriteStrategy": "disable_function_rewrite",
     "GroupKeyReductionStrategy": "disable_group_key_reduction",
-    "HashMapVariantStrategy": "disable_hash_map_variant",
-    "JoinBuildShapeStrategy": "disable_join_build_shape",
     "JoinConditionHoistStrategy": "disable_join_condition_hoist",
     "JoinEliminationStrategy": "disable_join_elimination",
     "JoinKeyMaterializationStrategy": "disable_join_key_materialization",
@@ -217,12 +214,21 @@ def _validate_strategy_order(strategies) -> None:
 
 
 class OptimizerVisitor:
-    def __init__(self, telemetry: QueryTelemetry):
+    def __init__(self, telemetry: QueryTelemetry, plan_context: PlanContext):
         """
         Initialize the OptimizerVisitor with a list of optimization strategies.
         Each strategy encapsulates a specific optimization rule.
         """
         self.telemetry = telemetry
+        # The query's estimates and scan-statistics memo. Handed to every
+        # strategy through OptimizerContext; never stored on plan nodes.
+        self.plan_context = plan_context
+        # Whether any optimize() run refreshed statistics. The refreshes here
+        # record NO telemetry — every one is superseded by a later refresh or
+        # describes a plan that no longer exists — so query_planner reads this
+        # to know it owes one telemetry refresh of the FINAL plan (architect
+        # ruling 2026-09-24: estimate telemetry describes the plan that runs).
+        self.refreshed_statistics = False
         self.strategies = [
             # Removes scalar subqueries by turning them into joins. Must run
             # before any strategy that reasons about joins or pushes predicates,
@@ -343,15 +349,9 @@ class OptimizerVisitor:
             # for the search to walk through.
             WindowTopKFusionStrategy(telemetry),
             ConstantFoldingStrategy(telemetry),
-            # Runs last: all other strategies have had their say.
-            # Uses FileEntry.stats_by_name for range detection — projection-stable.
-            HashMapVariantStrategy(telemetry),
-            # Also runs late, and for the same reason: it annotates each join with
-            # the row count that join is expected to EMIT, so every strategy that
-            # can add, remove or reorder a join (JoinElimination/JoinRewrite/
-            # JoinAlgorithm above) must already have had its say — otherwise the
-            # estimate describes a join the plan no longer contains.
-            JoinBuildShapeStrategy(telemetry),
+            # (The execution estimates the native sinks size themselves from —
+            # join output rows, GROUP BY / DISTINCT group counts — are computed by
+            # the physical planner from the final plan: execution_estimates.py.)
             # Runs dead last: it enumerates every reference to a column, so
             # every strategy that can add, remove or rewrite one must already
             # have run. Annotates scans only — it rewrites nothing.
@@ -376,7 +376,7 @@ class OptimizerVisitor:
             return plan
 
         root_nid = exit_points.pop()
-        context = OptimizerContext(plan)
+        context = OptimizerContext(plan, self.plan_context)
         if strategy.rebuilds_plan:
             # Rebuild-from-empty strategies re-add every surviving node and
             # edge themselves; they must start from nothing, not from a view
@@ -409,7 +409,7 @@ class OptimizerVisitor:
             return plan
         return optimized_plan
 
-    def optimize(self, plan: LogicalPlan, scan_stats_cache: Optional[dict] = None) -> LogicalPlan:
+    def optimize(self, plan: LogicalPlan) -> LogicalPlan:
         """
         Optimize the logical plan by applying all registered strategies in sequence.
 
@@ -423,13 +423,6 @@ class OptimizerVisitor:
         # Plans enter the optimizer with no propagated statistics, so treat them
         # as stale until refresh_statistics has populated per-node estimates.
         current_plan.statistics_are_stale = True
-        # Memoizes each scan's manifest-derived base statistics across the
-        # multiple refreshes one optimization run performs — the per-column
-        # manifest walk is the expensive half of a refresh and its inputs are
-        # immutable for the life of the plan. Owned by query_planner so the
-        # result-size guard's refresh shares it. See _scan_stats.
-        if scan_stats_cache is None:
-            scan_stats_cache = {}
         from opteryx.planner.optimizer.strategies.compaction_planning import (
             plan_has_compaction,
         )
@@ -447,11 +440,8 @@ class OptimizerVisitor:
                     strategy.optimization_technique == "cost"
                     and getattr(current_plan, "statistics_are_stale", True)
                 ):
-                    current_plan = refresh_statistics(
-                        current_plan,
-                        telemetry=self.telemetry,
-                        scan_stats_cache=scan_stats_cache,
-                    )
+                    current_plan = refresh_statistics(current_plan, self.plan_context)
+                    self.refreshed_statistics = True
                 before = (len(current_plan), len(current_plan.edges()))
                 previous_plan = current_plan
                 pre_epoch = current_plan._mutation_epoch
@@ -502,7 +492,7 @@ class OptimizerVisitor:
 def do_optimizer(
     plan: LogicalPlan,
     telemetry: QueryTelemetry,
-    scan_stats_cache: Optional[dict] = None,
+    plan_context: PlanContext,
     shared_ctes: Optional[dict] = None,
 ) -> LogicalPlan:
     """
@@ -511,8 +501,9 @@ def do_optimizer(
     Parameters:
         plan (LogicalPlan): The logical plan to optimize.
         telemetry (QueryTelemetry)
-        scan_stats_cache: per-query memo of manifest-derived scan base
-            statistics, shared with the result-size guard's refresh.
+        plan_context: the query's PlanContext — estimates and the scan
+            base-statistics memo, shared with the result-size guard, the
+            billing meter and physical planning. Never stored on nodes.
         shared_ctes: materialize-once CTE bodies (relation_resolver), keyed and
             topologically ordered dependencies-first. Threaded explicitly —
             Graph copies do not carry instance attributes, so an attribute on
@@ -527,26 +518,25 @@ def do_optimizer(
         message = "[OPTERYX] The optimizer has been disabled, 'DISABLE_OPTIMIZER' variable is TRUE."
         print(message)
         telemetry.add_message(message)
+        plan.statistics_are_stale = True
+        plan.statistics_estimated_by_optimizer = False
+        for body in (shared_ctes or {}).values():
+            body.statistics_are_stale = True
         return plan
-    optimizer = OptimizerVisitor(telemetry)
+    optimizer = OptimizerVisitor(telemetry, plan_context)
     shared = dict(shared_ctes or {})
 
     if shared:
         from opteryx.planner.optimizer.shared_cte import coordinate_shared_cte
-        from opteryx.planner.optimizer.shared_cte import stamp_reference_estimates
 
         # Estimates first: a reference leaf carries no manifest, so the main
         # plan's cost-based strategies would otherwise see UNKNOWN where the
         # body's output estimate is derivable. Dependencies first, so a body
         # referencing another shared CTE already sees ITS estimate.
         for key, body in shared.items():
-            body = refresh_statistics(body, scan_stats_cache=scan_stats_cache)
+            body = refresh_statistics(body, plan_context)
             head = body.get_exit_points()[0]
-            stamp_reference_estimates(
-                [plan] + [b for k, b in shared.items() if k != key],
-                key,
-                body[head].statistics,
-            )
+            plan_context.set_cte_statistics(key, plan_context.statistics(body[head]))
 
         # A recursive CTE's references carry its ANCHOR's estimate: the fixpoint's
         # true cardinality has no model yet (docs/RECURSIVE_CTE_DESIGN.md §5.4)
@@ -557,11 +547,9 @@ def do_optimizer(
             if anchor_body is None:
                 continue
             head = anchor_body.get_exit_points()[0]
-            stamp_reference_estimates(
-                [plan] + list(shared.values()), rkey, anchor_body[head].statistics
-            )
+            plan_context.set_cte_statistics(rkey, plan_context.statistics(anchor_body[head]))
 
-    plan = optimizer.optimize(plan, scan_stats_cache=scan_stats_cache)
+    plan = optimizer.optimize(plan)
 
     if shared:
         # Dependents first (reverse topological order): when a body is
@@ -573,11 +561,15 @@ def do_optimizer(
             body = coordinate_shared_cte(
                 shared[key], [plan] + list(optimized.values()), key, telemetry
             )
-            optimized[key] = optimizer.optimize(body, scan_stats_cache=scan_stats_cache)
+            optimized[key] = optimizer.optimize(body)
         # hand back in dependencies-first order — binding used it, compilation
         # relies on it (a producer pipeline must exist before its consumers)
         plan.shared_ctes = {key: optimized[key] for key in shared.keys()}
     else:
         plan.shared_ctes = {}
+
+    # See OptimizerVisitor.refreshed_statistics. Set on the returned plan, like
+    # shared_ctes, because Graph copies drop instance attributes mid-pass.
+    plan.statistics_estimated_by_optimizer = optimizer.refreshed_statistics
 
     return plan

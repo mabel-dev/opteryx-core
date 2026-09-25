@@ -207,6 +207,7 @@ __all__ = (
     "FileSystemConnector",
     "MabelConnector",
     "PostgresConnector",
+    "FirestoreConnector",
     # Factory functions for filesystem connectors
     "create_local_connector",
     "create_gcs_connector",
@@ -729,6 +730,10 @@ def __getattr__(connector_name: str):
         from opteryx.connectors.postgres_connector import PostgresConnector
 
         return PostgresConnector
+    if connector_name == "FirestoreConnector":
+        from opteryx.connectors.firestore_connector import FirestoreConnector
+
+        return FirestoreConnector
     if connector_name == "create_local_mabel_connector":
         from opteryx.connectors.mabel_connector import create_local_mabel_connector
 

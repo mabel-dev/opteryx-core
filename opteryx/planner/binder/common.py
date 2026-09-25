@@ -21,7 +21,7 @@ from opteryx.planner.binder.set_ops import visit_except, visit_intersect, visit_
 from opteryx.planner.binder.window import visit_window
 from opteryx.planner.binder.framed_window import visit_framed_window as _visit_framed_window
 from opteryx.planner.binder.subquery import visit_comment, visit_materialized_cte_ref, visit_subquery
-from opteryx.planner.binder.traversal import post_bind, traverse
+from opteryx.planner.binder.traversal import traverse
 from opteryx.planner.binder.view import (
     visit_alter_view,
     visit_create_view,
@@ -492,9 +492,6 @@ class BinderVisitor:
             "DependentJoin reached the Binder — correlated subquery was not decorrelated. "
             "This is a bug in the Plan Rewriter."
         )
-
-    def post_bind(self, node: Node) -> Node:
-        return post_bind(self, node)
 
     def traverse(
         self, graph: LogicalPlan, node: Node, context: BindingContext

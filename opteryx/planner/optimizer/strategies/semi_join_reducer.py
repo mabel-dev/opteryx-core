@@ -47,15 +47,17 @@ BUILD over a large relation, or a GROUP BY over one, disappears as a result.
 """
 
 from opteryx.expression import NodeType
-from opteryx.models import Node
 from opteryx.planner.binder.join_helpers import extract_join_fields
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.planner.plan_context import PlanContext
 from opteryx.utils import random_string
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
+from opteryx.compiled.structures.expressions import And
+from opteryx.compiled.structures.expressions import Comparison
 
 # The join types whose RIGHT leg is the build side and is therefore the expensive
 # one. compiler.py pins this: "LEFT OUTER / SEMI / ANTI: the LEFT leg is the
@@ -100,7 +102,7 @@ def _is_restricted(plan: LogicalPlan) -> bool:
     return narrowed
 
 
-def _scan_rows(plan: LogicalPlan):
+def _scan_rows(plan: LogicalPlan, plan_context: PlanContext):
     """
     Total base rows every Scan in this subtree reads, or None if any is unknown.
 
@@ -116,8 +118,8 @@ def _scan_rows(plan: LogicalPlan):
     total = 0
     for _nid, node in plan.nodes(True):
         if node.node_type == LogicalPlanStepType.Scan:
-            stats = getattr(node, "statistics", None)
-            rows = getattr(stats, "base_row_count", None) if stats is not None else None
+            stats = plan_context.statistics(node)
+            rows = None if stats is None else stats.base_row_count
             if not rows:
                 return None
             total += rows
@@ -258,10 +260,12 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
             and not getattr(node, "reducer_applied", False)
         ]
         for join_nid in targets:
-            plan = self._reduce_build_side(plan, join_nid)
+            plan = self._reduce_build_side(plan, join_nid, context.plan_context)
         return plan
 
-    def _reduce_build_side(self, plan: LogicalPlan, join_nid: str) -> LogicalPlan:
+    def _reduce_build_side(
+        self, plan: LogicalPlan, join_nid: str, plan_context: PlanContext
+    ) -> LogicalPlan:
         from opteryx.planner.relation_resolver import copy_sub_plan
         from opteryx.planner.relation_resolver import rename_relations
         from opteryx.planner.relation_resolver import subplan_rooted_at
@@ -334,8 +338,8 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
         # it to reduce a 60M-row build side costs 1.25-2.25x what it saves, and the
         # query measured SLOWER with the reducer than without it. Q04's source leg is
         # `orders` alone (15M against 60M) and measured 5.3x faster.
-        source_cost = _scan_rows(source_subplan)
-        target_cost = _scan_rows(subplan_rooted_at(plan, right_root))
+        source_cost = _scan_rows(source_subplan, plan_context)
+        target_cost = _scan_rows(subplan_rooted_at(plan, right_root), plan_context)
         if source_cost is None or not target_cost:
             return plan
         if source_cost >= target_cost * _COST_RATIO:
@@ -367,8 +371,8 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
                 return plan
             copied = source_col.copy()
             copied.source = alias_map.get(source_col.source, source_col.source)
-            equals = Node(
-                node_type=NodeType.COMPARISON_OPERATOR, value="Eq", do_not_create_column=True
+            equals = Comparison(
+                value="Eq", do_not_create_column=True
             )
             equals.left = target_col.copy()
             equals.right = copied
@@ -376,7 +380,7 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
             if on_condition is None:
                 on_condition = equals
             else:
-                conjunction = Node(node_type=NodeType.AND, do_not_create_column=True)
+                conjunction = And(do_not_create_column=True)
                 conjunction.left = on_condition
                 conjunction.right = equals
                 on_condition = conjunction

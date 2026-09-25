@@ -108,7 +108,6 @@ cdef extern from "skene/reader.h" namespace "skene" nogil:
         uint64_t byte_bytes
         cbool    has_statistics
         ColumnStatistics statistics
-        vector[uint64_t] sketch
         ZoneMap  zone_map
         vector[uint8_t] bloom
         vector[ColumnMetadata] children
@@ -124,15 +123,16 @@ cdef extern from "skene/reader.h" namespace "skene" nogil:
     cdef cppclass RowGroupColumnStatistics:
         cbool present
         ColumnStatistics statistics
-        vector[uint64_t] sketch
+
+    cdef cppclass ColumnSketch:
+        uint8_t  hash_family
+        uint32_t k
+        vector[uint64_t] hashes
+        cbool present() const
 
     cdef cppclass RowGroupSummary:
         uint64_t row_count
         uint64_t first_row
-        uint64_t byte_offset
-        uint64_t byte_bytes
-        uint64_t footer_offset
-        uint32_t footer_bytes
         vector[RowGroupColumnStatistics] column_statistics
 
     cdef cppclass FileMetadata:
@@ -143,6 +143,8 @@ cdef extern from "skene/reader.h" namespace "skene" nogil:
         string   writer_tag
         vector[ColumnSchema]    columns
         vector[RowGroupSummary] row_groups
+        uint32_t block_row_groups
+        vector[ColumnSketch]    sketches
 
     cdef cppclass RowGroupMetadata:
         uint64_t row_count
@@ -185,13 +187,17 @@ cdef extern from "skene/writer.h" namespace "skene" nogil:
         uint8_t file_uuid[16]
         uint64_t created_at_unix_us
         string writer_tag
+        uint32_t block_row_groups
+        string scratch_path
 
     cdef cppclass CFileWriter "skene::FileWriter":
         CFileWriter()
         Status begin(const WriteOptions& options, vector[uint8_t]* out)
+        Status begin(const WriteOptions& options, const string& path)
         Status add_row_group(const CxxMorsel& morsel)
         Status finish()
         uint32_t row_group_count()
+        uint64_t staged_bytes()
 
     Status c_write_morsel "skene::write_morsel"(const CxxMorsel& morsel,
                                                 const WriteOptions& options,
@@ -271,10 +277,9 @@ cdef dict _schema_to_dict(const ColumnSchema& c):
 cdef enum:
     _K_STAT_NDV = 0x40        # kStatNdv       — `ndv` holds a distinct count
     _K_STAT_NDV_EXACT = 0x80  # kStatNdvExact  — ...and it is a BOUND, not a sketch
-    _K_STAT_SKETCH = 0x100    # kStatSketch    — KMV min-hashes follow the struct
 
 
-cdef dict _statistics_to_dict(const ColumnStatistics& s, const vector[uint64_t]& sketch):
+cdef dict _statistics_to_dict(const ColumnStatistics& s):
     """One statistics blob as a plain dict.
 
     `ndv` is a v2 growth field. A v1 blob is a 48-byte PREFIX of the struct and
@@ -305,12 +310,26 @@ cdef dict _statistics_to_dict(const ColumnStatistics& s, const vector[uint64_t]&
         "sum": ((<object>s.sum_high) << 64) + ((<object>s.sum_low) & 0xFFFFFFFFFFFFFFFF),
         "ndv": ndv,
         "ndv_exact": ndv_exact,
-        # The MERGEABLE form of the same fact: the K smallest value hashes,
-        # ascending. None when untracked; a list (possibly shorter than K, which
-        # means the column holds exactly that many distinct values) otherwise.
-        # skene's own XXH3 dedup hashes — never mix with an ANALYZE/catalog
-        # sketch, which is hashed differently (format.h, ColumnSketchHeader).
-        "sketch": [sketch[i] for i in range(sketch.size())] if (s.flags & _K_STAT_SKETCH) else None,
+    }
+
+
+cdef object _sketch_to_dict(const ColumnSketch& k):
+    """One column's WHOLE-FILE KMV sketch, or None when not tracked.
+
+    `hash_family` is a correctness discriminant, not a label: two sketches union
+    only when their families are equal (draken/core/kmv_sketch.h). A v3 file's
+    sketches are family 2 — draken's Vector.hash(), the same hash ANALYZE and the
+    catalog sketch with. A v2 file's are family 1 — skene's own XXH3 — and never
+    mix with anything but another family-1 sketch.
+    """
+    if not k.present():
+        return None
+    cdef size_t i
+    return {
+        "hash_family": k.hash_family,
+        "k": k.k,
+        # Ascending; fewer than k means the column holds exactly that many.
+        "hashes": [k.hashes[i] for i in range(k.hashes.size())],
     }
 
 
@@ -319,8 +338,7 @@ cdef dict _row_group_to_dict(const RowGroupSummary& g):
     cdef size_t i
     for i in range(g.column_statistics.size()):
         if g.column_statistics[i].present:
-            stats.append(_statistics_to_dict(g.column_statistics[i].statistics,
-                                             g.column_statistics[i].sketch))
+            stats.append(_statistics_to_dict(g.column_statistics[i].statistics))
         else:
             # Absent means NOT TRACKED, never zero — draken's cardinal
             # statistics rule. None is the only honest spelling of that.
@@ -328,10 +346,6 @@ cdef dict _row_group_to_dict(const RowGroupSummary& g):
     return {
         "row_count": g.row_count,
         "first_row": g.first_row,
-        "byte_offset": g.byte_offset,
-        "byte_bytes": g.byte_bytes,
-        "footer_offset": g.footer_offset,
-        "footer_bytes": g.footer_bytes,
         # Depth-first over `columns`, ARRAY children included.
         "column_statistics": stats,
     }
@@ -368,7 +382,7 @@ cdef dict _column_to_dict(const ColumnMetadata& c):
         # ONE emitter for the blob (the row-group path uses the same call): a
         # second inline copy is how the two dict shapes drift apart on the next
         # growth field.
-        out["statistics"] = _statistics_to_dict(c.statistics, c.sketch)
+        out["statistics"] = _statistics_to_dict(c.statistics)
     if c.zone_map.present():
         out["zone_map"] = {
             "chunk_rows": c.zone_map.chunk_rows,
@@ -417,8 +431,10 @@ def read_metadata(const unsigned char[::1] file not None):
 
     Returns a dict: version, row_count (the file TOTAL), file_uuid,
     created_at_unix_us, writer_tag, columns (the schema: identity and type),
-    and row_groups — each carrying its row count, its byte extents, and its
-    per-column statistics.
+    block_row_groups (v3; 0 for v2, which recorded none), sketches (one per
+    column node, depth first — whole-file KMV with its hash family, or None),
+    and row_groups — each carrying its row count and its per-column
+    statistics.
 
     Those statistics are what makes this the pruning call: a reader decides
     which row groups it wants from this one read, then pays for only their
@@ -441,6 +457,8 @@ def read_metadata(const unsigned char[::1] file not None):
         "columns": [_schema_to_dict(meta.columns[i]) for i in range(meta.columns.size())],
         "row_groups": [_row_group_to_dict(meta.row_groups[i])
                        for i in range(meta.row_groups.size())],
+        "block_row_groups": meta.block_row_groups,
+        "sketches": [_sketch_to_dict(meta.sketches[i]) for i in range(meta.sketches.size())],
     }
 
 
@@ -499,7 +517,8 @@ def read_morsel(const unsigned char[::1] file not None, uint32_t row_group,
 # cannot come to disagree about what a codec name or a level means.
 cdef int _fill_write_options(WriteOptions* options, read_acceleration, codec,
                              zstd_level, bloom_columns, bloom_false_positive_rate,
-                             field_ids, created_at_unix_us, writer_tag) except -1:
+                             field_ids, created_at_unix_us, writer_tag,
+                             block_row_groups=4, scratch_path=None) except -1:
     cdef SectionCodec chosen
 
     if codec == "none":
@@ -519,6 +538,9 @@ cdef int _fill_write_options(WriteOptions* options, read_acceleration, codec,
     options.bloom_false_positive_rate = bloom_false_positive_rate
     options.created_at_unix_us = created_at_unix_us
     options.writer_tag = writer_tag.encode("utf-8")
+    options.block_row_groups = block_row_groups
+    if scratch_path is not None:
+        options.scratch_path = scratch_path.encode("utf-8")
     if bloom_columns is not None:
         for name in bloom_columns:
             options.bloom_columns.push_back(name.encode("utf-8"))
@@ -531,15 +553,23 @@ cdef int _fill_write_options(WriteOptions* options, read_acceleration, codec,
 cdef class SkeneWriter:
     """Builds a .skene file of one or more row groups, a row group at a time.
 
-    Streaming by construction: a caller decodes a row group, hands it over, and
-    drops it. Only the output buffer and a few kilobytes of per-row-group
-    metadata grow with the row group count — which is the difference between
-    writing a 16-row-group file and holding sixteen wide morsels at once.
+    v3 writes in TWO PASSES: add_row_group() encodes and STAGES each row group,
+    and finish() lays the whole file out column-major (FORMAT.md §3). Two
+    output modes, chosen by the constructor:
 
-        writer = SkeneWriter(read_acceleration=True, codec="lz4")
-        for morsel in row_groups:
-            writer.add_row_group(morsel)
-        writer.write_to("part-0000.skene")
+      buffer (default) — stages in memory; finish() returns the bytes, or
+        write_to(path) writes them.
+
+            writer = SkeneWriter(read_acceleration=True, codec="lz4")
+            for morsel in row_groups:
+                writer.add_row_group(morsel)
+            writer.write_to("part-0000.skene")
+
+      path — SkeneWriter(path=..., scratch_path=...) streams the file to `path`
+        and stages in the scratch file, so memory stays at one row group of plans
+        whatever the file's size. finish() completes it and returns its size;
+        there is no write_to(). The scratch path is required — the writer does
+        not choose where it may write — and is removed when the writer finishes.
 
     Every row group must share one schema; a divergent one is rejected rather
     than written into a file whose index does not describe it.
@@ -548,17 +578,26 @@ cdef class SkeneWriter:
     cdef CFileWriter* _writer
     cdef vector[uint8_t] _out
     cdef bint _finished
+    cdef object _path
 
     def __cinit__(self, *, read_acceleration=False, codec="none", zstd_level=0,
                   bloom_columns=None, bloom_false_positive_rate=0.05,
-                  field_ids=None, created_at_unix_us=0, writer_tag=""):
+                  field_ids=None, created_at_unix_us=0, writer_tag="",
+                  block_row_groups=4, path=None, scratch_path=None):
         cdef WriteOptions options
+        cdef string target
         _fill_write_options(&options, read_acceleration, codec, zstd_level,
                             bloom_columns, bloom_false_positive_rate, field_ids,
-                            created_at_unix_us, writer_tag)
+                            created_at_unix_us, writer_tag, block_row_groups,
+                            scratch_path)
         self._writer = new CFileWriter()
         self._finished = False
-        _check(self._writer.begin(options, &self._out))
+        self._path = path
+        if path is None:
+            _check(self._writer.begin(options, &self._out))
+        else:
+            target = path.encode("utf-8")
+            _check(self._writer.begin(options, target))
 
     def __dealloc__(self):
         if self._writer != NULL:
@@ -578,9 +617,12 @@ cdef class SkeneWriter:
 
     @property
     def nbytes(self):
-        """Bytes written so far. Meaningful before finish() as well as after —
-        it is what a caller watches to decide a file is big enough."""
-        return <object>self._out.size()
+        """Section bytes staged so far — what a caller watches to decide a file
+        is big enough. The finished file adds directories, padding and the
+        footer; after finish() in buffer mode, this is the file's exact size."""
+        if self._finished and self._path is None:
+            return <object>self._out.size()
+        return <object>self._writer.staged_bytes()
 
     cdef int _finish_once(self) except -1:
         cdef Status st
@@ -593,24 +635,29 @@ cdef class SkeneWriter:
         return 0
 
     def finish(self):
-        """Complete the file and return it as bytes.
+        """Complete the file.
 
-        This COPIES the whole image. Prefer write_to() for anything large — a
-        packed file of a wide schema is hundreds of megabytes and this doubles
-        the peak for no reason.
+        Buffer mode: returns it as bytes. This COPIES the whole image — prefer
+        write_to() for anything large. Path mode: the file is now at `path`;
+        returns its size in bytes.
         """
         self._finish_once()
+        if self._path is not None:
+            import os
+            return os.path.getsize(self._path)
         return PyBytes_FromStringAndSize(<char*>self._out.data(),
                                          <Py_ssize_t>self._out.size())
 
     def write_to(self, str path not None):
-        """Complete the file and write it to `path`, with no intermediate copy.
-
-        Writes to a temporary alongside the target and renames, so a concurrent
-        reader never observes a half-written file.
-        """
+        """Buffer mode: complete the file and write it to `path`, with no
+        intermediate copy, via a temporary renamed into place so a concurrent
+        reader never observes a half-written file."""
         cdef string target = path.encode("utf-8")
         cdef Status st
+        if self._path is not None:
+            raise SkeneError("Malformed",
+                             f"this SkeneWriter streams to {self._path!r}; "
+                             "finish() completes it")
         self._finish_once()
         with nogil:
             st = c_write_file(target, self._out)

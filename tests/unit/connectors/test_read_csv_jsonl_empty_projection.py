@@ -134,14 +134,20 @@ def test_column_drift_across_a_glob_still_fails(divergent_glob, fmt, ext):
     """Projecting a column across files whose columns disagree must still fail
     loud, naming the offending file.
 
-    Two wordings are both the drift check doing its job: the file's decoded names
-    disagreeing with the expectation (CSV), and the projected column's key being
-    absent from every record of the file (JSONL, whose bound schema is pinned onto
-    each chunk and reports the columns no record carried)."""
+    Three wordings are all the drift check doing its job: the file's decoded names
+    disagreeing with the expectation (CSV, some projected columns present), rugo
+    refusing a projection that names none of the file's columns (CSV, all absent),
+    and the projected column's key being absent from every record of the file
+    (JSONL, whose bound schema is pinned onto each chunk and reports the columns no
+    record carried)."""
     with pytest.raises(DatasetReadError) as exc:
         _rows(f"SELECT b FROM READ_{fmt}('{divergent_glob}/*.{ext}')")
     message = str(exc.value)
-    assert "do not match the expected" in message or "are absent from every record" in message
+    assert (
+        "do not match the expected" in message
+        or "none of the requested columns" in message
+        or "are absent from every record" in message
+    )
     assert "f2." + ext in message  # the offending file is named
 
     with pytest.raises(DatasetReadError):

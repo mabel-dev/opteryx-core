@@ -83,6 +83,8 @@ from opteryx.types.schema import ConstantColumn
 from .disjunction_simplification import _build_and, _split_and, _split_or
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
 from .predicate_pushdown import _normalize_col_op_lit
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
 
 # (value, inclusive, literal_node)
 _Bound = Tuple[object, bool, Node]
@@ -256,7 +258,7 @@ def _literal_node(value, column_type) -> Node:
     from WAS explicitly cast. A bound literal always carries both, so a
     synthesized one must too.
     """
-    lit = Node(node_type=NodeType.LITERAL, type=column_type, value=value)
+    lit = Literal(type=column_type, value=value)
     lit.schema_column = ConstantColumn(name="", column_type=column_type, value=value)
     return lit
 
@@ -265,8 +267,7 @@ def _comparison_node(op: str, ident: Node, lit: Node) -> Node:
     """A synthesized COMPARISON_OPERATOR, stamped BOOL like a bound one. Same
     half-bound hazard as `_literal_node` — a comparison is an expression, and
     a consumer reading its result type off `schema_column` must not find None."""
-    return Node(
-        NodeType.COMPARISON_OPERATOR,
+    return Comparison(
         value=op,
         left=ident.copy(),
         right=lit,

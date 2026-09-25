@@ -57,7 +57,7 @@ def visit_order(self, node: Node, context: BindingContext) -> Tuple[Node, Bindin
     order_by = []
     columns = []
     for column, ascending in node.order_by:
-        if column.is_wildcard_order_position:
+        if column.node_type == NodeType.LITERAL and column.is_wildcard_order_position:
             column = _resolve_wildcard_order_position(column, context)
         bound_column, context = inner_binder(column, context)
 

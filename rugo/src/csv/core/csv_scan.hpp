@@ -21,7 +21,7 @@ namespace rugo::_csv {
 // candidates 16/32 bytes at a time; emit is inlined so the caller can either
 // materialise markers or drive a state machine without an intermediate vector.
 //
-// `ctx.lut` encodes the five structural bytes; `ctx.delimiter` is used directly
+// `ctx.lut` encodes the four structural bytes; `ctx.delimiter` is used directly
 // to load the NEON/AVX2 comparison register. Both must be consistent (i.e. the
 // context was not mutated after construction without calling rebuild_lut()).
 // ---------------------------------------------------------------------------
@@ -40,16 +40,13 @@ inline void scan_structural_csv(
     const uint8x16_t m_cr = vdupq_n_u8('\r');
     const uint8x16_t m_dl = vdupq_n_u8(ctx.delimiter);
     const uint8x16_t m_qu = vdupq_n_u8('"');
-    const uint8x16_t m_bs = vdupq_n_u8('\\');
 
     size_t i = 0;
     for (; i + 16 <= length; i += 16) {
         const uint8x16_t v = vld1q_u8(data + i);
         const uint8x16_t any = vorrq_u8(
-            vorrq_u8(
-                vorrq_u8(vceqq_u8(v, m_nl), vceqq_u8(v, m_cr)),
-                vorrq_u8(vceqq_u8(v, m_dl), vceqq_u8(v, m_qu))),
-            vceqq_u8(v, m_bs));
+            vorrq_u8(vceqq_u8(v, m_nl), vceqq_u8(v, m_cr)),
+            vorrq_u8(vceqq_u8(v, m_dl), vceqq_u8(v, m_qu)));
 
         // Compress 16 byte-compare results to a 16-bit nibble mask
         uint64_t nibble_mask = vget_lane_u64(
@@ -77,16 +74,13 @@ inline void scan_structural_csv(
     const __m256i m_cr = _mm256_set1_epi8('\r');
     const __m256i m_dl = _mm256_set1_epi8(static_cast<char>(ctx.delimiter));
     const __m256i m_qu = _mm256_set1_epi8('"');
-    const __m256i m_bs = _mm256_set1_epi8('\\');
 
     size_t i = 0;
     for (; i + 32 <= length; i += 32) {
         const __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(data + i));
         const __m256i any = _mm256_or_si256(
-            _mm256_or_si256(
-                _mm256_or_si256(_mm256_cmpeq_epi8(v, m_nl), _mm256_cmpeq_epi8(v, m_cr)),
-                _mm256_or_si256(_mm256_cmpeq_epi8(v, m_dl), _mm256_cmpeq_epi8(v, m_qu))),
-            _mm256_cmpeq_epi8(v, m_bs));
+            _mm256_or_si256(_mm256_cmpeq_epi8(v, m_nl), _mm256_cmpeq_epi8(v, m_cr)),
+            _mm256_or_si256(_mm256_cmpeq_epi8(v, m_dl), _mm256_cmpeq_epi8(v, m_qu)));
 
         uint32_t mask = static_cast<uint32_t>(_mm256_movemask_epi8(any));
         while (mask) {
@@ -144,7 +138,7 @@ std::vector<uint32_t> find_safe_splits(
 // Safe-split discovery (parallel, prefix-sum FSM).
 //
 // Divides the buffer into `nt` equal chunks. Each chunk is independently
-// scanned (SIMD) and run through the 4-state quote FSM four times — once
+// scanned (SIMD) and run through the 3-state quote FSM three times — once
 // per possible starting state. A tiny O(nt) serial composition step resolves
 // the true initial state for each chunk, then safe \n positions are collected
 // in order. This eliminates the serial scan bottleneck and scales to hardware

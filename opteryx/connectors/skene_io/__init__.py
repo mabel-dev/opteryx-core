@@ -37,6 +37,24 @@ KSTAT_MIN_MAX = 0x3  # kStatMin | kStatMax
 KSTAT_NULL_COUNT = 0x4  # kStatNullCount
 
 
+def resolve_skene_coalesce_tuning(variables) -> tuple:
+    """``(waste_ratio, max_bytes)`` for a v3 skene scan's range coalescer —
+    skene's own knobs (design R12), resolved default -> env -> SET.
+
+    Session variables only: a skene reader honours no per-scan WITH(...)
+    settings, and the planner refuses one rather than accept an inert knob.
+    """
+    from opteryx import config
+    from opteryx.variables import resolve
+
+    return (
+        float(resolve("skene_io_coalesce_waste_ratio", variables,
+                      config.SKENE_IO_COALESCE_WASTE_RATIO)),
+        int(resolve("skene_io_coalesce_max_bytes", variables,
+                    config.SKENE_IO_COALESCE_MAX_BYTES)),
+    )
+
+
 def skene_statistics_positions(columns, position_by_name: Dict[str, int]) -> list:
     """Map each per-row-group statistics slot to a schema position, or None.
 
@@ -60,7 +78,7 @@ def skene_statistics_positions(columns, position_by_name: Dict[str, int]) -> lis
     return positions
 
 
-def skene_aggregate_row_group_statistics(row_groups, positions) -> tuple:
+def skene_aggregate_row_group_statistics(row_groups, positions, file_sketches) -> tuple:
     """Aggregate a skene file's PER-ROW-GROUP statistics blobs to FILE level.
 
     Statistics in a .skene footer describe a row group, not the file, and a file
@@ -84,13 +102,17 @@ def skene_aggregate_row_group_statistics(row_groups, positions) -> tuple:
     nulls, and `Manifest.get_total_null_count`'s caller (TopN manifest pruning)
     reads a total of 0 as "provably no nulls".
 
-    **NDV** — from the SKETCH when every row group carries one, and only from
-    the scalars when they do not.
+    **NDV** — the FILE's sketch as the footer carries it (``file_sketches``, one
+    per column node, depth first, from ``read_metadata()["sketches"]``), plus the
+    per-row-group scalars below.
 
-    The sketch path is exact arithmetic: the union of KMV sketches is the K
-    smallest of their combined hashes, so overlap between row groups is measured
-    rather than guessed, and a column with fewer than K distinct values comes
-    back EXACT. This is the whole reason skene stores the hashes.
+    A sketch is exact arithmetic: the union of KMV sketches is the K smallest of
+    their combined hashes, so overlap between files is measured rather than
+    guessed, and a column with fewer than K distinct values comes back EXACT.
+    A v3 file stores ONE sketch per column for the whole file, in draken's
+    ``Vector.hash()`` family (2); a v2 file stored one per row group in skene's
+    own XXH3 family (1), and skene's v2 reader reports their exact union. The
+    FAMILY is returned alongside, because sketches union only within a family.
 
     The scalar path is the fallback for files written before sketches existed,
     and it is a guess: distinct counts do NOT sum (two row groups can hold the
@@ -115,14 +137,18 @@ def skene_aggregate_row_group_statistics(row_groups, positions) -> tuple:
     overlapping ranges is a floor rather than a count, so it yields an ESTIMATE
     however exact each contributor was.
     """
-    from opteryx.utils.kmv import merge_min_k
-
     lower: Dict[int, int] = {}
     upper: Dict[int, int] = {}
     nulls: Dict[int, int] = {}
     distincts: Dict[int, tuple] = {}
     sketches: Dict[int, list] = {}
     floors: Dict[int, int] = {}
+    # One file, one hash family: every sketch a footer carries was produced by
+    # the same writer version.
+    families = {sketch["hash_family"] for sketch in file_sketches if sketch is not None}
+    if len(families) > 1:
+        raise ValueError(f"a skene footer reported sketches in hash families {sorted(families)}")
+    sketch_family = families.pop() if families else None
 
     for slot, position in enumerate(positions):
         if position is None:
@@ -137,11 +163,6 @@ def skene_aggregate_row_group_statistics(row_groups, positions) -> tuple:
         ndv_known = True
         ndv_lo = None
         ndv_hi = None
-        # Sketch union. One row group without a sketch voids it for the file —
-        # a union missing a row group's hashes silently undercounts, and there is
-        # no way to tell that apart from a genuinely smaller column.
-        rg_sketches = []
-        sketch_known = True
         # The largest EXACT per-row-group count. A row group is a subset of the
         # file and the file of the relation, so this is a hard LOWER BOUND on
         # both — and unlike the merged count it survives a MAX step, which is
@@ -156,7 +177,6 @@ def skene_aggregate_row_group_statistics(row_groups, positions) -> tuple:
                 bounded = False
                 nulls_known = False
                 ndv_known = False
-                sketch_known = False
                 break
             flags = statistics["flags"]
             has_bounds = (flags & KSTAT_MIN_MAX) == KSTAT_MIN_MAX
@@ -181,12 +201,6 @@ def skene_aggregate_row_group_statistics(row_groups, positions) -> tuple:
             # None is skene's spelling of NOT TRACKED — the native emitter gates
             # on kStatNdv, so a v1 blob (whose `ndv` bytes were never written)
             # reads as None, never as 0.
-            rg_sketch = statistics["sketch"]
-            if rg_sketch is None:
-                sketch_known = False
-            elif sketch_known:
-                rg_sketches.append(rg_sketch)
-
             rg_ndv = statistics["ndv"]
             if rg_ndv is not None and statistics["ndv_exact"]:
                 ndv_floor = max(ndv_floor, rg_ndv)
@@ -223,10 +237,11 @@ def skene_aggregate_row_group_statistics(row_groups, positions) -> tuple:
         if nulls_known:
             nulls[position] = null_total
 
-        if sketch_known and rg_sketches:
-            # The sketch is kept as well as the count it implies: a caller
-            # merging FILES needs the hashes, and a total cannot be un-merged.
-            sketches[position] = merge_min_k(rg_sketches)
+        file_sketch = file_sketches[slot]
+        if file_sketch is not None:
+            # The hashes are kept as well as the count they imply: a caller
+            # merging FILES needs them, and a total cannot be un-merged.
+            sketches[position] = file_sketch["hashes"]
         # The scalar merge is kept even when a sketch exists, and NOT because it
         # is a better estimate — it is not. An EXACT count is a hard LOWER BOUND
         # on the relation (a subset cannot hold more distinct values than the
@@ -238,7 +253,7 @@ def skene_aggregate_row_group_statistics(row_groups, positions) -> tuple:
         if ndv_floor:
             floors[position] = ndv_floor
 
-    return lower, upper, nulls, distincts, sketches, floors
+    return lower, upper, nulls, distincts, sketches, sketch_family, floors
 
 
 def skene_column_type(column: Dict[str, Any]) -> ColumnType:

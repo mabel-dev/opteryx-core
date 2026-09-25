@@ -45,8 +45,7 @@ from typing import Set
 
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
-from opteryx.models import LogicalColumn
-from opteryx.models import Node
+from opteryx.models import is_expression
 
 
 def _is_expression(value) -> bool:
@@ -60,14 +59,7 @@ def _is_expression(value) -> bool:
     carrier — including bare ``LogicalColumn``s held directly in fields like
     ``order_by`` and ``groups`` — while excluding plan nodes.
     """
-    # Both carriers answer `.node_type` natively (Node via its cdef slot,
-    # LogicalColumn as a real attribute); everything else — containers,
-    # scalars, schema objects — is excluded by the isinstance gate, so no
-    # defensive getattr is needed (and a defensive getattr here would hide
-    # what this function is actually asking).
-    if isinstance(value, (Node, LogicalColumn)):
-        return isinstance(value.node_type, NodeType)
-    return False
+    return is_expression(value)
 
 
 def _collect_roots(value, out: List) -> None:

@@ -3,14 +3,16 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-"""WP-7: JoinAlgorithmStrategy consumes node.statistics (post-filter row counts).
+"""WP-7: JoinAlgorithmStrategy consumes the PlanContext statistics (post-filter row counts).
 
 Two layers:
   * ``_decide_swap_reasoned`` — the pure side-selection logic, including the case the old
     pre-filter size heuristic got wrong (a heavily-filtered large table).
   * ``JoinAlgorithmStrategy.visit`` end-to-end — proves the strategy reads the
-    children's post-filter ``statistics.row_count`` (by 'left'/'right' edge
-    label) instead of the binder's pre-filter ``left_size``/``right_size``.
+    children's post-filter estimated row counts (by 'left'/'right' edge label).
+    (The binder's pre-filter leg sizes it once fell back to are gone: the refresh
+    always runs before this cost strategy, so a leg without statistics is an
+    invariant violation — architect ruling 2026-09-25.)
 """
 
 import os
@@ -22,6 +24,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import pytest
 
 from opteryx.models import QueryTelemetry
+from opteryx.planner.plan_context import PlanContext
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
@@ -102,28 +105,27 @@ def test_decide_swap_null_fraction_breaks_cardinality_tie():
 _K = b"tes_k_000000001"
 
 
-def _scan_with_stats(relation, row_count):
+def _scan_with_stats(relation, row_count, plan_context):
     n = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
     n.relation = relation
     n.all_relations = {relation}
     n.columns = []
-    n.statistics = RelationStatistics(
-        row_count_estimate=row_count,
-        columns={
-            _K: ColumnStatistics(column_name="k", data_type="INTEGER")
-        },
+    plan_context.set_statistics(
+        n,
+        RelationStatistics(
+            row_count_estimate=row_count,
+            columns={
+                _K: ColumnStatistics(column_name="k", data_type="INTEGER")
+            },
+        ),
     )
     return n
 
 
-def _inner_join_node(left_size, right_size):
+def _inner_join_node():
     n = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
     n.type = "inner"
     n.on = SimpleNamespace(value="Eq")
-    # pre-filter sizes (the binder estimate) — deliberately the OPPOSITE order to
-    # the post-filter statistics, so a passing test proves statistics won.
-    n.left_size = left_size
-    n.right_size = right_size
     # Join keys are raw column identities, matching how RelationStatistics is keyed.
     n.left_columns = [_K]
     n.right_columns = [_K]
@@ -161,38 +163,37 @@ def _leg_labels(plan):
 
 
 def test_visit_swaps_on_post_filter_statistics_not_pre_filter_size():
-    # Pre-filter sizes say left(big)=1_000_000 huge, right(small)=1000 -> old code
-    # swaps (big to the right). But post-filter statistics say the LEFT side is
-    # only 50 rows (a selective filter) and the right is 1000. With statistics the
-    # left is already the smaller side, so NO swap should happen.
-    join_node = _inner_join_node(left_size=1_000_000, right_size=1000)
-    left_scan = _scan_with_stats("big", row_count=50)  # post-filter: tiny
-    right_scan = _scan_with_stats("small", row_count=1000)
+    # Post-filter statistics say the LEFT side is only 50 rows (a selective filter)
+    # and the right is 1000: the left is already the smaller side, so NO swap.
+    plan_context = PlanContext()
+    join_node = _inner_join_node()
+    left_scan = _scan_with_stats("big", row_count=50, plan_context=plan_context)  # post-filter: tiny
+    right_scan = _scan_with_stats("small", row_count=1000, plan_context=plan_context)
     plan = _build_join_plan(join_node, left_scan, right_scan)
 
     strategy = JoinAlgorithmStrategy(telemetry=QueryTelemetry.detached())
-    context = OptimizerContext(plan)
+    context = OptimizerContext(plan, plan_context)
     context.node_id = "j"
 
     before = strategy.telemetry.optimization_inner_join_smallest_table_left
     strategy.visit(plan["j"], context)
     after = strategy.telemetry.optimization_inner_join_smallest_table_left
 
-    # No swap: statistics show left already smallest. (Pre-filter sizes alone
-    # would have forced a swap via the 3x rule.)
+    # No swap: statistics show left already smallest.
     assert after == before, "should not swap when post-filter stats show left is smaller"
     assert _leg_labels(context.optimized_plan) == {"l": "left", "r": "right"}
 
 
 def test_visit_swaps_when_statistics_show_left_is_larger():
     # Mirror: post-filter statistics show the left side is the big one.
-    join_node = _inner_join_node(left_size=1000, right_size=1000)
-    left_scan = _scan_with_stats("big", row_count=100_000)
-    right_scan = _scan_with_stats("small", row_count=100)
+    plan_context = PlanContext()
+    join_node = _inner_join_node()
+    left_scan = _scan_with_stats("big", row_count=100_000, plan_context=plan_context)
+    right_scan = _scan_with_stats("small", row_count=100, plan_context=plan_context)
     plan = _build_join_plan(join_node, left_scan, right_scan)
 
     strategy = JoinAlgorithmStrategy(telemetry=QueryTelemetry.detached())
-    context = OptimizerContext(plan)
+    context = OptimizerContext(plan, plan_context)
     context.node_id = "j"
 
     before = strategy.telemetry.optimization_inner_join_smallest_table_left
@@ -204,29 +205,6 @@ def test_visit_swaps_when_statistics_show_left_is_larger():
     # choose the build side. Swapping only the node attributes loses the decision.
     assert _leg_labels(context.optimized_plan) == {"l": "right", "r": "left"}
 
-
-def test_visit_falls_back_to_pre_filter_size_without_statistics():
-    # No statistics on children -> fall back to node.left_size / right_size.
-    join_node = _inner_join_node(left_size=100_000, right_size=100)
-    left_scan = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
-    left_scan.relation = "big"
-    left_scan.columns = []
-    right_scan = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
-    right_scan.relation = "small"
-    right_scan.columns = []
-    plan = _build_join_plan(join_node, left_scan, right_scan)
-
-    strategy = JoinAlgorithmStrategy(telemetry=QueryTelemetry.detached())
-    context = OptimizerContext(plan)
-    context.node_id = "j"
-
-    before = strategy.telemetry.optimization_inner_join_smallest_table_left
-    strategy.visit(plan["j"], context)
-    after = strategy.telemetry.optimization_inner_join_smallest_table_left
-
-    # left_size (100_000) > 3 * right_size (100) -> swap.
-    assert after == before + 1
-    assert _leg_labels(context.optimized_plan) == {"l": "right", "r": "left"}
 
 
 if __name__ == "__main__":  # pragma: no cover

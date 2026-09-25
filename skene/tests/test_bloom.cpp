@@ -171,7 +171,7 @@ static void test_non_string_types_get_no_filter() {
     auto in = morsel_of({
         {"arr", array_column({{1, 2}, {3}})},
         {"b",   bool_column({true, false})},
-        {"n",   dense_column<int64_t>({1, 2, 3, 4}, DRAKEN_INT64)},
+        {"n",   dense_column<int64_t>({1, 2}, DRAKEN_INT64)},
     });
     auto bytes = write_or_die(in, with_bloom({"arr", "b", "n"}));
 

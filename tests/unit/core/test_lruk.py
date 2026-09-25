@@ -161,13 +161,13 @@ def test_get_non_existing_key_after_eviction():
     lru = LRU_K()
 
     # Add 3 items to the cache
-    lru.set(b"a", b"1")
-    lru.set(b"b", b"2")
-    lru.set(b"c", b"3")
+    lru.set(b"a", b"1", False)
+    lru.set(b"b", b"2", False)
+    lru.set(b"c", b"3", False)
 
     # Add a fourth item to the cache, which should trigger an eviction of the least recently used item
-    lru.set(b"d", b"4")
-    lru.evict()
+    lru.set(b"d", b"4", False)
+    lru.evict(False)
 
     # Try to get a non-existing key
     assert lru.get(b"e") is None
@@ -177,12 +177,12 @@ def test_overwrite_existing_key():
     lru = LRU_K()
 
     # Add 3 items to the cache
-    lru.set(b"a", b"1")
-    lru.set(b"b", b"2")
-    lru.set(b"c", b"3")
+    lru.set(b"a", b"1", False)
+    lru.set(b"b", b"2", False)
+    lru.set(b"c", b"3", False)
 
     # Overwrite key "b"
-    lru.set(b"b", b"20")
+    lru.set(b"b", b"20", False)
 
     # Check the new value of "b"
     assert lru.get(b"b") == b"20"
@@ -195,11 +195,11 @@ def test_evict_as_last_resort():
     lru = LRU_K()
 
     for item in (b"a", b"b", b"c", b"d", b"e", b"f"):
-        lru.set(item, item)
+        lru.set(item, item, False)
 
-    lru.evict()
-    lru.evict()
-    lru.evict()
+    lru.evict(False)
+    lru.evict(False)
+    lru.evict(False)
 
     # Check the values
     assert lru.get(b"a") is None

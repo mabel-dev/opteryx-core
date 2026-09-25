@@ -31,6 +31,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 from opteryx.planner.optimizer.statistics import ColumnRange
 from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
+from opteryx.planner.plan_context import PlanContext
 from opteryx.planner.optimizer.statistics_refresh import _equi_key_classes
 
 
@@ -139,11 +140,12 @@ def _exit_estimate(sql):
     bound = do_bind_phase(
         plan, execution_context=ctx, query_id=str(uuid.uuid4()), telemetry=telemetry
     )
-    refreshed = refresh_statistics(bound)
+    plan_context = PlanContext()
+    refreshed = refresh_statistics(bound, plan_context)
 
     (exit_point,) = refreshed.get_exit_points()
     assert refreshed[exit_point].node_type == LogicalPlanStepType.Exit
-    return refreshed[exit_point].statistics.row_count
+    return plan_context.statistics(refreshed[exit_point]).row_count
 
 
 @pytest.mark.skipif(

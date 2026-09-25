@@ -1046,8 +1046,13 @@ def skene_extensions():
                     "skene/src/probe.cpp",
                     "skene/src/writer.cpp",
                     "skene/src/reader.cpp",
-                    "skene/src/reader_v1.cpp",
                     "skene/src/reader_v2.cpp",
+                    "skene/src/reader_v3.cpp",
+                    "skene/src/chunk_decode.cpp",
+                    "skene/src/footer_common.cpp",
+                    "skene/src/sketch.cpp",
+                    "skene/src/staging.cpp",
+                    "skene/src/patch.cpp",
                     "skene/src/migrate.cpp",
                     "skene/src/value_order.cpp",
                     "skene/src/statistics.cpp",
@@ -1058,6 +1063,16 @@ def skene_extensions():
                     # make_draken_extension (globals are extension-local; owners
                     # carry their deleters so cross-extension frees are safe).
                     "draken/core/vector_alloc.cpp",
+                    # v3's per-file sketch is draken's Vector.hash()
+                    # (skene/src/sketch.cpp -> draken/ops/hash.h ->
+                    # simd_hash_i64). Compiled in, as libskene.a does: this
+                    # extension links without dynamic lookup, and these three
+                    # TUs hold no process state (env reads and a CPU probe), so
+                    # a per-extension copy is benign — the same argument as the
+                    # duplicated codec TUs below.
+                    "draken/simd/simd_hash.cpp",
+                    "draken/simd/simd_env.cpp",
+                    "draken/simd/cpu_features.cpp",
                 ]
                 + get_zstd_vendor_sources()
                 + get_zstd_compress_sources()
@@ -1088,7 +1103,15 @@ def skene_extensions():
                 "skene/include/skene/status.h",
                 "skene/include/skene/file_io.h",
                 "skene/include/skene/checksum.h",
-                "skene/src/reader_v1.h",
+                "skene/include/skene/migrate.h",
+                "skene/include/skene/patch.h",
+                "skene/src/reader_v2.h",
+                "skene/src/reader_v3.h",
+                "skene/src/format_v2.h",
+                "skene/src/chunk_decode.h",
+                "skene/src/footer_common.h",
+                "skene/src/sketch.h",
+                "skene/src/staging.h",
                 "skene/src/encoding.h",
                 "skene/src/statistics.h",
                 "skene/src/value_order.h",

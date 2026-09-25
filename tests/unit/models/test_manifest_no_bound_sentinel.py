@@ -29,15 +29,18 @@ from __future__ import annotations
 
 import os
 import sys
+from opteryx.compiled.structures.expressions import Between
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.expression import NodeType
-from opteryx.models import Node
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import INT64, IPV4, UINT32
 from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 # The sentinel itself. Spelled out rather than imported so a change to the
 # constant in manifest.py has to be a deliberate, visible decision here too.
@@ -73,20 +76,18 @@ def _file(lower, upper, path="f1", record_count=10):
 
 
 def _comparison(op, value, column_name="value"):
-    return Node(
-        NodeType.COMPARISON_OPERATOR,
+    return Comparison(
         value=op,
-        left=Node(NodeType.IDENTIFIER, source_column=column_name),
-        right=Node(NodeType.LITERAL, value=value),
+        left=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name),
+        right=Literal(value=value),
     )
 
 
 def _between(lower, upper, column_name="value"):
-    return Node(
-        NodeType.BETWEEN,
-        left=Node(NodeType.IDENTIFIER, source_column=column_name),
-        right=Node(NodeType.LITERAL, value=lower),
-        centre=Node(NodeType.LITERAL, value=upper),
+    return Between(
+        left=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name),
+        right=Literal(value=lower),
+        centre=Literal(value=upper),
     )
 
 

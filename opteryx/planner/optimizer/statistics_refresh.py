@@ -11,8 +11,9 @@ Triggered by ``OptimizerVisitor.optimize`` immediately before any strategy
 declared as ``optimization_technique = "cost"`` whenever the plan's
 ``statistics_are_stale`` flag is set.
 
-Each visited node receives a ``statistics`` attribute holding a
-``RelationStatistics``. Scans seed stats from their manifest; downstream
+Each visited node gets a ``RelationStatistics`` recorded in the query's
+``PlanContext`` (never on the node itself: nodes carry only what they ARE).
+Scans seed stats from their manifest; downstream
 operators transform both row count *and* per-column stats (range, NDV)
 according to their semantics:
 
@@ -53,9 +54,8 @@ no-group aggregate = 1) or ``row_count_estimate`` (anything touched by a
 selectivity or NDV heuristic). The plan-time result-size guard acts only on
 metrics; estimates defer to the runtime row counter.
 
-Consumers (JoinAlgorithmStrategy, JoinPlanningStrategy) currently still
-read ``node.left_size`` / manifest directly; rewiring them to consume
-``node.statistics`` is a follow-up.
+Consumers (the cost strategies, the result-size guard, the physical planner's
+execution estimates) read these estimates through ``PlanContext.statistics``.
 """
 
 from typing import Dict
@@ -68,7 +68,7 @@ from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.cost_estimation import KeyStats
-from opteryx.planner.cost_estimation.join_cardinality import NdvProvenance
+from opteryx.planner.cost_estimation import NdvProvenance
 from opteryx.planner.cost_estimation import apply_occupancy_bound
 from opteryx.planner.cost_estimation import composite_key_ndv
 from opteryx.planner.cost_estimation import estimate_after_filter
@@ -78,11 +78,18 @@ from opteryx.planner.cost_estimation import surviving_distinct_count
 from opteryx.planner.optimizer.statistics import ColumnRange
 from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
+from opteryx.planner.plan_context import PlanContext
 
 # Fallback row count when a Scan has no manifest and no schema row estimate.
 # Picked to be obviously synthetic but non-zero so downstream estimators don't
 # divide-by-zero or collapse to 1-row plans.
 _UNKNOWN_ROW_COUNT = 1_000_000
+
+# Row counts are int64 in the native join estimator, so the arithmetic here that
+# can outgrow it (cross-join and keyless products, UNION ALL sums) is CAPPED at
+# INT64_MAX rather than carried as an unbounded Python int — architect ruling
+# 2026-09-24, the same cap the native estimator applies to its own results.
+_INT64_MAX = 9_223_372_036_854_775_807
 
 _PASS_THROUGH_TYPES = {
     LogicalPlanStepType.Order,
@@ -168,16 +175,8 @@ def _identifier_sources(node):
         src = node.source
         return {src} if src is not None else set()
     out = set()
-    if node.left is not None:
-        out |= _identifier_sources(node.left)
-    if node.right is not None:
-        out |= _identifier_sources(node.right)
-    if node.centre is not None:
-        out |= _identifier_sources(node.centre)
-    parameters = node.parameters
-    if parameters:
-        for p in parameters:
-            out |= _identifier_sources(p)
+    for child in node.children():
+        out |= _identifier_sources(child)
     return out
 
 
@@ -590,7 +589,7 @@ def scan_base_statistics(
     reads off storage, after manifest/file pruning but before any predicate is
     evaluated. `_scan_stats` narrows this on the way out, so a caller that
     needs the READ size (billing: see planner/data_processed.py) must come
-    here rather than read `node.statistics`, which is the narrowed result.
+    here rather than read `PlanContext.statistics(node)`, the narrowed result.
 
     Memoization: the base depends only on the scan's schema and manifest. Both
     are shared by reference across plan copies and the node's uuid is preserved
@@ -1112,7 +1111,7 @@ def _join_stats(
     join_type = getattr(node, "type", "inner")
 
     if join_type == "cross join" or join_type is None:
-        out_rows = max(1, left.row_count * right.row_count)
+        out_rows = max(1, min(_INT64_MAX, left.row_count * right.row_count))
         if join_notes is not None:
             join_notes.append(
                 _join_note(nid, join_type, left.row_count, right.row_count, out_rows, 0)
@@ -1220,7 +1219,7 @@ def _join_stats(
     if not left_keys or not right_keys:
         # Without a usable equi key, fall back to a cross-product upper bound;
         # JoinAlgorithm already guards against nested-loop blow-up by row count.
-        out_rows = max(1, left.row_count * right.row_count)
+        out_rows = max(1, min(_INT64_MAX, left.row_count * right.row_count))
         if join_notes is not None:
             join_notes.append(
                 _join_note(nid, join_type, left.row_count, right.row_count, out_rows, 0)
@@ -1668,7 +1667,7 @@ def _union_stats(
             continue
         if not cs.row_count_is_metric:
             all_metric = False
-        rows += cs.row_count
+        rows = min(_INT64_MAX, rows + cs.row_count)
         for k, v in cs.columns.items():
             existing = columns.get(k)
             if existing is None:
@@ -2148,11 +2147,11 @@ class StatisticsRefreshVisitor:
     don't require a second plan walk elsewhere.
     """
 
-    def __init__(self, plan: LogicalPlan, telemetry=None, scan_stats_cache: Optional[dict] = None):
+    def __init__(self, plan: LogicalPlan, context: PlanContext, telemetry=None):
         self.plan = plan
+        self.context = context
         self._visited: set = set()
         self.telemetry = telemetry
-        self.scan_stats_cache = scan_stats_cache
         self.predicate_notes: Optional[list] = [] if telemetry is not None else None
         self.join_notes: Optional[list] = [] if telemetry is not None else None
         # id(conjunct) -> claiming scan uuid, written by _scan_stats as it
@@ -2171,7 +2170,7 @@ class StatisticsRefreshVisitor:
         row_counts = []
         total_bytes_by_node = []
         for nid, node in self.plan.nodes(True):
-            stats = node.statistics
+            stats = self.context.statistics(node)
             if stats is None:
                 continue
             row_counts.append({
@@ -2214,11 +2213,11 @@ class StatisticsRefreshVisitor:
         for child_id, _, relationship in self.plan.ingoing_edges(nid):
             self._visit(child_id)
             child_stats.append(
-                (getattr(self.plan[child_id], "statistics", None), relationship)
+                (self.context.statistics(self.plan[child_id]), relationship)
             )
 
         node = self.plan[nid]
-        node.statistics = self._compute(node, child_stats, nid)
+        self.context.set_statistics(node, self._compute(node, child_stats, nid))
 
     def _compute(
         self,
@@ -2234,18 +2233,18 @@ class StatisticsRefreshVisitor:
                 self.plan,
                 nid,
                 self.predicate_notes,
-                self.scan_stats_cache,
+                self.context.scan_stats_cache,
                 self.fold_registry,
             )
         if nt == LogicalPlanStepType.MaterializedCteRef:
             # A reference to a shared CTE is a leaf with no manifest of its own;
-            # its cardinality is the shared body's output estimate, stamped by
-            # do_optimizer before the main plan is optimized (see shared_cte.py).
-            # Absent a stamp, UNKNOWN — the same posture as a scan with no
+            # its cardinality is the shared body's output estimate, recorded in
+            # the PlanContext under its cte_key by do_optimizer before the main
+            # plan is optimized. Absent one, UNKNOWN — the same posture as a scan with no
             # manifest counts. Zero would be a claim of provable emptiness and
             # propagates multiplicatively: any join against a 0-row side
             # collapses to ~1 row, poisoning every cost decision above it.
-            stamped = getattr(node, "cte_statistics", None)
+            stamped = self.context.cte_statistics(node.cte_key)
             return stamped if stamped is not None else _empty_stats(_UNKNOWN_ROW_COUNT)
         if nt == LogicalPlanStepType.Filter:
             return _filter_stats(
@@ -2274,13 +2273,11 @@ class StatisticsRefreshVisitor:
         return _first_child_stats(child_stats) or _empty_stats()
 
 
-def refresh_statistics(
-    plan: LogicalPlan, telemetry=None, scan_stats_cache: Optional[dict] = None
-) -> LogicalPlan:
+def refresh_statistics(plan: LogicalPlan, context: PlanContext, telemetry=None) -> LogicalPlan:
     """Recompute statistics for every node in ``plan``.
 
-    Walks the plan bottom-up from each exit point and attaches a
-    ``RelationStatistics`` to every node as ``node.statistics``. Clears the
+    Walks the plan bottom-up from each exit point and records a
+    ``RelationStatistics`` for every node in ``context``. Clears the
     plan's ``statistics_are_stale`` flag on completion.
 
     When ``telemetry`` is given, also records the planner's per-node row-count
@@ -2292,6 +2289,6 @@ def refresh_statistics(
     Omitting ``telemetry`` (the default) skips this entirely; existing
     callers are unaffected.
     """
-    StatisticsRefreshVisitor(plan, telemetry, scan_stats_cache).run()
+    StatisticsRefreshVisitor(plan, context, telemetry).run()
     plan.statistics_are_stale = False
     return plan

@@ -48,7 +48,7 @@ from opteryx.utils import random_string
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
-from .predicate_rewriter import _shallow
+from opteryx.compiled.structures.expressions import And
 
 
 def passthrough_column(schema_column, source: Optional[str] = None) -> LogicalColumn:
@@ -208,14 +208,14 @@ class JoinKeyMaterializationStrategy(OptimizationStrategy):
             # A NEW conjunct, never an in-place operand swap: the ON conjunct is
             # also held by the pre-optimization plan, and the reference names a
             # column that only exists above the Project just inserted on that leg.
-            conjuncts.append(_shallow(conjunct, **replaced) if replaced else conjunct)
+            conjuncts.append(conjunct.replace(**replaced) if replaced else conjunct)
 
         if not rewrote:
             return
 
         on_condition = conjuncts[0]
         for conjunct in conjuncts[1:]:
-            on_condition = Node(NodeType.AND, left=on_condition, right=conjunct)
+            on_condition = And(left=on_condition, right=conjunct)
         node.on = on_condition
 
         # Rebuild the join's bookkeeping from the rewritten condition. Every

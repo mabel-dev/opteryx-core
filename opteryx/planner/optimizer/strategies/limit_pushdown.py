@@ -63,15 +63,14 @@ class LimitPushdownStrategy(OptimizationStrategy):
         if node.node_type == LogicalPlanStepType.Limit:
             if node.offset is not None or node.limit in (None, 0):
                 return context
-            node.nid = context.node_id
-            if getattr(node, "pushdown_targets", None) is None:
-                node.pushdown_targets = set(node.all_relations or [])
+            context.collected_nids[id(node)] = context.node_id
+            context.limit_targets[id(node)] = set(node.all_relations or [])
             context.collected_limits.append(node)
             return context
 
         remaining_limits = []
         for limit_node in context.collected_limits:
-            if self._should_skip_branch(limit_node, node):
+            if self._should_skip_branch(limit_node, node, context):
                 remaining_limits.append(limit_node)
                 continue
 
@@ -119,8 +118,10 @@ class LimitPushdownStrategy(OptimizationStrategy):
             return set(relations)
         return set()
 
-    def _should_skip_branch(self, limit_node: LogicalPlanNode, node: LogicalPlanNode) -> bool:
-        targets: Set[str] = getattr(limit_node, "pushdown_targets", set())
+    def _should_skip_branch(
+        self, limit_node: LogicalPlanNode, node: LogicalPlanNode, context: OptimizerContext
+    ) -> bool:
+        targets: Set[str] = context.limit_targets[id(limit_node)]
         if not targets:
             return False
         node_relations = self._collect_relations(node)
@@ -132,9 +133,7 @@ class LimitPushdownStrategy(OptimizationStrategy):
         scan_node: LogicalPlanNode,
         context: OptimizerContext,
     ) -> Optional[bool]:
-        targets: Set[str] = getattr(
-            limit_node, "pushdown_targets", set(limit_node.all_relations or [])
-        )
+        targets: Set[str] = context.limit_targets[id(limit_node)]
         relation_names = {scan_node.relation, getattr(scan_node, "alias", None)}
         if targets and targets.isdisjoint({name for name in relation_names if name}):
             return None
@@ -157,8 +156,8 @@ class LimitPushdownStrategy(OptimizationStrategy):
             scan_node.limit = (
                 limit_node.limit if current_limit is None else min(current_limit, limit_node.limit)
             )
-            if limit_node.nid in context.optimized_plan:
-                context.optimized_plan.remove_node(limit_node.nid, heal=True)
+            if context.collected_nids[id(limit_node)] in context.optimized_plan:
+                context.optimized_plan.remove_node(context.collected_nids[id(limit_node)], heal=True)
             context.optimized_plan[context.node_id] = scan_node
             self.telemetry.optimization_limit_pushdown += 1
             return True
@@ -168,9 +167,9 @@ class LimitPushdownStrategy(OptimizationStrategy):
     def _place_before_node(
         self, limit_node: LogicalPlanNode, _: LogicalPlanNode, context: OptimizerContext
     ) -> None:
-        if limit_node.nid in context.optimized_plan:
-            context.optimized_plan.remove_node(limit_node.nid, heal=True)
-        context.optimized_plan.insert_node_after(limit_node.nid, limit_node, context.node_id)
+        if context.collected_nids[id(limit_node)] in context.optimized_plan:
+            context.optimized_plan.remove_node(context.collected_nids[id(limit_node)], heal=True)
+        context.optimized_plan.insert_node_after(context.collected_nids[id(limit_node)], limit_node, context.node_id)
         limit_node.columns = []
-        limit_node.pushdown_targets = set(limit_node.all_relations or [])
+        context.limit_targets[id(limit_node)] = set(limit_node.all_relations or [])
         self.telemetry.optimization_limit_pushdown += 1

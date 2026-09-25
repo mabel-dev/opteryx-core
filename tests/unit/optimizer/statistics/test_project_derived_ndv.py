@@ -35,7 +35,7 @@ from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.planner.optimizer.statistics_refresh import _equi_key_classes
 from opteryx.planner.optimizer.statistics_refresh import _project_stats
-from opteryx.planner.cost_estimation.join_cardinality import NdvProvenance
+from opteryx.planner.cost_estimation import NdvProvenance
 
 _SRC = b"tes_src_00000001"
 _DERIVED = b"tes_drv_00000002"

@@ -28,7 +28,7 @@ import opteryx
 from opteryx.config import features
 from opteryx.expression import NodeType
 from opteryx.planner.cost_estimation import plan_adapter
-from opteryx.planner.cost_estimation.join_graph import JoinGraph
+from opteryx.planner.cost_estimation import JoinGraph
 
 
 class _Flag:
@@ -53,8 +53,8 @@ def _capture_graphs(sql, reasons=None):
     captured = []
     real_build = plan_adapter.build_join_graph
 
-    def wrapped(plan, leaves, predicates):
-        graph, refusal = real_build(plan, leaves, predicates)
+    def wrapped(plan, leaves, predicates, plan_context):
+        graph, refusal = real_build(plan, leaves, predicates, plan_context)
         captured.append(graph)
         if reasons is not None:
             reasons.append(refusal)
@@ -186,3 +186,19 @@ def test_no_manifest_returns_none():
     graphs = _capture_graphs(sql)
     assert graphs, "adapter should have been called"
     assert all(g is None for g in graphs)
+
+
+def test_more_leaves_than_the_graph_holds_is_refused_not_raised():
+    """The native JoinGraph keys vertex sets on 64-bit bitsets. A chain wider
+    than that is REFUSED through the ordinary refusal channel (the chain keeps
+    its written order) rather than failing the query."""
+    from opteryx.compiled.planner.join_estimator import MAX_GRAPH_VERTICES
+
+    from opteryx.planner.plan_context import PlanContext
+
+    graph, reason = plan_adapter.build_join_graph(
+        None, [object()] * (MAX_GRAPH_VERTICES + 1), [], PlanContext()
+    )
+
+    assert graph is None
+    assert reason.startswith("too many leaves: 65 exceeds")

@@ -402,13 +402,11 @@ REGISTER: List[RegisteredDefect] = [
         error_type="RuntimeError",
         signature="err_op=15",
         detail=(
-            "RLIKE evaluates correctly only as a whole predicate or as a direct child of one "
-            "connective. Nested deeper it fails at execution with err_op=15:\n"
-            "  inside CASE/IIF   -> ExprMultiProjectOperator: expression evaluation failed\n"
-            "  inside nested OR  -> ExprFilterOperator: predicate evaluation failed, for\n"
-            "     WHERE ((name NOT RLIKE '[0-9]') OR (id > 3)) OR (name IS NULL)\n"
-            "     while the two-term WHERE (name NOT RLIKE '[0-9]') OR (id > 3) runs.\n"
-            "LIKE and ILIKE are unaffected in every one of those positions."
+            "RLIKE inside a projected CASE/IIF fails at execution with err_op=15 "
+            "(ExprMultiProjectOperator: expression evaluation failed): the pattern reaches "
+            "the kernel un-compiled. LIKE and ILIKE are unaffected. (RLIKE nested in a "
+            "multi-term OR in a WHERE, once part of this entry, runs since the predicate "
+            "rewriter walks every child, 2026-09-25.)"
         ),
     ),
     RegisteredDefect(

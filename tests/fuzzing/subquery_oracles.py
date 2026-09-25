@@ -289,7 +289,6 @@ _DIFFERENTIAL_STRATEGIES = (
     "disable_group_key_reduction",
     "disable_operator_fusion",
     "disable_project_fusion",
-    "disable_hash_map_variant",
     "disable_manifest_pruning",
 )
 for _flag in _DIFFERENTIAL_STRATEGIES:

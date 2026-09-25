@@ -26,11 +26,13 @@ AggregateAndGroup semantics (empty input → zero output rows, not one).
 """
 
 from opteryx.expression import NodeType
+from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.utils import random_string
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
+from opteryx.compiled.structures.expressions import Literal
 
 _STOP_TYPES = frozenset(
     {
@@ -109,16 +111,18 @@ def _collect_equality_predicates(plan: LogicalPlan, start_nid) -> dict:
 
 
 def _make_passthrough(original: Node) -> Node:
-    ref = Node(node_type=NodeType.IDENTIFIER)
-    ref.schema_column = original.schema_column
-    ref.value = original.schema_column.name if original.schema_column else original.value
-    ref.qualified_name = original.qualified_name
-    return ref
+    return LogicalColumn(
+        node_type=NodeType.IDENTIFIER,
+        source_column=(
+            original.schema_column.name if original.schema_column else original.value
+        ),
+        schema_column=original.schema_column,
+    )
 
 
 def _make_constant_literal(original: Node, value) -> Node:
     """Create a LITERAL node that emits value under the original column's schema identity."""
-    lit = Node(node_type=NodeType.LITERAL)
+    lit = Literal()
     lit.value = value
     lit.schema_column = original.schema_column
     return lit

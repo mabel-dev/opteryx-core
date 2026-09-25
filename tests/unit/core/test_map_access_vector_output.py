@@ -3,15 +3,17 @@ import sys
 from types import SimpleNamespace
 
 import draken.draken_native as dn
+from opteryx.compiled.structures.expressions import ExtractionOperator
+from opteryx.compiled.structures.expressions import Literal
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 from draken.morsels.morsel import Morsel
 from opteryx.expression import NodeType
 from opteryx.expression.evaluator import compile_eval_nodes, execute_and_append
-from opteryx.models import Node
 from opteryx.types.logical_type import INT64, VARCHAR
 import opteryx
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 
 def _schema(identity: str, value_type):
@@ -23,18 +25,12 @@ def test_map_access_string_projection_returns_draken_vector():
         ["user_name"], [dn.vector_from_string_sequence([b"alice", b"bob", None])]
     )
 
-    user_name = Node(
-        NodeType.IDENTIFIER,
-        value="user_name",
-        schema_column=_schema("user_name", VARCHAR),
-    )
-    zero = Node(
-        NodeType.LITERAL,
+    user_name = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="user_name", schema_column=_schema("user_name", VARCHAR))
+    zero = Literal(
         value=0,
         schema_column=_schema("zero", INT64),
     )
-    first_char = Node(
-        NodeType.EXTRACTION_OPERATOR,
+    first_char = ExtractionOperator(
         value="MapAccess",
         left=user_name,
         right=zero,

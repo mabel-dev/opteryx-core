@@ -176,7 +176,8 @@ def _cosine_node():
     """
     tokens = sqloxide.parse_sql(do_sql_rewrite(sql), "opteryx")
     plan, _, _ = do_logical_planning_phase(do_ast_rewriter(tokens, {})[0])
-    bound = do_bind_phase(plan, QueryTelemetry("test_vector_topk_mutual_exclusion"))
+    query_id = "test_vector_topk_mutual_exclusion"
+    bound = do_bind_phase(plan, query_id=query_id, telemetry=QueryTelemetry(query_id))
     for _, node in bound.nodes(True):
         if node.node_type == LogicalPlanStepType.Order:
             return node.order_by[0][0]

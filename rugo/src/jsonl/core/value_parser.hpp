@@ -27,20 +27,37 @@ inline bool parse_bool_wrapper(const uint8_t* buffer, uint32_t start, uint32_t e
     return parse_bool(buffer, start, end, out);
 }
 
-// Parse pred.value as int64/float64 ONCE and cache the result on the Predicate
-// (pred_int/pred_float/pred_parsed_int/pred_parsed_float). Call once per predicate
-// before the per-record evaluation loop — evaluate_predicate() reads the cached
-// fields instead of re-parsing pred.value on every call.
+// Parse pred.value ONCE, as its literal kind only (pred.kind: int/float/bool; a
+// string literal needs no parse), and cache the result on the Predicate. Call once
+// per predicate before the per-record evaluation loop — evaluate_predicate() reads
+// the cached fields instead of re-parsing pred.value on every call.
 void prepare_predicate(Predicate& pred);
 
-// Compare value with a predicate value (as string) using comparison op. pred must have
-// been passed through prepare_predicate() first (its numeric cache is read, not computed
-// here).
+// "JSON string", "JSON number", ... for a FieldSpan::type, for error messages.
+const char* json_value_kind_name(uint8_t value_type);
+
+// Whether a literal of `kind` (rugo::LiteralKind) can be compared with a JSON value
+// of `value_type`: string with string, number with int/float, boolean with bool.
+// A JSON array or object compares with nothing. JSON null is the caller's to handle.
+bool literal_fits_json_value(uint8_t value_type, uint8_t kind);
+
+// Evaluate pred against a present field value. pred must have been passed through
+// prepare_predicate() first (its numeric cache is read, not computed here). SQL
+// three-valued logic: a JSON null satisfies only IS NULL — and an empty NOT IN, which
+// asks no comparison. Throws std::invalid_argument when the field's JSON kind cannot
+// be compared with the literal's kind (literal_fits_json_value) — fail loud, never
+// "no match".
 bool evaluate_predicate(
     const uint8_t* buffer,
     const FieldSpan& value_span,
     const Predicate& pred
 );
+
+// Whether a record that does NOT carry pred's column at all passes pred. An absent key
+// is a NULL cell, so only IS NULL and an empty NOT IN accept it.
+inline bool predicate_accepts_absent(const Predicate& pred) {
+    return pred.op == 8 || (pred.op == 7 && pred.members.empty());
+}
 
 }  // namespace rugo::_jsonl
 

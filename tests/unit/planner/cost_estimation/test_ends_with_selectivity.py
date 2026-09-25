@@ -26,6 +26,9 @@ ColumnStatistics (no manifest/ANALYZE plumbing).
 
 import os
 import sys
+from opteryx.compiled.structures.expressions import Function
+from opteryx.compiled.structures.expressions import Literal
+from opteryx.compiled.structures.expressions import Not
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
@@ -45,6 +48,7 @@ from opteryx.planner.cost_estimation.selectivity import (
 )
 from opteryx.planner.optimizer.statistics import ColumnStatistics, RelationStatistics
 from opteryx.types.logical_type import NVARCHAR, VARCHAR
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 _IDENTITY = b"tes_col_00000001"
 
@@ -61,14 +65,14 @@ _UNIFORM_PROPORTIONS = {
 
 
 def _column_node(identity=_IDENTITY, column_type=VARCHAR):
-    identifier = Node(NodeType.IDENTIFIER, source_column="col")
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col")
     identifier.schema_column = Node(NodeType.IDENTIFIER, identity=identity, column_type=column_type)
     return identifier
 
 
 def _func_node(suffix, op="_ENDS_WITH", identity=_IDENTITY, column_type=VARCHAR):
-    literal = Node(NodeType.LITERAL, value=suffix)
-    return Node(NodeType.FUNCTION, value=op, parameters=[_column_node(identity, column_type), literal])
+    literal = Literal(value=suffix)
+    return Function(value=op, parameters=[_column_node(identity, column_type), literal])
 
 
 def _stats_with_char_class(
@@ -275,7 +279,7 @@ def test_ends_with_hard_guard_skipped_for_nvarchar():
 def test_not_ends_with_hard_zero_complements_to_one():
     stats = _stats_with_char_class(avg_length=20.0, length_bounds=(3, 22))
     inner = _func_node(b"x" * 25)
-    not_node = Node(NodeType.NOT, centre=inner)
+    not_node = Not(centre=inner)
     assert estimate_selectivity(inner, stats) == 0.0
     assert estimate_selectivity(not_node, stats) == 1.0
 
@@ -298,7 +302,7 @@ def test_estimate_selectivity_dispatches_ci_ends_with():
 def test_not_ends_with_is_the_complement():
     stats = _stats_with_char_class()
     inner = _func_node(b"foo")
-    not_node = Node(NodeType.NOT, centre=inner)
+    not_node = Not(centre=inner)
     s = estimate_selectivity(inner, stats)
     not_s = estimate_selectivity(not_node, stats)
     assert s == pytest.approx(1.0 - not_s)
@@ -337,7 +341,7 @@ def test_predicate_estimator_tag_flat_fallback_without_char_class_stats():
 
 def test_predicate_estimator_tag_none_for_unrelated_function():
     stats = _stats_with_char_class()
-    node = Node(NodeType.FUNCTION, value="SOMETHING_ELSE", parameters=[])
+    node = Function(value="SOMETHING_ELSE", parameters=[])
     assert predicate_estimator_tag(node, stats) is None
 
 

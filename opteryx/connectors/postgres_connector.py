@@ -82,7 +82,7 @@ from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import NotSupportedError
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.expression import Node, NodeType, get_all_nodes_of_type
+from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import QueryTelemetry
 from opteryx.types import logical_type as _lt
 from opteryx.types.logical_type import ColumnType, DrakenType, LogicalCategory, LogicalKind
@@ -874,7 +874,13 @@ class PostgresTable(
         if condition.node_type == NodeType.NOT:
             if condition.centre is None:
                 return False
-            gate_operator = Node(node_type=NodeType.UNKNOWN, condition=condition.centre)
+            # A Filter over what the NOT wraps — can_push reads only its condition.
+            from opteryx.planner.logical_planner import LogicalPlanNode
+            from opteryx.planner.logical_planner import LogicalPlanStepType
+
+            gate_operator = LogicalPlanNode(
+                node_type=LogicalPlanStepType.Filter, condition=condition.centre
+            )
         if not PredicatePushable.can_push(self, gate_operator, types):
             return False
         # BETWEEN is pushed only in its closed form; an open bound would need a

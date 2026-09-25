@@ -13,14 +13,14 @@ from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
 
-def post_bind(self, node):
+def post_bind(self, node, context):
     # The binder skips calculated fields when it performs binding because
     # sometimes it doesn't have access to all of the fields used in the
     # calculation - so we bind these now
     seen: dict = {}
 
     def _inner(branch):
-        if branch.fully_bound is False:
+        if id(branch) in context.reused_expressions:
             if branch.schema_column.identity in seen:
                 # A copy PER REPEAT, never the stored template itself. Handing every
                 # repeat the same object made the bound tree a DAG: IS [NOT]
@@ -33,14 +33,7 @@ def post_bind(self, node):
                 branch = seen[branch.schema_column.identity].copy()
         elif branch.schema_column:
             seen[branch.schema_column.identity] = branch.copy()
-        if branch.left is not None:
-            branch.left = _inner(branch.left)
-        if branch.right is not None:
-            branch.right = _inner(branch.right)
-        if branch.centre is not None:
-            branch.centre = _inner(branch.centre)
-        if branch.parameters:
-            branch.parameters = [_inner(p) for p in branch.parameters]
+        branch.map_children(_inner)
         return branch
 
     if node.condition:
@@ -160,6 +153,6 @@ def traverse(
         if plan_node.all_relations:
             return_node.all_relations.update(plan_node.all_relations)
 
-    return_node = post_bind(self, return_node)
+    return_node = post_bind(self, return_node, context)
     graph[node] = return_node
     return graph, context

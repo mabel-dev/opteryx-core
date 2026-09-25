@@ -120,6 +120,25 @@ struct WriteOptions {
     // non-elided types.
     std::vector<SortKey> cluster_keys;
 
+    // v3: row groups per fetch BLOCK (G), recorded in the footer and immutable
+    // (FORMAT.md §3.2). A reader fetches a column's chunks for one block as one
+    // range, so G and the row group size are separate knobs: the row group is
+    // the decode/claim/statistics unit, the block the request unit.
+    //
+    // 4, not a derived value: the architect's ruling (2026-09-24) is 64k-row
+    // row groups fetched in 256k-row blocks, the same block the parquet writer
+    // emits (docs/PARQUET_GROUPED_COLUMN_MAJOR_DESIGN.md), so both formats batch
+    // the same rows. At least 1; a file with fewer row groups has one partial
+    // block.
+    uint32_t block_row_groups = 4;
+
+    // v3 two-pass writer (design R9): where pass 1 stages section bodies when
+    // the output is a PATH. Required then, and rejected with buffer output —
+    // which stages in memory, because its output is in memory anyway. There is
+    // no default: a caller states where the writer may write. The file is
+    // created exclusively and removed when the writer finishes or is destroyed.
+    std::string scratch_path;
+
     // There is deliberately NO alignment switch. The v2 acceptance A/B
     // (2026-08-20, interleaved aligned-vs-packed ClickBench mirrors) measured
     // the two indistinguishable on read time (12353-12401ms vs 12165-12600ms,
@@ -213,6 +232,11 @@ struct WriteOptions {
 
 // ─── Writing a file ─────────────────────────────────────────────────────────
 
+// v3 writes in TWO PASSES. add_row_group encodes a row group and stages its
+// sections per column node; finish() lays the whole file out COLUMN-MAJOR —
+// every column's chunks for every row group adjacent (FORMAT.md §3) — and only
+// then writes it. Nothing reaches the output until finish().
+//
 // A .skene file holds one or more row groups. This is the only writer; the
 // single-row-group case is `write_morsel` below, which is a two-line wrapper
 // rather than a second implementation, so the two cannot drift.
@@ -242,8 +266,14 @@ class FileWriter {
     FileWriter& operator=(const FileWriter&) = delete;
 
     // Validates `options` and writes the file head into `out` (replacing its
-    // contents). `out` must outlive the writer.
+    // contents). `out` must outlive the writer. Stages in memory.
     Status begin(const WriteOptions& options, std::vector<uint8_t>* out);
+
+    // Streams the file to `path` (via `<path>.skene-partial`, renamed into place
+    // by finish(), so a reader sees it whole or not at all). Stages section
+    // bodies in `options.scratch_path`, which is required. Memory stays at one
+    // row group of plans plus the directory, whatever the file's size.
+    Status begin(const WriteOptions& options, const std::string& path);
 
     // Appends one row group. Fails loud rather than degrading, on: a type this
     // build cannot materialize, a parameterized physical type missing its
@@ -258,6 +288,10 @@ class FileWriter {
 
     uint32_t row_group_count() const;
 
+    // Section bytes staged so far — what a caller watches to decide a file is
+    // big enough. The finished file adds directories, padding and the footer.
+    uint64_t staged_bytes() const;
+
   private:
     struct State;
     std::unique_ptr<State> state_;
@@ -270,7 +304,9 @@ Status write_morsel(const CxxMorsel& morsel, const WriteOptions& options,
 
 // ─── Scope of this implementation ───────────────────────────────────────────
 //
-// IMPLEMENTED: the complete v2 required-section layout — every family
+// IMPLEMENTED: the v3 layout (whole-file column-major, one footer, directory
+// blocks, block size, per-file draken-family sketches) over the complete v2
+// required-section layout — every family
 // (fixed-width, BOOL, the string family including length-only columns, ARRAY
 // with recursive children, DRAKEN_NULL), all three selection kinds, LogicalType
 // round-trip, per-section and footer checksums, head/tail framing, every

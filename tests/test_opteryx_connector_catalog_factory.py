@@ -117,10 +117,11 @@ def test_cache_hit_survives_transient_properties_read_failure():
 def test_bubbles_type_error_on_unexpected_kwargs():
     class DummyCatalog:
         def __init__(self, workspace=None):
-            # does not accept unexpected kwargs like 'telemetry'
+            # does not accept unexpected kwargs (telemetry is the connector's own,
+            # never forwarded to the catalog, so it cannot be the probe here)
             self.workspace = workspace
 
-    conn = OpteryxConnector(catalog=DummyCatalog, telemetry="not-allowed")
+    conn = OpteryxConnector(catalog=DummyCatalog, unexpected_option="not-allowed")
     with pytest.raises(TypeError):
         conn._get_catalog("ws")
 

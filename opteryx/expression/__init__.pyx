@@ -354,40 +354,13 @@ def get_all_nodes_of_type(root, select_nodes: tuple) -> list:
 
     identifiers = []
     stack = list(root)
-    appender = stack.append
 
     while stack:
         node = stack.pop()
-
-        # Check whether to collect the node
         if collect_all or node.node_type in select_nodes_set:
             identifiers.append(node)
-
-        # Append parameters if they are valid nodes
-        if node.parameters:
-            stack.extend(
-                [param for param in node.parameters if isinstance(param, (Node, LogicalColumn))]
-            )
-
-        # NodeType.CASE uses conditions/results/else_result instead of parameters
-        if node.node_type == NodeType.CASE:
-            if node.conditions:
-                stack.extend(c for c in node.conditions if isinstance(c, (Node, LogicalColumn)))
-            if node.results:
-                stack.extend(r for r in node.results if isinstance(r, (Node, LogicalColumn)))
-            if node.else_result is not None and isinstance(node.else_result, (Node, LogicalColumn)):
-                appender(node.else_result)
-
-        # Append child nodes
-        child = node.right
-        if child:
-            appender(child)
-        child = node.centre
-        if child:
-            appender(child)
-        child = node.left
-        if child:
-            appender(child)
+        # Pre-order, children in their declared order.
+        stack.extend(reversed(node.children()))
 
     return identifiers
 

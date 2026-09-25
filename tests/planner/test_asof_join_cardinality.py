@@ -28,6 +28,7 @@ from opteryx.models import ExecutionContext
 from opteryx.models import QueryTelemetry
 from opteryx.planner import bind_statement
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.planner.plan_context import PlanContext
 from opteryx.planner.optimizer import do_optimizer
 from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
 from opteryx.planner.result_size_guard import check_estimated_result_size
@@ -64,7 +65,8 @@ def _bound(sql):
         query_id=query_id,
         telemetry=telemetry,
     )
-    return do_optimizer(bound, telemetry, scan_stats_cache={}, shared_ctes={}), telemetry
+    plan_context = PlanContext()
+    return do_optimizer(bound, telemetry, plan_context, shared_ctes={}), telemetry, plan_context
 
 
 def _inflate_scans(plan, rows):
@@ -85,8 +87,8 @@ def _inflate_scans(plan, rows):
     return plan
 
 
-def _join_and_child_rows(plan):
-    plan = refresh_statistics(plan)
+def _join_and_child_rows(plan, plan_context):
+    plan = refresh_statistics(plan, plan_context)
     joins = [
         node for _nid, node in plan.nodes(True) if node.node_type == LogicalPlanStepType.Join
     ]
@@ -99,13 +101,13 @@ def _join_and_child_rows(plan):
     edges = list(plan.outgoing_edges(join_nid))
     labelled = [target for _s, target, label in edges if label == "left"]
     left_nid = labelled[0] if labelled else edges[0][1]
-    return joins[0].statistics, plan[left_nid].statistics
+    return plan_context.statistics(joins[0]), plan_context.statistics(plan[left_nid])
 
 
 @pytest.mark.parametrize("sql", [_NO_ON, _WITH_KEY], ids=["no_on", "using_key"])
 def test_asof_cardinality_is_the_left_row_count(sql):
-    plan, _telemetry = _bound(sql)
-    join_stats, left_stats = _join_and_child_rows(plan)
+    plan, _telemetry, plan_context = _bound(sql)
+    join_stats, left_stats = _join_and_child_rows(plan, plan_context)
     assert join_stats.row_count == left_stats.row_count, (
         f"ASOF estimated {join_stats.row_count} rows from a {left_stats.row_count}-row "
         "left input — ASOF emits exactly one row per left row"
@@ -115,24 +117,28 @@ def test_asof_cardinality_is_the_left_row_count(sql):
 def test_asof_left_count_provenance_survives():
     """A metric left count makes the ASOF count a metric — it is EQUAL to the
     left count, not bounded by it, so no heuristic touched the number."""
-    plan, _telemetry = _bound(_NO_ON)
-    join_stats, left_stats = _join_and_child_rows(plan)
+    plan, _telemetry, plan_context = _bound(_NO_ON)
+    join_stats, left_stats = _join_and_child_rows(plan, plan_context)
     assert left_stats.row_count_is_metric, "left leg is not metric; test no longer covers this"
     assert join_stats.row_count_is_metric
 
 
 def test_no_on_asof_over_large_relations_is_not_refused():
-    plan, telemetry = _bound(_NO_ON)
+    plan, telemetry, _plan_context = _bound(_NO_ON)
     plan = _inflate_scans(plan, _BIG)
+    # A fresh context: the optimizer's memoized the scans' base statistics
+    # before _inflate_scans mutated their schemas in place.
+    plan_context = PlanContext()
     limit = 1_073_741_824
     # Would raise if the estimate were the cross product (_BIG ** 2 = 10**10).
-    plan = check_estimated_result_size(plan, limit, telemetry=telemetry, scan_stats_cache={})
+    plan = check_estimated_result_size(plan, limit, plan_context, telemetry=telemetry)
     exit_nid = plan.get_exit_points()[0]
     # Not just "wasn't refused" — the number the guard read has to be the left
     # count. A cross product that merely lost its metric provenance would slip
     # past the guard while still poisoning join ordering and EXPLAIN.
-    assert plan[exit_nid].statistics.row_count == _BIG, (
-        f"exit estimated {plan[exit_nid].statistics.row_count} rows from a "
+    exit_rows = plan_context.statistics(plan[exit_nid]).row_count
+    assert exit_rows == _BIG, (
+        f"exit estimated {exit_rows} rows from a "
         f"{_BIG}-row left input"
     )
 
@@ -140,10 +146,11 @@ def test_no_on_asof_over_large_relations_is_not_refused():
 def test_cross_join_over_the_same_relations_is_still_refused():
     """Control: the guard IS armed at this scale, so the test above is not
     passing because nothing was checked."""
-    plan, telemetry = _bound(_CROSS)
+    plan, telemetry, _plan_context = _bound(_CROSS)
     plan = _inflate_scans(plan, _BIG)
     with pytest.raises(ResultTooLargeError):
-        check_estimated_result_size(plan, 1_073_741_824, telemetry=telemetry, scan_stats_cache={})
+        # Fresh context, as above: the inflated schemas must be re-read.
+        check_estimated_result_size(plan, 1_073_741_824, PlanContext(), telemetry=telemetry)
 
 
 def test_pushed_down_scan_limit_caps_the_scan_row_count():
@@ -154,15 +161,16 @@ def test_pushed_down_scan_limit_caps_the_scan_row_count():
     import opteryx
 
     opteryx.register_workspace("testdata", DiskConnector)
-    plan, _telemetry = _bound("SELECT * FROM (SELECT * FROM testdata.planets LIMIT 3) AS t")
-    plan = refresh_statistics(plan)
+    plan, _telemetry, plan_context = _bound("SELECT * FROM (SELECT * FROM testdata.planets LIMIT 3) AS t")
+    plan = refresh_statistics(plan, plan_context)
     scans = [
         node for _nid, node in plan.nodes(True) if node.node_type == LogicalPlanStepType.Scan
     ]
     assert len(scans) == 1
     assert scans[0].limit == 3, "limit was not pushed into the scan; test covers nothing"
-    assert scans[0].statistics.row_count == 3, (
-        f"scan with a pushed LIMIT 3 reports {scans[0].statistics.row_count} rows"
+    scan_rows = plan_context.statistics(scans[0]).row_count
+    assert scan_rows == 3, (
+        f"scan with a pushed LIMIT 3 reports {scan_rows} rows"
     )
 
 
