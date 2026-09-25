@@ -87,7 +87,7 @@ uint32_t count_first_row_cols(const uint8_t* data, size_t length, const CsvParse
             if (c == '"')             { dq_pending = false; }
             else if (c == ctx.delimiter) { dq_pending = false; in_quoted = false; ++cols; at_field_start = true; }
             else if (c == '\n')       { break; }
-            else                      { dq_pending = false; }
+            else                      { dq_pending = false; in_quoted = false; }  // "a"b: rest is unquoted
             continue;
         }
         if (in_quoted) {

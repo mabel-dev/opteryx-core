@@ -245,6 +245,16 @@ def test_mid_field_quote_no_header_column_count():
     assert _to_list(r["columns"][0]) == ['x"y']
 
 
+def test_text_after_closing_quote_no_header_column_count():
+    # "a"b leaves the quoted field; the no-header count must agree with the
+    # header parser, which reads this row as three columns.
+    data = b'"a"b,c,d\n1,2,3\n'
+    assert read_csv(data)["column_names"] == ["ab", "c", "d"]
+    r = read_csv(data, has_header=False)
+    assert r["column_names"] == ["col_0", "col_1", "col_2"]
+    assert _to_list(r["columns"][2]) == ["d", "3"]
+
+
 def test_mid_field_quote_threaded_matches_python_csv():
     # A stray mid-field quote must not flip the split FSM into "quoted", or a
     # later real quoted field with an embedded newline gets split mid-field.

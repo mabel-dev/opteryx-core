@@ -1800,12 +1800,15 @@ constexpr int64_t kDistinctParviGateNDV = 16;
 constexpr size_t kGBFlushEntries = 65536;
 // ADAPTIVE RAW MODE (2026-09-25). A worker whose local tables are not deduplicating
 // stops probing them: at a flush, if the partitions hold more than this fraction of
-// the rows sunk since the previous flush (groups / rows > 0.3, i.e. under ~3.3 rows
-// per group), every later row becomes a NEW local group with no probe, and the
-// finalize merge — which dedups anyway — does all of the grouping. Sticky per worker.
-// POC (scratch/gb_merge_poc, 27 scenarios): -19..-71% at high cardinality, within
-// noise (<= +5%) below ~15% distinct; 0.5 missed most of the wins, 0.2 cost more.
-constexpr double kGBRawSwitchRatio = 0.3;
+// the rows sunk since the previous flush (groups / rows > 0.9 — nearly every row a
+// new group even inside one window), every later row becomes a NEW local group with
+// no probe, and the finalize merge — which dedups anyway — does all of the grouping.
+// Sticky per worker.
+// 0.9, not the POC's 0.3: MEASURED in the engine (ClickBench, interleaved). A flush
+// window cannot see GLOBAL dedup — Q36 is 10% distinct overall yet looks poorly
+// deduplicated per 65,536-group window, and at 0.3 it ran +26%; Q17/18 +29%. Raw mode
+// only paid on near-unique keys (Q33 -43%, Q32 -13%), which 0.9 still catches.
+constexpr double kGBRawSwitchRatio = 0.9;
 // RADIX-PARTITIONED MERGE (2026-09-25). A partition whose queued tables hold more
 // than kGBMergeLeaf entries is merged in 2^k buckets of <= ~kGBMergeLeaf entries,
 // chosen by hash bits [kGBMergeBucketShift, +k): pass 1 scatters every queued entry
@@ -2829,6 +2832,11 @@ struct GBPartition {
     // populated, so the same hash may appear more than once. Only the radix merge
     // (which builds fresh tables) may consume it — never as a merge base.
     bool unindexed = false;
+    // FINALIZE ONLY (the radix merge): where each group's key VALUES live, as
+    // (source index << 32 | row) into the partition's queued sources, instead of a
+    // copy in `keycols`. Group identity is the hash, so the values are needed once —
+    // at emit — and are gathered from the source then. Empty everywhere else.
+    std::vector<uint64_t> keyref;
 
     size_t size() const { return hashes.size(); }
 
@@ -4138,6 +4146,16 @@ struct GroupBySink : Sink {
             if constexpr (kSel) return sel[ii];
             else { (void)sel; return ii; }
         };
+        // COUNT(DISTINCT) pairs: resolved at COMPILE time like `pick` — the full-merge
+        // instantiation's pair loops are the original ones, with no per-pair branch.
+        auto pair_count = [psel](size_t s, const GBCountDistinct& SC) -> size_t {
+            if constexpr (kSel) return psel[s].n;
+            else { (void)psel; (void)s; return SC.size(); }
+        };
+        auto pair_at = [psel](size_t s, size_t pj) -> size_t {
+            if constexpr (kSel) return psel[s].idx[pj];
+            else { (void)psel; (void)s; return pj; }
+        };
         if (g.has_rows) {
             for (uint32_t ii = 0; ii < n; ++ii) {
                 const uint32_t e = pick(ii);
@@ -4153,16 +4171,16 @@ struct GroupBySink : Sink {
                 // (the fold after this loop fills the merged lanes).
                 GBCountDistinct& SC = src.cd[s];
                 GBCountDistinct& DC = dst.cd[s];
-                const size_t np = psel ? psel[s].n : SC.size();
+                const size_t np = pair_count(s, SC);
                 if (!SC.pair_raw128.empty()) {
                     for (size_t pj = 0; pj < np; ++pj) {
-                        const size_t pi = psel ? psel[s].idx[pj] : pj;
+                        const size_t pi = pair_at(s, pj);
                         DC.insert_raw128(ge[SC.pair_gid[pi]], SC.pair_vhash[pi],
                                          SC.pair_raw128[pi]);
                     }
                 } else {
                     for (size_t pj = 0; pj < np; ++pj) {
-                        const size_t pi = psel ? psel[s].idx[pj] : pj;
+                        const size_t pi = pair_at(s, pj);
                         DC.insert_raw(ge[SC.pair_gid[pi]], SC.pair_vhash[pi],
                                       SC.pair_raw[pi]);
                     }
@@ -4351,9 +4369,9 @@ struct GroupBySink : Sink {
                     // arrive from several workers — only a merged-set MISS counts.
                     GBCountDistinct& SC = src.cd[s];
                     GBCountDistinct& DC = dst.cd[s];
-                    const size_t np = psel ? psel[s].n : SC.size();
+                    const size_t np = pair_count(s, SC);
                     for (size_t pj = 0; pj < np; ++pj) {
-                        const size_t pi = psel ? psel[s].idx[pj] : pj;
+                        const size_t pi = pair_at(s, pj);
                         uint32_t m = ge[SC.pair_gid[pi]];
                         if (DC.insert(m, SC.pair_vhash[pi])) D.valid[m] += 1;
                     }
@@ -4366,8 +4384,11 @@ struct GroupBySink : Sink {
         return true;
     }
 
-    // Map every group of src into dst by PROBING dst's index; a new dst group takes
-    // its key values from src. Fills ge[0..src.size()).
+    // Map every group of src into dst by PROBING dst's index. Fills ge[0..src.size()).
+    // kRef = false: a new dst group copies its key VALUES from src.keycols.
+    // kRef = true (radix merge, pass 2): src is a bucket carrying key REFERENCES; a
+    // new dst group takes the reference, and no key bytes move.
+    template <bool kRef>
     void map_probe(GBPartition& dst, GBPartition& src, std::vector<uint32_t>& ge) {
         const uint32_t sn = static_cast<uint32_t>(src.size());
         ge.resize(sn);
@@ -4377,17 +4398,22 @@ struct GroupBySink : Sink {
                 src.hashes[e], static_cast<int64_t>(dst.hashes.size()), mg);
             if (is_new) {
                 dst.hashes.push_back(src.hashes[e]);
-                for (size_t k = 0; k < dst.keycols.size(); ++k)
-                    dst.keycols[k].append_from(src.keycols[k], e);
+                if constexpr (kRef) {
+                    dst.keyref.push_back(src.keyref[e]);
+                } else {
+                    for (size_t k = 0; k < dst.keycols.size(); ++k)
+                        dst.keycols[k].append_from(src.keycols[k], e);
+                }
             }
             ge[e] = static_cast<uint32_t>(mg);
         }
     }
 
     // Probe-merge ALL of src into dst (dst must be indexed; src need not be).
+    template <bool kRef>
     bool merge_probe(GroupByGlobal& g, GBPartition& dst, GBPartition& src,
                      std::vector<uint32_t>& ge, ErrCtx& err) {
-        map_probe(dst, src, ge);
+        map_probe<kRef>(dst, src, ge);
         grow_lanes(g, dst);
         return combine_into<false>(g, dst, src, ge.data(), nullptr,
                                    static_cast<uint32_t>(src.size()), nullptr, err);
@@ -4407,8 +4433,11 @@ struct GroupBySink : Sink {
     // RADIX SCATTER (pass 1): append every group of src, unprobed, to the bucket its
     // hash bits [kGBMergeBucketShift, +log2 nb) select. Source reads are sequential
     // and each bucket is written sequentially; no table is touched. A bucket may
-    // then hold the same hash more than once — pass 2 probe-merges it.
-    bool scatter_into(GroupByGlobal& g, GBPartition& src, std::vector<GBPartition>& frag,
+    // then hold the same hash more than once — pass 2 probe-merges it. Key VALUES do
+    // not move: the bucket records (src_idx, row), and src's key columns are kept
+    // until the partition is emitted (see merge_and_emit_partition).
+    bool scatter_into(GroupByGlobal& g, GBPartition& src, uint32_t src_idx,
+                      std::vector<GBPartition>& frag,
                       size_t nb, ScatterScratch& sc, ErrCtx& err) {
         const uint32_t sn = static_cast<uint32_t>(src.size());
         if (sn == 0) return true;
@@ -4448,12 +4477,12 @@ struct GroupBySink : Sink {
             const uint32_t lo = sc.start[b], hi = sc.start[b + 1];
             if (lo == hi) continue;
             GBPartition& D = frag[b];
+            const uint64_t src_tag = static_cast<uint64_t>(src_idx) << 32;
             for (uint32_t ii = lo; ii < hi; ++ii) {
                 const uint32_t e = sc.sel[ii];
                 sc.ge[e] = static_cast<uint32_t>(D.hashes.size());
                 D.hashes.push_back(src.hashes[e]);
-                for (size_t k = 0; k < D.keycols.size(); ++k)
-                    D.keycols[k].append_from(src.keycols[k], e);
+                D.keyref.push_back(src_tag | e);
             }
             grow_lanes(g, D);
             for (size_t s = 0; s < nspecs; ++s) {
@@ -4509,12 +4538,12 @@ struct GroupBySink : Sink {
                 merged.hashes.reserve(merge_total);
             }
             for (size_t i = first; i < list.size(); ++i) {
-                if (!merge_probe(g, merged, list[i], ge, err)) return;
+                if (!merge_probe<false>(g, merged, list[i], ge, err)) return;
                 list[i] = GBPartition();   // release the merged-in worker table
             }
             list.clear();
             if (prof) gb_fin_merge_ns.fetch_add(gb_prof_now() - t0, std::memory_order_relaxed);
-            finish_and_emit(g, merged, out_morsels, err);
+            finish_and_emit(g, merged, nullptr, out_morsels, err);
             return;
         }
 
@@ -4522,11 +4551,17 @@ struct GroupBySink : Sink {
         groupby_tel::merge_buckets.fetch_add(static_cast<long long>(nb), std::memory_order_relaxed);
         std::vector<GBPartition> frag(nb);
         for (GBPartition& f : frag) ready_partition(g, f);
+        // Each source's KEY COLUMNS outlive the scatter (the buckets reference them);
+        // everything else of the source — index, hashes, lanes, distinct pairs — is
+        // released as soon as it has been scattered.
+        std::vector<std::vector<GroupKeyColumn>> key_sources(list.size());
         {
             ScatterScratch sc;
             for (size_t i = 0; i < list.size(); ++i) {
-                if (!scatter_into(g, list[i], frag, nb, sc, err)) return;
-                list[i] = GBPartition();   // release as soon as it is scattered
+                if (!scatter_into(g, list[i], static_cast<uint32_t>(i), frag, nb, sc, err))
+                    return;
+                key_sources[i] = std::move(list[i].keycols);
+                list[i] = GBPartition();
             }
         }
         list.clear();
@@ -4538,17 +4573,21 @@ struct GroupBySink : Sink {
             ready_partition(g, merged);
             merged.index.reserve(frag[b].size());
             merged.hashes.reserve(frag[b].size());
-            if (!merge_probe(g, merged, frag[b], ge, err)) return;
+            if (!merge_probe<true>(g, merged, frag[b], ge, err)) return;
             frag[b] = GBPartition();
             if (prof) merge_ns += gb_prof_now() - t0;
-            finish_and_emit(g, merged, out_morsels, err);
+            finish_and_emit(g, merged, &key_sources, out_morsels, err);
             if (err.code != 0) return;
         }
         if (prof) gb_fin_merge_ns.fetch_add(merge_ns, std::memory_order_relaxed);
     }
 
     // Fold the distinct-operand pairs, then emit `merged` in chunk_rows morsels.
+    // `key_sources` null: key values are in merged.keycols. Non-null: merged.keyref
+    // locates each group's values in those sources, and each chunk's key columns
+    // are gathered from them — the ONE copy a group's key values make in finalize.
     void finish_and_emit(GroupByGlobal& g, GBPartition& merged,
+                         const std::vector<std::vector<GroupKeyColumn>>* key_sources,
                          std::vector<MorselPtr>& out_morsels, ErrCtx& err) {
         const size_t nspecs = specs.size();
         const bool prof = gb_finalize_prof_on();
@@ -4572,10 +4611,28 @@ struct GroupBySink : Sink {
             // each per-group key store (GroupKeyColumn) into the output morsel. Only
             // the emitted keys have a store — a hash-only key has no column here.
             const uint64_t prof_tk = prof ? gb_prof_now() : 0;
-            for (size_t k = 0; k < merged.keycols.size(); ++k) {
-                m->columns.push_back(jpc_emit_range(merged.keycols[k], start, n, err));
-                if (err.code != 0) return;
-                m->names.push_back(store_names[k]);
+            if (key_sources == nullptr) {
+                for (size_t k = 0; k < merged.keycols.size(); ++k) {
+                    m->columns.push_back(jpc_emit_range(merged.keycols[k], start, n, err));
+                    if (err.code != 0) return;
+                    m->names.push_back(store_names[k]);
+                }
+            } else {
+                // Gather this chunk's key values from their sources into typed
+                // stores, then emit those exactly as the copying path does.
+                GBPartition gathered;
+                type_keycols(gathered, g.key_meta);
+                for (size_t k = 0; k < gathered.keycols.size(); ++k) {
+                    GroupKeyColumn& col = gathered.keycols[k];
+                    for (uint32_t i = 0; i < n; ++i) {
+                        const uint64_t ref = merged.keyref[start + i];
+                        col.append_from((*key_sources)[ref >> 32][k],
+                                        static_cast<size_t>(ref & 0xFFFFFFFFu));
+                    }
+                    m->columns.push_back(jpc_emit_range(col, 0, n, err));
+                    if (err.code != 0) return;
+                    m->names.push_back(store_names[k]);
+                }
             }
             const uint64_t prof_tl = prof ? gb_prof_now() : 0;
             if (prof) gb_fin_keys_ns.fetch_add(prof_tl - prof_tk,
