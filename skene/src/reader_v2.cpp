@@ -6,6 +6,7 @@
 
 #include "reader_v2.h"
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
