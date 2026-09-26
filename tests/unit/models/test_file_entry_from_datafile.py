@@ -95,6 +95,49 @@ def test_from_datafile_fallback_attribute_shape_has_no_length_bounds():
     assert fe.max_length_bounds is None
 
 
+
+def test_from_datafile_keys_by_the_rows_own_tuple_field_ids_in_file_order():
+    # The live catalog bulk-scan hands `field_ids` over as a TUPLE, in the
+    # FILE's column order. A list-only check discarded it and keyed by
+    # `schema_field_ids` (schema order), so each column read another column's
+    # stats - public.github.events had created_at bounded by a URL string.
+    entry = {
+        "file_path": "f1",
+        "record_count": 10,
+        "file_size_in_bytes": 100,
+        "field_ids": (1, 3, 2),
+        "min_values": (10, "https://a", 100),
+        "max_values": (19, "https://z", 199),
+        "null_counts": (0, 4, 0),
+    }
+    fe = FileEntry.from_datafile(_datafile(entry), schema_field_ids=[1, 2, 3])
+
+    assert fe.lower_bounds == {1: 10, 2: 100, 3: "https://a"}
+    assert fe.upper_bounds == {1: 19, 2: 199, 3: "https://z"}
+    assert fe.null_value_counts == {1: 0, 2: 0, 3: 4}
+
+
+def test_from_datafile_tuple_field_ids_shorter_than_schema_keeps_its_stats():
+    # A file written without some schema columns (github.events rows with no
+    # org_* columns): its own ids line up with its own stats, so the stats are
+    # kept. Keyed against the full schema list instead, the length mismatch
+    # dropped every bound and null count on the file.
+    entry = {
+        "file_path": "f1",
+        "record_count": 10,
+        "file_size_in_bytes": 100,
+        "field_ids": (2, 1),
+        "min_values": (100, 10),
+        "max_values": (199, 19),
+        "null_counts": (0, 0),
+    }
+    fe = FileEntry.from_datafile(_datafile(entry), schema_field_ids=[1, 2, 3])
+
+    assert fe.lower_bounds == {1: 10, 2: 100}
+    assert fe.upper_bounds == {1: 19, 2: 199}
+    assert fe.null_value_counts == {1: 0, 2: 0}
+
+
 if __name__ == "__main__":  # pragma: no cover
     import pytest
 

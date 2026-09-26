@@ -219,7 +219,7 @@ def test_unknown_config_and_bad_credentials_are_refused():
     with pytest.raises(ValueError, match="unknown configuration keys"):
         FirestoreConnector(project="p", host="x")
     with pytest.raises(ValueError, match="service-account key"):
-        FirestoreConnector(project="p", credentials={"type": "service_account"})
+        FirestoreConnector(project="p", credentials={"project_id": "p"})
 
 
 def test_repr_never_shows_the_credential():

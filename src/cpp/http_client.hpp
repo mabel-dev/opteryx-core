@@ -50,8 +50,8 @@ struct HttpError : std::runtime_error {
 struct HttpTuning {
     long   max_host_connections      = 3;               // get_many()'s per-host connection cap
     int    max_retries                = 2;               // transient-failure retry budget
-    double min_bandwidth_bytes_per_s  = 20.0e6 / 8.0;     // assumed floor stream bandwidth
-    long   timeout_floor_ms           = 10000;            // minimum per-request timeout
+    double min_bandwidth_bytes_per_s  = 20.0e6 / 8.0;     // assumed floor bandwidth per get()/get_many() call
+    long   timeout_floor_ms           = 10000;            // minimum per-request (get_many: per-batch) timeout
 
     // ── HTTP/2 multiplexing ────────────────────────────────────────────────
     // get_many() adds every range's easy handle to one CURLM at once. WITHOUT
@@ -132,7 +132,8 @@ public:
      * Sets CURLOPT_SHARE so the shared connection/DNS cache is used. Retries
      * transient failures (per `tuning.max_retries`) and derives the per-request
      * timeout from the Range span (per `tuning.min_bandwidth_bytes_per_s` /
-     * `tuning.timeout_floor_ms`) — the same policy get_many() applies.
+     * `tuning.timeout_floor_ms`). get_many() applies the same policy to the
+     * batch's TOTAL bytes, since its ranges share connections.
      *
      * @param url      URL to fetch
      * @param headers  Optional request headers (e.g. Range, Authorization)

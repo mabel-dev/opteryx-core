@@ -150,25 +150,36 @@ bool http_status_retryable(long code) {
     return code >= 500 || code == 429;
 }
 
-// Derive a per-request timeout from the Range header's byte span: a small chunk
-// that stalls should time out in ~floor seconds, not the 60s client default, so
-// it can be retried promptly. Returns the client default when no Range present.
-long request_timeout_ms(const std::map<std::string, std::string>& headers, long fallback_ms,
-                         const HttpTuning& tuning) {
+// Byte span of a "Range: bytes=START-END" header; -1 when there is no Range
+// (a whole-object GET, whose size is unknown up front).
+long range_span_bytes(const std::map<std::string, std::string>& headers) {
     auto it = headers.find("Range");
-    if (it == headers.end()) return fallback_ms;
-    // "bytes=START-END"
+    if (it == headers.end()) return -1;
     const std::string& r = it->second;
     size_t eq = r.find('=');
     size_t dash = r.find('-', eq == std::string::npos ? 0 : eq + 1);
-    if (eq == std::string::npos || dash == std::string::npos) return fallback_ms;
+    if (eq == std::string::npos || dash == std::string::npos) return -1;
     long start = std::atol(r.c_str() + eq + 1);
     long end   = std::atol(r.c_str() + dash + 1);
-    long size  = (end >= start) ? (end - start + 1) : 0;
-    double bw  = tuning.min_bandwidth_bytes_per_s;
-    long derived = bw > 0 ? static_cast<long>(size * 1000.0 / bw) : fallback_ms;
-    long floor   = tuning.timeout_floor_ms;
-    return std::max(floor, derived);
+    return (end >= start) ? (end - start + 1) : 0;
+}
+
+// Timeout for moving `bytes` over ONE assumed-min-bandwidth stream, floored so
+// a small chunk that stalls times out in ~floor seconds, not the 60s client
+// default, and can be retried promptly.
+long timeout_for_bytes_ms(long bytes, const HttpTuning& tuning, long fallback_ms) {
+    double bw    = tuning.min_bandwidth_bytes_per_s;
+    long derived = bw > 0 ? static_cast<long>(bytes * 1000.0 / bw) : fallback_ms;
+    return std::max(tuning.timeout_floor_ms, derived);
+}
+
+// Single-request timeout from its own Range span; the client default when no
+// Range is present.
+long request_timeout_ms(const std::map<std::string, std::string>& headers, long fallback_ms,
+                         const HttpTuning& tuning) {
+    long span = range_span_bytes(headers);
+    if (span < 0) return fallback_ms;
+    return timeout_for_bytes_ms(span, tuning, fallback_ms);
 }
 
 // Backoff with full jitter: random in [0, base * 2^attempt], capped.
@@ -526,8 +537,13 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
         CURLcode       res      = CURLE_OK;
         long           http_code = 0;
         long           os_errno  = 0;   // DEBUG: raw connect()/socket() errno, see CURLINFO_OS_ERRNO
+        long           timeout_ms = 0;  // budget applied on the last attempt
+        curl_off_t     elapsed_us = 0;  // CURLINFO_TOTAL_TIME_T on the last attempt
     };
     std::vector<RequestCtx> ctx(n);
+    // Shape of the last attempt's batch, for the exhausted-retries message.
+    size_t last_batch_n     = 0;
+    long   last_batch_bytes = 0;
 
     // Fetch a subset of requests (by index) concurrently via one local CURLM,
     // harvesting result + status into ctx[idx]. Resets each buffer first so a
@@ -549,6 +565,20 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
         // added before any connection is established each get their own.
         curl_multi_setopt(multi, CURLMOPT_PIPELINING,
                           tuning.use_multiplexing ? (long)CURLPIPE_MULTIPLEX : (long)CURLPIPE_NOTHING);
+
+        // Every range in this batch shares the same (at most host_cap) h2
+        // connections, so the assumed min bandwidth covers the WHOLE batch, not
+        // each range: every handle gets the time to move the batch's total bytes.
+        // A range-less GET has no known size and keeps the client default as its
+        // lower bound.
+        long batch_bytes = 0;
+        for (size_t i : idxs) {
+            long span = range_span_bytes(requests[i].second);
+            if (span > 0) batch_bytes += span;
+        }
+        const long batch_timeout_ms = timeout_for_bytes_ms(batch_bytes, tuning, timeout_ms_);
+        last_batch_n     = idxs.size();
+        last_batch_bytes = batch_bytes;
 
         auto cleanup = [&]() {
             for (size_t j = 0; j < idxs.size(); ++j) {
@@ -574,9 +604,10 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
 
             curl_easy_setopt(easy, CURLOPT_URL,            req_url.c_str());
             curl_easy_setopt(easy, CURLOPT_USERAGENT,       user_agent_.c_str());
-            // Per-request timeout derived from the Range size (WP-5): a stalled
-            // small request times out near the floor, not the 60s client default.
-            curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,      request_timeout_ms(req_hdrs, timeout_ms_, tuning));
+            ctx[i].timeout_ms = range_span_bytes(req_hdrs) < 0
+                ? std::max(timeout_ms_, batch_timeout_ms)
+                : batch_timeout_ms;
+            curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,      ctx[i].timeout_ms);
             curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION,  1L);
             curl_easy_setopt(easy, CURLOPT_MAXREDIRS,       5L);
             curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION,   ResponseBuffer::write_body);
@@ -633,6 +664,8 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
                 curl_easy_getinfo(msg->easy_handle, CURLINFO_RESPONSE_CODE, &ctx[i].http_code);
                 ctx[i].os_errno = 0;
                 curl_easy_getinfo(msg->easy_handle, CURLINFO_OS_ERRNO, &ctx[i].os_errno);
+                ctx[i].elapsed_us = 0;
+                curl_easy_getinfo(msg->easy_handle, CURLINFO_TOTAL_TIME_T, &ctx[i].elapsed_us);
             }
         }
         cleanup();
@@ -676,11 +709,20 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
                       " [os_errno=" + std::to_string(ctx[i].os_errno) + " (" +
                       std::strerror(static_cast<int>(ctx[i].os_errno)) + ")]"
                 : std::string("HTTP ") + std::to_string(ctx[i].http_code);
+            // received vs expected + elapsed vs budget tells a transfer still
+            // moving (budget too tight) from one that stalled (dead connection).
+            const long span = range_span_bytes(requests[i].second);
             throw HttpError(
                 "get_many: exhausted " + std::to_string(max_retries) + " retries (" +
                 cause + ") url=" + requests[i].first + " range=" +
                 [&]() { auto it = requests[i].second.find("Range");
-                        return it == requests[i].second.end() ? std::string("full") : it->second; }(),
+                        return it == requests[i].second.end() ? std::string("full") : it->second; }() +
+                " received=" + std::to_string(ctx[i].buf.body.size()) + "/" +
+                (span < 0 ? std::string("?") : std::to_string(span)) + "B" +
+                " elapsed=" + std::to_string(ctx[i].elapsed_us / 1000) + "ms" +
+                " timeout=" + std::to_string(ctx[i].timeout_ms) + "ms" +
+                " batch=" + std::to_string(last_batch_n) + " ranges/" +
+                std::to_string(last_batch_bytes) + "B",
                 true, ctx[i].http_code);
         }
 

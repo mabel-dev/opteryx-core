@@ -73,7 +73,8 @@ def _warn_no_native_sketches(table: Any) -> None:
             f"manifest_sketch_vectors returning an empty dict to say so."
         )
 from opteryx.connectors.base.base_connector import BaseTable
-from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable, Writable
+from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable, TopNPushable, Writable
+from opteryx.connectors.capabilities.topn_pushable import single_physical_column_topn
 from opteryx.connectors.capabilities.writable import EgressRefusal
 from opteryx.connectors.manifest_disk_cache import CachingFileIO
 from opteryx.connectors.manifest_disk_cache import manifest_cache_tiers
@@ -111,7 +112,7 @@ def _accepts_include_expired(loader) -> bool:
     return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
 
 
-class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
+class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
     """
     Plan-time table metadata provider for Opteryx tables.
 
@@ -142,6 +143,9 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
     supports_statistics = True  # Manifest provides stats
     supports_predicate_pushdown = True  # Allow optimizer to push predicates to reader
     supports_limit_pushdown = True  # Allow optimizer to push LIMIT to OpteryxTable
+    # Served by ParquetReadNode (see below), which consumes the single-key
+    # top-N spec; the stamp also arms TopNManifestPruningStrategy.
+    supports_topn_pushdown = True
     # The reader that serves a catalog scan is not this class - it is chosen
     # from the manifest's FileEntry.file_format (physical_planner
     # `_scan_reader_for_manifest`), and a catalog manifest is parquet-only
@@ -231,6 +235,9 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
             self.snapshot_id = None if self.snapshot is None else self.snapshot.snapshot_id
         except DatasetNotFound as exc:
             raise DatasetNotFoundError(dataset=self.dataset, connector=self.__type__) from exc
+
+    def can_push_topn(self, order_by) -> bool:
+        return single_physical_column_topn(order_by)
 
     @staticmethod
     def _normalize_type(
@@ -906,12 +913,12 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
         file_entries = []
         protocols = set()
 
-        # The manifest rows carry per-column stats as POSITIONAL lists in schema
-        # order and no `field_ids` key of their own, but every reader of those
-        # stats resolves a column through `Manifest._resolve_field_id`, which
-        # returns the catalog field_id this schema assigns. Hand the schema's
-        # field ids down so both sides speak one key space - see the keying note
-        # in `FileEntry.from_datafile` for what the mismatch silently did.
+        # The manifest rows carry per-column stats as POSITIONAL lists in the
+        # FILE's column order, keyed by the row's own `field_ids`. Every reader
+        # of those stats resolves a column through `Manifest._resolve_field_id`,
+        # which returns the catalog field_id this schema assigns. The schema's
+        # field ids are handed down only for rows with no `field_ids` of their
+        # own - see the keying note in `FileEntry.from_datafile`.
         schema_field_ids = [column.field_id for column in self.schema.columns]
 
         for data_file in scan:

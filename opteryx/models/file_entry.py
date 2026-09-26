@@ -230,9 +230,7 @@ class FileEntry:
             #    order need not match "position in today's schema" once schema
             #    evolution has happened, which is why the row's own list wins.
             #  * `schema_field_ids` — the caller's schema in schema order, used
-            #    for rows that predate the row-level list. The current
-            #    opteryx_catalog writes NO `field_ids` key at all, so this is
-            #    the live path, not a legacy one.
+            #    for rows that predate the row-level list.
             #  * positional — only when neither is available, which means the
             #    schema assigns no field_ids either, so `_resolve_field_id`
             #    falls back to load-time position and the two spaces agree.
@@ -245,8 +243,15 @@ class FileEntry:
             # a string ordinal. Hence: when a key list exists but does not line
             # up with a stat list, that stat is DROPPED (no stats = no pruning =
             # correct but slower) rather than keyed by position.
+            # ⛔ (list, tuple), NOT list: the catalog bulk-scan delivers this
+            # list as a TUPLE, same as the stat lists (see _key_by_field_id).
+            # A list-only test discarded every row's own ids and keyed by
+            # schema order instead - a row written in its file's own column
+            # order then read other columns' stats (public.github.events:
+            # created_at bounded by a URL string ordinal), and a row with
+            # fewer columns than the schema lost all its stats.
             field_ids = entry.get("field_ids")
-            if not (field_ids and isinstance(field_ids, list)):
+            if not (field_ids and isinstance(field_ids, (list, tuple))):
                 # A schema that assigns no field_id to some column cannot key
                 # these stats: `_resolve_field_id` answers that column with its
                 # load-time POSITION, so a partially-keyed dict would put some
@@ -257,7 +262,7 @@ class FileEntry:
                 field_ids = schema_field_ids
                 if field_ids is not None and any(fid is None for fid in field_ids):
                     field_ids = None
-            if not (field_ids and isinstance(field_ids, list)):
+            if not (field_ids and isinstance(field_ids, (list, tuple))):
                 field_ids = None
 
             def _key_by_field_id(values):

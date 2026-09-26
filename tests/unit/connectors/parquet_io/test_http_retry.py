@@ -122,9 +122,68 @@ def test_transient_faults_recover():
         proc.kill(); proc.wait()
 
 
+# Runs in a child so OPTERYX_HTTP_* (read once per process into statics) apply.
+# Server: 8 Mbps = 1 MB/s PER CONNECTION, so a 256 KiB range takes ~256 ms.
+# Client assumes 16 Mbps = 2 MB/s, so ONE range's own budget is ~131 ms - too
+# short for any range, alone or batched. A 12-range batch over the 3-connection
+# host cap takes ~4 x 256 ms = ~1 s; its whole-batch budget is 12 x 131 ms = ~1.6 s.
+_BATCH_BUDGET_CHILD = r"""
+import sys
+from opteryx.compiled.http_client import HttpClient
+url, which = sys.argv[1], sys.argv[2]
+KIB256 = 256 * 1024
+if which == "single":
+    reqs = [(url, {"Range": f"bytes=0-{KIB256 - 1}"})]
+else:
+    reqs = [(url, {"Range": f"bytes={i * KIB256}-{(i + 1) * KIB256 - 1}"}) for i in range(12)]
+try:
+    out = HttpClient().get_many(reqs)
+    assert all(len(b) == KIB256 for b in out)
+    print("OK")
+except RuntimeError as e:
+    print("ERR " + str(e))
+"""
+
+
+def _run_budget_child(port, which):
+    env = dict(os.environ, OPTERYX_HTTP_TIMEOUT_FLOOR_MS="50", OPTERYX_HTTP_MIN_BW_MBPS="16")
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
+    res = subprocess.run(
+        [sys.executable, "-c", _BATCH_BUDGET_CHILD, _url(port), which],
+        env=env, cwd=root, capture_output=True, text=True, timeout=60,
+    )
+    return res.stdout.strip() + res.stderr.strip()
+
+
+def test_get_many_budget_covers_the_whole_batch():
+    """The time budget is sized from the batch's TOTAL bytes, because every
+    range in a get_many batch shares the same connections. The single-range
+    control proves the throttle really bites at these settings (a range cannot
+    finish inside its own budget), and pins the exhausted-retries diagnostics."""
+    _ensure_data()
+    proc = subprocess.Popen(
+        [sys.executable, SERVER, "--root", DATA_DIR, "--port", "0", "--bandwidth-mbps", "8"],
+        stdout=subprocess.PIPE, text=True,
+    )
+    port = int(proc.stdout.readline().strip().split("port=")[1])
+    try:
+        control = _run_budget_child(port, "single")
+        assert control.startswith("ERR "), control
+        assert "Timeout" in control, control
+        assert "timeout=131ms" in control, control
+        assert "batch=1 ranges/262144B" in control, control
+        assert "received=" in control and "/262144B" in control, control
+        assert "elapsed=" in control, control
+
+        assert _run_budget_child(port, "batch") == "OK"
+    finally:
+        proc.kill(); proc.wait()
+
+
 if __name__ == "__main__":
     test_no_fault_succeeds(); print("no-fault: OK")
     test_persistent_5xx_raises_exhausted(); print("persistent 5xx exhausted: OK")
     test_4xx_not_retried_and_immediate(); print("4xx immediate, no retry: OK")
     test_transient_faults_recover(); print("transient recover: OK")
+    test_get_many_budget_covers_the_whole_batch(); print("batch budget: OK")
     print("all WP-5 tests passed")
