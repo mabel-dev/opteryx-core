@@ -99,11 +99,6 @@ def render_explain(node: PlanStep) -> str:
     return f"EXPLAIN{' ANALYZE' if node.analyze else ''}{fmt}"
 
 
-@register_render(LogicalPlanStepType.Difference)
-def render_difference(_: PlanStep) -> str:
-    return "DIFFERENCE"
-
-
 @register_render(LogicalPlanStepType.Join)
 def render_join(node: PlanStep) -> str:
     join_type = node.type.upper()

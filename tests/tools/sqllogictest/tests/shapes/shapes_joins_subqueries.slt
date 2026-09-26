@@ -570,7 +570,7 @@ SELECT name FROM $planets WHERE gravity > (SELECT MIN(gravity) FROM $planets) AN
 
 # only equalities can become join keys; a non-equi correlation must say so
 statement error UnsupportedSyntaxError
-SELECT p.name FROM $planets p WHERE p.numberOfMoons < (SELECT AVG(p2.numberOfMoons) FROM $planets p2 WHERE p2.orbitalPeriod > p.orbitalPeriod)
+SELECT p.name FROM $planets p WHERE p.number_of_moons < (SELECT AVG(p2.number_of_moons) FROM $planets p2 WHERE p2.orbital_period > p.orbital_period)
 
 # an uncorrelated subquery that could return many rows must not silently multiply
 statement error UnsupportedSyntaxError

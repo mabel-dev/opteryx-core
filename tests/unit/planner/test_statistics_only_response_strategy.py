@@ -62,7 +62,7 @@ def _count_star():
     return Aggregator(
         value="COUNT",
         parameters=[Wildcard()],
-        schema_column=types.SimpleNamespace(identity="$COUNT(*)", column_type=None),
+        schema_column=types.SimpleNamespace(identity="$COUNT(*)", column_type=None, slot=None),
     )
 
 
@@ -71,7 +71,7 @@ def _count_distinct():
         value="COUNT",
         parameters=[LogicalColumn(NodeType.IDENTIFIER, "x")],
         duplicate_treatment="Distinct",
-        schema_column=types.SimpleNamespace(identity="$COUNT(*)", column_type=None),
+        schema_column=types.SimpleNamespace(identity="$COUNT(*)", column_type=None, slot=None),
     )
 
 

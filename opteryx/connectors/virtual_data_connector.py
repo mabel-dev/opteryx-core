@@ -23,7 +23,7 @@ _logger = logging.getLogger(__name__)
 from draken.morsels.morsel import Morsel
 from opteryx.connectors.base.base_connector import BaseConnector, BaseTable
 from opteryx.exceptions import DatasetNotFoundError
-from opteryx.types.schema import RelationSchema
+from opteryx.types.schema import RelationDescriptor
 
 # Datasets that exist ONLY to back a dedicated SQL surface and are therefore not
 # addressable by name in user SQL. `$variables` is reachable exclusively through
@@ -191,7 +191,7 @@ class VirtualDataTable(BaseTable):
     def interal_only(self):
         return True
 
-    def get_dataset_schema(self) -> RelationSchema:
+    def get_dataset_schema(self) -> RelationDescriptor:
         if self.dataset not in WELL_KNOWN_DATASETS:
             suggestion = suggest(self.dataset)
             raise DatasetNotFoundError(

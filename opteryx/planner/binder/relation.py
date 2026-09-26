@@ -2166,10 +2166,11 @@ def visit_insert(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
     from opteryx.expression import NodeType
     from opteryx.managers.permissions import can_perform_action
     from opteryx.models import LogicalColumn
+    from opteryx.types.schema import ColumnDescriptor
+    from opteryx.types.schema import RelationDescriptor
     from opteryx.types.schema import RelationSchema
 
     from opteryx.types.logical_type import LogicalCategory
-    from opteryx.types.schema import SchemaColumn
 
     node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
     if not isinstance(node.connector, Writable):
@@ -2356,12 +2357,12 @@ def visit_insert(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
                     f"CTAS column '{target_name}' has unresolved type; "
                     "specify the **SELECT**'s column types explicitly"
                 )
-            from opteryx.types.schema import mint_column_identity
-            flat = SchemaColumn(
+            # A description of the relation being created, handed to the store -
+            # never bound into this plan, so nothing is minted for it.
+            flat = ColumnDescriptor(
                 name=target_name,
                 column_type=sc.column_type,
                 nullable=sc.nullable,
-                identity=mint_column_identity(node.relation_name, target_name),
             )
             target_columns.append(flat)
 
@@ -2386,7 +2387,7 @@ def visit_insert(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
                     f"({existing_column_names}) - schema-changing REPLACE is not yet supported"
                 )
 
-        target_schema = RelationSchema(
+        target_schema = RelationDescriptor(
             name=node.relation_name,
             columns=target_columns,
         )
@@ -2426,7 +2427,7 @@ def visit_insert(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
     # discarded that manifest, having paid a full table.scan() of every data
     # file and its statistics to build it.
     table = node.connector.table_engine(node.relation_name, telemetry=context.telemetry)
-    target_schema = table.get_declared_schema()  # RelationSchema with SchemaColumn list
+    target_schema = table.get_declared_schema()  # RelationDescriptor
 
     node.target_schema = target_schema
     node.columns = []  # binder convention; INSERT produces no output columns
@@ -2511,6 +2512,12 @@ def visit_insert(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
     # names; the InsertNode will permute to schema order at write time.
     if values_node is not None:
         target_relation_name = values_node.alias
+        # The target's columns are DESCRIPTIONS; the VALUES rows become bound
+        # columns of the feeder, minted in this query in the user-listed order.
+        bound_target = context.plan_context.columns.bind_relation(
+            RelationDescriptor(name=target_relation_name, columns=target_columns_in_order),
+            target_relation_name,
+        )
         columns = [
             LogicalColumn(
                 node_type=NodeType.IDENTIFIER,
@@ -2518,7 +2525,7 @@ def visit_insert(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
                 source=target_relation_name,
                 schema_column=col,
             )
-            for col in target_columns_in_order
+            for col in bound_target.columns
         ]
         values_node.columns = columns
         schema = RelationSchema(

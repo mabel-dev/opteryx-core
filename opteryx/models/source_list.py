@@ -52,22 +52,21 @@ def _source_list_column_types():
 
 
 def sources_output_schema(relation_name: str = "$sources"):
-    """The fixed RelationSchema `SHOW SOURCES FOR <table>` always returns.
+    """The fixed RelationDescriptor `SHOW SOURCES FOR <table>` always returns.
 
     Every _SOURCE_LIST_COLUMNS column, never trimmed or projected. The
     row-count estimate is left to the caller (visit_show_sources), which holds
     the rows.
     """
-    from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+    from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 
     column_types = _source_list_column_types()
-    return RelationSchema(
+    return RelationDescriptor(
         name=relation_name,
         columns=[
-            SchemaColumn(
+            ColumnDescriptor(
                 name=name,
                 column_type=column_types[name],
-                identity=mint_column_identity(relation_name, name),
             )
             for name in _SOURCE_LIST_COLUMNS
         ],

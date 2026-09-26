@@ -912,7 +912,7 @@ SELECT CASE WHEN id > 0 THEN UPPER(name) ELSE LOWER(name) END AS result FROM $pl
 
 
 statement ok
-SELECT COUNT(DISTINCT surfacePressure) FROM $planets; -- DOUBLE (with nulls)
+SELECT COUNT(DISTINCT surface_pressure) FROM $planets; -- DOUBLE (with nulls)
 
 statement ok
 SELECT COUNT(DISTINCT mass) FROM $planets; -- DOUBLE
@@ -939,7 +939,7 @@ statement ok
 SELECT COUNT(DISTINCT id > 1) AS AM FROM $planets; -- BOOLEAN
 
 statement ok
-SELECT COUNT(DISTINCT surfacePressure > 1) AS AM FROM $planets; -- BOOLEAN (with nulls)
+SELECT COUNT(DISTINCT surface_pressure > 1) AS AM FROM $planets; -- BOOLEAN (with nulls)
 
 
 # crashed Opteryx (excluded): SELECT TRY_CAST(alma_mater AS ARRAY<VARCHAR>) FROM testdata.astronauts

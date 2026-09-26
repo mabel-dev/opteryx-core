@@ -1944,6 +1944,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         if condition.node_type == NodeType.BETWEEN and self._inline_trunc_alias_between(
             node, condition, alias_expressions, alias_chain,
             context.pre_optimized_tree, descent_start_nid, _emit_memo,
+            plan_context=context.plan_context,
         ):
             return
 
@@ -1953,6 +1954,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         if condition.value in _TRUNC_REWRITE_OPS and self._inline_trunc_alias_predicate(
             node, condition, alias_expressions, alias_chain,
             context.pre_optimized_tree, descent_start_nid, _emit_memo,
+            plan_context=context.plan_context,
         ):
             return
 
@@ -2010,8 +2012,9 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 if negate:
                     new_condition = Not(centre=expression)
                     expr_name = f"NOT {format_expression(expression)}"
-                    new_condition.schema_column = ExpressionColumn(
-                        name=expr_name,
+                    new_condition.schema_column = context.plan_context.columns.computed(
+                        ExpressionColumn,
+                        expr_name,
                         column_type=_CT_BOOLEAN,
                     )
                 else:
@@ -2070,6 +2073,8 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         plan: LogicalPlan,
         descent_start_nid: str,
         emit_memo: dict,
+        *,
+        plan_context,
     ) -> bool:
         """BETWEEN-shaped counterpart to _inline_trunc_alias_predicate.
 
@@ -2109,7 +2114,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         lower_literal, upper_literal = condition.right, condition.centre
         lower_inclusive, upper_inclusive = condition.value
 
-        def _make_side(op, literal):
+        def _make_side(op, literal, *, plan_context):
             trunc_expression = expression_template.copy()
             trunc_expression.alias = None
             trunc_expression.query_column = None
@@ -2119,13 +2124,19 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 left=trunc_expression,
                 right=literal,
             )
-            side_condition.schema_column = ExpressionColumn(
-                name=format_expression(side_condition, True), column_type=_CT_BOOLEAN
+            side_condition.schema_column = plan_context.columns.computed(
+                ExpressionColumn, format_expression(side_condition, True), column_type=_CT_BOOLEAN
             )
-            return rewrite_date_trunc_to_range(side_condition, self.telemetry)
+            return rewrite_date_trunc_to_range(
+                side_condition, self.telemetry, plan_context=plan_context
+            )
 
-        rewritten_lower = _make_side("GtEq" if lower_inclusive else "Gt", lower_literal)
-        rewritten_upper = _make_side("LtEq" if upper_inclusive else "Lt", upper_literal)
+        rewritten_lower = _make_side(
+            "GtEq" if lower_inclusive else "Gt", lower_literal, plan_context=plan_context
+        )
+        rewritten_upper = _make_side(
+            "LtEq" if upper_inclusive else "Lt", upper_literal, plan_context=plan_context
+        )
 
         # rewrite_date_trunc_to_range silently declines (returns its input
         # unchanged) for a literal it can't parse -- notably, parse_iso
@@ -2184,6 +2195,8 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         plan: LogicalPlan,
         descent_start_nid: str,
         emit_memo: dict,
+        *,
+        plan_context,
     ) -> bool:
         """Substitute a WHERE-clause alias for `TRUNC(col, unit)` with the TRUNC
         expression itself, then immediately fold it into a range predicate on the
@@ -2267,11 +2280,13 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 left=trunc_expression,
                 right=literal_candidate,
             )
-            new_condition.schema_column = ExpressionColumn(
-                name=format_expression(new_condition, True), column_type=_CT_BOOLEAN
+            new_condition.schema_column = plan_context.columns.computed(
+                ExpressionColumn, format_expression(new_condition, True), column_type=_CT_BOOLEAN
             )
 
-            rewritten = rewrite_date_trunc_to_range(new_condition, self.telemetry)
+            rewritten = rewrite_date_trunc_to_range(
+                new_condition, self.telemetry, plan_context=plan_context
+            )
 
             # rewrite_date_trunc_to_range silently declines (returns its input
             # unchanged, still TRUNC-wrapped) for a literal it can't parse --

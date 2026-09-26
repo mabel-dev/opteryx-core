@@ -14,7 +14,7 @@
 # `_operators.so` is dlopen'd, regardless of what the caller imports first.
 import opteryx.connectors.parquet_io  # noqa: F401
 
-from .catalog import OperatorCategory, OperatorParallelism, ParallelStrategy, get_registry
+from .catalog import OperatorCategory, get_registry
 from ._operators import (
     BasePlanNode,
     PhysicalStep,
@@ -28,8 +28,6 @@ __all__ = [
     "PhysicalStep",
     "PipelineContext",
     "OperatorCategory",
-    "OperatorParallelism",
-    "ParallelStrategy",
     "get_registry",
     "ReaderNode",
     "PostgresReadNode",

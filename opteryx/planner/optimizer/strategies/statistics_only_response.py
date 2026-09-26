@@ -676,7 +676,9 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
                 return plan
 
             # Build a literal projection node to replace the aggregate
-            literal = build_literal_node(result_value, suggested_type=result_type, plan_context=context.plan_context)
+            literal = build_literal_node(
+                result_value, suggested_type=result_type, plan_context=context.plan_context
+            )
 
             # Preserve the expected alias for this column
             setattr(literal, "alias", column_aliases[idx])
@@ -685,7 +687,9 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
             # aggregate so downstream Exit/Projection nodes can match by identity.
             agg_schema = agg_node.schema_column
             if agg_schema is not None and literal.schema_column is not None:
-                literal.schema_column.identity = agg_schema.identity
+                literal.schema_column = context.plan_context.columns.adopt(
+                    literal.schema_column, agg_schema
+                )
                 if agg_schema.column_type is not None:
                     literal.schema_column.column_type = agg_schema.column_type
 
@@ -816,10 +820,9 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         # Ensure schema is the virtual dataset schema so ReaderNode
         # normalization succeeds and downstream nodes see the
         # expected column identities.
-        scan_node.schema = scan_node.connector.get_dataset_schema()
-        # Ensure origin is set for schema columns
-        for col in getattr(scan_node.schema, "columns", []) or []:
-            col.origin = [scan_node.alias]
+        scan_node.schema = context.plan_context.columns.bind_relation(
+            scan_node.connector.get_dataset_schema(), scan_node.alias
+        )
 
         # The scan's `.columns` describes the scan's OWN schema (the binder seeds it
         # that way -- see binder/dataset.py::visit_scan), so re-pointing the scan at

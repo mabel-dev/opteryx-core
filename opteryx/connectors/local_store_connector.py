@@ -28,7 +28,8 @@ from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.models.manifest_io import read_manifest_file_entries
 from opteryx.models.manifest_io import write_manifest_parquet
-from opteryx.types.schema import RelationSchema
+from opteryx.types.schema import ColumnDescriptor
+from opteryx.types.schema import RelationDescriptor
 
 logger = logging.getLogger(__name__)
 from opteryx.utils import suggest_alternative, unique_id
@@ -39,7 +40,7 @@ def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def _view_schema_from_stored(stored) -> Optional[RelationSchema]:
+def _view_schema_from_stored(stored) -> Optional[RelationDescriptor]:
     """Rebuild a stored view schema, or None for a view recorded without one.
 
     A view written before schemas were kept has no `schema` key at all, which is
@@ -48,7 +49,7 @@ def _view_schema_from_stored(stored) -> Optional[RelationSchema]:
     """
     if stored is None:
         return None
-    return RelationSchema.from_dict(stored)
+    return RelationDescriptor.from_dict(stored)
 
 
 def _ts_for_filename(iso: str) -> str:
@@ -198,7 +199,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         return entries
 
     def create_relation(
-        self, relation_name: str, schema: RelationSchema, author: Optional[str] = None
+        self, relation_name: str, schema: RelationDescriptor, author: Optional[str] = None
     ) -> None:
         """Create a new relation.
 
@@ -207,7 +208,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
 
         Args:
             relation_name: Fully-qualified relation name
-            schema: RelationSchema for the table
+            schema: RelationDescriptor for the table
             author: session user, unused by this store
 
         Raises:
@@ -1165,7 +1166,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
     def replace_relation(
         self,
         relation_name: str,
-        schema: RelationSchema,
+        schema: RelationDescriptor,
         file_entries: List[FileEntry],
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
@@ -1181,7 +1182,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
 
         Args:
             relation_name: Fully-qualified relation name
-            schema: RelationSchema the new data conforms to (may differ from current)
+            schema: RelationDescriptor the new data conforms to (may differ from current)
             file_entries: List of FileEntry objects that become the relation's entire contents
             author: session user, unused by this store (see create_relation)
             commit_message: what this replace was, unused by this store - its
@@ -1315,7 +1316,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
                 )
             )
 
-        new_schema = RelationSchema(name=relation_name, columns=new_columns)
+        new_schema = RelationDescriptor(name=relation_name, columns=new_columns)
         self._commit(relation_name, new_entries, schema=new_schema)
 
     def add_column(
@@ -1336,8 +1337,6 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         answers is what goes in the file for the rows that already exist.
         """
         from opteryx.connectors.capabilities.writable import build_column_donor
-        from opteryx.types.schema import SchemaColumn
-        from opteryx.types.schema import mint_column_identity
 
         self._validate_relation_name(relation_name)
         relation_dir = self._relation_dir(relation_name)
@@ -1364,11 +1363,10 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             donors = [build_column_donor(column_name, column_type, default)]
 
         columns.append(
-            SchemaColumn(
+            ColumnDescriptor(
                 name=column_name,
                 column_type=column_type,
                 nullable=nullable,
-                identity=mint_column_identity("$add_column", column_name),
             )
         )
         # keep=None: appending shifts no existing column's position, so the
@@ -1525,7 +1523,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         # are carried over rather than dropped.
         self._patch_column(relation_name, new_columns=new_columns, retype=donors)
 
-    def relation_schema(self, relation_name: str) -> RelationSchema:
+    def relation_schema(self, relation_name: str) -> RelationDescriptor:
         """The relation's current schema, whole - see Writable.relation_schema."""
         relation_dir = self._relation_dir(relation_name)
         descriptor = self._read_dataset_json(relation_dir)
@@ -1572,7 +1570,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         self,
         relation_name: str,
         new_files: List[FileEntry],
-        schema: Optional[RelationSchema] = None,
+        schema: Optional[RelationDescriptor] = None,
     ) -> None:
         """Optimistic concurrency control commit protocol.
 
@@ -1725,7 +1723,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         statement: str,
         update_if_exists: bool = False,
         owner: Optional[str] = None,
-        schema: Optional[RelationSchema] = None,
+        schema: Optional[RelationDescriptor] = None,
     ) -> None:
         """Create (or replace) a view definition.
 
@@ -1810,7 +1808,7 @@ class LocalStoreTable(BaseTable):
         parts = self.dataset.split(".")
         return os.path.join(self.store_root, *parts)
 
-    def get_dataset_schema(self) -> RelationSchema:
+    def get_dataset_schema(self) -> RelationDescriptor:
         if self.schema is not None:
             return self.schema
         schema, _ = self.get_dataset_metadata()

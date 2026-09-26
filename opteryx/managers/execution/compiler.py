@@ -1328,6 +1328,7 @@ class _Compiler:
         from opteryx.expression.formatter import ExpressionColumn
         from opteryx.types import logical_type as _lt
 
+        columns = self.plan_context.columns
         nodes = [p.copy() for p in predicates if p is not None]
         root = nodes.pop()
         while nodes:
@@ -1335,7 +1336,7 @@ class _Compiler:
             root = And(
                 left=root,
                 right=right,
-                schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN),
+                schema_column=columns.computed(ExpressionColumn, "", column_type=_lt.BOOLEAN),
             )
         return root
 
@@ -4279,7 +4280,7 @@ class _Compiler:
             return self._compile_materialized_source(scan)
         if kind == "PostgresReadNode":
             return self._compile_postgres_scan(scan)
-        if kind in ("FunctionDatasetNode", "NullReaderNode", "ReaderNode", "JsonlReadNode", "CsvReadNode"):
+        if kind in ("FunctionDatasetNode", "ReaderNode", "JsonlReadNode", "CsvReadNode"):
             return self._compile_materialized_source(scan)
         if kind != "ParquetReadNode":
             _unsupported(f"the {kind} source")
@@ -5169,8 +5170,9 @@ class _Compiler:
             if (identity, target_name) in minted:
                 out_keys.append(minted[(identity, target_name)])
                 continue
-            schema_column = FunctionColumn(
-                name="%s::%s(join key)" % (self._layout_name(identity), target_name),
+            schema_column = self.plan_context.columns.computed(
+                FunctionColumn,
+                "%s::%s(join key)" % (self._layout_name(identity), target_name),
                 column_type=target_ct,
                 aliases=[],
             )
@@ -5702,8 +5704,8 @@ class _Compiler:
         return p, identities
 
     def _compile_materialized_source(self, node):
-        """Virtual datasets ($planets, VALUES, GENERATE_SERIES, contradiction-empty
-        relations): their content is a PLAN CONSTANT — materialize it once, here, at
+        """Virtual datasets ($planets, VALUES, GENERATE_SERIES, READ_CSV/READ_JSONL):
+        their content is a PLAN CONSTANT — materialize it once, here, at
         compile time into a native buffer. Execution reads the buffer natively; no
         Python runs. (Same legitimacy as bind-time literal materialization.)"""
         buf = self.nplan.new_buffer()

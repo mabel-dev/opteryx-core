@@ -15,7 +15,7 @@ from draken.draken_native import DrakenType
 from draken.interop.vector_sequence import vector_from_sequence
 from draken.morsels.morsel import Morsel
 from opteryx.types import logical_type as _lt
-from opteryx.types.schema import SchemaColumn, RelationSchema
+from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 from opteryx.variables import PLATFORM_ADMIN_ENTITLEMENT, SYSTEM_VARIABLES_DEFAULTS, Visibility
 
 __all__ = ("read", "schema")
@@ -108,10 +108,9 @@ def read(at_date=None, variables=None):
 
 def schema():
     # fmt:off
-    from opteryx.types.schema import mint_column_identity
     def sc(name):
-        return SchemaColumn(name=name, column_type=_lt.VARCHAR, identity=mint_column_identity("$variables", name))
-    return  RelationSchema(
+        return ColumnDescriptor(name=name, column_type=_lt.VARCHAR)
+    return  RelationDescriptor(
         name="$variables",
         columns=[
             sc("name"),

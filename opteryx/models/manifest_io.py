@@ -110,7 +110,7 @@ def _manifest_column_types():
 
 
 def manifest_output_schema(relation_name: str = "$manifest"):
-    """The fixed RelationSchema `SHOW MANIFEST FOR <table>` always returns.
+    """The fixed RelationDescriptor `SHOW MANIFEST FOR <table>` always returns.
 
     One row per file, every _MANIFEST_COLUMNS column — never trimmed,
     filtered, or projected (SHOW MANIFEST FOR has no WHERE/column-list
@@ -118,16 +118,15 @@ def manifest_output_schema(relation_name: str = "$manifest"):
     (visit_show_manifest) knows the real file count from the bound Manifest
     and should set it there instead of this being guessed here.
     """
-    from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+    from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 
     column_types = _manifest_column_types()
-    return RelationSchema(
+    return RelationDescriptor(
         name=relation_name,
         columns=[
-            SchemaColumn(
+            ColumnDescriptor(
                 name=name,
                 column_type=column_types[name],
-                identity=mint_column_identity(relation_name, name),
             )
             for name in _MANIFEST_COLUMNS
         ],

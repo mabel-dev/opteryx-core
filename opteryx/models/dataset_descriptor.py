@@ -10,7 +10,7 @@ In-memory representation of dataset.json metadata.
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from opteryx.types.schema import RelationSchema
+from opteryx.types.schema import RelationDescriptor
 
 
 @dataclass
@@ -22,7 +22,7 @@ class DatasetDescriptor:
     Attributes:
         format_version: Metadata format version (currently 1)
         relation_name: Fully-qualified relation name (e.g., "schema.sub.events")
-        schema: RelationSchema defining the table structure
+        schema: RelationDescriptor defining the table structure
         current_snapshot: Filename of the CURRENT snapshot - the one an
             unqualified read returns - or None for an empty relation
         created_at: ISO 8601 UTC timestamp when relation was created
@@ -30,7 +30,7 @@ class DatasetDescriptor:
 
     format_version: int
     relation_name: str
-    schema: RelationSchema
+    schema: RelationDescriptor
     current_snapshot: Optional[str]
     created_at: str
 
@@ -53,7 +53,7 @@ class DatasetDescriptor:
     def from_dict(cls, data: Dict[str, Any]) -> "DatasetDescriptor":
         """Create from dictionary (from JSON deserialization)."""
         data = data.copy()
-        # Convert schema dict to RelationSchema if needed
+        # Convert schema dict to RelationDescriptor if needed
         if isinstance(data.get("schema"), dict):
-            data["schema"] = RelationSchema.from_dict(data["schema"])
+            data["schema"] = RelationDescriptor.from_dict(data["schema"])
         return cls(**data)

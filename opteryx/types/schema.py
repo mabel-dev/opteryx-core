@@ -29,7 +29,7 @@ def mint_column_identity(relation: Optional[str], column: Optional[str]) -> byte
     name is not — two relations can share a column name). The random suffix
     guarantees uniqueness; the ``rel_col_`` prefix is a debugging affordance so
     that an identity leaked into an error/stack trace can be traced back to a
-    physical column. See SchemaColumn.__post_init__.
+    physical column. The query's ColumnTable is the only caller.
     """
     from opteryx.utils import random_string
 
@@ -50,6 +50,8 @@ __all__ = [
     "ConstantColumn",
     "FunctionColumn",
     "RelationSchema",
+    "ColumnDescriptor",
+    "RelationDescriptor",
     "ColumnDisposition",
 ]
 
@@ -87,14 +89,11 @@ class SchemaColumn:
         description: Human-readable description (default: None)
         disposition: Special treatment flag (default: None)
         aliases: Alternative names for this column (default: None)
+        origin: The relation(s) the column is read through
 
-    Advanced fields (unused in current Opteryx, kept for future compatibility):
-        highest_value: Estimated max value for statistics
-        lowest_value: Estimated min value for statistics
-        null_count: Number of NULLs for statistics
-        fields: For STRUCT types, nested fields
-        expectations: Data quality expectations (deferred to Phase 9)
-        origin: Column lineage tracking (deferred to Phase 9)
+    A BOUND column: made from a source's ColumnDescriptor (or minted as a computed
+    column) in the query's ColumnTable, which is the only thing that sets its
+    identity and slot - see opteryx/planner/plan_context.py.
     """
 
     name: str
@@ -111,12 +110,7 @@ class SchemaColumn:
     description: Optional[str] = None
     disposition: Optional[str] = None
     aliases: Optional[List[str]] = dataclasses.field(default_factory=lambda: None)
-    highest_value: Optional[Any] = None
-    lowest_value: Optional[Any] = None
-    null_count: Optional[int] = None
-    fields: Optional[List[SchemaColumn]] = None
-    expectations: Optional[Any] = None  # Deferred to Phase 9
-    origin: Optional[List[str]] = None  # Deferred to Phase 9
+    origin: Optional[List[str]] = None
     # column_type is the authoritative unified type carrier (physical DrakenType +
     # optional LogicalType descriptor + optional ARRAY element). Deepcopy
     # is safe — LogicalType has __deepcopy__ wired on the nanobind side.
@@ -148,8 +142,6 @@ class SchemaColumn:
             clone.aliases = list(clone.aliases)
         if clone.origin is not None:
             clone.origin = list(clone.origin)
-        if clone.fields:
-            clone.fields = [f.branch_copy(memo) for f in clone.fields]
         return clone
 
     def __post_init__(self):
@@ -206,6 +198,20 @@ class SchemaColumn:
         )
         return SchemaColumn(name=self.name, column_type=self.column_type, **common)
 
+    def describe(self) -> "ColumnDescriptor":
+        """What this bound column says about its values, as a source would describe
+        it - for handing a bound shape BACK to a source (a CTAS target, a view's
+        recorded schema). Engine state (identity, slot, origin, aliases) stays behind."""
+        return ColumnDescriptor(
+            name=self.name,
+            column_type=self.column_type,
+            nullable=self.nullable,
+            field_id=self.field_id,
+            default=self.default,
+            description=self.description,
+            disposition=self.disposition,
+        )
+
     def to_schema_column(self) -> "SchemaColumn":
         """Convert to a SchemaColumn (returns self when already a plain SchemaColumn)."""
         if type(self) is SchemaColumn:
@@ -223,69 +229,6 @@ class SchemaColumn:
             names.extend(self.aliases)
         return names
 
-    # D-4 Phase 2: column_type is a stored field (see the dataclass declaration
-    # above and the __post_init__ resolution). The former @property has been
-    # replaced — per-access recomputation is gone; new readers should rely on
-    # this single field. LogicalType has __deepcopy__ wired on the nanobind side
-    # so schema deepcopies (binder's merge_schemas) work cleanly.
-
-    # Schema-JSON format version. v2 (D-4 Phase 2 "full break"): the type is carried
-    # by a single canonical `column_type` string (e.g. "DECIMAL(15, 2)",
-    # "ARRAY<VARCHAR>") instead of the legacy type/precision/scale/element_type
-    # quartet. `from_dict` still reads the v1 quartet for backward compatibility
-    # with already-persisted schemas (the side-cars are valid InitVar params).
-    _SCHEMA_VERSION = 2
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert column to dictionary for serialization (v2 format)."""
-        from opteryx.types.logical_type import serialize_column_type
-
-        return {
-            "_v": self._SCHEMA_VERSION,
-            "name": self.name,
-            # Canonical column_type string is authoritative; `type` (bare LogicalCategory
-            # name) is kept for the rare column_type==None case and human readability.
-            "column_type": serialize_column_type(self.column_type),
-            "type": self.column_type.category.name if self.column_type is not None else None,
-            "identity": self.identity.decode("utf-8") if isinstance(self.identity, bytes) else self.identity,
-            "nullable": self.nullable,
-            "default": self.default,
-            "description": self.description,
-            "disposition": self.disposition,
-            "aliases": self.aliases,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> SchemaColumn:
-        """Create SchemaColumn from a serialized dict (v2 with v1 fallback)."""
-        data = data.copy()
-        data.pop("_v", None)
-        ct_str = data.pop("column_type", None)
-
-        # v2: reconstruct from the canonical column_type string.
-        if ct_str is not None:
-            from opteryx.types.logical_type import parse_column_type
-
-            data.pop("type", None)  # column_type supersedes the bare type tag
-            column_type = parse_column_type(ct_str)
-            return cls(name=data.pop("name"), column_type=column_type, **data)
-
-        # v1 fallback: legacy "type" string (e.g. "DECIMAL(10,2)", "ARRAY<VARCHAR>").
-        # parse_column_type handles the parameterized/element forms directly.
-        from opteryx.types.logical_type import parse_column_type
-
-        raw_type = data.pop("type", None)
-        data.pop("precision", None)
-        data.pop("scale", None)
-        data.pop("length", None)
-        data.pop("element_type", None)
-
-        if isinstance(raw_type, str):
-            column_type = parse_column_type(raw_type)
-            return cls(name=data.pop("name"), column_type=column_type, **data)
-        # already a type object, or unknown — pass through
-        return cls(name=data.pop("name"), column_type=raw_type, **data)
-
 
 @dataclasses.dataclass
 class ConstantColumn(SchemaColumn):
@@ -296,12 +239,6 @@ class ConstantColumn(SchemaColumn):
     """
 
     value: Any = None
-
-    def __post_init__(self):
-        # Constant columns are not relation-sourced; mint a unique `$const_` id.
-        if self.identity is None:
-            self.identity = _mint_tagged_identity("$const")
-        super().__post_init__()
 
     def __str__(self) -> str:
         """String representation: name = value."""
@@ -319,15 +256,6 @@ class FunctionColumn(SchemaColumn):
     Used for computed columns (e.g., SELECT col1 + col2 AS sum_col).
     Inherits from SchemaColumn with additional function expression semantics.
     """
-
-    def __post_init__(self):
-        # Computed columns are not relation-sourced; mint a unique `$derived_` id.
-        # (Expression reuse is matched by name in the binder, not by identity, so
-        # a random id is safe and does not break GROUP BY/SELECT expression
-        # collapse.)
-        if self.identity is None:
-            self.identity = _mint_tagged_identity("$derived")
-        super().__post_init__()
 
     def __str__(self) -> str:
         """String representation: name (computed)."""
@@ -395,6 +323,19 @@ class RelationSchema:
         clone.aliases = list(self.aliases)
         return clone
 
+    def describe(self) -> "RelationDescriptor":
+        """This bound relation as a source would describe it - see SchemaColumn.describe."""
+        return RelationDescriptor(
+            name=self.name,
+            columns=[column.describe() for column in self.columns],
+            aliases=list(self.aliases),
+            primary_key=self.primary_key,
+            row_count_metric=self.row_count_metric,
+            row_count_estimate=self.row_count_estimate,
+            data_size_metric=self.data_size_metric,
+            data_size_estimate=self.data_size_estimate,
+        )
+
     @property
     def column_names(self) -> List[str]:
         """Get list of all column names."""
@@ -456,44 +397,6 @@ class RelationSchema:
                 return self.columns.pop(i)
         return None
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert schema to dictionary for serialization."""
-        return {
-            "name": self.name,
-            "columns": [col.to_dict() for col in self.columns],
-            "aliases": self.aliases,
-            "primary_key": self.primary_key,
-            "row_count_metric": self.row_count_metric,
-            "row_count_estimate": self.row_count_estimate,
-            "data_size_metric": self.data_size_metric,
-            "data_size_estimate": self.data_size_estimate,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> RelationSchema:
-        """Create RelationSchema from dictionary."""
-        data = data.copy()
-        # Convert column dicts to SchemaColumn objects
-        if "columns" in data:
-            data["columns"] = [
-                SchemaColumn.from_dict(col) if isinstance(col, dict) else col
-                for col in data["columns"]
-            ]
-        return cls(**data)
-
-    def to_json(self) -> str:
-        """Convert to JSON string."""
-        import json
-
-        return json.dumps(self.to_dict())
-
-    @classmethod
-    def from_json(cls, json_str: str) -> RelationSchema:
-        """Create from JSON string."""
-        import json
-
-        return cls.from_dict(json.loads(json_str))
-
     def validate(self) -> bool:
         """Validate schema consistency.
 
@@ -542,3 +445,145 @@ class RelationSchema:
 
         self.columns.extend(other.columns)
         return self
+
+
+def _column_type_from_dict(data: Dict[str, Any]) -> Any:
+    """Pop and parse a persisted column's type: the v2 `column_type` string, else the
+    v1 `type` string (its precision/scale/length/element side-cars are subsumed by
+    the parameterized form `parse_column_type` reads)."""
+    from opteryx.types.logical_type import parse_column_type
+
+    ct_str = data.pop("column_type", None)
+    raw_type = data.pop("type", None)
+    for legacy in ("precision", "scale", "length", "element_type"):
+        data.pop(legacy, None)
+    if ct_str is not None:
+        return parse_column_type(ct_str)
+    if isinstance(raw_type, str):
+        return parse_column_type(raw_type)
+    return raw_type
+
+
+@dataclasses.dataclass
+class ColumnDescriptor:
+    """What a SOURCE says about one of its columns — and nothing the engine owns.
+
+    Connectors, virtual datasets, persisted schemas and CREATE TABLE describe their
+    columns with this. A bound column (`SchemaColumn`) is made from it by the binder
+    in the query's ColumnTable (`opteryx/planner/plan_context.py`), which is where
+    the engine state lives: identity, slot, origin and aliases exist ONLY on the
+    bound column (architect ruling 2026-09-26, stage 4 option C).
+    """
+
+    name: str
+    column_type: Optional[Any] = dataclasses.field(default=None, compare=False)
+    nullable: bool = True
+    # Stable, catalog-assigned column identifier (Iceberg-style field-id); keys
+    # per-file manifest statistics so they survive schema evolution.
+    field_id: Optional[int] = None
+    default: Optional[Any] = None
+    description: Optional[str] = None
+    disposition: Optional[str] = None
+
+    @property
+    def category(self):
+        """Operator-dispatch category projection of `column_type`."""
+        if self.column_type is None:
+            return None
+        return self.column_type.category
+
+    def __str__(self) -> str:
+        if self.column_type is not None:
+            return f"{self.name}:{self.column_type}"
+        return self.name
+
+    _SCHEMA_VERSION = 2
+
+    def to_dict(self) -> Dict[str, Any]:
+        """The persisted (v2) form."""
+        from opteryx.types.logical_type import serialize_column_type
+
+        return {
+            "_v": self._SCHEMA_VERSION,
+            "name": self.name,
+            "column_type": serialize_column_type(self.column_type),
+            "type": self.column_type.category.name if self.column_type is not None else None,
+            "nullable": self.nullable,
+            "default": self.default,
+            "description": self.description,
+            "disposition": self.disposition,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ColumnDescriptor":
+        """Read a persisted column (v2, or the v1 type quartet).
+
+        Documents written before descriptors carry the bound column's `identity` -
+        a random per-query handle that never meant anything once written down - so
+        it is discarded here. They may also carry `aliases`; an alias is binder
+        state, so a NON-EMPTY list cannot be represented and is refused rather than
+        dropped. Any other unknown key fails the constructor.
+        """
+        data = dict(data)
+        data.pop("_v", None)
+        data.pop("identity", None)
+        aliases = data.pop("aliases", None)
+        if aliases:
+            from opteryx.exceptions import InvalidInternalStateError
+
+            raise InvalidInternalStateError(
+                f"Persisted column '{data.get('name')}' carries aliases {aliases!r}; "
+                "a column description has none - aliases belong to a bound column."
+            )
+        column_type = _column_type_from_dict(data)
+        return cls(name=data.pop("name"), column_type=column_type, **data)
+
+
+@dataclasses.dataclass
+class RelationDescriptor:
+    """What a SOURCE says about one of its relations: its columns as descriptors,
+    plus the relation-level facts it knows. The binder turns it into a bound
+    `RelationSchema` (ColumnTable.bind_relation); nothing else produces one."""
+
+    name: str
+    columns: List[ColumnDescriptor] = dataclasses.field(default_factory=list)
+    aliases: List[str] = dataclasses.field(default_factory=list)
+    primary_key: Optional[str] = None
+    row_count_metric: Optional[int] = None
+    row_count_estimate: Optional[int] = None
+    data_size_metric: Optional[int] = None
+    data_size_estimate: Optional[int] = None
+
+    def __str__(self) -> str:
+        return f"{self.name}({', '.join(str(c) for c in self.columns)})"
+
+    @property
+    def column_names(self) -> List[str]:
+        return [column.name for column in self.columns]
+
+    def copy(self) -> "RelationDescriptor":
+        """An independent copy: its own column list of its own descriptors, so a
+        holder that adjusts what it was handed (a relation-level metric, a column
+        list) cannot reach back into a cached original."""
+        clone = copy_module.copy(self)
+        clone.columns = [copy_module.copy(column) for column in self.columns]
+        clone.aliases = list(self.aliases)
+        return clone
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "columns": [column.to_dict() for column in self.columns],
+            "aliases": self.aliases,
+            "primary_key": self.primary_key,
+            "row_count_metric": self.row_count_metric,
+            "row_count_estimate": self.row_count_estimate,
+            "data_size_metric": self.data_size_metric,
+            "data_size_estimate": self.data_size_estimate,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RelationDescriptor":
+        data = dict(data)
+        data["columns"] = [ColumnDescriptor.from_dict(column) for column in data.get("columns", [])]
+        return cls(**data)

@@ -85,8 +85,8 @@ def test_int_column_vs_negative_fractional_literal():
 
 
 def test_int64_column_vs_fractional_float_literal():
-    """numberOfMoons is INT64 (the direct, non-narrow path)."""
-    # DuckDB: numberOfMoons in {0,0,1,2,79,82,27,14,5}; > 1.5 → {2,79,82,27,14,5}.
+    """number_of_moons is INT64 (the direct, non-narrow path)."""
+    # DuckDB: number_of_moons in {0,0,1,2,79,82,27,14,5}; > 1.5 → {2,79,82,27,14,5}.
     got = _ids("SELECT id FROM $planets WHERE number_of_moons > 1.5")
     assert got == _ids("SELECT id FROM $planets WHERE number_of_moons >= 2")
 

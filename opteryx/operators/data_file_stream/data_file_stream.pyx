@@ -49,7 +49,6 @@ class DataFileStream:
         connector,
         relation_name,
         coalesce_rows=None,
-        target_file_bytes=None,
         sorted_by=None,
         write_profile="fast",
         pending_schema=None,
@@ -66,13 +65,9 @@ class DataFileStream:
         # unless the rows really are (a sort-aware OPTIMIZE); never verified.
         self.sorted_by = sorted_by
         self.write_profile = write_profile
-        if target_file_bytes is None:
-            from opteryx.planner.compaction.constants import TARGET_SIZE_BYTES
+        from opteryx.planner.compaction.constants import TARGET_SIZE_BYTES
 
-            target_file_bytes = TARGET_SIZE_BYTES
-        self.target_file_bytes = int(target_file_bytes)
-        if self.target_file_bytes <= 0:
-            raise ValueError("DataFileStream: target_file_bytes must be positive")
+        self.target_file_bytes = TARGET_SIZE_BYTES
         # Clamped to the writer's row-group size: a batch IS a row group, and a
         # larger row group than the measured best is a worse morsel for every
         # later read, so a SET past the ceiling gets the ceiling.

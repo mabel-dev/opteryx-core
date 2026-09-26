@@ -74,7 +74,9 @@ def _desugar_rewrite_only(node, telemetry: QueryTelemetry, *, plan_context):
     """
     from .predicate_rewriter import _rewrite_function
 
-    node.map_children(lambda child: _desugar_rewrite_only(child, telemetry, plan_context=plan_context))
+    node.map_children(
+        lambda child: _desugar_rewrite_only(child, telemetry, plan_context=plan_context)
+    )
     if _is_rewrite_only(node):
         return _rewrite_function(node, telemetry, plan_context=plan_context)
     return node
@@ -287,7 +289,8 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
 
     if root.node_type in (NodeType.DNF, NodeType.CNF):
         root.parameters = _dedupe_branches(
-            [fold_constants(p, telemetry, plan_context=plan_context) for p in root.parameters], telemetry
+            [fold_constants(p, telemetry, plan_context=plan_context) for p in root.parameters],
+            telemetry,
         )
         if len(root.parameters) == 1:
             # Don't leave a one-branch DNF/CNF behind — a bare condition is the shape
@@ -313,7 +316,9 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                 and root.left.value == 0
             ):
                 # 0 * anything = 0 (except NULL)
-                node = _build_if_not_null_node(root, root.right, build_literal_node(0, plan_context=plan_context))
+                node = _build_if_not_null_node(
+                    root, root.right, build_literal_node(0, plan_context=plan_context)
+                )
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
@@ -323,7 +328,9 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                 and root.right.value == 0
             ):
                 # anything * 0 = 0 (except NULL)
-                node = _build_if_not_null_node(root, root.left, build_literal_node(0, plan_context=plan_context))
+                node = _build_if_not_null_node(
+                    root, root.left, build_literal_node(0, plan_context=plan_context)
+                )
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
@@ -334,7 +341,9 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                 and _keeps_result_type(root, root.right)
             ):
                 # 1 * anything = anything (except NULL)
-                node = _build_transparent_node(root, root.right, telemetry, plan_context=plan_context)
+                node = _build_transparent_node(
+                    root, root.right, telemetry, plan_context=plan_context
+                )
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
@@ -345,7 +354,9 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                 and _keeps_result_type(root, root.left)
             ):
                 # anything * 1 = anything (except NULL)
-                node = _build_transparent_node(root, root.left, telemetry, plan_context=plan_context)
+                node = _build_transparent_node(
+                    root, root.left, telemetry, plan_context=plan_context
+                )
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
@@ -356,7 +367,9 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                 and _keeps_result_type(root, root.right)
             ):
                 # 0 + anything = anything (except NULL)
-                node = _build_transparent_node(root, root.right, telemetry, plan_context=plan_context)
+                node = _build_transparent_node(
+                    root, root.right, telemetry, plan_context=plan_context
+                )
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
@@ -367,7 +380,9 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                 and _keeps_result_type(root, root.left)
             ):
                 # anything +/- 0 = anything (except NULL)
-                node = _build_transparent_node(root, root.left, telemetry, plan_context=plan_context)
+                node = _build_transparent_node(
+                    root, root.left, telemetry, plan_context=plan_context
+                )
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
@@ -378,7 +393,9 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                 and _keeps_result_type(root, root.left)
             ):
                 # anything / 1 = anything (except NULL)
-                node = _build_transparent_node(root, root.left, telemetry, plan_context=plan_context)
+                node = _build_transparent_node(
+                    root, root.left, telemetry, plan_context=plan_context
+                )
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
 
@@ -416,7 +433,9 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                 and root.left.value
             ):
                 # True OR anything is True (including NULL)
-                node = _build_transparent_node(root, root.left, telemetry, plan_context=plan_context)
+                node = _build_transparent_node(
+                    root, root.left, telemetry, plan_context=plan_context
+                )
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
@@ -425,7 +444,9 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                 and root.right.value
             ):
                 # anything OR True is True (including NULL)
-                node = _build_transparent_node(root, root.right, telemetry, plan_context=plan_context)
+                node = _build_transparent_node(
+                    root, root.right, telemetry, plan_context=plan_context
+                )
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
@@ -434,7 +455,9 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                 and not root.left.value
             ):
                 # False OR anything is anything (except NULL)
-                node = _build_transparent_node(root, root.right, telemetry, plan_context=plan_context)
+                node = _build_transparent_node(
+                    root, root.right, telemetry, plan_context=plan_context
+                )
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
@@ -443,7 +466,9 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                 and not root.right.value
             ):
                 # anything OR False is anything (except NULL)
-                node = _build_transparent_node(root, root.left, telemetry, plan_context=plan_context)
+                node = _build_transparent_node(
+                    root, root.left, telemetry, plan_context=plan_context
+                )
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
 
@@ -454,7 +479,9 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                 and not root.left.value
             ):
                 # False AND anything is False (including NULL)
-                node = _build_transparent_node(root, root.left, telemetry, plan_context=plan_context)
+                node = _build_transparent_node(
+                    root, root.left, telemetry, plan_context=plan_context
+                )
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
@@ -463,7 +490,9 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                 and not root.right.value
             ):
                 # anything AND False is False (including NULL)
-                node = _build_transparent_node(root, root.right, telemetry, plan_context=plan_context)
+                node = _build_transparent_node(
+                    root, root.right, telemetry, plan_context=plan_context
+                )
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
@@ -472,7 +501,9 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                 and root.left.value
             ):
                 # True AND anything is anything (except NULL)
-                node = _build_transparent_node(root, root.right, telemetry, plan_context=plan_context)
+                node = _build_transparent_node(
+                    root, root.right, telemetry, plan_context=plan_context
+                )
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
@@ -481,7 +512,9 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                 and root.right.value
             ):
                 # anything AND True is anything (except NULL)
-                node = _build_transparent_node(root, root.left, telemetry, plan_context=plan_context)
+                node = _build_transparent_node(
+                    root, root.left, telemetry, plan_context=plan_context
+                )
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
 
@@ -589,7 +622,9 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                     vector_attach_logical_type(result_vector._nb, target_ct.logical)
         result = result_vector[0] if isinstance(result_vector, list) else result_vector.to_pylist()[0]
         telemetry.optimization_constant_fold_expression += 1
-        return build_literal_node(result, identity_of=root, suggested_type=target_ct, plan_context=plan_context)
+        return build_literal_node(
+            result, identity_of=root, suggested_type=target_ct, plan_context=plan_context
+        )
 
     return root
 
@@ -622,7 +657,9 @@ class ConstantFoldingStrategy(OptimizationStrategy):
         """
         # fold constants when referenced in filter clauses (WHERE/HAVING)
         if node.node_type == LogicalPlanStepType.Filter:
-            node.condition = _fold(node.condition, self.telemetry, plan_context=context.plan_context)
+            node.condition = _fold(
+                node.condition, self.telemetry, plan_context=context.plan_context
+            )
             if (
                 node.condition.node_type == NodeType.LITERAL
                 and node.condition.value is None
@@ -642,7 +679,10 @@ class ConstantFoldingStrategy(OptimizationStrategy):
                 context.optimized_plan[context.node_id] = node
         # fold constants when referenced in the SELECT clause
         if node.node_type == LogicalPlanStepType.Project:
-            node.columns = [_fold(c, self.telemetry, plan_context=context.plan_context) for c in node.columns]
+            node.columns = [
+                _fold(c, self.telemetry, plan_context=context.plan_context)
+                for c in node.columns
+            ]
             context.optimized_plan[context.node_id] = node
 
         # remove nesting in order by and group by clauses
@@ -657,7 +697,10 @@ class ConstantFoldingStrategy(OptimizationStrategy):
 
         if node.node_type == LogicalPlanStepType.AggregateAndGroup:
             node.groups = [g.centre if g.node_type == NodeType.NESTED else g for g in node.groups]
-            node.groups = [_fold(g, self.telemetry, plan_context=context.plan_context) for g in node.groups]
+            node.groups = [
+                _fold(g, self.telemetry, plan_context=context.plan_context)
+                for g in node.groups
+            ]
             context.optimized_plan[context.node_id] = node
 
         return context

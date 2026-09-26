@@ -171,11 +171,23 @@ def _emit(identifier, interval: Interval, literal_type, *, plan_context) -> List
     emitted = []
     if lower is not None:
         emitted.append(
-            _comparison_node(identifier, "GtEq" if lower_closed else "Gt", lower, literal_type, plan_context=plan_context)
+            _comparison_node(
+                identifier,
+                "GtEq" if lower_closed else "Gt",
+                lower,
+                literal_type,
+                plan_context=plan_context,
+            )
         )
     if upper is not None:
         emitted.append(
-            _comparison_node(identifier, "LtEq" if upper_closed else "Lt", upper, literal_type, plan_context=plan_context)
+            _comparison_node(
+                identifier,
+                "LtEq" if upper_closed else "Lt",
+                upper,
+                literal_type,
+                plan_context=plan_context,
+            )
         )
     return emitted
 

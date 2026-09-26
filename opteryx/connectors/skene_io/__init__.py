@@ -21,9 +21,8 @@ from draken.draken_native import LogicalType
 from draken.draken_native import TimestampUnit
 
 from opteryx.types.logical_type import ColumnType
-from opteryx.types.schema import RelationSchema
-from opteryx.types.schema import SchemaColumn
-from opteryx.types.schema import mint_column_identity
+from opteryx.types.schema import ColumnDescriptor
+from opteryx.types.schema import RelationDescriptor
 
 __all__ = [
     "skene_aggregate_row_group_statistics",
@@ -281,14 +280,13 @@ def skene_column_type(column: Dict[str, Any]) -> ColumnType:
     return ColumnType(physical, logical, element)
 
 
-def skene_metadata_to_schema(metadata: Dict[str, Any], schema_name: str) -> RelationSchema:
-    """RelationSchema from skene.read_metadata() output. Exact, not inferred."""
+def skene_metadata_to_schema(metadata: Dict[str, Any], schema_name: str) -> RelationDescriptor:
+    """RelationDescriptor from skene.read_metadata() output. Exact, not inferred."""
     columns = [
-        SchemaColumn(
+        ColumnDescriptor(
             name=column["name"],
             column_type=skene_column_type(column),
-            identity=mint_column_identity(schema_name, column["name"]),
         )
         for column in metadata["columns"]
     ]
-    return RelationSchema(name=schema_name, columns=columns)
+    return RelationDescriptor(name=schema_name, columns=columns)

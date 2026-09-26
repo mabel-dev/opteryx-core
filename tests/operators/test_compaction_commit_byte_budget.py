@@ -130,13 +130,14 @@ def _sink(budget, target=None, retired=("old_1.parquet",), sorted_by=None, rows=
             retired_files=list(retired),
             sorted_by=sorted_by,
         ),
-        target_file_bytes=target,
     )
     # Same construction the stream does, with a budget a test can reach.
     # `rows` shrinks the row ceiling so a test morsel is a whole batch (row
     # group) on its own; the real 262,144 would coalesce every test morsel
     # into one.
     stream = node._stream
+    if target is not None:
+        stream.target_file_bytes = target
     stream._batcher = MorselBatcher(rows or stream.coalesce_rows, max_arena_bytes=budget)
     return node
 
@@ -216,7 +217,8 @@ def test_compaction_writes_with_the_storage_profile_and_its_sort_claim():
 def test_a_plain_stream_makes_no_sort_claim_and_writes_fast():
     """INSERT / CTAS / MERGE construct the stream with its defaults."""
     connector = _RecordingConnector()
-    stream = DataFileStream(connector, "test.relation", target_file_bytes=_wide_morsel(0).nbytes)
+    stream = DataFileStream(connector, "test.relation")
+    stream.target_file_bytes = _wide_morsel(0).nbytes
     stream._batcher = MorselBatcher(ROWS_PER_MORSEL)
     for seed in range(2):
         stream.push(_wide_morsel(seed))
@@ -304,8 +306,6 @@ def test_stream_defaults_to_the_fixed_arena_ceiling_and_the_selection_target():
     assert len(node.connector.closed) == 1  # nowhere near 1 GiB or 4 GB
     with pytest.raises(ValueError):
         MorselBatcher(1000, max_arena_bytes=MORSEL_MAX_ARENA_BYTES + 1)
-    with pytest.raises(ValueError, match="positive"):
-        _sink(MORSEL_MAX_ARENA_BYTES, target=0)
     assert DataFileStream(_RecordingConnector(), "r", coalesce_rows=10**9).coalesce_rows == 65536
 
 

@@ -103,6 +103,59 @@ class ColumnTable:
         fresh.identity = mint_column_identity(relation, column.name)
         return self._register(fresh)
 
+    def bind_relation(self, descriptor, alias: str) -> "RelationSchema":
+        """Bind a source's `RelationDescriptor` as relation `alias`: every column
+        becomes a bound column of `alias` minted here, its origin `alias`.
+
+        A source that hands over anything but a descriptor is refused - a bound
+        schema from a connector would carry another binding's identities into this
+        query (architect ruling 2026-09-26: no dual path)."""
+        from opteryx.exceptions import InvalidInternalStateError
+        from opteryx.types.schema import RelationDescriptor
+        from opteryx.types.schema import RelationSchema
+
+        if type(descriptor) is not RelationDescriptor:
+            raise InvalidInternalStateError(
+                f"Relation '{alias}' was described by a {type(descriptor).__name__}; "
+                "sources describe relations with a RelationDescriptor and only the "
+                "binder makes bound columns."
+            )
+        columns = []
+        for column in descriptor.columns:
+            bound = self.relation_column(
+                alias,
+                column.name,
+                column_type=column.column_type,
+                nullable=column.nullable,
+                field_id=column.field_id,
+                default=column.default,
+                description=column.description,
+                disposition=column.disposition,
+            )
+            bound.origin = [alias]
+            columns.append(bound)
+        return RelationSchema(
+            name=descriptor.name,
+            columns=columns,
+            aliases=list(descriptor.aliases),
+            primary_key=descriptor.primary_key,
+            row_count_metric=descriptor.row_count_metric,
+            row_count_estimate=descriptor.row_count_estimate,
+            data_size_metric=descriptor.data_size_metric,
+            data_size_estimate=descriptor.data_size_estimate,
+        )
+
+    def adopt(self, column, owner) -> "SchemaColumn":
+        """A copy of `column` that IS `owner`'s column: `owner`'s identity and slot,
+        `column`'s metadata (e.g. a folded literal standing in for the aggregate it
+        answers). Nothing is registered and neither argument is modified."""
+        import copy
+
+        adopted = copy.copy(column)
+        adopted.identity = owner.identity
+        adopted.slot = owner.slot
+        return adopted
+
 
 class PlanContext:
     __slots__ = ("_statistics", "_cte_statistics", "scan_stats_cache", "columns")

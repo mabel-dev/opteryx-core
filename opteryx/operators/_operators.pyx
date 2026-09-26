@@ -4026,7 +4026,6 @@ _DRAKEN_CMP_OP_FLIPPED[18] = -1
 # ReaderNode is subclassed by the scan readers and function_dataset
 include "read/read.pyx"
 
-include "cross_join/cross_join.pyx"
 include "data_file_stream/data_file_stream.pyx"
 include "compaction_commit/compaction_commit.pyx"
 include "csv_read/csv_read.pyx"

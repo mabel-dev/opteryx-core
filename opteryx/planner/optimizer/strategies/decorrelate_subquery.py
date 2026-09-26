@@ -173,7 +173,6 @@ from opteryx.planner.optimizer.strategies.optimization_strategy import (
 )
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import RelationSchema
-from opteryx.types.schema import SchemaColumn, mint_column_identity
 from opteryx.utils import random_string
 from opteryx.compiled.structures.expressions import And
 from opteryx.compiled.structures.expressions import Or
@@ -808,7 +807,9 @@ def _is_restricted(plan: LogicalPlan) -> bool:
     return narrowed
 
 
-def _graft_key_reducer(plan: LogicalPlan, filter_nid, inner_plan, local_pairs, target_nid, *, plan_context) -> bool:
+def _graft_key_reducer(
+    plan: LogicalPlan, filter_nid, inner_plan, local_pairs, target_nid, *, plan_context
+) -> bool:
     """
     Restrict a decorrelated subquery's input to keys the outer query can consume.
 
@@ -918,12 +919,16 @@ def _graft_key_reducer(plan: LogicalPlan, filter_nid, inner_plan, local_pairs, t
     return True
 
 
-def _reduce_aggregate_input(plan: LogicalPlan, filter_nid, inner_plan, local_pairs, *, plan_context) -> bool:
+def _reduce_aggregate_input(
+    plan: LogicalPlan, filter_nid, inner_plan, local_pairs, *, plan_context
+) -> bool:
     """Reduce a decorrelated scalar subquery — the aggregate is the thing to protect."""
     aggregate_nid, aggregate = _aggregate_node(inner_plan)
     if aggregate_nid is None or aggregate.node_type != LogicalPlanStepType.AggregateAndGroup:
         return False
-    return _graft_key_reducer(plan, filter_nid, inner_plan, local_pairs, aggregate_nid, plan_context=plan_context)
+    return _graft_key_reducer(
+        plan, filter_nid, inner_plan, local_pairs, aggregate_nid, plan_context=plan_context
+    )
 
 
 # NOTE: there is deliberately no reducer for the EXISTS / IN (SEMI/ANTI) path here.
@@ -1097,7 +1102,7 @@ def _defer_correlation_to_ancestor(plan: LogicalPlan, from_nid: str, inner_key, 
         current = consumer_nid
 
 
-def _rewrite_order_limit_to_row_number(inner_plan: LogicalPlan, key_pairs) -> bool:
+def _rewrite_order_limit_to_row_number(inner_plan: LogicalPlan, key_pairs, *, plan_context) -> bool:
     """
     Turn a correlated `ORDER BY x LIMIT 1` subquery into a per-binding top-1.
 
@@ -1154,10 +1159,10 @@ def _rewrite_order_limit_to_row_number(inner_plan: LogicalPlan, key_pairs) -> bo
     # `outputs` pre-mints the row-number schema column, `window_functions` is the
     # (kind, identity) list the physical operator executes.
     rn_relation = f"$rownum-{random_string(6)}"
-    rn_schema_column = SchemaColumn(
-        name="$row_number",
+    rn_schema_column = plan_context.columns.relation_column(
+        rn_relation,
+        "$row_number",
         column_type=_lt.INT64,
-        identity=mint_column_identity(rn_relation, "$row_number"),
     )
     rn_reference = LogicalColumn(
         node_type=NodeType.IDENTIFIER,
@@ -1525,7 +1530,9 @@ def _node_has_existence(node) -> bool:
     return _find_existence_in_node(node)[0] is not None
 
 
-def _decorrelate_projection_existence(plan: LogicalPlan, project_nid: str, telemetry):
+def _decorrelate_projection_existence(
+    plan: LogicalPlan, project_nid: str, telemetry, *, plan_context
+):
     """
     Rewrite one SELECT-list EXISTS / IN into an EXISTENCE JOIN plus a projected
     boolean.
@@ -1588,7 +1595,8 @@ def _decorrelate_projection_existence(plan: LogicalPlan, project_nid: str, telem
             if residual is not None:
                 raise UnsupportedSyntaxError(_SELECT_LIST_EXISTENCE_REFUSAL)
             return _project_uncorrelated_exists(
-                plan, project_nid, inner_plan, remove, replace_fn, negated, telemetry
+                plan, project_nid, inner_plan, remove, replace_fn, negated, telemetry,
+                plan_context=plan_context,
             )
         three_valued = False
         replace_projection = True
@@ -1753,7 +1761,7 @@ def _graft_existence_join(
 
 
 def _project_uncorrelated_exists(plan, project_nid, inner_plan, remove, replace_fn,
-                                 negated, telemetry):
+                                 negated, telemetry, *, plan_context):
     """
     `SELECT ..., EXISTS (SELECT ... )` where the subquery reads nothing from the
     outer query: one answer for every row.
@@ -1766,7 +1774,9 @@ def _project_uncorrelated_exists(plan, project_nid, inner_plan, remove, replace_
     aggregate, so it emits exactly one row structurally — no cardinality guard is
     needed, unlike the general uncorrelated scalar subquery.
     """
-    agg_nid, count_relation, _count_reference = _synthesize_count_aggregate(inner_plan, [])
+    agg_nid, count_relation, _count_reference = _synthesize_count_aggregate(
+        inner_plan, [], plan_context=plan_context
+    )
 
     # `> 0` / `= 0` rather than IsNotNull: a cross join to a one-row count always
     # matches, so there is no NULL to test — the count itself is the answer.
@@ -1777,10 +1787,8 @@ def _project_uncorrelated_exists(plan, project_nid, inner_plan, remove, replace_
     comparison.alias = remove.alias
     comparison.left = _count_reference()
     zero = Literal(type=_lt.INT64, value=0)
-    zero.schema_column = SchemaColumn(
-        name="0",
-        column_type=_lt.INT64,
-        identity=mint_column_identity(count_relation, "$zero"),
+    zero.schema_column = plan_context.columns.relation_column(
+        count_relation, "0", column_type=_lt.INT64
     )
     comparison.right = zero
     replace_fn(comparison)
@@ -1869,9 +1877,13 @@ class DecorrelateSubqueryStrategy(OptimizationStrategy):
             if not filter_targets and not project_targets:
                 break
             if filter_targets:
-                plan = self._rewrite_filters(plan, filter_targets, plan_context=context.plan_context)
+                plan = self._rewrite_filters(
+                    plan, filter_targets, plan_context=context.plan_context
+                )
             if project_targets:
-                plan = self._rewrite_projects(plan, project_targets)
+                plan = self._rewrite_projects(
+                    plan, project_targets, plan_context=context.plan_context
+                )
         else:
             raise InvalidInternalStateError(
                 f"subquery decorrelation did not converge after {self.MAX_ROUNDS} rounds"
@@ -1931,7 +1943,7 @@ class DecorrelateSubqueryStrategy(OptimizationStrategy):
                     plan = rewrite(plan, filter_nid, self.telemetry, plan_context=plan_context)
         return plan
 
-    def _rewrite_projects(self, plan: LogicalPlan, project_nids) -> LogicalPlan:
+    def _rewrite_projects(self, plan: LogicalPlan, project_nids, *, plan_context) -> LogicalPlan:
         for project_nid in project_nids:
             # A SELECT list can hold several scalar subqueries — Q09's shape puts
             # three in a single CASE (WHEN/THEN/ELSE) and repeats that CASE five
@@ -1941,7 +1953,8 @@ class DecorrelateSubqueryStrategy(OptimizationStrategy):
             # scalar pass would then be looking at a tree that no longer exists.
             while project_nid in plan and _node_has_existence(plan[project_nid]):
                 plan = _decorrelate_projection_existence(
-                    plan, project_nid, self.telemetry
+                    plan, project_nid, self.telemetry,
+                    plan_context=plan_context,
                 )
             while project_nid in plan and _node_has_subquery(plan[project_nid]):
                 plan = _decorrelate_projection(plan, project_nid, self.telemetry)
@@ -2188,11 +2201,12 @@ def _decorrelate_in(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_conte
         residual=residual,
         telemetry=telemetry,
         counter="optimization_decorrelate_in_subquery",
-        replace_projection=False,
-    )
+        replace_projection=False, plan_context=plan_context)
 
 
-def _decorrelate_exists(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context) -> LogicalPlan:
+def _decorrelate_exists(
+    plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context
+) -> LogicalPlan:
     """
     Turn `EXISTS (subquery)` into a SEMI join and `NOT EXISTS` into an ANTI join.
 
@@ -2230,8 +2244,7 @@ def _decorrelate_exists(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_c
         residual=residual,
         telemetry=telemetry,
         counter="optimization_decorrelate_exists_subquery",
-        replace_projection=True,
-    )
+        replace_projection=True, plan_context=plan_context)
 
 
 def _not_top_level_error(remove) -> UnsupportedSyntaxError:
@@ -2283,6 +2296,8 @@ def _build_filter_join(
     telemetry,
     counter: str,
     replace_projection: bool,
+    *,
+    plan_context,
 ) -> LogicalPlan:
     """
     Replace a filtering subquery (EXISTS / IN) with a SEMI or ANTI join.
@@ -2318,8 +2333,7 @@ def _build_filter_join(
             residual,
             telemetry,
             counter,
-            replace_projection,
-        )
+            replace_projection, plan_context=plan_context)
 
     # The subquery must emit the join keys, and anything the residual reads (it is
     # evaluated per candidate pair). Target the node that defines the projection,
@@ -2530,7 +2544,7 @@ def _build_filter_join(
     return plan
 
 
-def _synthesize_count_aggregate(inner_plan: LogicalPlan, groups: list):
+def _synthesize_count_aggregate(inner_plan: LogicalPlan, groups: list, *, plan_context):
     """
     Append `COUNT(*) [GROUP BY <groups>]` to `inner_plan`; return
     (aggregate nid, relation name, a factory for references to the count).
@@ -2545,10 +2559,10 @@ def _synthesize_count_aggregate(inner_plan: LogicalPlan, groups: list):
     result with, not in what they count.
     """
     count_relation = f"$exists-{random_string(6)}"
-    count_schema_column = SchemaColumn(
-        name="$count",
+    count_schema_column = plan_context.columns.relation_column(
+        count_relation,
+        "$count",
         column_type=_lt.INT64,
-        identity=mint_column_identity(count_relation, "$count"),
     )
 
     def _count_reference() -> LogicalColumn:
@@ -2594,6 +2608,8 @@ def _materialize_boolean_value(
     telemetry,
     counter: str,
     replace_projection: bool,
+    *,
+    plan_context,
 ) -> LogicalPlan:
     """
     Turn a non-removable EXISTS/IN into a boolean VALUE, substituted in place.
@@ -2712,7 +2728,9 @@ def _materialize_boolean_value(
         seen_identities.add(identity)
         groups.append(inner_key)
 
-    agg_nid, count_relation, _count_reference = _synthesize_count_aggregate(inner_plan, groups)
+    agg_nid, count_relation, _count_reference = _synthesize_count_aggregate(
+        inner_plan, groups, plan_context=plan_context
+    )
 
     # --- ON condition: every key pair is local by construction (checked above) -
     on_condition = None
@@ -3009,7 +3027,9 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
     if key_pairs:
         _, aggregate = _aggregate_node(inner_plan)
         if aggregate is None:
-            window_rewritten = _rewrite_order_limit_to_row_number(inner_plan, key_pairs)
+            window_rewritten = _rewrite_order_limit_to_row_number(
+                inner_plan, key_pairs, plan_context=plan_context
+            )
 
     # Read the subquery's value column before the key widens the projection.
     value_column = _output_column(inner_plan)
@@ -3101,7 +3121,9 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
     # while `inner_plan` is still separate — after the merge below there is no inner
     # plan left to graft into — and after `_expose_key`, which is what makes the
     # aggregate grouped in the first place.
-    if local_pairs and _reduce_aggregate_input(plan, filter_nid, inner_plan, local_pairs, plan_context=plan_context):
+    if local_pairs and _reduce_aggregate_input(
+        plan, filter_nid, inner_plan, local_pairs, plan_context=plan_context
+    ):
         setattr(
             telemetry,
             "optimization_decorrelate_aggregate_reduced",

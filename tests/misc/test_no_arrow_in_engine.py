@@ -28,7 +28,7 @@ session = opteryx.session()
 # read + execute: scan, filter, sort, group-by, LIKE
 for sql in (
     "SELECT name, gravity FROM $planets WHERE id > 3 ORDER BY gravity",
-    "SELECT COUNT(*), MAX(gravity) FROM $planets GROUP BY orbitalInclination > 0",
+    "SELECT COUNT(*), MAX(gravity) FROM $planets GROUP BY orbital_inclination > 0",
     "SELECT name FROM $planets WHERE name LIKE 'M%'",
 ):
     for _ in session.execute_to_morsels(sql):

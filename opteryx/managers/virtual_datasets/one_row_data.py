@@ -20,7 +20,7 @@ from draken.draken_native import DrakenType
 from draken.interop.vector_sequence import vector_from_sequence
 from draken.morsels.morsel import Morsel
 from opteryx.types import logical_type as _lt
-from opteryx.types.schema import SchemaColumn, RelationSchema
+from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 
 __all__ = ("read", "schema")
 
@@ -35,7 +35,10 @@ def read(at_date=None, variables=None) -> Morsel:
 
 def schema():
     # fmt:off
-    from opteryx.types.schema import mint_column_identity
     # EXACT: this relation exists to give `SELECT 1` a single row to project from.
-    return RelationSchema(name="$one_row", columns=[SchemaColumn(name="$column", column_type=_lt.INT64, identity=mint_column_identity("$one_row", "$column"))], row_count_metric=1)
+    return RelationDescriptor(
+        name="$one_row",
+        columns=[ColumnDescriptor(name="$column", column_type=_lt.INT64)],
+        row_count_metric=1,
+    )
     # fmt:on

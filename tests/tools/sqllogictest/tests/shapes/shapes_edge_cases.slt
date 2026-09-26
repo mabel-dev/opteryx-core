@@ -223,7 +223,7 @@ query shape 5 20
 SELECT * FROM $planets WHERE name NOT LIKE '%a%' OR name IS NULL
 
 query shape 9 20
-SELECT * FROM $planets ORDER BY lengthOfDay NULLS LAST
+SELECT * FROM $planets ORDER BY length_of_day NULLS LAST
 
 query shape 0
 SELECT name[0] FROM $planets WHERE id IS NULL
@@ -348,7 +348,7 @@ query error io failed
 SELECT birth_place->>'town', birth_place->>'state' FROM testdata.astronauts
 
 query error io failed
-SELECT * FROM (SELECT p.Price AS pri, s.escapeVelocity FROM testdata.missions AS p INNER JOIN $planets AS s ON p.Price = s.escapeVelocity) AS SV WHERE IFNULL(null, pri) = pri
+SELECT * FROM (SELECT p.Price AS pri, s.escape_velocity FROM testdata.missions AS p INNER JOIN $planets AS s ON p.Price = s.escape_velocity) AS SV WHERE IFNULL(null, pri) = pri
 
 query error io failed
 SELECT name FROM (SELECT * FROM $planets LIMIT 5) AS S WHERE name != 'Mars'
@@ -525,10 +525,10 @@ query error io failed
 SELECT RANDOM_STRING(24) FROM $planets
 
 query error io failed
-SELECT CASE WHEN surfacePressure = 0 THEN -1 WHEN surfacePressure IS NULL THEN 0 ELSE -2 END FROM $planets
+SELECT CASE WHEN surface_pressure = 0 THEN -1 WHEN surface_pressure IS NULL THEN 0 ELSE -2 END FROM $planets
 
 query error io failed
-SELECT CASE WHEN surfacePressure = 0 THEN -1 ELSE -2 END FROM $planets
+SELECT CASE WHEN surface_pressure = 0 THEN -1 ELSE -2 END FROM $planets
 
 query error io failed
 SELECT DISTINCT sides FROM (SELECT * FROM $planets AS plans LEFT JOIN (SELECT ARRAY_AGG(id) as sids, planetId FROM testdata.satellites GROUP BY planetId) AS sats ON plans.id = planetId) AS plansats CROSS JOIN UNNEST (sids) as sides

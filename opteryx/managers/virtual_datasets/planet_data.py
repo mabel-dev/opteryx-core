@@ -32,7 +32,7 @@ from draken.morsels.morsel import Morsel
 
 from draken.interop.vector_sequence import vector_from_sequence
 from opteryx.types import logical_type as _lt
-from opteryx.types.schema import RelationSchema, SchemaColumn
+from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 from opteryx.utils import single_item_cache
 
 __all__ = ("read", "schema")
@@ -97,10 +97,9 @@ def read(at_date=None, variables=None) -> Morsel:
 
 def schema():
     # fmt:off
-    from opteryx.types.schema import mint_column_identity
     def fc(name, **kw):
-        return SchemaColumn(name=name, identity=mint_column_identity("$planets", name), **kw)
-    return RelationSchema(
+        return ColumnDescriptor(name=name, **kw)
+    return RelationDescriptor(
         name="$planets",
         columns=[
             fc(name="id",                  column_type=_lt.INT8),
@@ -109,20 +108,20 @@ def schema():
             fc(name="diameter",            column_type=_lt.INT32),
             fc(name="density",             column_type=_lt.INT16),
             fc(name="gravity",             column_type=_lt.DECIMAL(3, 1)),
-            fc(name="escape_velocity",     column_type=_lt.FLOAT32, aliases=["escapeVelocity"]),
-            fc(name="rotation_period",     column_type=_lt.FLOAT32, aliases=["rotationPeriod"]),
-            fc(name="length_of_day",       column_type=_lt.FLOAT32, aliases=["lengthOfDay"]),
-            fc(name="distance_from_sun",   column_type=_lt.FLOAT32, aliases=["distanceFromSun"]),
+            fc(name="escape_velocity",     column_type=_lt.FLOAT32),
+            fc(name="rotation_period",     column_type=_lt.FLOAT32),
+            fc(name="length_of_day",       column_type=_lt.FLOAT32),
+            fc(name="distance_from_sun",   column_type=_lt.FLOAT32),
             fc(name="perihelion",          column_type=_lt.FLOAT32),
             fc(name="aphelion",            column_type=_lt.FLOAT32),
-            fc(name="orbital_period",      column_type=_lt.FLOAT32, aliases=["orbitalPeriod"]),
-            fc(name="orbital_velocity",    column_type=_lt.FLOAT32, aliases=["orbitalVelocity"]),
-            fc(name="orbital_inclination", column_type=_lt.FLOAT32, aliases=["orbitalInclination"]),
-            fc(name="orbital_eccentricity",column_type=_lt.FLOAT32, aliases=["orbitalEccentricity"]),
-            fc(name="obliquity_to_orbit",  column_type=_lt.FLOAT32, aliases=["obliquityToOrbit"]),
-            fc(name="mean_temperature",    column_type=_lt.INT16,   aliases=["meanTemperature"]),
-            fc(name="surface_pressure",    column_type=_lt.FLOAT32, aliases=["surfacePressure"]),
-            fc(name="number_of_moons",     column_type=_lt.INT8,    aliases=["numberOfMoons"]),
+            fc(name="orbital_period",      column_type=_lt.FLOAT32),
+            fc(name="orbital_velocity",    column_type=_lt.FLOAT32),
+            fc(name="orbital_inclination", column_type=_lt.FLOAT32),
+            fc(name="orbital_eccentricity",column_type=_lt.FLOAT32),
+            fc(name="obliquity_to_orbit",  column_type=_lt.FLOAT32),
+            fc(name="mean_temperature",    column_type=_lt.INT16),
+            fc(name="surface_pressure",    column_type=_lt.FLOAT32),
+            fc(name="number_of_moons",     column_type=_lt.INT8),
           ],
           # EXACT, not an estimate: read() returns a fixed 9-row literal. Declared so
           # the optimizer does not fall back to _UNKNOWN_ROW_COUNT (1,000,000) — that

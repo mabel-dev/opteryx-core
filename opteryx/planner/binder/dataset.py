@@ -31,7 +31,7 @@ from opteryx.types.logical_type import (
     column_type_from_vector,
 )
 from opteryx.types import logical_type as _lt
-from opteryx.types.schema import SchemaColumn, RelationSchema, mint_column_identity
+from opteryx.types.schema import RelationSchema
 from opteryx.utils import random_string
 
 # JSONL columns rugo's decoder can currently produce that READ_JSONL knows how to
@@ -288,11 +288,14 @@ def visit_function_dataset(
                         element_types[column] = _elem
         def _build_value_column(column):
             ct = types.get(column)  # ColumnType or None
-            ident = mint_column_identity(relation_name, column)
             if isinstance(ct, ColumnType):
-                return SchemaColumn(name=column, column_type=ct, identity=ident)
+                return context.plan_context.columns.relation_column(
+                    relation_name, column, column_type=ct
+                )
             from opteryx.types import logical_type as _lt2
-            return SchemaColumn(name=column, column_type=_lt2.NULL, identity=ident)
+            return context.plan_context.columns.relation_column(
+                relation_name, column, column_type=_lt2.NULL
+            )
         columns = [
             LogicalColumn(
                 node_type=NodeType.IDENTIFIER,
@@ -319,7 +322,9 @@ def visit_function_dataset(
                 node_type=NodeType.IDENTIFIER,
                 source_column=node.unnest_target,
                 source=relation_name,
-                schema_column=SchemaColumn(name=node.unnest_target, identity=mint_column_identity(relation_name, node.unnest_target)),
+                schema_column=context.plan_context.columns.relation_column(
+                    relation_name, node.unnest_target
+                ),
             )
         ]
         schema = RelationSchema(name=relation_name, columns=[c.schema_column for c in columns])
@@ -360,7 +365,11 @@ def visit_function_dataset(
                 "GENERATE_SERIES reached the binder without its declared column "
                 "name — the logical planner stamps `series_column` at creation."
             )
-        _gs_schema_col = SchemaColumn(name=series_column, column_type=element_type if isinstance(element_type, ColumnType) else None, identity=mint_column_identity(node.relation_name, series_column))
+        _gs_schema_col = context.plan_context.columns.relation_column(
+            node.relation_name,
+            series_column,
+            column_type=element_type if isinstance(element_type, ColumnType) else None,
+        )
         columns = [
             LogicalColumn(
                 node_type=NodeType.IDENTIFIER,
@@ -679,10 +688,10 @@ def visit_function_dataset(
                     "INT64/FLOAT64/BOOL/VARCHAR/NULL/ARRAY/VARIANT are supported)."
                 )
             schema_columns.append(
-                SchemaColumn(
-                    name=external_name,
+                context.plan_context.columns.relation_column(
+                    relation_name,
+                    external_name,
                     column_type=column_type_from_vector(vector),
-                    identity=mint_column_identity(relation_name, external_name),
                 )
             )
 
@@ -853,10 +862,10 @@ def visit_function_dataset(
         external_names = physical_names
 
         schema_columns = [
-            SchemaColumn(
-                name=external_name,
+            context.plan_context.columns.relation_column(
+                relation_name,
+                external_name,
                 column_type=physical_column.column_type,
-                identity=mint_column_identity(relation_name, external_name),
             )
             for physical_column, external_name in zip(physical_schema.columns, external_names)
         ]
@@ -1115,10 +1124,10 @@ def visit_function_dataset(
                     "INT64/FLOAT64/VARCHAR/NULL are supported)."
                 )
             schema_columns.append(
-                SchemaColumn(
-                    name=external_name,
+                context.plan_context.columns.relation_column(
+                    relation_name,
+                    external_name,
                     column_type=ColumnType(physical=physical_type),
-                    identity=mint_column_identity(relation_name, external_name),
                 )
             )
 
@@ -1368,12 +1377,25 @@ def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
             # the Show visitor tells the two apart. Storing the absence keeps
             # that distinction rather than flattening it to "no rows".
             context.snapshots[node.alias] = None if loader is None else loader()
-            node.schema = output_schema(node.alias)
+            node.schema = context.plan_context.columns.bind_relation(
+                output_schema(node.alias), node.alias
+            )
         elif context.schema_only and getattr(node.connector, "get_dataset_schema", None) is not None:
-            node.schema = node.connector.get_dataset_schema()
+            node.schema = context.plan_context.columns.bind_relation(
+                node.connector.get_dataset_schema(), node.alias
+            )
             node.manifest = None
         elif getattr(node.connector, "get_dataset_metadata", None) is not None:
-            node.schema, node.manifest = node.connector.get_dataset_metadata()
+            described, node.manifest = node.connector.get_dataset_metadata()
+            node.schema = context.plan_context.columns.bind_relation(described, node.alias)
+            if node.manifest is not None:
+                # The manifest was built over the source's DESCRIPTION; its
+                # statistics are keyed by BOUND column identity and projection
+                # pushdown prunes it together with the scan's schema, so it reads
+                # the bound schema from here on - the same object the scan holds.
+                # Each connector builds its Manifest per call, so nothing shared
+                # is rebound.
+                node.manifest.schema = node.schema
             # Propagate dataset commit timestamp from the connector to the
             # logical node so it becomes available to physical nodes
             # (and ultimately shown as `committed_at` in telemetry).
@@ -1382,7 +1404,9 @@ def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
                 node.dataset_committed_at = dc
         else:
             # Fallback for connectors that don't have manifest support yet
-            node.schema = node.connector.get_dataset_schema()
+            node.schema = context.plan_context.columns.bind_relation(
+                node.connector.get_dataset_schema(), node.alias
+            )
             node.manifest = None
         # Physical row address, for a Scan the planner asked to emit one (MERGE).
         # These columns are not in the relation's schema and are not read from
@@ -1420,16 +1444,16 @@ def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
                     )
                 )
             node.schema.columns = list(node.schema.columns) + [
-                SchemaColumn(
-                    name=ROW_IDENTITY_FILE,
+                context.plan_context.columns.relation_column(
+                    node.alias,
+                    ROW_IDENTITY_FILE,
                     column_type=ColumnType(physical=DrakenType.INT64),
-                    identity=mint_column_identity(node.alias, ROW_IDENTITY_FILE),
                     nullable=False,
                 ),
-                SchemaColumn(
-                    name=ROW_IDENTITY_ORDINAL,
+                context.plan_context.columns.relation_column(
+                    node.alias,
+                    ROW_IDENTITY_ORDINAL,
                     column_type=ColumnType(physical=DrakenType.INT64),
-                    identity=mint_column_identity(node.alias, ROW_IDENTITY_ORDINAL),
                     nullable=False,
                 ),
             ]

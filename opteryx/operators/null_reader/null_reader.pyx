@@ -16,57 +16,24 @@
 """
 Null Reader Node
 
-This operator is used when a FILTER(FALSE) condition has been detected,
-indicating that no rows can possibly match the predicate. Instead of reading
-from the underlying connector, we short-circuit and return an empty table
-with the correct schema.
-
-This is more efficient than reading all rows and filtering them out.
+The physical form of the Scan under SHOW SNAPSHOTS / LINEAGE / SOURCES FOR. That
+Scan exists so the relation is BOUND — the permission gate, the connector, and
+the commit history the statement answers from — and its rows are never part of
+the answer: serial_engine answers from the Show node above it and never drives
+the pipeline. So this node has no read path at all.
 """
 
-import logging
-from typing import Generator
-
-
-from draken.draken_native import vector_int64_from_sequence as _vector_from_sequence
-from opteryx.types.schema import RelationSchema
-
-# EOS sentinel in scope as _EOS_SENTINEL via the umbrella unit.
 # BasePlanNode in scope via _operators.pyx include.
 
 
-logger = logging.getLogger(__name__)
-
-
 cdef class NullReaderNode(BasePlanNode):  # pragma: no cover
-    """
-    Returns an empty table with the correct schema.
-
-    Used when contradictory predicates make the result empty.
-    """
+    """A Scan kept only to bind a relation whose history — not its rows — is the answer."""
     # `columns` is a BasePlanNode field; only the scan-specific extras here.
     cdef public object schema
 
     def __init__(self, properties, step):
-        """A Scan step proven empty (contradictory predicates), or one kept only
-        to bind a relation whose history — not its rows — is the answer."""
         BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
         self.schema = step.schema
-
-    def read_morsels(self):
-        """Source-side iterator: yields a single empty morsel with the correct schema."""
-        # Build empty Morsel with correct schema from columns property
-        if self.columns:
-            empty_morsel = Morsel()
-            for col in self.columns:
-                col_name = getattr(col, "identity", None) or getattr(col, "name", None) or col
-                vector = _vector_from_sequence([])
-                empty_morsel.append_vector(col_name if isinstance(col_name, bytes) else str(col_name).encode(), vector)
-            yield empty_morsel
-            return
-
-        # Fallback: return completely empty morsel
-        yield Morsel()
 
     @property
     def name(self):  # pragma: no cover
@@ -76,7 +43,7 @@ cdef class NullReaderNode(BasePlanNode):  # pragma: no cover
     @property
     def config(self):
         """Additional details for this step"""
-        return "(empty table - contradictory predicates)"
+        return "(bound only - never read)"
 
     def __repr__(self):  # pragma: no cover
         return f"<{self.__class__.__name__}>"

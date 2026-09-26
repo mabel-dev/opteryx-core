@@ -18,7 +18,7 @@ from draken.morsels.morsel import Morsel
 from opteryx.connectors import TableType
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.models import QueryTelemetry
-from opteryx.types.schema import RelationSchema
+from opteryx.types.schema import RelationDescriptor
 
 
 class BaseConnector:
@@ -213,20 +213,20 @@ class BaseTable:
         else:
             self.config = config.copy()
         self.dataset = dataset
-        self.schema: RelationSchema = None
+        self.schema: RelationDescriptor = None
         self.telemetry = telemetry
         self.pushed_predicates: list = []
 
-    def get_dataset_schema(self) -> RelationSchema:  # pragma: no cover
+    def get_dataset_schema(self) -> RelationDescriptor:  # pragma: no cover
         """
         Retrieve the schema of a dataset.
 
         Returns:
-            A RelationSchema representing the schema of the dataset.
+            A RelationDescriptor describing the dataset.
         """
         raise NotImplementedError("Subclasses must implement get_dataset_schema method.")
 
-    def get_declared_schema(self) -> RelationSchema:
+    def get_declared_schema(self) -> RelationDescriptor:
         """
         Retrieve the relation's REGISTERED schema, independent of any snapshot.
 
@@ -242,7 +242,7 @@ class BaseTable:
         and read the registered schema directly - see `OpteryxTable`.
 
         Returns:
-            A RelationSchema representing the declared schema of the relation.
+            A RelationDescriptor describing the relation's declared schema.
         """
         return self.get_dataset_schema()
 

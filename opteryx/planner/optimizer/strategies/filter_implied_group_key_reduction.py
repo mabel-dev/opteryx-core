@@ -17,8 +17,8 @@ to the partition. This rule strips such keys from the aggregate and
 reconstructs them as literals in a Project inserted immediately above.
 
 Walk rule: descend through Filter, Project, Limit, Order, Distinct, and
-similar pass-through nodes. Stop at Join, DependentJoin, Union, Intersect,
-Except, Subquery, Aggregate, or another AggregateAndGroup — any of those
+similar pass-through nodes. Stop at Join, Union, Intersect, Except,
+Subquery, Aggregate, or another AggregateAndGroup — any of those
 can invalidate the equality guarantee.
 
 Safety: if stripping would leave zero group keys, keep one to preserve the
@@ -38,7 +38,6 @@ from opteryx.compiled.structures.plan_steps import ProjectStep
 _STOP_TYPES = frozenset(
     {
         LogicalPlanStepType.Join,
-        LogicalPlanStepType.DependentJoin,
         LogicalPlanStepType.Union,
         LogicalPlanStepType.Intersect,
         LogicalPlanStepType.Except,

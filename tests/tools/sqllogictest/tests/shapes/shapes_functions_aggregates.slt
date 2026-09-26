@@ -1,7 +1,7 @@
 # Source: test_shapes_functions_aggregates.py
 
 query shape 8 2
-SELECT MAX(density), COUNT(*) FROM $planets WHERE LENGTH(name) > 4 GROUP BY orbitalVelocity
+SELECT MAX(density), COUNT(*) FROM $planets WHERE LENGTH(name) > 4 GROUP BY orbital_velocity
 
 query shape 0
 SELECT name, COUNT(*) AS count FROM testdata.satellites GROUP BY name HAVING count > 1
@@ -370,7 +370,7 @@ query error NotSupportedError
 SELECT MIN(id), MAX(id + 1), SUM(id + 2), COUNT(id) FROM $planets
 
 query shape 6 1
-SELECT DISTINCT surfacePressure FROM $planets
+SELECT DISTINCT surface_pressure FROM $planets
 
 query shape 9 1
 SELECT DISTINCT mass FROM $planets
@@ -397,7 +397,7 @@ query shape 2 1
 SELECT DISTINCT id > 1 AS AM FROM $planets
 
 query shape 2 1
-SELECT DISTINCT surfacePressure > 1 AS AM FROM $planets
+SELECT DISTINCT surface_pressure > 1 AS AM FROM $planets
 
 query error NotSupportedError
 SELECT CAST(p.name AS ARRAY<VARCHAR>) FROM testdata.satellites as s LEFT JOIN $planets as p ON s.id = p.id WHERE s.id > 10
@@ -463,10 +463,10 @@ query shape 9 2
 SELECT COUNT(*) AS planets, id FROM $planets GROUP BY id ORDER BY planets DESC
 
 query shape 9 1
-SELECT MAX(density) FROM $planets GROUP BY orbitalInclination, escapeVelocity, orbitalInclination, numberOfMoons, escapeVelocity, density
+SELECT MAX(density) FROM $planets GROUP BY orbital_inclination, escape_velocity, orbital_inclination, number_of_moons, escape_velocity, density
 
 query shape 9 1
-SELECT COUNT(*) FROM $planets GROUP BY orbitalInclination, orbitalInclination
+SELECT COUNT(*) FROM $planets GROUP BY orbital_inclination, orbital_inclination
 
 query shape 0
 SELECT * FROM testdata.flat.formats.parquet WITH(NO_PARTITION) WHERE user_id = -1
@@ -526,7 +526,7 @@ statement error AmbiguousDatasetError
 SELECT * FROM $planets JOIN $planets ON 12 = id
 
 query shape 3 20
-SELECT * FROM $planets WHERE rotationPeriod = lengthOfDay
+SELECT * FROM $planets WHERE rotation_period = length_of_day
 
 query error ColumnNotFoundError
 SELECT * FROM 'testdata.planets' WITH(NO_PARTITION) WHERE rotationPeriod = lengthOfDay

@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types import logical_type as _lt
-from opteryx.types.schema import SchemaColumn, RelationSchema
+from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 
 __all__ = ["DataFrame"]
 
@@ -30,30 +30,28 @@ class DataFrame:
         dictionaries: Optional[Iterable[Dict[str, Any]]] = None,
         *,
         rows: Optional[List[tuple]] = None,
-        schema: Optional[Union[RelationSchema, List[str]]] = None,
+        schema: Optional[Union[RelationDescriptor, List[str]]] = None,
     ):
         """Initialize a DataFrame.
 
         Args:
             dictionaries: Optional list of dicts (not used; for API compatibility)
             rows: List of tuples representing rows
-            schema: RelationSchema or list of column names
+            schema: RelationDescriptor or list of column names
         """
         # Allow direct attribute access (needed by Session)
         self._rows = rows or []
         self._description: Optional[Tuple[Tuple[Any, ...], ...]] = None
-        self._schema: Optional[RelationSchema] = None
+        self._schema: Optional[RelationDescriptor] = None
 
-        # Convert schema to RelationSchema if needed
+        # Convert schema to RelationDescriptor if needed
         if schema is None:
-            self._schema = RelationSchema(name="table", columns=[])
-        elif isinstance(schema, RelationSchema):
+            self._schema = RelationDescriptor(name="table", columns=[])
+        elif isinstance(schema, RelationDescriptor):
             self._schema = schema
         elif isinstance(schema, (list, tuple)):
-            # Convert list of column names to RelationSchema
-            from opteryx.types.schema import mint_column_identity
-            columns = [SchemaColumn(name=str(col), column_type=_lt.VARCHAR, identity=mint_column_identity("table", str(col))) for col in schema]
-            self._schema = RelationSchema(name="table", columns=columns)
+            columns = [ColumnDescriptor(name=str(col), column_type=_lt.VARCHAR) for col in schema]
+            self._schema = RelationDescriptor(name="table", columns=columns)
         else:
             self._schema = schema
 

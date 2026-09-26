@@ -53,8 +53,8 @@ def _samp_var(values):
 def test_stddev_pop_is_stddev_alias():
     # STDDEV_POP is a pure alias for STDDEV (same AggFn/GBKind under the
     # hood) — not merely "close", bit-identical.
-    a = _rows("SELECT STDDEV(numberOfMoons) FROM $planets")[0][0]
-    b = _rows("SELECT STDDEV_POP(numberOfMoons) FROM $planets")[0][0]
+    a = _rows("SELECT STDDEV(number_of_moons) FROM $planets")[0][0]
+    b = _rows("SELECT STDDEV_POP(number_of_moons) FROM $planets")[0][0]
     assert a == b, (a, b)
 
 
@@ -89,10 +89,10 @@ def test_single_row_group_sample_forms_are_null_population_forms_are_zero():
 
 
 def test_ungrouped_matches_oracle_on_planets():
-    values = [float(r[0]) for r in _rows("SELECT numberOfMoons FROM $planets")]
+    values = [float(r[0]) for r in _rows("SELECT number_of_moons FROM $planets")]
     (ss, sp, vs, vp) = _rows(
-        "SELECT STDDEV_SAMP(numberOfMoons), STDDEV_POP(numberOfMoons), "
-        "VAR_SAMP(numberOfMoons), VAR_POP(numberOfMoons) FROM $planets"
+        "SELECT STDDEV_SAMP(number_of_moons), STDDEV_POP(number_of_moons), "
+        "VAR_SAMP(number_of_moons), VAR_POP(number_of_moons) FROM $planets"
     )[0]
     assert abs(sp - _pop_var(values) ** 0.5) < 1e-9, (sp, values)
     assert abs(vp - _pop_var(values)) < 1e-9, (vp, values)
@@ -101,13 +101,13 @@ def test_ungrouped_matches_oracle_on_planets():
 
 
 def test_grouped_matches_oracle_on_planets():
-    raw = _rows("SELECT numberOfMoons > 5, numberOfMoons FROM $planets")
+    raw = _rows("SELECT number_of_moons > 5, number_of_moons FROM $planets")
     got = {
         r[0]: (r[1], r[2], r[3], r[4])
         for r in _rows(
-            "SELECT numberOfMoons > 5 AS big, STDDEV_SAMP(numberOfMoons), "
-            "STDDEV_POP(numberOfMoons), VAR_SAMP(numberOfMoons), "
-            "VAR_POP(numberOfMoons) FROM $planets GROUP BY numberOfMoons > 5"
+            "SELECT number_of_moons > 5 AS big, STDDEV_SAMP(number_of_moons), "
+            "STDDEV_POP(number_of_moons), VAR_SAMP(number_of_moons), "
+            "VAR_POP(number_of_moons) FROM $planets GROUP BY number_of_moons > 5"
         )
     }
     for key in (True, False):
@@ -120,12 +120,12 @@ def test_grouped_matches_oracle_on_planets():
 
 
 def test_null_ignoring():
-    # surfacePressure carries NULLs — all four forms must ignore them, not
+    # surface_pressure carries NULLs — all four forms must ignore them, not
     # treat them as 0 or propagate NULL for the whole aggregate.
     values = [float(v) for (v,) in _rows(
-        "SELECT surfacePressure FROM $planets WHERE surfacePressure IS NOT NULL")]
+        "SELECT surface_pressure FROM $planets WHERE surface_pressure IS NOT NULL")]
     (ss, sp) = _rows(
-        "SELECT STDDEV_SAMP(surfacePressure), STDDEV_POP(surfacePressure) "
+        "SELECT STDDEV_SAMP(surface_pressure), STDDEV_POP(surface_pressure) "
         "FROM $planets")[0]
     assert abs(sp - _pop_var(values) ** 0.5) < 1e-6, (sp, values)
     assert abs(ss - _samp_var(values) ** 0.5) < 1e-6, (ss, values)
@@ -146,8 +146,8 @@ def test_variance_is_stddev_squared():
     # Mathematical identity, not a duplicate of the oracle checks above:
     # pins that VAR_* really is the pre-sqrt of STDDEV_* on the SAME data.
     (ss, vs, sp, vp) = _rows(
-        "SELECT STDDEV_SAMP(numberOfMoons), VAR_SAMP(numberOfMoons), "
-        "STDDEV_POP(numberOfMoons), VAR_POP(numberOfMoons) FROM $planets"
+        "SELECT STDDEV_SAMP(number_of_moons), VAR_SAMP(number_of_moons), "
+        "STDDEV_POP(number_of_moons), VAR_POP(number_of_moons) FROM $planets"
     )[0]
     assert abs(ss * ss - vs) < 1e-9, (ss, vs)
     assert abs(sp * sp - vp) < 1e-9, (sp, vp)

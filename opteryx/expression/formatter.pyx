@@ -19,12 +19,9 @@ from opteryx.utils import random_string
 
 @dataclass
 class ExpressionColumn(SchemaColumn):
-    def __post_init__(self):
-        # Expression/predicate columns are computed, not relation-sourced; mint a
-        # unique `$derived_` identity rather than hitting the base-class raise.
-        if self.identity is None:
-            self.identity = f"$derived_{random_string(8)}".encode("utf-8")
-        super().__post_init__()
+    """A computed expression/predicate column. Minted only by the query's
+    ColumnTable (`columns.computed(ExpressionColumn, ...)`), which assigns its
+    `$derived_` identity and slot."""
 
 
 cdef inline tuple _civil_from_days(long long days):

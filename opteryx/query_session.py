@@ -52,7 +52,7 @@ from opteryx.variables import resolve as _resolve_var
 from opteryx.models import ExecutionContext, QueryTelemetry, TraceBundle
 from opteryx.models.dataframe import DataFrame
 from opteryx.types.logical_type import LogicalCategory
-from opteryx.types.schema import SchemaColumn, RelationSchema
+from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 from opteryx.utils import sql
 
 _CAMEL_SPLIT_RE = re.compile(r"[A-Z][a-z]*|[0-9]+")
@@ -643,7 +643,7 @@ class Session(DataFrame):
             raise InvalidCursorStateError("Session is closed.")
 
     @staticmethod
-    def _schema_to_description(schema: Optional[RelationSchema]):
+    def _schema_to_description(schema: Optional[RelationDescriptor]):
         if schema is None or not schema.columns:
             return None
         description: List[Tuple[Any, ...]] = []
@@ -694,7 +694,7 @@ class Session(DataFrame):
         # clearing it a reused session reports its FIRST query's columns forever.
         self._executed = False
         self._rowcount = None
-        self._schema = RelationSchema(name="table", columns=[])
+        self._schema = RelationDescriptor(name="table", columns=[])
         self._description = None
         self._query_status = QueryStatus._UNDEFINED
         self._result_type = ResultType._UNDEFINED
@@ -714,7 +714,6 @@ class Session(DataFrame):
         from opteryx.types.logical_type import column_type_from_vector
 
         def _schema_from_morsel(morsel: Morsel):
-            from opteryx.types.schema import mint_column_identity
             columns = []
             for name in morsel.column_names:
                 col_name = name.decode("utf-8") if isinstance(name, bytes) else name
@@ -726,8 +725,8 @@ class Session(DataFrame):
                 # UINT32 for an address column (and, via its VARCHAR default, a
                 # STRING for every unsigned integer column).
                 ct = column_type_from_vector(morsel.column(name))
-                columns.append(SchemaColumn(name=col_name, column_type=ct, identity=mint_column_identity("table", col_name)))
-            return RelationSchema(name="table", columns=columns)
+                columns.append(ColumnDescriptor(name=col_name, column_type=ct))
+            return RelationDescriptor(name="table", columns=columns)
 
         start = time.time_ns()
         results = self._execute_statements(operation, params, visibility_filters)

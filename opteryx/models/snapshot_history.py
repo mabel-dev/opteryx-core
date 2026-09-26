@@ -144,7 +144,7 @@ def _snapshot_column_types():
 def snapshots_output_schema(
     relation_name: str = "$snapshots", include_expiry: bool = False
 ):
-    """The fixed RelationSchema `SHOW [ALL] SNAPSHOTS FOR <table>` returns.
+    """The fixed RelationDescriptor `SHOW [ALL] SNAPSHOTS FOR <table>` returns.
 
     Every _SNAPSHOT_COLUMNS column, never trimmed or projected — SHOW SNAPSHOTS
     FOR has no WHERE/column-list grammar to do so with. row_count_estimate is
@@ -156,16 +156,15 @@ def snapshots_output_schema(
     from, so the schema this returns and the rows that arrive cannot disagree
     about which shape the statement is.
     """
-    from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+    from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 
     column_types = _snapshot_column_types()
-    return RelationSchema(
+    return RelationDescriptor(
         name=relation_name,
         columns=[
-            SchemaColumn(
+            ColumnDescriptor(
                 name=name,
                 column_type=column_types[name],
-                identity=mint_column_identity(relation_name, name),
             )
             for name in (_ALL_SNAPSHOT_COLUMNS if include_expiry else _SNAPSHOT_COLUMNS)
         ],

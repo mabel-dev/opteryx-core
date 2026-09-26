@@ -3,7 +3,6 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-import copy
 from typing import Tuple
 
 from opteryx.compiled.structures.expressions import Expression
@@ -22,7 +21,7 @@ from opteryx.planner.binder.join_helpers import (
     reject_unhoistable_join_operands,
 )
 from opteryx.types.logical_type import LogicalCategory
-from opteryx.types.schema import RelationSchema, mint_column_identity
+from opteryx.types.schema import RelationSchema
 from opteryx.utils import random_string
 
 
@@ -322,15 +321,9 @@ def visit_join(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
             origins = merged_origins
 
             if coalesces:
-                merged = copy.copy(left_column)
-                merged.identity = mint_column_identity("$shared", column_name)
+                merged = context.plan_context.columns.remint(left_column, "$shared")
                 merged.aliases = None
                 merged.nullable = left_column.nullable or right_column.nullable
-                # Statistics describe the LEFT column; the coalesced one can hold
-                # right-only values outside that range, so it carries none.
-                merged.highest_value = None
-                merged.lowest_value = None
-                merged.null_count = None
                 using_merged.append(
                     (merged.identity, left_column.identity, right_column.identity)
                 )

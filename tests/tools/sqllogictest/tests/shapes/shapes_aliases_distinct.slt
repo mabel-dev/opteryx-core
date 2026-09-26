@@ -4,7 +4,7 @@ query shape 177 1
 SELECT planetId FROM testdata.satellites
 
 query shape 9 3
-SELECT escape_velocity, gravity, orbitalPeriod FROM $planets
+SELECT escape_velocity, gravity, orbital_period FROM $planets
 
 query shape 3 2
 SELECT * FROM (VALUES ('High', 3),('Medium', 2),('Low', 1)) AS ratings(name, rating)

@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 from typing import Optional
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from opteryx.types.schema import RelationSchema
+    from opteryx.types.schema import RelationDescriptor
 
 
 @dataclasses.dataclass
@@ -20,7 +20,7 @@ class ViewDefinition:
     # `statement`, so this describes the view but never determines it - and for
     # a definition with a wildcard it is a snapshot that the source gaining a
     # column leaves stale.
-    schema: Optional["RelationSchema"] = None
+    schema: Optional["RelationDescriptor"] = None
 
 
 class Eidetic:
@@ -49,7 +49,7 @@ class Eidetic:
         statement: str,
         update_if_exists: bool = False,
         owner: Optional[str] = None,
-        schema: Optional["RelationSchema"] = None,
+        schema: Optional["RelationDescriptor"] = None,
     ):
         """Create a new view with the given name and definition."""
         # Placeholder implementation; actual implementation would add

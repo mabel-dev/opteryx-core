@@ -569,7 +569,7 @@ def ARRAY(element_type: ColumnType) -> ColumnType:
 
 # ---------------------------------------------------------------------------
 # Canonical (de)serialization — the authoritative wire/persistence form of a
-# ColumnType. Used by SchemaColumn.to_dict()/from_dict() (D-4 Phase 2 "full break":
+# ColumnType. Used by ColumnDescriptor.to_dict()/from_dict() (D-4 Phase 2 "full break":
 # the schema JSON now carries a single `column_type` string instead of the
 # legacy type/precision/scale/element_type quartet).
 #

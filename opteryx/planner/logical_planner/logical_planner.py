@@ -131,7 +131,6 @@ class LogicalPlanStepType(int, Enum):
     Intersect = auto()  # set intersection (INTERSECT/INTERSECT ALL)
     Except = auto()  # set difference (EXCEPT/EXCEPT ALL)
     Explain = auto()  # EXPLAIN
-    Difference = auto()  # relation interection
     Join = auto()  # all joins
     Unnest = auto()  # UNNEST
     #    Containment = auto() # IN (maybe also EXISTS?)
@@ -169,7 +168,6 @@ class LogicalPlanStepType(int, Enum):
     Window = auto()  # OVER (PARTITION BY ...) — rewritten to join by plan rewriter
     FramedWindow = auto()  # SUM/COUNT/AVG/MIN/MAX OVER (... ROWS/RANGE BETWEEN ...) — native sink, never rewritten
     FunctionDataset = auto()  # Unnest, GenerateSeries, values + Fake
-    DependentJoin = auto()  # Correlated subquery awaiting decorrelation
 
     CreateView = auto()
     AlterView = auto()
@@ -6236,9 +6234,10 @@ def plan_create_table(statement, *, plan_context, **kwargs):
         ...
     )
 
-    Maps sqloxide column types to LogicalCategory and constructs a RelationSchema.
+    Maps sqloxide column types to LogicalCategory and constructs a RelationDescriptor.
     """
-    from opteryx.types.schema import RelationSchema
+    from opteryx.types.schema import ColumnDescriptor
+    from opteryx.types.schema import RelationDescriptor
 
     root_node = "CreateTable"
     plan = LogicalPlan()
@@ -6337,14 +6336,12 @@ def plan_create_table(statement, *, plan_context, **kwargs):
         )
         relationships.extend(col_relationships)
 
-        flat_col = plan_context.columns.relation_column(
-            "$create", col_name, column_type=sql_type_ct, nullable=col_nullable
-        )
+        flat_col = ColumnDescriptor(name=col_name, column_type=sql_type_ct, nullable=col_nullable)
         columns.append(flat_col)
 
 
-    # Build RelationSchema
-    schema = RelationSchema(name=create_table_node.relation_name, columns=columns)
+    # The table being created, as a description for the store: nothing is bound.
+    schema = RelationDescriptor(name=create_table_node.relation_name, columns=columns)
     create_table_node.schema = schema
     # Declared here, written by the operator after the relation exists - the
     # store hangs off the dataset document, so there is nothing to hang one on

@@ -91,7 +91,7 @@ from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.models import QueryTelemetry
 from opteryx.types import logical_type as _lt
-from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 
 FIRESTORE_ENDPOINT = "https://firestore.googleapis.com/v1"
 _DATASTORE_SCOPE = "https://www.googleapis.com/auth/datastore"
@@ -515,20 +515,19 @@ class FirestoreTable(BaseTable):
         self.gateway = gateway
         self.collection = gateway.collection_for(dataset, original_relation)
 
-    def get_dataset_schema(self) -> RelationSchema:
+    def get_dataset_schema(self) -> RelationDescriptor:
         if not self.gateway.exposes(self.collection):
             raise DatasetNotFoundError(connector=self.gateway.__type__, dataset=self.dataset)
         # One billed read to tell an existing collection from a typo: Firestore
         # has no collection objects, so "not found" means "no documents".
         if not self.gateway.list_page(self.collection, 1, None).get("documents"):
             raise DatasetNotFoundError(connector=self.gateway.__type__, dataset=self.dataset)
-        self.schema = RelationSchema(
+        self.schema = RelationDescriptor(
             name=self.dataset,
             columns=[
-                SchemaColumn(
+                ColumnDescriptor(
                     name=name,
                     column_type=column_type,
-                    identity=mint_column_identity(self.dataset, name),
                 )
                 for name, column_type, _ in _COLUMNS
             ],

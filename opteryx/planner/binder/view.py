@@ -49,7 +49,9 @@ def visit_show_manifest(self, node: PlanStep, context: BindingContext) -> Tuple[
         # Refusing instead reported a valid statement as an error, and "no manifest
         # support" - the message below - would have been a true-sounding sentence
         # about the wrong thing.
-        node.schema = manifest_output_schema(node.relation)
+        node.schema = context.plan_context.columns.bind_relation(
+            manifest_output_schema(node.relation), node.relation
+        )
     else:
         manifest = context.manifests.get(node.relation)
         if manifest is None:
@@ -58,7 +60,9 @@ def visit_show_manifest(self, node: PlanStep, context: BindingContext) -> Tuple[
                 "expose file-level metadata)."
             )
         node.manifest = manifest
-        node.schema = manifest_output_schema(node.relation)
+        node.schema = context.plan_context.columns.bind_relation(
+            manifest_output_schema(node.relation), node.relation
+        )
     node.columns = []
     for schema_column in node.schema.columns:
         column_reference = LogicalColumn(
@@ -92,7 +96,9 @@ def visit_show_snapshots(self, node: PlanStep, context: BindingContext) -> Tuple
         # deliberately did not read one — the same reasoning as SHOW MANIFEST:
         # the output schema is fixed, so the statement checks clean and only the
         # rows (and with them the row-count estimate) are left unknown.
-        node.schema = snapshots_output_schema(node.relation, include_expiry=include_expiry)
+        node.schema = context.plan_context.columns.bind_relation(
+            snapshots_output_schema(node.relation, include_expiry=include_expiry), node.relation
+        )
     else:
         snapshots = context.snapshots.get(node.relation)
         if snapshots is None:
@@ -103,7 +109,9 @@ def visit_show_snapshots(self, node: PlanStep, context: BindingContext) -> Tuple
                 "keep a commit log)."
             )
         node.snapshots = snapshots
-        node.schema = snapshots_output_schema(node.relation, include_expiry=include_expiry)
+        node.schema = context.plan_context.columns.bind_relation(
+            snapshots_output_schema(node.relation, include_expiry=include_expiry), node.relation
+        )
         node.schema.row_count_estimate = len(snapshots)
     node.columns = []
     for schema_column in node.schema.columns:
@@ -137,7 +145,9 @@ def visit_show_lineage(self, node: PlanStep, context: BindingContext) -> Tuple[P
     if context.schema_only:
         # The shape is fixed and knowable without reading anything; only the
         # rows are unknowable in a schema-only bind - as for SHOW SNAPSHOTS.
-        node.schema = lineage_output_schema(node.relation)
+        node.schema = context.plan_context.columns.bind_relation(
+            lineage_output_schema(node.relation), node.relation
+        )
     else:
         rows = context.snapshots.get(node.relation)
         if rows is None:
@@ -146,7 +156,9 @@ def visit_show_lineage(self, node: PlanStep, context: BindingContext) -> Tuple[P
                 "commit log)."
             )
         node.lineage = rows
-        node.schema = lineage_output_schema(node.relation)
+        node.schema = context.plan_context.columns.bind_relation(
+            lineage_output_schema(node.relation), node.relation
+        )
         node.schema.row_count_estimate = len(rows)
     node.columns = []
     for schema_column in node.schema.columns:
@@ -170,7 +182,9 @@ def visit_show_sources(self, node: PlanStep, context: BindingContext) -> Tuple[P
     from opteryx.models.source_list import sources_output_schema
 
     if context.schema_only:
-        node.schema = sources_output_schema(node.relation)
+        node.schema = context.plan_context.columns.bind_relation(
+            sources_output_schema(node.relation), node.relation
+        )
     else:
         rows = context.snapshots.get(node.relation)
         if rows is None:
@@ -179,7 +193,9 @@ def visit_show_sources(self, node: PlanStep, context: BindingContext) -> Tuple[P
                 "keep a commit log)."
             )
         node.sources = rows
-        node.schema = sources_output_schema(node.relation)
+        node.schema = context.plan_context.columns.bind_relation(
+            sources_output_schema(node.relation), node.relation
+        )
         node.schema.row_count_estimate = len(rows)
     node.columns = []
     for schema_column in node.schema.columns:
@@ -295,9 +311,8 @@ def _view_output_schema(node, context: BindingContext):
     misdescribe the view but can never change what it returns.
     """
     from opteryx.planner import bind_statement
-    from opteryx.types.schema import RelationSchema
-    from opteryx.types.schema import SchemaColumn
-    from opteryx.types.schema import mint_column_identity
+    from opteryx.types.schema import ColumnDescriptor
+    from opteryx.types.schema import RelationDescriptor
 
     bound_plan, _clean_sql, _ast = bind_statement(
         operation=node.view_sql,
@@ -328,20 +343,16 @@ def _view_output_schema(node, context: BindingContext):
         if isinstance(name, (list, tuple)):
             name = name[0] if name else None
         name = str(name)
+        # Recorded with the view as a description; nothing is bound here.
         columns.append(
-            SchemaColumn(
+            ColumnDescriptor(
                 name=name,
                 column_type=column.schema_column.column_type,
                 nullable=column.schema_column.nullable,
-                # A fresh identity, not the bound column's: these describe the
-                # VIEW's columns, and the plan they were bound in is discarded
-                # here. Reusing an identity from a throwaway plan would hand the
-                # catalog a handle onto columns that no longer exist.
-                identity=mint_column_identity(node.view_name, name),
             )
         )
 
-    return RelationSchema(name=node.view_name, columns=columns)
+    return RelationDescriptor(name=node.view_name, columns=columns)
 
 
 def _view_store(view_name: str, context: BindingContext):

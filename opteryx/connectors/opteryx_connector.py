@@ -88,7 +88,7 @@ from opteryx.exceptions import (
 from opteryx.exceptions import md_code
 from opteryx.models import FileEntry, Manifest
 from opteryx.types.logical_type import LogicalCategory
-from opteryx.types.schema import SchemaColumn, RelationSchema
+from opteryx.types.schema import SchemaColumn, RelationSchema, ColumnDescriptor, RelationDescriptor
 
 
 def _accepts_include_expired(loader) -> bool:
@@ -263,8 +263,18 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
     @classmethod
     def _normalize_schema(
         cls, schema: Any, relation_name: Optional[str] = None
-    ) -> RelationSchema:
+    ) -> RelationDescriptor:
+        # A catalog describes its relations; it never hands over BOUND columns -
+        # those carry identities minted in some other binding (architect ruling
+        # 2026-09-26: no dual path). Read one through the generic branch below
+        # and it has no `.type`, so it would come back silently as VARCHAR.
         if isinstance(schema, RelationSchema):
+            raise DatasetReadError(
+                f"The catalog described {relation_name or schema.name} with a bound "
+                "RelationSchema; a catalog must describe relations with a "
+                "RelationDescriptor."
+            )
+        if isinstance(schema, RelationDescriptor):
             if relation_name:
                 schema.name = relation_name
             return schema
@@ -272,6 +282,12 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
         columns = []
         for column in getattr(schema, "columns", []) or []:
             if isinstance(column, SchemaColumn):
+                raise DatasetReadError(
+                    f"The catalog described column {column.name} of "
+                    f"{relation_name or getattr(schema, 'name', 'dataset')} as a bound "
+                    "SchemaColumn; a catalog must describe columns with a ColumnDescriptor."
+                )
+            if isinstance(column, ColumnDescriptor):
                 normalized = column
             else:
                 name = getattr(column, "name", None)
@@ -338,22 +354,20 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
                     _ct = _lt.ARRAY(_elem)
                 else:
                     _ct = _CATEGORY_TO_CANONICAL.get(_ot)
-                from opteryx.types.schema import mint_column_identity
-                normalized = SchemaColumn(
+                normalized = ColumnDescriptor(
                     name=name,
                     column_type=_ct,
                     nullable=getattr(column, "nullable", True),
-                    identity=mint_column_identity(relation_name or getattr(schema, "name", None), name),
                     field_id=raw_field_id,
                 )
 
             columns.append(normalized)
 
-        return RelationSchema(
+        return RelationDescriptor(
             name=relation_name or getattr(schema, "name", "dataset"), columns=columns
         )
 
-    def get_dataset_schema(self) -> RelationSchema:
+    def get_dataset_schema(self) -> RelationDescriptor:
         """
         Get the dataset's column schema, without building a Manifest.
 
@@ -373,7 +387,7 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
         cannot disagree about whether such a relation is readable.
 
         Returns:
-            RelationSchema
+            RelationDescriptor
         """
         self._resolve_snapshot()
         if self.snapshot is None:
@@ -384,7 +398,7 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
         self.dataset_committed_at = self.snapshot.timestamp_ms
         return self.schema
 
-    def get_declared_schema(self) -> RelationSchema:
+    def get_declared_schema(self) -> RelationDescriptor:
         """The dataset's registered schema, read WITHOUT resolving a snapshot.
 
         Overrides `BaseTable.get_declared_schema` because this reader's schema
@@ -403,7 +417,7 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
         committed - where the declared schema is the only schema there is.
 
         Returns:
-            RelationSchema
+            RelationDescriptor
         """
         raw_schema = self.table.schema()
         if raw_schema is None:
@@ -857,7 +871,7 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
             self.snapshot = self.table.snapshot()
             self.snapshot_id = None if self.snapshot is None else self.snapshot.snapshot_id
 
-    def get_dataset_metadata(self) -> Tuple[RelationSchema, Manifest]:
+    def get_dataset_metadata(self) -> Tuple[RelationDescriptor, Manifest]:
         """
         Get dataset schema and build manifest from catalog.
 
@@ -865,7 +879,7 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
         Manifest contains file-level statistics from table.scan().
 
         Returns:
-            Tuple of (RelationSchema, Manifest)
+            Tuple of (RelationDescriptor, Manifest)
         """
         self._resolve_snapshot()
 
@@ -1034,8 +1048,8 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
         return self.schema, self.manifest
 
 
-def _normalized_view_schema(stored, view_name: str) -> Optional[RelationSchema]:
-    """A view's stored schema as an engine RelationSchema, or None.
+def _normalized_view_schema(stored, view_name: str) -> Optional[RelationDescriptor]:
+    """A view's stored schema as an engine RelationDescriptor, or None.
 
     The catalog hands back its own dependency-free schema object - the same one
     `SimpleDataset.schema()` returns - so this is the identical normalization a
@@ -2096,7 +2110,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         schema = catalog.load_dataset(relative_id).schema()
         return [c.name for c in schema.columns]
 
-    def relation_schema(self, relation_name: str) -> RelationSchema:
+    def relation_schema(self, relation_name: str) -> RelationDescriptor:
         """The dataset's current schema, whole - see Writable.relation_schema.
 
         Normalized on the way out, exactly as a scan normalizes it: the catalog
@@ -3304,7 +3318,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         statement: str,
         update_if_exists: bool = False,
         owner: str = None,
-        schema: Optional[RelationSchema] = None,
+        schema: Optional[RelationDescriptor] = None,
     ):
         """Create a new view with the given name and definition.
 

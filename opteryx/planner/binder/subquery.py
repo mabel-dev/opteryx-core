@@ -80,7 +80,6 @@ def visit_materialized_cte_ref(
     from opteryx.exceptions import InvalidInternalStateError
     from opteryx.expression import NodeType
     from opteryx.models import LogicalColumn
-    from opteryx.types.schema import mint_column_identity
 
     if node.alias and node.alias.lower() in {r.lower() for r in context.relations}:
         raise AmbiguousDatasetError(dataset=node.alias)
@@ -95,8 +94,7 @@ def visit_materialized_cte_ref(
     columns = []
     mapping = {}
     for body_column in boundary_schema.columns:
-        out_column = copy.copy(body_column)
-        out_column.identity = mint_column_identity(node.alias, body_column.name)
+        out_column = context.plan_context.columns.remint(body_column, node.alias)
         out_column.origin = [node.alias]
         out_column.aliases = []
         columns.append(out_column)

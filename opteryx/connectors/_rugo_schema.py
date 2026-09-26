@@ -1,12 +1,12 @@
 """
-Convert rugo parquet metadata schemas to RelationSchema format.
+Convert rugo parquet metadata schemas to RelationDescriptor format.
 """
 
 import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from opteryx.types.logical_type import LogicalCategory
-from opteryx.types.schema import SchemaColumn, RelationSchema
+from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 
 # draken LogicalKind ordinal for IPV4 (draken/core/draken_bridge.h). The only
 # kind rugo records in the parquet key-value side channel — every other kind
@@ -400,9 +400,9 @@ def _fallback_schema_columns(metadata: Dict[str, Any]) -> Iterable[Dict[str, Any
 
 def rugo_to_relation_schema(
     rugo_metadata, schema_name: str = "parquet_schema"
-) -> RelationSchema:
+) -> RelationDescriptor:
     """
-    Convert a typed rugo ParquetMetadata to an RelationSchema.
+    Convert a typed rugo ParquetMetadata to a RelationDescriptor.
 
     Args:
         rugo_metadata: The ParquetMetadata returned by rugo.parquet_reader.read_metadata()
@@ -496,13 +496,12 @@ def rugo_to_relation_schema(
                 _ct = _lt.IPV4
         else:
             _ct = _CATEGORY_TO_CANONICAL.get(sql_type)
-        from opteryx.types.schema import mint_column_identity
-        columns.append(SchemaColumn(name=name, column_type=_ct, nullable=nullable, identity=mint_column_identity(schema_name, name)))
+        columns.append(ColumnDescriptor(name=name, column_type=_ct, nullable=nullable))
 
     if not columns:
         raise ValueError("No columns could be derived from rugo metadata")
 
-    schema = RelationSchema(name=schema_name)
+    schema = RelationDescriptor(name=schema_name)
     schema.columns.extend(columns)
     schema.row_count_estimate = rugo_metadata.num_rows
 
@@ -575,9 +574,9 @@ def _map_jsonl_type_to_sql(jsonl_type: str) -> str:
 
 def jsonl_to_sql_schema(
     jsonl_schema: List[Dict[str, Any]], schema_name: str = "jsonl_schema"
-) -> RelationSchema:
+) -> RelationDescriptor:
     """
-    Convert JSON lines schema to an RelationSchema.
+    Convert JSON lines schema to a RelationDescriptor.
 
     Args:
         jsonl_schema: The schema list returned by rugo.jsonl.get_jsonl_schema()
@@ -606,14 +605,13 @@ def jsonl_to_sql_schema(
 
         sql_type = _map_jsonl_type_to_sql(jsonl_type)
         from opteryx.types.logical_type import _CATEGORY_TO_CANONICAL
-        from opteryx.types.schema import mint_column_identity
-        columns.append(SchemaColumn(name=name, column_type=_CATEGORY_TO_CANONICAL.get(sql_type), nullable=nullable, identity=mint_column_identity(schema_name, name)))
+        columns.append(ColumnDescriptor(name=name, column_type=_CATEGORY_TO_CANONICAL.get(sql_type), nullable=nullable))
 
     if not columns:
         raise ValueError("No columns could be derived from jsonl schema")
 
     # Create and populate the RelationSchema
-    schema = RelationSchema(name=schema_name)
+    schema = RelationDescriptor(name=schema_name)
 
     # Add all columns to the schema
     schema.columns.extend(columns)

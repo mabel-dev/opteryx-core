@@ -34,7 +34,6 @@ from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory, ColumnType
 from opteryx.types import logical_type as _lt
-from opteryx.types.schema import ConstantColumn
 from opteryx.utils import random_string
 from .optimization_strategy import (
     OptimizationStrategy,
@@ -145,7 +144,7 @@ def _order_simple_predicates(predicates, telemetry, relation_stats=None):
     return ordered
 
 
-def rewrite_anded_any_eq_to_contains_all(predicate, telemetry):
+def rewrite_anded_any_eq_to_contains_all(predicate, telemetry, *, plan_context):
     """
     Rewrite multiple AND'ed ANYOPEQ conditions on the same column into a single ArrayContainsAll (@>>) condition.
 
@@ -210,7 +209,9 @@ def rewrite_anded_any_eq_to_contains_all(predicate, telemetry):
             values_literal = first.left.replace(
                 value=values_set,
                 type=_arr_ct_po,
-                schema_column=ConstantColumn(name=None, column_type=_arr_ct_po, value=values_set),
+                schema_column=plan_context.columns.constant(
+                    None, column_type=_arr_ct_po, value=values_set
+                ),
             )
             # column @>> ARRAY[...] - the column (array) on the left
             replacements[id(first)] = first.replace(
@@ -299,7 +300,8 @@ class PredicateOrderingStrategy(OptimizationStrategy):
                 context.optimized_plan.remove_node(context.collected_nids[id(predicate)], heal=True)
 
             new_node.condition = rewrite_anded_any_eq_to_contains_all(
-                new_node.condition, self.telemetry
+                new_node.condition, self.telemetry,
+                plan_context=context.plan_context,
             )
 
             context.optimized_plan.insert_node_after(random_string(), new_node, context.node_id)

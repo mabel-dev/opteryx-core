@@ -2240,7 +2240,7 @@ class StatisticsRefreshVisitor:
             return _filter_stats(
                 node, child_stats, self.plan, nid, self.predicate_notes, self.fold_registry
             )
-        if nt in (LogicalPlanStepType.Join, LogicalPlanStepType.DependentJoin):
+        if nt == LogicalPlanStepType.Join:
             return _join_stats(node, child_stats, nid, self.join_notes)
         if nt == LogicalPlanStepType.AggregateAndGroup:
             return _aggregate_stats(node, child_stats)

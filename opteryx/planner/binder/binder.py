@@ -207,7 +207,7 @@ def _descriptor_carries_meaning(target) -> bool:
     return target.logical is not None
 
 
-def _bound_cast_node(source, target):
+def _bound_cast_node(source, target, *, plan_context):
     """CAST-wrap an already-bound expression to `target`, itself fully bound.
 
     The CAST node contract is the one the parser emits (logical_planner_builders.
@@ -243,7 +243,7 @@ def _bound_cast_node(source, target):
         value=value,
         parameters=parameters,
         alias=source.alias,
-        schema_column=ExpressionColumn(name="", column_type=target),
+        schema_column=plan_context.columns.computed(ExpressionColumn, "", column_type=target),
     )
 
 
@@ -254,17 +254,11 @@ def _operand_column_type(operand):
     operand isn't a numeric type the result-derivation rules know how to handle —
     the caller then skips parameter derivation (the LogicalCategory-only result stands).
 
-    D-4 Phase 2: when the operand has a bound schema_column, its `column_type` is
-    the authoritative unified type — use it directly (it carries the LogicalType
-    descriptor for DECIMAL, etc.). LITERAL operands without a bound schema_column
-    fall through to the LogicalCategory path.
+    D-4 Phase 2: the operand's bound schema_column `column_type` is the
+    authoritative unified type — use it directly (it carries the LogicalType
+    descriptor for DECIMAL, etc.). Operands reach here already bound, literals
+    included.
     """
-    from draken.draken_native import DrakenType
-
-    from opteryx.types import logical_type as lt
-    from opteryx.types.logical_type import ColumnType
-
-    # Prefer the bound schema_column's column_type (single source of truth).
     sc = operand.schema_column
     if sc is not None and sc.column_type is not None:
         ct = sc.column_type
@@ -276,16 +270,6 @@ def _operand_column_type(operand):
             # decimal_operand_scale_prec — represent as DRAKEN_INT64 ColumnType.
             return ct
         # Other categories aren't handled by _decimal_result; return None.
-        return None
-
-    # LITERAL fallback: operand carries .type directly (a LITERAL declares no
-    # precision/scale of its own, so a DECIMAL literal takes the defaults).
-    if operand.node_type == NodeType.LITERAL:
-        op_type = operand.type
-        if op_type == LogicalCategory.DECIMAL:
-            return lt.DECIMAL(18, 6)
-        if op_type == LogicalCategory.INTEGER:
-            return ColumnType(DrakenType.INT64)
     return None
 
 
@@ -397,19 +381,16 @@ def _copy_relation_schema(schema: RelationSchema) -> RelationSchema:
     What *is* mutated in place during binding is the column's own metadata —
     ``identity``, ``aliases`` (appended to), and ``origin`` (assigned). Each
     column therefore gets its own ``SchemaColumn`` with detached mutable lists,
-    while the immutable ``column_type`` is shared. Nested STRUCT ``fields`` are
-    rare and may themselves be rebound, so they are deep-copied when present.
+    while the immutable ``column_type`` is shared.
     """
     new_schema = copy.copy(schema)  # shallow: shares the columns/aliases lists we overwrite below
     new_columns = []
     for col in schema.columns:
-        c = copy.copy(col)  # new column object; shares column_type, aliases, origin, fields refs
+        c = copy.copy(col)  # new column object; shares column_type, aliases, origin refs
         if c.aliases is not None:
             c.aliases = list(c.aliases)
         if c.origin is not None:
             c.origin = list(c.origin)
-        if c.fields is not None:
-            c.fields = copy.deepcopy(c.fields)
         new_columns.append(c)
     new_schema.columns = new_columns
     if schema.aliases is not None:
@@ -655,7 +636,9 @@ def locate_identifier(node: Expression, context: Any) -> Tuple[Expression, Dict]
         the output column and resolves elsewhere in the query — the same treatment an
         aliased literal gets in `inner_binder`.
         """
-        schema_column = context.execution_context.variables.as_column(node.source_column)
+        schema_column = context.execution_context.variables.as_column(
+            node.source_column, plan_context=context.plan_context
+        )
         if node.alias:
             schema_column.aliases = [*(schema_column.aliases or []), node.alias]
         new_node = Literal(
@@ -1028,8 +1011,8 @@ def inner_binder(
 
     # Now do the node we're at
     if node_type == NodeType.LITERAL:
-        schema_column = ConstantColumn(
-            name=column_name,
+        schema_column = context.plan_context.columns.constant(
+            column_name,
             column_type=node.type,
             aliases=[node.alias] if node.alias else [],
             value=node.value,
@@ -1049,8 +1032,8 @@ def inner_binder(
                 result_type, fixed_function_result = fixed_value_function(node.value, context)
             if result_type:
                 # fixed_value_function returns (ColumnType, value) directly — no lookup needed.
-                schema_column = ConstantColumn(
-                    name=column_name,
+                schema_column = context.plan_context.columns.constant(
+                    column_name,
                     column_type=result_type,
                     aliases=aliases,
                     value=fixed_function_result,
@@ -1162,8 +1145,8 @@ def inner_binder(
                         _new_param.value = _new_value
                         _new_param.type = result_type
                         _old_sc = param.schema_column
-                        _new_param.schema_column = ConstantColumn(
-                            name=_old_sc.name if _old_sc is not None else str(_new_value),
+                        _new_param.schema_column = context.plan_context.columns.constant(
+                            _old_sc.name if _old_sc is not None else str(_new_value),
                             column_type=result_type,
                             aliases=list(_old_sc.aliases) if _old_sc is not None and _old_sc.aliases else [],
                             value=_new_value,
@@ -1213,19 +1196,24 @@ def inner_binder(
                             _arg_ct.category == LogicalCategory.DECIMAL
                             or result_type.category == LogicalCategory.DECIMAL
                         ):
-                            _params[_i] = _bound_cast_node(_arg, result_type)
+                            _params[_i] = _bound_cast_node(
+                                _arg, result_type, plan_context=context.plan_context
+                            )
                             continue
                         if _arg_ct.physical != result_type.physical:
                             continue
                         if not _descriptor_carries_meaning(result_type):
                             continue
-                        _params[_i] = _bound_cast_node(_arg, result_type)
+                        _params[_i] = _bound_cast_node(
+                            _arg, result_type, plan_context=context.plan_context
+                        )
                     node.parameters = _params
 
                 # Phase 5: result_type is ColumnType — use directly.
                 _ct = result_type
-                schema_column = FunctionColumn(
-                    name=column_name,
+                schema_column = context.plan_context.columns.computed(
+                    FunctionColumn,
+                    column_name,
                     column_type=_ct,
                     aliases=aliases,
                 )
@@ -1320,13 +1308,14 @@ def inner_binder(
                     # inside the CASE's own bind step, after its branches are
                     # already bound, so nothing will traverse into a freshly-
                     # inserted CAST to bind it a second time.
-                    return _bound_cast_node(branch, result_ct)
+                    return _bound_cast_node(branch, result_ct, plan_context=context.plan_context)
 
                 node.results = [_coerce_case_branch(b) for b in (node.results or [])]
                 if node.else_result is not None:
                     node.else_result = _coerce_case_branch(node.else_result)
-            schema_column = FunctionColumn(
-                name=column_name,
+            schema_column = context.plan_context.columns.computed(
+                FunctionColumn,
+                column_name,
                 column_type=result_ct,
                 aliases=aliases,
             )
@@ -1435,8 +1424,9 @@ def inner_binder(
                 _ct = _lt.VECTOR(int(_vec_dim))
             else:
                 _ct = parse_column_type(target_type_name)
-            schema_column = FunctionColumn(
-                name=column_name,
+            schema_column = context.plan_context.columns.computed(
+                FunctionColumn,
+                column_name,
                 column_type=_ct,
                 aliases=aliases,
             )
@@ -1491,7 +1481,9 @@ def inner_binder(
                             raise IncompatibleTypesError(
                                 message=f"LIKE patterns must be strings, got {type(pat).__name__}."
                             )
-            schema_column = ExpressionColumn(name=column_name, column_type=_lt.BOOLEAN)
+            schema_column = context.plan_context.columns.computed(
+                ExpressionColumn, column_name, column_type=_lt.BOOLEAN
+            )
             node.schema_column = schema_column
             schemas["$derived"].columns.append(schema_column)
         else:
@@ -1628,8 +1620,9 @@ def inner_binder(
                     result_ct_final = centre_sc.column_type
 
             _schema_ct = result_ct_final if result_ct_final is not None else result_type
-            schema_column = ExpressionColumn(
-                name=column_name,
+            schema_column = context.plan_context.columns.computed(
+                ExpressionColumn,
+                column_name,
                 column_type=_schema_ct,
                 aliases=[node.alias] if node.alias else [],
             )

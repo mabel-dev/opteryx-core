@@ -78,7 +78,6 @@ from opteryx.expression import ExpressionColumn, NodeType, get_all_nodes_of_type
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.types.logical_type import ARRAY as _CT_ARRAY
 from opteryx.types.logical_type import BOOLEAN as _CT_BOOLEAN
-from opteryx.types.schema import ConstantColumn
 
 from .disjunction_simplification import _build_and, _split_and, _split_or
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
@@ -244,7 +243,7 @@ def _domain_for_column(branch_domains: List[Dict[str, tuple]], identity: str) ->
     return ident, "range", (lo, hi)
 
 
-def _literal_node(value, column_type) -> Expression:
+def _literal_node(value, column_type, *, plan_context) -> Expression:
     """A synthesized LITERAL carrying BOTH its `.type` and a matching
     `schema_column`.
 
@@ -259,11 +258,11 @@ def _literal_node(value, column_type) -> Expression:
     synthesized one must too.
     """
     lit = Literal(type=column_type, value=value)
-    lit.schema_column = ConstantColumn(name="", column_type=column_type, value=value)
+    lit.schema_column = plan_context.columns.constant("", column_type=column_type, value=value)
     return lit
 
 
-def _comparison_node(op: str, ident: Expression, lit: Expression) -> Expression:
+def _comparison_node(op: str, ident: Expression, lit: Expression, *, plan_context) -> Expression:
     """A synthesized COMPARISON_OPERATOR, stamped BOOL like a bound one. Same
     half-bound hazard as `_literal_node` — a comparison is an expression, and
     a consumer reading its result type off `schema_column` must not find None."""
@@ -271,20 +270,28 @@ def _comparison_node(op: str, ident: Expression, lit: Expression) -> Expression:
         value=op,
         left=ident.copy(),
         right=lit,
-        schema_column=ExpressionColumn(name="", column_type=_CT_BOOLEAN),
+        schema_column=plan_context.columns.computed(ExpressionColumn, "", column_type=_CT_BOOLEAN),
     )
 
 
-def _build_points_node(ident: Expression, values: Set, element_type) -> Expression:
+def _build_points_node(ident: Expression, values: Set, element_type, *, plan_context) -> Expression:
     ordered = sorted(values, key=str)
     if len(ordered) == 1:
-        return _comparison_node("Eq", ident, _literal_node(ordered[0], element_type))
+        return _comparison_node(
+            "Eq",
+            ident,
+            _literal_node(ordered[0], element_type, plan_context=plan_context),
+            plan_context=plan_context,
+        )
     return _comparison_node(
-        "InList", ident, _literal_node(ordered, _CT_ARRAY(element_type))
+        "InList", ident, _literal_node(ordered, _CT_ARRAY(element_type), plan_context=plan_context),
+        plan_context=plan_context,
     )
 
 
-def _build_range_nodes(ident: Expression, lo: Optional[_Bound], hi: Optional[_Bound]) -> List[Expression]:
+def _build_range_nodes(
+    ident: Expression, lo: Optional[_Bound], hi: Optional[_Bound], *, plan_context
+) -> List[Expression]:
     """1 or 2 leaf comparisons. PredicateCompactionStrategy (later in the
     pipeline) recombines a lo+hi pair on the same column into one BETWEEN, so
     there's no need to build that node shape here."""
@@ -292,15 +299,17 @@ def _build_range_nodes(ident: Expression, lo: Optional[_Bound], hi: Optional[_Bo
     if lo is not None:
         _, inclusive, lit = lo
         op = "GtEq" if inclusive else "Gt"
-        nodes.append(_comparison_node(op, ident, lit.copy()))
+        nodes.append(_comparison_node(op, ident, lit.copy(), plan_context=plan_context))
     if hi is not None:
         _, inclusive, lit = hi
         op = "LtEq" if inclusive else "Lt"
-        nodes.append(_comparison_node(op, ident, lit.copy()))
+        nodes.append(_comparison_node(op, ident, lit.copy(), plan_context=plan_context))
     return nodes
 
 
-def _derive_domain_predicates(condition: Expression) -> Tuple[List[Expression], bool]:
+def _derive_domain_predicates(
+    condition: Expression, *, plan_context
+) -> Tuple[List[Expression], bool]:
     """(derived predicates, exact).
 
     `exact` is True when the derived predicate is not merely IMPLIED by the OR but
@@ -331,7 +340,9 @@ def _derive_domain_predicates(condition: Expression) -> Tuple[List[Expression], 
         ident, kind, payload = domain
         if kind == "points":
             values, element_type = payload
-            derived.append(_build_points_node(ident, values, element_type))
+            derived.append(
+                _build_points_node(ident, values, element_type, plan_context=plan_context)
+            )
             exact = len(candidate_identities) == 1 and all(
                 len(_split_and(branch)) == 1
                 and _classify_leaf(_split_and(branch)[0]) is not None
@@ -340,7 +351,7 @@ def _derive_domain_predicates(condition: Expression) -> Tuple[List[Expression], 
             )
         else:
             lo, hi = payload
-            derived.extend(_build_range_nodes(ident, lo, hi))
+            derived.extend(_build_range_nodes(ident, lo, hi, plan_context=plan_context))
     return derived, exact
 
 
@@ -362,7 +373,9 @@ class DisjunctiveDomainPushdownStrategy(OptimizationStrategy):
                 while unwrapped is not None and unwrapped.node_type == NodeType.NESTED:
                     unwrapped = unwrapped.centre
                 if unwrapped is not None and unwrapped.node_type == NodeType.OR:
-                    predicates, exact = _derive_domain_predicates(unwrapped)
+                    predicates, exact = _derive_domain_predicates(
+                        unwrapped, plan_context=context.plan_context
+                    )
                     if exact:
                         # Equivalent, not merely implied: the derived test IS the OR.
                         conjuncts.extend(predicates)

@@ -54,17 +54,17 @@ def _pearson(pairs):
 
 
 def test_ungrouped_corr_matches_oracle():
-    pairs = [(r[0], r[1]) for r in _rows("SELECT id, numberOfMoons FROM $planets")]
+    pairs = [(r[0], r[1]) for r in _rows("SELECT id, number_of_moons FROM $planets")]
     expected = _pearson([(float(x), float(y)) for x, y in pairs])
-    (got,) = _rows("SELECT CORR(id, numberOfMoons) FROM $planets")[0:1][0]
+    (got,) = _rows("SELECT CORR(id, number_of_moons) FROM $planets")[0:1][0]
     assert abs(got - expected) < 1e-12, (got, expected)
 
 
 def test_grouped_corr_matches_oracle():
-    raw = _rows("SELECT numberOfMoons > 5, id, numberOfMoons FROM $planets")
+    raw = _rows("SELECT number_of_moons > 5, id, number_of_moons FROM $planets")
     got = {r[0]: r[1] for r in _rows(
-        "SELECT numberOfMoons > 5 AS big, CORR(id, numberOfMoons) AS r "
-        "FROM $planets GROUP BY numberOfMoons > 5")}
+        "SELECT number_of_moons > 5 AS big, CORR(id, number_of_moons) AS r "
+        "FROM $planets GROUP BY number_of_moons > 5")}
     for key in (True, False):
         pairs = [(float(r[1]), float(r[2])) for r in raw if r[0] is key]
         expected = _pearson(pairs)
@@ -72,12 +72,12 @@ def test_grouped_corr_matches_oracle():
 
 
 def test_corr_pairwise_null_exclusion():
-    # surfacePressure carries NULLs: CORR must drop the PAIR when either side
+    # surface_pressure carries NULLs: CORR must drop the PAIR when either side
     # is NULL, matching an oracle over only the fully-populated rows.
-    raw = _rows("SELECT id, surfacePressure FROM $planets")
+    raw = _rows("SELECT id, surface_pressure FROM $planets")
     pairs = [(float(x), float(y)) for x, y in raw if y is not None]
     expected = _pearson(pairs)
-    (got,) = _rows("SELECT CORR(id, surfacePressure) FROM $planets")[0]
+    (got,) = _rows("SELECT CORR(id, surface_pressure) FROM $planets")[0]
     assert abs(got - expected) < 1e-12, (got, expected)
 
 
@@ -87,18 +87,18 @@ def test_corr_perfect_correlation_is_clamped():
 
 
 def test_corr_zero_variance_is_null():
-    (got,) = _rows("SELECT CORR(id, numberOfMoons * 0) FROM $planets")[0]
+    (got,) = _rows("SELECT CORR(id, number_of_moons * 0) FROM $planets")[0]
     assert got is None, got
 
 
 def test_corr_no_pairs_is_null():
-    (got,) = _rows("SELECT CORR(id, numberOfMoons) FROM $planets WHERE id > 999")[0]
+    (got,) = _rows("SELECT CORR(id, number_of_moons) FROM $planets WHERE id > 999")[0]
     assert got is None, got
 
 
 def test_corr_composes_with_scalar_functions():
-    (r,) = _rows("SELECT CORR(id, numberOfMoons) FROM $planets")[0]
-    (r2,) = _rows("SELECT POWER(CORR(id, numberOfMoons), 2) FROM $planets")[0]
+    (r,) = _rows("SELECT CORR(id, number_of_moons) FROM $planets")[0]
+    (r2,) = _rows("SELECT POWER(CORR(id, number_of_moons), 2) FROM $planets")[0]
     assert abs(r2 - r * r) < 1e-12, (r2, r * r)
 
 

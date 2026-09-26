@@ -88,7 +88,7 @@ def test_fast_is_the_default():
 def test_numeric_columns_are_identical_across_profiles():
     """Only BYTE_ARRAY takes the storage level, so an all-numeric file must not
     change at all between profiles — the policy's whole point."""
-    morsel = _morsel("SELECT id, gravity, orbitalPeriod FROM $planets")
+    morsel = _morsel("SELECT id, gravity, orbital_period FROM $planets")
     assert write_parquet(morsel, profile="fast") == write_parquet(
         morsel, profile="storage"
     )
@@ -135,7 +135,7 @@ def test_compressible_chunk_still_compresses():
     "sql",
     [
         STRINGY,
-        "SELECT id, name, gravity, orbitalPeriod FROM $planets",
+        "SELECT id, name, gravity, orbital_period FROM $planets",
         "SELECT CAST(RANDOM() * 9007199254740992 AS INTEGER)"
         " ^ (CAST(RANDOM() * 9007199254740992 AS INTEGER) * 2048) AS r"
         " FROM GENERATE_SERIES(5000) AS g",

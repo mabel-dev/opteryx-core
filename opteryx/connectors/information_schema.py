@@ -129,9 +129,8 @@ from opteryx.managers.permissions import effective_grants_in
 from opteryx.models.sort_order import _resolve_name
 from opteryx.models.sort_order import normalize_sort_order
 from opteryx.types import logical_type as _lt
-from opteryx.types.schema import RelationSchema
-from opteryx.types.schema import SchemaColumn
-from opteryx.types.schema import mint_column_identity
+from opteryx.types.schema import ColumnDescriptor
+from opteryx.types.schema import RelationDescriptor
 
 
 def build_information_schema_table(
@@ -419,7 +418,7 @@ class InformationSchemaTablesTable(BaseTable, _KeyColumnPredicatePushable):
         self.workspace = workspace
         self.execution_context = execution_context
 
-    def get_dataset_schema(self) -> RelationSchema:
+    def get_dataset_schema(self) -> RelationDescriptor:
         column_types = {
             "table_catalog": _lt.VARCHAR,
             "table_schema": _lt.VARCHAR,
@@ -433,13 +432,12 @@ class InformationSchemaTablesTable(BaseTable, _KeyColumnPredicatePushable):
             "table_bytes": _lt.INT64,
             "table_record_count": _lt.INT64,
         }
-        self.schema = RelationSchema(
+        self.schema = RelationDescriptor(
             name="information_schema.tables",
             columns=[
-                SchemaColumn(
+                ColumnDescriptor(
                     name=column_name,
                     column_type=column_types[column_name],
-                    identity=mint_column_identity("information_schema.tables", column_name),
                 )
                 for column_name in self._COLUMNS
             ],
@@ -643,7 +641,7 @@ class InformationSchemaColumnsTable(BaseTable, _KeyColumnPredicatePushable):
         self.workspace = workspace
         self.execution_context = execution_context
 
-    def get_dataset_schema(self) -> RelationSchema:
+    def get_dataset_schema(self) -> RelationDescriptor:
         column_types = {
             "table_catalog": _lt.VARCHAR,
             "table_schema": _lt.VARCHAR,
@@ -653,13 +651,12 @@ class InformationSchemaColumnsTable(BaseTable, _KeyColumnPredicatePushable):
             "data_type": _lt.VARCHAR,
             "is_nullable": _lt.VARCHAR,
         }
-        self.schema = RelationSchema(
+        self.schema = RelationDescriptor(
             name="information_schema.columns",
             columns=[
-                SchemaColumn(
+                ColumnDescriptor(
                     name=column_name,
                     column_type=column_types[column_name],
-                    identity=mint_column_identity("information_schema.columns", column_name),
                 )
                 for column_name in self._COLUMNS
             ],
@@ -766,7 +763,7 @@ class InformationSchemaViewsTable(BaseTable, _KeyColumnPredicatePushable):
         self.workspace = workspace
         self.execution_context = execution_context
 
-    def get_dataset_schema(self) -> RelationSchema:
+    def get_dataset_schema(self) -> RelationDescriptor:
         column_types = {
             "table_catalog": _lt.VARCHAR,
             "table_schema": _lt.VARCHAR,
@@ -775,13 +772,12 @@ class InformationSchemaViewsTable(BaseTable, _KeyColumnPredicatePushable):
             "view_owner": _lt.VARCHAR,
             "view_updated_at": _lt.TIMESTAMP(),
         }
-        self.schema = RelationSchema(
+        self.schema = RelationDescriptor(
             name="information_schema.views",
             columns=[
-                SchemaColumn(
+                ColumnDescriptor(
                     name=column_name,
                     column_type=column_types[column_name],
-                    identity=mint_column_identity("information_schema.views", column_name),
                 )
                 for column_name in self._COLUMNS
             ],
@@ -946,7 +942,7 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
         self.workspace = workspace
         self.execution_context = execution_context
 
-    def get_dataset_schema(self) -> RelationSchema:
+    def get_dataset_schema(self) -> RelationDescriptor:
         column_types = {
             "trigger_catalog": _lt.VARCHAR,
             "trigger_collection": _lt.VARCHAR,
@@ -972,13 +968,12 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
             # never reported.
             "signal_token_rotated_at": _lt.TIMESTAMP(),
         }
-        self.schema = RelationSchema(
+        self.schema = RelationDescriptor(
             name="information_schema.triggers",
             columns=[
-                SchemaColumn(
+                ColumnDescriptor(
                     name=column_name,
                     column_type=column_types[column_name],
-                    identity=mint_column_identity("information_schema.triggers", column_name),
                 )
                 for column_name in self._COLUMNS
             ],
@@ -1191,7 +1186,7 @@ class InformationSchemaTasksTable(BaseTable, _KeyColumnPredicatePushable):
         self.workspace = workspace
         self.execution_context = execution_context
 
-    def get_dataset_schema(self) -> RelationSchema:
+    def get_dataset_schema(self) -> RelationDescriptor:
         column_types = {
             "task_catalog": _lt.VARCHAR,
             "task_collection": _lt.VARCHAR,
@@ -1211,13 +1206,12 @@ class InformationSchemaTasksTable(BaseTable, _KeyColumnPredicatePushable):
             "last_window_to": _lt.INT64,
             "listening": _lt.VARCHAR,
         }
-        self.schema = RelationSchema(
+        self.schema = RelationDescriptor(
             name="information_schema.tasks",
             columns=[
-                SchemaColumn(
+                ColumnDescriptor(
                     name=column_name,
                     column_type=column_types[column_name],
-                    identity=mint_column_identity("information_schema.tasks", column_name),
                 )
                 for column_name in self._COLUMNS
             ],
@@ -1388,7 +1382,7 @@ class InformationSchemaColumnRelationshipsTable(BaseTable, _KeyColumnPredicatePu
         self.workspace = workspace
         self.execution_context = execution_context
 
-    def get_dataset_schema(self) -> RelationSchema:
+    def get_dataset_schema(self) -> RelationDescriptor:
         column_types = {
             "constraint_catalog": _lt.VARCHAR,
             "constraint_collection": _lt.VARCHAR,
@@ -1407,15 +1401,12 @@ class InformationSchemaColumnRelationshipsTable(BaseTable, _KeyColumnPredicatePu
             "asserted_at": _lt.TIMESTAMP(),
             "verified_at": _lt.TIMESTAMP(),
         }
-        self.schema = RelationSchema(
+        self.schema = RelationDescriptor(
             name="information_schema.column_relationships",
             columns=[
-                SchemaColumn(
+                ColumnDescriptor(
                     name=column_name,
                     column_type=column_types[column_name],
-                    identity=mint_column_identity(
-                        "information_schema.column_relationships", column_name
-                    ),
                 )
                 for column_name in self._COLUMNS
             ],
@@ -1555,14 +1546,13 @@ class InformationSchemaSchemataTable(BaseTable, _KeyColumnPredicatePushable):
         self.workspace = workspace
         self.execution_context = execution_context
 
-    def get_dataset_schema(self) -> RelationSchema:
-        self.schema = RelationSchema(
+    def get_dataset_schema(self) -> RelationDescriptor:
+        self.schema = RelationDescriptor(
             name="information_schema.schemata",
             columns=[
-                SchemaColumn(
+                ColumnDescriptor(
                     name=column_name,
                     column_type=_lt.VARCHAR,
-                    identity=mint_column_identity("information_schema.schemata", column_name),
                 )
                 for column_name in self._COLUMNS
             ],
@@ -1728,14 +1718,13 @@ class InformationSchemaGrantsTable(BaseTable, _KeyColumnPredicatePushable):
         self.workspace = workspace
         self.execution_context = execution_context
 
-    def get_dataset_schema(self) -> RelationSchema:
-        self.schema = RelationSchema(
+    def get_dataset_schema(self) -> RelationDescriptor:
+        self.schema = RelationDescriptor(
             name="information_schema.grants",
             columns=[
-                SchemaColumn(
+                ColumnDescriptor(
                     name=column_name,
                     column_type=_lt.VARCHAR,
-                    identity=mint_column_identity("information_schema.grants", column_name),
                 )
                 for column_name in self._COLUMNS
             ],
@@ -1898,7 +1887,7 @@ class InformationSchemaListenersTable(BaseTable):
         self.workspace = workspace
         self.execution_context = execution_context
 
-    def get_dataset_schema(self) -> RelationSchema:
+    def get_dataset_schema(self) -> RelationDescriptor:
         column_types = {
             "object_catalog": _lt.VARCHAR,
             "object_collection": _lt.VARCHAR,
@@ -1907,13 +1896,12 @@ class InformationSchemaListenersTable(BaseTable):
             "outcome": _lt.VARCHAR,
             "created_at": _lt.TIMESTAMP(),
         }
-        self.schema = RelationSchema(
+        self.schema = RelationDescriptor(
             name="information_schema.listeners",
             columns=[
-                SchemaColumn(
+                ColumnDescriptor(
                     name=column_name,
                     column_type=column_types[column_name],
-                    identity=mint_column_identity("information_schema.listeners", column_name),
                 )
                 for column_name in self._COLUMNS
             ],
@@ -2010,7 +1998,7 @@ class InformationSchemaForksTable(BaseTable):
         self.workspace = workspace
         self.execution_context = execution_context
 
-    def get_dataset_schema(self) -> RelationSchema:
+    def get_dataset_schema(self) -> RelationDescriptor:
         column_types = {
             "fork": _lt.VARCHAR,
             "upstream": _lt.VARCHAR,
@@ -2019,13 +2007,12 @@ class InformationSchemaForksTable(BaseTable):
             "revisions_ahead": _lt.INT64,
             "last_sync": _lt.TIMESTAMP(),
         }
-        self.schema = RelationSchema(
+        self.schema = RelationDescriptor(
             name="information_schema.forks",
             columns=[
-                SchemaColumn(
+                ColumnDescriptor(
                     name=column_name,
                     column_type=column_types[column_name],
-                    identity=mint_column_identity("information_schema.forks", column_name),
                 )
                 for column_name in self._COLUMNS
             ],
@@ -2141,19 +2128,17 @@ class InformationSchemaMaintenanceTable(BaseTable):
         self.workspace = workspace
         self.execution_context = execution_context
 
-    def get_dataset_schema(self) -> RelationSchema:
-        self.schema = RelationSchema(
+    def get_dataset_schema(self) -> RelationDescriptor:
+        self.schema = RelationDescriptor(
             name="information_schema.maintenance",
             columns=[
-                SchemaColumn(
+                ColumnDescriptor(
                     name="catalog_name",
                     column_type=_lt.VARCHAR,
-                    identity=mint_column_identity("information_schema.maintenance", "catalog_name"),
                 ),
-                SchemaColumn(
+                ColumnDescriptor(
                     name="maintenance",
                     column_type=_lt.BOOLEAN,
-                    identity=mint_column_identity("information_schema.maintenance", "maintenance"),
                 ),
             ],
         )

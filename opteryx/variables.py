@@ -638,7 +638,7 @@ class SystemVariablesContainer:
     def snapshot(self, owner: VariableOwner = VariableOwner.USER) -> "SystemVariablesContainer":
         return SystemVariablesContainer(owner)
 
-    def as_column(self, key: str):
+    def as_column(self, key: str, *, plan_context):
         """Return a variable as a CONSTANT column.
 
         This is the `SELECT @@name` read path (binder.create_variable_node), and it
@@ -646,9 +646,9 @@ class SystemVariablesContainer:
         row is worthless if the value is still one `@@name` away. Ad-hoc `@x` user
         variables never reach the check — they are registered UNRESTRICTED by
         __setitem__ and belong to the caller who set them.
-        """
-        from opteryx.types.schema import ConstantColumn
 
+        The column is minted in the query's column table (`plan_context`).
+        """
         # system variables aren't stored with the @@
         #
         # Both branches LOOK the name up rather than subscripting it: the `@@` branch
@@ -675,7 +675,7 @@ class SystemVariablesContainer:
                 f"{md_code(PLATFORM_ADMIN_ENTITLEMENT)} entitlement, which this session "
                 f"does not hold."
             )
-        return ConstantColumn(name=key, column_type=variable[0], value=variable[1])
+        return plan_context.columns.constant(key, column_type=variable[0], value=variable[1])
 
 
 # load the base set

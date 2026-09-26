@@ -21,7 +21,7 @@ from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory, ColumnType, find_compatible_type
 from opteryx.types import logical_type as _lt
-from opteryx.types.schema import ConstantColumn, SchemaColumn, RelationSchema, mint_column_identity
+from opteryx.types.schema import RelationSchema
 from opteryx.compiled.structures.expressions import And
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.plan_steps import JoinStep
@@ -465,7 +465,9 @@ def _branch_project_node(self, node: PlanStep, relation_names: List[str]):
     return None
 
 
-def _cast_leg_columns_to(columns: List[Expression], coerced_types: List[ColumnType]) -> None:
+def _cast_leg_columns_to(
+    columns: List[Expression], coerced_types: List[ColumnType], *, plan_context
+) -> None:
     """Wrap each of a UNION leg's bound columns in a CAST when it doesn't already
     match the position's coerced (unified-across-both-legs) type.
 
@@ -521,7 +523,7 @@ def _cast_leg_columns_to(columns: List[Expression], coerced_types: List[ColumnTy
             col.type = target
             schema_column.column_type = target
             continue
-        columns[i] = _bound_cast_node(col, target)
+        columns[i] = _bound_cast_node(col, target, plan_context=plan_context)
 
 
 _SET_OP_STEP_TYPES = (
@@ -604,7 +606,7 @@ def _retype_declared_columns(columns: List[Expression], context: BindingContext,
             # nowhere else — the first occurrence keeps the leg's identity, which
             # projection pushdown and the aggregate-key emit rely on ("the union's
             # output identities ARE the first leg's").
-            replacement.identity = mint_column_identity(None, schema_column.name)
+            replacement = context.plan_context.columns.remint(replacement, None)
         claimed_identities.add(replacement.identity)
         column.schema_column = replacement
         retyped_by_identity.setdefault(identity, replacement)
@@ -676,7 +678,7 @@ def _coerce_branch_to(self, branch: PlanStep, context: BindingContext, coerced_t
         _retype_declared_columns(branch.columns, context, coerced_types)
         return
 
-    _cast_leg_columns_to(branch.columns, coerced_types)
+    _cast_leg_columns_to(branch.columns, coerced_types, plan_context=context.plan_context)
 
 
 def _set_op_common_type(left_type, right_type):
@@ -920,7 +922,6 @@ def visit_unnest(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
         # column renders as an integer and CIDR_AGG refuses to take it back, so
         # the round trip would not close.
         from opteryx.exceptions import IncorrectTypeError
-        from opteryx.types.schema import mint_column_identity
 
         # A literal source is bound like any other expression rather than
         # special-cased. That keeps ONE compile path: the literal becomes a
@@ -940,10 +941,10 @@ def visit_unnest(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
             )
         node.columns += [node.unnest_column]
 
-        schema_column = SchemaColumn(
-            name=node.unnest_alias,
+        schema_column = context.plan_context.columns.relation_column(
+            node.unnest_alias,
+            node.unnest_alias,
             column_type=_lt.IPV4,
-            identity=mint_column_identity(node.unnest_alias, node.unnest_alias),
         )
         node.unnest_target = LogicalColumn(
             alias=node.unnest_alias,
@@ -971,8 +972,8 @@ def visit_unnest(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
             # makes the unnested column unmaterializable (and unfilterable)
             # downstream. Falls back to VARIANT only when nothing is inferable.
             elem_ct = _literal_array_element_type(node.unnest_column.value)
-        schema_column = ConstantColumn(
-            name=node.unnest_alias,
+        schema_column = context.plan_context.columns.constant(
+            node.unnest_alias,
             column_type=elem_ct,
             value=node.unnest_column.value,
         )
@@ -1035,8 +1036,9 @@ def visit_unnest(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
         else:
             elem_ct_unnest = _lt.VARCHAR
 
-        from opteryx.types.schema import mint_column_identity
-        schema_column = SchemaColumn(name=node.unnest_alias, column_type=elem_ct_unnest, identity=mint_column_identity(node.unnest_alias, node.unnest_alias))
+        schema_column = context.plan_context.columns.relation_column(
+            node.unnest_alias, node.unnest_alias, column_type=elem_ct_unnest
+        )
         node.unnest_target = LogicalColumn(
             alias=node.unnest_alias,
             node_type=NodeType.IDENTIFIER,

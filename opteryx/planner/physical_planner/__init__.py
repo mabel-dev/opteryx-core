@@ -17,7 +17,7 @@ every other operator is a PhysicalStep — the typed logical step plus the plann
 physical decisions (operator kind, join mode, sizing estimates):
 
 - Scan         → ParquetReadNode (all-parquet manifests), Reader (internal datasets),
-                 NullReaderNode (empty-result scans with contradictory predicates)
+                 NullReaderNode (SHOW SNAPSHOTS/LINEAGE/SOURCES scans, never read)
 - Join         → the inner / outer / filter (semi, anti) / existence / cross /
                  nested loop / ASOF / band join kinds
 - Aggregate    → the ungrouped or grouped (hashed) aggregate kinds
@@ -561,10 +561,7 @@ def _build_scan_node(logical_node, query_properties, registry):
     scan_overrides = _validated_scan_overrides(logical_node.hint_settings, query_properties)
     connector = logical_node.connector
 
-    if connector == "__null__":
-        # Scan marked for empty result (contradictory predicates)
-        return registry.create("Null Reader", query_properties, logical_node)
-    elif logical_node.for_snapshots_only:
+    if logical_node.for_snapshots_only:
         # SHOW SNAPSHOTS / LINEAGE / SOURCES FOR: this Scan exists so the
         # relation is BOUND — the permission gate, the connector, and the commit
         # history the statement answers from — and is never read. serial_engine
@@ -572,8 +569,8 @@ def _build_scan_node(logical_node, query_properties, registry):
         #
         # It carries no manifest by design: the history is the result, and
         # building one would pay binding's expensive half to produce a file list
-        # nothing looks at. So it cannot take the manifest branch below, and the
-        # reader that yields no rows is the honest physical form of a scan whose
+        # nothing looks at. So it cannot take the manifest branch below, and a
+        # reader with no read path is the honest physical form of a scan whose
         # rows are not part of the answer. SHOW MANIFEST FOR differs here — its
         # Scan does carry a Manifest, because that IS its result.
         return registry.create("Null Reader", query_properties, logical_node)

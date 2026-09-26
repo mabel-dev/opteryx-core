@@ -34,9 +34,7 @@ from opteryx.exceptions import md_code
 
 
 class CompactionCommitNode(BasePlanNode):
-    def __init__(self, properties: QueryProperties, step, target_file_bytes=None):
-        """`target_file_bytes`: the size output files roll at; None takes the
-        stream's own target (the planner never sets it)."""
+    def __init__(self, properties: QueryProperties, step):
         BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
         self.relation_name: str = step.relation_name
         self.connector = step.connector
@@ -58,7 +56,6 @@ class CompactionCommitNode(BasePlanNode):
         self._stream = DataFileStream(
             self.connector,
             self.relation_name,
-            target_file_bytes=target_file_bytes,
             sorted_by=self.sorted_by,
             write_profile="storage",
         )

@@ -102,7 +102,6 @@ NO_BINDER_REQUIRED = frozenset(
         "Explain",  # wraps an already-bound subplan
         "Limit",  # row count only
         "HeapSort",  # rewritten from Order + Limit, both bound
-        "Difference",  # unreachable: no builder emits it
         # CALL carries a procedure name and literal argument VALUES, both resolved by
         # `plan_call` against the procedure registry. There is no relation beneath it
         # and no identifier in it, so there is nothing for the binder to bind.
@@ -484,14 +483,6 @@ class BinderVisitor:
         self, node: PlanStep, context: BindingContext
     ) -> Tuple[PlanStep, BindingContext]:
         return visit_subquery(self, node, context)
-
-    def visit_dependent_join(
-        self, node: PlanStep, context: BindingContext
-    ) -> Tuple[PlanStep, BindingContext]:
-        raise InvalidInternalStateError(
-            "DependentJoin reached the Binder — correlated subquery was not decorrelated. "
-            "This is a bug in the Plan Rewriter."
-        )
 
     def traverse(
         self, graph: LogicalPlan, node: str, context: BindingContext

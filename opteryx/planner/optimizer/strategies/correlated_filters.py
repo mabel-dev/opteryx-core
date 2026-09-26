@@ -562,7 +562,9 @@ def _range_conditions(target_col, value_range, *, plan_context):
             Comparison(
                 value=operator,
                 left=target_col,
-                right=build_literal_node(bound, suggested_type=target_type, plan_context=plan_context),
+                right=build_literal_node(
+                    bound, suggested_type=target_type, plan_context=plan_context
+                ),
             )
         )
     return conditions
@@ -575,7 +577,6 @@ _SET_OPERATIONS = (
     LogicalPlanStepType.Union,
     LogicalPlanStepType.Intersect,
     LogicalPlanStepType.Except,
-    LogicalPlanStepType.Difference,
 )
 
 
@@ -816,7 +817,9 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
                 )
                 if literal is None:
                     continue
-                condition = _constant_condition(target_col, literal, plan_context=context.plan_context)
+                condition = _constant_condition(
+                    target_col, literal, plan_context=context.plan_context
+                )
                 if condition is None:
                     continue
                 self._push_conditions(

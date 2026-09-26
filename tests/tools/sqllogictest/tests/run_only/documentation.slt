@@ -18,13 +18,13 @@ statement ok
 SELECT id, UPPER(name) AS uppercase_name FROM $planets WHERE id = 3
 
 statement ok
-SELECT * FROM $planets WHERE lengthOfDay > 24 AND numberOfMoons < 10
+SELECT * FROM $planets WHERE length_of_day > 24 AND number_of_moons < 10
 
 statement ok
-SELECT name, numberOfMoons FROM $planets WHERE numberOfMoons = 0
+SELECT name, number_of_moons FROM $planets WHERE number_of_moons = 0
 
 statement ok
-SELECT name, numberOfMoons FROM $planets WHERE numberOfMoons = 0 ORDER BY name
+SELECT name, number_of_moons FROM $planets WHERE number_of_moons = 0 ORDER BY name
 
 statement ok
 SELECT DISTINCT planetId FROM testdata.satellites
@@ -88,10 +88,10 @@ SELECT name FROM $planets WHERE name = null
 
 # CASE
 statement ok
-SELECT name, CASE numberOfMoons WHEN 0 THEN 'none' WHEN 1 THEN 'one' ELSE 'lots' END as how_many_moons from $planets
+SELECT name, CASE number_of_moons WHEN 0 THEN 'none' WHEN 1 THEN 'one' ELSE 'lots' END as how_many_moons from $planets
 
 statement ok
-SELECT name, CASE WHEN numberOfMoons = 0 THEN 'none' WHEN numberOfMoons = 1 THEN 'one' ELSE 'lots' END as how_many_moons from $planets
+SELECT name, CASE WHEN number_of_moons = 0 THEN 'none' WHEN number_of_moons = 1 THEN 'one' ELSE 'lots' END as how_many_moons from $planets
 
 
 # SELECT name FROM $planets WHERE id NOT IN (SELECT DISTINCT planetId FROM testdata.satellites);

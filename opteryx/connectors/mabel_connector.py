@@ -70,7 +70,7 @@ from opteryx.exceptions import DataError
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.types.schema import RelationSchema
+from opteryx.types.schema import RelationDescriptor
 
 PARQUET_SUFFIX = ".parquet"
 
@@ -246,13 +246,13 @@ class MabelTable(BaseTable, Diachronic):
             # path when no separator is already present, matching FileSystemTable.
             self.dataset = self.dataset.replace(".", "/")
 
-    def get_dataset_schema(self) -> RelationSchema:
+    def get_dataset_schema(self) -> RelationDescriptor:
         if self.schema is not None:
             return self.schema
         schema, _ = self.get_dataset_metadata()
         return schema
 
-    def get_dataset_metadata(self) -> Tuple[RelationSchema, "Manifest"]:  # noqa: F821
+    def get_dataset_metadata(self) -> Tuple[RelationDescriptor, "Manifest"]:  # noqa: F821
         if self.schema is not None and self._manifest is not None:
             return self.schema, self._manifest
 

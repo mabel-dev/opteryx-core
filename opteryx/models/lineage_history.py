@@ -110,23 +110,22 @@ def _lineage_column_types():
 
 
 def lineage_output_schema(relation_name: str = "$lineage"):
-    """The fixed RelationSchema `SHOW LINEAGE FOR <table>` always returns.
+    """The fixed RelationDescriptor `SHOW LINEAGE FOR <table>` always returns.
 
     Every _LINEAGE_COLUMNS column, never trimmed or projected - SHOW LINEAGE
     FOR has no WHERE/column-list grammar to do so with. row_count_estimate is
     left unset for the same reason snapshots_output_schema leaves it: the
     caller (visit_show_lineage) holds the real rows and knows their number.
     """
-    from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+    from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 
     column_types = _lineage_column_types()
-    return RelationSchema(
+    return RelationDescriptor(
         name=relation_name,
         columns=[
-            SchemaColumn(
+            ColumnDescriptor(
                 name=name,
                 column_type=column_types[name],
-                identity=mint_column_identity(relation_name, name),
             )
             for name in _LINEAGE_COLUMNS
         ],

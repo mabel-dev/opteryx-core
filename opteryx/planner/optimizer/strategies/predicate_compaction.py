@@ -51,7 +51,6 @@ from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.types import logical_type as _lt
-from opteryx.types.schema import ConstantColumn
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
@@ -284,13 +283,13 @@ def _within(value, value_range: ValueRange) -> bool:
     return True
 
 
-def _retype_literal(literal: Expression, column_type, value) -> None:
+def _retype_literal(literal: Expression, column_type, value, *, plan_context) -> None:
     """Stamp a literal with a new value AND matching type — `.type` and
     `schema_column` are read by different consumers (row-group pruner vs the
     bytecode compiler), so both must agree or the node is half-bound."""
     literal.value = value
     literal.type = column_type
-    literal.schema_column = ConstantColumn(name="", column_type=column_type, value=value)
+    literal.schema_column = plan_context.columns.constant("", column_type=column_type, value=value)
 
 
 class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
@@ -394,7 +393,9 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         replacements: Dict[str, List[Expression]] = {}
 
         for occurrences in column_occurrences.values():
-            analysis = self._analyze_column_predicates(occurrences)
+            analysis = self._analyze_column_predicates(
+                occurrences, plan_context=context.plan_context
+            )
             status = analysis.status
 
             if status == "contradiction":
@@ -476,7 +477,9 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         return optimized_plan
 
     def _analyze_column_predicates(
-        self, occurrences: List[PredicateOccurrence]
+        self, occurrences: List[PredicateOccurrence],
+        *,
+        plan_context,
     ) -> ColumnAnalysisResult:
         """Determine the minimal set of predicates required for a column.
 
@@ -579,7 +582,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
                 {points[0].value} if points[0].operator == "Eq" else set(points[0].value)
             ):
                 return ColumnAnalysisResult(status="rewritten", required=[points[0]])
-            replacement = self._build_points_node(points, surviving)
+            replacement = self._build_points_node(points, surviving, plan_context=plan_context)
             if replacement is None:
                 return ColumnAnalysisResult(status="unsupported")
             return ColumnAnalysisResult(status="rewritten", replacements=[replacement])
@@ -615,7 +618,9 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
             seen_exclusions.add(occ.value)
             surviving_exclusions.append(occ)
         if len(surviving_exclusions) >= 2:
-            replacement = self._build_not_in_list_node(surviving_exclusions)
+            replacement = self._build_not_in_list_node(
+                surviving_exclusions, plan_context=plan_context
+            )
             if replacement is None:
                 return ColumnAnalysisResult(status="unsupported")
             replacements.append(replacement)
@@ -643,7 +648,9 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
                 return literal_type.element
         return None
 
-    def _build_points_node(self, points: List[PredicateOccurrence], surviving: Set) -> Optional[Expression]:
+    def _build_points_node(
+        self, points: List[PredicateOccurrence], surviving: Set, *, plan_context
+    ) -> Optional[Expression]:
         """`col = v` for one surviving point, `col IN (..)` for several."""
         element_type = self._point_element_type(points)
         if element_type is None:
@@ -652,13 +659,15 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         ordered = sorted(surviving, key=str)
         if len(ordered) == 1:
             node.value = "Eq"
-            _retype_literal(node.right, element_type, ordered[0])
+            _retype_literal(node.right, element_type, ordered[0], plan_context=plan_context)
         else:
             node.value = "InList"
-            _retype_literal(node.right, _lt.ARRAY(element_type), ordered)
+            _retype_literal(node.right, _lt.ARRAY(element_type), ordered, plan_context=plan_context)
         return node
 
-    def _build_not_in_list_node(self, exclusions: List[PredicateOccurrence]) -> Optional[Expression]:
+    def _build_not_in_list_node(
+        self, exclusions: List[PredicateOccurrence], *, plan_context
+    ) -> Optional[Expression]:
         """`col NOT IN (..)` standing in for a chain of `col != v` conjuncts."""
         element_type = exclusions[0].predicate.right.type
         if not isinstance(element_type, _lt.ColumnType):
@@ -666,7 +675,8 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         node = exclusions[0].predicate.copy()
         node.value = "NotInList"
         _retype_literal(
-            node.right, _lt.ARRAY(element_type), sorted((occ.value for occ in exclusions), key=str)
+            node.right, _lt.ARRAY(element_type), sorted((occ.value for occ in exclusions), key=str),
+            plan_context=plan_context,
         )
         return node
 

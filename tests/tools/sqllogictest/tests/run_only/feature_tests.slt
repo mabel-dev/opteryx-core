@@ -555,46 +555,46 @@ statement ok
 WITH large_planets AS (SELECT id, name, mass, diameter FROM $planets WHERE mass > 1.0) SELECT lp.name AS large_planet FROM large_planets lp
 
 statement ok
-WITH cold_planets AS (SELECT id, name, meanTemperature FROM $planets WHERE meanTemperature < 0) SELECT name FROM cold_planets
+WITH cold_planets AS (SELECT id, name, mean_temperature FROM $planets WHERE mean_temperature < 0) SELECT name FROM cold_planets
 
 statement ok
-WITH long_days AS (SELECT id, name, lengthOfDay FROM $planets WHERE lengthOfDay > 1000) SELECT name, lengthOfDay FROM long_days
+WITH long_days AS (SELECT id, name, length_of_day FROM $planets WHERE length_of_day > 1000) SELECT name, length_of_day FROM long_days
 
 statement ok
 WITH dense_planets AS (SELECT id, name, density FROM $planets WHERE density > 5) SELECT COUNT(*) FROM dense_planets
 
 statement ok
-WITH far_planets AS (SELECT id, name, distanceFromSun FROM $planets WHERE distanceFromSun > 1000) SELECT name FROM far_planets ORDER BY distanceFromSun DESC
+WITH far_planets AS (SELECT id, name, distance_from_sun FROM $planets WHERE distance_from_sun > 1000) SELECT name FROM far_planets ORDER BY distance_from_sun DESC
 
 statement ok
-WITH fast_planets AS (SELECT id, name, orbitalVelocity FROM $planets WHERE orbitalVelocity > 30) SELECT name FROM fast_planets ORDER BY orbitalVelocity DESC
+WITH fast_planets AS (SELECT id, name, orbital_velocity FROM $planets WHERE orbital_velocity > 30) SELECT name FROM fast_planets ORDER BY orbital_velocity DESC
 
 statement ok
-WITH inclined_planets AS (SELECT id, name, orbitalInclination FROM $planets WHERE orbitalInclination > 3) SELECT COUNT(*) FROM inclined_planets
+WITH inclined_planets AS (SELECT id, name, orbital_inclination FROM $planets WHERE orbital_inclination > 3) SELECT COUNT(*) FROM inclined_planets
 
 statement ok
-WITH eccentric_planets AS (SELECT id, name, orbitalEccentricity FROM $planets WHERE orbitalEccentricity > 0.05) SELECT name, orbitalEccentricity FROM eccentric_planets
+WITH eccentric_planets AS (SELECT id, name, orbital_eccentricity FROM $planets WHERE orbital_eccentricity > 0.05) SELECT name, orbital_eccentricity FROM eccentric_planets
 
 statement ok
 WITH high_gravity AS (SELECT id, name, gravity FROM $planets WHERE gravity > 10) SELECT name FROM high_gravity
 
 statement ok
-WITH escaping_planets AS (SELECT id, name, escapeVelocity FROM $planets WHERE escapeVelocity > 50) SELECT name FROM escaping_planets
+WITH escaping_planets AS (SELECT id, name, escape_velocity FROM $planets WHERE escape_velocity > 50) SELECT name FROM escaping_planets
 
 statement ok
-WITH slow_rotators AS (SELECT id, name, rotationPeriod FROM $planets WHERE rotationPeriod > 500) SELECT COUNT(*) FROM slow_rotators
+WITH slow_rotators AS (SELECT id, name, rotation_period FROM $planets WHERE rotation_period > 500) SELECT COUNT(*) FROM slow_rotators
 
 statement ok
 WITH big_diameter AS (SELECT id, name, diameter FROM $planets WHERE diameter > 100000) SELECT name FROM big_diameter
 
 statement ok
-WITH temperate_planets AS (SELECT id, name, meanTemperature FROM $planets WHERE meanTemperature BETWEEN -50 AND 50) SELECT name FROM temperate_planets ORDER BY meanTemperature
+WITH temperate_planets AS (SELECT id, name, mean_temperature FROM $planets WHERE mean_temperature BETWEEN -50 AND 50) SELECT name FROM temperate_planets ORDER BY mean_temperature
 
 statement ok
-WITH atmospheric_planets AS (SELECT id, name, surfacePressure FROM $planets WHERE surfacePressure IS NOT NULL) SELECT COUNT(*) FROM atmospheric_planets
+WITH atmospheric_planets AS (SELECT id, name, surface_pressure FROM $planets WHERE surface_pressure IS NOT NULL) SELECT COUNT(*) FROM atmospheric_planets
 
 statement ok
-WITH moonful_planets AS (SELECT id, name, numberOfMoons FROM $planets WHERE numberOfMoons > 0) SELECT name, numberOfMoons FROM moonful_planets
+WITH moonful_planets AS (SELECT id, name, number_of_moons FROM $planets WHERE number_of_moons > 0) SELECT name, number_of_moons FROM moonful_planets
 
 statement ok
 WITH matching_names AS (SELECT id, name FROM $planets WHERE name LIKE 'M%') SELECT COUNT(*) FROM matching_names
@@ -606,7 +606,7 @@ statement ok
 WITH exact_gravity AS (SELECT id, name FROM $planets WHERE gravity = 9.8) SELECT name FROM exact_gravity
 
 statement ok
-WITH retrograde AS (SELECT id, name, obliquityToOrbit FROM $planets WHERE obliquityToOrbit > 90) SELECT name FROM retrograde
+WITH retrograde AS (SELECT id, name, obliquity_to_orbit FROM $planets WHERE obliquity_to_orbit > 90) SELECT name FROM retrograde
 
 statement ok
 WITH flattened_names AS (SELECT id, LOWER(name) AS name FROM $planets) SELECT name FROM flattened_names ORDER BY name

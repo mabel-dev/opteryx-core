@@ -12,7 +12,7 @@ itself (`1 AS k`) is re-added by the Project inserted above the aggregate.
 ClickBench q35 (`GROUP BY 1, URL`) already worked because the real `URL` key
 kept the column count at one; the all-constant case was the gap.
 
-$planets has 9 rows; numberOfMoons sums to 210.
+$planets has 9 rows; number_of_moons sums to 210.
 """
 import sys
 from pathlib import Path
@@ -35,7 +35,7 @@ def _rows(sql):
 
 
 def test_group_by_single_constant_literal():
-    rows = _rows("SELECT 1 AS k, SUM(numberOfMoons) AS s FROM $planets GROUP BY 1")
+    rows = _rows("SELECT 1 AS k, SUM(number_of_moons) AS s FROM $planets GROUP BY 1")
     assert rows == [{"k": 1, "s": 210}], rows
 
 
@@ -47,7 +47,7 @@ def test_group_by_positional_aggregate_is_rejected():
     from opteryx.exceptions import UnsupportedSyntaxError
 
     try:
-        _rows("SELECT SUM(numberOfMoons) AS s FROM $planets GROUP BY 1")
+        _rows("SELECT SUM(number_of_moons) AS s FROM $planets GROUP BY 1")
     except UnsupportedSyntaxError:
         pass
     else:

@@ -27,7 +27,8 @@ from opteryx.models.dataset_format import SKENE
 from opteryx.models.dataset_format import dataset_format
 from opteryx.models.dataset_format import format_for_path
 from opteryx.types.logical_type import LogicalCategory
-from opteryx.types.schema import RelationSchema
+from opteryx.types.schema import ColumnDescriptor
+from opteryx.types.schema import RelationDescriptor
 
 OS_SEP = os.sep
 
@@ -45,40 +46,23 @@ _MANIFEST_CACHE_MAX = 128
 
 # Parsed parquet footer metadata (rugo ParquetMetadata — owned Python objects,
 # no buffer views), keyed by (path, size, mtime) so any rewrite invalidates.
-# A schema read that misses _SCHEMA_CACHE (below) builds its RelationSchema
-# fresh from this parse (rugo_to_relation_schema) — schema/column objects are
-# mutated per query by the binder (origin, name) and column identities must be
-# re-minted per parse so a self-join's two scans never share identities. Only
-# the file read and thrift parse are cached here; LRU, bounded.
+# A schema read that misses _SCHEMA_CACHE (below) builds its RelationDescriptor
+# fresh from this parse (rugo_to_relation_schema). Only the file read and thrift
+# parse are cached here; LRU, bounded.
 _FOOTER_METADATA_CACHE: dict = {}
 _FOOTER_METADATA_CACHE_MAX = 256
 
 # The dataset schema, keyed by dataset and valid only for the SAME file-set
 # signature the manifest cache uses, so it is never staler than the manifest.
-# Callers mutate the schema they are handed (the binder renames and aliases
-# columns, projection pushdown prunes them) and a self-join's two scans must not
-# share column identities, so the cached value is a TEMPLATE nobody holds: each
-# hand-out is a `branch_copy` (exactly the state the binder mutates, detached)
-# with every column identity re-minted. The entry also records the row estimate
+# It is a RelationDescriptor: no identities to re-mint, since the binder mints
+# every bound column in its own query. The cached value is still a TEMPLATE
+# nobody holds - each hand-out is a `copy()`, so a holder adjusting what it was
+# handed never reaches the cache. The entry also records the row estimate
 # building the schema added to telemetry, which each hand-out adds again — a hit
 # reports what a fresh read would. Bounded like the manifest cache; LRU.
 _SCHEMA_CACHE: dict = {}
 _SCHEMA_CACHE_MAX = _MANIFEST_CACHE_MAX
 
-
-def _hand_out_schema(template: RelationSchema) -> RelationSchema:
-    """A caller's own copy of a cached schema template, with fresh column identities."""
-    from opteryx.types.schema import mint_column_identity
-
-    schema = template.branch_copy({})
-    pending = list(schema.columns)
-    while pending:
-        column = pending.pop()
-        if column.identity is not None:
-            column.identity = mint_column_identity(schema.name, column.name)
-        if column.fields:
-            pending.extend(column.fields)
-    return schema
 
 
 class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable):
@@ -353,7 +337,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
             just_schema: If True, only return schema
 
         Returns:
-            RelationSchema if just_schema=True
+            RelationDescriptor if just_schema=True
 
         Raises:
             UnsupportedSyntaxError: For data reads
@@ -414,7 +398,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
                 f"Unable to read Parquet metadata from {blob_name}: {type(e).__name__}: {e}"
             ) from e
 
-    def _read_skene_schema(self, blob_name: str) -> RelationSchema:
+    def _read_skene_schema(self, blob_name: str) -> RelationDescriptor:
         """Schema for a skene dataset, read exactly from the first file's footer."""
         from opteryx.connectors.skene_io import skene_metadata_to_schema
         from skene import SkeneError
@@ -450,7 +434,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         _FOOTER_METADATA_CACHE[cache_key] = metadata
         return skene_metadata_to_schema(metadata, self.dataset)
 
-    def _infer_jsonl_schema(self, blob_names: list) -> RelationSchema:
+    def _infer_jsonl_schema(self, blob_names: list) -> RelationDescriptor:
         """Schema for a JSONL dataset, inferred by decoding its first file that
         actually contains a record.
 
@@ -491,8 +475,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         from opteryx.connectors.jsonl_io import JSONL_SUPPORTED_TYPES
         from opteryx.connectors.jsonl_io import iter_newline_chunks
         from opteryx.types.logical_type import column_type_from_vector
-        from opteryx.types.schema import SchemaColumn
-        from opteryx.types.schema import mint_column_identity
         from rugo.jsonl import read_jsonl as _rugo_read_jsonl
 
         sample_morsel = None
@@ -520,7 +502,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
                 break
 
         if sample_morsel is None:
-            return RelationSchema(name=self.dataset, columns=[])
+            return RelationDescriptor(name=self.dataset, columns=[])
 
         schema_columns = []
         for raw_name in sample_morsel.column_names:
@@ -532,13 +514,12 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
                     f"{vector.type!r}, which the JSONL reader does not support."
                 )
             schema_columns.append(
-                SchemaColumn(
+                ColumnDescriptor(
                     name=name,
                     column_type=column_type_from_vector(vector),
-                    identity=mint_column_identity(self.dataset, name),
                 )
             )
-        return RelationSchema(name=self.dataset, columns=schema_columns)
+        return RelationDescriptor(name=self.dataset, columns=schema_columns)
 
     def read_dataset(
         self,
@@ -546,7 +527,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         predicates: list = None,
         just_schema: bool = False,
         **kwargs,
-    ) -> Generator[RelationSchema, None, None]:
+    ) -> Generator[RelationDescriptor, None, None]:
         """
         Read the entire dataset from the filesystem.
 
@@ -579,7 +560,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
             "ParquetReadNode."
         )
 
-    def _schema_from_listing(self, blob_infos: list) -> Tuple[Optional[RelationSchema], int]:
+    def _schema_from_listing(self, blob_infos: list) -> Tuple[Optional[RelationDescriptor], int]:
         """(schema, estimated_rows) from an already-made listing (manifest excluded);
         schema is None when the listing holds no file of the dataset's format.
         `estimated_rows` is the row estimate reading the schema produced, which the
@@ -623,7 +604,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
             return schema, schema.row_count_estimate
         return schema, 0
 
-    def get_dataset_schema(self) -> RelationSchema:
+    def get_dataset_schema(self) -> RelationDescriptor:
         """
         Retrieve the schema of the dataset.
 
@@ -647,7 +628,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
             raise EmptyDatasetError(dataset=self.relation_name)
         raise DatasetNotFoundError(dataset=self.relation_name, connector=self.__type__)
 
-    def _dataset_schema_for(self, blob_infos: list, signature: tuple) -> RelationSchema:
+    def _dataset_schema_for(self, blob_infos: list, signature: tuple) -> RelationDescriptor:
         """`get_dataset_schema` for a listing the caller already made (manifest
         excluded), served from `_SCHEMA_CACHE` when `signature` matches."""
         if self.schema:
@@ -656,7 +637,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         if cached is not None and cached[0] == signature:
             _SCHEMA_CACHE.pop(self.dataset, None)
             _SCHEMA_CACHE[self.dataset] = cached
-            self.schema = _hand_out_schema(cached[1])
+            self.schema = cached[1].copy()
             if cached[2]:
                 self.telemetry.estimated_row_count += cached[2]
             return self.schema
@@ -668,11 +649,11 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
             self.telemetry.estimated_row_count += estimated_rows
         if self.dataset not in _SCHEMA_CACHE and len(_SCHEMA_CACHE) >= _SCHEMA_CACHE_MAX:
             _SCHEMA_CACHE.pop(next(iter(_SCHEMA_CACHE)), None)
-        _SCHEMA_CACHE[self.dataset] = (signature, schema.branch_copy({}), estimated_rows)
+        _SCHEMA_CACHE[self.dataset] = (signature, schema.copy(), estimated_rows)
         self.schema = schema
         return schema
 
-    def get_dataset_metadata(self) -> Tuple[RelationSchema, "Manifest"]:
+    def get_dataset_metadata(self) -> Tuple[RelationDescriptor, "Manifest"]:
         """
         Get dataset schema and build manifest from file metadata.
 
@@ -681,7 +662,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         extracted from file metadata without reading data.
 
         Returns:
-            Tuple of (RelationSchema, Manifest)
+            Tuple of (RelationDescriptor, Manifest)
         """
         from opteryx.models.file_entry import FileEntry
         from opteryx.models.manifest import Manifest

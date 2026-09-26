@@ -86,7 +86,7 @@ from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import QueryTelemetry
 from opteryx.types import logical_type as _lt
 from opteryx.types.logical_type import ColumnType, DrakenType, LogicalCategory, LogicalKind
-from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.types.schema import SchemaColumn, ColumnDescriptor, RelationDescriptor
 from opteryx.compiled.structures.plan_steps import FilterStep
 
 # Rows per morsel the native Source cuts the server stream into. One morsel of
@@ -557,7 +557,7 @@ class PostgresTable(
             return None
         return list(columns)
 
-    def _schema_from_catalog_record(self, columns: List[dict]) -> RelationSchema:
+    def _schema_from_catalog_record(self, columns: List[dict]) -> RelationDescriptor:
         """Build the relation's schema from the catalog's record of it.
 
         THE CATALOG IS AUTHORITATIVE. Nothing here asks the server what its
@@ -608,24 +608,23 @@ class PostgresTable(
                 )
             self._meta[name.lower()] = (name, oid, typmod)
             built.append(
-                SchemaColumn(
+                ColumnDescriptor(
                     name=name,
                     column_type=self._column_type(name, oid, typmod),
-                    identity=mint_column_identity(self.dataset, name),
                 )
             )
 
         statistics = getattr(self._catalog_record.metadata, "statistics", None) or {}
         row_count = statistics.get("row-count")
         self._schema_from_catalog = True
-        self.schema = RelationSchema(
+        self.schema = RelationDescriptor(
             name=self.dataset,
             columns=built,
             row_count_estimate=None if row_count is None else int(row_count),
         )
         return self.schema
 
-    def get_dataset_schema(self) -> RelationSchema:
+    def get_dataset_schema(self) -> RelationDescriptor:
         if self.schema is not None:
             return self.schema
 
@@ -658,14 +657,13 @@ class PostgresTable(
                 )
             self._meta[name.lower()] = (name, oid, typmod)
             columns.append(
-                SchemaColumn(
+                ColumnDescriptor(
                     name=name,
                     column_type=self._column_type(name, oid, typmod),
-                    identity=mint_column_identity(self.dataset, name),
                 )
             )
 
-        self.schema = RelationSchema(
+        self.schema = RelationDescriptor(
             name=self.dataset, columns=columns, row_count_estimate=self._row_estimate(query_text)
         )
         return self.schema
@@ -700,7 +698,7 @@ class PostgresTable(
             )
         return _TYPE_BY_PHYSICAL[tag]
 
-    def get_dataset_metadata(self) -> Tuple[RelationSchema, Optional["Manifest"]]:
+    def get_dataset_metadata(self) -> Tuple[RelationDescriptor, Optional["Manifest"]]:
         """The relation's schema, plus a HINT statistics manifest when one exists.
 
         The manifest holds nothing about files - the rows come over a socket -
@@ -722,7 +720,7 @@ class PostgresTable(
         schema = self.get_dataset_schema()
         return schema, self._read_stats_manifest(schema)
 
-    def _read_stats_manifest(self, schema: RelationSchema) -> Optional["Manifest"]:
+    def _read_stats_manifest(self, schema: RelationDescriptor) -> Optional["Manifest"]:
         path = self.gateway.stats_manifest_path(self.schema_name, self.table_name)
         if path is None:
             return None

@@ -45,13 +45,13 @@ class Writable:
     supports_schema_evolution_on_replace: bool = False
 
     def create_relation(
-        self, relation_name: str, schema: "RelationSchema", author: Optional[str] = None
+        self, relation_name: str, schema: "RelationDescriptor", author: Optional[str] = None
     ) -> None:
         """Create a new relation (table) with the given schema.
 
         Args:
             relation_name: Fully-qualified relation name (e.g., "schema.table")
-            schema: RelationSchema defining the table structure
+            schema: RelationDescriptor defining the table structure
             author: session user this creation is attributed to. A store with no
                 attribution concept ignores it; a store that requires one rejects
                 None rather than inventing an identity.
@@ -260,7 +260,7 @@ class Writable:
     def replace_relation(
         self,
         relation_name: str,
-        schema: "RelationSchema",
+        schema: "RelationDescriptor",
         file_entries: "List[FileEntry]",
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
@@ -278,7 +278,7 @@ class Writable:
 
         Args:
             relation_name: Fully-qualified relation name
-            schema: RelationSchema the new data conforms to (unchanged from current)
+            schema: RelationDescriptor the new data conforms to (unchanged from current)
             file_entries: List of FileEntry objects that become the relation's entire contents
             author: session user this replace is attributed to (see create_relation)
             commit_message: what the reader of the snapshot history should be told
@@ -1218,7 +1218,7 @@ class Writable:
         """
         raise NotImplementedError
 
-    def relation_schema(self, relation_name: str) -> "RelationSchema":
+    def relation_schema(self, relation_name: str) -> "RelationDescriptor":
         """Return the relation's current schema, whole.
 
         `relation_column_names` drops the types and `relation_column_types`

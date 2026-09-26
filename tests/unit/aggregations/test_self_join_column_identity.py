@@ -8,8 +8,8 @@ operators then dropped (cross join) or shadowed (align_tables) one of them, and 
 reference to one leg's column silently read the other leg's data.
 
 The reported symptom was a grouped aggregate over a CROSS JOIN: per-group SUMs
-were `9 * left.numberOfMoons[k]` instead of the constant 210 (the right leg's
-`numberOfMoons` had collapsed onto the left's). The scalar form was only
+were `9 * left.number_of_moons[k]` instead of the constant 210 (the right leg's
+`number_of_moons` had collapsed onto the left's). The scalar form was only
 *coincidentally* correct: sum(moons)*9 == 210*9 either way.
 
 The fix mints a genuinely unique identity per column at construction (the
@@ -17,7 +17,7 @@ The fix mints a genuinely unique identity per column at construction (the
 guard the whole family: self cross/inner joins, and two distinct relations that
 share a column name — virtual and physical.
 
-$planets has 9 rows; numberOfMoons sums to 210.
+$planets has 9 rows; number_of_moons sums to 210.
 """
 import sys
 from pathlib import Path
@@ -42,7 +42,7 @@ def _rows(sql):
 def test_grouped_aggregate_over_cross_join():
     # The reported bug. Each p.id group sees all 9 p2 rows, so SUM(p2.moons)==210.
     rows = _rows(
-        "SELECT p.id AS k, SUM(CAST(p2.numberOfMoons AS INTEGER)) AS s "
+        "SELECT p.id AS k, SUM(CAST(p2.number_of_moons AS INTEGER)) AS s "
         "FROM $planets p CROSS JOIN $planets p2 GROUP BY p.id ORDER BY p.id"
     )
     assert len(rows) == 9, rows
@@ -65,10 +65,10 @@ def test_self_inner_join_reads_correct_leg():
     # leg's id must be the matched row's, not a copy of the left's id.
     rows = _rows(
         "SELECT l.id AS lid, r.id AS rid "
-        "FROM $planets l INNER JOIN $planets r ON l.numberOfMoons = r.id "
+        "FROM $planets l INNER JOIN $planets r ON l.number_of_moons = r.id "
         "ORDER BY l.id"
     )
-    # Every match must have rid == l.numberOfMoons (definitionally), and at least
+    # Every match must have rid == l.number_of_moons (definitionally), and at least
     # one row where lid != rid (proving rid isn't just echoing lid).
     assert rows, rows
     assert any(r["lid"] != r["rid"] for r in rows), rows
@@ -101,7 +101,7 @@ def test_physical_self_cross_join():
 
 def test_scalar_cross_join_unchanged():
     # The scalar form was coincidentally correct before the fix; it must stay so.
-    rows = _rows("SELECT SUM(p2.numberOfMoons) AS s FROM $planets p CROSS JOIN $planets p2")
+    rows = _rows("SELECT SUM(p2.number_of_moons) AS s FROM $planets p CROSS JOIN $planets p2")
     assert rows == [{"s": 1890}], rows  # 210 * 9
 
 
