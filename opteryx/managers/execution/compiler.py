@@ -5075,7 +5075,6 @@ class _Compiler:
         from opteryx.compiled.structures.expressions import LogicalColumn
         from opteryx.expression import NodeType
         from opteryx.types.logical_type import LogicalCategory
-        from opteryx.types.schema import SchemaColumn
 
         left_identity = node.step.asof_left_column
         right_identity = node.step.asof_right_column
@@ -5131,10 +5130,9 @@ class _Compiler:
             key_node = LogicalColumn(
                 NodeType.IDENTIFIER,
                 names.get(identity),
-                schema_column=SchemaColumn(
-                    name=names.get(identity, "asof key"),
-                    identity=identity,
-                    column_type=column_type,
+                # the match key the plan already bound, read under its stream type
+                schema_column=self.plan_context.columns.reference(
+                    identity, names.get(identity, "asof key"), column_type
                 ),
             )
             coercions[identity] = (key_node, target_name, target)

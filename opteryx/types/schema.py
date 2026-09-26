@@ -145,7 +145,7 @@ class SchemaColumn:
         return clone
 
     def __post_init__(self):
-        """Normalize identity.
+        """A bound column exists only as a row of its query's ColumnTable.
 
         A column identity is a unique, opaque handle — the execution engine keys
         columns by it, so it must NOT be derived from the (non-unique) name. A
@@ -153,6 +153,11 @@ class SchemaColumn:
         than silently falling back to the name (which collapses distinct columns
         that share a name — every self-join, and any join of tables with a common
         column name — into one).
+
+        The slot is required for the same reason: the ColumnTable is the only
+        thing that constructs a bound column, and it constructs it with its slot
+        (architect ruling 2026-09-26, stage 4C). A column built anywhere else
+        belongs to no query and is refused here, where it is made.
         """
         if self.identity is None:
             from opteryx.exceptions import InvalidInternalStateError
@@ -161,6 +166,14 @@ class SchemaColumn:
                 f"Column '{self.name}' was constructed without an identity. "
                 "Relation-sourced columns must be minted with a unique identity; "
                 "the name is not a valid identity."
+            )
+        if self.slot is None:
+            from opteryx.exceptions import InvalidInternalStateError
+
+            raise InvalidInternalStateError(
+                f"Column '{self.name}' was constructed without a slot - bound columns "
+                "are minted by the query's ColumnTable (PlanContext.columns), never "
+                "constructed directly."
             )
         if isinstance(self.identity, str):
             self.identity = self.identity.encode("utf-8")

@@ -32,6 +32,7 @@ from typing import Tuple
 
 if TYPE_CHECKING:  # annotation only: importing the optimizer package here is a cycle
     from opteryx.planner.optimizer.statistics import RelationStatistics
+    from opteryx.types.schema import RelationSchema
     from opteryx.types.schema import SchemaColumn
 
 
@@ -52,17 +53,24 @@ class ColumnTable:
     A copy that takes a NEW identity is a new column, and `remint` makes it.
     """
 
-    __slots__ = ("_columns",)
+    __slots__ = ("_columns", "_slot_of")
 
     def __init__(self) -> None:
         self._columns: List["SchemaColumn"] = []
+        # identity -> slot. A function: a copy that keeps an identity keeps its
+        # slot, and a new identity is only ever minted together with a new slot.
+        self._slot_of: Dict[bytes, int] = {}
 
     def __len__(self) -> int:
         return len(self._columns)
 
+    def _next_slot(self) -> int:
+        return len(self._columns)
+
     def _register(self, column):
-        column.slot = len(self._columns)
+        """Record a column constructed with `slot=self._next_slot()`."""
         self._columns.append(column)
+        self._slot_of[column.identity] = column.slot
         return column
 
     def relation_column(self, relation: Optional[str], name: str, **fields) -> "SchemaColumn":
@@ -71,7 +79,12 @@ class ColumnTable:
         from opteryx.types.schema import mint_column_identity
 
         return self._register(
-            SchemaColumn(name=name, identity=mint_column_identity(relation, name), **fields)
+            SchemaColumn(
+                name=name,
+                identity=mint_column_identity(relation, name),
+                slot=self._next_slot(),
+                **fields,
+            )
         )
 
     def constant(self, name: str, **fields) -> "SchemaColumn":
@@ -80,7 +93,12 @@ class ColumnTable:
         from opteryx.types.schema import _mint_tagged_identity
 
         return self._register(
-            ConstantColumn(name=name, identity=_mint_tagged_identity("$const"), **fields)
+            ConstantColumn(
+                name=name,
+                identity=_mint_tagged_identity("$const"),
+                slot=self._next_slot(),
+                **fields,
+            )
         )
 
     def computed(self, column_class, name: str, **fields) -> "SchemaColumn":
@@ -89,7 +107,12 @@ class ColumnTable:
         from opteryx.types.schema import _mint_tagged_identity
 
         return self._register(
-            column_class(name=name, identity=_mint_tagged_identity("$derived"), **fields)
+            column_class(
+                name=name,
+                identity=_mint_tagged_identity("$derived"),
+                slot=self._next_slot(),
+                **fields,
+            )
         )
 
     def remint(self, column, relation: Optional[str]) -> "SchemaColumn":
@@ -101,7 +124,23 @@ class ColumnTable:
 
         fresh = copy.copy(column)
         fresh.identity = mint_column_identity(relation, column.name)
+        fresh.slot = self._next_slot()
         return self._register(fresh)
+
+    def reference(self, identity: bytes, name: str, column_type) -> "SchemaColumn":
+        """A plain column REFERRING to the already-minted column `identity` - its
+        identity and slot, with the name and type the caller reads it under (e.g.
+        a join key the compiler casts). An identity this query never minted is
+        refused: it would be a column from some other binding."""
+        from opteryx.exceptions import InvalidInternalStateError
+        from opteryx.types.schema import SchemaColumn
+
+        slot = self._slot_of.get(identity)
+        if slot is None:
+            raise InvalidInternalStateError(
+                f"Column {name!r} ({identity!r}) was not minted in this query's column table."
+            )
+        return SchemaColumn(name=name, identity=identity, column_type=column_type, slot=slot)
 
     def bind_relation(self, descriptor, alias: str) -> "RelationSchema":
         """Bind a source's `RelationDescriptor` as relation `alias`: every column
