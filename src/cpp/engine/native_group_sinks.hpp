@@ -48,6 +48,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
+#include <bit>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -1769,8 +1770,25 @@ struct KeyColMeta {
 
 // ---- shared partitioned-dedup machinery (GroupBy + ungrouped COUNT DISTINCT) -------
 
+// PARTITION BITS (2026-09-26). The partition is hash bits [32, 38), NOT the top
+// bits. carchar's SIMD tag is bits 57..63 (key_tag, shared by parvi and medius);
+// when the partition was the top 6 bits (58..63) every key in a partition shared 6
+// of the 7 tag bits, the tag scan matched ~half the occupied slots and each match
+// paid a full hash compare. MEASURED (docs/GROUPBY_SCALING_LIMITS_ASSESSMENT.md,
+// interleaved, results identical): COUNT(DISTINCT UserID) 0.71-0.74x, GROUP BY
+// UserID 0.84-0.86x, GROUP BY URL 0.93-0.96x at DOP 4 and 16. The bit budget is
+// pinned by the static_asserts after kGBMergeMaxBuckets — every range that picks a
+// slot, bucket, group or tag from the same hash must stay disjoint.
 constexpr size_t kGBParts = 64;
-constexpr int kGBPartShift = 58;   // top 6 bits pick the partition
+constexpr int kGBPartBits = 6;
+constexpr int kGBPartShift = 32;
+static_assert(kGBParts == (size_t(1) << kGBPartBits), "kGBParts must be 2^kGBPartBits");
+// THE partition of a hash. Every partitioned structure (GroupBySink tables, the
+// dict path, ungrouped COUNT(DISTINCT), DistinctSink, WindowTopK) must use this and
+// nothing else — they share kGBParts and must agree on the layout.
+inline size_t gb_part(uint64_t h) {
+    return static_cast<size_t>((h >> kGBPartShift) & (kGBParts - 1));
+}
 // Low-cardinality GROUP BY: when the planner's NDV estimate for the grouped
 // key product is <= this, each partition fronts its CarcharIndex with a
 // 64-slot ParviMap (4 group-selected groups of 16 — still a single SIMD-group
@@ -1815,12 +1833,28 @@ constexpr double kGBRawSwitchRatio = 0.9;
 // into its bucket (sequential reads, 2^k sequential write streams, no probe); pass 2
 // merges one bucket at a time through a table small enough to stay in cache. The
 // single merged table it replaces held ~1.5M groups on ClickBench Q33 — a DRAM (and
-// TLB) miss per probe. Bits 40.. keep clear of the partition (58..63), the carchar
-// tag (57..63) and slot bits (low bits): taking the bits just below the partition
-// would make every tag in a bucket identical and the SIMD tag filter useless.
+// TLB) miss per probe. Bits 40..51 keep clear of the partition (32..37), the parvi
+// group select (53..54), the carchar tag (57..63) and slot bits (low bits): bucket
+// bits inside the tag range would make every tag in a bucket identical and the
+// SIMD tag filter useless.
 constexpr size_t kGBMergeLeaf = 65536;
 constexpr int kGBMergeBucketShift = 40;
 constexpr size_t kGBMergeMaxBuckets = 4096;
+// Hash-bit budget (see PARTITION BITS above). Slot bits: carchar indexes slots by
+// the low log2(capacity) bits; group ids are uint32 (dict_gid, keyref rows), so no
+// per-partition table reaches 2^32 slots and bits 32.. never feed a slot index.
+// Merge tables are ~kGBMergeLeaf entries per bucket in practice. Parvi's group select is hard-coded as bits 53..54 in
+// third_party/mabel/parvi/parvi.hpp (group_base); the carchar tag is bits 57..63
+// (carchar_common.hpp key_tag). Keep these literals in step with those files.
+constexpr int kGBParviGroupLo = 53, kGBParviGroupHi = 55;   // [lo, hi)
+constexpr int kGBTagLo = 57;
+constexpr int kGBMergeBucketBits = std::bit_width(kGBMergeMaxBuckets) - 1;
+static_assert(kGBPartShift >= 32, "partition bits overlap table slot bits");
+static_assert(kGBPartShift + kGBPartBits <= kGBMergeBucketShift,
+              "partition bits overlap radix-merge bucket bits");
+static_assert(kGBMergeBucketShift + kGBMergeBucketBits <= kGBParviGroupLo,
+              "radix-merge bucket bits overlap parvi group-select bits");
+static_assert(kGBParviGroupHi <= kGBTagLo, "parvi group-select bits overlap carchar tag");
 constexpr size_t kGBArenaChunk = 1u << 20;   // 1 MiB key-arena chunks (string-key mode)
 
 // Combine a group id with a value hash into one 64-bit dedup key. Both the sink
@@ -2150,7 +2184,7 @@ struct UngroupedAggSink : Sink {
                 std::vector<uint64_t> vh;
                 if (!compute_row_hashes(in, allcols, vh, err)) return SinkResult::CONTINUE;
                 for (uint32_t i = 0; i < rows; ++i)
-                    DP[vh[i] >> kGBPartShift].insert(vh[i]);
+                    DP[gb_part(vh[i])].insert(vh[i]);
                 continue;
             }
             if (specs[s].col_idx == kAggNoOperand) continue;
@@ -2166,13 +2200,13 @@ struct UngroupedAggSink : Sink {
                 if (v.type == DRAKEN_DECIMAL128) {
                     for (uint32_t i = 0; i < v.length; ++i) {
                         if (!sort_row_valid(v, i)) continue;
-                        DP[vh[i] >> kGBPartShift].insert_raw128(vh[i], agg2_read_i128(v, i));
+                        DP[gb_part(vh[i])].insert_raw128(vh[i], agg2_read_i128(v, i));
                     }
                 } else {
                     bool is_f = l.meta[s].is_float;
                     for (uint32_t i = 0; i < v.length; ++i) {
                         if (!sort_row_valid(v, i)) continue;
-                        DP[vh[i] >> kGBPartShift].insert_raw(vh[i], agg2_read_raw(v, i, is_f));
+                        DP[gb_part(vh[i])].insert_raw(vh[i], agg2_read_raw(v, i, is_f));
                     }
                 }
                 continue;
@@ -2192,7 +2226,7 @@ struct UngroupedAggSink : Sink {
                 if (!compute_row_hashes(in, vcol, vh, err)) return SinkResult::CONTINUE;
                 for (uint32_t i = 0; i < v.length; ++i) {
                     if (!sort_row_valid(v, i)) continue;
-                    DP[vh[i] >> kGBPartShift].insert(vh[i]);
+                    DP[gb_part(vh[i])].insert(vh[i]);
                 }
             } else if (l.meta[s].is_string) {
                 bool want_max = specs[s].fn == AggFn::Max;
@@ -2497,7 +2531,7 @@ struct UngroupedAggSink : Sink {
 //     column, identity is one memcmp against ONE contiguous array, and emit
 //     reads the packed bytes in place. Any string key falls back to the v2
 //     arena format. Identity stays hash + full byte compare — never hash-only.
-//   • sink: rows hash-partition (top 6 bits of one XXH3 over the key bytes)
+//   • sink: rows hash-partition (gb_part: bits 32..37 of one XXH3 over the key bytes)
 //     into kGBParts flat open-addressing tables per worker; the 64-bit hash is
 //     STORED so no later phase re-hashes.
 //   • combine: O(kGBParts) std::move's under the mutex — queued, never merged
@@ -3125,7 +3159,7 @@ struct GroupBySink : Sink {
         const size_t nk = b.keycols.size();
         for (size_t t = 0; t < nt; ++t) {
             const uint64_t h = b.hashes[t];
-            GBPartition& P = l.parts[h >> kGBPartShift];
+            GBPartition& P = l.parts[gb_part(h)];
             int64_t gid;
             const bool is_new =
                 P.find_or_insert_group(h, static_cast<int64_t>(P.hashes.size()), gid);
@@ -3436,7 +3470,7 @@ struct GroupBySink : Sink {
             // hash `h`, key values at morsel row `rep`.
             auto emit_tuple = [&](uint64_t h, int64_t count, uint32_t rep,
                                   ErrCtx& e) -> bool {
-                const size_t pi = h >> kGBPartShift;
+                const size_t pi = gb_part(h);
                 const int owner = route_owner(pi, W);
                 if (owner == l.widx) {
                     GBPartition& P = l.parts[pi];
@@ -3619,7 +3653,7 @@ struct GroupBySink : Sink {
             for (uint32_t d = 0; d < D; ++d) {
                 if (l.dict_rep[d] == UINT32_MAX) continue;  // code never used
                 const uint64_t h = skh.hashes[d];
-                const uint8_t pi = static_cast<uint8_t>(h >> kGBPartShift);
+                const uint8_t pi = static_cast<uint8_t>(gb_part(h));
                 GBPartition& P = l.parts[pi];
                 int64_t gid = static_cast<int64_t>(P.hashes.size());
                 // Raw mode: each distinct code of this morsel is its own new group —
@@ -3681,7 +3715,7 @@ struct GroupBySink : Sink {
         }
 
         // Pass B: find-or-insert each row's group into its partition (partition =
-        // hash >> kGBPartShift; group id from CarcharIndex, equality by 64-bit hash
+        // gb_part(hash); group id from CarcharIndex, equality by 64-bit hash
         // identity). A NEW group appends the key VALUES nothing above has finished
         // with (this representative row) to the partition's per-column key store —
         // NULL keys collapse to one group via the NULL_HASH sentinel, exactly as SQL
@@ -3722,7 +3756,7 @@ struct GroupBySink : Sink {
             // The finalize (radix) merge groups them; see kGBRawSwitchRatio.
             for (uint32_t i = 0; i < rows; ++i) {
                 uint64_t h = l.mk_hash[i];
-                GBPartition& P = l.parts[h >> kGBPartShift];
+                GBPartition& P = l.parts[gb_part(h)];
                 const int64_t gid = static_cast<int64_t>(P.hashes.size());
                 P.hashes.push_back(h);
                 for (size_t j = 0; j < store_col_idx.size(); ++j) {
@@ -3735,7 +3769,7 @@ struct GroupBySink : Sink {
         } else {
         for (uint32_t i = 0; i < rows; ++i) {
             uint64_t h = l.mk_hash[i];
-            GBPartition& P = l.parts[h >> kGBPartShift];
+            GBPartition& P = l.parts[gb_part(h)];
             int64_t gid;
             bool is_new = P.find_or_insert_group(
                 h, static_cast<int64_t>(P.hashes.size()), gid);
@@ -3770,7 +3804,7 @@ struct GroupBySink : Sink {
         GROUPBY_TEL_START(_gbC_t0);
         if (l.has_rows) {
             for (uint32_t i = 0; i < rows; ++i)
-                l.parts[l.mk_hash[i] >> kGBPartShift].grows[l.mk_ent[i]] += 1;
+                l.parts[gb_part(l.mk_hash[i])].grows[l.mk_ent[i]] += 1;
         }
         for (size_t s = 0; s < nspecs; ++s) {
             GBKind kind = l.kinds[s];
@@ -3785,7 +3819,7 @@ struct GroupBySink : Sink {
                 if (!compute_row_hashes(in, allcols, l.cd_vhash, err))
                     return SinkResult::CONTINUE;
                 for (uint32_t i = 0; i < rows; ++i) {
-                    GBPartition& P = l.parts[l.mk_hash[i] >> kGBPartShift];
+                    GBPartition& P = l.parts[gb_part(l.mk_hash[i])];
                     uint32_t e = l.mk_ent[i];
                     if (P.cd[s].insert(e, l.cd_vhash[i]))
                         P.lanes[s].valid[e] += 1;
@@ -3825,13 +3859,13 @@ struct GroupBySink : Sink {
                 if (vtype == DRAKEN_DECIMAL128) {
                     for (uint32_t i = 0; i < rows; ++i) {
                         if (!row_ok(i)) continue;
-                        l.parts[l.mk_hash[i] >> kGBPartShift].cd[s].insert_raw128(
+                        l.parts[gb_part(l.mk_hash[i])].cd[s].insert_raw128(
                             l.mk_ent[i], l.cd_vhash[i], agg2_read_i128(v, i));
                     }
                 } else {
                     for (uint32_t i = 0; i < rows; ++i) {
                         if (!row_ok(i)) continue;
-                        l.parts[l.mk_hash[i] >> kGBPartShift].cd[s].insert_raw(
+                        l.parts[gb_part(l.mk_hash[i])].cd[s].insert_raw(
                             l.mk_ent[i], l.cd_vhash[i],
                             agg2_read_raw_at(vtype, vdata, vsel, i, is_f));
                     }
@@ -3843,13 +3877,13 @@ struct GroupBySink : Sink {
                 case GBKind::Valid:
                     for (uint32_t i = 0; i < rows; ++i) {
                         if (!row_ok(i)) continue;
-                        lp[l.mk_hash[i] >> kGBPartShift]->valid[l.mk_ent[i]] += 1;
+                        lp[gb_part(l.mk_hash[i])]->valid[l.mk_ent[i]] += 1;
                     }
                     break;
                 case GBKind::SumI:
                     for (uint32_t i = 0; i < rows; ++i) {
                         if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
+                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
                         uint32_t e = l.mk_ent[i];
                         int64_t r = agg2_read_raw_at(vtype, vdata, vsel, i, false);
                         if (__builtin_add_overflow(L.i64[e], r, &L.i64[e])) {
@@ -3864,7 +3898,7 @@ struct GroupBySink : Sink {
                 case GBKind::AvgI:
                     for (uint32_t i = 0; i < rows; ++i) {
                         if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
+                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
                         uint32_t e = l.mk_ent[i];
                         L.i128[e] += agg2_read_raw_at(vtype, vdata, vsel, i, false);
                         L.valid[e] += 1;
@@ -3874,7 +3908,7 @@ struct GroupBySink : Sink {
                 case GBKind::AvgF:
                     for (uint32_t i = 0; i < rows; ++i) {
                         if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
+                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
                         uint32_t e = l.mk_ent[i];
                         int64_t bits = agg2_read_raw_at(vtype, vdata, vsel, i, true);
                         double d;
@@ -3891,7 +3925,7 @@ struct GroupBySink : Sink {
                     // emit_lane_column's finalize formula differs.
                     for (uint32_t i = 0; i < rows; ++i) {
                         if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
+                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
                         uint32_t e = l.mk_ent[i];
                         int64_t raw = agg2_read_raw_at(vtype, vdata, vsel, i, is_f);
                         double d;
@@ -3915,7 +3949,7 @@ struct GroupBySink : Sink {
                         if (!row_ok(i)) continue;
                         if (vvalid2 != nullptr
                                 && ((vvalid2[i >> 3] >> (i & 7)) & 1u) == 0) continue;
-                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
+                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
                         uint32_t e = l.mk_ent[i];
                         int64_t rx = agg2_read_raw_at(vtype, vdata, vsel, i, is_f);
                         int64_t ry = agg2_read_raw_at(vtype2, vdata2, vsel2, i, is_f2);
@@ -3936,7 +3970,7 @@ struct GroupBySink : Sink {
                 case GBKind::Median:
                     for (uint32_t i = 0; i < rows; ++i) {
                         if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
+                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
                         uint32_t e = l.mk_ent[i];
                         int64_t raw = agg2_read_raw_at(vtype, vdata, vsel, i, is_f);
                         double d;
@@ -3953,7 +3987,7 @@ struct GroupBySink : Sink {
                 case GBKind::AvgD128:
                     for (uint32_t i = 0; i < rows; ++i) {
                         if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
+                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
                         uint32_t e = l.mk_ent[i];
                         L.i128[e] += agg2_read_i128(v, i);
                         L.valid[e] += 1;
@@ -3962,7 +3996,7 @@ struct GroupBySink : Sink {
                 case GBKind::MinMaxNum:
                     for (uint32_t i = 0; i < rows; ++i) {
                         if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
+                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
                         uint32_t e = l.mk_ent[i];
                         uint64_t kk = sort_num_key(v, i);
                         if (L.valid[e] == 0
@@ -3976,7 +4010,7 @@ struct GroupBySink : Sink {
                 case GBKind::MinMaxD128:
                     for (uint32_t i = 0; i < rows; ++i) {
                         if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
+                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
                         uint32_t e = l.mk_ent[i];
                         __int128 r = agg2_read_i128(v, i);
                         if (L.valid[e] == 0
@@ -3994,7 +4028,7 @@ struct GroupBySink : Sink {
                         return SinkResult::CONTINUE;
                     for (uint32_t i = 0; i < rows; ++i) {
                         if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
+                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
                         L.hll[l.mk_ent[i]].add_hash(hll_avalanche(l.cd_vhash[i]));
                     }
                     break;
@@ -4002,7 +4036,7 @@ struct GroupBySink : Sink {
                 case GBKind::ApproxPercentile:
                     for (uint32_t i = 0; i < rows; ++i) {
                         if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
+                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
                         uint32_t e = l.mk_ent[i];
                         int64_t raw = agg2_read_raw_at(vtype, vdata, vsel, i, is_f);
                         double d;
@@ -4020,7 +4054,7 @@ struct GroupBySink : Sink {
                         return SinkResult::CONTINUE;
                     for (uint32_t i = 0; i < rows; ++i) {
                         if (!row_ok(i)) continue;
-                        GBPartition& P = l.parts[l.mk_hash[i] >> kGBPartShift];
+                        GBPartition& P = l.parts[gb_part(l.mk_hash[i])];
                         uint32_t e = l.mk_ent[i];
                         if (P.cd[s].insert(e, l.cd_vhash[i]))
                             P.lanes[s].valid[e] += 1;
@@ -4031,7 +4065,7 @@ struct GroupBySink : Sink {
                     const DrakenStringArena* sa = string_arena_of(v);
                     for (uint32_t i = 0; i < rows; ++i) {
                         if (!row_ok(i)) continue;
-                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
+                        GBLanes& L = *lp[gb_part(l.mk_hash[i])];
                         uint32_t e = l.mk_ent[i];
                         const DrakenStringSlot* slot = &sa->slots[v.selection[i]];
                         const char* p =
@@ -4058,7 +4092,7 @@ struct GroupBySink : Sink {
                         (st == AAStore::Str) ? string_arena_of(v) : nullptr;
                     for (uint32_t i = 0; i < rows; ++i) {
                         GBArrayAggState& A =
-                            l.parts[l.mk_hash[i] >> kGBPartShift].lanes[s].aa[l.mk_ent[i]];
+                            l.parts[gb_part(l.mk_hash[i])].lanes[s].aa[l.mk_ent[i]];
                         bool nul = !sort_row_valid(v, i);
                         if (st == AAStore::Str) {
                             const char* p = nullptr;
@@ -4090,7 +4124,7 @@ struct GroupBySink : Sink {
                     for (uint32_t i = 0; i < rows; ++i) {
                         if (!sort_row_valid(v, i)) continue;
                         opteryx::roaring32::Roaring32& R =
-                            l.parts[l.mk_hash[i] >> kGBPartShift].lanes[s].cidr[l.mk_ent[i]];
+                            l.parts[gb_part(l.mk_hash[i])].lanes[s].cidr[l.mk_ent[i]];
                         // Return ignored deliberately: a refusal latches
                         // R.overflowed, which emit_cidr_lane_column raises on.
                         // Checking per row would branch the hot loop to reach the
@@ -4934,7 +4968,7 @@ struct GroupBySink : Sink {
 // ---- DistinctSink -------------------------------------------------------------------
 
 // One worker's locally-new rows for ONE hash partition. Bucketed at sink time by
-// the top kGBPartShift bits of the dedup hash — the same partitioning GroupBySink
+// gb_part of the dedup hash — the same partitioning GroupBySink
 // uses — so the cross-worker dedup can run per-partition in parallel at finalize.
 struct DistinctPart {
     std::vector<uint64_t> hashes;         // dedup hash per kept row
@@ -5057,7 +5091,7 @@ struct DistinctSink : Sink {
         for (size_t j = 0; j < nnew; ++j) {
             uint32_t row = static_cast<uint32_t>(l.newidx[j]);
             uint64_t h = l.rowh[row];
-            DistinctPart& P = l.parts[h >> kGBPartShift];
+            DistinctPart& P = l.parts[gb_part(h)];
             P.hashes.push_back(h);
             P.ref_m.push_back(mi);
             P.ref_r.push_back(row);
@@ -5169,7 +5203,7 @@ struct DistinctSink : Sink {
 // morsel's partition columns (compute_row_hashes — the same 64-bit hash-only
 // identity contract GROUP BY/DISTINCT use) and maintains, per worker, a bounded
 // max-heap of the K best rows per partition hash — O(log K) per row instead of an
-// O(n log n) sort of every row, bucketed by the top hash bits (kGBParts). combine()
+// O(n log n) sort of every row, bucketed by gb_part of the hash (kGBParts). combine()
 // only QUEUES each worker's bucket maps under the global mutex (O(kGBParts) moves —
 // bounded per bucket: at most K survivors per partition per worker). finalize()
 // merges the queued worker heaps bucket-parallel (buckets are disjoint by hash),
@@ -5226,7 +5260,7 @@ using WindowTopKHeapMap = std::unordered_map<uint64_t, std::vector<WindowTopKCan
 
 struct WindowTopKLocal : LocalSinkState {
     std::vector<MorselPtr> morsels;
-    // Heaps bucketed by the top kGBPartShift bits of the partition hash (the same
+    // Heaps bucketed by gb_part of the partition hash (the same
     // partitioning GroupBySink/DistinctSink use) so the cross-worker merge can run
     // per-bucket in parallel at finalize.
     std::array<WindowTopKHeapMap, kGBParts> heaps;
@@ -5287,7 +5321,7 @@ struct WindowTopKSink : Sink {
             c.morsel_idx = mi;
             c.row = r;
             uint64_t ph = phashes[r];
-            window_topk_offer(l.heaps[ph >> kGBPartShift][ph], c, k, better);
+            window_topk_offer(l.heaps[gb_part(ph)][ph], c, k, better);
         }
         return SinkResult::CONTINUE;
     }
