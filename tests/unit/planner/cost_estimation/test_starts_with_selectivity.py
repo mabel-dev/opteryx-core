@@ -22,7 +22,7 @@ ordinalized-bounds-through-get_distogram coverage).
 
 import os
 import sys
-from opteryx.types.schema import SchemaColumn
+from opteryx.planner.plan_context import PlanContext
 from opteryx.compiled.structures.expressions import Function
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import Not
@@ -49,7 +49,9 @@ from opteryx.third_party.maki_nage.distogram import load_counts_i64
 from opteryx.types.logical_type import NVARCHAR, VARCHAR, DrakenType
 from opteryx.compiled.structures.expressions import LogicalColumn
 
-_IDENTITY = b"tes_col_00000001"
+# Statistics are keyed by the identity of a column minted in a query's ColumnTable.
+_PLAN_CONTEXT = PlanContext()
+_IDENTITY = _PLAN_CONTEXT.columns.relation_column("t", "col").identity
 
 _UNIFORM_PROPORTIONS = {
     "upper": 0.05,
@@ -65,7 +67,7 @@ _UNIFORM_PROPORTIONS = {
 
 def _column_node(identity=_IDENTITY, column_type=VARCHAR):
     identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col")
-    identifier.schema_column = SchemaColumn(name="col", identity=identity, column_type=column_type)
+    identifier.schema_column = _PLAN_CONTEXT.columns.reference(identity, "col", column_type)
     return identifier
 
 
@@ -152,7 +154,7 @@ def test_no_histogram_falls_back_to_prefix_constant():
 def test_unknown_column_falls_back_to_prefix_constant():
     dgram = _distogram_over_values(VARCHAR.ordinalize("a"), VARCHAR.ordinalize("z"))
     stats = _stats_with_histogram(dgram, identity=_IDENTITY)
-    node = _func_node(b"foo", identity=b"tes_other_0000")
+    node = _func_node(b"foo", identity=_PLAN_CONTEXT.columns.relation_column("t", "other").identity)
     assert _selectivity_starts_with(node, stats) == _LIKE_PREFIX_SELECTIVITY
 
 

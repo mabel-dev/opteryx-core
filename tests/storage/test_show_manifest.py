@@ -59,17 +59,14 @@ def test_bounds_of_mixed_types_render_as_text():
     from opteryx.models.manifest_io import file_entries_to_manifest_morsel
     from opteryx.models.manifest_io import manifest_output_schema
     from opteryx.types import logical_type as lt
-    from opteryx.types.schema import RelationSchema
-    from opteryx.types.schema import SchemaColumn
-    from opteryx.types.schema import mint_column_identity
+    from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 
-    schema = RelationSchema(
+    schema = RelationDescriptor(
         name="t",
         columns=[
-            SchemaColumn(
+            ColumnDescriptor(
                 name=name,
                 column_type=column_type,
-                identity=mint_column_identity("t", name),
             )
             for name, column_type in (("a", lt.INT64), ("b", lt.VARCHAR), ("c", lt.FLOAT64))
         ],
@@ -102,17 +99,15 @@ def test_the_persisted_manifest_keeps_typed_bounds():
     from opteryx.models.file_entry import FileEntry
     from opteryx.models.manifest_io import file_entries_to_manifest_morsel
     from opteryx.types import logical_type as lt
-    from opteryx.types.schema import RelationSchema
-    from opteryx.types.schema import SchemaColumn
-    from opteryx.types.schema import mint_column_identity
+    from opteryx.types.schema import ColumnDescriptor
+    from opteryx.types.schema import RelationDescriptor
 
-    schema = RelationSchema(
+    schema = RelationDescriptor(
         name="t",
         columns=[
-            SchemaColumn(
+            ColumnDescriptor(
                 name=name,
                 column_type=lt.INT64,
-                identity=mint_column_identity("t", name),
             )
             for name in ("a", "b")
         ],

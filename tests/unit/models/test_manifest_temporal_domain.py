@@ -46,9 +46,12 @@ from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from draken.draken_native import TimestampUnit
 from opteryx.types.logical_type import DATE, INT64, TIME, TIMESTAMP, VARCHAR
-from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.types.schema import RelationSchema
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
+
+# Bound columns are minted by a query's ColumnTable; these tests share one.
+_PLAN_CONTEXT = PlanContext()
 
 US_PER_DAY = 86_400_000_000
 
@@ -67,9 +70,8 @@ def _schema(column_type, name="value"):
     return RelationSchema(
         name="t",
         columns=[
-            SchemaColumn(
-                name=name, column_type=column_type, identity=mint_column_identity("t", name)
-            )
+            _PLAN_CONTEXT.columns.relation_column(
+                "t", name, column_type=column_type)
         ],
     )
 

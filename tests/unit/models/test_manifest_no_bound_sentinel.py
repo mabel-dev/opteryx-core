@@ -39,9 +39,12 @@ from opteryx.expression import NodeType
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import INT64, IPV4, UINT32
-from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.types.schema import RelationSchema
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
+
+# Bound columns are minted by a query's ColumnTable; these tests share one.
+_PLAN_CONTEXT = PlanContext()
 
 # The sentinel itself. Spelled out rather than imported so a change to the
 # constant in manifest.py has to be a deliberate, visible decision here too.
@@ -58,9 +61,8 @@ def _schema(column_type, name="value"):
     return RelationSchema(
         name="t",
         columns=[
-            SchemaColumn(
-                name=name, column_type=column_type, identity=mint_column_identity("t", name)
-            )
+            _PLAN_CONTEXT.columns.relation_column(
+                "t", name, column_type=column_type)
         ],
     )
 

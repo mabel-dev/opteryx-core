@@ -30,9 +30,11 @@ from opteryx.exceptions import NotSupportedError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.types import logical_type as _lt
-from opteryx.types.schema import SchemaColumn
-from opteryx.types.schema import mint_column_identity
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.planner.plan_context import PlanContext
+
+# Bound columns are minted by a query's ColumnTable; these tests share one.
+_PLAN_CONTEXT = PlanContext()
 
 
 class _Node:
@@ -70,7 +72,7 @@ def _table(prefix="pg", **connector_kwargs) -> PostgresTable:
 
 
 def _schema_column(name, column_type=_lt.INT64):
-    return SchemaColumn(name=name, column_type=column_type, identity=mint_column_identity("planets", name))
+    return _PLAN_CONTEXT.columns.relation_column("planets", name, column_type=column_type)
 
 
 def _col(name, column_type=_lt.INT64):
@@ -486,9 +488,8 @@ def _agg(function, operand, result_type, name="agg", distinct=False):
     node = _Node(NodeType.AGGREGATOR, value=function)
     node.parameters = [operand]
     node.duplicate_treatment = "Distinct" if distinct else None
-    node.schema_column = SchemaColumn(
-        name=name, column_type=result_type, identity=mint_column_identity("planets", name)
-    )
+    node.schema_column = _PLAN_CONTEXT.columns.relation_column(
+        "planets", name, column_type=result_type)
     return node
 
 
@@ -505,9 +506,8 @@ def _typed_col(name, column_type):
     return _Node(
         NodeType.IDENTIFIER,
         value=name,
-        schema_column=SchemaColumn(
-            name=name, column_type=column_type, identity=mint_column_identity("planets", name)
-        ),
+        schema_column=_PLAN_CONTEXT.columns.relation_column(
+            "planets", name, column_type=column_type),
     )
 
 

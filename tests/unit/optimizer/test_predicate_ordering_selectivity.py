@@ -18,7 +18,7 @@ import array
 import os
 import sys
 from types import SimpleNamespace
-from opteryx.types.schema import SchemaColumn
+from opteryx.planner.plan_context import PlanContext
 from opteryx.compiled.structures.expressions import Function
 from opteryx.compiled.structures.expressions import Literal
 
@@ -42,9 +42,11 @@ from opteryx.compiled.structures.expressions import LogicalColumn
 # RelationStatistics is keyed by column identity, never by name — a name is not
 # unique across a plan. The identifier nodes below therefore carry an identity
 # on their schema_column, exactly as bound identifiers do.
-_LOW = b"tes_low_00000001"
-_HIGH = b"tes_high_0000002"
-_MISSING = b"tes_msg_00000003"
+# Statistics are keyed by the identity of a column minted in a query's ColumnTable.
+_PLAN_CONTEXT = PlanContext()
+_LOW = _PLAN_CONTEXT.columns.relation_column("t", "low").identity
+_HIGH = _PLAN_CONTEXT.columns.relation_column("t", "high").identity
+_MISSING = _PLAN_CONTEXT.columns.relation_column("t", "msg").identity
 
 
 def _cmp(op, col_identity, literal, col_name="col"):
@@ -140,12 +142,12 @@ def test_order_without_statistics_keeps_constant_tie_order():
 # generalization: with no relation_stats, or for predicates with no
 # selectivity model, behavior is unchanged from pure cost ordering.
 
-_SW_IDENTITY = b"tes_sw_000000001"
+_SW_IDENTITY = _PLAN_CONTEXT.columns.relation_column("t", "sw").identity
 
 
 def _varchar_identifier(col_identity, col_name="col"):
     n = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=col_name)
-    n.schema_column = SchemaColumn(name="col", identity=col_identity, column_type=VARCHAR)
+    n.schema_column = _PLAN_CONTEXT.columns.reference(col_identity, "col", VARCHAR)
     return n
 
 
@@ -163,7 +165,7 @@ def _cheap_no_model_func_pred(col_identity=_LOW):
     # cost is far below _STARTS_WITH's, so pre-change cost-only ordering
     # would always place it first.
     identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col2")
-    identifier.schema_column = SchemaColumn(name="col", identity=col_identity)
+    identifier.schema_column = _PLAN_CONTEXT.columns.reference(col_identity, "col", None)
     condition = Function(value="LENGTH", parameters=[identifier])
     return _pred(condition)
 
@@ -209,7 +211,7 @@ def test_complex_ordering_no_model_predicates_keep_cost_order_even_with_statisti
     a = _cheap_no_model_func_pred(col_identity=_LOW)
     b_condition = Function(
         value="UPPER",
-        parameters=[LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col3", schema_column=SchemaColumn(name="col", identity=_HIGH))],
+        parameters=[LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col3", schema_column=_PLAN_CONTEXT.columns.reference(_HIGH, "col", None))],
     )
     b = _pred(b_condition)
     telemetry = QueryTelemetry.detached()

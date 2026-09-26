@@ -13,7 +13,6 @@ from opteryx.models import QueryTelemetry
 from opteryx.planner.optimizer.strategies.constant_folding import fold_constants
 from opteryx.planner.optimizer.strategies.predicate_ordering import order_predicates
 from opteryx.types.logical_type import ARRAY, INT64, VARCHAR
-from opteryx.types.schema import SchemaColumn
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
 
@@ -27,7 +26,7 @@ def _literal(value_type, value):
 
 
 def _identifier(name, value_type):
-    column = SchemaColumn(name=name, column_type=value_type, identity=name)
+    column = PlanContext().columns.relation_column("t", name, column_type=value_type)
     return LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=None, schema_column=column)
 
 

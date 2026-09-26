@@ -37,7 +37,7 @@ hold.
 
 import os
 import sys
-from opteryx.types.schema import SchemaColumn
+from opteryx.planner.plan_context import PlanContext
 from opteryx.compiled.structures.expressions import Between
 from opteryx.compiled.structures.expressions import Literal
 
@@ -55,7 +55,9 @@ from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.third_party.maki_nage import distogram as dg
 from opteryx.compiled.structures.expressions import LogicalColumn
 
-_SRC = b"net_src_kNjxTk2T"
+# One bound column, minted the way a query mints it; statistics are keyed by its identity.
+_PLAN_CONTEXT = PlanContext()
+_SRC = _PLAN_CONTEXT.columns.relation_column("net", "src").identity
 
 # 192.168.0.0/16 as the rewriter emits it.
 _LO = 3232235520
@@ -93,7 +95,7 @@ def _stats(histogram):
 
 def _identifier():
     node = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="src_addr")
-    node.schema_column = SchemaColumn(name="col", identity=_SRC)
+    node.schema_column = _PLAN_CONTEXT.columns.reference(_SRC, "col", None)
     return node
 
 

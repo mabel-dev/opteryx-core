@@ -27,17 +27,21 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import INT64
-from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.types.schema import RelationSchema
+from opteryx.planner.plan_context import PlanContext
+
+# Bound columns are minted by a query's ColumnTable; these tests share one.
+_PLAN_CONTEXT = PlanContext()
 
 
 def _schema(column_name="project"):
     return RelationSchema(
         name="t",
         columns=[
-            SchemaColumn(
-                name=column_name,
+            _PLAN_CONTEXT.columns.relation_column(
+                "t",
+                column_name,
                 column_type=INT64,
-                identity=mint_column_identity("t", column_name),
             ),
         ],
     )

@@ -36,21 +36,23 @@ from opteryx.expression import NodeType
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import FLOAT64, INT64, TIMESTAMP, VARCHAR
-from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.types.schema import RelationSchema
 from opteryx.compiled.structures.expressions import Between
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
 
+# Bound columns are minted by a query's ColumnTable; these tests share one.
+_PLAN_CONTEXT = PlanContext()
+
 
 def _schema(column_type, name="value"):
     return RelationSchema(
         name="t",
         columns=[
-            SchemaColumn(
-                name=name, column_type=column_type, identity=mint_column_identity("t", name)
-            )
+            _PLAN_CONTEXT.columns.relation_column(
+                "t", name, column_type=column_type)
         ],
     )
 
@@ -378,10 +380,10 @@ def _multi_col_schema(*, names_and_field_ids):
     return RelationSchema(
         name="t",
         columns=[
-            SchemaColumn(
-                name=name,
+            _PLAN_CONTEXT.columns.relation_column(
+                "t",
+                name,
                 column_type=VARCHAR,
-                identity=mint_column_identity("t", name),
                 field_id=field_id,
             )
             for name, field_id in names_and_field_ids

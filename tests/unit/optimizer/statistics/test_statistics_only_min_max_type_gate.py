@@ -44,7 +44,7 @@ import pytest
 
 from opteryx.planner.optimizer.strategies.statistics_only_response import is_simple_aggregate
 from opteryx.expression import NodeType
-from opteryx.types.schema import SchemaColumn
+from opteryx.planner.plan_context import PlanContext
 from opteryx.types.logical_type import (
     DATE,
     DECIMAL,
@@ -87,7 +87,9 @@ _COLUMN_TYPE_OF = {
 
 def _aggregate(func, category):
     """An AGGREGATOR node over one column of `category`."""
-    schema_column = SchemaColumn(name="c", identity=b"tes_c_0000000001", column_type=_COLUMN_TYPE_OF[category])
+    schema_column = PlanContext().columns.relation_column(
+        "t", "c", column_type=_COLUMN_TYPE_OF[category]
+    )
     return Aggregator(
         value=func,
         duplicate_treatment=None,

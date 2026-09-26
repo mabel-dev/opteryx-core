@@ -4,8 +4,19 @@
 import pytest
 
 from opteryx.types import LogicalCategory
-from opteryx.types.logical_type import ARRAY, DECIMAL, FLOAT64, INT64, VARCHAR
-from opteryx.types.schema import ColumnDescriptor, ColumnDisposition, ConstantColumn, RelationDescriptor, RelationSchema, SchemaColumn
+from opteryx.types.logical_type import FLOAT64, INT64, VARCHAR
+from opteryx.planner.plan_context import PlanContext
+from opteryx.types.schema import ColumnDescriptor, ColumnDisposition, RelationDescriptor, RelationSchema, SchemaColumn
+
+
+
+def _col(name, column_type, **fields):
+    """A bound column, minted the only way one is: in a query's ColumnTable."""
+    return PlanContext().columns.relation_column("users", name, column_type=column_type, **fields)
+
+
+def _const(name, column_type, **fields):
+    return PlanContext().columns.constant(name, column_type=column_type, **fields)
 
 
 class TestColumnDisposition:
@@ -21,67 +32,40 @@ class TestColumnDisposition:
 class TestSchemaColumn:
     """Test SchemaColumn dataclass."""
 
-    def test_create_basic_column(self):
-        """Test creating a basic SchemaColumn."""
-        col = SchemaColumn(name="test_col", column_type=VARCHAR, identity="test_col")
-        assert col.name == "test_col"
-        assert col.category == LogicalCategory.VARCHAR
-        assert col.identity == b"test_col"
-        assert col.nullable is True
-        assert col.default is None
+    def test_bound_column_is_minted_not_constructed(self):
+        """A bound column exists only as a row of its query's ColumnTable: built
+        without a slot it is refused where it is made (stage 4C)."""
+        from opteryx.exceptions import InvalidInternalStateError
 
-    def test_create_column_with_metadata(self):
-        """Test creating SchemaColumn with additional metadata."""
-        col = SchemaColumn(
-            name="age",
-            column_type=INT64,
-            identity="age",
-            nullable=False,
-            description="User age",
-            disposition=ColumnDisposition.INDEXED,
-        )
-        assert col.name == "age"
-        assert col.category == LogicalCategory.INTEGER
-        assert col.nullable is False
-        assert col.description == "User age"
-        assert col.disposition == ColumnDisposition.INDEXED
+        with pytest.raises(InvalidInternalStateError):
+            SchemaColumn(name="test_col", column_type=VARCHAR, identity=b"test_col")
+
+        col = _col("test_col", VARCHAR)
+        assert col.slot is not None
+        assert col.category == LogicalCategory.VARCHAR
+        assert col.nullable is True
 
     def test_column_str(self):
         """Test string representation of column."""
-        col = SchemaColumn(name="test_col", column_type=VARCHAR, identity="test_col")
+        col = _col("test_col", VARCHAR)
         assert str(col) == "test_col:VARCHAR"
 
     def test_column_repr(self):
         """Test repr of column."""
-        col = SchemaColumn(name="test_col", column_type=VARCHAR, identity="test_col")
+        col = _col("test_col", VARCHAR)
         repr_str = repr(col)
         assert "SchemaColumn" in repr_str
         assert "test_col" in repr_str
 
     def test_column_all_names_without_aliases(self):
         """Test all_names property without aliases."""
-        col = SchemaColumn(name="col1", column_type=INT64, identity="col1")
+        col = _col("col1", INT64)
         assert col.all_names == ["col1"]
 
     def test_column_all_names_with_aliases(self):
         """Test all_names property with aliases."""
-        col = SchemaColumn(
-            name="col1", column_type=INT64, identity="col1", aliases=["col_one", "column_1"]
-        )
+        col = _col("col1", INT64, aliases=["col_one", "column_1"])
         assert col.all_names == ["col1", "col_one", "column_1"]
-
-    def test_column_with_complex_type(self):
-        """Test column with complex type (e.g., ARRAY with element type)."""
-        col = SchemaColumn(name="tags", column_type=ARRAY(VARCHAR), identity="tags")
-        assert col.category == LogicalCategory.ARRAY
-        assert col.column_type.element == VARCHAR
-
-    def test_column_with_decimal_precision_scale(self):
-        """Test column with DECIMAL precision and scale."""
-        col = SchemaColumn(name="price", column_type=DECIMAL(10, 2), identity="price")
-        assert col.category == LogicalCategory.DECIMAL
-        assert col.column_type.logical.precision == 10
-        assert col.column_type.logical.scale == 2
 
     def test_column_to_dict(self):
         """A column is persisted as its DESCRIPTION - no engine identity."""
@@ -140,29 +124,15 @@ class TestConstantColumn:
 
     def test_create_constant_column(self):
         """Test creating a ConstantColumn."""
-        col = ConstantColumn(name="const_42", column_type=INT64, identity="const_42", value=42)
+        col = _const("const_42", INT64, value=42)
         assert col.name == "const_42"
         assert col.category == LogicalCategory.INTEGER
         assert col.value == 42
 
     def test_constant_column_str(self):
         """Test string representation of constant column."""
-        col = ConstantColumn(name="const_42", column_type=INT64, identity="const_42", value=42)
+        col = _const("const_42", INT64, value=42)
         assert str(col) == "const_42=42"
-
-    def test_constant_column_inherits_from_schemacolumn(self):
-        """Test that ConstantColumn inherits SchemaColumn properties."""
-        col = ConstantColumn(
-            name="const_val",
-            column_type=VARCHAR,
-            identity="const_val",
-            value="hello",
-            nullable=False,
-        )
-        assert col.nullable is False
-        assert col.all_names == ["const_val"]
-        assert str(col) == "const_val=hello"
-
 
 class TestRelationSchema:
     """Test RelationSchema dataclass."""
@@ -176,8 +146,8 @@ class TestRelationSchema:
 
     def test_create_schema_with_columns(self):
         """Test creating a schema with columns."""
-        col1 = SchemaColumn(name="id", column_type=INT64, identity="id")
-        col2 = SchemaColumn(name="name", column_type=VARCHAR, identity="name")
+        col1 = _col("id", INT64)
+        col2 = _col("name", VARCHAR)
         schema = RelationSchema(name="users", columns=[col1, col2])
         assert schema.name == "users"
         assert schema.num_columns == 2
@@ -185,8 +155,8 @@ class TestRelationSchema:
 
     def test_schema_str(self):
         """Test string representation of schema."""
-        col1 = SchemaColumn(name="id", column_type=INT64, identity="id")
-        col2 = SchemaColumn(name="name", column_type=VARCHAR, identity="name")
+        col1 = _col("id", INT64)
+        col2 = _col("name", VARCHAR)
         schema = RelationSchema(name="users", columns=[col1, col2])
         schema_str = str(schema)
         assert "users" in schema_str
@@ -195,8 +165,8 @@ class TestRelationSchema:
 
     def test_schema_column_lookup(self):
         """Test column lookup by name."""
-        col1 = SchemaColumn(name="id", column_type=INT64, identity="id")
-        col2 = SchemaColumn(name="name", column_type=VARCHAR, identity="name")
+        col1 = _col("id", INT64)
+        col2 = _col("name", VARCHAR)
         schema = RelationSchema(name="users", columns=[col1, col2])
 
         found_col = schema.column("id")
@@ -209,9 +179,7 @@ class TestRelationSchema:
 
     def test_schema_column_lookup_with_aliases(self):
         """Test column lookup including aliases."""
-        col = SchemaColumn(
-            name="user_id", column_type=INT64, identity="user_id", aliases=["uid", "id"]
-        )
+        col = _col("user_id", INT64, aliases=["uid", "id"])
         schema = RelationSchema(name="users", columns=[col])
 
         # Find by primary name
@@ -229,8 +197,8 @@ class TestRelationSchema:
 
     def test_schema_pop_column(self):
         """Test removing a column."""
-        col1 = SchemaColumn(name="id", column_type=INT64, identity="id")
-        col2 = SchemaColumn(name="name", column_type=VARCHAR, identity="name")
+        col1 = _col("id", INT64)
+        col2 = _col("name", VARCHAR)
         schema = RelationSchema(name="users", columns=[col1, col2])
 
         assert schema.num_columns == 2
@@ -245,8 +213,8 @@ class TestRelationSchema:
 
     def test_schema_all_column_names_with_aliases(self):
         """Test all_column_names including aliases."""
-        col1 = SchemaColumn(name="id", column_type=INT64, identity="id", aliases=["user_id"])
-        col2 = SchemaColumn(name="name", column_type=VARCHAR, identity="name")
+        col1 = _col("id", INT64, aliases=["user_id"])
+        col2 = _col("name", VARCHAR)
         schema = RelationSchema(name="users", columns=[col1, col2])
 
         all_names = schema.all_column_names
@@ -254,27 +222,6 @@ class TestRelationSchema:
         assert "user_id" in all_names
         assert "name" in all_names
         assert len(all_names) == 3
-
-    def test_schema_validate_duplicate_names(self):
-        """Test schema validation detects duplicate column names."""
-        col1 = SchemaColumn(name="id", column_type=INT64, identity="id")
-        col2 = SchemaColumn(
-            name="id",  # Duplicate name
-            column_type=VARCHAR,
-            identity="id2",
-        )
-        schema = RelationSchema(name="users", columns=[col1, col2])
-
-        # Validation should fail with duplicate names
-        assert schema.validate() is False
-
-    def test_schema_validate_valid(self):
-        """Test schema validation passes for valid schema."""
-        col1 = SchemaColumn(name="id", column_type=INT64, identity="id")
-        col2 = SchemaColumn(name="name", column_type=VARCHAR, identity="name")
-        schema = RelationSchema(name="users", columns=[col1, col2])
-
-        assert schema.validate() is True
 
     def test_schema_to_dict(self):
         """Test converting schema to dictionary."""
@@ -322,7 +269,7 @@ class TestRelationSchema:
 
     def test_schema_find_column_alias(self):
         """Test find_column method (API compatibility)."""
-        col = SchemaColumn(name="user_id", column_type=INT64, identity="user_id")
+        col = _col("user_id", INT64)
         schema = RelationSchema(name="users", columns=[col])
 
         found = schema.find_column("user_id")

@@ -39,8 +39,10 @@ from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.planner.plan_context import PlanContext
 from opteryx.types.schema import RelationSchema
 from opteryx.types.schema import SchemaColumn
-from opteryx.types.schema import mint_column_identity
 from opteryx.compiled.structures.expressions import LogicalColumn
+
+# Bound columns are minted by a query's ColumnTable; these tests share one.
+_PLAN_CONTEXT = PlanContext()
 
 
 def _make_scan(
@@ -57,7 +59,7 @@ def _make_scan(
     """
     alias = alias or relation
     columns = {
-        name: SchemaColumn(name=name, identity=mint_column_identity(alias, name))
+        name: plan_context.columns.relation_column(alias, name)
         for name in column_specs
     }
     schema = RelationSchema(

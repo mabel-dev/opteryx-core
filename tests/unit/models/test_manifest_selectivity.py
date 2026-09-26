@@ -28,7 +28,8 @@ from opteryx.compiled.structures.expressions import Expression
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import INT64, VARCHAR
-from opteryx.types.schema import RelationSchema, SchemaColumn
+from opteryx.planner.plan_context import PlanContext
+from opteryx.types.schema import RelationSchema
 from opteryx.compiled.structures.expressions import And
 from opteryx.compiled.structures.expressions import Between
 from opteryx.compiled.structures.expressions import Comparison
@@ -45,22 +46,29 @@ from opteryx.compiled.structures.expressions import LogicalColumn
 # ---------------------------------------------------------------------------
 
 
-def _ident(name: str) -> bytes:
-    """Deterministic per-name identity for this fixture's single relation.
+# Selectivity estimation keys statistics on column *identity*, never on name
+# (names are not unique across a plan). In a real plan a bound identifier refers
+# to its scan column; these fixtures mint ONE bound column per name in a query's
+# ColumnTable and have `_identifier` refer to it, so the two agree.
+_PLAN_CONTEXT = PlanContext()
+_MINTED: dict = {}
 
-    Selectivity estimation keys statistics on column *identity*, never on name
-    (names are not unique across a plan). In a real plan a bound identifier
-    node carries its schema column's identity; these fixtures reproduce that by
-    minting deterministically so ``_identifier`` and ``_schema`` agree.
-    ``mint_column_identity`` is random per call, so it cannot be used here.
-    """
-    return f"t_{name}".encode("utf-8")
+
+def _column(name: str, column_type):
+    key = (name, str(column_type))
+    if key not in _MINTED:
+        _MINTED[key] = _PLAN_CONTEXT.columns.relation_column("t", name, column_type=column_type)
+    return _MINTED[key]
+
+
+def _reference(name: str, column_type):
+    return _PLAN_CONTEXT.columns.reference(_column(name, column_type).identity, name, column_type)
 
 
 def _schema(*names: str) -> RelationSchema:
     return RelationSchema(
         name="t",
-        columns=[SchemaColumn(name=n, column_type=INT64, identity=_ident(n)) for n in names],
+        columns=[_column(n, INT64) for n in names],
     )
 
 
@@ -108,7 +116,7 @@ def _identifier(name: str) -> Expression:
     return LogicalColumn(
         node_type=NodeType.IDENTIFIER,
         source_column=name,
-        schema_column=SchemaColumn(name=name, column_type=INT64, identity=_ident(name)),
+        schema_column=_reference(name, INT64),
     )
 
 
@@ -378,7 +386,7 @@ class TestLike:
 def _varchar_schema(*names: str) -> RelationSchema:
     return RelationSchema(
         name="t",
-        columns=[SchemaColumn(name=n, column_type=VARCHAR, identity=_ident(n)) for n in names],
+        columns=[_column(n, VARCHAR) for n in names],
     )
 
 
@@ -386,7 +394,7 @@ def _varchar_identifier(name: str) -> Expression:
     return LogicalColumn(
         node_type=NodeType.IDENTIFIER,
         source_column=name,
-        schema_column=SchemaColumn(name=name, column_type=VARCHAR, identity=_ident(name)),
+        schema_column=_reference(name, VARCHAR),
     )
 
 

@@ -25,17 +25,21 @@ from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.models.manifest_io import read_manifest_file_entries, write_manifest_parquet
 from opteryx.types import logical_type as _lt
-from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.types.schema import RelationSchema
+from opteryx.planner.plan_context import PlanContext
+
+# Bound columns are minted by a query's ColumnTable; these tests share one.
+_PLAN_CONTEXT = PlanContext()
 
 
 def _schema(*names):
     return RelationSchema(
         name="t",
         columns=[
-            SchemaColumn(
-                name=name,
+            _PLAN_CONTEXT.columns.relation_column(
+                "t",
+                name,
                 column_type=_lt.INT64,
-                identity=mint_column_identity("t", name),
             )
             for name in names
         ],

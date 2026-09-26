@@ -20,11 +20,14 @@ from opteryx.planner.optimizer.strategies.statistics_only_response import (
     get_min_max_from_manifest,
 )
 from opteryx.types.logical_type import INT64
-from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.types.schema import RelationSchema
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
+
+# Bound columns are minted by a query's ColumnTable; these tests share one.
+_PLAN_CONTEXT = PlanContext()
 
 
 def _schema_with_field_ids(names_and_ids):
@@ -34,10 +37,10 @@ def _schema_with_field_ids(names_and_ids):
     return RelationSchema(
         name="t",
         columns=[
-            SchemaColumn(
-                name=n,
+            _PLAN_CONTEXT.columns.relation_column(
+                "t",
+                n,
                 column_type=INT64,
-                identity=mint_column_identity("t", n),
                 field_id=fid,
             )
             for n, fid in names_and_ids
@@ -58,8 +61,8 @@ def test_resolve_field_id_falls_back_to_load_time_position_when_no_field_id():
     schema = RelationSchema(
         name="t",
         columns=[
-            SchemaColumn(name="a", column_type=INT64, identity=mint_column_identity("t", "a")),
-            SchemaColumn(name="b", column_type=INT64, identity=mint_column_identity("t", "b")),
+            _PLAN_CONTEXT.columns.relation_column("t", "a", column_type=INT64),
+            _PLAN_CONTEXT.columns.relation_column("t", "b", column_type=INT64),
         ],
     )
     manifest = Manifest(files=[], schema=schema)

@@ -18,7 +18,7 @@ from opteryx.connectors import register_workspace
 from opteryx.connectors.local_store_connector import LocalStoreConnector
 from opteryx.exceptions import DatasetNotFoundError, UnsupportedSyntaxError
 from opteryx.models.create_statement import render_create_table
-from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 from opteryx.types import logical_type as _lt
 
 
@@ -117,18 +117,16 @@ def test_show_create_table_renders_clustering_as_a_second_statement():
     connector, and the local store cannot set one - `set_cluster_by` raises for
     it, which is exactly why `cluster_by_columns` may answer "none" there.
     """
-    schema = RelationSchema(
+    schema = RelationDescriptor(
         name="ws.events",
         columns=[
-            SchemaColumn(
+            ColumnDescriptor(
                 name="id",
                 column_type=_lt.INT64,
-                identity=mint_column_identity("ws.events", "id"),
             ),
-            SchemaColumn(
+            ColumnDescriptor(
                 name="label",
                 column_type=_lt.VARCHAR,
-                identity=mint_column_identity("ws.events", "label"),
             ),
         ],
     )

@@ -17,7 +17,7 @@ ColumnStatistics.
 
 import os
 import sys
-from opteryx.types.schema import SchemaColumn
+from opteryx.planner.plan_context import PlanContext
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 
@@ -42,7 +42,9 @@ from opteryx.planner.optimizer.statistics import ColumnStatistics, RelationStati
 from opteryx.types.logical_type import NVARCHAR, VARCHAR
 from opteryx.compiled.structures.expressions import LogicalColumn
 
-_IDENTITY = b"tes_col_00000001"
+# Statistics are keyed by the identity of a column minted in a query's ColumnTable.
+_PLAN_CONTEXT = PlanContext()
+_IDENTITY = _PLAN_CONTEXT.columns.relation_column("t", "col").identity
 
 # A uniform-ish column: every class present with a plausible proportion,
 # roughly matching the offline experiment's typical VARCHAR shape.
@@ -74,7 +76,7 @@ def _stats(
 
 def _instr_node(needle, decay=0.7, op="InStr", column_type=VARCHAR):
     identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col")
-    identifier.schema_column = SchemaColumn(name="col", identity=_IDENTITY, column_type=column_type)
+    identifier.schema_column = _PLAN_CONTEXT.columns.reference(_IDENTITY, "col", column_type)
     literal = Literal(value=needle)
     node = Comparison(value=op, left=identifier, right=literal)
     node.like_selectivity_decay = decay
@@ -214,7 +216,7 @@ def test_selectivity_instr_falls_back_when_avg_length_is_zero():
 def test_selectivity_instr_falls_back_for_unknown_column():
     stats = _stats()
     unknown_identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="other")
-    unknown_identifier.schema_column = SchemaColumn(name="col", identity=b"tes_other_0000")
+    unknown_identifier.schema_column = _PLAN_CONTEXT.columns.relation_column("t", "other")
     literal = Literal(value="hello")
     node = Comparison(value="InStr", left=unknown_identifier, right=literal)
     node.like_selectivity_decay = 0.7
@@ -225,7 +227,7 @@ def test_selectivity_instr_falls_back_for_unknown_column():
 def test_predicate_estimator_tag_none_for_non_instr_predicate():
     stats = _stats()
     identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col")
-    identifier.schema_column = SchemaColumn(name="col", identity=_IDENTITY)
+    identifier.schema_column = _PLAN_CONTEXT.columns.reference(_IDENTITY, "col", None)
     literal = Literal(value="hello")
     node = Comparison(value="Eq", left=identifier, right=literal)
     assert predicate_estimator_tag(node, stats) is None

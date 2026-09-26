@@ -29,7 +29,11 @@ from types import SimpleNamespace
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import INT64
-from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.types.schema import RelationSchema
+from opteryx.planner.plan_context import PlanContext
+
+# Bound columns are minted by a query's ColumnTable; these tests share one.
+_PLAN_CONTEXT = PlanContext()
 
 
 def _datafile_entry(**overrides):
@@ -80,16 +84,16 @@ def test_get_total_null_count_now_resolves_for_catalog_backed_files():
     schema = RelationSchema(
         name="t",
         columns=[
-            SchemaColumn(
-                name="followers",
+            _PLAN_CONTEXT.columns.relation_column(
+                "t",
+                "followers",
                 column_type=INT64,
-                identity=mint_column_identity("t", "followers"),
                 field_id=5,
             ),
-            SchemaColumn(
-                name="tweet_id",
+            _PLAN_CONTEXT.columns.relation_column(
+                "t",
+                "tweet_id",
                 column_type=INT64,
-                identity=mint_column_identity("t", "tweet_id"),
                 field_id=1,
             ),
         ],

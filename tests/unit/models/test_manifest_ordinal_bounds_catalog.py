@@ -35,19 +35,22 @@ from opteryx.expression import NodeType
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import DATE, DECIMAL, FLOAT64, INT64, TIMESTAMP, VARCHAR
-from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.types.schema import RelationSchema
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
+
+# Bound columns are minted by a query's ColumnTable; these tests share one.
+_PLAN_CONTEXT = PlanContext()
 
 
 def _manifest(column_type, ordinal_min, ordinal_max, *, bounds_are_ordinal=True):
     schema = RelationSchema(
         name="t",
         columns=[
-            SchemaColumn(
-                name="c",
+            _PLAN_CONTEXT.columns.relation_column(
+                "t",
+                "c",
                 column_type=column_type,
-                identity=mint_column_identity("t", "c"),
                 field_id=0,
             )
         ],

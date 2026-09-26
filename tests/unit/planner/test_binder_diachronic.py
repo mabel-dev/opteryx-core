@@ -6,20 +6,19 @@ from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.plan_context import PlanContext
 from opteryx.planner.binder.common import BinderVisitor
 from opteryx.types.logical_type import INT64
-from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 
 
 class FakeConnector(Diachronic):
     __mode__ = "FAKE"
 
     def get_dataset_schema(self):
-        return RelationSchema(
+        return RelationDescriptor(
             name="fake",
             columns=[
-                SchemaColumn(
+                ColumnDescriptor(
                     name="id",
                     column_type=INT64,
-                    identity=mint_column_identity("fake", "id"),
                 )
             ],
         )

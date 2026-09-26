@@ -410,55 +410,6 @@ class RelationSchema:
                 return self.columns.pop(i)
         return None
 
-    def validate(self) -> bool:
-        """Validate schema consistency.
-
-        Returns:
-            True if schema is valid, False otherwise
-        """
-        # Check for duplicate column names
-        names = set()
-        for col in self.columns:
-            if col.name in names:
-                return False
-            names.add(col.name)
-        return True
-
-    def __add__(self, other: "RelationSchema") -> "RelationSchema":
-        """Combine two schemas by merging columns.
-
-        Args:
-            other: Another RelationSchema to combine with
-
-        Returns:
-            New RelationSchema with combined columns
-        """
-        if not isinstance(other, RelationSchema):
-            return NotImplemented
-
-        combined_columns = self.columns + other.columns
-        return RelationSchema(
-            name=self.name,
-            columns=combined_columns,
-            aliases=self.aliases + other.aliases,
-            primary_key=self.primary_key or other.primary_key,
-        )
-
-    def __iadd__(self, other: "RelationSchema") -> "RelationSchema":
-        """In-place merge with another schema.
-
-        Args:
-            other: Another RelationSchema to combine with
-
-        Returns:
-            Self with columns from other schema added
-        """
-        if not isinstance(other, RelationSchema):
-            return NotImplemented
-
-        self.columns.extend(other.columns)
-        return self
-
 
 def _column_type_from_dict(data: Dict[str, Any]) -> Any:
     """Pop and parse a persisted column's type: the v2 `column_type` string, else the

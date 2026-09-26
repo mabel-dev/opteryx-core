@@ -25,7 +25,6 @@ from opteryx.planner.optimizer.strategies.redundant_operators import (
 )
 from opteryx.planner.optimizer.strategies.optimization_strategy import OptimizerContext
 from opteryx.types.logical_type import INT64
-from opteryx.types.schema import SchemaColumn
 from tests.helpers import execute_and_get_rowcount
 from opteryx.compiled.structures.expressions import LogicalColumn
 
@@ -38,8 +37,8 @@ def _physical_node_types(sql: str):
 
 
 def _column(name):
-    """Build an IDENTIFIER Node with a SchemaColumn whose identity is its name."""
-    schema_column = SchemaColumn(name=name, column_type=INT64, identity=name)
+    """Build an IDENTIFIER Node over a freshly minted bound column."""
+    schema_column = PlanContext().columns.relation_column("fake", name, column_type=INT64)
     return LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=None, schema_column=schema_column)
 
 
