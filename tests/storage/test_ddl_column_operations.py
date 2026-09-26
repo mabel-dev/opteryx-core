@@ -28,6 +28,7 @@ straight into `_DATA_TYPES` and need no new test code.
 
 import json
 
+import pyarrow.parquet as pq
 import pytest
 
 import opteryx
@@ -868,6 +869,34 @@ def _parquet_data_region(path):
     return raw[4 : len(raw) - 8 - footer_len]
 
 
+def _column_chunks(path):
+    """`{column: (page bytes, bloom bytes | None)}` for a single-row-group file,
+    sliced by the offsets the footer records.
+
+    Copy-verbatim is a per-CHUNK property, not a positional one: the writer puts
+    bloom filters after the data pages, so dropping or adding a column moves
+    where chunks and blooms sit without re-encoding any of them. Comparing each
+    column's own bytes catches a re-encode without caring about placement. The
+    footer is read with pyarrow, so this helper does not depend on the reader
+    it is used to check.
+    """
+    raw = path.read_bytes()
+    metadata = pq.ParquetFile(path).metadata
+    assert metadata.num_row_groups == 1, "helper assumes one row group"
+    chunks = {}
+    for index in range(metadata.row_group(0).num_columns):
+        chunk = metadata.row_group(0).column(index).to_dict()
+        start = chunk["dictionary_page_offset"] or chunk["data_page_offset"]
+        pages = raw[start : start + chunk["total_compressed_size"]]
+        bloom = None
+        if chunk["bloom_filter_offset"] is not None:
+            assert chunk["bloom_filter_length"] is not None, "bloom filter has no recorded length"
+            bloom_start = chunk["bloom_filter_offset"]
+            bloom = raw[bloom_start : bloom_start + chunk["bloom_filter_length"]]
+        chunks[chunk["path_in_schema"]] = (pages, bloom)
+    return chunks
+
+
 def test_rename_column_does_not_touch_a_single_data_byte(tmp_path):
     """The load-bearing property for RENAME: the encoded pages come out
     byte-for-byte identical, because a rename is a footer edit and nothing else.
@@ -889,35 +918,35 @@ def test_rename_column_does_not_touch_a_single_data_byte(tmp_path):
 
 def test_drop_column_copies_surviving_pages_verbatim(tmp_path):
     """The load-bearing property for DROP: the columns that survive are copied,
-    not re-encoded. Dropping the LAST column leaves the earlier chunks exactly
-    where they were, so the new page region is a byte-for-byte PREFIX of the old
-    one. Re-encoding would produce equal VALUES but different BYTES."""
+    not re-encoded - pages and bloom filter alike. Re-encoding would produce
+    equal VALUES but different BYTES."""
     session = _setup(tmp_path)
     session_exec(session, "CREATE TABLE ws.events (keep INT64, doomed VARCHAR)")
     session_exec(session, "INSERT INTO ws.events VALUES (1, 'xxxxxxxxxx'), (2, 'yyyyyyyyyy')")
     paths = _data_files(tmp_path)
-    before = _parquet_data_region(paths[0])
+    before = _column_chunks(paths[0])
 
     session_exec(session, "ALTER TABLE ws.events DROP COLUMN doomed")
 
-    after = _parquet_data_region(_new_data_file(tmp_path, paths))
-    assert len(after) < len(before), "dropped column's pages should not be carried over"
-    assert before.startswith(after), "surviving pages were re-encoded rather than copied"
+    after = _column_chunks(_new_data_file(tmp_path, paths))
+    assert "doomed" not in after, "dropped column's chunk should not be carried over"
+    assert after == {"keep": before["keep"]}, "surviving chunk was re-encoded rather than copied"
 
 
 def test_add_column_copies_existing_pages_verbatim(tmp_path):
     """ADD appends one near-empty constant chunk; every pre-existing page is
-    carried through untouched, so the old region stays a prefix of the new."""
+    carried through untouched - pages and bloom filter alike."""
     session = _setup(tmp_path)
     session_exec(session, "CREATE TABLE ws.events (id INT64)")
     session_exec(session, "INSERT INTO ws.events VALUES (1), (2)")
     paths = _data_files(tmp_path)
-    before = _parquet_data_region(paths[0])
+    before = _column_chunks(paths[0])
 
     session_exec(session, "ALTER TABLE ws.events ADD COLUMN extra INT64")
 
-    after = _parquet_data_region(_new_data_file(tmp_path, paths))
-    assert after.startswith(before), "existing pages were re-encoded rather than copied"
+    after = _column_chunks(_new_data_file(tmp_path, paths))
+    assert set(after) == {"id", "extra"}
+    assert after["id"] == before["id"], "existing chunk was re-encoded rather than copied"
 
 
 def test_add_column_costs_almost_nothing_on_disk(tmp_path):
@@ -1076,10 +1105,12 @@ def test_each_operation_patches_the_previous_operations_output(tmp_path, planets
 
     # 3. an add, against the file the rename produced
     files = _data_files(tmp_path, "planets")
-    before = _parquet_data_region(renamed)
+    before = _column_chunks(renamed)
     session_exec(session, f"ALTER TABLE {_PLANETS} ADD COLUMN discovered_by VARCHAR")
     added = _new_data_file(tmp_path, files, "planets")
-    assert _parquet_data_region(added).startswith(before), "existing pages were re-encoded"
+    after = _column_chunks(added)
+    assert set(after) == set(before) | {"discovered_by"}
+    assert {name: after[name] for name in before} == before, "existing chunks were re-encoded"
 
     # 4. an annotation-only widen, against the file the add produced. INT8/INT16/
     #    INT32 all ride parquet's physical int32, so this changes the footer and

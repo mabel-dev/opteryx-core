@@ -26,7 +26,7 @@ from opteryx.planner.expression_traits import has_volatile_function
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.utils import random_string
 
-from .optimization_strategy import OptimizationStrategy, OptimizerContext
+from .optimization_strategy import OptimizationStrategy, OptimizerContext, get_nodes_of_type_from_logical_plan
 from opteryx.compiled.structures.plan_steps import ProjectStep
 
 
@@ -64,6 +64,13 @@ def _make_passthrough(original: Expression) -> Expression:
 
 
 class GroupKeyReductionStrategy(OptimizationStrategy):
+    def should_i_run(self, plan: LogicalPlan) -> bool:
+        # visit() acts on AggregateAndGroup nodes only.
+        return (
+            len(get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.AggregateAndGroup,)))
+            > 0
+        )
+
     def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type != LogicalPlanStepType.AggregateAndGroup:
             return context

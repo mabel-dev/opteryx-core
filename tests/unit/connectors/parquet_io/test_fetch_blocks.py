@@ -94,20 +94,16 @@ def _register_http_workspace(name, local_dir, port, subdir):
         def rewrite_to_signed_url(self, path, expiry_seconds=3600):
             return path
 
-        def list_files(self, base_dir, recursive=True):
-            return list(urls)
+        def list_file_infos(self, base_dir, recursive=True):
+            # The connector takes every size/mtime from the listing itself, as
+            # the object-store listings provide them; the served dir has no
+            # dataset manifest, so none is listed.
+            from opteryx.connectors.io_systems._file_info import FileInfoLike
+
+            return [FileInfoLike(path=u, size=sizes[u], mtime=0) for u in urls]
 
         def get_file_size(self, path):
             return sizes[path]
-
-        def get_file_info(self, paths):
-            # The connector stats the data files and the (absent) dataset
-            # manifest together; answer from the listing instead of HEADing a
-            # relative manifest path the HTTP filesystem cannot resolve.
-            from opteryx.connectors.io_systems.http_filesystem import FileInfo, FileType
-
-            return [FileInfo(path=p, type=FileType.File, size=sizes[p]) if p in sizes
-                    else FileInfo(path=p, type=FileType.NotFound) for p in paths]
 
     register_workspace(name, FileSystemConnector, filesystem=ServedDirFileSystem(),
                        storage_type="HTTP")

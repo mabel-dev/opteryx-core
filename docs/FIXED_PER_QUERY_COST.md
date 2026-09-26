@@ -110,14 +110,72 @@ Suite cost: about 3.5 ms × 41 ≈ **0.15 s (1.5%)**. This is extrapolated from 
 | 5 | Skip optimizer passes that cannot apply to the plan shape | ~20 ms / ~20 ms | −0.5 ms |
 | – | Parse cache | < 5 ms | **Not worth it** |
 
-### Not prototyped: design decisions for the architect
+## Implemented (2026-09-26, all five, as ruled)
 
-Fix 1 is material, but it changes ownership of cached footers. Today the cache hands out copies and evicts freely. Pinning entries through `shared_ptr` from the cache into three native Sources changes eviction semantics, the `footer_map` type (an ABI change across `pool_reader.pxd`, `_operators.pyx`, `native_parquet_scan_source.hpp`, `native_latmat_scan_source.hpp` and `engine.hpp`), and memory accounting, because pinned entries outlive the 512-entry bound while queries run. The "Tier-2 pinning plan" the cache refers to is the ruling this needs.
+### Rulings
 
-Fix 3 adds a new process-global cache inside the C++ engine, so it is a comparable decision.
+1. Footers are shared through `shared_ptr` and the cache has a byte budget.
+2. The skene cache belongs to the engine, not to skene.
+3. Blooms are read as few times as possible.
+4. Filesystem metadata: implement the recommendation as written.
+5. Optimizer: gate the passes that cannot apply.
 
-Questions for the architect:
+### Fixed-cost components, same harness (`fixed_cost_suite.py`, 3 rounds, Σ over 43 queries, ms)
 
-1. **Fix 1:** is `shared_ptr<const FileStats>` in the cache and in `footer_map` the pinning model you want? The alternative is a per-query borrow of `try_get_ptr`, with eviction blocked while any plan is open.
-2. **Fix 3:** where should the skene metadata cache live? In `skene` (the format library, standalone-safe) or in the engine Source?
-3. **Fix 2:** (a) or (b)? Option (b) raises the cache's memory footprint by the size of the bloom bitsets.
+| Component | pq before | pq after | sk before | sk after |
+|---|---|---|---|---|
+| `open_native_scan_plan` | 631.9 | **82.0** | – | – |
+| Teardown, close scans | 137.3 | **23.0** | – | – |
+| `compile_to_native` (all of it) | 689.6 | **130.1** | 12.7 | 9.9 |
+| Python planning | 184.4 | **117.6** | 125.4 | **91.2** |
+| Q37–Q43 wall (Σ min-of-3) | 383.2 | **128.7** | 136.9 | **88.0** |
+
+Per-query plan-open timings, measured in isolation with `fixed_cost_scanplan_split.py` (median of 10, warm):
+
+| Query | Before | After |
+|---|---|---|
+| No predicate | 8.4 ms | 0.62 ms |
+| Q42 | 27.3 ms | 1.1 ms |
+| Q20 (`UserID =`) | 51.7 ms | 3.5 ms |
+| `IsRefresh = 0` | 30.0 ms | 2.8 ms |
+
+On skene, first-morsel time for Q42/Q43 fell by 3.8/3.7 ms, which is the claim-set build the cache now skips.
+
+⚠ **The suite WALL totals are not attributable to these changes.** Parquet fell 13.58 → 9.91 s and skene 9.87 → 8.11 s, but most of that is data-path (first-morsel) time none of these fixes touch. Another session rebuilt the tree with its own changes between the two runs. The before/after runs are also sequential, not an interleaved A/B, so thermal state differs. Quote only the components above.
+
+Q20's plan open reads ~13 MB of `UserID` blooms across 99 files: ~3.5 ms when those pages are cached, ~31 ms after the preceding heavy queries evict them. That is data IO, which the old per-probe path also paid, plus a file open per row group.
+
+### What changed
+
+| # | Change |
+|---|---|
+| 1 | `ParquetParsedFooterCache` holds `shared_ptr<const FileStats>` (`src/cpp/engine/parquet_footer_map.hpp`: `ParquetFooterRef` / `ParquetFooterMap`, plus `parquet_footer_bytes`). Every footer map (native plan, trampoline source, pass-2 source, stats batch) holds references; the three C++ consumers take `const ParquetFooterMap*`. Budget: `PARQUET_FOOTER_CACHE_BYTES` (default 256 MiB, charged at parsed size — the whole hits dataset is 86 MB, 0.87 MB/file). An entry over the whole budget is not kept and is counted in `stats()["over_budget"]`. A footer evicted while a query holds it lives until that query ends; the budget bounds what the cache keeps resident, not what running queries pin. |
+| 2 | `_prune_row_groups` (pool_reader) runs min/max first, then reads the blooms for the surviving row groups once per file: ranges gathered, coalesced under the parquet IO coalescing rule, one descriptor, one `pread` per run, probed in memory with `TestBloomFilterBytes`. A grouped file keeps each column's blooms contiguous in its tail, so this is one read per (file, predicate column). |
+| 3 | `SkeneReaderCache` in `native_skene_scan_source.hpp`, keyed by (path, size, mtime ns). Budget: `SKENE_FOOTER_CACHE_BYTES` (default 256 MiB), charged at the encoded footer plus attached directory bytes; ClickBench resident is 11–49 MB depending on columns attached. Scans share an entry by `shared_ptr`. Directory attaches are serialised per entry and tracked by top-level column, so a scan never reads a node another scan is still attaching. Block 0 is merged into the directory read only when this scan attaches the whole read set itself. |
+| 4 | One listing (`list_file_infos`) on local, GCS and S3 filesystems gives path, size and mtime; `list_files` is now a view over it. The manifest's entry comes from the same listing, so there is no `get_file_info` stat. The native local listing now reports mtime in ns (`file_info_t.mtime_ns`); it was whole seconds, which would let a same-size rewrite inside one second look unchanged. The dataset schema is cached (`_SCHEMA_CACHE`) under the manifest cache's file-set signature and handed out as a `branch_copy` with re-minted column identities; the telemetry row estimate is replayed on a hit. |
+| 5 | Exact `should_i_run` gates on the seven strategies whose `visit` acts only on one node type: SplitConjunctivePredicates, PredicateRewrite, LimitFilesPruning, OperatorFusion, ProjectFusion, GroupKeyReduction, FilterImpliedGroupKeyReduction. |
+
+### Behaviour notes
+
+- **Fixed along the way:** the H5 single-cold-local-file poison. `try_get(&footer_map[k])` default-constructed an empty footer on a miss, so the scan saw zero row groups. The map now only takes a reference on a hit. The strict xfail in `test_fetch_ahead.py` XPASSed and was removed.
+- **Bloom error contract, kept:** a probe that cannot evaluate a bloom still fails OPEN. A bloom whose length the footer omits is still probed on its own through `TestBloomFilter`, because its extent is not known without parsing its header.
+- **New failure mode:** a failure to open or read a local file's bloom bytes now RAISES `DatasetReadError`. Before, it failed open silently.
+- **v2 skene:** a cached v2 entry keeps its whole-file mapping alive while cached. That is virtual memory, charged only by footer bytes.
+- **GCS listing mtime:** now the object's `updated` time. `get_file_info` reported none, so the signature carried 0.
+
+### Verification
+
+- `make q`, `make st`, and the connector / planner / parquet_io / skene unit tests pass.
+- Parquet vs skene results are identical on Q02/Q08/Q20/Q37–Q43 and the extra `IN` / bloom queries. The Q39–Q42 top-10 slices differ only on ties under a non-total `ORDER BY … LIMIT … OFFSET`; the full grouped results are identical.
+- Skene under concurrency: 36 concurrent runs with different read sets from a cold cache match serial results, including under a 4 MB budget that forced constant eviction (38 over-budget refusals, no errors).
+- Full suite (serial; xdist collection is nondeterministic here, and `make test` needs `uv`, which is absent): 10,369 passed, 40 failed. All 40 trace to causes outside these changes. Examples:
+  - LRU-K `set()` arity
+  - `rugo/__init__.py` importing pyarrow
+  - `Vector.is_constant_encoded` missing
+  - GROUP BY literal rejection
+  - `testdata.satellites` lacking the columns `test_groupby_advanced` uses
+  - UPDATE/OPTIMIZE ignoring `write_coalesce_rows`
+  - drop-column page copy
+  - a trampoline-only latmat sensor
+  - storage and valkey environment
+- The two planner failures were re-run with the new optimizer gates removed and still fail.

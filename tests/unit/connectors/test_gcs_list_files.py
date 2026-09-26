@@ -1,4 +1,4 @@
-"""OpteryxGcsFileSystem.list_files — the blob listing ad-hoc GCS datasets depend on.
+"""OpteryxGcsFileSystem.list_files / list_file_infos — the blob listing ad-hoc GCS datasets depend on.
 
 `FileSystemConnector.get_list_of_blob_names` calls `filesystem.list_files(...)`; without it
 every ad-hoc GCS query dies at listing. These tests pin the three decisions in it that would
@@ -45,6 +45,11 @@ def _fs(pages):
     return fs
 
 
+def _item(name, size=10, updated="2026-09-26T01:02:03.456Z"):
+    # A listed object as the JSON API returns it for the fields the listing requests.
+    return {"name": name, "size": str(size), "updated": updated}
+
+
 def _query_params(url):
     return urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
 
@@ -52,14 +57,14 @@ def _query_params(url):
 def test_paths_are_returned_gs_schemed():
     # Bare `bucket/object` paths would be treated as LOCAL downstream (_is_local_path) and
     # pread() off disk by the native scan path — a silently wrong read, not an error.
-    fs = _fs([{"items": [{"name": "space_missions/a.parquet"}]}])
+    fs = _fs([{"items": [_item("space_missions/a.parquet")]}])
     assert fs.list_files("opteryx/space_missions") == [
         "gs://opteryx/space_missions/a.parquet"
     ]
 
 
 def test_scheme_on_the_input_is_accepted_and_not_doubled():
-    fs = _fs([{"items": [{"name": "space_missions/a.parquet"}]}])
+    fs = _fs([{"items": [_item("space_missions/a.parquet")]}])
     assert fs.list_files("gs://opteryx/space_missions") == [
         "gs://opteryx/space_missions/a.parquet"
     ]
@@ -74,7 +79,7 @@ def test_prefix_is_slash_terminated_so_siblings_cannot_leak_in():
 
 
 def test_whole_bucket_listing_uses_no_prefix_filter():
-    fs = _fs([{"items": [{"name": "a.parquet"}]}])
+    fs = _fs([{"items": [_item("a.parquet")]}])
     assert fs.list_files("opteryx") == ["gs://opteryx/a.parquet"]
     # An empty prefix is dropped by urlencode-with-empty-value semantics or sent empty;
     # either way it must not become a spurious "/" filter that matches nothing.
@@ -85,9 +90,9 @@ def test_listing_paginates_until_the_token_is_exhausted():
     # A dataset over the API's 1000-object page limit must not silently truncate.
     fs = _fs(
         [
-            {"items": [{"name": "many/1.parquet"}], "nextPageToken": "t1"},
-            {"items": [{"name": "many/2.parquet"}], "nextPageToken": "t2"},
-            {"items": [{"name": "many/3.parquet"}]},
+            {"items": [_item("many/1.parquet")], "nextPageToken": "t1"},
+            {"items": [_item("many/2.parquet")], "nextPageToken": "t2"},
+            {"items": [_item("many/3.parquet")]},
         ]
     )
     assert fs.list_files("opteryx/many") == [
@@ -102,8 +107,23 @@ def test_listing_paginates_until_the_token_is_exhausted():
 
 def test_folder_placeholder_objects_are_skipped():
     # Console-created zero-byte "folder" markers are not readable data files.
-    fs = _fs([{"items": [{"name": "ds/"}, {"name": "ds/real.parquet"}]}])
+    fs = _fs([{"items": [{"name": "ds/"}, _item("ds/real.parquet")]}])
     assert fs.list_files("opteryx/ds") == ["gs://opteryx/ds/real.parquet"]
+
+
+def test_file_infos_carry_the_listing_size_and_update_time():
+    # The connector takes sizes and mtimes from the listing instead of HEADing every
+    # object, so the listing must request them and report them faithfully.
+    fs = _fs([{"items": [_item("ds/a.parquet", size=1234, updated="2026-09-26T01:02:03.456Z")]}])
+    (info,) = fs.list_file_infos("opteryx/ds")
+    assert (info.path, info.size, info.mtime) == (
+        "gs://opteryx/ds/a.parquet",
+        1234,
+        1790384523456000000,
+    )
+    assert _query_params(fs.http_client.requested[0])["fields"] == [
+        "items(name,size,updated),nextPageToken"
+    ]
 
 
 def test_non_recursive_listing_sets_a_delimiter():

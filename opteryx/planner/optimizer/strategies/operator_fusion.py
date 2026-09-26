@@ -31,7 +31,7 @@ from opteryx.types.vectors.vector_types import (
     node_is_vector_query_expression,
 )
 
-from .optimization_strategy import OptimizationStrategy, OptimizerContext
+from .optimization_strategy import OptimizationStrategy, OptimizerContext, get_nodes_of_type_from_logical_plan
 from opteryx.compiled.structures.plan_steps import HeapSortStep
 
 
@@ -61,6 +61,10 @@ class OperatorFusionStrategy(OptimizationStrategy):
         return (expression.value == "COSINE_DISTANCE" and not descending) or (
             expression.value == "COSINE_SIMILARITY" and descending
         )
+
+    def should_i_run(self, plan: LogicalPlan) -> bool:
+        # visit() fuses an Order into the Limit above it; no Order, nothing to fuse.
+        return len(get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Order,))) > 0
 
     def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Order:

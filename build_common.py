@@ -545,7 +545,7 @@ def get_zstd_vendor_sources():
         f"{ZSTD}/common/entropy_common.cpp",
         f"{ZSTD}/common/fse_decompress.cpp",
         f"{ZSTD}/common/zstd_common.cpp",
-        f"{ZSTD}/common/xxhash.cpp",
+        f"{ZSTD}/common/zstd_xxhash.cpp",
         f"{ZSTD}/common/error_private.cpp",
         f"{ZSTD}/decompress/zstd_decompress.cpp",
         f"{ZSTD}/decompress/zstd_decompress_block.cpp",

@@ -166,18 +166,6 @@ def test_native_plan_reports_depth_and_rejects_an_inert_one():
             proc.kill(); proc.wait()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="PRE-EXISTING, found 2026-09-12 while adding fetch-ahead: open_native_scan_plan's "
-           "H5 local-footer pre-pass probes _PARSED_FOOTER_CACHE with try_get(path, "
-           "&footer_map[path]), which default-constructs an EMPTY entry on a miss; with "
-           "exactly ONE cold local file the `len(_local_miss_paths) > 1` guard skips the "
-           "batch fill, the main loop sees the entry as parsed and enumerates ZERO row "
-           "groups. Same poison-on-miss class as test_footer_cache_row_loss.py. "
-           "test_wp02_predicate_relocation::test_pruning_matches_direct_source_plan fails "
-           "the same way. Not fixed here (out of scope); flip this to a passing test "
-           "when it is.",
-)
 def test_native_plan_local_only_is_validated_but_not_armed():
     from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
 

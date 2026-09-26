@@ -14,7 +14,7 @@ from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.utils import random_string
 
-from .optimization_strategy import OptimizationStrategy, OptimizerContext, filter_referenced_columns
+from .optimization_strategy import OptimizationStrategy, OptimizerContext, filter_referenced_columns, get_nodes_of_type_from_logical_plan
 from .predicate_rewriter import rewrite_anded_not_like_to_all
 from opteryx.compiled.structures.plan_steps import FilterStep
 
@@ -48,6 +48,11 @@ def _inner_split(node):
 
 class SplitConjunctivePredicatesStrategy(OptimizationStrategy):
     rebuilds_plan = True  # rebuilds the whole plan into an empty working plan
+    def should_i_run(self, plan: LogicalPlan) -> bool:
+        # visit() acts on Filter nodes only; with none, the rebuild re-adds the
+        # plan unchanged.
+        return len(get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Filter,))) > 0
+
     def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         """
         Conjunctive Predicates (ANDs) can be split and executed in any order to get the

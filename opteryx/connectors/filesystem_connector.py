@@ -45,13 +45,40 @@ _MANIFEST_CACHE_MAX = 128
 
 # Parsed parquet footer metadata (rugo ParquetMetadata — owned Python objects,
 # no buffer views), keyed by (path, size, mtime) so any rewrite invalidates.
-# The schema handed to callers is still BUILT FRESH per query from this parse
-# (rugo_to_relation_schema) — schema/column objects are mutated per query by
-# the binder (origin, name) and column identities must be re-minted per parse
-# so a self-join's two scans never share identities. Only the file read and
-# thrift parse are cached; LRU, bounded.
+# A schema read that misses _SCHEMA_CACHE (below) builds its RelationSchema
+# fresh from this parse (rugo_to_relation_schema) — schema/column objects are
+# mutated per query by the binder (origin, name) and column identities must be
+# re-minted per parse so a self-join's two scans never share identities. Only
+# the file read and thrift parse are cached here; LRU, bounded.
 _FOOTER_METADATA_CACHE: dict = {}
 _FOOTER_METADATA_CACHE_MAX = 256
+
+# The dataset schema, keyed by dataset and valid only for the SAME file-set
+# signature the manifest cache uses, so it is never staler than the manifest.
+# Callers mutate the schema they are handed (the binder renames and aliases
+# columns, projection pushdown prunes them) and a self-join's two scans must not
+# share column identities, so the cached value is a TEMPLATE nobody holds: each
+# hand-out is a `branch_copy` (exactly the state the binder mutates, detached)
+# with every column identity re-minted. The entry also records the row estimate
+# building the schema added to telemetry, which each hand-out adds again — a hit
+# reports what a fresh read would. Bounded like the manifest cache; LRU.
+_SCHEMA_CACHE: dict = {}
+_SCHEMA_CACHE_MAX = _MANIFEST_CACHE_MAX
+
+
+def _hand_out_schema(template: RelationSchema) -> RelationSchema:
+    """A caller's own copy of a cached schema template, with fresh column identities."""
+    from opteryx.types.schema import mint_column_identity
+
+    schema = template.branch_copy({})
+    pending = list(schema.columns)
+    while pending:
+        column = pending.pop()
+        if column.identity is not None:
+            column.identity = mint_column_identity(schema.name, column.name)
+        if column.fields:
+            pending.extend(column.fields)
+    return schema
 
 
 class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable):
@@ -298,13 +325,20 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         """
         from opteryx.models.manifest_io import is_dataset_manifest
 
+        return [
+            info.path for info in self._list_blob_infos(prefix) if not is_dataset_manifest(info.path)
+        ]
+
+    def _list_blob_infos(self, prefix: str) -> list:
+        """ONE listing of `prefix`: every file — dataset manifest INCLUDED — with the
+        size and modification time the listing itself carries, sorted by path (see
+        `get_list_of_blob_names` for why the order matters). Callers that need sizes
+        or mtimes take them from here instead of stat-ing the files again."""
         return sorted(
-            name
-            for name in self.filesystem.list_files(prefix, recursive=True)
-            if not is_dataset_manifest(name)
+            self.filesystem.list_file_infos(prefix, recursive=True), key=lambda info: info.path
         )
 
-    def read_blob(self, *, blob_name: str, just_schema=False):
+    def read_blob(self, *, blob_name: str, just_schema=False, info=None):
         """
         Read a single blob using the filesystem.
 
@@ -347,7 +381,8 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
             # The parsed footer (owned Python objects) is cached by
             # (path, size, mtime); the RelationSchema is rebuilt fresh per
             # query — see _FOOTER_METADATA_CACHE for why both halves matter.
-            info = self.filesystem.get_file_info([blob_name])[0]
+            if info is None:
+                info = self.filesystem.get_file_info([blob_name])[0]
             cache_key = (
                 blob_name,
                 getattr(info, "size", None),
@@ -523,20 +558,48 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         Yields:
             Morsel or schemas
         """
-        blob_names = self.get_list_of_blob_names(prefix=self.dataset, predicates=predicates or [])
+        if just_schema:
+            from opteryx.models.manifest_io import is_dataset_manifest
+
+            schema, estimated_rows = self._schema_from_listing(
+                [
+                    info
+                    for info in self._list_blob_infos(self.dataset)
+                    if not is_dataset_manifest(info.path)
+                ]
+            )
+            if estimated_rows:
+                self.telemetry.estimated_row_count += estimated_rows
+            if schema is not None:
+                yield schema
+            return
+
+        raise InvalidInternalStateError(
+            "A Parquet read reached FileSystemConnector; all Parquet scans go through "
+            "ParquetReadNode."
+        )
+
+    def _schema_from_listing(self, blob_infos: list) -> Tuple[Optional[RelationSchema], int]:
+        """(schema, estimated_rows) from an already-made listing (manifest excluded);
+        schema is None when the listing holds no file of the dataset's format.
+        `estimated_rows` is the row estimate reading the schema produced, which the
+        CALLER adds to telemetry — 0 when there is none."""
+        blob_names = [info.path for info in blob_infos]
         # Single-format discovery: raises on a mixed listing, never drops files.
         dataset_fmt = dataset_format(blob_names, self.dataset) or PARQUET
-        blob_names = [name for name in blob_names if format_for_path(name) == dataset_fmt]
+        blob_infos = [info for info in blob_infos if format_for_path(info.path) == dataset_fmt]
+        blob_names = [info.path for info in blob_infos]
+        if not blob_names:
+            return None, 0
 
-        if just_schema and dataset_fmt == SKENE and blob_names:
+        if dataset_fmt == SKENE:
             # Skene's footer IS the schema — exact DrakenType + LogicalType per
             # column, no inference and no translation loss. Read from the first
             # file; every file is validated against it at read time
             # (SkeneReadNode's per-file name/type checks).
-            yield self._read_skene_schema(blob_names[0])
-            return
+            return self._read_skene_schema(blob_names[0]), 0
 
-        if just_schema and dataset_fmt == JSONL and blob_names:
+        if dataset_fmt == JSONL:
             # JSONL carries no footer: the schema is inferred from the FIRST
             # file (architect decision 2026-08-07 — catalog-declared schema when
             # one exists, first-file inference as the fallback; filesystem
@@ -545,32 +608,20 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
             # JsonlReadNode's per-file/per-chunk fail-loud checks. Record-less
             # blobs are skipped when choosing that first file — they have no
             # schema to give; see _infer_jsonl_schema.
-            yield self._infer_jsonl_schema(blob_names)
-            return
+            return self._infer_jsonl_schema(blob_names), 0
 
-        if just_schema:
-            for blob_name in blob_names:
-                try:
-                    schema = self.read_blob(
-                        blob_name=blob_name,
-                        just_schema=True,
-                    )
-                    blob_count = len(blob_names)
-                    if schema.row_count_metric and blob_count > 1:
-                        schema.row_count_estimate = schema.row_count_metric * blob_count
-                        schema.row_count_metric = None
-                        self.telemetry.estimated_row_count += schema.row_count_estimate
-                    yield schema
-                except Exception as err:
-                    raise DataError(
-                        f"Unable to read file {blob_name}: {type(err).__name__}"
-                    ) from err
-            return
-
-        raise InvalidInternalStateError(
-            "A Parquet read reached FileSystemConnector; all Parquet scans go through "
-            "ParquetReadNode."
-        )
+        # The schema is the FIRST file's (the listing is sorted).
+        first = blob_infos[0]
+        try:
+            schema = self.read_blob(blob_name=first.path, just_schema=True, info=first)
+        except Exception as err:
+            raise DataError(f"Unable to read file {first.path}: {type(err).__name__}") from err
+        blob_count = len(blob_names)
+        if schema.row_count_metric and blob_count > 1:
+            schema.row_count_estimate = schema.row_count_metric * blob_count
+            schema.row_count_metric = None
+            return schema, schema.row_count_estimate
+        return schema, 0
 
     def get_dataset_schema(self) -> RelationSchema:
         """
@@ -587,11 +638,39 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
             break
 
         if self.schema is None:
-            if os.path.isdir(self.dataset):
-                raise EmptyDatasetError(dataset=self.relation_name)
-            raise DatasetNotFoundError(dataset=self.relation_name, connector=self.__type__)
+            self._raise_no_schema()
 
         return self.schema
+
+    def _raise_no_schema(self):
+        if os.path.isdir(self.dataset):
+            raise EmptyDatasetError(dataset=self.relation_name)
+        raise DatasetNotFoundError(dataset=self.relation_name, connector=self.__type__)
+
+    def _dataset_schema_for(self, blob_infos: list, signature: tuple) -> RelationSchema:
+        """`get_dataset_schema` for a listing the caller already made (manifest
+        excluded), served from `_SCHEMA_CACHE` when `signature` matches."""
+        if self.schema:
+            return self.schema
+        cached = _SCHEMA_CACHE.get(self.dataset)
+        if cached is not None and cached[0] == signature:
+            _SCHEMA_CACHE.pop(self.dataset, None)
+            _SCHEMA_CACHE[self.dataset] = cached
+            self.schema = _hand_out_schema(cached[1])
+            if cached[2]:
+                self.telemetry.estimated_row_count += cached[2]
+            return self.schema
+
+        schema, estimated_rows = self._schema_from_listing(blob_infos)
+        if schema is None:
+            self._raise_no_schema()
+        if estimated_rows:
+            self.telemetry.estimated_row_count += estimated_rows
+        if self.dataset not in _SCHEMA_CACHE and len(_SCHEMA_CACHE) >= _SCHEMA_CACHE_MAX:
+            _SCHEMA_CACHE.pop(next(iter(_SCHEMA_CACHE)), None)
+        _SCHEMA_CACHE[self.dataset] = (signature, schema.branch_copy({}), estimated_rows)
+        self.schema = schema
+        return schema
 
     def get_dataset_metadata(self) -> Tuple[RelationSchema, "Manifest"]:
         """
@@ -607,16 +686,22 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         from opteryx.models.file_entry import FileEntry
         from opteryx.models.manifest import Manifest
         from opteryx.models.manifest_io import DATASET_MANIFEST_NAME
+        from opteryx.models.manifest_io import is_dataset_manifest
 
-        # Data files. get_list_of_blob_names already excludes the dataset
-        # manifest, so this is data only; the manifest is addressed by its known
-        # path instead of being fished back out of the listing.
+        # ONE listing serves everything below: the data files, the dataset
+        # manifest's own entry, every size and mtime in the signature, and the
+        # schema read. Nothing re-lists and nothing re-stats.
         # Format is discovered from the listing (datasets are single-format —
         # dataset_format raises on a mixed listing rather than dropping files);
         # an empty listing is an empty relation and defaults to PARQUET.
-        blob_names = self.get_list_of_blob_names(self.dataset)
+        manifest_path = os.path.join(self.dataset, DATASET_MANIFEST_NAME)
+        listing = self._list_blob_infos(self.dataset)
+        blob_infos = [info for info in listing if not is_dataset_manifest(info.path)]
+        manifest_infos = [info for info in listing if info.path == manifest_path]
+        blob_names = [info.path for info in blob_infos]
         dataset_fmt = dataset_format(blob_names, self.dataset) or PARQUET
-        data_names = [b for b in blob_names if format_for_path(b) == dataset_fmt]
+        data_infos = [info for info in blob_infos if format_for_path(info.path) == dataset_fmt]
+        data_names = [info.path for info in data_infos]
         # Bind-time capability gating (the optimizer runs after this): pushdown
         # a reader cannot honor must be DECLINED here, because a pushed limit or
         # predicate is REMOVED from the plan — accepting one the reader ignores
@@ -639,24 +724,18 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
             # predicate is no harder for it than for a Filter node. The parquet
             # reader's own gate is left alone — see can_push.
             self.PUSHABLE_SCALAR_FUNCTIONS = True
-        manifest_path = os.path.join(self.dataset, DATASET_MANIFEST_NAME)
-        # Stat the manifest alongside the data: ANALYZE rewrites only the manifest,
-        # so a data-only signature would serve stale sketches from cache forever.
-        infos = self.filesystem.get_file_info(data_names + [manifest_path])
-        infos = [i for i in infos if (getattr(i, "size", None) is not None)]
-        sizes = {i.path: (getattr(i, "size", 0) or 0) for i in infos}
+        # The manifest's entry is in the signature alongside the data: ANALYZE
+        # rewrites only the manifest, so a data-only signature would serve stale
+        # sketches from cache forever.
+        infos = data_infos + manifest_infos
+        sizes = {i.path: i.size for i in infos}
 
         # File-set signature: any add/remove/resize/rewrite changes it, so a
         # cache hit provably describes the current dataset (no stale reads).
         signature = tuple(
-            (i.path, getattr(i, "size", 0) or 0, getattr(i, "mtime", 0.0) or 0.0)
-            for i in sorted(infos, key=lambda x: x.path)
+            (i.path, i.size, i.mtime) for i in sorted(infos, key=lambda x: x.path)
         )
-        # Schema is recomputed fresh every query (~0.5ms): downstream projection
-        # pushdown prunes columns on the returned schema, so a cached/shared
-        # schema would surface a ColumnNotFoundError on the next query. Only the
-        # expensive-to-build file entries (per-file footer-stats parse) are cached.
-        schema = self.get_dataset_schema()
+        schema = self._dataset_schema_for(blob_infos, signature)
 
         cached = _MANIFEST_CACHE.get(self.dataset)
         if cached is not None and cached[0] == signature:

@@ -52,6 +52,13 @@ class LimitFilesPruningStrategy(OptimizationStrategy):
         """Initialize the strategy with telemetry."""
         super().__init__(telemetry=telemetry)
 
+    def should_i_run(self, plan: LogicalPlan) -> bool:
+        # visit() acts only on a Scan carrying a pushed limit.
+        return any(
+            node.limit is not None
+            for _, node in get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Scan,))
+        )
+
     def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         """Visitor method - process each node."""
         if node.node_type == LogicalPlanStepType.Scan and node.limit is not None:

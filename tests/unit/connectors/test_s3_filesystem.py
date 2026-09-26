@@ -332,7 +332,12 @@ def test_open_input_stream_rejects_projection(fs):
 
 
 def _listing(keys, truncated=False, token=None):
-    entries = "".join(f"<Contents><Key>{key}</Key></Contents>" for key in keys)
+    # Size and LastModified are on every object a ListObjectsV2 reply lists.
+    entries = "".join(
+        f"<Contents><Key>{key}</Key><Size>10</Size>"
+        f"<LastModified>2026-09-26T01:02:03.000Z</LastModified></Contents>"
+        for key in keys
+    )
     next_token = f"<NextContinuationToken>{token}</NextContinuationToken>" if token else ""
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'

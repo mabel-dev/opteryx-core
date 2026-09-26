@@ -189,7 +189,9 @@ def test_other_gcs_read_paths_are_not_gated_by_the_read_jsonl_check():
 
     filesystem = OpteryxGcsFileSystem.__new__(OpteryxGcsFileSystem)
     filesystem.bucket = None
-    filesystem.http_client = _FakeGcsListHttpClient([{"name": "space_missions/a.parquet"}])
+    filesystem.http_client = _FakeGcsListHttpClient(
+        [{"name": "space_missions/a.parquet", "size": "10", "updated": "2026-09-26T01:02:03Z"}]
+    )
     filesystem.client_credentials = type("C", (), {"valid": True, "token": "fake-token"})()
 
     assert filesystem.list_files("opteryx/space_missions") == [

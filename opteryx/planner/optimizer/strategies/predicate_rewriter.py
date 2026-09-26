@@ -62,7 +62,7 @@ from opteryx.types import logical_type as _lt
 from opteryx.types.schema import ConstantColumn
 from opteryx.utils.dates import add_single_unit, parse_iso, truncate_single
 
-from .optimization_strategy import OptimizationStrategy, OptimizerContext
+from .optimization_strategy import OptimizationStrategy, OptimizerContext, get_nodes_of_type_from_logical_plan
 from opteryx.compiled.structures.expressions import Between
 from opteryx.compiled.structures.expressions import BinaryOperator
 from opteryx.compiled.structures.expressions import Cnf
@@ -2329,6 +2329,10 @@ def _rewrite_function(function, telemetry: QueryTelemetry, *, plan_context):
 
 
 class PredicateRewriteStrategy(OptimizationStrategy):
+    def should_i_run(self, plan: LogicalPlan) -> bool:
+        # visit() rewrites Filter conditions only.
+        return len(get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Filter,))) > 0
+
     def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Filter:
             condition = _rewrite_predicate(node.condition, self.telemetry, plan_context=context.plan_context)
