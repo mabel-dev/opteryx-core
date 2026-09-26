@@ -636,7 +636,10 @@ def test_relation_statistics_carry_length_bounds_and_null_fraction():
     _clean_nullable()
     try:
         _run(f"ANALYZE TABLE {NULLABLE_DATASET}")
-        _, manifest = _astronauts_metadata()
+        described, manifest = _astronauts_metadata()
+        # Bound the way binder/dataset.py::visit_scan binds a scan: statistics are
+        # keyed by BOUND column identity, so the manifest reads the bound schema.
+        manifest.schema = PlanContext().columns.bind_relation(described, NULLABLE_DATASET)
         stats = manifest._as_relation_statistics()
 
         column = next(

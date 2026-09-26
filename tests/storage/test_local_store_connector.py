@@ -19,7 +19,7 @@ from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.models.manifest_io import read_manifest_file_entries
 from opteryx.types.logical_type import INT64, TIMESTAMP, VARCHAR
-from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import LogicalColumn
@@ -35,25 +35,22 @@ def connector(tmp_path):
 @pytest.fixture
 def simple_schema():
     """Create a simple test schema."""
-    return RelationSchema(
+    return RelationDescriptor(
         name="events",
         columns=[
-            SchemaColumn(
+            ColumnDescriptor(
                 name="id",
                 column_type=INT64,
-                identity=mint_column_identity("events", "id"),
                 nullable=False,
             ),
-            SchemaColumn(
+            ColumnDescriptor(
                 name="name",
                 column_type=VARCHAR,
-                identity=mint_column_identity("events", "name"),
                 nullable=True,
             ),
-            SchemaColumn(
+            ColumnDescriptor(
                 name="timestamp",
                 column_type=TIMESTAMP(),
-                identity=mint_column_identity("events", "timestamp"),
                 nullable=False,
             ),
         ],

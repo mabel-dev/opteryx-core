@@ -157,12 +157,15 @@ def test_pushed_range_preserves_results():
 def _column(column_type):
     from opteryx.expression import NodeType
     from opteryx.models import LogicalColumn
+    from opteryx.planner.plan_context import PlanContext
     from opteryx.types.schema import FunctionColumn
 
     return LogicalColumn(
         node_type=NodeType.IDENTIFIER,
         source_column="k",
-        schema_column=FunctionColumn(name="k", column_type=column_type, aliases=[]),
+        schema_column=PlanContext().columns.computed(
+            FunctionColumn, "k", column_type=column_type, aliases=[]
+        ),
     )
 
 

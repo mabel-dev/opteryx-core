@@ -5,7 +5,7 @@ import pytest
 
 from opteryx.types import LogicalCategory
 from opteryx.types.logical_type import ARRAY, DECIMAL, FLOAT64, INT64, VARCHAR
-from opteryx.types.schema import ColumnDisposition, ConstantColumn, RelationSchema, SchemaColumn
+from opteryx.types.schema import ColumnDescriptor, ColumnDisposition, ConstantColumn, RelationDescriptor, RelationSchema, SchemaColumn
 
 
 class TestColumnDisposition:
@@ -84,53 +84,55 @@ class TestSchemaColumn:
         assert col.column_type.logical.scale == 2
 
     def test_column_to_dict(self):
-        """Test converting column to dictionary."""
-        col = SchemaColumn(
+        """A column is persisted as its DESCRIPTION - no engine identity."""
+        col = ColumnDescriptor(
             name="test_col",
             column_type=VARCHAR,
-            identity="test_col",
             nullable=False,
             description="Test column",
         )
         col_dict = col.to_dict()
         assert col_dict["name"] == "test_col"
         assert col_dict["type"] == "VARCHAR"
-        assert col_dict["identity"] == "test_col"
+        assert "identity" not in col_dict
         assert col_dict["nullable"] is False
         assert col_dict["description"] == "Test column"
 
     def test_column_from_dict(self):
-        """Test creating column from dictionary."""
+        """A persisted column reads back as a descriptor; a legacy `identity` key
+        (a per-query handle that meant nothing once written) is discarded."""
         col_dict = {
             "name": "test_col",
             "type": "VARCHAR",
             "identity": "test_col",
             "nullable": False,
         }
-        col = SchemaColumn.from_dict(col_dict)
+        col = ColumnDescriptor.from_dict(col_dict)
         assert col.name == "test_col"
         assert col.category == LogicalCategory.VARCHAR
-        assert col.identity == b"test_col"
         assert col.nullable is False
+
+    def test_column_from_dict_refuses_aliases(self):
+        """An alias is binder state; a persisted column carrying one cannot be
+        described, so it is refused rather than dropped."""
+        from opteryx.exceptions import InvalidInternalStateError
+
+        with pytest.raises(InvalidInternalStateError):
+            ColumnDescriptor.from_dict({"name": "c", "type": "VARCHAR", "aliases": ["c1"]})
 
     def test_column_roundtrip(self):
         """Test to_dict/from_dict roundtrip."""
-        original = SchemaColumn(
+        original = ColumnDescriptor(
             name="col1",
             column_type=FLOAT64,
-            identity="col1",
             nullable=True,
             description="Test",
-            aliases=["c1"],
         )
-        col_dict = original.to_dict()
-        restored = SchemaColumn.from_dict(col_dict)
+        restored = ColumnDescriptor.from_dict(original.to_dict())
         assert restored.name == original.name
         assert restored.column_type == original.column_type
-        assert restored.identity == original.identity
         assert restored.nullable == original.nullable
         assert restored.description == original.description
-        assert restored.aliases == original.aliases
 
 
 class TestConstantColumn:
@@ -276,8 +278,8 @@ class TestRelationSchema:
 
     def test_schema_to_dict(self):
         """Test converting schema to dictionary."""
-        col = SchemaColumn(name="id", column_type=INT64, identity="id")
-        schema = RelationSchema(name="users", columns=[col], primary_key="id")
+        col = ColumnDescriptor(name="id", column_type=INT64)
+        schema = RelationDescriptor(name="users", columns=[col], primary_key="id")
         schema_dict = schema.to_dict()
 
         assert schema_dict["name"] == "users"
@@ -295,25 +297,26 @@ class TestRelationSchema:
             ],
             "primary_key": "id",
         }
-        schema = RelationSchema.from_dict(schema_dict)
+        schema = RelationDescriptor.from_dict(schema_dict)
 
         assert schema.name == "users"
-        assert schema.num_columns == 2
+        assert len(schema.columns) == 2
         assert schema.column_names == ["id", "name"]
         assert schema.primary_key == "id"
 
     def test_schema_json_roundtrip(self):
-        """Test to_json/from_json roundtrip."""
-        col1 = SchemaColumn(name="id", column_type=INT64, identity="id")
-        col2 = SchemaColumn(name="name", column_type=VARCHAR, identity="name")
-        original = RelationSchema(name="users", columns=[col1, col2], primary_key="id")
+        """A described relation survives a JSON round trip."""
+        import json
 
-        json_str = original.to_json()
-        assert isinstance(json_str, str)
-        restored = RelationSchema.from_json(json_str)
+        col1 = ColumnDescriptor(name="id", column_type=INT64)
+        col2 = ColumnDescriptor(name="name", column_type=VARCHAR)
+        original = RelationDescriptor(name="users", columns=[col1, col2], primary_key="id")
+
+        json_str = json.dumps(original.to_dict())
+        restored = RelationDescriptor.from_dict(json.loads(json_str))
 
         assert restored.name == original.name
-        assert restored.num_columns == original.num_columns
+        assert len(restored.columns) == len(original.columns)
         assert restored.column_names == original.column_names
         assert restored.primary_key == original.primary_key
 

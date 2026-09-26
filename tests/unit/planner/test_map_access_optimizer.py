@@ -13,7 +13,7 @@ from opteryx.models import QueryTelemetry
 from opteryx.planner.optimizer.strategies.constant_folding import fold_constants
 from opteryx.planner.optimizer.strategies.predicate_ordering import order_predicates
 from opteryx.types.logical_type import ARRAY, INT64, VARCHAR
-from opteryx.types.schema import ConstantColumn, SchemaColumn
+from opteryx.types.schema import SchemaColumn
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
 
@@ -22,7 +22,7 @@ def _literal(value_type, value):
     return Literal(
         type=value_type,
         value=value,
-        schema_column=ConstantColumn(name="literal", column_type=value_type, value=value),
+        schema_column=PlanContext().columns.constant("literal", column_type=value_type, value=value),
     )
 
 
@@ -48,7 +48,7 @@ def test_constant_folding_folds_constant_map_access_expression():
         value="MapAccess",
         left=_literal(ARRAY(INT64), [10, 20, 30]),
         right=_literal(INT64, 1),
-        schema_column=ConstantColumn(name="result", column_type=INT64),
+        schema_column=PlanContext().columns.constant("result", column_type=INT64),
     )
 
     folded = fold_constants(expr, telemetry, plan_context=plan_context)
@@ -75,7 +75,7 @@ def test_predicate_ordering_treats_nested_function_map_access_as_complex():
         value="MapAccess",
         left=split_fn,
         right=_literal(INT64, 0),
-        schema_column=ConstantColumn(name="first_part", column_type=VARCHAR),
+        schema_column=PlanContext().columns.constant("first_part", column_type=VARCHAR),
     )
     complex_condition = Comparison(
         value="Eq",

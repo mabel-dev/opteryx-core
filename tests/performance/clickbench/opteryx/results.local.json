@@ -1,5 +1,5 @@
 make clickbench (9.75s seconds) [256K rg] (26-SEP) [0.92x]
-make clickbench-skene (7.42s) (26-SEP) [0.70x]
+make clickbench-skene (7.35s) (26-SEP) [0.69x]
 
 (125.6 seconds) <- Opteryx 0.26.8
 (11.59 seconds) <- best on clickbench parquet files (26-SEP) [1.09x]

@@ -22,6 +22,7 @@ import pytest
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 from opteryx.connectors.skene_io import skene_aggregate_row_group_statistics
+from opteryx.planner.plan_context import PlanContext
 
 # skene format.h StatFlag
 K_STAT_MIN = 0x1
@@ -316,7 +317,11 @@ def _relation_statistics(dataset):
 
     connector = connector_factory(dataset, telemetry=None)
     table = connector.table_engine(dataset)
-    schema, manifest = table.get_dataset_metadata()
+    described, manifest = table.get_dataset_metadata()
+    # Bound the way binder/dataset.py::visit_scan binds a scan: the statistics
+    # are keyed by BOUND column identity, so the manifest reads the bound schema.
+    schema = PlanContext().columns.bind_relation(described, dataset)
+    manifest.schema = schema
     stats = manifest._as_relation_statistics()
     by_name = {
         column.name: stats.columns.get(column.identity)

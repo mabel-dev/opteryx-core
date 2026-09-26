@@ -11,7 +11,8 @@ from opteryx.exceptions import IncorrectTypeError
 from opteryx.expression import NodeType
 from opteryx.planner.binder.operator_map import determine_type
 from opteryx.types.logical_type import ARRAY, INT64, VARCHAR
-from opteryx.types.schema import ConstantColumn, SchemaColumn
+from opteryx.planner.plan_context import PlanContext
+from opteryx.types.schema import SchemaColumn
 from opteryx.compiled.structures.expressions import LogicalColumn
 
 
@@ -19,7 +20,7 @@ def _literal(value_type, value):
     return Literal(
         type=value_type,
         value=value,
-        schema_column=ConstantColumn(name="literal", column_type=value_type, value=value),
+        schema_column=PlanContext().columns.constant("literal", column_type=value_type, value=value),
     )
 
 
