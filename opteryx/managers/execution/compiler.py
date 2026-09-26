@@ -804,6 +804,9 @@ class _Compiler:
     def __init__(self, plan, nplan, pool=None):
         self.plan = plan
         self.nplan = nplan
+        # The query's PlanContext, carried by the physical plan: every column the
+        # compiler mints goes in the same table planning used.
+        self.plan_context = plan.plan_context
         # Gap #3 Phase 2b: the query's exec CppThreadPool, if constructed early
         # enough to be available at scan-compile time (see compile_to_native /
         # execute_native). Forwarded to open_native_scan_plan so the scan's decode
@@ -818,6 +821,10 @@ class _Compiler:
         self._cts: dict = {}
         self._names: dict = {}
         self._hash_key_ids_cache = None
+        # GROUP BY sinks by plan-node identity -> (sink pipeline, [aggregate output
+        # identity per spec], [spec fn per spec], rows-preserving?). Read by the
+        # HeapSort branch to arm the GROUP BY -> ORDER BY/LIMIT top-k fusion.
+        self._groupby_sinks: dict = {}
         # WP-INSTR (instrument 2): per-scan Source-type selection, keyed by scan
         # node identity. "NativeParquetScanSource" == zero-Python native pull;
         # "StreamingScanSource" == the GIL trampoline. Later work packages assert
@@ -2388,6 +2395,12 @@ class _Compiler:
                        if identity != _GROUPING_ID_IDENTITY]
                 self.nplan.add_select(p2, keep, [out_layout[i] for i in keep])
                 out_layout = [out_layout[i] for i in keep]
+            # Rows-preserving: every group the sink emits reaches the node above —
+            # no HAVING filter, no ROLLUP expansion/GROUPING() ops — which is what
+            # lets a HeapSort above cut the groups inside the sink (top-k fusion).
+            self._groupby_sinks[node.identity] = (
+                p, [spec[0] for spec in specs], [spec[1] for spec in specs],
+                having is None and not set_masks, frozenset(out_layout))
             self._apply_having(p2, having, out_layout)
             return p2, out_layout
 
@@ -2471,6 +2484,7 @@ class _Compiler:
             spec, sink_layout = self._sort_spec(p, node.step.order_by, layout)
             emit, layout = self._emit_subset(node, sink_layout)
             spec, emit, _ = self._narrow_sink_input(p, sink_layout, spec, emit)
+            self._arm_groupby_topk(in_edges[0][0], node.step.order_by, int(limit))
             buf = self.nplan.new_buffer()
             self.nplan.set_topn_sink(p, spec, int(limit), buf, emit)
             p2 = self.nplan.new_pipeline()
@@ -2916,6 +2930,84 @@ class _Compiler:
                 None if extra_read is None
                 else [position[i] if i >= 0 else i for i in extra_read])
 
+    # Aggregates whose grouped result the GROUP BY sink can rank in place (their emit
+    # is a pure read of the lanes). MEDIAN / APPROX_* / ARRAY_AGG / CIDR_AGG are not
+    # ranked there — an ORDER BY on one simply leaves the fusion unarmed.
+    _TOPK_RANKABLE_AGG_FNS = frozenset({
+        "CountStar", "Count", "CountDistinct", "Sum", "Avg", "Min", "Max", "AnyValue",
+        "Stddev", "StddevSamp", "VarPop", "VarSamp", "Corr",
+    })
+
+    def _arm_groupby_topk(self, child_nid, order_by, limit):
+        """GROUP BY -> ORDER BY <aggregate> LIMIT k fusion
+        (docs/GROUPBY_TOPK_FUSION_DESIGN.md).
+
+        When the HeapSort's input is a GROUP BY reached through nothing but pure
+        column selects, and its ORDER BY leads with that GROUP BY's aggregates, the
+        GROUP BY sink is told to emit only each hash partition's top ``limit`` groups.
+        The HeapSort itself is compiled unchanged and still produces the exact
+        answer; this only shrinks what reaches it, sparing the key gather and emit
+        of every group that cannot win.
+
+        A plan-SHAPE decision, made once here. Every condition is about correctness:
+        * rows-preserving GROUP BY (no HAVING, no ROLLUP) — cutting groups before a
+          HAVING could keep ones it removes and drop ones it keeps;
+        * nothing in between EVALUATES anything per row: every projection column
+          is either a GROUP BY output already in the stream (the binder resolves a
+          repeated expression — `COUNT(*)`, a computed key — to that column, and
+          `_add_computed` skips it) or a literal. A real computation evaluated on
+          fewer rows could stop raising an error the unfused plan raises;
+        * the ORDER BY's LEADING keys are rankable aggregates of that GROUP BY
+          (matched by identity — `ORDER BY COUNT(*)` binds to the aggregate's own
+          output); if it continues past them (onto a group key or an expression),
+          groups tied with the k-th on the leading keys are all kept and the
+          HeapSort breaks the tie.
+        """
+        if limit <= 0:
+            return
+        chain = []
+        nid = child_nid
+        node = self.plan[nid]
+        while node.kind == "ProjectionNode":
+            chain.append(node.step)
+            edges = list(self.plan.ingoing_edges(nid))
+            if len(edges) != 1:
+                return
+            nid = edges[0][0]
+            node = self.plan[nid]
+        if node.kind != "GroupedAggregateHashedNode":
+            return
+        entry = self._groupby_sinks.get(node.identity)
+        if entry is None:
+            raise InvalidInternalStateError(
+                "GROUP BY top-k fusion: the GROUP BY below this HeapSort was not "
+                "registered when it compiled")
+        gb_pipeline, spec_identities, spec_fns, rows_preserving, gb_outputs = entry
+        if not rows_preserving:
+            return
+        for step in chain:
+            projected = (list(step.hoisted_columns or []) + list(step.columns or [])
+                         + list(step.passthrough_columns or []))
+            for col in projected:
+                if col.node_type == NodeType.LITERAL:
+                    continue
+                if col.schema_column is None or col.schema_column.identity not in gb_outputs:
+                    return
+        keys = []
+        for col, ascending in order_by:
+            if col.schema_column is None:
+                break
+            identity = col.schema_column.identity
+            if identity not in spec_identities:
+                break
+            spec_index = spec_identities.index(identity)
+            if spec_fns[spec_index] not in self._TOPK_RANKABLE_AGG_FNS:
+                break
+            keys.append((spec_index, bool(ascending)))
+        if not keys:
+            return
+        self.nplan.set_groupby_topk(gb_pipeline, keys, limit, len(keys) < len(order_by))
+
     def _sort_spec(self, p, order_by, layout):
         if not order_by:
             _unsupported("an ORDER BY with no keys")
@@ -3137,7 +3229,7 @@ class _Compiler:
                 # By PHYSICAL name: the Source matches these against each file's
                 # own footer schema, which is file-named. `sc.name` is the same
                 # spelling `read_columns` uses.
-                zone_terms = manifest.ordinal_zone_map_terms(predicates)
+                zone_terms = manifest.ordinal_zone_map_terms(predicates, plan_context=self.plan_context)
         # Columns the optimizer proved are read ONLY through length-answerable
         # operations (LengthOnlyColumnStrategy). This is the identity -> positional
         # translation point — identities do not cross the native boundary — and it
@@ -3391,7 +3483,7 @@ class _Compiler:
         # Filter above still runs, so a row group its bounds exclude holds no row
         # that survives to the answer either way. The terms are a conjunction and
         # every conjunct here is ANDed into the effective WHERE.
-        zone_terms = manifest.ordinal_zone_map_terms(predicates)
+        zone_terms = manifest.ordinal_zone_map_terms(predicates, plan_context=self.plan_context)
 
         # Columns the optimizer proved are read ONLY through length-answerable
         # operations (LengthOnlyColumnStrategy), as the identity -> positional
@@ -5093,8 +5185,8 @@ class _Compiler:
             cast_parameters = []
             if target_ct.logical is not None and target_name == "DECIMAL":
                 cast_parameters = [
-                    build_literal_node(int(target_ct.logical.precision)),
-                    build_literal_node(int(target_ct.logical.scale)),
+                    build_literal_node(int(target_ct.logical.precision), plan_context=self.plan_context),
+                    build_literal_node(int(target_ct.logical.scale), plan_context=self.plan_context),
                 ]
             cast_node = Cast(
                 value=target_name,

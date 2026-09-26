@@ -658,7 +658,7 @@ void PgConnection::startup(const PgConfig& config) {
                 break;
             }
             case 'E': raise_server_error(m.payload, m.len);
-            case 'S': { Reader r(m.payload, m.len); std::string k = r.cstr(); params_[k] = r.cstr(); break; }
+            case 'S': record_parameter_status(m); break;
             case 'K': break;   // BackendKeyData (cancel is not implemented)
             case 'N': break;   // NoticeResponse
             case 'Z': {
@@ -727,6 +727,16 @@ std::vector<PgField> PgConnection::parse_row_description(const Msg& m) {
     return fields;
 }
 
+// ParameterStatus is asynchronous: the protocol lets the server send it at any
+// point in a session (a SET of a reported GUC, a config reload, a pooler moving
+// the session to another backend), so every read loop records it, not just
+// startup.
+void PgConnection::record_parameter_status(const Msg& m) {
+    Reader r(m.payload, m.len);
+    std::string k = r.cstr();
+    params_[k] = r.cstr();
+}
+
 std::vector<PgField> PgConnection::describe(const std::string& sql) {
     if (streaming_) fail("postgres: describe() called while a result stream is open");
     healthy_ = false;  // until we see ReadyForQuery again
@@ -741,6 +751,7 @@ std::vector<PgField> PgConnection::describe(const std::string& sql) {
         Msg m = read_msg();
         switch (m.type) {
             case '1': case 't': case 'n': case 'N': break;   // ParseComplete, ParameterDescription, NoData, Notice
+            case 'S': record_parameter_status(m); break;
             case 'T': fields = parse_row_description(m); break;
             case 'E': pending_error.assign(m.payload, m.payload + m.len); have_error = true; break;
             case 'Z':
@@ -768,6 +779,7 @@ std::vector<std::vector<std::optional<std::string>>> PgConnection::query_text(
         Msg m = read_msg();
         switch (m.type) {
             case '1': case '2': case 'n': case 'N': case 'T': break;
+            case 'S': record_parameter_status(m); break;
             case 'D': {
                 Reader r(m.payload, m.len);
                 const int16_t n = r.i16();
@@ -806,6 +818,7 @@ std::vector<PgField> PgConnection::begin(const std::string& sql,
         Msg m = read_msg();
         switch (m.type) {
             case '1': case '2': case 'N': break;
+            case 'S': record_parameter_status(m); break;
             case 'T': {
                 auto fields = parse_row_description(m);
                 Reader r(m.payload, m.len);
@@ -847,6 +860,7 @@ bool PgConnection::next_row(const uint8_t** payload, size_t* length) {
                 *length = m.len;
                 return true;
             case 'N': break;
+            case 'S': record_parameter_status(m); break;
             case 'C': { Reader r(m.payload, m.len); command_tag_ = r.cstr(); break; }
             case 's': break;                            // PortalSuspended (not used: no row cap)
             case 'E': {

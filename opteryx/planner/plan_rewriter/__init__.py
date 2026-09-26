@@ -39,6 +39,8 @@ __all__ = ["do_plan_rewrite"]
 def do_plan_rewrite(
     plan: LogicalPlan,
     telemetry: QueryTelemetry,
+    *,
+    plan_context,
 ) -> LogicalPlan:
     """
     Apply structural rewrites to the unbound logical plan.
@@ -52,11 +54,13 @@ def do_plan_rewrite(
     Parameters:
         plan: The fully-expanded logical plan.
         telemetry: Query telemetry for timing and diagnostics.
+        plan_context: The query's PlanContext; a rewrite that synthesizes a column
+            mints it there.
 
     Returns:
         The rewritten logical plan, ready for the Binder.
     """
-    rewriter = PlanRewriterVisitor(telemetry)
+    rewriter = PlanRewriterVisitor(telemetry, plan_context)
     # Shared CTE bodies (see relation_resolver) live OUTSIDE the main plan and
     # execute once each — but they are query text like any other and carry the
     # same shapes this pass exists to eliminate (subquery expressions, windows).

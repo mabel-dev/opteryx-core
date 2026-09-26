@@ -102,6 +102,7 @@
 #include "scan_tel.hpp"           // scan_tel::str_* — shape the ENGINE receives
 #include "io_pipeline.hpp"        // rugo::ParquetIOPipeline, MorselRef, ColumnOut, DK_*
 #include "metadata.hpp"           // FileStats, RowGroupStats, ColumnStats
+#include "engine/parquet_footer_map.hpp"  // ParquetFooterMap: shared, never-copied footers
 #include "runtime_bound.hpp"       // RuntimeKeyBound — runtime min/max join filter
 #include "parquet_stat_ordinal.hpp"  // stat_bytes_to_ordinal — footer stats -> draken ordinal
 #include "core/vector_alloc.h"    // draken_vector_from_dense / draken_vector_from_dict
@@ -729,7 +730,7 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
     // NativeScanColumnBuilder base — same arrays, same meaning, shared with the R3
     // latmat Source.
     rugo::ParquetIOPipeline* pipeline;
-    const std::unordered_map<std::string, FileStats>* footer_map;
+    const ParquetFooterMap* footer_map;
     const std::vector<std::pair<std::string, int>>* work_items;
     const std::vector<std::string>* column_names;
     int in_flight_limit;
@@ -776,7 +777,7 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
     void set_runtime_pruned_counter(int64_t* slot) { row_groups_pruned_runtime_ = slot; }
 
     NativeParquetScanSource(rugo::ParquetIOPipeline* pipeline_,
-                            const std::unordered_map<std::string, FileStats>* footer_map_,
+                            const ParquetFooterMap* footer_map_,
                             const std::vector<std::pair<std::string, int>>* work_items_,
                             const std::vector<std::string>* column_names_,
                             int in_flight_limit_,
@@ -828,8 +829,8 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
             // the unbounded frontier and let submit_one fail loud on it.
             if (fit == footer_map->end()) return n_items;
             const size_t rg_idx = static_cast<size_t>((*work_items)[w].second);
-            if (rg_idx >= fit->second.row_groups.size()) return n_items;
-            cumulative += fit->second.row_groups[rg_idx].num_rows;
+            if (rg_idx >= fit->second->row_groups.size()) return n_items;
+            cumulative += fit->second->row_groups[rg_idx].num_rows;
             if (cumulative >= row_limit) return i + 1;
         }
         return n_items;
@@ -871,7 +872,7 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                 auto fit = footer_map->find(path);
                 std::vector<int32_t> ids;
                 if (fit != footer_map->end())
-                    ids = rugo::ParquetIOPipeline::infer_fetch_blocks(fit->second, *column_names);
+                    ids = rugo::ParquetIOPipeline::infer_fetch_blocks(*fit->second, *column_names);
                 pit = per_file.emplace(path, std::move(ids)).first;
             }
             const size_t rg = static_cast<size_t>((*work_items)[i].second);
@@ -916,8 +917,8 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
             auto fit = footer_map->find((*work_items)[i].first);
             if (fit == footer_map->end()) { kept.push_back(i); continue; }
             const size_t rg_idx = static_cast<size_t>((*work_items)[i].second);
-            if (rg_idx >= fit->second.row_groups.size()) { kept.push_back(i); continue; }
-            const RowGroupStats& rg = fit->second.row_groups[rg_idx];
+            if (rg_idx >= fit->second->row_groups.size()) { kept.push_back(i); continue; }
+            const RowGroupStats& rg = fit->second->row_groups[rg_idx];
             bool excluded = false;
             for (size_t b = 0; b < cols.size() && !excluded; ++b) {
                 for (const ColumnStats& cs : rg.columns) {
@@ -971,7 +972,7 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
         for (int u = first; u < last; ++u) {
             const size_t idx = static_cast<size_t>(g.item_index(u));
             const int rg_idx = (*work_items)[idx].second;
-            const RowGroupStats& rg = fit->second.row_groups[static_cast<size_t>(rg_idx)];
+            const RowGroupStats& rg = fit->second->row_groups[static_cast<size_t>(rg_idx)];
             std::vector<ColumnStats> col_stats_vec;
             col_stats_vec.reserve(column_names->size());
             for (const std::string& want : *column_names) {

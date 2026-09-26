@@ -45,6 +45,7 @@ from opteryx.planner.relation_resolver import do_resolve_relations
 from opteryx.planner.sql_rewriter import do_sql_rewrite
 from opteryx.third_party import sqloxide
 from opteryx.types.logical_type import INT64, VARCHAR
+from opteryx.planner.plan_context import PlanContext
 
 # Sources that reach the native kernel — the cast stays a runtime CAST node.
 RUNTIME_SOURCES = [
@@ -62,18 +63,20 @@ FOLDED_SOURCES = [
 
 
 def _logical_plan(sql: str):
+    plan_context = PlanContext()
     telemetry = QueryTelemetry.detached()
     plan, _, ctes = do_logical_planning_phase(
         do_ast_rewriter(
             sqloxide.parse_sql(do_sql_rewrite(sql), _dialect="opteryx"), parameters=[]
-        )[0]
-    )
-    plan = do_resolve_relations(plan, ctes, telemetry)
-    return do_plan_rewrite(plan, telemetry), telemetry
+        )[0], 
+    plan_context=plan_context)
+    plan = do_resolve_relations(plan, ctes, telemetry, plan_context=plan_context)
+    return do_plan_rewrite(plan, telemetry, plan_context=plan_context), telemetry
 
 
 def _build_projection_expression(sql: str):
     """Build the single projected expression, bypassing plan-level projection rules."""
+    plan_context = PlanContext()
     from opteryx.planner.logical_planner import logical_planner_builders
 
     projected = sqloxide.parse_sql(do_sql_rewrite(sql), _dialect="opteryx")[0]["Query"]["body"][
@@ -82,7 +85,7 @@ def _build_projection_expression(sql: str):
     expression = projected.get("UnnamedExpr")
     if expression is None:
         expression = projected["ExprWithAlias"]["expr"]
-    return logical_planner_builders.build(expression)
+    return logical_planner_builders.build(expression, plan_context=plan_context)
 
 
 def _projection(plan, node_type):
@@ -95,13 +98,13 @@ def _projection(plan, node_type):
 
 def _bound_cast_type(sql: str):
     """The bound ColumnType of a runtime CAST node."""
+    plan_context = PlanContext()
     plan, telemetry = _logical_plan(sql)
     bound = do_bind_phase(
         plan,
         execution_context=ExecutionContext(),
         query_id=str(uuid.uuid4()),
-        telemetry=telemetry,
-    )
+        telemetry=telemetry, plan_context=plan_context)
     node = _projection(bound, NodeType.CAST)
     assert node is not None, f"no bound CAST node aliased 'v' for {sql!r}"
     return node.schema_column.column_type

@@ -50,6 +50,7 @@ def _optimized_plan(sql: str):
     Mirrors the optimizer entry path in opteryx/planner/__init__.py so the plan
     we assert on is the same one the physical planner consumes.
     """
+    plan_context = PlanContext()
     telemetry = QueryTelemetry.detached()
     query_id = str(uuid.uuid4())
     ctx = ExecutionContext(access_policies=[{"pattern": "testdata.*", "role": "reader"}])
@@ -57,15 +58,14 @@ def _optimized_plan(sql: str):
     clean = do_sql_rewrite(sql)
     parsed = sqloxide.parse_sql(clean, _dialect="opteryx")
     ast = do_ast_rewriter(parsed, parameters=[])[0]
-    plan, _, ctes = do_logical_planning_phase(ast)
-    plan = do_resolve_relations(plan, ctes, telemetry)
-    plan = do_plan_rewrite(plan, telemetry)
+    plan, _, ctes = do_logical_planning_phase(ast, plan_context=plan_context)
+    plan = do_resolve_relations(plan, ctes, telemetry, plan_context=plan_context)
+    plan = do_plan_rewrite(plan, telemetry, plan_context=plan_context)
     bound = do_bind_phase(
         plan,
         execution_context=ctx,
         query_id=query_id,
-        telemetry=telemetry,
-    )
+        telemetry=telemetry, plan_context=plan_context)
     return do_optimizer(bound, telemetry, PlanContext())
 
 

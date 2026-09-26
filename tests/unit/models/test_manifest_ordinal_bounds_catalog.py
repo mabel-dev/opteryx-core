@@ -37,6 +37,7 @@ from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import DATE, DECIMAL, FLOAT64, INT64, TIMESTAMP, VARCHAR
 from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.planner.plan_context import PlanContext
 
 
 def _manifest(column_type, ordinal_min, ordinal_max, *, bounds_are_ordinal=True):
@@ -71,7 +72,8 @@ def _predicate(op, value, column_type):
 
 
 def _survives(manifest, op, value, column_type):
-    manifest = manifest.prune_files([_predicate(op, value, column_type)])
+    plan_context = PlanContext()
+    manifest = manifest.prune_files([_predicate(op, value, column_type)], plan_context=plan_context)
     return len(manifest.files) == 1
 
 

@@ -26,17 +26,91 @@ there, and the statistics store becomes native.
 
 from typing import TYPE_CHECKING
 from typing import Dict
+from typing import List
 from typing import Optional
 from typing import Tuple
 
 if TYPE_CHECKING:  # annotation only: importing the optimizer package here is a cycle
     from opteryx.planner.optimizer.statistics import RelationStatistics
+    from opteryx.types.schema import SchemaColumn
+
+
+class ColumnTable:
+    """Every bound column of one query, in the order it was minted — a column's
+    `slot` is its position here.
+
+    This is the ONE place a bound column is created (architect ruling
+    2026-09-26, option C): a connector describes its columns without identities,
+    and the query — through this table, reached by every phase from the AST
+    builders to the compiler — mints each column's identity and slot. The
+    identity is the engine's column key (random bytes with a traceable prefix,
+    unchanged by this); the slot is the column's number in its query, the handle
+    the native plan graph will key its column table by.
+
+    A copy of a column that keeps its identity (a binder branch copy, a
+    subclass stripped to a plain column) is the same column and keeps its slot.
+    A copy that takes a NEW identity is a new column, and `remint` makes it.
+    """
+
+    __slots__ = ("_columns",)
+
+    def __init__(self) -> None:
+        self._columns: List["SchemaColumn"] = []
+
+    def __len__(self) -> int:
+        return len(self._columns)
+
+    def _register(self, column):
+        column.slot = len(self._columns)
+        self._columns.append(column)
+        return column
+
+    def relation_column(self, relation: Optional[str], name: str, **fields) -> "SchemaColumn":
+        """A column read from (or produced as) `relation`: identity `rel_col_…`."""
+        from opteryx.types.schema import SchemaColumn
+        from opteryx.types.schema import mint_column_identity
+
+        return self._register(
+            SchemaColumn(name=name, identity=mint_column_identity(relation, name), **fields)
+        )
+
+    def constant(self, name: str, **fields) -> "SchemaColumn":
+        """A constant (literal) column: identity `$const_…`."""
+        from opteryx.types.schema import ConstantColumn
+        from opteryx.types.schema import _mint_tagged_identity
+
+        return self._register(
+            ConstantColumn(name=name, identity=_mint_tagged_identity("$const"), **fields)
+        )
+
+    def computed(self, column_class, name: str, **fields) -> "SchemaColumn":
+        """A computed column (a FunctionColumn or ExpressionColumn): identity
+        `$derived_…`."""
+        from opteryx.types.schema import _mint_tagged_identity
+
+        return self._register(
+            column_class(name=name, identity=_mint_tagged_identity("$derived"), **fields)
+        )
+
+    def remint(self, column, relation: Optional[str]) -> "SchemaColumn":
+        """A copy of `column` that is a NEW column of `relation`: same metadata,
+        fresh identity and slot. `column` is not modified."""
+        import copy
+
+        from opteryx.types.schema import mint_column_identity
+
+        fresh = copy.copy(column)
+        fresh.identity = mint_column_identity(relation, column.name)
+        return self._register(fresh)
 
 
 class PlanContext:
-    __slots__ = ("_statistics", "_cte_statistics", "scan_stats_cache")
+    __slots__ = ("_statistics", "_cte_statistics", "scan_stats_cache", "columns")
 
     def __init__(self) -> None:
+        # The query's bound columns — see ColumnTable. Created with the context at
+        # the start of planning, before anything mints a column.
+        self.columns = ColumnTable()
         self._statistics: Dict[int, Tuple[object, "RelationStatistics"]] = {}
         self._cte_statistics: Dict[str, "RelationStatistics"] = {}
         # Memo of each scan's manifest-derived base statistics, shared by every

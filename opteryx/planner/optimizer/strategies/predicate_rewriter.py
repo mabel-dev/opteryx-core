@@ -154,7 +154,7 @@ def reorder_interval_calc(predicate):
     return predicate.replace(left=date_end, right=new_binary_op)
 
 
-def _rewrite_rlike_to_dfa(predicate, telemetry):
+def _rewrite_rlike_to_dfa(predicate, telemetry, *, plan_context):
     """RLike/NotRLike with a literal pattern: compile the pattern into a byte
     DFA at plan time (RE2's parser only — see vector_dfa_compile.pyx's module
     docstring) and replace the pattern operand with the compiled blob.
@@ -199,7 +199,7 @@ def _rewrite_rlike_to_dfa(predicate, telemetry):
     compiled_blob = compiled_vector_ops.compile_rlike_program(pattern_value)
     if compiled_blob is not None:
         telemetry.optimization_predicate_rewriter_rlike_to_dfa += 1
-        return _with_compiled_pattern(predicate, compiled_blob)
+        return _with_compiled_pattern(predicate, compiled_blob, plan_context=plan_context)
 
     compiled_blob = compiled_vector_ops.compile_rlike_dfa(pattern_value)
     if compiled_blob is None:
@@ -211,7 +211,7 @@ def _rewrite_rlike_to_dfa(predicate, telemetry):
         )
 
     telemetry.optimization_predicate_rewriter_rlike_to_dfa += 1
-    return _with_compiled_pattern(predicate, compiled_blob)
+    return _with_compiled_pattern(predicate, compiled_blob, plan_context=plan_context)
 
 
 def _fresh_literal(literal):
@@ -226,7 +226,7 @@ def _fresh_literal(literal):
     return literal.replace(schema_column=ConstantColumn(name=name))
 
 
-def _with_compiled_pattern(predicate, compiled_blob):
+def _with_compiled_pattern(predicate, compiled_blob, *, plan_context):
     """A NEW RLIKE node whose pattern operand is the compiled blob.
 
     The input pattern literal used to be overwritten with the blob in place, so
@@ -236,8 +236,7 @@ def _with_compiled_pattern(predicate, compiled_blob):
     blob = build_literal_node(
         compiled_blob,
         identity_of=_fresh_literal(predicate.right),
-        suggested_type=_lt.VARBINARY,
-    )
+        suggested_type=_lt.VARBINARY, plan_context=plan_context)
     blob.rlike_compiled = True
     return predicate.replace(right=blob)
 
@@ -1324,7 +1323,7 @@ def _unwrap_ipv4_retag(addr_node):
     return operand
 
 
-def rewrite_cidr_to_range(predicate, telemetry: QueryTelemetry):
+def rewrite_cidr_to_range(predicate, telemetry: QueryTelemetry, *, plan_context):
     """
     Rewrite IPv4 CIDR containment against a LITERAL network into a range.
 
@@ -1421,7 +1420,7 @@ def rewrite_cidr_to_range(predicate, telemetry: QueryTelemetry):
     # edits of the input: it can be held elsewhere, and in a SELECT list its
     # identity is what the projected column is referenced by.
     if prefix == 32:
-        return predicate.replace(value="Eq", left=addr_node, right=build_literal_node(int(base))
+        return predicate.replace(value="Eq", left=addr_node, right=build_literal_node(int(base), plan_context=plan_context)
         )
 
     # A network is a CLOSED interval, so both bounds are inclusive. This is the
@@ -1430,8 +1429,8 @@ def rewrite_cidr_to_range(predicate, telemetry: QueryTelemetry):
     return Between(
         value=(True, True),
         left=addr_node,
-        right=build_literal_node(int(base)),
-        centre=build_literal_node(int(upper)),
+        right=build_literal_node(int(base), plan_context=plan_context),
+        centre=build_literal_node(int(upper), plan_context=plan_context),
         alias=predicate.alias,
         query_column=predicate.query_column,
         schema_column=predicate.schema_column,
@@ -1439,7 +1438,7 @@ def rewrite_cidr_to_range(predicate, telemetry: QueryTelemetry):
     )
 
 
-def rewrite_int_vs_fractional_const(predicate, telemetry: QueryTelemetry):
+def rewrite_int_vs_fractional_const(predicate, telemetry: QueryTelemetry, *, plan_context):
     """
     Rewrite `integer_expr <op> float_literal` to an equivalent integer comparison.
 
@@ -1509,7 +1508,7 @@ def rewrite_int_vs_fractional_const(predicate, telemetry: QueryTelemetry):
         final_op, bound = "LtEq", lo
 
     predicate.left = col_node
-    predicate.right = build_literal_node(int(bound))
+    predicate.right = build_literal_node(int(bound), plan_context=plan_context)
     predicate.value = final_op
     return predicate
 
@@ -1804,17 +1803,17 @@ def _rewrite_case_node(node, telemetry: QueryTelemetry):
     return node
 
 
-def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
+def _rewrite_predicate(predicate, telemetry: QueryTelemetry, *, plan_context):
     if predicate.node_type == NodeType.CASE:
         return _rewrite_case_node(predicate, telemetry)
     if predicate.node_type == NodeType.FUNCTION:
-        return _rewrite_function(predicate, telemetry)
+        return _rewrite_function(predicate, telemetry, plan_context=plan_context)
 
     if predicate.node_type == NodeType.COMPARISON_OPERATOR and predicate.value in (
         "RLike",
         "NotRLike",
     ):
-        return _rewrite_rlike_to_dfa(predicate, telemetry)
+        return _rewrite_rlike_to_dfa(predicate, telemetry, plan_context=plan_context)
 
     # Fuse OR'd LIKE/ILIKE on one column into a single native LIKE ANY, OR'd
     # point tests into one IN-list, OR'd `lit = ANY(col)` into one containment.
@@ -1829,7 +1828,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
         predicate = _prune_false_or_branches(predicate)
         if predicate.node_type == NodeType.NESTED:
             # one survivor: keep the identity-carrying wrapper, rewrite what is inside
-            predicate.centre = _rewrite_predicate(predicate.centre, telemetry)
+            predicate.centre = _rewrite_predicate(predicate.centre, telemetry, plan_context=plan_context)
             return predicate
 
     if predicate.node_type == NodeType.CNF:
@@ -1837,7 +1836,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
         predicate = rewrite_cnf_like_to_any(predicate, telemetry)
         predicate = rewrite_cnf_any_eq_to_contains(predicate, telemetry)
 
-    predicate.map_children(lambda child: _rewrite_predicate(child, telemetry))
+    predicate.map_children(lambda child: _rewrite_predicate(child, telemetry, plan_context=plan_context))
 
     if predicate.node_type not in {NodeType.BINARY_OPERATOR, NodeType.COMPARISON_OPERATOR}:
         # after rewrites, some filters aren't actually predicates
@@ -1863,7 +1862,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
     # May collapse the comparison to a boolean literal (e.g. `id = 4.5` → FALSE),
     # so return early when it is no longer a comparison.
     if predicate.node_type == NodeType.COMPARISON_OPERATOR:
-        predicate = rewrite_int_vs_fractional_const(predicate, telemetry)
+        predicate = rewrite_int_vs_fractional_const(predicate, telemetry, plan_context=plan_context)
         if predicate.node_type != NodeType.COMPARISON_OPERATOR:
             return predicate
 
@@ -1879,7 +1878,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
     # kernel call over every materialised row. Becomes an AND of two bounds
     # (or an Eq for a /32), so return early once it is no longer a comparison.
     if predicate.node_type == NodeType.COMPARISON_OPERATOR:
-        predicate = rewrite_cidr_to_range(predicate, telemetry)
+        predicate = rewrite_cidr_to_range(predicate, telemetry, plan_context=plan_context)
         if predicate.node_type != NodeType.COMPARISON_OPERATOR:
             return predicate
 
@@ -1922,7 +1921,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
                 pattern_bytes = predicate.right.value[:-1].encode()
                 negated = predicate.value in {"NotLike", "NotILike"}
                 func_name = "_CI_STARTS_WITH" if predicate.value in {"ILike", "NotILike"} else "_STARTS_WITH"
-                fn_node = Function(value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes)], schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN))
+                fn_node = Function(value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes, plan_context=plan_context)], schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN))
                 _rebind_function_node(fn_node)
                 predicate = _like_as_function(predicate, fn_node, negated)
             elif (
@@ -1934,7 +1933,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
                 pattern_bytes = predicate.right.value[1:].encode()
                 negated = predicate.value in {"NotLike", "NotILike"}
                 func_name = "_CI_ENDS_WITH" if predicate.value in {"ILike", "NotILike"} else "_ENDS_WITH"
-                fn_node = Function(value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes)], schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN))
+                fn_node = Function(value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes, plan_context=plan_context)], schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN))
                 _rebind_function_node(fn_node)
                 predicate = _like_as_function(predicate, fn_node, negated)
 
@@ -1978,7 +1977,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
                 pattern_bytes = predicate.right.value[:-1]
                 negated = predicate.value in {"NotLike", "NotILike"}
                 func_name = "_CI_STARTS_WITH" if predicate.value in {"ILike", "NotILike"} else "_STARTS_WITH"
-                fn_node = Function(value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes)], schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN))
+                fn_node = Function(value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes, plan_context=plan_context)], schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN))
                 _rebind_function_node(fn_node)
                 predicate = _like_as_function(predicate, fn_node, negated)
             elif (
@@ -1990,7 +1989,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
                 pattern_bytes = predicate.right.value[1:]
                 negated = predicate.value in {"NotLike", "NotILike"}
                 func_name = "_CI_ENDS_WITH" if predicate.value in {"ILike", "NotILike"} else "_ENDS_WITH"
-                fn_node = Function(value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes)], schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN))
+                fn_node = Function(value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes, plan_context=plan_context)], schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN))
                 _rebind_function_node(fn_node)
                 predicate = _like_as_function(predicate, fn_node, negated)
 
@@ -2025,7 +2024,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
             # a directly-written `col = 1.5` would have gone through above —
             # re-enter so it gets the same treatment instead of reaching the
             # native kernel as a raw, unnormalised Eq.
-            return _rewrite_predicate(predicate, telemetry)
+            return _rewrite_predicate(predicate, telemetry, plan_context=plan_context)
 
     if (
         predicate.node_type == NodeType.COMPARISON_OPERATOR
@@ -2145,7 +2144,7 @@ def _concat_chain_type(function):
     return _lt.VARCHAR
 
 
-def _rewrite_function(function, telemetry: QueryTelemetry):
+def _rewrite_function(function, telemetry: QueryTelemetry, *, plan_context):
     def _rebind_function_ref():
         # Rebind the function reference when the function name or parameters have been rewritten.
         # The binder runs before the optimizer, so we must update node.function_ref here.
@@ -2181,7 +2180,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
 
         return compiled_vector_ops.compile_dfa_program(pattern_value, replacement_value)
 
-    def _rewrite_regexp_replace_to_dfa():
+    def _rewrite_regexp_replace_to_dfa(*, plan_context):
         if function.value != "REGEXP_REPLACE" or len(function.parameters) != 3:
             return None
 
@@ -2208,13 +2207,12 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
             build_literal_node(
                 compiled_program,
                 identity_of=_fresh_literal(function.parameters[1]),
-                suggested_type=_lt.VARBINARY,
-            ),
+                suggested_type=_lt.VARBINARY, plan_context=plan_context),
         ]
         _rebind_function_ref()
         return function
 
-    rewritten = _rewrite_regexp_replace_to_dfa()
+    rewritten = _rewrite_regexp_replace_to_dfa(plan_context=plan_context)
     if rewritten is not None:
         return rewritten
 
@@ -2254,7 +2252,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
     # kernel set.
     if function.value == "CONCAT" and len(function.parameters) > 1:
         telemetry.optimization_predicate_rewriter_concat_to_double_pipe += 1
-        function.parameters = [_rewrite_predicate(param, telemetry) for param in function.parameters]
+        function.parameters = [_rewrite_predicate(param, telemetry, plan_context=plan_context) for param in function.parameters]
         _chain_ct = _concat_chain_type(function)
         left_node = _stringify_for_concat(function.parameters[0])
         for param in function.parameters[1:]:
@@ -2271,7 +2269,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
     # as CONCAT above, applied to the separator and every value.
     if function.value == "CONCAT_WS" and len(function.parameters) > 2:
         telemetry.optimization_predicate_rewriter_concatws_to_double_pipe += 1
-        function.parameters = [_rewrite_predicate(param, telemetry) for param in function.parameters]
+        function.parameters = [_rewrite_predicate(param, telemetry, plan_context=plan_context) for param in function.parameters]
         _chain_ct = _concat_chain_type(function)
         separator = _stringify_for_concat(function.parameters[0])
         left_node = _stringify_for_concat(function.parameters[1])
@@ -2304,7 +2302,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
     # dependency (the architect's choice) rather than removing it with a kernel.
     if function.value == "CONCAT_WS" and len(function.parameters) == 2:
         telemetry.optimization_predicate_rewriter_concatws_to_double_pipe += 1
-        function.parameters = [_rewrite_predicate(param, telemetry) for param in function.parameters]
+        function.parameters = [_rewrite_predicate(param, telemetry, plan_context=plan_context) for param in function.parameters]
         _chain_ct = _concat_chain_type(function)
         value_node = _stringify_for_concat(function.parameters[1])
         # The empty literal must carry the CHAIN's string type, not a hardcoded
@@ -2312,11 +2310,11 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
         # with a VARCHAR '' would build the very mixed node this ruling forbids —
         # `CONCAT_WS(b'-', b'a')` would be refused by its own desugaring.
         if _chain_ct is _lt.VARBINARY:
-            _empty = build_literal_node(b"", suggested_type=_lt.VARBINARY)
+            _empty = build_literal_node(b"", suggested_type=_lt.VARBINARY, plan_context=plan_context)
         elif _chain_ct is _lt.NVARCHAR:
-            _empty = build_literal_node("", suggested_type=_lt.NVARCHAR)
+            _empty = build_literal_node("", suggested_type=_lt.NVARCHAR, plan_context=plan_context)
         else:
-            _empty = build_literal_node("", suggested_type=_lt.VARCHAR)
+            _empty = build_literal_node("", suggested_type=_lt.VARCHAR, plan_context=plan_context)
         left_node = BinaryOperator(
             value="StringConcat",
             left=value_node,
@@ -2333,7 +2331,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
 class PredicateRewriteStrategy(OptimizationStrategy):
     def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Filter:
-            condition = _rewrite_predicate(node.condition, self.telemetry)
+            condition = _rewrite_predicate(node.condition, self.telemetry, plan_context=context.plan_context)
             # A Filter's root carries no identity anything reads, and pushdown /
             # compaction key on a BARE root — strip the transparent wrapper an OR
             # collapse leaves (see _prune_false_or_branches), exactly as boolean

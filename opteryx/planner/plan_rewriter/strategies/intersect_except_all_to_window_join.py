@@ -45,7 +45,6 @@ from opteryx.planner.plan_rewriter.strategies._set_op_join_common import live_re
 from opteryx.planner.plan_rewriter.strategies.rewrite_strategy import PlanRewriteContext
 from opteryx.planner.plan_rewriter.strategies.rewrite_strategy import PlanRewriteStrategy
 from opteryx.types import logical_type as _lt
-from opteryx.types.schema import SchemaColumn, mint_column_identity
 from opteryx.utils import random_string
 from opteryx.compiled.structures.expressions import And
 from opteryx.compiled.structures.expressions import Comparison
@@ -96,13 +95,11 @@ def _subtree_scans(plan: LogicalPlan, start_nid: str) -> set:
     return out
 
 
-def _make_window(partition_relation: str, col_names: list):
+def _make_window(partition_relation: str, col_names: list, plan_context):
     """Build a ranking Window node that appends ROW_NUMBER over `col_names`."""
     rn_relation = f"$rownum-{random_string(6)}"
-    rn_column = SchemaColumn(
-        name=_ROW_NUMBER_NAME,
-        column_type=_lt.INT64,
-        identity=mint_column_identity(rn_relation, _ROW_NUMBER_NAME),
+    rn_column = plan_context.columns.relation_column(
+        rn_relation, _ROW_NUMBER_NAME, column_type=_lt.INT64
     )
     window = WindowStep()
     window.partition_by = [
@@ -171,8 +168,8 @@ class IntersectExceptAllToWindowJoinStrategy(PlanRewriteStrategy):
                     right_leg = child
 
             # ROW_NUMBER over all projected columns on each leg.
-            left_window, left_rn_rel = _make_window(live_left[0], col_names)
-            right_window, right_rn_rel = _make_window(live_right[0], col_names)
+            left_window, left_rn_rel = _make_window(live_left[0], col_names, context.plan_context)
+            right_window, right_rn_rel = _make_window(live_right[0], col_names, context.plan_context)
             _insert_window_on_edge(plan, left_leg, nid, left_window)
             _insert_window_on_edge(plan, right_leg, nid, right_window)
 

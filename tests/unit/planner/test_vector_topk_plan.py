@@ -21,6 +21,7 @@ import pytest  # noqa: E402
 
 import opteryx  # noqa: E402
 from opteryx.exceptions import IncompatibleTypesError  # noqa: E402
+from opteryx.planner.plan_context import PlanContext
 
 # Three 2-d vectors and the query vector (1.0, 0.0):
 #   match      (1,0) -> cosine distance 0.0
@@ -161,6 +162,7 @@ def test_embed_literal_vector_sort_renders_vector_heap_sort():
 
 def _cosine_node():
     """A bound COSINE_DISTANCE(CAST(col AS VECTOR(2)), <vector literal>) sort key."""
+    plan_context = PlanContext()
     from opteryx.planner.logical_planner import do_logical_planning_phase
     from opteryx.planner.ast_rewriter import do_ast_rewriter
     from opteryx.planner.sql_rewriter import do_sql_rewrite
@@ -175,9 +177,9 @@ def _cosine_node():
         LIMIT 2
     """
     tokens = sqloxide.parse_sql(do_sql_rewrite(sql), "opteryx")
-    plan, _, _ = do_logical_planning_phase(do_ast_rewriter(tokens, {})[0])
+    plan, _, _ = do_logical_planning_phase(do_ast_rewriter(tokens, {})[0], plan_context=plan_context)
     query_id = "test_vector_topk_mutual_exclusion"
-    bound = do_bind_phase(plan, query_id=query_id, telemetry=QueryTelemetry(query_id))
+    bound = do_bind_phase(plan, query_id=query_id, telemetry=QueryTelemetry(query_id), plan_context=plan_context)
     for _, node in bound.nodes(True):
         if node.node_type == LogicalPlanStepType.Order:
             return node.order_by[0][0]

@@ -24,6 +24,7 @@ from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_ident
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.planner.plan_context import PlanContext
 
 
 def _schema_with_field_ids(names_and_ids):
@@ -115,6 +116,7 @@ def test_get_min_max_from_manifest_does_not_use_positional_min_values_when_field
 
 
 def test_prune_files_resolves_field_id_after_projection_pushdown():
+    plan_context = PlanContext()
     # Reproduce the documented "MAX(followers) answered with MAX(tweet_id)"
     # shape: after projection pushdown, self.schema is pruned down to just
     # `followers` at schema position 0 — but the file's real bounds are keyed
@@ -138,6 +140,6 @@ def test_prune_files_resolves_field_id_after_projection_pushdown():
     literal = Literal(type=INT64, value=100)
     predicate = Comparison(value="Gt", left=identifier, right=literal)
 
-    manifest = manifest.prune_files([predicate])
+    manifest = manifest.prune_files([predicate], plan_context=plan_context)
 
     assert manifest.files == []

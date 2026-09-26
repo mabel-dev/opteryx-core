@@ -28,14 +28,16 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.logical_planner import do_logical_planning_phase
 from opteryx.planner.sql_rewriter import do_sql_rewrite
 from opteryx.third_party.sqloxide import parse_sql
+from opteryx.planner.plan_context import PlanContext
 
 
 def _declared(decl: str):
     """The ColumnType a `CREATE TABLE t (c <decl>)` resolves to."""
+    plan_context = PlanContext()
     rewritten = do_sql_rewrite(f"CREATE TABLE t (c {decl})")
     if isinstance(rewritten, tuple):
         rewritten = rewritten[0]
-    plan, _, _ = do_logical_planning_phase(parse_sql(rewritten, "mysql")[0])
+    plan, _, _ = do_logical_planning_phase(parse_sql(rewritten, "mysql")[0], plan_context=plan_context)
     for _, node in plan.nodes(True):
         if node.node_type == LogicalPlanStepType.CreateRelation:
             return node.schema.columns[0].column_type
@@ -45,6 +47,7 @@ def _declared(decl: str):
 def test_the_reported_syslog_schema_plans():
     """The exact shape that failed: TIMESTAMP[us] parsed as a Custom type and was
     rejected, and NVARCHAR/VARBINARY would have been rejected right behind it."""
+    plan_context = PlanContext()
     sql = """CREATE TABLE personal.bastian.events (
         ingest_time TIMESTAMP[us],
         event_time TIMESTAMP[us],
@@ -58,7 +61,7 @@ def test_the_reported_syslog_schema_plans():
     rewritten = do_sql_rewrite(sql)
     if isinstance(rewritten, tuple):
         rewritten = rewritten[0]
-    plan, _, _ = do_logical_planning_phase(parse_sql(rewritten, "mysql")[0])
+    plan, _, _ = do_logical_planning_phase(parse_sql(rewritten, "mysql")[0], plan_context=plan_context)
     resolved = None
     for _, node in plan.nodes(True):
         if node.node_type == LogicalPlanStepType.CreateRelation:

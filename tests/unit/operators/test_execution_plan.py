@@ -9,13 +9,14 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 from opteryx.models import PhysicalPlan
+from opteryx.planner.plan_context import PlanContext
 
 
 def test_linear_execution_tree():
     """
     Test an execution tree where each item has no more than one incoming edge
     """
-    tree = PhysicalPlan()
+    tree = PhysicalPlan(PlanContext())
     tree.add_node("p", print)
     tree.add_node("m", max)
     tree.add_edge("p", "m")

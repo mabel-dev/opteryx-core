@@ -28,6 +28,7 @@ from opteryx.compute import parse_sql
 from opteryx.compute import restore_ast
 from opteryx.expression import format_expression
 from opteryx.planner.logical_planner.logical_planner_builders import build
+from opteryx.planner.plan_context import PlanContext
 
 
 def _selection(sql: str):
@@ -282,8 +283,9 @@ def test_custom_operators_round_trip_to_reparsable_sql(sql):
 
 def test_round_tripped_predicate_builds_the_same_expression():
     """The spelling must map back to the canonical operator name in the planner."""
+    plan_context = PlanContext()
     sql = "SELECT * FROM t WHERE ip::IPV4 <<= '10.0.0.0/8'"
     stored = restore_ast(parse_sql(sql, "opteryx"))[0]
-    assert format_expression(build(_selection(sql))) == format_expression(
-        build(_selection(stored))
+    assert format_expression(build(_selection(sql), plan_context=plan_context)) == format_expression(
+        build(_selection(stored), plan_context=plan_context)
     )

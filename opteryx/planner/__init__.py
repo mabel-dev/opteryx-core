@@ -65,7 +65,6 @@ from opteryx.types.logical_type import (
     ColumnType,
     LogicalCategory,
 )
-from opteryx.types.schema import ConstantColumn
 from opteryx.planner.plan_context import PlanContext
 from opteryx.compiled.structures.expressions import Literal
 
@@ -76,7 +75,7 @@ from opteryx.compiled.structures.expressions import Literal
 ASIDE_GRAMMAR_ERROR_PREFIX = "OPTERYX-SYNTAX: "
 
 
-def _infer_collection_literal(value: Any):
+def _infer_collection_literal(value: Any, *, plan_context):
     """Return (ColumnType_for_collection, None) for a list/tuple literal.
 
     The element type is embedded in the ARRAY ColumnType; no separate sidecar.
@@ -85,7 +84,7 @@ def _infer_collection_literal(value: Any):
     if not isinstance(value, (list, tuple)) or not value:
         return ARRAY(VARIANT), None
 
-    element_types = {build_literal_node(item).type for item in value if item is not None}
+    element_types = {build_literal_node(item, plan_context=plan_context).type for item in value if item is not None}
     if len(element_types) != 1:
         return ARRAY(VARIANT), None
 
@@ -102,7 +101,7 @@ def _infer_collection_literal(value: Any):
     return ARRAY(element_ct), None
 
 
-def build_literal_node(value: Any, identity_of: Optional[Expression] = None, suggested_type=None):
+def build_literal_node(value: Any, identity_of: Optional[Expression] = None, suggested_type=None, *, plan_context):
     """
     Build a NEW literal node with the appropriate type based on the value.
 
@@ -135,7 +134,7 @@ def build_literal_node(value: Any, identity_of: Optional[Expression] = None, sug
 
     if identity_of is None:
         root = Literal(
-            schema_column=ConstantColumn(name=str(value)),
+            schema_column=plan_context.columns.constant(str(value)),
         )
     else:
         root = Literal(
@@ -161,7 +160,7 @@ def build_literal_node(value: Any, identity_of: Optional[Expression] = None, sug
 
     collection_ct = None
     if suggested_type is None:
-        collection_ct, _ = _infer_collection_literal(value)
+        collection_ct, _ = _infer_collection_literal(value, plan_context=plan_context)
 
     # Define a mapping of Python types to canonical ColumnType instances.
     type_mapping = {
@@ -321,6 +320,8 @@ def bind_statement(
     source_offset: int = 0,
     catalog_cache=None,
     schema_only: bool = False,
+    *,
+    plan_context,
 ):
     """
     Plan `operation` as far as the end of binding, and return the bound plan.
@@ -343,6 +344,8 @@ def bind_statement(
         catalog_cache: opt-in, check-path only. See `opteryx.CatalogCache`.
         schema_only: bind without reading each relation's Manifest. Check-path only -
             the resulting plan cannot be optimized or executed.
+        plan_context: the query's PlanContext — every column the plan gets is
+            minted in it.
     """
     from opteryx.connectors import resolution_scope
 
@@ -363,6 +366,7 @@ def bind_statement(
             telemetry=telemetry,
             catalog_cache=catalog_cache,
             schema_only=schema_only,
+            plan_context=plan_context,
         )
 
 
@@ -373,6 +377,8 @@ def build_logical_plan(
     telemetry,
     catalog_cache=None,
     variables=None,
+    *,
+    plan_context,
 ):
     """
     Rewrite the AST, plan it, expand its relations and rewrite the plan - everything
@@ -413,7 +419,7 @@ def build_logical_plan(
     # `clean_sql` knows both the text the parser saw and the text the reader submitted.
     # The error is re-raised unchanged; only its presentation is filled in.
     try:
-        logical_plan, ast, ctes = do_logical_planning_phase(parsed_statement)  # type: ignore
+        logical_plan, ast, ctes = do_logical_planning_phase(parsed_statement, plan_context=plan_context)  # type: ignore
     except SqlError as error:
         attach_source_position(error, clean_sql)
         raise
@@ -422,12 +428,14 @@ def build_logical_plan(
     # rewriter so the rewriter sees one fully-expanded plan — a subquery inside a view or
     # CTE body is eliminated by the same pass that handles the main query.
     start = time.monotonic_ns()
-    logical_plan = do_resolve_relations(logical_plan, ctes, telemetry, catalog_cache)
+    logical_plan = do_resolve_relations(
+        logical_plan, ctes, telemetry, catalog_cache, plan_context=plan_context
+    )
     telemetry.time_planning_relation_resolver += time.monotonic_ns() - start
 
     # Plan Rewriter: structural rewrites on the unbound, fully-expanded logical plan
     start = time.monotonic_ns()
-    logical_plan = do_plan_rewrite(logical_plan, telemetry)
+    logical_plan = do_plan_rewrite(logical_plan, telemetry, plan_context=plan_context)
     telemetry.time_planning_plan_rewriter += time.monotonic_ns() - start
 
     # check user has permission for this query type
@@ -449,6 +457,8 @@ def bind_logical_plan(
     query_id: str,
     telemetry,
     schema_only: bool = False,
+    *,
+    plan_context,
 ):
     """
     The Binder adds schema information to the logical plan.
@@ -467,6 +477,7 @@ def bind_logical_plan(
             visibility_filters=visibility_filters,
             telemetry=telemetry,
             schema_only=schema_only,
+            plan_context=plan_context,
         )
     except SqlError as error:
         attach_source_position(error, clean_sql)
@@ -487,6 +498,8 @@ def bind_parsed_statement(
     telemetry,
     catalog_cache=None,
     schema_only: bool = False,
+    *,
+    plan_context,
 ):
     """
     Everything from the AST rewriter to the end of binding, on an already-parsed
@@ -499,6 +512,7 @@ def bind_parsed_statement(
         telemetry=telemetry,
         catalog_cache=catalog_cache,
         variables=execution_context.variables,
+        plan_context=plan_context,
     )
     bound_plan = bind_logical_plan(
         logical_plan=logical_plan,
@@ -508,6 +522,7 @@ def bind_parsed_statement(
         query_id=query_id,
         telemetry=telemetry,
         schema_only=schema_only,
+        plan_context=plan_context,
     )
     return bound_plan, clean_sql, ast
 
@@ -546,6 +561,11 @@ def query_planner(
     # physical planner build connectors too, and each of those is another call
     # into the resolver. See `opteryx.connectors.resolution_scope`.
     with resolution_scope():
+        # The query's planning context: its columns (minted by every phase, from the
+        # AST builders on), its estimates and the scan base-statistics memo — shared
+        # by the optimizer, the result-size guard and the billing meter, never across
+        # queries, and never stored on plan nodes.
+        plan_context = PlanContext()
         # Parse, resolve, rewrite and bind - the same path `Session.check` stops at the
         # end of.
         bound_plan, _clean_sql, _ast = bind_statement(
@@ -557,13 +577,10 @@ def query_planner(
             telemetry=telemetry,
             source=source,
             source_offset=source_offset,
+            plan_context=plan_context,
         )
 
         start = time.monotonic_ns()
-        # The query's planning context: estimates and the scan base-statistics
-        # memo, shared by the optimizer, the result-size guard and the billing
-        # meter, never across queries — and never stored on plan nodes.
-        plan_context = PlanContext()
         # Threaded explicitly from here on: Graph copies do not carry instance
         # attributes, so `shared_ctes` on the plan object would not survive an
         # optimizer strategy handing back a copy.
@@ -727,10 +744,14 @@ def execute_logical_plan(
     else:
         conn_context = connection
 
+    # The query's planning context — see query_planner. The caller built the logical
+    # plan outside any query, so the columns it mints from here on are this query's.
+    plan_context = PlanContext()
+
     # Externally-supplied logical plans still reference relations by name, so they go
     # through the same resolver. They carry no CTEs — a CTE only exists in SQL text.
     start = time.monotonic_ns()
-    logical_plan = do_resolve_relations(logical_plan, None, telemetry)
+    logical_plan = do_resolve_relations(logical_plan, None, telemetry, plan_context=plan_context)
     telemetry.time_planning_relation_resolver += time.monotonic_ns() - start
 
     # Must run AFTER relation resolution and BEFORE the binder, exactly as query_planner
@@ -746,7 +767,7 @@ def execute_logical_plan(
     # query text and needs schema to settle), and the DISTINCT forms of INTERSECT/EXCEPT
     # lower in the BINDER. See plan_rewriter/strategies/__init__.py, which is the list.
     start = time.monotonic_ns()
-    logical_plan = do_plan_rewrite(logical_plan, telemetry)
+    logical_plan = do_plan_rewrite(logical_plan, telemetry, plan_context=plan_context)
     telemetry.time_planning_plan_rewriter += time.monotonic_ns() - start
 
     # The Binder adds schema information to the logical plan
@@ -757,11 +778,11 @@ def execute_logical_plan(
         query_id=query_id,
         visibility_filters=visibility_filters,
         telemetry=telemetry,
+        plan_context=plan_context,
     )
     telemetry.time_planning_binder += time.monotonic_ns() - start
 
     start = time.monotonic_ns()
-    plan_context = PlanContext()
     optimized_plan = do_optimizer(bound_plan, telemetry, plan_context)
     telemetry.time_planning_optimizer += time.monotonic_ns() - start
 

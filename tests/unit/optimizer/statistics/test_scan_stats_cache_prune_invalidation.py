@@ -35,6 +35,7 @@ from opteryx.planner.optimizer.statistics_refresh import _scan_stats
 from opteryx.types.logical_type import INT64
 from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.planner.plan_context import PlanContext
 
 
 def _schema():
@@ -75,6 +76,7 @@ def _scan_node(manifest, schema):
 
 
 def test_refresh_after_prune_reflects_pruned_file_set():
+    plan_context = PlanContext()
     schema = _schema()
     manifest = Manifest(
         files=[_file("low", 0, 100, 10), _file("high", 1000, 2000, 20)],
@@ -87,7 +89,7 @@ def test_refresh_after_prune_reflects_pruned_file_set():
     assert before.row_count == 30
 
     # What ManifestPruningStrategy does: copy-on-write prune, re-assign.
-    node.manifest = node.manifest.prune_files([_comparison("Gt", 500)])
+    node.manifest = node.manifest.prune_files([_comparison("Gt", 500)], plan_context=plan_context)
     assert node.manifest.get_file_count() == 1
 
     after = _scan_stats(node, base_stats_cache=cache)
@@ -97,13 +99,14 @@ def test_refresh_after_prune_reflects_pruned_file_set():
 
 
 def test_prune_files_is_copy_on_write():
+    plan_context = PlanContext()
     schema = _schema()
     manifest = Manifest(
         files=[_file("low", 0, 100, 10), _file("high", 1000, 2000, 20)],
         schema=schema,
     )
 
-    pruned = manifest.prune_files([_comparison("Gt", 500)])
+    pruned = manifest.prune_files([_comparison("Gt", 500)], plan_context=plan_context)
 
     # A real prune hands back a NEW object and leaves the original untouched.
     assert pruned is not manifest
@@ -114,7 +117,7 @@ def test_prune_files_is_copy_on_write():
 
     # A prune that removes nothing hands the SAME object back — no epoch
     # churn, no cache invalidation, nothing changed.
-    unpruned = manifest.prune_files([_comparison("Gt", -1)])
+    unpruned = manifest.prune_files([_comparison("Gt", -1)], plan_context=plan_context)
     assert unpruned is manifest
 
 

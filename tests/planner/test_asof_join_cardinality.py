@@ -55,6 +55,7 @@ _CROSS = "SELECT p.name, p2.name FROM $planets AS p CROSS JOIN $planets AS p2"
 
 
 def _bound(sql):
+    plan_context = PlanContext()
     query_id = random_string(32)
     telemetry = QueryTelemetry(query_id)
     bound, _clean_sql, _ast = bind_statement(
@@ -63,8 +64,7 @@ def _bound(sql):
         visibility_filters=None,
         execution_context=ExecutionContext(memberships=["opteryx"]),
         query_id=query_id,
-        telemetry=telemetry,
-    )
+        telemetry=telemetry, plan_context=plan_context)
     plan_context = PlanContext()
     return do_optimizer(bound, telemetry, plan_context, shared_ctes={}), telemetry, plan_context
 

@@ -31,6 +31,7 @@ from draken.draken_native import ipv4_parse
 from opteryx.exceptions import SqlError
 from opteryx.planner.logical_planner import logical_planner_builders as builders
 from opteryx.third_party import sqloxide
+from opteryx.planner.plan_context import PlanContext
 
 # 192.168.1.1 == 0xC0A80101. Octet A occupies bits 31..24 (draken/core/ipv4.h),
 # which is what makes unsigned integer order and IPv4 address order the same.
@@ -47,10 +48,11 @@ STRICT_REJECTIONS = [
 
 def _fold(sql):
     """Return the folded projection Node for a single-expression SELECT."""
+    plan_context = PlanContext()
     ast = sqloxide.parse_sql(sql, _dialect="opteryx")
     projection = ast[0]["Query"]["body"]["Select"]["projection"][0]
     expression = projection.get("UnnamedExpr", projection)
-    return builders.build(expression)
+    return builders.build(expression, plan_context=plan_context)
 
 
 def _values(sql):

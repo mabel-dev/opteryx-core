@@ -25,6 +25,7 @@ from opteryx.planner import execute_logical_plan
 from opteryx.planner.logical_planner import do_logical_planning_phase
 from opteryx.planner.sql_rewriter import do_sql_rewrite
 from opteryx.third_party import sqloxide
+from opteryx.planner.plan_context import PlanContext
 
 # Self-referencing IN-subquery: the shape a view body expands to once the resolver
 # splices it into an externally-supplied plan. The alias is required — a dataset
@@ -36,8 +37,9 @@ IN_SUBQUERY_SQL = (
 
 def _raw_logical_plan(sql):
     """Parse + logical-plan only — deliberately stopping before the rewriter."""
+    plan_context = PlanContext()
     ast = sqloxide.parse_sql(do_sql_rewrite(sql), _dialect="opteryx")
-    result = do_logical_planning_phase(ast[0])
+    result = do_logical_planning_phase(ast[0], plan_context=plan_context)
     return result[0] if isinstance(result, tuple) else next(iter(result))
 
 

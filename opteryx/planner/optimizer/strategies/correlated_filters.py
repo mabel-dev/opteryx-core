@@ -544,7 +544,7 @@ def _comparable_encoding(source_type, target_type) -> bool:
     return source_type == target_type
 
 
-def _range_conditions(target_col, value_range):
+def _range_conditions(target_col, value_range, *, plan_context):
     """Build GtEq/LtEq COMPARISON_OPERATOR condition Nodes pushing *value_range*
     (native, post-filter bounds) onto *target_col*, correctly typed."""
     target_type = _column_type(target_col)
@@ -562,7 +562,7 @@ def _range_conditions(target_col, value_range):
             Comparison(
                 value=operator,
                 left=target_col,
-                right=build_literal_node(bound, suggested_type=target_type),
+                right=build_literal_node(bound, suggested_type=target_type, plan_context=plan_context),
             )
         )
     return conditions
@@ -621,7 +621,7 @@ def _constant_literal_for(plan, start_nid, identity):
     return first
 
 
-def _constant_condition(target_col, literal):
+def _constant_condition(target_col, literal, *, plan_context):
     """`target_col = <literal>` as a scan predicate, or None when *literal*'s value
     has no EXACT spelling in the target's type.
 
@@ -683,7 +683,7 @@ def _constant_condition(target_col, literal):
     return Comparison(
         value="Eq",
         left=target_col,
-        right=build_literal_node(value, suggested_type=target_type),
+        right=build_literal_node(value, suggested_type=target_type, plan_context=plan_context),
     )
 
 
@@ -816,7 +816,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
                 )
                 if literal is None:
                     continue
-                condition = _constant_condition(target_col, literal)
+                condition = _constant_condition(target_col, literal, plan_context=context.plan_context)
                 if condition is None:
                     continue
                 self._push_conditions(
@@ -854,7 +854,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
     def _push_range(self, context, join_node, target_col, value_range, uuid_to_nid):
         """Push *value_range* onto *target_col*'s scan(s): append to the scan's
         predicate list when the connector supports it, else add a Filter node."""
-        conditions = _range_conditions(target_col, value_range)
+        conditions = _range_conditions(target_col, value_range, plan_context=context.plan_context)
         if not conditions:
             return
         self._push_conditions(

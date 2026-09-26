@@ -50,6 +50,7 @@ from opteryx.exceptions import ReadOnlyConnectorError
 from opteryx.exceptions import SqlError
 from opteryx.planner.binder.view import _assert_name_free_in_source
 from opteryx.planner.binder.view import _view_store
+from opteryx.planner.plan_context import PlanContext
 
 
 class DataConnector:
@@ -210,19 +211,21 @@ def test_create_view_is_not_refused_by_a_view_of_the_same_name(clean_registry):
 
 
 def test_a_view_stored_in_the_catalog_entry_is_found_again(clean_registry):
+    plan_context = PlanContext()
     from opteryx.managers.views import resolve_relation
 
     _bind_a_workspace()
     store = view_store_connector("aiven.public.orders_v", telemetry=None)
     store.create_view("aiven.public.orders_v", "SELECT 1 AS one")
 
-    kind, resolved = resolve_relation("aiven.public.orders_v", None)
+    kind, resolved = resolve_relation("aiven.public.orders_v", None, plan_context=plan_context)
 
     assert kind == "view"
     assert resolved is not None
 
 
 def test_a_dataset_answer_from_the_store_is_honoured(clean_registry):
+    plan_context = PlanContext()
     # Regression: the dataset answer used to be dropped whenever the store was
     # not the same OBJECT as connector_factory's, on the assumption that two
     # objects meant two places. Both resolvers pointing at the SAME catalog
@@ -243,7 +246,7 @@ def test_a_dataset_answer_from_the_store_is_honoured(clean_registry):
     store = view_store_connector("cockroach.public.tpch_08", telemetry=None)
     assert store is not data  # same catalog, two cache entries
 
-    kind, obj = resolve_relation("cockroach.public.tpch_08", None)
+    kind, obj = resolve_relation("cockroach.public.tpch_08", None, plan_context=plan_context)
 
     assert kind == "dataset"
     assert obj == "handle-for-cockroach.public.tpch_08"
@@ -265,6 +268,7 @@ def test_a_dataset_answer_for_an_EXTERNAL_catalog_IS_honoured(clean_registry):
     wrong answer reported as success. That protection now lives where the record
     is actually read, and the two tests below pin both halves of it.
     """
+    plan_context = PlanContext()
     from opteryx.managers.views import resolve_relation
 
     class _OurCatalog:
@@ -291,7 +295,7 @@ def test_a_dataset_answer_for_an_EXTERNAL_catalog_IS_honoured(clean_registry):
     store = view_store_connector("polaris_test.interop_ns.people", telemetry=None)
     assert store.catalog_factory is not data.catalog_factory  # two catalogs
 
-    kind, obj = resolve_relation("polaris_test.interop_ns.people", None)
+    kind, obj = resolve_relation("polaris_test.interop_ns.people", None, plan_context=plan_context)
 
     assert kind == "dataset"
     assert obj == "record-for-polaris_test.interop_ns.people"
@@ -306,6 +310,7 @@ def test_a_data_connector_with_no_catalog_still_takes_the_stores_record(clean_re
     `prefetched_table`, and what it does with an incomplete one is pinned in
     tests/unit/connectors/test_postgres_catalog_schema.py.
     """
+    plan_context = PlanContext()
     from opteryx.managers.views import resolve_relation
 
     class _OurCatalog:
@@ -325,7 +330,7 @@ def test_a_data_connector_with_no_catalog_still_takes_the_stores_record(clean_re
     data = connector_factory("aiven.public.orders", telemetry=None)
     assert getattr(data, "catalog_factory", None) is None
 
-    kind, obj = resolve_relation("aiven.public.orders", None)
+    kind, obj = resolve_relation("aiven.public.orders", None, plan_context=plan_context)
 
     assert kind == "dataset"
     assert obj == "record-for-aiven.public.orders"

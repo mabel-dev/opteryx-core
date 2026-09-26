@@ -109,20 +109,31 @@ class OpteryxLocalFileSystem:
         """
         Return a list of file paths under base_dir using compiled disk_reader.
         """
-        paths = []
+        return [info.path for info in self.list_file_infos(base_dir, recursive)]
+
+    def list_file_infos(self, base_dir: str, recursive: bool = True) -> list:
+        """
+        Every file under base_dir with its size and modification time (nanoseconds),
+        from ONE directory walk — the stat the walk already does, so a caller that
+        needs sizes/mtimes never stats the files a second time.
+        """
+        from opteryx.connectors.io_systems._file_info import FileInfoLike
+
+        infos = []
         if not os.path.isdir(base_dir):
-            return paths
+            return infos
 
         if recursive:
-            for entry in list_files_info(base_dir, ()):
-                path, is_dir, is_file, size, mtime = entry
+            for path, is_dir, is_file, size, mtime_ns in list_files_info(base_dir, ()):
                 if is_file:
-                    paths.append(path)
+                    infos.append(FileInfoLike(path=path, size=size, mtime=mtime_ns))
         else:
-            for name, is_dir, is_file, size, mtime in list_directory(base_dir):
+            for name, is_dir, is_file, size, mtime_ns in list_directory(base_dir):
                 if is_file:
-                    paths.append(os.path.join(base_dir, name))
-        return paths
+                    infos.append(
+                        FileInfoLike(path=os.path.join(base_dir, name), size=size, mtime=mtime_ns)
+                    )
+        return infos
 
     def get_file_info(self, paths):
         """

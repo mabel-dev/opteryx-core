@@ -6,7 +6,7 @@
 # parquet_read.pyx cimports:
 #   CppIOPipeline            (to hold a typed reference + call submit_work_native)
 #   _read_footer_payload     (cdef function → sequential footer fetch)
-#   _rg_passes_predicates_native (cdef function → row-group pruning)
+#   (row-group pruning is internal to pool_reader.pyx: _prune_row_groups)
 
 from libc.stdint cimport uint8_t, int32_t, int64_t, uint32_t, uint64_t
 from libc.stddef cimport size_t
@@ -17,7 +17,7 @@ from libcpp.unordered_map cimport unordered_map
 from libcpp.memory cimport shared_ptr
 
 from opteryx.compiled.structures.memory_pool cimport MemoryPool, CppMemoryPool
-from opteryx.compiled.structures.footer_cache cimport ParquetFooterBytesCache
+from opteryx.compiled.structures.footer_cache cimport ParquetFooterBytesCache, ParquetFooterMap, ParquetFooterRef
 from opteryx.compiled.thread_pool cimport CppThreadPool, PriorityPool
 from rugo.parquet_reader cimport ColumnStats, RowGroupStats, FileStats
 
@@ -164,9 +164,9 @@ cdef class CppIOPipeline:
     # stays 0 — its being 0 while ipc_bytes_serialized is large is the evidence
     # the copy is gone. Kept for the harness before/after comparison.
     cdef public uint64_t committed_bytes
-    cdef submit_work_native(self, str cpp_path, int rg_idx, list column_names, RowGroupStats* rg)
-    cdef submit_work_native_masked(self, str cpp_path, int rg_idx, list column_names, RowGroupStats* rg, bytes row_mask)
-    cdef submit_block_native(self, str cpp_path, FileStats* fs, list rg_idxs, list column_names, list row_masks)
+    cdef submit_work_native(self, str cpp_path, int rg_idx, list column_names, const RowGroupStats* rg)
+    cdef submit_work_native_masked(self, str cpp_path, int rg_idx, list column_names, const RowGroupStats* rg, bytes row_mask)
+    cdef submit_block_native(self, str cpp_path, const FileStats* fs, list rg_idxs, list column_names, list row_masks)
 
 
 cdef tuple _read_footer_payload(
@@ -175,7 +175,6 @@ cdef tuple _read_footer_payload(
     ParquetFooterBytesCache footer_cache,
 )
 
-cdef bint _rg_passes_predicates_native(RowGroupStats& rg, list predicates, str cpp_path)
 
 
 # NativeScanPlan — planning-time output for the fully-native (zero-Python)
@@ -183,7 +182,7 @@ cdef bint _rg_passes_predicates_native(RowGroupStats& rg, list predicates, str c
 # docstring in pool_reader.pyx for the scope boundary (first landing).
 cdef class NativeScanPlan:
     cdef ParquetIOPipeline* pipeline_ptr
-    cdef unordered_map[string, FileStats]* footer_map
+    cdef ParquetFooterMap* footer_map
     cdef vector[pair[string, int]] work_items
     cdef vector[string] column_names
     # Per-projected-column declared string DrakenType (parallel to column_names):

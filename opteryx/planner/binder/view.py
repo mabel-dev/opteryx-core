@@ -310,6 +310,9 @@ def _view_output_schema(node, context: BindingContext):
         query_id=context.query_id,
         telemetry=context.telemetry,
         schema_only=True,
+        # the view body is bound inside the CREATE VIEW's own planning, so its
+        # columns are minted in this statement's table
+        plan_context=context.plan_context,
     )
 
     heads = bound_plan.get_exit_points()

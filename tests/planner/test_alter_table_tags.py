@@ -25,12 +25,14 @@ from opteryx.planner.logical_planner import do_logical_planning_phase
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.sql_rewriter import do_sql_rewrite
 from opteryx.third_party import sqloxide
+from opteryx.planner.plan_context import PlanContext
 
 
 def _plan_node(sql: str):
     """The single logical node a tag statement plans to."""
+    plan_context = PlanContext()
     parsed = sqloxide.parse_sql(str(do_sql_rewrite(sql)), _dialect="opteryx")[0]
-    plan = do_logical_planning_phase(parsed)[0]
+    plan = do_logical_planning_phase(parsed, plan_context=plan_context)[0]
     node_ids = list(plan.nodes())
     assert len(node_ids) == 1, "tag DDL is one node"
     return plan[node_ids[0]]

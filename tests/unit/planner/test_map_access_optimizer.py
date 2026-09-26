@@ -15,6 +15,7 @@ from opteryx.planner.optimizer.strategies.predicate_ordering import order_predic
 from opteryx.types.logical_type import ARRAY, INT64, VARCHAR
 from opteryx.types.schema import ConstantColumn, SchemaColumn
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.planner.plan_context import PlanContext
 
 
 def _literal(value_type, value):
@@ -41,6 +42,7 @@ def _filter(condition):
 # builds in logical_planner_builders.json_access. Building it as a BINARY_OPERATOR
 # tests a shape nothing produces, and fails in the bytecode builder.
 def test_constant_folding_folds_constant_map_access_expression():
+    plan_context = PlanContext()
     telemetry = QueryTelemetry("test_map_access_constant_folding")
     expr = ExtractionOperator(
         value="MapAccess",
@@ -49,7 +51,7 @@ def test_constant_folding_folds_constant_map_access_expression():
         schema_column=ConstantColumn(name="result", column_type=INT64),
     )
 
-    folded = fold_constants(expr, telemetry)
+    folded = fold_constants(expr, telemetry, plan_context=plan_context)
 
     assert folded.node_type == NodeType.LITERAL
     assert folded.type == INT64

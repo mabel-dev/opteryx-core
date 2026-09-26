@@ -48,6 +48,7 @@ from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import FLOAT64, INT64
 from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.planner.plan_context import PlanContext
 
 # Bounds over a file whose real values are 0.0 .. 10.0 PLUS one NaN. The NaN is
 # absent from both bounds — that absence is the whole subject.
@@ -140,10 +141,11 @@ def _case(op, ordinalize=None):
 
 @pytest.mark.parametrize("op", UNSOUND)
 def test_float_file_is_kept_for_ops_a_nan_would_satisfy(op):
+    plan_context = PlanContext()
     lower, upper, literal = _case(op)
     manifest = _manifest(FLOAT64, ordinal=False, lower=lower, upper=upper)
 
-    manifest = manifest.prune_files([_comparison(op, literal)])
+    manifest = manifest.prune_files([_comparison(op, literal)], plan_context=plan_context)
 
     assert len(manifest.files) == 1, (
         f"{op} pruned a float file on bounds that cannot see a NaN — a NaN row "
@@ -153,40 +155,43 @@ def test_float_file_is_kept_for_ops_a_nan_would_satisfy(op):
 
 @pytest.mark.parametrize("op", SOUND)
 def test_float_file_still_prunes_for_ops_a_nan_cannot_satisfy(op):
+    plan_context = PlanContext()
     # `< -1.0` / `<= -1.0` / `= 1000.0` are all disproved by [0.0, 10.0], and a
     # NaN satisfies none of them, so the prune is correct and must still happen.
     lower, upper, literal = _case(op)
     manifest = _manifest(FLOAT64, ordinal=False, lower=lower, upper=upper)
 
-    manifest = manifest.prune_files([_comparison(op, literal)])
+    manifest = manifest.prune_files([_comparison(op, literal)], plan_context=plan_context)
 
     assert len(manifest.files) == 0, f"{op} stopped pruning floats — the fix is too wide"
 
 
 @pytest.mark.parametrize("op", UNSOUND + SOUND)
 def test_non_float_columns_are_untouched(op):
+    plan_context = PlanContext()
     # An INT64 column cannot hold a NaN, so every op must still prune. Pinned
     # because a guard written against the wrong thing (all numerics, say) would
     # cost every integer range predicate its pruning and never fail a NaN test.
     lower, upper, literal = _case(op)
     manifest = _manifest(INT64, ordinal=False, lower=int(lower), upper=int(upper))
 
-    manifest = manifest.prune_files([_comparison(op, int(literal))])
+    manifest = manifest.prune_files([_comparison(op, int(literal))], plan_context=plan_context)
 
     assert len(manifest.files) == 0, f"{op} stopped pruning an INT64 column"
 
 
 def test_between_keeps_the_arm_a_nan_cannot_satisfy():
+    plan_context = PlanContext()
     # BETWEEN is two conjuncts. `value BETWEEN 1000.0 AND 2000.0` is disproved
     # ONLY by the `max < lower` half — the unsound one — so the file is kept.
     manifest = _manifest(FLOAT64, ordinal=False)
-    manifest = manifest.prune_files([_between(ABOVE, ABOVE * 2)])
+    manifest = manifest.prune_files([_between(ABOVE, ABOVE * 2)], plan_context=plan_context)
     assert len(manifest.files) == 1, "BETWEEN pruned a float file on the NaN-blind arm"
 
     # `value BETWEEN -20.0 AND -10.0` is disproved by the `min > upper` half,
     # which a NaN cannot affect — that arm must still prune.
     manifest = _manifest(FLOAT64, ordinal=False)
-    manifest = manifest.prune_files([_between(-20.0, -10.0)])
+    manifest = manifest.prune_files([_between(-20.0, -10.0)], plan_context=plan_context)
     assert len(manifest.files) == 0, "BETWEEN lost the sound half of its float pruning"
 
 
@@ -221,11 +226,12 @@ def test_ordinalize_puts_nan_above_every_float():
 
 @pytest.mark.parametrize("op", UNSOUND)
 def test_ordinal_float_bounds_still_prune(op):
+    plan_context = PlanContext()
     # Ordinal bounds DO cover a NaN, so there is nothing to stand down from.
     lower, upper, literal = _case(op, ordinalize=FLOAT64.ordinalize)
     manifest = _manifest(FLOAT64, ordinal=True, lower=lower, upper=upper)
 
-    manifest = manifest.prune_files([_comparison(op, literal)])
+    manifest = manifest.prune_files([_comparison(op, literal)], plan_context=plan_context)
 
     assert len(manifest.files) == 0, (
         f"{op} stopped pruning ordinal float bounds — those bounds rank NaN "

@@ -134,7 +134,7 @@ def _column_type_of(identifier, column_type_for):
 # ---------------------------------------------------------------------------
 
 
-def _comparison_node(identifier, operator: str, value, literal_type) -> Expression:
+def _comparison_node(identifier, operator: str, value, literal_type, *, plan_context) -> Expression:
     """A fully-bound `identifier <operator> literal` node.
 
     Fully bound is not optional: `prune_files` reads `left.source_column` to
@@ -145,11 +145,11 @@ def _comparison_node(identifier, operator: str, value, literal_type) -> Expressi
     return Comparison(
         value=operator,
         left=identifier,
-        right=build_literal_node(value, suggested_type=literal_type),
+        right=build_literal_node(value, suggested_type=literal_type, plan_context=plan_context),
     )
 
 
-def _emit(identifier, interval: Interval, literal_type) -> List[Expression]:
+def _emit(identifier, interval: Interval, literal_type, *, plan_context) -> List[Expression]:
     """Canonical conjuncts for `identifier`'s value lying in `interval`."""
     lower, lower_closed, upper, upper_closed = interval
 
@@ -166,16 +166,16 @@ def _emit(identifier, interval: Interval, literal_type) -> List[Expression]:
         and upper_closed
         and lower == upper
     ):
-        return [_comparison_node(identifier, "Eq", lower, literal_type)]
+        return [_comparison_node(identifier, "Eq", lower, literal_type, plan_context=plan_context)]
 
     emitted = []
     if lower is not None:
         emitted.append(
-            _comparison_node(identifier, "GtEq" if lower_closed else "Gt", lower, literal_type)
+            _comparison_node(identifier, "GtEq" if lower_closed else "Gt", lower, literal_type, plan_context=plan_context)
         )
     if upper is not None:
         emitted.append(
-            _comparison_node(identifier, "LtEq" if upper_closed else "Lt", upper, literal_type)
+            _comparison_node(identifier, "LtEq" if upper_closed else "Lt", upper, literal_type, plan_context=plan_context)
         )
     return emitted
 
@@ -1180,7 +1180,9 @@ def split_conjuncts(predicates: List) -> List:
 
 
 def derive_bound_conjuncts(
-    predicates: List, column_type_for: Optional[Callable[[str], Any]] = None
+    predicates: List, column_type_for: Optional[Callable[[str], Any]] = None,
+    *,
+    plan_context,
 ) -> List:
     """The ANDed terms of `predicates`, PLUS a derived `column <op> literal` for
     every term that confines a column without saying so in that shape.
@@ -1226,7 +1228,7 @@ def derive_bound_conjuncts(
             if column_type is not None and column_type.category in _TEMPORAL_CATEGORIES
             else None
         )
-        derived.extend(_emit(identifier, interval, literal_type))
+        derived.extend(_emit(identifier, interval, literal_type, plan_context=plan_context))
 
     return conjuncts + derived
 
@@ -1284,7 +1286,9 @@ _FOLD_FUNCTIONS = ("LOWER", "UPPER")
 
 
 def derive_case_fold_conjuncts(
-    predicates: List, column_type_for: Optional[Callable[[str], Any]] = None
+    predicates: List, column_type_for: Optional[Callable[[str], Any]] = None,
+    *,
+    plan_context,
 ) -> List[Tuple[str, str, List]]:
     """`(column_name, fold_name, conjuncts)` — bounds that are valid ONLY for a
     file in which `fold_name` is provably the identity on `column_name`.
@@ -1372,7 +1376,7 @@ def derive_case_fold_conjuncts(
             if not _comparable_pair(lower, upper) or lower > upper:
                 continue
 
-        emitted = _emit(identifier, interval, None)
+        emitted = _emit(identifier, interval, None, plan_context=plan_context)
         if emitted:
             derived.append((identifier.source_column, fold, emitted))
 

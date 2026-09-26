@@ -38,6 +38,8 @@ inline std::atomic<long long> distinct_parvi_promotes {0};  // front set overflo
 inline std::atomic<long long> raw_switches {0};     // worker stopped probing its local tables
 inline std::atomic<long long> merge_bucketed {0};   // partitions merged through radix buckets
 inline std::atomic<long long> merge_buckets {0};    // buckets those partitions were split into
+// GROUP BY -> ORDER BY <aggregate> LIMIT k fusion (docs/GROUPBY_TOPK_FUSION_DESIGN.md):
+inline std::atomic<long long> topk_pruned {0};      // merged partitions/buckets cut to their top k
 
 inline void reset() {
     hash_ns.store(0, std::memory_order_relaxed);
@@ -52,6 +54,7 @@ inline void reset() {
     raw_switches.store(0, std::memory_order_relaxed);
     merge_bucketed.store(0, std::memory_order_relaxed);
     merge_buckets.store(0, std::memory_order_relaxed);
+    topk_pruned.store(0, std::memory_order_relaxed);
 }
 
 using Clock = std::chrono::steady_clock;
@@ -76,6 +79,7 @@ inline long long distinct_parvi_promotes_count() { return distinct_parvi_promote
 inline long long raw_switches_count()   { return raw_switches.load(std::memory_order_relaxed); }
 inline long long merge_bucketed_count() { return merge_bucketed.load(std::memory_order_relaxed); }
 inline long long merge_buckets_count()  { return merge_buckets.load(std::memory_order_relaxed); }
+inline long long topk_pruned_count()    { return topk_pruned.load(std::memory_order_relaxed); }
 
 }  // namespace opteryx::engine::groupby_tel
 

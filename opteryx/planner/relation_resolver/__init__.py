@@ -178,7 +178,7 @@ def subplan_rooted_at(plan: LogicalPlan, root_nid: str) -> LogicalPlan:
     return sub
 
 
-def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX):
+def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX, *, plan_context):
     """
     When we include VIEWs and CTEs in a plan, we randomize the name of the
     relations to avoid conflicts.
@@ -292,10 +292,6 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX):
             )
             and node.output_relation
         ):
-            import dataclasses
-
-            from opteryx.types.schema import mint_column_identity
-
             new_rel = f"{node.output_relation.rsplit('-', 1)[0]}-{random_string(6)}"
             node.output_relation = new_rel
             # REPLACE the SchemaColumns rather than mutating them: copy_sub_plan's
@@ -307,10 +303,7 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX):
             node.outputs = [
                 (
                     output[0],
-                    dataclasses.replace(
-                        output[1],
-                        identity=mint_column_identity(new_rel, output[1].name),
-                    ),
+                    plan_context.columns.remint(output[1], new_rel),
                     *output[2:],
                 )
                 for output in node.outputs
@@ -472,13 +465,13 @@ def _boundary_columns(sub_plan: LogicalPlan, head_nid: str, relation: str) -> li
     return list(_output_columns(sub_plan, head_nid) or [Wildcard()])
 
 
-def _splice(plan: LogicalPlan, nid: str, node, sub_plan: LogicalPlan) -> LogicalPlan:
+def _splice(plan: LogicalPlan, nid: str, node, sub_plan: LogicalPlan, *, plan_context) -> LogicalPlan:
     """Replace a Scan node with a sub-plan, in place.
 
     The Scan becomes a Subquery boundary node keeping its alias — that alias is how the
     outer query addresses the expanded relation.
     """
-    sub_plan = rename_relations(sub_plan)
+    sub_plan = rename_relations(sub_plan, plan_context=plan_context)
     sub_plan_head = sub_plan.get_exit_points()[0]
 
     outgoing = plan.outgoing_edges(nid)
@@ -532,6 +525,8 @@ def _resolve(
     cte_names: Optional[Dict[str, str]] = None,
     recursive_defs: Optional[Dict[str, "RecursiveCteDefinition"]] = None,
     relation_memo: Optional[Dict[str, Tuple]] = None,
+    *,
+    plan_context,
 ) -> LogicalPlan:
     """
     Expand every view reference in one plan, resolve every CTE reference to a
@@ -633,8 +628,7 @@ def _resolve(
                                     cte_body_keys=cte_body_keys,
                                     cte_names=cte_names,
                                     recursive_defs=recursive_defs,
-                                    relation_memo=relation_memo,
-                                )
+                                    relation_memo=relation_memo, plan_context=plan_context)
                             )
                         recursive_defs[body_key] = RecursiveCteDefinition(
                             anchor=legs[0],
@@ -675,14 +669,13 @@ def _resolve(
                         cte_body_keys=cte_body_keys,
                         cte_names=cte_names,
                         recursive_defs=recursive_defs,
-                        relation_memo=relation_memo,
-                    )
+                        relation_memo=relation_memo, plan_context=plan_context)
                 node.pending_cte_key = body_key
                 settled.add(nid)
                 continue
             else:
                 kind, resolved = resolve_relation(
-                    relation, telemetry, catalog_cache, memo=relation_memo
+                    relation, telemetry, catalog_cache, memo=relation_memo, plan_context=plan_context
                 )
                 if kind == "view":
                     if relation in path:
@@ -716,7 +709,7 @@ def _resolve(
             for sub_nid in sub_plan.nodes():
                 scopes[sub_nid] = (child_scope, child_path, child_via_view)
 
-            plan = _splice(plan, nid, node, sub_plan)
+            plan = _splice(plan, nid, node, sub_plan, plan_context=plan_context)
             expanded = True
             break  # topology changed — restart the scan
 
@@ -740,8 +733,7 @@ def _resolve(
                 cte_body_keys=cte_body_keys,
                 cte_names=cte_names,
                 recursive_defs=recursive_defs,
-                relation_memo=relation_memo,
-            )
+                relation_memo=relation_memo, plan_context=plan_context)
 
     return plan
 
@@ -852,6 +844,8 @@ def _finalize_cte_sharing(
     registry: Dict[str, LogicalPlan],
     names: Dict[str, str],
     recursive_defs: Optional[Dict[str, RecursiveCteDefinition]] = None,
+    *,
+    plan_context,
 ) -> LogicalPlan:
     """Decide, per CTE definition, between inline expansion and result sharing.
 
@@ -930,7 +924,7 @@ def _finalize_cte_sharing(
             )
         member, nid, node = sites[0]
         node.pending_cte_key = None
-        _splice(member, nid, node, registry.pop(key))
+        _splice(member, nid, node, registry.pop(key), plan_context=plan_context)
 
     # ---- refcount 2+ (and every recursive CTE): shared, materialized once ----
     shared: Dict[str, LogicalPlan] = {}
@@ -1074,6 +1068,8 @@ def do_resolve_relations(
     common_table_expressions: Optional[Dict[str, LogicalPlan]],
     telemetry,
     catalog_cache=None,
+    *,
+    plan_context,
 ) -> LogicalPlan:
     """
     Expand every CTE and view reference in the plan until only real datasets remain.
@@ -1104,6 +1100,5 @@ def do_resolve_relations(
         cte_body_keys=body_keys,
         cte_names=names,
         recursive_defs=recursive_defs,
-        relation_memo=relation_memo,
-    )
-    return _finalize_cte_sharing(plan, registry, names, recursive_defs)
+        relation_memo=relation_memo, plan_context=plan_context)
+    return _finalize_cte_sharing(plan, registry, names, recursive_defs, plan_context=plan_context)

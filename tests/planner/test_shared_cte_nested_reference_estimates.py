@@ -73,6 +73,7 @@ def _optimized(sql):
     """(plan, shared_ctes, plan_context) for `sql`, taken through bind and the optimizer —
     the same two calls `query_planner` makes, stopping before physical planning
     because the property under test lives on the logical reference node."""
+    plan_context = PlanContext()
     query_id = random_string(32)
     telemetry = QueryTelemetry(query_id)
     bound, _clean_sql, _ast = bind_statement(
@@ -81,8 +82,7 @@ def _optimized(sql):
         visibility_filters=None,
         execution_context=ExecutionContext(memberships=["opteryx"]),
         query_id=query_id,
-        telemetry=telemetry,
-    )
+        telemetry=telemetry, plan_context=plan_context)
     shared = getattr(bound, "shared_ctes", None) or {}
     plan_context = PlanContext()
     plan = do_optimizer(bound, telemetry, plan_context, shared_ctes=shared)

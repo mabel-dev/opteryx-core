@@ -27,6 +27,7 @@ from opteryx.planner.logical_planner.logical_planner_builders import (
 )
 from opteryx.planner.sql_rewriter import do_sql_rewrite
 from opteryx.third_party import sqloxide
+from opteryx.planner.plan_context import PlanContext
 
 
 def _rewritten(sql: str) -> str:
@@ -196,6 +197,7 @@ def test_an_at_clause_that_is_not_a_tag_is_refused_by_name():
     syntax by a docstring while every code path raised. The claim is withdrawn:
     there is one spelling for a point-in-time read.
     """
+    plan_context = PlanContext()
     from opteryx.planner.logical_planner.logical_planner_builders import (
         extract_timetravel_timestamp,
     )
@@ -203,5 +205,5 @@ def test_an_at_clause_that_is_not_a_tag_is_refused_by_name():
     version = _parse_version("SELECT * FROM reports AT(TIMESTAMP => '2024-12-15')")
     assert is_tag_clause(version) is False
     with pytest.raises(UnsupportedSyntaxError) as err:
-        extract_timetravel_timestamp(version)
+        extract_timetravel_timestamp(version, plan_context=plan_context)
     assert "TIMESTAMP AS OF" in str(err.value)

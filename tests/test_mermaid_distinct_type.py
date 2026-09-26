@@ -1,4 +1,5 @@
 from opteryx.models.physical_plan import PhysicalPlan
+from opteryx.planner.plan_context import PlanContext
 from opteryx.models.query_properties import QueryProperties
 from opteryx.compiled.structures.plan_steps import DistinctStep
 from opteryx.operators.catalog import get_registry
@@ -6,7 +7,7 @@ from opteryx.utils.mermaid import plan_to_mermaid
 
 
 def test_mermaid_telemetry_marks_distinct_as_aggregate_rel():
-    plan = PhysicalPlan()
+    plan = PhysicalPlan(PlanContext())
     node = get_registry().create_step(
         "Distinct", QueryProperties(query_id="mermaid-distinct", variables={}), DistinctStep()
     )

@@ -3,6 +3,7 @@ import datetime
 from opteryx.connectors.capabilities import Diachronic
 from opteryx.compiled.structures.plan_steps import ScanStep
 from opteryx.planner.binder.binding_context import BindingContext
+from opteryx.planner.plan_context import PlanContext
 from opteryx.planner.binder.common import BinderVisitor
 from opteryx.types.logical_type import INT64
 from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
@@ -41,6 +42,7 @@ def test_binder_sets_diachronic_dates():
         execution_context=SimpleNamespace(memberships=["opteryx"]),
         relations={},
         telemetry=None,
+        plan_context=PlanContext(),
     )
 
     # Monkeypatch the connector_factory so our fake connector is used

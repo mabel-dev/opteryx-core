@@ -965,7 +965,7 @@ _DISPATCH = {
 def create_physical_plan(
     logical_plan, query_properties, plan_context: PlanContext, shared_ctes=None
 ) -> PhysicalPlan:
-    plan = PhysicalPlan()
+    plan = PhysicalPlan(plan_context)
     registry = get_registry()
 
     for nid, logical_node in logical_plan.nodes(data=True):

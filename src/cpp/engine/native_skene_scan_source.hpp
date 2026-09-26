@@ -106,9 +106,12 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <fcntl.h>
@@ -165,6 +168,152 @@ class SkeneFileMapping {
   private:
     void* data_ = nullptr;
     size_t size_ = 0;
+};
+
+// ─── Cross-query reader cache ────────────────────────────────────────────────
+//
+// Opening a .skene file — reading its suffix and parsing the footer — was paid by
+// every scan, serially, inside the claim set's call_once while every other worker
+// waited (measured ~3.8 ms of a 10 ms ClickBench query over 4 files). The engine
+// keeps opened readers across queries instead. skene is not asked to know: the
+// cache, its keying, its budget and its locking are all here.
+//
+// One entry is one opened file: the skene::FileReader (parsed footer, and every
+// column directory any scan has attached), plus the whole-file mapping a v2
+// reader borrows. Scans SHARE the entry through shared_ptr — a skene::FileReader
+// copy would share its parse state anyway — so an entry evicted mid-query lives
+// until the last scan holding it ends.
+//
+// Attaching directories mutates the shared reader. skene's attach writes only the
+// nodes it attaches, and a scan only reads nodes it has attached, so the engine
+// serialises attaches per entry (`attach_mtx`) and records which top-level columns
+// are attached (`attached`, under the same lock). A scan never reads a node another
+// scan is still attaching: it attaches (or finds attached) its own read set under
+// the lock before planning a single read.
+//
+// Keyed by (path, size, mtime): a rewritten file is a different entry, never a
+// stale hit. Budgeted in the ENCODED bytes an entry was built from — its footer
+// plus every attached directory block — because the reader's parsed state is
+// private to skene and reports no size.
+struct SkeneCachedReader {
+    uint16_t                           version = 0;
+    std::unique_ptr<SkeneFileMapping>  mapping;   // v2: the reader borrows it
+    skene::FileReader                  reader;
+    std::mutex                         attach_mtx;
+    std::unordered_set<std::string>    attached;  // top-level columns; under attach_mtx
+};
+
+class SkeneReaderCache {
+  public:
+    static SkeneReaderCache& instance() {
+        static SkeneReaderCache cache;
+        return cache;
+    }
+
+    // Set once from config at engine import (SKENE_FOOTER_CACHE_BYTES).
+    void set_budget(int64_t budget_bytes) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        budget_ = budget_bytes;
+        evict_to(budget_);
+    }
+
+    static std::string key_for(const std::string& path, const struct stat& st) {
+#if defined(__APPLE__)
+        const int64_t mtime_ns = static_cast<int64_t>(st.st_mtimespec.tv_sec) * 1000000000LL +
+                                 st.st_mtimespec.tv_nsec;
+#else
+        const int64_t mtime_ns = static_cast<int64_t>(st.st_mtim.tv_sec) * 1000000000LL +
+                                 st.st_mtim.tv_nsec;
+#endif
+        return path + '\x1f' + std::to_string(static_cast<int64_t>(st.st_size)) + '\x1f' +
+               std::to_string(mtime_ns);
+    }
+
+    // False when no budget was ever configured — the caller fails the scan.
+    bool configured() const {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return budget_ > 0;
+    }
+
+    std::shared_ptr<SkeneCachedReader> get(const std::string& key) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        auto it = map_.find(key);
+        if (it == map_.end()) return nullptr;
+        lru_.splice(lru_.begin(), lru_, it->second.lru);
+        return it->second.entry;
+    }
+
+    // Caches a freshly opened entry charged `bytes`. An entry larger than the whole
+    // budget is not kept (the scan still uses it) and is counted in over_budget.
+    void put(const std::string& key, const std::shared_ptr<SkeneCachedReader>& entry,
+             int64_t bytes) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        auto it = map_.find(key);
+        if (it != map_.end()) {           // a concurrent scan opened it too: replace
+            resident_ -= it->second.bytes;
+            lru_.erase(it->second.lru);
+            map_.erase(it);
+        }
+        if (bytes > budget_) {
+            ++over_budget_;
+            return;
+        }
+        evict_to(budget_ - bytes);
+        lru_.push_front(key);
+        map_.emplace(key, Slot{entry, bytes, lru_.begin()});
+        resident_ += bytes;
+    }
+
+    // Adds `bytes` (directories just attached) to `entry`'s charge while it is still
+    // the cached entry for `key`, evicting others to stay within budget. An entry
+    // the cache no longer holds is only its scans' memory, and is not charged.
+    void charge(const std::string& key, const SkeneCachedReader* entry, int64_t bytes) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        auto it = map_.find(key);
+        if (it == map_.end() || it->second.entry.get() != entry) return;
+        it->second.bytes += bytes;
+        resident_ += bytes;
+        if (it->second.bytes > budget_) {
+            resident_ -= it->second.bytes;
+            lru_.erase(it->second.lru);
+            map_.erase(it);
+            ++over_budget_;
+            return;
+        }
+        lru_.splice(lru_.begin(), lru_, it->second.lru);
+        evict_to(budget_);
+    }
+
+    int64_t resident_bytes() const { std::lock_guard<std::mutex> lk(mtx_); return resident_; }
+    int64_t budget_bytes() const { std::lock_guard<std::mutex> lk(mtx_); return budget_; }
+    int64_t entries() const { std::lock_guard<std::mutex> lk(mtx_); return static_cast<int64_t>(map_.size()); }
+    int64_t over_budget() const { std::lock_guard<std::mutex> lk(mtx_); return over_budget_; }
+
+  private:
+    struct Slot {
+        std::shared_ptr<SkeneCachedReader> entry;
+        int64_t                            bytes = 0;
+        std::list<std::string>::iterator   lru;
+    };
+
+    // Evicts least-recently-used entries until resident <= target. Called under mtx_.
+    // The most-recently-used entry is evicted last, so the entry being charged is
+    // only ever evicted by the over-budget check in charge().
+    void evict_to(int64_t target) {
+        while (resident_ > target && !lru_.empty()) {
+            auto it = map_.find(lru_.back());
+            resident_ -= it->second.bytes;
+            map_.erase(it);
+            lru_.pop_back();
+        }
+    }
+
+    mutable std::mutex                    mtx_;
+    int64_t                               budget_ = 0;
+    int64_t                               resident_ = 0;
+    int64_t                               over_budget_ = 0;
+    std::list<std::string>                lru_;   // front = most recently used
+    std::unordered_map<std::string, Slot> map_;
 };
 
 // Retag an INT64-decoded column to TIMESTAMP64 in place. Payload-preserving by
@@ -497,17 +646,23 @@ inline bool skene_fetch_ranges(int fd, const std::vector<skene::ByteRange>& plan
 }
 
 // One scanned file: a v3 file open for positional reads, or a v2 file mapped.
+// The opened reader is the cross-query cache's entry, shared (see
+// SkeneReaderCache); `cache_key` is its key, for charging directories attached.
 struct SkeneFile {
-    std::string                        path;
-    uint16_t                           version = 0;
-    int                                fd = -1;         // v3
-    std::unique_ptr<SkeneFileMapping>  mapping;         // v2
-    skene::FileReader                  reader;
-    // v3: the end of the file read at open (skene_suffix_bytes) — the tail, the
-    // footer when it fit, and on a small file everything. Never resized after
-    // open, so `held` may point into it for the scan's lifetime.
-    SkeneReadBuffer                    suffix;
-    skene::FetchedRange                held{};
+    std::string                         path;
+    std::string                         cache_key;
+    uint16_t                            version = 0;
+    int                                 fd = -1;         // v3
+    std::shared_ptr<SkeneCachedReader>  cached;
+    // v3, and only when THIS scan opened the file: the end of the file read at
+    // open (skene_suffix_bytes) — the tail, the footer when it fit, and on a small
+    // file everything. Never resized after open, so `held` may point into it for
+    // the scan's lifetime. A scan served from the cache read no suffix and holds
+    // nothing.
+    SkeneReadBuffer                     suffix;
+    skene::FetchedRange                 held{};
+
+    const skene::FileReader& reader() const { return cached->reader; }
 
     SkeneFile() = default;
     SkeneFile(const SkeneFile&) = delete;
@@ -597,7 +752,7 @@ class SkeneClaimSet {
             file.path = files[i];
             if (!open_file(file, err_buf)) return false;
 
-            const skene::FileMetadata& metadata = file.reader.metadata();
+            const skene::FileMetadata& metadata = file.reader().metadata();
             // A file with no row groups cannot be produced by the writer and is
             // rejected by the reader, so reaching here would mean the two
             // disagree — fail rather than silently scan nothing.
@@ -648,7 +803,7 @@ class SkeneClaimSet {
                         // passes themselves plan narrower reads.
                         std::vector<skene::ByteRange> plan;
                         skene::Status status = skene::plan_fetch(
-                            file.reader, read_columns_, {g}, policy_, &plan);
+                            file.reader(), read_columns_, {g}, policy_, &plan);
                         if (!status.is_ok()) {
                             err_buf = "NativeSkeneScanSource: '" + file.path + "': " +
                                       status.message();
@@ -674,6 +829,9 @@ class SkeneClaimSet {
                 if (g < first_block_end) ++first_block_claimed;
             const bool merge_first_block =
                 first_block_rows > 0 && first_block_claimed == first_block_rows;
+            // Null unless THIS scan attached the read set's directories through
+            // block 0 — a reader served from the cache with the read set already
+            // attached fetches no directories, so block 0 is claimed like any other.
             std::shared_ptr<SkeneFetchedBlock> first_block;
             if (!attach_read_set(file, merge_first_block,
                                  merge_first_block ? &first_block : nullptr, err_buf))
@@ -685,7 +843,7 @@ class SkeneClaimSet {
                 const uint32_t block = surviving[k] / G;
                 while (k < surviving.size() && surviving[k] / G == block)
                     claim.row_groups.push_back(surviving[k++]);
-                skene::Status status = skene::plan_fetch(file.reader, read_columns_,
+                skene::Status status = skene::plan_fetch(file.reader(), read_columns_,
                                                          claim.row_groups, policy_,
                                                          &claim.fetch);
                 if (!status.is_ok()) {
@@ -696,7 +854,7 @@ class SkeneClaimSet {
                 // carries them — the directory reads' extra bytes are metadata.
                 for (const skene::ByteRange& r : claim.fetch)
                     bytes_claimed += static_cast<int64_t>(r.bytes);
-                if (block == 0 && merge_first_block) {
+                if (block == 0 && first_block) {
                     claim.prefetched = first_block;
                     claim.fetch.clear();
                 }
@@ -764,12 +922,12 @@ class SkeneClaimSet {
                                  const SkeneFetchedBlock* block, CxxMorsel* out,
                                  std::string& err_buf) const {
         const SkeneFile& f = *files_[file_idx];
-        if (f.version == 2) return skene::read_morsel(f.reader, row_group, options, out);
+        if (f.version == 2) return skene::read_morsel(f.reader(), row_group, options, out);
         if (block != nullptr)
-            return skene::read_morsel(f.reader, row_group, options, block->ranges, out);
+            return skene::read_morsel(f.reader(), row_group, options, block->ranges, out);
         std::vector<skene::ByteRange> plan;
         skene::Status status =
-            skene::plan_fetch(f.reader, options.columns, {row_group}, policy_, &plan);
+            skene::plan_fetch(f.reader(), options.columns, {row_group}, policy_, &plan);
         if (!status.is_ok()) return status;
         SkeneFetchedBlock fetched;
         if (!skene_fetch_ranges(f.fd, plan, f.held, &fetched,
@@ -777,13 +935,21 @@ class SkeneClaimSet {
                                 io_ == nullptr ? nullptr : &io_->bytes_fetched, f.path,
                                 err_buf))
             return skene::Status(skene::Code::kMalformed, err_buf);
-        return skene::read_morsel(f.reader, row_group, options, fetched.ranges, out);
+        return skene::read_morsel(f.reader(), row_group, options, fetched.ranges, out);
     }
 
   private:
-    // Opens `file`: v3 for positional reads (the suffix, then the footer only if
-    // the suffix missed it), v2 mapped whole.
+    // Opens `file`: the descriptor always (v3 reads chunks through it), the reader
+    // from the cross-query cache when this exact file (path, size, mtime) is held,
+    // else by reading the suffix — and the footer only if the suffix missed it — or,
+    // for v2, mapping the file whole. A freshly opened reader is cached.
     bool open_file(SkeneFile& file, std::string& err_buf) {
+        SkeneReaderCache& cache = SkeneReaderCache::instance();
+        if (!cache.configured()) {
+            err_buf = "NativeSkeneScanSource: the skene reader cache has no budget "
+                      "(SKENE_FOOTER_CACHE_BYTES was never applied)";
+            return false;
+        }
         file.fd = ::open(file.path.c_str(), O_RDONLY);
         if (file.fd < 0) {
             err_buf = "NativeSkeneScanSource: cannot open file '" + file.path + "': " +
@@ -794,6 +960,16 @@ class SkeneClaimSet {
         if (::fstat(file.fd, &st) != 0 || st.st_size < static_cast<off_t>(skene::kMinFileBytes)) {
             err_buf = "NativeSkeneScanSource: '" + file.path + "' is too small to be a .skene file";
             return false;
+        }
+        file.cache_key = SkeneReaderCache::key_for(file.path, st);
+        file.cached = cache.get(file.cache_key);
+        if (file.cached) {
+            file.version = file.cached->version;
+            if (file.version == 2) {
+                ::close(file.fd);
+                file.fd = -1;
+            }
+            return true;
         }
         const uint64_t size = static_cast<uint64_t>(st.st_size);
 
@@ -813,22 +989,24 @@ class SkeneClaimSet {
         }
         skene::FileTail parsed_tail;
         std::memcpy(&parsed_tail, tail, sizeof(parsed_tail));
-        file.version = parsed_tail.version;
+        auto entry = std::make_shared<SkeneCachedReader>();
+        entry->version = parsed_tail.version;
+        file.version = entry->version;
 
         if (file.version == 2) {
             ::close(file.fd);
             file.fd = -1;
-            file.mapping = std::make_unique<SkeneFileMapping>(file.path);
-            if (!file.mapping->ok()) {
+            entry->mapping = std::make_unique<SkeneFileMapping>(file.path);
+            if (!entry->mapping->ok()) {
                 err_buf = "NativeSkeneScanSource: cannot map file '" + file.path + "'";
                 return false;
             }
-            status = skene::open_reader(file.mapping->data(), file.mapping->size(),
-                                        &file.reader);
+            status = skene::open_reader(entry->mapping->data(), entry->mapping->size(),
+                                        &entry->reader);
         } else if (footer_offset >= suffix_offset) {
             status = skene::open_reader_ranged(
                 tail, skene::kFileTailBytes, suffix.data() + (footer_offset - suffix_offset),
-                static_cast<size_t>(footer_bytes), footer_offset, size, &file.reader);
+                static_cast<size_t>(footer_bytes), footer_offset, size, &entry->reader);
         } else {
             SkeneReadBuffer footer;
             if (!skene_pread(file.fd, footer_offset, footer_bytes, &footer, file.path, err_buf))
@@ -836,29 +1014,55 @@ class SkeneClaimSet {
             count_metadata(1, static_cast<int64_t>(footer_bytes));
             status = skene::open_reader_ranged(tail, skene::kFileTailBytes, footer.data(),
                                                footer.size(), footer_offset, size,
-                                               &file.reader);
-        }
-        if (status.is_ok() && file.version != 2) {
-            // Kept: whatever else of the file the suffix covers is not re-read.
-            file.suffix = std::move(suffix);
-            file.held = skene::FetchedRange{suffix_offset, suffix_bytes, file.suffix.data()};
+                                               &entry->reader);
         }
         if (!status.is_ok()) {
             err_buf = "NativeSkeneScanSource: '" + file.path + "': " + status.message();
             return false;
         }
+        if (file.version != 2) {
+            // Kept for this scan: whatever else of the file the suffix covers is
+            // not re-read. Not cached — later scans read what they need.
+            file.suffix = std::move(suffix);
+            file.held = skene::FetchedRange{suffix_offset, suffix_bytes, file.suffix.data()};
+        }
+        file.cached = entry;
+        cache.put(file.cache_key, entry, static_cast<int64_t>(footer_bytes));
         return true;
     }
 
-    // Fetches and attaches the read set's directory blocks (v3). With
-    // `through_first_block`, each range runs on through the column's block 0 and
-    // the fetched bytes are handed back in `first_block` for block 0's claim.
+    // Attaches the read set's directory blocks (v3) that no scan has attached to
+    // this reader yet, under the entry's attach lock. With `through_first_block`,
+    // and only when NONE of the read set was attached before, each range runs on
+    // through the column's block 0 and the fetched bytes are handed back in
+    // `first_block` for block 0's claim; otherwise `first_block` is left null.
     bool attach_read_set(SkeneFile& file, bool through_first_block,
                          std::shared_ptr<SkeneFetchedBlock>* first_block,
                          std::string& err_buf) {
-        std::vector<skene::ByteRange> plan;
+        SkeneCachedReader& entry = *file.cached;
+        std::lock_guard<std::mutex> lk(entry.attach_mtx);
+        std::vector<std::string> wanted;
+        if (read_columns_.empty()) {
+            for (const skene::ColumnSchema& c : entry.reader.metadata().columns)
+                wanted.push_back(c.name);
+        } else {
+            wanted = read_columns_;
+        }
+        std::vector<std::string> missing;
+        for (const std::string& name : wanted)
+            if (entry.attached.count(name) == 0) missing.push_back(name);
+        if (missing.empty()) return true;
+        const bool through = through_first_block && missing.size() == wanted.size();
+
+        // The directories' own bytes, for the cache charge: planned without block 0
+        // and merging only touching ranges, so the total is exactly their size.
+        // Planning reads nothing.
+        std::vector<skene::ByteRange> directories;
         skene::Status status = skene::plan_directory_fetch(
-            file.reader, read_columns_, through_first_block, policy_, &plan);
+            entry.reader, missing, false, skene::FetchPolicy{}, &directories);
+        std::vector<skene::ByteRange> plan;
+        if (status.is_ok())
+            status = skene::plan_directory_fetch(entry.reader, missing, through, policy_, &plan);
         if (status.is_ok()) {
             auto fetched = std::make_shared<SkeneFetchedBlock>();
             if (!skene_fetch_ranges(file.fd, plan, file.held, fetched.get(),
@@ -866,13 +1070,19 @@ class SkeneClaimSet {
                                     io_ == nullptr ? nullptr : &io_->bytes_fetched,
                                     file.path, err_buf))
                 return false;
-            status = skene::attach_directories(&file.reader, read_columns_, fetched->ranges);
-            if (status.is_ok() && first_block != nullptr) *first_block = std::move(fetched);
+            status = skene::attach_directories(&entry.reader, missing, fetched->ranges);
+            if (status.is_ok() && through && first_block != nullptr)
+                *first_block = std::move(fetched);
         }
         if (!status.is_ok()) {
             err_buf = "NativeSkeneScanSource: '" + file.path + "': " + status.message();
             return false;
         }
+        int64_t directory_bytes = 0;
+        for (const skene::ByteRange& r : directories)
+            directory_bytes += static_cast<int64_t>(r.bytes);
+        for (const std::string& name : missing) entry.attached.insert(name);
+        SkeneReaderCache::instance().charge(file.cache_key, &entry, directory_bytes);
         return true;
     }
 

@@ -8,8 +8,10 @@ from opteryx.planner.logical_planner import PlanStep
 
 
 class PlanRewriteContext:
-    def __init__(self, plan: LogicalPlan, ctes: dict):
+    def __init__(self, plan: LogicalPlan, ctes: dict, plan_context):
         self.pre_rewrite_tree: LogicalPlan = plan
+        # The query's PlanContext: a strategy that synthesizes a column mints it here.
+        self.plan_context = plan_context
         self.rewritten_plan: LogicalPlan = LogicalPlan()
         self.ctes: dict = ctes
         self.node_id: str | None = None

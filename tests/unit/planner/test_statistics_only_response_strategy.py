@@ -28,6 +28,8 @@ from opteryx.compiled.structures.expressions import Wildcard
 from opteryx.compiled.structures.plan_steps import AggregateStep
 from opteryx.compiled.structures.plan_steps import ExitStep
 from opteryx.compiled.structures.plan_steps import ScanStep
+from opteryx.planner.optimizer.strategies.optimization_strategy import OptimizerContext
+from opteryx.planner.plan_context import PlanContext
 
 def _telemetry():
     return types.SimpleNamespace(optimization_statistics_only_response=0)
@@ -115,7 +117,7 @@ def test_strategy_rewrites_count_star_plan():
     strategy = StatisticsOnlyResponseStrategy(telemetry=_telemetry())
 
     # Run the strategy's complete phase which performs the rewrite
-    rewritten = strategy.complete(plan, None)
+    rewritten = strategy.complete(plan, OptimizerContext(plan, PlanContext()))
 
     # Assert the same plan object is returned
     assert rewritten is plan
@@ -166,7 +168,7 @@ def test_strategy_prunes_manifest():
     scan_node = next(n for _, n in plan.nodes(data=True) if n.node_type == LogicalPlanStepType.Scan)
     assert hasattr(scan_node, "manifest") and scan_node.manifest is not None
 
-    strategy.complete(plan, None)
+    strategy.complete(plan, OptimizerContext(plan, PlanContext()))
 
     # After the rewrite the scan is repointed at the `$one_row` virtual relation and
     # its manifest is dropped entirely — the strategy clears it so a file-based reader
@@ -182,7 +184,7 @@ def test_strategy_no_manifest_leaves_plan_unchanged():
     scan_node.manifest = None
 
     strategy = StatisticsOnlyResponseStrategy(telemetry=_telemetry())
-    rewritten = strategy.complete(plan, None)
+    rewritten = strategy.complete(plan, OptimizerContext(plan, PlanContext()))
 
     # Plan should be unchanged (still has Aggregate node)
     agg_nodes = [n for nid, n in plan.nodes(data=True) if n.node_type == LogicalPlanStepType.Aggregate]

@@ -121,6 +121,10 @@ class SchemaColumn:
     # optional LogicalType descriptor + optional ARRAY element). Deepcopy
     # is safe — LogicalType has __deepcopy__ wired on the nanobind side.
     column_type: Optional[Any] = dataclasses.field(default=None, repr=False, compare=False)
+    # The column's number in its query — its position in the query's ColumnTable
+    # (opteryx/planner/plan_context.py), which is the only thing that sets it.
+    # Not part of the column's value: two columns compare by what they describe.
+    slot: Optional[int] = dataclasses.field(default=None, repr=False, compare=False)
 
     def branch_copy(self, memo: dict) -> "SchemaColumn":
         """Copy for binder branch isolation — see RelationSchema.branch_copy.
@@ -197,6 +201,8 @@ class SchemaColumn:
             disposition=self.disposition,
             aliases=self.aliases,
             origin=self.origin,
+            # The same column, stripped of its subclass: same identity, same slot.
+            slot=self.slot,
         )
         return SchemaColumn(name=self.name, column_type=self.column_type, **common)
 

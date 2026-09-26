@@ -53,6 +53,7 @@ def _rows(sql):
 
 
 def _optimized_plan(sql):
+    plan_context = PlanContext()
     from opteryx.models import ExecutionContext, QueryTelemetry
     from opteryx.planner.ast_rewriter import do_ast_rewriter
     from opteryx.planner.binder import do_bind_phase
@@ -69,10 +70,10 @@ def _optimized_plan(sql):
     ast = do_ast_rewriter(
         sqloxide.parse_sql(do_sql_rewrite(sql), _dialect="opteryx"), parameters=[]
     )[0]
-    plan, _, ctes = do_logical_planning_phase(ast)
-    plan = do_resolve_relations(plan, ctes, telemetry)
-    plan = do_plan_rewrite(plan, telemetry)
-    bound = do_bind_phase(plan, execution_context=ctx, query_id=qid, telemetry=telemetry)
+    plan, _, ctes = do_logical_planning_phase(ast, plan_context=plan_context)
+    plan = do_resolve_relations(plan, ctes, telemetry, plan_context=plan_context)
+    plan = do_plan_rewrite(plan, telemetry, plan_context=plan_context)
+    bound = do_bind_phase(plan, execution_context=ctx, query_id=qid, telemetry=telemetry, plan_context=plan_context)
     return do_optimizer(bound, telemetry, PlanContext()), telemetry
 
 

@@ -48,6 +48,7 @@ from draken.draken_native import TimestampUnit
 from opteryx.types.logical_type import DATE, INT64, TIME, TIMESTAMP, VARCHAR
 from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.planner.plan_context import PlanContext
 
 US_PER_DAY = 86_400_000_000
 
@@ -101,12 +102,13 @@ def _between(lower, upper, literal_type=None, column_name="value"):
 
 
 def _prune(column_type, bounds, predicate, bounds_are_ordinal=False):
+    plan_context = PlanContext()
     manifest = Manifest(
         files=[_file(*bounds)],
         schema=_schema(column_type),
         bounds_are_ordinal=bounds_are_ordinal,
     )
-    manifest = manifest.prune_files([predicate])
+    manifest = manifest.prune_files([predicate], plan_context=plan_context)
     return manifest.files
 
 
@@ -293,6 +295,7 @@ def test_temporal_column_against_non_temporal_literal_is_not_this_guards_busines
 
 
 def test_mixed_predicates_drop_only_the_unsafe_one():
+    plan_context = PlanContext()
     # A query carrying both a safe and an unsafe predicate must keep pruning on
     # the safe one - the guard drops predicates, not pruning.
     manifest = Manifest(
@@ -307,7 +310,7 @@ def test_mixed_predicates_drop_only_the_unsafe_one():
         [
             _comparison("GtEq", US_2025_01_01, literal_type=TIMESTAMP()),  # unsafe, ignored
             _comparison("GtEq", DAY_2025_01_01, literal_type=DATE),  # safe, prunes
-        ]
-    )
+        ], 
+    plan_context=plan_context)
 
     assert [f.file_path for f in manifest.files] == ["in_range"]

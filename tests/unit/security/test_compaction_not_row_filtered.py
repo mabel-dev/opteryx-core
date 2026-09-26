@@ -28,6 +28,7 @@ from opteryx.models import QueryTelemetry
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.logical_planner import apply_visibility_filters
+from opteryx.planner.plan_context import PlanContext
 
 
 def _plan(relation: str, *, compaction: bool) -> LogicalPlan:
@@ -56,33 +57,34 @@ FILTER = [("billing_account", "Eq", "opteryx")]
 )
 def test_filtered_compaction_is_refused(key):
     """Both match paths refuse, because both would narrow the rewrite."""
+    plan_context = PlanContext()
     with pytest.raises(PermissionsError):
         apply_visibility_filters(
             _plan("platform.billing.events", compaction=True),
             {key: FILTER},
-            QueryTelemetry.detached(),
-        )
+            QueryTelemetry.detached(), plan_context=plan_context)
 
 
 def test_deny_all_compaction_is_refused():
     """`[]` is the deny-all and IS a match, so it must refuse rather than
     rewrite the relation as empty - the worst case this exists to prevent."""
+    plan_context = PlanContext()
     with pytest.raises(PermissionsError):
         apply_visibility_filters(
             _plan("platform.billing.events", compaction=True),
             {"platform.billing.*": []},
-            QueryTelemetry.detached(),
-        )
+            QueryTelemetry.detached(), plan_context=plan_context)
 
 
 def test_unfiltered_compaction_is_untouched():
     """The exempt caller's path. `data_admin` lifts the filters at the front
     door, so a permitted compaction arrives here with nothing that matches and
     must proceed - no Filter inserted, nothing raised."""
+    plan_context = PlanContext()
     telemetry = QueryTelemetry.detached()
     plan = _plan("platform.billing.events", compaction=True)
 
-    result = apply_visibility_filters(plan, {"public.security.*": FILTER}, telemetry)
+    result = apply_visibility_filters(plan, {"public.security.*": FILTER}, telemetry, plan_context=plan_context)
 
     assert telemetry.visibility_filters_condition_added == 0
     assert not any(
@@ -93,10 +95,11 @@ def test_unfiltered_compaction_is_untouched():
 def test_an_ordinary_read_is_still_filtered():
     """The refusal is scoped to compaction: row-level security on a SELECT is
     unchanged, or this 'fix' would be a data leak."""
+    plan_context = PlanContext()
     telemetry = QueryTelemetry.detached()
     plan = _plan("platform.billing.events", compaction=False)
 
-    result = apply_visibility_filters(plan, {"platform.billing.*": FILTER}, telemetry)
+    result = apply_visibility_filters(plan, {"platform.billing.*": FILTER}, telemetry, plan_context=plan_context)
 
     assert telemetry.visibility_filters_condition_added == 1
     assert any(

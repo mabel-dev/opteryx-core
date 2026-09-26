@@ -33,6 +33,7 @@ _TPCH = "testdata/tpch_001"
 
 
 def _optimize(sql):
+    plan_context = PlanContext()
     from opteryx.models import ExecutionContext, QueryTelemetry
     from opteryx.planner.ast_rewriter import do_ast_rewriter
     from opteryx.planner.binder import do_bind_phase
@@ -47,10 +48,10 @@ def _optimize(sql):
     ctx = ExecutionContext(access_policies=[{"pattern": "testdata.*", "role": "reader"}])
     parsed = sqloxide.parse_sql(do_sql_rewrite(sql), _dialect="opteryx")
     ast = do_ast_rewriter(parsed, parameters=[])[0]
-    plan, _, ctes = do_logical_planning_phase(ast)
-    plan = do_resolve_relations(plan, ctes, telemetry)
-    plan = do_plan_rewrite(plan, telemetry)
-    bound = do_bind_phase(plan, execution_context=ctx, query_id=str(uuid.uuid4()), telemetry=telemetry)
+    plan, _, ctes = do_logical_planning_phase(ast, plan_context=plan_context)
+    plan = do_resolve_relations(plan, ctes, telemetry, plan_context=plan_context)
+    plan = do_plan_rewrite(plan, telemetry, plan_context=plan_context)
+    bound = do_bind_phase(plan, execution_context=ctx, query_id=str(uuid.uuid4()), telemetry=telemetry, plan_context=plan_context)
     return do_optimizer(bound, telemetry, PlanContext()), telemetry
 
 

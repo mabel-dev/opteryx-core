@@ -15,6 +15,7 @@ A view carries its OWN CTEs. They travel with the plan (see `_view_as_plan`) and
 the scope the resolver uses for the view body — a view never sees the caller's CTEs.
 """
 
+import copy
 from typing import Dict
 from typing import Optional
 from typing import Tuple
@@ -25,19 +26,15 @@ from opteryx.exceptions import DatasetNotFoundError
 from opteryx.utils import lru_cache_with_expiry
 
 
-def _view_plan_from_definition(definition) -> Optional[Tuple[object, Dict[str, object]]]:
+def _view_plan_from_definition(definition, *, plan_context) -> Optional[Tuple[object, Dict[str, object]]]:
     """Build (plan, ctes) for a view definition, or None."""
     if definition is None:
         return None
-    view_plan, view_ctes = _view_as_plan(definition.statement)
-    # Copy the cached plan so downstream mutation doesn't corrupt the cache. The CTE
-    # plans are copied by the resolver at splice time (copy_sub_plan), so they are not
-    # copied here.
-    view_plan = view_plan.copy()
+    view_plan, view_ctes = _view_as_plan(definition.statement, plan_context=plan_context)
     return _bind_row_count_estimate(view_plan, definition.last_row_count), view_ctes
 
 
-def resolve_relation(relation: str, telemetry, catalog_cache=None, memo=None):
+def resolve_relation(relation: str, telemetry, catalog_cache=None, memo=None, *, plan_context):
     """Catalog resolution step: resolve a relation in a single catalog round
     trip, returning one of:
 
@@ -115,7 +112,7 @@ def resolve_relation(relation: str, telemetry, catalog_cache=None, memo=None):
         resolver = getattr(store, "get_relation", None)
         if resolver is None:
             definition = _get_view_definition(relation, telemetry, store)
-            return ("view", _view_plan_from_definition(definition)) if definition else (None, None)
+            return ("view", _view_plan_from_definition(definition, plan_context=plan_context)) if definition else (None, None)
 
         raw = None if memo is None else memo.get(relation)
         if raw is None:
@@ -126,7 +123,7 @@ def resolve_relation(relation: str, telemetry, catalog_cache=None, memo=None):
                 catalog_cache.put(relation, raw)
             if memo is not None:
                 memo[relation] = raw
-        return _finish(store, relation, raw, telemetry)
+        return _finish(store, relation, raw, telemetry, plan_context=plan_context)
     finally:
         # The catalog lookup is a cloud round trip (Firestore), distinct from the GCS
         # manifest/footer fetch timed as time_binding_metadata. Kept separate so the two
@@ -135,7 +132,7 @@ def resolve_relation(relation: str, telemetry, catalog_cache=None, memo=None):
             telemetry.time_binding_catalog += _cat_time.monotonic_ns() - _cat0
 
 
-def _finish(store, relation: str, raw, telemetry):
+def _finish(store, relation: str, raw, telemetry, *, plan_context):
     """Turn a connector's raw ``(kind, obj)`` answer into the resolver's answer.
 
     Run PER REFERENCE, never once per name: a view becomes a fresh plan copy here
@@ -145,7 +142,7 @@ def _finish(store, relation: str, raw, telemetry):
     """
     kind, obj = raw
     if kind == "view":
-        return "view", _view_plan_from_definition(obj)
+        return "view", _view_plan_from_definition(obj, plan_context=plan_context)
     if kind == "dataset":
         # THE CATALOG IS AUTHORITATIVE (architect, 2026-09-17) - see
         # `resolve_relation` for what this replaced and what now guards the case
@@ -226,9 +223,12 @@ def _get_view_definition(view_name: str, telemetry, store=None) -> Optional[View
         return None
 
 
-@lru_cache_with_expiry(maxsize=128, ttl=300)
-def _view_as_plan(view_sql: str) -> tuple:
-    """Return (logical_plan, ctes) for a view's SQL.
+def _view_as_plan(view_sql: str, *, plan_context) -> tuple:
+    """Return (logical_plan, ctes) for a view's SQL, planned into THIS query's context.
+
+    Only the parse is cached (`_parse_view`); planning runs per query because every
+    column a plan carries is minted in the query's own column table (architect,
+    2026-09-26) - a plan cached across queries would carry another query's columns.
 
     The plan is NOT rewritten here. The resolver splices it into the calling query and
     the Plan Rewriter then runs once over the whole expanded plan — so a subquery in a
@@ -238,6 +238,21 @@ def _view_as_plan(view_sql: str) -> tuple:
     resolves the view body against.
     """
     from opteryx.planner.logical_planner import do_logical_planning_phase
+
+    logical_plan, _, view_ctes = do_logical_planning_phase(
+        copy.deepcopy(_parse_view(view_sql)), plan_context=plan_context
+    )
+
+    # views don't have an exit node
+    plan_head = logical_plan.get_exit_points()[0]
+    logical_plan.remove_node(plan_head, True)
+
+    return logical_plan, view_ctes
+
+
+@lru_cache_with_expiry(maxsize=128, ttl=300)
+def _parse_view(view_sql: str) -> dict:
+    """Rewrite and parse a view's SQL. Cached: callers must copy before planning."""
     from opteryx.planner.sql_rewriter import do_sql_rewrite
     from opteryx.third_party import sqloxide
 
@@ -251,13 +266,7 @@ def _view_as_plan(view_sql: str) -> tuple:
         from opteryx.planner.parse_error import raise_parse_error
 
         raise_parse_error(clean_sql, parser_error)
-    logical_plan, _, view_ctes = do_logical_planning_phase(parsed_statements[0])
-
-    # views don't have an exit node
-    plan_head = logical_plan.get_exit_points()[0]
-    logical_plan.remove_node(plan_head, True)
-
-    return logical_plan, view_ctes
+    return parsed_statements[0]
 
 
 def _bind_row_count_estimate(logical_plan: dict, row_count: Optional[int]) -> dict:

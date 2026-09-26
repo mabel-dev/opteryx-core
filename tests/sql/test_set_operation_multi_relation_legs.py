@@ -47,6 +47,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 import opteryx
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.planner.plan_context import PlanContext
 
 # Each leg below self-joins `$planets` on `id`, so it holds exactly the nine planets.
 IDS = list(range(1, 10))
@@ -70,16 +71,17 @@ def join_on_width(sql):
     One per output column is the contract; fewer is a set operation that calls two
     rows equal without having compared them.
     """
+    plan_context = PlanContext()
     from opteryx.models import QueryTelemetry
     from opteryx.planner import bind_logical_plan, build_logical_plan, parse_statement
 
     telemetry = QueryTelemetry("test")
     session = opteryx.session()
     clean_sql, statements = parse_statement(sql)
-    plan, _ = build_logical_plan(statements, clean_sql, None, telemetry)
+    plan, _ = build_logical_plan(statements, clean_sql, None, telemetry, plan_context=plan_context)
     plan = bind_logical_plan(
-        plan, clean_sql, None, session.context, "test", telemetry
-    )
+        plan, clean_sql, None, session.context, "test", telemetry, 
+    plan_context=plan_context)
 
     widths = [
         len(get_all_nodes_of_type(node.on, (NodeType.COMPARISON_OPERATOR,)))

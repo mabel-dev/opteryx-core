@@ -130,6 +130,7 @@ def test_self_comparison_lteq_is_always_true():
 
 
 def _optimized_and_refreshed_scan_row_count(sql):
+    plan_context = PlanContext()
     import uuid
 
     from opteryx.models import ExecutionContext, QueryTelemetry
@@ -151,10 +152,10 @@ def _optimized_and_refreshed_scan_row_count(sql):
     clean = do_sql_rewrite(sql)
     parsed = sqloxide.parse_sql(clean, _dialect="opteryx")
     ast = do_ast_rewriter(parsed, parameters=[])[0]
-    plan, _, ctes = do_logical_planning_phase(ast)
-    plan = do_resolve_relations(plan, ctes, telemetry)
-    plan = do_plan_rewrite(plan, telemetry)
-    bound = do_bind_phase(plan, execution_context=ctx, query_id=query_id, telemetry=telemetry)
+    plan, _, ctes = do_logical_planning_phase(ast, plan_context=plan_context)
+    plan = do_resolve_relations(plan, ctes, telemetry, plan_context=plan_context)
+    plan = do_plan_rewrite(plan, telemetry, plan_context=plan_context)
+    bound = do_bind_phase(plan, execution_context=ctx, query_id=query_id, telemetry=telemetry, plan_context=plan_context)
     plan_context = PlanContext()
     optimized = do_optimizer(bound, telemetry, plan_context)
     refreshed = refresh_statistics(optimized, plan_context)

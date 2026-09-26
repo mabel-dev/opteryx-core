@@ -28,6 +28,7 @@ from opteryx.planner.plan_context import PlanContext
 
 
 def _optimized_plan(sql):
+    plan_context = PlanContext()
     from opteryx.models import ExecutionContext, QueryTelemetry
     from opteryx.planner.ast_rewriter import do_ast_rewriter
     from opteryx.planner.binder import do_bind_phase
@@ -43,15 +44,14 @@ def _optimized_plan(sql):
     ast = do_ast_rewriter(
         sqloxide.parse_sql(do_sql_rewrite(sql), _dialect="opteryx"), parameters=[]
     )[0]
-    plan, _, ctes = do_logical_planning_phase(ast)
-    plan = do_resolve_relations(plan, ctes, telemetry)
-    plan = do_plan_rewrite(plan, telemetry)
+    plan, _, ctes = do_logical_planning_phase(ast, plan_context=plan_context)
+    plan = do_resolve_relations(plan, ctes, telemetry, plan_context=plan_context)
+    plan = do_plan_rewrite(plan, telemetry, plan_context=plan_context)
     bound = do_bind_phase(
         plan,
         execution_context=ctx,
         query_id=str(uuid.uuid4()),
-        telemetry=telemetry,
-    )
+        telemetry=telemetry, plan_context=plan_context)
     return do_optimizer(bound, telemetry, PlanContext())
 
 
@@ -184,13 +184,14 @@ def test_derived_bound_matches_the_target_type(
     """A pushed bound's Python value must match the type the literal is TAGGED
     with — anything else materialises a constant of the wrong physical type and
     the identical-type compare kernel declines it (err_op=11)."""
+    plan_context = PlanContext()
     from opteryx.planner.optimizer.strategies import correlated_filters as cf
     from opteryx.types import logical_type
 
     column_type = getattr(logical_type, column_type_name)
     conditions = cf._range_conditions(
-        _column(column_type), type("R", (), {"upper_bound": upper, "lower_bound": lower})()
-    )
+        _column(column_type), type("R", (), {"upper_bound": upper, "lower_bound": lower})(), 
+    plan_context=plan_context)
     by_op = {c.value: c.right for c in conditions}
     assert by_op["LtEq"].value == expected_upper
     assert type(by_op["LtEq"].value) is type(expected_upper)
@@ -203,6 +204,7 @@ def test_derived_bound_matches_the_target_type(
 def test_derived_bound_is_dropped_when_it_cannot_be_carried():
     """Dropping is always sound — a correlated filter is a derived
     necessary-condition, so a missing bound only forgoes pruning."""
+    plan_context = PlanContext()
     from opteryx.planner.optimizer.strategies import correlated_filters as cf
     from opteryx.types import logical_type
 
@@ -210,8 +212,7 @@ def test_derived_bound_is_dropped_when_it_cannot_be_carried():
     # column's declared scale, rounding in a direction this layer cannot see.
     conditions = cf._range_conditions(
         _column(logical_type.DECIMAL(18, 6)),
-        type("R", (), {"upper_bound": 4.5, "lower_bound": 2.5})(),
-    )
+        type("R", (), {"upper_bound": 4.5, "lower_bound": 2.5})(), plan_context=plan_context)
     assert conditions == []
 
 

@@ -78,6 +78,16 @@ class GcsFile:
         self._data = b""
 
 
+def _rfc3339_to_ns(stamp: str) -> int:
+    """Nanoseconds since the epoch for an RFC 3339 timestamp (the object listing's
+    `updated`). Integer arithmetic, so no float rounding moves the value."""
+    import datetime
+
+    moment = datetime.datetime.fromisoformat(stamp)
+    delta = moment - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+    return (delta // datetime.timedelta(microseconds=1)) * 1000
+
+
 class OpteryxGcsFileSystem:
     """
     Custom GCS filesystem using direct HTTP API for optimal performance.
@@ -188,7 +198,13 @@ class OpteryxGcsFileSystem:
         )
 
     def list_files(self, base_dir: str, recursive: bool = True) -> list:
-        """Return the objects under ``base_dir`` as ``gs://bucket/name`` paths.
+        """The paths of `list_file_infos` — see it for the listing's semantics."""
+        return [info.path for info in self.list_file_infos(base_dir, recursive)]
+
+    def list_file_infos(self, base_dir: str, recursive: bool = True) -> list:
+        """Return the objects under ``base_dir`` as ``gs://bucket/name`` paths, each
+        with the size and update time (nanoseconds) the listing itself carries — so a
+        caller that needs them issues no per-object HEAD.
 
         ``base_dir`` is ``<bucket>/<prefix...>``, with or without a ``gs://`` scheme —
         the first path component is the bucket, matching every other method here.
@@ -210,6 +226,8 @@ class OpteryxGcsFileSystem:
         """
         import json
 
+        from opteryx.connectors.io_systems._file_info import FileInfoLike
+
         path = base_dir[5:] if base_dir.startswith("gs://") else base_dir
         path = path.strip("/")
         if not path:
@@ -222,11 +240,11 @@ class OpteryxGcsFileSystem:
 
         api = f"https://storage.googleapis.com/storage/v1/b/{urllib.parse.quote(bucket, safe='')}/o"
         bearer = self._bearer
-        blobs: List[str] = []
+        blobs: list = []
         page_token = None
 
         while True:
-            params = {"prefix": prefix, "fields": "items(name),nextPageToken"}
+            params = {"prefix": prefix, "fields": "items(name,size,updated),nextPageToken"}
             if not recursive:
                 # GCS is flat; a delimiter is what makes a listing non-recursive.
                 params["delimiter"] = "/"
@@ -245,7 +263,13 @@ class OpteryxGcsFileSystem:
                 # Skip the zero-byte placeholder objects the console creates for "folders" —
                 # they are not readable data files.
                 if name and not name.endswith("/"):
-                    blobs.append(f"gs://{bucket}/{name}")
+                    blobs.append(
+                        FileInfoLike(
+                            path=f"gs://{bucket}/{name}",
+                            size=int(item["size"]),
+                            mtime=_rfc3339_to_ns(item["updated"]),
+                        )
+                    )
 
             page_token = payload.get("nextPageToken")
             if not page_token:

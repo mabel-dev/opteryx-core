@@ -14,7 +14,7 @@ LRU caches for Parquet footer data.
 ParquetFooterBytesCache  — raw footer envelope bytes (16 MB MemoryPool).
                            Avoids repeated network/disk fetches.
 
-ParquetParsedFooterCache — parsed FileStats structs (≈64 MB, 512 entries).
+ParquetParsedFooterCache — parsed FileStats structs, shared by reference, byte-budgeted.
                            Avoids repeated Thrift deserialization.
 
 Both caches are keyed by the canonical file path (not signed URLs).
@@ -23,7 +23,9 @@ Files are immutable, so cached entries never go stale.
 
 import threading
 from libc.stdint cimport int64_t, uint8_t
+from libcpp.memory cimport make_shared
 from libcpp.unordered_map cimport unordered_map
+from libcpp.utility cimport move
 from libcpp.string cimport string
 from cython.operator cimport dereference as deref
 
@@ -165,27 +167,40 @@ cdef class ParquetFooterBytesCache:
 
 
 cdef class ParquetParsedFooterCache:
-    """LRU cache for parsed Parquet FileStats structs.
+    """Byte-budgeted LRU cache of parsed Parquet footers, shared by reference.
 
     Caches the result of Thrift deserialization so repeated reads of the same
-    file skip parsing entirely. Holds up to max_entries (default 512) parsed
-    footers — approximately 64 MB assuming ~128 KB per FileStats.
+    file skip parsing entirely. Entries are `shared_ptr<const FileStats>`
+    (src/cpp/engine/parquet_footer_map.hpp): `get` hands the caller a reference,
+    never a copy, and a scan plan holding one keeps the footer alive past its
+    eviction. Nothing is copied per query.
+
+    The budget bounds what the CACHE keeps resident, charged at each footer's
+    parsed size (`parquet_footer_bytes`). Inserting evicts least-recently-used
+    entries until the new one fits. A footer larger than the whole budget is not
+    kept — the caller still gets its reference for the query — and is counted in
+    `stats()["over_budget"]`. A footer pinned only by a running query is that
+    query's memory, not the cache's.
 
     Files are immutable; cached entries never go stale.
 
     Thread-safe. Process-global singleton (_PARSED_FOOTER_CACHE in pool_reader).
-    All methods that touch the C++ unordered_map run under _lock.
-
-    try_get / put_fs are cdef (Cython-only) because FileStats is a C++ struct.
+    All methods that touch the C++ maps run under the native mutex.
     """
 
-    def __cinit__(self, int max_entries=512):
+    def __cinit__(self, int64_t budget_bytes):
+        if budget_bytes <= 0:
+            raise ValueError(
+                f"ParquetParsedFooterCache budget must be positive, got {budget_bytes}"
+            )
         self.lru = LRU_K(k=1, max_memory=0, max_size=0)
-        self._max_entries = max_entries
-        # Native std::mutex (not a Python threading.Lock): it guards a C++
-        # unordered_map + the C++ LRU2, and every critical section below runs
-        # nogil. A Python lock here would force GIL-held access and give no
-        # protection once footer lookups move onto a GIL-free native path.
+        self._budget_bytes = budget_bytes
+        self._resident_bytes = 0
+        self._over_budget = 0
+        # Native std::mutex (not a Python threading.Lock): it guards C++ maps + the
+        # C++ LRU2, and every critical section below runs nogil. A Python lock here
+        # would force GIL-held access and give no protection once footer lookups
+        # move onto a GIL-free native path.
         self._mutex = new cpp_mutex()
 
     def __dealloc__(self):
@@ -193,51 +208,30 @@ cdef class ParquetParsedFooterCache:
             del self._mutex
             self._mutex = NULL
 
-    cdef bint try_get(self, str path, FileStats* out):
-        """Return True and copy the cached FileStats into *out, else False."""
+    cdef ParquetFooterRef get(self, str path):
+        """The cached footer for `path` (a shared reference, no copy), or an empty
+        reference on a miss. A hit marks the entry most-recently-used."""
         cdef string key = path.encode('utf-8')
-        cdef unordered_map[string, FileStats].iterator it
+        cdef unordered_map[string, ParquetFooterRef].iterator it
         cdef CppLRU2* lru_ptr = self.lru._lru
         cdef const char* od = NULL
         cdef int64_t ol = 0
-        cdef bint found = False
+        cdef ParquetFooterRef result
         with nogil:
             self._mutex.lock()
             it = self._map.find(key)
             if it != self._map.end():
-                out[0] = deref(it).second
-                lru_ptr.get_into(key.data(), <int64_t>key.size(), &od, &ol)
-                found = True
-            self._mutex.unlock()
-        return found
-
-    cdef const FileStats* try_get_ptr(self, str path):
-        """Borrow a pointer to the cached FileStats (NO copy), or NULL on miss.
-
-        The pointer is valid until this entry is EVICTED. It is safe for a
-        transient, synchronous read during planning: this call marks the entry
-        most-recently-used, so a concurrent put_fs evicts something else first,
-        and the caller does not insert (no eviction on its own thread). A borrow
-        that must survive query EXECUTION must copy (try_get) or be pinned —
-        see the Tier-2 pinning plan; do not stash this pointer past the read."""
-        cdef string key = path.encode('utf-8')
-        cdef unordered_map[string, FileStats].iterator it
-        cdef CppLRU2* lru_ptr = self.lru._lru
-        cdef const char* od = NULL
-        cdef int64_t ol = 0
-        cdef const FileStats* result = NULL
-        with nogil:
-            self._mutex.lock()
-            it = self._map.find(key)
-            if it != self._map.end():
-                result = &deref(it).second
+                result = deref(it).second
                 lru_ptr.get_into(key.data(), <int64_t>key.size(), &od, &ol)
             self._mutex.unlock()
         return result
 
-    cdef void put_fs(self, str path, const FileStats& fs):
-        """Store a parsed FileStats under path, evicting LRU entries if full."""
+    cdef ParquetFooterRef put(self, str path, FileStats fs):
+        """Take ownership of a freshly parsed footer, cache it under `path` within
+        the budget, and return the shared reference the caller uses."""
         cdef string key = path.encode('utf-8')
+        cdef int64_t nbytes = parquet_footer_bytes(fs)
+        cdef ParquetFooterRef ref = <ParquetFooterRef>make_shared[FileStats](move(fs))
         cdef string ek
         cdef string ev
         cdef CppLRU2* lru_ptr = self.lru._lru
@@ -246,19 +240,27 @@ cdef class ParquetParsedFooterCache:
         with nogil:
             self._mutex.lock()
             if self._map.count(key):
-                # Already cached — overwrite value, refresh LRU position.
-                self._map[key] = fs
-                lru_ptr.get_into(key.data(), <int64_t>key.size(), &od, &ol)
+                # Already cached (a concurrent scan parsed it too): replace, same key.
+                self._resident_bytes -= self._entry_bytes[key]
+                self._map.erase(key)
+                self._entry_bytes.erase(key)
+                lru_ptr.erase(key.data(), <int64_t>key.size())
+            if nbytes > self._budget_bytes:
+                self._over_budget += 1
             else:
-                # Evict LRU victims until under the entry cap.
-                while <int>self._map.size() >= self._max_entries:
+                while self._resident_bytes + nbytes > self._budget_bytes:
                     if not lru_ptr.evict_one_into(False, ek, ev):
                         break
+                    self._resident_bytes -= self._entry_bytes[ek]
                     self._map.erase(ek)
-                self._map[key] = fs
-                # Value is a dummy (real payload lives in _map); len 0.
+                    self._entry_bytes.erase(ek)
+                self._map[key] = ref
+                self._entry_bytes[key] = nbytes
+                self._resident_bytes += nbytes
+                # Value is a dummy (the payload lives in _map); len 0.
                 lru_ptr.set(key.data(), <int64_t>key.size(), key.data(), 0, True)
             self._mutex.unlock()
+        return ref
 
     cpdef void clear(self):
         """Evict all cached entries."""
@@ -266,20 +268,28 @@ cdef class ParquetParsedFooterCache:
         with nogil:
             self._mutex.lock()
             self._map.clear()
+            self._entry_bytes.clear()
+            self._resident_bytes = 0
             lru_ptr.clear(False)
             self._mutex.unlock()
 
     cpdef dict stats(self):
         """Return cache statistics."""
         cdef int64_t count
+        cdef int64_t resident
+        cdef int64_t over
         with nogil:
             self._mutex.lock()
             count = <int64_t>self._map.size()
+            resident = self._resident_bytes
+            over = self._over_budget
             self._mutex.unlock()
         lru_stats = self.lru.stats
         return {
             "cached_paths": count,
-            "max_entries": self._max_entries,
+            "resident_bytes": resident,
+            "budget_bytes": self._budget_bytes,
+            "over_budget": over,
             "lru_hits": lru_stats[0],
             "lru_misses": lru_stats[1],
         }

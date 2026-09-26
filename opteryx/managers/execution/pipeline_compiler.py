@@ -91,7 +91,7 @@ def compile_pipeline(plan: PhysicalPlan):
             continue
         from opteryx.managers.execution.compiler import _Compiler
 
-        _compiler = _Compiler(None, None)
+        _compiler = _Compiler(plan, None)
         node.compiled_predicate = _compiler._lower_bytecode(
             _compiler._compose_predicate_nodes(predicates)
         )

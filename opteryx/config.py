@@ -437,6 +437,21 @@ four (which have four times the row groups for the same data). On a row-major
 file every row group is its own block, so the count is unchanged there. Tune
 per session with `SET parquet_io_fetch_ahead_min_blocks`."""
 
+PARQUET_FOOTER_CACHE_BYTES: int = int(get("PARQUET_FOOTER_CACHE_BYTES", 256 * 1024 * 1024))
+"""Byte budget for the process-wide cache of PARSED parquet footers, which lives
+across queries. Charged at each footer's parsed in-memory size, not its encoded
+size. Scans share cached footers by reference, so a footer the cache evicts while
+a query holds it stays alive until that query ends — the budget bounds what the
+cache keeps resident, not what running queries pin. Must be positive."""
+
+SKENE_FOOTER_CACHE_BYTES: int = int(get("SKENE_FOOTER_CACHE_BYTES", 256 * 1024 * 1024))
+"""Byte budget for the engine's process-wide cache of opened skene readers (parsed
+footer plus attached column directories), which lives across queries. Charged at
+the ENCODED bytes each entry was built from — the footer and every attached
+directory block — because the reader's parsed state is private to skene and has
+no size of its own to report. Keyed by (path, size, mtime), so a rewritten file
+is a new entry. Must be positive."""
+
 PARQUET_IO_MEMORY_BUDGET_BYTES: int = int(get("PARQUET_IO_MEMORY_BUDGET_BYTES", 0))
 """Memory admission budget for one parquet scan's IO pipeline, in BYTES.
 0 = auto: half of the cgroup memory limit when one is in effect (Cloud Run),

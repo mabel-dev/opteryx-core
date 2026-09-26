@@ -36,6 +36,7 @@ def _bind(sql, ctx, run_optimizer=True):
     InStr mutation is an OPTIMIZER pass (see EXPLAIN's "predicate rewriter
     replace like with in string" step), not part of do_bind_phase itself —
     so a caller wanting the post-rewrite node needs run_optimizer=True."""
+    plan_context = PlanContext()
     from opteryx.planner.ast_rewriter import do_ast_rewriter
     from opteryx.planner.binder import do_bind_phase
     from opteryx.planner.logical_planner import do_logical_planning_phase
@@ -50,12 +51,12 @@ def _bind(sql, ctx, run_optimizer=True):
     clean = do_sql_rewrite(sql)
     parsed = sqloxide.parse_sql(clean, _dialect="opteryx")
     ast = do_ast_rewriter(parsed, parameters=[])[0]
-    plan, _, ctes = do_logical_planning_phase(ast)
-    plan = do_resolve_relations(plan, ctes, telemetry)
-    plan = do_plan_rewrite(plan, telemetry)
+    plan, _, ctes = do_logical_planning_phase(ast, plan_context=plan_context)
+    plan = do_resolve_relations(plan, ctes, telemetry, plan_context=plan_context)
+    plan = do_plan_rewrite(plan, telemetry, plan_context=plan_context)
     bound = do_bind_phase(
-        plan, execution_context=ctx, query_id=str(uuid.uuid4()), telemetry=telemetry
-    )
+        plan, execution_context=ctx, query_id=str(uuid.uuid4()), telemetry=telemetry, 
+    plan_context=plan_context)
     if run_optimizer:
         bound = do_optimizer(bound, telemetry, PlanContext())
     return bound

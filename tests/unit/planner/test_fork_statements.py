@@ -26,6 +26,7 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.logical_planner import do_logical_planning_phase
 from opteryx.third_party import sqloxide
 from opteryx.utils.query_parser import parse_query_info
+from opteryx.planner.plan_context import PlanContext
 
 UPSTREAM = "samples.tpch_sf1.lineitem"
 FORK = "personal.justin.lineitem"
@@ -33,6 +34,7 @@ FORK = "personal.justin.lineitem"
 
 def _node(sql):
     """The single logical node `sql` plans to."""
+    plan_context = PlanContext()
     # One front door: RESYNC and DETACH are parsed by the aside parser
     # (`src/aside/admin.rs`) on the same token stream as everything else.
     # Through `parse_statement`, not `sqloxide` directly, because that is where
@@ -41,7 +43,7 @@ def _node(sql):
     from opteryx.planner import parse_statement
 
     _clean_sql, ast = parse_statement(sql, telemetry=None)
-    plan, _ast, _ctes = do_logical_planning_phase(ast[0])
+    plan, _ast, _ctes = do_logical_planning_phase(ast[0], plan_context=plan_context)
     return plan[list(plan.nodes())[0]]
 
 

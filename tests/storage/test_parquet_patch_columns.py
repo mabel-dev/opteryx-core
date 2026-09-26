@@ -23,6 +23,7 @@ import opteryx
 import rugo.parquet as rp
 from opteryx.connectors import register_workspace
 from opteryx.connectors.local_store_connector import LocalStoreConnector
+from opteryx.planner.plan_context import PlanContext
 
 # Types that INSERT ... VALUES can populate; see test_ddl_column_operations.py
 # for why the parameterized/temporal types are absent (an insert-path gap, not
@@ -334,12 +335,13 @@ def _donor(name, value, sql_type):
     """A donor built the way `build_column_donor` builds one, via the SQL
     surface rather than by hand, so the shape under test is the shape the
     connector actually produces."""
+    plan_context = PlanContext()
     from opteryx.connectors.capabilities.writable import build_column_donor
     from opteryx.planner.logical_planner.logical_planner_builders import column_type_from_ast
     from opteryx.third_party.sqloxide import parse_sql
 
     ast = parse_sql(f"CREATE TABLE t (c {sql_type})", "opteryx")[0]
-    column_type = column_type_from_ast(ast["CreateTable"]["columns"][0])
+    column_type = column_type_from_ast(ast["CreateTable"]["columns"][0], plan_context=plan_context)
     return build_column_donor(name, column_type, value)
 
 

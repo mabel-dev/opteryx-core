@@ -23,6 +23,7 @@ from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_ident
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.planner.plan_context import PlanContext
 
 
 @pytest.fixture
@@ -300,6 +301,7 @@ def test_local_store_bounds_prune_correctly_as_real_values_not_ordinal(connector
     A Manifest built from this round-trip must default bounds_are_ordinal to
     False and prune using the literal AS-IS, exactly as before that flag
     existed."""
+    plan_context = PlanContext()
     entry = FileEntry(
         file_path="data.parquet",
         file_format="PARQUET",
@@ -323,10 +325,10 @@ def test_local_store_bounds_prune_correctly_as_real_values_not_ordinal(connector
         return Comparison(value=op, left=identifier, right=literal)
 
     # id's real range is [5, 95] — 1000 is out of range and must prune.
-    manifest = manifest.prune_files([_comparison("id", "Gt", 1000)])
+    manifest = manifest.prune_files([_comparison("id", "Gt", 1000)], plan_context=plan_context)
     assert manifest.files == []
 
     manifest = Manifest(files=restored_entries, schema=simple_schema)
     # 50 is within [5, 95] and must be kept.
-    manifest = manifest.prune_files([_comparison("id", "Eq", 50)])
+    manifest = manifest.prune_files([_comparison("id", "Eq", 50)], plan_context=plan_context)
     assert len(manifest.files) == 1

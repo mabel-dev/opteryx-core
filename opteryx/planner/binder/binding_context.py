@@ -78,6 +78,10 @@ class BindingContext:
     execution_context: ExecutionContext
     relations: Dict[str, str]
     telemetry: QueryTelemetry
+    # The query's PlanContext. Every column the binder mints — a relation's bound
+    # columns, a computed expression's column — is minted in its ColumnTable.
+    # Shared by reference into every copied and child scope: one query, one table.
+    plan_context: Any
     outer_schemas: Dict[str, Any] = field(default_factory=dict)
     # Boundary schemas of shared (materialize-once) CTE bodies, keyed by cte_key.
     # Populated by do_bind_phase after binding each body, BEFORE any plan that
@@ -113,7 +117,7 @@ class BindingContext:
 
     @classmethod
     def initialize(
-        cls, query_id: str, execution_context=None, schema_only: bool = False
+        cls, query_id: str, execution_context=None, schema_only: bool = False, *, plan_context
     ) -> "BindingContext":
         """
         Initialize a new BindingContext with the given query ID and connection.
@@ -125,6 +129,8 @@ class BindingContext:
                 Database connection, defaults to None.
             schema_only: bool, optional
                 Skip the per-relation Manifest read; see the class docstring.
+            plan_context: PlanContext
+                The query's planning context; its ColumnTable mints every column.
 
         Returns:
             A new BindingContext instance.
@@ -135,6 +141,7 @@ class BindingContext:
             execution_context=execution_context,
             relations={},
             telemetry=QueryTelemetry(query_id),
+            plan_context=plan_context,
             schema_only=schema_only,
         )
 
@@ -155,6 +162,7 @@ class BindingContext:
             execution_context=self.execution_context,
             relations={k: v for k, v in self.relations.items()},
             telemetry=self.telemetry,
+            plan_context=self.plan_context,
             shared_cte_schemas=self.shared_cte_schemas,
             reused_expressions=self.reused_expressions,
             # NOT deep-copied: the outer scope is read-only from in here, and
@@ -185,6 +193,7 @@ class BindingContext:
             execution_context=self.execution_context,
             relations={},
             telemetry=self.telemetry,
+            plan_context=self.plan_context,
             outer_schemas={**self.outer_schemas, **self.schemas},
             shared_cte_schemas=self.shared_cte_schemas,
             reused_expressions=self.reused_expressions,

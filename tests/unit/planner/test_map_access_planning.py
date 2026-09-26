@@ -11,12 +11,14 @@ from opteryx.planner.ast_rewriter import do_ast_rewriter
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.logical_planner import do_logical_planning_phase
 from opteryx.third_party import sqloxide
+from opteryx.planner.plan_context import PlanContext
 
 
 def _first_projection_expression(sql: str):
+    plan_context = PlanContext()
     parsed = sqloxide.parse_sql(sql, _dialect="opteryx")
     ast = do_ast_rewriter(parsed, parameters=[])[0]
-    plan, _, _ = do_logical_planning_phase(ast)
+    plan, _, _ = do_logical_planning_phase(ast, plan_context=plan_context)
 
     for _, node in plan.nodes(True):
         if node.node_type == LogicalPlanStepType.Project:
@@ -27,9 +29,10 @@ def _first_projection_expression(sql: str):
 
 
 def _plan(sql: str):
+    plan_context = PlanContext()
     parsed = sqloxide.parse_sql(sql, _dialect="opteryx")
     ast = do_ast_rewriter(parsed, parameters=[])[0]
-    return do_logical_planning_phase(ast)
+    return do_logical_planning_phase(ast, plan_context=plan_context)
 
 
 def test_bracket_access_on_function_expression_uses_map_access():

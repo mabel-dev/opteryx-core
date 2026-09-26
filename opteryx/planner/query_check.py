@@ -555,6 +555,7 @@ def check_statement(
     from opteryx.planner import build_logical_plan
     from opteryx.planner import parse_statement
     from opteryx.planner.ast_rewriter.relation_pronouns import do_substitute_relation_pronouns
+    from opteryx.planner.plan_context import PlanContext
     from opteryx.utils.query_parser import describe_statement
 
     # The binder's relation gates raise the BUILTIN PermissionError, so it is named
@@ -605,6 +606,7 @@ def check_statement(
         "permission_required": described["permission_required"],
     }
 
+    plan_context = PlanContext()
     try:
         logical_plan, _ast = build_logical_plan(
             parsed_statements=parsed_statements,
@@ -613,6 +615,7 @@ def check_statement(
             telemetry=telemetry,
             catalog_cache=catalog_cache,
             variables=execution_context.variables,
+            plan_context=plan_context,
         )
     except reportable as error:
         # No plan was built, so there is nothing resolved to offer.
@@ -627,6 +630,7 @@ def check_statement(
             query_id=query_id,
             telemetry=telemetry,
             schema_only=True,
+            plan_context=plan_context,
         )
     except reportable as error:
         # Binding is bottom-up and mutates `logical_plan` in place, so a statement

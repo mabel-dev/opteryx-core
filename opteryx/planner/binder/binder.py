@@ -964,6 +964,20 @@ def inner_binder(
             node.schema_column = found_column
             node.query_column = node.alias or column_name
 
+            # A reuse still NAMES an output, so its alias is published onto the shared
+            # column exactly as the identifier path publishes one (below, where an
+            # identifier binds) and as the mint path does when it creates the column.
+            # This was the one bind path that dropped it: `SELECT id + 1 AS a,
+            # id + 1 AS b ... ORDER BY b` minted the column as `a`, reused it for `b`
+            # without recording `b`, and visit_project re-publishes only the FIRST
+            # node's alias per identity — so nothing above the Project could resolve
+            # `b` and ORDER BY raised ColumnNotFoundError.
+            if node.alias and node.alias not in found_column.all_names:
+                if found_column.aliases:
+                    found_column.aliases.append(node.alias)
+                else:
+                    found_column.aliases = [node.alias]
+
             if isinstance(found_column, ConstantColumn):
                 # A repeat of a constant (a nullary constant function — PI(), E() —
                 # folded to its value) IS that constant: a new LITERAL in its place.

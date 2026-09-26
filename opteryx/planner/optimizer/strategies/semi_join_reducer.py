@@ -359,7 +359,7 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
             if n.node_type in (LogicalPlanStepType.Scan, LogicalPlanStepType.FunctionDataset)
             and n.alias
         }
-        rename_relations(reducer_source)
+        rename_relations(reducer_source, plan_context=plan_context)
         alias_map = {old: reducer_source[nid].alias for nid, old in scans_before.items()}
 
         on_condition = None

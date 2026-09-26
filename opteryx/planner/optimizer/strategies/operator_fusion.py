@@ -68,9 +68,13 @@ class OperatorFusionStrategy(OptimizationStrategy):
             if len(edges) == 1:
                 next_node_id = edges[0][1]
                 next_node = context.optimized_plan[next_node_id]
-                if next_node.node_type == LogicalPlanStepType.Limit and not next_node.offset:
+                if next_node.node_type == LogicalPlanStepType.Limit and next_node.limit is not None:
+                    offset = int(next_node.offset or 0)
                     new_node = HeapSortStep()
-                    new_node.limit = next_node.limit
+                    # LIMIT l OFFSET o reads the first l + o rows of the ordered
+                    # stream and discards o of them, so the top l + o is all the
+                    # sort ever has to keep.
+                    new_node.limit = int(next_node.limit) + offset
                     new_node.order_by = node.order_by
                     # This strategy runs AFTER projection pushdown, so the fused node
                     # is the only place the Order's active-column set can come from —
@@ -81,8 +85,16 @@ class OperatorFusionStrategy(OptimizationStrategy):
                     # own so the two sets are the same set anyway.
                     new_node.pre_update_columns = node.pre_update_columns
                     new_node.vector_topk_candidate = self._is_vector_topk_candidate(node.order_by)
-                    context.optimized_plan[next_node_id] = new_node
-                    context.optimized_plan.remove_node(context.node_id, heal=True)
+                    if offset:
+                        # The HeapSort replaces the Order and the Limit STAYS above
+                        # it to skip the offset — HeapSortStep has no offset, and the
+                        # Limit already applies one natively over the sorted stream
+                        # (both run on one ordered dop-1 pipeline).
+                        context.optimized_plan[context.node_id] = new_node
+                        self.telemetry.optimization_fuse_operators_heap_sort_offset += 1
+                    else:
+                        context.optimized_plan[next_node_id] = new_node
+                        context.optimized_plan.remove_node(context.node_id, heal=True)
                     self.telemetry.optimization_fuse_operators_heap_sort += 1
                     if new_node.vector_topk_candidate:
                         self.telemetry.optimization_fuse_operators_vector_heap_sort += 1

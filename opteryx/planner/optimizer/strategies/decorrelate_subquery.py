@@ -808,7 +808,7 @@ def _is_restricted(plan: LogicalPlan) -> bool:
     return narrowed
 
 
-def _graft_key_reducer(plan: LogicalPlan, filter_nid, inner_plan, local_pairs, target_nid) -> bool:
+def _graft_key_reducer(plan: LogicalPlan, filter_nid, inner_plan, local_pairs, target_nid, *, plan_context) -> bool:
     """
     Restrict a decorrelated subquery's input to keys the outer query can consume.
 
@@ -857,7 +857,7 @@ def _graft_key_reducer(plan: LogicalPlan, filter_nid, inner_plan, local_pairs, t
         if node.node_type in (LogicalPlanStepType.Scan, LogicalPlanStepType.FunctionDataset)
         and node.alias
     }
-    rename_relations(reducer_source)
+    rename_relations(reducer_source, plan_context=plan_context)
     alias_map = {
         old: reducer_source[nid].alias for nid, old in scans_before.items()
     }
@@ -918,12 +918,12 @@ def _graft_key_reducer(plan: LogicalPlan, filter_nid, inner_plan, local_pairs, t
     return True
 
 
-def _reduce_aggregate_input(plan: LogicalPlan, filter_nid, inner_plan, local_pairs) -> bool:
+def _reduce_aggregate_input(plan: LogicalPlan, filter_nid, inner_plan, local_pairs, *, plan_context) -> bool:
     """Reduce a decorrelated scalar subquery — the aggregate is the thing to protect."""
     aggregate_nid, aggregate = _aggregate_node(inner_plan)
     if aggregate_nid is None or aggregate.node_type != LogicalPlanStepType.AggregateAndGroup:
         return False
-    return _graft_key_reducer(plan, filter_nid, inner_plan, local_pairs, aggregate_nid)
+    return _graft_key_reducer(plan, filter_nid, inner_plan, local_pairs, aggregate_nid, plan_context=plan_context)
 
 
 # NOTE: there is deliberately no reducer for the EXISTS / IN (SEMI/ANTI) path here.
@@ -1869,7 +1869,7 @@ class DecorrelateSubqueryStrategy(OptimizationStrategy):
             if not filter_targets and not project_targets:
                 break
             if filter_targets:
-                plan = self._rewrite_filters(plan, filter_targets)
+                plan = self._rewrite_filters(plan, filter_targets, plan_context=context.plan_context)
             if project_targets:
                 plan = self._rewrite_projects(plan, project_targets)
         else:
@@ -1908,7 +1908,7 @@ class DecorrelateSubqueryStrategy(OptimizationStrategy):
         context.collected_decorrelations = []
         return plan
 
-    def _rewrite_filters(self, plan: LogicalPlan, filter_nids) -> LogicalPlan:
+    def _rewrite_filters(self, plan: LogicalPlan, filter_nids, *, plan_context) -> LogicalPlan:
         for filter_nid in filter_nids:
             # One predicate can hold several subqueries (`EXISTS (...) AND
             # x < (SELECT ...)`). Each pass removes exactly one, so keep going
@@ -1928,7 +1928,7 @@ class DecorrelateSubqueryStrategy(OptimizationStrategy):
                     and plan[filter_nid].node_type == LogicalPlanStepType.Filter
                     and finder(plan[filter_nid].condition)[0] is not None
                 ):
-                    plan = rewrite(plan, filter_nid, self.telemetry)
+                    plan = rewrite(plan, filter_nid, self.telemetry, plan_context=plan_context)
         return plan
 
     def _rewrite_projects(self, plan: LogicalPlan, project_nids) -> LogicalPlan:
@@ -2143,7 +2143,7 @@ def _lift_correlations(inner_plan: LogicalPlan):
     return key_pairs, residual
 
 
-def _decorrelate_in(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
+def _decorrelate_in(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context) -> LogicalPlan:
     """
     Turn `x IN (subquery)` into a SEMI join and `x NOT IN` into a NULL-AWARE ANTI join.
 
@@ -2192,7 +2192,7 @@ def _decorrelate_in(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPla
     )
 
 
-def _decorrelate_exists(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
+def _decorrelate_exists(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context) -> LogicalPlan:
     """
     Turn `EXISTS (subquery)` into a SEMI join and `NOT EXISTS` into an ANTI join.
 
@@ -2967,7 +2967,7 @@ def _split_out(condition, target):
     return False, condition
 
 
-def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
+def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context) -> LogicalPlan:
     filter_node = plan[filter_nid]
     subquery, _ = _filter_find_subquery(filter_node.condition)
     if subquery is None:
@@ -3101,7 +3101,7 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
     # while `inner_plan` is still separate — after the merge below there is no inner
     # plan left to graft into — and after `_expose_key`, which is what makes the
     # aggregate grouped in the first place.
-    if local_pairs and _reduce_aggregate_input(plan, filter_nid, inner_plan, local_pairs):
+    if local_pairs and _reduce_aggregate_input(plan, filter_nid, inner_plan, local_pairs, plan_context=plan_context):
         setattr(
             telemetry,
             "optimization_decorrelate_aggregate_reduced",

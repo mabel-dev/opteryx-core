@@ -772,7 +772,13 @@ class OpteryxS3FileSystem:
     # ── Reads ───────────────────────────────────────────────────────────────
 
     def list_files(self, base_dir: str, recursive: bool = True) -> List[str]:
-        """Return the objects under ``base_dir`` as ``s3://bucket/key`` paths.
+        """The paths of `list_file_infos` — see it for the listing's semantics."""
+        return [info.path for info in self.list_file_infos(base_dir, recursive)]
+
+    def list_file_infos(self, base_dir: str, recursive: bool = True) -> list:
+        """Return the objects under ``base_dir`` as ``s3://bucket/key`` paths, each
+        with the size and last-modified time (nanoseconds) the listing itself
+        carries — so a caller that needs them issues no per-object HEAD.
 
         The prefix is always terminated with ``/`` before listing: S3 prefix
         matching is a plain string match, so listing ``space_missions`` would
@@ -790,13 +796,16 @@ class OpteryxS3FileSystem:
         # addressed to an AWS endpoint; it is not user-supplied.
         import xml.etree.ElementTree as ElementTree  # nosec B405
 
+        from opteryx.connectors.io_systems._file_info import FileInfoLike
+        from opteryx.connectors.io_systems.gcs_filesystem import _rfc3339_to_ns
+
         bucket, prefix = split_path(base_dir.rstrip("/"))
         # Trailing slash = directory semantics (see docstring). An empty prefix
         # means the whole bucket, where no prefix filter is correct.
         if prefix:
             prefix = f"{prefix}/"
 
-        blobs: List[str] = []
+        blobs: list = []
         continuation_token = None
 
         while True:
@@ -826,7 +835,15 @@ class OpteryxS3FileSystem:
                 # Skip the zero-byte placeholder objects consoles create for
                 # "folders" - they are not readable data files.
                 if key and not key.endswith("/"):
-                    blobs.append(f"s3://{bucket}/{key}")
+                    blobs.append(
+                        FileInfoLike(
+                            path=f"s3://{bucket}/{key}",
+                            size=int(contents.find(f"{_LIST_NAMESPACE}Size").text),
+                            mtime=_rfc3339_to_ns(
+                                contents.find(f"{_LIST_NAMESPACE}LastModified").text
+                            ),
+                        )
+                    )
 
             truncated = root.find(f"{_LIST_NAMESPACE}IsTruncated")
             if truncated is None or (truncated.text or "").lower() != "true":

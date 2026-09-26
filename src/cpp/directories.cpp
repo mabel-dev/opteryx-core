@@ -18,6 +18,14 @@
 #endif
 
 // List files in a directory (non-recursive)
+int64_t stat_mtime_ns(const struct stat* st) {
+#if defined(__APPLE__)
+    return (int64_t)st->st_mtimespec.tv_sec * 1000000000LL + (int64_t)st->st_mtimespec.tv_nsec;
+#else
+    return (int64_t)st->st_mtim.tv_sec * 1000000000LL + (int64_t)st->st_mtim.tv_nsec;
+#endif
+}
+
 int list_directory(const char* path, file_info_t** files, size_t* count) {
     DIR* dir = opendir(path);
     if (!dir) return -errno;
@@ -76,7 +84,7 @@ int list_directory(const char* path, file_info_t** files, size_t* count) {
         (*files)[num_files].is_directory = S_ISDIR(st.st_mode);
         (*files)[num_files].is_regular_file = S_ISREG(st.st_mode);
         (*files)[num_files].size = (int64_t)st.st_size;
-        (*files)[num_files].mtime = (int64_t)st.st_mtime;
+        (*files)[num_files].mtime_ns = stat_mtime_ns(&st);
 
         num_files++;
     }
@@ -491,7 +499,7 @@ int list_files_with_info(const char* base_path, const char** extensions, size_t 
                     info.is_directory = 0;
                     info.is_regular_file = 1;
                     info.size = (int64_t)st.st_size;
-                    info.mtime = (int64_t)st.st_mtime;
+                    info.mtime_ns = stat_mtime_ns(&st);
                     out_list.push_back(info);
                 }
             }

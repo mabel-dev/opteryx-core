@@ -2015,8 +2015,8 @@ class InformationSchemaForksTable(BaseTable):
             "fork": _lt.VARCHAR,
             "upstream": _lt.VARCHAR,
             "base_snapshot": _lt.VARCHAR,
-            "revisions_behind": _lt.INTEGER,
-            "revisions_ahead": _lt.INTEGER,
+            "revisions_behind": _lt.INT64,
+            "revisions_ahead": _lt.INT64,
             "last_sync": _lt.TIMESTAMP(),
         }
         self.schema = RelationSchema(
@@ -2036,6 +2036,7 @@ class InformationSchemaForksTable(BaseTable):
         from draken.draken_native import DrakenType
         from draken.interop.vector_sequence import vector_from_sequence
         from draken.morsels.morsel import Morsel
+        from opteryx_catalog.exceptions import DatasetNotFound
 
         fork = []
         upstream = []
@@ -2056,10 +2057,11 @@ class InformationSchemaForksTable(BaseTable):
                 identifier = f"{collection}.{name}"
                 qualified = f"{self.workspace}.{identifier}"
 
-                dataset = None
+                # Dropped between the listing and the load: it has no row.
+                # Any other catalog failure is not "no row" - it raises.
                 try:
                     dataset = self.catalog.load_dataset(identifier, load_history=True)
-                except Exception:  # noqa: BLE001 - catalog boundary, one row must not fail the scan
+                except DatasetNotFound:
                     dataset = None
 
                 # This dataset AS A FORK. The state walk needs the upstream,
@@ -2080,11 +2082,8 @@ class InformationSchemaForksTable(BaseTable):
                 # must still be counted.
                 if list_forks is None:
                     continue
-                try:
-                    registrations = list_forks(identifier)
-                except Exception:  # noqa: BLE001 - catalog boundary, see above
-                    continue
-                for row in registrations or ():
+                # No forks is an empty list, not an error - a failure raises.
+                for row in list_forks(identifier):
                     fork.append(row.get("fork"))
                     upstream.append(qualified)
                     pinned = row.get("pinned-snapshot")
@@ -2100,8 +2099,8 @@ class InformationSchemaForksTable(BaseTable):
             vector_from_sequence(fork, dtype=DrakenType.VARCHAR),
             vector_from_sequence(upstream, dtype=DrakenType.VARCHAR),
             vector_from_sequence(base_snapshot, dtype=DrakenType.VARCHAR),
-            vector_from_sequence(revisions_behind, dtype=DrakenType.INTEGER),
-            vector_from_sequence(revisions_ahead, dtype=DrakenType.INTEGER),
+            vector_from_sequence(revisions_behind, dtype=DrakenType.INT64),
+            vector_from_sequence(revisions_ahead, dtype=DrakenType.INT64),
             vector_from_sequence(last_sync, dtype=DrakenType.TIMESTAMP64),
         ]
         yield Morsel.from_vectors(list(self._COLUMNS), vectors)

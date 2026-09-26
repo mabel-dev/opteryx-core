@@ -505,7 +505,7 @@ class Manifest:
     ZONE_OP_LT = 3
     ZONE_OP_LTEQ = 4
 
-    def ordinal_zone_map_terms(self, predicates: List) -> List[tuple]:
+    def ordinal_zone_map_terms(self, predicates: List, *, plan_context) -> List[tuple]:
         """`(column_name, op_code, ordinal)` terms a ROW-GROUP zone map can be
         tested against, for the conjuncts of `predicates` that are safely prunable.
 
@@ -578,7 +578,7 @@ class Manifest:
         # transform around the column). Row groups gain those shapes for the same
         # reason files do, from the same derivation: a second one here would be
         # the second dialect this method's docstring exists to prevent.
-        conjuncts = derive_bound_conjuncts(predicates, self._column_type)
+        conjuncts = derive_bound_conjuncts(predicates, self._column_type, plan_context=plan_context)
 
         for conjunct in conjuncts:
             if self._predicate_domain_mismatch(conjunct):
@@ -611,7 +611,7 @@ class Manifest:
 
         return terms
 
-    def prune_files(self, predicates: List) -> "Manifest":
+    def prune_files(self, predicates: List, *, plan_context) -> "Manifest":
         """
         Filter files based on predicates using min/max bounds.
 
@@ -679,7 +679,7 @@ class Manifest:
         # wrapped around the column. A derived term is implied by the term it came
         # from, so it is evidence about the same conjunction and the paragraph
         # above applies to it unchanged.
-        conjuncts: List = derive_bound_conjuncts(predicates, self._column_type)
+        conjuncts: List = derive_bound_conjuncts(predicates, self._column_type, plan_context=plan_context)
 
         # Whether a literal is order-comparable with a column's raw stored bounds
         # depends only on the two TYPES, so it is settled once per predicate here
@@ -722,8 +722,8 @@ class Manifest:
         case_fold_terms = []
         if self._char_class_vector is not None:
             for column_name, fold, conjuncts in derive_case_fold_conjuncts(
-                predicates, self._column_type
-            ):
+                predicates, self._column_type,
+            plan_context=plan_context):
                 sketch_index = self._sketch_index(column_name)
                 if sketch_index is not None:
                     case_fold_terms.append(

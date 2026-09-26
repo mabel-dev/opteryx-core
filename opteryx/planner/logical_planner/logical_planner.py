@@ -447,12 +447,12 @@ class RecursiveCteDefinition:
         self.name = name
 
 
-def _plan_cte_leg(query_ast, leg_body, column_aliases, alias):
+def _plan_cte_leg(query_ast, leg_body, column_aliases, alias, *, plan_context):
     """Plan one leg of a recursive CTE as its own query (the leg inherits the
     CTE query's non-body siblings, which extract-time validation has already
     required to be empty), strip its exit, and apply the declared column
     aliases to its output projection."""
-    leg_plan = plan_query({**query_ast, "body": leg_body})
+    leg_plan = plan_query({**query_ast, "body": leg_body}, plan_context=plan_context)
     head = leg_plan.get_exit_points()[0]
     output_columns = leg_plan[head].columns
     leg_plan.remove_node(head, True)
@@ -468,7 +468,7 @@ def _scans_of(plan, relation_name):
     ]
 
 
-def _extract_recursive_cte(_ast, alias, column_aliases):
+def _extract_recursive_cte(_ast, alias, column_aliases, *, plan_context):
     """Split one CTE under `WITH RECURSIVE` at its topmost UNION [ALL], or return
     None when the body never references itself (RECURSIVE is permission, not
     obligation — such a CTE plans as an ordinary one). Everything this fixpoint
@@ -477,19 +477,19 @@ def _extract_recursive_cte(_ast, alias, column_aliases):
     body = query_ast.get("body") or {}
     setop = body.get("SetOperation")
 
-    def _references_self(leg_body):
-        return bool(_scans_of(plan_query({**query_ast, "body": leg_body}), alias))
+    def _references_self(leg_body, *, plan_context):
+        return bool(_scans_of(plan_query({**query_ast, "body": leg_body}, plan_context=plan_context), alias))
 
     if setop is None or setop.get("op") != "Union":
-        if _references_self(body):
+        if _references_self(body, plan_context=plan_context):
             raise UnsupportedSyntaxError(
                 f"Recursive CTE '{alias}' must be `<anchor> UNION ALL <recursive term>`; "
                 "the self-reference belongs in the recursive term."
             )
         return None  # not self-referencing — an ordinary CTE under the RECURSIVE keyword
 
-    if not _references_self(setop["right"]):
-        if _references_self(setop["left"]):
+    if not _references_self(setop["right"], plan_context=plan_context):
+        if _references_self(setop["left"], plan_context=plan_context):
             raise UnsupportedSyntaxError(
                 f"Recursive CTE '{alias}' references itself in the anchor term. "
                 "Only the term after UNION ALL may reference the CTE."
@@ -512,17 +512,17 @@ def _extract_recursive_cte(_ast, alias, column_aliases):
     # and relies on the iteration ceiling for cyclic input.
     distinct = setop.get("set_quantifier") != "All"
 
-    anchor = _plan_cte_leg(query_ast, setop["left"], column_aliases, alias)
+    anchor = _plan_cte_leg(query_ast, setop["left"], column_aliases, alias, plan_context=plan_context)
     if _scans_of(anchor, alias):
         raise UnsupportedSyntaxError(
             f"Recursive CTE '{alias}' references itself in the anchor term. "
             "Only the term after UNION ALL may reference the CTE."
         )
-    term = _plan_cte_leg(query_ast, setop["right"], column_aliases, alias)
+    term = _plan_cte_leg(query_ast, setop["right"], column_aliases, alias, plan_context=plan_context)
     return RecursiveCteDefinition(anchor=anchor, term=term, distinct=distinct, name=alias)
 
 
-def extract_ctes(branch):
+def extract_ctes(branch, *, plan_context):
     ctes = {}
     with_clause = _query_body(branch).get("with")
     if with_clause:
@@ -533,7 +533,7 @@ def extract_ctes(branch):
                 col["name"]["value"] for col in (_ast.get("alias").get("columns") or [])
             ]
             if recursive:
-                definition = _extract_recursive_cte(_ast, alias, column_aliases)
+                definition = _extract_recursive_cte(_ast, alias, column_aliases, plan_context=plan_context)
                 if definition is not None:
                     ctes[alias] = definition
                     continue
@@ -544,7 +544,7 @@ def extract_ctes(branch):
             # row — while the identical inline derived table honoured it. This is the
             # same entry point the derived-table path uses (create_node_relation), so
             # the two forms now converge on the same logical plan.
-            logical_plan = plan_query(_ast["query"])
+            logical_plan = plan_query(_ast["query"], plan_context=plan_context)
             # CTEs don't have an exit node. Its columns ARE the CTE's output
             # projection — the same list object the Project node holds — so read them
             # before it goes. The node left at the head is whatever the body ends with,
@@ -563,10 +563,10 @@ def extract_ctes(branch):
     return ctes
 
 
-def extract_value(clause):
+def extract_value(clause, *, plan_context):
     if len(clause) == 1:
-        return logical_planner_builders.build(clause[0])
-    return [logical_planner_builders.build(token) for token in clause]
+        return logical_planner_builders.build(clause[0], plan_context=plan_context)
+    return [logical_planner_builders.build(token, plan_context=plan_context) for token in clause]
 
 
 def extract_variable(clause):
@@ -575,7 +575,7 @@ def extract_variable(clause):
     return [token["Identifier"]["value"] for token in clause]
 
 
-def extract_simple_filter(filters, identifier: str = "Name"):
+def extract_simple_filter(filters, identifier: str = "Name", *, plan_context):
     if "Like" in filters:
         left = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=identifier)
         right = Literal(type=_plt.VARCHAR, value=filters["Like"])
@@ -586,7 +586,7 @@ def extract_simple_filter(filters, identifier: str = "Name"):
         )
         return root
     if "Where" in filters:
-        root = logical_planner_builders.build(filters["Where"])
+        root = logical_planner_builders.build(filters["Where"], plan_context=plan_context)
         return root
 
 
@@ -976,7 +976,7 @@ def _enclosing_aggregator(tree, target, nearest=None):
     return None
 
 
-def _rendered_window(window) -> str:
+def _rendered_window(window, *, plan_context) -> str:
     """A window's display form, rendered from its own OVER spec.
 
     The loop below renders the same thing from the spec nodes it has already built
@@ -1000,15 +1000,15 @@ def _rendered_window(window) -> str:
     for _nested in get_all_nodes_of_type(window, select_nodes=(NodeType.AGGREGATOR,)):
         if _nested is window or _nested.over is None:
             continue
-        _nested_display = _rendered_window(_nested)
+        _nested_display = _rendered_window(_nested, plan_context=plan_context)
         _nested_ref = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=_nested_display)
         _nested_ref.query_column = _nested_display
         _replace_node(window, _nested, _nested_ref)
-    _partition_by, _order_by = _window_spec_nodes(window.over)
+    _partition_by, _order_by = _window_spec_nodes(window.over, plan_context=plan_context)
     return _window_display_name(window, _partition_by, _order_by)
 
 
-def _refuse_nested_window(tree, window) -> None:
+def _refuse_nested_window(tree, window, *, plan_context) -> None:
     """Refuse a window written inside an aggregate's or another window's argument.
 
     Both halves are named as the CALLER wrote them. That is the whole reason this
@@ -1025,7 +1025,7 @@ def _refuse_nested_window(tree, window) -> None:
     if _enclosing is None:
         return
 
-    _window_display = _rendered_window(window)
+    _window_display = _rendered_window(window, plan_context=plan_context)
     _display_ref = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=_window_display)
     _display_ref.query_column = _window_display
     _replace_node(_enclosing, window, _display_ref)
@@ -1050,7 +1050,7 @@ def _refuse_nested_window(tree, window) -> None:
     raise UnsupportedSyntaxError(
         compose(
             f"Window function {md_code(_window_display)} cannot appear inside the window "
-            f"function {md_code(_rendered_window(_enclosing))}",
+            f"function {md_code(_rendered_window(_enclosing, plan_context=plan_context))}",
             "Window functions cannot be nested — each is computed over the rows of its "
             "own window, so neither can be the input to the other",
             "Compute the inner window in a subquery and apply the outer window to its result",
@@ -1058,7 +1058,7 @@ def _refuse_nested_window(tree, window) -> None:
     )
 
 
-def _refuse_window_in_window_spec(spec_nodes: list, clause: str) -> None:
+def _refuse_window_in_window_spec(spec_nodes: list, clause: str, *, plan_context) -> None:
     """Refuse a window function written in a PARTITION BY or a window's ORDER BY.
 
     The other half of "window functions cannot be nested", and it is invisible to
@@ -1079,7 +1079,7 @@ def _refuse_window_in_window_spec(spec_nodes: list, clause: str) -> None:
                 continue
             raise UnsupportedSyntaxError(
                 compose(
-                    f"Window function {md_code(_rendered_window(_node))} cannot appear in "
+                    f"Window function {md_code(_rendered_window(_node, plan_context=plan_context))} cannot appear in "
                     f"the {md_syntax(clause)} of an {md_syntax('over')} (...) clause",
                     "Window functions cannot be nested — the window spec is computed "
                     "before the window it defines",
@@ -1273,7 +1273,7 @@ def _resolve_named_windows(ast_branch: dict) -> None:
             _substitute_named_windows(value, definitions)
 
 
-def _refuse_window_in_having(having) -> None:
+def _refuse_window_in_having(having, *, plan_context) -> None:
     """Refuse a window function written in HAVING.
 
     Standard SQL does not allow one there, and the reason is the evaluation order it
@@ -1302,7 +1302,7 @@ def _refuse_window_in_having(having) -> None:
         _is_window = _node.over is not None
         if not _is_window and _node.value not in _RANKING_FUNCTIONS:
             continue
-        _display = _rendered_window(_node) if _is_window else format_expression(_node)
+        _display = _rendered_window(_node, plan_context=plan_context) if _is_window else format_expression(_node)
         raise UnsupportedSyntaxError(
             compose(
                 f"Window function {md_code(_display)} cannot appear in {md_syntax('having')}",
@@ -1314,7 +1314,7 @@ def _refuse_window_in_having(having) -> None:
         )
 
 
-def _refuse_window_group_key(key, window_outputs: set, position: int = 0) -> None:
+def _refuse_window_group_key(key, window_outputs: set, position: int = 0, *, plan_context) -> None:
     """Refuse a window function used as a GROUP BY key.
 
     Standard SQL does not allow one, for the same evaluation-order reason HAVING does
@@ -1401,7 +1401,7 @@ def _refuse_window_group_key(key, window_outputs: set, position: int = 0) -> Non
             continue
         # Rendered as WRITTEN — with its spec if it has one, bare if it does not —
         # rather than being given an `OVER ()` the caller did not type.
-        _refuse(_rendered_window(_node) if _is_window else format_expression(_node))
+        _refuse(_rendered_window(_node, plan_context=plan_context) if _is_window else format_expression(_node))
 
     if not window_outputs:
         return
@@ -1498,7 +1498,7 @@ def _window_display_name(
 _RANKING_FUNCTIONS = tuple(WINDOW_FUNCTIONS)
 
 
-def _window_spec_nodes(over: Optional[dict]) -> Tuple[list, list]:
+def _window_spec_nodes(over: Optional[dict], *, plan_context) -> Tuple[list, list]:
     """An OVER clause's PARTITION BY and its ORDER BY, built into expression nodes.
 
     The WINDOW's own ORDER BY is a different thing from the statement-level ORDER BY,
@@ -1507,12 +1507,12 @@ def _window_spec_nodes(over: Optional[dict]) -> Tuple[list, list]:
     """
     _over = over or {}
     _partition_by = [
-        _strip_outer_nesting(logical_planner_builders.build(pb))
+        _strip_outer_nesting(logical_planner_builders.build(pb, plan_context=plan_context))
         for pb in _over.get("partition_by", [])
     ]
     _window_order_by = [
         (
-            _strip_outer_nesting(logical_planner_builders.build(item["expr"])),
+            _strip_outer_nesting(logical_planner_builders.build(item["expr"], plan_context=plan_context)),
             logical_planner_builders.sort_is_ascending(item["options"]),
         )
         for item in _over.get("order_by", [])
@@ -1529,11 +1529,11 @@ _FRAME_BOUND_RANK = {
 }
 
 
-def _frame_offset_literal(expr_dict) -> int:
+def _frame_offset_literal(expr_dict, *, plan_context) -> int:
     """A window FRAME's PRECEDING/FOLLOWING offset — a non-negative integer literal,
     the same requirement LAG/LEAD's row offset already enforces (no column reference:
     the frame shape must be known before any row is read)."""
-    node = logical_planner_builders.build(expr_dict)
+    node = logical_planner_builders.build(expr_dict, plan_context=plan_context)
     offset = node.value if node.node_type == NodeType.LITERAL else None
     if offset is None or isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
         raise UnsupportedSyntaxError(
@@ -1542,21 +1542,21 @@ def _frame_offset_literal(expr_dict) -> int:
     return offset
 
 
-def _parse_frame_bound(bound) -> Tuple[str, int]:
+def _parse_frame_bound(bound, *, plan_context) -> Tuple[str, int]:
     """One frame bound (the parser's `start_bound`/`end_bound`) to (kind name, offset)."""
     if bound == "CurrentRow":
         return "CURRENT_ROW", 0
     if isinstance(bound, dict):
         if "Preceding" in bound:
             value = bound["Preceding"]
-            return ("UNBOUNDED_PRECEDING", 0) if value is None else ("PRECEDING", _frame_offset_literal(value))
+            return ("UNBOUNDED_PRECEDING", 0) if value is None else ("PRECEDING", _frame_offset_literal(value, plan_context=plan_context))
         if "Following" in bound:
             value = bound["Following"]
-            return ("UNBOUNDED_FOLLOWING", 0) if value is None else ("FOLLOWING", _frame_offset_literal(value))
+            return ("UNBOUNDED_FOLLOWING", 0) if value is None else ("FOLLOWING", _frame_offset_literal(value, plan_context=plan_context))
     raise InvalidInternalStateError(f"unrecognised window frame bound: {bound!r}")
 
 
-def _build_window_frame(over: dict, has_order_by: bool) -> Optional[tuple]:
+def _build_window_frame(over: dict, has_order_by: bool, *, plan_context) -> Optional[tuple]:
     """A window's FrameSpec as (units, start_kind, start_offset, end_kind, end_offset)
     — engine kind codes (FRAME_UNITS / FRAME_BOUND_KIND, native_window_frame.hpp's
     mirror) — or None when the window has no ORDER BY and therefore no per-row
@@ -1591,9 +1591,9 @@ def _build_window_frame(over: dict, has_order_by: bool) -> Optional[tuple]:
                 f"Window **FRAME** unit {md_code(str(units_name))} is not supported. Use **ROWS** or **RANGE**."
             )
         units = "ROWS" if units_name == "Rows" else "RANGE"
-        start_kind, start_offset = _parse_frame_bound(frame["start_bound"])
+        start_kind, start_offset = _parse_frame_bound(frame["start_bound"], plan_context=plan_context)
         end_bound = frame.get("end_bound")
-        end_kind, end_offset = ("CURRENT_ROW", 0) if end_bound is None else _parse_frame_bound(end_bound)
+        end_kind, end_offset = ("CURRENT_ROW", 0) if end_bound is None else _parse_frame_bound(end_bound, plan_context=plan_context)
         if units == "RANGE" and (
             start_kind in ("PRECEDING", "FOLLOWING") or end_kind in ("PRECEDING", "FOLLOWING")
         ):
@@ -1628,6 +1628,8 @@ def _hoist_windows(
     ranking_specs: list,
     minted: dict,
     newly_minted: list,
+    *,
+    plan_context,
 ):
     """Lift every window function out of `item`, leaving a reference to its output.
 
@@ -1677,7 +1679,7 @@ def _hoist_windows(
     # ALSO run this over its own predicate, where the enclosing call still is — by the
     # time a borrowed window arrives here it is a bare node with its context left behind.
     for _window in _windows:
-        _refuse_nested_window(item, _window)
+        _refuse_nested_window(item, _window, plan_context=plan_context)
 
     # (reference, minted alias) per hoisted window. The references are built carrying the
     # window's DISPLAY form and re-pointed at their minted aliases once the residual
@@ -1710,17 +1712,17 @@ def _hoist_windows(
                 f"{', '.join(sorted(FRAMED_AGGREGATE_FUNCTIONS))} support a running/framed window. "
                 "Use **PARTITION BY** only, or compute the running aggregate in a subquery."
             )
-        _partition_by, _window_order_by = _window_spec_nodes(_over)
+        _partition_by, _window_order_by = _window_spec_nodes(_over, plan_context=plan_context)
         # A window in the SPEC is invisible to `_refuse_nested_window` — the spec is the
         # parser's dict, not part of the expression tree — so it is tested here, where it
         # has just become nodes.
-        _refuse_window_in_window_spec(_partition_by, "PARTITION BY")
-        _refuse_window_in_window_spec([_col for _col, _asc in _window_order_by], "ORDER BY")
+        _refuse_window_in_window_spec(_partition_by, "PARTITION BY", plan_context=plan_context)
+        _refuse_window_in_window_spec([_col for _col, _asc in _window_order_by], "ORDER BY", plan_context=plan_context)
 
         # A framed aggregate window's FrameSpec — see `_build_window_frame`. None
         # (including for every ranking/navigation window) means "no ORDER BY, no
         # frame": the whole-partition broadcast-join path, unchanged.
-        _frame = None if _is_ranking else _build_window_frame(_over, bool(_window_order_by))
+        _frame = None if _is_ranking else _build_window_frame(_over, bool(_window_order_by), plan_context=plan_context)
 
         # Rendered before anything is mutated — the aggregate path clears `over`, and the
         # spec is part of what the column IS. Deliberately alias-independent, because this
@@ -2004,7 +2006,7 @@ def _group_by_all_keys(projection: list, window_outputs: set) -> list:
 TABLE_HINTS = frozenset({"NO_CACHE", "NO_PARTITION"})
 
 
-def _parse_table_hints(with_hints: list, relation_name: str) -> tuple:
+def _parse_table_hints(with_hints: list, relation_name: str, *, plan_context) -> tuple:
     """Extract and validate the `WITH(...)` hints on a table factor.
 
     Returns ``(hints, settings)``:
@@ -2084,15 +2086,15 @@ def _parse_table_hints(with_hints: list, relation_name: str) -> tuple:
                 f"Query hint {md_column(left['value'])} is set more than once "
                 f"on {md_column(relation_name)}"
             )
-        settings[name] = logical_planner_builders.build(binary_op["right"])
+        settings[name] = logical_planner_builders.build(binary_op["right"], plan_context=plan_context)
     return hints, settings
 
 
-def _limit_value(ast, clause: str):
+def _limit_value(ast, clause: str, *, plan_context):
     """LIMIT/OFFSET value from its AST: a literal, optionally parenthesised."""
     if ast is None:
         return None
-    node = logical_planner_builders.build(ast)
+    node = logical_planner_builders.build(ast, plan_context=plan_context)
     while node.node_type == NodeType.NESTED:
         node = node.centre
     if node.node_type != NodeType.LITERAL:
@@ -2109,16 +2111,16 @@ def _projection_except_columns(projection):
     return head.except_columns
 
 
-def inner_query_planner(ast_branch: dict) -> LogicalPlan:
+def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
     if "Query" in ast_branch:
         # Sometimes we get a full query plan here (e.g. when queries in set
         # functions are in parenthesis)
-        return plan_query(ast_branch)
+        return plan_query(ast_branch, plan_context=plan_context)
 
     # Handle nested SetOperations (chained UNION/INTERSECT/EXCEPT)
     if "SetOperation" in ast_branch:
         # Recursively call plan_query to handle the nested set operation
-        return plan_query({"Query": {"body": ast_branch}})
+        return plan_query({"Query": {"body": ast_branch}}, plan_context=plan_context)
 
     inner_plan = LogicalPlan()
     step_id = None
@@ -2139,7 +2141,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
 
     # Process first relation if any
     if len(_relations) > 0:
-        step_id, sub_plan = create_node_relation(_relations[0])
+        step_id, sub_plan = create_node_relation(_relations[0], plan_context=plan_context)
         inner_plan += sub_plan
 
         # If there are multiple relations, build sequential binary implicit cross joins
@@ -2147,7 +2149,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         if len(_relations) > 1:
             for i in range(1, len(_relations)):
                 # Process the next relation
-                right_step_id, right_sub_plan = create_node_relation(_relations[i])
+                right_step_id, right_sub_plan = create_node_relation(_relations[i], plan_context=plan_context)
 
                 # Get relation names BEFORE adding right_sub_plan to inner_plan
                 left_relation_names = get_subplan_schemas(inner_plan)
@@ -2192,13 +2194,14 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                         "with_hints": [],
                     }
                 }
-            }
+            },
+            plan_context=plan_context,
         )
         inner_plan += sub_plan
 
     # selection
     _selection = _strip_outer_nesting(
-        logical_planner_builders.build(ast_branch["Select"].get("selection"))
+        logical_planner_builders.build(ast_branch["Select"].get("selection"), plan_context=plan_context)
     )
     if _selection:
         if len(_relations) == 0:
@@ -2214,7 +2217,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     # groups
     _projection = [
         _strip_outer_nesting(p)
-        for p in (logical_planner_builders.build(ast_branch["Select"].get("projection")) or [])
+        for p in (logical_planner_builders.build(ast_branch["Select"].get("projection"), plan_context=plan_context) or [])
     ]
     if len(_projection) > 1 and any(
         p.node_type == NodeType.WILDCARD and p.value is None for p in _projection
@@ -2265,7 +2268,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     # the clause parsed, bound, and then vanished, so QUALIFY silently returned
     # the unfiltered relation.
     _qualify = _strip_outer_nesting(
-        logical_planner_builders.build(ast_branch["Select"].get("qualify"))
+        logical_planner_builders.build(ast_branch["Select"].get("qualify"), plan_context=plan_context)
     )
     _qualify_window_slots: list = []  # (index into _projection, original node)
     # The minted names of window columns a clause OTHER than the SELECT list needed —
@@ -2297,7 +2300,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             # with the aggregate left behind here. Nothing saw that aggregate — it was
             # never collected into `_aggregates` either — and the statement planned,
             # then died in the engine with a raw KeyError naming a `$derived_` column.
-            _refuse_nested_window(_qualify, _window_function)
+            _refuse_nested_window(_qualify, _window_function, plan_context=plan_context)
             _qualify_window_slots.append((len(_projection), _window_function))
             _projection.append(_window_function)
     _qualify_slot_indices = {_slot for _slot, _ in _qualify_window_slots}
@@ -2315,8 +2318,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             _window_specs,
             _ranking_specs,
             _minted,
-            _newly_minted,
-        )
+            _newly_minted, plan_context=plan_context)
         if _i in _qualify_slot_indices:
             _hidden_window_columns.extend(_newly_minted)
     # Collect aggregates in projection (SELECT) order. get_all_nodes_of_type uses a
@@ -2343,7 +2345,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     if _order_by and _order_by.get("kind") and _order_by["kind"].get("Expressions"):
         _order_by = [
             (
-                _strip_outer_nesting(logical_planner_builders.build(item["expr"])),
+                _strip_outer_nesting(logical_planner_builders.build(item["expr"], plan_context=plan_context)),
                 logical_planner_builders.sort_is_ascending(item["options"]),
             )
             for item in _order_by["kind"]["Expressions"]
@@ -2420,8 +2422,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                 _window_specs,
                 _ranking_specs,
                 _minted,
-                _newly_minted,
-            )
+                _newly_minted, plan_context=plan_context)
             _hidden_window_columns.extend(_newly_minted)
             _hoisted_order_by.append((_expr, _ascending))
         _order_by = _hoisted_order_by
@@ -2455,16 +2456,16 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     # an expression that nothing computes. Undecomposed aggregates over expressions are
     # supported by the aggregate operator directly.
     _having = _strip_outer_nesting(
-        logical_planner_builders.build(ast_branch["Select"].get("having"))
+        logical_planner_builders.build(ast_branch["Select"].get("having"), plan_context=plan_context)
     )
     _having_passthrough: list = []
     if _having:
         # Before the aggregates are collected (below, once the group keys are resolved) —
         # that walk cannot tell a window from a plain aggregate, and appending one to
         # `_aggregates` is what silently threw its OVER spec away.
-        _refuse_window_in_having(_having)
+        _refuse_window_in_having(_having, plan_context=plan_context)
 
-    _groups = logical_planner_builders.build(ast_branch["Select"].get("group_by"))[0]
+    _groups = logical_planner_builders.build(ast_branch["Select"].get("group_by"), plan_context=plan_context)[0]
 
     # GROUP BY ROLLUP(...) — lower the construct to the flat key list plus an explicit
     # list of GROUPING SETS over it, before any of the rewriting below runs. The flat
@@ -2534,7 +2535,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                     # whole-partition aggregate window is still an AGGREGATOR node here,
                     # and reporting that as "an aggregate in the SELECT list" would name
                     # the wrong rule for it.
-                    _refuse_window_group_key(_target, _window_output_aliases, _position)
+                    _refuse_window_group_key(_target, _window_output_aliases, _position, plan_context=plan_context)
                     if get_all_nodes_of_type(_target, select_nodes=(NodeType.AGGREGATOR,)):
                         raise UnsupportedSyntaxError(
                             f"**GROUP BY** position {_position} refers to an aggregate in the **SELECT** "
@@ -2556,7 +2557,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             # written directly in GROUP BY (unchanged by the arms above), one reached
             # through an output alias, and one reached by position (already refused
             # above, with its position named).
-            _refuse_window_group_key(_group_expr, _window_output_aliases)
+            _refuse_window_group_key(_group_expr, _window_output_aliases, plan_context=plan_context)
             _rewritten_groups.append(_group_expr)
         _groups = _rewritten_groups
 
@@ -3020,8 +3021,6 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                 inner_plan.add_edge(previous_step_id, step_id)
 
         if _framed_specs:
-            from opteryx.types.schema import SchemaColumn, mint_column_identity
-
             # FramedWindowSink has no DISTINCT framing: its function tuples carry
             # (kind, out, arg, frame) only, so the modifier would vanish here and a
             # plain running aggregate would be returned in its place. Refuse it
@@ -3064,10 +3063,8 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                 _outputs = [
                     (
                         _agg_node.value,
-                        SchemaColumn(
-                            name=_agg_node.alias,
-                            column_type=_plt.INT64,
-                            identity=mint_column_identity(_win_rel, _agg_node.alias),
+                        plan_context.columns.relation_column(
+                            _win_rel, _agg_node.alias, column_type=_plt.INT64
                         ),
                         list(_agg_node.parameters or []),
                         _frame,
@@ -3085,8 +3082,6 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                 inner_plan.add_edge(previous_step_id, step_id)
 
     if _ranking_specs:
-        from opteryx.types.schema import SchemaColumn, mint_column_identity
-
         # Group ranking functions that share the same PARTITION BY + ORDER BY into a
         # single Window node (one sort serves all of them).
         # `_window_order_by` here is the WINDOW's ORDER BY, deliberately NOT named
@@ -3109,10 +3104,8 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             _outputs = [
                 (
                     _kind,
-                    SchemaColumn(
-                        name=_win_alias,
-                        column_type=_plt.INT64,
-                        identity=mint_column_identity(_win_rel, _win_alias),
+                    plan_context.columns.relation_column(
+                        _win_rel, _win_alias, column_type=_plt.INT64
                     ),
                     _params,
                 )
@@ -3384,7 +3377,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         if isinstance(ast_branch["Select"]["distinct"], dict):
             distinct_step.on = [
                 _strip_outer_nesting(c)
-                for c in logical_planner_builders.build(ast_branch["Select"]["distinct"]["On"])
+                for c in logical_planner_builders.build(ast_branch["Select"]["distinct"]["On"], plan_context=plan_context)
             ]
         elif project_step is not None and project_step.passthrough_columns:
             # the ORDER BY value is ambiguous once rows collapse into a DISTINCT
@@ -3415,8 +3408,8 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     _offset = ast_branch.get("offset")
     if _limit or _offset:
         limit_step = LimitStep()
-        limit_step.limit = _limit_value(_limit, "LIMIT")
-        limit_step.offset = _limit_value(_offset, "OFFSET")
+        limit_step.limit = _limit_value(_limit, "LIMIT", plan_context=plan_context)
+        limit_step.offset = _limit_value(_offset, "OFFSET", plan_context=plan_context)
         previous_step_id, step_id = step_id, random_string()
         inner_plan.add_node(step_id, limit_step)
         if previous_step_id is not None:
@@ -3439,7 +3432,7 @@ STATEMENT PLANNERS
 """
 
 
-def process_join_tree(join: dict) -> PlanStep:
+def process_join_tree(join: dict, *, plan_context) -> PlanStep:
     """
     Processes a join tree from the AST and returns a PlanStep representing the join.
     """
@@ -3478,7 +3471,7 @@ def process_join_tree(join: dict) -> PlanStep:
             "Natural": "natural join",  # should never match, here for completeness
         }.get(join_operator)
 
-    def extract_join_condition(join: dict) -> Tuple[Optional[str], Optional[List[str]]]:
+    def extract_join_condition(join: dict, *, plan_context) -> Tuple[Optional[str], Optional[List[str]]]:
         """
         Extracts the join's limiting condition from the AST node representing the join.
         """
@@ -3494,7 +3487,8 @@ def process_join_tree(join: dict) -> PlanStep:
         if join_condition == "On":
             join_on = _strip_outer_nesting(
                 logical_planner_builders.build(
-                    join["join_operator"][join_operator][join_condition]
+                    join["join_operator"][join_operator][join_condition],
+                    plan_context=plan_context,
                 )
             )
             # A conjunct with no column reference at all (a bare literal like
@@ -3508,13 +3502,13 @@ def process_join_tree(join: dict) -> PlanStep:
             )
         if join_condition == "Using":
             join_using = [
-                logical_planner_builders.build(identifier[0])
+                logical_planner_builders.build(identifier[0], plan_context=plan_context)
                 for identifier in join["join_operator"][join_operator][join_condition]
             ]
 
         return join_on, join_using
 
-    def create_unnest_node(join: dict, join_step: PlanStep, function: str = "UNNEST") -> PlanStep:
+    def create_unnest_node(join: dict, join_step: PlanStep, function: str = "UNNEST", *, plan_context) -> PlanStep:
         """
         Extracts information for an UNNEST dataset from the AST node representing the join.
 
@@ -3529,7 +3523,7 @@ def process_join_tree(join: dict) -> PlanStep:
         """
         if join_step.type != "cross join":
             raise UnsupportedSyntaxError(f"**JOIN** on {function} only supported for CROSS joins. Write it as a **CROSS JOIN**.")
-        unnest_column = logical_planner_builders.build(join["relation"]["Table"]["args"]["args"][0])
+        unnest_column = logical_planner_builders.build(join["relation"]["Table"]["args"]["args"][0], plan_context=plan_context)
         if join["relation"]["Table"].get("alias") is None:
             raise UnnamedColumnError(
                 f"Column created by {function} has no name, use AS to name the column."
@@ -3557,17 +3551,17 @@ def process_join_tree(join: dict) -> PlanStep:
     if join_step.type == "asof":
         asof_payload = join["join_operator"]["AsOf"]
         join_step.asof_condition = _strip_outer_nesting(
-            logical_planner_builders.build(asof_payload["match_condition"])
+            logical_planner_builders.build(asof_payload["match_condition"], plan_context=plan_context)
         )
         constraint = asof_payload.get("constraint", "None")
         if isinstance(constraint, dict) and "On" in constraint:
             join_step.on = _strip_outer_nesting(
-                logical_planner_builders.build(constraint["On"])
+                logical_planner_builders.build(constraint["On"], plan_context=plan_context)
             )
         elif isinstance(constraint, dict) and "Using" in constraint:
-            join_step.using = [logical_planner_builders.build(i[0]) for i in constraint["Using"]]
+            join_step.using = [logical_planner_builders.build(i[0], plan_context=plan_context) for i in constraint["Using"]]
     else:
-        join_step.on, join_step.using = extract_join_condition(join)
+        join_step.on, join_step.using = extract_join_condition(join, plan_context=plan_context)
 
     if not join_step.on and not join_step.using and join_step.type in ("left outer", "right outer"):
         raise UnsupportedSyntaxError(
@@ -3577,22 +3571,22 @@ def process_join_tree(join: dict) -> PlanStep:
     # JOIN UNNEST needs to be handled differently
     if "Table" in join.get("relation", {}):
         relation_name = ".".join(
-            logical_planner_builders.build(p).value for p in join["relation"]["Table"]["name"]
+            logical_planner_builders.build(p, plan_context=plan_context).value for p in join["relation"]["Table"]["name"]
         )
         if relation_name.upper() in ("UNNEST", "CIDR_UNNEST"):
-            join_step = create_unnest_node(join, join_step, relation_name.upper())
+            join_step = create_unnest_node(join, join_step, relation_name.upper(), plan_context=plan_context)
 
     return join_step
 
 
-def create_node_relation(relation: dict):
+def create_node_relation(relation: dict, *, plan_context):
     sub_plan = LogicalPlan()
     root_node = None
 
     relation_name = None
     if "Table" in relation["relation"]:
         relation_name = ".".join(
-            logical_planner_builders.build(p).value for p in relation["relation"]["Table"]["name"]
+            logical_planner_builders.build(p, plan_context=plan_context).value for p in relation["relation"]["Table"]["name"]
         )
 
     if "Derived" in relation["relation"]:
@@ -3609,7 +3603,7 @@ def create_node_relation(relation: dict):
                 step_id = random_string()
                 sub_plan.add_node(step_id, subquery_step)
 
-                subquery_plan = plan_query(subquery["subquery"])
+                subquery_plan = plan_query(subquery["subquery"], plan_context=plan_context)
                 exit_node = subquery_plan.get_exit_points()[0]
                 subquery_step.columns = subquery_plan[exit_node].columns
                 subquery_plan.remove_node(exit_node, heal=True)
@@ -3634,7 +3628,7 @@ def create_node_relation(relation: dict):
                     col["name"]["value"] for col in subquery["alias"]["columns"]
                 )
                 values_step.values = [
-                    tuple(logical_planner_builders.build(value) for value in row["content"])
+                    tuple(logical_planner_builders.build(value, plan_context=plan_context) for value in row["content"])
                     for row in subquery["subquery"]["body"]["Values"]["rows"]
                 ]
                 step_id = random_string()
@@ -3682,7 +3676,8 @@ def create_node_relation(relation: dict):
         # without this, `WITH(anything)` on a function dataset was discarded
         # silently, garbage included.
         function_step_hints, function_step_settings = _parse_table_hints(
-            function["with_hints"], relation_name
+            function["with_hints"], relation_name,
+            plan_context=plan_context,
         )
         if function_step_settings:
             names = ", ".join(md_column(name) for name in sorted(function_step_settings))
@@ -3727,9 +3722,9 @@ def create_node_relation(relation: dict):
         for arg in function["args"]["args"]:
             if "Named" in arg:
                 named = arg["Named"]
-                named_args[named["name"]["value"]] = logical_planner_builders.build(named["arg"])
+                named_args[named["name"]["value"]] = logical_planner_builders.build(named["arg"], plan_context=plan_context)
             else:
-                args.append(logical_planner_builders.build(arg))
+                args.append(logical_planner_builders.build(arg, plan_context=plan_context))
         function_step.args = args
         function_step.named_args = named_args
         if function["alias"] is not None:
@@ -3753,7 +3748,7 @@ def create_node_relation(relation: dict):
             from_step.relation if table["alias"] is None else table["alias"]["name"]["value"]
         )
         from_step.hints, from_step.hint_settings = _parse_table_hints(
-            table["with_hints"], relation_name)
+            table["with_hints"], relation_name, plan_context=plan_context)
 
         # Extract and validate AT / VERSION clause if present
         version_clause = table.get("version")
@@ -3771,11 +3766,13 @@ def create_node_relation(relation: dict):
                 )
             elif logical_planner_builders.is_version_as_of_clause(version_clause):
                 from_step.version = logical_planner_builders.extract_timetravel_version(
-                    version_clause
+                    version_clause,
+                    plan_context=plan_context,
                 )
             else:
                 from_step.at_date = logical_planner_builders.extract_timetravel_timestamp(
-                    version_clause
+                    version_clause,
+                    plan_context=plan_context,
                 )
 
         step_id = random_string()
@@ -3789,7 +3786,7 @@ def create_node_relation(relation: dict):
     for join in _joins:
         # this is the convention: select * from LEFT join RIGHT
 
-        join_step = process_join_tree(join)
+        join_step = process_join_tree(join, plan_context=plan_context)
 
         if join_step.node_type == LogicalPlanStepType.Unnest:
             # UNNEST joins don't have a LEFT and RIGHT side
@@ -3799,7 +3796,7 @@ def create_node_relation(relation: dict):
             root_node = join_step_id
             continue
 
-        right_node_id, right_plan = create_node_relation(join)
+        right_node_id, right_plan = create_node_relation(join, plan_context=plan_context)
 
         # add the left and right relation names - we sometimes need these later
         join_step.left_relation_names = get_subplan_schemas(sub_plan)
@@ -3822,7 +3819,7 @@ def create_node_relation(relation: dict):
     return root_node, sub_plan
 
 
-def plan_explain(statement, **kwargs) -> LogicalPlan:
+def plan_explain(statement, *, plan_context, **kwargs) -> LogicalPlan:
     plan = LogicalPlan()
     explain_node = ExplainStep()
     explain_node.analyze = statement["Explain"]["analyze"]
@@ -3862,7 +3859,7 @@ def plan_explain(statement, **kwargs) -> LogicalPlan:
         raise UnsupportedSyntaxError(
             f"**EXPLAIN** does not support **{inner_root.upper()}** statements."
         )
-    sub_plan = builder(inner)
+    sub_plan = builder(inner, plan_context=plan_context)
     sub_plan_id = sub_plan.get_exit_points()[0]
     plan += sub_plan
     plan.add_edge(sub_plan_id, explain_id)
@@ -3870,7 +3867,7 @@ def plan_explain(statement, **kwargs) -> LogicalPlan:
     return plan
 
 
-def plan_query(statement: dict) -> LogicalPlan:
+def plan_query(statement: dict, *, plan_context) -> LogicalPlan:
     """ """
 
     root_node = statement
@@ -3899,18 +3896,18 @@ def plan_query(statement: dict) -> LogicalPlan:
         plan.add_node(step_id, set_op_node)
         head_nid = step_id
 
-        left_plan = inner_query_planner(set_operation["left"])
+        left_plan = inner_query_planner(set_operation["left"], plan_context=plan_context)
         from opteryx.planner.relation_resolver import UNION_ALIAS_PREFIX
         from opteryx.planner.relation_resolver import rename_relations
 
-        left_plan = rename_relations(left_plan, prefix=UNION_ALIAS_PREFIX)
+        left_plan = rename_relations(left_plan, prefix=UNION_ALIAS_PREFIX, plan_context=plan_context)
         plan += left_plan
         subquery_entry_id = left_plan.get_exit_points()[0]
         plan.add_edge(subquery_entry_id, step_id)
         # remove the exit node
         plan.remove_node(subquery_entry_id, heal=True)
 
-        right_plan = inner_query_planner(set_operation["right"])
+        right_plan = inner_query_planner(set_operation["right"], plan_context=plan_context)
 
         # Both sides must present the same number of columns. The binder checks this
         # too (binder/set_ops.py `_validate_set_operation_types`), but only UNION ever
@@ -3934,7 +3931,7 @@ def plan_query(statement: dict) -> LogicalPlan:
                 f"{op_type.upper()}: column count mismatch — left has {left_arity}, right has {right_arity}"
             )
 
-        right_plan = rename_relations(right_plan, prefix=UNION_ALIAS_PREFIX)
+        right_plan = rename_relations(right_plan, prefix=UNION_ALIAS_PREFIX, plan_context=plan_context)
         plan += right_plan
         subquery_entry_id = right_plan.get_exit_points()[0]
         plan.add_edge(subquery_entry_id, step_id)
@@ -3957,8 +3954,8 @@ def plan_query(statement: dict) -> LogicalPlan:
                 _offset = _offset.get("value")
             if _limit or _offset:
                 limit_step = LimitStep()
-                limit_step.limit = _limit_value(_limit, "LIMIT")
-                limit_step.offset = _limit_value(_offset, "OFFSET")
+                limit_step.limit = _limit_value(_limit, "LIMIT", plan_context=plan_context)
+                limit_step.offset = _limit_value(_offset, "OFFSET", plan_context=plan_context)
                 head_nid, step_id = step_id, random_string()
                 plan.add_node(step_id, limit_step)
                 if head_nid is not None:
@@ -3999,7 +3996,7 @@ def plan_query(statement: dict) -> LogicalPlan:
         root_node["body"]["offset"] = root_node["limit_clause"].get("LimitOffset", {}).get("offset")
     root_node["body"]["order_by"] = root_node.get("order_by", None)
 
-    planned_query = inner_query_planner(root_node["body"])
+    planned_query = inner_query_planner(root_node["body"], plan_context=plan_context)
 
     # DEBUG: print("LOGICAL PLAN")
     # DEBUG: print(planned_query.draw())
@@ -4007,19 +4004,19 @@ def plan_query(statement: dict) -> LogicalPlan:
     return planned_query
 
 
-def plan_set_variable(statement, **kwargs):
+def plan_set_variable(statement, *, plan_context, **kwargs):
     root_node = "SingleAssignment"
     statement = statement["Set"]
     plan = LogicalPlan()
     set_step = SetStep(
         variable=extract_variable(statement[root_node]["variable"]),
-        value=extract_value(statement[root_node]["values"]),
+        value=extract_value(statement[root_node]["values"], plan_context=plan_context),
     )
     plan.add_node(random_string(), set_step)
     return plan
 
 
-def plan_show_columns(statement, **kwargs):
+def plan_show_columns(statement, *, plan_context, **kwargs):
     root_node = "ShowColumns"
     plan = LogicalPlan()
 
@@ -4042,7 +4039,7 @@ def plan_show_columns(statement, **kwargs):
     if _filter:
         _filter = _filter["Suffix"]
         filter_node = FilterStep()
-        filter_node.condition = extract_simple_filter(_filter, "name")
+        filter_node.condition = extract_simple_filter(_filter, "name", plan_context=plan_context)
         previous_step_id, step_id = step_id, random_string()
         plan.add_node(step_id, filter_node)
         plan.add_edge(previous_step_id, step_id)
@@ -4200,7 +4197,7 @@ def _plan_show_history(
     return plan
 
 
-def _plan_show_triggers(table_name: str) -> LogicalPlan:
+def _plan_show_triggers(table_name: str, *, plan_context) -> LogicalPlan:
     """`SHOW TRIGGERS FOR <holder>` — desugars to
     `SELECT * FROM <workspace>.information_schema.triggers
      WHERE trigger_holder = '<collection.name>'`.
@@ -4240,7 +4237,7 @@ def _plan_show_triggers(table_name: str) -> LogicalPlan:
 
     filter_node = FilterStep()
     filter_node.condition = build_expression_tree(
-        relation, [("trigger_holder", "Eq", relative)]
+        relation, [("trigger_holder", "Eq", relative)], plan_context=plan_context
     )
     previous_step_id, step_id = step_id, random_string()
     plan.add_node(step_id, filter_node)
@@ -4255,7 +4252,7 @@ def _plan_show_triggers(table_name: str) -> LogicalPlan:
     return plan
 
 
-def plan_show_variables(statement, **kwargs):
+def plan_show_variables(statement, *, plan_context, **kwargs):
     """SHOW VARIABLES, SHOW USER, SHOW GRANTS, SHOW MANIFEST FOR — planned from
     the parser's generic `ShowVariable` catch-all.
 
@@ -4354,7 +4351,7 @@ def plan_show_variables(statement, **kwargs):
             )
         # Original case preserved, as for SHOW MANIFEST FOR above.
         table_name = ".".join(part["value"] for part in parts[2:])
-        return _plan_show_triggers(table_name)
+        return _plan_show_triggers(table_name, plan_context=plan_context)
     raise UnsupportedSyntaxError(
         f"Opteryx does not support 'SHOW {' '.join(words)}'; "
         "supported forms are `SHOW VARIABLES`, `SHOW USER`, `SHOW GRANTS`, "
@@ -4364,7 +4361,7 @@ def plan_show_variables(statement, **kwargs):
     )
 
 
-def plan_show_create_query(statement, **kwargs):
+def plan_show_create_query(statement, *, plan_context, **kwargs):
     root_node = "ShowCreate"
     plan = LogicalPlan()
     show_step = ShowStep()
@@ -4399,7 +4396,7 @@ def plan_show_create_query(statement, **kwargs):
     return plan
 
 
-def plan_create_view(statement, **kwargs):
+def plan_create_view(statement, *, plan_context, **kwargs):
     """
     Create a logical plan for CREATE VIEW statement.
 
@@ -4455,8 +4452,7 @@ def plan_create_view(statement, **kwargs):
             if_not_exists=False,
             query_ast=statement[root_node]["query"],
             or_replace=create_view_node.or_replace,
-            is_materialized_view=True,
-        )
+            is_materialized_view=True, plan_context=plan_context)
 
     # Extract columns (if specified)
     columns = statement[root_node].get("columns")
@@ -4499,7 +4495,7 @@ def plan_create_view(statement, **kwargs):
     return plan
 
 
-def plan_alter_view(statement, **kwargs):
+def plan_alter_view(statement, *, plan_context, **kwargs):
     """
     Create a logical plan for ALTER VIEW statement (UpdateView).
 
@@ -4557,7 +4553,7 @@ def plan_alter_view(statement, **kwargs):
     return plan
 
 
-def plan_alter_table(statement, **kwargs):
+def plan_alter_table(statement, *, plan_context, **kwargs):
     """
     Create a logical plan for ALTER TABLE statement.
 
@@ -4657,7 +4653,7 @@ def plan_alter_table(statement, **kwargs):
         column_name = column_def["name"]["value"]
 
         try:
-            column_type = column_type_from_ast(column_def)
+            column_type = column_type_from_ast(column_def, plan_context=plan_context)
         except (_SqlError, ValueError) as err:
             raise UnsupportedSyntaxError(
                 f"unsupported column type in **ALTER TABLE ... ADD COLUMN** for '{column_name}': {err}"
@@ -4672,7 +4668,7 @@ def plan_alter_table(statement, **kwargs):
             elif option == "Null":
                 continue
             elif isinstance(option, dict) and "Default" in option:
-                default_expr = build_expression(option["Default"])
+                default_expr = build_expression(option["Default"], plan_context=plan_context)
                 if default_expr is None or default_expr.node_type != NodeType.LITERAL:
                     raise UnsupportedSyntaxError(
                         "**ALTER TABLE ... ADD COLUMN ... DEFAULT** only supports literal "
@@ -4782,7 +4778,7 @@ def plan_alter_table(statement, **kwargs):
             )
 
         try:
-            new_column_type = column_type_from_ast(set_type_op)
+            new_column_type = column_type_from_ast(set_type_op, plan_context=plan_context)
         except (_SqlError, ValueError) as err:
             raise UnsupportedSyntaxError(
                 f"unsupported column type in **ALTER TABLE ... ALTER COLUMN ... TYPE** for '{column_name}': {err}"
@@ -5314,7 +5310,7 @@ WORKSPACE_PROPERTIES = {
 }
 
 
-def plan_alter_workspace(statement, **kwargs):
+def plan_alter_workspace(statement, *, plan_context, **kwargs):
     """
     Create a logical plan for ALTER WORKSPACE statement.
 
@@ -5374,7 +5370,7 @@ def plan_alter_workspace(statement, **kwargs):
     return plan
 
 
-def plan_alter_workspace_secure(statement, **kwargs) -> LogicalPlan:
+def plan_alter_workspace_secure(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """ALTER WORKSPACE <source> SET SECURE <object> TO <ws>[, ...] | DROP SECURE <object>.
 
     Synthesized by pre-parse. The SECURE flag sanctions ONE object - a task, a
@@ -5428,7 +5424,7 @@ def plan_alter_workspace_secure(statement, **kwargs) -> LogicalPlan:
     return plan
 
 
-def plan_create_collection(statement, **kwargs):
+def plan_create_collection(statement, *, plan_context, **kwargs):
     """
     Create a logical plan for CREATE COLLECTION statement.
 
@@ -5498,7 +5494,7 @@ def plan_create_collection(statement, **kwargs):
     return plan
 
 
-def plan_drop(statement, **kwargs):
+def plan_drop(statement, *, plan_context, **kwargs):
     """
     Create a logical plan for DROP statement (VIEW or TABLE).
 
@@ -5611,7 +5607,7 @@ def plan_drop(statement, **kwargs):
         raise UnsupportedSyntaxError(f"DROP {object_type} is not supported")
 
 
-def plan_drop_workspace(statement, **kwargs):
+def plan_drop_workspace(statement, *, plan_context, **kwargs):
     """
     Create a logical plan for DROP WORKSPACE statement.
 
@@ -5840,7 +5836,7 @@ def _resolve_symbolic_versions(parsed: dict, arguments: dict) -> dict:
     return resolved
 
 
-def plan_execute(statement, **kwargs):
+def plan_execute(statement, *, plan_context, **kwargs):
     """Plan `EXECUTE <task> USING <value> AS <name>, ...`.
 
     Desugars to the task's own recorded statement, with the `USING` arguments
@@ -5997,7 +5993,7 @@ def plan_execute(statement, **kwargs):
             f"task {relation_name} is recorded as a **{inner_root.upper()}** "
             "statement, which cannot be executed."
         )
-    plan = builder(bound)
+    plan = builder(bound, plan_context=plan_context)
 
     # The write this task expands to carries the task's identity, so the egress
     # gate can ask whether a source workspace has marked THIS task SECURE. The
@@ -6014,7 +6010,7 @@ def plan_execute(statement, **kwargs):
     return plan
 
 
-def plan_refresh_materialized_view(statement, **kwargs):
+def plan_refresh_materialized_view(statement, *, plan_context, **kwargs):
     """Plan REFRESH MATERIALIZED VIEW <name>.
 
     Desugars to the view's own defining SELECT written back over its backing
@@ -6067,8 +6063,7 @@ def plan_refresh_materialized_view(statement, **kwargs):
         if_not_exists=False,
         query_ast=parsed[0],
         or_replace=True,
-        is_refresh=True,
-    )
+        is_refresh=True, plan_context=plan_context)
 
 
 def _plan_ctas(
@@ -6078,6 +6073,8 @@ def _plan_ctas(
     or_replace=False,
     is_materialized_view=False,
     is_refresh=False,
+    *,
+    plan_context,
 ):
     """Plan CREATE TABLE ... AS SELECT.
 
@@ -6095,7 +6092,7 @@ def _plan_ctas(
     # shape when the insert operator re-renders it at registration time.
     defining_query = copy.deepcopy(query_ast) if is_materialized_view else None
 
-    source_plan = plan_query(query_ast)
+    source_plan = plan_query(query_ast, plan_context=plan_context)
     exit_node_id = source_plan.get_exit_points()[0]
     plan += source_plan
     source_tail_id = exit_node_id
@@ -6180,7 +6177,7 @@ def _plan_clone(create_statement, target_name: str, clone_parts):
     return plan
 
 
-def plan_resync_relation(statement, **kwargs):
+def plan_resync_relation(statement, *, plan_context, **kwargs):
     """Plan `ALTER TABLE <fork> RESYNC [FORCE]`.
 
     Synthesized by pre_parse - the parser's ALTER TABLE grammar has no such
@@ -6208,7 +6205,7 @@ def plan_resync_relation(statement, **kwargs):
     return plan
 
 
-def plan_detach_relation(statement, **kwargs):
+def plan_detach_relation(statement, *, plan_context, **kwargs):
     """Plan `ALTER TABLE <fork> DETACH`.
 
     The one fork statement that moves bytes - it copies everything the fork
@@ -6230,7 +6227,7 @@ def plan_detach_relation(statement, **kwargs):
     return plan
 
 
-def plan_create_table(statement, **kwargs):
+def plan_create_table(statement, *, plan_context, **kwargs):
     """
     Create a logical plan for CREATE TABLE statement.
 
@@ -6241,7 +6238,7 @@ def plan_create_table(statement, **kwargs):
 
     Maps sqloxide column types to LogicalCategory and constructs a RelationSchema.
     """
-    from opteryx.types.schema import RelationSchema, SchemaColumn
+    from opteryx.types.schema import RelationSchema
 
     root_node = "CreateTable"
     plan = LogicalPlan()
@@ -6300,8 +6297,7 @@ def plan_create_table(statement, **kwargs):
             relation_name=create_table_node.relation_name,
             if_not_exists=create_table_node.if_not_exists,
             query_ast=query_ast,
-            or_replace=statement[root_node].get("or_replace", False),
-        )
+            or_replace=statement[root_node].get("or_replace", False), plan_context=plan_context)
 
     # Check for unsupported options (plain CREATE TABLE form — or_replace not supported here)
     for option in ["or_replace", "external", "temporary", "transient", "volatile", "iceberg"]:
@@ -6330,7 +6326,7 @@ def plan_create_table(statement, **kwargs):
         from opteryx.exceptions import SqlError as _SqlError
 
         try:
-            sql_type_ct = column_type_from_ast(col_def)
+            sql_type_ct = column_type_from_ast(col_def, plan_context=plan_context)
         except (_SqlError, ValueError) as err:
             raise UnsupportedSyntaxError(
                 f"unsupported column type in **CREATE TABLE** for '{col_name}': {err}"
@@ -6341,14 +6337,8 @@ def plan_create_table(statement, **kwargs):
         )
         relationships.extend(col_relationships)
 
-        # Create SchemaColumn
-        from opteryx.types.schema import mint_column_identity
-
-        flat_col = SchemaColumn(
-            name=col_name,
-            column_type=sql_type_ct,
-            nullable=col_nullable,
-            identity=mint_column_identity("$create", col_name),
+        flat_col = plan_context.columns.relation_column(
+            "$create", col_name, column_type=sql_type_ct, nullable=col_nullable
         )
         columns.append(flat_col)
 
@@ -6367,7 +6357,7 @@ def plan_create_table(statement, **kwargs):
     return plan
 
 
-def plan_truncate(statement, **kwargs):
+def plan_truncate(statement, *, plan_context, **kwargs):
     """
     Create a logical plan for TRUNCATE TABLE statement.
 
@@ -6396,7 +6386,7 @@ def plan_truncate(statement, **kwargs):
     return plan
 
 
-def plan_optimize_table(statement, **kwargs):
+def plan_optimize_table(statement, *, plan_context, **kwargs):
     """
     Create a logical plan for OPTIMIZE statement.
 
@@ -6493,14 +6483,14 @@ def plan_optimize_table(statement, **kwargs):
             "interpolate": None,
         }
 
-    plan = plan_query(query)
+    plan = plan_query(query, plan_context=plan_context)
 
     sink = CompactionCommitStep()
     sink.relation_name = relation_name
     return _attach_sink(plan, sink)
 
 
-def plan_insert(statement, **kwargs):
+def plan_insert(statement, *, plan_context, **kwargs):
     """
     Create a logical plan for INSERT statement.
 
@@ -6518,7 +6508,7 @@ def plan_insert(statement, **kwargs):
 
     # Target relation name
     table_name_parts = insert_stmt["table"]["TableName"]
-    relation_name = ".".join(logical_planner_builders.build(p).value for p in table_name_parts)
+    relation_name = ".".join(logical_planner_builders.build(p, plan_context=plan_context).value for p in table_name_parts)
 
     # Explicit column list (may be empty/None). sqloxide represents each column
     # reference as a compound-identifier part list; a plain (non-dotted) column
@@ -6547,7 +6537,7 @@ def plan_insert(statement, **kwargs):
         )
         values_step.alias = f"$insert_values-{random_string(6)}"
         values_step.values = [
-            tuple(logical_planner_builders.build(value) for value in row["content"])
+            tuple(logical_planner_builders.build(value, plan_context=plan_context) for value in row["content"])
             for row in body["Values"]["rows"]
         ]
         # Generate placeholder column names. These will be replaced by visit_insert
@@ -6576,7 +6566,7 @@ def plan_insert(statement, **kwargs):
         # mirrors plan_explain's pattern and keeps the SELECT subplan genuinely
         # Exit-headed, which execute_native requires to run it on the native
         # engine instead of the legacy push-pipeline.
-        source_plan = plan_query(insert_stmt["source"])
+        source_plan = plan_query(insert_stmt["source"], plan_context=plan_context)
         exit_node_id = source_plan.get_exit_points()[0]
 
         plan += source_plan
@@ -6594,7 +6584,7 @@ def plan_insert(statement, **kwargs):
     return plan
 
 
-def plan_analyze_query(statement, **kwargs) -> LogicalPlan:
+def plan_analyze_query(statement, *, plan_context, **kwargs) -> LogicalPlan:
     root = "Analyze"
 
     if not statement[root]["has_table_keyword"]:
@@ -6617,7 +6607,7 @@ def plan_analyze_query(statement, **kwargs) -> LogicalPlan:
     return plan
 
 
-def plan_drop_statistics(statement, **kwargs) -> LogicalPlan:
+def plan_drop_statistics(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """DROP STATISTICS ON t [FOR COLUMNS …] — synthesized by the planner's
     pre-parse interception (no native sqlparser grammar). Reuses the Analyze
     logical node / Table Management physical node, dispatching on `action`."""
@@ -6722,7 +6712,7 @@ def _reject_pronouns_in_task_body(task_sql: str, what: str) -> None:
         )
 
 
-def plan_create_task(statement, **kwargs) -> LogicalPlan:
+def plan_create_task(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """CREATE [OR REPLACE] TASK <name> AS <statement> — synthesized by pre-parse.
 
     The statement is parsed here - so a task that is not valid SQL is refused at
@@ -6803,7 +6793,7 @@ def plan_create_task(statement, **kwargs) -> LogicalPlan:
     return plan
 
 
-def plan_drop_task(statement, **kwargs) -> LogicalPlan:
+def plan_drop_task(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """DROP TASK [IF EXISTS] <name> — synthesized by pre-parse.
 
     A task owns no storage, so dropping one reclaims nothing and there is
@@ -6822,7 +6812,7 @@ def plan_drop_task(statement, **kwargs) -> LogicalPlan:
     return plan
 
 
-def plan_alter_task(statement, **kwargs) -> LogicalPlan:
+def plan_alter_task(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """ALTER TASK <name> AS <statement> — synthesized by pre-parse.
 
     The narrow form: it redefines what a task runs and nothing else. Unlike
@@ -6880,7 +6870,7 @@ def plan_alter_task(statement, **kwargs) -> LogicalPlan:
     return plan
 
 
-def plan_create_trigger(statement, **kwargs) -> LogicalPlan:
+def plan_create_trigger(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """CREATE [OR REPLACE] TRIGGER <name> ON <table> EXECUTE <task>, and the
     ON SCHEDULE / ON SIGNAL forms — synthesized by pre-parse.
 
@@ -6916,7 +6906,7 @@ def plan_create_trigger(statement, **kwargs) -> LogicalPlan:
     return plan
 
 
-def plan_alter_trigger_owner(statement, **kwargs) -> LogicalPlan:
+def plan_alter_trigger_owner(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """ALTER TRIGGER <name> ON <table> OWNER TO <principal>|CURRENT_USER.
 
     The identity an UNATTENDED run executes as. It is the trigger's rather than
@@ -6940,7 +6930,7 @@ def plan_alter_trigger_owner(statement, **kwargs) -> LogicalPlan:
     return plan
 
 
-def plan_alter_trigger_suspended(statement, **kwargs) -> LogicalPlan:
+def plan_alter_trigger_suspended(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """ALTER TRIGGER <name> ON <table> SUSPEND|RESUME — synthesized by pre-parse.
 
     A suspended trigger still exists and still records that it was reached; it
@@ -6959,7 +6949,7 @@ def plan_alter_trigger_suspended(statement, **kwargs) -> LogicalPlan:
     return plan
 
 
-def plan_alter_trigger_minimum_interval(statement, **kwargs) -> LogicalPlan:
+def plan_alter_trigger_minimum_interval(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """ALTER TRIGGER <name> ON <table> SET MINIMUM INTERVAL TO <n> [SECONDS|MINUTES]
     — synthesized by pre-parse, which has already reduced the value to seconds.
 
@@ -6979,7 +6969,7 @@ def plan_alter_trigger_minimum_interval(statement, **kwargs) -> LogicalPlan:
     return plan
 
 
-def plan_drop_trigger(statement, **kwargs) -> LogicalPlan:
+def plan_drop_trigger(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """DROP TRIGGER [IF EXISTS] <name> ON <table> — synthesized by the planner's
     pre-parse interception (OpteryxDialect has no native sqlparser grammar for
     trigger statements). The table is required: trigger names are only unique
@@ -6996,7 +6986,7 @@ def plan_drop_trigger(statement, **kwargs) -> LogicalPlan:
     return plan
 
 
-def plan_alter_materialized_view_owner(statement, **kwargs) -> LogicalPlan:
+def plan_alter_materialized_view_owner(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """ALTER MATERIALIZED VIEW <name> OWNER TO <principal> — synthesized by the
     planner's pre-parse interception.
 
@@ -7022,7 +7012,7 @@ def plan_alter_materialized_view_owner(statement, **kwargs) -> LogicalPlan:
     return plan
 
 
-def plan_alter_materialized_view_suspended(statement, **kwargs) -> LogicalPlan:
+def plan_alter_materialized_view_suspended(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """ALTER MATERIALIZED VIEW <name> SUSPEND | RESUME — synthesized pre-parse.
 
     Suspends automatic refresh without removing the machinery that performs it.
@@ -7091,7 +7081,7 @@ def _plan_grant_statement(statement, root: str, node_type) -> LogicalPlan:
     return plan
 
 
-def plan_grant_access(statement, **kwargs) -> LogicalPlan:
+def plan_grant_access(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """GRANT <role> ON <kind> <object> TO USER <user> — synthesized pre-parse.
 
     Adds exactly ONE policy; the permissions capability owns every rule (owner
@@ -7100,7 +7090,7 @@ def plan_grant_access(statement, **kwargs) -> LogicalPlan:
     return _plan_grant_statement(statement, "GrantAccess", LogicalPlanStepType.GrantAccess)
 
 
-def plan_revoke_access(statement, **kwargs) -> LogicalPlan:
+def plan_revoke_access(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """REVOKE <role> ON <kind> <object> FROM USER <user> — synthesized pre-parse.
 
     Deletes exactly ONE policy, resolved 1:1 by (principal, pattern, role) —
@@ -7130,7 +7120,7 @@ def _plan_grant_listing(statement, root: str, node_type, effective: bool) -> Log
     return plan
 
 
-def plan_show_grants_on(statement, **kwargs) -> LogicalPlan:
+def plan_show_grants_on(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """SHOW GRANTS ON <kind> <object> — synthesized pre-parse.
 
     Lists the stored policies AT an object, one row per policy - the console's
@@ -7142,7 +7132,7 @@ def plan_show_grants_on(statement, **kwargs) -> LogicalPlan:
     )
 
 
-def plan_show_effective_grants_on(statement, **kwargs) -> LogicalPlan:
+def plan_show_effective_grants_on(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """SHOW EFFECTIVE GRANTS ON <kind> <object> — synthesized pre-parse.
 
     Lists every stored policy that COVERS the object - the one attached to it
@@ -7159,7 +7149,7 @@ def plan_show_effective_grants_on(statement, **kwargs) -> LogicalPlan:
     )
 
 
-def plan_listen(statement, **kwargs) -> LogicalPlan:
+def plan_listen(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """LISTEN TO <task> [FOR ...] — synthesized pre-parse.
 
     Subscribes the SESSION USER to a task's run outcomes; there is no form that
@@ -7180,7 +7170,7 @@ def plan_listen(statement, **kwargs) -> LogicalPlan:
     return plan
 
 
-def plan_unlisten(statement, **kwargs) -> LogicalPlan:
+def plan_unlisten(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """UNLISTEN <task> — synthesized pre-parse.
 
     Removes the session user's own subscription, whole. There is no FOR clause:
@@ -7196,7 +7186,7 @@ def plan_unlisten(statement, **kwargs) -> LogicalPlan:
     return plan
 
 
-def plan_show_listeners(statement, **kwargs) -> LogicalPlan:
+def plan_show_listeners(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """SHOW LISTENERS — recognized, and refused pending an architect ruling.
 
     The statement names no object, and `information_schema` in this engine is
@@ -7226,7 +7216,7 @@ def plan_show_listeners(statement, **kwargs) -> LogicalPlan:
     )
 
 
-def build_expression_tree(relation, dnf_list):
+def build_expression_tree(relation, dnf_list, *, plan_context):
     """
     Recursively build an expression tree from a DNF-like list structure.
     The structure can include:
@@ -7249,8 +7239,8 @@ def build_expression_tree(relation, dnf_list):
         and all(isinstance(c, list) for c in dnf_list[1])
     ):
         common_clause, or_clauses = dnf_list
-        left = build_expression_tree(relation, common_clause)
-        right = build_expression_tree(relation, or_clauses)
+        left = build_expression_tree(relation, common_clause, plan_context=plan_context)
+        right = build_expression_tree(relation, or_clauses, plan_context=plan_context)
         return And(left=left, right=right)
 
     # --- Case: flat clause (AND of tuples) ---
@@ -7258,7 +7248,7 @@ def build_expression_tree(relation, dnf_list):
         and_node = None
         for identifier, operator, value in dnf_list:
             if identifier is True or identifier is False:
-                left_node = build_literal_node(identifier)
+                left_node = build_literal_node(identifier, plan_context=plan_context)
             else:
                 left_node = LogicalColumn(
                     NodeType.IDENTIFIER, source_column=identifier, source=relation
@@ -7266,7 +7256,7 @@ def build_expression_tree(relation, dnf_list):
             comparison_node = Comparison(
                 value=operator,
                 left=left_node,
-                right=build_literal_node(value),
+                right=build_literal_node(value, plan_context=plan_context),
             )
             if operator.startswith("AnyOp"):
                 comparison_node.left, comparison_node.right = (
@@ -7284,7 +7274,7 @@ def build_expression_tree(relation, dnf_list):
     if all(isinstance(x, list) and all(isinstance(p, tuple) for p in x) for x in dnf_list):
         or_node = None
         for clause in dnf_list:
-            clause_node = build_expression_tree(relation, clause)
+            clause_node = build_expression_tree(relation, clause, plan_context=plan_context)
             or_node = (
                 clause_node
                 if or_node is None
@@ -7296,15 +7286,15 @@ def build_expression_tree(relation, dnf_list):
     if any(isinstance(x, tuple) for x in dnf_list) and any(isinstance(x, list) for x in dnf_list):
         flat_preds = [x for x in dnf_list if isinstance(x, tuple)]
         subgroups = [x for x in dnf_list if isinstance(x, list)]
-        left = build_expression_tree(relation, flat_preds)
-        right = build_expression_tree(relation, subgroups)
+        left = build_expression_tree(relation, flat_preds, plan_context=plan_context)
+        right = build_expression_tree(relation, subgroups, plan_context=plan_context)
         return And(left=left, right=right)
 
     # --- Case: fallback, treat as OR of subgroups ---
     if isinstance(dnf_list, list):
         or_node = None
         for subgroup in dnf_list:
-            subgroup_node = build_expression_tree(relation, subgroup)
+            subgroup_node = build_expression_tree(relation, subgroup, plan_context=plan_context)
             or_node = (
                 subgroup_node
                 if or_node is None
@@ -7315,7 +7305,7 @@ def build_expression_tree(relation, dnf_list):
     raise ValueError(f"Unsupported DNF structure: {dnf_list}")
 
 
-def plan_comment(statement, **kwargs):
+def plan_comment(statement, *, plan_context, **kwargs):
     """
     Create a logical plan for a COMMENT ON TABLE/VIEW statement.
 
@@ -7367,7 +7357,7 @@ from opteryx.planner.logical_planner.merge_desugar import plan_delete  # noqa: E
 from opteryx.planner.logical_planner.merge_desugar import plan_merge  # noqa: E402
 from opteryx.planner.logical_planner.merge_desugar import plan_update  # noqa: E402
 
-def plan_call(statement, **kwargs) -> LogicalPlan:
+def plan_call(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """Plan `CALL <procedure>(<literal>, ...)`.
 
     CALL runs a procedure the HOST PROCESS registered (see `opteryx.procedures`), and
@@ -7421,7 +7411,7 @@ def plan_call(statement, **kwargs) -> LogicalPlan:
             f"{md_code('CALL <procedure>(<value>, ...)')}."
         )
     procedure_name = ".".join(
-        logical_planner_builders.build(part).value for part in name_parts
+        logical_planner_builders.build(part, plan_context=plan_context).value for part in name_parts
     ).upper()
 
     arguments = []
@@ -7446,7 +7436,7 @@ def plan_call(statement, **kwargs) -> LogicalPlan:
                 f"{md_syntax('CALL')} does not take a {md_code(found)} clause "
                 f"inside its arguments."
             )
-        arguments = [logical_planner_builders.build(a) for a in argument_list["args"]]
+        arguments = [logical_planner_builders.build(a, plan_context=plan_context) for a in argument_list["args"]]
 
     values = []
     for position, argument in enumerate(arguments, start=1):
@@ -7560,7 +7550,7 @@ QUERY_BUILDERS = {
 VISIBILITY_PATTERN_CHARACTERS = ("*", "?", "[")
 
 
-def _insert_visibility_filter(logical_plan, nid, node, filter_dnf, telemetry) -> None:
+def _insert_visibility_filter(logical_plan, nid, node, filter_dnf, telemetry, *, plan_context) -> None:
     """Insert the Filter node `filter_dnf` describes directly above the scan at `nid`.
 
     Called once per matching key, so a scan covered by several keys ends up under
@@ -7572,8 +7562,8 @@ def _insert_visibility_filter(logical_plan, nid, node, filter_dnf, telemetry) ->
         # means that the relation should not be visible
         expression_tree = Comparison(
             value="Eq",
-            left=build_literal_node(True),
-            right=build_literal_node(False),
+            left=build_literal_node(True, plan_context=plan_context),
+            right=build_literal_node(False, plan_context=plan_context),
         )
 
         # If the filter is an empty list, it means that the relation should not be visible
@@ -7590,7 +7580,7 @@ def _insert_visibility_filter(logical_plan, nid, node, filter_dnf, telemetry) ->
         filter_dnf = dnf.simplify_dnf(filter_dnf)
         telemetry.time_rewriting_visibility_filters += time.monotonic_ns() - start
         # Apply the transformation from DNF to an expression tree
-        expression_tree = build_expression_tree(node.alias, filter_dnf)
+        expression_tree = build_expression_tree(node.alias, filter_dnf, plan_context=plan_context)
 
         filter_node = FilterStep(
             condition=expression_tree,  # Use the built expression tree
@@ -7618,7 +7608,9 @@ def _compaction_is_filtered(relation: str) -> PermissionsError:
 
 
 def apply_visibility_filters(
-    logical_plan: LogicalPlan, visibility_filters: dict, telemetry
+    logical_plan: LogicalPlan, visibility_filters: dict, telemetry,
+    *,
+    plan_context,
 ) -> LogicalPlan:
     """Attach the caller's row-level filters to the scans they cover.
 
@@ -7687,7 +7679,7 @@ def apply_visibility_filters(
             if filter_dnf is not None:
                 if is_compaction:
                     raise _compaction_is_filtered(node.relation)
-                _insert_visibility_filter(logical_plan, nid, node, filter_dnf, telemetry)
+                _insert_visibility_filter(logical_plan, nid, node, filter_dnf, telemetry, plan_context=plan_context)
 
             # A scan with no relation name (a subquery, a function scan) has nothing
             # for a pattern to match against; the exact lookup above already covers
@@ -7702,12 +7694,13 @@ def apply_visibility_filters(
                         if is_compaction:
                             raise _compaction_is_filtered(node.relation)
                         _insert_visibility_filter(
-                            logical_plan, nid, node, pattern_dnf, telemetry
+                            logical_plan, nid, node, pattern_dnf, telemetry,
+                            plan_context=plan_context,
                         )
     return logical_plan
 
 
-def do_logical_planning_phase(parsed_statement: dict) -> tuple:
+def do_logical_planning_phase(parsed_statement: dict, *, plan_context) -> tuple:
     # The sqlparser ast is an array of asts
 
     statement_type = next(iter(parsed_statement))
@@ -7732,5 +7725,5 @@ def do_logical_planning_phase(parsed_statement: dict) -> tuple:
             f"Opteryx does not support '{convert_camel_to_sql_case(statement_type)}' type queries."
         )
     # CTEs are Common Table Expressions, they're variations of subqueries
-    ctes = extract_ctes(parsed_statement)
-    return QUERY_BUILDERS[statement_type](parsed_statement), parsed_statement, ctes
+    ctes = extract_ctes(parsed_statement, plan_context=plan_context)
+    return QUERY_BUILDERS[statement_type](parsed_statement, plan_context=plan_context), parsed_statement, ctes

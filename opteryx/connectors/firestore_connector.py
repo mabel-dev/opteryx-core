@@ -313,7 +313,9 @@ class FirestoreConnector(BaseConnector):
                 headers["Content-Type"] = "application/json"
             request = urllib.request.Request(url, data=data, headers=headers)
             try:
-                with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+                # nosec B310 - every caller builds `url` from FIRESTORE_ENDPOINT
+                # (a fixed https constant); no user-supplied scheme reaches here.
+                with urllib.request.urlopen(request, timeout=self.timeout_s) as response:  # nosec B310
                     return json.loads(response.read())
             except urllib.error.HTTPError as err:
                 status = err.code

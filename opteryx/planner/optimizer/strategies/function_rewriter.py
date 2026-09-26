@@ -21,23 +21,23 @@ from .predicate_rewriter import _rewrite_predicate
 
 
 class FunctionRewriteStrategy(OptimizationStrategy):
-    def _rewrite_expression_list(self, expressions):
+    def _rewrite_expression_list(self, expressions, *, plan_context):
         if not expressions:
             return expressions
-        return [_rewrite_predicate(expr, self.telemetry) for expr in expressions]
+        return [_rewrite_predicate(expr, self.telemetry, plan_context=plan_context) for expr in expressions]
 
     def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Project:
-            node.columns = self._rewrite_expression_list(node.columns)
+            node.columns = self._rewrite_expression_list(node.columns, plan_context=context.plan_context)
             context.optimized_plan[context.node_id] = node
 
         if node.node_type in {LogicalPlanStepType.Aggregate, LogicalPlanStepType.AggregateAndGroup}:
             if node.groups:
-                node.groups = self._rewrite_expression_list(node.groups)
+                node.groups = self._rewrite_expression_list(node.groups, plan_context=context.plan_context)
             if node.aggregates:
-                node.aggregates = self._rewrite_expression_list(node.aggregates)
+                node.aggregates = self._rewrite_expression_list(node.aggregates, plan_context=context.plan_context)
             if node.projection:
-                node.projection = self._rewrite_expression_list(node.projection)
+                node.projection = self._rewrite_expression_list(node.projection, plan_context=context.plan_context)
             context.optimized_plan[context.node_id] = node
 
         return context

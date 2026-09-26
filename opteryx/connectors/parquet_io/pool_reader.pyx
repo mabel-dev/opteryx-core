@@ -25,6 +25,7 @@ from libcpp.vector cimport vector
 from libcpp.unordered_map cimport unordered_map
 from libcpp.pair cimport pair
 from libcpp.memory cimport shared_ptr
+from cython.operator cimport dereference as deref
 import time
 import struct
 
@@ -109,7 +110,10 @@ cdef extern from "core/draken_bridge.h":
 
 from rugo.parquet import decode_value as _decode_value_c, _make_scan_row_group
 from rugo.parquet_reader cimport ReadParquetMetadataFromBuffer, FileStats, RowGroupStats, ColumnStats, AggColumnStat, AggregateColumnStats
-from rugo.parquet_reader cimport TestBloomFilter
+from rugo.parquet_reader cimport TestBloomFilter, TestBloomFilterBytes
+from posix.fcntl cimport open as posix_open, O_RDONLY
+from posix.types cimport off_t
+from posix.unistd cimport close as posix_close, pread
 from rugo.parquet_reader cimport EncodingToString, CompressionCodecToString
 from rugo.parquet_reader cimport ParquetFooterResult, FetchParquetFooter, FetchParquetFootersMany
 
@@ -126,11 +130,15 @@ _PARQUET_MAGIC = b"PAR1"
 _PARQUET_FOOTER_SUFFIX = 8
 _FOOTER_PREFETCH = 65536
 
-# Process-global cache for parsed Parquet FileStats (~64 MB, 512 entries).
-# Avoids repeated Thrift deserialization when the same files are scanned
-# across queries. Keyed by canonical file path (never signed URLs).
-# Typed so Cython dispatches cdef methods (try_get / put_fs) statically.
-cdef ParquetParsedFooterCache _PARSED_FOOTER_CACHE = ParquetParsedFooterCache()
+# Process-global cache for parsed Parquet footers, shared by reference and bounded
+# by config.PARQUET_FOOTER_CACHE_BYTES. Avoids repeated Thrift deserialization when
+# the same files are scanned across queries, and — because scans hold the cached
+# `shared_ptr<const FileStats>` instead of a copy — costs nothing per query on a
+# hit. Keyed by canonical file path (never signed URLs). Typed so Cython
+# dispatches the cdef methods (get / put) statically.
+from opteryx import config as _config
+cdef ParquetParsedFooterCache _PARSED_FOOTER_CACHE = ParquetParsedFooterCache(
+    _config.PARQUET_FOOTER_CACHE_BYTES)
 
 
 cdef inline Vector _wrap_string_direct(MorselRef* result, size_t i, DrakenType want_type=DRAKEN_VARCHAR):
@@ -447,7 +455,7 @@ cdef int _count_remote_fetch_blocks(list work_items, list block_ids) except -1:
 
 
 cdef int _count_remote_fetch_blocks_native(list work_items,
-                                           unordered_map[string, FileStats]* footer_map,
+                                           ParquetFooterMap* footer_map,
                                            list column_names) except -1:
     """`_count_remote_fetch_blocks` for the native plan, whose block ids come
     straight from the C++ footer map (keyed by the FETCH url, as `work_items`
@@ -465,7 +473,7 @@ cdef int _count_remote_fetch_blocks_native(list work_items,
             continue
         if p not in per_file:
             path_bytes_cpp = p.encode('utf-8')
-            ids = ParquetIOPipeline.infer_fetch_blocks(footer_map[0][path_bytes_cpp], names)
+            ids = ParquetIOPipeline.infer_fetch_blocks(deref(footer_map[0][path_bytes_cpp]), names)
             per_file[p] = [ids[k] for k in range(ids.size())]
         seen.add((p, per_file[p][rg_idx]))
     return len(seen)
@@ -708,7 +716,7 @@ cdef class CppIOPipeline:
         with nogil:
             self.pipeline.submit_row_group(path_str, rg_idx, col_names_vec, col_stats_vec)
 
-    cdef submit_work_native(self, str cpp_path, int rg_idx, list column_names, RowGroupStats* rg):
+    cdef submit_work_native(self, str cpp_path, int rg_idx, list column_names, const RowGroupStats* rg):
         """Submit a row group using C++ ColumnStats directly — no Python dict round-trip."""
         cdef vector[string] col_names_vec
         cdef vector[ColumnStats] col_stats_vec
@@ -731,7 +739,7 @@ cdef class CppIOPipeline:
         with nogil:
             self.pipeline.submit_row_group(path_str, rg_idx, col_names_vec, col_stats_vec)
 
-    cdef submit_work_native_masked(self, str cpp_path, int rg_idx, list column_names, RowGroupStats* rg, bytes row_mask):
+    cdef submit_work_native_masked(self, str cpp_path, int rg_idx, list column_names, const RowGroupStats* rg, bytes row_mask):
         """Submit a row group with a per-row mask using C++ ColumnStats directly."""
         cdef vector[string] col_names_vec
         cdef vector[ColumnStats] col_stats_vec
@@ -769,7 +777,7 @@ cdef class CppIOPipeline:
         with nogil:
             self.pipeline.submit_row_group(path_str, rg_idx, col_names_vec, col_stats_vec, mask_vec)
 
-    cdef submit_block_native(self, str cpp_path, FileStats* fs, list rg_idxs, list column_names, list row_masks):
+    cdef submit_block_native(self, str cpp_path, const FileStats* fs, list rg_idxs, list column_names, list row_masks):
         """Submit the row groups `rg_idxs` of one file as ONE fetch block, using
         C++ ColumnStats directly. `row_masks` is None (decode every row) or a
         list parallel to `rg_idxs` of bit-packed pass-1 masks. Same
@@ -788,7 +796,7 @@ cdef class CppIOPipeline:
         cdef size_t i
         cdef Py_ssize_t r, num_rows, packed_len, k
         cdef const uint8_t* mask_ptr
-        cdef RowGroupStats* rg
+        cdef const RowGroupStats* rg
         for col_name in column_names:
             col_names_vec.push_back(col_name.encode('utf-8'))
         for k in range(len(rg_idxs)):
@@ -1043,20 +1051,18 @@ cpdef dict fetch_column_chunk_info(
     cdef bytes envelope
     cdef const uint8_t* buf_ptr
     cdef size_t buf_size
-    cdef FileStats fs
-    cdef const FileStats* fsp        # borrowed (cache) on hit, &fs on cold miss
+    cdef ParquetFooterRef footer
+    cdef const FileStats* fsp        # held alive by `footer` for this call
     cdef size_t rg_count, col_count, col_i
     cdef str col_name
 
-    # Borrowed for the duration of this read only — never stashed past the return.
-    fsp = _PARSED_FOOTER_CACHE.try_get_ptr(path)
-    if fsp == NULL:
+    footer = _PARSED_FOOTER_CACHE.get(path)
+    if footer.get() == NULL:
         envelope, _ = _read_footer_payload(path, -1, footer_bytes_cache)
         buf_ptr = <const uint8_t*>envelope
         buf_size = <size_t>len(envelope)
-        fs = ReadParquetMetadataFromBuffer(buf_ptr, buf_size)
-        _PARSED_FOOTER_CACHE.put_fs(path, fs)
-        fsp = &fs
+        footer = _PARSED_FOOTER_CACHE.put(path, ReadParquetMetadataFromBuffer(buf_ptr, buf_size))
+    fsp = footer.get()
 
     rg_count = fsp.row_groups.size()
     if rg_idx < 0 or <size_t>rg_idx >= rg_count:
@@ -1150,38 +1156,224 @@ cdef bint _bloom_value_bytes(const string& physical_type, object value, string* 
     return True
 
 
-cdef bint _bloom_excludes(str cpp_path, ColumnStats* col, object op, object value):
-    """True only when the column's bloom filter PROVES the predicate cannot
-    match this row group (safe to prune). Eq -> the value is absent; InList ->
-    every candidate is absent. Any probe error or unencodable value fails OPEN
-    (returns False = keep the row group)."""
-    cdef string path_b = cpp_path.encode("utf-8")
+cdef tuple _bloom_needles(const string& physical_type, object op, object value):
+    """The PLAIN-encoded needles a bloom probe for (op, value) tests, or None when
+    no probe applies: the op is not Eq/InList, or a candidate cannot be encoded
+    byte-identically (it could then never be proven absent)."""
     cdef string vbytes
     if op == "Eq":
-        if not _bloom_value_bytes(col.physical_type, value, &vbytes):
-            return False
+        if not _bloom_value_bytes(physical_type, value, &vbytes):
+            return None
+        return (<bytes>vbytes,)
+    if op == "InList":
+        needles = []
+        for v in value:
+            if not _bloom_value_bytes(physical_type, v, &vbytes):
+                return None
+            needles.append(<bytes>vbytes)
+        return tuple(needles)
+    return None
+
+
+cdef bint _bloom_proves_absent(const uint8_t* data, size_t length, tuple needles):
+    """True only when the bloom bytes prove EVERY needle absent (safe to prune).
+    A probe error fails OPEN (keep the row group) — the contract this check has
+    always had: a bloom is an optimisation, and an unreadable one proves nothing."""
+    cdef string needle
+    for n in needles:
+        needle = <bytes>n
         try:
-            return not TestBloomFilter(path_b, col.bloom_offset, col.bloom_length, vbytes)
+            if TestBloomFilterBytes(data, length, needle):
+                return False
         except Exception:
             return False
-    elif op == "InList":
-        # Prune only if NONE of the candidates may be present.
-        for v in value:
-            if not _bloom_value_bytes(col.physical_type, v, &vbytes):
-                return False  # can't prove this one absent -> can't prune
-            try:
-                if TestBloomFilter(path_b, col.bloom_offset, col.bloom_length, vbytes):
-                    return False  # a candidate may be present
-            except Exception:
-                return False
-        return True
-    return False
+    return True
 
 
-cdef bint _rg_passes_predicates_native(RowGroupStats& rg, list predicates, str cpp_path):
-    """Evaluate AND-combined predicates against RowGroupStats min/max (and bloom
-    filters, for Eq/InList on local files) without materialising a Python dict.
-    `cpp_path` is the local file path for bloom probing, or None to skip it.
+cdef tuple _bloom_coalesce_policy(object coalesce_tuning):
+    """(waste_ratio, max_bytes) bloom reads coalesce under: the scan's resolved
+    coalesce tuning when the caller resolved one (io_tuning.resolve_coalesce_tuning),
+    else the configured parquet defaults — the same two values that tuning resolves
+    from when nothing overrides them."""
+    if coalesce_tuning is not None:
+        return (float(coalesce_tuning[0]), int(coalesce_tuning[1]))
+    return (float(_config.PARQUET_IO_COALESCE_WASTE_RATIO), int(_config.PARQUET_IO_COALESCE_MAX_BYTES))
+
+
+cdef list _prune_row_groups(const FileStats& fs, list predicates, str bloom_path,
+                            double waste_ratio, int64_t max_bytes):
+    """Indices of `fs`'s row groups that survive the pushed `predicates`.
+
+    Min/max first (`_rg_passes_predicates_native`), then bloom membership for the
+    Eq/InList predicates — but only on the row groups min/max kept, and with the
+    file's bloom bytes READ ONCE for all of them: every needed bloom's range is
+    gathered, coalesced under the same (waste_ratio, max_bytes) rule the parquet
+    IO pipeline coalesces with, and fetched with one descriptor and one pread per
+    coalesced run. A grouped (column-major) file keeps a column's blooms for every
+    row group contiguous in its tail, so that is one read per predicate column.
+    It used to be one file open + read per (row group, predicate).
+
+    `bloom_path` is the LOCAL path to read blooms from, or None (remote) to prune
+    on min/max only. A bloom whose length the footer does not record cannot be
+    planned into a range read; it is probed on its own through TestBloomFilter,
+    which parses the header to find its extent."""
+    cdef size_t rg_i, ci, n_rg = fs.row_groups.size()
+    cdef list keep = []
+    for rg_i in range(n_rg):
+        if not predicates or _rg_passes_predicates_native(fs.row_groups[rg_i], predicates):
+            keep.append(rg_i)
+    if bloom_path is None or not keep or not predicates:
+        return keep
+
+    cdef const RowGroupStats* rgp
+    cdef const ColumnStats* csp
+    cdef string col_str
+    cdef list probes = []          # (keep position, offset, length, needles)
+    cdef list unsized = []         # (keep position, offset, needles)
+    cdef Py_ssize_t pos
+    for pred in predicates:
+        col_name, op, value = pred
+        if op != "Eq" and op != "InList":
+            continue
+        col_str = col_name.encode('utf-8')
+        for pos in range(len(keep)):
+            rgp = &fs.row_groups[<size_t>keep[pos]]
+            for ci in range(rgp.columns.size()):
+                csp = &rgp.columns[ci]
+                if csp.name != col_str:
+                    continue
+                if csp.bloom_offset >= 0:
+                    needles = _bloom_needles(csp.physical_type, op, value)
+                    if needles is not None:
+                        if csp.bloom_length > 0:
+                            probes.append((pos, csp.bloom_offset, csp.bloom_length, needles))
+                        else:
+                            unsized.append((pos, csp.bloom_offset, needles))
+                break
+    if not probes and not unsized:
+        return keep
+
+    cdef bytearray dropped = bytearray(len(keep))
+    cdef list runs = _coalesce_bloom_ranges(
+        sorted({(p[1], p[2]) for p in probes}), waste_ratio, max_bytes)
+    cdef list run_bytes = _pread_runs(bloom_path, runs)
+    cdef Py_ssize_t r
+    cdef int64_t off, length, run_start
+    cdef const uint8_t* base
+    for pos, off, length, needles in probes:
+        if dropped[pos]:
+            continue
+        r = _run_index(runs, off)
+        run_start = runs[r][0]
+        base = <const uint8_t*>(<bytes>run_bytes[r])
+        if _bloom_proves_absent(base + (off - run_start), <size_t>length, needles):
+            dropped[pos] = 1
+    cdef string path_b
+    cdef string needle
+    if unsized:
+        path_b = bloom_path.encode('utf-8')
+        for pos, off, needles in unsized:
+            if dropped[pos]:
+                continue
+            absent = True
+            for n in needles:
+                needle = <bytes>n
+                try:
+                    if TestBloomFilter(path_b, off, -1, needle):
+                        absent = False
+                        break
+                except Exception:
+                    absent = False
+                    break
+            if absent:
+                dropped[pos] = 1
+    return [keep[pos] for pos in range(len(keep)) if not dropped[pos]]
+
+
+cdef list _coalesce_bloom_ranges(list ranges, double waste_ratio, int64_t max_bytes):
+    """Sorted, distinct (offset, length) ranges merged into [start, end) runs: a run
+    grows while its cumulative gap bytes stay <= waste_ratio * its useful bytes and
+    its span stays <= max_bytes (0 = uncapped) — the parquet IO pipeline's rule.
+    Touching or overlapping ranges always merge (their gap is zero)."""
+    cdef list runs = []
+    cdef int64_t start, end, useful, gaps, off, length, gap, new_end
+    if not ranges:
+        return runs
+    start, length = ranges[0]
+    end = start + length
+    useful = length
+    gaps = 0
+    for off, length in ranges[1:]:
+        new_end = max(end, off + length)
+        gap = off - end if off > end else 0
+        if gap == 0 or (
+            gaps + gap <= waste_ratio * (useful + length)
+            and (max_bytes == 0 or new_end - start <= max_bytes)
+        ):
+            gaps += gap
+            useful += length
+            end = new_end
+            continue
+        runs.append((start, end))
+        start = off
+        end = off + length
+        useful = length
+        gaps = 0
+    runs.append((start, end))
+    return runs
+
+
+cdef Py_ssize_t _run_index(list runs, int64_t offset):
+    """Index of the run holding `offset` (runs are sorted and disjoint)."""
+    cdef Py_ssize_t lo = 0, hi = len(runs) - 1, mid
+    while lo < hi:
+        mid = (lo + hi + 1) >> 1
+        if runs[mid][0] <= offset:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+cdef list _pread_runs(str path, list runs):
+    """Read every [start, end) run of the local file `path` through ONE descriptor.
+    A short read or an unopenable file raises: the scan is about to read this file,
+    so a failure here is the scan failing early, not a pruning miss."""
+    cdef bytes p = path.encode('utf-8')
+    cdef const char* cpath = p
+    cdef int fd
+    cdef list out = []
+    cdef bytearray buf
+    cdef int64_t start, end, got, n
+    cdef char* dst
+    with nogil:
+        fd = posix_open(cpath, O_RDONLY)
+    if fd < 0:
+        raise DatasetReadError(f"Unable to open '{path}' to read its bloom filters")
+    try:
+        for start, end in runs:
+            buf = bytearray(end - start)
+            dst = buf
+            got = 0
+            while got < end - start:
+                with nogil:
+                    n = pread(fd, dst + got, <size_t>(end - start - got), <off_t>(start + got))
+                if n <= 0:
+                    raise DatasetReadError(
+                        f"Short read of bloom filters in '{path}' at offset {start + got}"
+                    )
+                got += n
+            out.append(bytes(buf))
+    finally:
+        posix_close(fd)
+    return out
+
+
+cdef bint _rg_passes_predicates_native(const RowGroupStats& rg, list predicates):
+    """Evaluate AND-combined predicates against RowGroupStats min/max without
+    materialising a Python dict. Bloom membership is NOT tested here — it needs
+    the file's bloom bytes, which `_prune_row_groups` reads once per file for
+    every row group this test keeps.
 
     Every test below assumes the row group's values lie in [min_val, max_val].
     That is FALSE for a float column holding a NaN — Parquet keeps NaN out of
@@ -1200,12 +1392,6 @@ cdef bint _rg_passes_predicates_native(RowGroupStats& rg, list predicates, str c
         for i in range(rg.columns.size()):
             if rg.columns[i].name != col_str:
                 continue
-            # Bloom membership pruning runs first: it can exclude on equality
-            # even when min/max stats are absent, and is independent of them.
-            if (cpp_path is not None and rg.columns[i].bloom_offset >= 0
-                    and (op == "Eq" or op == "InList")):
-                if _bloom_excludes(cpp_path, &rg.columns[i], op, value):
-                    return False
             min_val = _decode_value_c(
                 rg.columns[i].physical_type, rg.columns[i].logical_type,
                 rg.columns[i].min, False,
@@ -1278,7 +1464,7 @@ cdef class IpcRowGroupSource:
     cdef list column_names_bytes         # bytes, for name-keyed callers
     cdef list column_null_fillers        # per-column callable n->Vector (schema-evolution NULL-fill); None = untyped
     cdef dict column_string_types        # bytes name -> declared DrakenType (VARCHAR/NVARCHAR/VARBINARY); None = all VARCHAR
-    cdef unordered_map[string, FileStats]* footer_map
+    cdef ParquetFooterMap* footer_map
     cdef object prefetched_footers
     cdef dict orig_to_cpp
     cdef dict cpp_to_orig
@@ -1391,7 +1577,7 @@ cdef class IpcRowGroupSource:
                 continue
             if path not in per_file:
                 path_bytes_cpp = path.encode('utf-8')
-                ids = ParquetIOPipeline.infer_fetch_blocks(self.footer_map[0][path_bytes_cpp], names)
+                ids = ParquetIOPipeline.infer_fetch_blocks(deref(self.footer_map[0][path_bytes_cpp]), names)
                 per_file[path] = [ids[k] for k in range(ids.size())]
             self.block_ids[i] = per_file[path][self.work_items[i][1]]
 
@@ -1413,7 +1599,7 @@ cdef class IpcRowGroupSource:
             return
         path_bytes_cpp = path.encode('utf-8')
         self.pipeline.submit_block_native(
-            cpp_path, &self.footer_map[0][path_bytes_cpp],
+            cpp_path, self.footer_map[0][path_bytes_cpp].get(),
             [self.work_items[idx][1] for idx in range(first, last)],
             self.column_names,
             None if self.masks is None else [self.masks[idx] for idx in range(first, last)])
@@ -1427,7 +1613,7 @@ cdef class IpcRowGroupSource:
         cdef int rg_idx = self.work_items[idx][1]
         cdef str cpp_path = self.orig_to_cpp.get(path, path)
         cdef string path_bytes_cpp
-        cdef RowGroupStats* rg_ptr
+        cdef const RowGroupStats* rg_ptr
         cdef list column_stats_dicts
         cdef list present_names
         cdef object meta, rg_meta, col_meta, col_name
@@ -1435,7 +1621,7 @@ cdef class IpcRowGroupSource:
             # Pass-2 late materialization: decode only surviving rows (the
             # bit-packed mask from pass-1) — always the native-footer path.
             path_bytes_cpp = path.encode('utf-8')
-            rg_ptr = &self.footer_map[0][path_bytes_cpp].row_groups[rg_idx]
+            rg_ptr = &deref(self.footer_map[0][path_bytes_cpp]).row_groups[rg_idx]
             self.pipeline.submit_work_native_masked(
                 cpp_path, rg_idx, self.column_names, rg_ptr, self.masks[idx])
             return
@@ -1455,7 +1641,7 @@ cdef class IpcRowGroupSource:
             self.pipeline.submit_work(cpp_path, rg_idx, present_names, column_stats_dicts)
         else:
             path_bytes_cpp = path.encode('utf-8')
-            rg_ptr = &self.footer_map[0][path_bytes_cpp].row_groups[rg_idx]
+            rg_ptr = &deref(self.footer_map[0][path_bytes_cpp]).row_groups[rg_idx]
             self.pipeline.submit_work_native(cpp_path, rg_idx, self.column_names, rg_ptr)
 
     def set_pass1_predicate(self, size_t fn, size_t ctx, list cols):
@@ -1631,7 +1817,7 @@ cdef class IpcRowGroupSource:
         (native footer_map keyed by original path, or the prefetched footer dict)."""
         cdef string key = path_str.encode('utf-8')
         if self.footer_map != NULL and self.footer_map[0].count(key) > 0:
-            return self.footer_map[0][key].row_groups[rg_idx].num_rows
+            return deref(self.footer_map[0][key]).row_groups[rg_idx].num_rows
         if self.prefetched_footers and path_str in self.prefetched_footers:
             return self.prefetched_footers[path_str]["row_groups"][rg_idx]["num_rows"]
         return 0
@@ -1651,8 +1837,8 @@ cdef class IpcRowGroupSource:
         cdef list out = []
         cdef size_t i
         if self.footer_map != NULL and self.footer_map[0].count(key) > 0:
-            for i in range(self.footer_map[0][key].row_groups.size()):
-                out.append(self.footer_map[0][key].row_groups[i].num_rows)
+            for i in range(deref(self.footer_map[0][key]).row_groups.size()):
+                out.append(deref(self.footer_map[0][key]).row_groups[i].num_rows)
             return out
         if self.prefetched_footers and path_str in self.prefetched_footers:
             return [rg["num_rows"] for rg in self.prefetched_footers[path_str]["row_groups"]]
@@ -1822,7 +2008,7 @@ cdef tuple _acquire_remote_footers(
     dict orig_to_cpp,
     object file_sizes,
     ParquetFooterBytesCache footer_bytes_cache,
-    unordered_map[string, FileStats]* footer_map,
+    ParquetFooterMap* footer_map,
     object prefetched_footers,
     str auth_header=None,
 ):
@@ -1859,7 +2045,7 @@ cdef tuple _acquire_remote_footers(
     Returns (remote_files_seen, process_hits, tier_hits, tier_misses) for telemetry.
     `remote_files_seen == 0` means the scan was all-local and the other counters carry
     no information — the caller should report nothing rather than report zeros."""
-    cdef const FileStats* probe_fsp
+    cdef ParquetFooterRef probe
     cdef Py_ssize_t bi
     cdef str path, fetch_url
     cdef bytes envelope
@@ -1886,15 +2072,14 @@ cdef tuple _acquire_remote_footers(
         if not _is_remote_url(fetch_url):
             continue
         remote_files_seen += 1
-        # Parsed-struct cache hit → nothing to parse. The borrowed pointer (not
-        # &footer_map[key]) keeps a MISS from default-constructing an empty FileStats
-        # in the map, which a caller's pruning loop would read as "zero row groups"
-        # and silently skip the file's rows. Borrow-then-assign copies the struct
-        # once, into its final owner; the map must own it (it outlives this call).
-        probe_fsp = _PARSED_FOOTER_CACHE.try_get_ptr(path)
-        if probe_fsp != NULL:
+        # Parsed-struct cache hit → nothing to parse. Probing the cache (not
+        # footer_map[key]) keeps a MISS from inserting an empty reference into the
+        # map. On a hit the map takes a SHARED reference — no copy — which keeps the
+        # footer alive for the map's lifetime even if the cache evicts it.
+        probe = _PARSED_FOOTER_CACHE.get(path)
+        if probe.get() != NULL:
             if footer_map != NULL:
-                footer_map[0][path.encode('utf-8')] = probe_fsp[0]
+                footer_map[0][path.encode('utf-8')] = probe
             process_hits += 1
             continue
         if footer_bytes_cache is not None:
@@ -1955,16 +2140,17 @@ cdef tuple _acquire_remote_footers(
 cdef void _parse_and_cache_footer(
     str path,
     bytes envelope,
-    unordered_map[string, FileStats]* footer_map,
+    ParquetFooterMap* footer_map,
 ):
     """Parse one footer envelope and land it in `_PARSED_FOOTER_CACHE` under the
-    stable ORIGINAL path, plus `footer_map` when the caller keeps one."""
+    stable ORIGINAL path, plus `footer_map` (the same shared reference) when the
+    caller keeps one."""
     cdef const uint8_t* buf_ptr = <const uint8_t*>envelope
     cdef size_t buf_size = len(envelope)
-    cdef FileStats fs = ReadParquetMetadataFromBuffer(buf_ptr, buf_size)
-    _PARSED_FOOTER_CACHE.put_fs(path, fs)
+    cdef ParquetFooterRef footer = _PARSED_FOOTER_CACHE.put(
+        path, ReadParquetMetadataFromBuffer(buf_ptr, buf_size))
     if footer_map != NULL:
-        footer_map[0][path.encode('utf-8')] = fs
+        footer_map[0][path.encode('utf-8')] = footer
 
 
 cpdef list fetch_column_stats_many(
@@ -2013,10 +2199,9 @@ cpdef list fetch_column_stats_many(
     """
     cdef list out = []
     cdef dict orig_to_cpp
-    cdef unordered_map[string, FileStats] footer_map
+    cdef ParquetFooterMap footer_map
     cdef string path_bytes
-    cdef const FileStats* fsp
-    cdef FileStats fs
+    cdef ParquetFooterRef footer
     cdef vector[AggColumnStat] agg_stats
     cdef bytes envelope
     cdef const uint8_t* buf_ptr
@@ -2037,12 +2222,12 @@ cpdef list fetch_column_stats_many(
         # Probe with count() first: indexing a std::unordered_map default-constructs
         # an empty FileStats on a miss, which reads downstream as "zero row groups".
         if footer_map.count(path_bytes) != 0:
-            fsp = &footer_map[path_bytes]
+            footer = footer_map[path_bytes]
         else:
             # Local file (or a remote one this build classifies as local). No
             # signing applies, so the original path IS the fetch path.
-            fsp = _PARSED_FOOTER_CACHE.try_get_ptr(path)
-            if fsp == NULL:
+            footer = _PARSED_FOOTER_CACHE.get(path)
+            if footer.get() == NULL:
                 fetch_url = orig_to_cpp.get(path, path)
                 envelope, _ = _read_footer_payload(
                     fetch_url,
@@ -2051,13 +2236,12 @@ cpdef list fetch_column_stats_many(
                 )
                 buf_ptr = <const uint8_t*>envelope
                 buf_size = <size_t>len(envelope)
-                fs = ReadParquetMetadataFromBuffer(buf_ptr, buf_size)
-                _PARSED_FOOTER_CACHE.put_fs(path, fs)
-                fsp = &fs
-        agg_stats = AggregateColumnStats(fsp[0])
+                footer = _PARSED_FOOTER_CACHE.put(
+                    path, ReadParquetMetadataFromBuffer(buf_ptr, buf_size))
+        agg_stats = AggregateColumnStats(deref(footer))
         out.append((
-            fsp.num_rows,
-            <int>fsp.row_groups.size(),
+            deref(footer).num_rows,
+            <int>deref(footer).row_groups.size(),
             file_column_stats_from_agg(agg_stats),
         ))
 
@@ -2112,7 +2296,7 @@ cpdef IpcRowGroupSource open_ipc_source(
         dict(zip(src.column_names_bytes, string_types)) if string_types is not None else None
     )
     src.prefetched_footers = prefetched_footers
-    src.footer_map = new unordered_map[string, FileStats]()
+    src.footer_map = new ParquetFooterMap()
 
     cdef dict orig_to_cpp
     cdef dict cpp_to_orig
@@ -2123,12 +2307,17 @@ cpdef IpcRowGroupSource open_ipc_source(
     cdef string path_bytes_cpp
     cdef const uint8_t* footer_buf_ptr
     cdef size_t footer_buf_size
-    cdef RowGroupStats* rgp
     cdef size_t rg_i, ci
     cdef int64_t max_rg_bytes = 0
     cdef int64_t rg_bytes
     cdef int64_t est_rg, dyn_pool_size
     cdef int in_flight_limit
+    cdef ParquetFooterRef footer
+    cdef const FileStats* fsp
+    cdef const RowGroupStats* rgp
+    cdef double bloom_waste_ratio
+    cdef int64_t bloom_max_bytes
+    bloom_waste_ratio, bloom_max_bytes = _bloom_coalesce_policy(coalesce_tuning)
 
     work_items = []
 
@@ -2175,7 +2364,8 @@ cpdef IpcRowGroupSource open_ipc_source(
         else:
             path_bytes_cpp = path.encode('utf-8')
             if src.footer_map[0].count(path_bytes_cpp) == 0:
-                if not _PARSED_FOOTER_CACHE.try_get(path, &src.footer_map[0][path_bytes_cpp]):
+                footer = _PARSED_FOOTER_CACHE.get(path)
+                if footer.get() == NULL:
                     envelope, _ = _read_footer_payload(
                         orig_to_cpp.get(path, path),
                         file_sizes.get(path, -1) if file_sizes else -1,
@@ -2183,23 +2373,21 @@ cpdef IpcRowGroupSource open_ipc_source(
                     )
                     footer_buf_ptr = <const uint8_t*>envelope
                     footer_buf_size = len(envelope)
-                    src.footer_map[0][path_bytes_cpp] = ReadParquetMetadataFromBuffer(
-                        footer_buf_ptr, footer_buf_size
-                    )
-                    _PARSED_FOOTER_CACHE.put_fs(path, src.footer_map[0][path_bytes_cpp])
-            # Local file path for bloom probing (None for remote — the C++
-            # bloom probe opens the file via ifstream and can't read URLs).
+                    footer = _PARSED_FOOTER_CACHE.put(
+                        path, ReadParquetMetadataFromBuffer(footer_buf_ptr, footer_buf_size))
+                src.footer_map[0][path_bytes_cpp] = footer
+            fsp = src.footer_map[0][path_bytes_cpp].get()
+            # Local file path for bloom probing (None for remote — blooms are read
+            # with pread, which cannot read URLs).
             cpp_path_str = orig_to_cpp.get(path, path)
             bloom_path = cpp_path_str if _is_local_path(cpp_path_str) else None
-            for rg_i in range(src.footer_map[0][path_bytes_cpp].row_groups.size()):
-                if predicates and not _rg_passes_predicates_native(
-                    src.footer_map[0][path_bytes_cpp].row_groups[rg_i], predicates, bloom_path
-                ):
-                    src.pruned_row_group_count += 1
-                    continue
+            kept = _prune_row_groups(deref(fsp), predicates or [], bloom_path,
+                                     bloom_waste_ratio, bloom_max_bytes)
+            src.pruned_row_group_count += <int>fsp.row_groups.size() - len(kept)
+            for rg_i in kept:
                 work_items.append((path, rg_i))
                 if limit_gate:
-                    limit_rows_seen += src.footer_map[0][path_bytes_cpp].row_groups[rg_i].num_rows
+                    limit_rows_seen += fsp.row_groups[rg_i].num_rows
                     if limit_rows_seen >= limit:
                         break
 
@@ -2224,7 +2412,7 @@ cpdef IpcRowGroupSource open_ipc_source(
                         rg_bytes += cm_sz
         else:
             path_bytes_cpp = path.encode('utf-8')
-            rgp = &src.footer_map[0][path_bytes_cpp].row_groups[rg_idx]
+            rgp = &deref(src.footer_map[0][path_bytes_cpp]).row_groups[rg_idx]
             for ci in range(rgp.columns.size()):
                 if rgp.columns[ci].total_uncompressed_size > 0 and \
                         bytes(rgp.columns[ci].name) in proj_set_bytes:
@@ -2323,7 +2511,7 @@ cpdef IpcRowGroupSource open_pass2_source(
         dict(zip(src.column_names_bytes, string_types)) if string_types is not None else None
     )
     src.prefetched_footers = None
-    src.footer_map = new unordered_map[string, FileStats]()
+    src.footer_map = new ParquetFooterMap()
 
     # Was an inlined copy of _sign_paths; folded back onto the shared helper so the
     # signs_urls check cannot be honoured in one place and missed in the other.
@@ -2338,12 +2526,14 @@ cpdef IpcRowGroupSource open_pass2_source(
     cdef size_t footer_buf_size
     cdef list wi = []
     cdef list masks = []
+    cdef ParquetFooterRef footer
     for path, rg_idx, mask_bytes in work_items:
         wi.append((path, rg_idx))
         masks.append(bytes(mask_bytes))
         path_bytes_cpp = path.encode('utf-8')
         if src.footer_map[0].count(path_bytes_cpp) == 0:
-            if not _PARSED_FOOTER_CACHE.try_get(path, &src.footer_map[0][path_bytes_cpp]):
+            footer = _PARSED_FOOTER_CACHE.get(path)
+            if footer.get() == NULL:
                 envelope, _ = _read_footer_payload(
                     orig_to_cpp.get(path, path),
                     file_sizes.get(path, -1) if file_sizes else -1,
@@ -2351,10 +2541,9 @@ cpdef IpcRowGroupSource open_pass2_source(
                 )
                 footer_buf_ptr = <const uint8_t*>envelope
                 footer_buf_size = len(envelope)
-                src.footer_map[0][path_bytes_cpp] = ReadParquetMetadataFromBuffer(
-                    footer_buf_ptr, footer_buf_size
-                )
-                _PARSED_FOOTER_CACHE.put_fs(path, src.footer_map[0][path_bytes_cpp])
+                footer = _PARSED_FOOTER_CACHE.put(
+                    path, ReadParquetMetadataFromBuffer(footer_buf_ptr, footer_buf_size))
+            src.footer_map[0][path_bytes_cpp] = footer
     src.work_items = wi
     src.masks = masks
     src.n_items = len(wi)
@@ -2463,7 +2652,7 @@ cdef class NativeScanPlan:
         for i in range(n):
             path_bytes = self.work_items[i].first
             rg_idx = self.work_items[i].second
-            total += self.footer_map[0][path_bytes].row_groups[rg_idx].num_rows
+            total += deref(self.footer_map[0][path_bytes]).row_groups[rg_idx].num_rows
         return total
 
     def diagnostics(self):
@@ -2612,7 +2801,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     exclusive pool sized to ``decode_workers``, e.g. EXPLAIN-only planning, tests
     that call this directly, or any caller outside the main query-execution path."""
     cdef NativeScanPlan plan = NativeScanPlan()
-    plan.footer_map = new unordered_map[string, FileStats]()
+    plan.footer_map = new ParquetFooterMap()
     plan.column_names = [c.encode('utf-8') for c in column_names]
     # Per-column declared string DrakenType (0 = non-string). Kept parallel to
     # column_names so the native Source tags each string column and routes DK_POOL
@@ -2675,7 +2864,9 @@ cpdef NativeScanPlan open_native_scan_plan(
     cdef string path_bytes_cpp
     cdef const uint8_t* footer_buf_ptr
     cdef size_t footer_buf_size
-    cdef RowGroupStats* rgp
+    cdef const RowGroupStats* rgp
+    cdef ParquetFooterRef footer
+    cdef const FileStats* fsp
     cdef size_t rg_i, ci
     cdef int64_t max_rg_bytes = 0
     cdef int64_t rg_bytes
@@ -2705,8 +2896,8 @@ cpdef NativeScanPlan open_native_scan_plan(
     # dependent tail preads at device latency), a fixed ~0.3s plan-time tax on
     # a 100-file cold scan. `_fetch_footers_many` fans the local reads across
     # threads in C++ (GIL released for the whole batch); parsing stays here,
-    # serial — it is microseconds. A cache HIT inside try_get also fills the
-    # footer_map slot, exactly as the loop's own try_get would.
+    # serial — it is microseconds. A cache HIT here also fills the footer_map
+    # slot (a shared reference, no copy), exactly as the loop below would.
     _local_miss_paths = []
     _local_miss_urls = []
     for path in paths:
@@ -2714,8 +2905,12 @@ cpdef NativeScanPlan open_native_scan_plan(
         if not _is_local_path(fetch_url):
             continue
         path_bytes_cpp = fetch_url.encode('utf-8')
-        if plan.footer_map[0].count(path_bytes_cpp) == 0 and \
-                not _PARSED_FOOTER_CACHE.try_get(path, &plan.footer_map[0][path_bytes_cpp]):
+        if plan.footer_map[0].count(path_bytes_cpp) != 0:
+            continue
+        footer = _PARSED_FOOTER_CACHE.get(path)
+        if footer.get() != NULL:
+            plan.footer_map[0][path_bytes_cpp] = footer
+        else:
             _local_miss_paths.append(path)
             _local_miss_urls.append(fetch_url)
     if len(_local_miss_paths) > 1:
@@ -2730,18 +2925,20 @@ cpdef NativeScanPlan open_native_scan_plan(
             path_bytes_cpp = _local_miss_urls[_lm_i].encode('utf-8')
             footer_buf_ptr = <const uint8_t*>envelope
             footer_buf_size = len(envelope)
-            plan.footer_map[0][path_bytes_cpp] = ReadParquetMetadataFromBuffer(
-                footer_buf_ptr, footer_buf_size
-            )
-            _PARSED_FOOTER_CACHE.put_fs(path, plan.footer_map[0][path_bytes_cpp])
+            plan.footer_map[0][path_bytes_cpp] = _PARSED_FOOTER_CACHE.put(
+                path, ReadParquetMetadataFromBuffer(footer_buf_ptr, footer_buf_size))
         plan.footer_fetch_ns += time.perf_counter_ns() - _footer_t0
 
+    cdef double bloom_waste_ratio
+    cdef int64_t bloom_max_bytes
+    bloom_waste_ratio, bloom_max_bytes = _bloom_coalesce_policy(coalesce_tuning)
     for path in paths:
         fetch_url = orig_to_cpp.get(path, path)
         path_bytes_cpp = fetch_url.encode('utf-8')
         if plan.footer_map[0].count(path_bytes_cpp) == 0:
             # Cache key is the ORIGINAL path (stable); map key is the FETCH url.
-            if not _PARSED_FOOTER_CACHE.try_get(path, &plan.footer_map[0][path_bytes_cpp]):
+            footer = _PARSED_FOOTER_CACHE.get(path)
+            if footer.get() == NULL:
                 # Not "compile" — a real network round-trip (cold cache), timed on its
                 # own so it cannot hide inside whatever span calls this function. Only
                 # LOCAL files reach here: `_acquire_remote_footers` above has already
@@ -2752,20 +2949,18 @@ cpdef NativeScanPlan open_native_scan_plan(
                 )
                 footer_buf_ptr = <const uint8_t*>envelope
                 footer_buf_size = len(envelope)
-                plan.footer_map[0][path_bytes_cpp] = ReadParquetMetadataFromBuffer(
-                    footer_buf_ptr, footer_buf_size
-                )
-                _PARSED_FOOTER_CACHE.put_fs(path, plan.footer_map[0][path_bytes_cpp])
+                footer = _PARSED_FOOTER_CACHE.put(
+                    path, ReadParquetMetadataFromBuffer(footer_buf_ptr, footer_buf_size))
                 plan.footer_fetch_ns += time.perf_counter_ns() - _footer_t0
-        # None for remote — the C++ bloom probe opens the file via ifstream and
-        # cannot read a URL, so a remote scan prunes on min/max stats only.
+            plan.footer_map[0][path_bytes_cpp] = footer
+        fsp = plan.footer_map[0][path_bytes_cpp].get()
+        # None for remote — blooms are read with pread, which cannot read a URL, so
+        # a remote scan prunes on min/max stats only.
         bloom_path = fetch_url if _is_local_path(fetch_url) else None
-        for rg_i in range(plan.footer_map[0][path_bytes_cpp].row_groups.size()):
-            if predicates and not _rg_passes_predicates_native(
-                plan.footer_map[0][path_bytes_cpp].row_groups[rg_i], predicates, bloom_path
-            ):
-                plan.pruned_items += 1
-                continue
+        kept = _prune_row_groups(deref(fsp), predicates or [], bloom_path,
+                                 bloom_waste_ratio, bloom_max_bytes)
+        plan.pruned_items += <int>fsp.row_groups.size() - len(kept)
+        for rg_i in kept:
             # Both work-item lists carry the FETCH url: the Python one is re-encoded
             # below to index footer_map, the C++ one is what the Source fetches.
             work_items.append((fetch_url, rg_i))
@@ -2791,7 +2986,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     max_rg_bytes = 0
     for path, rg_idx in work_items:
         path_bytes_cpp = path.encode('utf-8')
-        rgp = &plan.footer_map[0][path_bytes_cpp].row_groups[rg_idx]
+        rgp = &deref(plan.footer_map[0][path_bytes_cpp]).row_groups[rg_idx]
         proj_idx = proj_idx_by_path.get(path)
         if proj_idx is None:
             proj_idx = []
@@ -2971,8 +3166,8 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     acquires remote footers through the batched, shared-tier `_acquire_remote_footers`
     rather than the serial per-file path.
     """
-    cdef FileStats fs
-    cdef const FileStats* fsp = NULL   # borrowed (cache) on hit, &fs on cold miss
+    cdef ParquetFooterRef footer
+    cdef const FileStats* fsp = NULL   # held alive by `footer` for the iteration
     cdef const RowGroupStats* rgp
     cdef const ColumnStats* csp
     cdef size_t rg_i, ci, n_rg_cols
@@ -3065,7 +3260,7 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     _local_miss_urls = []
     for path in paths:
         fetch_url = orig_to_cpp.get(path, path)
-        if _is_local_path(fetch_url) and _PARSED_FOOTER_CACHE.try_get_ptr(path) == NULL:
+        if _is_local_path(fetch_url) and _PARSED_FOOTER_CACHE.get(path).get() == NULL:
             _local_miss_paths.append(path)
             _local_miss_urls.append(fetch_url)
     if len(_local_miss_paths) > 1:
@@ -3077,26 +3272,24 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
             envelope = _local_envs[_lm_i]
             buf_ptr = <const uint8_t*>envelope
             buf_size = <size_t>len(envelope)
-            fs = ReadParquetMetadataFromBuffer(buf_ptr, buf_size)
-            _PARSED_FOOTER_CACHE.put_fs(_local_miss_paths[_lm_i], fs)
+            _PARSED_FOOTER_CACHE.put(_local_miss_paths[_lm_i],
+                                     ReadParquetMetadataFromBuffer(buf_ptr, buf_size))
 
     for path in paths:
         fetch_url = orig_to_cpp.get(path, path)
-        # Borrow the parsed footer (no copy) on a hit; on a cold miss parse into
-        # the local and point at it. The pointer is only read within this loop
-        # iteration (never stashed, no put_fs on the hot path), so it stays valid.
-        # Cache key is the ORIGINAL path — a signed URL's signature expires, so it
-        # would never hit twice.
-        fsp = _PARSED_FOOTER_CACHE.try_get_ptr(path)
-        if fsp == NULL:
+        # A shared reference to the parsed footer (no copy); on a cold miss parse
+        # it into the cache and hold that. `footer` keeps it alive for this
+        # iteration whatever the cache evicts meanwhile. Cache key is the ORIGINAL
+        # path — a signed URL's signature expires, so it would never hit twice.
+        footer = _PARSED_FOOTER_CACHE.get(path)
+        if footer.get() == NULL:
             envelope, _ = _read_footer_payload(
                 fetch_url, file_sizes.get(path, -1) if file_sizes else -1, None
             )
             buf_ptr = <const uint8_t*>envelope
             buf_size = <size_t>len(envelope)
-            fs = ReadParquetMetadataFromBuffer(buf_ptr, buf_size)
-            _PARSED_FOOTER_CACHE.put_fs(path, fs)
-            fsp = &fs
+            footer = _PARSED_FOOTER_CACHE.put(path, ReadParquetMetadataFromBuffer(buf_ptr, buf_size))
+        fsp = footer.get()
         for rg_i in range(fsp.row_groups.size()):
             rgp = &fsp.row_groups[rg_i]
             n_rg_cols = rgp.columns.size()

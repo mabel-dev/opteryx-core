@@ -96,6 +96,8 @@ def do_bind_phase(
     visibility_filters: dict = None,
     telemetry=None,
     schema_only: bool = False,
+    *,
+    plan_context,
 ) -> LogicalPlan:
     """
     Execute the bind phase of the query engine.
@@ -110,6 +112,9 @@ def do_bind_phase(
             Only for callers that stop at the end of binding - the plan this
             produces carries no file lists or statistics and cannot be optimized
             or executed. See BindingContext.
+        plan_context: PlanContext
+            The query's planning context; every column the binder mints is minted
+            in its ColumnTable.
 
     Returns:
         Modified logical plan after the binding phase.
@@ -118,7 +123,7 @@ def do_bind_phase(
         InvalidInternalStateError: Raised when the logical plan has more than one root node.
     """
     if visibility_filters:
-        plan = apply_visibility_filters(plan, visibility_filters, telemetry)
+        plan = apply_visibility_filters(plan, visibility_filters, telemetry, plan_context=plan_context)
 
     binder_visitor = BinderVisitor()
 
@@ -144,14 +149,17 @@ def do_bind_phase(
     shared_cte_schemas: dict = {}
     for cte_key, body in shared_ctes.items():
         if visibility_filters:
-            body = apply_visibility_filters(body, visibility_filters, telemetry)
+            body = apply_visibility_filters(body, visibility_filters, telemetry, plan_context=plan_context)
         body_heads = body.get_exit_points()
         if len(body_heads) != 1:
             raise InvalidInternalStateError(
                 f"{query_id} - shared CTE body has {len(body_heads)} heads - this is an error"
             )
         body_context = BindingContext.initialize(
-            query_id=query_id, execution_context=execution_context, schema_only=schema_only
+            query_id=query_id,
+            execution_context=execution_context,
+            schema_only=schema_only,
+            plan_context=plan_context,
         )
         body_context.shared_cte_schemas = shared_cte_schemas
         body, _ = binder_visitor.traverse(body, body_heads[0], context=body_context)
@@ -173,7 +181,10 @@ def do_bind_phase(
 
     root_node = plan.get_exit_points()
     context = BindingContext.initialize(
-        query_id=query_id, execution_context=execution_context, schema_only=schema_only
+        query_id=query_id,
+        execution_context=execution_context,
+        schema_only=schema_only,
+        plan_context=plan_context,
     )
     context.shared_cte_schemas = shared_cte_schemas
 

@@ -624,7 +624,7 @@ def _extract_version_expression(version_clause):
     )
 
 
-def extract_timetravel_timestamp(version_clause) -> Optional[object]:
+def extract_timetravel_timestamp(version_clause, *, plan_context) -> Optional[object]:
     """
     Extract and evaluate a time-travel timestamp from the table version clause.
 
@@ -647,7 +647,7 @@ def extract_timetravel_timestamp(version_clause) -> Optional[object]:
         return None
 
     expression_ast = _extract_version_expression(version_clause)
-    expression_node = build(expression_ast)
+    expression_node = build(expression_ast, plan_context=plan_context)
     value, value_type = _evaluate_timetravel_expression(
         expression_node, apply_interval_literal_to_now=True
     )
@@ -667,7 +667,7 @@ def is_version_as_of_clause(version_clause) -> bool:
     return version_clause is not None and "VersionAsOf" in version_clause
 
 
-def extract_timetravel_version(version_clause) -> int:
+def extract_timetravel_version(version_clause, *, plan_context) -> int:
     """
     Extract the requested snapshot id from a `VERSION AS OF <n>` clause.
 
@@ -683,7 +683,7 @@ def extract_timetravel_version(version_clause) -> int:
     Raises:
         UnsupportedSyntaxError: If the literal is not a non-negative whole number.
     """
-    literal_node = build(version_clause["VersionAsOf"])
+    literal_node = build(version_clause["VersionAsOf"], plan_context=plan_context)
     if (
         literal_node is None
         or literal_node.node_type != NodeType.LITERAL
@@ -697,26 +697,26 @@ def extract_timetravel_version(version_clause) -> int:
     return literal_node.value
 
 
-def any_op(branch, alias: Optional[List[str]] = None, key=None):
+def any_op(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     return Comparison(
         value="AnyOp" + branch.get("compare_op", "Unsupported"),
-        left=build(branch["left"]),
-        right=build(branch["right"]),
+        left=build(branch["left"], plan_context=plan_context),
+        right=build(branch["right"], plan_context=plan_context),
     )
 
 
-def all_op(branch, alias: Optional[List[str]] = None, key=None):
+def all_op(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     return Comparison(
         value="AllOp" + branch.get("compare_op", "Unsupported"),
-        left=build(branch["left"]),
-        right=build(branch["right"]),
+        left=build(branch["left"], plan_context=plan_context),
+        right=build(branch["right"], plan_context=plan_context),
     )
 
 
-def array(branch, alias: Optional[List[str]] = None, key=None):
+def array(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     from opteryx.types import logical_type as _lt
 
-    value_nodes = [build(elem) for elem in branch["elem"]]
+    value_nodes = [build(elem, plan_context=plan_context) for elem in branch["elem"]]
     value_list = [v.value for v in value_nodes]
     element_ct_set = {v.type for v in value_nodes}
     if len(element_ct_set) > 1:
@@ -735,14 +735,14 @@ def array(branch, alias: Optional[List[str]] = None, key=None):
     )
 
 
-def between(branch, alias: Optional[List[str]] = None, key=None):
+def between(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     # BETWEEN is LOWERED to a pair of comparisons, so the node returned here renders
     # as the rewrite (`(id >= 1 AND id <= 2)`), not as the SQL the user wrote. The
     # alias must reach that outermost AND/OR node — without it the binder names the
     # column after the rewrite, and CREATE TABLE ... AS stores that name.
-    expr = build(branch["expr"])
-    low = build(branch["low"])
-    high = build(branch["high"])
+    expr = build(branch["expr"], plan_context=plan_context)
+    low = build(branch["low"], plan_context=plan_context)
+    high = build(branch["high"], plan_context=plan_context)
     inverted = branch["negated"]
 
     if inverted:
@@ -787,10 +787,10 @@ _OPERATOR_CLASSES = {
 }
 
 
-def binary_op(branch, alias: Optional[List[str]] = None, key=None):
-    left = build(branch["left"])
+def binary_op(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
+    left = build(branch["left"], plan_context=plan_context)
     operator = branch["op"]
-    right = build(branch["right"])
+    right = build(branch["right"], plan_context=plan_context)
 
     # Dialect-specific operator mapping. A custom operator arrives as its SQL
     # spelling (`<<=`), because that is what sqlparser writes when an AST is
@@ -818,14 +818,14 @@ def binary_op(branch, alias: Optional[List[str]] = None, key=None):
     )
 
 
-def case_when(value, alias: Optional[List[str]] = None, key=None):
-    fixed_operand = build(value["operand"])
-    else_result = build(value["else_result"])
+def case_when(value, alias: Optional[List[str]] = None, key=None, *, plan_context):
+    fixed_operand = build(value["operand"], plan_context=plan_context)
+    else_result = build(value["else_result"], plan_context=plan_context)
 
     conditions = []
     results = []
     for condition in value["conditions"]:
-        operand = build(condition["condition"])
+        operand = build(condition["condition"], plan_context=plan_context)
         if fixed_operand is None:
             conditions.append(operand)
         else:
@@ -836,7 +836,7 @@ def case_when(value, alias: Optional[List[str]] = None, key=None):
                     right=operand,
                 )
             )
-        result = build(condition["result"])
+        result = build(condition["result"], plan_context=plan_context)
         results.append(result)
 
     return Case(
@@ -847,21 +847,21 @@ def case_when(value, alias: Optional[List[str]] = None, key=None):
     )
 
 
-def cast(branch, alias: Optional[List[str]] = None, key=None):
+def cast(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     """
     Convert CAST(<expr> AS <type>) to a typed function call <type>(<expr>).
     Handles literal value casting at compile time when possible.
     """
     from opteryx.planner import build_literal_node
 
-    source_expr = build(branch["expr"])
+    source_expr = build(branch["expr"], plan_context=plan_context)
     kind = branch["kind"]
     raw_data_type = branch["data_type"]
 
     cast_parameters = []
 
     # Extract the base data type from the AST structure
-    data_type = _extract_data_type(raw_data_type, branch, cast_parameters, build_literal_node)
+    data_type = _extract_data_type(raw_data_type, branch, cast_parameters, build_literal_node, plan_context=plan_context)
 
     # Validate and normalize the data type
     normalized_type = _normalize_cast_type(
@@ -904,7 +904,7 @@ def cast(branch, alias: Optional[List[str]] = None, key=None):
             _fmt_str = _fmt_value["DoubleQuotedString"]
         else:
             raise UnsupportedSyntaxError("**CAST** ... FORMAT requires a string literal pattern.")
-        format_literal_node = build_literal_node(_fmt_str)
+        format_literal_node = build_literal_node(_fmt_str, plan_context=plan_context)
 
     # Handle literal value casting at compile time.
     # NVARCHAR is routed through the runtime CAST node instead, so literals go
@@ -963,7 +963,7 @@ def cast(branch, alias: Optional[List[str]] = None, key=None):
     )
 
 
-def _extract_data_type(raw_data_type, branch, args, build_literal_node):
+def _extract_data_type(raw_data_type, branch, args, build_literal_node, *, plan_context):
     """Extract and process the data type from the AST structure."""
     data_type = raw_data_type
 
@@ -1001,7 +1001,7 @@ def _extract_data_type(raw_data_type, branch, args, build_literal_node):
             # sqlparser hands these back as strings; keep an integral one integral so
             # the binder can read a dimension without re-parsing.
             _p = str(_param)
-            args.append(build_literal_node(int(_p) if _p.lstrip("-").isdigit() else _p))
+            args.append(build_literal_node(int(_p) if _p.lstrip("-").isdigit() else _p, plan_context=plan_context))
 
     # Both parameter reads below key off the AST NODE, not off a substring of the
     # type's NAME. Asking `"array" in data_type.lower()` said yes to SUBARRAY and
@@ -1016,10 +1016,10 @@ def _extract_data_type(raw_data_type, branch, args, build_literal_node):
     if isinstance(_decimal, dict) and "PrecisionAndScale" in _decimal:
         precision = _decimal["PrecisionAndScale"][0]
         scale = _decimal["PrecisionAndScale"][1]
-        args.append(build_literal_node(precision))
-        args.append(build_literal_node(scale))
+        args.append(build_literal_node(precision, plan_context=plan_context))
+        args.append(build_literal_node(scale, plan_context=plan_context))
     elif isinstance(_decimal, dict) and "Precision" in _decimal:
-        args.append(build_literal_node(_decimal["Precision"]))
+        args.append(build_literal_node(_decimal["Precision"], plan_context=plan_context))
 
     # Handle ARRAY element types
     if isinstance(_raw_type, dict) and "Array" in _raw_type:
@@ -1027,7 +1027,7 @@ def _extract_data_type(raw_data_type, branch, args, build_literal_node):
         if isinstance(element_key, dict):
             element_key = next(iter(element_key))
         if isinstance(element_key, str):
-            element_key = build_literal_node(element_key.upper())
+            element_key = build_literal_node(element_key.upper(), plan_context=plan_context)
             args.append(element_key)
 
     return data_type
@@ -1343,7 +1343,7 @@ def _decimal_needs_precision_and_scale(params, spell) -> UnsupportedSyntaxError:
     )
 
 
-def column_type_from_ast(branch) -> "ColumnType":
+def column_type_from_ast(branch, *, plan_context) -> "ColumnType":
     """Resolve a DECLARED column type (its AST `data_type` node) to a ColumnType.
 
     For anywhere a type is WRITTEN rather than cast to — CREATE TABLE today. It
@@ -1363,7 +1363,7 @@ def column_type_from_ast(branch) -> "ColumnType":
     from opteryx.types.logical_type import parse_column_type, try_parse_column_type
 
     params: list = []
-    raw_name = _extract_data_type(branch["data_type"], branch, params, build_literal_node)
+    raw_name = _extract_data_type(branch["data_type"], branch, params, build_literal_node, plan_context=plan_context)
     try:
         normalized = _normalize_cast_type(raw_name, refused_as="a column can be declared as")
     except SqlError:
@@ -1801,13 +1801,13 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
         raise SqlError(f"Error casting value '{literal_node.value}' to type '{base_type}': {e}")
 
 
-def ceiling(value, alias: Optional[List[str]] = None, key=None):
-    data_value = build(value["expr"])
-    scale = build(value["field"]["Scale"]) if "Scale" in value["field"] else literal_number([0])
+def ceiling(value, alias: Optional[List[str]] = None, key=None, *, plan_context):
+    data_value = build(value["expr"], plan_context=plan_context)
+    scale = build(value["field"]["Scale"], plan_context=plan_context) if "Scale" in value["field"] else literal_number([0], plan_context=plan_context)
     return Function(value="CEILING", parameters=[data_value, scale], alias=alias)
 
 
-def compound_identifier(branch, alias: Optional[List[str]] = None, key=None):
+def compound_identifier(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     column = LogicalColumn(
         node_type=NodeType.IDENTIFIER,  # column type
         alias=alias,  # type: ignore
@@ -1828,12 +1828,12 @@ def compound_identifier(branch, alias: Optional[List[str]] = None, key=None):
     return column
 
 
-def expression_with_alias(branch, alias: Optional[List[str]] = None, key=None):
+def expression_with_alias(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     """an alias"""
-    return build(branch["expr"], alias=branch["alias"]["value"])
+    return build(branch["expr"], alias=branch["alias"]["value"], plan_context=plan_context)
 
 
-def scalar_subquery(branch, alias: Optional[List[str]] = None, key=None):
+def scalar_subquery(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     """
     Scalar subquery used as an expression value, e.g.:
         WHERE col = (SELECT MAX(x) FROM T WHERE T.k = outer.k)
@@ -1846,18 +1846,18 @@ def scalar_subquery(branch, alias: Optional[List[str]] = None, key=None):
     """
     from opteryx.planner.logical_planner.logical_planner import plan_query
 
-    subquery_plan = plan_query(branch)
+    subquery_plan = plan_query(branch, plan_context=plan_context)
     exit_node = subquery_plan.get_exit_points()[0]
     subquery_plan.remove_node(exit_node, heal=True)
 
     return Subquery(value=subquery_plan, alias=alias)
 
 
-def exists(branch, alias: Optional[List[str]] = None, key=None):
+def exists(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     from opteryx.planner.logical_planner.logical_planner import plan_query
 
     ast = {"Query": branch["subquery"]}
-    subquery_plan = plan_query(ast)
+    subquery_plan = plan_query(ast, plan_context=plan_context)
     exit_node = subquery_plan.get_exit_points()[0]
     subquery_plan.remove_node(exit_node, heal=True)
 
@@ -1903,11 +1903,11 @@ class GroupingConstruct:
         raise SqlError(f"Unhandled grouping construct `{self.kind}`")
 
 
-def rollup(branch, alias: Optional[List[str]] = None, key=None):
-    return GroupingConstruct("ROLLUP", [[build(part) for part in element] for element in branch])
+def rollup(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
+    return GroupingConstruct("ROLLUP", [[build(part, plan_context=plan_context) for part in element] for element in branch])
 
 
-def unsupported_grouping_construct(branch, alias: Optional[List[str]] = None, key=None):
+def unsupported_grouping_construct(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     """`CUBE` and `GROUPING SETS` parse — they are in the same family as `ROLLUP` and the
     dialect enables the whole production — but nothing lowers them yet. Refuse them here,
     named, rather than let a half-understood construct reach the aggregate: the internal
@@ -1920,17 +1920,17 @@ def unsupported_grouping_construct(branch, alias: Optional[List[str]] = None, ke
     )
 
 
-def expressions(branch, alias: Optional[List[str]] = None, key=None):
-    return [build(part) for part in branch]
+def expressions(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
+    return [build(part, plan_context=plan_context) for part in branch]
 
 
-def extract(branch, alias: Optional[List[str]] = None, key=None):
+def extract(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     # EXTRACT(part FROM timestamp)
     datepart_value = branch["field"]
     if isinstance(datepart_value, dict):
         datepart_value = list(datepart_value)[0]
     datepart = Literal(type=_CT_VARCHAR, value=datepart_value)
-    identifier = build(branch["expr"])
+    identifier = build(branch["expr"], plan_context=plan_context)
 
     # EXTRACT(EPOCH FROM x) -> UNIXTIME(x). `epoch` is not one of the part ids
     # draken_date_part implements, so an EXTRACT node carrying it is refused at
@@ -1956,9 +1956,9 @@ def extract(branch, alias: Optional[List[str]] = None, key=None):
     )
 
 
-def floor(value, alias: Optional[List[str]] = None, key=None):
-    data_value = build(value["expr"])
-    scale = build(value["field"]["Scale"]) if "Scale" in value["field"] else literal_number([0])
+def floor(value, alias: Optional[List[str]] = None, key=None, *, plan_context):
+    data_value = build(value["expr"], plan_context=plan_context)
+    scale = build(value["field"]["Scale"], plan_context=plan_context) if "Scale" in value["field"] else literal_number([0], plan_context=plan_context)
     return Function(value="FLOOR", parameters=[data_value, scale], alias=alias)
 
 
@@ -1986,8 +1986,8 @@ def _validate_window_int_literal(func: str, node, role: str, minimum: int) -> No
         raise UnsupportedSyntaxError(f"{func}()'s {role} must be a {bound}.")
 
 
-def function(branch, alias: Optional[List[str]] = None, key=None):
-    func = ".".join(build(p).value for p in branch["name"]).upper()
+def function(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
+    func = ".".join(build(p, plan_context=plan_context).value for p in branch["name"]).upper()
     # The whole dotted name, first part to last - that is what the error names.
     name_span = _span_of(branch["name"][0].get("Identifier", {}), branch["name"][-1].get("Identifier", {}))
 
@@ -1999,19 +1999,19 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
     args = []
 
     if branch["args"] != "None":
-        args = [build(a) for a in branch["args"]["List"]["args"]]
+        args = [build(a, plan_context=plan_context) for a in branch["args"]["List"]["args"]]
 
         for clause in branch["args"]["List"]["clauses"]:
             if "OrderBy" in clause:
                 order_by = [
                     (
-                        build(item["expr"]),
+                        build(item["expr"], plan_context=plan_context),
                         sort_is_ascending(item["options"]),
                     )
                     for item in clause["OrderBy"]
                 ]
             elif "Limit" in clause:
-                limit = build(clause["Limit"]).value
+                limit = build(clause["Limit"], plan_context=plan_context).value
             elif "Where" in clause:
                 # AGG(expr WHERE cond) - the inline aggregate filter, and the ONLY
                 # spelling of it we accept (the standard `FILTER (WHERE ...)` form
@@ -2057,7 +2057,7 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
                     f"{md_code('AND')}",
                 )
             )
-        built_filter = build(branch["filter"])
+        built_filter = build(branch["filter"], plan_context=plan_context)
         # With no arguments to put it among, there is no concrete spelling to
         # offer - name the shape instead of rendering `SUM( WHERE ...)`.
         corrected = (
@@ -2075,7 +2075,7 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
 
     filter_condition = inline_filter
     if filter_condition is not None:
-        filter_condition = build(filter_condition)
+        filter_condition = build(filter_condition, plan_context=plan_context)
 
     # EXTRACT('epoch', x) -> UNIXTIME(x). EXTRACT is a registered function, so it
     # is also reachable as an ordinary call that never passes through `extract()`
@@ -2458,7 +2458,7 @@ def _inline_filter_spelling(func, args, duplicate_treatment, condition) -> str:
     return f"{func}({distinct}{rendered} WHERE {format_expression(condition)})"
 
 
-def hex_literal(branch, alias: Optional[List[str]] = None, key=None):
+def hex_literal(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     value = int(branch, 16)
     return Literal(
         type=_CT_INT64,
@@ -2467,10 +2467,10 @@ def hex_literal(branch, alias: Optional[List[str]] = None, key=None):
     )
 
 
-def identifier(branch, alias: Optional[List[str]] = None, key=None):
+def identifier(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     """idenitifier doesn't have a qualifier (recorded in source)"""
     if "Identifier" in branch:
-        return build(branch["Identifier"], alias=alias)
+        return build(branch["Identifier"], alias=alias, plan_context=plan_context)
     column = LogicalColumn(
         node_type=NodeType.IDENTIFIER,  # column type
         alias=alias,  # type: ignore
@@ -2482,9 +2482,9 @@ def identifier(branch, alias: Optional[List[str]] = None, key=None):
     return column
 
 
-def in_list(branch, alias: Optional[List[str]] = None, key=None):
-    left_node = build(branch["expr"])
-    value_nodes = [build(v) for v in branch["list"]]
+def in_list(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
+    left_node = build(branch["expr"], plan_context=plan_context)
+    value_nodes = [build(v, plan_context=plan_context) for v in branch["list"]]
 
     # A list element is usually already a LITERAL, but templates like TPC-DS
     # write adjacent values as arithmetic — `d_year IN (1999, 1999+1, 1999+2)`.
@@ -2505,7 +2505,7 @@ def in_list(branch, alias: Optional[List[str]] = None, key=None):
         # to no query, so take an unregistered sink rather than the private base.
         _telemetry = QueryTelemetry.detached()
         value_nodes = [
-            v if v.node_type == NodeType.LITERAL else fold_constants(v, _telemetry)
+            v if v.node_type == NodeType.LITERAL else fold_constants(v, _telemetry, plan_context=plan_context)
             for v in value_nodes
         ]
         not_literal = [v for v in value_nodes if v.node_type != NodeType.LITERAL]
@@ -2532,12 +2532,12 @@ def in_list(branch, alias: Optional[List[str]] = None, key=None):
     )
 
 
-def in_subquery(branch, alias: Optional[List[str]] = None, key=None):
+def in_subquery(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     from opteryx.planner.logical_planner.logical_planner import plan_query
 
-    left = build(branch["expr"])
+    left = build(branch["expr"], plan_context=plan_context)
     ast = {"Query": branch["subquery"]}
-    subquery_plan = plan_query(ast)
+    subquery_plan = plan_query(ast, plan_context=plan_context)
     exit_node = subquery_plan.get_exit_points()[0]
     subquery_plan.remove_node(exit_node, heal=True)
 
@@ -2556,10 +2556,10 @@ def in_subquery(branch, alias: Optional[List[str]] = None, key=None):
     return node
 
 
-def in_unnest(branch, alias: Optional[List[str]] = None, key=None):
-    left_node = build(branch["expr"])
+def in_unnest(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
+    left_node = build(branch["expr"], plan_context=plan_context)
     operator = "AllOpNotEq" if branch["negated"] else "AnyOpEq"
-    right_node = build(branch["array_expr"])
+    right_node = build(branch["array_expr"], plan_context=plan_context)
     return Comparison(
         value=operator,
         left=left_node,
@@ -2595,7 +2595,7 @@ IS_JSON_OPERATORS = frozenset(
 )
 
 
-def is_json(branch, alias: Optional[List[str]] = None, key=None):
+def is_json(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     """`operand IS [NOT] JSON [kind]`, as a UNARY_OPERATOR node.
 
     Same shape as `_null_test`: the operand rides on `.centre`, and the polarity
@@ -2626,7 +2626,7 @@ def is_json(branch, alias: Optional[List[str]] = None, key=None):
     operator = ("IsNotJson" if branch["negated"] else "IsJson") + _IS_JSON_KINDS[kind]
     return UnaryOperator(
         value=operator,
-        centre=build(branch["expr"]),
+        centre=build(branch["expr"], plan_context=plan_context),
         alias=alias,
     )
 
@@ -2647,7 +2647,7 @@ def _any_of(*conditions):
     return combined
 
 
-def distinct_from(branch, alias: Optional[List[str]] = None, key=None):
+def distinct_from(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     """`a IS [NOT] DISTINCT FROM b` — null-safe comparison.
 
     Lowered to null tests, AND/OR and one ordinary comparison:
@@ -2684,7 +2684,7 @@ def distinct_from(branch, alias: Optional[List[str]] = None, key=None):
     standard requires FALSE — so it cannot be used for a projected value. If IS
     DISTINCT FROM ever needs to decorrelate, extend that matcher to this shape.
     """
-    left, right = build(branch[0]), build(branch[1])
+    left, right = build(branch[0], plan_context=plan_context), build(branch[1], plan_context=plan_context)
     distinct = key == "IsDistinctFrom"
 
     # Every use of an operand gets its OWN node. Passing `left` and `right` into
@@ -2723,7 +2723,7 @@ def distinct_from(branch, alias: Optional[List[str]] = None, key=None):
     return node
 
 
-def overlay_string(branch, alias: Optional[List[str]] = None, key=None):
+def overlay_string(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     """`OVERLAY(s PLACING r FROM start [FOR length])` — splice `r` into `s`.
 
     Lowered to the definition, which is exactly what the standard gives:
@@ -2737,10 +2737,10 @@ def overlay_string(branch, alias: Optional[List[str]] = None, key=None):
     two-argument-substring-is-unbindable); LENGTH(s) is an upper bound the kernel
     already clamps to, so it reads to the end.
     """
-    source = build(branch["expr"])
-    replacement = build(branch["overlay_what"])
-    start = build(branch["overlay_from"])
-    length = build(branch.get("overlay_for"))
+    source = build(branch["expr"], plan_context=plan_context)
+    replacement = build(branch["overlay_what"], plan_context=plan_context)
+    start = build(branch["overlay_from"], plan_context=plan_context)
+    length = build(branch.get("overlay_for"), plan_context=plan_context)
     if length is None:
         length = Function(value="LENGTH", parameters=[replacement])
 
@@ -2771,17 +2771,17 @@ def overlay_string(branch, alias: Optional[List[str]] = None, key=None):
     return spliced
 
 
-def is_compare(branch, alias: Optional[List[str]] = None, key=None):
+def is_compare(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     # The alias belongs to the UNARY node, not to its operand — the binder names a
     # projection from the OUTERMOST node (`node.alias or <rendered text>`), so
     # dropping it here named `x IS NOT NULL AS y` after its own SQL text.
-    centre = build(branch)
+    centre = build(branch, plan_context=plan_context)
     return UnaryOperator(value=key, centre=centre, alias=alias)
 
 
-def json_access(branch, alias: Optional[List[str]] = None, key=None):
-    identifier_node = build(branch["value"])
-    key_node = build(branch["path"]["path"][0]["Bracket"]["key"])
+def json_access(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
+    identifier_node = build(branch["value"], plan_context=plan_context)
+    key_node = build(branch["path"]["path"][0]["Bracket"]["key"], plan_context=plan_context)
 
     from opteryx.exceptions import IncorrectTypeError, UnsupportedSyntaxError
 
@@ -2806,12 +2806,12 @@ def json_access(branch, alias: Optional[List[str]] = None, key=None):
     )
 
 
-def literal_boolean(branch, alias: Optional[List[str]] = None, key=None):
+def literal_boolean(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     """create node for a literal boolean branch"""
     return Literal(type=_CT_BOOLEAN, value=branch, alias=alias)
 
 
-def literal_interval(branch, alias: Optional[List[str]] = None, key=None):
+def literal_interval(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     """
     Create node for a time literal.
 
@@ -2834,7 +2834,7 @@ def literal_interval(branch, alias: Optional[List[str]] = None, key=None):
 
     if "Value" not in branch["value"]:
         raise SqlError("Invalid INTERVAL, expected format `INTERVAL '1' MONTH`")
-    values = build(branch["value"]["Value"]).value
+    values = build(branch["value"]["Value"], plan_context=plan_context).value
     if not isinstance(values, str):
         raise SqlError("Invalid INTERVAL, values must be provided as a VARCHAR. Quote the value, for example `INTERVAL '1' MONTH`.")
 
@@ -2893,7 +2893,7 @@ def literal_interval(branch, alias: Optional[List[str]] = None, key=None):
     return Literal(type=_CT_INTERVAL, value=interval, alias=alias)
 
 
-def literal_null(branch=None, alias: Optional[List[str]] = None, key=None):
+def literal_null(branch=None, alias: Optional[List[str]] = None, key=None, *, plan_context):
     """create node for a literal null branch"""
     return Literal(type=_CT_NULL, alias=alias)
 
@@ -2933,7 +2933,7 @@ def integer_literal_node(value: int, alias: Optional[List[str]] = None) -> Expre
     )
 
 
-def literal_number(branch, alias: Optional[List[str]] = None, key=None):
+def literal_number(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     """create node for a literal number branch"""
     # we have one internal numeric type
 
@@ -2951,12 +2951,12 @@ def literal_number(branch, alias: Optional[List[str]] = None, key=None):
         )
 
 
-def literal_string(branch, alias: Optional[List[str]] = None, key=None):
+def literal_string(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     """create node for a string branch"""
     return Literal(type=_CT_VARCHAR, value=branch, alias=alias)
 
 
-def match_against(branch, alias: Optional[List[str]] = None, key=None):
+def match_against(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     # `columns` is a list of compound identifiers; only the first was ever read, so
     # `MATCH (a, b) AGAINST (...)` silently answered on `a` alone. The declared arity of
     # _MATCH_AGAINST is 2 (one column, one query), so a second column cannot reach the
@@ -2973,8 +2973,8 @@ def match_against(branch, alias: Optional[List[str]] = None, key=None):
             f"MATCH does not support the `{branch['opt_search_modifier']}` search modifier; "
             "matching is by embedding cosine similarity. Tune it with `SET match_threshold`."
         )
-    columns = [identifier(col["Identifier"]) for col in branch["columns"][0]]
-    match_to = build(branch["match_value"])
+    columns = [identifier(col["Identifier"], plan_context=plan_context) for col in branch["columns"][0]]
+    match_to = build(branch["match_value"], plan_context=plan_context)
 
     return Function(
         value="_MATCH_AGAINST",
@@ -2983,7 +2983,7 @@ def match_against(branch, alias: Optional[List[str]] = None, key=None):
     )
 
 
-def nested(branch, alias: Optional[List[str]] = None, key=None):
+def nested(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     # The alias belongs on the wrapper, not the centre: the binder names the
     # projection from the outermost node (`query_column = alias or rendered
     # text`), and NESTED is that node for a parenthesised select item. Dropping
@@ -2992,7 +2992,7 @@ def nested(branch, alias: Optional[List[str]] = None, key=None):
     # downstream, and CREATE TABLE/MATERIALIZED VIEW baked that text into the
     # stored schema.
     return Nested(
-        centre=build(branch),
+        centre=build(branch, plan_context=plan_context),
         alias=alias,
     )
 
@@ -3066,9 +3066,9 @@ def _all_quantifier_patterns(pattern_branch):
     return patterns
 
 
-def pattern_match(branch, alias: Optional[List[str]] = None, key=None):
+def pattern_match(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     negated = branch["negated"]
-    left = build(branch["expr"])
+    left = build(branch["expr"], plan_context=plan_context)
     is_any = branch.get("any", False)
     pattern_branch = branch["pattern"]
     is_all = False
@@ -3080,7 +3080,7 @@ def pattern_match(branch, alias: Optional[List[str]] = None, key=None):
             # produces, so both quantifiers share one operand-shaping path below
             # and cannot drift in how they build the pattern array.
             pattern_branch = {"Tuple": all_patterns}
-    right = build(pattern_branch)
+    right = build(pattern_branch, plan_context=plan_context)
     if key == "SimilarTo":
         raise UnsupportedSyntaxError(_SIMILAR_TO_REFUSAL)
     if is_any and negated and key in ("Like", "ILike"):
@@ -3123,25 +3123,25 @@ def pattern_match(branch, alias: Optional[List[str]] = None, key=None):
     )
 
 
-def placeholder(value, alias: Optional[List[str]] = None, key=None):
+def placeholder(value, alias: Optional[List[str]] = None, key=None, *, plan_context):
     from opteryx.exceptions import ParameterError
 
     raise ParameterError("Unresolved parameter in query. Supply a value for every placeholder in the statement.")
 
 
-def position(value, alias: Optional[List[str]] = None, key=None):
-    sub = build(value["expr"])
-    string = build(value["in"])
+def position(value, alias: Optional[List[str]] = None, key=None, *, plan_context):
+    sub = build(value["expr"], plan_context=plan_context)
+    string = build(value["in"], plan_context=plan_context)
     return Function(value="POSITION", parameters=[sub, string], alias=alias)
 
 
-def qualified_wildcard(branch, alias: Optional[List[str]] = None, key=None):
-    parts = [build(part).value for part in branch[0]["ObjectName"]]
+def qualified_wildcard(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
+    parts = [build(part, plan_context=plan_context).value for part in branch[0]["ObjectName"]]
     qualifier = (".".join(parts),)
     return Wildcard(value=qualifier, alias=alias)
 
 
-def substring(branch, alias: Optional[List[str]] = None, key=None):
+def substring(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     """SUBSTRING(s FROM a [FOR b]) — emit only the arguments that were written.
 
     Both slots used to be padded with an untyped NULL literal, so every call
@@ -3154,11 +3154,11 @@ def substring(branch, alias: Optional[List[str]] = None, key=None):
     `SUBSTRING(s FOR n)` means; a missing FOR is the real two-argument form and
     is passed through as such.
     """
-    string = build(branch["expr"])
-    substring_from = build(branch["substring_from"]) or Literal(
+    string = build(branch["expr"], plan_context=plan_context)
+    substring_from = build(branch["substring_from"], plan_context=plan_context) or Literal(
         type=_CT_INT64, value=1
     )
-    substring_for = build(branch["substring_for"])
+    substring_for = build(branch["substring_for"], plan_context=plan_context)
     parameters = [string, substring_from]
     if substring_for is not None:
         parameters.append(substring_for)
@@ -3169,7 +3169,7 @@ def substring(branch, alias: Optional[List[str]] = None, key=None):
     )
 
 
-def trim_string(branch, alias: Optional[List[str]] = None, key=None):
+def trim_string(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     """TRIM in all three of its spellings, onto TRIM / LTRIM / RTRIM.
 
     The direction picks the function; the characters, whichever spelling carried
@@ -3186,8 +3186,8 @@ def trim_string(branch, alias: Optional[List[str]] = None, key=None):
     A direction cannot reach this branch: parse_opteryx_trim (src/opteryx_dialect.rs)
     refuses `TRIM(LEADING str, 'x')` outright rather than dropping the LEADING.
     """
-    who = build(branch["trim_what"])
-    what = build(branch["expr"])
+    who = build(branch["trim_what"], plan_context=plan_context)
+    what = build(branch["expr"], plan_context=plan_context)
     where = branch["trim_where"] or "Both"
 
     function = "TRIM"
@@ -3200,7 +3200,7 @@ def trim_string(branch, alias: Optional[List[str]] = None, key=None):
     if who is not None:
         parameters.append(who)
     for characters in branch["trim_characters"] or []:
-        parameters.append(build(characters))
+        parameters.append(build(characters, plan_context=plan_context))
 
     return Function(
         value=function,
@@ -3209,10 +3209,10 @@ def trim_string(branch, alias: Optional[List[str]] = None, key=None):
     )
 
 
-def tuple_literal(branch, alias: Optional[List[str]] = None, key=None):
+def tuple_literal(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     # Tuples can have values of different types
     # if they all are the same type, be explicit about it
-    node_values = [build(t) for t in branch]
+    node_values = [build(t, plan_context=plan_context) for t in branch]
     values = [t.value for t in node_values]
 
     # Infer element ColumnType: homogeneous only
@@ -3234,7 +3234,7 @@ def tuple_literal(branch, alias: Optional[List[str]] = None, key=None):
     literal_type = _CT_ARRAY(element_ct if element_ct is not None else _CT_VARIANT)
 
     if values and isinstance(values[0], dict):
-        values = [build(val["Identifier"]).value for val in values]
+        values = [build(val["Identifier"], plan_context=plan_context).value for val in values]
     return Literal(
         type=literal_type,
         value=tuple(values),
@@ -3242,7 +3242,7 @@ def tuple_literal(branch, alias: Optional[List[str]] = None, key=None):
     )
 
 
-def typed_string(branch, alias: Optional[List[str]] = None, key=None):
+def typed_string(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     data_type = branch["data_type"]
 
     if isinstance(data_type, dict):
@@ -3261,13 +3261,13 @@ def typed_string(branch, alias: Optional[List[str]] = None, key=None):
     )
 
 
-def unary_op(branch, alias: Optional[List[str]] = None, key=None):
+def unary_op(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     if branch["op"] == "Not":
         # As in is_compare: the alias names the NOT node, never its operand.
-        centre = build(branch["expr"])
+        centre = build(branch["expr"], plan_context=plan_context)
         return Not(centre=centre, alias=alias)
     if branch["op"] == "Minus":
-        centre = build(branch["expr"], alias=alias)
+        centre = build(branch["expr"], alias=alias, plan_context=plan_context)
         # Constant-fold numeric literals (e.g. `-5`). An INTEGER literal must be
         # RE-TYPED from the negated value, not just have its value flipped: the
         # parser hands us `-N` as unary minus over the POSITIVE literal N, so a wide
@@ -3290,21 +3290,21 @@ def unary_op(branch, alias: Optional[List[str]] = None, key=None):
             alias=alias,
         )
     if branch["op"] == "Plus":
-        return build(branch["expr"], alias=alias)
+        return build(branch["expr"], alias=alias, plan_context=plan_context)
     if branch["op"] == "BitwiseNot":
-        centre = build(branch["expr"])
+        centre = build(branch["expr"], plan_context=plan_context)
         return UnaryOperator(
             value="BitwiseNot", centre=centre, alias=alias
         )
 
 
-def wildcard_filter(branch, alias: Optional[List[str]] = None, key=None):
+def wildcard_filter(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     """a wildcard"""
     except_columns = None
     if isinstance(branch, dict) and branch.get("opt_except") is not None:
-        except_columns = [build({"Identifier": branch["opt_except"]["first_element"]})]
+        except_columns = [build({"Identifier": branch["opt_except"]["first_element"]}, plan_context=plan_context)]
         except_columns.extend(
-            [build({"Identifier": e}) for e in branch["opt_except"]["additional_elements"]]
+            [build({"Identifier": e}, plan_context=plan_context) for e in branch["opt_except"]["additional_elements"]]
         )
     return Wildcard(except_columns=except_columns)
 
@@ -3317,7 +3317,7 @@ def unsupported(branch, alias: Optional[List[str]] = None, key=None):
     raise SqlError(f"Unhandled token in Syntax Tree `{key}`")
 
 
-def build(value, alias: Optional[List[str]] = None, key=None):
+def build(value, alias: Optional[List[str]] = None, key=None, *, plan_context):
     """
     Extract values from a value node in the AST and create a ExpressionNode for it
 
@@ -3338,21 +3338,21 @@ def build(value, alias: Optional[List[str]] = None, key=None):
         # synthesizes one NULL literal per column of the non-preserved side —
         # two such columns collided and the union concatenated mismatched types.
         # Both builders already accept and honour `alias`.
-        return BUILDERS[value](value, alias)
+        return BUILDERS[value](value, alias, plan_context=plan_context)
     if isinstance(value, dict):
         key = next(iter(value))
         if key in ignored:
             return None
-        return BUILDERS.get(key, unsupported)(value[key], alias, key)
+        return BUILDERS.get(key, unsupported)(value[key], alias, key, plan_context=plan_context)
     if isinstance(value, list):
-        return [build(item, alias) for item in value]
+        return [build(item, alias, plan_context=plan_context) for item in value]
     return None
 
 
 # parts to build the literal parts of a query
 BUILDERS = {
     "AnyOp": any_op,
-    "All": lambda x, y, z: [NodeType.WILDCARD],
+    "All": lambda x, y, z, *, plan_context: [NodeType.WILDCARD],
     "AllOp": all_op,
     "Array": array,  # not actually implemented
     "Between": between,

@@ -676,7 +676,7 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
                 return plan
 
             # Build a literal projection node to replace the aggregate
-            literal = build_literal_node(result_value, suggested_type=result_type)
+            literal = build_literal_node(result_value, suggested_type=result_type, plan_context=context.plan_context)
 
             # Preserve the expected alias for this column
             setattr(literal, "alias", column_aliases[idx])

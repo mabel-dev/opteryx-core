@@ -130,7 +130,7 @@ struct LatmatScanGlobal : GlobalSourceState {
 struct LatmatScanSource : Source {
     // ── pass 1 (predicate columns + sort key) ──────────────────────────────────────
     rugo::ParquetIOPipeline* p1_pipeline;
-    const std::unordered_map<std::string, FileStats>* footer_map;
+    const ParquetFooterMap* footer_map;
     const std::vector<std::pair<std::string, int>>* work_items;
     const std::vector<std::string>* p1_column_names;
     NativeScanColumnBuilder p1_build;
@@ -180,7 +180,7 @@ struct LatmatScanSource : Source {
                 auto fit = footer_map->find(items[i].first);
                 std::vector<int32_t> ids;
                 if (fit != footer_map->end())
-                    ids = rugo::ParquetIOPipeline::infer_fetch_blocks(fit->second, names);
+                    ids = rugo::ParquetIOPipeline::infer_fetch_blocks(*fit->second, names);
                 pit = per_file.emplace(items[i].first, std::move(ids)).first;
             }
             const size_t rg = static_cast<size_t>(items[i].second);
@@ -216,7 +216,7 @@ struct LatmatScanSource : Source {
         std::vector<std::vector<ColumnStats>> stats;
         stats.reserve(rg_idxs.size());
         for (int rg_idx : rg_idxs) {
-            const RowGroupStats& rg = fit->second.row_groups[static_cast<size_t>(rg_idx)];
+            const RowGroupStats& rg = fit->second->row_groups[static_cast<size_t>(rg_idx)];
             std::vector<ColumnStats> col_stats_vec;
             col_stats_vec.reserve(want_names.size());
             for (const std::string& want : want_names) {

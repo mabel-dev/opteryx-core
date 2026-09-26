@@ -34,17 +34,17 @@ TABLE = "testdata.tpch_001.lineitem"
 
 
 def _scan_physical(sql: str, column: str):
+    plan_context = PlanContext()
     telemetry = QueryTelemetry.detached()
     ctx = ExecutionContext(access_policies=[{"pattern": "testdata.*", "role": "reader"}])
     plan, _, ctes = do_logical_planning_phase(
-        do_ast_rewriter(sqloxide.parse_sql(do_sql_rewrite(sql), _dialect="opteryx"), parameters=[])[0]
-    )
-    plan = do_resolve_relations(plan, ctes, telemetry)
-    plan = do_plan_rewrite(plan, telemetry)
+        do_ast_rewriter(sqloxide.parse_sql(do_sql_rewrite(sql), _dialect="opteryx"), parameters=[])[0], 
+    plan_context=plan_context)
+    plan = do_resolve_relations(plan, ctes, telemetry, plan_context=plan_context)
+    plan = do_plan_rewrite(plan, telemetry, plan_context=plan_context)
     bound = do_bind_phase(
         plan, execution_context=ctx, query_id=str(uuid.uuid4()),
-        telemetry=telemetry,
-    )
+        telemetry=telemetry, plan_context=plan_context)
     opt = do_optimizer(bound, telemetry, PlanContext())
     out = []
     for _, node in opt.nodes(True):

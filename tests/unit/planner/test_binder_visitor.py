@@ -15,6 +15,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.binder.common import BinderVisitor
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanStepType
+from opteryx.planner.plan_context import PlanContext
 from opteryx.types.schema import RelationSchema
 
 
@@ -73,7 +74,12 @@ def test_logical_plan_visitor():
             return node, context
 
     context = BindingContext(
-        schemas={}, query_id="12345", execution_context=None, relations={}, telemetry=None
+        schemas={},
+        query_id="12345",
+        execution_context=None,
+        relations={},
+        telemetry=None,
+        plan_context=PlanContext(),
     )
 
     visitor = TestBinderVisitor()

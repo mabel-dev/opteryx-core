@@ -162,6 +162,7 @@ private:
                        const std::vector<std::optional<std::string>>& params,
                        bool binary_results, bool describe_portal);
     static std::vector<PgField> parse_row_description(const Msg& m);
+    void record_parameter_status(const Msg& m);
     [[noreturn]] void raise_server_error(const uint8_t* payload, size_t len);
 
     std::unique_ptr<Transport> t_;

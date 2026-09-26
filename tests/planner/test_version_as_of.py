@@ -24,6 +24,7 @@ from opteryx.planner.logical_planner.logical_planner_builders import (
 )
 from opteryx.planner.sql_rewriter import do_sql_rewrite
 from opteryx.third_party import sqloxide
+from opteryx.planner.plan_context import PlanContext
 
 
 def _parse_version(sql: str):
@@ -32,9 +33,10 @@ def _parse_version(sql: str):
 
 
 def test_version_as_of_number_is_a_version_clause():
+    plan_context = PlanContext()
     version = _parse_version("SELECT * FROM $planets VERSION AS OF 42")
     assert is_version_as_of_clause(version)
-    assert extract_timetravel_version(version) == 42
+    assert extract_timetravel_version(version, plan_context=plan_context) == 42
 
 
 def test_timestamp_as_of_is_not_a_version_clause():
@@ -43,17 +45,19 @@ def test_timestamp_as_of_is_not_a_version_clause():
 
 
 def test_version_as_of_rejects_non_integer():
+    plan_context = PlanContext()
     version = _parse_version("SELECT * FROM $planets VERSION AS OF 4.5")
     with pytest.raises(UnsupportedSyntaxError):
-        extract_timetravel_version(version)
+        extract_timetravel_version(version, plan_context=plan_context)
 
 
 def test_version_as_of_previous_rewrites_to_sentinel_zero():
+    plan_context = PlanContext()
     rewritten = do_sql_rewrite("SELECT * FROM $planets VERSION AS OF PREVIOUS")
     assert str(rewritten) == "SELECT * FROM $planets VERSION AS OF 0"
 
     version = _parse_version(str(rewritten))
-    assert extract_timetravel_version(version) == 0
+    assert extract_timetravel_version(version, plan_context=plan_context) == 0
 
 
 def test_version_as_of_literal_zero_is_refused():

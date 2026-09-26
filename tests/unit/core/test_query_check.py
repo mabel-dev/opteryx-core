@@ -19,6 +19,7 @@ from opteryx.catalog_cache import CatalogCache
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.exceptions import ParameterError
 from opteryx.exceptions import QueryParseError
+from opteryx.planner.plan_context import PlanContext
 
 
 def _session():
@@ -457,6 +458,7 @@ def test_the_check_path_and_the_planner_path_are_the_same_front_half():
 
 
 def test_a_schema_only_bind_reads_no_manifest():
+    plan_context = PlanContext()
     from opteryx.models import ExecutionContext
     from opteryx.models import QueryTelemetry
     from opteryx.planner import bind_statement
@@ -469,8 +471,7 @@ def test_a_schema_only_bind_reads_no_manifest():
         execution_context=ExecutionContext(memberships=["public"]),
         query_id="test",
         telemetry=QueryTelemetry("test"),
-        schema_only=True,
-    )
+        schema_only=True, plan_context=plan_context)
 
     scans = [node for _, node in plan.nodes(True) if node.node_type == LogicalPlanStepType.Scan]
     assert scans
@@ -535,6 +536,7 @@ def test_cache_rejects_a_ttl_that_never_expires():
 
 def test_resolve_relation_asks_the_catalog_once_per_ttl(monkeypatch):
     """The whole point: a burst of keystrokes costs one round trip per relation."""
+    plan_context = PlanContext()
     from opteryx.managers import views
 
     calls = []
@@ -550,7 +552,7 @@ def test_resolve_relation_asks_the_catalog_once_per_ttl(monkeypatch):
 
     cache = CatalogCache(ttl=60)
     for _ in range(5):
-        kind, obj = views.resolve_relation("space.planets", None, cache)
+        kind, obj = views.resolve_relation("space.planets", None, cache, plan_context=plan_context)
         assert kind == "dataset"
         assert obj == "handle-for-space.planets"
 
@@ -560,6 +562,7 @@ def test_resolve_relation_asks_the_catalog_once_per_ttl(monkeypatch):
 def test_resolve_relation_without_a_cache_asks_every_time():
     """The execute path passes no cache, and must not quietly get a stale one: the
     dataset document is the version pointer."""
+    plan_context = PlanContext()
     from opteryx.managers import views
 
     calls = []
@@ -575,7 +578,7 @@ def test_resolve_relation_without_a_cache_asks_every_time():
     views.view_store_connector = lambda relation, telemetry: _Connector()
     try:
         for _ in range(3):
-            views.resolve_relation("space.planets", None)
+            views.resolve_relation("space.planets", None, plan_context=plan_context)
     finally:
         views.view_store_connector = original
 

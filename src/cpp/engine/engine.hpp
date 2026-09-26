@@ -467,6 +467,9 @@ public:
         pipelines[p]->operators.push_back(std::move(op));
         return pipelines[p]->operators.back().get();
     }
+    // Plan-time registry of GroupBySinks by pipeline, for set_groupby_topk — the sink
+    // is owned by pipelines[p]; this is a non-owning, compile-time-only lookup.
+    std::unordered_map<size_t, GroupBySink*> groupby_sinks_;
     void set_sink_(size_t p, std::unique_ptr<Sink> s) {
         s->stats.identity = current_identity_;
         s->stats.display_name = current_display_name_;
@@ -911,7 +914,7 @@ public:
     }
 
     void set_native_scan_source(size_t p, rugo::ParquetIOPipeline* pipeline,
-                                const std::unordered_map<std::string, FileStats>* footer_map,
+                                const ParquetFooterMap* footer_map,
                                 const std::vector<std::pair<std::string, int>>* work_items,
                                 const std::vector<std::string>* column_names,
                                 int in_flight_limit,
@@ -946,7 +949,7 @@ public:
     void set_latmat_scan_source(
             size_t p,
             rugo::ParquetIOPipeline* p1_pipeline,
-            const std::unordered_map<std::string, FileStats>* footer_map,
+            const ParquetFooterMap* footer_map,
             const std::vector<std::pair<std::string, int>>* work_items,
             const std::vector<std::string>* p1_column_names,
             int in_flight_limit,
@@ -1295,9 +1298,32 @@ public:
                           std::vector<std::string> key_names,
                           std::vector<uint8_t> key_emit,
                           std::vector<AggSpec2> specs, size_t buf, int64_t ndv_estimate) {
-        set_sink_(p, std::make_unique<GroupBySink>(
+        auto sink = std::make_unique<GroupBySink>(
             std::move(key_idx), std::move(key_names), std::move(key_emit),
-            std::move(specs), sink_buffer_(buf), ndv_estimate));
+            std::move(specs), sink_buffer_(buf), ndv_estimate);
+        groupby_sinks_[p] = sink.get();
+        set_sink_(p, std::move(sink));
+    }
+    // GROUP BY -> ORDER BY <aggregate> LIMIT k fusion (docs/GROUPBY_TOPK_FUSION_DESIGN.md):
+    // arm the GroupBySink that pipeline `p` sinks into. `keys` index the sink's
+    // aggregate specs (col_idx = spec position), in ORDER BY order; `ties` = the
+    // ORDER BY continues past them. Plan-time only; the compiler decides eligibility.
+    void set_groupby_topk(size_t p, std::vector<SortKeySpec> keys, size_t k, bool ties) {
+        auto it = groupby_sinks_.find(p);
+        if (it == groupby_sinks_.end() || pipelines[p]->sink.get() != it->second) {
+            throw std::runtime_error(
+                "set_groupby_topk: pipeline does not sink into a GROUP BY");
+        }
+        if (k == 0 || keys.empty()) {
+            throw std::runtime_error("set_groupby_topk: needs k > 0 and at least one key");
+        }
+        for (const SortKeySpec& key : keys) {
+            if (key.col_idx >= it->second->specs.size()) {
+                throw std::runtime_error("set_groupby_topk: ORDER BY key is not an aggregate "
+                                         "of this GROUP BY");
+            }
+        }
+        it->second->arm_topk(std::move(keys), k, ties);
     }
     void set_distinct_sink(size_t p, std::vector<size_t> on_idx, size_t buf,
                            int64_t ndv_estimate) {

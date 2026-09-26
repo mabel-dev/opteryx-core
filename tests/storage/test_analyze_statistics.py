@@ -26,6 +26,7 @@ from opteryx.models.manifest_io import read_manifest_histograms
 from opteryx.models.manifest_io import read_manifest_sketches
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.planner.plan_context import PlanContext
 
 DATASET = "testdata.satellites"
 _MANIFEST_GLOB = f"testdata/satellites/{DATASET_MANIFEST_NAME}"
@@ -178,6 +179,7 @@ def test_prune_files_wired_from_analyze_manifest_int_column():
     Manifest.prune_files (previously discarded — see filesystem_connector.py's
     _read_dataset_manifest). INT64.ordinalize is an identity widen, so this
     also proves the wiring end-to-end without any lossiness in play."""
+    plan_context = PlanContext()
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS id")
@@ -187,19 +189,20 @@ def test_prune_files_wired_from_analyze_manifest_int_column():
         assert manifest.files[0].lower_bounds is not None
 
         # id's real range is [1, 177] — 10000 is far outside it.
-        manifest = manifest.prune_files([_comparison("id", "Gt", 10000)])
+        manifest = manifest.prune_files([_comparison("id", "Gt", 10000)], plan_context=plan_context)
         assert manifest.files == []
     finally:
         _clean()
 
 
 def test_prune_files_wired_from_analyze_manifest_int_column_keeps_in_range():
+    plan_context = PlanContext()
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS id")
         _, manifest = _metadata()
 
-        manifest = manifest.prune_files([_comparison("id", "Eq", 1)])
+        manifest = manifest.prune_files([_comparison("id", "Eq", 1)], plan_context=plan_context)
         assert len(manifest.files) == 1
     finally:
         _clean()
@@ -209,6 +212,7 @@ def test_prune_files_wired_from_analyze_manifest_float_column():
     """gm's ordinal bound is NOT the real float value (lossy bit-transform) —
     pruning must still be correct because the predicate literal is run
     through the same ColumnType.ordinalize transform before comparing."""
+    plan_context = PlanContext()
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS gm")
@@ -224,19 +228,20 @@ def test_prune_files_wired_from_analyze_manifest_float_column():
         assert stored_max != 9887.834  # real max is 9887.834; ordinal key is not
 
         # gm's real range is [0.0, 9887.834] — 1e12 is far outside it.
-        manifest = manifest.prune_files([_comparison("gm", "Gt", 1e12)])
+        manifest = manifest.prune_files([_comparison("gm", "Gt", 1e12)], plan_context=plan_context)
         assert manifest.files == []
     finally:
         _clean()
 
 
 def test_prune_files_wired_from_analyze_manifest_float_column_keeps_in_range():
+    plan_context = PlanContext()
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS gm")
         _, manifest = _metadata()
 
-        manifest = manifest.prune_files([_comparison("gm", "Lt", 5000.0)])
+        manifest = manifest.prune_files([_comparison("gm", "Lt", 5000.0)], plan_context=plan_context)
         assert len(manifest.files) == 1
     finally:
         _clean()
@@ -245,6 +250,7 @@ def test_prune_files_wired_from_analyze_manifest_float_column_keeps_in_range():
 def test_prune_files_wired_from_analyze_manifest_varchar_column():
     """name's ordinal bound is a lossy 8-byte-prefix transform, not the
     string itself — pruning must still be correct via ordinalize(literal)."""
+    plan_context = PlanContext()
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS name")
@@ -258,19 +264,20 @@ def test_prune_files_wired_from_analyze_manifest_varchar_column():
         assert isinstance(stored_min, int)
 
         # name's real range is ['Adrastea', 'Ymir'] — "Zzz" sorts after both.
-        manifest = manifest.prune_files([_comparison("name", "Eq", "Zzz")])
+        manifest = manifest.prune_files([_comparison("name", "Eq", "Zzz")], plan_context=plan_context)
         assert manifest.files == []
     finally:
         _clean()
 
 
 def test_prune_files_wired_from_analyze_manifest_varchar_column_keeps_in_range():
+    plan_context = PlanContext()
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS name")
         _, manifest = _metadata()
 
-        manifest = manifest.prune_files([_comparison("name", "Eq", "Adrastea")])
+        manifest = manifest.prune_files([_comparison("name", "Eq", "Adrastea")], plan_context=plan_context)
         assert len(manifest.files) == 1
     finally:
         _clean()
@@ -280,6 +287,7 @@ def test_prune_files_manifest_bounds_survive_the_metadata_cache():
     """get_dataset_metadata caches file_entries across calls within a process
     (see filesystem_connector._MANIFEST_CACHE) — bounds_are_ordinal must be
     cached alongside them, not just computed on the first (cold) call."""
+    plan_context = PlanContext()
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS id")
@@ -289,7 +297,7 @@ def test_prune_files_manifest_bounds_survive_the_metadata_cache():
         _, manifest = _metadata()
 
         assert manifest.bounds_are_ordinal is True
-        manifest = manifest.prune_files([_comparison("id", "Gt", 10000)])
+        manifest = manifest.prune_files([_comparison("id", "Gt", 10000)], plan_context=plan_context)
         assert manifest.files == []
     finally:
         _clean()
@@ -298,12 +306,13 @@ def test_prune_files_manifest_bounds_survive_the_metadata_cache():
 def test_no_manifest_means_no_bounds_and_no_pruning():
     """Without an ANALYZE'd manifest, no lower_bounds/upper_bounds are
     available at all — prune_files must be a safe no-op, not a crash."""
+    plan_context = PlanContext()
     _clean()
     try:
         _, manifest = _metadata()
         assert manifest.files[0].lower_bounds is None
 
-        manifest = manifest.prune_files([_comparison("id", "Gt", 10000)])
+        manifest = manifest.prune_files([_comparison("id", "Gt", 10000)], plan_context=plan_context)
         # No bounds to prune with — the file is conservatively kept.
         assert len(manifest.files) == 1
     finally:

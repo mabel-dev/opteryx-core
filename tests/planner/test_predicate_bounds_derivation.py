@@ -50,6 +50,7 @@ from opteryx.types.logical_type import INT64
 from opteryx.types.logical_type import TIMESTAMP
 from opteryx.types.logical_type import VARCHAR
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.planner.plan_context import PlanContext
 
 # ---------------------------------------------------------------------------
 # Node builders — the shapes the binder produces, built by hand so a test can
@@ -62,7 +63,8 @@ def ident(name="col"):
 
 
 def lit(value, column_type=None):
-    return build_literal_node(value, suggested_type=column_type)
+    plan_context = PlanContext()
+    return build_literal_node(value, suggested_type=column_type, plan_context=plan_context)
 
 
 def compare(left, operator, right):
@@ -99,7 +101,8 @@ _ADMITS = {
 def derived_terms(conjunct, column_type_for=None):
     """Just the DERIVED conjuncts — the originals come back first and unchanged,
     which is itself asserted in `test_original_conjuncts_pass_through`."""
-    produced = derive_bound_conjuncts([conjunct], column_type_for)
+    plan_context = PlanContext()
+    produced = derive_bound_conjuncts([conjunct], column_type_for, plan_context=plan_context)
     return [term for term in produced if term is not conjunct]
 
 
@@ -146,9 +149,10 @@ def assert_excludes_something(terms, domain, matches):
 
 def test_original_conjuncts_pass_through_untouched():
     """A caller swapping its splitter for this must not lose anything it had."""
+    plan_context = PlanContext()
     first = compare(ident("a"), "Gt", lit(5))
     second = compare(ident("b"), "Eq", lit("x"))
-    produced = derive_bound_conjuncts([first, second])
+    produced = derive_bound_conjuncts([first, second], plan_context=plan_context)
     assert produced[0] is first
     assert produced[1] is second
 
@@ -160,9 +164,10 @@ def test_canonical_comparison_is_not_re_derived():
 
 
 def test_and_tree_is_split():
+    plan_context = PlanContext()
     left = compare(ident("a"), "Gt", lit(5))
     right = compare(ident("b"), "Lt", lit(9))
-    produced = derive_bound_conjuncts([And(left=left, right=right)])
+    produced = derive_bound_conjuncts([And(left=left, right=right)], plan_context=plan_context)
     assert left in produced and right in produced
 
 
@@ -840,8 +845,9 @@ def test_null_terms_are_found_inside_a_conjunction():
 
 
 def test_no_predicates_derives_nothing():
-    assert derive_bound_conjuncts([]) == []
-    assert derive_bound_conjuncts(None) == []
+    plan_context = PlanContext()
+    assert derive_bound_conjuncts([], plan_context=plan_context) == []
+    assert derive_bound_conjuncts(None, plan_context=plan_context) == []
     assert derive_null_terms(None) == []
 
 
@@ -859,8 +865,9 @@ def test_case_fold_terms_never_leak_into_the_ordinary_conjuncts():
 
 
 def test_lower_equality_derives_a_conditional_point_bound():
+    plan_context = PlanContext()
     conjunct = compare(function("LOWER", ident("label")), "Eq", lit("caa"))
-    derived = derive_case_fold_conjuncts([conjunct])
+    derived = derive_case_fold_conjuncts([conjunct], plan_context=plan_context)
     assert len(derived) == 1
     column, fold, conjuncts = derived[0]
     assert (column, fold) == ("label", "LOWER")
@@ -868,8 +875,9 @@ def test_lower_equality_derives_a_conditional_point_bound():
 
 
 def test_upper_equality_derives_against_the_other_fold():
+    plan_context = PlanContext()
     conjunct = compare(function("UPPER", ident("label")), "Eq", lit("CAA"))
-    column, fold, conjuncts = derive_case_fold_conjuncts([conjunct])[0]
+    column, fold, conjuncts = derive_case_fold_conjuncts([conjunct], plan_context=plan_context)[0]
     assert (column, fold) == ("label", "UPPER")
     assert [(t.value, t.right.value) for t in conjuncts] == [("Eq", "CAA")]
 
@@ -877,16 +885,18 @@ def test_upper_equality_derives_against_the_other_fold():
 def test_case_fold_covers_every_comparison_operator():
     """Under identity the fold vanishes entirely, so ranges work as well as
     equality — not just the `=` case."""
+    plan_context = PlanContext()
     conjunct = compare(function("LOWER", ident("label")), "GtEq", lit("c"))
-    _, _, conjuncts = derive_case_fold_conjuncts([conjunct])[0]
+    _, _, conjuncts = derive_case_fold_conjuncts([conjunct], plan_context=plan_context)[0]
     assert [(t.value, t.right.value) for t in conjuncts] == [("GtEq", "c")]
 
 
 def test_ci_starts_with_folds_the_pattern_before_deriving():
     """The ILIKE lowering does NOT fold the pattern. Under identity the column
     holds no uppercase, so only the folded pattern can match."""
+    plan_context = PlanContext()
     conjunct = function("_CI_STARTS_WITH", ident("label"), lit(b"Ca"))
-    column, fold, conjuncts = derive_case_fold_conjuncts([conjunct])[0]
+    column, fold, conjuncts = derive_case_fold_conjuncts([conjunct], plan_context=plan_context)[0]
     assert (column, fold) == ("label", "LOWER")
     assert sorted((t.value, t.right.value) for t in conjuncts) == [
         ("GtEq", b"ca"),
@@ -895,8 +905,9 @@ def test_ci_starts_with_folds_the_pattern_before_deriving():
 
 
 def test_ilike_derives_the_folded_prefix():
+    plan_context = PlanContext()
     conjunct = compare(ident("label"), "ILike", lit("Ca%"))
-    column, fold, conjuncts = derive_case_fold_conjuncts([conjunct])[0]
+    column, fold, conjuncts = derive_case_fold_conjuncts([conjunct], plan_context=plan_context)[0]
     assert (column, fold) == ("label", "LOWER")
     assert sorted((t.value, t.right.value) for t in conjuncts) == [("GtEq", "ca"), ("Lt", "cb")]
 
@@ -904,17 +915,20 @@ def test_ilike_derives_the_folded_prefix():
 def test_non_ascii_case_fold_declines():
     """Outside ASCII the two folds disagree, and a bound that depends on which
     one ran is a wrong answer on the type it guessed wrong."""
-    assert derive_case_fold_conjuncts([compare(ident("label"), "ILike", lit("Café%"))]) == []
+    plan_context = PlanContext()
+    assert derive_case_fold_conjuncts([compare(ident("label"), "ILike", lit("Café%"))], plan_context=plan_context) == []
 
 
 def test_case_fold_of_a_non_identifier_declines():
+    plan_context = PlanContext()
     conjunct = compare(function("LOWER", function("TRIM", ident("label"))), "Eq", lit("caa"))
-    assert derive_case_fold_conjuncts([conjunct]) == []
+    assert derive_case_fold_conjuncts([conjunct], plan_context=plan_context) == []
 
 
 def test_ordinary_predicates_contribute_no_case_fold_terms():
-    assert derive_case_fold_conjuncts([compare(ident("a"), "Eq", lit(5))]) == []
-    assert derive_case_fold_conjuncts([function("_STARTS_WITH", ident("a"), lit(b"ab"))]) == []
+    plan_context = PlanContext()
+    assert derive_case_fold_conjuncts([compare(ident("a"), "Eq", lit(5))], plan_context=plan_context) == []
+    assert derive_case_fold_conjuncts([function("_STARTS_WITH", ident("a"), lit(b"ab"))], plan_context=plan_context) == []
 
 
 # ---------------------------------------------------------------------------
@@ -938,25 +952,26 @@ def test_row_group_zone_terms_gain_the_same_shapes_as_file_pruning():
     """Both pruners read the derivation, so a shape added for files reaches row
     groups too. A second derivation for the finer grain would be the second
     dialect `bounds_are_ordinal` exists to prevent."""
+    plan_context = PlanContext()
     from opteryx.models.manifest import Manifest
 
     manifest = _ordinal_manifest()
     gt_eq, lt_eq = Manifest.ZONE_OP_GTEQ, Manifest.ZONE_OP_LTEQ
 
     in_list = compare(ident("seq"), "InList", lit([12, 31]))
-    assert manifest.ordinal_zone_map_terms([in_list]) == [
+    assert manifest.ordinal_zone_map_terms([in_list], plan_context=plan_context) == [
         ("seq", gt_eq, 12),
         ("seq", lt_eq, 31),
     ]
 
     scaled = compare(arithmetic(ident("seq"), "Multiply", lit(2)), "GtEq", lit(42))
-    assert manifest.ordinal_zone_map_terms([scaled]) == [("seq", gt_eq, 21)]
+    assert manifest.ordinal_zone_map_terms([scaled], plan_context=plan_context) == [("seq", gt_eq, 21)]
 
     disjunction = Or(
         left=compare(ident("seq"), "Eq", lit(3)),
         right=compare(ident("seq"), "Eq", lit(9)),
     )
-    assert manifest.ordinal_zone_map_terms([disjunction]) == [
+    assert manifest.ordinal_zone_map_terms([disjunction], plan_context=plan_context) == [
         ("seq", gt_eq, 3),
         ("seq", lt_eq, 9),
     ]

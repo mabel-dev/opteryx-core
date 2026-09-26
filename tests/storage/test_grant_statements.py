@@ -29,6 +29,7 @@ from opteryx.planner.logical_planner.logical_planner import (
     plan_alter_materialized_view_owner,
 )
 from opteryx.planner import parse_statement
+from opteryx.planner.plan_context import PlanContext
 
 
 def parse_one(sql):
@@ -405,6 +406,7 @@ def test_alter_materialized_view_owner_takes_a_parameter():
     Parsed by the aside parser now, so the name arrives as an `ObjectName` -
     but the owner slot is unchanged: still the `Placeholder` node the AST
     rewriter binds, which is the property this test exists for."""
+    plan_context = PlanContext()
     from opteryx.planner import parse_statement
 
     _clean, [statement] = parse_statement(
@@ -416,7 +418,7 @@ def test_alter_materialized_view_owner_takes_a_parameter():
     # A parameter carries a value, never the CURRENT_USER keyword.
     assert body["current_user"] is False
     [bound] = do_ast_rewriter([statement], {"who": "bob"})
-    plan = plan_alter_materialized_view_owner(bound)
+    plan = plan_alter_materialized_view_owner(bound, plan_context=plan_context)
     [node] = [plan[nid] for nid in plan.nodes()]
     assert node.new_owner == "bob"
     assert node.owner_is_current_user is False

@@ -51,10 +51,11 @@ from opteryx.third_party import sqloxide
 
 def _planned(sql):
     """Resolve then rewrite — the plan exactly as the Binder receives it."""
+    plan_context = PlanContext()
     ast = sqloxide.parse_sql(sql, _dialect="opteryx")[0]
-    plan, _, ctes = do_logical_planning_phase(ast)
-    plan = do_resolve_relations(plan, ctes, QueryTelemetry.detached())
-    return do_plan_rewrite(plan, QueryTelemetry.detached())
+    plan, _, ctes = do_logical_planning_phase(ast, plan_context=plan_context)
+    plan = do_resolve_relations(plan, ctes, QueryTelemetry.detached(), plan_context=plan_context)
+    return do_plan_rewrite(plan, QueryTelemetry.detached(), plan_context=plan_context)
 
 
 def _optimized(sql):
@@ -68,12 +69,12 @@ def _optimized(sql):
     place for every shape, inline ones included, and says nothing about whether
     it reaches the engine.
     """
+    plan_context = PlanContext()
     bound = do_bind_phase(
         _planned(sql),
         execution_context=ExecutionContext(memberships=[]),
         query_id="test_relation_resolver",
-        telemetry=QueryTelemetry.detached(),
-    )
+        telemetry=QueryTelemetry.detached(), plan_context=plan_context)
     return do_optimizer(bound, QueryTelemetry.detached(), PlanContext())
 
 
@@ -393,9 +394,10 @@ def test_get_relation_branch_detects_a_cycle(catalog):
 
 def _join_legs(sql):
     """(left_relation_names, right_relation_names) for every Join in the resolved plan."""
+    plan_context = PlanContext()
     ast = sqloxide.parse_sql(sql, _dialect="opteryx")[0]
-    plan, _, ctes = do_logical_planning_phase(ast)
-    plan = do_resolve_relations(plan, ctes, QueryTelemetry.detached())
+    plan, _, ctes = do_logical_planning_phase(ast, plan_context=plan_context)
+    plan = do_resolve_relations(plan, ctes, QueryTelemetry.detached(), plan_context=plan_context)
     return [
         (list(node.left_relation_names or []), list(node.right_relation_names or []))
         for _, node in plan.nodes(True)
@@ -475,14 +477,15 @@ def test_rename_relations_re_aliases_subquery_nodes():
     through the window rewrite that first tripped over it (see the window entries in
     tests/integration/sql_battery/test_shapes_basic.py).
     """
+    plan_context = PlanContext()
     from opteryx.planner.relation_resolver import copy_sub_plan
     from opteryx.planner.relation_resolver import rename_relations
 
     ast = sqloxide.parse_sql(
         "SELECT name FROM (SELECT * FROM $planets) AS s", _dialect="opteryx"
     )[0]
-    plan, _, ctes = do_logical_planning_phase(ast)
-    plan = do_resolve_relations(plan, ctes, QueryTelemetry.detached())
+    plan, _, ctes = do_logical_planning_phase(ast, plan_context=plan_context)
+    plan = do_resolve_relations(plan, ctes, QueryTelemetry.detached(), plan_context=plan_context)
 
     def _subquery_aliases(p):
         return {
@@ -493,7 +496,7 @@ def test_rename_relations_re_aliases_subquery_nodes():
 
     assert _subquery_aliases(plan) == {"s"}, "expected the derived table to be a Subquery named s"
 
-    copy = rename_relations(copy_sub_plan(plan), prefix="$test-")
+    copy = rename_relations(copy_sub_plan(plan), prefix="$test-", plan_context=plan_context)
     renamed = _subquery_aliases(copy)
     assert renamed and all(a.startswith("$test-") for a in renamed), (
         f"Subquery alias was not re-aliased: {renamed}"

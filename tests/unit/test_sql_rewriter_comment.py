@@ -14,14 +14,16 @@ from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.planner.logical_planner import do_logical_planning_phase
 from opteryx.planner.sql_rewriter import do_sql_rewrite
 from opteryx.third_party import sqloxide
+from opteryx.planner.plan_context import PlanContext
 
 
 def _plan(sql: str):
+    plan_context = PlanContext()
     rewritten = do_sql_rewrite(sql)
     # The rewriter has no business touching a COMMENT statement at all.
     assert str(rewritten) == sql
     parsed = sqloxide.parse_sql(str(rewritten), _dialect="opteryx")
-    return do_logical_planning_phase(parsed[0])[0]
+    return do_logical_planning_phase(parsed[0], plan_context=plan_context)[0]
 
 
 def _comment_node(plan):

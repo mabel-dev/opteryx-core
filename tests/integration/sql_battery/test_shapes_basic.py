@@ -56,6 +56,7 @@ from opteryx.exceptions import (
     VariableNotFoundError,
 )
 from opteryx.utils.formatter import format_sql
+from opteryx.planner.plan_context import PlanContext
 
 # fmt:off
 # fmt:off
@@ -255,6 +256,25 @@ STATEMENTS = [
         ("SELECT * FROM $planets WHERE name IS NULL", 0, 20, None),
         ("SELECT * FROM $planets WHERE name IS NOT NULL", 9, 20, None),
         ("SELECT name FROM testdata.satellites WHERE magnitude = 'NaN'::FLOAT64", 6, 1, None),
+        # A filter predicate that constant-folds to NULL keeps no rows — a filter keeps
+        # a row only when its predicate is TRUE. These used to reach the compiler as a
+        # NULL literal and be refused as "does not produce a true/false result".
+        # (fuzz seed 2461587667761478903)
+        ("SELECT \"Mission\" FROM testdata.missions WHERE (CASE WHEN ('2025-09-05 03:32:53'::TIMESTAMP = '1998-04-03 04:04:00'::TIMESTAMP) THEN TRUE END)", 0, 1, None),
+        ("SELECT * FROM $planets WHERE (CASE WHEN 1 = 2 THEN TRUE END)", 0, 20, None),
+        ("SELECT * FROM $planets WHERE (CASE WHEN 1 = 1 THEN NULL ELSE TRUE END)", 0, 20, None),
+        ("SELECT * FROM $planets WHERE IIF(1 = 2, TRUE, NULL)", 0, 20, None),
+        ("SELECT * FROM $planets WHERE NOT (CASE WHEN 1 = 2 THEN TRUE END)", 0, 20, None),
+        # NULL AND TRUE, NULL OR FALSE: both NULL, both keep nothing
+        ("SELECT * FROM $planets WHERE (CASE WHEN 1 = 2 THEN TRUE END) AND (1 = 1)", 0, 20, None),
+        ("SELECT * FROM $planets WHERE (CASE WHEN 1 = 2 THEN TRUE END) OR (1 = 2)", 0, 20, None),
+        # controls: NULL OR TRUE is TRUE, and NULL OR p is p — NULL is not "drop the lot"
+        ("SELECT * FROM $planets WHERE (CASE WHEN 1 = 2 THEN TRUE END) OR (1 = 1)", 9, 20, None),
+        ("SELECT * FROM $planets WHERE (CASE WHEN 1 = 2 THEN TRUE END) OR name = 'Earth'", 1, 20, None),
+        # an untyped NULL literal (HAVING has no bare-literal shape check)
+        ("SELECT COUNT(*) FROM $planets GROUP BY name HAVING NULL", 0, 1, None),
+        # a NULL of a non-boolean type is still refused, not treated as FALSE
+        ("SELECT * FROM $planets WHERE (CASE WHEN 1 = 2 THEN 1 END)", None, None, UnsupportedSyntaxError),
 
         # Combining conditions
         ("SELECT * FROM $planets WHERE id > 3 AND id < 7", 3, 20, None),
@@ -4982,6 +5002,7 @@ def test_unrecognised_function_argument_clause_is_refused():
     of them would reintroduce the same class of silent wrong answer, and the suite
     would stay green through it.
     """
+    plan_context = PlanContext()
     from opteryx.planner.logical_planner.logical_planner_builders import function
     from opteryx.third_party.sqloxide import parse_sql
 
@@ -4990,7 +5011,7 @@ def test_unrecognised_function_argument_clause_is_refused():
     branch["args"]["List"]["clauses"].append({"JsonNullClause": "AbsentOnNull"})
 
     with pytest.raises(UnsupportedSyntaxError) as refused:
-        function(branch)
+        function(branch, plan_context=plan_context)
     assert "JsonNullClause" in str(refused.value), refused.value
 
 

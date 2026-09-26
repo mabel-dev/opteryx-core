@@ -95,7 +95,7 @@ class ManifestPruningStrategy(OptimizationStrategy):
                 # statistics cache misses and recomputes over the pruned set.
                 original_count = node.manifest.get_file_count()
 
-                pruned_manifest = node.manifest.prune_files(prunable)
+                pruned_manifest = node.manifest.prune_files(prunable, plan_context=context.plan_context)
 
                 if pruned_manifest is not node.manifest:
                     node.manifest = pruned_manifest

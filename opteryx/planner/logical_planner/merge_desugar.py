@@ -509,7 +509,7 @@ def _chain(arms, groups, per_arm_result):
     raise InvalidInternalStateError("merge chain: no population blocks")  # pragma: no cover
 
 
-def plan_merge(statement, **kwargs):
+def plan_merge(statement, *, plan_context, **kwargs):
     """Build the logical plan for MERGE INTO."""
     # Imported here rather than at module scope: logical_planner imports this
     # module, so a top-level import back into it would be circular.
@@ -701,7 +701,7 @@ def plan_merge(statement, **kwargs):
         }
     }
 
-    plan = plan_query(query)
+    plan = plan_query(query, plan_context=plan_context)
     exit_node_id = plan.get_exit_points()[0]
 
     # Ask the TARGET scan for row identity. Only that scan: the source's rows
@@ -942,7 +942,7 @@ def _attach_sink(plan, step):
     return plan
 
 
-def plan_delete(statement, **kwargs):
+def plan_delete(statement, *, plan_context, **kwargs):
     """Build the logical plan for DELETE FROM.
 
     A DELETE reads nothing but the columns its predicate needs plus the row
@@ -998,13 +998,14 @@ def plan_delete(statement, **kwargs):
     plan = plan_query(
         _select_over(
             projection, table_factor, delete.get("selection"), delete.get("optimizer_hints")
-        )
+        ),
+        plan_context=plan_context,
     )
     _stamp_target_scan(plan, relation_name, alias, keyword)
     return _attach_sink(plan, _sink_node(relation_name, (), alias, keyword, "delete"))
 
 
-def plan_update(statement, **kwargs):
+def plan_update(statement, *, plan_context, **kwargs):
     """Build the logical plan for UPDATE.
 
     An updated row is retired and a replacement appended, exactly as MERGE's
@@ -1066,7 +1067,8 @@ def plan_update(statement, **kwargs):
     plan = plan_query(
         _select_over(
             projection, table_factor, update.get("selection"), update.get("optimizer_hints")
-        )
+        ),
+        plan_context=plan_context,
     )
     _stamp_target_scan(plan, relation_name, alias, keyword)
     return _attach_sink(

@@ -324,7 +324,7 @@ NB_MODULE(disk_reader, m) {
                     static_cast<bool>(entry.is_directory),
                     static_cast<bool>(entry.is_regular_file),
                     entry.size,
-                    entry.mtime
+                    entry.mtime_ns
                 ));
             }
             return out;
@@ -402,7 +402,7 @@ NB_MODULE(disk_reader, m) {
                     static_cast<bool>(entry.is_directory),
                     static_cast<bool>(entry.is_regular_file),
                     entry.size,
-                    entry.mtime
+                    entry.mtime_ns
                 ));
             }
             return out;

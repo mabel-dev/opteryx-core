@@ -2527,6 +2527,18 @@ struct GBLanes {
     std::vector<TDigestPtr> td;    // ApproxPercentile per-group sketches
 };
 
+// Exchange groups `a` and `b`'s state in every lane this spec allocated. Kind-blind
+// on purpose: gb_lanes_resize sizes exactly the lanes a kind uses and leaves the
+// rest EMPTY, so "swap every non-empty lane" is exactly that kind's lane set.
+// A move, never a recompute — which is what lets the top-k cut (GroupBySink::
+// topk_select) relocate digests, bitmaps and lists without changing their answer.
+inline void gb_lanes_swap(GBLanes& L, size_t a, size_t b) {
+    auto sw = [a, b](auto& lane) { if (!lane.empty()) std::swap(lane[a], lane[b]); };
+    sw(L.valid); sw(L.i64); sw(L.f64); sw(L.f64sq); sw(L.f64y); sw(L.f64yy);
+    sw(L.f64xy); sw(L.mkey); sw(L.i128); sw(L.sval); sw(L.aa); sw(L.cidr);
+    sw(L.median); sw(L.hll); sw(L.td);
+}
+
 inline void gb_lanes_resize(GBLanes& L, GBKind k, size_t n) {
     switch (k) {
         case GBKind::Rows:
@@ -2997,6 +3009,23 @@ struct GroupBySink : Sink {
     size_t chunk_rows;
     bool low_card;   // planner NDV estimate <= kGBParviGateNDV → parvi front maps
 
+    // GROUP BY -> ORDER BY <aggregate> LIMIT k fusion (docs/GROUPBY_TOPK_FUSION_DESIGN.md).
+    // Armed by the compiler (Engine::set_groupby_topk) when a HeapSort consumes this
+    // sink's output through nothing but column selects. Each merged partition (or
+    // radix bucket) then emits only its top k groups: partitions hold DISJOINT group
+    // sets and a merged group's aggregate is final, so the union of per-partition top
+    // k contains the global top k. The HeapSort above stays the exact final ORDER BY
+    // + LIMIT — this only shrinks its input, and spares the key gather + emit of every
+    // group that cannot win (measured: the dominant finalize cost on high-card keys).
+    //
+    // topk_keys index into `specs` (col_idx = spec index) — the ORDER BY's leading
+    // aggregate keys. topk_ties: the ORDER BY continues past them (onto a group key),
+    // so every group TIED with the k-th on these keys is kept too, leaving the tie
+    // break to the HeapSort. topk_k == 0: not armed.
+    std::vector<SortKeySpec> topk_keys;
+    size_t topk_k = 0;
+    bool topk_ties = false;
+
     // `kemit` has one entry per key (invariant enforced at the binding, which is the
     // only construction site and can raise) — false = hash the key, never store it.
     GroupBySink(std::vector<size_t> keys, std::vector<std::string> knames,
@@ -3012,6 +3041,17 @@ struct GroupBySink : Sink {
             store_col_idx.push_back(key_idx[k]);
             store_names.push_back(knames[k]);
         }
+    }
+
+    // Plan-time arming (compiler, single-threaded, before the pipeline runs). The
+    // compiler only arms ORDER BY keys over aggregates whose emit is a pure read of
+    // their lanes — never MEDIAN / APPROX_* / ARRAY_AGG / CIDR_AGG, whose emit may
+    // consume state (emit_lane_column on a lane twice would be wrong). That is
+    // re-checked here against the sink's own kinds, in finalize, where they are known.
+    void arm_topk(std::vector<SortKeySpec> keys, size_t k, bool ties) {
+        topk_keys = std::move(keys);
+        topk_k = k;
+        topk_ties = ties;
     }
 
     std::unique_ptr<GlobalSinkState> make_global() override {
@@ -4582,10 +4622,154 @@ struct GroupBySink : Sink {
         if (prof) gb_fin_merge_ns.fetch_add(merge_ns, std::memory_order_relaxed);
     }
 
+    // Read-only view of spec `s`'s lanes in `P`, starting at group `start` — what
+    // emit_lane_column consumes. Lanes are contiguous per-group vectors, so a range
+    // of groups is a plain pointer offset.
+    GBLaneView lane_view(const GroupByGlobal& g, GBPartition& P, size_t s, size_t start) {
+        const GBKind kind = g.kinds[s];
+        const GBLanes& L = P.lanes[s];
+        GBLaneView lv;
+        if (kind == GBKind::Rows) {
+            lv.rows = P.grows.data() + start;
+        } else if (kind == GBKind::ArrayAgg) {
+            lv.aa = const_cast<GBArrayAggState*>(L.aa.data()) + start;
+            lv.aa_spec = &specs[s];
+        } else if (kind == GBKind::CidrAgg) {
+            // No `valid` lane (see gb_lanes_resize) — never NULL.
+            lv.cidr = const_cast<opteryx::roaring32::Roaring32*>(L.cidr.data()) + start;
+        } else if (kind == GBKind::Median) {
+            // No `valid` lane (Median never allocates one — see
+            // gb_lanes_resize); null-ness is each state's own size==0.
+            lv.median = const_cast<opteryx::ungrouped::MedianState*>(
+                L.median.data()) + start;
+        } else if (kind == GBKind::ApproxCountDistinct) {
+            // No `valid` lane either — never NULL (see emit_lane_column).
+            lv.hll = L.hll.data() + start;
+        } else if (kind == GBKind::ApproxPercentile) {
+            // No `valid` lane: null-ness is each digest's own td_size()==0.
+            lv.td = const_cast<TDigestPtr*>(L.td.data()) + start;
+            lv.pct_spec = &specs[s];
+        } else {
+            lv.valid = L.valid.data() + start;
+            if (!L.i64.empty())   lv.i64   = L.i64.data() + start;
+            if (!L.f64.empty())   lv.f64   = L.f64.data() + start;
+            if (!L.f64sq.empty()) lv.f64sq = L.f64sq.data() + start;
+            if (!L.f64y.empty())  lv.f64y  = L.f64y.data() + start;
+            if (!L.f64yy.empty()) lv.f64yy = L.f64yy.data() + start;
+            if (!L.f64xy.empty()) lv.f64xy = L.f64xy.data() + start;
+            if (!L.i128.empty())  lv.i128  = L.i128.data() + start;
+            if (!L.sval.empty())  lv.sval  = L.sval.data() + start;
+        }
+        return lv;
+    }
+
+    // An aggregate kind whose emit_lane_column is a PURE read of its lanes. The
+    // others (ARRAY_AGG / CIDR_AGG / MEDIAN / APPROX_*) hand emit mutable state, so
+    // emitting their lane once to select on and again for the winners is not
+    // allowed — and none of them is an ORDER BY key the compiler arms.
+    static bool topk_key_kind_pure(GBKind k) {
+        switch (k) {
+            case GBKind::ArrayAgg: case GBKind::CidrAgg: case GBKind::Median:
+            case GBKind::ApproxCountDistinct: case GBKind::ApproxPercentile:
+                return false;
+            default:
+                return true;
+        }
+    }
+
+    // TOP-K SELECTION (armed sinks only; see topk_keys). Cuts `merged` down to its
+    // top topk_k groups by the ORDER BY aggregate keys, IN PLACE:
+    //   * the winners' lane state is SWAPPED into groups [0, n) — moved, never
+    //     recomputed, so every aggregate kind (digests, bitmaps, lists included)
+    //     emits bit-identically to the un-armed path;
+    //   * merged.keycols is replaced by the winners' key values, gathered ONCE and
+    //     only for them (from key_sources when the radix merge left references).
+    // Ranking uses draken's own sort keys and comparator (build_sort_keys +
+    // sort_perm — the ones the HeapSort above uses), over the aggregate columns as
+    // emit_lane_column produces them, so NULL/NaN/-0.0 placement cannot drift from
+    // the final sort. Returns the surviving group count n (winners in ascending
+    // group order); 0 with err set on failure.
+    size_t topk_select(const GroupByGlobal& g, GBPartition& merged,
+                       const std::vector<std::vector<GroupKeyColumn>>* key_sources,
+                       ErrCtx& err) {
+        const size_t total = merged.size();
+        const uint32_t N = static_cast<uint32_t>(total);
+        const size_t k = topk_k;
+        // 1. The ORDER BY aggregate columns, full range, as one morsel.
+        auto km = std::make_shared<CxxMorsel>();
+        km->zero_col_rows = N;
+        std::vector<SortKeySpec> kspec;
+        kspec.reserve(topk_keys.size());
+        for (const SortKeySpec& tk : topk_keys) {
+            const size_t s = tk.col_idx;
+            if (s >= specs.size() || !topk_key_kind_pure(g.kinds[s])) {
+                err.code = 1;
+                err.msg = "GROUP BY top-k fusion armed on an ORDER BY aggregate it cannot "
+                          "rank (invalid spec or state-consuming aggregate) — compiler "
+                          "invariant violated";
+                return 0;
+            }
+            kspec.push_back(SortKeySpec{km->columns.size(), tk.ascending});
+            km->columns.push_back(emit_lane_column(g.meta[s], g.kinds[s],
+                                                   lane_view(g, merged, s, 0), N, err));
+            if (err.code != 0) return 0;
+        }
+        // 2. Rank: the top k by the exact comparator the final sort uses.
+        std::vector<SortKeyColumn> keys;
+        if (!build_sort_keys({km}, kspec, total, keys, err)) return 0;
+        std::vector<uint32_t> perm(total);
+        for (uint32_t i = 0; i < N; ++i) perm[i] = i;
+        sort_perm(keys, perm, k, 1u);   // partial sort: perm[0, k) is the top k
+        std::vector<uint32_t> win(perm.begin(), perm.begin() + static_cast<std::ptrdiff_t>(k));
+        if (topk_ties) {
+            // The ORDER BY continues onto a group key, so the tie among groups equal
+            // to the k-th on the aggregate keys is broken ABOVE — keep all of them.
+            // perm[k, N) holds no row ordered before the k-th, so a row there is tied
+            // with it exactly when the k-th is not ordered before it either.
+            const SortKeyCmp cmp{keys};
+            const uint32_t kth = perm[k - 1];
+            for (size_t j = k; j < total; ++j) {
+                if (!cmp(kth, perm[j])) win.push_back(perm[j]);
+            }
+        }
+        // Ascending group order: the in-place swap below needs it (win[i] >= i, so a
+        // swap never displaces a winner not yet moved), and it keeps the key gather
+        // and lane moves walking forward through memory.
+        std::sort(win.begin(), win.end());
+        const size_t n = win.size();
+        // 3. Winners' key values — the only key bytes this partition copies.
+        GBPartition gathered;
+        type_keycols(gathered, g.key_meta);
+        for (size_t kc = 0; kc < gathered.keycols.size(); ++kc) {
+            GroupKeyColumn& col = gathered.keycols[kc];
+            for (uint32_t w : win) {
+                if (key_sources == nullptr) {
+                    col.append_from(merged.keycols[kc], w);
+                } else {
+                    const uint64_t ref = merged.keyref[w];
+                    col.append_from((*key_sources)[ref >> 32][kc],
+                                    static_cast<size_t>(ref & 0xFFFFFFFFu));
+                }
+            }
+        }
+        merged.keycols = std::move(gathered.keycols);
+        // 4. Winners' lane state into groups [0, n).
+        for (size_t i = 0; i < n; ++i) {
+            const size_t w = win[i];
+            if (w == i) continue;
+            for (GBLanes& L : merged.lanes) gb_lanes_swap(L, i, w);
+            if (!merged.grows.empty()) std::swap(merged.grows[i], merged.grows[w]);
+        }
+        groupby_tel::topk_pruned.fetch_add(1, std::memory_order_relaxed);
+        return n;
+    }
+
     // Fold the distinct-operand pairs, then emit `merged` in chunk_rows morsels.
     // `key_sources` null: key values are in merged.keycols. Non-null: merged.keyref
     // locates each group's values in those sources, and each chunk's key columns
     // are gathered from them — the ONE copy a group's key values make in finalize.
+    // An armed top-k sink first cuts `merged` to its winners (topk_select), which
+    // leaves their keys in merged.keycols — so the emit below reads those.
     void finish_and_emit(GroupByGlobal& g, GBPartition& merged,
                          const std::vector<std::vector<GroupKeyColumn>>* key_sources,
                          std::vector<MorselPtr>& out_morsels, ErrCtx& err) {
@@ -4603,6 +4787,11 @@ struct GroupBySink : Sink {
         // Emit chunk_rows-group morsels — lanes are contiguous vectors, so a
         // chunk is a plain slice.
         size_t total = merged.size();
+        if (topk_k > 0 && total > topk_k) {
+            total = topk_select(g, merged, key_sources, err);
+            if (err.code != 0) return;
+            key_sources = nullptr;   // the winners' keys now live in merged.keycols
+        }
         for (size_t start = 0; start < total; start += chunk_rows) {
             uint32_t n = static_cast<uint32_t>(std::min(chunk_rows, total - start));
             auto m = std::make_shared<CxxMorsel>();
@@ -4638,41 +4827,8 @@ struct GroupBySink : Sink {
             if (prof) gb_fin_keys_ns.fetch_add(prof_tl - prof_tk,
                                                std::memory_order_relaxed);
             for (size_t s = 0; s < nspecs; ++s) {
-                GBKind kind = g.kinds[s];
-                const GBLanes& L = merged.lanes[s];
-                GBLaneView lv;
-                if (kind == GBKind::Rows) {
-                    lv.rows = merged.grows.data() + start;
-                } else if (kind == GBKind::ArrayAgg) {
-                    lv.aa = const_cast<GBArrayAggState*>(L.aa.data()) + start;
-                    lv.aa_spec = &specs[s];
-                } else if (kind == GBKind::CidrAgg) {
-                    // No `valid` lane (see gb_lanes_resize) — never NULL.
-                    lv.cidr = const_cast<opteryx::roaring32::Roaring32*>(L.cidr.data()) + start;
-                } else if (kind == GBKind::Median) {
-                    // No `valid` lane (Median never allocates one — see
-                    // gb_lanes_resize); null-ness is each state's own size==0.
-                    lv.median = const_cast<opteryx::ungrouped::MedianState*>(
-                        L.median.data()) + start;
-                } else if (kind == GBKind::ApproxCountDistinct) {
-                    // No `valid` lane either — never NULL (see emit_lane_column).
-                    lv.hll = L.hll.data() + start;
-                } else if (kind == GBKind::ApproxPercentile) {
-                    // No `valid` lane: null-ness is each digest's own td_size()==0.
-                    lv.td = const_cast<TDigestPtr*>(L.td.data()) + start;
-                    lv.pct_spec = &specs[s];
-                } else {
-                    lv.valid = L.valid.data() + start;
-                    if (!L.i64.empty())   lv.i64   = L.i64.data() + start;
-                    if (!L.f64.empty())   lv.f64   = L.f64.data() + start;
-                    if (!L.f64sq.empty()) lv.f64sq = L.f64sq.data() + start;
-                    if (!L.f64y.empty())  lv.f64y  = L.f64y.data() + start;
-                    if (!L.f64yy.empty()) lv.f64yy = L.f64yy.data() + start;
-                    if (!L.f64xy.empty()) lv.f64xy = L.f64xy.data() + start;
-                    if (!L.i128.empty())  lv.i128  = L.i128.data() + start;
-                    if (!L.sval.empty())  lv.sval  = L.sval.data() + start;
-                }
-                m->columns.push_back(emit_lane_column(g.meta[s], kind, lv, n, err));
+                m->columns.push_back(emit_lane_column(g.meta[s], g.kinds[s],
+                                                      lane_view(g, merged, s, start), n, err));
                 if (err.code != 0) return;
                 m->names.push_back(specs[s].name);
             }

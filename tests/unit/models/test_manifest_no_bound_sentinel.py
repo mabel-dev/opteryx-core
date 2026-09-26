@@ -41,6 +41,7 @@ from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import INT64, IPV4, UINT32
 from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.planner.plan_context import PlanContext
 
 # The sentinel itself. Spelled out rather than imported so a change to the
 # constant in manifest.py has to be a deliberate, visible decision here too.
@@ -97,6 +98,7 @@ def _between(lower, upper, column_name="value"):
 
 
 def test_sentinel_bounds_keep_file_for_every_comparison_operator():
+    plan_context = PlanContext()
     # Eq is the one that returned zero rows in production, but every handler
     # dereferences the same bounds - none of them may act on the sentinel.
     for op, literal in (
@@ -112,43 +114,47 @@ def test_sentinel_bounds_keep_file_for_every_comparison_operator():
             schema=_schema(UINT32),
             bounds_are_ordinal=True,
         )
-        manifest = manifest.prune_files([_comparison(op, literal)])
+        manifest = manifest.prune_files([_comparison(op, literal)], plan_context=plan_context)
         assert len(manifest.files) == 1, f"{op} pruned a file on a no-bound sentinel"
 
 
 def test_sentinel_bounds_keep_file_for_ipv4_column():
+    plan_context = PlanContext()
     # IPV4 is physically uint32, so it lands in the identical catalog gap.
     manifest = Manifest(
         files=[_file(NO_BOUND, NO_BOUND)], schema=_schema(IPV4), bounds_are_ordinal=True
     )
 
-    manifest = manifest.prune_files([_comparison("Eq", IP_LOW)])
+    manifest = manifest.prune_files([_comparison("Eq", IP_LOW)], plan_context=plan_context)
 
     assert len(manifest.files) == 1
 
 
 def test_sentinel_bounds_keep_file_for_between():
+    plan_context = PlanContext()
     manifest = Manifest(
         files=[_file(NO_BOUND, NO_BOUND)], schema=_schema(UINT32), bounds_are_ordinal=True
     )
 
-    manifest = manifest.prune_files([_between(1, 10)])
+    manifest = manifest.prune_files([_between(1, 10)], plan_context=plan_context)
 
     assert len(manifest.files) == 1
 
 
 def test_one_sentinel_bound_is_enough_to_disqualify_the_pair():
+    plan_context = PlanContext()
     # A producer that computed one end but not the other still has no usable
     # range - half a bound must not be pruned on.
     for lower, upper in ((NO_BOUND, IP_HIGH), (IP_LOW, NO_BOUND)):
         manifest = Manifest(
             files=[_file(lower, upper)], schema=_schema(UINT32), bounds_are_ordinal=True
         )
-        manifest = manifest.prune_files([_comparison("Eq", 999999)])
+        manifest = manifest.prune_files([_comparison("Eq", 999999)], plan_context=plan_context)
         assert len(manifest.files) == 1
 
 
 def test_sentinel_file_kept_while_real_bounded_file_still_prunes():
+    plan_context = PlanContext()
     # The guard must not disarm pruning for files that DO carry statistics.
     manifest = Manifest(
         files=[
@@ -159,7 +165,7 @@ def test_sentinel_file_kept_while_real_bounded_file_still_prunes():
         bounds_are_ordinal=True,
     )
 
-    manifest = manifest.prune_files([_comparison("Eq", IP_HIGH)])
+    manifest = manifest.prune_files([_comparison("Eq", IP_HIGH)], plan_context=plan_context)
 
     assert [f.file_path for f in manifest.files] == ["no_stats"]
 
@@ -171,18 +177,20 @@ def test_sentinel_file_kept_while_real_bounded_file_still_prunes():
 
 
 def test_negative_but_real_bounds_still_prune():
+    plan_context = PlanContext()
     manifest = Manifest(
         files=[_file(INT64.ordinalize(-100), INT64.ordinalize(-50))],
         schema=_schema(INT64),
         bounds_are_ordinal=True,
     )
 
-    manifest = manifest.prune_files([_comparison("Gt", 0)])
+    manifest = manifest.prune_files([_comparison("Gt", 0)], plan_context=plan_context)
 
     assert manifest.files == []
 
 
 def test_int64_min_plus_one_is_a_real_bound_and_still_prunes():
+    plan_context = PlanContext()
     # The nearest value to the sentinel that is NOT the sentinel - pins the
     # boundary so the guard can't drift into a range check.
     manifest = Manifest(
@@ -191,7 +199,7 @@ def test_int64_min_plus_one_is_a_real_bound_and_still_prunes():
         bounds_are_ordinal=True,
     )
 
-    manifest = manifest.prune_files([_comparison("Gt", 0)])
+    manifest = manifest.prune_files([_comparison("Gt", 0)], plan_context=plan_context)
 
     assert manifest.files == []
 

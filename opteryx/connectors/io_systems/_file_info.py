@@ -6,6 +6,11 @@ __slots__ = ("path", "size", "mtime")
 
 
 class FileInfoLike:
+    """A file's path, size and modification time. `mtime` is whatever the producing
+    filesystem's listing reports, consistently per filesystem (nanoseconds on the
+    local and object-store listings); it is compared only against values from the
+    same filesystem, never interpreted as a clock."""
+
     __slots__ = ("path", "size", "mtime")
 
     def __init__(self, path: str, size: int = 0, mtime: float = 0.0):

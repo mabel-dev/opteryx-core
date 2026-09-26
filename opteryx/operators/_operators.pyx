@@ -69,7 +69,7 @@ from libcpp.unordered_map cimport unordered_map
 from libcpp.pair cimport pair
 from libcpp.string cimport string
 from opteryx.connectors.parquet_io.pool_reader cimport NativeScanPlan, ParquetIOPipeline
-from rugo.parquet_reader cimport FileStats
+from opteryx.compiled.structures.footer_cache cimport ParquetFooterMap
 from opteryx.compiled.structures.memory_pool cimport MemoryPool, CppMemoryPool
 
 # ScanPullFn: the streaming scan pull-on-demand callback. LIVE — ``_scan_pull_trampoline``
@@ -183,6 +183,7 @@ cdef extern from "engine/groupby_tel.hpp" namespace "opteryx::engine::groupby_te
     long long gb_tel_raw_switches "opteryx::engine::groupby_tel::raw_switches_count" ()
     long long gb_tel_merge_bucketed "opteryx::engine::groupby_tel::merge_bucketed_count" ()
     long long gb_tel_merge_buckets "opteryx::engine::groupby_tel::merge_buckets_count" ()
+    long long gb_tel_topk_pruned "opteryx::engine::groupby_tel::topk_pruned_count" ()
     void gb_tel_reset "opteryx::engine::groupby_tel::reset" ()
 
 cdef extern from "engine/scan_tel.hpp" namespace "opteryx::engine::scan_tel" nogil:
@@ -278,6 +279,41 @@ cdef extern from "engine/native_skene_scan_source.hpp" namespace "opteryx::engin
         int64_t  requests
         int64_t  metadata_requests
         int64_t  bytes_fetched
+
+    # The engine's cross-query cache of opened skene readers (see SkeneReaderCache).
+    cdef cppclass SkeneReaderCache:
+        @staticmethod
+        SkeneReaderCache& instance()
+        void set_budget(int64_t budget_bytes)
+        int64_t resident_bytes()
+        int64_t budget_bytes()
+        int64_t entries()
+        int64_t over_budget()
+
+
+# The skene reader cache takes its budget from config once, at engine import; a
+# scan against a cache with no budget fails rather than running unbounded.
+def _apply_skene_reader_cache_budget():
+    from opteryx import config as _config
+    cdef int64_t budget = _config.SKENE_FOOTER_CACHE_BYTES
+    if budget <= 0:
+        raise ValueError(f"SKENE_FOOTER_CACHE_BYTES must be positive, got {budget}")
+    SkeneReaderCache.instance().set_budget(budget)
+
+
+_apply_skene_reader_cache_budget()
+
+
+def skene_reader_cache_stats():
+    """Resident bytes, budget, entry count and over-budget refusals of the
+    engine's cross-query skene reader cache."""
+    cdef SkeneReaderCache* cache = &SkeneReaderCache.instance()
+    return {
+        "resident_bytes": cache.resident_bytes(),
+        "budget_bytes": cache.budget_bytes(),
+        "entries": cache.entries(),
+        "over_budget": cache.over_budget(),
+    }
 
 
 cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
@@ -384,7 +420,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                           int64_t* bytes_claimed,
                                           SkeneIo* io)
         void set_native_scan_source(size_t p, ParquetIOPipeline* pipeline,
-                                    const unordered_map[string, FileStats]* footer_map,
+                                    const ParquetFooterMap* footer_map,
                                     const cppvector[pair[string, int]]* work_items,
                                     const cppvector[string]* column_names,
                                     int in_flight_limit,
@@ -397,7 +433,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                     const cppvector[int]* widen_types,
                                     int64_t row_limit)
         void set_latmat_scan_source(size_t p, ParquetIOPipeline* p1_pipeline,
-                                    const unordered_map[string, FileStats]* footer_map,
+                                    const ParquetFooterMap* footer_map,
                                     const cppvector[pair[string, int]]* work_items,
                                     const cppvector[string]* p1_column_names,
                                     int in_flight_limit,
@@ -463,6 +499,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                               cppvector[uint8_t] key_emit,
                               cppvector[AggSpec2] specs, size_t buf,
                               int64_t ndv_estimate)
+        void set_groupby_topk(size_t p, cppvector[SortKeySpec] keys, size_t k,
+                              bint ties) except +
         void set_distinct_sink(size_t p, cppvector[size_t] on_idx, size_t buf,
                                int64_t ndv_estimate)
         void set_buffer_append_sink(size_t p, size_t buf)
@@ -797,6 +835,7 @@ def get_groupby_telemetry():
         "raw_switches":   gb_tel_raw_switches(),
         "merge_bucketed": gb_tel_merge_bucketed(),
         "merge_buckets":  gb_tel_merge_buckets(),
+        "topk_pruned":    gb_tel_topk_pruned(),
     }
 
 
@@ -2995,6 +3034,14 @@ cdef class NativePlan:
             kemit.push_back(<uint8_t>(1 if e else 0))
         self._e.set_groupby_sink(p, keys, knames, kemit, _agg_spec_from_list(specs), buf,
                                  ndv_estimate)
+
+    def set_groupby_topk(self, size_t p, list keys, size_t k, bint ties):
+        """Arm the GROUP BY sink on pipeline ``p`` to emit only each hash partition's
+        top ``k`` groups (docs/GROUPBY_TOPK_FUSION_DESIGN.md). ``keys`` =
+        [(aggregate spec index, ascending), ...] — the ORDER BY's leading aggregate
+        keys; ``ties`` = the ORDER BY continues past them, so groups tied with the
+        k-th are kept for the HeapSort above to order."""
+        self._e.set_groupby_topk(p, _sort_spec_from_list(keys), k, ties)
 
     def set_distinct_sink(self, size_t p, list on_idx, size_t buf, int64_t ndv_estimate):
         """``on_idx`` = dedup key column indices; empty list = every column.

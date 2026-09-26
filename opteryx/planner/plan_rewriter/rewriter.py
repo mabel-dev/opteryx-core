@@ -11,8 +11,9 @@ from opteryx.planner.plan_rewriter.strategies.rewrite_strategy import PlanRewrit
 
 
 class PlanRewriterVisitor:
-    def __init__(self, telemetry: QueryTelemetry):
+    def __init__(self, telemetry: QueryTelemetry, plan_context):
         self.telemetry = telemetry
+        self.plan_context = plan_context
         self.strategies = [cls(telemetry) for cls in STRATEGIES]
 
     def traverse(self, plan: LogicalPlan, strategy, ctes: dict) -> LogicalPlan:
@@ -21,7 +22,7 @@ class PlanRewriterVisitor:
             return plan
 
         root_nid = exit_points.pop()
-        context = PlanRewriteContext(plan, ctes)
+        context = PlanRewriteContext(plan, ctes, self.plan_context)
 
         def _inner(nid, parent_nid, context):
             node = context.pre_rewrite_tree[nid]

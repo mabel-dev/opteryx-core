@@ -8,10 +8,11 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 from opteryx.models.physical_plan import PhysicalPlan
+from opteryx.planner.plan_context import PlanContext
 
 
 def test_execution_tree():
-    et = PhysicalPlan()
+    et = PhysicalPlan(PlanContext())
     et.add_node("a", None)
     et.add_node("b", None)
     et.add_edge("a", "b", "forwards")

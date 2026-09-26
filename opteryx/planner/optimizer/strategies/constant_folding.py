@@ -59,7 +59,7 @@ def _is_rewrite_only(node) -> bool:
     return kernel is None or kernel.callable_ref is None
 
 
-def _desugar_rewrite_only(node, telemetry: QueryTelemetry):
+def _desugar_rewrite_only(node, telemetry: QueryTelemetry, *, plan_context):
     """Desugar every rewrite-only FUNCTION in `node`'s subtree, bottom up.
 
     Constant folding runs BEFORE the strategies that do this desugaring (see the
@@ -74,9 +74,9 @@ def _desugar_rewrite_only(node, telemetry: QueryTelemetry):
     """
     from .predicate_rewriter import _rewrite_function
 
-    node.map_children(lambda child: _desugar_rewrite_only(child, telemetry))
+    node.map_children(lambda child: _desugar_rewrite_only(child, telemetry, plan_context=plan_context))
     if _is_rewrite_only(node):
-        return _rewrite_function(node, telemetry)
+        return _rewrite_function(node, telemetry, plan_context=plan_context)
     return node
 
 
@@ -137,7 +137,7 @@ def _keeps_result_type(root, operand) -> bool:
     )
 
 
-def _build_transparent_node(root, value, telemetry) -> Expression:
+def _build_transparent_node(root, value, telemetry, *, plan_context) -> Expression:
     # An algebraic reduction (x * 1 -> x, TRUE AND x -> x) must keep the folded
     # expression's output identity — downstream references root's schema_column,
     # not the operand's. NESTED is the planner's transparent wrapper: it lowers
@@ -150,7 +150,7 @@ def _build_transparent_node(root, value, telemetry) -> Expression:
     node.query_column = root.query_column
     node.alias = root.alias
     # See if we can fold this further
-    return fold_constants(node, telemetry)
+    return fold_constants(node, telemetry, plan_context=plan_context)
 
 
 # Operators whose operands may be swapped without changing meaning. Ordering
@@ -271,7 +271,7 @@ _PARAMETER_CARRIERS = frozenset(
 )
 
 
-def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
+def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context) -> Expression:
     if root.node_type == NodeType.LITERAL:
         # if we're already a literal (constant), we can't fold
         return root
@@ -287,7 +287,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
 
     if root.node_type in (NodeType.DNF, NodeType.CNF):
         root.parameters = _dedupe_branches(
-            [fold_constants(p, telemetry) for p in root.parameters], telemetry
+            [fold_constants(p, telemetry, plan_context=plan_context) for p in root.parameters], telemetry
         )
         if len(root.parameters) == 1:
             # Don't leave a one-branch DNF/CNF behind — a bare condition is the shape
@@ -301,8 +301,8 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
         NodeType.EXTRACTION_OPERATOR,
     }:
         # if we have a binary expression, try to fold each side
-        root.left = fold_constants(root.left, telemetry)
-        root.right = fold_constants(root.right, telemetry)
+        root.left = fold_constants(root.left, telemetry, plan_context=plan_context)
+        root.right = fold_constants(root.right, telemetry, plan_context=plan_context)
 
         # some expressions we can simplify to x or 0.
         if root.node_type == NodeType.BINARY_OPERATOR:
@@ -313,7 +313,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
                 and root.left.value == 0
             ):
                 # 0 * anything = 0 (except NULL)
-                node = _build_if_not_null_node(root, root.right, build_literal_node(0))
+                node = _build_if_not_null_node(root, root.right, build_literal_node(0, plan_context=plan_context))
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
@@ -323,7 +323,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
                 and root.right.value == 0
             ):
                 # anything * 0 = 0 (except NULL)
-                node = _build_if_not_null_node(root, root.left, build_literal_node(0))
+                node = _build_if_not_null_node(root, root.left, build_literal_node(0, plan_context=plan_context))
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
@@ -334,7 +334,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
                 and _keeps_result_type(root, root.right)
             ):
                 # 1 * anything = anything (except NULL)
-                node = _build_transparent_node(root, root.right, telemetry)
+                node = _build_transparent_node(root, root.right, telemetry, plan_context=plan_context)
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
@@ -345,7 +345,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
                 and _keeps_result_type(root, root.left)
             ):
                 # anything * 1 = anything (except NULL)
-                node = _build_transparent_node(root, root.left, telemetry)
+                node = _build_transparent_node(root, root.left, telemetry, plan_context=plan_context)
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
@@ -356,7 +356,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
                 and _keeps_result_type(root, root.right)
             ):
                 # 0 + anything = anything (except NULL)
-                node = _build_transparent_node(root, root.right, telemetry)
+                node = _build_transparent_node(root, root.right, telemetry, plan_context=plan_context)
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
@@ -367,7 +367,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
                 and _keeps_result_type(root, root.left)
             ):
                 # anything +/- 0 = anything (except NULL)
-                node = _build_transparent_node(root, root.left, telemetry)
+                node = _build_transparent_node(root, root.left, telemetry, plan_context=plan_context)
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
@@ -378,7 +378,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
                 and _keeps_result_type(root, root.left)
             ):
                 # anything / 1 = anything (except NULL)
-                node = _build_transparent_node(root, root.left, telemetry)
+                node = _build_transparent_node(root, root.left, telemetry, plan_context=plan_context)
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
 
@@ -403,9 +403,9 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
     if root.node_type in {NodeType.AND, NodeType.OR, NodeType.XOR}:
         # try to fold each side of logical operators
         if root.left is not None:
-            root.left = fold_constants(root.left, telemetry)
+            root.left = fold_constants(root.left, telemetry, plan_context=plan_context)
         if root.right is not None:
-            root.right = fold_constants(root.right, telemetry)
+            root.right = fold_constants(root.right, telemetry, plan_context=plan_context)
 
         # If we have a logical expression and one side is a constant,
         # we can simplify further
@@ -416,7 +416,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
                 and root.left.value
             ):
                 # True OR anything is True (including NULL)
-                node = _build_transparent_node(root, root.left, telemetry)
+                node = _build_transparent_node(root, root.left, telemetry, plan_context=plan_context)
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
@@ -425,7 +425,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
                 and root.right.value
             ):
                 # anything OR True is True (including NULL)
-                node = _build_transparent_node(root, root.right, telemetry)
+                node = _build_transparent_node(root, root.right, telemetry, plan_context=plan_context)
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
@@ -434,7 +434,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
                 and not root.left.value
             ):
                 # False OR anything is anything (except NULL)
-                node = _build_transparent_node(root, root.right, telemetry)
+                node = _build_transparent_node(root, root.right, telemetry, plan_context=plan_context)
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
@@ -443,7 +443,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
                 and not root.right.value
             ):
                 # anything OR False is anything (except NULL)
-                node = _build_transparent_node(root, root.left, telemetry)
+                node = _build_transparent_node(root, root.left, telemetry, plan_context=plan_context)
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
 
@@ -454,7 +454,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
                 and not root.left.value
             ):
                 # False AND anything is False (including NULL)
-                node = _build_transparent_node(root, root.left, telemetry)
+                node = _build_transparent_node(root, root.left, telemetry, plan_context=plan_context)
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
@@ -463,7 +463,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
                 and not root.right.value
             ):
                 # anything AND False is False (including NULL)
-                node = _build_transparent_node(root, root.right, telemetry)
+                node = _build_transparent_node(root, root.right, telemetry, plan_context=plan_context)
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
@@ -472,7 +472,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
                 and root.left.value
             ):
                 # True AND anything is anything (except NULL)
-                node = _build_transparent_node(root, root.right, telemetry)
+                node = _build_transparent_node(root, root.right, telemetry, plan_context=plan_context)
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
@@ -481,7 +481,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
                 and root.right.value
             ):
                 # anything AND True is anything (except NULL)
-                node = _build_transparent_node(root, root.left, telemetry)
+                node = _build_transparent_node(root, root.left, telemetry, plan_context=plan_context)
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
 
@@ -500,7 +500,7 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
         if isinstance(root.parameters, tuple):
             root.parameters = list(root.parameters)
         for i, param in enumerate(root.parameters):
-            root.parameters[i] = fold_constants(param, telemetry)
+            root.parameters[i] = fold_constants(param, telemetry, plan_context=plan_context)
 
     _root_ct = (
         root.schema_column.column_type if root.schema_column is not None else None
@@ -532,9 +532,9 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
         # object is not callable. Apply the same rewrite here first, ANYWHERE in
         # the subtree about to be evaluated, so folding sees the canonical
         # executable form (see _desugar_rewrite_only).
-        rewritten = _desugar_rewrite_only(root, telemetry)
+        rewritten = _desugar_rewrite_only(root, telemetry, plan_context=plan_context)
         if rewritten is not root:
-            return fold_constants(rewritten, telemetry)
+            return fold_constants(rewritten, telemetry, plan_context=plan_context)
 
         table = one_row_data.read()
         bc = build_bytecode(lower(root))
@@ -589,12 +589,12 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry) -> Expression:
                     vector_attach_logical_type(result_vector._nb, target_ct.logical)
         result = result_vector[0] if isinstance(result_vector, list) else result_vector.to_pylist()[0]
         telemetry.optimization_constant_fold_expression += 1
-        return build_literal_node(result, identity_of=root, suggested_type=target_ct)
+        return build_literal_node(result, identity_of=root, suggested_type=target_ct, plan_context=plan_context)
 
     return root
 
 
-def _fold(expression: Expression, telemetry: QueryTelemetry) -> Expression:
+def _fold(expression: Expression, telemetry: QueryTelemetry, *, plan_context) -> Expression:
     """fold_constants, skipping trees this strategy has already folded.
 
     The strategy deliberately runs TWICE (early, then after the rewrite
@@ -609,7 +609,7 @@ def _fold(expression: Expression, telemetry: QueryTelemetry) -> Expression:
     """
     if expression.folded_by_constant_folding:
         return expression
-    folded = fold_constants(expression, telemetry)
+    folded = fold_constants(expression, telemetry, plan_context=plan_context)
     folded.folded_by_constant_folding = True
     return folded
 
@@ -622,14 +622,27 @@ class ConstantFoldingStrategy(OptimizationStrategy):
         """
         # fold constants when referenced in filter clauses (WHERE/HAVING)
         if node.node_type == LogicalPlanStepType.Filter:
-            node.condition = _fold(node.condition, self.telemetry)
+            node.condition = _fold(node.condition, self.telemetry, plan_context=context.plan_context)
+            if (
+                node.condition.node_type == NodeType.LITERAL
+                and node.condition.value is None
+                and node.condition.type.category in (LC.BOOLEAN, LC.NULL)
+            ):
+                # A filter keeps a row only when its condition is TRUE, so a condition
+                # that folded to NULL (`CASE WHEN <false> THEN TRUE END`) keeps nothing
+                # — exactly what FALSE does. Only the ROOT is rewritten: under a NOT,
+                # NULL and FALSE differ, but the fold has already resolved those. A
+                # NULL of any other type is left for the compiler to refuse.
+                node.condition = build_literal_node(
+                    False, identity_of=node.condition, plan_context=context.plan_context
+                )
             if node.condition.node_type == NodeType.LITERAL and node.condition.value:
                 context.optimized_plan.remove_node(context.node_id, heal=True)
             else:
                 context.optimized_plan[context.node_id] = node
         # fold constants when referenced in the SELECT clause
         if node.node_type == LogicalPlanStepType.Project:
-            node.columns = [_fold(c, self.telemetry) for c in node.columns]
+            node.columns = [_fold(c, self.telemetry, plan_context=context.plan_context) for c in node.columns]
             context.optimized_plan[context.node_id] = node
 
         # remove nesting in order by and group by clauses
@@ -644,7 +657,7 @@ class ConstantFoldingStrategy(OptimizationStrategy):
 
         if node.node_type == LogicalPlanStepType.AggregateAndGroup:
             node.groups = [g.centre if g.node_type == NodeType.NESTED else g for g in node.groups]
-            node.groups = [_fold(g, self.telemetry) for g in node.groups]
+            node.groups = [_fold(g, self.telemetry, plan_context=context.plan_context) for g in node.groups]
             context.optimized_plan[context.node_id] = node
 
         return context

@@ -1,5 +1,6 @@
 # footer_cache.pxd — typed Cython interface for ParquetFooterBytesCache / ParquetParsedFooterCache
 from libc.stdint cimport int64_t, uint8_t
+from libcpp.memory cimport shared_ptr
 from libcpp.unordered_map cimport unordered_map
 from libcpp.string cimport string
 
@@ -27,14 +28,24 @@ cdef class ParquetFooterBytesCache:
     cpdef dict stats(self)
 
 
+# The shared footer-map vocabulary (src/cpp/engine/parquet_footer_map.hpp): a parsed
+# footer is immutable and held by shared_ptr, so scans pin it instead of copying it.
+cdef extern from "engine/parquet_footer_map.hpp" nogil:
+    ctypedef shared_ptr[const FileStats] ParquetFooterRef
+    ctypedef unordered_map[string, ParquetFooterRef] ParquetFooterMap
+    int64_t parquet_footer_bytes(const FileStats& fs)
+
+
 cdef class ParquetParsedFooterCache:
-    cdef unordered_map[string, FileStats] _map
+    cdef unordered_map[string, ParquetFooterRef] _map
+    cdef unordered_map[string, int64_t] _entry_bytes
     cdef LRU_K lru
-    cdef int _max_entries
+    cdef int64_t _budget_bytes
+    cdef int64_t _resident_bytes
+    cdef int64_t _over_budget
     cdef cpp_mutex* _mutex
 
-    cdef bint try_get(self, str path, FileStats* out)
-    cdef const FileStats* try_get_ptr(self, str path)
-    cdef void put_fs(self, str path, const FileStats& fs)
+    cdef ParquetFooterRef get(self, str path)
+    cdef ParquetFooterRef put(self, str path, FileStats fs)
     cpdef void clear(self)
     cpdef dict stats(self)

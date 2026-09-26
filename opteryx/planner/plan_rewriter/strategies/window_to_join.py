@@ -142,8 +142,8 @@ def _window_source(plan: LogicalPlan, win_nid: str) -> str:
 
 
 def _build_window_cte(
-    plan: LogicalPlan, source_subplan: LogicalPlan, win_node: PlanStep
-) -> tuple:
+    plan: LogicalPlan, source_subplan: LogicalPlan, win_node: PlanStep,
+*, plan_context) -> tuple:
     """Build one aggregate CTE for one partition spec and merge it into `plan`.
 
     Returns `(subquery_wrapper_nid, subquery_alias)`. The caller wires it as the right
@@ -169,7 +169,7 @@ def _build_window_cte(
     # INSIDE the copy (a filter's predicate, say) onto the new alias, which is why the
     # copy can carry arbitrary nodes and not just a Scan.
     inner_plan = copy_sub_plan(source_subplan)
-    rename_relations(inner_plan, prefix=WINDOW_SOURCE_ALIAS_PREFIX)
+    rename_relations(inner_plan, prefix=WINDOW_SOURCE_ALIAS_PREFIX, plan_context=plan_context)
     cte_src_alias = _source_relation(inner_plan).alias
     cte_root_nid = inner_plan.get_exit_points()[0]
 
@@ -234,7 +234,7 @@ def _build_window_cte(
     return subquery_wrapper_nid, subquery_alias
 
 
-def _rewrite_window_chain(plan: LogicalPlan, chain: list) -> LogicalPlan:
+def _rewrite_window_chain(plan: LogicalPlan, chain: list, *, plan_context) -> LogicalPlan:
     """Rewrite a chain of stacked Window nodes over ONE source into joins.
 
     `chain` is bottom-up: `chain[0]`'s input is the source sub-plan, and each later
@@ -271,7 +271,8 @@ def _rewrite_window_chain(plan: LogicalPlan, chain: list) -> LogicalPlan:
     for win_nid in chain:
         win_node = plan[win_nid]
         subquery_wrapper_nid, subquery_alias = _build_window_cte(
-            plan, source_subplan, win_node
+            plan, source_subplan, win_node,
+            plan_context=plan_context,
         )
         _replace_window_with_join(
             plan, win_nid, win_node, left_nid, subquery_wrapper_nid, subquery_alias, source_alias
@@ -458,5 +459,5 @@ class WindowToJoinStrategy(PlanRewriteStrategy):
         candidates = context.bag.get("candidates", [])
         chains = _window_chains(plan, candidates)
         for chain in _innermost_chain_first(plan, chains):
-            plan = _rewrite_window_chain(plan, chain)
+            plan = _rewrite_window_chain(plan, chain, plan_context=context.plan_context)
         return plan
