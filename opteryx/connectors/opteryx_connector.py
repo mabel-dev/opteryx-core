@@ -14,6 +14,7 @@ Architecture:
 import decimal
 import logging
 import threading
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 from opteryx.connectors import TableType
@@ -878,93 +879,15 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
         Get dataset schema and build manifest from catalog.
 
         Returns both schema and manifest to make the dual purpose explicit.
-        Manifest contains file-level statistics from table.scan().
+        The manifest comes from whichever producer the dataset declares
+        (`has_opteryx_manifest`): the snapshot's manifest parquet decoded
+        natively, or - for a backend with no opteryx-format manifest
+        (opteryx-iceberg) - its `scan()` rows.
 
         Returns:
             Tuple of (RelationDescriptor, Manifest)
         """
         self._resolve_snapshot()
-
-        if self.snapshot is None:
-            # Nothing committed - see _resolve_snapshot. The relation is served
-            # as declared with no files, which the scan turns into a single
-            # empty morsel: the same result a TRUNCATEd relation gives through
-            # its own empty manifest. There is no scan to run and no commit to
-            # timestamp, so neither is invented.
-            #
-            # `bounds_are_ordinal` is still demanded of the dataset even though
-            # an empty file list carries no bounds to misread: the declaration
-            # is a property of the metastore implementation, not of whether it
-            # holds data, so a backend missing it fails on the first READ rather
-            # than silently waiting for the first commit to corrupt pruning.
-            self.dataset_committed_at = None
-            self.schema = self.get_declared_schema()
-            bounds_are_ordinal = getattr(self.table, "bounds_are_ordinal", None)
-            if bounds_are_ordinal is None:
-                raise DatasetReadError(
-                    f"{type(self.table).__name__} does not declare `bounds_are_ordinal`, so the "
-                    "encoding of its manifest min/max bounds is unknown. Implementations of "
-                    "opteryx-catalog's `Dataset` must set it (True for Vector.ordinalize() keys, "
-                    "False for real decoded values); guessing either way silently corrupts pruning."
-                )
-            # A relation with no committed snapshot genuinely HAS no rows - that
-            # is a fact about the catalog, not a stale reading: authoritative.
-            self.manifest = _catalog_manifest(self.schema, bounds_are_ordinal, [], {}, None)
-            return self.schema, self.manifest
-
-        raw_schema = self.table.schema(self.snapshot.schema_id)
-        self.schema = self._normalize_schema(raw_schema, relation_name=self.dataset)
-        self.dataset_committed_at = self.snapshot.timestamp_ms
-
-        # Build Manifest from catalog table.scan()
-        # scan() returns an iterable of DataFile objects
-        scan = self.table.scan(snapshot_id=self.snapshot_id)
-
-        entries = []
-        protocols = set()
-        for data_file in scan:
-            # Both producers (opteryx_catalog, opteryx_iceberg) yield a
-            # `Datafile` whose `entry` is the manifest row, dict-like.
-            entry = data_file.entry
-            entries.append(entry)
-            file_path = entry.get("file_path")
-            if "://" in file_path:
-                protocols.add(file_path.split("://")[0])
-
-        # Validate all files use same protocol
-        if len(protocols) > 1:
-            raise DatasetReadError(
-                f"Mixed protocols in manifest: {protocols}. All files must use the same protocol."
-            )
-
-        # Whole-column native sketch vectors (min_k_hashes / histogram_counts /
-        # char_class_counts) from the same cached manifest read. A backend that
-        # does not implement the accessor has no sketches, and
-        # _warn_no_native_sketches reports it once per backend class. A backend
-        # that returns {} has declared "no sketches" and is not reported.
-        sketch_vectors_fn = getattr(self.table, "manifest_sketch_vectors", None)
-        if sketch_vectors_fn is not None:
-            sketch_vectors = sketch_vectors_fn(self.snapshot_id)
-        else:
-            sketch_vectors = {}
-            _warn_no_native_sketches(self.table)
-
-        # Merge-on-read deletes: each delete-bearing file's row ordinals are
-        # resolved NOW, at binding, from the dataset's sidecar(s) - one small
-        # cached read via the same manifest LRU the scan itself warmed. They
-        # ride on the manifest row so the read node subtracts them per row group
-        # with no further catalog round-trip. Fail-closed on both sides: the
-        # dataset raises if a sidecar is unreadable, and _catalog_manifest
-        # raises for a file with deletes but no vector.
-        resolved_deletes = None
-        if any(entry.get("deleted_record_count") for entry in entries):
-            delete_vectors_fn = getattr(self.table, "delete_vectors", None)
-            if delete_vectors_fn is None:
-                raise DatasetReadError(
-                    f"{type(self.table).__name__} reports merge-on-read deletes but does not "
-                    "implement delete_vectors(); refusing to scan and resurrect deleted rows."
-                )
-            resolved_deletes = delete_vectors_fn(self.snapshot_id)
 
         # bounds_are_ordinal is asked of the DATASET, never assumed here. This
         # connector serves every metastore opteryx-catalog's `Dataset` interface
@@ -975,7 +898,11 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
         # ordinal and pruned every file of `WHERE <double col> >= 250.0`.
         # A dataset that declares nothing is an ERROR, not a defaulting case:
         # True and False are each silently wrong for one of the two producers.
-        bounds_are_ordinal = getattr(self.table, "bounds_are_ordinal", None)
+        # It is demanded even of an empty relation: the declaration is a
+        # property of the metastore implementation, not of whether it holds
+        # data, so a backend missing it fails on the first READ rather than
+        # silently waiting for the first commit to corrupt pruning.
+        bounds_are_ordinal = self.table.bounds_are_ordinal
         if bounds_are_ordinal is None:
             raise DatasetReadError(
                 f"{type(self.table).__name__} does not declare `bounds_are_ordinal`, so the "
@@ -984,13 +911,164 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
                 "False for real decoded values); guessing either way silently corrupts pruning."
             )
 
+        if self.snapshot is None:
+            # Nothing committed - see _resolve_snapshot. The relation is served
+            # as declared with no files, which the scan turns into a single
+            # empty morsel: the same result a TRUNCATEd relation gives through
+            # its own empty manifest. There is no scan to run and no commit to
+            # timestamp, so neither is invented. A relation with no committed
+            # snapshot genuinely HAS no rows: authoritative.
+            self.dataset_committed_at = None
+            self.schema = self.get_declared_schema()
+            self.manifest = _catalog_manifest(self.schema, bounds_are_ordinal, [], {}, None)
+            return self.schema, self.manifest
+
+        raw_schema = self.table.schema(self.snapshot.schema_id)
+        self.schema = self._normalize_schema(raw_schema, relation_name=self.dataset)
+        self.dataset_committed_at = self.snapshot.timestamp_ms
+
+        has_opteryx_manifest = self.table.has_opteryx_manifest
+        if has_opteryx_manifest is None:
+            raise DatasetReadError(
+                f"{type(self.table).__name__} does not declare `has_opteryx_manifest`, so how "
+                "its snapshots' manifests are read is unknown. Implementations of "
+                "opteryx-catalog's `Dataset` must set it (True: `manifest_bytes()` serves the "
+                "opteryx manifest parquet; False: planning reads `scan()` rows)."
+            )
+        if has_opteryx_manifest:
+            self.manifest = Manifest(self._decoded_manifest(bounds_are_ordinal), self.schema)
+        else:
+            self.manifest = self._row_manifest(bounds_are_ordinal)
+        return self.schema, self.manifest
+
+    def _decoded_manifest(self, bounds_are_ordinal: bool):
+        """The resolved snapshot's manifest parquet, decoded natively over the
+        relation's schema, with its merge-on-read deletes resolved.
+
+        Cached by the manifest's location - written once per snapshot, never
+        rewritten - and the layout it was decoded against. The bytes are read
+        for the RESOLVED snapshot by its own id: asking for "current" again
+        could meet a commit that landed since, pairing this snapshot's schema
+        with the next one's files."""
+        from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
+        from opteryx.compiled.planner.native_manifest import decode_manifest_parquet
+
+        columns = self.schema.columns
+        names = tuple(column.name for column in columns)
+        physical = tuple(column.column_type.physical for column in columns)
+        position_of_field_id = {
+            column.field_id: position
+            for position, column in enumerate(columns)
+            if column.field_id is not None
+        }
+        location = self.snapshot.manifest_list
+        if not location:
+            # a snapshot with no manifest is an empty dataset
+            return NativeManifestBuilder(names, physical, bounds_are_ordinal, True).build({})
+
+        key = (location, names, physical, tuple(sorted(position_of_field_id.items())), bounds_are_ordinal)
+        native = _decoded_manifest_cache_get(key)
+        if native is not None:
+            return native
+
+        data = self.table.manifest_bytes(self.snapshot.snapshot_id)
+        if data is None:
+            raise DatasetReadError(
+                f"Snapshot {self.snapshot.snapshot_id} of {self.dataset} names the manifest "
+                f"{location} but the catalog served none."
+            )
         # Written by the commit that produced these files; they cannot
         # disagree with the data: authoritative.
-        self.manifest = _catalog_manifest(
+        native = decode_manifest_parquet(
+            data, names, physical, position_of_field_id, bounds_are_ordinal, True
+        )
+
+        protocols = {path.split("://")[0] for path in native.file_paths() if "://" in path}
+        if len(protocols) > 1:
+            raise DatasetReadError(
+                f"Mixed protocols in manifest: {protocols}. All files must use the same protocol."
+            )
+
+        # Merge-on-read deletes: each delete-bearing file's row ordinals are
+        # resolved NOW, at binding, from the dataset's sidecar(s), so the read
+        # node subtracts them per row group with no further catalog round-trip.
+        # Fail-closed on both sides: the dataset raises if a sidecar is
+        # unreadable, and resolve_deletes for a file left without a vector.
+        pending = native.unresolved_deletes()
+        if pending:
+            native.resolve_deletes(self.table.delete_vectors_for(pending))
+
+        _decoded_manifest_cache_put(key, native)
+        return native
+
+    def _row_manifest(self, bounds_are_ordinal: bool) -> Manifest:
+        """The manifest of a backend with no opteryx-format manifest
+        (opteryx-iceberg), from its `scan()` rows."""
+        entries = [data_file.entry for data_file in self.table.scan(snapshot_id=self.snapshot.snapshot_id)]
+
+        protocols = {
+            entry.get("file_path").split("://")[0]
+            for entry in entries
+            if "://" in entry.get("file_path")
+        }
+        if len(protocols) > 1:
+            raise DatasetReadError(
+                f"Mixed protocols in manifest: {protocols}. All files must use the same protocol."
+            )
+
+        # Whole-column native sketch vectors. A backend that does not implement
+        # the accessor has no sketches, and _warn_no_native_sketches reports it
+        # once per backend class. A backend that returns {} has declared "no
+        # sketches" and is not reported.
+        sketch_vectors_fn = getattr(self.table, "manifest_sketch_vectors", None)
+        if sketch_vectors_fn is not None:
+            sketch_vectors = sketch_vectors_fn(self.snapshot.snapshot_id)
+        else:
+            sketch_vectors = {}
+            _warn_no_native_sketches(self.table)
+
+        resolved_deletes = None
+        if any(entry.get("deleted_record_count") for entry in entries):
+            resolved_deletes = self.table.delete_vectors(self.snapshot.snapshot_id)
+
+        return _catalog_manifest(
             self.schema, bounds_are_ordinal, entries, sketch_vectors, resolved_deletes
         )
 
-        return self.schema, self.manifest
+# Decoded catalog manifests, shared across queries (the connector is recreated
+# per query). Keyed by manifest location + the layout decoded against; bounded
+# by entry count AND by the manifests' own resident bytes
+# (NativeManifest.resident_bytes), LRU eviction. An entry is only ever read: a
+# Manifest narrows by COPYING (subset / with_paths), never in place.
+_DECODED_MANIFESTS: "OrderedDict" = OrderedDict()
+_DECODED_MANIFEST_COSTS: dict = {}
+_DECODED_MANIFEST_MAX_ENTRIES = 32
+_DECODED_MANIFEST_BUDGET_BYTES = 128 * 1024 * 1024
+_DECODED_MANIFEST_LOCK = threading.Lock()
+
+
+def _decoded_manifest_cache_get(key):
+    with _DECODED_MANIFEST_LOCK:
+        native = _DECODED_MANIFESTS.get(key)
+        if native is not None:
+            _DECODED_MANIFESTS.move_to_end(key)
+        return native
+
+
+def _decoded_manifest_cache_put(key, native) -> None:
+    cost = native.resident_bytes()
+    if cost > _DECODED_MANIFEST_BUDGET_BYTES:
+        return  # served, never cached: one entry would own the budget
+    with _DECODED_MANIFEST_LOCK:
+        _DECODED_MANIFESTS[key] = native
+        _DECODED_MANIFESTS.move_to_end(key)
+        _DECODED_MANIFEST_COSTS[key] = cost
+        while _DECODED_MANIFESTS and (
+            len(_DECODED_MANIFESTS) > _DECODED_MANIFEST_MAX_ENTRIES
+            or sum(_DECODED_MANIFEST_COSTS.values()) > _DECODED_MANIFEST_BUDGET_BYTES
+        ):
+            evicted, _ = _DECODED_MANIFESTS.popitem(last=False)
+            _DECODED_MANIFEST_COSTS.pop(evicted)
 
 
 _NO_BOUND = -(1 << 63)          # the ordinal NULL_FLAG: "no bound"
@@ -999,11 +1077,12 @@ _INT64_MAX = (1 << 63) - 1
 
 
 def _catalog_manifest(schema, bounds_are_ordinal, entries, sketch_vectors, resolved_deletes):
-    """The Manifest for a catalog snapshot: its manifest rows (`Datafile.entry`
-    dicts) into the native builder.
-
-    INTERIM (architect ruling 2026-09-27 (5c)): M-e replaces this with the
-    catalog's raw manifest bytes decoded natively.
+    """The Manifest for a snapshot of a backend with NO opteryx-format manifest
+    (`has_opteryx_manifest` False - opteryx-iceberg): its `scan()` rows
+    (`Datafile.entry` dicts) into the native builder. Also the empty manifest
+    of a relation with no committed snapshot. A backend whose manifests ARE the
+    opteryx manifest parquet is decoded natively instead
+    (`OpteryxTable._decoded_manifest`; architect ruling 2026-09-27 (6b)).
 
     Every per-column stat a row carries (min/max values, lengths, null counts,
     distinct counts, char bytes, column sizes) is a POSITIONAL list in the

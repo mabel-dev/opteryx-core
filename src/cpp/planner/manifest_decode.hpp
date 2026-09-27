@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include <cctype>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -139,24 +140,36 @@ inline bool child_double(const ManifestArrayColumn& col, int32_t g, double& out)
     return true;
 }
 
-// The load-time position of each element of row `row`'s write-order lists.
+// The load-time position of each element of row `row`'s write-order lists
+// (-1: the element is dropped). With a schema that has field ids:
+//   - a row carrying `field_ids` keys each element by its id, and a list whose
+//     length is not the id list's cannot be lined up, so ALL of it is dropped;
+//   - a row with none was written in schema order: positional, and when every
+//     schema column is keyed, only when the list covers exactly the schema's
+//     columns - a partial list could belong to any of them.
+// With no field ids (or only some), a row with no ids is positional.
+// No stats is correct but slower; stats keyed by the wrong column is a wrong answer.
 inline std::vector<int64_t> positions_of(const ManifestColumnsIn& in, const ManifestSchemaIn& schema,
                                          uint32_t row, size_t elements) {
     std::vector<int64_t> positions(elements, -1);
+    const bool schema_keyed = !schema.position_of_field_id.empty();
     int32_t begin = 0, end = 0;
-    bool by_field_id = !schema.position_of_field_id.empty() &&
-                       array_range(in.field_ids, row, begin, end) &&
-                       static_cast<size_t>(end - begin) == elements;
-    for (size_t j = 0; j < elements; ++j) {
-        if (by_field_id) {
+    const bool row_keyed = schema_keyed && array_range(in.field_ids, row, begin, end) && end > begin;
+    if (row_keyed) {
+        if (static_cast<size_t>(end - begin) != elements) return positions;
+        for (size_t j = 0; j < elements; ++j) {
             int64_t field_id = 0;
             if (!child_int(in.field_ids, begin + static_cast<int32_t>(j), field_id)) continue;
             auto found = schema.position_of_field_id.find(field_id);
             if (found != schema.position_of_field_id.end()) positions[j] = static_cast<int64_t>(found->second);
-        } else if (j < schema.columns.size()) {
-            positions[j] = static_cast<int64_t>(j);
         }
+        return positions;
     }
+    if (schema.position_of_field_id.size() == schema.columns.size() && schema_keyed &&
+        elements != schema.columns.size()) {
+        return positions;
+    }
+    for (size_t j = 0; j < elements && j < schema.columns.size(); ++j) positions[j] = static_cast<int64_t>(j);
     return positions;
 }
 
@@ -219,6 +232,9 @@ inline NativeManifest decode_manifest(const ManifestColumnsIn& in, const Manifes
         ManifestFile file;
         read_string(in.file_path, row, file.path);
         read_string(in.file_format, row, file.format);
+        // A format is a case-insensitive name: the catalog writes "parquet",
+        // core writes "PARQUET"; the engine's vocabulary is upper case.
+        for (char& c : file.format) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         read_int(in.record_count, row, file.record_count);
         read_int(in.file_size, row, file.file_size);
         read_int(in.uncompressed_size, row, file.uncompressed_size);

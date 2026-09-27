@@ -70,6 +70,8 @@ class _Dataset:
     one exactly as a full one does."""
 
     bounds_are_ordinal = True
+    # planning reads this double through `scan()` rows (an empty scan)
+    has_opteryx_manifest = False
 
     def __init__(self, identifier, history):
         self.identifier = identifier

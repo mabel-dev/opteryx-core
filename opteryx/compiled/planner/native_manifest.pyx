@@ -54,13 +54,15 @@ from rugo.parquet_reader cimport AggColumnStat
 
 
 cdef extern from "core/buffers.h":
-    ctypedef struct DrakenVector:
-        uint32_t length
-
     ctypedef enum DrakenType:
         DRAKEN_INT64
         DRAKEN_UINT64
         DRAKEN_VARCHAR
+        DRAKEN_ARRAY
+
+    ctypedef struct DrakenVector:
+        uint32_t length
+        DrakenType type
 
 
 cdef extern from "core/string_slot.h":
@@ -182,6 +184,7 @@ cdef extern from "planner/native_manifest.hpp" namespace "opteryx::planner":
         ManifestCell& cell(size_t row, size_t column) except +
         int64_t record_count()
         int64_t total_size()
+        size_t resident_bytes()
 
 
     void set_ordinal_bound(Bounds& b, DrakenType physical, cbool is_min, int64_t ordinal)
@@ -532,6 +535,11 @@ cdef class NativeManifest:
     def total_size(self):
         return self._manifest.total_size()
 
+    def resident_bytes(self):
+        """The memory this manifest holds resident (file rows, cells, the
+        sketch vectors it views) - what a cache of decoded manifests budgets by."""
+        return self._manifest.resident_bytes()
+
     @property
     def bounds_are_ordinal(self):
         return self._manifest.bounds_are_ordinal()
@@ -778,6 +786,47 @@ cdef class NativeManifest:
                 )
             out[path] = tuple(file.delete_positions)
         return out
+
+    def unresolved_deletes(self):
+        """[{file_path, delete_file_path, deleted_record_count}] for each file
+        whose merge-on-read deletes are counted but not yet resolved - what a
+        catalog's sidecar reader takes."""
+        cdef size_t row
+        cdef ManifestFile* file
+        out = []
+        for row in range(self._manifest.file_count()):
+            file = &self._manifest.file(row)
+            if file.deleted_record_count == 0 or file.delete_positions_resolved:
+                continue
+            out.append({
+                "file_path": file.path.decode("utf-8"),
+                "delete_file_path": file.delete_file_path.decode("utf-8"),
+                "deleted_record_count": file.deleted_record_count,
+            })
+        return out
+
+    def resolve_deletes(self, dict positions):
+        """Attach resolved delete positions ({file_path: row ordinals}) to every
+        file with unresolved deletes. PRODUCER ONLY: called on a freshly decoded
+        manifest before anything else holds it. A file left without a vector
+        raises - scanning it would resurrect deleted rows."""
+        cdef size_t row
+        cdef ManifestFile* file
+        for row in range(self._manifest.file_count()):
+            file = &self._manifest.file(row)
+            if file.deleted_record_count == 0 or file.delete_positions_resolved:
+                continue
+            path = file.path.decode("utf-8")
+            vector = positions.get(path)
+            if vector is None:
+                raise ValueError(
+                    f"{path} reports {file.deleted_record_count} deleted rows but its delete "
+                    "sidecar holds no vector for it; refusing to scan and serve deleted rows."
+                )
+            file.delete_positions.clear()
+            for ordinal in vector:
+                file.delete_positions.push_back(<int64_t?>ordinal)
+            file.delete_positions_resolved = True
 
     def with_paths(self, list paths):
         """A copy of this manifest whose files live at `paths` (one per file,
@@ -1227,8 +1276,17 @@ cdef NestedArrayView _sketch_view(dict sketches, str name) except *:
     # array constructors) - dispatched on the concrete type
     native = sketch if type(sketch) is _NativeVector else sketch._nb
     handle = <PyObject*>native
+    # A sketch column in which no file holds a single slice describes nothing:
+    # no rows at all, or rows that are all empty lists - which a writer types
+    # with no element shape (a flat array, or no type), since there is no
+    # element to take one from. Any other shape must be array<array<T>>.
+    cdef const DrakenVector* outer = draken_vector_unwrap(handle)
+    if outer.length == 0:
+        return NestedArrayView()
+    if outer.type == DRAKEN_ARRAY and draken_array_child_unwrap(handle).length == 0:
+        return NestedArrayView()
     return NestedArrayView(
-        draken_vector_unwrap(handle),
+        outer,
         draken_array_child_unwrap(handle),
         draken_array_grandchild_unwrap(handle),
     )

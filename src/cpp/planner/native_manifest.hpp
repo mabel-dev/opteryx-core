@@ -136,6 +136,13 @@ inline bool is_integer(DrakenType t) {
 
 inline bool is_float(DrakenType t) { return t == DRAKEN_FLOAT32 || t == DRAKEN_FLOAT64; }
 
+// A string's heap allocation: 0 while its characters sit inline (short-string).
+inline size_t heap_bytes(const std::string& s) {
+    const char* data = s.data();
+    const char* self = reinterpret_cast<const char*>(&s);
+    return (data >= self && data < self + sizeof(s)) ? 0 : s.capacity() + 1;
+}
+
 // An integer or temporal column whose ordinal key IS its value (UINT64's key is
 // sign-biased, so it is not one of them).
 inline bool ordinal_is_value(DrakenType t) {
@@ -448,6 +455,32 @@ public:
     int64_t total_size() const {
         int64_t total = 0;
         for (const ManifestFile& f : files_) total += f.file_size;
+        return total;
+    }
+
+    // The memory this manifest holds resident: its file rows and cells with
+    // their heap strings and vectors, plus the sketch vectors it views (owned
+    // or borrowed - either way this manifest keeps them alive). What a cache of
+    // decoded manifests budgets by; raw manifest bytes are no proxy (a
+    // compressible manifest decodes to 60-85x its size, an incompressible one
+    // to 3.5x - measured 2026-09-27).
+    size_t resident_bytes() const {
+        size_t total = sizeof(*this) + columns_.size() * sizeof(std::string);
+        for (const std::string& c : columns_) total += heap_bytes(c);
+        total += files_.size() * sizeof(ManifestFile) + cells_.size() * sizeof(ManifestCell);
+        for (const ManifestFile& f : files_) {
+            total += heap_bytes(f.path) + heap_bytes(f.format) + heap_bytes(f.delete_file_path) +
+                     f.delete_positions.capacity() * sizeof(int64_t);
+        }
+        for (const ManifestCell& c : cells_) {
+            total += heap_bytes(c.bounds.min_text) + heap_bytes(c.bounds.max_text) +
+                     heap_bytes(c.footer.bounds.min_text) + heap_bytes(c.footer.bounds.max_text) +
+                     c.distinct_sketch.capacity() * sizeof(uint64_t);
+        }
+        for (const NestedArrayView* v : {&min_k, &histogram, &char_class}) {
+            if (!v->present()) continue;
+            total += draken_vector_nbytes(v->outer) + draken_vector_nbytes(v->mid) + draken_vector_nbytes(v->leaf);
+        }
         return total;
     }
 
