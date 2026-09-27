@@ -52,12 +52,13 @@ def test_bounds_of_mixed_types_render_as_text():
     so the mixture raised `vector_array_from_sequence: string child element
     must be str/bytes/None` and SHOW MANIFEST FOR could not answer at all.
 
-    The statement renders bounds as text for every source. This exercises the
-    builder directly because no connector in this repo produces mixed bounds.
+    The statement renders bounds as text for every source. This builds the
+    manifest directly (decoded-value dialect) because no connector in this repo
+    produces mixed bounds.
     """
-    from opteryx.models.file_entry import FileEntry
-    from opteryx.models.manifest_io import file_entries_to_manifest_morsel
     from opteryx.models.manifest_io import manifest_output_schema
+    from tests.manifests import FileSpec
+    from tests.manifests import build_manifest
     from opteryx.types import logical_type as lt
     from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 
@@ -71,16 +72,16 @@ def test_bounds_of_mixed_types_render_as_text():
             for name, column_type in (("a", lt.INT64), ("b", lt.VARCHAR), ("c", lt.FLOAT64))
         ],
     )
-    entry = FileEntry(
+    spec = FileSpec(
         file_path="a.parquet",
         file_format="parquet",
         record_count=2,
         file_size_in_bytes=100,
-        min_values=[1961, "Apollo", 1.5],
-        max_values=[1975, "Soyuz", None],
+        lower_bounds={0: 1961, 1: "Apollo", 2: 1.5},
+        upper_bounds={0: 1975, 1: "Soyuz"},
     )
 
-    morsel = file_entries_to_manifest_morsel([entry], schema)
+    morsel = build_manifest(schema, [spec], bounds_are_ordinal=False).show_morsel()
 
     assert morsel.column(b"min_values").to_pylist() == [["1961", "Apollo", "1.5"]]
     assert morsel.column(b"max_values").to_pylist() == [["1975", "Soyuz", None]]

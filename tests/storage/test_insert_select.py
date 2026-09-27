@@ -12,7 +12,8 @@ import opteryx
 from opteryx.connectors import register_workspace
 from opteryx.connectors.local_store_connector import LocalStoreConnector
 from opteryx.exceptions import ColumnNotFoundError, UnsupportedSyntaxError
-from opteryx.models.manifest_io import read_manifest_file_entries
+from opteryx.compiled.planner.native_manifest import decode_manifest_parquet
+from opteryx.models.dataset_descriptor import DatasetDescriptor
 
 
 def _setup_workspace(tmp_path):
@@ -20,11 +21,12 @@ def _setup_workspace(tmp_path):
 
 
 def _read_snapshot(tmp_path, relation):
-    """Return (dataset_info, snapshot_pointer, file_entries, dataset_path).
+    """Return (dataset_info, snapshot_pointer, manifest, dataset_path).
 
     snapshot_pointer is the small commit-log JSON dict (format_version,
-    created_at, parent_snapshot, manifest_file). file_entries is the decoded
-    FileEntry list from the sibling Parquet manifest it points to.
+    created_at, parent_snapshot, manifest_file, bounds_are_ordinal). manifest
+    is the NativeManifest decoded from the sibling Parquet manifest it points
+    to, over the relation's schema (positional: no field ids).
     """
     dataset_path = tmp_path / "ws" / relation
     with open(dataset_path / "dataset.json") as f:
@@ -32,18 +34,23 @@ def _read_snapshot(tmp_path, relation):
     snapshot_name = dataset_info["current_snapshot"]
     with open(dataset_path / snapshot_name) as f:
         snapshot = json.load(f)
-    manifest_file = snapshot.get("manifest_file")
-    entries = []
-    if manifest_file:
-        with open(dataset_path / manifest_file, "rb") as f:
-            entries, _native = read_manifest_file_entries(f.read())
-    return dataset_info, snapshot, entries, dataset_path
+    schema = DatasetDescriptor.from_dict(dataset_info).schema
+    with open(dataset_path / snapshot["manifest_file"], "rb") as f:
+        manifest = decode_manifest_parquet(
+            f.read(),
+            tuple(c.name for c in schema.columns),
+            tuple(c.column_type.physical for c in schema.columns),
+            {},
+            snapshot["bounds_are_ordinal"],
+            True,
+        )
+    return dataset_info, snapshot, manifest, dataset_path
 
 
-def _read_parquet(dataset_path, file_entry):
+def _read_parquet(dataset_path, file_path):
     from rugo import parquet
 
-    parquet_file = dataset_path / file_entry.file_path
+    parquet_file = dataset_path / file_path
     with open(parquet_file, "rb") as f:
         with parquet.read_parquet(f.read()) as reader:
             morsels = list(reader)
@@ -56,8 +63,8 @@ def test_insert_select_literal(tmp_path):
     list(session.execute_to_morsels("CREATE TABLE ws.t (a BIGINT, b VARCHAR)"))
     list(session.execute_to_morsels("INSERT INTO ws.t SELECT 1, 'hello'"))
 
-    _, _snapshot, entries, _ = _read_snapshot(tmp_path, "t")
-    assert len(entries) == 1
+    _, _snapshot, manifest, _ = _read_snapshot(tmp_path, "t")
+    assert len(manifest) == 1
 
 
 def test_insert_select_from_values_subquery(tmp_path):
@@ -70,9 +77,9 @@ def test_insert_select_from_values_subquery(tmp_path):
         )
     )
 
-    _, _snapshot, entries, dataset_path = _read_snapshot(tmp_path, "t")
-    assert len(entries) == 1
-    morsel = _read_parquet(dataset_path, entries[0])
+    _, _snapshot, manifest, dataset_path = _read_snapshot(tmp_path, "t")
+    assert len(manifest) == 1
+    morsel = _read_parquet(dataset_path, manifest.file_paths()[0])
     assert len(morsel) == 2
 
 
@@ -88,8 +95,8 @@ def test_insert_select_with_filter(tmp_path):
     )
     list(session.execute_to_morsels("INSERT INTO ws.tgt SELECT * FROM ws.src WHERE a > 2"))
 
-    _, _snapshot, entries, _ = _read_snapshot(tmp_path, "tgt")
-    total_rows = sum(fe.record_count for fe in entries)
+    _, _snapshot, manifest, _ = _read_snapshot(tmp_path, "tgt")
+    total_rows = sum(manifest.record_counts())
     assert total_rows == 3
 
 
@@ -115,8 +122,8 @@ def test_insert_select_integer_to_double_widening(tmp_path):
     list(session.execute_to_morsels("CREATE TABLE ws.t (a DOUBLE)"))
     list(session.execute_to_morsels("INSERT INTO ws.t SELECT 42"))
 
-    _, _snapshot, entries, _ = _read_snapshot(tmp_path, "t")
-    assert len(entries) == 1
+    _, _snapshot, manifest, _ = _read_snapshot(tmp_path, "t")
+    assert len(manifest) == 1
 
 
 def test_insert_explicit_columns_reorder(tmp_path):
@@ -129,9 +136,9 @@ def test_insert_explicit_columns_reorder(tmp_path):
         )
     )
 
-    _, _snapshot, entries, dataset_path = _read_snapshot(tmp_path, "t")
-    assert len(entries) == 1
-    morsel = _read_parquet(dataset_path, entries[0])
+    _, _snapshot, manifest, dataset_path = _read_snapshot(tmp_path, "t")
+    assert len(manifest) == 1
+    morsel = _read_parquet(dataset_path, manifest.file_paths()[0])
     pydict = morsel.to_arrow().to_pydict()
     # Column 'a' should hold the integer, 'b' the string — i.e. INSERT
     # respected the user-supplied (b, a) ordering.
@@ -185,7 +192,7 @@ def test_insert_select_single_snapshot_per_statement(tmp_path):
             "INSERT INTO ws.t SELECT * FROM (VALUES (2), (3), (4)) AS v(x)"
         )
     )
-    info_after, snapshot_after, _entries, _ = _read_snapshot(tmp_path, "t")
+    info_after, snapshot_after, _manifest, _ = _read_snapshot(tmp_path, "t")
 
     assert info_after["current_snapshot"] != pre_snapshot
     assert snapshot_after.get("parent_snapshot") == pre_snapshot

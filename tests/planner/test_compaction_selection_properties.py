@@ -9,8 +9,8 @@ size ceiling the pass was budgeted against.
 
 Ported from opteryx-catalog when compaction moved into the engine
 (docs/COMPACTION_ENGINE_EXECUTION_DESIGN.md). The invariants are unchanged; what
-changed is that plans are `CompactionPlan` objects over `FileEntry` rather than
-dicts, and that there is now ONE pass budget rather than a separate RAM-derived
+changed is that plans are `CompactionPlan` objects over `CompactionFile` rather
+than dicts, and that there is now ONE pass budget rather than a separate RAM-derived
 gate for the brute rules (D-5, D-13).
 """
 
@@ -22,7 +22,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 from hypothesis import given
 from hypothesis import strategies as st
 
-from opteryx.models.file_entry import FileEntry
+from opteryx.planner.compaction import CompactionFile
 from opteryx.planner.compaction import MIN_FILE_SIZE_BYTES
 from opteryx.planner.compaction import MIN_SIZE_BYTES
 from opteryx.planner.compaction import PASS_BUDGET_BYTES
@@ -56,23 +56,22 @@ _sizes = st.one_of(
     st.integers(min_value=0, max_value=5 * 1024 * MB),
     # NULL sizes are real: a manifest fills absent keys with SQL NULL, and
     # `uncompressed_size_in_bytes` is None for files written before it was
-    # recorded. That is why `entry_size` exists.
+    # recorded (CompactionFile.uncompressed_size). That is why `entry_size` exists.
     st.none(),
 )
 
 
 @st.composite
 def _entries(draw, sizes=_sizes, min_size=0, max_size=24):
-    """Distinct FileEntry objects. Distinct so a selector returning the same
+    """Distinct CompactionFile objects. Distinct so a selector returning the same
     file twice is visible as a duplicate identity, not a coincidence."""
     drawn = draw(st.lists(sizes, min_size=min_size, max_size=max_size))
     return [
-        FileEntry(
+        CompactionFile(
+            row=i,
             file_path=f"mem://data/f{i}.parquet",
-            file_format="PARQUET",
             record_count=1,
-            file_size_in_bytes=0,
-            uncompressed_size_in_bytes=size,
+            uncompressed_size=size,
         )
         for i, size in enumerate(drawn)
     ]

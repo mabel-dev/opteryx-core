@@ -32,56 +32,47 @@ import pytest
 import opteryx.planner.optimizer  # noqa: F401  (resolves the optimizer import cycle)
 from draken.draken_native import DrakenType
 from opteryx.expression import NodeType
-from opteryx.models.file_entry import FileEntry
-from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import DATE, DECIMAL, FLOAT64, INT64, TIMESTAMP, VARCHAR
 from opteryx.types.schema import RelationSchema
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
-from opteryx.compiled.structures.expressions import ExprArena
-
-# One expression arena for the expressions this module builds outside any query.
-_TEST_ARENA = ExprArena()
-
-# Bound columns are minted by a query's ColumnTable; these tests share one.
-_PLAN_CONTEXT = PlanContext()
+from tests.manifests import FileSpec
+from tests.manifests import build_manifest
 
 
-def _manifest(column_type, ordinal_min, ordinal_max, *, bounds_are_ordinal=True):
+def _manifest(plan_context, column_type, ordinal_min, ordinal_max, *, bounds_are_ordinal=True):
     schema = RelationSchema(
         name="t",
-        columns=[
-            _PLAN_CONTEXT.columns.relation_column(
-                "t",
-                "c",
-                column_type=column_type,
-                field_id=0,
-            )
-        ],
+        columns=[plan_context.columns.relation_column("t", "c", column_type=column_type)],
     )
-    entry = FileEntry(
+    entry = FileSpec(
         file_path="f1",
-        file_format="PARQUET",
         record_count=10,
-        file_size_in_bytes=0,
         lower_bounds={0: ordinal_min},
         upper_bounds={0: ordinal_max},
     )
-    return Manifest(
-        files=[entry], schema=schema, bounds_are_ordinal=bounds_are_ordinal
+    return build_manifest(schema, [entry], bounds_are_ordinal=bounds_are_ordinal)
+
+
+def _predicate(plan_context, op, value, column_type):
+    identifier = LogicalColumn(
+        node_type=NodeType.IDENTIFIER, source_column="c", arena=plan_context.expressions
     )
+    literal = Literal(type=column_type, value=value, arena=plan_context.expressions)
+    return Comparison(value=op, left=identifier, right=literal, arena=plan_context.expressions)
 
 
-def _predicate(op, value, column_type):
-    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="c", arena=_TEST_ARENA)
-    literal = Literal(type=column_type, value=value, arena=_TEST_ARENA)
-    return Comparison(value=op, left=identifier, right=literal, arena=_TEST_ARENA)
-
-
-def _survives(manifest, op, value, column_type):
+def _survives(column_type, ordinal_min, ordinal_max, op, value, literal_type=None, *, bounds_are_ordinal=True):
+    """Whether the one file bounded by (ordinal_min, ordinal_max) survives
+    `c <op> value`. The literal is typed as the column unless `literal_type`
+    says otherwise, and holds that type's native value."""
     plan_context = PlanContext()
-    manifest = manifest.prune_files([_predicate(op, value, column_type)], plan_context=plan_context)
-    return len(manifest.files) == 1
+    manifest = _manifest(
+        plan_context, column_type, ordinal_min, ordinal_max, bounds_are_ordinal=bounds_are_ordinal
+    )
+    predicate = _predicate(plan_context, op, value, literal_type or column_type)
+    manifest = manifest.prune_files([predicate], plan_context=plan_context)
+    return manifest.get_file_count() == 1
 
 
 # ── FLOAT: the bug this exists for ──────────────────────────────────────────
@@ -90,22 +81,22 @@ def _survives(manifest, op, value, column_type):
 def test_float_in_range_equality_keeps_the_file():
     lo = DrakenType.FLOAT64.ordinalize(0.1)
     hi = DrakenType.FLOAT64.ordinalize(0.9)
-    assert _survives(_manifest(FLOAT64, lo, hi), "Eq", 0.5, FLOAT64)
+    assert _survives(FLOAT64, lo, hi, "Eq", 0.5)
 
 
 def test_float_out_of_range_equality_prunes_the_file():
     lo = DrakenType.FLOAT64.ordinalize(0.1)
     hi = DrakenType.FLOAT64.ordinalize(0.9)
-    assert not _survives(_manifest(FLOAT64, lo, hi), "Eq", 5.0, FLOAT64)
+    assert not _survives(FLOAT64, lo, hi, "Eq", 5.0)
 
 
 def test_float_range_predicates():
     lo = DrakenType.FLOAT64.ordinalize(0.1)
     hi = DrakenType.FLOAT64.ordinalize(0.9)
-    assert _survives(_manifest(FLOAT64, lo, hi), "Gt", 0.5, FLOAT64)
-    assert not _survives(_manifest(FLOAT64, lo, hi), "Gt", 100.0, FLOAT64)
-    assert _survives(_manifest(FLOAT64, lo, hi), "Lt", 0.5, FLOAT64)
-    assert not _survives(_manifest(FLOAT64, lo, hi), "Lt", -100.0, FLOAT64)
+    assert _survives(FLOAT64, lo, hi, "Gt", 0.5)
+    assert not _survives(FLOAT64, lo, hi, "Gt", 100.0)
+    assert _survives(FLOAT64, lo, hi, "Lt", 0.5)
+    assert not _survives(FLOAT64, lo, hi, "Lt", -100.0)
 
 
 def test_negative_floats_order_correctly():
@@ -113,9 +104,9 @@ def test_negative_floats_order_correctly():
     # value order; a naive raw-bit key would sort these backwards.
     lo = DrakenType.FLOAT64.ordinalize(-5.0)
     hi = DrakenType.FLOAT64.ordinalize(-1.0)
-    assert _survives(_manifest(FLOAT64, lo, hi), "Eq", -3.0, FLOAT64)
-    assert not _survives(_manifest(FLOAT64, lo, hi), "Eq", -100.0, FLOAT64)
-    assert not _survives(_manifest(FLOAT64, lo, hi), "Eq", 3.0, FLOAT64)
+    assert _survives(FLOAT64, lo, hi, "Eq", -3.0)
+    assert not _survives(FLOAT64, lo, hi, "Eq", -100.0)
+    assert not _survives(FLOAT64, lo, hi, "Eq", 3.0)
 
 
 def test_float_without_the_flag_is_the_old_broken_behaviour():
@@ -123,23 +114,22 @@ def test_float_without_the_flag_is_the_old_broken_behaviour():
     # when the manifest doesn't declare its bounds as ordinal.
     lo = DrakenType.FLOAT64.ordinalize(0.1)
     hi = DrakenType.FLOAT64.ordinalize(0.9)
-    stale = _manifest(FLOAT64, lo, hi, bounds_are_ordinal=False)
-    assert not _survives(stale, "Eq", 0.5, FLOAT64)
+    assert not _survives(FLOAT64, lo, hi, "Eq", 0.5, bounds_are_ordinal=False)
 
 
 # ── types that already worked must keep working ─────────────────────────────
 
 
 def test_integer_bounds_unaffected():
-    assert _survives(_manifest(INT64, 1, 177), "Eq", 50, INT64)
-    assert not _survives(_manifest(INT64, 1, 177), "Eq", 9999, INT64)
-    assert not _survives(_manifest(INT64, 1, 177), "Gt", 1000, INT64)
+    assert _survives(INT64, 1, 177, "Eq", 50)
+    assert not _survives(INT64, 1, 177, "Eq", 9999)
+    assert not _survives(INT64, 1, 177, "Gt", 1000)
 
 
 def test_date_bounds_unaffected():
     # Binder normalises a DATE literal to days-since-epoch (an int).
-    assert _survives(_manifest(DATE, -7305, 9131), "Eq", 0, DATE)
-    assert not _survives(_manifest(DATE, -7305, 9131), "Eq", 99999, DATE)
+    assert _survives(DATE, -7305, 9131, "Eq", 0)
+    assert not _survives(DATE, -7305, 9131, "Eq", 99999)
 
 
 def test_timestamp_bounds_still_prune():
@@ -147,16 +137,16 @@ def test_timestamp_bounds_still_prune():
     # physical-only draken entry point, so a naive wiring would skip pruning
     # for the most common filter on a log table.
     lo, hi = 1784534400432637, 1785477522500643
-    assert _survives(_manifest(TIMESTAMP(), lo, hi), "Eq", 1785000000000000, TIMESTAMP())
-    assert not _survives(_manifest(TIMESTAMP(), lo, hi), "Eq", 1, TIMESTAMP())
-    assert not _survives(_manifest(TIMESTAMP(), lo, hi), "Gt", 1785477522500644, TIMESTAMP())
+    assert _survives(TIMESTAMP(), lo, hi, "Eq", 1785000000000000)
+    assert not _survives(TIMESTAMP(), lo, hi, "Eq", 1)
+    assert not _survives(TIMESTAMP(), lo, hi, "Gt", 1785477522500644)
 
 
 def test_string_bounds_prune_on_the_prefix_key():
     lo = DrakenType.VARCHAR.ordinalize("apple")
     hi = DrakenType.VARCHAR.ordinalize("pear")
-    assert _survives(_manifest(VARCHAR, lo, hi), "Eq", "banana", VARCHAR)
-    assert not _survives(_manifest(VARCHAR, lo, hi), "Eq", "zebra", VARCHAR)
+    assert _survives(VARCHAR, lo, hi, "Eq", b"banana")
+    assert not _survives(VARCHAR, lo, hi, "Eq", b"zebra")
 
 
 def test_decimal_prunes_on_the_rescaled_mantissa():
@@ -177,17 +167,17 @@ def test_decimal_prunes_on_the_rescaled_mantissa():
 
     dec = DECIMAL(10, 4)
     # 0.5 -> mantissa 5000, inside [1000, 90000].
-    assert _survives(_manifest(dec, 1000, 90000), "Eq", decimal.Decimal("0.5"), dec)
+    assert _survives(dec, 1000, 90000, "Eq", decimal.Decimal("0.5"))
     # 999999 -> mantissa 9999990000, far above the maximum: provably absent.
-    assert not _survives(_manifest(dec, 1000, 90000), "Eq", decimal.Decimal("999999"), dec)
+    assert not _survives(dec, 1000, 90000, "Eq", decimal.Decimal("999999"))
     # Ranges prune from the correct side.
-    assert not _survives(_manifest(dec, 1000, 90000), "Gt", decimal.Decimal("9"), dec)
-    assert _survives(_manifest(dec, 1000, 90000), "Gt", decimal.Decimal("8.9999"), dec)
-    assert not _survives(_manifest(dec, 1000, 90000), "Lt", decimal.Decimal("0.1"), dec)
-    assert _survives(_manifest(dec, 1000, 90000), "Lt", decimal.Decimal("0.1001"), dec)
+    assert not _survives(dec, 1000, 90000, "Gt", decimal.Decimal("9"))
+    assert _survives(dec, 1000, 90000, "Gt", decimal.Decimal("8.9999"))
+    assert not _survives(dec, 1000, 90000, "Lt", decimal.Decimal("0.1"))
+    assert _survives(dec, 1000, 90000, "Lt", decimal.Decimal("0.1001"))
     # An integer literal is a decimal at scale 0 and must rescale too: 5 is 50000.
-    assert _survives(_manifest(dec, 1000, 90000), "Eq", 5, dec)
-    assert not _survives(_manifest(dec, 1000, 90000), "Eq", 50, dec)
+    assert _survives(dec, 1000, 90000, "Eq", 5, INT64)
+    assert not _survives(dec, 1000, 90000, "Eq", 50, INT64)
 
 
 def test_decimal_off_gridline_equality_is_still_skipped():
@@ -204,8 +194,8 @@ def test_decimal_off_gridline_equality_is_still_skipped():
 
     dec = DECIMAL(10, 2)          # gridline is 0.01
     # 0.005 is not representable at scale 2 -> no term -> file kept.
-    assert _survives(_manifest(dec, 1000, 90000), "Eq", decimal.Decimal("0.005"), dec)
-    assert _survives(_manifest(dec, 1000, 90000), "Gt", decimal.Decimal("999.995"), dec)
+    assert _survives(dec, 1000, 90000, "Eq", decimal.Decimal("0.005"))
+    assert _survives(dec, 1000, 90000, "Gt", decimal.Decimal("999.995"))
 
 
 def test_decimal128_still_refuses():
@@ -220,8 +210,8 @@ def test_decimal128_still_refuses():
     with pytest.raises(ValueError):
         d128.ordinalize(decimal.Decimal("0.5"))
     # And the file is KEPT rather than compared in a space that does not exist —
-    # _ordinalize_literal turns that raise into "skip pruning".
-    assert _survives(_manifest(d128, 1000, 90000), "Eq", decimal.Decimal("999999"), d128)
+    # the native pruner has no ordinal key for the literal, so it skips the term.
+    assert _survives(d128, 1000, 90000, "Eq", decimal.Decimal("999999"))
 
 
 if __name__ == "__main__":  # pragma: no cover

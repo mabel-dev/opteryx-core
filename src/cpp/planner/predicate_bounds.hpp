@@ -6,7 +6,7 @@
 // src/cpp/planner/predicate_bounds.hpp — the terms a manifest prunes files on,
 // derived natively from a query's predicates (native plan graph Q8, M-d2).
 //
-// The native port of opteryx/planner/optimizer/predicate_bounds.py, read from the
+// The native port of the Python predicate_bounds.py (deleted with the Q8 façade), read from the
 // query's expression arena (expr_arena.hpp) instead of Python expression objects.
 // The bounds pruners read ONE shape - `column <op> literal` (and BETWEEN) - and
 // this derives, from every other shape a user writes (IN, LIKE 'abc%', a

@@ -8,9 +8,11 @@ Covers each predicate kind across three tiers:
 
 Plus compound predicates (AND / OR / NOT) and clamping.
 
-Sketches live only as whole-column native draken vectors on the Manifest (one
-outer row per file, one middle row per column) — never boxed onto FileEntry — so
-the helpers below build those vectors directly.
+Manifests are hand-built through tests/manifests.py (FileSpec + build_manifest),
+every per-column stat keyed by the column's load-time position. Sketches live
+only as whole-column native draken vectors on the Manifest (one outer row per
+file, one middle row per column), so the helpers below build those vectors
+directly and hand them to build_manifest as its `sketches`.
 """
 
 from __future__ import annotations
@@ -25,7 +27,6 @@ import pytest
 import opteryx.planner.optimizer  # noqa: F401
 from opteryx.expression import NodeType
 from opteryx.compiled.structures.expressions import Expression
-from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import INT64, VARCHAR
 from opteryx.planner.plan_context import PlanContext
@@ -40,6 +41,8 @@ from opteryx.compiled.structures.expressions import Or
 from opteryx.compiled.structures.expressions import UnaryOperator
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.compiled.structures.expressions import ExprArena
+from tests.manifests import FileSpec
+from tests.manifests import build_manifest
 
 # One expression arena for the expressions this module builds outside any query.
 _TEST_ARENA = ExprArena()
@@ -79,18 +82,16 @@ def _schema(*names: str) -> RelationSchema:
 def _file(
     *,
     record_count: int = 0,
-    min_values: Optional[List] = None,
-    max_values: Optional[List] = None,
+    lower_bounds: Optional[dict] = None,
+    upper_bounds: Optional[dict] = None,
     null_value_counts: Optional[dict] = None,
-) -> FileEntry:
-    return FileEntry(
+) -> FileSpec:
+    return FileSpec(
         file_path="x",
-        file_format="PARQUET",
         record_count=record_count,
-        file_size_in_bytes=0,
-        min_values=min_values,
-        max_values=max_values,
-        null_value_counts=null_value_counts,
+        lower_bounds=lower_bounds or {},
+        upper_bounds=upper_bounds or {},
+        null_value_counts=null_value_counts or {},
     )
 
 
@@ -179,8 +180,8 @@ def _histogram_manifest(
     column: str = "x",
     *,
     counts: Optional[List[int]] = None,
-    col_min: float = 0.0,
-    col_max: float = 100.0,
+    col_min: int = 0,
+    col_max: int = 100,
     record_count: Optional[int] = None,
     null_count: int = 0,
 ) -> Manifest:
@@ -191,21 +192,21 @@ def _histogram_manifest(
     rc = record_count if record_count is not None else sum(counts) + null_count
     file = _file(
         record_count=rc,
-        min_values=[col_min],
-        max_values=[col_max],
-        null_value_counts={0: null_count} if null_count else {0: 0},
+        lower_bounds={0: col_min},
+        upper_bounds={0: col_max},
+        null_value_counts={0: null_count},
     )
-    return Manifest(
-        files=[file],
-        schema=_schema(column),
-        histogram_vector=_histogram_vector([[counts]]),  # one file, one column
+    return build_manifest(
+        _schema(column),
+        [file],
+        sketches={"histogram_counts": _histogram_vector([[counts]])},  # one file, one column
     )
 
 
 def _bare_manifest(column: str = "x", *, record_count: int = 100) -> Manifest:
     """Manifest with no per-column stats (no histogram, no NDV, no nulls)."""
     file = _file(record_count=record_count)
-    return Manifest(files=[file], schema=_schema(column))
+    return build_manifest(_schema(column), [file])
 
 
 def _ndv_manifest(
@@ -225,10 +226,10 @@ def _ndv_manifest(
         record_count=record_count,
         null_value_counts={0: null_count},
     )
-    return Manifest(
-        files=[file],
-        schema=_schema(column),
-        min_k_vector=_min_k_vector([[hashes]]),  # one file, one column
+    return build_manifest(
+        _schema(column),
+        [file],
+        sketches={"min_k_hashes": _min_k_vector([[hashes]])},  # one file, one column
     )
 
 
@@ -282,12 +283,12 @@ class TestRange:
         assert 0.4 <= s <= 1.0
 
     def test_lt_below_min(self):
-        m = _histogram_manifest(col_min=10.0, col_max=20.0)
+        m = _histogram_manifest(col_min=10, col_max=20)
         s = m.estimate_selectivity(_cmp("Lt", "x", 0))
         assert s == 0.0
 
     def test_gt_above_max(self):
-        m = _histogram_manifest(col_min=10.0, col_max=20.0)
+        m = _histogram_manifest(col_min=10, col_max=20)
         s = m.estimate_selectivity(_cmp("Gt", "x", 999))
         assert s == 0.0
 
@@ -420,18 +421,19 @@ def _varchar_histogram_manifest(
     record_count: Optional[int] = None,
 ) -> Manifest:
     """Manifest with a single file carrying a VARCHAR histogram for `column`,
-    with ordinalized min/max -- exactly what Manifest._native_distogram folds
-    against for a real ANALYZE'd relation."""
+    with ordinalized min/max in the ordinal bound dialect -- exactly what the
+    native distogram fold reads for a real ANALYZE'd relation."""
     if counts is None:
         counts = [10] * 50
     rc = record_count if record_count is not None else sum(counts)
     col_min = VARCHAR.ordinalize(col_min_str)
     col_max = VARCHAR.ordinalize(col_max_str)
-    file = _file(record_count=rc, min_values=[col_min], max_values=[col_max])
-    return Manifest(
-        files=[file],
-        schema=_varchar_schema(column),
-        histogram_vector=_histogram_vector([[counts]]),
+    file = _file(record_count=rc, lower_bounds={0: col_min}, upper_bounds={0: col_max})
+    return build_manifest(
+        _varchar_schema(column),
+        [file],
+        bounds_are_ordinal=True,
+        sketches={"histogram_counts": _histogram_vector([[counts]])},
     )
 
 
@@ -447,7 +449,7 @@ class TestStartsWith:
         assert s == pytest.approx(0.0, abs=1e-6)
 
     def test_no_stats_falls_back_to_prefix_constant(self):
-        m = Manifest(files=[_file(record_count=100)], schema=_varchar_schema("x"))
+        m = build_manifest(_varchar_schema("x"), [_file(record_count=100)])
         s = m.estimate_selectivity(_starts_with("_STARTS_WITH", "x", b"foo"))
         assert s == 0.25
 

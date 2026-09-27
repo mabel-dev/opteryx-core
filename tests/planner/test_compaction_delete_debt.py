@@ -16,18 +16,17 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 import pytest
 
-from opteryx.models.file_entry import FileEntry
+from opteryx.planner.compaction import CompactionFile
 from opteryx.planner.compaction.constants import DELETE_DEBT_THRESHOLD
 from opteryx.planner.compaction.selection import _select_delete_debt
 
 
-def _entry(path, record_count, deleted_record_count, size=1024):
-    return FileEntry(
+def _entry(path, record_count, deleted_record_count, size=1024, row=0):
+    return CompactionFile(
+        row=row,
         file_path=path,
-        file_format="PARQUET",
         record_count=record_count,
-        file_size_in_bytes=size,
-        uncompressed_size_in_bytes=size,
+        uncompressed_size=size,
         deleted_record_count=deleted_record_count,
     )
 
@@ -61,9 +60,9 @@ def test_a_file_with_no_deletes_is_never_selected():
 def test_the_worst_offender_wins_and_only_one_file_is_taken():
     """One file per pass, worst ratio first; repeated passes clear the backlog."""
     entries = [
-        _entry("mem://data/light.parquet", 100, 15),  # 15%
-        _entry("mem://data/heavy.parquet", 100, 80),  # 80%
-        _entry("mem://data/clean.parquet", 100, 0),
+        _entry("mem://data/light.parquet", 100, 15, row=0),  # 15%
+        _entry("mem://data/heavy.parquet", 100, 80, row=1),  # 80%
+        _entry("mem://data/clean.parquet", 100, 0, row=2),
     ]
 
     plan = _select_delete_debt(entries, sort_column=None)
@@ -73,7 +72,7 @@ def test_the_worst_offender_wins_and_only_one_file_is_taken():
 
 
 def test_an_unknown_record_count_is_skipped_not_treated_as_zero():
-    """None means UNKNOWN (see FileEntry.record_count); a ratio cannot be formed
+    """None means UNKNOWN (see CompactionFile.record_count); a ratio cannot be formed
     from it, and dividing by a fabricated 0 would raise."""
     entries = [_entry("mem://data/f1.parquet", None, 5)]
 

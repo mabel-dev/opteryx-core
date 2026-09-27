@@ -484,9 +484,8 @@ def test_topn_manifest_pruning_can_now_fire_on_skene(disjoint_skene_files):
 
     # The survivors must still cover the rows the query will return: the file
     # holding the global minimum cannot have been dropped.
-    position = manifest._resolve_field_id("id")
-    lowest = min(f.lower_bounds[position] for f in manifest.files)
-    assert min(f.lower_bounds[position] for f in pruned.files) == lowest
+    lowest, _ = manifest.get_ordinal_bounds("id")
+    assert pruned.get_ordinal_bounds("id")[0] == lowest
 
 
 # ── The stored KMV sketch ────────────────────────────────────────────────────

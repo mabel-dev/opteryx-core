@@ -20,14 +20,12 @@ import opteryx
 from opteryx.connectors import connector_factory
 from opteryx.expression import NodeType
 from opteryx.models.manifest_io import DATASET_MANIFEST_NAME
-from opteryx.models.manifest_io import read_manifest_file_entries
+from opteryx.types.logical_type import FLOAT64
+from opteryx.types.logical_type import INT64
+from opteryx.types.logical_type import VARCHAR
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
-from opteryx.compiled.structures.expressions import ExprArena
-
-# One expression arena for the expressions this module builds outside any query.
-_TEST_ARENA = ExprArena()
 
 DATASET = "testdata.satellites"
 _MANIFEST_GLOB = f"testdata/satellites/{DATASET_MANIFEST_NAME}"
@@ -50,23 +48,39 @@ def _manifests():
     return glob.glob(_MANIFEST_GLOB)
 
 
-def _nested(data, column):
+def _manifest_rows(path=None):
+    """The dataset manifest's rows AS WRITTEN - one {manifest column: value}
+    dict per file - read with rugo directly, which is what the format is. The
+    per-column lists are positional over the dataset's schema."""
+    import rugo.parquet as rugo_parquet
+
+    with open(path or _manifests()[0], "rb") as handle:
+        data = handle.read()
+    rows = []
+    with rugo_parquet.read_parquet(data) as reader:
+        for morsel in reader:
+            columns = {
+                name.decode("utf-8"): morsel.column(name).to_pylist()
+                for name in morsel.column_names
+            }
+            for i in range(morsel.num_rows):
+                rows.append({name: values[i] for name, values in columns.items()})
+    return rows
+
+
+def _nested(column):
     """{file_path: positional per-column list} of one nested statistic
-    (min_k_hashes / histogram_counts / char_class_counts) - the manifest's
-    native vector for it, row by row."""
-    entries, native = read_manifest_file_entries(data)
-    vector = native.get(column)
-    rows = [] if vector is None else vector.to_pylist()
+    (min_k_hashes / histogram_counts / char_class_counts) as the manifest
+    records it, row by row."""
     return {
-        entry.file_path: [list(values or []) for values in (rows[i] or [])]
-        for i, entry in enumerate(entries)
+        row["file_path"]: [list(values or []) for values in (row[column] or [])]
+        for row in _manifest_rows()
     }
 
 
 def _sketches():
     """{file_path: positional per-column sketch} from the dataset manifest."""
-    with open(_manifests()[0], "rb") as handle:
-        return _nested(handle.read(), "min_k_hashes")
+    return _nested("min_k_hashes")
 
 
 def _analyzed_column_count(sketch) -> int:
@@ -177,10 +191,13 @@ def test_drop_statistics_bad_syntax_fails_loud():
         _clean()
 
 
-def _comparison(column_name, op, value):
-    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name, arena=_TEST_ARENA)
-    literal = Literal(value=value, arena=_TEST_ARENA)
-    return Comparison(value=op, left=identifier, right=literal, arena=_TEST_ARENA)
+def _comparison(plan_context, column_name, op, value, column_type):
+    """`column_name <op> value`, built in the arena of the query that prunes;
+    the literal carries its type and a native value."""
+    arena = plan_context.expressions
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name, arena=arena)
+    literal = Literal(value=value, type=column_type, arena=arena)
+    return Comparison(value=op, left=identifier, right=literal, arena=arena)
 
 
 # satellites.id ranges [1, 177], gm ranges [0.0, 9887.834], name ranges
@@ -200,11 +217,13 @@ def test_prune_files_wired_from_analyze_manifest_int_column():
         _, manifest = _metadata()
 
         assert manifest.bounds_are_ordinal is True
-        assert manifest.files[0].lower_bounds is not None
+        assert manifest.get_ordinal_bounds("id") is not None
 
         # id's real range is [1, 177] — 10000 is far outside it.
-        manifest = manifest.prune_files([_comparison("id", "Gt", 10000)], plan_context=plan_context)
-        assert manifest.files == []
+        manifest = manifest.prune_files(
+            [_comparison(plan_context, "id", "Gt", 10000, INT64)], plan_context=plan_context
+        )
+        assert manifest.get_file_count() == 0
     finally:
         _clean()
 
@@ -216,8 +235,10 @@ def test_prune_files_wired_from_analyze_manifest_int_column_keeps_in_range():
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS id")
         _, manifest = _metadata()
 
-        manifest = manifest.prune_files([_comparison("id", "Eq", 1)], plan_context=plan_context)
-        assert len(manifest.files) == 1
+        manifest = manifest.prune_files(
+            [_comparison(plan_context, "id", "Eq", 1, INT64)], plan_context=plan_context
+        )
+        assert manifest.get_file_count() == 1
     finally:
         _clean()
 
@@ -235,15 +256,14 @@ def test_prune_files_wired_from_analyze_manifest_float_column():
         # The stored bound is an ordinal key, not the real value. (gm's real
         # min happens to be exactly 0.0, whose ordinal key is also 0 — use
         # the max bound, where the transform is unambiguously visible.)
-        field_id = next(
-            i for i, c in enumerate(manifest.schema.columns) if c.name == "gm"
-        )
-        stored_max = manifest.files[0].upper_bounds[field_id]
+        _, stored_max = manifest.get_ordinal_bounds("gm")
         assert stored_max != 9887.834  # real max is 9887.834; ordinal key is not
 
         # gm's real range is [0.0, 9887.834] — 1e12 is far outside it.
-        manifest = manifest.prune_files([_comparison("gm", "Gt", 1e12)], plan_context=plan_context)
-        assert manifest.files == []
+        manifest = manifest.prune_files(
+            [_comparison(plan_context, "gm", "Gt", 1e12, FLOAT64)], plan_context=plan_context
+        )
+        assert manifest.get_file_count() == 0
     finally:
         _clean()
 
@@ -255,8 +275,10 @@ def test_prune_files_wired_from_analyze_manifest_float_column_keeps_in_range():
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS gm")
         _, manifest = _metadata()
 
-        manifest = manifest.prune_files([_comparison("gm", "Lt", 5000.0)], plan_context=plan_context)
-        assert len(manifest.files) == 1
+        manifest = manifest.prune_files(
+            [_comparison(plan_context, "gm", "Lt", 5000.0, FLOAT64)], plan_context=plan_context
+        )
+        assert manifest.get_file_count() == 1
     finally:
         _clean()
 
@@ -270,16 +292,15 @@ def test_prune_files_wired_from_analyze_manifest_varchar_column():
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS name")
         _, manifest = _metadata()
 
-        field_id = next(
-            i for i, c in enumerate(manifest.schema.columns) if c.name == "name"
-        )
-        stored_min = manifest.files[0].lower_bounds[field_id]
+        stored_min, _ = manifest.get_ordinal_bounds("name")
         assert stored_min != "Adrastea"
-        assert isinstance(stored_min, int)
+        assert type(stored_min) is int
 
         # name's real range is ['Adrastea', 'Ymir'] — "Zzz" sorts after both.
-        manifest = manifest.prune_files([_comparison("name", "Eq", "Zzz")], plan_context=plan_context)
-        assert manifest.files == []
+        manifest = manifest.prune_files(
+            [_comparison(plan_context, "name", "Eq", b"Zzz", VARCHAR)], plan_context=plan_context
+        )
+        assert manifest.get_file_count() == 0
     finally:
         _clean()
 
@@ -291,16 +312,18 @@ def test_prune_files_wired_from_analyze_manifest_varchar_column_keeps_in_range()
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS name")
         _, manifest = _metadata()
 
-        manifest = manifest.prune_files([_comparison("name", "Eq", "Adrastea")], plan_context=plan_context)
-        assert len(manifest.files) == 1
+        manifest = manifest.prune_files(
+            [_comparison(plan_context, "name", "Eq", b"Adrastea", VARCHAR)], plan_context=plan_context
+        )
+        assert manifest.get_file_count() == 1
     finally:
         _clean()
 
 
 def test_prune_files_manifest_bounds_survive_the_metadata_cache():
-    """get_dataset_metadata caches file_entries across calls within a process
-    (see filesystem_connector._MANIFEST_CACHE) — bounds_are_ordinal must be
-    cached alongside them, not just computed on the first (cold) call."""
+    """get_dataset_metadata caches the native manifest across calls within a
+    process (see filesystem_connector._MANIFEST_CACHE) — bounds_are_ordinal must
+    be cached alongside the rows, not just computed on the first (cold) call."""
     plan_context = PlanContext()
     _clean()
     try:
@@ -311,8 +334,10 @@ def test_prune_files_manifest_bounds_survive_the_metadata_cache():
         _, manifest = _metadata()
 
         assert manifest.bounds_are_ordinal is True
-        manifest = manifest.prune_files([_comparison("id", "Gt", 10000)], plan_context=plan_context)
-        assert manifest.files == []
+        manifest = manifest.prune_files(
+            [_comparison(plan_context, "id", "Gt", 10000, INT64)], plan_context=plan_context
+        )
+        assert manifest.get_file_count() == 0
     finally:
         _clean()
 
@@ -324,11 +349,14 @@ def test_no_manifest_means_no_bounds_and_no_pruning():
     _clean()
     try:
         _, manifest = _metadata()
-        assert manifest.files[0].lower_bounds is None
+        bounds = manifest.native.cell(0, manifest.position_of("id"))["bounds"]
+        assert bounds["min"] is None and bounds["min_ordinal"] is None
 
-        manifest = manifest.prune_files([_comparison("id", "Gt", 10000)], plan_context=plan_context)
+        manifest = manifest.prune_files(
+            [_comparison(plan_context, "id", "Gt", 10000, INT64)], plan_context=plan_context
+        )
         # No bounds to prune with — the file is conservatively kept.
-        assert len(manifest.files) == 1
+        assert manifest.get_file_count() == 1
     finally:
         _clean()
 
@@ -337,18 +365,13 @@ def test_no_manifest_means_no_bounds_and_no_pruning():
 # min/max, histogram, char-class, lengths) — not just the KMV sketch ────────
 
 
-def _entries():
-    with open(_manifests()[0], "rb") as handle:
-        return read_manifest_file_entries(handle.read())
-
-
 def test_record_count_is_real_not_hardcoded_zero():
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites")
-        entries, _native = _entries()
-        assert len(entries) == 1
-        assert entries[0].record_count == 177  # satellites has 177 rows
+        rows = _manifest_rows()
+        assert len(rows) == 1
+        assert rows[0]["record_count"] == 177  # satellites has 177 rows
     finally:
         _clean()
 
@@ -357,11 +380,11 @@ def test_null_counts_populated_for_analyzed_columns():
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS id, name")
-        entries, _native = _entries()
+        rows = _manifest_rows()
         schema, _ = _metadata()
         id_idx = next(i for i, c in enumerate(schema.columns) if c.name == "id")
         name_idx = next(i for i, c in enumerate(schema.columns) if c.name == "name")
-        null_counts = entries[0].null_counts
+        null_counts = rows[0]["null_counts"]
         assert null_counts[id_idx] == 0  # satellites has no nulls
         assert null_counts[name_idx] == 0
         # An un-analyzed column's slot stays None, not a fabricated 0.
@@ -375,12 +398,11 @@ def test_histogram_bins_populated_and_sum_to_record_count():
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS gm")
-        data = open(_manifests()[0], "rb").read()
-        histograms = _nested(data, "histogram_counts")
+        histograms = _nested("histogram_counts")
         schema, _ = _metadata()
         gm_idx = next(i for i, c in enumerate(schema.columns) if c.name == "gm")
-        entries, _native = _entries()
-        bins = histograms[entries[0].file_path][gm_idx]
+        rows = _manifest_rows()
+        bins = histograms[rows[0]["file_path"]][gm_idx]
         assert len(bins) == 32  # HISTOGRAM_BINS
         assert sum(bins) == 177  # every non-null row counted exactly once
     finally:
@@ -391,17 +413,17 @@ def test_min_max_lengths_populated_for_string_columns_only():
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites")  # all columns
-        entries, _native = _entries()
+        row = _manifest_rows()[0]
         schema, _ = _metadata()
         name_idx = next(i for i, c in enumerate(schema.columns) if c.name == "name")
         gm_idx = next(i for i, c in enumerate(schema.columns) if c.name == "gm")
         # 'Adrastea'..'Ymir'-ish range — real string lengths, not None.
-        assert entries[0].min_lengths[name_idx] is not None
-        assert entries[0].max_lengths[name_idx] is not None
-        assert entries[0].min_lengths[name_idx] <= entries[0].max_lengths[name_idx]
+        assert row["min_lengths"][name_idx] is not None
+        assert row["max_lengths"][name_idx] is not None
+        assert row["min_lengths"][name_idx] <= row["max_lengths"][name_idx]
         # gm is FLOAT64 — no string lengths.
-        assert entries[0].min_lengths[gm_idx] is None
-        assert entries[0].max_lengths[gm_idx] is None
+        assert row["min_lengths"][gm_idx] is None
+        assert row["max_lengths"][gm_idx] is None
     finally:
         _clean()
 
@@ -410,13 +432,11 @@ def test_char_class_counts_populated_for_string_columns_only():
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites")
-        data = open(_manifests()[0], "rb").read()
-        char_classes = _nested(data, "char_class_counts")
+        char_classes = _nested("char_class_counts")
         schema, _ = _metadata()
         name_idx = next(i for i, c in enumerate(schema.columns) if c.name == "name")
         gm_idx = next(i for i, c in enumerate(schema.columns) if c.name == "gm")
-        entries, _native = _entries()
-        row = char_classes[entries[0].file_path]
+        row = char_classes[_manifest_rows()[0]["file_path"]]
         assert len(row[name_idx]) == 8
         assert sum(row[name_idx]) > 0
         assert row[gm_idx] == []  # non-string column, empty not fabricated
@@ -428,13 +448,12 @@ def test_char_total_bytes_equals_sum_of_char_class_counts():
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS name")
-        data = open(_manifests()[0], "rb").read()
-        char_classes = _nested(data, "char_class_counts")
-        entries, _native = _entries()
+        char_classes = _nested("char_class_counts")
+        written = _manifest_rows()[0]
         schema, _ = _metadata()
         name_idx = next(i for i, c in enumerate(schema.columns) if c.name == "name")
-        row = char_classes[entries[0].file_path]
-        assert entries[0].char_total_bytes[name_idx] == sum(row[name_idx])
+        row = char_classes[written["file_path"]]
+        assert written["char_total_bytes"][name_idx] == sum(row[name_idx])
     finally:
         _clean()
 
@@ -448,16 +467,16 @@ def test_column_subset_analyze_preserves_full_stats_of_untouched_columns():
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS id")
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS name")
 
-        entries, _native = _entries()
+        row = _manifest_rows()[0]
         schema, _ = _metadata()
         id_idx = next(i for i, c in enumerate(schema.columns) if c.name == "id")
         name_idx = next(i for i, c in enumerate(schema.columns) if c.name == "name")
 
         # id's stats from the FIRST analyze must still be present.
-        assert entries[0].null_counts[id_idx] == 0
-        assert entries[0].min_values[id_idx] is not None
+        assert row["null_counts"][id_idx] == 0
+        assert row["min_values"][id_idx] is not None
         # name's stats from the SECOND analyze must also be present.
-        assert entries[0].min_lengths[name_idx] is not None
+        assert row["min_lengths"][name_idx] is not None
     finally:
         _clean()
 
@@ -471,30 +490,28 @@ def test_drop_statistics_for_columns_clears_all_new_stat_types():
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS id, name")
         _run("DROP STATISTICS ON testdata.satellites FOR COLUMNS name")
 
-        entries, _native = _entries()
+        row = _manifest_rows()[0]
         schema, _ = _metadata()
         id_idx = next(i for i, c in enumerate(schema.columns) if c.name == "id")
         name_idx = next(i for i, c in enumerate(schema.columns) if c.name == "name")
 
         # A list no column of the file records a value in is written EMPTY
-        # (the manifest's "not tracked"), which reads back as None; otherwise
-        # it is positional with None for the dropped column. Either way nothing
-        # survives for `name`.
+        # (the manifest's "not tracked"); otherwise it is positional with None
+        # for the dropped column. Either way nothing survives for `name`.
         def _unrecorded(values, index):
             return not values or values[index] is None
 
-        assert _unrecorded(entries[0].null_counts, name_idx)
-        assert _unrecorded(entries[0].min_lengths, name_idx)
-        assert _unrecorded(entries[0].max_lengths, name_idx)
-        assert _unrecorded(entries[0].min_values, name_idx)
+        assert _unrecorded(row["null_counts"], name_idx)
+        assert _unrecorded(row["min_lengths"], name_idx)
+        assert _unrecorded(row["max_lengths"], name_idx)
+        assert _unrecorded(row["min_values"], name_idx)
 
         # id survives untouched.
-        assert entries[0].null_counts[id_idx] == 0
-        assert entries[0].min_values[id_idx] is not None
+        assert row["null_counts"][id_idx] == 0
+        assert row["min_values"][id_idx] is not None
 
-        data = open(_manifests()[0], "rb").read()
-        char_classes = _nested(data, "char_class_counts")
-        assert char_classes[entries[0].file_path][name_idx] == []
+        char_classes = _nested("char_class_counts")
+        assert char_classes[row["file_path"]][name_idx] == []
     finally:
         _clean()
 
@@ -547,18 +564,17 @@ def test_analyze_does_not_crash_on_array_columns():
             "testdata.astronauts", telemetry=None
         )
         schema, _ = eng.get_dataset_metadata()
-        with open(glob.glob(manifest_glob)[0], "rb") as handle:
-            entries, _native = read_manifest_file_entries(handle.read())
+        row = _manifest_rows(glob.glob(manifest_glob)[0])[0]
 
         alma_mater_idx = next(i for i, c in enumerate(schema.columns) if c.name == "alma_mater")
         name_idx = next(i for i, c in enumerate(schema.columns) if c.name == "name")
 
         # The ARRAY column has no ordinal min/max (unsupported type)...
-        assert entries[0].min_values[alma_mater_idx] is None
+        assert row["min_values"][alma_mater_idx] is None
         # ...but every OTHER column's stats still landed -- the ARRAY column
         # didn't abort the rest of the file's analysis.
-        assert entries[0].min_values[name_idx] is not None
-        assert entries[0].null_counts[alma_mater_idx] is not None  # null_count has no such gap
+        assert row["min_values"][name_idx] is not None
+        assert row["null_counts"][alma_mater_idx] is not None  # null_count has no such gap
     finally:
         for p in glob.glob(manifest_glob):
             os.remove(p)
@@ -580,7 +596,7 @@ def test_analyze_unknown_column_fails_loud():
 
 
 # ======================================================================
-# Statistics decoded from the manifest must reach the FileEntry the
+# Statistics decoded from the manifest must reach the manifest rows the
 # planner sees. Before this, _read_dataset_manifest returned only the
 # sketches and the value bounds: every other per-column statistic ANALYZE
 # had computed was decoded and then dropped on the floor.
@@ -610,7 +626,7 @@ def _clean_nullable():
 def test_length_bounds_reach_the_manifest_from_an_analyzed_dataset():
     """get_length_bounds returned None for EVERY filesystem dataset, however
     recently ANALYZE'd, because min_length_bounds/max_length_bounds were never
-    carried from the manifest onto the FileEntry."""
+    carried from the manifest onto the planner's file rows."""
     _clean()
     try:
         _, manifest = _fresh_metadata(DATASET)
@@ -630,20 +646,21 @@ def test_length_bounds_reach_the_manifest_from_an_analyzed_dataset():
 
 
 def test_null_counts_reach_the_manifest_from_an_analyzed_dataset():
-    """ANALYZE's per-column null counts land on the FileEntry in BOTH forms —
-    the positional list (SHOW MANIFEST, the char-class avg_length denominator)
-    and the field_id-keyed dict every Manifest accessor reads."""
+    """ANALYZE's per-column null counts land on the planner's file row, keyed
+    by load-time position (the manifest's one key space), and are what every
+    Manifest accessor reads."""
     _clean_nullable()
     try:
         _run(f"ANALYZE TABLE {NULLABLE_DATASET}")
         _, manifest = _astronauts_metadata()
-        file_entry = manifest.files[0]
-        assert file_entry.null_counts is not None
-        assert file_entry.null_value_counts is not None
+        assert manifest.has_null_counts()
         # death_date is mostly null in this dataset — a real count, not zeros.
-        field_id = manifest._resolve_field_id("death_date")
-        assert file_entry.null_value_counts[field_id] > 0
-        assert file_entry.null_counts[field_id] == file_entry.null_value_counts[field_id]
+        position = manifest.position_of("death_date")
+        null_count = manifest.native.cell(0, position)["null_count"]
+        assert null_count is not None and null_count > 0
+        # ...and it is the number the manifest had written for that column.
+        assert null_count == _manifest_rows(glob.glob(_NULLABLE_MANIFEST_GLOB)[0])[0]["null_counts"][position]
+        assert manifest.get_total_null_count("death_date") == null_count
 
         null_fraction = manifest.estimate_null_fraction("death_date")
         assert null_fraction is not None and 0.0 < null_fraction < 1.0
@@ -687,7 +704,7 @@ def test_histogram_bin_count_is_read_back_not_assumed():
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS id")
         _, manifest = _metadata()
-        assert manifest.files[0].histogram_bins == HISTOGRAM_BINS
+        assert manifest.native.file_row(0)["histogram_bins"] == HISTOGRAM_BINS
         # ... and the histogram still folds cleanly against it.
         assert manifest.get_distogram("id") is not None
     finally:
@@ -703,50 +720,90 @@ def test_stale_row_bin_count_does_not_block_the_fold():
     and ignores the scalar rather than rejecting a well-formed histogram."""
     _clean()
     try:
-        import dataclasses
-
-        from opteryx.models.manifest import Manifest
+        from tests.manifests import FileSpec
+        from tests.manifests import build_manifest
 
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS id")
         schema, manifest = _metadata()
-        # A width the stored counts do not have. A COPY of the file entry, not
-        # the live one: get_dataset_metadata caches the FileEntry objects
-        # themselves, so mutating one would poison every later reader.
-        patched = dataclasses.replace(manifest.files[0], histogram_bins=17)
-        probe = Manifest(
-            [patched],
+        # A width the stored counts do not have, on a NEW manifest over the same
+        # file, bounds (the histogram's span) and sketch vectors -
+        # get_dataset_metadata caches its manifest, so the live one is never
+        # touched.
+        file_row = manifest.native.file_row(0)
+        position = manifest.position_of("id")
+        bounds = manifest.native.cell(0, position)["bounds"]
+        probe = build_manifest(
             schema,
-            min_k_vector=manifest._min_k_vector,
-            histogram_vector=manifest._histogram_vector,
-            char_class_vector=manifest._char_class_vector,
+            [
+                FileSpec(
+                    file_path=file_row["file_path"],
+                    record_count=file_row["record_count"],
+                    file_size_in_bytes=file_row["file_size_in_bytes"],
+                    histogram_bins=17,
+                    lower_bounds={position: bounds["min_ordinal"]},
+                    upper_bounds={position: bounds["max_ordinal"]},
+                )
+            ],
             bounds_are_ordinal=manifest.bounds_are_ordinal,
+            sketches=manifest.native.sketches,
         )
+        assert probe.native.file_row(0)["histogram_bins"] == 17
         assert probe.get_distogram("id") is not None
     finally:
         _clean()
 
 
-def test_manifest_writer_stamps_the_real_bin_count():
-    from opteryx.models.manifest_io import _histogram_bins_of
-    from opteryx.models.file_entry import FileEntry
+def _written_bin_count(histograms, stored_bins=None):
+    """The histogram_bins the manifest writer (the native encoder) records for
+    one file whose per-column histogram_counts are `histograms` (None: no
+    histogram vector at all) and whose row carries `stored_bins`."""
+    from draken import draken_native as dn
 
-    entry = FileEntry(file_path="f.parquet", file_format="PARQUET", record_count=1, file_size_in_bytes=1)
-    assert _histogram_bins_of(entry, None) == 0
-    assert _histogram_bins_of(entry, [[], []]) == 0
-    assert _histogram_bins_of(entry, [[0] * 8, []]) == 8
+    from opteryx.types.schema import ColumnDescriptor
+    from opteryx.types.schema import RelationDescriptor
+    from tests.manifests import FileSpec
+    from tests.manifests import build_manifest
+
+    schema = RelationDescriptor(
+        name="t",
+        columns=[ColumnDescriptor(name=f"c{i}", column_type=INT64) for i in range(2)],
+    )
+    sketches = {}
+    if histograms is not None:
+        sketches["histogram_counts"] = dn.vector_array_from_sequence(
+            [histograms], element_type=dn.DrakenType.INT64.value, nesting_depth=2
+        )
+    manifest = build_manifest(
+        schema,
+        [FileSpec("f.parquet", record_count=1, file_size_in_bytes=1, histogram_bins=stored_bins)],
+        bounds_are_ordinal=True,
+        sketches=sketches,
+    )
+    manifest_bytes = manifest.native.to_parquet()
+    rows = []
+    import rugo.parquet as rugo_parquet
+
+    with rugo_parquet.read_parquet(manifest_bytes) as reader:
+        for morsel in reader:
+            rows.extend(morsel.column(b"histogram_bins").to_pylist())
+    assert len(rows) == 1
+    return rows[0]
+
+
+def test_manifest_writer_stamps_the_real_bin_count():
+    assert _written_bin_count(None) == 0
+    assert _written_bin_count([[], []]) == 0
+    assert _written_bin_count([[0] * 8, []]) == 8
 
     # The width is derived from the counts in hand, never copied from a stored
     # scalar that producers stamp unconditionally.
-    entry.histogram_bins = 8
-    assert _histogram_bins_of(entry, [[0] * 8]) == 8
-    entry.histogram_bins = 32
-    assert _histogram_bins_of(entry, [[0] * 8]) == 8
+    assert _written_bin_count([[0] * 8, []], stored_bins=8) == 8
+    assert _written_bin_count([[0] * 8, []], stored_bins=32) == 8
 
     # Per-column widths in one file are legal — a boolean's exact two bins
     # beside 32-bin numerics. No single number describes them, so the row says
     # 0 ("no single width") and readers fall back to each column's own length.
-    entry.histogram_bins = None
-    assert _histogram_bins_of(entry, [[0] * 2, [0] * 32]) == 0
+    assert _written_bin_count([[0] * 2, [0] * 32]) == 0
 
 
 def test_analyze_records_uncompressed_sizes():
@@ -756,26 +813,21 @@ def test_analyze_records_uncompressed_sizes():
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites")
-        with open(_manifests()[0], "rb") as handle:
-            entries, _native = read_manifest_file_entries(handle.read())
-        entry = entries[0]
+        row = _manifest_rows()[0]
+        sizes = row["column_uncompressed_sizes_in_bytes"]
 
         schema, manifest = _fresh_metadata(DATASET)
-        assert entry.column_uncompressed_sizes_in_bytes is not None
-        assert len(entry.column_uncompressed_sizes_in_bytes) == len(schema.columns)
-        assert all(size > 0 for size in entry.column_uncompressed_sizes_in_bytes)
+        assert sizes is not None
+        assert len(sizes) == len(schema.columns)
+        assert all(size > 0 for size in sizes)
         # The file total is the sum of its columns, not a separate measurement.
-        assert entry.uncompressed_size_in_bytes == sum(
-            entry.column_uncompressed_sizes_in_bytes
-        )
+        assert row["uncompressed_size_in_bytes"] == sum(sizes)
 
         # ... and they are the SAME bytes the footer reports, positionally by
-        # field_id — a size list keyed one column out would be silently wrong,
-        # never visibly so.
+        # load-time position — a size list keyed one column out would be
+        # silently wrong, never visibly so.
         for position, column in enumerate(schema.columns):
-            assert entry.column_uncompressed_sizes_in_bytes[
-                position
-            ] == manifest.get_total_uncompressed_size(column.name), column.name
+            assert sizes[position] == manifest.get_total_uncompressed_size(column.name), column.name
     finally:
         _clean()
 
@@ -786,10 +838,8 @@ def test_analyze_for_columns_still_sizes_every_column():
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS name")
-        with open(_manifests()[0], "rb") as handle:
-            entries, _native = read_manifest_file_entries(handle.read())
         schema, _ = _fresh_metadata(DATASET)
-        sizes = entries[0].column_uncompressed_sizes_in_bytes
+        sizes = _manifest_rows()[0]["column_uncompressed_sizes_in_bytes"]
         assert sizes is not None and len(sizes) == len(schema.columns)
         assert all(size > 0 for size in sizes)
     finally:
@@ -802,18 +852,16 @@ def test_drop_statistics_for_columns_keeps_sizes():
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites")
-        with open(_manifests()[0], "rb") as handle:
-            before, _native = read_manifest_file_entries(handle.read())
+        before = _manifest_rows()[0]
 
         _run("DROP STATISTICS ON testdata.satellites FOR COLUMNS name")
-        with open(_manifests()[0], "rb") as handle:
-            after, _native = read_manifest_file_entries(handle.read())
+        after = _manifest_rows()[0]
 
         assert (
-            after[0].column_uncompressed_sizes_in_bytes
-            == before[0].column_uncompressed_sizes_in_bytes
+            after["column_uncompressed_sizes_in_bytes"]
+            == before["column_uncompressed_sizes_in_bytes"]
         )
-        assert after[0].uncompressed_size_in_bytes == before[0].uncompressed_size_in_bytes
+        assert after["uncompressed_size_in_bytes"] == before["uncompressed_size_in_bytes"]
     finally:
         _clean()
 

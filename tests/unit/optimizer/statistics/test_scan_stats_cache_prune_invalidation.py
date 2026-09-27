@@ -29,27 +29,20 @@ from opteryx.compiled.structures.plan_steps import ScanStep
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
 from opteryx.expression import NodeType
-from opteryx.models.file_entry import FileEntry
-from opteryx.models.manifest import Manifest
 from opteryx.planner.optimizer.statistics_refresh import _scan_stats
 from opteryx.types.logical_type import INT64
 from opteryx.types.schema import RelationSchema
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
-from opteryx.compiled.structures.expressions import ExprArena
-
-# One expression arena for the expressions this module builds outside any query.
-_TEST_ARENA = ExprArena()
-
-# Bound columns are minted by a query's ColumnTable; these tests share one.
-_PLAN_CONTEXT = PlanContext()
+from tests.manifests import FileSpec
+from tests.manifests import build_manifest
 
 
-def _schema():
+def _schema(plan_context):
     return RelationSchema(
         name="t",
         columns=[
-            _PLAN_CONTEXT.columns.relation_column(
+            plan_context.columns.relation_column(
                 "t",
                 "value",
                 column_type=INT64,
@@ -59,7 +52,7 @@ def _schema():
 
 
 def _file(path, lo, hi, record_count):
-    return FileEntry(
+    return FileSpec(
         file_path=path,
         file_format="PARQUET",
         record_count=record_count,
@@ -69,10 +62,13 @@ def _file(path, lo, hi, record_count):
     )
 
 
-def _comparison(op, value):
-    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="value", arena=_TEST_ARENA)
-    literal = Literal(value=value, arena=_TEST_ARENA)
-    return Comparison(value=op, left=identifier, right=literal, arena=_TEST_ARENA)
+def _comparison(plan_context, op, value):
+    """`value <op> <value>` in the query's own expression arena - the arena
+    native pruning reads the predicate from."""
+    arena = plan_context.expressions
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="value", arena=arena)
+    literal = Literal(value=value, type=INT64, arena=arena)
+    return Comparison(value=op, left=identifier, right=literal, arena=arena)
 
 
 def _scan_node(manifest, schema):
@@ -84,11 +80,8 @@ def _scan_node(manifest, schema):
 
 def test_refresh_after_prune_reflects_pruned_file_set():
     plan_context = PlanContext()
-    schema = _schema()
-    manifest = Manifest(
-        files=[_file("low", 0, 100, 10), _file("high", 1000, 2000, 20)],
-        schema=schema,
-    )
+    schema = _schema(plan_context)
+    manifest = build_manifest(schema, [_file("low", 0, 100, 10), _file("high", 1000, 2000, 20)])
     node = _scan_node(manifest, schema)
     cache: dict = {}
 
@@ -96,7 +89,9 @@ def test_refresh_after_prune_reflects_pruned_file_set():
     assert before.row_count == 30
 
     # What ManifestPruningStrategy does: copy-on-write prune, re-assign.
-    node.manifest = node.manifest.prune_files([_comparison("Gt", 500)], plan_context=plan_context)
+    node.manifest = node.manifest.prune_files(
+        [_comparison(plan_context, "Gt", 500)], plan_context=plan_context
+    )
     assert node.manifest.get_file_count() == 1
 
     after = _scan_stats(node, base_stats_cache=cache)
@@ -107,13 +102,10 @@ def test_refresh_after_prune_reflects_pruned_file_set():
 
 def test_prune_files_is_copy_on_write():
     plan_context = PlanContext()
-    schema = _schema()
-    manifest = Manifest(
-        files=[_file("low", 0, 100, 10), _file("high", 1000, 2000, 20)],
-        schema=schema,
-    )
+    schema = _schema(plan_context)
+    manifest = build_manifest(schema, [_file("low", 0, 100, 10), _file("high", 1000, 2000, 20)])
 
-    pruned = manifest.prune_files([_comparison("Gt", 500)], plan_context=plan_context)
+    pruned = manifest.prune_files([_comparison(plan_context, "Gt", 500)], plan_context=plan_context)
 
     # A real prune hands back a NEW object and leaves the original untouched.
     assert pruned is not manifest
@@ -124,44 +116,45 @@ def test_prune_files_is_copy_on_write():
 
     # A prune that removes nothing hands the SAME object back — no epoch
     # churn, no cache invalidation, nothing changed.
-    unpruned = manifest.prune_files([_comparison("Gt", -1)], plan_context=plan_context)
+    unpruned = manifest.prune_files([_comparison(plan_context, "Gt", -1)], plan_context=plan_context)
     assert unpruned is manifest
 
 
 def test_prune_files_for_topn_is_copy_on_write():
-    schema = _schema()
-    manifest = Manifest(
-        files=[_file("low", 0, 100, 10), _file("high", 1000, 2000, 20)],
-        schema=schema,
-    )
+    schema = _schema(PlanContext())
+    manifest = build_manifest(schema, [_file("low", 0, 100, 10), _file("high", 1000, 2000, 20)])
 
     pruned = manifest.prune_files_for_topn("value", descending=True, limit=5)
 
     assert pruned is not manifest
     assert manifest.get_file_count() == 2
     assert pruned.get_file_count() == 1
-    assert pruned.files[0].file_path == "high"
+    assert pruned.get_file_paths() == ["high"]
+
+
+def _vector_rows(manifest):
+    """Each file's row in the manifest's sketch vectors."""
+    return [manifest.native.file_row(row)["vector_row"] for row in range(manifest.get_file_count())]
 
 
 def test_subset_is_copy_on_write_and_tracks_live_rows():
-    schema = _schema()
-    manifest = Manifest(
-        files=[_file("a", 0, 10, 5), _file("b", 20, 30, 5), _file("c", 40, 50, 5)],
-        schema=schema,
+    schema = _schema(PlanContext())
+    manifest = build_manifest(
+        schema, [_file("a", 0, 10, 5), _file("b", 20, 30, 5), _file("c", 40, 50, 5)]
     )
 
     picked = manifest.subset([2, 0])
 
     assert picked is not manifest
     assert manifest.get_file_count() == 3
-    assert [f.file_path for f in picked.files] == ["c", "a"]
+    assert picked.get_file_paths() == ["c", "a"]
     # The sketch-vector row mapping follows the reorder/truncation.
-    assert picked._live_rows == [2, 0]
+    assert _vector_rows(picked) == [2, 0]
 
     # Subset of a subset composes through to ORIGINAL vector rows.
     again = picked.subset([1])
-    assert [f.file_path for f in again.files] == ["a"]
-    assert again._live_rows == [0]
+    assert again.get_file_paths() == ["a"]
+    assert _vector_rows(again) == [0]
 
 
 if __name__ == "__main__":  # pragma: no cover

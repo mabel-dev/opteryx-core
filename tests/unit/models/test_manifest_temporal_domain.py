@@ -42,20 +42,17 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import pytest
 
 from opteryx.expression import NodeType
-from opteryx.models.file_entry import FileEntry
-from opteryx.models.manifest import Manifest
 from draken.draken_native import TimestampUnit
-from opteryx.types.logical_type import DATE, INT64, TIME, TIMESTAMP, VARCHAR
+from opteryx.types.logical_type import DATE, INT64, TIME, TIMESTAMP
 from opteryx.types.schema import RelationSchema
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
-from opteryx.compiled.structures.expressions import ExprArena
+from tests.manifests import FileSpec
+from tests.manifests import build_manifest
 
-# One expression arena for the expressions this module builds outside any query.
-_TEST_ARENA = ExprArena()
-
-# Bound columns are minted by a query's ColumnTable; these tests share one.
-_PLAN_CONTEXT = PlanContext()
+# Pruning is native and reads its predicates from the query's expression arena,
+# so every case builds its schema columns and predicates in ONE PlanContext:
+# `_comparison` / `_between` return a builder that `_prune` runs against it.
 
 US_PER_DAY = 86_400_000_000
 
@@ -70,54 +67,58 @@ US_2026_08_03 = DAY_2026_08_03 * US_PER_DAY
 ALL_OPS = ("Eq", "NotEq", "Gt", "GtEq", "Lt", "LtEq")
 
 
-def _schema(column_type, name="value"):
+def _schema(plan_context, column_type, name="value"):
     return RelationSchema(
         name="t",
         columns=[
-            _PLAN_CONTEXT.columns.relation_column(
+            plan_context.columns.relation_column(
                 "t", name, column_type=column_type)
         ],
     )
 
 
 def _file(lower, upper, path="f1", record_count=10):
-    return FileEntry(
+    return FileSpec(
         file_path=path,
-        file_format="PARQUET",
         record_count=record_count,
-        file_size_in_bytes=0,
         lower_bounds={0: lower},
         upper_bounds={0: upper},
     )
 
 
 def _comparison(op, value, literal_type=None, column_name="value"):
-    return Comparison(
-        value=op,
-        left=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name, arena=_TEST_ARENA),
-        right=Literal(type=literal_type, value=value, arena=_TEST_ARENA),
-        arena=_TEST_ARENA,
-    )
+    def build(arena):
+        return Comparison(
+            value=op,
+            left=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name, arena=arena),
+            right=Literal(type=literal_type, value=value, arena=arena),
+            arena=arena,
+        )
+
+    return build
 
 
 def _between(lower, upper, literal_type=None, column_name="value"):
-    return Between(
-        left=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name, arena=_TEST_ARENA),
-        right=Literal(type=literal_type, value=lower, arena=_TEST_ARENA),
-        centre=Literal(type=literal_type, value=upper, arena=_TEST_ARENA),
-        arena=_TEST_ARENA,
-    )
+    def build(arena):
+        return Between(
+            left=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name, arena=arena),
+            right=Literal(type=literal_type, value=lower, arena=arena),
+            centre=Literal(type=literal_type, value=upper, arena=arena),
+            arena=arena,
+        )
+
+    return build
 
 
 def _prune(column_type, bounds, predicate, bounds_are_ordinal=False):
     plan_context = PlanContext()
-    manifest = Manifest(
-        files=[_file(*bounds)],
-        schema=_schema(column_type),
+    manifest = build_manifest(
+        _schema(plan_context, column_type),
+        [_file(*bounds)],
         bounds_are_ordinal=bounds_are_ordinal,
     )
-    manifest = manifest.prune_files([predicate], plan_context=plan_context)
-    return manifest.files
+    manifest = manifest.prune_files([predicate(plan_context.expressions)], plan_context=plan_context)
+    return manifest.get_file_paths()
 
 
 # The catalog path (`OpteryxConnector`, which is what the hosted service runs)
@@ -283,42 +284,34 @@ def test_non_temporal_columns_still_prune():
     assert files == []
 
 
-def test_untyped_literal_keeps_pruning():
-    # Producers that don't stamp a type on the literal node predate this guard;
-    # they must keep the pruning they have rather than silently lose it.
-    files = _prune(INT64, (0, 100), _comparison("Gt", 500))
-
-    assert files == []
-
-
 def test_temporal_column_against_non_temporal_literal_is_not_this_guards_business():
     # `date_col >= 100` is a type error the binder rejects before pruning runs.
     # Answering "mismatch" here would be harmless but wrong-headed; the point is
-    # that the guard only fires when BOTH sides are temporal.
-    from opteryx.models.manifest import _temporal_domain_mismatch
-
-    assert _temporal_domain_mismatch(DATE, INT64) is False
-    assert _temporal_domain_mismatch(DATE, VARCHAR) is False
-    assert _temporal_domain_mismatch(INT64, TIMESTAMP()) is False
+    # that the guard only fires when BOTH sides are temporal. The guard is now
+    # native (manifest_prune.hpp temporal_domain_mismatch), so this is pinned
+    # through its effect: a pairing the guard lets through still prunes.
+    assert _prune(DATE, (0, 100), _comparison("Gt", 500, literal_type=INT64)) == []
+    assert _prune(INT64, (0, 100), _comparison("Gt", US_2025_01_01, literal_type=TIMESTAMP())) == []
 
 
 def test_mixed_predicates_drop_only_the_unsafe_one():
     plan_context = PlanContext()
     # A query carrying both a safe and an unsafe predicate must keep pruning on
     # the safe one - the guard drops predicates, not pruning.
-    manifest = Manifest(
-        files=[
+    manifest = build_manifest(
+        _schema(plan_context, DATE),
+        [
             _file(DAY_2025_01_01, DAY_2026_08_03, path="in_range"),
             _file(DAY_2025_01_01 - 100, DAY_2025_01_01 - 50, path="out_of_range"),
         ],
-        schema=_schema(DATE),
     )
 
     manifest = manifest.prune_files(
         [
-            _comparison("GtEq", US_2025_01_01, literal_type=TIMESTAMP()),  # unsafe, ignored
-            _comparison("GtEq", DAY_2025_01_01, literal_type=DATE),  # safe, prunes
-        ], 
-    plan_context=plan_context)
+            _comparison("GtEq", US_2025_01_01, literal_type=TIMESTAMP())(plan_context.expressions),  # unsafe, ignored
+            _comparison("GtEq", DAY_2025_01_01, literal_type=DATE)(plan_context.expressions),  # safe, prunes
+        ],
+        plan_context=plan_context,
+    )
 
-    assert [f.file_path for f in manifest.files] == ["in_range"]
+    assert manifest.get_file_paths() == ["in_range"]

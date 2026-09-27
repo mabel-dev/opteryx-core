@@ -43,19 +43,12 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import pytest
 
 from opteryx.expression import NodeType
-from opteryx.models.file_entry import FileEntry
-from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import FLOAT64, INT64
 from opteryx.types.schema import RelationSchema
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
-from opteryx.compiled.structures.expressions import ExprArena
-
-# One expression arena for the expressions this module builds outside any query.
-_TEST_ARENA = ExprArena()
-
-# Bound columns are minted by a query's ColumnTable; these tests share one.
-_PLAN_CONTEXT = PlanContext()
+from tests.manifests import FileSpec
+from tests.manifests import build_manifest
 
 # Bounds over a file whose real values are 0.0 .. 10.0 PLUS one NaN. The NaN is
 # absent from both bounds — that absence is the whole subject.
@@ -73,48 +66,56 @@ UNSOUND = ("Gt", "GtEq", "NotEq")
 SOUND = ("Lt", "LtEq", "Eq")
 
 
-def _schema(column_type, name="value"):
+def _schema(plan_context, column_type, name="value"):
     return RelationSchema(
         name="t",
         columns=[
-            _PLAN_CONTEXT.columns.relation_column(
+            plan_context.columns.relation_column(
                 "t", name, column_type=column_type)
         ],
     )
 
 
 def _file(lower, upper, path="f1", record_count=10):
-    return FileEntry(
+    return FileSpec(
         file_path=path,
-        file_format="PARQUET",
         record_count=record_count,
-        file_size_in_bytes=0,
         lower_bounds={0: lower},
         upper_bounds={0: upper},
     )
 
 
-def _comparison(op, value, column_name="value"):
+def _literal(plan_context, value, column_type):
+    return Literal(value=value, type=column_type, arena=plan_context.expressions)
+
+
+def _column(plan_context, column_name):
+    return LogicalColumn(
+        node_type=NodeType.IDENTIFIER, source_column=column_name, arena=plan_context.expressions
+    )
+
+
+def _comparison(plan_context, op, value, column_type, column_name="value"):
     return Comparison(
         value=op,
-        left=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name, arena=_TEST_ARENA),
-        right=Literal(value=value, arena=_TEST_ARENA),
-        arena=_TEST_ARENA,
+        left=_column(plan_context, column_name),
+        right=_literal(plan_context, value, column_type),
+        arena=plan_context.expressions,
     )
 
 
-def _between(lower, upper, column_name="value"):
+def _between(plan_context, lower, upper, column_type, column_name="value"):
     return Between(
-        left=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name, arena=_TEST_ARENA),
-        right=Literal(value=lower, arena=_TEST_ARENA),
-        centre=Literal(value=upper, arena=_TEST_ARENA),
-        arena=_TEST_ARENA,
+        left=_column(plan_context, column_name),
+        right=_literal(plan_context, lower, column_type),
+        centre=_literal(plan_context, upper, column_type),
+        arena=plan_context.expressions,
     )
 
 
-def _manifest(column_type, *, ordinal, lower=LOW, upper=HIGH):
-    return Manifest(
-        files=[_file(lower, upper)], schema=_schema(column_type), bounds_are_ordinal=ordinal
+def _manifest(plan_context, column_type, *, ordinal, lower=LOW, upper=HIGH):
+    return build_manifest(
+        _schema(plan_context, column_type), [_file(lower, upper)], bounds_are_ordinal=ordinal
     )
 
 
@@ -151,11 +152,13 @@ def _case(op, ordinalize=None):
 def test_float_file_is_kept_for_ops_a_nan_would_satisfy(op):
     plan_context = PlanContext()
     lower, upper, literal = _case(op)
-    manifest = _manifest(FLOAT64, ordinal=False, lower=lower, upper=upper)
+    manifest = _manifest(plan_context, FLOAT64, ordinal=False, lower=lower, upper=upper)
 
-    manifest = manifest.prune_files([_comparison(op, literal)], plan_context=plan_context)
+    manifest = manifest.prune_files(
+        [_comparison(plan_context, op, literal, FLOAT64)], plan_context=plan_context
+    )
 
-    assert len(manifest.files) == 1, (
+    assert manifest.get_file_count() == 1, (
         f"{op} pruned a float file on bounds that cannot see a NaN — a NaN row "
         f"satisfies `{op} {literal}` and would be silently dropped"
     )
@@ -167,11 +170,13 @@ def test_float_file_still_prunes_for_ops_a_nan_cannot_satisfy(op):
     # `< -1.0` / `<= -1.0` / `= 1000.0` are all disproved by [0.0, 10.0], and a
     # NaN satisfies none of them, so the prune is correct and must still happen.
     lower, upper, literal = _case(op)
-    manifest = _manifest(FLOAT64, ordinal=False, lower=lower, upper=upper)
+    manifest = _manifest(plan_context, FLOAT64, ordinal=False, lower=lower, upper=upper)
 
-    manifest = manifest.prune_files([_comparison(op, literal)], plan_context=plan_context)
+    manifest = manifest.prune_files(
+        [_comparison(plan_context, op, literal, FLOAT64)], plan_context=plan_context
+    )
 
-    assert len(manifest.files) == 0, f"{op} stopped pruning floats — the fix is too wide"
+    assert manifest.get_file_count() == 0, f"{op} stopped pruning floats — the fix is too wide"
 
 
 @pytest.mark.parametrize("op", UNSOUND + SOUND)
@@ -181,41 +186,48 @@ def test_non_float_columns_are_untouched(op):
     # because a guard written against the wrong thing (all numerics, say) would
     # cost every integer range predicate its pruning and never fail a NaN test.
     lower, upper, literal = _case(op)
-    manifest = _manifest(INT64, ordinal=False, lower=int(lower), upper=int(upper))
+    manifest = _manifest(plan_context, INT64, ordinal=False, lower=int(lower), upper=int(upper))
 
-    manifest = manifest.prune_files([_comparison(op, int(literal))], plan_context=plan_context)
+    manifest = manifest.prune_files(
+        [_comparison(plan_context, op, int(literal), INT64)], plan_context=plan_context
+    )
 
-    assert len(manifest.files) == 0, f"{op} stopped pruning an INT64 column"
+    assert manifest.get_file_count() == 0, f"{op} stopped pruning an INT64 column"
 
 
 def test_between_keeps_the_arm_a_nan_cannot_satisfy():
     plan_context = PlanContext()
     # BETWEEN is two conjuncts. `value BETWEEN 1000.0 AND 2000.0` is disproved
     # ONLY by the `max < lower` half — the unsound one — so the file is kept.
-    manifest = _manifest(FLOAT64, ordinal=False)
-    manifest = manifest.prune_files([_between(ABOVE, ABOVE * 2)], plan_context=plan_context)
-    assert len(manifest.files) == 1, "BETWEEN pruned a float file on the NaN-blind arm"
+    manifest = _manifest(plan_context, FLOAT64, ordinal=False)
+    manifest = manifest.prune_files(
+        [_between(plan_context, ABOVE, ABOVE * 2, FLOAT64)], plan_context=plan_context
+    )
+    assert manifest.get_file_count() == 1, "BETWEEN pruned a float file on the NaN-blind arm"
 
     # `value BETWEEN -20.0 AND -10.0` is disproved by the `min > upper` half,
     # which a NaN cannot affect — that arm must still prune.
-    manifest = _manifest(FLOAT64, ordinal=False)
-    manifest = manifest.prune_files([_between(-20.0, -10.0)], plan_context=plan_context)
-    assert len(manifest.files) == 0, "BETWEEN lost the sound half of its float pruning"
+    manifest = _manifest(plan_context, FLOAT64, ordinal=False)
+    manifest = manifest.prune_files(
+        [_between(plan_context, -20.0, -10.0, FLOAT64)], plan_context=plan_context
+    )
+    assert manifest.get_file_count() == 0, "BETWEEN lost the sound half of its float pruning"
 
 
 def test_topn_pruning_stands_down_for_float_columns():
     # DESC top-n: the NaN rows ARE the top-n but sit outside every `hi`, so a
     # file holding them ranks last and is dropped. The zero-NULL precondition
     # this method documents does not cover a NaN — a NaN is not a null.
-    manifest = Manifest(
-        files=[_file(LOW, HIGH, path="f1"), _file(100.0, 200.0, path="f2")],
-        schema=_schema(FLOAT64),
+    plan_context = PlanContext()
+    manifest = build_manifest(
+        _schema(plan_context, FLOAT64),
+        [_file(LOW, HIGH, path="f1"), _file(100.0, 200.0, path="f2")],
         bounds_are_ordinal=False,
     )
 
     manifest = manifest.prune_files_for_topn("value", descending=True, limit=1)
 
-    assert len(manifest.files) == 2, "top-n pruning dropped a float file that may hold a NaN"
+    assert manifest.get_file_count() == 2, "top-n pruning dropped a float file that may hold a NaN"
 
 
 # ---------------------------------------------------------------------------
@@ -237,11 +249,13 @@ def test_ordinal_float_bounds_still_prune(op):
     plan_context = PlanContext()
     # Ordinal bounds DO cover a NaN, so there is nothing to stand down from.
     lower, upper, literal = _case(op, ordinalize=FLOAT64.ordinalize)
-    manifest = _manifest(FLOAT64, ordinal=True, lower=lower, upper=upper)
+    manifest = _manifest(plan_context, FLOAT64, ordinal=True, lower=lower, upper=upper)
 
-    manifest = manifest.prune_files([_comparison(op, literal)], plan_context=plan_context)
+    manifest = manifest.prune_files(
+        [_comparison(plan_context, op, literal, FLOAT64)], plan_context=plan_context
+    )
 
-    assert len(manifest.files) == 0, (
+    assert manifest.get_file_count() == 0, (
         f"{op} stopped pruning ordinal float bounds — those bounds rank NaN "
         f"highest and are a real bound"
     )

@@ -1,21 +1,25 @@
 """
 Regression tests for the field-id manifest statistics fix.
 
-Bug: MIN/MAX over a column read the wrong file-entry bound whenever a
-column's position in `self.schema.columns` (used as a fallback "field_id")
-didn't match the position a file's own writer used for its min/max lists.
-`Manifest._resolve_field_id` now prefers a real, catalog-assigned
-`SchemaColumn.field_id` over any positional guess, and consumers
-(`get_min_max_from_manifest`, `Manifest.prune_files`) read `FileEntry`'s
-field-id-keyed `lower_bounds`/`upper_bounds` dict instead of indexing the
-positional `min_values`/`max_values` lists by that id.
+Bug: MIN/MAX over a column read the wrong file bound whenever a column's
+position in `self.schema.columns` (used as a fallback "field_id") didn't match
+the position a file's own writer used for its min/max lists.
+
+The manifest now has ONE key space - every per-column statistic is keyed by the
+column's LOAD-TIME position - and a catalog row's field-id-keyed lists are
+mapped onto those positions once, where the rows are read
+(`opteryx_connector._catalog_manifest`), through the schema's real,
+catalog-assigned `field_id`s. A row with no `field_ids` of its own was written
+in schema order, so its lists are positional. The consumers
+(`get_min_max_from_manifest`, `Manifest.prune_files`) find a column by NAME, so
+a live schema pruned by projection pushdown cannot redirect them to another
+column's bounds.
 """
 
 from __future__ import annotations
 
 from opteryx.expression import NodeType
-from opteryx.models.file_entry import FileEntry
-from opteryx.models.manifest import Manifest
+from opteryx.connectors.opteryx_connector import _catalog_manifest
 from opteryx.planner.optimizer.strategies.statistics_only_response import (
     get_min_max_from_manifest,
 )
@@ -25,23 +29,16 @@ from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
-from opteryx.compiled.structures.expressions import ExprArena
-
-# One expression arena for the expressions this module builds outside any query.
-_TEST_ARENA = ExprArena()
-
-# Bound columns are minted by a query's ColumnTable; these tests share one.
-_PLAN_CONTEXT = PlanContext()
 
 
-def _schema_with_field_ids(names_and_ids):
+def _schema_with_field_ids(plan_context, names_and_ids):
     """Build a RelationSchema whose column order deliberately does NOT match
     the catalog field-ids assigned to those columns — this is exactly the
     "schema evolution reordered things" shape that exposed the bug."""
     return RelationSchema(
         name="t",
         columns=[
-            _PLAN_CONTEXT.columns.relation_column(
+            plan_context.columns.relation_column(
                 "t",
                 n,
                 column_type=INT64,
@@ -52,45 +49,60 @@ def _schema_with_field_ids(names_and_ids):
     )
 
 
-def test_resolve_field_id_prefers_real_field_id_over_position():
-    # "followers" sits at schema position 0, but its real catalog field-id is 5.
-    schema = _schema_with_field_ids([("followers", 5), ("tweet_id", 1)])
-    manifest = Manifest(files=[], schema=schema)
+def _row(field_ids, min_values, max_values):
+    """A catalog manifest row: per-column lists in the row's own column order,
+    keyed by its `field_ids` (None = written in schema order)."""
+    row = {
+        "file_path": "f1",
+        "record_count": 10,
+        "file_size_in_bytes": 0,
+        "min_values": min_values,
+        "max_values": max_values,
+    }
+    if field_ids is not None:
+        row["field_ids"] = field_ids
+    return row
 
-    assert manifest._resolve_field_id("followers") == 5
-    assert manifest._resolve_field_id("tweet_id") == 1
+
+def _manifest(schema, rows):
+    return _catalog_manifest(schema, False, rows, {}, None)
 
 
-def test_resolve_field_id_falls_back_to_load_time_position_when_no_field_id():
+def test_catalog_rows_are_keyed_by_real_field_id_over_position():
+    plan_context = PlanContext()
+    # "followers" sits at schema position 0, but its real catalog field-id is 5;
+    # the row lists its columns in its own order (tweet_id, followers).
+    schema = _schema_with_field_ids(plan_context, [("followers", 5), ("tweet_id", 1)])
+    manifest = _manifest(schema, [_row([1, 5], [100, 7], [999, 42])])
+
+    assert manifest.min_max("followers") == (7, 42)
+    assert manifest.min_max("tweet_id") == (100, 999)
+
+
+def test_catalog_rows_without_field_ids_are_positional():
+    plan_context = PlanContext()
     schema = RelationSchema(
         name="t",
         columns=[
-            _PLAN_CONTEXT.columns.relation_column("t", "a", column_type=INT64),
-            _PLAN_CONTEXT.columns.relation_column("t", "b", column_type=INT64),
+            plan_context.columns.relation_column("t", "a", column_type=INT64),
+            plan_context.columns.relation_column("t", "b", column_type=INT64),
         ],
     )
-    manifest = Manifest(files=[], schema=schema)
+    manifest = _manifest(schema, [_row(None, [1, 10], [2, 20])])
 
-    assert manifest._resolve_field_id("a") == 0
-    assert manifest._resolve_field_id("b") == 1
+    assert manifest.min_max("a") == (1, 2)
+    assert manifest.min_max("b") == (10, 20)
 
 
 def test_get_min_max_from_manifest_reads_correct_column_via_field_id():
+    plan_context = PlanContext()
     # Two columns; the file's own min/max lists are in "tweet_id, followers"
     # order (positions 0/1) but the *schema's* field-ids for them are 1 and 5
     # respectively (mirrors the reported gdelt_events-style mismatch).
-    schema = _schema_with_field_ids([("followers", 5), ("tweet_id", 1)])
+    schema = _schema_with_field_ids(plan_context, [("followers", 5), ("tweet_id", 1)])
 
-    file_entry = FileEntry(
-        file_path="f1",
-        file_format="PARQUET",
-        record_count=10,
-        file_size_in_bytes=0,
-        lower_bounds={1: 100, 5: 7},  # tweet_id min=100, followers min=7
-        upper_bounds={1: 999, 5: 42},  # tweet_id max=999, followers max=42
-    )
-
-    manifest = Manifest(files=[file_entry], schema=schema, stats_are_authoritative=True)
+    # tweet_id min=100 max=999, followers min=7 max=42
+    manifest = _manifest(schema, [_row([1, 5], [100, 7], [999, 42])])
 
     assert get_min_max_from_manifest(manifest, "followers", "MIN") == 7
     assert get_min_max_from_manifest(manifest, "followers", "MAX") == 42
@@ -98,55 +110,25 @@ def test_get_min_max_from_manifest_reads_correct_column_via_field_id():
     assert get_min_max_from_manifest(manifest, "tweet_id", "MAX") == 999
 
 
-def test_get_min_max_from_manifest_does_not_use_positional_min_values_when_field_id_keyed_bounds_exist():
-    # Regression guard: even if a legacy positional min_values/max_values list
-    # is present (backward-compat leftover), the field-id-keyed lower_bounds/
-    # upper_bounds dict must win — indexing the positional list by a real
-    # field-id (5) would go out of range / read the wrong slot.
-    schema = _schema_with_field_ids([("followers", 5)])
-
-    file_entry = FileEntry(
-        file_path="f1",
-        file_format="PARQUET",
-        record_count=10,
-        file_size_in_bytes=0,
-        lower_bounds={5: 7},
-        upper_bounds={5: 42},
-        min_values=[999],  # positional list — index 5 would be out of range
-        max_values=[999],
-    )
-
-    manifest = Manifest(files=[file_entry], schema=schema, stats_are_authoritative=True)
-
-    assert get_min_max_from_manifest(manifest, "followers", "MIN") == 7
-    assert get_min_max_from_manifest(manifest, "followers", "MAX") == 42
-
-
 def test_prune_files_resolves_field_id_after_projection_pushdown():
     plan_context = PlanContext()
     # Reproduce the documented "MAX(followers) answered with MAX(tweet_id)"
-    # shape: after projection pushdown, self.schema is pruned down to just
-    # `followers` at schema position 0 — but the file's real bounds are keyed
-    # by followers' true field-id (5), not position 0.
-    pruned_schema = _schema_with_field_ids([("followers", 5)])
+    # shape: the manifest is built over the load-time schema (tweet_id at
+    # position 0, followers at position 1, field ids 1 and 5), then projection
+    # pushdown prunes the live schema down to just `followers` - now at live
+    # position 0, which holds tweet_id's bounds.
+    schema = _schema_with_field_ids(plan_context, [("tweet_id", 1), ("followers", 5)])
+    manifest = _manifest(schema, [_row([1, 5], [100, 7], [999, 42])])
+    manifest.schema.columns = [manifest.schema.columns[1]]
 
-    file_entry = FileEntry(
-        file_path="f1",
-        file_format="PARQUET",
-        record_count=10,
-        file_size_in_bytes=0,
-        lower_bounds={5: 7},
-        upper_bounds={5: 42},
+    # `followers > 100` should prune the file (max is 42), not read tweet_id's
+    # bounds (max 999) and keep it.
+    identifier = LogicalColumn(
+        node_type=NodeType.IDENTIFIER, source_column="followers", arena=plan_context.expressions
     )
-    manifest = Manifest(files=[file_entry], schema=pruned_schema)
-
-    # `followers > 100` should prune the file (max is 42), not silently read
-    # field_id=0 (which doesn't exist in lower_bounds/upper_bounds) and skip
-    # pruning.
-    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="followers", arena=_TEST_ARENA)
-    literal = Literal(type=INT64, value=100, arena=_TEST_ARENA)
-    predicate = Comparison(value="Gt", left=identifier, right=literal, arena=_TEST_ARENA)
+    literal = Literal(type=INT64, value=100, arena=plan_context.expressions)
+    predicate = Comparison(value="Gt", left=identifier, right=literal, arena=plan_context.expressions)
 
     manifest = manifest.prune_files([predicate], plan_context=plan_context)
 
-    assert manifest.files == []
+    assert manifest.get_file_count() == 0

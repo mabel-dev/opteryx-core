@@ -15,19 +15,27 @@ from opteryx.connectors.local_store_connector import LocalStoreConnector
 from opteryx.exceptions import ConcurrentModificationError
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.expression import NodeType
-from opteryx.models.file_entry import FileEntry
+from opteryx.compiled.planner.native_manifest import decode_manifest_parquet
 from opteryx.models.manifest import Manifest
-from opteryx.models.manifest_io import read_manifest_file_entries
 from opteryx.types.logical_type import INT64, TIMESTAMP, VARCHAR
 from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
-from opteryx.compiled.structures.expressions import ExprArena
 
-# One expression arena for the expressions this module builds outside any query.
-_TEST_ARENA = ExprArena()
+
+def _decode(manifest_bytes, schema, bounds_are_ordinal=True):
+    """Manifest parquet bytes as the NativeManifest this store's reader builds
+    (positional lists - the store's schemas carry no field ids)."""
+    return decode_manifest_parquet(
+        manifest_bytes,
+        tuple(c.name for c in schema.columns),
+        tuple(c.column_type.physical for c in schema.columns),
+        {},
+        bounds_are_ordinal,
+        True,
+    )
 
 
 @pytest.fixture
@@ -177,12 +185,11 @@ def test_truncate_creates_empty_snapshot(connector, simple_schema):
     assert snapshot["parent_snapshot"] is None
     assert snapshot["manifest_file"] is not None
 
-    # The manifest it points to has zero file entries
+    # The manifest it points to has zero files
     manifest_path = os.path.join(table_dir, snapshot["manifest_file"])
     with open(manifest_path, "rb") as f:
         manifest_bytes = f.read()
-    entries, _native = read_manifest_file_entries(manifest_bytes)
-    assert entries == []
+    assert len(_decode(manifest_bytes, simple_schema, snapshot["bounds_are_ordinal"])) == 0
 
 
 def _rows(*files):
@@ -226,12 +233,11 @@ def test_insert_appends_to_snapshot_chain(connector, simple_schema):
     manifest_path = os.path.join(table_dir, snapshot2["manifest_file"])
     with open(manifest_path, "rb") as f:
         manifest_bytes = f.read()
-    entries, _native = read_manifest_file_entries(manifest_bytes)
-    assert len(entries) == 2
+    native = _decode(manifest_bytes, simple_schema, snapshot2["bounds_are_ordinal"])
+    assert len(native) == 2
 
-    # First file should match entry1
-    assert entries[0].file_path == "data-001.parquet"
-    assert entries[1].file_path == "data-002.parquet"
+    # The carried file first, then the appended one
+    assert native.file_paths() == ["data-001.parquet", "data-002.parquet"]
 
 
 def test_concurrent_commit_aborts(connector, simple_schema):
@@ -276,22 +282,26 @@ def _one_file_manifest(schema, bounds):
 def test_file_row_manifest_round_trip(simple_schema):
     """A file's row round-trips through the Parquet manifest."""
     data = _one_file_manifest(simple_schema, {0: (5, 95)})
-    restored_entries, _native = read_manifest_file_entries(data)
-    restored = restored_entries[0]
+    native = _decode(data, simple_schema)
+    restored = native.file_row(0)
 
-    assert restored.file_path == "data.parquet"
-    assert restored.file_format == "PARQUET"
-    assert restored.record_count == 1000
-    assert restored.file_size_in_bytes == 50000
-    assert restored.uncompressed_size_in_bytes == 60000
-    assert restored.lower_bounds[0] == 5
-    assert restored.upper_bounds[0] == 95
+    assert len(native) == 1
+    assert restored["file_path"] == "data.parquet"
+    assert restored["file_format"] == "PARQUET"
+    assert restored["record_count"] == 1000
+    assert restored["file_size_in_bytes"] == 50000
+    assert restored["uncompressed_size_in_bytes"] == 60000
+    bounds = native.cell(0, 0)["bounds"]
+    assert bounds["min_ordinal"] == 5
+    assert bounds["max_ordinal"] == 95
 
 
-def _comparison(column_name, op, value):
-    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name, arena=_TEST_ARENA)
-    literal = Literal(value=value, arena=_TEST_ARENA)
-    return Comparison(value=op, left=identifier, right=literal, arena=_TEST_ARENA)
+def _comparison(plan_context, column_name, op, value, column_type):
+    """`column_name <op> value`, built in the arena of the query that prunes."""
+    arena = plan_context.expressions
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name, arena=arena)
+    literal = Literal(value=value, type=column_type, arena=arena)
+    return Comparison(value=op, left=identifier, right=literal, arena=arena)
 
 
 def test_local_store_bounds_are_ordinal_and_prune_through_ordinalize(simple_schema):
@@ -299,17 +309,21 @@ def test_local_store_bounds_are_ordinal_and_prune_through_ordinalize(simple_sche
     writer's, the one ANALYZE writes) and says so in the snapshot; a Manifest
     read with that marker ordinalizes predicate literals before comparing."""
     plan_context = PlanContext()
-    restored_entries, _native = read_manifest_file_entries(_one_file_manifest(simple_schema, {0: (5, 95)}))
+    native = _decode(_one_file_manifest(simple_schema, {0: (5, 95)}), simple_schema)
+    manifest = Manifest(native, simple_schema)
+    assert manifest.bounds_are_ordinal
 
     # id's range is [5, 95] — 1000 is out of range and must prune.
-    manifest = Manifest(files=restored_entries, schema=simple_schema, bounds_are_ordinal=True)
-    manifest = manifest.prune_files([_comparison("id", "Gt", 1000)], plan_context=plan_context)
-    assert manifest.files == []
+    pruned = manifest.prune_files(
+        [_comparison(plan_context, "id", "Gt", 1000, INT64)], plan_context=plan_context
+    )
+    assert pruned.get_file_count() == 0
 
     # 50 is within [5, 95] and must be kept.
-    manifest = Manifest(files=restored_entries, schema=simple_schema, bounds_are_ordinal=True)
-    manifest = manifest.prune_files([_comparison("id", "Eq", 50)], plan_context=plan_context)
-    assert len(manifest.files) == 1
+    kept = manifest.prune_files(
+        [_comparison(plan_context, "id", "Eq", 50, INT64)], plan_context=plan_context
+    )
+    assert kept.get_file_paths() == ["data.parquet"]
 
 
 def test_a_manifest_from_before_the_ordinal_marker_is_rewritten_ordinal():
@@ -351,6 +365,6 @@ def test_a_manifest_from_before_the_ordinal_marker_is_rewritten_ordinal():
     carried = decode_manifest_parquet(old_manifest, ("f",), (FLOAT64.physical,), {}, False, True)
     rewritten = _assemble(schema, carried=carried, carried_positions=[0]).to_parquet()
 
-    entries, _native = read_manifest_file_entries(rewritten)
-    assert entries[0].min_values == [FLOAT64.ordinalize(0.5)]
-    assert entries[0].max_values == [FLOAT64.ordinalize(9.5)]
+    bounds = _decode(rewritten, schema).cell(0, 0)["bounds"]
+    assert bounds["min_ordinal"] == FLOAT64.ordinalize(0.5)
+    assert bounds["max_ordinal"] == FLOAT64.ordinalize(9.5)

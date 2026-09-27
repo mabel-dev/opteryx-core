@@ -120,7 +120,7 @@ def test_dataset_metadata_is_the_declared_schema_and_an_empty_manifest():
     schema, manifest = table.get_dataset_metadata()
 
     assert [column.name for column in schema.columns] == ["id", "name"]
-    assert manifest.files == []
+    assert manifest.get_file_count() == 0
     assert manifest.get_file_paths() == []
     assert table.dataset_committed_at is None
 

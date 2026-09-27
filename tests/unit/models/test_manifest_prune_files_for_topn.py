@@ -8,8 +8,8 @@ Manifest.prune_files_for_topn - file pruning for `ORDER BY <col> LIMIT n`.
 
 Drops files that provably cannot hold any of the top-`limit` rows of a
 single-column sort, using per-file (lower_bound, upper_bound, record_count)
-already in the manifest. See the method's own docstring
-(opteryx/models/manifest.py) for the accumulation algorithm.
+already in the manifest. The pruning is native: see prune_files_for_topn in
+src/cpp/planner/manifest_prune.hpp for the accumulation algorithm.
 
 Precondition enforced by the CALLER (TopNManifestPruningStrategy), not this
 method: the sort column must have zero NULLs across the manifest. These
@@ -24,11 +24,11 @@ import os
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.models.file_entry import FileEntry
-from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import INT64
 from opteryx.types.schema import RelationSchema
 from opteryx.planner.plan_context import PlanContext
+from tests.manifests import FileSpec
+from tests.manifests import build_manifest
 
 # Bound columns are minted by a query's ColumnTable; these tests share one.
 _PLAN_CONTEXT = PlanContext()
@@ -48,14 +48,16 @@ def _schema(column_name="project"):
 
 
 def _file(path, lo, hi, record_count):
-    return FileEntry(
+    return FileSpec(
         file_path=path,
-        file_format="PARQUET",
         record_count=record_count,
-        file_size_in_bytes=0,
         lower_bounds={0: lo},
         upper_bounds={0: hi},
     )
+
+
+def _manifest(files, sketches=None):
+    return build_manifest(_schema(), files, sketches=sketches)
 
 
 def test_desc_prunes_file_entirely_below_the_guaranteed_floor():
@@ -67,11 +69,11 @@ def test_desc_prunes_file_entirely_below_the_guaranteed_floor():
         _file("grape_jackfruit", 41, 60, 10),
         _file("lemon_melon", 61, 80, 10),
     ]
-    manifest = Manifest(files=files, schema=_schema())
+    manifest = _manifest(files)
 
     manifest = manifest.prune_files_for_topn("project", descending=True, limit=5)
 
-    assert [f.file_path for f in manifest.files] == ["lemon_melon"]
+    assert manifest.get_file_paths() == ["lemon_melon"]
 
 
 def test_asc_is_the_mirror_of_desc():
@@ -81,11 +83,11 @@ def test_asc_is_the_mirror_of_desc():
         _file("grape_jackfruit", 41, 60, 10),
         _file("lemon_melon", 61, 80, 10),
     ]
-    manifest = Manifest(files=files, schema=_schema())
+    manifest = _manifest(files)
 
     manifest = manifest.prune_files_for_topn("project", descending=False, limit=5)
 
-    assert [f.file_path for f in manifest.files] == ["apple_banana"]
+    assert manifest.get_file_paths() == ["apple_banana"]
 
 
 def test_desc_needs_two_files_when_the_top_file_is_short_of_the_limit():
@@ -94,13 +96,13 @@ def test_desc_needs_two_files_when_the_top_file_is_short_of_the_limit():
         _file("middle", 50, 89, 10),
         _file("bottom", 0, 49, 10),
     ]
-    manifest = Manifest(files=files, schema=_schema())
+    manifest = _manifest(files)
 
     manifest = manifest.prune_files_for_topn("project", descending=True, limit=5)
 
     # top (3) + middle (10) = 13 >= 5; threshold = min(lo) over {top, middle}
     # = min(90, 50) = 50, so "bottom" (max 49) is provably excluded.
-    assert {f.file_path for f in manifest.files} == {"top", "middle"}
+    assert set(manifest.get_file_paths()) == {"top", "middle"}
 
 
 def test_threshold_is_the_minimum_lower_bound_across_all_included_files_not_just_the_last():
@@ -122,11 +124,11 @@ def test_threshold_is_the_minimum_lower_bound_across_all_included_files_not_just
         _file("B", 10, 90, 3),
         _file("D", 7, 8, 1),  # max=8: survives under threshold=5, dies under threshold=10
     ]
-    manifest = Manifest(files=files, schema=_schema())
+    manifest = _manifest(files)
 
     manifest = manifest.prune_files_for_topn("project", descending=True, limit=5)
 
-    kept = {f.file_path for f in manifest.files}
+    kept = set(manifest.get_file_paths())
     assert "D" in kept, kept
 
 
@@ -136,31 +138,24 @@ def test_tie_at_the_boundary_is_kept_inclusive():
         _file("tied", 100, 100, 5),  # same max as the threshold - must survive
         _file("loser", 1, 99, 100),
     ]
-    manifest = Manifest(files=files, schema=_schema())
+    manifest = _manifest(files)
 
     manifest = manifest.prune_files_for_topn("project", descending=True, limit=5)
 
-    assert {f.file_path for f in manifest.files} == {"winner", "tied"}
+    assert set(manifest.get_file_paths()) == {"winner", "tied"}
 
 
 def test_file_with_no_bounds_is_always_kept_and_not_used_to_tighten_the_threshold():
     files = [
         _file("has_stats_high", 90, 100, 5),
-        FileEntry(
-            file_path="no_stats",
-            file_format="PARQUET",
-            record_count=1000,
-            file_size_in_bytes=0,
-            lower_bounds=None,
-            upper_bounds=None,
-        ),
+        FileSpec(file_path="no_stats", record_count=1000),
         _file("has_stats_low", 0, 10, 5),
     ]
-    manifest = Manifest(files=files, schema=_schema())
+    manifest = _manifest(files)
 
     manifest = manifest.prune_files_for_topn("project", descending=True, limit=5)
 
-    kept = {f.file_path for f in manifest.files}
+    kept = set(manifest.get_file_paths())
     assert "no_stats" in kept, kept
     assert "has_stats_high" in kept, kept
     assert "has_stats_low" not in kept, kept
@@ -171,11 +166,11 @@ def test_limit_larger_than_total_stats_bearing_rows_prunes_nothing():
         _file("a", 1, 10, 5),
         _file("b", 11, 20, 5),
     ]
-    manifest = Manifest(files=files, schema=_schema())
+    manifest = _manifest(files)
 
     manifest = manifest.prune_files_for_topn("project", descending=True, limit=1000)
 
-    assert {f.file_path for f in manifest.files} == {"a", "b"}
+    assert set(manifest.get_file_paths()) == {"a", "b"}
 
 
 def test_accumulated_exactly_equal_to_limit_stops_there():
@@ -183,53 +178,67 @@ def test_accumulated_exactly_equal_to_limit_stops_there():
         _file("top", 50, 100, 5),
         _file("bottom", 0, 49, 5),
     ]
-    manifest = Manifest(files=files, schema=_schema())
+    manifest = _manifest(files)
 
     manifest = manifest.prune_files_for_topn("project", descending=True, limit=5)
 
-    assert [f.file_path for f in manifest.files] == ["top"]
+    assert manifest.get_file_paths() == ["top"]
 
 
 def test_unresolvable_column_is_a_no_op():
     files = [_file("a", 1, 10, 5)]
-    manifest = Manifest(files=files, schema=_schema())
+    manifest = _manifest(files)
 
     manifest = manifest.prune_files_for_topn("does_not_exist", descending=True, limit=1)
 
-    assert [f.file_path for f in manifest.files] == ["a"]
+    assert manifest.get_file_paths() == ["a"]
 
 
 def test_zero_or_negative_limit_is_a_no_op():
     files = [_file("a", 1, 10, 5)]
-    manifest = Manifest(files=files, schema=_schema())
+    manifest = _manifest(files)
 
     manifest = manifest.prune_files_for_topn("project", descending=True, limit=0)
-    assert [f.file_path for f in manifest.files] == ["a"]
+    assert manifest.get_file_paths() == ["a"]
 
 
-def test_live_rows_stay_aligned_after_pruning_for_topn():
-    # Mirrors the _live_rows bookkeeping prune_files itself relies on for
-    # sketch-vector alignment - a second shrink (e.g. WHERE-predicate pruning
-    # followed by topn pruning) must keep mapping to ORIGINAL file position,
-    # not position-after-first-shrink.
+def _min_k_vector(per_file_hashes):
+    """array<array<uint64>> min-k vector: [file][column][hash]."""
+    from draken import draken_native as _dn
+
+    return _dn.vector_array_from_sequence(
+        per_file_hashes, element_type=_dn.DrakenType.UINT64.value, nesting_depth=2
+    )
+
+
+def test_sketch_rows_stay_aligned_after_pruning_for_topn():
+    # Sketch vectors are laid out one outer row per ORIGINAL file. A second
+    # shrink (e.g. WHERE-predicate pruning followed by topn pruning) must keep
+    # each surviving file mapped to its ORIGINAL sketch row, not to its
+    # position in the already-once-shrunk file list.
     files = [
         _file("keep_first", 100, 100, 5),
         _file("drop_by_where", 1, 1, 5),
         _file("keep_second", 90, 99, 5),
     ]
-    manifest = Manifest(files=files, schema=_schema())
+    # Distinct counts 3 / 5 / 7 per file, so the sketch a file reads back
+    # names the row it is mapped to (the KMV union is exact below K).
+    sketches = {
+        "min_k_hashes": _min_k_vector(
+            [[list(range(1, 4))], [list(range(1, 6))], [list(range(1, 8))]]
+        )
+    }
+    manifest = _manifest(files, sketches=sketches)
 
     # Simulate a prior WHERE-predicate prune that already dropped the middle
     # file, the way ManifestPruningStrategy would run before this strategy.
-    manifest.files = [files[0], files[2]]
-    manifest._live_rows = [0, 2]
+    manifest = manifest.subset([0, 2])
 
     manifest = manifest.prune_files_for_topn("project", descending=True, limit=3)
 
     # keep_first alone (record_count=5) already satisfies LIMIT 3, so
     # keep_second (max=99 < threshold=100) is dropped by this second pass -
-    # its surviving row index must still be the ORIGINAL position (0), not
-    # its position (0) in the already-once-shrunk 2-file list mistaken for
-    # a fresh identity mapping.
-    assert manifest._live_rows == [0]
-    assert [f.file_path for f in manifest.files] == ["keep_first"]
+    # and the survivor must still read the sketch of its ORIGINAL row (0,
+    # 3 distinct), not the row at its position in the shrunk list.
+    assert manifest.get_file_paths() == ["keep_first"]
+    assert manifest.estimate_cardinality("project") == 3

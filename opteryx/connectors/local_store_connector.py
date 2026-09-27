@@ -106,6 +106,45 @@ def _assemble(schema: RelationDescriptor, carried=None, carried_positions=None, 
     return builder.build({})
 
 
+def _read_snapshot(relation_dir: str, snapshot_name: Optional[str]) -> dict:
+    """Read the snapshot commit-log pointer.
+
+    Args:
+        relation_dir: Path to relation directory
+        snapshot_name: Filename of snapshot (e.g., "snapshot-2026-05-06T12-34-56-123456Z.json")
+
+    Returns:
+        Small dict: format_version, created_at, parent_snapshot, manifest_file
+        (the sibling Parquet manifest's name; None entries have no manifest).
+
+    Raises:
+        FileNotFoundError: If snapshot doesn't exist
+    """
+    if snapshot_name is None:
+        return {"manifest_file": None}
+    snapshot_path = os.path.join(relation_dir, snapshot_name)
+    with open(snapshot_path, "r") as f:
+        return json.load(f)
+
+def _read_current_rows(relation_dir: str, descriptor: DatasetDescriptor):
+    """The dataset's current files as native rows over its schema (its
+    snapshot's manifest, decoded natively), or None when the snapshot has
+    no manifest. A manifest written before this store recorded ordinal
+    bounds reads in the decoded dialect it was written in."""
+    from opteryx.compiled.planner.native_manifest import decode_manifest_parquet
+
+    snapshot = _read_snapshot(relation_dir, descriptor.current_snapshot)
+    manifest_file = snapshot.get("manifest_file")
+    if not manifest_file:
+        return None
+    with open(os.path.join(relation_dir, manifest_file), "rb") as f:
+        manifest_bytes = f.read()
+    names, physical = _schema_layout(descriptor.schema)
+    return decode_manifest_parquet(
+        manifest_bytes, names, physical, {}, snapshot.get("bounds_are_ordinal", False), True
+    )
+
+
 class LocalStoreConnector(Eidetic, Writable, BaseConnector):
     """Local file-based storage connector.
 
@@ -200,46 +239,8 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             data = json.load(f)
         return DatasetDescriptor.from_dict(data)
 
-    def _read_snapshot(self, relation_dir: str, snapshot_name: Optional[str]) -> dict:
-        """Read the snapshot commit-log pointer.
-
-        Args:
-            relation_dir: Path to relation directory
-            snapshot_name: Filename of snapshot (e.g., "snapshot-2026-05-06T12-34-56-123456Z.json")
-
-        Returns:
-            Small dict: format_version, created_at, parent_snapshot, manifest_file
-            (the sibling Parquet manifest's name; None entries have no manifest).
-
-        Raises:
-            FileNotFoundError: If snapshot doesn't exist
-        """
-        if snapshot_name is None:
-            return {"manifest_file": None}
-        snapshot_path = os.path.join(relation_dir, snapshot_name)
-        with open(snapshot_path, "r") as f:
-            return json.load(f)
-
-    def _read_current_rows(self, relation_dir: str, descriptor: DatasetDescriptor):
-        """The dataset's current files as native rows over its schema (its
-        snapshot's manifest, decoded natively), or None when the snapshot has
-        no manifest. A manifest written before this store recorded ordinal
-        bounds reads in the decoded dialect it was written in."""
-        from opteryx.compiled.planner.native_manifest import decode_manifest_parquet
-
-        snapshot = self._read_snapshot(relation_dir, descriptor.current_snapshot)
-        manifest_file = snapshot.get("manifest_file")
-        if not manifest_file:
-            return None
-        with open(os.path.join(relation_dir, manifest_file), "rb") as f:
-            manifest_bytes = f.read()
-        names, physical = _schema_layout(descriptor.schema)
-        return decode_manifest_parquet(
-            manifest_bytes, names, physical, {}, snapshot.get("bounds_are_ordinal", False), True
-        )
-
     def _current_file_count(self, relation_dir: str, descriptor: DatasetDescriptor) -> int:
-        rows = self._read_current_rows(relation_dir, descriptor)
+        rows = _read_current_rows(relation_dir, descriptor)
         return 0 if rows is None else len(rows)
 
     def create_relation(
@@ -1202,7 +1203,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
 
         # The current files, carried as they are, then the new ones
         base_descriptor = self._read_dataset_json(relation_dir)
-        current = self._read_current_rows(relation_dir, base_descriptor)
+        current = _read_current_rows(relation_dir, base_descriptor)
         schema = base_descriptor.schema
         self._commit(
             relation_name,
@@ -1307,7 +1308,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
                 dataset=relation_name, connector=self.__class__.__name__
             )
 
-        current = self._read_current_rows(relation_dir, descriptor)
+        current = _read_current_rows(relation_dir, descriptor)
         new_schema = RelationDescriptor(name=relation_name, columns=new_columns)
         # each surviving column's source position (statistics are keyed by
         # position, so a drop shifts every later column's); an added column
@@ -1860,7 +1861,7 @@ class LocalStoreTable(BaseTable):
 
         native = None
         if descriptor.current_snapshot is not None:
-            native = self._read_current_rows(relation_dir, descriptor)
+            native = _read_current_rows(relation_dir, descriptor)
         if native is None:
             native = _assemble(self.schema)
         else:

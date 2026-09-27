@@ -16,17 +16,25 @@ from opteryx.exceptions import (
     ReadOnlyConnectorError,
     UnsupportedSyntaxError,
 )
-from opteryx.models.manifest_io import read_manifest_file_entries
+from opteryx.compiled.planner.native_manifest import decode_manifest_parquet
+from opteryx.models.dataset_descriptor import DatasetDescriptor
 
 
-def _manifest_entries(dataset_path, snapshot):
-    """Decode the FileEntry list from the manifest a snapshot pointer names."""
-    manifest_file = snapshot.get("manifest_file")
-    if not manifest_file:
-        return []
-    with open(dataset_path / manifest_file, "rb") as f:
-        entries, _native = read_manifest_file_entries(f.read())
-    return entries
+def _manifest_file_paths(dataset_path, snapshot):
+    """The data file paths in the manifest a snapshot pointer names, decoded
+    natively over the relation's schema (positional: no field ids)."""
+    with open(dataset_path / "dataset.json") as f:
+        schema = DatasetDescriptor.from_dict(json.load(f)).schema
+    with open(dataset_path / snapshot["manifest_file"], "rb") as f:
+        native = decode_manifest_parquet(
+            f.read(),
+            tuple(c.name for c in schema.columns),
+            tuple(c.column_type.physical for c in schema.columns),
+            {},
+            snapshot["bounds_are_ordinal"],
+            True,
+        )
+    return native.file_paths()
 
 
 def _setup_workspace(tmp_path):
@@ -58,7 +66,7 @@ def test_insert_single_row(tmp_path):
     with open(dataset_path / snapshot_name) as f:
         snapshot = json.load(f)
 
-    assert len(_manifest_entries(dataset_path, snapshot)) == 1
+    assert len(_manifest_file_paths(dataset_path, snapshot)) == 1
 
 
 def test_insert_multiple_rows_one_statement(tmp_path):
@@ -86,7 +94,7 @@ def test_insert_multiple_rows_one_statement(tmp_path):
     with open(dataset_path / snapshot_name) as f:
         snapshot = json.load(f)
 
-    assert len(_manifest_entries(dataset_path, snapshot)) == 1
+    assert len(_manifest_file_paths(dataset_path, snapshot)) == 1
 
 
 def test_insert_round_trip_via_rugo(tmp_path):
@@ -112,8 +120,8 @@ def test_insert_round_trip_via_rugo(tmp_path):
         snapshot = json.load(f)
 
     # Verify parquet file can be read via rugo without error
-    entries = _manifest_entries(dataset_path, snapshot)
-    parquet_file = dataset_path / entries[0].file_path
+    file_paths = _manifest_file_paths(dataset_path, snapshot)
+    parquet_file = dataset_path / file_paths[0]
     assert parquet_file.exists(), f"Parquet file not found: {parquet_file}"
 
     with open(parquet_file, "rb") as f:
@@ -160,7 +168,7 @@ def test_insert_two_statements_chain_snapshots(tmp_path):
     assert second_snapshot.get("parent_snapshot") == first_snapshot_name
     # Second snapshot should have 2 files total (1 from first insert + 1 new)
     # The manifest includes all files from the parent
-    assert len(_manifest_entries(dataset_path, second_snapshot)) == 2
+    assert len(_manifest_file_paths(dataset_path, second_snapshot)) == 2
 
 
 def test_insert_into_missing_relation(tmp_path):

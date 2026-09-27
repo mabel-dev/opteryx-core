@@ -9,8 +9,8 @@ that source as it was at the last refresh. Using those as law returns a WRONG
 ANSWER - fewer rows than exist, a stale COUNT, a MIN that is not the minimum -
 and nothing downstream can detect it.
 
-The flag defaults to FALSE (hints) deliberately: a producer that forgets to
-speak up loses an optimisation, where the opposite default would lose rows.
+The flag has no default: every producer (NativeManifestBuilder,
+decode_manifest_parquet) must state it.
 """
 
 import os
@@ -20,8 +20,8 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 import pytest
 
-from opteryx.models.file_entry import FileEntry
-from opteryx.models.manifest import Manifest
+from tests.manifests import FileSpec
+from tests.manifests import build_manifest
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import RelationSchema
 from opteryx.planner.plan_context import PlanContext
@@ -44,26 +44,23 @@ def _schema():
 
 
 def _entry(record_count=100):
-    return FileEntry(
+    return FileSpec(
         file_path="s3://bucket/one.parquet",
         file_format="PARQUET",
         record_count=record_count,
         file_size_in_bytes=1024,
+        lower_bounds={0: 1},
+        upper_bounds={0: 9},
     )
 
 
 def _manifest(authoritative, record_count=100):
-    return Manifest(
-        [_entry(record_count)], _schema(), stats_are_authoritative=authoritative
+    return build_manifest(
+        _schema(), [_entry(record_count)], stats_are_authoritative=authoritative
     )
 
 
 # ---- the flag itself ---------------------------------------------------------
-
-
-def test_the_default_is_hints():
-    """Forgetting to speak up must cost an optimisation, never a row."""
-    assert Manifest([_entry()], _schema()).stats_are_authoritative is False
 
 
 def test_the_flag_survives_a_prune():
@@ -93,6 +90,10 @@ def test_min_max_is_not_answered_from_hint_bounds():
     from opteryx.planner.optimizer.strategies.statistics_only_response import (
         get_min_max_from_manifest,
     )
+
+    # the same bounds ARE the answer when the commit that wrote them made the data
+    assert get_min_max_from_manifest(_manifest(True), "id", "MIN") == 1
+    assert get_min_max_from_manifest(_manifest(True), "id", "MAX") == 9
 
     assert get_min_max_from_manifest(_manifest(False), "id", "MIN") is None
     assert get_min_max_from_manifest(_manifest(False), "id", "MAX") is None

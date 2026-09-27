@@ -239,7 +239,7 @@ inline std::optional<BVal> ceil_int(const BVal& v) {
     return v.kind == BKind::INT ? std::optional<BVal>(v) : to_int(v.d, true);
 }
 
-// --- interval rules (predicate_bounds.py) ------------------------------------
+// --- interval rules ----------------------------------------------------------
 
 // Interval on x given `iv` holds for y = multiplier * x + addend; bounds move
 // OUTWARD. nullopt: declined.

@@ -4,9 +4,10 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-`predicate_bounds` — SOUNDNESS, by oracle.
+Predicate bounds derivation (src/cpp/planner/predicate_bounds.hpp, read through
+`native_manifest.derivation`) — SOUNDNESS, by oracle.
 
-Every rule in that module claims: "a row matching this predicate lies inside
+Every rule in that derivation claims: "a row matching this predicate lies inside
 this interval". The tests here check that claim the only way it can honestly be
 checked — by evaluating the real predicate over a domain of values, and
 asserting that EVERY value it matches is admitted by the derived bounds.
@@ -41,9 +42,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 from opteryx.expression import NodeType
 from opteryx.planner import build_literal_node
-from opteryx.planner.optimizer.predicate_bounds import derive_bound_conjuncts
-from opteryx.planner.optimizer.predicate_bounds import derive_case_fold_conjuncts
-from opteryx.planner.optimizer.predicate_bounds import derive_null_terms
+from opteryx.compiled.planner.native_manifest import derivation
 from opteryx.types.logical_type import DATE
 from opteryx.types.logical_type import FLOAT64
 from opteryx.types.logical_type import INT64
@@ -85,8 +84,46 @@ def arithmetic(left, operator, right):
 
 
 def types_of(**mapping):
-    """A `column_type_for` callback over a literal name->ColumnType mapping."""
-    return lambda name: mapping.get(name)
+    """The live schema's column types, name -> ColumnType (the derivation reads
+    a column's type from it, as the manifest's live schema)."""
+    return mapping
+
+
+# ---------------------------------------------------------------------------
+# The derivation, through its native view
+# ---------------------------------------------------------------------------
+
+
+def _derivation(conjuncts, column_types=None):
+    """What the native derivation makes of `conjuncts` (a conjunction):
+    {"terms": [(column, op, value, upper, derived)], "nulls": [(column,
+    requires_null)], "folds": [(column, lower, [term])]}."""
+    live_types = {name: column_type.type_id for name, column_type in (column_types or {}).items()}
+    return derivation(
+        _CONTEXT.expressions,
+        _CONTEXT.columns,
+        [conjunct.expr_id for conjunct in conjuncts],
+        live_types,
+    )
+
+
+def _pairs(terms):
+    """(op, value) of each term - a derived term is never a BETWEEN."""
+    for _column, _op, _value, upper, _derived in terms:
+        assert upper is None
+    return [(op, value) for _column, op, value, _upper, _derived in terms]
+
+
+def derive_null_terms(conjuncts):
+    return _derivation(conjuncts)["nulls"]
+
+
+def derive_case_fold_terms(conjuncts):
+    """(column, fold, [(op, value)]) per case-folded conjunct."""
+    return [
+        (column, "LOWER" if lower else "UPPER", _pairs(terms))
+        for column, lower, terms in _derivation(conjuncts)["folds"]
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -104,17 +141,17 @@ _ADMITS = {
 
 
 def derived_terms(conjunct, column_type_for=None):
-    """Just the DERIVED conjuncts — the originals come back first and unchanged,
-    which is itself asserted in `test_original_conjuncts_pass_through`."""
-    plan_context = _CONTEXT
-    produced = derive_bound_conjuncts([conjunct], column_type_for, plan_context=plan_context)
-    return [term for term in produced if term is not conjunct]
+    """Just the DERIVED terms, as (op, value) — the originals come back first
+    and unchanged, which is itself asserted in
+    `test_original_conjuncts_pass_through_untouched`."""
+    terms = _derivation([conjunct], column_type_for)["terms"]
+    return _pairs([term for term in terms if term[4]])
 
 
 def admits(terms, value) -> bool:
     """Would the derived bounds let a row holding `value` through?"""
-    for term in terms:
-        if not _ADMITS[term.value](value, term.right.value):
+    for op, bound in terms:
+        if not _ADMITS[op](value, bound):
             return False
     return True
 
@@ -132,7 +169,7 @@ def assert_sound(conjunct, domain, matches, column_type_for=None, expect_terms=T
         if matches(value):
             assert admits(terms, value), (
                 f"UNSOUND: {value!r} matches the predicate but the derived bounds "
-                f"{[(t.value, t.right.value) for t in terms]} exclude it"
+                f"{terms} exclude it"
             )
     return terms
 
@@ -154,12 +191,10 @@ def assert_excludes_something(terms, domain, matches):
 
 def test_original_conjuncts_pass_through_untouched():
     """A caller swapping its splitter for this must not lose anything it had."""
-    plan_context = _CONTEXT
     first = compare(ident("a"), "Gt", lit(5))
     second = compare(ident("b"), "Eq", lit("x"))
-    produced = derive_bound_conjuncts([first, second], plan_context=plan_context)
-    assert produced[0] is first
-    assert produced[1] is second
+    produced = _derivation([first, second])["terms"]
+    assert produced[:2] == [("a", "Gt", 5, None, False), ("b", "Eq", b"x", None, False)]
 
 
 def test_canonical_comparison_is_not_re_derived():
@@ -169,11 +204,11 @@ def test_canonical_comparison_is_not_re_derived():
 
 
 def test_and_tree_is_split():
-    plan_context = _CONTEXT
     left = compare(ident("a"), "Gt", lit(5))
     right = compare(ident("b"), "Lt", lit(9))
-    produced = derive_bound_conjuncts([And(left=left, right=right, arena=_TEST_ARENA)], plan_context=plan_context)
-    assert left in produced and right in produced
+    produced = _derivation([And(left=left, right=right, arena=_TEST_ARENA)])["terms"]
+    assert ("a", "Gt", 5, None, False) in produced
+    assert ("b", "Lt", 9, None, False) in produced
 
 
 # ---------------------------------------------------------------------------
@@ -187,14 +222,14 @@ def test_in_list_derives_the_hull():
     domain = list(range(0, 41))
     terms = assert_sound(conjunct, domain, lambda v: v in values)
     assert_excludes_something(terms, domain, lambda v: v in values)
-    assert sorted((t.value, t.right.value) for t in terms) == [("GtEq", 10), ("LtEq", 30)]
+    assert sorted(terms) == [("GtEq", 10), ("LtEq", 30)]
 
 
 def test_single_member_in_list_derives_an_equality():
     """Equality, not a degenerate range: `Eq` is the one operator the min-k
     membership sketch can eliminate a file on outright."""
     terms = derived_terms(compare(ident(), "InList", lit([7])))
-    assert [(t.value, t.right.value) for t in terms] == [("Eq", 7)]
+    assert terms == [("Eq", 7)]
 
 
 def test_string_in_list_derives_the_hull():
@@ -204,7 +239,7 @@ def test_string_in_list_derives_the_hull():
     domain = [b"aardvark", b"apple", b"fig", b"pear", b"zebra"]
     encoded = [value.encode() for value in values]
     terms = assert_sound(conjunct, domain, lambda v: v in encoded)
-    assert sorted((t.value, t.right.value) for t in terms) == [
+    assert sorted(terms) == [
         ("GtEq", b"apple"),
         ("LtEq", b"pear"),
     ]
@@ -249,7 +284,7 @@ def test_like_prefix_derives_a_range():
     matches = _like_matches("abc%")
     terms = assert_sound(conjunct, _LIKE_DOMAIN, matches)
     assert_excludes_something(terms, _LIKE_DOMAIN, matches)
-    assert sorted((t.value, t.right.value) for t in terms) == [("GtEq", b"abc"), ("Lt", b"abd")]
+    assert sorted(terms) == [("GtEq", b"abc"), ("Lt", b"abd")]
 
 
 def test_like_underscore_wildcard_derives_the_prefix_before_it():
@@ -259,7 +294,7 @@ def test_like_underscore_wildcard_derives_the_prefix_before_it():
 
 def test_like_without_a_wildcard_is_an_equality():
     terms = derived_terms(compare(ident(), "Like", lit("abc")))
-    assert [(t.value, t.right.value) for t in terms] == [("Eq", b"abc")]
+    assert terms == [("Eq", b"abc")]
 
 
 def test_leading_wildcard_declines():
@@ -298,7 +333,7 @@ def test_same_column_or_derives_the_hull():
     matches = lambda v: v in (3, 9)
     terms = assert_sound(arms, domain, matches)
     assert_excludes_something(terms, domain, matches)
-    assert sorted((t.value, t.right.value) for t in terms) == [("GtEq", 3), ("LtEq", 9)]
+    assert sorted(terms) == [("GtEq", 3), ("LtEq", 9)]
 
 
 def test_or_over_different_columns_declines():
@@ -320,7 +355,7 @@ def test_or_with_an_unbounded_arm_loses_that_side():
     domain = list(range(0, 200))
     matches = lambda v: v > 100 or v == 3
     terms = assert_sound(arms, domain, matches)
-    assert [(t.value, t.right.value) for t in terms] == [("GtEq", 3)]
+    assert terms == [("GtEq", 3)]
 
 
 def test_or_with_an_unevaluable_arm_declines():
@@ -383,7 +418,7 @@ def test_constant_on_the_left_of_a_subtraction_reverses_the_axis():
     domain = list(range(-50, 200))
     terms = assert_sound(conjunct, domain, lambda value: 100 - value > 40)
     assert_excludes_something(terms, domain, lambda value: 100 - value > 40)
-    assert [(t.value, t.right.value) for t in terms] == [("Lt", 60)]
+    assert terms == [("Lt", 60)]
 
 
 def test_literal_on_the_left_of_the_comparison_flips_the_operator():
@@ -554,7 +589,7 @@ def test_sign_preimage_is_sound_for_every_target():
 
 def test_sign_equals_one_means_strictly_positive():
     terms = derived_terms(compare(function("SIGN", ident()), "Eq", lit(1)))
-    assert [(t.value, t.right.value) for t in terms] == [("Gt", 0)]
+    assert terms == [("Gt", 0)]
 
 
 # ---------------------------------------------------------------------------
@@ -596,7 +631,7 @@ def test_left_equality_derives_the_prefix_range():
     matches = lambda value: value[:3] == b"abc"
     terms = assert_sound(conjunct, _STRING_DOMAIN, matches)
     assert_excludes_something(terms, _STRING_DOMAIN, matches)
-    assert sorted((t.value, t.right.value) for t in terms) == [("GtEq", b"abc"), ("Lt", b"abd")]
+    assert sorted(terms) == [("GtEq", b"abc"), ("Lt", b"abd")]
 
 
 def test_left_upper_bound_truncates_the_bound_first():
@@ -605,7 +640,7 @@ def test_left_upper_bound_truncates_the_bound_first():
     successor('abc') would have been sound but looser."""
     conjunct = compare(function("LEFT", ident(), lit(2)), "LtEq", lit("abc"))
     terms = assert_sound(conjunct, _STRING_DOMAIN, lambda value: value[:2] <= b"abc")
-    assert [(t.value, t.right.value) for t in terms] == [("Lt", b"ac")]
+    assert terms == [("Lt", b"ac")]
 
 
 def test_substring_from_one_behaves_as_left():
@@ -622,7 +657,7 @@ def test_substring_from_any_other_offset_declines():
 def test_substring_without_a_length_is_the_identity():
     conjunct = compare(function("SUBSTRING", ident(), lit(1)), "GtEq", lit("abc"))
     terms = assert_sound(conjunct, _STRING_DOMAIN, lambda value: value >= b"abc")
-    assert [(t.value, t.right.value) for t in terms] == [("GtEq", b"abc")]
+    assert terms == [("GtEq", b"abc")]
 
 
 def test_non_ascii_bound_emits_no_upper_bound_but_stays_sound():
@@ -631,7 +666,7 @@ def test_non_ascii_bound_emits_no_upper_bound_but_stays_sound():
     through — half the evidence, none of the risk."""
     conjunct = compare(function("LEFT", ident(), lit(3)), "GtEq", lit("é"))
     terms = derived_terms(conjunct)
-    assert [(t.value, t.right.value) for t in terms] == [("GtEq", "é".encode())]
+    assert terms == [("GtEq", "é".encode())]
 
 
 def test_prefix_of_all_high_bytes_emits_no_upper_bound():
@@ -669,7 +704,7 @@ def test_extract_year_equality_derives_exactly_that_year():
     terms = derived_terms(conjunct, types_of(d=DATE))
     start = (datetime.datetime(2024, 1, 1) - _EPOCH).days
     end = (datetime.datetime(2025, 1, 1) - _EPOCH).days
-    assert sorted((t.value, t.right.value) for t in terms) == [("GtEq", start), ("Lt", end)]
+    assert sorted(terms) == [("GtEq", start), ("Lt", end)]
 
 
 def test_extract_year_from_a_timestamp_column_is_sound():
@@ -688,15 +723,16 @@ def test_extract_year_from_a_timestamp_column_is_sound():
             )
 
 
-def test_derived_temporal_literal_carries_the_column_type():
-    """A pushed temporal literal is a PHYSICAL INT; consumers render and compare
-    it from the type tag. An untagged one reads as a plain integer against
-    temporal bounds, which is the class of bug `_temporal_domain_mismatch`
-    exists to catch."""
+def test_derived_temporal_literal_is_the_raw_stored_integer():
+    """A pushed temporal bound is a PHYSICAL INT in the column's own unit. A
+    derived term is not a minted literal and carries no type tag of its own: it
+    is on the raw stored column by construction, so the temporal-domain guard
+    (which reads a literal's declared type) has nothing to trip on."""
     conjunct = compare(function("EXTRACT", lit("year"), ident("ts")), "Eq", lit(2024))
-    for term in derived_terms(conjunct, types_of(ts=TIMESTAMP())):
-        assert term.right.type == TIMESTAMP()
-        assert isinstance(term.right.value, int)
+    terms = derived_terms(conjunct, types_of(ts=TIMESTAMP()))
+    assert terms
+    for _op, value in terms:
+        assert type(value) is int
 
 
 def test_cyclic_extract_parts_decline():
@@ -799,7 +835,7 @@ def test_transforms_compose():
     matches = lambda value: math.floor(value * 2) == 7
     terms = assert_sound(conjunct, _STEP_DOMAIN, matches)
     assert_excludes_something(terms, _STEP_DOMAIN, matches)
-    bounds = sorted((t.value, t.right.value) for t in terms)
+    bounds = sorted(terms)
     # The lower bound is nudged one ulp DOWN of the exact 3.5 — every derived
     # quotient widens, and 3.5 itself is a value the predicate matches.
     assert [t[0] for t in bounds] == ["GtEq", "Lt"]
@@ -830,7 +866,7 @@ def test_between_over_a_transform_derives_both_ends():
         arena=_TEST_ARENA,
     )
     terms = assert_sound(conjunct, _NUMERIC_DOMAIN, lambda v: 20 <= v + 10 <= 30)
-    assert sorted((t.value, t.right.value) for t in terms) == [("GtEq", 10), ("LtEq", 20)]
+    assert sorted(terms) == [("GtEq", 10), ("LtEq", 20)]
 
 
 def test_unknown_functions_decline():
@@ -860,10 +896,7 @@ def test_null_terms_are_found_inside_a_conjunction():
 
 
 def test_no_predicates_derives_nothing():
-    plan_context = _CONTEXT
-    assert derive_bound_conjuncts([], plan_context=plan_context) == []
-    assert derive_bound_conjuncts(None, plan_context=plan_context) == []
-    assert derive_null_terms(None) == []
+    assert _derivation([]) == {"terms": [], "nulls": [], "folds": []}
 
 
 # ---------------------------------------------------------------------------
@@ -873,77 +906,69 @@ def test_no_predicates_derives_nothing():
 
 def test_case_fold_terms_never_leak_into_the_ordinary_conjuncts():
     """THE containment rule. These bounds are valid only where the fold is the
-    identity; one reaching `derive_bound_conjuncts` would be applied to every
+    identity; one reaching the ordinary terms would be applied to every
     file, and a file holding 'CAA' would be dropped from `LOWER(col) = 'caa'`."""
     conjunct = compare(function("LOWER", ident("label")), "Eq", lit("caa"))
     assert derived_terms(conjunct) == []
 
 
 def test_lower_equality_derives_a_conditional_point_bound():
-    plan_context = _CONTEXT
     conjunct = compare(function("LOWER", ident("label")), "Eq", lit("caa"))
-    derived = derive_case_fold_conjuncts([conjunct], plan_context=plan_context)
+    derived = derive_case_fold_terms([conjunct])
     assert len(derived) == 1
     column, fold, conjuncts = derived[0]
     assert (column, fold) == ("label", "LOWER")
-    assert [(t.value, t.right.value) for t in conjuncts] == [("Eq", b"caa")]
+    assert conjuncts == [("Eq", b"caa")]
 
 
 def test_upper_equality_derives_against_the_other_fold():
-    plan_context = _CONTEXT
     conjunct = compare(function("UPPER", ident("label")), "Eq", lit("CAA"))
-    column, fold, conjuncts = derive_case_fold_conjuncts([conjunct], plan_context=plan_context)[0]
+    column, fold, conjuncts = derive_case_fold_terms([conjunct])[0]
     assert (column, fold) == ("label", "UPPER")
-    assert [(t.value, t.right.value) for t in conjuncts] == [("Eq", b"CAA")]
+    assert conjuncts == [("Eq", b"CAA")]
 
 
 def test_case_fold_covers_every_comparison_operator():
     """Under identity the fold vanishes entirely, so ranges work as well as
     equality — not just the `=` case."""
-    plan_context = _CONTEXT
     conjunct = compare(function("LOWER", ident("label")), "GtEq", lit("c"))
-    _, _, conjuncts = derive_case_fold_conjuncts([conjunct], plan_context=plan_context)[0]
-    assert [(t.value, t.right.value) for t in conjuncts] == [("GtEq", b"c")]
+    _, _, conjuncts = derive_case_fold_terms([conjunct])[0]
+    assert conjuncts == [("GtEq", b"c")]
 
 
 def test_ci_starts_with_folds_the_pattern_before_deriving():
     """The ILIKE lowering does NOT fold the pattern. Under identity the column
     holds no uppercase, so only the folded pattern can match."""
-    plan_context = _CONTEXT
     conjunct = function("_CI_STARTS_WITH", ident("label"), lit(b"Ca"))
-    column, fold, conjuncts = derive_case_fold_conjuncts([conjunct], plan_context=plan_context)[0]
+    column, fold, conjuncts = derive_case_fold_terms([conjunct])[0]
     assert (column, fold) == ("label", "LOWER")
-    assert sorted((t.value, t.right.value) for t in conjuncts) == [
+    assert sorted(conjuncts) == [
         ("GtEq", b"ca"),
         ("Lt", b"cb"),
     ]
 
 
 def test_ilike_derives_the_folded_prefix():
-    plan_context = _CONTEXT
     conjunct = compare(ident("label"), "ILike", lit("Ca%"))
-    column, fold, conjuncts = derive_case_fold_conjuncts([conjunct], plan_context=plan_context)[0]
+    column, fold, conjuncts = derive_case_fold_terms([conjunct])[0]
     assert (column, fold) == ("label", "LOWER")
-    assert sorted((t.value, t.right.value) for t in conjuncts) == [("GtEq", b"ca"), ("Lt", b"cb")]
+    assert sorted(conjuncts) == [("GtEq", b"ca"), ("Lt", b"cb")]
 
 
 def test_non_ascii_case_fold_declines():
     """Outside ASCII the two folds disagree, and a bound that depends on which
     one ran is a wrong answer on the type it guessed wrong."""
-    plan_context = _CONTEXT
-    assert derive_case_fold_conjuncts([compare(ident("label"), "ILike", lit("Café%"))], plan_context=plan_context) == []
+    assert derive_case_fold_terms([compare(ident("label"), "ILike", lit("Café%"))]) == []
 
 
 def test_case_fold_of_a_non_identifier_declines():
-    plan_context = _CONTEXT
     conjunct = compare(function("LOWER", function("TRIM", ident("label"))), "Eq", lit("caa"))
-    assert derive_case_fold_conjuncts([conjunct], plan_context=plan_context) == []
+    assert derive_case_fold_terms([conjunct]) == []
 
 
 def test_ordinary_predicates_contribute_no_case_fold_terms():
-    plan_context = _CONTEXT
-    assert derive_case_fold_conjuncts([compare(ident("a"), "Eq", lit(5))], plan_context=plan_context) == []
-    assert derive_case_fold_conjuncts([function("_STARTS_WITH", ident("a"), lit(b"ab"))], plan_context=plan_context) == []
+    assert derive_case_fold_terms([compare(ident("a"), "Eq", lit(5))]) == []
+    assert derive_case_fold_terms([function("_STARTS_WITH", ident("a"), lit(b"ab"))]) == []
 
 
 # ---------------------------------------------------------------------------
@@ -954,13 +979,14 @@ def test_ordinary_predicates_contribute_no_case_fold_terms():
 def _ordinal_manifest():
     """A bounds-are-ordinal Manifest over one INT64 column and no files — enough
     to exercise `ordinal_zone_map_terms`, which reads only types and predicates."""
-    from opteryx.models.manifest import Manifest
+    from opteryx.types.schema import RelationSchema
+    from tests.manifests import build_manifest
 
-    column = type("_Column", (), {"name": "seq", "column_type": INT64})()
-    schema = type("_Schema", (), {"columns": [column]})()
-    manifest = Manifest.__new__(Manifest)
-    Manifest.__init__(manifest, files=[], schema=schema, bounds_are_ordinal=True)
-    return manifest
+    schema = RelationSchema(
+        name="t",
+        columns=[_CONTEXT.columns.relation_column("t", "seq", column_type=INT64)],
+    )
+    return build_manifest(schema, [], bounds_are_ordinal=True)
 
 
 def test_row_group_zone_terms_gain_the_same_shapes_as_file_pruning():

@@ -431,25 +431,54 @@ def test_a_manifest_that_cannot_be_read_is_an_error(monkeypatch, status):
         table._read_stats_manifest(None)
 
 
+def _stats_schema():
+    from opteryx.types.schema import ColumnDescriptor
+    from opteryx.types.schema import RelationDescriptor
+
+    return RelationDescriptor(
+        name="planets",
+        columns=[ColumnDescriptor(name="id", column_type=_lt.INT64)],
+    )
+
+
+def _stats_manifest_bytes(files):
+    """A statistics manifest as the refresh writes it: positional lists,
+    ordinal bounds."""
+    from tests.manifests import build_manifest
+
+    return build_manifest(_stats_schema(), files, bounds_are_ordinal=True).native.to_parquet()
+
+
 def test_a_present_manifest_is_actually_read(monkeypatch):
     """The read path runs and releases the handle. It could not before: GcsFile
     is not a context manager, so the `with` that used to wrap this raised
     TypeError on EVERY call and the bare except turned it into "no manifest" -
     the manifest was unreadable for every relation, whatever storage held."""
-    from opteryx.models import manifest_io
+    from tests.manifests import FileSpec
 
-    seen = {}
+    data = _stats_manifest_bytes(
+        [FileSpec("planets", record_count=9, lower_bounds={0: 1}, upper_bounds={0: 9})]
+    )
+    table = _stats_table(monkeypatch, data=data)
 
-    def _fake_read(data):
-        seen["data"] = data
-        return [], None
+    manifest = table._read_stats_manifest(_stats_schema())
 
-    monkeypatch.setattr(manifest_io, "read_manifest_file_entries", _fake_read)
-    table = _stats_table(monkeypatch, data=b"MANIFEST-BYTES")
-
-    assert table._read_stats_manifest(None) is None  # no entries -> no manifest
-    assert seen["data"] == b"MANIFEST-BYTES"
+    assert manifest.get_file_paths() == ["planets"]
+    assert manifest.record_counts() == [9]
+    assert manifest.get_ordinal_bounds("id") == (1, 9)
+    # the refresh's bounds are ordinal keys, and they describe the server as it
+    # was at the last refresh - hints, never law
+    assert manifest.bounds_are_ordinal is True
+    assert manifest.stats_are_authoritative is False
     assert _FakeGcs.last.opened.endswith("/metadata/manifest-planets.parquet")
+    assert _FakeGcs.last.handle.closed is True
+
+
+def test_a_manifest_with_no_files_is_no_manifest(monkeypatch):
+    """A readable manifest that lists no files carries no statistics."""
+    table = _stats_table(monkeypatch, data=_stats_manifest_bytes([]))
+
+    assert table._read_stats_manifest(_stats_schema()) is None
     assert _FakeGcs.last.handle.closed is True
 
 
