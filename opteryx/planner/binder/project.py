@@ -116,8 +116,6 @@ def visit_exit(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
                 for schema_col in expanded:
                     output_name = schema_col.name
                     origin = schema_col.origin
-                    if isinstance(origin, str):
-                        origin = [origin]
                     if name_counts[schema_col.name] > 1 and origin and len(origin) == 1:
                         output_name = f"{origin[0]}.{schema_col.name}"
                     output_columns.append(

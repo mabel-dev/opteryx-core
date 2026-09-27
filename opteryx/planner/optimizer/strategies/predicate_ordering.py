@@ -210,7 +210,7 @@ def rewrite_anded_any_eq_to_contains_all(predicate, telemetry, *, plan_context):
                 value=values_set,
                 type=_arr_ct_po,
                 schema_column=plan_context.columns.constant(
-                    None, column_type=_arr_ct_po, value=values_set
+                    str(values_set), column_type=_arr_ct_po, value=values_set
                 ),
             )
             # column @>> ARRAY[...] - the column (array) on the left

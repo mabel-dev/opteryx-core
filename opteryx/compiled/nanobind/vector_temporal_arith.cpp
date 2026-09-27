@@ -167,15 +167,18 @@ static int parse_part_kind(const char* part) {
 // trunc_kind encoding: 0=year 1=month 2=quarter 3=week 4=day 5=hour 6=minute 7=second
 // ---------------------------------------------------------------------------
 
+// Singular and plural — the same set as _TRUNC_PARTS (compiled_expression.pyx)
+// and TRUNC's declared `unit` domain, so a folded TRUNC accepts what a lowered
+// one does.
 static int parse_trunc_kind(const char* unit) {
-    if (ci_eq(unit, "year"))    return 0;
-    if (ci_eq(unit, "month"))   return 1;
-    if (ci_eq(unit, "quarter")) return 2;
-    if (ci_eq(unit, "week"))    return 3;
-    if (ci_eq(unit, "day"))     return 4;
-    if (ci_eq(unit, "hour"))    return 5;
-    if (ci_eq(unit, "minute"))  return 6;
-    if (ci_eq(unit, "second"))  return 7;
+    if (ci_eq(unit, "year")    || ci_eq(unit, "years"))    return 0;
+    if (ci_eq(unit, "month")   || ci_eq(unit, "months"))   return 1;
+    if (ci_eq(unit, "quarter") || ci_eq(unit, "quarters")) return 2;
+    if (ci_eq(unit, "week")    || ci_eq(unit, "weeks"))    return 3;
+    if (ci_eq(unit, "day")     || ci_eq(unit, "days"))     return 4;
+    if (ci_eq(unit, "hour")    || ci_eq(unit, "hours"))    return 5;
+    if (ci_eq(unit, "minute")  || ci_eq(unit, "minutes"))  return 6;
+    if (ci_eq(unit, "second")  || ci_eq(unit, "seconds"))  return 7;
     return -1;
 }
 
@@ -449,7 +452,7 @@ static nb::object impl_date_trunc(nb::object v_obj, const char* unit_str) {
     if (trunc_kind < 0) {
         PyErr_Format(PyExc_ValueError,
             "vector_date_trunc: unsupported unit '%s'; "
-            "supported: year, quarter, month, week, day, hour, minute, second",
+            "supported (singular or plural): year, quarter, month, week, day, hour, minute, second",
             unit_str);
         throw nb::python_error();
     }

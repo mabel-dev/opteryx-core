@@ -993,6 +993,26 @@ STATEMENTS = [
         ("SELECT * FROM $planets PIVOT (SUM(id) FOR name IN (1))", None, None, UnsupportedSyntaxError),
         # The operand must be JSON text — `id` is an integer.
         ("SELECT * FROM $planets WHERE id IS JSON", None, None, IncorrectTypeError),
+        # A part/unit/mode outside a parameter's declared domain is refused at plan
+        # time, typed — including when constant folding would otherwise hand it to
+        # the kernel, which raised a bare ValueError (fuzzer seed 6860829805210140717).
+        ("SELECT EXTRACT('row', 548096) FROM testdata.satellites", None, None, IncompatibleTypesError),
+        ("SELECT EXTRACT('row', birth_date) FROM testdata.astronauts", None, None, InvalidFunctionParameterError),
+        ("SELECT EXTRACT('ro' || 'w', birth_date) FROM testdata.astronauts", None, None, InvalidFunctionParameterError),
+        ("SELECT EXTRACT('row', CAST('2020-01-01' AS TIMESTAMP))", None, None, InvalidFunctionParameterError),
+        ("SELECT EXTRACT('dow', CAST('2020-01-01' AS TIMESTAMP))", None, None, InvalidFunctionParameterError),
+        ("SELECT DATE_TRUNC('row', CAST('2020-01-01' AS TIMESTAMP))", None, None, InvalidFunctionParameterError),
+        ("SELECT DATEDIFF('row', CAST('2020-01-01' AS TIMESTAMP), CAST('2020-01-02' AS TIMESTAMP))", None, None, InvalidFunctionParameterError),
+        ("SELECT TIME_BUCKET(2, 'row', birth_date) FROM testdata.astronauts", None, None, InvalidFunctionParameterError),
+        ("SELECT REGEXP_REPLACE(name, '^(.*)$', 'x') FROM $planets", None, None, InvalidFunctionParameterError),
+        # ...and every spelling the lowering accepts is inside the domain.
+        ("SELECT EXTRACT('Month', birth_date), EXTRACT(epoch FROM birth_date) FROM testdata.astronauts", 357, 2, None),
+        ("SELECT EXTRACT('year', CAST('2020-01-01' AS TIMESTAMP))", 1, 1, None),
+        ("SELECT DATEDIFF('days', birth_date, death_date) FROM testdata.astronauts", 357, 1, None),
+        ("SELECT DATEDIFF('Days', CAST('2020-01-01' AS TIMESTAMP), CAST('2020-02-01' AS TIMESTAMP))", 1, 1, None),
+        ("SELECT DATE_TRUNC('months', CAST(birth_date AS TIMESTAMP)) FROM testdata.astronauts", 357, 1, None),
+        ("SELECT TRUNC('2023-05-31'::DATE, 'days'), TRUNC('2023-05-31'::DATE, 'Weeks')", 1, 2, None),
+        ("SELECT TIME_BUCKET(2, 'Weeks', birth_date) FROM testdata.astronauts", 357, 1, None),
 ]
 
 # fmt:on

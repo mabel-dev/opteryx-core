@@ -47,11 +47,11 @@ def get_builtin_temporal_extra_functions() -> List[FunctionDefinition]:
                             name="part",
                             type_family="string",
                             constant_only=True,
-                            # The parts draken_date_part actually implements,
-                            # plus `epoch`. This IS the closed set: `week`,
-                            # `dow`, `doy`, `julian` and `date` are NOT among
-                            # them; each is refused as "outside the c-native
-                            # kernel set".
+                            # The parts draken_date_part actually implements
+                            # (_EXTRACT_PARTS in compiled_expression.pyx), plus
+                            # `epoch`. This IS the closed set, and it is enforced:
+                            # `week`, `dow`, `doy`, `julian` and `date` are NOT
+                            # among them, and each is refused at plan time.
                             #
                             # `epoch` has no draken_date_part part id and never
                             # reaches that kernel — EXTRACT(EPOCH FROM x) is
@@ -79,20 +79,6 @@ def get_builtin_temporal_extra_functions() -> List[FunctionDefinition]:
                         id="default",
                         callable_ref=date_functions.date_part,
                         cost_us_per_million=4761.27,
-                    ),
-                ),
-                FunctionOverload(
-                    id="EXTRACT_INT",
-                    parameters=(
-                        ParameterSpec(name="part", type_family="string", constant_only=True),
-                        ParameterSpec(name="date", type_family="integer"),
-                    ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_INT64),
-                    kernel=KernelSpec(
-                        engine="draken",
-                        id="default",
-                        callable_ref=date_functions.date_part,
-                        cost_us_per_million=0.97,
                     ),
                 ),
             ),

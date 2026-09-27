@@ -818,6 +818,15 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
+    # One query's bound columns as native rows (src/cpp/planner/column_table.hpp)
+    # and their canonical façades; types via column_type.pxd.
+    Extension(
+        "opteryx.compiled.planner.column_table",
+        sources=["opteryx/compiled/planner/column_table.pyx"],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
     # Helpers for relation statistics
     Extension(
         "opteryx.compiled.structures.relation_statistics",

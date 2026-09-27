@@ -167,11 +167,6 @@ def physical_is_parameterized(physical) -> bool:
     return column_type_is_parameterized(<CDrakenType><int>physical.value)
 
 
-cdef ColumnType column_type_of(uint32_t type_id):
-    """The canonical ColumnType of an interned id."""
-    return <ColumnType>_BY_ID[type_id]
-
-
 @cython.auto_pickle(False)  # an id means nothing outside this process
 @cython.final
 cdef class ColumnType:

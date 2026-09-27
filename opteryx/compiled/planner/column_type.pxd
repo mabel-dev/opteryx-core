@@ -9,5 +9,3 @@ cdef class ColumnType:
     # types, and a native column row stores exactly this.
     cdef readonly uint32_t type_id
 
-
-cdef ColumnType column_type_of(uint32_t type_id)

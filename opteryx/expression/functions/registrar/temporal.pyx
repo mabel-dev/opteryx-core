@@ -17,9 +17,12 @@ def get_builtin_temporal_functions() -> list:
         # microsecond are differences, not truncation boundaries), which is
         # exactly why the domain belongs on the parameter and not in a shared
         # "date parts" paragraph.
+        # Singular and plural, as _DIFF_PARTS in compiled_expression.pyx reads them.
         domain=(
-            "year", "quarter", "month", "week", "day",
-            "hour", "minute", "second", "millisecond", "microsecond",
+            "year", "years", "quarter", "quarters", "month", "months",
+            "week", "weeks", "day", "days", "hour", "hours",
+            "minute", "minutes", "second", "seconds",
+            "millisecond", "milliseconds", "microsecond", "microseconds",
         ),
     )
     _date = ParameterSpec(name="date", type_family="temporal")
@@ -51,9 +54,12 @@ def get_builtin_temporal_functions() -> list:
                     name="units",
                     type_family="string",
                     constant_only=True,
+                    # Singular and plural, as _BUCKET_UNITS in
+                    # compiled_expression.pyx reads them.
                     domain=(
-                        "year", "quarter", "month", "week",
-                        "day", "hour", "minute", "second",
+                        "year", "years", "quarter", "quarters", "month", "months",
+                        "week", "weeks", "day", "days", "hour", "hours",
+                        "minute", "minutes", "second", "seconds",
                     ),
                 ),
                 _date,

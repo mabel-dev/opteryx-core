@@ -175,7 +175,12 @@ def get_builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
         # The truncation boundaries draken_date_trunc implements. Narrower than
         # DATEDIFF's part set (millisecond/microsecond are differences, not
         # boundaries) — the two were previously both just "a unit string".
-        domain=("year", "quarter", "month", "week", "day", "hour", "minute", "second"),
+        # Singular and plural, as _TRUNC_PARTS in compiled_expression.pyx reads them.
+        domain=(
+            "year", "years", "quarter", "quarters", "month", "months",
+            "week", "weeks", "day", "days", "hour", "hours",
+            "minute", "minutes", "second", "seconds",
+        ),
     )
 
     return [

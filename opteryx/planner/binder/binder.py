@@ -669,9 +669,7 @@ def locate_identifier(node: Expression, context: Any) -> Tuple[Expression, Dict]
             column = schema.find_column(node.source_column, case_insensitive=True)
             if column is None:
                 return False
-            origin = column.origin or []
-            if isinstance(origin, str):
-                origin = [origin]
+            origin = column.origin or ()
             return any(
                 o.lower() == source_lower or o.lower().endswith(suffix) for o in origin
             )
@@ -771,9 +769,7 @@ def locate_identifier(node: Expression, context: Any) -> Tuple[Expression, Dict]
     )
     if shared_hit:
         qualifier = node.source.lower()
-        origin = column.origin or []
-        if isinstance(origin, str):
-            origin = [origin]
+        origin = column.origin or ()
         node.source = next(
             o for o in origin
             if o.lower() == qualifier or o.lower().endswith(f".{qualifier}")

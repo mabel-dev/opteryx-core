@@ -1546,15 +1546,25 @@
                         "null_handling": "strict",
                         "domain": [
                             "year",
+                            "years",
                             "quarter",
+                            "quarters",
                             "month",
+                            "months",
                             "week",
+                            "weeks",
                             "day",
+                            "days",
                             "hour",
+                            "hours",
                             "minute",
+                            "minutes",
                             "second",
+                            "seconds",
                             "millisecond",
-                            "microsecond"
+                            "milliseconds",
+                            "microsecond",
+                            "microseconds"
                         ],
                         "minimum": null,
                         "maximum": null,
@@ -1778,68 +1788,6 @@
                     {
                         "label": "date",
                         "type": "temporal",
-                        "documentation": "Date, time, or timestamp value to evaluate.",
-                        "optional": false,
-                        "variadic": false,
-                        "constant_only": false,
-                        "null_handling": "strict",
-                        "domain": [],
-                        "minimum": null,
-                        "maximum": null,
-                        "value_format": null,
-                        "element_of": null,
-                        "excludes": []
-                    }
-                ],
-                "notes": "Canonical SQL-92 form is `EXTRACT(part FROM date)`. The supported parts are `year`, `quarter`, `month`, `day`, `hour`, `minute`, `second` and `epoch`; each returns an `integer`. `epoch` is whole Unix epoch seconds - `EXTRACT(EPOCH FROM ts)` is the same value as `TO_UNIXTIME(ts)`, and is planned as that call. Sub-day parts require a TIMESTAMP operand."
-            },
-            {
-                "id": "EXTRACT_INT",
-                "label": "EXTRACT(part FROM date)",
-                "category": "Date & Time Functions",
-                "documentation": "Extracts a named part from a date or timestamp. The supported parts are year, quarter, month, day, hour, minute, second and epoch - the list is closed, and a part outside it is refused.",
-                "related_functions": [
-                    "TRUNC",
-                    "DATEDIFF",
-                    "TIME_BUCKET",
-                    "CURRENT_DATE",
-                    "CURRENT_TIME"
-                ],
-                "return_type": "integer",
-                "returns": {
-                    "type": "integer",
-                    "documentation": "Returns the requested part as an `integer`; `epoch` returns whole Unix epoch seconds."
-                },
-                "arity": {
-                    "minimum": 2,
-                    "maximum": 2,
-                    "variadic": false
-                },
-                "homogeneous": false,
-                "execution": {
-                    "kernel_id": "default",
-                    "engine": "draken",
-                    "cost_us_per_million": 0.97
-                },
-                "parameters": [
-                    {
-                        "label": "part",
-                        "type": "varchar",
-                        "documentation": "Date or time part to extract: `year`, `quarter`, `month`, `day`, `hour`, `minute`, `second` or `epoch`. Must be a constant expression.",
-                        "optional": false,
-                        "variadic": false,
-                        "constant_only": true,
-                        "null_handling": "strict",
-                        "domain": [],
-                        "minimum": null,
-                        "maximum": null,
-                        "value_format": null,
-                        "element_of": null,
-                        "excludes": []
-                    },
-                    {
-                        "label": "date",
-                        "type": "integer",
                         "documentation": "Date, time, or timestamp value to evaluate.",
                         "optional": false,
                         "variadic": false,
@@ -6226,13 +6174,21 @@
                         "null_handling": "strict",
                         "domain": [
                             "year",
+                            "years",
                             "quarter",
+                            "quarters",
                             "month",
+                            "months",
                             "week",
+                            "weeks",
                             "day",
+                            "days",
                             "hour",
+                            "hours",
                             "minute",
-                            "second"
+                            "minutes",
+                            "second",
+                            "seconds"
                         ],
                         "minimum": null,
                         "maximum": null,
@@ -6606,13 +6562,21 @@
                         "null_handling": "strict",
                         "domain": [
                             "year",
+                            "years",
                             "quarter",
+                            "quarters",
                             "month",
+                            "months",
                             "week",
+                            "weeks",
                             "day",
+                            "days",
                             "hour",
+                            "hours",
                             "minute",
-                            "second"
+                            "minutes",
+                            "second",
+                            "seconds"
                         ],
                         "minimum": null,
                         "maximum": null,
@@ -6677,13 +6641,21 @@
                         "null_handling": "strict",
                         "domain": [
                             "year",
+                            "years",
                             "quarter",
+                            "quarters",
                             "month",
+                            "months",
                             "week",
+                            "weeks",
                             "day",
+                            "days",
                             "hour",
+                            "hours",
                             "minute",
-                            "second"
+                            "minutes",
+                            "second",
+                            "seconds"
                         ],
                         "minimum": null,
                         "maximum": null,

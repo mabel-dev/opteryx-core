@@ -638,7 +638,9 @@ REGISTER: List[RegisteredDefect] = [
     ),
     RegisteredDefect(
         id="regexp-replace-is-only-partly-implemented",
-        repro="SELECT REGEXP_REPLACE('theta', 'x', '[aeiou]') FROM testdata.planets",
+        # The replacement is the one value its domain allows ('\\1'): any other is
+        # refused first, by the parameter's enforced domain, and would hide this.
+        repro="SELECT REGEXP_REPLACE('theta', 'x', '\\1') FROM testdata.planets",
         error_type="UnsupportedSyntaxError",
         signature="REGEXP_REPLACE is only supported natively",
         detail=(
@@ -748,7 +750,7 @@ REGISTER: List[RegisteredDefect] = [
     RegisteredDefect(
         id="non-native-function-call-in-an-expression-tree",
         repro=(
-            "SELECT REGEXP_REPLACE(CAST(bin_null AS VARCHAR), '[aeiou]', '[0-9]+') "
+            "SELECT REGEXP_REPLACE(CAST(bin_null AS VARCHAR), '[aeiou]', '\\1') "
             "FROM testdata.fuzzing.mixed"
         ),
         error_type="NotSupportedError",

@@ -513,8 +513,6 @@ def locate_using_column(
         if schema_column is None:
             continue
         origin = schema_column.origin
-        if isinstance(origin, str):
-            origin = [origin]
         if origin and set(origin) <= leg:
             _consider(schema_key, schema)
 

@@ -30,6 +30,7 @@ from opteryx.compiled.structures.plan_steps import ExitStep
 from opteryx.compiled.structures.plan_steps import ScanStep
 from opteryx.planner.optimizer.strategies.optimization_strategy import OptimizerContext
 from opteryx.planner.plan_context import PlanContext
+from opteryx.types.schema import FunctionColumn
 
 def _telemetry():
     return types.SimpleNamespace(optimization_statistics_only_response=0)
@@ -57,12 +58,12 @@ class MockManifest:
         return clone
 
 
-def _count_star():
+def _count_star(plan_context):
     """COUNT(*) — the aggregate shape the strategy answers from the manifest."""
     return Aggregator(
         value="COUNT",
         parameters=[Wildcard()],
-        schema_column=types.SimpleNamespace(identity="$COUNT(*)", column_type=None, slot=None),
+        schema_column=plan_context.columns.computed(FunctionColumn, "COUNT(*)"),
     )
 
 
@@ -71,11 +72,11 @@ def _count_distinct():
         value="COUNT",
         parameters=[LogicalColumn(NodeType.IDENTIFIER, "x")],
         duplicate_treatment="Distinct",
-        schema_column=types.SimpleNamespace(identity="$COUNT(*)", column_type=None, slot=None),
+        schema_column=types.SimpleNamespace(identity=b"$COUNT(*)", column_type=None, slot=None),
     )
 
 
-def make_simple_count_plan(count=9, alias="my_count"):
+def make_simple_count_plan(plan_context, count=9, alias="my_count"):
     plan = LogicalPlan()
 
     # Scan node
@@ -86,7 +87,7 @@ def make_simple_count_plan(count=9, alias="my_count"):
 
     # Aggregate node representing `SELECT COUNT(*) AS alias` over the scan
     agg = AggregateStep()
-    aggregator = _count_star()
+    aggregator = _count_star(plan_context)
     agg.aggregates = [aggregator]
 
     # Exit node to hold column alias. The strategy pairs Exit columns to aggregates
@@ -113,11 +114,12 @@ def make_simple_count_plan(count=9, alias="my_count"):
 
 
 def test_strategy_rewrites_count_star_plan():
-    plan = make_simple_count_plan(count=9, alias="total_count")
+    plan_context = PlanContext()
+    plan = make_simple_count_plan(plan_context, count=9, alias="total_count")
     strategy = StatisticsOnlyResponseStrategy(telemetry=_telemetry())
 
     # Run the strategy's complete phase which performs the rewrite
-    rewritten = strategy.complete(plan, OptimizerContext(plan, PlanContext()))
+    rewritten = strategy.complete(plan, OptimizerContext(plan, plan_context))
 
     # Assert the same plan object is returned
     assert rewritten is plan
@@ -161,14 +163,15 @@ def test_strategy_rewrites_count_star_plan():
 
 
 def test_strategy_prunes_manifest():
-    plan = make_simple_count_plan(count=9, alias="total_count")
+    plan_context = PlanContext()
+    plan = make_simple_count_plan(plan_context, count=9, alias="total_count")
     strategy = StatisticsOnlyResponseStrategy(telemetry=_telemetry())
 
     # ensure manifest initially present
     scan_node = next(n for _, n in plan.nodes(data=True) if n.node_type == LogicalPlanStepType.Scan)
     assert hasattr(scan_node, "manifest") and scan_node.manifest is not None
 
-    strategy.complete(plan, OptimizerContext(plan, PlanContext()))
+    strategy.complete(plan, OptimizerContext(plan, plan_context))
 
     # After the rewrite the scan is repointed at the `$one_row` virtual relation and
     # its manifest is dropped entirely — the strategy clears it so a file-based reader
@@ -178,13 +181,14 @@ def test_strategy_prunes_manifest():
 
 
 def test_strategy_no_manifest_leaves_plan_unchanged():
-    plan = make_simple_count_plan(count=9, alias="total_count")
+    plan_context = PlanContext()
+    plan = make_simple_count_plan(plan_context, count=9, alias="total_count")
     # Remove manifest to simulate absence of statistics
     scan_node = next(n for nid, n in plan.nodes(data=True) if n.node_type == LogicalPlanStepType.Scan)
     scan_node.manifest = None
 
     strategy = StatisticsOnlyResponseStrategy(telemetry=_telemetry())
-    rewritten = strategy.complete(plan, OptimizerContext(plan, PlanContext()))
+    rewritten = strategy.complete(plan, OptimizerContext(plan, plan_context))
 
     # Plan should be unchanged (still has Aggregate node)
     agg_nodes = [n for nid, n in plan.nodes(data=True) if n.node_type == LogicalPlanStepType.Aggregate]

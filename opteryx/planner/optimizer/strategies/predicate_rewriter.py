@@ -594,7 +594,9 @@ def _contains_node(first, column_node, values, *, plan_context):
     literal = first.left.replace(
         value=ordered,
         type=array_type,
-        schema_column=plan_context.columns.constant(None, column_type=array_type, value=ordered),
+        schema_column=plan_context.columns.constant(
+            str(ordered), column_type=array_type, value=ordered
+        ),
     )
     return first.replace(
         value="AtArrow",
@@ -719,7 +721,9 @@ def _make_inlist_node(node, column, values, element_type, *, plan_context):
     new_literal = literal.replace(
         value=ordered,
         type=array_type,
-        schema_column=plan_context.columns.constant(None, column_type=array_type, value=ordered),
+        schema_column=plan_context.columns.constant(
+            str(ordered), column_type=array_type, value=ordered
+        ),
     )
     return node.replace(value="InList", left=column_side, right=new_literal)
 

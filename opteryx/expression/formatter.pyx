@@ -5,7 +5,6 @@ Not on the per-row hot path — called once per shown expression.
 """
 
 import datetime
-from dataclasses import dataclass
 
 from draken.draken_native import DrakenType
 from draken.draken_native import LogicalKind
@@ -13,15 +12,8 @@ from draken.draken_native import ipv4_format
 
 from opteryx.compiled.structures.expressions import current_name_of
 from opteryx.types.logical_type import ColumnType
-from opteryx.types.schema import SchemaColumn
+from opteryx.compiled.planner.column_table import ExpressionColumn  # noqa: F401 (re-exported)
 from opteryx.utils import random_string
-
-
-@dataclass
-class ExpressionColumn(SchemaColumn):
-    """A computed expression/predicate column. Minted only by the query's
-    ColumnTable (`columns.computed(ExpressionColumn, ...)`), which assigns its
-    `$derived_` identity and slot."""
 
 
 cdef inline tuple _civil_from_days(long long days):

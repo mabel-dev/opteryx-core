@@ -9,7 +9,9 @@ Advanced features (DictionaryColumn, SparseColumn, RLEColumn, FunctionColumn)
 are deferred to Phase 9 if needed.
 
 Key design:
-- Dataclass-based for simplicity and performance
+- Bound columns (SchemaColumn and its kinds) are native rows of the query's
+  ColumnTable (opteryx/compiled/planner/column_table.pyx); descriptors and
+  relation schemas are dataclasses here
 - No external dependencies (stdlib only + opteryx.types)
 - Optimized for the operations Opteryx actually performs
 - Full type hints; comprehensive docstrings
@@ -21,28 +23,12 @@ import copy as copy_module
 import dataclasses
 from typing import Any, Dict, List, Optional
 
-
-def mint_column_identity(relation: Optional[str], column: Optional[str]) -> bytes:
-    """Mint a unique, opaque column identity with a traceable prefix.
-
-    Identities are the engine's per-column handles; they MUST be unique (the
-    name is not — two relations can share a column name). The random suffix
-    guarantees uniqueness; the ``rel_col_`` prefix is a debugging affordance so
-    that an identity leaked into an error/stack trace can be traced back to a
-    physical column. The query's ColumnTable is the only caller.
-    """
-    from opteryx.utils import random_string
-
-    rel = (relation or "")[:3]
-    col = (column or "")[:3]
-    return f"{rel}_{col}_{random_string(8)}".encode("utf-8")
-
-
-def _mint_tagged_identity(tag: str) -> bytes:
-    """Mint a unique identity for a non-relation column (e.g. ``$const``, ``$derived``)."""
-    from opteryx.utils import random_string
-
-    return f"{tag}_{random_string(8)}".encode("utf-8")
+# Bound columns are rows of the query's native ColumnTable; their façade classes
+# live with it (opteryx/compiled/planner/column_table.pyx, native plan graph P1).
+from opteryx.compiled.planner.column_table import ConstantColumn
+from opteryx.compiled.planner.column_table import FunctionColumn
+from opteryx.compiled.planner.column_table import SchemaColumn
+from opteryx.compiled.planner.column_table import mint_column_identity  # noqa: F401 (re-exported)
 
 
 __all__ = [
@@ -72,139 +58,6 @@ class ColumnDisposition:
     INDEXED = "INDEXED"
     NAME = "NAME"
     AGE = "AGE"
-
-
-@dataclasses.dataclass
-class SchemaColumn:
-    """Column definition with metadata.
-
-    Opteryx column definition.
-
-    Attributes:
-        name: Column name (required)
-        column_type: Unified ColumnType carrier (physical DrakenType + optional logical descriptor)
-        identity: Unique identifier for this column (default: auto-generated from name)
-        nullable: Whether NULL values are allowed (default: True)
-        aliases: Alternative names for this column (default: None)
-        origin: The relation(s) the column is read through
-
-    A BOUND column: made from a source's ColumnDescriptor (or minted as a computed
-    column) in the query's ColumnTable, which is the only thing that sets its
-    identity and slot - see opteryx/planner/plan_context.py.
-    """
-
-    name: str
-    nullable: bool = True
-    identity: Optional[bytes] = None
-    # Stable, catalog-assigned column identifier (Iceberg-style field-id),
-    # distinct from `identity` above (a random, non-persistent, engine-internal
-    # join/dedup handle re-minted on every schema normalization). Used to key
-    # per-file manifest min/max statistics so they survive schema evolution
-    # without positional drift. None for sources with no catalog-assigned id
-    # (e.g. ad-hoc Arrow/pandas inputs, or catalog schemas predating this).
-    field_id: Optional[int] = None
-    aliases: Optional[List[str]] = dataclasses.field(default_factory=lambda: None)
-    origin: Optional[List[str]] = None
-    # column_type is the authoritative unified type carrier (physical DrakenType +
-    # optional LogicalType descriptor + optional ARRAY element). Deepcopy
-    # is safe — LogicalType has __deepcopy__ wired on the nanobind side.
-    column_type: Optional[Any] = dataclasses.field(default=None, repr=False, compare=False)
-    # The column's number in its query — its position in the query's ColumnTable
-    # (opteryx/planner/plan_context.py), which is the only thing that sets it.
-    # Not part of the column's value: two columns compare by what they describe.
-    slot: Optional[int] = dataclasses.field(default=None, repr=False, compare=False)
-
-    def __post_init__(self):
-        """A bound column exists only as a row of its query's ColumnTable.
-
-        A column identity is a unique, opaque handle — the execution engine keys
-        columns by it, so it must NOT be derived from the (non-unique) name. A
-        ``None`` identity means a mint site failed to assign one; fail loud rather
-        than silently falling back to the name (which collapses distinct columns
-        that share a name — every self-join, and any join of tables with a common
-        column name — into one).
-
-        The slot is required for the same reason: the ColumnTable is the only
-        thing that constructs a bound column, and it constructs it with its slot
-        (architect ruling 2026-09-26, stage 4C). A column built anywhere else
-        belongs to no query and is refused here, where it is made.
-        """
-        if self.identity is None:
-            from opteryx.exceptions import InvalidInternalStateError
-
-            raise InvalidInternalStateError(
-                f"Column '{self.name}' was constructed without an identity. "
-                "Relation-sourced columns must be minted with a unique identity; "
-                "the name is not a valid identity."
-            )
-        if self.slot is None:
-            from opteryx.exceptions import InvalidInternalStateError
-
-            raise InvalidInternalStateError(
-                f"Column '{self.name}' was constructed without a slot - bound columns "
-                "are minted by the query's ColumnTable (PlanContext.columns), never "
-                "constructed directly."
-            )
-        if isinstance(self.identity, str):
-            self.identity = self.identity.encode("utf-8")
-
-    @property
-    def category(self):
-        """Operator-dispatch category projection of `column_type` (the one type carrier).
-
-        Returns `None` when no `column_type` is resolved yet. This is a pure projection
-        of `column_type` — not a parallel type.
-        """
-        if self.column_type is None:
-            return None
-        return self.column_type.category
-
-    def __str__(self) -> str:
-        """String representation: name."""
-        ct = self.column_type
-        if ct is not None:
-            return f"{self.name}:{ct}"
-        return self.name
-
-    def __repr__(self) -> str:
-        return f"SchemaColumn(name={self.name!r}, column_type={self.column_type}, nullable={self.nullable})"
-
-    @property
-    def all_names(self) -> List[str]:
-        """Get all names for this column (name + aliases)."""
-        names = [self.name]
-        if self.aliases:
-            names.extend(self.aliases)
-        return names
-
-
-@dataclasses.dataclass
-class ConstantColumn(SchemaColumn):
-    """Column with a constant value.
-
-    Used for constant expressions (e.g., SELECT 42 AS constant_col).
-    Inherits from SchemaColumn with additional constant value semantics.
-    """
-
-    value: Any = None
-
-    def __str__(self) -> str:
-        """String representation: name = value."""
-        return f"{self.name}={self.value}"
-
-
-@dataclasses.dataclass
-class FunctionColumn(SchemaColumn):
-    """Column defined by a function/expression.
-
-    Used for computed columns (e.g., SELECT col1 + col2 AS sum_col).
-    Inherits from SchemaColumn with additional function expression semantics.
-    """
-
-    def __str__(self) -> str:
-        """String representation: name (computed)."""
-        return f"{self.name}(computed)"
-
 
 
 @dataclasses.dataclass
