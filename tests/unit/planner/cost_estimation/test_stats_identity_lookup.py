@@ -157,15 +157,15 @@ def test_join_graph_edges_receive_stats_ndv_and_null_fraction():
     """End to end through build_join_graph: the KeyStats on the edges the
     enumerators consume must carry the scans' real NDV and null_fraction."""
     plan_context = PlanContext()
-    plan = LogicalPlan()
+    plan = LogicalPlan(PlanContext())
     orders, o_cols = _make_scan("orders", 1_500_000, {"o_custkey": (100_000, 0.01)}, plan_context)
     customer, c_cols = _make_scan("customer", 150_000, {"c_custkey": (150_000, 0.0)}, plan_context)
-    plan.add_node("scan-orders", orders)
-    plan.add_node("scan-customer", customer)
+    scan_orders_nid = plan.add_node(orders)
+    scan_customer_nid = plan.add_node(customer)
 
     leaves = [
-        SimpleNamespace(subplan_id="scan-orders", rel_names=["orders"]),
-        SimpleNamespace(subplan_id="scan-customer", rel_names=["customer"]),
+        SimpleNamespace(subplan_id=scan_orders_nid, rel_names=["orders"]),
+        SimpleNamespace(subplan_id=scan_customer_nid, rel_names=["customer"]),
     ]
     predicate = _eq_predicate(
         _identifier("orders", o_cols["o_custkey"]),
@@ -188,16 +188,16 @@ def test_self_join_sides_keep_their_own_statistics():
     Each edge endpoint must read its own side's statistics — keying by name
     collapsed both sides onto whichever dict entry survived."""
     plan_context = PlanContext()
-    plan = LogicalPlan()
+    plan = LogicalPlan(PlanContext())
     e1, e1_cols = _make_scan("employees", 1_000_000, {"manager_id": (50_000, 0.10)}, plan_context, alias="e1")
     e2, e2_cols = _make_scan("employees", 1_000_000, {"manager_id": (60_000, 0.0)}, plan_context, alias="e2")
     assert e1_cols["manager_id"].identity != e2_cols["manager_id"].identity
-    plan.add_node("scan-e1", e1)
-    plan.add_node("scan-e2", e2)
+    scan_e1_nid = plan.add_node(e1)
+    scan_e2_nid = plan.add_node(e2)
 
     leaves = [
-        SimpleNamespace(subplan_id="scan-e1", rel_names=["e1"]),
-        SimpleNamespace(subplan_id="scan-e2", rel_names=["e2"]),
+        SimpleNamespace(subplan_id=scan_e1_nid, rel_names=["e1"]),
+        SimpleNamespace(subplan_id=scan_e2_nid, rel_names=["e2"]),
     ]
     predicate = _eq_predicate(
         _identifier("e1", e1_cols["manager_id"]),

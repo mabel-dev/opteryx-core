@@ -55,7 +55,7 @@ def _right_columns_used_above(plan: LogicalPlan, join_nid: str, right_relations:
         ):
             if expr is None:
                 continue
-            exprs = expr if isinstance(expr, list) else [expr]
+            exprs = expr if type(expr) is tuple else (expr,)  # a list field, or one expression
             for e in exprs:
                 # order_by items are (column_node, ascending_bool) tuples
                 if isinstance(e, tuple):

@@ -36,17 +36,9 @@ def validate_plan(plan: LogicalPlan, where: str = "") -> None:
     nodes = dict(plan.nodes(True))
     node_ids = set(nodes.keys())
 
-    # 1. Every edge connects two nodes that actually exist in the plan. A dangling
-    #    endpoint means a rewrite removed a node without healing its edges.
-    for source, target, _ in plan.edges():
-        if source not in node_ids:
-            raise InvalidInternalStateError(
-                f"{prefix}edge references source '{source}' which is not a node in the plan"
-            )
-        if target not in node_ids:
-            raise InvalidInternalStateError(
-                f"{prefix}edge references target '{target}' which is not a node in the plan"
-            )
+    # (Every edge joins two nodes of the plan by construction: the native plan
+    # graph refuses an edge to a node it does not hold, and removing a node
+    # removes its edges.)
 
     # An empty plan has no further structure to check.
     if not node_ids:

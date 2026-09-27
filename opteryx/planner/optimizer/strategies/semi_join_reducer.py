@@ -46,6 +46,7 @@ not key-set selectivity (Q19's is 1.1% and it still lost); it is whether a hash
 BUILD over a large relation, or a GROUP BY over one, disappears as a result.
 """
 
+from opteryx.compiled.planner.plan_graph import EdgeRole
 from opteryx.expression import NodeType
 from opteryx.planner.binder.join_helpers import extract_join_fields
 from opteryx.planner.logical_planner import LogicalPlan
@@ -393,7 +394,7 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
             return plan
 
         target_relations, target_schemas = _collect_relations(plan, right_root)
-        reducer_exit = reducer_source.get_exit_points()[0]
+        reducer_exit = reducer_source.exit_point()
         # ⛔ Collect from `reducer_source` BEFORE merging, and do not merge until every
         # guard below has passed. `plan.absorb(reducer_source)` with a later `return plan`
         # leaves the copy in the plan with nothing consuming it — a second exit point,
@@ -425,8 +426,8 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
         plan.absorb(reducer_source)
         reducer_nid = plan.add_node(reducer)
         plan.remove_edge(target_child, target_parent, parent_rel)
-        plan.add_edge(target_child, reducer_nid, "left")
-        plan.add_edge(reducer_exit, reducer_nid, "right")
+        plan.add_edge(target_child, reducer_nid, EdgeRole.LEFT)
+        plan.add_edge(reducer_exit, reducer_nid, EdgeRole.RIGHT)
         plan.add_edge(reducer_nid, target_parent, parent_rel)
 
         join.reducer_applied = True

@@ -83,10 +83,8 @@ def _optimized(sql):
         execution_context=ExecutionContext(memberships=["opteryx"]),
         query_id=query_id,
         telemetry=telemetry, plan_context=plan_context)
-    shared = getattr(bound, "shared_ctes", None) or {}
-    plan_context = PlanContext()
-    plan = do_optimizer(bound, telemetry, plan_context, shared_ctes=shared)
-    return plan, (getattr(plan, "shared_ctes", None) or shared), plan_context
+    plan = do_optimizer(bound, telemetry, plan_context)
+    return plan, plan_context.shared_ctes, plan_context
 
 
 def _references(plan, shared):

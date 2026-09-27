@@ -37,7 +37,17 @@ if TYPE_CHECKING:  # annotation only: importing the optimizer package here is a 
 
 
 class PlanContext:
-    __slots__ = ("_statistics", "_cte_statistics", "scan_stats_cache", "columns", "node_ids")
+    __slots__ = (
+        "_statistics",
+        "_cte_statistics",
+        "scan_stats_cache",
+        "columns",
+        "node_ids",
+        "shared_ctes",
+        "physical_shared_ctes",
+        "recursive_ctes",
+        "statistics_estimated_by_optimizer",
+    )
 
     def __init__(self) -> None:
         # The query's bound columns — see ColumnTable. Created with the context at
@@ -47,6 +57,20 @@ class PlanContext:
         # draws from this one counter, so plans merge without colliding (native
         # plan graph P2, architect rulings 2026-09-27).
         self.node_ids = NodeIds()
+        # The query's shared CTE bodies - CTEs referenced 2+ times, executed once
+        # (relation_resolver) - keyed by cte_key, dependencies first. Each planning
+        # phase (resolver, rewriter, binder, optimizer) replaces the bodies it
+        # transforms; `physical_shared_ctes` holds their physical plans. Held here,
+        # not on a plan object, because they belong to the query, not to one plan
+        # (architect ruling 2026-09-27, native plan graph P2).
+        self.shared_ctes: dict = {}
+        self.physical_shared_ctes: dict = {}
+        # Recursive CTE metadata: rcte_key -> its anchor/term leg keys (the legs
+        # are shared_ctes entries). See docs/RECURSIVE_CTE_DESIGN.md.
+        self.recursive_ctes: dict = {}
+        # Whether the optimizer refreshed statistics - see
+        # OptimizerVisitor.refreshed_statistics.
+        self.statistics_estimated_by_optimizer: bool = False
         self._statistics: Dict[int, Tuple[object, "RelationStatistics"]] = {}
         self._cte_statistics: Dict[str, "RelationStatistics"] = {}
         # Memo of each scan's manifest-derived base statistics, shared by every

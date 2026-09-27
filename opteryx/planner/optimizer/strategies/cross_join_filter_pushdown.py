@@ -19,6 +19,7 @@ intermediate materialization of the full cross product.
 
 from typing import Dict, List, Optional, Set, Tuple
 
+from opteryx.compiled.planner.plan_graph import EdgeRole
 from opteryx.compiled.structures.expressions import Expression
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.planner.binder.common import extract_join_fields
@@ -172,9 +173,9 @@ def _hoist_arithmetic_join_key(
             continue
         bare_side = _get_table_from_identifier(bare)
         if bare_side in left_relations:
-            expr_relations, expr_side = right_relations, "right"
+            expr_relations, expr_side = right_relations, EdgeRole.RIGHT
         elif bare_side in right_relations:
-            expr_relations, expr_side = left_relations, "left"
+            expr_relations, expr_side = left_relations, EdgeRole.LEFT
         else:
             continue
         if not _affine_hoist_target(other, expr_relations):
@@ -188,7 +189,7 @@ def _hoist_arithmetic_join_key(
         # `_subplan_relation_names`) will not reproduce exactly.
         target_child_id = None
         for child_id, _, relationship in plan.ingoing_edges(join_id):
-            if relationship == expr_side:
+            if relationship is expr_side:
                 target_child_id = child_id
                 break
         if target_child_id is None:
@@ -393,10 +394,10 @@ def _try_dissolve_cross_join_in_inner_join(
     # Legs are labelled at creation (architect ruling 2026-09-27). The cross join
     # becomes (A LEFT, C RIGHT) and feeds the outer join as its LEFT; B is the
     # outer join's RIGHT. Existing edges are relabelled in place.
-    plan.add_edge(cross_left_id, cross_join_id, "left")
-    plan.add_edge(other_child_id, cross_join_id, "right")
-    plan.add_edge(cross_join_id, inner_join_id, "left")
-    plan.add_edge(cross_right_id, inner_join_id, "right")
+    plan.add_edge(cross_left_id, cross_join_id, EdgeRole.LEFT)
+    plan.add_edge(other_child_id, cross_join_id, EdgeRole.RIGHT)
+    plan.add_edge(cross_join_id, inner_join_id, EdgeRole.LEFT)
+    plan.add_edge(cross_right_id, inner_join_id, EdgeRole.RIGHT)
 
     # Rebuild readers from the actual scan nodes now under each side.
     # left_readers/right_readers name the scans under each leg — they must reflect

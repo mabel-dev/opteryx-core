@@ -330,8 +330,7 @@ def _view_output_schema(node, context: BindingContext):
         plan_context=context.plan_context,
     )
 
-    heads = bound_plan.get_exit_points()
-    head = bound_plan[heads[0]]
+    head = bound_plan[bound_plan.exit_point()]
 
     columns = []
     for column in head.columns:

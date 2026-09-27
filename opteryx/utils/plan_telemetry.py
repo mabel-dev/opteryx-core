@@ -726,7 +726,7 @@ def collect_plan_telemetry(plan: PhysicalPlan) -> dict:
     # Write the edge list to telemetry now that excluded_nodes is finalised
     if _any_telemetry is not None:
         _any_telemetry.edges = [
-            {"from": s, "to": t, **(({"leg": r}) if r else {})}
+            {"from": s, "to": t, **(({"leg": r.name.lower()}) if r is not None else {})}
             for s, t, r in _raw_edges
             if s not in excluded_nodes and t not in excluded_nodes and t not in exit_nids
         ]

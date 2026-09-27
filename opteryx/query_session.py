@@ -594,7 +594,10 @@ class Session(DataFrame):
             }
             nodes.append(node_entry)
 
-        edges = [{"source": s, "target": t, "relation": r} for s, t, r in self._plan.edges()]
+        edges = [
+            {"source": s, "target": t, "relation": (r.name.lower() if r is not None else None)}
+            for s, t, r in self._plan.edges()
+        ]
 
         return {
             "nodes": nodes,

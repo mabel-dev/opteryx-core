@@ -15,6 +15,7 @@ import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
+from opteryx.compiled.planner.plan_graph import EdgeRole
 from opteryx.planner.optimizer.statistics import ColumnRange
 from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
@@ -62,7 +63,7 @@ def _relation(rows, key, ndv, base_ndv=None, lower=None, upper=None, nulls=None)
 
 def _estimate(join_type, left, right):
     notes = []
-    stats = _join_stats(_Node(join_type), [(left, "left"), (right, "right")], "nid", notes)
+    stats = _join_stats(_Node(join_type), [(left, EdgeRole.LEFT), (right, EdgeRole.RIGHT)], "nid", notes)
     return stats, notes[0]
 
 

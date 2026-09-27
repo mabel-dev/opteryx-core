@@ -77,7 +77,7 @@ def _count_distinct():
 
 
 def make_simple_count_plan(plan_context, count=9, alias="my_count"):
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
 
     # Scan node
     scan = ScanStep()
@@ -103,12 +103,12 @@ def make_simple_count_plan(plan_context, count=9, alias="my_count"):
         )
     ]
 
-    plan.add_node("scan", scan)
-    plan.add_node("agg", agg)
-    plan.add_node("exit", exit_node)
+    scan_nid = plan.add_node(scan)
+    agg_nid = plan.add_node(agg)
+    exit_nid = plan.add_node(exit_node)
 
-    plan.add_edge("scan", "agg")
-    plan.add_edge("agg", "exit")
+    plan.add_edge(scan_nid, agg_nid)
+    plan.add_edge(agg_nid, exit_nid)
 
     return plan
 

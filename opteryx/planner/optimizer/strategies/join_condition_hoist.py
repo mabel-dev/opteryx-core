@@ -211,7 +211,7 @@ class JoinConditionHoistStrategy(OptimizationStrategy):
 
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:
         for join_nid, filter_node in context.bag.get("join_condition_hoist", []):
-            plan.insert_node_after(plan.plan_context.node_ids.mint(), filter_node, join_nid)
+            plan.insert_node_after(filter_node, join_nid)
         return plan
 
     def should_i_run(self, plan: LogicalPlan) -> bool:

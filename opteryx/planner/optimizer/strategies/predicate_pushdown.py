@@ -301,7 +301,7 @@ def _restore_at_original_position(plan, predicate, predicate_nid: str, plan_path
             continue
         incoming = plan.ingoing_edges(nid)
         if len(incoming) <= 1:
-            plan.insert_node_before(predicate_nid, predicate, nid)
+            plan.insert_node_before(predicate, nid, nid=predicate_nid)
             return True
 
         needed = _predicate_column_ids(predicate)
@@ -318,7 +318,7 @@ def _restore_at_original_position(plan, predicate, predicate_nid: str, plan_path
                 f"inputs carry the columns the filter reads, and exactly one must."
             )
         source, relationship = legs[0]
-        plan.place(predicate_nid, predicate)
+        plan.add_node(predicate, nid=predicate_nid)
         plan.remove_edge(source, nid, relationship)
         plan.add_edge(source, predicate_nid)
         plan.add_edge(predicate_nid, nid, relationship)
@@ -953,7 +953,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     # predicate is put back above this node rather than pushed.
                     self.telemetry.optimization_predicate_pushdown_declined += 1
                     context.optimized_plan.insert_node_after(
-                        context.plan_context.node_ids.mint(), predicate, context.node_id
+                        predicate, context.node_id
                     )
                 elif id(predicate) in context.predicate_paths:
                     self.telemetry.optimization_predicate_pushdown_unplaced += 1
@@ -1131,7 +1131,8 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 ):
                     self.telemetry.optimization_predicate_pushdown += 1
                     context.optimized_plan.insert_node_before(
-                        context.collected_nids[id(predicate)], predicate, context.node_id
+                        predicate, context.node_id,
+                        nid=context.collected_nids[id(predicate)],
                     )
                     continue
 
@@ -1186,7 +1187,8 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 ):
                     self.telemetry.optimization_predicate_pushdown += 1
                     context.optimized_plan.insert_node_after(
-                        context.collected_nids[id(predicate)], predicate, context.node_id
+                        predicate, context.node_id,
+                        nid=context.collected_nids[id(predicate)],
                     )
                 else:
                     remaining_predicates.append(predicate)
@@ -1416,7 +1418,8 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     ):
                         self.telemetry.optimization_predicate_pushdown += 1
                         context.optimized_plan.insert_node_after(
-                            context.collected_nids[id(predicate)], predicate, context.node_id
+                            predicate, context.node_id,
+                            nid=context.collected_nids[id(predicate)],
                         )
                         return True
                     return False
@@ -1498,7 +1501,8 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                                     # clauses, and this predicate is not one yet.
                                     self.telemetry.optimization_predicate_pushdown_declined += 1
                                     context.optimized_plan.insert_node_after(
-                                        context.collected_nids[id(predicate)], predicate, context.node_id
+                                        predicate, context.node_id,
+                                        nid=context.collected_nids[id(predicate)],
                                     )
                                     continue
                                 # Convert to inner join
@@ -1532,7 +1536,8 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                                 # above the join rather than into it.
                                 self.telemetry.optimization_predicate_pushdown_declined += 1
                                 context.optimized_plan.insert_node_after(
-                                    context.collected_nids[id(predicate)], predicate, context.node_id
+                                    predicate, context.node_id,
+                                    nid=context.collected_nids[id(predicate)],
                                 )
                         elif predicate.relations.intersection(all_join_rels) and not predicate.relations.issubset(all_join_rels):
                             # Looks like it references something outside this join. But
@@ -1745,7 +1750,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 <= _emitted_identities(context.optimized_plan, target, _memo)
             ):
                 self.telemetry.optimization_predicate_pushdown_deep_restore += 1
-                context.optimized_plan.insert_node_after(context.collected_nids[id(predicate)], predicate, target)
+                context.optimized_plan.insert_node_after(predicate, target, nid=context.collected_nids[id(predicate)])
                 continue
 
             # The target was refused (gone, or no longer emitting what the
@@ -1849,9 +1854,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         # scan's own selectivity estimate decides whether two-pass pays off, not this
         # strategy (see comment above).
         for _predicate, condition in selective_to_push + metadata_to_push:
-            if not node.predicates:
-                node.predicates = []
-            node.predicates.append(condition)
+            node.predicates = (*(node.predicates or ()), condition)
             # The predicate reached the READER — the outcome this whole strategy
             # exists to produce (CLAUDE.md §12.1: faster queries read less data) and,
             # until this counter, the only outcome with no telemetry at all. Its
@@ -1867,7 +1870,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             # the scan. Counted separately from a push — conflating the two makes the
             # telemetry unable to answer "did pushdown help?".
             self.telemetry.optimization_predicate_pushdown_declined += 1
-            context.optimized_plan.insert_node_after(context.collected_nids[id(predicate)], predicate, context.node_id)
+            context.optimized_plan.insert_node_after(predicate, context.node_id, nid=context.collected_nids[id(predicate)])
 
         context.collected_predicates = remaining_predicates
         return context

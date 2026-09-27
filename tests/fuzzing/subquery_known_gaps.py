@@ -139,48 +139,6 @@ REGISTER: List[RegisteredDefect] = [
             "scoping problem that does not exist."
         ),
     ),
-    RegisteredDefect(
-        id="skip-level-exists-over-two-aliased-derived-relations-is-refused",
-        repro=(
-            "SELECT sq_o.id FROM testdata.planets AS sq_o WHERE EXISTS "
-            "(SELECT 1 FROM (SELECT planetId AS k FROM testdata.satellites) AS sq_i "
-            "WHERE sq_i.k = sq_o.id AND EXISTS "
-            "(SELECT 1 FROM (SELECT planetId AS k FROM testdata.satellites) AS sq_n "
-            "WHERE sq_n.k = sq_i.k))"
-        ),
-        error_type="NotSupportedError",
-        signature="a build-side join key the engine could not resolve here",
-        requires_tag="nested-existence",
-        detail=(
-            "An EXISTS nested inside an EXISTS, correlated to the MIDDLE scope, is refused "
-            "when BOTH nested relations are derived tables that expose the correlation key "
-            "under a projection ALIAS. The refusal comes from the compiler "
-            "(opteryx/managers/execution/compiler.py:206), so it survives planning and dies at "
-            "compile time.\n"
-            "\n"
-            "The repro is an exact no-op: `sq_i` is itself a row of the same relation with the "
-            "same key, so the inner EXISTS is satisfied whenever `sq_i.k` is non-NULL, which "
-            "the enclosing correlation already guarantees. Deleting the inner EXISTS gives the "
-            "same seven planets. That is what makes this a clean find — the query the engine "
-            "refuses is provably equivalent to one it answers.\n"
-            "\n"
-            "MEASURED — the alias on BOTH sides is what does it:\n"
-            "  middle `(SELECT planetId AS k …)`, inner `(SELECT planetId AS k …)`   REFUSED\n"
-            "  middle `(SELECT planetId AS ka …)`, inner `(SELECT planetId AS kb …)` REFUSED\n"
-            "  middle `(SELECT planetId AS k …)`, inner `(SELECT * …)`               ok\n"
-            "  middle `(SELECT * …)`,             inner `(SELECT planetId AS k …)`   ok\n"
-            "  middle `(SELECT * …)`,             inner `(SELECT * …)`               ok\n"
-            "  middle base relation,              inner base relation                ok\n"
-            "  middle `(SELECT planetId + 0 AS k …)`, inner base relation            ok\n"
-            "so it is not the derived table and it is not the computed column — it is a "
-            "renamed key on both legs of a deferred (skip-level) correlation.\n"
-            "\n"
-            "`_defer_existence_to_ancestor` in decorrelate_subquery.py is what carries a "
-            "correlation that names a relation below no join it can see, and the message names "
-            "a BUILD-SIDE key, so the deferred pair is reaching the ancestor join with a "
-            "reference the operator cannot attribute to either leg."
-        ),
-    ),
 ]
 
 

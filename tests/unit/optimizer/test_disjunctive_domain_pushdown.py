@@ -57,7 +57,7 @@ def _optimized_plan(sql):
     plan = do_resolve_relations(plan, ctes, telemetry, plan_context=plan_context)
     plan = do_plan_rewrite(plan, telemetry, plan_context=plan_context)
     bound = do_bind_phase(plan, execution_context=ctx, query_id=qid, telemetry=telemetry, plan_context=plan_context)
-    return do_optimizer(bound, telemetry, PlanContext()), telemetry
+    return do_optimizer(bound, telemetry, plan_context), telemetry
 
 
 def _scan_predicates(plan, alias):

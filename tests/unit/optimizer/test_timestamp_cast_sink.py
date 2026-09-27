@@ -45,7 +45,7 @@ def _scan_physical(sql: str, column: str):
     bound = do_bind_phase(
         plan, execution_context=ctx, query_id=str(uuid.uuid4()),
         telemetry=telemetry, plan_context=plan_context)
-    opt = do_optimizer(bound, telemetry, PlanContext())
+    opt = do_optimizer(bound, telemetry, plan_context)
     out = []
     for _, node in opt.nodes(True):
         if node.node_type == LogicalPlanStepType.Scan:

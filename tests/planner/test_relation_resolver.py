@@ -49,9 +49,9 @@ from opteryx.third_party import sqloxide
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _planned(sql):
+def _planned(sql, plan_context=None):
     """Resolve then rewrite — the plan exactly as the Binder receives it."""
-    plan_context = PlanContext()
+    plan_context = plan_context or PlanContext()
     ast = sqloxide.parse_sql(sql, _dialect="opteryx")[0]
     plan, _, ctes = do_logical_planning_phase(ast, plan_context=plan_context)
     plan = do_resolve_relations(plan, ctes, QueryTelemetry.detached(), plan_context=plan_context)
@@ -71,11 +71,11 @@ def _optimized(sql):
     """
     plan_context = PlanContext()
     bound = do_bind_phase(
-        _planned(sql),
+        _planned(sql, plan_context),
         execution_context=ExecutionContext(memberships=[]),
         query_id="test_relation_resolver",
         telemetry=QueryTelemetry.detached(), plan_context=plan_context)
-    return do_optimizer(bound, QueryTelemetry.detached(), PlanContext())
+    return do_optimizer(bound, QueryTelemetry.detached(), plan_context)
 
 
 def _surviving_subquery_nodes(plan):

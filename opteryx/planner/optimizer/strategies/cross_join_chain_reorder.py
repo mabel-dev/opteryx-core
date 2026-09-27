@@ -40,6 +40,7 @@ narrowing or widening the walk.
 
 from typing import Dict, List, Optional, Set, Tuple
 
+from opteryx.compiled.planner.plan_graph import EdgeRole
 from opteryx.compiled.structures.expressions import Expression
 from opteryx.compiled.structures.plan_steps import steps_with
 from opteryx.expression import NodeType
@@ -374,8 +375,8 @@ def _rewire_chain(
     bottom_left = new_leaves[0]
     bottom_right = new_leaves[1]
     # Legs are labelled at creation (architect ruling 2026-09-27).
-    plan.add_edge(bottom_left.subplan_id, bottom_id, "left")
-    plan.add_edge(bottom_right.subplan_id, bottom_id, "right")
+    plan.add_edge(bottom_left.subplan_id, bottom_id, EdgeRole.LEFT)
+    plan.add_edge(bottom_right.subplan_id, bottom_id, EdgeRole.RIGHT)
 
     bottom_node.left_relation_names = list(bottom_left.rel_names)
     bottom_node.left_readers = list(bottom_left.readers)
@@ -398,11 +399,11 @@ def _rewire_chain(
     leaf_cursor = 2
     for jid, jnode in reversed(chain[:-1]):
         leaf = new_leaves[leaf_cursor]
-        plan.add_edge(leaf.subplan_id, jid, "right")
+        plan.add_edge(leaf.subplan_id, jid, EdgeRole.RIGHT)
         # The join below is this join's LEFT: the running accumulator.
         for child_id, _target, _relationship in list(plan.ingoing_edges(jid)):
             if child_id in chain_ids:
-                plan.add_edge(child_id, jid, "left")
+                plan.add_edge(child_id, jid, EdgeRole.LEFT)
 
         jnode.left_relation_names = list(accumulated_names)
         jnode.left_readers = list(accumulated_readers)

@@ -109,14 +109,14 @@ def check_estimated_result_size(plan, limit: int, plan_context: PlanContext, tel
     if getattr(plan, "statistics_are_stale", True):
         plan = refresh_statistics(plan, plan_context, telemetry=telemetry)
 
-    exit_points = plan.get_exit_points()
-    if len(exit_points) != 1 or plan[exit_points[0]].node_type != LogicalPlanStepType.Exit:
+    exit_nid = plan.exit_point()
+    if plan[exit_nid].node_type != LogicalPlanStepType.Exit:
         return plan
 
     # Enforce ONLY on a metric terminal count — `row_count_metric` is None
     # whenever the number is an estimate, so estimates fall through to the
     # runtime counter without a special case here.
-    exit_statistics = plan_context.statistics(plan[exit_points[0]])
+    exit_statistics = plan_context.statistics(plan[exit_nid])
     estimate = None if exit_statistics is None else exit_statistics.row_count_metric
 
     if estimate is not None and estimate > limit:

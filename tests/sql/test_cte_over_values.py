@@ -171,7 +171,7 @@ def test_a_well_formed_projection_passes_the_guard():
 
     node = ProjectStep()
     node.columns = [LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="c")]
-    assert _boundary_columns(_FakePlan(node), "nid", "brands") == node.columns
+    assert _boundary_columns(_FakePlan(node), "nid", "brands") == list(node.columns)
 
     # a leaf with no projection at all is the wildcard, not an error
     values = FunctionDatasetStep(function="VALUES")

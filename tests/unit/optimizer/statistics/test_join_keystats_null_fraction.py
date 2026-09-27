@@ -20,6 +20,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
 import pytest
 
+from opteryx.compiled.planner.plan_graph import EdgeRole
 from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.planner.optimizer.statistics_refresh import _join_stats
@@ -58,7 +59,7 @@ def _estimate(left_null_fraction):
             _RK: ColumnStatistics(column_name="rk", data_type="INTEGER", distinct_count=100, null_fraction=0.0)
         },
     )
-    child_stats = [(left, "left"), (right, "right")]
+    child_stats = [(left, EdgeRole.LEFT), (right, EdgeRole.RIGHT)]
     return _join_stats(_join_node(), child_stats).row_count
 
 

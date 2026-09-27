@@ -241,10 +241,9 @@ def _output_columns(bound_plan) -> Tuple[CheckedColumn, ...]:
     resolved. A statement with no result set has no such head and reports nothing,
     which is not the same as reporting no columns for one that does.
     """
-    heads = bound_plan.get_exit_points()
-    if not heads:
+    if not bound_plan:
         return ()
-    head = bound_plan[heads[0]]
+    head = bound_plan[bound_plan.exit_point()]
     columns = head.columns
     if not columns:
         return ()
@@ -403,8 +402,7 @@ def _identities(bound_plan) -> Tuple[CheckedIdentity, ...]:
         identities.setdefault((identity.type, identity.identity, identity.source), identity)
 
     scan_types = (LogicalPlanStepType.Scan, LogicalPlanStepType.FunctionDataset)
-    heads = bound_plan.get_exit_points()
-    head_id = heads[0] if heads else None
+    head_id = bound_plan.exit_point() if bound_plan else None
 
     # Columns spliced in with a sub-plan are qualified by the alias the resolver
     # minted for it, and a reader told their column comes `from $view-bn46` has been

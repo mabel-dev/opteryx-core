@@ -18,6 +18,7 @@ Two layers:
 import os
 import sys
 
+from opteryx.compiled.planner.plan_graph import EdgeRole
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.plan_steps import ExitStep
 from opteryx.compiled.structures.plan_steps import JoinStep
@@ -140,28 +141,32 @@ def _inner_join_node():
     return n
 
 
-def _build_join_plan(join_node, left_scan, right_scan):
-    plan = LogicalPlan()
+def _build_join_plan(join_node, left_scan, right_scan, plan_context):
+    """(plan, ids): the join plan and each node's id by its label."""
+    plan = LogicalPlan(plan_context)
     # The swap is gated on both legs carrying reader UUIDs, as the binder's
     # join_leg_preprocess attaches for any join over real scans. Without them
     # the strategy declines to reorder and no swap can ever be observed.
     join_node.left_readers = [left_scan.uuid]
     join_node.right_readers = [right_scan.uuid]
-    plan.add_node("j", join_node)
-    plan.add_node("l", left_scan)
-    plan.add_node("r", right_scan)
-    plan.add_edge("l", "j", "left")
-    plan.add_edge("r", "j", "right")
+    j_nid = plan.add_node(join_node)
+    l_nid = plan.add_node(left_scan)
+    r_nid = plan.add_node(right_scan)
+    plan.add_edge(l_nid, j_nid, EdgeRole.LEFT)
+    plan.add_edge(r_nid, j_nid, EdgeRole.RIGHT)
     exit_node = ExitStep()
     exit_node.columns = []
-    plan.add_node("e", exit_node)
-    plan.add_edge("j", "e")
-    return plan
+    e_nid = plan.add_node(exit_node)
+    plan.add_edge(j_nid, e_nid)
+    return plan, {"j": j_nid, "l": l_nid, "r": r_nid, "e": e_nid}
 
 
-def _leg_labels(plan):
-    """The 'left'/'right' label on each edge feeding the join, keyed by source."""
-    return {source: relation for source, _target, relation in plan.ingoing_edges("j")}
+def _leg_labels(plan, ids):
+    """The 'left'/'right' label on each edge feeding the join, keyed by source label."""
+    label_of = {nid: label for label, nid in ids.items()}
+    return {
+        label_of[source]: relation for source, _target, relation in plan.ingoing_edges(ids["j"])
+    }
 
 
 def test_visit_swaps_on_post_filter_statistics_not_pre_filter_size():
@@ -171,19 +176,19 @@ def test_visit_swaps_on_post_filter_statistics_not_pre_filter_size():
     join_node = _inner_join_node()
     left_scan = _scan_with_stats("big", row_count=50, plan_context=plan_context)  # post-filter: tiny
     right_scan = _scan_with_stats("small", row_count=1000, plan_context=plan_context)
-    plan = _build_join_plan(join_node, left_scan, right_scan)
+    plan, ids = _build_join_plan(join_node, left_scan, right_scan, plan_context)
 
     strategy = JoinAlgorithmStrategy(telemetry=QueryTelemetry.detached())
     context = OptimizerContext(plan, plan_context)
-    context.node_id = "j"
+    context.node_id = ids["j"]
 
     before = strategy.telemetry.optimization_inner_join_smallest_table_left
-    strategy.visit(plan["j"], context)
+    strategy.visit(plan[ids["j"]], context)
     after = strategy.telemetry.optimization_inner_join_smallest_table_left
 
     # No swap: statistics show left already smallest.
     assert after == before, "should not swap when post-filter stats show left is smaller"
-    assert _leg_labels(context.optimized_plan) == {"l": "left", "r": "right"}
+    assert _leg_labels(context.optimized_plan, ids) == {"l": EdgeRole.LEFT, "r": EdgeRole.RIGHT}
 
 
 def test_visit_swaps_when_statistics_show_left_is_larger():
@@ -192,20 +197,20 @@ def test_visit_swaps_when_statistics_show_left_is_larger():
     join_node = _inner_join_node()
     left_scan = _scan_with_stats("big", row_count=100_000, plan_context=plan_context)
     right_scan = _scan_with_stats("small", row_count=100, plan_context=plan_context)
-    plan = _build_join_plan(join_node, left_scan, right_scan)
+    plan, ids = _build_join_plan(join_node, left_scan, right_scan, plan_context)
 
     strategy = JoinAlgorithmStrategy(telemetry=QueryTelemetry.detached())
     context = OptimizerContext(plan, plan_context)
-    context.node_id = "j"
+    context.node_id = ids["j"]
 
     before = strategy.telemetry.optimization_inner_join_smallest_table_left
-    strategy.visit(plan["j"], context)
+    strategy.visit(plan[ids["j"]], context)
     after = strategy.telemetry.optimization_inner_join_smallest_table_left
 
     assert after == before + 1, "should swap when post-filter stats show left is larger"
     # The swap must reach the edges: they are what the physical plan reads to
     # choose the build side. Swapping only the node attributes loses the decision.
-    assert _leg_labels(context.optimized_plan) == {"l": "right", "r": "left"}
+    assert _leg_labels(context.optimized_plan, ids) == {"l": EdgeRole.RIGHT, "r": EdgeRole.LEFT}
 
 
 

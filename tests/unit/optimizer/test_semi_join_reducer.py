@@ -26,6 +26,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
 from opteryx.connectors import DiskConnector
+from opteryx.planner.plan_context import PlanContext
 
 opteryx.register_workspace("testdata", DiskConnector)
 
@@ -93,7 +94,7 @@ def test_no_reducer_without_a_candidate_join():
     from opteryx.planner.optimizer.strategies.semi_join_reducer import SemiJoinReducerStrategy
 
     strategy = SemiJoinReducerStrategy(QueryTelemetry.detached())
-    assert strategy.should_i_run(LogicalPlan()) is False
+    assert strategy.should_i_run(LogicalPlan(PlanContext())) is False
 
 
 if __name__ == "__main__":  # pragma: no cover

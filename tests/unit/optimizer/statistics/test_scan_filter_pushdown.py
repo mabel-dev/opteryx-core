@@ -82,7 +82,6 @@ def _build_optimized_and_refreshed_plan(sql):
     plan = do_resolve_relations(plan, ctes, telemetry, plan_context=plan_context)
     plan = do_plan_rewrite(plan, telemetry, plan_context=plan_context)
     bound = do_bind_phase(plan, execution_context=ctx, query_id=query_id, telemetry=telemetry, plan_context=plan_context)
-    plan_context = PlanContext()
     optimized = do_optimizer(bound, telemetry, plan_context)
     return refresh_statistics(optimized, plan_context), plan_context
 

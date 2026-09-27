@@ -5,6 +5,7 @@
 
 from typing import Tuple
 
+from opteryx.compiled.planner.plan_graph import EdgeRole
 from opteryx.compiled.structures.expressions import Expression
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
@@ -104,15 +105,11 @@ def flip_join_leg_labels(plan: LogicalPlan, join_nid: str) -> None:
     attributes alone leaves the two disagreeing, and the build side silently
     reverts to the pre-swap leg.
 
-    Edges an optimizer rewrite left unlabelled are skipped — the physical plan
-    infers those from the (already swapped) reader UUIDs.
+    Every leg is labelled where it is made (plan.legs refuses otherwise).
     """
-    opposite = {"left": "right", "right": "left"}
-    # Materialise before mutating: add_edge invalidates the edge caches.
-    for provider, _target, relation in list(plan.ingoing_edges(join_nid)):
-        flipped = opposite.get(relation)
-        if flipped is not None:
-            plan.add_edge(provider, join_nid, flipped)
+    left, right = plan.legs(join_nid)
+    plan.add_edge(left, join_nid, EdgeRole.RIGHT)
+    plan.add_edge(right, join_nid, EdgeRole.LEFT)
 
 
 class CopyOnWritePlan:
@@ -191,11 +188,8 @@ class CopyOnWritePlan:
     def absorb(self, other):
         self._mutable().absorb(other)
 
-    def add_node(self, node):
-        return self._mutable().add_node(node)
-
-    def place(self, nid, node):
-        self._mutable().place(nid, node)
+    def add_node(self, node, nid=None):
+        return self._mutable().add_node(node, nid=nid)
 
     def add_edge(self, source, target, relationship=None):
         return self._mutable().add_edge(source, target, relationship)
@@ -206,11 +200,11 @@ class CopyOnWritePlan:
     def remove_edge(self, source, target, relationship):
         return self._mutable().remove_edge(source, target, relationship)
 
-    def insert_node_before(self, nid, node, before_nid):
-        return self._mutable().insert_node_before(nid, node, before_nid)
+    def insert_node_before(self, node, before_nid, *, nid=None):
+        return self._mutable().insert_node_before(node, before_nid, nid=nid)
 
-    def insert_node_after(self, nid, node, after_nid):
-        return self._mutable().insert_node_after(nid, node, after_nid)
+    def insert_node_after(self, node, after_nid, *, nid=None):
+        return self._mutable().insert_node_after(node, after_nid, nid=nid)
 
 
 class OptimizerContext:

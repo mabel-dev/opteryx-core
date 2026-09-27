@@ -98,14 +98,10 @@ def execute(
     from opteryx.operators.merge import MergeNode
     from opteryx.operators.compaction_commit import CompactionCommitNode
 
-    head_nodes = list(set(plan.get_exit_points()))
-    if len(head_nodes) != 1:
-        raise InvalidInternalStateError(
-            f"Query plan has {len(head_nodes)} heads, expected exactly 1."
-        )
+    head_nid = plan.exit_point()
 
     if head_node is None:
-        head_node = plan[head_nodes[0]]
+        head_node = plan[head_nid]
 
     # ── Non-pipeline special cases ───────────────────────────────────────────
     if isinstance(head_node, ExplainNode):
@@ -129,9 +125,9 @@ def execute(
         # sink, so the read, the sort and the split all run natively and only the
         # write-and-commit is driven from here. It shares this branch rather than
         # adding a third copy of the loop, so there is still ONE to move.
-        subplan = plan.copy()
-        subplan.remove_node(head_nodes[0], heal=True)
-        new_head = subplan[subplan.get_exit_points()[0]]
+        subplan = plan.shallow_copy()  # structure only: the operators are shared
+        subplan.remove_node(head_nid, heal=True)
+        new_head = subplan[subplan.exit_point()]
         if new_head.kind != "ExitNode":
             raise InvalidInternalStateError(
                 f"{head_node.kind} sub-plan is not Exit-headed; it cannot "
@@ -157,9 +153,9 @@ def execute(
         # push-pipeline. Strip InsertNode from a copy of the plan (heal=True
         # re-exposes whatever sits below it as the sole exit point) and check
         # which shape we actually have before picking an engine.
-        subplan = plan.copy()
-        subplan.remove_node(head_nodes[0], heal=True)
-        new_head = subplan[subplan.get_exit_points()[0]]
+        subplan = plan.shallow_copy()  # structure only: the operators are shared
+        subplan.remove_node(head_nid, heal=True)
+        new_head = subplan[subplan.exit_point()]
         if new_head.kind == "ExitNode":
             # Drive InsertNode's existing, tested write/commit logic directly
             # from the native generator's morsels. This keeps a Python-driven
@@ -243,18 +239,10 @@ def explain(
     # Real operator children of a node, transparently skipping the Exit/Explain
     # wrappers so the rendered tree starts at the first data operator.
     def _real_children(node_id):
-        # Ordered by edge label so a join's legs render left-then-right. The
-        # label is what the physical plan reads to pick the build side, and
-        # ingoing_edges yields in storage order, which for a swapped join is
-        # the pre-swap order -- rendering that order makes a correct
-        # smallest-table-left swap read as inverted. Unlabelled edges keep
-        # their relative order.
-        _leg_rank = {"left": 0, "right": 1}
+        # ingoing_edges yields a join's legs LEFT then RIGHT (the plan graph's
+        # order), so they render left-then-right.
         kids = []
-        edges = sorted(
-            plan.ingoing_edges(node_id), key=lambda edge: _leg_rank.get(edge[2], 2)
-        )
-        for edge in edges:
+        for edge in plan.ingoing_edges(node_id):
             child_id = edge[0]
             child = plan[child_id]
             if child.kind in ("ExitNode", "ExplainNode"):
@@ -278,9 +266,7 @@ def explain(
         for index, child_id in enumerate(children):
             _tree_rows(child_id, child_prefix, index == len(children) - 1, False, out)
 
-    head = list(dict.fromkeys(plan.get_exit_points()))
-    if len(head) != 1:
-        raise InvalidInternalStateError(f"Problem with the plan - it has {len(head)} heads.")
+    head_nid = plan.exit_point()
 
     if analyze:
         # Drive the underlying query for telemetry but discard the result rows.
@@ -292,23 +278,19 @@ def explain(
         # native per-operator stats land in telemetry._reading["native_op_stats"],
         # keyed by node identity, which _row_count/_self_ms below read via the
         # plan-telemetry overlay.
-        query_head_edges = plan.ingoing_edges(head[0])
+        query_head_edges = plan.ingoing_edges(head_nid)
         if query_head_edges:
             from opteryx.managers.execution.compiler import execute_native
 
-            subplan = plan.copy()
-            subplan.remove_node(head[0], heal=True)
-            # Graph.copy() drops instance attributes; without these the compiler
-            # refuses every CTE reference ("shared body was not compiled").
-            subplan.shared_ctes = getattr(plan, "shared_ctes", None) or {}
-            subplan.recursive_ctes = getattr(plan, "recursive_ctes", None) or {}
+            subplan = plan.shallow_copy()  # structure only: the operators are shared
+            subplan.remove_node(head_nid, heal=True)
             generator, _ = execute_native(subplan, telemetry=telemetry)
             for _ in generator:
                 pass
 
     # ── Tabular operator tree ────────────────────────────────────────────────
     op_rows: list = []
-    tops = _real_children(head[0])
+    tops = _real_children(head_nid)
     for index, top in enumerate(tops):
         _tree_rows(top, "", index == len(tops) - 1, True, op_rows)
 
@@ -325,7 +307,7 @@ def explain(
         # Shared/recursive CTE bodies ran in the same engine and their operators
         # carry readings under their own identities; fold them in so the
         # RECURSIVE CTE section below renders real numbers, not zeros.
-        for _body in (getattr(plan, "shared_ctes", None) or {}).values():
+        for _body in plan.plan_context.physical_shared_ctes.values():
             _body_stats = collect_plan_telemetry(_body)
             node_stats_by_nid.update(_body_stats)
 
@@ -465,11 +447,11 @@ def explain(
     # Each WITH RECURSIVE renders as its own section: the header carries the
     # UNION flavour and — under ANALYZE — the passes the fixpoint actually ran
     # and (UNION) the visited-set size, from the engine's LoopSpan readings.
-    # The legs are physical plans of their own (plan.shared_ctes); their
+    # The legs are physical plans of their own (plan_context.physical_shared_ctes); their
     # operator rows read the same per-identity stats overlay as the main tree.
-    recursive_meta = getattr(plan, "recursive_ctes", None) or {}
+    recursive_meta = plan.plan_context.recursive_ctes
     if recursive_meta:
-        shared_bodies = getattr(plan, "shared_ctes", None) or {}
+        shared_bodies = plan.plan_context.physical_shared_ctes
         loop_by_name = {
             entry["name"]: entry
             for entry in (
@@ -484,10 +466,7 @@ def explain(
             label = prefix + ("└─ " if is_last else "├─ ") + name
             child_prefix = prefix + ("   " if is_last else "│  ")
             out.append((label, str(operator.config) if operator.config else "", node_id))
-            _leg_rank = {"left": 0, "right": 1}
-            children = sorted(
-                graph.ingoing_edges(node_id), key=lambda edge: _leg_rank.get(edge[2], 2)
-            )
+            children = graph.ingoing_edges(node_id)  # legs LEFT then RIGHT
             for index, edge in enumerate(children):
                 _graph_tree_rows(
                     graph, edge[0], child_prefix, index == len(children) - 1, out
@@ -516,15 +495,13 @@ def explain(
                 if body is None:
                     continue
                 body_rows: list = []
-                body_heads = list(dict.fromkeys(body.get_exit_points()))
-                for index, body_head in enumerate(body_heads):
-                    _graph_tree_rows(
-                        body,
-                        body_head,
-                        "   " if leg_is_last else "│  ",
-                        index == len(body_heads) - 1,
-                        body_rows,
-                    )
+                _graph_tree_rows(
+                    body,
+                    body.exit_point(),
+                    "   " if leg_is_last else "│  ",
+                    True,
+                    body_rows,
+                )
                 for label, config, body_nid in body_rows:
                     tree_col.append(label)
                     details_col.append(config)

@@ -61,7 +61,6 @@ def _build_optimized_and_refreshed_plan_with_telemetry(sql):
     plan = do_resolve_relations(plan, ctes, telemetry, plan_context=plan_context)
     plan = do_plan_rewrite(plan, telemetry, plan_context=plan_context)
     bound = do_bind_phase(plan, execution_context=ctx, query_id=query_id, telemetry=telemetry, plan_context=plan_context)
-    plan_context = PlanContext()
     optimized = do_optimizer(bound, telemetry, plan_context)
     refresh_statistics(optimized, plan_context, telemetry=telemetry)
     return telemetry
@@ -99,7 +98,6 @@ def test_omitting_telemetry_does_not_change_the_computed_statistics():
     plan = do_resolve_relations(plan, ctes, telemetry, plan_context=plan_context)
     plan = do_plan_rewrite(plan, telemetry, plan_context=plan_context)
     bound = do_bind_phase(plan, execution_context=ctx, query_id=str(uuid.uuid4()), telemetry=telemetry, plan_context=plan_context)
-    plan_context = PlanContext()
     optimized = do_optimizer(bound, telemetry, plan_context)
     refresh_statistics(optimized, plan_context)  # no telemetry argument at all
 

@@ -11,22 +11,17 @@ import pytest
 from opteryx.exceptions import NotSupportedError
 from opteryx.models import QueryProperties
 from opteryx.planner.physical_planner import create_physical_plan
+from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.plan_context import PlanContext
 import opteryx.planner.physical_planner as physical_planner
 from opteryx.compiled.structures.plan_steps import JoinStep
 
 
-class _LogicalPlan:
-    def __init__(self, node):
-        self._node = node
-
-    def nodes(self, data=True):
-        if data:
-            return [(1, self._node)]
-        return [1]
-
-    def edges(self):
-        return []
+def _one_node_plan(node):
+    """(logical plan, its PlanContext, the node's id): a plan holding just `node`."""
+    plan_context = PlanContext()
+    plan = LogicalPlan(plan_context)
+    return plan, plan_context, plan.add_node(node)
 
 
 def _inner_join_node():
@@ -43,25 +38,27 @@ def test_physical_planner_uses_draken_inner_join(monkeypatch):
     monkeypatch.setattr(physical_planner, "_inner_join_supported", lambda join: True)
 
     node = _inner_join_node()
+    logical, plan_context, nid = _one_node_plan(node)
     plan = create_physical_plan(
-        _LogicalPlan(node),
+        logical,
         QueryProperties(query_id="test-qid", variables={}),
-        PlanContext(),
+        plan_context,
     )
-    assert plan[1].kind == "DrakenInnerJoinNode"
-    assert plan[1].join_type == "inner"
+    assert plan[nid].kind == "DrakenInnerJoinNode"
+    assert plan[nid].join_type == "inner"
     # The typed logical step itself, plus the output-rows estimate the physical
     # planner computes (None: nothing in this PlanContext estimated the join).
-    assert plan[1].step is node
-    assert plan[1].join_output_rows_estimate is None
+    assert plan[nid].step is node
+    assert plan[nid].join_output_rows_estimate is None
 
 
 def test_physical_planner_errors_when_draken_inner_join_not_supported(monkeypatch):
     monkeypatch.setattr(physical_planner, "_inner_join_supported", lambda join: False)
 
+    logical, plan_context, _nid = _one_node_plan(_inner_join_node())
     with pytest.raises(NotSupportedError):
         create_physical_plan(
-            _LogicalPlan(_inner_join_node()),
+            logical,
             QueryProperties(query_id="test-qid", variables={}),
-            PlanContext(),
+            plan_context,
         )

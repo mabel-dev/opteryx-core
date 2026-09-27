@@ -155,6 +155,7 @@ Known gaps (raise, never silently wrong):
 The first two predate this strategy.
 """
 
+from opteryx.compiled.planner.plan_graph import EdgeRole
 from opteryx.exceptions import InvalidInternalStateError, UnsupportedSyntaxError
 from opteryx.expression import NodeType, binary_operands, get_all_nodes_of_type
 from opteryx.expression.formatter import format_expression
@@ -724,10 +725,7 @@ def _emits_exactly_one_row(inner_plan: LogicalPlan) -> bool:
     joining their empty result would silently DROP every outer row where SQL
     says the subquery IS NULL (visible on `WHERE (subq) IS NULL`).
     """
-    exit_points = inner_plan.get_exit_points()
-    if len(exit_points) != 1:
-        return False
-    nid = exit_points[0]
+    nid = inner_plan.exit_point()
     while True:
         node = inner_plan[nid]
         if node.node_type == LogicalPlanStepType.Aggregate:
@@ -762,7 +760,7 @@ def _guard_scalar_cardinality(inner_plan: LogicalPlan, telemetry) -> None:
     """
     if _emits_exactly_one_row(inner_plan):
         return
-    exit_nid = inner_plan.get_exit_points()[0]
+    exit_nid = inner_plan.exit_point()
     guard = ScalarSubqueryGuardStep()
     guard_nid = inner_plan.add_node(guard)
     inner_plan.add_edge(exit_nid, guard_nid)
@@ -889,7 +887,7 @@ def _graft_key_reducer(
         return False
 
     left_relations, left_schemas = _collect_relations(inner_plan, providers[0][0])
-    reducer_exit = reducer_source.get_exit_points()[0]
+    reducer_exit = reducer_source.exit_point()
     inner_plan.absorb(reducer_source)
     right_relations, right_schemas = _collect_relations(inner_plan, reducer_exit)
 
@@ -912,8 +910,7 @@ def _graft_key_reducer(
     ):
         return False
 
-    reducer_nid = inner_plan.plan_context.node_ids.mint()
-    inner_plan.insert_node_before(reducer_nid, reducer, target_nid)
+    reducer_nid = inner_plan.insert_node_before(reducer, target_nid)
     _label_inserted_join_legs(inner_plan, reducer_nid, reducer_exit)
     return True
 
@@ -1276,7 +1273,7 @@ def _projecting_node(plan: LogicalPlan):
         LogicalPlanStepType.AggregateAndGroup,
         LogicalPlanStepType.Union,
     )
-    frontier = [plan.get_exit_points()[0]]
+    frontier = [plan.exit_point()]
     seen: set = set()
     while frontier:
         nid = frontier.pop(0)
@@ -1302,8 +1299,8 @@ def _label_inserted_join_legs(plan: LogicalPlan, join_nid, inner_exit) -> None:
         raise InvalidInternalStateError(
             f"a decorrelated join needs exactly one outer input, found {len(outer)}"
         )
-    plan.add_edge(outer[0][0], join_nid, "left")
-    plan.add_edge(inner_exit, join_nid, "right")
+    plan.add_edge(outer[0][0], join_nid, EdgeRole.LEFT)
+    plan.add_edge(inner_exit, join_nid, EdgeRole.RIGHT)
 
 
 def _output_column(plan: LogicalPlan):
@@ -1421,10 +1418,10 @@ def _has_work(condition) -> bool:
     )
 
 
-def _find_subquery_in_columns(columns):
+def _find_subquery_in_columns(node, attribute):
     """
-    Locate the first scalar subquery across a Project's column list, with a
-    callable that replaces it in place.
+    Locate the first scalar subquery across one of `node`'s expression lists
+    (`attribute`, see `_SUBQUERY_BEARING_ATTRS`), with a callable that replaces it.
 
     The list-level analogue of `_find`, which locates a match WITHIN one
     expression tree; a Project has several top-level trees (one per SELECT-list
@@ -1432,15 +1429,10 @@ def _find_subquery_in_columns(columns):
     Q09: each `bucket` column is a CASE whose WHEN/THEN/ELSE are three separate
     scalar subqueries).
     """
-    for index, column in enumerate(columns or []):
+    for index, column in enumerate(_owned_list(node, attribute) or ()):
         found, replace_child = _find_subquery(column)
         if found is not None:
-
-            def _replace(new, _cols=columns, _i=index, _rc=replace_child):
-                _cols[_i] = _rc(new)
-                return _cols[_i]
-
-            return found, _replace
+            return found, _list_replacer(node, attribute, index, replace_child)
     return None, None
 
 
@@ -1477,6 +1469,32 @@ def _owned_list(node, attribute):
     raise InvalidInternalStateError(f"'{attribute}' is not a subquery-bearing expression list")
 
 
+def _set_owned_list(node, attribute, values):
+    """Assign `values` as the expression list `attribute` names on `node`. Step list
+    fields are immutable (architect ruling Q3): a change is a new list assigned."""
+    if attribute == "columns":
+        node.columns = values
+    elif attribute == "aggregates":
+        node.aggregates = values
+    elif attribute == "groups":
+        node.groups = values
+    else:
+        raise InvalidInternalStateError(f"'{attribute}' is not a subquery-bearing expression list")
+
+
+def _list_replacer(node, attribute, index, replace_child):
+    """A callable replacing entry `index` of `node`'s `attribute` list with
+    `replace_child(new)` - the list is rebuilt and assigned back."""
+
+    def _replace(new):
+        values = list(_owned_list(node, attribute))
+        values[index] = replace_child(new)
+        _set_owned_list(node, attribute, values)
+        return values[index]
+
+    return _replace
+
+
 def _find_subquery_in_node(node):
     """
     Locate the first scalar subquery this node owns, as (node, replace_fn).
@@ -1484,7 +1502,7 @@ def _find_subquery_in_node(node):
     See `_SUBQUERY_BEARING_ATTRS` for which lists each node type owns.
     """
     for attribute in _SUBQUERY_BEARING_ATTRS.get(node.node_type, ()):
-        found, replace = _find_subquery_in_columns(_owned_list(node, attribute))
+        found, replace = _find_subquery_in_columns(node, attribute)
         if found is not None:
             return found, replace
     return None, None
@@ -1528,16 +1546,10 @@ def _find_existence_in_node(node):
     and the join has to go BELOW it.
     """
     for attribute in _SUBQUERY_BEARING_ATTRS.get(node.node_type, ()):
-        columns = _owned_list(node, attribute)
-        for index, column in enumerate(columns or []):
+        for index, column in enumerate(_owned_list(node, attribute) or ()):
             found, replace_child = _find_existence(column)
             if found is not None:
-
-                def _replace(new, _cols=columns, _i=index, _rc=replace_child):
-                    _cols[_i] = _rc(new)
-                    return _cols[_i]
-
-                return found, _replace
+                return found, _list_replacer(node, attribute, index, replace_child)
     return None, None
 
 
@@ -1736,7 +1748,7 @@ def _graft_existence_join(
     flag.alias = remove.alias
     flag.query_column = remove.query_column
 
-    inner_exit = inner_plan.get_exit_points()[0]
+    inner_exit = inner_plan.exit_point()
     plan.absorb(inner_plan)
     inner_relations, inner_schemas = _collect_relations(plan, inner_exit)
     for inner_key, _outer_key in key_pairs:
@@ -1775,8 +1787,7 @@ def _graft_existence_join(
             "decorrelation built a join key naming a relation that is on neither leg"
         )
 
-    join_nid = plan.plan_context.node_ids.mint()
-    plan.insert_node_before(join_nid, join, anchor_nid)
+    join_nid = plan.insert_node_before(join, anchor_nid)
     _label_inserted_join_legs(plan, join_nid, inner_exit)
 
     return flag
@@ -1837,8 +1848,7 @@ def _project_uncorrelated_exists(plan, project_nid, inner_plan, remove, replace_
     join.schemas = {**outer_schemas, **inner_schemas}
     join.left_columns, join.right_columns = [], []
 
-    join_nid = plan.plan_context.node_ids.mint()
-    plan.insert_node_before(join_nid, join, project_nid)
+    join_nid = plan.insert_node_before(join, project_nid)
     _label_inserted_join_legs(plan, join_nid, agg_nid)
 
     telemetry.optimization_decorrelate_select_list_existence = (
@@ -2039,7 +2049,7 @@ def _relation_node_supplying(inner_plan: LogicalPlan, expression):
     identities = {identifier.schema_column.identity for identifier in identifiers}
 
     deepest = None
-    stack = [inner_plan.get_exit_points()[0]]
+    stack = [inner_plan.exit_point()]
     seen: set = set()
     while stack:
         nid = stack.pop()
@@ -2087,7 +2097,7 @@ def _materialize_inner_key(inner_plan: LogicalPlan, inner_key):
     if inner_key is None or inner_key.node_type == NodeType.IDENTIFIER:
         return inner_key
 
-    inner_relations, _schemas = _collect_relations(inner_plan, inner_plan.get_exit_points()[0])
+    inner_relations, _schemas = _collect_relations(inner_plan, inner_plan.exit_point())
     # THE shared hoistability decision — an aggregate, a subquery, a volatile
     # function or an expression straddling the correlation boundary all come back
     # as "no" here, and none of them can key a join whatever we project.
@@ -2423,7 +2433,7 @@ def _build_filter_join(
         else:
             deferred_pairs.append((inner_key, outer_key))
 
-    inner_exit = inner_plan.get_exit_points()[0]
+    inner_exit = inner_plan.exit_point()
     plan.absorb(inner_plan)
     inner_relations, inner_schemas = _collect_relations(plan, inner_exit)
     # Any relation named by a key that this leg supplies must be known as one of
@@ -2556,8 +2566,7 @@ def _build_filter_join(
             for column in (filter_node.columns or [])
             if column.node_type == NodeType.IDENTIFIER
         ]
-        join_nid = plan.plan_context.node_ids.mint()
-        plan.insert_node_before(join_nid, join, filter_nid)
+        join_nid = plan.insert_node_before(join, filter_nid)
         _label_inserted_join_legs(plan, join_nid, inner_exit)
 
     # Bind deferred correlations on the ancestor existence join. Must run AFTER
@@ -2621,9 +2630,8 @@ def _synthesize_count_aggregate(inner_plan: LogicalPlan, groups: list, *, plan_c
     aggregate.columns = [count_node] + groups
     aggregate.schema = RelationSchema(name=count_relation, columns=[count_schema_column])
 
-    inner_exit = inner_plan.get_exit_points()[0]
-    agg_nid = inner_plan.plan_context.node_ids.mint()
-    inner_plan.insert_node_after(agg_nid, aggregate, inner_exit)
+    inner_exit = inner_plan.exit_point()
+    agg_nid = inner_plan.insert_node_after(aggregate, inner_exit)
     return agg_nid, count_relation, _count_reference
 
 
@@ -2813,8 +2821,7 @@ def _materialize_boolean_value(
             "decorrelation built a join key naming a relation that is on neither leg"
         )
 
-    join_nid = plan.plan_context.node_ids.mint()
-    plan.insert_node_before(join_nid, join, filter_nid)
+    join_nid = plan.insert_node_before(join, filter_nid)
     _label_inserted_join_legs(plan, join_nid, agg_nid)
 
     # --- substitute the EXISTS/IN node with the boolean value, in place -------
@@ -3168,7 +3175,7 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
             getattr(telemetry, "optimization_decorrelate_aggregate_reduced", 0) + 1,
         )
 
-    inner_exit = inner_plan.get_exit_points()[0]
+    inner_exit = inner_plan.exit_point()
     plan.absorb(inner_plan)
     inner_relations, inner_schemas = _collect_relations(plan, inner_exit)
     # The alias stamped onto the value column above has to be a known name of this
@@ -3236,8 +3243,7 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
     else:
         join.left_columns, join.right_columns = [], []
 
-    join_nid = plan.plan_context.node_ids.mint()
-    plan.insert_node_before(join_nid, join, filter_nid)
+    join_nid = plan.insert_node_before(join, filter_nid)
     _label_inserted_join_legs(plan, join_nid, inner_exit)
 
     # --- narrow back to the pre-decorrelation shape ---------------------------
@@ -3272,7 +3278,7 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
         narrow_back = ProjectStep()
         narrow_back.columns = [_local_copy(col) for col in pre_decorrelation_columns]
         narrow_back.passthrough_columns = []
-        plan.insert_node_after(plan.plan_context.node_ids.mint(), narrow_back, filter_nid)
+        plan.insert_node_after(narrow_back, filter_nid)
 
     # Correlations reaching past the enclosing scope are bound on the ancestor join
     # that owns their relation. This has to run AFTER the join is in the plan, since
@@ -3370,9 +3376,14 @@ def _decorrelate_projection(
     # --- the subquery's value becomes an ordinary column ----------------------
     for attribute in _SUBQUERY_BEARING_ATTRS.get(project_node.node_type, ()):
         expressions = _owned_list(project_node, attribute)
-        for index, expression in enumerate(expressions or []):
-            expressions[index] = _replace_every(
-                expression, subquery, lambda: _reference_to(value_column)
+        if expressions is not None:
+            _set_owned_list(
+                project_node,
+                attribute,
+                [
+                    _replace_every(expression, subquery, lambda: _reference_to(value_column))
+                    for expression in expressions
+                ],
             )
 
     # --- graft the subquery in as a joined relation ---------------------------
@@ -3385,7 +3396,7 @@ def _decorrelate_projection(
         outer_relations |= found_relations
         outer_schemas.update(found_schemas)
 
-    inner_exit = inner_plan.get_exit_points()[0]
+    inner_exit = inner_plan.exit_point()
     plan.absorb(inner_plan)
     inner_relations, inner_schemas = _collect_relations(plan, inner_exit)
     inner_relations.add(scalar_alias)
@@ -3407,8 +3418,7 @@ def _decorrelate_projection(
     join.schemas = {**outer_schemas, **inner_schemas}
     join.left_columns, join.right_columns = [], []
 
-    join_nid = plan.plan_context.node_ids.mint()
-    plan.insert_node_before(join_nid, join, project_nid)
+    join_nid = plan.insert_node_before(join, project_nid)
     _label_inserted_join_legs(plan, join_nid, inner_exit)
 
     telemetry.optimization_decorrelate_scalar_subquery = (

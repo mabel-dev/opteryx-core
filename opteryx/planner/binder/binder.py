@@ -524,14 +524,10 @@ def bind_correlated_subquery(node: Expression, context: Any) -> Tuple[Expression
     )
 
     subplan = node.value
-    exit_points = subplan.get_exit_points()
-    if len(exit_points) != 1:
-        raise InvalidInternalStateError(
-            f"subquery plan has {len(exit_points)} heads - this is an error"
-        )
+    exit_point = subplan.exit_point()
 
     bound_subplan, _ = BinderVisitor().traverse(
-        subplan, exit_points[0], context=context.open_correlated_scope()
+        subplan, exit_point, context=context.open_correlated_scope()
     )
     node.value = bound_subplan
 
@@ -573,7 +569,7 @@ def bind_correlated_subquery(node: Expression, context: Any) -> Tuple[Expression
     # o_orderdate's DATE as the subquery's type, so `(...) > 100000` was refused as
     # DATE vs INTEGER. LIMIT, ORDER BY and DISTINCT pass their input's columns
     # through unchanged, so they are descended whatever `columns` they carry.
-    top_nid = bound_subplan.get_exit_points()[0]
+    top_nid = bound_subplan.exit_point()
     top = bound_subplan[top_nid]
     while not top.columns or top.node_type in output_pass_through:
         feeders = bound_subplan.ingoing_edges(top_nid)

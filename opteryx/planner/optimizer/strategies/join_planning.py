@@ -30,6 +30,7 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
+from opteryx.compiled.planner.plan_graph import EdgeRole
 from opteryx.config import features
 from opteryx.planner.cost_estimation import JoinTree
 from opteryx.planner.cost_estimation import JoinTreeLeaf
@@ -150,8 +151,8 @@ def _apply_join_tree(
         join_node.schemas = _schemas_for(accumulated)
         plan[join_id] = join_node
 
-        plan.add_edge(left_id, join_id, "left")
-        plan.add_edge(right_id, join_id, "right")
+        plan.add_edge(left_id, join_id, EdgeRole.LEFT)
+        plan.add_edge(right_id, join_id, EdgeRole.RIGHT)
 
         return join_id, accumulated, list(left_readers) + list(right_readers)
 

@@ -49,7 +49,7 @@ def execute(plan, telemetry, trace_sink=None):
         raise InvalidInternalStateError("Query plan is cyclic, cannot execute.")
 
     # Shared CTE bodies are plans in their own right.
-    for body in (getattr(plan, "shared_ctes", None) or {}).values():
+    for body in plan.plan_context.physical_shared_ctes.values():
         if not body.is_acyclic():
             raise InvalidInternalStateError("Shared CTE body plan is cyclic, cannot execute.")
 
@@ -60,8 +60,7 @@ def execute(plan, telemetry, trace_sink=None):
     # THE data executor, no second engine, no fallback. A plan the native engine has
     # no operator for raises NotSupportedError at compile time (hard-cutover posture;
     # see the engine_cutover_decisions memory).
-    head_nodes = list(set(plan.get_exit_points()))
-    if len(head_nodes) == 1 and is_special_op(plan[head_nodes[0]]):
+    if is_special_op(plan[plan.exit_point()]):
         results, result_type = serial_execute(plan, telemetry=telemetry)
     else:
         from .compiler import execute_native

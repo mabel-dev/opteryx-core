@@ -1847,7 +1847,7 @@ def scalar_subquery(branch, alias: Optional[List[str]] = None, key=None, *, plan
     from opteryx.planner.logical_planner.logical_planner import plan_query
 
     subquery_plan = plan_query(branch, plan_context=plan_context)
-    exit_node = subquery_plan.get_exit_points()[0]
+    exit_node = subquery_plan.exit_point()
     subquery_plan.remove_node(exit_node, heal=True)
 
     return Subquery(value=subquery_plan, alias=alias)
@@ -1858,7 +1858,7 @@ def exists(branch, alias: Optional[List[str]] = None, key=None, *, plan_context)
 
     ast = {"Query": branch["subquery"]}
     subquery_plan = plan_query(ast, plan_context=plan_context)
-    exit_node = subquery_plan.get_exit_points()[0]
+    exit_node = subquery_plan.exit_point()
     subquery_plan.remove_node(exit_node, heal=True)
 
     sub_query = Subquery(value=subquery_plan)
@@ -2538,7 +2538,7 @@ def in_subquery(branch, alias: Optional[List[str]] = None, key=None, *, plan_con
     left = build(branch["expr"], plan_context=plan_context)
     ast = {"Query": branch["subquery"]}
     subquery_plan = plan_query(ast, plan_context=plan_context)
-    exit_node = subquery_plan.get_exit_points()[0]
+    exit_node = subquery_plan.exit_point()
     subquery_plan.remove_node(exit_node, heal=True)
 
     sub_query = Subquery(value=subquery_plan)

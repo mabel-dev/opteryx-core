@@ -59,27 +59,36 @@ cdef inline void _require_expression(str name, object value):
         raise TypeError(f"{name} must be an expression or None, got {type(value).__name__}")
 
 
-cdef inline list _require_expression_list(str name, object value):
+cdef inline tuple _frozen_list(str name, object value):
+    """A list field's value as the step holds it: a tuple. Step list fields are
+    immutable (architect ruling Q3, native plan graph P2-d) - a change is a new
+    value assigned through the setter, never an in-place edit."""
     if value is None:
         return None
-    if type(value) is not list:
-        raise TypeError(f"{name} must be a list of expressions, got {type(value).__name__}")
-    for item in value:
+    if type(value) is not tuple and type(value) is not list:
+        raise TypeError(f"{name} must be a list or tuple, got {type(value).__name__}")
+    return tuple(value)
+
+
+cdef inline tuple _require_expression_list(str name, object value):
+    cdef tuple frozen = _frozen_list(name, value)
+    if frozen is None:
+        return None
+    for item in frozen:
         if not is_expression(item):
             raise TypeError(f"{name} must hold expressions, got {type(item).__name__}")
-    return value
+    return frozen
 
 
-cdef inline list _require_order_list(str name, object value):
-    """ORDER BY: a list of (expression, ascending) pairs."""
-    if value is None:
+cdef inline tuple _require_order_list(str name, object value):
+    """ORDER BY: (expression, ascending) pairs."""
+    cdef tuple frozen = _frozen_list(name, value)
+    if frozen is None:
         return None
-    if type(value) is not list:
-        raise TypeError(f"{name} must be a list of (expression, bool) pairs, got {type(value).__name__}")
-    for item in value:
+    for item in frozen:
         if type(item) is not tuple or len(item) != 2 or not is_expression(item[0]) or type(item[1]) is not bool:
             raise TypeError(f"{name} must hold (expression, bool) pairs, got {item!r}")
-    return value
+    return frozen
 
 
 cdef inline dict _require_expression_dict(str name, object value):
@@ -93,33 +102,31 @@ cdef inline dict _require_expression_dict(str name, object value):
     return value
 
 
-cdef inline list _require_rows(str name, object value):
-    """VALUES rows: a list of tuples of expressions."""
-    if value is None:
+cdef inline tuple _require_rows(str name, object value):
+    """VALUES rows: tuples of expressions."""
+    cdef tuple frozen = _frozen_list(name, value)
+    if frozen is None:
         return None
-    if type(value) is not list:
-        raise TypeError(f"{name} must be a list of rows, got {type(value).__name__}")
-    for row in value:
+    for row in frozen:
         if type(row) is not tuple:
             raise TypeError(f"{name} rows must be tuples, got {type(row).__name__}")
         for item in row:
             if not is_expression(item):
                 raise TypeError(f"{name} must hold expressions, got {type(item).__name__}")
-    return value
+    return frozen
 
 
-cdef inline list _require_window_functions(str name, object value):
+cdef inline tuple _require_window_functions(str name, object value):
     """Window functions: (name, output identity, operand expression or None, extra)."""
-    if value is None:
+    cdef tuple frozen = _frozen_list(name, value)
+    if frozen is None:
         return None
-    if type(value) is not list:
-        raise TypeError(f"{name} must be a list of window functions, got {type(value).__name__}")
-    for item in value:
+    for item in frozen:
         if type(item) is not tuple or len(item) != 4:
             raise TypeError(f"{name} must hold 4-tuples, got {item!r}")
         if item[2] is not None and not is_expression(item[2]):
             raise TypeError(f"{name} operand must be an expression or None, got {type(item[2]).__name__}")
-    return value
+    return frozen
 
 
 cdef inline void _require_plan_step(str name, object value):
@@ -137,13 +144,13 @@ cdef inline void _append_expression(list out, object expression):
         out.append(expression)
 
 
-cdef inline void _extend_expressions(list out, list expressions):
+cdef inline void _extend_expressions(list out, tuple expressions):
     if expressions is not None:
         for expression in expressions:
             out.append(expression)
 
 
-cdef inline void _extend_order_expressions(list out, list order):
+cdef inline void _extend_order_expressions(list out, tuple order):
     if order is not None:
         for expression, _ascending in order:
             out.append(expression)
@@ -155,14 +162,14 @@ cdef inline void _extend_dict_expressions(list out, dict expressions):
             out.append(expression)
 
 
-cdef inline void _extend_row_expressions(list out, list rows):
+cdef inline void _extend_row_expressions(list out, tuple rows):
     if rows is not None:
         for row in rows:
             for expression in row:
                 out.append(expression)
 
 
-cdef inline void _extend_window_expressions(list out, list window_functions):
+cdef inline void _extend_window_expressions(list out, tuple window_functions):
     if window_functions is not None:
         for item in window_functions:
             if item[2] is not None:
@@ -173,13 +180,13 @@ cdef inline object _map_expression(object fn, object expression):
     return None if expression is None else fn(expression)
 
 
-cdef inline list _map_expressions(object fn, list expressions):
+cdef inline list _map_expressions(object fn, tuple expressions):
     if expressions is None:
         return None
     return [fn(expression) for expression in expressions]
 
 
-cdef inline list _map_order_expressions(object fn, list order):
+cdef inline list _map_order_expressions(object fn, tuple order):
     if order is None:
         return None
     return [(fn(expression), ascending) for expression, ascending in order]
@@ -191,13 +198,13 @@ cdef inline dict _map_dict_expressions(object fn, dict expressions):
     return {key: fn(expression) for key, expression in expressions.items()}
 
 
-cdef inline list _map_row_expressions(object fn, list rows):
+cdef inline list _map_row_expressions(object fn, tuple rows):
     if rows is None:
         return None
     return [tuple([fn(expression) for expression in row]) for row in rows]
 
 
-cdef inline list _map_window_expressions(object fn, list window_functions):
+cdef inline list _map_window_expressions(object fn, tuple window_functions):
     if window_functions is None:
         return None
     return [
@@ -508,9 +515,9 @@ cdef class AddRelationshipStep(PlanStep):
     cdef object _if_exists
     cdef str _references_column_name
     cdef str _references_relation_name
-    cdef list _references_relation_parts
+    cdef tuple _references_relation_parts
     cdef str _relation_name
-    cdef list _relation_parts
+    cdef tuple _relation_parts
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, cardinality=None, column_name=None, connector=None, constraint_name=None, if_exists=None, references_column_name=None, references_relation_name=None, references_relation_parts=None, relation_name=None, relation_parts=None):
         self.node_type = _step_types().AddRelationship
@@ -589,7 +596,7 @@ cdef class AddRelationshipStep(PlanStep):
 
     @references_relation_parts.setter
     def references_relation_parts(self, value):
-        self._references_relation_parts = value
+        self._references_relation_parts = _frozen_list("AddRelationshipStep.references_relation_parts", value)
 
     @property
     def relation_name(self):
@@ -605,7 +612,7 @@ cdef class AddRelationshipStep(PlanStep):
 
     @relation_parts.setter
     def relation_parts(self, value):
-        self._relation_parts = value
+        self._relation_parts = _frozen_list("AddRelationshipStep.relation_parts", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
         cdef list out = []
@@ -672,9 +679,9 @@ cdef class AddRelationshipStep(PlanStep):
 cdef class AggregateStep(PlanStep):
     """The Aggregate logical plan step."""
 
-    cdef list _aggregates
-    cdef list _groups
-    cdef list _projection
+    cdef tuple _aggregates
+    cdef tuple _groups
+    cdef tuple _projection
     cdef object _schema
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, aggregates=None, groups=None, projection=None, schema=None):
@@ -770,12 +777,12 @@ cdef class AggregateStep(PlanStep):
 cdef class AggregateAndGroupStep(PlanStep):
     """The AggregateAndGroup logical plan step."""
 
-    cdef list _aggregates
-    cdef list _grouping_set_identities
-    cdef list _grouping_sets
-    cdef list _groups
+    cdef tuple _aggregates
+    cdef tuple _grouping_set_identities
+    cdef tuple _grouping_sets
+    cdef tuple _groups
     cdef object _having_condition
-    cdef list _projection
+    cdef tuple _projection
     cdef object _schema
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, aggregates=None, grouping_set_identities=None, grouping_sets=None, groups=None, having_condition=None, projection=None, schema=None):
@@ -803,7 +810,7 @@ cdef class AggregateAndGroupStep(PlanStep):
 
     @grouping_set_identities.setter
     def grouping_set_identities(self, value):
-        self._grouping_set_identities = value
+        self._grouping_set_identities = _frozen_list("AggregateAndGroupStep.grouping_set_identities", value)
 
     @property
     def grouping_sets(self):
@@ -811,7 +818,7 @@ cdef class AggregateAndGroupStep(PlanStep):
 
     @grouping_sets.setter
     def grouping_sets(self, value):
-        self._grouping_sets = value
+        self._grouping_sets = _frozen_list("AggregateAndGroupStep.grouping_sets", value)
 
     @property
     def groups(self):
@@ -1202,7 +1209,7 @@ cdef class AlterMaterializedViewSuspendedStep(PlanStep):
 cdef class AlterRelationStep(PlanStep):
     """The AlterRelation logical plan step."""
 
-    cdef list _cluster_columns
+    cdef tuple _cluster_columns
     cdef object _connector
     cdef object _if_exists
     cdef str _relation_name
@@ -1221,7 +1228,7 @@ cdef class AlterRelationStep(PlanStep):
 
     @cluster_columns.setter
     def cluster_columns(self, value):
-        self._cluster_columns = value
+        self._cluster_columns = _frozen_list("AlterRelationStep.cluster_columns", value)
 
     @property
     def connector(self):
@@ -1296,9 +1303,9 @@ cdef class AlterTaskStep(PlanStep):
     """The AlterTask logical plan step."""
 
     cdef object _connector
-    cdef list _source_tables
+    cdef tuple _source_tables
     cdef str _statement
-    cdef list _target_tables
+    cdef tuple _target_tables
     cdef str _task_name
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, source_tables=None, statement=None, target_tables=None, task_name=None):
@@ -1324,7 +1331,7 @@ cdef class AlterTaskStep(PlanStep):
 
     @source_tables.setter
     def source_tables(self, value):
-        self._source_tables = value
+        self._source_tables = _frozen_list("AlterTaskStep.source_tables", value)
 
     @property
     def statement(self):
@@ -1340,7 +1347,7 @@ cdef class AlterTaskStep(PlanStep):
 
     @target_tables.setter
     def target_tables(self, value):
-        self._target_tables = value
+        self._target_tables = _frozen_list("AlterTaskStep.target_tables", value)
 
     @property
     def task_name(self):
@@ -1917,7 +1924,7 @@ cdef class AlterWorkspaceSecureStep(PlanStep):
     """The AlterWorkspaceSecure logical plan step."""
 
     cdef object _connector
-    cdef list _secure_destinations
+    cdef tuple _secure_destinations
     cdef str _secure_object
     cdef str _workspace_name
 
@@ -1943,7 +1950,7 @@ cdef class AlterWorkspaceSecureStep(PlanStep):
 
     @secure_destinations.setter
     def secure_destinations(self, value):
-        self._secure_destinations = value
+        self._secure_destinations = _frozen_list("AlterWorkspaceSecureStep.secure_destinations", value)
 
     @property
     def secure_object(self):
@@ -2009,7 +2016,7 @@ cdef class AnalyzeStep(PlanStep):
     """The Analyze logical plan step."""
 
     cdef str _action
-    cdef list _analyze_columns
+    cdef tuple _analyze_columns
     cdef object _connector
     cdef str _table_name
 
@@ -2035,7 +2042,7 @@ cdef class AnalyzeStep(PlanStep):
 
     @analyze_columns.setter
     def analyze_columns(self, value):
-        self._analyze_columns = value
+        self._analyze_columns = _frozen_list("AnalyzeStep.analyze_columns", value)
 
     @property
     def connector(self):
@@ -2100,7 +2107,7 @@ cdef class AnalyzeStep(PlanStep):
 cdef class CallProcedureStep(PlanStep):
     """The CallProcedure logical plan step."""
 
-    cdef list _arguments
+    cdef tuple _arguments
     cdef str _procedure_name
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, arguments=None, procedure_name=None):
@@ -2115,7 +2122,7 @@ cdef class CallProcedureStep(PlanStep):
 
     @arguments.setter
     def arguments(self, value):
-        self._arguments = value
+        self._arguments = _frozen_list("CallProcedureStep.arguments", value)
 
     @property
     def procedure_name(self):
@@ -2447,9 +2454,9 @@ cdef class CompactionCommitStep(PlanStep):
     cdef object _baseline_snapshot_id
     cdef object _connector
     cdef str _relation_name
-    cdef list _retired_files
+    cdef tuple _retired_files
     cdef object _sorted_by
-    cdef str _source_tail_id
+    cdef object _source_tail_id
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, baseline_snapshot_id=None, connector=None, relation_name=None, retired_files=None, sorted_by=None, source_tail_id=None):
         self.node_type = _step_types().CompactionCommit
@@ -2492,7 +2499,7 @@ cdef class CompactionCommitStep(PlanStep):
 
     @retired_files.setter
     def retired_files(self, value):
-        self._retired_files = value
+        self._retired_files = _frozen_list("CompactionCommitStep.retired_files", value)
 
     @property
     def sorted_by(self):
@@ -2508,6 +2515,7 @@ cdef class CompactionCommitStep(PlanStep):
 
     @source_tail_id.setter
     def source_tail_id(self, value):
+        _require_optional_int("CompactionCommitStep.source_tail_id", value)
         self._source_tail_id = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -2646,7 +2654,7 @@ cdef class CreateRelationStep(PlanStep):
     cdef object _connector
     cdef object _if_not_exists
     cdef object _relation_name
-    cdef list _relationships
+    cdef tuple _relationships
     cdef object _schema
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, if_not_exists=None, relation_name=None, relationships=None, schema=None):
@@ -2689,7 +2697,7 @@ cdef class CreateRelationStep(PlanStep):
 
     @relationships.setter
     def relationships(self, value):
-        self._relationships = value
+        self._relationships = _frozen_list("CreateRelationStep.relationships", value)
 
     @property
     def schema(self):
@@ -2859,9 +2867,9 @@ cdef class CreateTaskStep(PlanStep):
     cdef object _if_not_exists
     cdef str _on_table
     cdef object _or_replace
-    cdef list _source_tables
+    cdef tuple _source_tables
     cdef str _statement
-    cdef list _target_tables
+    cdef tuple _target_tables
     cdef str _task_name
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, if_not_exists=None, on_table=None, or_replace=None, source_tables=None, statement=None, target_tables=None, task_name=None):
@@ -2916,7 +2924,7 @@ cdef class CreateTaskStep(PlanStep):
 
     @source_tables.setter
     def source_tables(self, value):
-        self._source_tables = value
+        self._source_tables = _frozen_list("CreateTaskStep.source_tables", value)
 
     @property
     def statement(self):
@@ -2932,7 +2940,7 @@ cdef class CreateTaskStep(PlanStep):
 
     @target_tables.setter
     def target_tables(self, value):
-        self._target_tables = value
+        self._target_tables = _frozen_list("CreateTaskStep.target_tables", value)
 
     @property
     def task_name(self):
@@ -3373,7 +3381,7 @@ cdef class DistinctStep(PlanStep):
     """The Distinct logical plan step."""
 
     cdef str _alias
-    cdef list _on
+    cdef tuple _on
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, on=None):
         self.node_type = _step_types().Distinct
@@ -3440,7 +3448,7 @@ cdef class DistinctStep(PlanStep):
 cdef class DropCollectionStep(PlanStep):
     """The DropCollection logical plan step."""
 
-    cdef list _collection_names
+    cdef tuple _collection_names
     cdef dict _connectors
     cdef object _if_exists
 
@@ -3457,7 +3465,7 @@ cdef class DropCollectionStep(PlanStep):
 
     @collection_names.setter
     def collection_names(self, value):
-        self._collection_names = value
+        self._collection_names = _frozen_list("DropCollectionStep.collection_names", value)
 
     @property
     def connectors(self):
@@ -3630,7 +3638,7 @@ cdef class DropRelationStep(PlanStep):
     cdef dict _connectors
     cdef object _if_exists
     cdef object _is_materialized_view
-    cdef list _relation_names
+    cdef tuple _relation_names
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connectors=None, if_exists=None, is_materialized_view=None, relation_names=None):
         self.node_type = _step_types().DropRelation
@@ -3672,7 +3680,7 @@ cdef class DropRelationStep(PlanStep):
 
     @relation_names.setter
     def relation_names(self, value):
-        self._relation_names = value
+        self._relation_names = _frozen_list("DropRelationStep.relation_names", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
         cdef list out = []
@@ -3726,7 +3734,7 @@ cdef class DropRelationshipStep(PlanStep):
     cdef str _constraint_name
     cdef object _if_exists
     cdef str _relation_name
-    cdef list _relation_parts
+    cdef tuple _relation_parts
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, constraint_if_exists=None, constraint_name=None, if_exists=None, relation_name=None, relation_parts=None):
         self.node_type = _step_types().DropRelationship
@@ -3786,7 +3794,7 @@ cdef class DropRelationshipStep(PlanStep):
 
     @relation_parts.setter
     def relation_parts(self, value):
-        self._relation_parts = value
+        self._relation_parts = _frozen_list("DropRelationshipStep.relation_parts", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
         cdef list out = []
@@ -4109,7 +4117,7 @@ cdef class DropViewStep(PlanStep):
 
     cdef dict _connectors
     cdef object _if_exists
-    cdef list _view_names
+    cdef tuple _view_names
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connectors=None, if_exists=None, view_names=None):
         self.node_type = _step_types().DropView
@@ -4141,7 +4149,7 @@ cdef class DropViewStep(PlanStep):
 
     @view_names.setter
     def view_names(self, value):
-        self._view_names = value
+        self._view_names = _frozen_list("DropViewStep.view_names", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
         cdef list out = []
@@ -4267,9 +4275,9 @@ cdef class DropWorkspaceStep(PlanStep):
 cdef class ExceptStep(PlanStep):
     """The Except logical plan step."""
 
-    cdef list _left_relation_names
+    cdef tuple _left_relation_names
     cdef str _modifier
-    cdef list _right_relation_names
+    cdef tuple _right_relation_names
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, left_relation_names=None, modifier=None, right_relation_names=None):
         self.node_type = _step_types().Except
@@ -4284,7 +4292,7 @@ cdef class ExceptStep(PlanStep):
 
     @left_relation_names.setter
     def left_relation_names(self, value):
-        self._left_relation_names = value
+        self._left_relation_names = _frozen_list("ExceptStep.left_relation_names", value)
 
     @property
     def modifier(self):
@@ -4300,7 +4308,7 @@ cdef class ExceptStep(PlanStep):
 
     @right_relation_names.setter
     def right_relation_names(self, value):
-        self._right_relation_names = value
+        self._right_relation_names = _frozen_list("ExceptStep.right_relation_names", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
         cdef list out = []
@@ -4346,7 +4354,7 @@ cdef class ExceptStep(PlanStep):
 cdef class ExitStep(PlanStep):
     """The Exit logical plan step."""
 
-    cdef list _hidden_columns
+    cdef tuple _hidden_columns
     cdef str _relation_name
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, hidden_columns=None, relation_name=None):
@@ -4361,7 +4369,7 @@ cdef class ExitStep(PlanStep):
 
     @hidden_columns.setter
     def hidden_columns(self, value):
-        self._hidden_columns = value
+        self._hidden_columns = _frozen_list("ExitStep.hidden_columns", value)
 
     @property
     def relation_name(self):
@@ -4481,9 +4489,9 @@ cdef class FilterStep(PlanStep):
 
     cdef str _alias
     cdef object _condition
-    cdef str _deep_restore_target
+    cdef object _deep_restore_target
     cdef object _from_join_on
-    cdef list _pre_inline_columns
+    cdef tuple _pre_inline_columns
     cdef object _pre_inline_condition
     cdef set _pre_inline_relations
     cdef object _relations
@@ -4525,6 +4533,7 @@ cdef class FilterStep(PlanStep):
 
     @deep_restore_target.setter
     def deep_restore_target(self, value):
+        _require_optional_int("FilterStep.deep_restore_target", value)
         self._deep_restore_target = value
 
     @property
@@ -4645,11 +4654,11 @@ cdef class FilterStep(PlanStep):
 cdef class FramedWindowStep(PlanStep):
     """The FramedWindow logical plan step."""
 
-    cdef list _order_by
+    cdef tuple _order_by
     cdef str _output_relation
-    cdef list _outputs
-    cdef list _partition_by
-    cdef list _window_functions
+    cdef tuple _outputs
+    cdef tuple _partition_by
+    cdef tuple _window_functions
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, order_by=None, output_relation=None, outputs=None, partition_by=None, window_functions=None):
         self.node_type = _step_types().FramedWindow
@@ -4682,7 +4691,7 @@ cdef class FramedWindowStep(PlanStep):
 
     @outputs.setter
     def outputs(self, value):
-        self._outputs = value
+        self._outputs = _frozen_list("FramedWindowStep.outputs", value)
 
     @property
     def partition_by(self):
@@ -4757,34 +4766,34 @@ cdef class FunctionDatasetStep(PlanStep):
     """The FunctionDataset logical plan step."""
 
     cdef str _alias
-    cdef list _args
+    cdef tuple _args
     cdef tuple _column_aliases
     cdef object _connector
     cdef object _csv_fail_on_error
-    cdef list _csv_files
+    cdef tuple _csv_files
     cdef object _csv_has_header_row
     cdef object _csv_infer_sample_size
     cdef dict _csv_physical_by_identity
-    cdef list _csv_physical_columns
+    cdef tuple _csv_physical_columns
     cdef str _csv_separator
     cdef str _dataset
     cdef str _function
-    cdef list _hints
+    cdef tuple _hints
     cdef object _jsonl_fail_on_error
-    cdef list _jsonl_files
+    cdef tuple _jsonl_files
     cdef object _jsonl_infer_sample_size
     cdef object _jsonl_infer_schema
     cdef dict _jsonl_physical_by_identity
-    cdef list _jsonl_physical_columns
+    cdef tuple _jsonl_physical_columns
     cdef object _manifest
     cdef dict _named_args
-    cdef list _predicates
+    cdef tuple _predicates
     cdef str _relation
     cdef str _relation_name
     cdef object _schema
     cdef str _series_column
     cdef str _unnest_target
-    cdef list _values
+    cdef tuple _values
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, args=None, column_aliases=None, connector=None, csv_fail_on_error=None, csv_files=None, csv_has_header_row=None, csv_infer_sample_size=None, csv_physical_by_identity=None, csv_physical_columns=None, csv_separator=None, dataset=None, function=None, hints=None, jsonl_fail_on_error=None, jsonl_files=None, jsonl_infer_sample_size=None, jsonl_infer_schema=None, jsonl_physical_by_identity=None, jsonl_physical_columns=None, manifest=None, named_args=None, predicates=None, relation=None, relation_name=None, schema=None, series_column=None, unnest_target=None, values=None):
         self.node_type = _step_types().FunctionDataset
@@ -4866,7 +4875,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @csv_files.setter
     def csv_files(self, value):
-        self._csv_files = value
+        self._csv_files = _frozen_list("FunctionDatasetStep.csv_files", value)
 
     @property
     def csv_has_header_row(self):
@@ -4900,7 +4909,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @csv_physical_columns.setter
     def csv_physical_columns(self, value):
-        self._csv_physical_columns = value
+        self._csv_physical_columns = _frozen_list("FunctionDatasetStep.csv_physical_columns", value)
 
     @property
     def csv_separator(self):
@@ -4932,7 +4941,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @hints.setter
     def hints(self, value):
-        self._hints = value
+        self._hints = _frozen_list("FunctionDatasetStep.hints", value)
 
     @property
     def jsonl_fail_on_error(self):
@@ -4949,7 +4958,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @jsonl_files.setter
     def jsonl_files(self, value):
-        self._jsonl_files = value
+        self._jsonl_files = _frozen_list("FunctionDatasetStep.jsonl_files", value)
 
     @property
     def jsonl_infer_sample_size(self):
@@ -4983,7 +4992,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @jsonl_physical_columns.setter
     def jsonl_physical_columns(self, value):
-        self._jsonl_physical_columns = value
+        self._jsonl_physical_columns = _frozen_list("FunctionDatasetStep.jsonl_physical_columns", value)
 
     @property
     def manifest(self):
@@ -5306,7 +5315,7 @@ cdef class HeapSortStep(PlanStep):
     """The HeapSort logical plan step."""
 
     cdef object _limit
-    cdef list _order_by
+    cdef tuple _order_by
     cdef object _vector_topk_candidate
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, limit=None, order_by=None, vector_topk_candidate=None):
@@ -5388,7 +5397,7 @@ cdef class HeapSortStep(PlanStep):
 cdef class InsertStep(PlanStep):
     """The Insert logical plan step."""
 
-    cdef list _column_mapping
+    cdef tuple _column_mapping
     cdef object _connector
     cdef object _create_target
     cdef dict _defining_query
@@ -5401,11 +5410,11 @@ cdef class InsertStep(PlanStep):
     cdef object _is_replace
     cdef object _or_replace
     cdef str _produced_by
-    cdef list _read_sources
+    cdef tuple _read_sources
     cdef str _relation_name
-    cdef list _source_tables
-    cdef str _source_tail_id
-    cdef list _target_column_names
+    cdef tuple _source_tables
+    cdef object _source_tail_id
+    cdef tuple _target_column_names
     cdef object _target_schema
     cdef object _values_feeder
     cdef object _write_coalesce_rows
@@ -5441,7 +5450,7 @@ cdef class InsertStep(PlanStep):
 
     @column_mapping.setter
     def column_mapping(self, value):
-        self._column_mapping = value
+        self._column_mapping = _frozen_list("InsertStep.column_mapping", value)
 
     @property
     def connector(self):
@@ -5552,7 +5561,7 @@ cdef class InsertStep(PlanStep):
 
     @read_sources.setter
     def read_sources(self, value):
-        self._read_sources = value
+        self._read_sources = _frozen_list("InsertStep.read_sources", value)
 
     @property
     def relation_name(self):
@@ -5568,7 +5577,7 @@ cdef class InsertStep(PlanStep):
 
     @source_tables.setter
     def source_tables(self, value):
-        self._source_tables = value
+        self._source_tables = _frozen_list("InsertStep.source_tables", value)
 
     @property
     def source_tail_id(self):
@@ -5576,6 +5585,7 @@ cdef class InsertStep(PlanStep):
 
     @source_tail_id.setter
     def source_tail_id(self, value):
+        _require_optional_int("InsertStep.source_tail_id", value)
         self._source_tail_id = value
 
     @property
@@ -5584,7 +5594,7 @@ cdef class InsertStep(PlanStep):
 
     @target_column_names.setter
     def target_column_names(self, value):
-        self._target_column_names = value
+        self._target_column_names = _frozen_list("InsertStep.target_column_names", value)
 
     @property
     def target_schema(self):
@@ -5710,9 +5720,9 @@ cdef class InsertStep(PlanStep):
 cdef class IntersectStep(PlanStep):
     """The Intersect logical plan step."""
 
-    cdef list _left_relation_names
+    cdef tuple _left_relation_names
     cdef str _modifier
-    cdef list _right_relation_names
+    cdef tuple _right_relation_names
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, left_relation_names=None, modifier=None, right_relation_names=None):
         self.node_type = _step_types().Intersect
@@ -5727,7 +5737,7 @@ cdef class IntersectStep(PlanStep):
 
     @left_relation_names.setter
     def left_relation_names(self, value):
-        self._left_relation_names = value
+        self._left_relation_names = _frozen_list("IntersectStep.left_relation_names", value)
 
     @property
     def modifier(self):
@@ -5743,7 +5753,7 @@ cdef class IntersectStep(PlanStep):
 
     @right_relation_names.setter
     def right_relation_names(self, value):
-        self._right_relation_names = value
+        self._right_relation_names = _frozen_list("IntersectStep.right_relation_names", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
         cdef list out = []
@@ -5805,23 +5815,23 @@ cdef class JoinStep(PlanStep):
     cdef object _implied_join
     cdef object _is_window_join
     cdef bytes _left_column
-    cdef list _left_columns
-    cdef list _left_readers
-    cdef list _left_relation_names
+    cdef tuple _left_columns
+    cdef tuple _left_readers
+    cdef tuple _left_relation_names
     cdef object _on
     cdef object _reducer_applied
-    cdef list _relation_names
+    cdef tuple _relation_names
     cdef object _residual
     cdef bytes _right_column
-    cdef list _right_columns
-    cdef list _right_readers
-    cdef list _right_relation_names
+    cdef tuple _right_columns
+    cdef tuple _right_readers
+    cdef tuple _right_relation_names
     cdef dict _schemas
-    cdef list _setop_leg_columns
+    cdef tuple _setop_leg_columns
     cdef object _swap_build_side
     cdef str _type
-    cdef list _using
-    cdef list _using_merged
+    cdef tuple _using
+    cdef tuple _using_merged
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, asof_condition=None, asof_left_column=None, asof_op=None, asof_right_column=None, band_column=None, band_column_name=None, band_lower=None, band_lower_closed=None, band_upper=None, band_upper_closed=None, existence_column=None, existence_three_valued=None, implied_join=None, is_window_join=None, left_column=None, left_columns=None, left_readers=None, left_relation_names=None, on=None, reducer_applied=None, relation_names=None, residual=None, right_column=None, right_columns=None, right_readers=None, right_relation_names=None, schemas=None, setop_leg_columns=None, swap_build_side=None, type=None, using=None, using_merged=None):
         self.node_type = _step_types().Join
@@ -6003,7 +6013,7 @@ cdef class JoinStep(PlanStep):
 
     @left_columns.setter
     def left_columns(self, value):
-        self._left_columns = value
+        self._left_columns = _frozen_list("JoinStep.left_columns", value)
 
     @property
     def left_readers(self):
@@ -6011,7 +6021,7 @@ cdef class JoinStep(PlanStep):
 
     @left_readers.setter
     def left_readers(self, value):
-        self._left_readers = value
+        self._left_readers = _frozen_list("JoinStep.left_readers", value)
 
     @property
     def left_relation_names(self):
@@ -6019,7 +6029,7 @@ cdef class JoinStep(PlanStep):
 
     @left_relation_names.setter
     def left_relation_names(self, value):
-        self._left_relation_names = value
+        self._left_relation_names = _frozen_list("JoinStep.left_relation_names", value)
 
     @property
     def on(self):
@@ -6045,7 +6055,7 @@ cdef class JoinStep(PlanStep):
 
     @relation_names.setter
     def relation_names(self, value):
-        self._relation_names = value
+        self._relation_names = _frozen_list("JoinStep.relation_names", value)
 
     @property
     def residual(self):
@@ -6070,7 +6080,7 @@ cdef class JoinStep(PlanStep):
 
     @right_columns.setter
     def right_columns(self, value):
-        self._right_columns = value
+        self._right_columns = _frozen_list("JoinStep.right_columns", value)
 
     @property
     def right_readers(self):
@@ -6078,7 +6088,7 @@ cdef class JoinStep(PlanStep):
 
     @right_readers.setter
     def right_readers(self, value):
-        self._right_readers = value
+        self._right_readers = _frozen_list("JoinStep.right_readers", value)
 
     @property
     def right_relation_names(self):
@@ -6086,7 +6096,7 @@ cdef class JoinStep(PlanStep):
 
     @right_relation_names.setter
     def right_relation_names(self, value):
-        self._right_relation_names = value
+        self._right_relation_names = _frozen_list("JoinStep.right_relation_names", value)
 
     @property
     def schemas(self):
@@ -6102,7 +6112,7 @@ cdef class JoinStep(PlanStep):
 
     @setop_leg_columns.setter
     def setop_leg_columns(self, value):
-        self._setop_leg_columns = value
+        self._setop_leg_columns = _frozen_list("JoinStep.setop_leg_columns", value)
 
     @property
     def swap_build_side(self):
@@ -6135,7 +6145,7 @@ cdef class JoinStep(PlanStep):
 
     @using_merged.setter
     def using_merged(self, value):
-        self._using_merged = value
+        self._using_merged = _frozen_list("JoinStep.using_merged", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
         cdef list out = []
@@ -6476,10 +6486,10 @@ cdef class MaterializedCteRefStep(PlanStep):
     cdef str _cte_key
     cdef str _cte_name
     cdef dict _hint_settings
-    cdef list _hints
+    cdef tuple _hints
     cdef str _relation
     cdef object _schema
-    cdef list _unpruned_columns
+    cdef tuple _unpruned_columns
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, cte_column_map=None, cte_key=None, cte_name=None, hint_settings=None, hints=None, relation=None, schema=None, unpruned_columns=None):
         self.node_type = _step_types().MaterializedCteRef
@@ -6540,7 +6550,7 @@ cdef class MaterializedCteRefStep(PlanStep):
 
     @hints.setter
     def hints(self, value):
-        self._hints = value
+        self._hints = _frozen_list("MaterializedCteRefStep.hints", value)
 
     @property
     def relation(self):
@@ -6564,7 +6574,7 @@ cdef class MaterializedCteRefStep(PlanStep):
 
     @unpruned_columns.setter
     def unpruned_columns(self, value):
-        self._unpruned_columns = value
+        self._unpruned_columns = _frozen_list("MaterializedCteRefStep.unpruned_columns", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
         cdef list out = []
@@ -6631,12 +6641,12 @@ cdef class MergeStep(PlanStep):
     """The Merge logical plan step."""
 
     cdef object _connector
-    cdef list _file_paths
+    cdef tuple _file_paths
     cdef str _operation
     cdef str _produced_by
-    cdef list _read_sources
+    cdef tuple _read_sources
     cdef str _relation_name
-    cdef str _source_tail_id
+    cdef object _source_tail_id
     cdef str _statement_name
     cdef str _target_alias
     cdef tuple _target_column_names
@@ -6671,7 +6681,7 @@ cdef class MergeStep(PlanStep):
 
     @file_paths.setter
     def file_paths(self, value):
-        self._file_paths = value
+        self._file_paths = _frozen_list("MergeStep.file_paths", value)
 
     @property
     def operation(self):
@@ -6695,7 +6705,7 @@ cdef class MergeStep(PlanStep):
 
     @read_sources.setter
     def read_sources(self, value):
-        self._read_sources = value
+        self._read_sources = _frozen_list("MergeStep.read_sources", value)
 
     @property
     def relation_name(self):
@@ -6711,6 +6721,7 @@ cdef class MergeStep(PlanStep):
 
     @source_tail_id.setter
     def source_tail_id(self, value):
+        _require_optional_int("MergeStep.source_tail_id", value)
         self._source_tail_id = value
 
     @property
@@ -6814,7 +6825,7 @@ cdef class OrderStep(PlanStep):
     """The Order logical plan step."""
 
     cdef str _alias
-    cdef list _order_by
+    cdef tuple _order_by
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, order_by=None):
         self.node_type = _step_types().Order
@@ -6883,10 +6894,10 @@ cdef class ProjectStep(PlanStep):
 
     cdef str _alias
     cdef object _estimated_row_count
-    cdef list _except_columns
-    cdef list _hidden_columns
-    cdef list _hoisted_columns
-    cdef list _passthrough_columns
+    cdef tuple _except_columns
+    cdef tuple _hidden_columns
+    cdef tuple _hoisted_columns
+    cdef tuple _passthrough_columns
     cdef object _schema
     cdef dict _sources
 
@@ -6933,7 +6944,7 @@ cdef class ProjectStep(PlanStep):
 
     @hidden_columns.setter
     def hidden_columns(self, value):
-        self._hidden_columns = value
+        self._hidden_columns = _frozen_list("ProjectStep.hidden_columns", value)
 
     @property
     def hoisted_columns(self):
@@ -7571,17 +7582,17 @@ cdef class ScanStep(PlanStep):
     cdef object _for_manifest_only
     cdef object _for_snapshots_only
     cdef dict _hint_settings
-    cdef list _hints
+    cdef tuple _hints
     cdef str _history_view
     cdef object _internal_relation
     cdef set _length_only_columns
     cdef object _limit
     cdef object _manifest
     cdef str _pending_cte_key
-    cdef list _predicates
-    cdef list _pushed_aggregates
+    cdef tuple _predicates
+    cdef tuple _pushed_aggregates
     cdef object _pushed_distinct
-    cdef list _pushed_groups
+    cdef tuple _pushed_groups
     cdef str _relation
     cdef object _resolved_dataset
     cdef str _row_identity_statement
@@ -7590,10 +7601,10 @@ cdef class ScanStep(PlanStep):
     cdef object _start_date
     cdef object _topn_descending
     cdef object _topn_limit
-    cdef list _topn_order_by
+    cdef tuple _topn_order_by
     cdef bytes _topn_sort_identity
     cdef str _topn_sort_name
-    cdef list _unpruned_columns
+    cdef tuple _unpruned_columns
     cdef object _version
     cdef str _version_tag
     cdef str _via_view
@@ -7719,7 +7730,7 @@ cdef class ScanStep(PlanStep):
 
     @hints.setter
     def hints(self, value):
-        self._hints = value
+        self._hints = _frozen_list("ScanStep.hints", value)
 
     @property
     def history_view(self):
@@ -7876,7 +7887,7 @@ cdef class ScanStep(PlanStep):
 
     @topn_order_by.setter
     def topn_order_by(self, value):
-        self._topn_order_by = value
+        self._topn_order_by = _frozen_list("ScanStep.topn_order_by", value)
 
     @property
     def topn_sort_identity(self):
@@ -7900,7 +7911,7 @@ cdef class ScanStep(PlanStep):
 
     @unpruned_columns.setter
     def unpruned_columns(self, value):
-        self._unpruned_columns = value
+        self._unpruned_columns = _frozen_list("ScanStep.unpruned_columns", value)
 
     @property
     def version(self):
@@ -8556,7 +8567,7 @@ cdef class ShowLineageStep(PlanStep):
     """The ShowLineage logical plan step."""
 
     cdef str _history_view
-    cdef list _lineage
+    cdef tuple _lineage
     cdef str _relation
     cdef object _schema
 
@@ -8582,7 +8593,7 @@ cdef class ShowLineageStep(PlanStep):
 
     @lineage.setter
     def lineage(self, value):
-        self._lineage = value
+        self._lineage = _frozen_list("ShowLineageStep.lineage", value)
 
     @property
     def relation(self):
@@ -8821,7 +8832,7 @@ cdef class ShowSourcesStep(PlanStep):
     cdef str _history_view
     cdef str _relation
     cdef object _schema
-    cdef list _sources
+    cdef tuple _sources
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, history_view=None, relation=None, schema=None, sources=None):
         self.node_type = _step_types().ShowSources
@@ -8861,7 +8872,7 @@ cdef class ShowSourcesStep(PlanStep):
 
     @sources.setter
     def sources(self, value):
-        self._sources = value
+        self._sources = _frozen_list("ShowSourcesStep.sources", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
         cdef list out = []
@@ -8912,11 +8923,11 @@ cdef class SubqueryStep(PlanStep):
 
     cdef str _alias
     cdef dict _hint_settings
-    cdef list _hints
+    cdef tuple _hints
     cdef str _relation
     cdef object _schema
     cdef set _source_relations
-    cdef list _unpruned_columns
+    cdef tuple _unpruned_columns
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, hint_settings=None, hints=None, relation=None, schema=None, source_relations=None, unpruned_columns=None):
         self.node_type = _step_types().Subquery
@@ -8951,7 +8962,7 @@ cdef class SubqueryStep(PlanStep):
 
     @hints.setter
     def hints(self, value):
-        self._hints = value
+        self._hints = _frozen_list("SubqueryStep.hints", value)
 
     @property
     def relation(self):
@@ -8983,7 +8994,7 @@ cdef class SubqueryStep(PlanStep):
 
     @unpruned_columns.setter
     def unpruned_columns(self, value):
-        self._unpruned_columns = value
+        self._unpruned_columns = _frozen_list("SubqueryStep.unpruned_columns", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
         cdef list out = []
@@ -9124,9 +9135,9 @@ cdef class UnionStep(PlanStep):
     """The Union logical plan step."""
 
     cdef str _alias
-    cdef list _left_relation_names
+    cdef tuple _left_relation_names
     cdef str _modifier
-    cdef list _right_relation_names
+    cdef tuple _right_relation_names
     cdef dict _sources
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, left_relation_names=None, modifier=None, right_relation_names=None, sources=None):
@@ -9152,7 +9163,7 @@ cdef class UnionStep(PlanStep):
 
     @left_relation_names.setter
     def left_relation_names(self, value):
-        self._left_relation_names = value
+        self._left_relation_names = _frozen_list("UnionStep.left_relation_names", value)
 
     @property
     def modifier(self):
@@ -9168,7 +9179,7 @@ cdef class UnionStep(PlanStep):
 
     @right_relation_names.setter
     def right_relation_names(self, value):
-        self._right_relation_names = value
+        self._right_relation_names = _frozen_list("UnionStep.right_relation_names", value)
 
     @property
     def sources(self):
@@ -9322,7 +9333,7 @@ cdef class UnnestStep(PlanStep):
 
     cdef str _alias
     cdef object _distinct_target
-    cdef list _filter_conditions
+    cdef tuple _filter_conditions
     cdef str _type
     cdef str _unnest_alias
     cdef object _unnest_column
@@ -9473,13 +9484,13 @@ cdef class UnnestStep(PlanStep):
 cdef class WindowStep(PlanStep):
     """The Window logical plan step."""
 
-    cdef list _aggregates
-    cdef list _order_by
+    cdef tuple _aggregates
+    cdef tuple _order_by
     cdef str _output_relation
-    cdef list _outputs
-    cdef list _partition_by
+    cdef tuple _outputs
+    cdef tuple _partition_by
     cdef object _top_k
-    cdef list _window_functions
+    cdef tuple _window_functions
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, aggregates=None, order_by=None, output_relation=None, outputs=None, partition_by=None, top_k=None, window_functions=None):
         self.node_type = _step_types().Window
@@ -9522,7 +9533,7 @@ cdef class WindowStep(PlanStep):
 
     @outputs.setter
     def outputs(self, value):
-        self._outputs = value
+        self._outputs = _frozen_list("WindowStep.outputs", value)
 
     @property
     def partition_by(self):

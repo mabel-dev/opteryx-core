@@ -702,7 +702,7 @@ def plan_merge(statement, *, plan_context, **kwargs):
     }
 
     plan = plan_query(query, plan_context=plan_context)
-    exit_node_id = plan.get_exit_points()[0]
+    exit_node_id = plan.exit_point()
 
     # Ask the TARGET scan for row identity. Only that scan: the source's rows
     # are never addressed, and a second scan emitting `$ordinal` would force
@@ -931,7 +931,7 @@ def _sink_node(relation_name: str, target_columns, alias: str, keyword: str, ope
 
 
 def _attach_sink(plan, step):
-    exit_node_id = plan.get_exit_points()[0]
+    exit_node_id = plan.exit_point()
     step.source_tail_id = exit_node_id
     node_id = plan.add_node(step)
     plan.add_edge(exit_node_id, node_id)

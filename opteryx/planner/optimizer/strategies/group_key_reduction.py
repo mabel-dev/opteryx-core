@@ -115,7 +115,7 @@ class GroupKeyReductionStrategy(OptimizationStrategy):
         project_node.passthrough_columns = []
 
         context.optimized_plan.insert_node_after(
-            context.plan_context.node_ids.mint(), project_node, context.node_id
+            project_node, context.node_id
         )
         self.telemetry.optimization_group_key_reduction = (
             getattr(self.telemetry, "optimization_group_key_reduction", 0) + len(reducible)

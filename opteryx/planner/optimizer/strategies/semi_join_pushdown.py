@@ -47,6 +47,7 @@ shape. The decision — either way — is recorded with its numbers in EXPLAIN's
 OPTIMIZATIONS block.
 """
 
+from opteryx.compiled.planner.plan_graph import EdgeRole
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.planner.binder.join_helpers import extract_join_fields
@@ -99,7 +100,7 @@ def _resolve_legs(plan, join_nid):
     tuple, read from the edge labels - plan.legs refuses a join whose legs are
     not labelled (architect ruling 2026-09-27)."""
     left, right = plan.legs(join_nid)
-    return (left, join_nid, "left"), (right, join_nid, "right")
+    return (left, join_nid, EdgeRole.LEFT), (right, join_nid, EdgeRole.RIGHT)
 
 
 def _collect_scan_uuids(plan, root_nid):
@@ -303,12 +304,12 @@ class SemiJoinPushdownStrategy(OptimizationStrategy):
         #     before:  target → below → J → parent      after:  target → J → below → parent
         # Every join leg is labelled where it is made, so each edge that moves
         # carries its label across.
-        target_resolved = "left" if target_edge is below_legs[0] else "right"
+        target_resolved = EdgeRole.LEFT if target_edge is below_legs[0] else EdgeRole.RIGHT
         plan.remove_edge(probe_root, join_nid, probe_label)
         plan.remove_edge(target_root, probe_root, target_resolved)
         plan.remove_edge(join_nid, parent_nid, parent_label)
-        plan.add_edge(target_root, join_nid, "left")
-        plan.add_edge(build_root, join_nid, "right")  # relabels the existing edge
+        plan.add_edge(target_root, join_nid, EdgeRole.LEFT)
+        plan.add_edge(build_root, join_nid, EdgeRole.RIGHT)  # relabels the existing edge
         plan.add_edge(join_nid, probe_root, target_resolved)
         plan.add_edge(probe_root, parent_nid, parent_label)
 

@@ -1130,7 +1130,7 @@ cdef class BasePlanNode:
         self.bytes_in = 0
         self.records_out = 0
         self.bytes_out = 0
-        self.columns = columns or []
+        self.columns = list(columns) if columns else []  # the operator's own list
         self.pre_update_columns = pre_update_columns or set()
 
         self._empty_morsel_cache = None

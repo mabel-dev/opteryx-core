@@ -591,17 +591,9 @@ def query_planner(
         )
 
         start = time.monotonic_ns()
-        # Threaded explicitly from here on: Graph copies do not carry instance
-        # attributes, so `shared_ctes` on the plan object would not survive an
-        # optimizer strategy handing back a copy.
-        shared_ctes = getattr(bound_plan, "shared_ctes", None) or {}
-        # Recursive-CTE metadata rides the same way: the legs are shared_ctes
-        # entries, this maps each rcte_key to them (docs/RECURSIVE_CTE_DESIGN.md).
-        recursive_ctes = getattr(bound_plan, "recursive_ctes", None) or {}
-        optimized_plan = do_optimizer(
-            bound_plan, telemetry, plan_context, shared_ctes=shared_ctes
-        )
-        shared_ctes = getattr(optimized_plan, "shared_ctes", None) or shared_ctes
+        # The shared CTE bodies (and recursive-CTE metadata) are the query's, on
+        # plan_context; the optimizer optimizes them alongside the main plan.
+        optimized_plan = do_optimizer(bound_plan, telemetry, plan_context)
         telemetry.time_planning_optimizer += time.monotonic_ns() - start
         # Read BEFORE the guard / EXPLAIN ANALYZE refreshes below, which clear it:
         # together with the flag after them it says whether either of those
@@ -648,7 +640,7 @@ def query_planner(
         # no longer exist. When the optimizer estimated at all and neither refresh
         # above ran on the final plan (it was fresh already, or is still stale),
         # this is the one refresh that records it.
-        if optimized_plan.statistics_estimated_by_optimizer and (
+        if plan_context.statistics_estimated_by_optimizer and (
             fresh_from_optimizer or optimized_plan.statistics_are_stale
         ):
             from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
@@ -661,7 +653,7 @@ def query_planner(
         # its last one — without telemetry, which describes the main plan.
         from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
 
-        for body in shared_ctes.values():
+        for body in plan_context.shared_ctes.values():
             if body.statistics_are_stale:
                 refresh_statistics(body, plan_context)
 
@@ -681,7 +673,9 @@ def query_planner(
 
         telemetry.increase(
             "billing_bytes",
-            measure_data_processed(optimized_plan, plan_context.scan_stats_cache, shared_ctes),
+            measure_data_processed(
+                optimized_plan, plan_context.scan_stats_cache, plan_context.shared_ctes
+            ),
         )
         # Per-scan breakdown of that same figure, keyed by the `uuid` the physical
         # planner carries from the logical node onto the compiled scan node —
@@ -691,7 +685,7 @@ def query_planner(
         # are two entries, matching the two scan nodes in the physical plan and the
         # two `billing_bytes` above counts.
         telemetry._reading["billing_bytes_by_scan"] = data_processed_by_scan(
-            optimized_plan, plan_context.scan_stats_cache, shared_ctes
+            optimized_plan, plan_context.scan_stats_cache, plan_context.shared_ctes
         )
         # The relations that figure was measured over, recorded from the SAME plan
         # and the same scan walk. Downstream this is what attributes a query to the
@@ -700,16 +694,13 @@ def query_planner(
         # billed here. Unioned, not assigned, for the same reason `billing_bytes`
         # is increased: a semicolon-separated batch plans each statement through
         # here and the session emits one event for the batch.
-        telemetry.add_relations(plan_relations(optimized_plan, shared_ctes))
+        telemetry.add_relations(plan_relations(optimized_plan, plan_context.shared_ctes))
 
         # Default: build traditional physical plan
         # before we write the new optimizer and execution engine, convert to a V1 plan
         start = time.monotonic_ns()
         query_properties = QueryProperties(query_id=query_id, variables=execution_context.variables)
-        physical_plan = create_physical_plan(
-            optimized_plan, query_properties, plan_context, shared_ctes=shared_ctes
-        )
-        physical_plan.recursive_ctes = recursive_ctes
+        physical_plan = create_physical_plan(optimized_plan, query_properties, plan_context)
         telemetry.time_planning_physical_planner += time.monotonic_ns() - start
 
         return physical_plan
@@ -754,9 +745,10 @@ def execute_logical_plan(
     else:
         conn_context = connection
 
-    # The query's planning context — see query_planner. The caller built the logical
-    # plan outside any query, so the columns it mints from here on are this query's.
-    plan_context = PlanContext()
+    # The query's planning context — see query_planner. The caller built the plan
+    # with it (`LogicalPlan(plan_context)`: the context mints the plan's node ids),
+    # so the query continues under that one context.
+    plan_context = logical_plan.plan_context
 
     # Externally-supplied logical plans still reference relations by name, so they go
     # through the same resolver. They carry no CTEs — a CTE only exists in SQL text.
@@ -799,7 +791,7 @@ def execute_logical_plan(
     # Estimate telemetry describes the FINAL plan, as in query_planner. This path
     # has no result-size guard to have refreshed it, so the optimizer having
     # estimated at all is the whole condition.
-    if optimized_plan.statistics_estimated_by_optimizer:
+    if plan_context.statistics_estimated_by_optimizer:
         from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
 
         optimized_plan = refresh_statistics(optimized_plan, plan_context, telemetry=telemetry)

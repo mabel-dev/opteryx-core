@@ -946,12 +946,12 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
 
             connector = scan.connector if scan.node_type in steps_with("connector") else None
             if connector is not None and getattr(connector, "supports_predicate_pushdown", False):
-                if not scan.predicates:
-                    scan.predicates = []
+                predicates = list(scan.predicates or ())
                 for condition in conditions:
-                    if not _predicate_already_present(scan.predicates, condition):
-                        scan.predicates.append(condition)
+                    if not _predicate_already_present(predicates, condition):
+                        predicates.append(condition)
                         self.telemetry.increase(telemetry_reading)
+                scan.predicates = predicates
             else:
                 # Fallback for non-pushdown connectors: a Filter node still
                 # filters at execution, just without row-group pruning.
@@ -963,7 +963,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
                         all_relations={target_relation},
                     )
                     context.optimized_plan.insert_node_after(
-                        context.plan_context.node_ids.mint(), filter_node, reader_nid
+                        filter_node, reader_nid
                     )
                     self.telemetry.increase(telemetry_reading)
 

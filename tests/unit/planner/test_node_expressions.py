@@ -128,7 +128,7 @@ def _optimized_plan(sql: str):
         execution_context=ctx,
         query_id=query_id,
         telemetry=telemetry, plan_context=plan_context)
-    return do_optimizer(bound, telemetry, PlanContext())
+    return do_optimizer(bound, telemetry, plan_context)
 
 
 def _nodes(plan, step_type):

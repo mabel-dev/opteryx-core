@@ -65,8 +65,7 @@ def _bound(sql):
         execution_context=ExecutionContext(memberships=["opteryx"]),
         query_id=query_id,
         telemetry=telemetry, plan_context=plan_context)
-    plan_context = PlanContext()
-    return do_optimizer(bound, telemetry, plan_context, shared_ctes={}), telemetry, plan_context
+    return do_optimizer(bound, telemetry, plan_context), telemetry, plan_context
 
 
 def _inflate_scans(plan, rows):

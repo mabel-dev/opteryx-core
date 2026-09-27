@@ -169,7 +169,7 @@ class LimitPushdownStrategy(OptimizationStrategy):
     ) -> None:
         if context.collected_nids[id(limit_node)] in context.optimized_plan:
             context.optimized_plan.remove_node(context.collected_nids[id(limit_node)], heal=True)
-        context.optimized_plan.insert_node_after(context.collected_nids[id(limit_node)], limit_node, context.node_id)
+        context.optimized_plan.insert_node_after(limit_node, context.node_id, nid=context.collected_nids[id(limit_node)])
         limit_node.columns = []
         context.limit_targets[id(limit_node)] = set(limit_node.all_relations or [])
         self.telemetry.optimization_limit_pushdown += 1

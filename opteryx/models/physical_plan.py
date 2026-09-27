@@ -34,7 +34,7 @@ class PhysicalPlan(PlanGraph):
         the outcome we're after.
         """
         if node is None:
-            node = self.get_exit_points()[0]
+            node = self.exit_point()
 
         if visited is None:
             visited = set()

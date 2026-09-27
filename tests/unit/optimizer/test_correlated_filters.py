@@ -52,7 +52,7 @@ def _optimized_plan(sql):
         execution_context=ctx,
         query_id=str(uuid.uuid4()),
         telemetry=telemetry, plan_context=plan_context)
-    return do_optimizer(bound, telemetry, PlanContext())
+    return do_optimizer(bound, telemetry, plan_context)
 
 
 def _scan_predicate_ops(plan, relation):

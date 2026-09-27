@@ -11,15 +11,19 @@ every logical and physical plan, and its Python interface.
 
 Native plan graph P2 (architect rulings 2026-09-27):
   - node ids are per-query integers minted by the query's PlanContext
-    (`PlanContext.node_ids`); `add_node(step)` mints one, `place(nid, step)` puts a
-    step under an id already minted (a re-added or pre-minted node);
+    (`PlanContext.node_ids`). The plan allocates them: `add_node(step)` and the
+    `insert_node_*` methods mint the node's id and return it; `nid=` re-adds a
+    step under an id this query already minted (a node a rebuild puts back);
   - a node's ingoing edges come back LEFT, RIGHT, unlabelled, creation order within;
   - reading a node that is not in the plan raises; so does merging plans that share
     a node, adding an edge to a node the plan does not hold, or removing an edge or
     node that is not there.
 
-Edge roles cross this interface as the strings "left" / "right" / None.
+Edge roles cross this interface as `EdgeRole.LEFT` / `EdgeRole.RIGHT`, or None for
+an unlabelled edge (architect ruling 2026-09-27: an enum, not strings).
 """
+
+from enum import Enum
 
 from libc.stdint cimport int32_t
 from libc.stdint cimport uint8_t
@@ -33,14 +37,14 @@ from opteryx.exceptions import InvalidInternalStateError
 
 
 cdef extern from "planner/plan_graph.hpp":
-    cdef enum EdgeRole "opteryx::planner::EdgeRole":
+    cdef enum CEdgeRole "opteryx::planner::EdgeRole":
         EDGE_NONE "opteryx::planner::EDGE_NONE"
         EDGE_LEFT "opteryx::planner::EDGE_LEFT"
         EDGE_RIGHT "opteryx::planner::EDGE_RIGHT"
 
     cdef cppclass CEdge "opteryx::planner::Edge":
         uint32_t other
-        EdgeRole role
+        CEdgeRole role
 
     cdef cppclass CPlanNode "opteryx::planner::PlanNode":
         uint32_t id
@@ -59,9 +63,9 @@ cdef extern from "planner/plan_graph.hpp":
         PyObject* step(uint32_t id) except +
         void add(uint32_t id, PyObject* step) except +
         void replace(uint32_t id, PyObject* step) except +
-        void add_edge(uint32_t source, uint32_t target, EdgeRole role) except +
-        cbool remove_edge(uint32_t source, uint32_t target, EdgeRole role) except +
-        cbool relationship(uint32_t source, uint32_t target, EdgeRole* role) except +
+        void add_edge(uint32_t source, uint32_t target, CEdgeRole role) except +
+        cbool remove_edge(uint32_t source, uint32_t target, CEdgeRole role) except +
+        cbool relationship(uint32_t source, uint32_t target, CEdgeRole* role) except +
         cbool legs(uint32_t id, uint32_t* left, uint32_t* right) except +
         void remove(uint32_t id, cbool heal) except +
         void insert_before(uint32_t id, PyObject* step, uint32_t before) except +
@@ -71,21 +75,35 @@ cdef extern from "planner/plan_graph.hpp":
         vector[uint32_t] exit_points()
 
 
-cdef inline EdgeRole _role_code(object relationship) except *:
+class EdgeRole(Enum):
+    """The place an edge takes at its CONSUMER: the LEFT or RIGHT leg of a join or
+    set operation. An edge with no role (a node's single input) is None."""
+
+    LEFT = 1
+    RIGHT = 2
+
+
+cdef object _LEFT = EdgeRole.LEFT
+cdef object _RIGHT = EdgeRole.RIGHT
+
+
+cdef inline CEdgeRole _role_code(object relationship) except *:
     if relationship is None:
         return EDGE_NONE
-    if relationship == "left":
+    if relationship is _LEFT:
         return EDGE_LEFT
-    if relationship == "right":
+    if relationship is _RIGHT:
         return EDGE_RIGHT
-    raise InvalidInternalStateError(f"Unknown plan edge role {relationship!r}.")
+    raise InvalidInternalStateError(
+        f"A plan edge role is EdgeRole.LEFT, EdgeRole.RIGHT or None; got {relationship!r}."
+    )
 
 
-cdef inline object _role_name(EdgeRole role):
+cdef inline object _role_name(CEdgeRole role):
     if role == EDGE_LEFT:
-        return "left"
+        return _LEFT
     if role == EDGE_RIGHT:
-        return "right"
+        return _RIGHT
     return None
 
 
@@ -154,16 +172,19 @@ cdef class PlanGraph:
         return <uint32_t>nid
 
     # -- nodes ------------------------------------------------------------------
-    def add_node(self, step) -> int:
-        """Add `step` under a newly minted id, which is returned."""
-        cdef uint32_t nid = self._node_ids.mint()
-        self._graph.add(nid, <PyObject*>step)
-        return nid
+    cdef uint32_t _allocate(self, object nid) except? 0:
+        """A new id, or `nid` - an id this query minted that is not in the plan."""
+        if nid is None:
+            return self._node_ids.mint()
+        return self._unplaced(nid)
 
-    def place(self, nid, step):
-        """Add `step` under `nid`, an id this query minted that is not in the plan —
-        a node re-added by a rebuild, or a pre-minted one."""
-        self._graph.add(self._unplaced(nid), <PyObject*>step)
+    def add_node(self, step, nid=None) -> int:
+        """Add `step` and return its id: a newly minted one, or `nid` to re-add a
+        step under an id this query already minted (architect ruling 2026-09-27:
+        the plan allocates node ids)."""
+        cdef uint32_t placed = self._allocate(nid)
+        self._graph.add(placed, <PyObject*>step)
+        return placed
 
     def __getitem__(self, nid):
         return <object>self._graph.step(self._present(nid))
@@ -202,17 +223,21 @@ cdef class PlanGraph:
         each of its consumers."""
         self._graph.remove(self._present(nid), heal)
 
-    def insert_node_before(self, nid, step, before_nid):
-        """Put `step`, under the minted id `nid`, between `before_nid` and everything
-        feeding it."""
-        self._graph.insert_before(
-            self._unplaced(nid), <PyObject*>step, self._present(before_nid)
-        )
+    def insert_node_before(self, step, before_nid, *, nid=None) -> int:
+        """Put `step` between `before_nid` and everything feeding it; its id (new,
+        or `nid` for a re-add) is returned."""
+        cdef uint32_t before = self._present(before_nid)
+        cdef uint32_t placed = self._allocate(nid)
+        self._graph.insert_before(placed, <PyObject*>step, before)
+        return placed
 
-    def insert_node_after(self, nid, step, after_nid):
-        """Put `step`, under the minted id `nid`, between `after_nid` and everything
-        it feeds."""
-        self._graph.insert_after(self._unplaced(nid), <PyObject*>step, self._present(after_nid))
+    def insert_node_after(self, step, after_nid, *, nid=None) -> int:
+        """Put `step` between `after_nid` and everything it feeds; its id (new, or
+        `nid` for a re-add) is returned."""
+        cdef uint32_t after = self._present(after_nid)
+        cdef uint32_t placed = self._allocate(nid)
+        self._graph.insert_after(placed, <PyObject*>step, after)
+        return placed
 
     # -- edges ------------------------------------------------------------------
     def add_edge(self, source, target, relationship=None):
@@ -229,7 +254,7 @@ cdef class PlanGraph:
 
     def relationship(self, source, target):
         """The role on the edge source -> target; None when unlabelled or absent."""
-        cdef EdgeRole role = EDGE_NONE
+        cdef CEdgeRole role = EDGE_NONE
         if not self._graph.relationship(self._present(source), self._present(target), &role):
             return None
         return _role_name(role)
@@ -284,6 +309,17 @@ cdef class PlanGraph:
         """The plan's heads: nodes that consume something and feed nothing,
         ascending by id (a one-node plan's node)."""
         return list(self._graph.exit_points())
+
+    def exit_point(self):
+        """The plan's single head. A plan has exactly one (architect ruling
+        2026-09-27: callers that need THE head say so, and anything else is
+        refused rather than one head being picked)."""
+        cdef vector[uint32_t] heads = self._graph.exit_points()
+        if heads.size() != 1:
+            raise InvalidInternalStateError(
+                f"Expected a plan with exactly one exit point, found {heads.size()}: {list(heads)}."
+            )
+        return heads[0]
 
     @property
     def mutation_epoch(self) -> int:

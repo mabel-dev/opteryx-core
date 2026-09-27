@@ -58,7 +58,7 @@ def _bind(sql, ctx, run_optimizer=True):
         plan, execution_context=ctx, query_id=str(uuid.uuid4()), telemetry=telemetry, 
     plan_context=plan_context)
     if run_optimizer:
-        bound = do_optimizer(bound, telemetry, PlanContext())
+        bound = do_optimizer(bound, telemetry, plan_context)
     return bound
 
 

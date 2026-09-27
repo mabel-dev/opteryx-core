@@ -52,7 +52,7 @@ def _optimize(sql):
     plan = do_resolve_relations(plan, ctes, telemetry, plan_context=plan_context)
     plan = do_plan_rewrite(plan, telemetry, plan_context=plan_context)
     bound = do_bind_phase(plan, execution_context=ctx, query_id=str(uuid.uuid4()), telemetry=telemetry, plan_context=plan_context)
-    return do_optimizer(bound, telemetry, PlanContext()), telemetry
+    return do_optimizer(bound, telemetry, plan_context), telemetry
 
 
 @pytest.mark.skipif(not os.path.isdir(_TPCH), reason=f"{_TPCH} not populated")
@@ -65,7 +65,7 @@ def test_optimizer_refreshes_record_no_estimate_telemetry():
         " WHERE r_name = 'ASIA'"
     )
 
-    assert optimized.statistics_estimated_by_optimizer is True
+    assert optimized.plan_context.statistics_estimated_by_optimizer is True
     assert "estimated_row_counts" not in telemetry._reading
     assert "predicate_estimates" not in telemetry._reading
     assert "join_estimates" not in telemetry._reading

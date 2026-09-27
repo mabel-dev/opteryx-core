@@ -108,7 +108,7 @@ def materialize_operand_as_column(
     project_node = ProjectStep()
     project_node.columns = project_columns
     project_node.passthrough_columns = []
-    plan.insert_node_after(plan.plan_context.node_ids.mint(), project_node, child_id)
+    plan.insert_node_after(project_node, child_id)
     return passthrough_column(expr.schema_column, source=relation_names[0])
 
 

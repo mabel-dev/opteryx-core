@@ -135,13 +135,13 @@ def do_bind_phase(
     # visit_materialized_cte_ref re-exposes it per reference under fresh
     # identities. Row-level security applies inside the bodies exactly as it
     # does in the main plan — a body holds real Scans.
-    shared_ctes = getattr(plan, "shared_ctes", None) or {}
+    shared_ctes = plan_context.shared_ctes
     # Recursive CTE metadata (relation_resolver): rcte_key -> anchor/term leg
     # keys. The legs are ordinary entries in shared_ctes (anchor immediately
     # before term); the CTE itself has no body of its own — its schema IS the
     # anchor's, registered under the rcte_key the references carry, and the
     # term binds against it (docs/RECURSIVE_CTE_DESIGN.md §5.2).
-    recursive_ctes = getattr(plan, "recursive_ctes", None) or {}
+    recursive_ctes = plan_context.recursive_ctes
     anchor_key_to_rcte = {meta["anchor_key"]: rkey for rkey, meta in recursive_ctes.items()}
     term_key_to_rcte = {meta["term_key"]: rkey for rkey, meta in recursive_ctes.items()}
     # One registry dict, shared BY REFERENCE into every context (including the
@@ -150,11 +150,7 @@ def do_bind_phase(
     for cte_key, body in shared_ctes.items():
         if visibility_filters:
             body = apply_visibility_filters(body, visibility_filters, telemetry, plan_context=plan_context)
-        body_heads = body.get_exit_points()
-        if len(body_heads) != 1:
-            raise InvalidInternalStateError(
-                f"{query_id} - shared CTE body has {len(body_heads)} heads - this is an error"
-            )
+        body_head = body.exit_point()
         body_context = BindingContext.initialize(
             query_id=query_id,
             execution_context=execution_context,
@@ -162,9 +158,9 @@ def do_bind_phase(
             plan_context=plan_context,
         )
         body_context.shared_cte_schemas = shared_cte_schemas
-        body, _ = binder_visitor.traverse(body, body_heads[0], context=body_context)
+        body, _ = binder_visitor.traverse(body, body_head, context=body_context)
         shared_ctes[cte_key] = body
-        shared_cte_schemas[cte_key] = body[body_heads[0]].schema
+        shared_cte_schemas[cte_key] = body[body_head].schema
         rkey = anchor_key_to_rcte.get(cte_key)
         if rkey is not None:
             # the anchor's boundary schema IS the recursive CTE's schema — the
@@ -179,7 +175,7 @@ def do_bind_phase(
                 shared_cte_schemas[cte_key],
             )
 
-    root_node = plan.get_exit_points()
+    root_node = plan.exit_point()
     context = BindingContext.initialize(
         query_id=query_id,
         execution_context=execution_context,
@@ -188,13 +184,6 @@ def do_bind_phase(
     )
     context.shared_cte_schemas = shared_cte_schemas
 
-    if len(root_node) > 1:
-        raise InvalidInternalStateError(
-            f"{context.query_id} - logical plan has {len(root_node)} heads - this is an error"
-        )
-
-    plan, _ = binder_visitor.traverse(plan, root_node[0], context=context)
-    plan.shared_ctes = shared_ctes
-    plan.recursive_ctes = recursive_ctes
+    plan, _ = binder_visitor.traverse(plan, root_node, context=context)
 
     return plan

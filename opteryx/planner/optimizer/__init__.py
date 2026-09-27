@@ -29,7 +29,6 @@ Example Usage:
 This module aims to enhance query performance through systematic and incremental optimization steps.
 """
 
-from typing import Optional
 
 from opteryx import config
 from opteryx.exceptions import InvalidInternalStateError
@@ -370,12 +369,11 @@ class OptimizerVisitor:
         Returns:
             LogicalPlan: The optimized logical plan.
         """
-        exit_points = plan.get_exit_points()
-        if not exit_points:
+        if not plan:
             # Empty plan, return as-is
             return plan
 
-        root_nid = exit_points.pop()
+        root_nid = plan.exit_point()
         context = OptimizerContext(plan, self.plan_context)
         if strategy.rebuilds_plan:
             # Rebuild-from-empty strategies re-add every surviving node and
@@ -493,7 +491,6 @@ def do_optimizer(
     plan: LogicalPlan,
     telemetry: QueryTelemetry,
     plan_context: PlanContext,
-    shared_ctes: Optional[dict] = None,
 ) -> LogicalPlan:
     """
     Perform optimization on the given logical plan.
@@ -503,28 +500,26 @@ def do_optimizer(
         telemetry (QueryTelemetry)
         plan_context: the query's PlanContext — estimates and the scan
             base-statistics memo, shared with the result-size guard, the
-            billing meter and physical planning. Never stored on nodes.
-        shared_ctes: materialize-once CTE bodies (relation_resolver), keyed and
-            topologically ordered dependencies-first. Threaded explicitly —
-            Graph copies do not carry instance attributes, so an attribute on
-            `plan` would not survive the strategies.
+            billing meter and physical planning. Never stored on nodes. Its
+            `shared_ctes` (materialize-once CTE bodies, dependencies first) are
+            optimized too and replaced with their optimized plans - each body
+            coordinated with its references and optimized in its own right (see
+            opteryx/planner/optimizer/shared_cte.py).
 
     Returns:
-        LogicalPlan: The optimized logical plan, with `shared_ctes` re-attached
-        (each body coordinated with its references and optimized in its own
-        right — see opteryx/planner/optimizer/shared_cte.py).
+        LogicalPlan: The optimized logical plan.
     """
     if config.DISABLE_OPTIMIZER:  # pragma: no cover
         message = "[OPTERYX] The optimizer has been disabled, 'DISABLE_OPTIMIZER' variable is TRUE."
         print(message)
         telemetry.add_message(message)
         plan.statistics_are_stale = True
-        plan.statistics_estimated_by_optimizer = False
-        for body in (shared_ctes or {}).values():
+        plan_context.statistics_estimated_by_optimizer = False
+        for body in plan_context.shared_ctes.values():
             body.statistics_are_stale = True
         return plan
     optimizer = OptimizerVisitor(telemetry, plan_context)
-    shared = dict(shared_ctes or {})
+    shared = dict(plan_context.shared_ctes)
 
     if shared:
         from opteryx.planner.optimizer.shared_cte import coordinate_shared_cte
@@ -535,18 +530,18 @@ def do_optimizer(
         # referencing another shared CTE already sees ITS estimate.
         for key, body in shared.items():
             body = refresh_statistics(body, plan_context)
-            head = body.get_exit_points()[0]
+            head = body.exit_point()
             plan_context.set_cte_statistics(key, plan_context.statistics(body[head]))
 
         # A recursive CTE's references carry its ANCHOR's estimate: the fixpoint's
         # true cardinality has no model yet (docs/RECURSIVE_CTE_DESIGN.md §5.4)
         # and the anchor is an honest lower bound — better than UNKNOWN for join
         # ordering, and still labelled an estimate.
-        for rkey, meta in (getattr(plan, "recursive_ctes", None) or {}).items():
+        for rkey, meta in plan_context.recursive_ctes.items():
             anchor_body = shared.get(meta["anchor_key"])
             if anchor_body is None:
                 continue
-            head = anchor_body.get_exit_points()[0]
+            head = anchor_body.exit_point()
             plan_context.set_cte_statistics(rkey, plan_context.statistics(anchor_body[head]))
 
     plan = optimizer.optimize(plan)
@@ -564,12 +559,9 @@ def do_optimizer(
             optimized[key] = optimizer.optimize(body)
         # hand back in dependencies-first order — binding used it, compilation
         # relies on it (a producer pipeline must exist before its consumers)
-        plan.shared_ctes = {key: optimized[key] for key in shared.keys()}
-    else:
-        plan.shared_ctes = {}
+        plan_context.shared_ctes = {key: optimized[key] for key in shared.keys()}
 
-    # See OptimizerVisitor.refreshed_statistics. Set on the returned plan, like
-    # shared_ctes, because Graph copies drop instance attributes mid-pass.
-    plan.statistics_estimated_by_optimizer = optimizer.refreshed_statistics
+    # See OptimizerVisitor.refreshed_statistics.
+    plan_context.statistics_estimated_by_optimizer = optimizer.refreshed_statistics
 
     return plan

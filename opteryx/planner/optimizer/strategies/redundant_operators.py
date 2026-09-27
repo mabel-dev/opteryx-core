@@ -70,7 +70,7 @@ def _output_identities(plan: LogicalPlan, nid) -> set | None:
         # schema pruning — see binder/aggregate.py). The outputs are the
         # aggregates and groups.
         return {
-            c.schema_column.identity for c in (node.aggregates or []) + (node.groups or [])
+            c.schema_column.identity for c in (*(node.aggregates or ()), *(node.groups or ()))
         }
     return None
 

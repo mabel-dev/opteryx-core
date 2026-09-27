@@ -19,6 +19,7 @@ SQL, because going through SQL is precisely what does not reproduce it.
 import pytest
 
 from opteryx.connectors.capabilities.eidetic import ViewDefinition
+from opteryx.planner.plan_context import PlanContext
 from opteryx.expression import NodeType
 from opteryx.managers import views as views_module
 from opteryx.planner import execute_logical_plan
@@ -60,14 +61,13 @@ def odata_style_count_plan(relation):
     This mirrors ODataLogicalPlanBuilder's `count_only` plan: there is no Project between
     the aggregate and the exit, so the EXIT column is the raw aggregate node.
     """
-    plan = LogicalPlan()
+    plan = LogicalPlan(PlanContext())
 
     scan = ScanStep()
     scan.relation = relation
     scan.alias = relation.split(".")[-1]
     scan.hints = []
-    scan_id = random_string()
-    plan.add_node(scan_id, scan)
+    scan_id = plan.add_node(scan)
 
     count = Aggregator(
         value="COUNT", parameters=[Wildcard()]
@@ -76,14 +76,12 @@ def odata_style_count_plan(relation):
     aggregate = AggregateStep()
     aggregate.groups = []
     aggregate.aggregates = [count]
-    aggregate_id = random_string()
-    plan.add_node(aggregate_id, aggregate)
+    aggregate_id = plan.add_node(aggregate)
     plan.add_edge(scan_id, aggregate_id)
 
     exit_node = ExitStep()
     exit_node.columns = [count]
-    exit_id = random_string()
-    plan.add_node(exit_id, exit_node)
+    exit_id = plan.add_node(exit_node)
     plan.add_edge(aggregate_id, exit_id)
 
     return plan
@@ -110,18 +108,16 @@ def test_count_over_a_view_containing_a_subquery(view_in_catalog):
 
 def test_view_rows_still_read(view_in_catalog):
     """The non-aggregate path over the same view was always fine — keep it that way."""
-    plan = LogicalPlan()
+    plan = LogicalPlan(PlanContext())
     scan = ScanStep()
     scan.relation = "heavy_planets"
     scan.alias = "heavy_planets"
     scan.hints = []
-    scan_id = random_string()
-    plan.add_node(scan_id, scan)
+    scan_id = plan.add_node(scan)
 
     exit_node = ExitStep()
     exit_node.columns = [Wildcard()]
-    exit_id = random_string()
-    plan.add_node(exit_id, exit_node)
+    exit_id = plan.add_node(exit_node)
     plan.add_edge(scan_id, exit_id)
 
     morsels, _ = execute_logical_plan(plan)

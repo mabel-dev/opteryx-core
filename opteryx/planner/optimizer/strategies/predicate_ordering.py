@@ -288,23 +288,24 @@ class PredicateOrderingStrategy(OptimizationStrategy):
                 context.collected_predicates, self.telemetry, relation_stats
             )
             new_node.condition.parameters = [c.condition for c in context.collected_predicates]
-            new_node.columns = []
             new_node.relations = set()
             new_node.all_relations = set()
 
+            columns = []
             for predicate in context.collected_predicates:
-                new_node.columns.extend(predicate.columns)
+                columns.extend(predicate.columns)
                 new_node.relations.update(predicate.relations)
                 new_node.all_relations.update(predicate.all_relations)
                 self.telemetry.optimization_flatten_filters += 1
                 context.optimized_plan.remove_node(context.collected_nids[id(predicate)], heal=True)
+            new_node.columns = columns
 
             new_node.condition = rewrite_anded_any_eq_to_contains_all(
                 new_node.condition, self.telemetry,
                 plan_context=context.plan_context,
             )
 
-            context.optimized_plan.insert_node_after(context.optimized_plan.plan_context.node_ids.mint(), new_node, context.node_id)
+            context.optimized_plan.insert_node_after(new_node, context.node_id)
             context.collected_predicates.clear()
 
         return context

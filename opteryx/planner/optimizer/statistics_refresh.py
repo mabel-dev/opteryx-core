@@ -64,6 +64,7 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
+from opteryx.compiled.planner.plan_graph import EdgeRole
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import PlanStep
@@ -807,7 +808,7 @@ def _scan_stats(
 
 def _filter_stats(
     node: PlanStep,
-    child_stats: List[Tuple[Optional[RelationStatistics], str]],
+    child_stats: List[Tuple[Optional[RelationStatistics], Optional[EdgeRole]]],
     plan: LogicalPlan,
     nid: str,
     predicate_notes: Optional[list] = None,
@@ -1099,7 +1100,7 @@ def _equi_key_classes(
 
 def _join_stats(
     node: PlanStep,
-    child_stats: List[Tuple[Optional[RelationStatistics], str]],
+    child_stats: List[Tuple[Optional[RelationStatistics], Optional[EdgeRole]]],
     nid: Optional[str] = None,
     join_notes: Optional[list] = None,
 ) -> RelationStatistics:
@@ -1345,7 +1346,7 @@ def _intersect_join_keys(
 
 def _aggregate_stats(
     node: PlanStep,
-    child_stats: List[Tuple[Optional[RelationStatistics], str]],
+    child_stats: List[Tuple[Optional[RelationStatistics], Optional[EdgeRole]]],
 ) -> RelationStatistics:
     base = _first_child_stats(child_stats) or _empty_stats()
     groups = node.groups or []
@@ -1399,7 +1400,7 @@ def _aggregate_stats(
 
 def _limit_stats(
     node: PlanStep,
-    child_stats: List[Tuple[Optional[RelationStatistics], str]],
+    child_stats: List[Tuple[Optional[RelationStatistics], Optional[EdgeRole]]],
 ) -> RelationStatistics:
     base = _first_child_stats(child_stats) or _empty_stats()
     limit = node.limit
@@ -1526,7 +1527,7 @@ def _cast_preserves_distinctness(cast_node) -> bool:
 
 def _project_stats(
     node: PlanStep,
-    child_stats: List[Tuple[Optional[RelationStatistics], str]],
+    child_stats: List[Tuple[Optional[RelationStatistics], Optional[EdgeRole]]],
 ) -> RelationStatistics:
     """Pass the child's statistics through, and give derived columns whose
     expression cannot change the distinct-value count their source's NDV.
@@ -1611,7 +1612,7 @@ def _project_stats(
 
 def _distinct_stats(
     node: PlanStep,
-    child_stats: List[Tuple[Optional[RelationStatistics], str]],
+    child_stats: List[Tuple[Optional[RelationStatistics], Optional[EdgeRole]]],
     plan: Optional["LogicalPlan"] = None,
     nid: Optional[str] = None,
 ) -> RelationStatistics:
@@ -1647,7 +1648,7 @@ def _distinct_stats(
 
 
 def _union_stats(
-    child_stats: List[Tuple[Optional[RelationStatistics], str]],
+    child_stats: List[Tuple[Optional[RelationStatistics], Optional[EdgeRole]]],
 ) -> RelationStatistics:
     """UNION ALL — sum row counts; widen each column's range (lower=min, upper=max).
 
@@ -1721,7 +1722,7 @@ def _max_or_none(a, b):
 
 def _set_op_stats(
     node: PlanStep,
-    child_stats: List[Tuple[Optional[RelationStatistics], str]],
+    child_stats: List[Tuple[Optional[RelationStatistics], Optional[EdgeRole]]],
 ) -> RelationStatistics:
     """INTERSECT / EXCEPT — bounded by the left input; a bound is an estimate."""
     left, _ = _split_join_children(child_stats) if len(child_stats) >= 2 else (None, None)
@@ -1743,7 +1744,7 @@ def _first_child_stats(
 
 
 def _split_join_children(
-    child_stats: List[Tuple[Optional[RelationStatistics], str]],
+    child_stats: List[Tuple[Optional[RelationStatistics], Optional[EdgeRole]]],
 ) -> Tuple[Optional[RelationStatistics], Optional[RelationStatistics]]:
     """(left, right) child statistics of a join or set operation, by EDGE LABEL.
 
@@ -1752,18 +1753,12 @@ def _split_join_children(
     nothing reads a leg from edge order (architect ruling 2026-09-27)."""
     if len(child_stats) == 1:
         return child_stats[0][0], None
-    labels = [rel for _, rel in child_stats]
-    if sorted(str(label) for label in labels) != ["left", "right"]:
+    roles = [role for _, role in child_stats]  # ingoing order: LEFT, RIGHT, unlabelled
+    if roles != [EdgeRole.LEFT, EdgeRole.RIGHT]:
         raise InvalidInternalStateError(
-            f"A two-input node's legs must be labelled LEFT and RIGHT; got {labels}."
+            f"A two-input node's legs must be labelled LEFT and RIGHT; got {roles}."
         )
-    left = right = None
-    for cs, rel in child_stats:
-        if rel == "left":
-            left = cs
-        else:
-            right = cs
-    return left, right
+    return child_stats[0][0], child_stats[1][0]
 
 
 def _merge_columns(left: RelationStatistics, right: RelationStatistics) -> dict:
@@ -2205,7 +2200,7 @@ class StatisticsRefreshVisitor:
         self._visited.add(nid)
 
         # Children first.
-        child_stats: List[Tuple[Optional[RelationStatistics], str]] = []
+        child_stats: List[Tuple[Optional[RelationStatistics], Optional[EdgeRole]]] = []
         for child_id, _, relationship in self.plan.ingoing_edges(nid):
             self._visit(child_id)
             child_stats.append(
@@ -2218,7 +2213,7 @@ class StatisticsRefreshVisitor:
     def _compute(
         self,
         node: PlanStep,
-        child_stats: List[Tuple[Optional[RelationStatistics], str]],
+        child_stats: List[Tuple[Optional[RelationStatistics], Optional[EdgeRole]]],
         nid: str,
     ) -> RelationStatistics:
         nt = node.node_type

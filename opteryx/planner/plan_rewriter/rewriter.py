@@ -17,11 +17,10 @@ class PlanRewriterVisitor:
         self.strategies = [cls(telemetry) for cls in STRATEGIES]
 
     def traverse(self, plan: LogicalPlan, strategy, ctes: dict) -> LogicalPlan:
-        exit_points = plan.get_exit_points()
-        if not exit_points:
+        if not plan:
             return plan
 
-        root_nid = exit_points.pop()
+        root_nid = plan.exit_point()
         context = PlanRewriteContext(plan, ctes, self.plan_context)
 
         def _inner(nid, parent_nid, context):

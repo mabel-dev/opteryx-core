@@ -11,9 +11,9 @@ def test_plan_telemetry_marks_distinct_as_aggregate_rel():
     node = get_registry().create_step(
         "Distinct", QueryProperties(query_id="telemetry-distinct", variables={}), DistinctStep()
     )
-    plan.add_node("N1", node)
+    N1_nid = plan.add_node(node)
 
     collect_plan_telemetry(plan)
 
-    assert "N1" in node.telemetry.operations
-    assert node.telemetry.operations["N1"]["type"] == "AggregateRel"
+    assert N1_nid in node.telemetry.operations
+    assert node.telemetry.operations[N1_nid]["type"] == "AggregateRel"

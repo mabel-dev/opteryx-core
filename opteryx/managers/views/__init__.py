@@ -244,7 +244,7 @@ def _view_as_plan(view_sql: str, *, plan_context) -> tuple:
     )
 
     # views don't have an exit node
-    plan_head = logical_plan.get_exit_points()[0]
+    plan_head = logical_plan.exit_point()
     logical_plan.remove_node(plan_head, True)
 
     return logical_plan, view_ctes
@@ -274,7 +274,7 @@ def _bind_row_count_estimate(logical_plan: dict, row_count: Optional[int]) -> di
     if row_count is None:
         return logical_plan
 
-    root_nid = logical_plan.get_exit_points()[0]
+    root_nid = logical_plan.exit_point()
     root_node = logical_plan[root_nid]
     root_node.estimated_row_count = row_count
     logical_plan[root_nid] = root_node

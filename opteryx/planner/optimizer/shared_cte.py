@@ -83,7 +83,7 @@ def strip_body_boundary(body: LogicalPlan):
     `cte_column_map` onto it) is settled now, and the physical planner has no
     Subquery operator — the boundary must not survive to compilation.
     """
-    head_nid = body.get_exit_points()[0]
+    head_nid = body.exit_point()
     boundary = body[head_nid]
     if boundary.node_type != LogicalPlanStepType.Subquery:
         # already stripped (or never added — a body built by a future producer);
@@ -100,7 +100,7 @@ def _projection_head(body: LogicalPlan):
     columns of their own and are walked through. Returns (None, None) when the
     head with columns is not a Project (an aggregate head prunes via its own
     optimization instead)."""
-    nid = body.get_exit_points()[0]
+    nid = body.exit_point()
     while True:
         node = body[nid]
         if node.columns:
@@ -239,7 +239,7 @@ def _push_common_predicates(body: LogicalPlan, refs, body_schema, telemetry) -> 
         return
 
     body_columns_by_identity = {c.identity: c for c in (body_schema.columns if body_schema else [])}
-    head_nid = body.get_exit_points()[0]
+    head_nid = body.exit_point()
 
     for key in common:
         _donor_plan, _donor_nid, donor, donor_mapping = per_ref[0][key]

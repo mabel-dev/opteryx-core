@@ -15,6 +15,7 @@ import time
 from enum import Enum, auto
 from typing import Dict, List, Optional, Tuple
 
+from opteryx.compiled.planner.plan_graph import EdgeRole
 from opteryx.compiled.structures.expressions import Expression
 from opteryx.compiled.structures.expressions import expressions_with
 from opteryx.exceptions import (
@@ -158,7 +159,7 @@ class LogicalPlanStepType(int, Enum):
 
     Subquery = auto()
     # Leaf reference to a multiply-referenced CTE whose body executes ONCE (the
-    # body plan lives in `plan.shared_ctes`, keyed by this node's `cte_key`).
+    # body plan lives in `plan_context.shared_ctes`, keyed by this node's `cte_key`).
     # Inserted by the Relation Resolver when a CTE is referenced >= 2 times;
     # single-reference CTEs are still spliced inline. Each reference mints its
     # own column identities at bind time (`cte_column_map`: ref identity ->
@@ -247,10 +248,7 @@ def _set_operation_leg_columns(leg_plan: LogicalPlan) -> Optional[list]:
 
     Returns None when the leg has no single locatable exit, or an exit with no columns.
     """
-    exit_points = leg_plan.get_exit_points()
-    if len(exit_points) != 1:
-        return None
-    return leg_plan[exit_points[0]].columns or None
+    return leg_plan[leg_plan.exit_point()].columns or None
 
 
 def _set_operation_leg_arity(leg_plan: LogicalPlan) -> Optional[int]:
@@ -279,7 +277,7 @@ def _depth_first_children(sub_plan: LogicalPlan) -> Tuple[int, Dict[int, List[in
     (ingoing edges in order, children before siblings) and appears under that
     parent only — the shape the sub-plan walkers below prune over.
     """
-    root = sub_plan.get_exit_points()[0]
+    root = sub_plan.exit_point()
     children: Dict[int, List[int]] = {}
     visited = {root}
 
@@ -486,7 +484,7 @@ def _plan_cte_leg(query_ast, leg_body, column_aliases, alias, *, plan_context):
     required to be empty), strip its exit, and apply the declared column
     aliases to its output projection."""
     leg_plan = plan_query({**query_ast, "body": leg_body}, plan_context=plan_context)
-    head = leg_plan.get_exit_points()[0]
+    head = leg_plan.exit_point()
     output_columns = leg_plan[head].columns
     leg_plan.remove_node(head, True)
     _apply_column_aliases(column_aliases, output_columns, alias)
@@ -583,7 +581,7 @@ def extract_ctes(branch, *, plan_context):
             # before it goes. The node left at the head is whatever the body ends with,
             # and for a body with ORDER BY or LIMIT that is an Order/Limit node, which
             # carries no columns of its own.
-            plan_head = logical_plan.get_exit_points()[0]
+            plan_head = logical_plan.exit_point()
             output_columns = logical_plan[plan_head].columns
             logical_plan.remove_node(plan_head, True)
 
@@ -2208,8 +2206,8 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
 
                 # Add join node and wire it
                 join_step_id = inner_plan.add_node(join_step)
-                inner_plan.add_edge(step_id, join_step_id, "left")
-                inner_plan.add_edge(right_step_id, join_step_id, "right")
+                inner_plan.add_edge(step_id, join_step_id, EdgeRole.LEFT)
+                inner_plan.add_edge(right_step_id, join_step_id, EdgeRole.RIGHT)
 
                 # Update step_id for next iteration
                 step_id = join_step_id
@@ -3618,12 +3616,12 @@ def create_node_relation(relation: dict, *, plan_context):
                 step_id = sub_plan.add_node(subquery_step)
 
                 subquery_plan = plan_query(subquery["subquery"], plan_context=plan_context)
-                exit_node = subquery_plan.get_exit_points()[0]
+                exit_node = subquery_plan.exit_point()
                 subquery_step.columns = subquery_plan[exit_node].columns
                 subquery_plan.remove_node(exit_node, heal=True)
 
                 sub_plan.absorb(subquery_plan)
-                subquery_entry_id = subquery_plan.get_exit_points()[0]
+                subquery_entry_id = subquery_plan.exit_point()
                 sub_plan.add_edge(subquery_entry_id, step_id)
 
                 root_node = step_id
@@ -3802,7 +3800,7 @@ def create_node_relation(relation: dict, *, plan_context):
         if join_step.node_type == LogicalPlanStepType.Unnest:
             # UNNEST joins don't have a LEFT and RIGHT side
             join_step_id = sub_plan.add_node(join_step)
-            sub_plan.add_edge(root_node, join_step_id, "left")
+            sub_plan.add_edge(root_node, join_step_id, EdgeRole.LEFT)
             root_node = join_step_id
             continue
 
@@ -3820,8 +3818,8 @@ def create_node_relation(relation: dict, *, plan_context):
         join_step_id = sub_plan.add_node(join_step)
 
         # add the from table as the left side of the join
-        sub_plan.add_edge(root_node, join_step_id, "left")
-        sub_plan.add_edge(right_node_id, join_step_id, "right")
+        sub_plan.add_edge(root_node, join_step_id, EdgeRole.LEFT)
+        sub_plan.add_edge(right_node_id, join_step_id, EdgeRole.RIGHT)
 
         root_node = join_step_id
 
@@ -3865,7 +3863,7 @@ def plan_explain(statement, *, plan_context, **kwargs) -> LogicalPlan:
             f"**EXPLAIN** does not support **{inner_root.upper()}** statements."
         )
     sub_plan = builder(inner, plan_context=plan_context)
-    sub_plan_id = sub_plan.get_exit_points()[0]
+    sub_plan_id = sub_plan.exit_point()
     plan.absorb(sub_plan)
     plan.add_edge(sub_plan_id, explain_id)
 
@@ -3906,11 +3904,11 @@ def plan_query(statement: dict, *, plan_context) -> LogicalPlan:
 
         left_plan = rename_relations(left_plan, prefix=UNION_ALIAS_PREFIX, plan_context=plan_context)
         plan.absorb(left_plan)
-        subquery_entry_id = left_plan.get_exit_points()[0]
+        subquery_entry_id = left_plan.exit_point()
         # Legs are labelled at creation (architect ruling 2026-09-27): EXCEPT and
         # INTERSECT are not symmetric, and a UNION's output columns are its LEFT
         # leg's. The heal below carries the label onto the leg's real input.
-        plan.add_edge(subquery_entry_id, step_id, "left")
+        plan.add_edge(subquery_entry_id, step_id, EdgeRole.LEFT)
         # remove the exit node
         plan.remove_node(subquery_entry_id, heal=True)
 
@@ -3940,8 +3938,8 @@ def plan_query(statement: dict, *, plan_context) -> LogicalPlan:
 
         right_plan = rename_relations(right_plan, prefix=UNION_ALIAS_PREFIX, plan_context=plan_context)
         plan.absorb(right_plan)
-        subquery_entry_id = right_plan.get_exit_points()[0]
-        plan.add_edge(subquery_entry_id, step_id, "right")
+        subquery_entry_id = right_plan.exit_point()
+        plan.add_edge(subquery_entry_id, step_id, EdgeRole.RIGHT)
         # remove the exit node
         plan.remove_node(subquery_entry_id, heal=True)
 
@@ -3988,7 +3986,9 @@ def plan_query(statement: dict, *, plan_context) -> LogicalPlan:
         if head_nid is not None:
             plan.add_edge(head_nid, step_id)
 
-        set_op_node.columns = columns
+        # The SAME frozen list as the EXIT's: the binder publishes the set op's settled
+        # columns to the steps sharing it (binder/set_ops.py _steps_sharing_columns).
+        set_op_node.columns = exit_node.columns
         set_op_node.left_relation_names = get_subplan_schemas(left_plan)
         set_op_node.right_relation_names = get_subplan_schemas(right_plan)
 
@@ -6087,7 +6087,7 @@ def _plan_ctas(
     defining_query = copy.deepcopy(query_ast) if is_materialized_view else None
 
     source_plan = plan_query(query_ast, plan_context=plan_context)
-    exit_node_id = source_plan.get_exit_points()[0]
+    exit_node_id = source_plan.exit_point()
     plan.absorb(source_plan)
     source_tail_id = exit_node_id
 
@@ -6558,7 +6558,7 @@ def plan_insert(statement, *, plan_context, **kwargs):
         # Exit-headed, which execute_native requires to run it on the native
         # engine instead of the legacy push-pipeline.
         source_plan = plan_query(insert_stmt["source"], plan_context=plan_context)
-        exit_node_id = source_plan.get_exit_points()[0]
+        exit_node_id = source_plan.exit_point()
 
         plan.absorb(source_plan)
         source_tail_id = exit_node_id
@@ -7561,7 +7561,7 @@ def _insert_visibility_filter(logical_plan, nid, node, filter_dnf, telemetry, *,
             condition=expression_tree,  # Use the built expression tree
             all_relations={node.relation, node.alias},
         )
-        logical_plan.insert_node_after(logical_plan.plan_context.node_ids.mint(), filter_node, nid)
+        logical_plan.insert_node_after(filter_node, nid)
         telemetry.visibility_filters_blank_condition_added += 1
     if filter_dnf:
         # Do some basic simplification early, less binding etc to do if we can
@@ -7577,7 +7577,7 @@ def _insert_visibility_filter(logical_plan, nid, node, filter_dnf, telemetry, *,
             all_relations={node.relation, node.alias},
         )
 
-        logical_plan.insert_node_after(logical_plan.plan_context.node_ids.mint(), filter_node, nid)
+        logical_plan.insert_node_after(filter_node, nid)
         telemetry.visibility_filters_condition_added += 1
 
 

@@ -13,21 +13,31 @@ from opteryx.planner.plan_context import PlanContext
 
 def test_execution_tree():
     et = PhysicalPlan(PlanContext())
-    et.add_node("a", None)
-    et.add_node("b", None)
-    et.add_edge("a", "b", "forwards")
+    a = et.add_node(None)
+    b = et.add_node(None)
+    et.add_edge(a, b)
 
     assert et.is_acyclic()
-    assert et.get_entry_points() == ["a"]
-    assert et.get_exit_points() == ["b"]
+    assert et.get_exit_points() == [b]
 
-    et.add_node("c", None)
-    et.add_edge("b", "c", "forward")
-    et.add_edge("c", "a", "forward")
+    c = et.add_node(None)
+    et.add_edge(b, c)
+    et.add_edge(c, a)
 
     assert not et.is_acyclic()
-    assert et.get_entry_points() == []
     assert et.get_exit_points() == []
+
+
+def test_edge_roles_are_left_right_or_none():
+    et = PhysicalPlan(PlanContext())
+    a = et.add_node(None)
+    b = et.add_node(None)
+    import pytest
+
+    from opteryx.exceptions import InvalidInternalStateError
+
+    with pytest.raises(InvalidInternalStateError):
+        et.add_edge(a, b, "forwards")
 
 
 if __name__ == "__main__":  # pragma: no cover

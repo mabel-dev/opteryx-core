@@ -33,15 +33,15 @@ from opteryx.planner.plan_context import PlanContext
 
 def _plan(relation: str, *, compaction: bool) -> LogicalPlan:
     """A one-scan plan, optionally under a compaction sink."""
-    plan = LogicalPlan()
+    plan = LogicalPlan(PlanContext())
     scan = ScanStep()
     scan.relation = relation
-    plan.add_node("scan", scan)
+    scan_nid = plan.add_node(scan)
 
     head = CompactionCommitStep() if compaction else ExitStep()
     head.relation_name = relation
-    plan.add_node("head", head)
-    plan.add_edge("scan", "head")
+    head_nid = plan.add_node(head)
+    plan.add_edge(scan_nid, head_nid)
     return plan
 
 

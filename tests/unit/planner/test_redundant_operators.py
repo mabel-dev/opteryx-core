@@ -67,20 +67,19 @@ def _exit():
 
 
 def _build_plan(provider_node, project_node, exit_node=None):
-    plan = LogicalPlan()
-    plan.add_node("scan", provider_node)
-    plan.add_node("project", project_node)
-    plan.add_edge("scan", "project")
+    plan = LogicalPlan(PlanContext())
+    scan = plan.add_node(provider_node)
+    project = plan.add_node(project_node)
+    plan.add_edge(scan, project)
     if exit_node is not None:
-        plan.add_node("exit", exit_node)
-        plan.add_edge("project", "exit")
+        plan.add_edge(project, plan.add_node(exit_node))
     return plan
 
 
 def _run_strategy(plan):
     telemetry = QueryTelemetry("test_redundant_operators")
     strategy = RedundantOperationsStrategy(telemetry=telemetry)
-    context = OptimizerContext(plan, PlanContext())
+    context = OptimizerContext(plan, plan.plan_context)
 
     # Walk from the exit/root toward the leaves so the strategy sees the
     # Project node — mirrors the OptimizerVisitor traversal.

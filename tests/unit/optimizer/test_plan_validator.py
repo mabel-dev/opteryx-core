@@ -33,45 +33,48 @@ def _node(step_type):
 
 
 def _valid_plan():
-    plan = LogicalPlan()
-    plan.add_node("scan", _node(LogicalPlanStepType.Scan))
-    plan.add_node("exit", _node(LogicalPlanStepType.Exit))
-    plan.add_edge("scan", "exit")
-    return plan
+    """(plan, exit id) for a two-node scan -> exit plan."""
+    plan = LogicalPlan(PlanContext())
+    scan = plan.add_node(_node(LogicalPlanStepType.Scan))
+    exit_nid = plan.add_node(_node(LogicalPlanStepType.Exit))
+    plan.add_edge(scan, exit_nid)
+    return plan, exit_nid
 
 
 # --- positive ---------------------------------------------------------------
 
 
 def test_valid_plan_passes():
-    validate_plan(_valid_plan())  # must not raise
+    validate_plan(_valid_plan()[0])  # must not raise
 
 
 def test_single_node_plan_passes():
-    plan = LogicalPlan()
-    plan.add_node("only", _node(LogicalPlanStepType.Exit))
+    plan = LogicalPlan(PlanContext())
+    plan.add_node(_node(LogicalPlanStepType.Exit))
     validate_plan(plan)
 
 
 # --- structural violations --------------------------------------------------
 
 
-def test_dangling_edge_target_raises():
-    plan = _valid_plan()
-    plan.add_edge("exit", "ghost")  # 'ghost' is not a node
+def test_dangling_edge_is_refused_by_the_plan():
+    # The native plan graph refuses an edge to a node it does not hold when the
+    # edge is added, so a dangling edge never reaches the validator.
+    plan, exit_nid = _valid_plan()
+    ghost = plan.plan_context.node_ids.mint()  # minted, never placed
     with pytest.raises(InvalidInternalStateError) as exc:
-        validate_plan(plan)
-    assert "ghost" in str(exc.value)
+        plan.add_edge(exit_nid, ghost)
+    assert str(ghost) in str(exc.value)
 
 
 def test_two_roots_raises():
     # scan feeds two sink nodes: two exit points.
-    plan = LogicalPlan()
-    plan.add_node("scan", _node(LogicalPlanStepType.Scan))
-    plan.add_node("b", _node(LogicalPlanStepType.Exit))
-    plan.add_node("c", _node(LogicalPlanStepType.Exit))
-    plan.add_edge("scan", "b")
-    plan.add_edge("scan", "c")
+    plan = LogicalPlan(PlanContext())
+    scan = plan.add_node(_node(LogicalPlanStepType.Scan))
+    b = plan.add_node(_node(LogicalPlanStepType.Exit))
+    c = plan.add_node(_node(LogicalPlanStepType.Exit))
+    plan.add_edge(scan, b)
+    plan.add_edge(scan, c)
     with pytest.raises(InvalidInternalStateError) as exc:
         validate_plan(plan)
     assert "exit point" in str(exc.value)
@@ -79,16 +82,16 @@ def test_two_roots_raises():
 
 def test_orphan_node_raises():
     # A disconnected node is invisible to get_exit_points but is still corruption.
-    plan = _valid_plan()
-    plan.add_node("orphan", _node(LogicalPlanStepType.Project))
+    plan, _exit = _valid_plan()
+    plan.add_node(_node(LogicalPlanStepType.Project))
     with pytest.raises(InvalidInternalStateError) as exc:
         validate_plan(plan)
-    assert "orphan" in str(exc.value)
+    assert "disconnected" in str(exc.value)
 
 
 def test_where_label_is_included_in_message():
-    plan = _valid_plan()
-    plan.add_edge("exit", "ghost")
+    plan, _exit = _valid_plan()
+    plan.add_node(_node(LogicalPlanStepType.Project))  # an orphan
     with pytest.raises(InvalidInternalStateError) as exc:
         validate_plan(plan, where="SomeStrategy")
     assert "SomeStrategy" in str(exc.value)
@@ -130,7 +133,7 @@ def test_real_optimized_plan_is_valid():
             execution_context=ctx,
             query_id=str(uuid.uuid4()),
             telemetry=telemetry, plan_context=plan_context)
-        optimized = do_optimizer(bound, telemetry, PlanContext())
+        optimized = do_optimizer(bound, telemetry, plan_context)
         validate_plan(optimized, where="end-to-end")  # must not raise
 
 

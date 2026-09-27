@@ -203,6 +203,6 @@ class IntersectExceptAllToWindowJoinStrategy(PlanRewriteStrategy):
                 for c in col_names
             ]
             project.passthrough_columns = []
-            plan.insert_node_after(plan.plan_context.node_ids.mint(), project, nid)
+            plan.insert_node_after(project, nid)
 
         return plan

@@ -466,7 +466,7 @@ def _branch_project_node(self, node: PlanStep, relation_names: List[str]):
 
 def _cast_leg_columns_to(
     columns: List[Expression], coerced_types: List[ColumnType], *, plan_context
-) -> None:
+) -> List[Expression]:
     """Wrap each of a UNION leg's bound columns in a CAST when it doesn't already
     match the position's coerced (unified-across-both-legs) type.
 
@@ -490,9 +490,10 @@ def _cast_leg_columns_to(
     (binder.py, "Coerce LITERAL branches to the resolved result type") is the
     same idea for CASE branches; this is that pattern's NULL case.
     """
+    columns = list(columns)  # the leg's new column list (step lists are immutable)
     for i, col in enumerate(columns):
         if i >= len(coerced_types):
-            return
+            return columns
         target = coerced_types[i]
         if target is None:
             continue
@@ -524,6 +525,7 @@ def _cast_leg_columns_to(
             col.schema_column = plan_context.columns.retype(schema_column, target)
             continue
         columns[i] = _bound_cast_node(col, target, plan_context=plan_context)
+    return columns
 
 
 _SET_OP_STEP_TYPES = (
@@ -628,14 +630,30 @@ def _retype_declared_columns(columns: List[Expression], context: BindingContext,
                 schema.columns[position] = replacement
 
 
-def _publish_declared_columns(bound_columns: List[Expression], exit_columns: List[Expression]) -> None:
-    """Make the query's EXIT read this set operation's settled output columns.
+def _steps_sharing_columns(graph, node) -> list:
+    """The OTHER steps of `graph` holding `node`'s column list itself.
 
     A set operation's output IS the query's output, and logical_planner says so by
-    handing ONE list object to both the set-op node and the EXIT node. This node then
-    gets its own list from visit_exit and settles its columns (coercion, and the
-    re-identification in `_retype_declared_columns`); `exit_columns` is that original
-    shared list, still what the EXIT node will iterate when the binder reaches it.
+    handing ONE column list to both the set-op node and its EXIT (plan_query) - for
+    a set operation nested as another's left leg, to the outer set op and ITS EXIT
+    too. Read before this node's own columns are rebound (visit_exit)."""
+    shared = node.columns
+    return [
+        step
+        for _nid, step in graph.nodes(True)
+        if step is not node and step.node_type in steps_with("columns") and step.columns is shared
+    ]
+
+
+def _publish_declared_columns(bound_columns: List[Expression], exit_holders: list) -> None:
+    """Make the query's EXIT read this set operation's settled output columns.
+
+    `exit_holders` are the steps that shared this node's column list
+    (`_steps_sharing_columns`) - the EXIT the binder reaches after this node. This
+    node gets its own list from visit_exit and settles its columns (coercion, and
+    the re-identification in `_retype_declared_columns`); the holders are given
+    that settled list (step lists are immutable, architect ruling Q3: a change is a
+    new list assigned, never an edit the sharers see).
 
     Republishing positionally is the only way to carry a RE-IDENTIFIED column across.
     The EXIT's own entries are the left leg's projection nodes, already bound, and
@@ -653,10 +671,10 @@ def _publish_declared_columns(bound_columns: List[Expression], exit_columns: Lis
     Length disagreement means the EXIT is not a mirror of this node after all — a
     wildcard set-op EXIT, which expands from the schemas on its own — so leave it be.
     """
-    if len(bound_columns) != len(exit_columns):
-        return
-    for position, bound_column in enumerate(bound_columns):
-        exit_columns[position] = bound_column
+    published = tuple(bound_columns)
+    for holder in exit_holders:
+        if len(holder.columns) == len(published):
+            holder.columns = published
 
 
 def _coerce_branch_to(self, branch: PlanStep, context: BindingContext, coerced_types) -> None:
@@ -685,7 +703,9 @@ def _coerce_branch_to(self, branch: PlanStep, context: BindingContext, coerced_t
         _retype_declared_columns(branch.columns, context, coerced_types)
         return
 
-    _cast_leg_columns_to(branch.columns, coerced_types, plan_context=context.plan_context)
+    branch.columns = _cast_leg_columns_to(
+        branch.columns, coerced_types, plan_context=context.plan_context
+    )
 
 
 def _set_op_common_type(left_type, right_type):
@@ -732,11 +752,11 @@ def _validate_set_operation_types(
 def visit_union(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     _validate_set_operation_types(self, node, context, "UNION")
 
-    # The list object this node's columns live in is SHARED with the query's EXIT node
-    # (logical_planner assigns one list to both), and the EXIT is bound after this node.
-    # Captured before visit_exit below swaps this node onto its own list, so that what
-    # this node settles on can be published back into it — see `_publish_declared_columns`.
-    exit_columns = node.columns
+    # The column list this node holds is SHARED with the query's EXIT node (logical_planner
+    # hands one list to both), and the EXIT is bound after this node. Its holders are
+    # found before visit_exit below gives this node its own list, so that what this node
+    # settles on can be published to them — see `_publish_declared_columns`.
+    exit_holders = _steps_sharing_columns(self.graph, node)
 
     # Physically enforce the coercion: the executor concatenates each leg's
     # columns by position with no type check of its own (UnionNode just selects
@@ -803,7 +823,7 @@ def visit_union(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep
     # types positionally.
     if leg_coerced_types is not None:
         _retype_declared_columns(node.columns, context, leg_coerced_types)
-        _publish_declared_columns(node.columns, exit_columns)
+        _publish_declared_columns(node.columns, exit_holders)
 
     return node, context
 
@@ -946,7 +966,7 @@ def visit_unnest(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
                 "**CROSS JOIN CIDR_UNNEST** requires a text CIDR block such as "
                 f"'10.0.0.0/24', not {category}."
             )
-        node.columns += [node.unnest_column]
+        node.columns = (*node.columns, node.unnest_column)
 
         schema_column = context.plan_context.columns.relation_column(
             node.unnest_alias,
@@ -963,7 +983,7 @@ def visit_unnest(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
         context.schemas[unnest_schema] = RelationSchema(
             name=unnest_schema, columns=[schema_column]
         )
-        node.columns.append(node.unnest_target)
+        node.columns = (*node.columns, node.unnest_target)
         return node, context
 
     # this is the column which is being unnested
@@ -994,12 +1014,12 @@ def visit_unnest(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
         # create the schema for the unnested column
         context.schemas[unnest_schema] = RelationSchema(name=unnest_schema, columns=[schema_column])
         # reference the new column in the node
-        node.columns.append(node.unnest_target)
+        node.columns = (*node.columns, node.unnest_target)
     else:
         from opteryx.planner.binder.binder import inner_binder
 
         node.unnest_column, context = inner_binder(node.unnest_column, context)
-        node.columns += [node.unnest_column]
+        node.columns = (*node.columns, node.unnest_column)
 
         # The source array must survive the bind-time schema narrowing even when no
         # projection or aggregate names it. UNNEST reads it STRUCTURALLY — the output
@@ -1058,6 +1078,6 @@ def visit_unnest(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
         context.schemas[unnest_schema] = RelationSchema(name=unnest_schema, columns=[schema_column])
 
         # reference the new column in the node
-        node.columns.append(node.unnest_target)
+        node.columns = (*node.columns, node.unnest_target)
 
     return node, context

@@ -44,8 +44,8 @@ recursive CTE arrives from extract_ctes as a RecursiveCteDefinition (anchor plan
 recursive-term plan, already split at its topmost UNION ALL) and is NEVER spliced —
 every reference, the term's self-reference included, becomes a MaterializedCteRef on
 the one definition, so no cycle ever exists in the plan graph. The legs ride
-`plan.shared_ctes` as ordinary bodies (bound, optimized and compiled on the existing
-shared-CTE rail) and `plan.recursive_ctes` carries the fixpoint metadata the plan
+`plan_context.shared_ctes` as ordinary bodies (bound, optimized and compiled on the existing
+shared-CTE rail) and `plan_context.recursive_ctes` carries the fixpoint metadata the plan
 compiler turns into the engine's LoopSpan.
 """
 
@@ -53,6 +53,7 @@ from typing import Dict
 from typing import Optional
 from typing import Tuple
 
+from opteryx.compiled.planner.plan_graph import EdgeRole
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.models import is_expression
@@ -152,7 +153,7 @@ def subplan_rooted_at(plan: LogicalPlan, root_nid: str) -> LogicalPlan:
         if nid in seen:
             continue
         seen.add(nid)
-        sub.place(nid, plan[nid])
+        sub.add_node(plan[nid], nid=nid)
         for child, _target, _relation in plan.ingoing_edges(nid):
             stack.append(child)
     for nid in seen:
@@ -357,16 +358,22 @@ def join_leg_preprocess(plan: LogicalPlan):
         leg = None
         while location_nid:
             if location_node.node_type == LogicalPlanStepType.Join:
-                if leg == "left":
+                if leg is EdgeRole.LEFT:
                     if uuid not in location_node.left_readers:
-                        location_node.left_readers.append(uuid)
+                        location_node.left_readers = (*location_node.left_readers, uuid)
                     if node.alias not in location_node.left_relation_names:
-                        location_node.left_relation_names.append(node.alias)
-                elif leg == "right":
+                        location_node.left_relation_names = (
+                            *location_node.left_relation_names,
+                            node.alias,
+                        )
+                elif leg is EdgeRole.RIGHT:
                     if uuid not in location_node.right_readers:
-                        location_node.right_readers.append(uuid)
+                        location_node.right_readers = (*location_node.right_readers, uuid)
                     if node.alias not in location_node.right_relation_names:
-                        location_node.right_relation_names.append(node.alias)
+                        location_node.right_relation_names = (
+                            *location_node.right_relation_names,
+                            node.alias,
+                        )
                 plan[location_nid] = location_node
             incoming = plan.outgoing_edges(location_nid)
             if incoming:
@@ -460,7 +467,7 @@ def _splice(plan: LogicalPlan, nid: str, node, sub_plan: LogicalPlan, *, plan_co
     a reader (see `get_subplan_reads`).
     """
     sub_plan = rename_relations(sub_plan, plan_context=plan_context)
-    sub_plan_head = sub_plan.get_exit_points()[0]
+    sub_plan_head = sub_plan.exit_point()
 
     outgoing = plan.outgoing_edges(nid)
     if not outgoing:
@@ -844,7 +851,7 @@ def _finalize_cte_sharing(
     - refcount 1  -> splice the body inline at its single reference (exactly the plan
       shape the resolver produced before sharing existed, minus redundant copies).
     - refcount 2+ -> the markers become MaterializedCteRef leaves and the body stays
-      in `plan.shared_ctes` (topologically ordered, dependencies first), headed by a
+      in `plan_context.shared_ctes` (topologically ordered, dependencies first), headed by a
       Subquery boundary node so the Binder derives its output schema the same way it
       does for any derived relation.
 
@@ -852,8 +859,8 @@ def _finalize_cte_sharing(
 
     Recursive CTEs (`recursive_defs`, keyed like the registry) never take the
     inline path — their references share the fixpoint's one accumulated result by
-    definition. Each one's anchor/term legs enter `plan.shared_ctes` as ordinary
-    bodies and `plan.recursive_ctes` carries the metadata binding them together.
+    definition. Each one's anchor/term legs enter `plan_context.shared_ctes` as ordinary
+    bodies and `plan_context.recursive_ctes` carries the metadata binding them together.
     """
     recursive_defs = recursive_defs or {}
 
@@ -979,7 +986,7 @@ def _finalize_cte_sharing(
     from opteryx.utils import random_string
 
     def _add_boundary(body: LogicalPlan, alias: str):
-        head = body.get_exit_points()[0]
+        head = body.exit_point()
         boundary = SubqueryStep()
         boundary.alias = alias
         boundary.columns = _boundary_columns(body, head, boundary.alias)
@@ -1045,8 +1052,8 @@ def _finalize_cte_sharing(
     for key in list(shared) + recursive_used:
         _emit(key, ())
 
-    plan.shared_ctes = ordered
-    plan.recursive_ctes = recursive_meta
+    plan.plan_context.shared_ctes = ordered
+    plan.plan_context.recursive_ctes = recursive_meta
     return plan
 
 

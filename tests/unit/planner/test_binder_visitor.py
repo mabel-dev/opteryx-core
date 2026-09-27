@@ -5,6 +5,7 @@ correctly and that we're merging values correctly.
 
 import os
 import sys
+from opteryx.compiled.planner.plan_graph import EdgeRole
 from opteryx.compiled.structures.plan_steps import FilterStep
 from opteryx.compiled.structures.plan_steps import ProjectStep
 from opteryx.compiled.structures.plan_steps import ScanStep
@@ -20,7 +21,7 @@ from opteryx.types.schema import RelationSchema
 
 
 def test_logical_plan_visitor():
-    plan = LogicalPlan()
+    plan = LogicalPlan(PlanContext())
     scan_node_left = ScanStep()
     scan_node_left.relation = "left"
     scan_node_right = ScanStep()
@@ -28,15 +29,15 @@ def test_logical_plan_visitor():
     project_node = ProjectStep()
     filter_node = FilterStep()
     union_node = UnionStep()
-    plan.add_node(1, scan_node_left)
-    plan.add_node(2, project_node)
-    plan.add_node(3, filter_node)
-    plan.add_node(4, union_node)
-    plan.add_node(5, scan_node_right)
-    plan.add_edge(1, 3)
-    plan.add_edge(3, 2)
-    plan.add_edge(2, 4, "left")
-    plan.add_edge(5, 4, "right")
+    left_scan = plan.add_node(scan_node_left)
+    project = plan.add_node(project_node)
+    filter_nid = plan.add_node(filter_node)
+    union = plan.add_node(union_node)
+    right_scan = plan.add_node(scan_node_right)
+    plan.add_edge(left_scan, filter_nid)
+    plan.add_edge(filter_nid, project)
+    plan.add_edge(project, union, EdgeRole.LEFT)
+    plan.add_edge(right_scan, union, EdgeRole.RIGHT)
 
     # does this look right?
     print(plan.draw())

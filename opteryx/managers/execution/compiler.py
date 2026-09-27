@@ -3290,7 +3290,7 @@ class _Compiler:
         node_id = nid
         while True:
             out_edges = list(self.plan.outgoing_edges(node_id))
-            # travers edges are (source, target, relationship).
+            # plan edges are (source, target, relationship).
             if len(out_edges) != 1:
                 return None
             node_id = out_edges[0][1]
@@ -5976,10 +5976,7 @@ def compile_to_native(plan, pool=None):
     from opteryx.compiled.morsel_queue import PyMorselQueue
     from opteryx.operators._operators import NativePlan
 
-    heads = list(set(plan.get_exit_points()))
-    if len(heads) != 1:
-        _unsupported(f"a plan with {len(heads)} heads")
-    exit_id = heads[0]
+    exit_id = plan.exit_point()
     exit_node = plan[exit_id]
     if exit_node.kind != "ExitNode":
         _unsupported(f"a plan headed by {exit_node.kind}")
@@ -5997,14 +5994,14 @@ def compile_to_native(plan, pool=None):
     # engine's fixpoint — anchor appends into DELTA, the term's pipelines form
     # the LoopSpan (its self-reference reads WORKING), and every outer reference
     # reads the accumulated RESULT. See docs/RECURSIVE_CTE_DESIGN.md §3.
-    recursive_meta = getattr(plan, "recursive_ctes", None) or {}
+    recursive_meta = plan.plan_context.recursive_ctes
     leg_roles = {}
     for rkey, meta in recursive_meta.items():
         leg_roles[meta["anchor_key"]] = (rkey, "anchor", meta)
         leg_roles[meta["term_key"]] = (rkey, "term", meta)
     recursive_state: dict = {}  # rcte_key -> plan-time buffer/layout facts
 
-    for cte_key, body_plan in (getattr(plan, "shared_ctes", None) or {}).items():
+    for cte_key, body_plan in plan.plan_context.physical_shared_ctes.items():
         body_compiler = _Compiler(body_plan, nplan, pool=pool)
         role = leg_roles.get(cte_key)
         if role is not None and role[1] == "term":
@@ -6017,10 +6014,7 @@ def compile_to_native(plan, pool=None):
             state["first"] = nplan.pipeline_count()
         else:
             body_compiler.cte_buffers = compiler.cte_buffers
-        body_heads = list(set(body_plan.get_exit_points()))
-        if len(body_heads) != 1:
-            _unsupported(f"a shared CTE body with {len(body_heads)} heads")
-        body_pipeline, body_layout = body_compiler.compile_node(body_heads[0])
+        body_pipeline, body_layout = body_compiler.compile_node(body_plan.exit_point())
 
         if role is None:
             buf = nplan.new_buffer()

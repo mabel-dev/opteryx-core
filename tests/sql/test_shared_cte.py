@@ -1,7 +1,7 @@
 """A CTE referenced two or more times executes ONCE.
 
 The Relation Resolver registers a multiply-referenced CTE's body as a shared
-plan (`plan.shared_ctes`) and turns each reference into a MaterializedCteRef
+plan (`plan_context.shared_ctes`) and turns each reference into a MaterializedCteRef
 leaf; the engine materializes the body's result into one buffer and every
 reference reads that buffer (per-run cursor — each reference sees every
 morsel). A single-reference CTE is still spliced inline, exactly as before.

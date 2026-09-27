@@ -169,7 +169,7 @@ def visit_join(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
                 raise UnsupportedSyntaxError(
                     "ASOF **JOIN** partition keys must be columns, not expressions."
                 )
-            node.columns += list(get_all_nodes_of_type(node.on, (NodeType.IDENTIFIER,)))
+            node.columns = (*node.columns, *get_all_nodes_of_type(node.on, (NodeType.IDENTIFIER,)))
 
         node.schemas = context.schemas
         return node, context

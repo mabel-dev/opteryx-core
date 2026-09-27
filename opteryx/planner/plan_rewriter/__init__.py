@@ -64,14 +64,8 @@ def do_plan_rewrite(
     # Shared CTE bodies (see relation_resolver) live OUTSIDE the main plan and
     # execute once each — but they are query text like any other and carry the
     # same shapes this pass exists to eliminate (subquery expressions, windows).
-    # Rewrite each body as a plan in its own right, then the main plan, and carry
-    # the registry across — the rewriter can hand back a different plan object,
-    # and Graph copies do not carry instance attributes.
-    shared_ctes = getattr(plan, "shared_ctes", None) or {}
-    recursive_ctes = getattr(plan, "recursive_ctes", None) or {}
+    # Rewrite each body as a plan in its own right, then the main plan.
+    shared_ctes = plan_context.shared_ctes
     for key, body in shared_ctes.items():
         shared_ctes[key] = rewriter.rewrite(body, {})
-    plan = rewriter.rewrite(plan, {})
-    plan.shared_ctes = shared_ctes
-    plan.recursive_ctes = recursive_ctes
-    return plan
+    return rewriter.rewrite(plan, {})

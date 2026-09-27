@@ -53,7 +53,7 @@ def _optimized_plan(sql: str):
         execution_context=ctx,
         query_id=query_id,
         telemetry=telemetry, plan_context=plan_context)
-    return do_optimizer(bound, telemetry, PlanContext())
+    return do_optimizer(bound, telemetry, plan_context)
 
 
 def _nodes(plan, step_type):
@@ -182,26 +182,23 @@ def test_fanned_out_project_is_not_fused():
     # either would duplicate lower's work for the other. Columns are left empty
     # since the fan-out check (len(outgoing edges) == 1) must short-circuit
     # before any column/identity resolution is attempted.
-    plan = LogicalPlan()
-    for nid in ("lower", "upper_a", "upper_b"):
+    plan = LogicalPlan(PlanContext())
+    ids = {}
+    for label in ("lower", "upper_a", "upper_b"):
         node = ProjectStep()
         node.columns = []
-        plan.add_node(nid, node)
-    plan.add_edge("lower", "upper_a")
-    plan.add_edge("lower", "upper_b")
+        ids[label] = plan.add_node(node)
+    plan.add_edge(ids["lower"], ids["upper_a"])
+    plan.add_edge(ids["lower"], ids["upper_b"])
 
     strategy = ProjectFusionStrategy(QueryTelemetry.detached())
-    context = OptimizerContext(plan, PlanContext())
+    context = OptimizerContext(plan, plan.plan_context)
     context.optimized_plan = plan.copy()
-    context.node_id = "lower"
+    context.node_id = ids["lower"]
 
-    strategy.visit(plan["lower"], context)
+    strategy.visit(plan[ids["lower"]], context)
 
-    assert set(nid for nid, _ in context.optimized_plan.nodes(True)) == {
-        "lower",
-        "upper_a",
-        "upper_b",
-    }
+    assert set(nid for nid, _ in context.optimized_plan.nodes(True)) == set(ids.values())
 
 
 if __name__ == "__main__":  # pragma: no cover

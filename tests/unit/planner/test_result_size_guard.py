@@ -145,12 +145,13 @@ def test_limit_of_zero_disables_enforcement():
 # ── the conditional: unknown statistics must not produce a false rejection ──────
 
 def test_gate_is_disabled_when_an_input_has_no_row_count():
-    from opteryx.third_party.travers import Graph
+    from opteryx.planner.logical_planner import LogicalPlan
+    from opteryx.planner.plan_context import PlanContext
 
-    plan = Graph()
+    plan = LogicalPlan(PlanContext())
     scan = ScanStep()
     scan.relation = "unknowable"
-    plan.add_node("s", scan)
+    s_nid = plan.add_node(scan)
     # No manifest and no schema -> no declared count -> the plan-time gate must
     # decline to act rather than reject on a fabricated number.
     assert _declared_row_count(scan) is None

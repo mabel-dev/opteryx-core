@@ -275,7 +275,7 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
             # Update the node with the pushed columns
             node.columns = node_columns
 
-        context.optimized_plan.place(context.node_id, node.shallow_copy())
+        context.optimized_plan.add_node(node.shallow_copy(), nid=context.node_id)
         if context.parent_nid:
             # Re-adding the edge must preserve its relationship: a join leg label
             # records which side of the parent join this branch feeds. Read it from

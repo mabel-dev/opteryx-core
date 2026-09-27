@@ -57,6 +57,7 @@ Limitations (Phase 1):
 - NULL partition keys: uses Eq (= not IS NOT DISTINCT FROM); NULL partitions are excluded.
 """
 
+from opteryx.compiled.planner.plan_graph import EdgeRole
 from opteryx.compiled.structures.expressions import Expression
 from opteryx.compiled.structures.expressions import expressions_with
 from opteryx.exceptions import InvalidInternalStateError
@@ -100,7 +101,7 @@ def _source_relation(plan: LogicalPlan) -> PlanStep:
     """
     from opteryx.planner.relation_resolver import RELATION_STEP_TYPES
 
-    nid = plan.get_exit_points()[0]
+    nid = plan.exit_point()
     while True:
         node = plan[nid]
         if node.node_type in RELATION_STEP_TYPES:
@@ -171,7 +172,7 @@ def _build_window_cte(
     inner_plan = copy_sub_plan(source_subplan)
     rename_relations(inner_plan, prefix=WINDOW_SOURCE_ALIAS_PREFIX, plan_context=plan_context)
     cte_src_alias = _source_relation(inner_plan).alias
-    cte_root_nid = inner_plan.get_exit_points()[0]
+    cte_root_nid = inner_plan.exit_point()
 
     # --- Build partition column refs for the CTE inner plan ---
     # These carry cte_src_alias so the binder resolves them within the CTE scope.
@@ -289,8 +290,7 @@ def _rewrite_window_chain(plan: LogicalPlan, chain: list, *, plan_context) -> Lo
     filter_step.passthrough_columns = []
     filter_step.except_columns = None
     filter_step.columns = [outer_wildcard] + win_refs
-    filter_nid = plan.plan_context.node_ids.mint()
-    plan.insert_node_after(filter_nid, filter_step, chain[-1])
+    filter_nid = plan.insert_node_after(filter_step, chain[-1])
 
     return plan
 
@@ -361,8 +361,8 @@ def _replace_window_with_join(
     # ("a build-side join key the engine could not resolve here"). The direct-Scan case
     # only ever worked because the order happened to come out right. `add_edge` updates an
     # existing edge's relationship, so the first call relabels the source leg in place.
-    plan.add_edge(left_nid, win_nid, "left")
-    plan.add_edge(subquery_wrapper_nid, win_nid, "right")
+    plan.add_edge(left_nid, win_nid, EdgeRole.LEFT)
+    plan.add_edge(subquery_wrapper_nid, win_nid, EdgeRole.RIGHT)
 
 
 def _window_chains(plan: LogicalPlan, candidates: list) -> list:
