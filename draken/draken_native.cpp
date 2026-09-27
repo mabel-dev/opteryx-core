@@ -54,6 +54,7 @@ namespace { std::atomic<uint64_t> g_e37_carried_hits{0}; }
 #include "ops/bool_compare.h"        // bool_compare_vector (R5 fast-path fuzz test)
 #include "ops/bool_reductions.h"
 #include "ops/hash.h"               // includes decimal_arith.h transitively (E.32)
+#include "ops/column_profile.h"     // char_class_stats / ordinal_min_max / histogram_bucket
 #include "parvi.hpp"                 // opteryx::parvi::ParviSet — Vector.unique() fast path (<=16 distinct)
 #include "ops/int64_arithmetic.h"   // i64_neg (used by bridge round-trip test)
 #include "ops/int64_reductions.h"   // i64_sum (used by bridge round-trip test)
@@ -2381,6 +2382,26 @@ extern "C" const DrakenVector* draken_vector_unwrap(PyObject* obj) {
         return nullptr;
     }
     return &nb::inst_ptr<VectorOwner>(h)->vec;
+}
+
+// draken_owner_unwrap — the borrowed VectorOwner behind a Python Vector handle:
+// what native code needs beyond the DrakenVector itself (an ARRAY's child
+// owner, a VECTOR's logical type, a carried key-hash buffer). Same type check
+// and lifetime contract as draken_vector_unwrap.
+extern "C" const VectorOwner* draken_owner_unwrap(PyObject* obj) {
+    if (!obj || obj == Py_None) {
+        PyErr_SetString(PyExc_TypeError,
+            "draken_owner_unwrap: expected draken.draken_native.Vector, got None");
+        return nullptr;
+    }
+    nb::handle h(obj);
+    if (!nb::isinstance<VectorOwner>(h)) {
+        PyErr_Format(PyExc_TypeError,
+            "draken_owner_unwrap: expected draken.draken_native.Vector, got %.100s",
+            Py_TYPE(obj)->tp_name);
+        return nullptr;
+    }
+    return nb::inst_ptr<VectorOwner>(h);
 }
 
 // draken_vector_mark_dict_sorted — OR DRAKEN_DICT_KEYS_SORTED onto a dict-shaped
@@ -7060,6 +7081,23 @@ static const bool g_hash_timing = [](){
     return true;
 }();
 
+// draken_hash_rows — each logical row's Vector.hash_shaped() value, through the
+// SAME hash_shaped_impl, into out[0..v->vec.length). For native statistics that
+// must agree with what the binding computes (the KMV sketches a manifest
+// stores). Pure C++, GIL-free. Returns 0, or -1 with the reason in `error`
+// (hash_shaped refuses DRAKEN_ARRAY; a VECTOR needs its logical type).
+extern "C" int draken_hash_rows(const VectorOwner* v, uint64_t* out, char* error, size_t error_len) {
+    try {
+        const VectorOwner hashed = hash_shaped_impl(*v);
+        const uint64_t* data = static_cast<const uint64_t*>(hashed.vec.data);
+        for (uint32_t i = 0; i < hashed.vec.length; ++i) out[i] = data[hashed.vec.selection[i]];
+        return 0;
+    } catch (const std::exception& e) {
+        std::snprintf(error, error_len, "%s", e.what());
+        return -1;
+    }
+}
+
 extern "C" CxxMorsel* cxx_hash_c(const CxxMorsel* m, const int32_t* col_idxs, uint32_t n_cols) {
     if (!g_hash_timing) return new CxxMorsel(cxx_hash(*m, col_idxs, n_cols));
     const auto t0 = std::chrono::steady_clock::now();
@@ -8238,20 +8276,12 @@ NB_MODULE(draken_native, m) {
             if (v.vec.type != DRAKEN_INT64)
                 throw std::invalid_argument(
                     "ordinal_min_max: column must be INT64 (the output of Vector.ordinalize())");
-            const uint32_t n = v.vec.length;
-            int64_t vmin = std::numeric_limits<int64_t>::max();
-            int64_t vmax = std::numeric_limits<int64_t>::min();
-            bool any = false;
+            int64_t vmin = 0, vmax = 0;
+            bool any;
             {
                 nb::gil_scoped_release _gil;
-                const int64_t* data = static_cast<const int64_t*>(v.vec.data);
-                for (uint32_t i = 0; i < n; ++i) {
-                    const int64_t val = data[v.vec.selection[i]];
-                    if (val == draken::ops::ORDINAL_NULL) continue;
-                    any = true;
-                    if (val < vmin) vmin = val;
-                    if (val > vmax) vmax = val;
-                }
+                any = draken::ops::ordinal_min_max(static_cast<const int64_t*>(v.vec.data),
+                                                   v.vec.selection, v.vec.length, vmin, vmax);
             }
             if (!any) return nb::none();
             return nb::make_tuple(nb::int_(vmin), nb::int_(vmax));
@@ -8265,30 +8295,11 @@ NB_MODULE(draken_native, m) {
                     "histogram_bucket: column must be INT64 (the output of Vector.ordinalize())");
             if (n_bins <= 0)
                 throw std::invalid_argument("histogram_bucket: n_bins must be positive");
-            const uint32_t n = v.vec.length;
-            const int64_t span = vmax - vmin;
             std::vector<int64_t> counts(static_cast<size_t>(n_bins), 0);
             {
                 nb::gil_scoped_release _gil;
-                const int64_t* data = static_cast<const int64_t*>(v.vec.data);
-                for (uint32_t i = 0; i < n; ++i) {
-                    const int64_t val = data[v.vec.selection[i]];
-                    if (val == draken::ops::ORDINAL_NULL) continue;
-                    int64_t bin;
-                    if (span <= 0) {
-                        bin = 0;
-                    } else {
-                        // Equi-width bucket, clamped: floating-point rounding
-                        // at the vmax boundary can otherwise land one bin
-                        // past the end.
-                        const double frac =
-                            static_cast<double>(val - vmin) / static_cast<double>(span);
-                        bin = static_cast<int64_t>(frac * static_cast<double>(n_bins - 1));
-                        if (bin < 0) bin = 0;
-                        if (bin >= n_bins) bin = n_bins - 1;
-                    }
-                    counts[static_cast<size_t>(bin)] += 1;
-                }
+                draken::ops::histogram_bucket(static_cast<const int64_t*>(v.vec.data), v.vec.selection,
+                                              v.vec.length, vmin, vmax, n_bins, counts.data());
             }
             nb::list out;
             for (int64_t b = 0; b < n_bins; ++b)
@@ -8303,64 +8314,25 @@ NB_MODULE(draken_native, m) {
         // in one native pass. Backs the LIKE '%needle%' selectivity char-class
         // estimator's ANALYZE-time stats collection, plus min_lengths/
         // max_lengths pruning (opteryx's _analyze.py, the catalog's
-        // _compute_column_stats). The 256-entry table is a byte-for-byte port
-        // of opteryx-core's scratch/like_selectivity/stats.py `_BYTE_CLASS` --
-        // NOT re-derived by hand, to avoid transcription drift between the
-        // offline-validated Python classifier and this kernel. Every byte
+        // _compute_column_stats). The kernel and its 256-entry byte-class table
+        // live in ops/column_profile.h, shared with native file statistics. Every byte
         // 0-255 classifies into exactly one class -- there is no "other"
         // bucket. NULL rows are skipped entirely.
         .def("char_class_stats", [](const VectorOwner& v) -> nb::object {
-            static const uint8_t BYTE_CLASS[256] = {
-                7, 7, 7, 7, 7, 7, 7, 7, 7, 3, 3, 3, 3, 3, 7, 7,
-                7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-                3, 4, 4, 5, 5, 5, 5, 4, 4, 4, 5, 5, 4, 4, 4, 5,
-                2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 5, 4, 5, 5, 5, 4,
-                5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5,
-                5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 5, 5, 5, 5, 7,
-                6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
-                6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
-                6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
-                6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
-                6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
-                6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
-                6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
-                6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
-            };
-            const bool is_str = v.vec.type == DRAKEN_VARCHAR
-                              || v.vec.type == DRAKEN_NVARCHAR
-                              || v.vec.type == DRAKEN_VARBINARY;
-            if (!is_str)
+            if (!draken::ops::is_string_type(v.vec.type))
                 throw std::invalid_argument(
                     "char_class_stats: expected a string Vector (VARCHAR, NVARCHAR, or VARBINARY)");
-            const uint32_t n = v.vec.length;
-            uint64_t counts[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-            uint64_t total_bytes = 0;
-            uint32_t min_len = 0xFFFFFFFFu;
-            uint32_t max_len = 0;
-            bool any = false;
+            draken::ops::CharClassStats stats;
             {
                 nb::gil_scoped_release _gil;
-                const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(v.vec.data);
-                for (uint32_t i = 0; i < n; ++i) {
-                    if (!row_is_valid(v.vec, i)) continue;
-                    const DrakenStringSlot* slot = &sa->slots[v.vec.selection[i]];
-                    const uint8_t* p = str_data(slot, sa->arena);
-                    const uint32_t len = str_length(slot);
-                    for (uint32_t j = 0; j < len; ++j) counts[BYTE_CLASS[p[j]]] += 1;
-                    total_bytes += len;
-                    if (len < min_len) min_len = len;
-                    if (len > max_len) max_len = len;
-                    any = true;
-                }
+                draken::ops::char_class_stats(v.vec, stats);
             }
             nb::list counts_list;
-            for (int k = 0; k < 8; ++k) counts_list.append(nb::int_(counts[k]));
-            nb::object length_range = any
-                ? nb::object(nb::make_tuple(nb::int_(min_len), nb::int_(max_len)))
+            for (int k = 0; k < 8; ++k) counts_list.append(nb::int_(stats.counts[k]));
+            nb::object length_range = stats.any
+                ? nb::object(nb::make_tuple(nb::int_(stats.min_len), nb::int_(stats.max_len)))
                 : nb::none();
-            return nb::make_tuple(counts_list, nb::int_(total_bytes), length_range);
+            return nb::make_tuple(counts_list, nb::int_(stats.total_bytes), length_range);
         })
         // ----------------------------------------------------------------
         // C.2 — arithmetic (vector × vector or vector × scalar)

@@ -70,8 +70,14 @@ cdef extern from "core/string_slot.h":
         pass
 
 
+cdef extern from "core/vector_owner.h":
+    cdef cppclass VectorOwner:
+        pass
+
+
 cdef extern from "core/draken_bridge.h":
     const DrakenVector* draken_vector_unwrap(PyObject* obj) except NULL
+    const VectorOwner* draken_owner_unwrap(PyObject* obj) except NULL
     PyObject* draken_vector_own_raw(void* data, uint8_t* validity, uint32_t length, DrakenType type) except NULL
     PyObject* draken_vector_own_string(DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
                                        uint8_t* validity, uint32_t length, DrakenType type) except NULL
@@ -136,6 +142,9 @@ cdef extern from "planner/native_manifest.hpp" namespace "opteryx::planner":
         cbool has_distinct_sketch
         vector[uint64_t] distinct_sketch
         FooterStats footer
+        int64_t element_min
+        int64_t element_max
+        vector[uint64_t] element_min_k
 
     cdef cppclass ManifestFile:
         string path
@@ -158,6 +167,7 @@ cdef extern from "planner/native_manifest.hpp" namespace "opteryx::planner":
 
     cdef cppclass SketchStaging:
         cbool carry(const NestedArrayView& view, uint32_t vector_row, size_t row, size_t columns)
+        void carry_keyed(const NestedArrayView& view, uint32_t vector_row, size_t row, const vector[int64_t]& positions)
         cbool clear(size_t row, size_t column)
         cbool any_values()
         vector[optional[vector[uint64_t]]]& row_of(size_t row, size_t columns) except +
@@ -173,8 +183,7 @@ cdef extern from "planner/native_manifest.hpp" namespace "opteryx::planner":
         cbool stats_are_authoritative()
         const unordered_map[string, size_t]& positions()
         int64_t find_file(const string& path)
-        cbool row_has_sketch_values(size_t row) except +
-        size_t add_file_from(const CNativeManifest& src, size_t row, const vector[int64_t]& positions) except +
+        size_t add_file_cells_from(const CNativeManifest& src, size_t row, const vector[int64_t]& positions) except +
         void own_sketches(shared_ptr[const OwnedNested] k, shared_ptr[const OwnedNested] h,
                           shared_ptr[const OwnedNested] c)
         NestedArrayView min_k
@@ -391,8 +400,30 @@ cdef extern from "planner/file_stats.hpp" namespace "opteryx::planner":
     cdef cppclass FileStatsAccumulator:
         FileStatsAccumulator(vector[DrakenType] physical)
         size_t column_count()
-        void add(size_t position, const DrakenVector& v) except +
-        void write(CNativeManifest& m, size_t row) except +
+        void add(size_t position, const VectorOwner& owner) except +
+        void write(CNativeManifest& m, size_t row, vector[vector[uint64_t]]& min_k,
+                   vector[vector[int64_t]]& histogram, vector[vector[int64_t]]& char_class) except +
+
+
+cdef extern from *:
+    """
+    // A file's sketch slices (one per column, empty when it has none) into a
+    // builder's staging row. int64 counts are staged as their bits.
+    static inline void stage_u64(opteryx::planner::SketchStaging& s, size_t row,
+                                 const std::vector<std::vector<uint64_t>>& slices) {
+        auto& out = s.row_of(row, slices.size());
+        for (size_t k = 0; k < slices.size(); ++k) out[k] = slices[k];
+    }
+    static inline void stage_i64(opteryx::planner::SketchStaging& s, size_t row,
+                                 const std::vector<std::vector<int64_t>>& slices) {
+        auto& out = s.row_of(row, slices.size());
+        for (size_t k = 0; k < slices.size(); ++k) {
+            out[k] = std::vector<uint64_t>(slices[k].begin(), slices[k].end());
+        }
+    }
+    """
+    void stage_u64(SketchStaging& s, size_t row, const vector[vector[uint64_t]]& slices) except +
+    void stage_i64(SketchStaging& s, size_t row, const vector[vector[int64_t]]& slices) except +
 
 
 cdef extern from "skene/format.h" namespace "skene":
@@ -941,6 +972,8 @@ cdef class NativeManifest:
             "distinct_count": None if c.distinct_count == kUnknown else (c.distinct_count, c.distinct_exact),
             "distinct_floor": _optional(c.distinct_floor),
             "distinct_sketch": tuple(c.distinct_sketch) if c.has_distinct_sketch else None,
+            "element_bounds": None if c.element_min == kNoBound else (c.element_min, c.element_max),
+            "element_min_k": tuple(c.element_min_k),
             "footer": None if not self._manifest.file(row).has_footer else {
                 "bounds": _bounds_view(&c.footer.bounds),
                 "null_count": _optional(c.footer.null_count),
@@ -1521,12 +1554,18 @@ cdef class NativeManifestBuilder:
         file.vector_row = source_file.vector_row
 
     def add_file_from(self, NativeManifest source not None, size_t source_row, list positions):
-        """File `source_row` of `source` as a new file row; column k takes
-        `source`'s column positions[k] (None: nothing recorded). Its row."""
+        """File `source_row` of `source` as a new file row - its cells and its
+        sketch rows - with column k taking `source`'s column positions[k]
+        (None: nothing recorded). Its row."""
         cdef vector[int64_t] at
         for position in positions:
             at.push_back(-1 if position is None else <int64_t?>position)
-        return self._manifest.add_file_from(source._manifest[0], source_row, at)
+        cdef size_t added = self._manifest.add_file_cells_from(source._manifest[0], source_row, at)
+        cdef uint32_t vector_row = source._manifest.file(source_row).vector_row
+        self._min_k.carry_keyed(source._manifest.min_k, vector_row, added, at)
+        self._histogram.carry_keyed(source._manifest.histogram, vector_row, added, at)
+        self._char_class.carry_keyed(source._manifest.char_class, vector_row, added, at)
+        return added
 
     def set_skene_footer(self, size_t row, const unsigned char[::1] file not None):
         """The .skene file's footer statistics (skene_stats.hpp) into file
@@ -1655,9 +1694,11 @@ cdef class NativeManifestBuilder:
 
 cdef class FileStats:
     """One data file's statistics, fed row group by row group by the writer
-    that writes it (file_stats.hpp): per column, the ordinal min / max and the
-    null count. The columns are the first row group's; every later row group
-    must carry the same ones."""
+    that writes it (file_stats.hpp): the catalog manifest's full statistic set -
+    per column the KMV sketch, null count, byte size, ordinal min / max and
+    histogram, string byte classes and lengths, ARRAY element statistics. The
+    columns are the first row group's; every later row group must carry the
+    same ones."""
 
     cdef FileStatsAccumulator* _accumulator
     cdef tuple _columns
@@ -1688,7 +1729,7 @@ cdef class FileStats:
             # a draken Vector wrapper or the native Vector itself
             native = vector if type(vector) is _NativeVector else vector._nb
             handle = <PyObject*>native
-            self._accumulator.add(position, draken_vector_unwrap(handle)[0])
+            self._accumulator.add(position, draken_owner_unwrap(handle)[0])
 
     def file_row(self, str path, str file_format, int64_t record_count, int64_t file_size,
                  int64_t row_group_count, int64_t uncompressed_size):
@@ -1698,13 +1739,20 @@ cdef class FileStats:
             raise ValueError(f"no row group was written to '{path}'")
         cdef NativeManifestBuilder builder = NativeManifestBuilder(self._columns, self._physical, True, True)
         cdef size_t row = builder.add_file(path, file_format, record_count, file_size, row_group_count, uncompressed_size)
-        self._accumulator.write(builder._manifest[0], row)
+        cdef vector[vector[uint64_t]] min_k
+        cdef vector[vector[int64_t]] histogram
+        cdef vector[vector[int64_t]] char_class
+        self._accumulator.write(builder._manifest[0], row, min_k, histogram, char_class)
+        stage_u64(builder._min_k, row, min_k)
+        stage_i64(builder._histogram, row, histogram)
+        stage_i64(builder._char_class, row, char_class)
         return builder.build({})
 
 
 def concat_rows(list batches):
-    """Native file rows (NativeManifests over the same columns, no sketches) as
-    one batch, in order. An empty list is an empty batch over no columns."""
+    """Native file rows (NativeManifests over the same columns) as one batch, in
+    order, each file's sketch rows with it. An empty list is an empty batch over
+    no columns."""
     if not batches:
         return NativeManifestBuilder((), (), True, True).build({})
     cdef NativeManifest first = batches[0]

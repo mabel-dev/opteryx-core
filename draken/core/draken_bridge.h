@@ -59,6 +59,16 @@ extern "C" {
 // Returns a borrowed pointer valid ONLY while `obj` is kept alive.
 const DrakenVector* draken_vector_unwrap(PyObject* obj);
 
+// draken_owner_unwrap — the borrowed VectorOwner behind a Python Vector handle
+// (child owner, logical type, carried key-hash buffer). Same type check and
+// lifetime contract as draken_vector_unwrap.
+const VectorOwner* draken_owner_unwrap(PyObject* obj);
+
+// draken_hash_rows — each logical row's Vector.hash_shaped() value into
+// out[0..v->vec.length), through the binding's own implementation. Pure C++,
+// GIL-free. 0, or -1 with the reason written to `error`.
+int draken_hash_rows(const VectorOwner* v, uint64_t* out, char* error, size_t error_len);
+
 // draken_vector_mark_dict_sorted — set DRAKEN_DICT_KEYS_SORTED on a dict-shaped
 // Vector (no-op for non-dict shapes). Lets the parquet scan carry a sorted
 // dictionary's is_sorted property into execution. Returns 0 on success, -1 +

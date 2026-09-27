@@ -105,6 +105,12 @@ struct ManifestCell {
     bool has_distinct_sketch = false;
     std::vector<uint64_t> distinct_sketch;   // a skene file's own KMV sketch (may be empty)
     FooterStats footer;
+    // ARRAY columns: statistics over the flat child - the elements of every
+    // list - which the catalog's manifest carries (element_min_values /
+    // element_max_values / element_min_k_hashes). Ordinal keys.
+    int64_t element_min = kNoBound;
+    int64_t element_max = kNoBound;
+    std::vector<uint64_t> element_min_k;
 };
 
 struct ManifestFile {
@@ -308,6 +314,28 @@ struct SketchStaging {
         return true;
     }
 
+    // Carry `view`'s row `vector_row` into file `row`, re-keyed: column k takes
+    // the source column positions[k]'s slice (-1: an empty slice). Nothing is
+    // staged when the source row holds no sketches.
+    void carry_keyed(const NestedArrayView& view, uint32_t vector_row, size_t row,
+                     const std::vector<int64_t>& positions) {
+        if (!view.present() || vector_row >= view.n_files() || !sketch_bit_valid(view.outer->validity, vector_row)) {
+            return;
+        }
+        grow(row + 1);
+        std::vector<std::optional<std::vector<uint64_t>>> slices(positions.size(), std::vector<uint64_t>());
+        for (size_t k = 0; k < positions.size(); ++k) {
+            if (positions[k] < 0) continue;
+            view.with_field_slice(vector_row, positions[k], [&](int32_t g0, int32_t g1) {
+                std::vector<uint64_t> values;
+                values.reserve(static_cast<size_t>(g1 - g0));
+                for (int32_t g = g0; g < g1; ++g) values.push_back(view.u64(g));
+                slices[k] = std::move(values);
+            });
+        }
+        files[row] = std::move(slices);
+    }
+
     // Empty column `column`'s slice of file `row`; whether it held anything.
     bool clear(size_t row, size_t column) {
         if (row >= files.size() || !files[row] || column >= files[row]->size()) return false;
@@ -353,30 +381,12 @@ public:
         for (size_t k = 0; k < columns_.size(); ++k) positions_.emplace(columns_[k], k);
     }
 
-    // Whether file `row` holds any sketch value (a non-empty slice of any kind).
-    bool row_has_sketch_values(size_t row) const {
-        const uint32_t vector_row = files_.at(row).vector_row;
-        for (const NestedArrayView* v : {&min_k, &histogram, &char_class}) {
-            if (!v->present() || vector_row >= v->n_files() || !sketch_bit_valid(v->outer->validity, vector_row)) continue;
-            const int32_t* poff = static_cast<const int32_t*>(v->outer->data);
-            const uint32_t pi = v->outer->selection[vector_row];
-            for (int64_t c = 0; c < static_cast<int64_t>(poff[pi + 1]) - poff[pi]; ++c) {
-                bool any = false;
-                v->with_field_slice(vector_row, c, [&](int32_t g0, int32_t g1) { any = g1 > g0; });
-                if (any) return true;
-            }
-        }
-        return false;
-    }
-
-    // File `row` of `src` as a new row here, each column k taking `src`'s column
-    // positions[k] (-1: nothing recorded). Sketches do not travel this way: a
-    // source row holding any is refused rather than silently losing them.
-    size_t add_file_from(const NativeManifest& src, size_t row, const std::vector<int64_t>& positions) {
+    // File `row` of `src` as a new row here - the file and its cells - each
+    // column k taking `src`'s column positions[k] (-1: nothing recorded). The
+    // file's SKETCHES are not cells: the builder carries them alongside
+    // (SketchStaging::carry_keyed), which is the only caller.
+    size_t add_file_cells_from(const NativeManifest& src, size_t row, const std::vector<int64_t>& positions) {
         if (positions.size() != columns_.size()) throw std::invalid_argument("one source position per column");
-        if (src.row_has_sketch_values(row)) {
-            throw std::invalid_argument("a file row holding sketches cannot be re-keyed; its sketches would be lost");
-        }
         ManifestFile file = src.files_.at(row);
         file.vector_row = 0;
         const size_t added = add_file(std::move(file));
@@ -475,7 +485,7 @@ public:
         for (const ManifestCell& c : cells_) {
             total += heap_bytes(c.bounds.min_text) + heap_bytes(c.bounds.max_text) +
                      heap_bytes(c.footer.bounds.min_text) + heap_bytes(c.footer.bounds.max_text) +
-                     c.distinct_sketch.capacity() * sizeof(uint64_t);
+                     (c.distinct_sketch.capacity() + c.element_min_k.capacity()) * sizeof(uint64_t);
         }
         for (const NestedArrayView* v : {&min_k, &histogram, &char_class}) {
             if (!v->present()) continue;
