@@ -39,7 +39,7 @@ Ratified:
 | The scan takes its file list from a `Manifest` returned by `get_dataset_metadata()`. | [`opteryx_connector.py:658`](../opteryx/connectors/opteryx_connector.py) |
 | `SortSink` appends every morsel and sorts the lot in `finalize`. No bound, no spill. | [`native_sort.hpp`](../src/cpp/engine/native_sort.hpp) |
 | `SpillStore` exists — native, GIL-free, orphan sweep on startup. Only consumer today is `pipeline_buffers.hpp`. | [`spill_store.hpp`](../src/cpp/engine/spill_store.hpp) |
-| Optimizer strategies get a `CopyOnWritePlan`; every change must go through a graph op or it is invisible to change detection. | `optimizer/strategies/optimization_strategy.py` |
+| Optimizer strategies get a copy-on-write view of the plan (`PlanGraph.cow_view`); every change must go through a graph op or it is invisible to change detection. | `optimizer/strategies/optimization_strategy.py` |
 
 ### 1.1 The measured failure
 

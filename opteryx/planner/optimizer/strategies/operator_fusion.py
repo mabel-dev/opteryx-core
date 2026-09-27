@@ -43,7 +43,7 @@ class OperatorFusionStrategy(OptimizationStrategy):
         if len(order_by) != 1:
             return False
 
-        expression, ascending = order_by[0]
+        expression, ascending, _nulls_first = order_by[0]
         if expression.node_type != NodeType.FUNCTION:
             return False
         if expression.value not in ("COSINE_SIMILARITY", "COSINE_DISTANCE"):

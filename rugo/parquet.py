@@ -35,6 +35,7 @@ surviving morsels.
 """
 
 import contextlib
+import decimal
 import mmap
 import struct
 from typing import List, Optional, Sequence, Tuple, Union
@@ -212,6 +213,32 @@ def _align_text_domain(value, mn, mx):
     return value, mn, mx
 
 
+def _as_decimal(v):
+    """A float/int as the decimal it spells (`Decimal(str(v))`); anything else unchanged."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return decimal.Decimal(str(v))
+    return v
+
+
+def _align_decimal_domain(value, mn, mx):
+    """Return (value, mn, mx) with a float/int literal read as the decimal it spells
+    when the bounds are DECIMAL.
+
+    `decode_value` decodes DECIMAL statistics to exact `decimal.Decimal`, and a
+    float compares against a Decimal by its exact binary value: 7.7 is
+    7.7000000000000001776..., ABOVE a row group's `Decimal('7.70')` max, so
+    `("d", "=", 7.7)` pruned the row group holding the value. Python's float repr
+    is shortest-roundtrip, so `Decimal(str(7.7))` is the 7.7 the caller wrote, and
+    an exact comparison against exact bounds never excludes a stored value (they
+    lie on the column's scale grid). `in` / `not in` members are read the same way.
+    """
+    if not (isinstance(mn, decimal.Decimal) and isinstance(mx, decimal.Decimal)):
+        return value, mn, mx
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_as_decimal(v) for v in value], mn, mx
+    return _as_decimal(value), mn, mx
+
+
 def _row_group_mask(data, path: Optional[str], predicates: Sequence[Predicate]) -> List[int]:
     """1 = keep, 0 = prune.
 
@@ -273,6 +300,7 @@ def _row_group_mask(data, path: Optional[str], predicates: Sequence[Predicate]) 
                 mn = _native.decode_value(pt, lt, col_stats["min"], True)
                 mx = _native.decode_value(pt, lt, col_stats["max"], True)
                 bound_value, mn, mx = _align_text_domain(value, mn, mx)
+                bound_value, mn, mx = _align_decimal_domain(bound_value, mn, mx)
                 try:
                     if excl(bound_value, mn, mx):
                         mask[rg_idx] = 0

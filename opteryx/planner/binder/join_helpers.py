@@ -538,6 +538,8 @@ def convert_using_to_on(
     left_relation_names: List[str],
     right_relation_names: List[str],
     schemas: Dict[str, "RelationSchema"],
+    *,
+    arena,
 ) -> Expression:
     """
     Converts USING fields to the equivalent ON condition.
@@ -591,16 +593,19 @@ def convert_using_to_on(
         condition = Comparison(
             value="Eq",
             do_not_create_column=True,
+            arena=arena,
         )
         condition.left = LogicalColumn(
             node_type=NodeType.IDENTIFIER,
             source=_relation_holding(field, left_relation_names, "left"),
             source_column=field,
+            arena=arena,
         )
         condition.right = LogicalColumn(
             node_type=NodeType.IDENTIFIER,
             source=_relation_holding(field, right_relation_names, "right"),
             source_column=field,
+            arena=arena,
         )
         conditions.append(condition)
 
@@ -614,7 +619,7 @@ def convert_using_to_on(
         folded = []
         for i in range(0, len(conditions), 2):
             if i + 1 < len(conditions):
-                and_node = And(do_not_create_column=True)
+                and_node = And(do_not_create_column=True, arena=arena)
                 and_node.left = conditions[i]
                 and_node.right = conditions[i + 1]
                 folded.append(and_node)

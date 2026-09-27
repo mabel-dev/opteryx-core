@@ -660,6 +660,33 @@ def test_decimal_all_constant(tmp_path, monkeypatch):
     _assert_parity(tmp_path, monkeypatch, cols, "d")
 
 
+@pytest.mark.parametrize("use_dictionary", [True, False], ids=["dict", "plain"])
+def test_decimal128_wide_projection(tmp_path, monkeypatch, use_dictionary):
+    """precision > 18 (int128). pyarrow DICTIONARY-encodes it by default, which
+    rugo now emits as DK_DECIMAL128_DICT (an __int128 dictionary + codes); before,
+    it fell to the pool path, the native scan refused it ("unsupported column
+    encoding") and the pool serializer read the empty int128_values. Both paths
+    must agree on values, nulls and the precision/scale descriptor."""
+    pool = [decimal.Decimal(v) for v in (
+        "0.00", "-1.50", "12345678901234567890123.45", "-98765432109876543210987.65", "7.77")]
+    ds = [pool[i % len(pool)] for i in range(200)]
+    ds[3] = ds[150] = None
+    cols = {"d": (pa.decimal128(38, 2), ds), "n": (pa.int64(), list(range(200)))}
+    sig, rows = _assert_parity(tmp_path, monkeypatch, cols, "d, n",
+                               write_kw={"use_dictionary": use_dictionary})
+    assert sig[0][1][3] == 38 and sig[0][1][4] == 2, sig
+    assert len(rows) == 200
+
+
+def test_decimal128_dict_predicate(tmp_path, monkeypatch):
+    pool = [decimal.Decimal(v) for v in ("1.10", "2.20", "33333333333333333333.33")]
+    cols = {"d": (pa.decimal128(38, 2), [pool[i % 3] for i in range(200)]),
+            "n": (pa.int64(), list(range(200)))}
+    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "d, n WHERE d > 2.0",
+                             expect_native=False)
+    assert len(rows) == 133  # every row whose d is 2.20 or 33333333333333333333.33
+
+
 def test_decimal_predicate_role2(tmp_path, monkeypatch):
     cols = {"d": (pa.decimal128(10, 2), [decimal.Decimal(i) / 4 for i in range(200)]),
             "n": (pa.int64(), list(range(200)))}

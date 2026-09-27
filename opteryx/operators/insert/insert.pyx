@@ -72,7 +72,8 @@ class InsertNode(BasePlanNode):
         # connector beside `author`; the connector decides what the store
         # accepts. `[]` here is an assertion the statement read no catalog
         # relation, and only the binder's walk may make it.
-        self.read_sources = step.read_sources
+        # The connector API takes a list (None: not recorded); step lists are tuples.
+        self.read_sources = None if step.read_sources is None else list(step.read_sources)
         self.produced_by = step.produced_by
 
         self._total_rows = 0

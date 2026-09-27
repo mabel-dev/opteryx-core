@@ -219,7 +219,8 @@ cdef inline Vector _wrap_num_dict_direct(MorselRef* result, size_t i, int dk):
     entry owns all three buffers; both takes null the MorselRef slots so the
     destructor frees nothing. dk: 8=int64, 9=float64, 10=float32,
     15..18=uint8/16/32/64, 22..24=int8/16/32 (E33 — exact declared width, no
-    widening)."""
+    widening), 25=decimal128 (its precision/scale descriptor is attached by the
+    caller, `_wrap_direct`)."""
     cdef uint32_t dlen = result.columns[i].length
     cdef uint32_t data_length = result.columns[i].data_length
     cdef void* data_ptr
@@ -235,7 +236,7 @@ cdef inline Vector _wrap_num_dict_direct(MorselRef* result, size_t i, int dk):
         raw = draken_vector_own_dict_f64(data_ptr, data_length, <uint32_t*>codes_ptr, dlen, dval)
     elif dk == 10:
         raw = draken_vector_own_dict_f32(data_ptr, data_length, <uint32_t*>codes_ptr, dlen, dval)
-    elif dk >= 15 and dk <= 18 or dk >= 22 and dk <= 24:
+    elif dk >= 15 and dk <= 18 or dk >= 22 and dk <= 25:
         if dk == 15:
             udtype = DRAKEN_UINT8
         elif dk == 16:
@@ -248,8 +249,10 @@ cdef inline Vector _wrap_num_dict_direct(MorselRef* result, size_t i, int dk):
             udtype = DRAKEN_INT8
         elif dk == 23:
             udtype = DRAKEN_INT16
-        else:
+        elif dk == 24:
             udtype = DRAKEN_INT32
+        else:
+            udtype = DRAKEN_DECIMAL128
         raw = draken_vector_own_dict(data_ptr, data_length, <uint32_t*>codes_ptr, dlen, dval, udtype)
     else:
         raw = draken_vector_own_dict_i64(data_ptr, data_length, <uint32_t*>codes_ptr, dlen, dval)
@@ -319,6 +322,15 @@ cdef inline Vector _wrap_direct(MorselRef* result, size_t i, DrakenType want_typ
         return _wrap_string_direct(result, i, want_type)
     if dk == 7:
         return _wrap_string_dict_direct(result, i, want_type)
+    if dk == 25:
+        # DECIMAL128 dict-shaped: the precision/scale descriptor is mandatory
+        # (draken hard-errors on a DECIMAL128 vector without one), exactly as the
+        # dense dk == 5 arm below attaches it.
+        vec = _wrap_num_dict_direct(result, i, dk)
+        if dlen > 0:
+            vec._nb.set_decimal_descriptor(
+                result.columns[i].dec_precision, result.columns[i].dec_scale)
+        return _attach_file_logical(result, i, vec)
     if (dk == 8 or dk == 9 or dk == 10 or dk >= 15 and dk <= 18
             or dk >= 22 and dk <= 24):
         # A dict-shaped uint32 column is the common case for addresses (low

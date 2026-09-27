@@ -21,7 +21,6 @@ This is a SQL Query Execution Plan Node.
 This Node creates datasets based on function calls like VALUES and UNNEST.
 """
 
-import copy
 import datetime
 import time
 from numbers import Integral
@@ -133,15 +132,15 @@ def _restore_temporal_series_args(args):
     for arg in args:
         _arg_cat = arg.type.category if isinstance(arg.type, ColumnType) else arg.type
         if _arg_cat == LogicalCategory.DATE and isinstance(arg.value, Integral):
-            restored = copy.copy(arg)
-            restored.value = _EPOCH_DATE + datetime.timedelta(days=int(arg.value))
-            restored_args.append(restored)
+            restored_args.append(
+                arg.replace(value=_EPOCH_DATE + datetime.timedelta(days=int(arg.value)))
+            )
             continue
 
         if _arg_cat == LogicalCategory.TIMESTAMP and isinstance(arg.value, Integral):
-            restored = copy.copy(arg)
-            restored.value = _EPOCH_DT + datetime.timedelta(microseconds=int(arg.value))
-            restored_args.append(restored)
+            restored_args.append(
+                arg.replace(value=_EPOCH_DT + datetime.timedelta(microseconds=int(arg.value)))
+            )
             continue
 
         restored_args.append(arg)

@@ -338,7 +338,7 @@ def _residual_without_keyed_equalities(on_condition, left_relation_names,
         return None
     combined = remaining[0]
     for conjunct in remaining[1:]:
-        combined = And(left=combined, right=conjunct)
+        combined = And(left=combined, right=conjunct, arena=combined.arena)
     return combined
 
 
@@ -368,6 +368,20 @@ def _live_positions(layout, live):
 # stream identity the planner never mints and nothing below the aggregate can collide
 # with. See src/cpp/engine/native_grouping_expand.hpp.
 _GROUPING_ID_IDENTITY = "$grouping_id"
+
+
+def _refuse_window_null_placement(order_by) -> None:
+    """A window's sinks (WindowSink, FramedWindowSink, WindowTopKSink) implement only
+    the default null placement — NULLS FIRST under ASC, NULLS LAST under DESC. The
+    parser refuses any other placement in a written window, but a rewrite can still
+    build a window from a query ORDER BY (decorrelation's ROW_NUMBER), so the sink
+    boundary refuses it too rather than silently sorting NULLs the default way."""
+    for _column, ascending, nulls_first in order_by:
+        if bool(nulls_first) != bool(ascending):
+            _unsupported(
+                "NULLS FIRST/LAST other than the default in an ORDER BY evaluated as a window",
+                "remove the NULLS clause, or order by an expression that maps NULL to a sentinel value",
+            )
 
 
 def _unsupported(what: str, remedy: str = None):
@@ -985,7 +999,7 @@ class _Compiler:
                 v = r.value
                 phys = getattr(out_ct.physical, "name", "")
                 if v is None:
-                    nl = Literal(value=None)
+                    nl = Literal(value=None, arena=self.plan_context.expressions)
                     nl.type = out_ct
                     return nl
                 if isinstance(v, bool) or not isinstance(v, (int, float, _dec.Decimal)):
@@ -996,7 +1010,7 @@ class _Compiler:
                     rescaled = q.quantize(_dec.Decimal(1).scaleb(-scale))
                     if rescaled != q:
                         return r   # inexact — leave it, kernel fails loud
-                    nl = Literal(value=rescaled)
+                    nl = Literal(value=rescaled, arena=self.plan_context.expressions)
                     # The literal carries the CASE's own declared type, both tiers
                     # alike. It used to be pinned to an int64-tier DECIMAL(18, scale)
                     # for a DECIMAL128 target, on the grounds that a DECIMAL128
@@ -1012,7 +1026,7 @@ class _Compiler:
                     nl.type = out_ct
                     return nl
                 if phys in ("FLOAT64", "FLOAT32"):
-                    nl = Literal(value=float(v))
+                    nl = Literal(value=float(v), arena=self.plan_context.expressions)
                     nl.type = out_ct
                     return nl
                 return r
@@ -1033,14 +1047,12 @@ class _Compiler:
                         return expr
 
             acc = _coerce(els) if els is not None else _coerce(
-                Literal(value=None))
+                Literal(value=None, arena=self.plan_context.expressions))
             for cond, res in zip(reversed(conditions), reversed(results)):
                 f = Function(value="IF_THEN_ELSE",
-                         parameters=[cond, _coerce(res), acc])
+                         parameters=[cond, _coerce(res), acc], arena=self.plan_context.expressions)
                 acc = f
-            acc.schema_column = sc
-            acc.alias = expr.alias
-            return acc
+            return acc.with_fields(schema_column=sc, alias=expr.alias)
         return rewrite_children(expr, self._rewrite_case)
 
     def _rewrite_decimal_compares(self, expr):
@@ -1137,15 +1149,14 @@ class _Compiler:
                     _lit_type = _lt.DECIMAL(_needed_p, _scale)
                 else:
                     continue
-                nl = Literal(value=rescaled)
-                nl.type = _lit_type
+                nl = Literal(value=rescaled, type=_lit_type, arena=self.plan_context.expressions)
                 if new is None:
-                    new = expr.copy()
+                    new = expr
                 # The literal is the side opposite the column.
                 if a == "left":
-                    new.right = nl
+                    new = new.with_fields(right=nl)
                 else:
-                    new.left = nl
+                    new = new.with_fields(left=nl)
             return new if new is not None else expr
         return rewrite_children(expr, self._rewrite_decimal_compares)
 
@@ -1203,6 +1214,7 @@ class _Compiler:
                 schema_column=sc,
                 alias=expr.alias,
                 query_column=expr.query_column,
+                arena=self.plan_context.expressions,
             )
 
         return rewrite_children(
@@ -1337,6 +1349,7 @@ class _Compiler:
                 left=root,
                 right=right,
                 schema_column=columns.computed(ExpressionColumn, "", column_type=_lt.BOOLEAN),
+                arena=self.plan_context.expressions,
             )
         return root
 
@@ -2505,8 +2518,9 @@ class _Compiler:
             order_by = list(step.order_by or [])
             window_fn_nodes = list(step.window_functions or [])
             part_cols = [col.schema_column.identity for col in partition_by]
-            order_cols = [col.schema_column.identity for col, _asc in order_by]
-            order_asc = [bool(asc) for _col, asc in order_by]
+            _refuse_window_null_placement(order_by)
+            order_cols = [col.schema_column.identity for col, _asc, _nf in order_by]
+            order_asc = [bool(asc) for _col, asc, _nf in order_by]
             # (kind code, output identity, argument identity or None, offset). The
             # argument is set only for the kinds that read a value from another row
             # (GATHERED_FUNCTIONS); `offset` is the kind's single constant integer
@@ -2530,7 +2544,7 @@ class _Compiler:
             # `computed` handling above.
             computed = [col for col in partition_by
                         if col.node_type != NodeType.IDENTIFIER]
-            computed += [col for col, _asc in order_by
+            computed += [col for col, _asc, _nf in order_by
                          if col.node_type != NodeType.IDENTIFIER]
             computed += [arg for _k, _o, arg, _off in window_fn_nodes
                          if arg is not None and arg.node_type != NodeType.IDENTIFIER]
@@ -2545,14 +2559,15 @@ class _Compiler:
                 self._check_key_type(
                     "PARTITION BY", self._layout_name(identity),
                     self._layout_type(None, identity))
-                sort_spec.append((layout.index(identity), True))
+                sort_spec.append((layout.index(identity), True, True))
             for identity, asc in zip(order_cols, order_asc):
                 if identity not in layout:
                     _unsupported("a window ORDER BY column the engine could not resolve here")
                 self._check_key_type(
                     "window ORDER BY", self._layout_name(identity),
                     self._layout_type(None, identity))
-                sort_spec.append((layout.index(identity), bool(asc)))
+                # Default placement only — _refuse_window_null_placement above.
+                sort_spec.append((layout.index(identity), bool(asc), bool(asc)))
             fn_kinds = [int(k) for k, _out, _arg, _off in funcs]
             fn_names = [out for _k, out, _arg, _off in funcs]
             fn_offsets = [int(off) for _k, _out, _arg, off in funcs]
@@ -2586,8 +2601,8 @@ class _Compiler:
             )
             buf = self.nplan.new_buffer()
             if use_topk_sink:
-                part_idx = [idx for idx, _asc in sort_spec[: len(part_cols)]]
-                order_idx, order_asc0 = sort_spec[len(part_cols)]
+                part_idx = [idx for idx, _asc, _nf in sort_spec[: len(part_cols)]]
+                order_idx, order_asc0, _order_nf0 = sort_spec[len(part_cols)]
                 self.nplan.set_window_topk_sink(
                     p, part_idx, order_idx, bool(order_asc0), top_k, fn_names[0], buf)
                 p2 = self.nplan.new_pipeline()
@@ -2623,8 +2638,9 @@ class _Compiler:
             partition_by = list(step.partition_by or [])
             order_by = list(step.order_by or [])
             part_cols = [col.schema_column.identity for col in partition_by]
-            order_cols = [col.schema_column.identity for col, _asc in order_by]
-            order_asc = [bool(asc) for _col, asc in order_by]
+            _refuse_window_null_placement(order_by)
+            order_cols = [col.schema_column.identity for col, _asc, _nf in order_by]
+            order_asc = [bool(asc) for _col, asc, _nf in order_by]
             # (kind code, output identity, argument expression or None, frame). The
             # argument stays an EXPRESSION: a computed one is projected to a stream
             # column below, same as the ranking window's navigation argument.
@@ -2641,7 +2657,7 @@ class _Compiler:
             # ARGUMENT (`SUM(a + b) OVER (...)`): project each to a stream column
             # first, then resolve by identity — mirrors WindowNode's identical need.
             computed = [col for col in partition_by if col.node_type != NodeType.IDENTIFIER]
-            computed += [col for col, _asc in order_by if col.node_type != NodeType.IDENTIFIER]
+            computed += [col for col, _asc, _nf in order_by if col.node_type != NodeType.IDENTIFIER]
             computed += [
                 arg for _k, _out, arg, _frame in funcs
                 if arg is not None and arg.node_type != NodeType.IDENTIFIER
@@ -2656,14 +2672,15 @@ class _Compiler:
                 self._check_key_type(
                     "PARTITION BY", self._layout_name(identity),
                     self._layout_type(None, identity))
-                sort_spec.append((layout.index(identity), True))
+                sort_spec.append((layout.index(identity), True, True))
             for identity, asc in zip(order_cols, order_asc):
                 if identity not in layout:
                     _unsupported("a window ORDER BY column the engine could not resolve here")
                 self._check_key_type(
                     "window ORDER BY", self._layout_name(identity),
                     self._layout_type(None, identity))
-                sort_spec.append((layout.index(identity), bool(asc)))
+                # Default placement only — _refuse_window_null_placement above.
+                sort_spec.append((layout.index(identity), bool(asc), bool(asc)))
 
             # Each function's OUTPUT identity was pre-minted at plan time and its
             # true ColumnType resolved at bind time (`_aggregate_return_type`, off
@@ -2926,12 +2943,12 @@ class _Compiler:
         extra = [i for i in (extra_read or []) if i >= 0]
         if emit is None:
             return spec, emit, extra_read
-        keep = sorted({idx for idx, _ascending in spec} | set(emit) | set(extra))
+        keep = sorted({idx for idx, _ascending, _nulls_first in spec} | set(emit) | set(extra))
         if len(keep) == len(layout):
             return spec, emit, extra_read
         self.nplan.add_select(p, keep, [layout[i] for i in keep])
         position = {old: new for new, old in enumerate(keep)}
-        return ([(position[idx], ascending) for idx, ascending in spec],
+        return ([(position[idx], ascending, nulls_first) for idx, ascending, nulls_first in spec],
                 [position[i] for i in emit],
                 None if extra_read is None
                 else [position[i] if i >= 0 else i for i in extra_read])
@@ -3000,7 +3017,7 @@ class _Compiler:
                 if col.schema_column is None or col.schema_column.identity not in gb_outputs:
                     return
         keys = []
-        for col, ascending in order_by:
+        for col, ascending, nulls_first in order_by:
             if col.schema_column is None:
                 break
             identity = col.schema_column.identity
@@ -3009,7 +3026,7 @@ class _Compiler:
             spec_index = spec_identities.index(identity)
             if spec_fns[spec_index] not in self._TOPK_RANKABLE_AGG_FNS:
                 break
-            keys.append((spec_index, bool(ascending)))
+            keys.append((spec_index, bool(ascending), bool(nulls_first)))
         if not keys:
             return
         self.nplan.set_groupby_topk(gb_pipeline, keys, limit, len(keys) < len(order_by))
@@ -3017,19 +3034,19 @@ class _Compiler:
     def _sort_spec(self, p, order_by, layout):
         if not order_by:
             _unsupported("an ORDER BY with no keys")
-        computed = [col for col, _asc in order_by
+        computed = [col for col, _asc, _nf in order_by
                     if col.node_type != NodeType.IDENTIFIER]
         if computed:
             layout = self._add_computed(p, computed, layout)
         spec = []
-        for col, ascending in order_by:
+        for col, ascending, nulls_first in order_by:
             identity = col.schema_column.identity
             if identity not in layout:
                 _unsupported("an ORDER BY key the engine could not resolve here")
             self._check_key_type(
                 "ORDER BY", col.schema_column.name or identity,
                 self._layout_type(None, identity))
-            spec.append((layout.index(identity), bool(ascending)))
+            spec.append((layout.index(identity), bool(ascending), bool(nulls_first)))
         return spec, layout
 
     def _compile_only_child(self, in_edges, kind, node):
@@ -3391,7 +3408,7 @@ class _Compiler:
         order_by = heapsort.step.order_by or []
         if limit is None or int(limit) <= 0 or len(order_by) != 1:
             return None
-        sort_expression, ascending = order_by[0]
+        sort_expression, ascending, nulls_first = order_by[0]
         if sort_expression.node_type != NodeType.IDENTIFIER:
             return None
         sort_sc = sort_expression.schema_column
@@ -3545,7 +3562,7 @@ class _Compiler:
         )
         splan.scan_identity = scan.identity
         return (splan, resolver, p1_index_by_name[sort_sc.name], bool(ascending),
-                int(limit), len(p1_names))
+                bool(nulls_first), int(limit), len(p1_names))
 
     def _native_scan_plan(self, scan):
         """Plan-time setup for the zero-Python scan Source (NativeParquetScanSource)
@@ -4137,6 +4154,7 @@ class _Compiler:
         return (p1_plan, p2_plan, resolver, pred_col_to_p1,
                 p1_index_by_name[sort_name],
                 not bool(scan._topn_descending),
+                bool(scan._topn_nulls_first),
                 int(topn_limit), out_from_p1, out_from_p2, emit_ids)
 
     def _compile_scan(self, scan, kind, nid):
@@ -4169,8 +4187,8 @@ class _Compiler:
             if lat is not None:
                 from opteryx.expression.evaluator.evaluation import get_pass1_eval_fn_ptr
 
-                (lat_plan, resolver, sort_p1_index, sort_ascending, topn_limit,
-                 p1_column_count) = lat
+                (lat_plan, resolver, sort_p1_index, sort_ascending, sort_nulls_first,
+                 topn_limit, p1_column_count) = lat
                 self.scan_sources[scan.identity] = "NativeSkeneLatmatScanSource"
                 manifest = scan.manifest
                 file_count = manifest.get_file_count() if manifest is not None else 0
@@ -4204,7 +4222,7 @@ class _Compiler:
                 p = self.nplan.new_pipeline()
                 self.nplan.set_skene_latmat_scan_source(
                     p, lat_plan, get_pass1_eval_fn_ptr(), resolver.ctx_ptr(),
-                    resolver, sort_p1_index, sort_ascending, topn_limit)
+                    resolver, sort_p1_index, sort_ascending, sort_nulls_first, topn_limit)
                 self._remember_types(scan.columns)
                 # This Source emits the READ SET (projection ∪ predicate-only
                 # columns). A pushed predicate can add a column nobody projects, so
@@ -4306,7 +4324,7 @@ class _Compiler:
         lat = None if _scan_has_deletes else self._latmat_scan_plan(scan)
         if lat is not None:
             (p1_plan, p2_plan, resolver, pred_col_to_p1, sort_p1_index, sort_ascending,
-             topn_limit, out_from_p1, out_from_p2, emit_ids) = lat
+             sort_nulls_first, topn_limit, out_from_p1, out_from_p2, emit_ids) = lat
             from opteryx.expression.evaluator.evaluation import get_pass1_eval_fn_ptr
             self.scan_sources[scan.identity] = "LatmatScanSource"
             manifest = scan.manifest
@@ -4322,8 +4340,8 @@ class _Compiler:
             p = self.nplan.new_pipeline()
             self.nplan.set_latmat_scan_source(
                 p, p1_plan, p2_plan, get_pass1_eval_fn_ptr(), resolver.ctx_ptr(),
-                resolver, pred_col_to_p1, sort_p1_index, sort_ascending, topn_limit,
-                out_from_p1, out_from_p2, emit_ids)
+                resolver, pred_col_to_p1, sort_p1_index, sort_ascending, sort_nulls_first,
+                topn_limit, out_from_p1, out_from_p2, emit_ids)
             self._remember_types(scan.columns)
             # The predicate is fully applied in pass 1, and the Source emits the
             # projection directly — no relocated ExprFilter, no trailing Select.
@@ -5136,6 +5154,7 @@ class _Compiler:
                 schema_column=self.plan_context.columns.reference(
                     identity, names.get(identity, "asof key"), column_type
                 ),
+                arena=self.plan_context.expressions,
             )
             coercions[identity] = (key_node, target_name, target)
         return coercions
@@ -5195,6 +5214,7 @@ class _Compiler:
                 left=key_node,
                 parameters=cast_parameters,
                 schema_column=schema_column,
+                arena=self.plan_context.expressions,
             )
             layout = self._add_computed(p, [cast_node], layout)
             if schema_column.identity not in layout:
@@ -5280,7 +5300,7 @@ class _Compiler:
 
             condition = folded[0]
             for extra in folded[1:]:
-                conjunction = And()
+                conjunction = And(arena=self.plan_context.expressions)
                 conjunction.left = condition
                 conjunction.right = extra
                 condition = conjunction

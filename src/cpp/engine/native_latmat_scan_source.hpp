@@ -151,6 +151,7 @@ struct LatmatScanSource : Source {
     // ── the top-n spec ─────────────────────────────────────────────────────────────
     int     sort_p1_index;     // sort key's position within the pass-1 columns
     bool    sort_ascending;
+    bool    sort_nulls_first;  // resolved by the planner, independent of direction
     int64_t topn_limit;
 
     // ── output assembly ────────────────────────────────────────────────────────────
@@ -423,7 +424,8 @@ struct LatmatScanSource : Source {
         const size_t n = static_cast<size_t>(topn_limit);
         if (n < total) {
             std::vector<SortKeySpec> spec{
-                SortKeySpec{static_cast<size_t>(sort_p1_index), sort_ascending}};
+                SortKeySpec{static_cast<size_t>(sort_p1_index), sort_ascending,
+                            sort_nulls_first}};
             std::vector<SortKeyColumn> keys;
             if (!build_sort_keys(ms, spec, total, keys, err)) return;
             SortKeyCmp cmp{keys};

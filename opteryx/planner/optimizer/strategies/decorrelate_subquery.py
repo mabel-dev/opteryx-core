@@ -182,6 +182,7 @@ from opteryx.compiled.structures.expressions import Wildcard
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import Aggregator
+from opteryx.compiled.structures.expressions import rewrite_children
 from opteryx.compiled.structures.plan_steps import steps_with
 from opteryx.compiled.structures.plan_steps import AggregateAndGroupStep
 from opteryx.compiled.structures.plan_steps import AggregateStep
@@ -298,8 +299,9 @@ def _find(condition, predicate, into_aggregates: bool = True):
 
             def _replace(new, _c=condition, _child=child, _rc=replace_child):
                 replacement = _rc(new)
-                _c.map_children(lambda c: replacement if c is _child else c)
-                return _c
+                return rewrite_children(
+                    _c, lambda c: replacement if c is _child else c, share=True
+                )
 
             return found, _replace
 
@@ -338,41 +340,35 @@ def _replace_every(root, target, make_replacement):
     deep-copies the embedded plan WITH ITS NODE IDS. Decorrelating that copy as a
     second subquery grafted a second plan whose nids collide with the first - one
     inner subtree with two Join consumers, which the optimizer's walk visits twice
-    (`RedundantOperationsStrategy` then died on `None.alias`). `Node.copy` keeps the
-    `uuid`, so a SUBQUERY node carrying the target's uuid is the same written
+    (`RedundantOperationsStrategy` then died on `None.alias`). A copy shares its
+    `origin_id`, so a SUBQUERY node carrying the target's origin is the same written
     subquery; it is replaced by the same value, and its duplicate plan is dropped.
 
-    Children are replaced in place. That is safe on a shared parent because the
-    substitution means the same thing everywhere: the subquery IS that value.
+    Expressions are immutable once bound, so every parent on a path to a target is
+    rebuilt (copy-on-write) and a subtree reached twice is rebuilt once.
     """
 
     def _is_target(node):
         return node is target or (
             is_expression(node)
             and node.node_type == NodeType.SUBQUERY
-            and node.uuid == target.uuid
+            and node.origin_id == target.origin_id
         )
 
-    if _is_target(root):
-        return make_replacement()
-    visited: set = set()
+    rebuilt: dict = {}
 
-    def _walk(node):
-        if not is_expression(node) or id(node) in visited:
-            return
-        visited.add(id(node))
-        if node.node_type == NodeType.SUBQUERY:
-            return  # a different subquery's plan is not this rewrite's to touch
-        node.map_children(_visit)
-
-    def _visit(child):
-        if _is_target(child):
+    def _rewrite(node):
+        if _is_target(node):
             return make_replacement()
-        _walk(child)
-        return child
+        if not is_expression(node) or node.node_type == NodeType.SUBQUERY:
+            return node  # a different subquery's plan is not this rewrite's to touch
+        done = rebuilt.get(id(node))
+        if done is None:
+            done = rewrite_children(node, _rewrite, share=True)
+            rebuilt[id(node)] = done
+        return done
 
-    _walk(root)
-    return root
+    return _rewrite(root)
 
 
 def _key_relation(key):
@@ -501,7 +497,7 @@ def _split_correlations(condition):
         elif right_rest is None:
             remaining = left_rest
         else:
-            remaining = And(do_not_create_column=True)
+            remaining = And(do_not_create_column=True, arena=condition.arena)
             remaining.left = left_rest
             remaining.right = right_rest
         return left_corr + right_corr, remaining
@@ -602,7 +598,7 @@ def _factor_common_or_correlation(condition):
             if branch_condition is None:
                 branch_condition = node
             else:
-                joined = And(do_not_create_column=True)
+                joined = And(do_not_create_column=True, arena=condition.arena)
                 joined.left = node
                 joined.right = branch_condition
                 branch_condition = joined
@@ -616,7 +612,7 @@ def _factor_common_or_correlation(condition):
 
     remaining = new_branches[0]
     for branch in new_branches[1:]:
-        joined = Or(do_not_create_column=True)
+        joined = Or(do_not_create_column=True, arena=condition.arena)
         joined.left = remaining
         joined.right = branch
         remaining = joined
@@ -663,7 +659,7 @@ def _split_outer_referencing(condition):
                 return right
             if right is None:
                 return left
-            joined = And(do_not_create_column=True)
+            joined = And(do_not_create_column=True, arena=left.arena)
             joined.left = left
             joined.right = right
             return joined
@@ -870,15 +866,15 @@ def _graft_key_reducer(
         copied_key = _local_copy(outer_key)
         copied_key.source = alias_map.get(outer_key.source, outer_key.source)
         equals = Comparison(
-            value="Eq", do_not_create_column=True
-        )
+            value="Eq", do_not_create_column=True, 
+        arena=plan_context.expressions)
         equals.left = _local_copy(inner_key)
         equals.right = copied_key
         join_columns.extend((_local_copy(inner_key), copied_key))
         if on_condition is None:
             on_condition = equals
         else:
-            conjunction = And(do_not_create_column=True)
+            conjunction = And(do_not_create_column=True, arena=plan_context.expressions)
             conjunction.left = on_condition
             conjunction.right = equals
             on_condition = conjunction
@@ -1016,14 +1012,14 @@ def _carry_column_upward(plan, nid, column) -> None:
 def _attach_correlation(join, inner_key, outer_key, carried, outer_on_left: bool) -> None:
     """Bind a deferred correlation onto the ancestor join that owns its outer relation."""
     outer_reference = _local_copy(outer_key)
-    equals = Comparison(value="Eq", do_not_create_column=True)
+    equals = Comparison(value="Eq", do_not_create_column=True, arena=carried.arena)
     equals.left = outer_reference
     equals.right = carried
 
     if join.on is None:
         join.on = equals
     else:
-        conjunction = And(do_not_create_column=True)
+        conjunction = And(do_not_create_column=True, arena=carried.arena)
         conjunction.left = join.on
         conjunction.right = equals
         join.on = conjunction
@@ -1165,6 +1161,7 @@ def _rewrite_order_limit_to_row_number(inner_plan: LogicalPlan, key_pairs, *, pl
         source=rn_relation,
         source_column=rn_schema_column.name,
         schema_column=rn_schema_column,
+        arena=plan_context.expressions,
     )
 
     window = WindowStep()
@@ -1184,7 +1181,7 @@ def _rewrite_order_limit_to_row_number(inner_plan: LogicalPlan, key_pairs, *, pl
     window.columns = (
         [rn_reference]
         + list(window.partition_by)
-        + [_local_copy(column) for column, _ascending in order_by]
+        + [_local_copy(column) for column, _ascending, _nulls_first in order_by]
     )
     inner_plan[order_nid] = window
 
@@ -1379,7 +1376,7 @@ def _collect_relations(plan: LogicalPlan, root_nid: str):
     return relations, schemas
 
 
-def _reference_to(column) -> LogicalColumn:
+def _reference_to(column, arena) -> LogicalColumn:
     """
     A bound IDENTIFIER referring to an already-bound schema column.
 
@@ -1393,6 +1390,7 @@ def _reference_to(column) -> LogicalColumn:
         source_column=column.name,
         source=(column.origin[0] if column.origin else None),
         schema_column=column,
+        arena=arena,
     )
 
 
@@ -1404,11 +1402,9 @@ def _local_copy(column) -> LogicalColumn:
     of the join's legs, so leaving it flagged would make a later pass treat it as
     still pointing out of scope.
     """
-    local = column.copy()
-    if local.node_type == NodeType.IDENTIFIER:
-        local.is_outer_reference = False
-        local.outer_relation = None
-    return local
+    if column.node_type == NodeType.IDENTIFIER:
+        return column.replace(is_outer_reference=False, outer_relation=None)
+    return column.copy()
 
 
 def _has_work(condition) -> bool:
@@ -1421,7 +1417,7 @@ def _has_work(condition) -> bool:
 def _find_subquery_in_columns(node, attribute):
     """
     Locate the first scalar subquery across one of `node`'s expression lists
-    (`attribute`, see `_SUBQUERY_BEARING_ATTRS`), with a callable that replaces it.
+    (`attribute`, see `_SUBQUERY_BEARING_ATTRS`).
 
     The list-level analogue of `_find`, which locates a match WITHIN one
     expression tree; a Project has several top-level trees (one per SELECT-list
@@ -1429,11 +1425,11 @@ def _find_subquery_in_columns(node, attribute):
     Q09: each `bucket` column is a CASE whose WHEN/THEN/ELSE are three separate
     scalar subqueries).
     """
-    for index, column in enumerate(_owned_list(node, attribute) or ()):
-        found, replace_child = _find_subquery(column)
+    for column in _owned_list(node, attribute) or ():
+        found, _ = _find_subquery(column)
         if found is not None:
-            return found, _list_replacer(node, attribute, index, replace_child)
-    return None, None
+            return found
+    return None
 
 
 # The expression lists a node OWNS, per node type. A scalar subquery in the
@@ -1446,8 +1442,8 @@ def _find_subquery_in_columns(node, attribute):
 # stream does not carry" on the scalar's identity.
 #
 # An aggregate's `columns` is a derived mirror of `aggregates` + `groups` +
-# their operands, sharing the same expression objects, so rewriting the
-# semantic lists updates it for free. It is deliberately NOT searched: a
+# their operands, sharing the same expression objects; `_set_owned_list` hands a
+# rewritten entry to every step holding it. It is deliberately NOT searched: a
 # top-level match there that is in neither semantic list would be replaced in
 # one list and left stale in the other. `_backstop` raises on anything that
 # somehow reaches the compiler still holding a SUBQUERY.
@@ -1469,9 +1465,45 @@ def _owned_list(node, attribute):
     raise InvalidInternalStateError(f"'{attribute}' is not a subquery-bearing expression list")
 
 
-def _set_owned_list(node, attribute, values):
-    """Assign `values` as the expression list `attribute` names on `node`. Step list
-    fields are immutable (architect ruling Q3): a change is a new list assigned."""
+def _substitute_everywhere(plan, replacements: dict) -> None:
+    """Replace, in every step of `plan`, each expression keyed (by `id`) in
+    `replacements` with its replacement, rebuilding the trees that hold it.
+
+    The binder shares expression objects between steps - HAVING's aggregate IS the
+    Aggregate step's, an aggregate's `columns` mirror shares its `aggregates` - and
+    this strategy rewrites at the deepest holder. Expressions are immutable once
+    bound (P3), so the other holders do not see that rewrite by themselves: each is
+    handed the replacement here. A tree reached from several steps is rebuilt once.
+    """
+    if not replacements:
+        return
+    rebuilt: dict = {}
+
+    def _substitute(expression):
+        replacement = replacements.get(id(expression))
+        if replacement is not None:
+            return replacement
+        done = rebuilt.get(id(expression))
+        if done is None:
+            done = rewrite_children(expression, _substitute, share=True)
+            rebuilt[id(expression)] = done
+        return done
+
+    for _nid, step in plan.nodes(True):
+        step.map_expressions(_substitute)
+
+
+def _set_owned_list(plan, node, attribute, values):
+    """Assign `values` as the expression list `attribute` names on `node`, and hand
+    every replaced entry's replacement to the other steps holding it (see
+    `_substitute_everywhere`). Step list fields are immutable (architect ruling Q3):
+    a change is a new list assigned."""
+    previous = _owned_list(node, attribute) or ()
+    replacements = {
+        id(old): new
+        for old, new in zip(previous, values)
+        if new is not old
+    }
     if attribute == "columns":
         node.columns = values
     elif attribute == "aggregates":
@@ -1480,16 +1512,18 @@ def _set_owned_list(node, attribute, values):
         node.groups = values
     else:
         raise InvalidInternalStateError(f"'{attribute}' is not a subquery-bearing expression list")
+    # `previous` stays referenced until here, so its ids cannot be reused
+    _substitute_everywhere(plan, replacements)
 
 
-def _list_replacer(node, attribute, index, replace_child):
+def _list_replacer(plan, node, attribute, index, replace_child):
     """A callable replacing entry `index` of `node`'s `attribute` list with
     `replace_child(new)` - the list is rebuilt and assigned back."""
 
     def _replace(new):
         values = list(_owned_list(node, attribute))
         values[index] = replace_child(new)
-        _set_owned_list(node, attribute, values)
+        _set_owned_list(plan, node, attribute, values)
         return values[index]
 
     return _replace
@@ -1497,19 +1531,19 @@ def _list_replacer(node, attribute, index, replace_child):
 
 def _find_subquery_in_node(node):
     """
-    Locate the first scalar subquery this node owns, as (node, replace_fn).
+    Locate the first scalar subquery this node owns.
 
     See `_SUBQUERY_BEARING_ATTRS` for which lists each node type owns.
     """
     for attribute in _SUBQUERY_BEARING_ATTRS.get(node.node_type, ()):
-        found, replace = _find_subquery_in_columns(node, attribute)
+        found = _find_subquery_in_columns(node, attribute)
         if found is not None:
-            return found, replace
-    return None, None
+            return found
+    return None
 
 
 def _node_has_subquery(node) -> bool:
-    return _find_subquery_in_node(node)[0] is not None
+    return _find_subquery_in_node(node) is not None
 
 
 def _subquery_target_depth(plan, nid) -> int:
@@ -1536,9 +1570,10 @@ def _find_existence(expression):
     return _find(expression, lambda n: _is_exists(n) or _is_in_subquery(n))
 
 
-def _find_existence_in_node(node):
+def _find_existence_in_node(plan, node):
     """
-    Locate the first EXISTS / IN this node owns, as (node, replace_fn).
+    Locate the first EXISTS / IN the step `node` of `plan` owns, as (node,
+    replace_fn).
 
     The existence twin of `_find_subquery_in_node`, over the same expression
     lists and for the same reason — an existence test inside an aggregate
@@ -1549,12 +1584,16 @@ def _find_existence_in_node(node):
         for index, column in enumerate(_owned_list(node, attribute) or ()):
             found, replace_child = _find_existence(column)
             if found is not None:
-                return found, _list_replacer(node, attribute, index, replace_child)
+                return found, _list_replacer(plan, node, attribute, index, replace_child)
     return None, None
 
 
 def _node_has_existence(node) -> bool:
-    return _find_existence_in_node(node)[0] is not None
+    return any(
+        _find_existence(column)[0] is not None
+        for attribute in _SUBQUERY_BEARING_ATTRS.get(node.node_type, ())
+        for column in _owned_list(node, attribute) or ()
+    )
 
 
 def _decorrelate_projection_existence(
@@ -1592,7 +1631,7 @@ def _decorrelate_projection_existence(
         absorption identity does not hold through a negation.
     """
     project_node = plan[project_nid]
-    remove, replace_fn = _find_existence_in_node(project_node)
+    remove, replace_fn = _find_existence_in_node(plan, project_node)
     if remove is None:
         return plan
 
@@ -1614,7 +1653,7 @@ def _decorrelate_projection_existence(
         key_pairs, residual = _lift_correlations(inner_plan)
         if key_pairs or residual is not None:
             raise UnsupportedSyntaxError(_SELECT_LIST_EXISTENCE_REFUSAL)
-        key_pairs = [(_reference_to(membership_column), remove.left)]
+        key_pairs = [(_reference_to(membership_column, plan_context.expressions), remove.left)]
         three_valued = True
         replace_projection = False
     else:
@@ -1726,14 +1765,14 @@ def _graft_existence_join(
     on_condition = None
     for inner_key, outer_key in key_pairs:
         equals = Comparison(
-            value="Eq", do_not_create_column=True
-        )
+            value="Eq", do_not_create_column=True, 
+        arena=plan.plan_context.expressions)
         equals.left = _local_copy(outer_key)
         equals.right = _local_copy(inner_key)
         if on_condition is None:
             on_condition = equals
         else:
-            conjunction = And(do_not_create_column=True)
+            conjunction = And(do_not_create_column=True, arena=plan.plan_context.expressions)
             conjunction.left = on_condition
             conjunction.right = equals
             on_condition = conjunction
@@ -1741,7 +1780,7 @@ def _graft_existence_join(
     # The flag is emitted under the EXISTS/IN node's own identity — already bound,
     # already BOOL — so nothing above has to be re-pointed. Same reuse, and the
     # same reason, as `_materialize_boolean_value`'s substituted IsNotNull.
-    flag = _reference_to(remove.schema_column)
+    flag = _reference_to(remove.schema_column, plan.plan_context.expressions)
     # The reference REPLACES the expression wherever it sat, including as a whole
     # SELECT-list entry (`EXISTS (...) AS flagged`). The alias is the output NAME
     # there, so dropping it renames the column to the rendered expression text.
@@ -1813,13 +1852,13 @@ def _project_uncorrelated_exists(plan, project_nid, inner_plan, remove, replace_
 
     # `> 0` / `= 0` rather than IsNotNull: a cross join to a one-row count always
     # matches, so there is no NULL to test — the count itself is the answer.
-    comparison = Comparison()
+    comparison = Comparison(arena=plan_context.expressions)
     comparison.value = "Eq" if negated else "Gt"
     comparison.schema_column = remove.schema_column
     comparison.query_column = remove.query_column
     comparison.alias = remove.alias
     comparison.left = _count_reference()
-    zero = Literal(type=_lt.INT64, value=0)
+    zero = Literal(type=_lt.INT64, value=0, arena=plan_context.expressions)
     zero.schema_column = plan_context.columns.relation_column(
         count_relation, "0", column_type=_lt.INT64
     )
@@ -2229,7 +2268,7 @@ def _decorrelate_in(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_conte
         )
 
     key_pairs, residual = _lift_correlations(inner_plan)
-    key_pairs = [(_reference_to(membership_column), in_node.left)] + key_pairs
+    key_pairs = [(_reference_to(membership_column, plan_context.expressions), in_node.left)] + key_pairs
 
     return _build_filter_join(
         plan,
@@ -2478,14 +2517,14 @@ def _build_filter_join(
     on_condition = None
     for inner_key, outer_key in local_pairs:
         equals = Comparison(
-            value="Eq", do_not_create_column=True
-        )
+            value="Eq", do_not_create_column=True, 
+        arena=plan_context.expressions)
         equals.left = _local_copy(outer_key)
         equals.right = _local_copy(inner_key)
         if on_condition is None:
             on_condition = equals
         else:
-            conjunction = And(do_not_create_column=True)
+            conjunction = And(do_not_create_column=True, arena=plan_context.expressions)
             conjunction.left = on_condition
             conjunction.right = equals
             on_condition = conjunction
@@ -2611,13 +2650,15 @@ def _synthesize_count_aggregate(inner_plan: LogicalPlan, groups: list, *, plan_c
             source_column=count_schema_column.name,
             source=count_relation,
             schema_column=count_schema_column,
+            arena=plan_context.expressions,
         )
 
     count_node = Aggregator(
         value="COUNT",
-        parameters=[Wildcard()],
+        parameters=[Wildcard(arena=plan_context.expressions)],
         schema_column=count_schema_column,
         do_not_create_column=True,
+        arena=plan_context.expressions,
     )
 
     # No groups is an UNGROUPED aggregate, a different node type — and the one
@@ -2775,14 +2816,14 @@ def _materialize_boolean_value(
     on_condition = None
     for inner_key, outer_key in key_pairs:
         equals = Comparison(
-            value="Eq", do_not_create_column=True
-        )
+            value="Eq", do_not_create_column=True, 
+        arena=plan_context.expressions)
         equals.left = _local_copy(outer_key)
         equals.right = _local_copy(inner_key)
         if on_condition is None:
             on_condition = equals
         else:
-            conjunction = And(do_not_create_column=True)
+            conjunction = And(do_not_create_column=True, arena=plan_context.expressions)
             conjunction.left = on_condition
             conjunction.right = equals
             on_condition = conjunction
@@ -2831,7 +2872,7 @@ def _materialize_boolean_value(
     # schema_column rather than minting one: constant_folding.py's `LIKE '%'`
     # -> `IsNotNull` rewrite does the same for the same reason — this node
     # slots into a general boolean expression exactly where `remove` sat.
-    substituted = UnaryOperator()
+    substituted = UnaryOperator(arena=plan_context.expressions)
     substituted.value = "IsNull" if negated else "IsNotNull"
     substituted.schema_column = remove.schema_column
     substituted.centre = _count_reference()
@@ -2903,7 +2944,7 @@ def _materialize_in_membership(
         column
         for column in (filter_node.columns or [])
         if column.node_type in FILTER_REFERENCED_NODE_TYPES
-    ] + [_reference_to(remove.schema_column)]
+    ] + [_reference_to(remove.schema_column, plan.plan_context.expressions)]
 
     setattr(
         telemetry,
@@ -2947,8 +2988,7 @@ def _clear_outer_markers(node):
         return None
     if node.node_type == NodeType.IDENTIFIER:
         return _local_copy(node) if _is_outer(node) else node
-    node.map_children(_clear_outer_markers)
-    return node
+    return rewrite_children(node, _clear_outer_markers, share=True)
 
 
 def _is_removable_conjunct(condition, target) -> bool:
@@ -3100,13 +3140,13 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
 
     # --- the subquery's value becomes an ordinary column ----------------------
     filter_node.condition = _replace_every(
-        filter_node.condition, subquery, lambda: _reference_to(value_column)
+        filter_node.condition, subquery, lambda: _reference_to(value_column, plan_context.expressions)
     )
     filter_node.columns = [
         column
         for column in (filter_node.columns or [])
         if column.node_type in FILTER_REFERENCED_NODE_TYPES
-    ] + [_reference_to(value_column)]
+    ] + [_reference_to(value_column, plan_context.expressions)]
 
     # --- graft the subquery in as a joined relation ---------------------------
     # Capture the outer leg BEFORE rewiring: insert_node_before moves every
@@ -3146,7 +3186,7 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
         )
         if provider_schema is not None:
             pre_decorrelation_columns.extend(
-                _reference_to(col) for col in provider_schema.columns
+                _reference_to(col, plan_context.expressions) for col in provider_schema.columns
             )
 
     # A correlation whose outer column belongs to THIS join's left leg can be a key
@@ -3185,14 +3225,14 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
     on_condition = None
     for inner_key, outer_key in local_pairs:
         equals = Comparison(
-            value="Eq", do_not_create_column=True
-        )
+            value="Eq", do_not_create_column=True, 
+        arena=plan_context.expressions)
         equals.left = _local_copy(outer_key)
         equals.right = _local_copy(inner_key)
         if on_condition is None:
             on_condition = equals
         else:
-            conjunction = And(do_not_create_column=True)
+            conjunction = And(do_not_create_column=True, arena=plan_context.expressions)
             conjunction.left = on_condition
             conjunction.right = equals
             on_condition = conjunction
@@ -3219,7 +3259,7 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
             for column in (_local_copy(pair[1]), _local_copy(pair[0]))
         ]
         + [_local_copy(inner_key) for inner_key, _outer_key in deferred_pairs]
-    ) or [_reference_to(value_column)]
+    ) or [_reference_to(value_column, plan_context.expressions)]
     join.left_relation_names = sorted(outer_relations)
     join.right_relation_names = sorted(inner_relations)
     join.all_relations = outer_relations | inner_relations
@@ -3328,7 +3368,7 @@ def _decorrelate_projection(
     does.
     """
     project_node = plan[project_nid]
-    subquery, _ = _find_subquery_in_node(project_node)
+    subquery = _find_subquery_in_node(project_node)
     if subquery is None:
         return plan
 
@@ -3378,10 +3418,11 @@ def _decorrelate_projection(
         expressions = _owned_list(project_node, attribute)
         if expressions is not None:
             _set_owned_list(
+                plan,
                 project_node,
                 attribute,
                 [
-                    _replace_every(expression, subquery, lambda: _reference_to(value_column))
+                    _replace_every(expression, subquery, lambda: _reference_to(value_column, plan_context.expressions))
                     for expression in expressions
                 ],
             )
@@ -3411,7 +3452,7 @@ def _decorrelate_projection(
     # `_decorrelate`'s: projection pushdown only harvests a node's identities
     # when `node.columns` is truthy, and the value column is the only thing the
     # outer query needs from this leg.
-    join.columns = [_reference_to(value_column)]
+    join.columns = [_reference_to(value_column, plan_context.expressions)]
     join.left_relation_names = sorted(outer_relations)
     join.right_relation_names = sorted(inner_relations)
     join.all_relations = outer_relations | inner_relations

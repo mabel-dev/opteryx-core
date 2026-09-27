@@ -574,7 +574,7 @@ class RelationManagementNode(BasePlanNode):
             # Declared on the Writable mixin, and visit_alter_relation has
             # already rejected a non-Writable connector.
             self.step.connector.set_cluster_by(
-                self.step.relation_name, self.step.cluster_columns, author=self._author
+                self.step.relation_name, list(self.step.cluster_columns), author=self._author
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 

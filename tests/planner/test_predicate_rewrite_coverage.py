@@ -183,7 +183,7 @@ def test_ored_equality_and_inlist_merge():
 
 def test_literal_left_equalities_merge():
     sql = "SELECT name FROM $planets WHERE 'Earth' = name OR 'Mars' = name"
-    assert _filters(_plan(sql)) == ["name IN [b'Earth', b'Mars']"]
+    assert _filters(_plan(sql)) == ["name IN ['Earth', 'Mars']"]
     assert _rows(sql) == 2
 
 

@@ -24,6 +24,7 @@ order. A walker descends from those roots with the expressions' own
 from opteryx.compiled.functions.random_helper import random_string_c
 from opteryx.compiled.structures.expressions import EXPRESSION_TYPES
 from opteryx.compiled.structures.expressions import is_expression
+from opteryx.compiled.structures.expressions import publish
 
 
 cdef object _StepType = None
@@ -54,8 +55,18 @@ cdef inline void _require_optional_int(str name, object value):
         raise TypeError(f"{name} must be an int or None, got {type(value).__name__}")
 
 
+cdef inline bint _placed(object value):
+    """Whether `value` is an expression, placing it if so: an expression held by a
+    step is immutable once the query's arena is sealed (P3, see
+    expressions.publish)."""
+    if not is_expression(value):
+        return False
+    publish(value)
+    return True
+
+
 cdef inline void _require_expression(str name, object value):
-    if value is not None and not is_expression(value):
+    if value is not None and not _placed(value):
         raise TypeError(f"{name} must be an expression or None, got {type(value).__name__}")
 
 
@@ -75,19 +86,26 @@ cdef inline tuple _require_expression_list(str name, object value):
     if frozen is None:
         return None
     for item in frozen:
-        if not is_expression(item):
+        if not _placed(item):
             raise TypeError(f"{name} must hold expressions, got {type(item).__name__}")
     return frozen
 
 
 cdef inline tuple _require_order_list(str name, object value):
-    """ORDER BY: (expression, ascending) pairs."""
+    """ORDER BY: (expression, ascending, nulls_first) triples — null placement is
+    always resolved to an explicit bool by the planner, never implied by direction."""
     cdef tuple frozen = _frozen_list(name, value)
     if frozen is None:
         return None
     for item in frozen:
-        if type(item) is not tuple or len(item) != 2 or not is_expression(item[0]) or type(item[1]) is not bool:
-            raise TypeError(f"{name} must hold (expression, bool) pairs, got {item!r}")
+        if (
+            type(item) is not tuple
+            or len(item) != 3
+            or not _placed(item[0])
+            or type(item[1]) is not bool
+            or type(item[2]) is not bool
+        ):
+            raise TypeError(f"{name} must hold (expression, bool, bool) triples, got {item!r}")
     return frozen
 
 
@@ -97,7 +115,7 @@ cdef inline dict _require_expression_dict(str name, object value):
     if type(value) is not dict:
         raise TypeError(f"{name} must be a dict of expressions, got {type(value).__name__}")
     for item in value.values():
-        if not is_expression(item):
+        if not _placed(item):
             raise TypeError(f"{name} must hold expressions, got {type(item).__name__}")
     return value
 
@@ -111,7 +129,7 @@ cdef inline tuple _require_rows(str name, object value):
         if type(row) is not tuple:
             raise TypeError(f"{name} rows must be tuples, got {type(row).__name__}")
         for item in row:
-            if not is_expression(item):
+            if not _placed(item):
                 raise TypeError(f"{name} must hold expressions, got {type(item).__name__}")
     return frozen
 
@@ -124,7 +142,7 @@ cdef inline tuple _require_window_functions(str name, object value):
     for item in frozen:
         if type(item) is not tuple or len(item) != 4:
             raise TypeError(f"{name} must hold 4-tuples, got {item!r}")
-        if item[2] is not None and not is_expression(item[2]):
+        if item[2] is not None and not _placed(item[2]):
             raise TypeError(f"{name} operand must be an expression or None, got {type(item[2]).__name__}")
     return frozen
 
@@ -152,7 +170,7 @@ cdef inline void _extend_expressions(list out, tuple expressions):
 
 cdef inline void _extend_order_expressions(list out, tuple order):
     if order is not None:
-        for expression, _ascending in order:
+        for expression, _ascending, _nulls_first in order:
             out.append(expression)
 
 
@@ -189,7 +207,9 @@ cdef inline list _map_expressions(object fn, tuple expressions):
 cdef inline list _map_order_expressions(object fn, tuple order):
     if order is None:
         return None
-    return [(fn(expression), ascending) for expression, ascending in order]
+    return [
+        (fn(expression), ascending, nulls_first) for expression, ascending, nulls_first in order
+    ]
 
 
 cdef inline dict _map_dict_expressions(object fn, dict expressions):
@@ -256,7 +276,12 @@ cdef class PlanStep:
 
     cdef readonly object node_type
     cdef public str uuid
-    cdef list _columns
+    # Bumped by every field setter: a plan whose steps' write counts moved was
+    # changed, so its statistics are stale (architect ruling Q2, native plan graph
+    # P2-d). Fields are immutable values (Q3), so a setter is the only way to
+    # change one. Expressions inside a field are not steps and are not counted.
+    cdef readonly unsigned long long write_count
+    cdef tuple _columns
     cdef set _all_relations
     cdef set _pre_update_columns
 
@@ -272,6 +297,7 @@ cdef class PlanStep:
 
     @columns.setter
     def columns(self, value):
+        self.write_count += 1
         self._columns = _require_expression_list(f"{type(self).__name__}.columns", value)
 
     @property
@@ -280,6 +306,7 @@ cdef class PlanStep:
 
     @all_relations.setter
     def all_relations(self, set value):
+        self.write_count += 1
         self._all_relations = value
 
     @property
@@ -288,6 +315,7 @@ cdef class PlanStep:
 
     @pre_update_columns.setter
     def pre_update_columns(self, set value):
+        self.write_count += 1
         self._pre_update_columns = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -388,6 +416,7 @@ cdef class AddColumnStep(PlanStep):
 
     @column_name.setter
     def column_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._column_name = value
 
     @property
@@ -396,6 +425,7 @@ cdef class AddColumnStep(PlanStep):
 
     @column_type.setter
     def column_type(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._column_type = value
 
     @property
@@ -404,6 +434,7 @@ cdef class AddColumnStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -412,6 +443,7 @@ cdef class AddColumnStep(PlanStep):
 
     @default.setter
     def default(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._default = value
 
     @property
@@ -420,6 +452,7 @@ cdef class AddColumnStep(PlanStep):
 
     @if_exists.setter
     def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("AddColumnStep.if_exists", value)
         self._if_exists = value
 
@@ -429,6 +462,7 @@ cdef class AddColumnStep(PlanStep):
 
     @if_not_exists.setter
     def if_not_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("AddColumnStep.if_not_exists", value)
         self._if_not_exists = value
 
@@ -438,6 +472,7 @@ cdef class AddColumnStep(PlanStep):
 
     @nullable.setter
     def nullable(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("AddColumnStep.nullable", value)
         self._nullable = value
 
@@ -447,6 +482,7 @@ cdef class AddColumnStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -539,6 +575,7 @@ cdef class AddRelationshipStep(PlanStep):
 
     @cardinality.setter
     def cardinality(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._cardinality = value
 
     @property
@@ -547,6 +584,7 @@ cdef class AddRelationshipStep(PlanStep):
 
     @column_name.setter
     def column_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._column_name = value
 
     @property
@@ -555,6 +593,7 @@ cdef class AddRelationshipStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -563,6 +602,7 @@ cdef class AddRelationshipStep(PlanStep):
 
     @constraint_name.setter
     def constraint_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._constraint_name = value
 
     @property
@@ -571,6 +611,7 @@ cdef class AddRelationshipStep(PlanStep):
 
     @if_exists.setter
     def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("AddRelationshipStep.if_exists", value)
         self._if_exists = value
 
@@ -580,6 +621,7 @@ cdef class AddRelationshipStep(PlanStep):
 
     @references_column_name.setter
     def references_column_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._references_column_name = value
 
     @property
@@ -588,6 +630,7 @@ cdef class AddRelationshipStep(PlanStep):
 
     @references_relation_name.setter
     def references_relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._references_relation_name = value
 
     @property
@@ -596,6 +639,7 @@ cdef class AddRelationshipStep(PlanStep):
 
     @references_relation_parts.setter
     def references_relation_parts(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._references_relation_parts = _frozen_list("AddRelationshipStep.references_relation_parts", value)
 
     @property
@@ -604,6 +648,7 @@ cdef class AddRelationshipStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     @property
@@ -612,6 +657,7 @@ cdef class AddRelationshipStep(PlanStep):
 
     @relation_parts.setter
     def relation_parts(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_parts = _frozen_list("AddRelationshipStep.relation_parts", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -698,6 +744,7 @@ cdef class AggregateStep(PlanStep):
 
     @aggregates.setter
     def aggregates(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._aggregates = _require_expression_list("AggregateStep.aggregates", value)
 
     @property
@@ -706,6 +753,7 @@ cdef class AggregateStep(PlanStep):
 
     @groups.setter
     def groups(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._groups = _require_expression_list("AggregateStep.groups", value)
 
     @property
@@ -714,6 +762,7 @@ cdef class AggregateStep(PlanStep):
 
     @projection.setter
     def projection(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._projection = _require_expression_list("AggregateStep.projection", value)
 
     @property
@@ -722,6 +771,7 @@ cdef class AggregateStep(PlanStep):
 
     @schema.setter
     def schema(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._schema = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -802,6 +852,7 @@ cdef class AggregateAndGroupStep(PlanStep):
 
     @aggregates.setter
     def aggregates(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._aggregates = _require_expression_list("AggregateAndGroupStep.aggregates", value)
 
     @property
@@ -810,6 +861,7 @@ cdef class AggregateAndGroupStep(PlanStep):
 
     @grouping_set_identities.setter
     def grouping_set_identities(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._grouping_set_identities = _frozen_list("AggregateAndGroupStep.grouping_set_identities", value)
 
     @property
@@ -818,6 +870,7 @@ cdef class AggregateAndGroupStep(PlanStep):
 
     @grouping_sets.setter
     def grouping_sets(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._grouping_sets = _frozen_list("AggregateAndGroupStep.grouping_sets", value)
 
     @property
@@ -826,6 +879,7 @@ cdef class AggregateAndGroupStep(PlanStep):
 
     @groups.setter
     def groups(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._groups = _require_expression_list("AggregateAndGroupStep.groups", value)
 
     @property
@@ -834,6 +888,7 @@ cdef class AggregateAndGroupStep(PlanStep):
 
     @having_condition.setter
     def having_condition(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_expression("AggregateAndGroupStep.having_condition", value)
         self._having_condition = value
 
@@ -843,6 +898,7 @@ cdef class AggregateAndGroupStep(PlanStep):
 
     @projection.setter
     def projection(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._projection = _require_expression_list("AggregateAndGroupStep.projection", value)
 
     @property
@@ -851,6 +907,7 @@ cdef class AggregateAndGroupStep(PlanStep):
 
     @schema.setter
     def schema(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._schema = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -940,6 +997,7 @@ cdef class AlterColumnTypeStep(PlanStep):
 
     @column_name.setter
     def column_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._column_name = value
 
     @property
@@ -948,6 +1006,7 @@ cdef class AlterColumnTypeStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -956,6 +1015,7 @@ cdef class AlterColumnTypeStep(PlanStep):
 
     @current_column_type.setter
     def current_column_type(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._current_column_type = value
 
     @property
@@ -964,6 +1024,7 @@ cdef class AlterColumnTypeStep(PlanStep):
 
     @if_exists.setter
     def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("AlterColumnTypeStep.if_exists", value)
         self._if_exists = value
 
@@ -973,6 +1034,7 @@ cdef class AlterColumnTypeStep(PlanStep):
 
     @new_column_type.setter
     def new_column_type(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._new_column_type = value
 
     @property
@@ -981,6 +1043,7 @@ cdef class AlterColumnTypeStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -1055,6 +1118,7 @@ cdef class AlterMaterializedViewOwnerStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -1063,6 +1127,7 @@ cdef class AlterMaterializedViewOwnerStep(PlanStep):
 
     @new_owner.setter
     def new_owner(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._new_owner = value
 
     @property
@@ -1071,6 +1136,7 @@ cdef class AlterMaterializedViewOwnerStep(PlanStep):
 
     @owner_is_current_user.setter
     def owner_is_current_user(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("AlterMaterializedViewOwnerStep.owner_is_current_user", value)
         self._owner_is_current_user = value
 
@@ -1080,6 +1146,7 @@ cdef class AlterMaterializedViewOwnerStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -1146,6 +1213,7 @@ cdef class AlterMaterializedViewSuspendedStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -1154,6 +1222,7 @@ cdef class AlterMaterializedViewSuspendedStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     @property
@@ -1162,6 +1231,7 @@ cdef class AlterMaterializedViewSuspendedStep(PlanStep):
 
     @suspended.setter
     def suspended(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("AlterMaterializedViewSuspendedStep.suspended", value)
         self._suspended = value
 
@@ -1228,6 +1298,7 @@ cdef class AlterRelationStep(PlanStep):
 
     @cluster_columns.setter
     def cluster_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._cluster_columns = _frozen_list("AlterRelationStep.cluster_columns", value)
 
     @property
@@ -1236,6 +1307,7 @@ cdef class AlterRelationStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -1244,6 +1316,7 @@ cdef class AlterRelationStep(PlanStep):
 
     @if_exists.setter
     def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("AlterRelationStep.if_exists", value)
         self._if_exists = value
 
@@ -1253,6 +1326,7 @@ cdef class AlterRelationStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -1323,6 +1397,7 @@ cdef class AlterTaskStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -1331,6 +1406,7 @@ cdef class AlterTaskStep(PlanStep):
 
     @source_tables.setter
     def source_tables(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._source_tables = _frozen_list("AlterTaskStep.source_tables", value)
 
     @property
@@ -1339,6 +1415,7 @@ cdef class AlterTaskStep(PlanStep):
 
     @statement.setter
     def statement(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._statement = value
 
     @property
@@ -1347,6 +1424,7 @@ cdef class AlterTaskStep(PlanStep):
 
     @target_tables.setter
     def target_tables(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._target_tables = _frozen_list("AlterTaskStep.target_tables", value)
 
     @property
@@ -1355,6 +1433,7 @@ cdef class AlterTaskStep(PlanStep):
 
     @task_name.setter
     def task_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._task_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -1426,6 +1505,7 @@ cdef class AlterTriggerMinimumIntervalStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -1434,6 +1514,7 @@ cdef class AlterTriggerMinimumIntervalStep(PlanStep):
 
     @minimum_interval_seconds.setter
     def minimum_interval_seconds(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("AlterTriggerMinimumIntervalStep.minimum_interval_seconds", value)
         self._minimum_interval_seconds = value
 
@@ -1443,6 +1524,7 @@ cdef class AlterTriggerMinimumIntervalStep(PlanStep):
 
     @table_name.setter
     def table_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._table_name = value
 
     @property
@@ -1451,6 +1533,7 @@ cdef class AlterTriggerMinimumIntervalStep(PlanStep):
 
     @trigger_name.setter
     def trigger_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._trigger_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -1523,6 +1606,7 @@ cdef class AlterTriggerOwnerStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -1531,6 +1615,7 @@ cdef class AlterTriggerOwnerStep(PlanStep):
 
     @new_owner.setter
     def new_owner(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._new_owner = value
 
     @property
@@ -1539,6 +1624,7 @@ cdef class AlterTriggerOwnerStep(PlanStep):
 
     @owner_is_current_user.setter
     def owner_is_current_user(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("AlterTriggerOwnerStep.owner_is_current_user", value)
         self._owner_is_current_user = value
 
@@ -1548,6 +1634,7 @@ cdef class AlterTriggerOwnerStep(PlanStep):
 
     @resolved_owner.setter
     def resolved_owner(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._resolved_owner = value
 
     @property
@@ -1556,6 +1643,7 @@ cdef class AlterTriggerOwnerStep(PlanStep):
 
     @table_name.setter
     def table_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._table_name = value
 
     @property
@@ -1564,6 +1652,7 @@ cdef class AlterTriggerOwnerStep(PlanStep):
 
     @trigger_name.setter
     def trigger_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._trigger_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -1638,6 +1727,7 @@ cdef class AlterTriggerSuspendedStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -1646,6 +1736,7 @@ cdef class AlterTriggerSuspendedStep(PlanStep):
 
     @suspended.setter
     def suspended(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("AlterTriggerSuspendedStep.suspended", value)
         self._suspended = value
 
@@ -1655,6 +1746,7 @@ cdef class AlterTriggerSuspendedStep(PlanStep):
 
     @table_name.setter
     def table_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._table_name = value
 
     @property
@@ -1663,6 +1755,7 @@ cdef class AlterTriggerSuspendedStep(PlanStep):
 
     @trigger_name.setter
     def trigger_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._trigger_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -1733,6 +1826,7 @@ cdef class AlterViewStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -1741,6 +1835,7 @@ cdef class AlterViewStep(PlanStep):
 
     @query.setter
     def query(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._query = value
 
     @property
@@ -1749,6 +1844,7 @@ cdef class AlterViewStep(PlanStep):
 
     @view_name.setter
     def view_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._view_name = value
 
     @property
@@ -1757,6 +1853,7 @@ cdef class AlterViewStep(PlanStep):
 
     @view_schema.setter
     def view_schema(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._view_schema = value
 
     @property
@@ -1765,6 +1862,7 @@ cdef class AlterViewStep(PlanStep):
 
     @view_sql.setter
     def view_sql(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._view_sql = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -1838,6 +1936,7 @@ cdef class AlterWorkspaceStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -1846,6 +1945,7 @@ cdef class AlterWorkspaceStep(PlanStep):
 
     @execution_context.setter
     def execution_context(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._execution_context = value
 
     @property
@@ -1854,6 +1954,7 @@ cdef class AlterWorkspaceStep(PlanStep):
 
     @property_name.setter
     def property_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._property_name = value
 
     @property
@@ -1862,6 +1963,7 @@ cdef class AlterWorkspaceStep(PlanStep):
 
     @property_value.setter
     def property_value(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("AlterWorkspaceStep.property_value", value)
         self._property_value = value
 
@@ -1871,6 +1973,7 @@ cdef class AlterWorkspaceStep(PlanStep):
 
     @workspace_name.setter
     def workspace_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._workspace_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -1942,6 +2045,7 @@ cdef class AlterWorkspaceSecureStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -1950,6 +2054,7 @@ cdef class AlterWorkspaceSecureStep(PlanStep):
 
     @secure_destinations.setter
     def secure_destinations(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._secure_destinations = _frozen_list("AlterWorkspaceSecureStep.secure_destinations", value)
 
     @property
@@ -1958,6 +2063,7 @@ cdef class AlterWorkspaceSecureStep(PlanStep):
 
     @secure_object.setter
     def secure_object(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._secure_object = value
 
     @property
@@ -1966,6 +2072,7 @@ cdef class AlterWorkspaceSecureStep(PlanStep):
 
     @workspace_name.setter
     def workspace_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._workspace_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -2034,6 +2141,7 @@ cdef class AnalyzeStep(PlanStep):
 
     @action.setter
     def action(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._action = value
 
     @property
@@ -2042,6 +2150,7 @@ cdef class AnalyzeStep(PlanStep):
 
     @analyze_columns.setter
     def analyze_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._analyze_columns = _frozen_list("AnalyzeStep.analyze_columns", value)
 
     @property
@@ -2050,6 +2159,7 @@ cdef class AnalyzeStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -2058,6 +2168,7 @@ cdef class AnalyzeStep(PlanStep):
 
     @table_name.setter
     def table_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._table_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -2122,6 +2233,7 @@ cdef class CallProcedureStep(PlanStep):
 
     @arguments.setter
     def arguments(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._arguments = _frozen_list("CallProcedureStep.arguments", value)
 
     @property
@@ -2130,6 +2242,7 @@ cdef class CallProcedureStep(PlanStep):
 
     @procedure_name.setter
     def procedure_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._procedure_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -2190,6 +2303,7 @@ cdef class CloneCollectionStep(PlanStep):
 
     @collection_name.setter
     def collection_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._collection_name = value
 
     @property
@@ -2198,6 +2312,7 @@ cdef class CloneCollectionStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -2206,6 +2321,7 @@ cdef class CloneCollectionStep(PlanStep):
 
     @source_collection.setter
     def source_collection(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._source_collection = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -2271,6 +2387,7 @@ cdef class CloneRelationStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -2279,6 +2396,7 @@ cdef class CloneRelationStep(PlanStep):
 
     @if_not_exists.setter
     def if_not_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("CloneRelationStep.if_not_exists", value)
         self._if_not_exists = value
 
@@ -2288,6 +2406,7 @@ cdef class CloneRelationStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     @property
@@ -2296,6 +2415,7 @@ cdef class CloneRelationStep(PlanStep):
 
     @source_relation.setter
     def source_relation(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._source_relation = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -2366,6 +2486,7 @@ cdef class CommentStep(PlanStep):
 
     @comment.setter
     def comment(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._comment = value
 
     @property
@@ -2374,6 +2495,7 @@ cdef class CommentStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -2382,6 +2504,7 @@ cdef class CommentStep(PlanStep):
 
     @if_exists.setter
     def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("CommentStep.if_exists", value)
         self._if_exists = value
 
@@ -2391,6 +2514,7 @@ cdef class CommentStep(PlanStep):
 
     @object_name.setter
     def object_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._object_name = value
 
     @property
@@ -2399,6 +2523,7 @@ cdef class CommentStep(PlanStep):
 
     @object_type.setter
     def object_type(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._object_type = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -2474,6 +2599,7 @@ cdef class CompactionCommitStep(PlanStep):
 
     @baseline_snapshot_id.setter
     def baseline_snapshot_id(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("CompactionCommitStep.baseline_snapshot_id", value)
         self._baseline_snapshot_id = value
 
@@ -2483,6 +2609,7 @@ cdef class CompactionCommitStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -2491,6 +2618,7 @@ cdef class CompactionCommitStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     @property
@@ -2499,6 +2627,7 @@ cdef class CompactionCommitStep(PlanStep):
 
     @retired_files.setter
     def retired_files(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._retired_files = _frozen_list("CompactionCommitStep.retired_files", value)
 
     @property
@@ -2507,6 +2636,7 @@ cdef class CompactionCommitStep(PlanStep):
 
     @sorted_by.setter
     def sorted_by(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._sorted_by = value
 
     @property
@@ -2515,6 +2645,7 @@ cdef class CompactionCommitStep(PlanStep):
 
     @source_tail_id.setter
     def source_tail_id(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("CompactionCommitStep.source_tail_id", value)
         self._source_tail_id = value
 
@@ -2588,6 +2719,7 @@ cdef class CreateCollectionStep(PlanStep):
 
     @collection_name.setter
     def collection_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._collection_name = value
 
     @property
@@ -2596,6 +2728,7 @@ cdef class CreateCollectionStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -2604,6 +2737,7 @@ cdef class CreateCollectionStep(PlanStep):
 
     @if_not_exists.setter
     def if_not_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("CreateCollectionStep.if_not_exists", value)
         self._if_not_exists = value
 
@@ -2672,6 +2806,7 @@ cdef class CreateRelationStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -2680,6 +2815,7 @@ cdef class CreateRelationStep(PlanStep):
 
     @if_not_exists.setter
     def if_not_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("CreateRelationStep.if_not_exists", value)
         self._if_not_exists = value
 
@@ -2689,6 +2825,7 @@ cdef class CreateRelationStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     @property
@@ -2697,6 +2834,7 @@ cdef class CreateRelationStep(PlanStep):
 
     @relationships.setter
     def relationships(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relationships = _frozen_list("CreateRelationStep.relationships", value)
 
     @property
@@ -2705,6 +2843,7 @@ cdef class CreateRelationStep(PlanStep):
 
     @schema.setter
     def schema(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._schema = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -2778,6 +2917,7 @@ cdef class CreateTagStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -2786,6 +2926,7 @@ cdef class CreateTagStep(PlanStep):
 
     @if_exists.setter
     def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("CreateTagStep.if_exists", value)
         self._if_exists = value
 
@@ -2795,6 +2936,7 @@ cdef class CreateTagStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     @property
@@ -2803,6 +2945,7 @@ cdef class CreateTagStep(PlanStep):
 
     @tag_name.setter
     def tag_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._tag_name = value
 
     @property
@@ -2811,6 +2954,7 @@ cdef class CreateTagStep(PlanStep):
 
     @version_spec.setter
     def version_spec(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._version_spec = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -2890,6 +3034,7 @@ cdef class CreateTaskStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -2898,6 +3043,7 @@ cdef class CreateTaskStep(PlanStep):
 
     @if_not_exists.setter
     def if_not_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("CreateTaskStep.if_not_exists", value)
         self._if_not_exists = value
 
@@ -2907,6 +3053,7 @@ cdef class CreateTaskStep(PlanStep):
 
     @on_table.setter
     def on_table(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._on_table = value
 
     @property
@@ -2915,6 +3062,7 @@ cdef class CreateTaskStep(PlanStep):
 
     @or_replace.setter
     def or_replace(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("CreateTaskStep.or_replace", value)
         self._or_replace = value
 
@@ -2924,6 +3072,7 @@ cdef class CreateTaskStep(PlanStep):
 
     @source_tables.setter
     def source_tables(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._source_tables = _frozen_list("CreateTaskStep.source_tables", value)
 
     @property
@@ -2932,6 +3081,7 @@ cdef class CreateTaskStep(PlanStep):
 
     @statement.setter
     def statement(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._statement = value
 
     @property
@@ -2940,6 +3090,7 @@ cdef class CreateTaskStep(PlanStep):
 
     @target_tables.setter
     def target_tables(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._target_tables = _frozen_list("CreateTaskStep.target_tables", value)
 
     @property
@@ -2948,6 +3099,7 @@ cdef class CreateTaskStep(PlanStep):
 
     @task_name.setter
     def task_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._task_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -3040,6 +3192,7 @@ cdef class CreateTriggerStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -3048,6 +3201,7 @@ cdef class CreateTriggerStep(PlanStep):
 
     @event_kind.setter
     def event_kind(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._event_kind = value
 
     @property
@@ -3056,6 +3210,7 @@ cdef class CreateTriggerStep(PlanStep):
 
     @if_not_exists.setter
     def if_not_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("CreateTriggerStep.if_not_exists", value)
         self._if_not_exists = value
 
@@ -3065,6 +3220,7 @@ cdef class CreateTriggerStep(PlanStep):
 
     @or_replace.setter
     def or_replace(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("CreateTriggerStep.or_replace", value)
         self._or_replace = value
 
@@ -3074,6 +3230,7 @@ cdef class CreateTriggerStep(PlanStep):
 
     @schedule.setter
     def schedule(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._schedule = value
 
     @property
@@ -3082,6 +3239,7 @@ cdef class CreateTriggerStep(PlanStep):
 
     @table_name.setter
     def table_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._table_name = value
 
     @property
@@ -3090,6 +3248,7 @@ cdef class CreateTriggerStep(PlanStep):
 
     @task_name.setter
     def task_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._task_name = value
 
     @property
@@ -3098,6 +3257,7 @@ cdef class CreateTriggerStep(PlanStep):
 
     @time_zone.setter
     def time_zone(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._time_zone = value
 
     @property
@@ -3106,6 +3266,7 @@ cdef class CreateTriggerStep(PlanStep):
 
     @trigger_name.setter
     def trigger_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._trigger_name = value
 
     @property
@@ -3114,6 +3275,7 @@ cdef class CreateTriggerStep(PlanStep):
 
     @window_source.setter
     def window_source(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._window_source = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -3206,6 +3368,7 @@ cdef class CreateViewStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -3214,6 +3377,7 @@ cdef class CreateViewStep(PlanStep):
 
     @if_not_exists.setter
     def if_not_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("CreateViewStep.if_not_exists", value)
         self._if_not_exists = value
 
@@ -3223,6 +3387,7 @@ cdef class CreateViewStep(PlanStep):
 
     @or_replace.setter
     def or_replace(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("CreateViewStep.or_replace", value)
         self._or_replace = value
 
@@ -3232,6 +3397,7 @@ cdef class CreateViewStep(PlanStep):
 
     @query.setter
     def query(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._query = value
 
     @property
@@ -3240,6 +3406,7 @@ cdef class CreateViewStep(PlanStep):
 
     @view_name.setter
     def view_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._view_name = value
 
     @property
@@ -3248,6 +3415,7 @@ cdef class CreateViewStep(PlanStep):
 
     @view_schema.setter
     def view_schema(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._view_schema = value
 
     @property
@@ -3256,6 +3424,7 @@ cdef class CreateViewStep(PlanStep):
 
     @view_sql.setter
     def view_sql(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._view_sql = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -3329,6 +3498,7 @@ cdef class DetachRelationStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -3337,6 +3507,7 @@ cdef class DetachRelationStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -3395,6 +3566,7 @@ cdef class DistinctStep(PlanStep):
 
     @alias.setter
     def alias(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._alias = value
 
     @property
@@ -3403,6 +3575,7 @@ cdef class DistinctStep(PlanStep):
 
     @on.setter
     def on(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._on = _require_expression_list("DistinctStep.on", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -3465,6 +3638,7 @@ cdef class DropCollectionStep(PlanStep):
 
     @collection_names.setter
     def collection_names(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._collection_names = _frozen_list("DropCollectionStep.collection_names", value)
 
     @property
@@ -3473,6 +3647,7 @@ cdef class DropCollectionStep(PlanStep):
 
     @connectors.setter
     def connectors(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connectors = value
 
     @property
@@ -3481,6 +3656,7 @@ cdef class DropCollectionStep(PlanStep):
 
     @if_exists.setter
     def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("DropCollectionStep.if_exists", value)
         self._if_exists = value
 
@@ -3549,6 +3725,7 @@ cdef class DropColumnStep(PlanStep):
 
     @column_if_exists.setter
     def column_if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("DropColumnStep.column_if_exists", value)
         self._column_if_exists = value
 
@@ -3558,6 +3735,7 @@ cdef class DropColumnStep(PlanStep):
 
     @column_name.setter
     def column_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._column_name = value
 
     @property
@@ -3566,6 +3744,7 @@ cdef class DropColumnStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -3574,6 +3753,7 @@ cdef class DropColumnStep(PlanStep):
 
     @if_exists.setter
     def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("DropColumnStep.if_exists", value)
         self._if_exists = value
 
@@ -3583,6 +3763,7 @@ cdef class DropColumnStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -3654,6 +3835,7 @@ cdef class DropRelationStep(PlanStep):
 
     @connectors.setter
     def connectors(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connectors = value
 
     @property
@@ -3662,6 +3844,7 @@ cdef class DropRelationStep(PlanStep):
 
     @if_exists.setter
     def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("DropRelationStep.if_exists", value)
         self._if_exists = value
 
@@ -3671,6 +3854,7 @@ cdef class DropRelationStep(PlanStep):
 
     @is_materialized_view.setter
     def is_materialized_view(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("DropRelationStep.is_materialized_view", value)
         self._is_materialized_view = value
 
@@ -3680,6 +3864,7 @@ cdef class DropRelationStep(PlanStep):
 
     @relation_names.setter
     def relation_names(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_names = _frozen_list("DropRelationStep.relation_names", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -3752,6 +3937,7 @@ cdef class DropRelationshipStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -3760,6 +3946,7 @@ cdef class DropRelationshipStep(PlanStep):
 
     @constraint_if_exists.setter
     def constraint_if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("DropRelationshipStep.constraint_if_exists", value)
         self._constraint_if_exists = value
 
@@ -3769,6 +3956,7 @@ cdef class DropRelationshipStep(PlanStep):
 
     @constraint_name.setter
     def constraint_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._constraint_name = value
 
     @property
@@ -3777,6 +3965,7 @@ cdef class DropRelationshipStep(PlanStep):
 
     @if_exists.setter
     def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("DropRelationshipStep.if_exists", value)
         self._if_exists = value
 
@@ -3786,6 +3975,7 @@ cdef class DropRelationshipStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     @property
@@ -3794,6 +3984,7 @@ cdef class DropRelationshipStep(PlanStep):
 
     @relation_parts.setter
     def relation_parts(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_parts = _frozen_list("DropRelationshipStep.relation_parts", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -3868,6 +4059,7 @@ cdef class DropTagStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -3876,6 +4068,7 @@ cdef class DropTagStep(PlanStep):
 
     @if_exists.setter
     def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("DropTagStep.if_exists", value)
         self._if_exists = value
 
@@ -3885,6 +4078,7 @@ cdef class DropTagStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     @property
@@ -3893,6 +4087,7 @@ cdef class DropTagStep(PlanStep):
 
     @tag_name.setter
     def tag_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._tag_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -3959,6 +4154,7 @@ cdef class DropTaskStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -3967,6 +4163,7 @@ cdef class DropTaskStep(PlanStep):
 
     @if_exists.setter
     def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("DropTaskStep.if_exists", value)
         self._if_exists = value
 
@@ -3976,6 +4173,7 @@ cdef class DropTaskStep(PlanStep):
 
     @task_name.setter
     def task_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._task_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -4041,6 +4239,7 @@ cdef class DropTriggerStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -4049,6 +4248,7 @@ cdef class DropTriggerStep(PlanStep):
 
     @if_exists.setter
     def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("DropTriggerStep.if_exists", value)
         self._if_exists = value
 
@@ -4058,6 +4258,7 @@ cdef class DropTriggerStep(PlanStep):
 
     @table_name.setter
     def table_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._table_name = value
 
     @property
@@ -4066,6 +4267,7 @@ cdef class DropTriggerStep(PlanStep):
 
     @trigger_name.setter
     def trigger_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._trigger_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -4132,6 +4334,7 @@ cdef class DropViewStep(PlanStep):
 
     @connectors.setter
     def connectors(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connectors = value
 
     @property
@@ -4140,6 +4343,7 @@ cdef class DropViewStep(PlanStep):
 
     @if_exists.setter
     def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("DropViewStep.if_exists", value)
         self._if_exists = value
 
@@ -4149,6 +4353,7 @@ cdef class DropViewStep(PlanStep):
 
     @view_names.setter
     def view_names(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._view_names = _frozen_list("DropViewStep.view_names", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -4212,6 +4417,7 @@ cdef class DropWorkspaceStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -4220,6 +4426,7 @@ cdef class DropWorkspaceStep(PlanStep):
 
     @if_exists.setter
     def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("DropWorkspaceStep.if_exists", value)
         self._if_exists = value
 
@@ -4229,6 +4436,7 @@ cdef class DropWorkspaceStep(PlanStep):
 
     @workspace_name.setter
     def workspace_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._workspace_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -4292,6 +4500,7 @@ cdef class ExceptStep(PlanStep):
 
     @left_relation_names.setter
     def left_relation_names(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._left_relation_names = _frozen_list("ExceptStep.left_relation_names", value)
 
     @property
@@ -4300,6 +4509,7 @@ cdef class ExceptStep(PlanStep):
 
     @modifier.setter
     def modifier(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._modifier = value
 
     @property
@@ -4308,6 +4518,7 @@ cdef class ExceptStep(PlanStep):
 
     @right_relation_names.setter
     def right_relation_names(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._right_relation_names = _frozen_list("ExceptStep.right_relation_names", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -4369,6 +4580,7 @@ cdef class ExitStep(PlanStep):
 
     @hidden_columns.setter
     def hidden_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._hidden_columns = _frozen_list("ExitStep.hidden_columns", value)
 
     @property
@@ -4377,6 +4589,7 @@ cdef class ExitStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -4435,6 +4648,7 @@ cdef class ExplainStep(PlanStep):
 
     @analyze.setter
     def analyze(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("ExplainStep.analyze", value)
         self._analyze = value
 
@@ -4444,6 +4658,7 @@ cdef class ExplainStep(PlanStep):
 
     @format.setter
     def format(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._format = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -4516,6 +4731,7 @@ cdef class FilterStep(PlanStep):
 
     @alias.setter
     def alias(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._alias = value
 
     @property
@@ -4524,6 +4740,7 @@ cdef class FilterStep(PlanStep):
 
     @condition.setter
     def condition(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_expression("FilterStep.condition", value)
         self._condition = value
 
@@ -4533,6 +4750,7 @@ cdef class FilterStep(PlanStep):
 
     @deep_restore_target.setter
     def deep_restore_target(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("FilterStep.deep_restore_target", value)
         self._deep_restore_target = value
 
@@ -4542,6 +4760,7 @@ cdef class FilterStep(PlanStep):
 
     @from_join_on.setter
     def from_join_on(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("FilterStep.from_join_on", value)
         self._from_join_on = value
 
@@ -4551,6 +4770,7 @@ cdef class FilterStep(PlanStep):
 
     @pre_inline_columns.setter
     def pre_inline_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._pre_inline_columns = _require_expression_list("FilterStep.pre_inline_columns", value)
 
     @property
@@ -4559,6 +4779,7 @@ cdef class FilterStep(PlanStep):
 
     @pre_inline_condition.setter
     def pre_inline_condition(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_expression("FilterStep.pre_inline_condition", value)
         self._pre_inline_condition = value
 
@@ -4568,6 +4789,7 @@ cdef class FilterStep(PlanStep):
 
     @pre_inline_relations.setter
     def pre_inline_relations(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._pre_inline_relations = value
 
     @property
@@ -4576,6 +4798,7 @@ cdef class FilterStep(PlanStep):
 
     @relations.setter
     def relations(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relations = value
 
     @property
@@ -4584,6 +4807,7 @@ cdef class FilterStep(PlanStep):
 
     @sources.setter
     def sources(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._sources = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -4675,6 +4899,7 @@ cdef class FramedWindowStep(PlanStep):
 
     @order_by.setter
     def order_by(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._order_by = _require_order_list("FramedWindowStep.order_by", value)
 
     @property
@@ -4683,6 +4908,7 @@ cdef class FramedWindowStep(PlanStep):
 
     @output_relation.setter
     def output_relation(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._output_relation = value
 
     @property
@@ -4691,6 +4917,7 @@ cdef class FramedWindowStep(PlanStep):
 
     @outputs.setter
     def outputs(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._outputs = _frozen_list("FramedWindowStep.outputs", value)
 
     @property
@@ -4699,6 +4926,7 @@ cdef class FramedWindowStep(PlanStep):
 
     @partition_by.setter
     def partition_by(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._partition_by = _require_expression_list("FramedWindowStep.partition_by", value)
 
     @property
@@ -4707,6 +4935,7 @@ cdef class FramedWindowStep(PlanStep):
 
     @window_functions.setter
     def window_functions(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._window_functions = _require_window_functions("FramedWindowStep.window_functions", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -4834,6 +5063,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @alias.setter
     def alias(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._alias = value
 
     @property
@@ -4842,6 +5072,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @args.setter
     def args(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._args = _require_expression_list("FunctionDatasetStep.args", value)
 
     @property
@@ -4850,6 +5081,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @column_aliases.setter
     def column_aliases(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._column_aliases = value
 
     @property
@@ -4858,6 +5090,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -4866,6 +5099,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @csv_fail_on_error.setter
     def csv_fail_on_error(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("FunctionDatasetStep.csv_fail_on_error", value)
         self._csv_fail_on_error = value
 
@@ -4875,6 +5109,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @csv_files.setter
     def csv_files(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._csv_files = _frozen_list("FunctionDatasetStep.csv_files", value)
 
     @property
@@ -4883,6 +5118,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @csv_has_header_row.setter
     def csv_has_header_row(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("FunctionDatasetStep.csv_has_header_row", value)
         self._csv_has_header_row = value
 
@@ -4892,6 +5128,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @csv_infer_sample_size.setter
     def csv_infer_sample_size(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("FunctionDatasetStep.csv_infer_sample_size", value)
         self._csv_infer_sample_size = value
 
@@ -4901,6 +5138,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @csv_physical_by_identity.setter
     def csv_physical_by_identity(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._csv_physical_by_identity = value
 
     @property
@@ -4909,6 +5147,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @csv_physical_columns.setter
     def csv_physical_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._csv_physical_columns = _frozen_list("FunctionDatasetStep.csv_physical_columns", value)
 
     @property
@@ -4917,6 +5156,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @csv_separator.setter
     def csv_separator(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._csv_separator = value
 
     @property
@@ -4925,6 +5165,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @dataset.setter
     def dataset(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._dataset = value
 
     @property
@@ -4933,6 +5174,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @function.setter
     def function(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._function = value
 
     @property
@@ -4941,6 +5183,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @hints.setter
     def hints(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._hints = _frozen_list("FunctionDatasetStep.hints", value)
 
     @property
@@ -4949,6 +5192,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @jsonl_fail_on_error.setter
     def jsonl_fail_on_error(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("FunctionDatasetStep.jsonl_fail_on_error", value)
         self._jsonl_fail_on_error = value
 
@@ -4958,6 +5202,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @jsonl_files.setter
     def jsonl_files(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._jsonl_files = _frozen_list("FunctionDatasetStep.jsonl_files", value)
 
     @property
@@ -4966,6 +5211,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @jsonl_infer_sample_size.setter
     def jsonl_infer_sample_size(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("FunctionDatasetStep.jsonl_infer_sample_size", value)
         self._jsonl_infer_sample_size = value
 
@@ -4975,6 +5221,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @jsonl_infer_schema.setter
     def jsonl_infer_schema(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("FunctionDatasetStep.jsonl_infer_schema", value)
         self._jsonl_infer_schema = value
 
@@ -4984,6 +5231,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @jsonl_physical_by_identity.setter
     def jsonl_physical_by_identity(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._jsonl_physical_by_identity = value
 
     @property
@@ -4992,6 +5240,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @jsonl_physical_columns.setter
     def jsonl_physical_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._jsonl_physical_columns = _frozen_list("FunctionDatasetStep.jsonl_physical_columns", value)
 
     @property
@@ -5000,6 +5249,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @manifest.setter
     def manifest(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._manifest = value
 
     @property
@@ -5008,6 +5258,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @named_args.setter
     def named_args(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._named_args = _require_expression_dict("FunctionDatasetStep.named_args", value)
 
     @property
@@ -5016,6 +5267,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @predicates.setter
     def predicates(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._predicates = _require_expression_list("FunctionDatasetStep.predicates", value)
 
     @property
@@ -5024,6 +5276,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @relation.setter
     def relation(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation = value
 
     @property
@@ -5032,6 +5285,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     @property
@@ -5040,6 +5294,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @schema.setter
     def schema(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._schema = value
 
     @property
@@ -5048,6 +5303,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @series_column.setter
     def series_column(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._series_column = value
 
     @property
@@ -5056,6 +5312,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @unnest_target.setter
     def unnest_target(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._unnest_target = value
 
     @property
@@ -5064,6 +5321,7 @@ cdef class FunctionDatasetStep(PlanStep):
 
     @values.setter
     def values(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._values = _require_rows("FunctionDatasetStep.values", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -5219,6 +5477,7 @@ cdef class GrantAccessStep(PlanStep):
 
     @execution_context.setter
     def execution_context(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._execution_context = value
 
     @property
@@ -5227,6 +5486,7 @@ cdef class GrantAccessStep(PlanStep):
 
     @object_kind.setter
     def object_kind(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._object_kind = value
 
     @property
@@ -5235,6 +5495,7 @@ cdef class GrantAccessStep(PlanStep):
 
     @object_name.setter
     def object_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._object_name = value
 
     @property
@@ -5243,6 +5504,7 @@ cdef class GrantAccessStep(PlanStep):
 
     @pattern.setter
     def pattern(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._pattern = value
 
     @property
@@ -5251,6 +5513,7 @@ cdef class GrantAccessStep(PlanStep):
 
     @principal.setter
     def principal(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._principal = value
 
     @property
@@ -5259,6 +5522,7 @@ cdef class GrantAccessStep(PlanStep):
 
     @role.setter
     def role(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._role = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -5331,6 +5595,7 @@ cdef class HeapSortStep(PlanStep):
 
     @limit.setter
     def limit(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("HeapSortStep.limit", value)
         self._limit = value
 
@@ -5340,6 +5605,7 @@ cdef class HeapSortStep(PlanStep):
 
     @order_by.setter
     def order_by(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._order_by = _require_order_list("HeapSortStep.order_by", value)
 
     @property
@@ -5348,6 +5614,7 @@ cdef class HeapSortStep(PlanStep):
 
     @vector_topk_candidate.setter
     def vector_topk_candidate(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("HeapSortStep.vector_topk_candidate", value)
         self._vector_topk_candidate = value
 
@@ -5450,6 +5717,7 @@ cdef class InsertStep(PlanStep):
 
     @column_mapping.setter
     def column_mapping(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._column_mapping = _frozen_list("InsertStep.column_mapping", value)
 
     @property
@@ -5458,6 +5726,7 @@ cdef class InsertStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -5466,6 +5735,7 @@ cdef class InsertStep(PlanStep):
 
     @create_target.setter
     def create_target(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("InsertStep.create_target", value)
         self._create_target = value
 
@@ -5475,6 +5745,7 @@ cdef class InsertStep(PlanStep):
 
     @defining_query.setter
     def defining_query(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._defining_query = value
 
     @property
@@ -5483,6 +5754,7 @@ cdef class InsertStep(PlanStep):
 
     @executing_task.setter
     def executing_task(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._executing_task = value
 
     @property
@@ -5491,6 +5763,7 @@ cdef class InsertStep(PlanStep):
 
     @explicit_columns.setter
     def explicit_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._explicit_columns = value
 
     @property
@@ -5499,6 +5772,7 @@ cdef class InsertStep(PlanStep):
 
     @if_not_exists.setter
     def if_not_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("InsertStep.if_not_exists", value)
         self._if_not_exists = value
 
@@ -5508,6 +5782,7 @@ cdef class InsertStep(PlanStep):
 
     @is_materialized_view.setter
     def is_materialized_view(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("InsertStep.is_materialized_view", value)
         self._is_materialized_view = value
 
@@ -5517,6 +5792,7 @@ cdef class InsertStep(PlanStep):
 
     @is_noop.setter
     def is_noop(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("InsertStep.is_noop", value)
         self._is_noop = value
 
@@ -5526,6 +5802,7 @@ cdef class InsertStep(PlanStep):
 
     @is_refresh.setter
     def is_refresh(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("InsertStep.is_refresh", value)
         self._is_refresh = value
 
@@ -5535,6 +5812,7 @@ cdef class InsertStep(PlanStep):
 
     @is_replace.setter
     def is_replace(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("InsertStep.is_replace", value)
         self._is_replace = value
 
@@ -5544,6 +5822,7 @@ cdef class InsertStep(PlanStep):
 
     @or_replace.setter
     def or_replace(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("InsertStep.or_replace", value)
         self._or_replace = value
 
@@ -5553,6 +5832,7 @@ cdef class InsertStep(PlanStep):
 
     @produced_by.setter
     def produced_by(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._produced_by = value
 
     @property
@@ -5561,6 +5841,7 @@ cdef class InsertStep(PlanStep):
 
     @read_sources.setter
     def read_sources(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._read_sources = _frozen_list("InsertStep.read_sources", value)
 
     @property
@@ -5569,6 +5850,7 @@ cdef class InsertStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     @property
@@ -5577,6 +5859,7 @@ cdef class InsertStep(PlanStep):
 
     @source_tables.setter
     def source_tables(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._source_tables = _frozen_list("InsertStep.source_tables", value)
 
     @property
@@ -5585,6 +5868,7 @@ cdef class InsertStep(PlanStep):
 
     @source_tail_id.setter
     def source_tail_id(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("InsertStep.source_tail_id", value)
         self._source_tail_id = value
 
@@ -5594,6 +5878,7 @@ cdef class InsertStep(PlanStep):
 
     @target_column_names.setter
     def target_column_names(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._target_column_names = _frozen_list("InsertStep.target_column_names", value)
 
     @property
@@ -5602,6 +5887,7 @@ cdef class InsertStep(PlanStep):
 
     @target_schema.setter
     def target_schema(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._target_schema = value
 
     @property
@@ -5610,6 +5896,7 @@ cdef class InsertStep(PlanStep):
 
     @values_feeder.setter
     def values_feeder(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_plan_step("InsertStep.values_feeder", value)
         self._values_feeder = value
 
@@ -5619,6 +5906,7 @@ cdef class InsertStep(PlanStep):
 
     @write_coalesce_rows.setter
     def write_coalesce_rows(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("InsertStep.write_coalesce_rows", value)
         self._write_coalesce_rows = value
 
@@ -5737,6 +6025,7 @@ cdef class IntersectStep(PlanStep):
 
     @left_relation_names.setter
     def left_relation_names(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._left_relation_names = _frozen_list("IntersectStep.left_relation_names", value)
 
     @property
@@ -5745,6 +6034,7 @@ cdef class IntersectStep(PlanStep):
 
     @modifier.setter
     def modifier(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._modifier = value
 
     @property
@@ -5753,6 +6043,7 @@ cdef class IntersectStep(PlanStep):
 
     @right_relation_names.setter
     def right_relation_names(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._right_relation_names = _frozen_list("IntersectStep.right_relation_names", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -5876,6 +6167,7 @@ cdef class JoinStep(PlanStep):
 
     @alias.setter
     def alias(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._alias = value
 
     @property
@@ -5884,6 +6176,7 @@ cdef class JoinStep(PlanStep):
 
     @asof_condition.setter
     def asof_condition(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_expression("JoinStep.asof_condition", value)
         self._asof_condition = value
 
@@ -5893,6 +6186,7 @@ cdef class JoinStep(PlanStep):
 
     @asof_left_column.setter
     def asof_left_column(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._asof_left_column = value
 
     @property
@@ -5901,6 +6195,7 @@ cdef class JoinStep(PlanStep):
 
     @asof_op.setter
     def asof_op(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._asof_op = value
 
     @property
@@ -5909,6 +6204,7 @@ cdef class JoinStep(PlanStep):
 
     @asof_right_column.setter
     def asof_right_column(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._asof_right_column = value
 
     @property
@@ -5917,6 +6213,7 @@ cdef class JoinStep(PlanStep):
 
     @band_column.setter
     def band_column(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._band_column = value
 
     @property
@@ -5925,6 +6222,7 @@ cdef class JoinStep(PlanStep):
 
     @band_column_name.setter
     def band_column_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._band_column_name = value
 
     @property
@@ -5933,6 +6231,7 @@ cdef class JoinStep(PlanStep):
 
     @band_lower.setter
     def band_lower(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_expression("JoinStep.band_lower", value)
         self._band_lower = value
 
@@ -5942,6 +6241,7 @@ cdef class JoinStep(PlanStep):
 
     @band_lower_closed.setter
     def band_lower_closed(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("JoinStep.band_lower_closed", value)
         self._band_lower_closed = value
 
@@ -5951,6 +6251,7 @@ cdef class JoinStep(PlanStep):
 
     @band_upper.setter
     def band_upper(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_expression("JoinStep.band_upper", value)
         self._band_upper = value
 
@@ -5960,6 +6261,7 @@ cdef class JoinStep(PlanStep):
 
     @band_upper_closed.setter
     def band_upper_closed(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("JoinStep.band_upper_closed", value)
         self._band_upper_closed = value
 
@@ -5969,6 +6271,7 @@ cdef class JoinStep(PlanStep):
 
     @existence_column.setter
     def existence_column(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_expression("JoinStep.existence_column", value)
         self._existence_column = value
 
@@ -5978,6 +6281,7 @@ cdef class JoinStep(PlanStep):
 
     @existence_three_valued.setter
     def existence_three_valued(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("JoinStep.existence_three_valued", value)
         self._existence_three_valued = value
 
@@ -5987,6 +6291,7 @@ cdef class JoinStep(PlanStep):
 
     @implied_join.setter
     def implied_join(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("JoinStep.implied_join", value)
         self._implied_join = value
 
@@ -5996,6 +6301,7 @@ cdef class JoinStep(PlanStep):
 
     @is_window_join.setter
     def is_window_join(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("JoinStep.is_window_join", value)
         self._is_window_join = value
 
@@ -6005,6 +6311,7 @@ cdef class JoinStep(PlanStep):
 
     @left_column.setter
     def left_column(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._left_column = value
 
     @property
@@ -6013,6 +6320,7 @@ cdef class JoinStep(PlanStep):
 
     @left_columns.setter
     def left_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._left_columns = _frozen_list("JoinStep.left_columns", value)
 
     @property
@@ -6021,6 +6329,7 @@ cdef class JoinStep(PlanStep):
 
     @left_readers.setter
     def left_readers(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._left_readers = _frozen_list("JoinStep.left_readers", value)
 
     @property
@@ -6029,6 +6338,7 @@ cdef class JoinStep(PlanStep):
 
     @left_relation_names.setter
     def left_relation_names(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._left_relation_names = _frozen_list("JoinStep.left_relation_names", value)
 
     @property
@@ -6037,6 +6347,7 @@ cdef class JoinStep(PlanStep):
 
     @on.setter
     def on(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_expression("JoinStep.on", value)
         self._on = value
 
@@ -6046,6 +6357,7 @@ cdef class JoinStep(PlanStep):
 
     @reducer_applied.setter
     def reducer_applied(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("JoinStep.reducer_applied", value)
         self._reducer_applied = value
 
@@ -6055,6 +6367,7 @@ cdef class JoinStep(PlanStep):
 
     @relation_names.setter
     def relation_names(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_names = _frozen_list("JoinStep.relation_names", value)
 
     @property
@@ -6063,6 +6376,7 @@ cdef class JoinStep(PlanStep):
 
     @residual.setter
     def residual(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_expression("JoinStep.residual", value)
         self._residual = value
 
@@ -6072,6 +6386,7 @@ cdef class JoinStep(PlanStep):
 
     @right_column.setter
     def right_column(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._right_column = value
 
     @property
@@ -6080,6 +6395,7 @@ cdef class JoinStep(PlanStep):
 
     @right_columns.setter
     def right_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._right_columns = _frozen_list("JoinStep.right_columns", value)
 
     @property
@@ -6088,6 +6404,7 @@ cdef class JoinStep(PlanStep):
 
     @right_readers.setter
     def right_readers(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._right_readers = _frozen_list("JoinStep.right_readers", value)
 
     @property
@@ -6096,6 +6413,7 @@ cdef class JoinStep(PlanStep):
 
     @right_relation_names.setter
     def right_relation_names(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._right_relation_names = _frozen_list("JoinStep.right_relation_names", value)
 
     @property
@@ -6104,6 +6422,7 @@ cdef class JoinStep(PlanStep):
 
     @schemas.setter
     def schemas(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._schemas = value
 
     @property
@@ -6112,6 +6431,7 @@ cdef class JoinStep(PlanStep):
 
     @setop_leg_columns.setter
     def setop_leg_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._setop_leg_columns = _frozen_list("JoinStep.setop_leg_columns", value)
 
     @property
@@ -6120,6 +6440,7 @@ cdef class JoinStep(PlanStep):
 
     @swap_build_side.setter
     def swap_build_side(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("JoinStep.swap_build_side", value)
         self._swap_build_side = value
 
@@ -6129,6 +6450,7 @@ cdef class JoinStep(PlanStep):
 
     @type.setter
     def type(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._type = value
 
     @property
@@ -6137,6 +6459,7 @@ cdef class JoinStep(PlanStep):
 
     @using.setter
     def using(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._using = _require_expression_list("JoinStep.using", value)
 
     @property
@@ -6145,6 +6468,7 @@ cdef class JoinStep(PlanStep):
 
     @using_merged.setter
     def using_merged(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._using_merged = _frozen_list("JoinStep.using_merged", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -6312,6 +6636,7 @@ cdef class LimitStep(PlanStep):
 
     @alias.setter
     def alias(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._alias = value
 
     @property
@@ -6320,6 +6645,7 @@ cdef class LimitStep(PlanStep):
 
     @limit.setter
     def limit(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("LimitStep.limit", value)
         self._limit = value
 
@@ -6329,6 +6655,7 @@ cdef class LimitStep(PlanStep):
 
     @offset.setter
     def offset(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("LimitStep.offset", value)
         self._offset = value
 
@@ -6397,6 +6724,7 @@ cdef class ListenStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -6405,6 +6733,7 @@ cdef class ListenStep(PlanStep):
 
     @execution_context.setter
     def execution_context(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._execution_context = value
 
     @property
@@ -6413,6 +6742,7 @@ cdef class ListenStep(PlanStep):
 
     @object_kind.setter
     def object_kind(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._object_kind = value
 
     @property
@@ -6421,6 +6751,7 @@ cdef class ListenStep(PlanStep):
 
     @outcome.setter
     def outcome(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._outcome = value
 
     @property
@@ -6429,6 +6760,7 @@ cdef class ListenStep(PlanStep):
 
     @task_name.setter
     def task_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._task_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -6510,6 +6842,7 @@ cdef class MaterializedCteRefStep(PlanStep):
 
     @alias.setter
     def alias(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._alias = value
 
     @property
@@ -6518,6 +6851,7 @@ cdef class MaterializedCteRefStep(PlanStep):
 
     @cte_column_map.setter
     def cte_column_map(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._cte_column_map = value
 
     @property
@@ -6526,6 +6860,7 @@ cdef class MaterializedCteRefStep(PlanStep):
 
     @cte_key.setter
     def cte_key(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._cte_key = value
 
     @property
@@ -6534,6 +6869,7 @@ cdef class MaterializedCteRefStep(PlanStep):
 
     @cte_name.setter
     def cte_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._cte_name = value
 
     @property
@@ -6542,6 +6878,7 @@ cdef class MaterializedCteRefStep(PlanStep):
 
     @hint_settings.setter
     def hint_settings(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._hint_settings = _require_expression_dict("MaterializedCteRefStep.hint_settings", value)
 
     @property
@@ -6550,6 +6887,7 @@ cdef class MaterializedCteRefStep(PlanStep):
 
     @hints.setter
     def hints(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._hints = _frozen_list("MaterializedCteRefStep.hints", value)
 
     @property
@@ -6558,6 +6896,7 @@ cdef class MaterializedCteRefStep(PlanStep):
 
     @relation.setter
     def relation(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation = value
 
     @property
@@ -6566,6 +6905,7 @@ cdef class MaterializedCteRefStep(PlanStep):
 
     @schema.setter
     def schema(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._schema = value
 
     @property
@@ -6574,6 +6914,7 @@ cdef class MaterializedCteRefStep(PlanStep):
 
     @unpruned_columns.setter
     def unpruned_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._unpruned_columns = _frozen_list("MaterializedCteRefStep.unpruned_columns", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -6673,6 +7014,7 @@ cdef class MergeStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -6681,6 +7023,7 @@ cdef class MergeStep(PlanStep):
 
     @file_paths.setter
     def file_paths(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._file_paths = _frozen_list("MergeStep.file_paths", value)
 
     @property
@@ -6689,6 +7032,7 @@ cdef class MergeStep(PlanStep):
 
     @operation.setter
     def operation(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._operation = value
 
     @property
@@ -6697,6 +7041,7 @@ cdef class MergeStep(PlanStep):
 
     @produced_by.setter
     def produced_by(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._produced_by = value
 
     @property
@@ -6705,6 +7050,7 @@ cdef class MergeStep(PlanStep):
 
     @read_sources.setter
     def read_sources(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._read_sources = _frozen_list("MergeStep.read_sources", value)
 
     @property
@@ -6713,6 +7059,7 @@ cdef class MergeStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     @property
@@ -6721,6 +7068,7 @@ cdef class MergeStep(PlanStep):
 
     @source_tail_id.setter
     def source_tail_id(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("MergeStep.source_tail_id", value)
         self._source_tail_id = value
 
@@ -6730,6 +7078,7 @@ cdef class MergeStep(PlanStep):
 
     @statement_name.setter
     def statement_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._statement_name = value
 
     @property
@@ -6738,6 +7087,7 @@ cdef class MergeStep(PlanStep):
 
     @target_alias.setter
     def target_alias(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._target_alias = value
 
     @property
@@ -6746,6 +7096,7 @@ cdef class MergeStep(PlanStep):
 
     @target_column_names.setter
     def target_column_names(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._target_column_names = value
 
     @property
@@ -6754,6 +7105,7 @@ cdef class MergeStep(PlanStep):
 
     @target_schema.setter
     def target_schema(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._target_schema = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -6839,6 +7191,7 @@ cdef class OrderStep(PlanStep):
 
     @alias.setter
     def alias(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._alias = value
 
     @property
@@ -6847,6 +7200,7 @@ cdef class OrderStep(PlanStep):
 
     @order_by.setter
     def order_by(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._order_by = _require_order_list("OrderStep.order_by", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -6919,6 +7273,7 @@ cdef class ProjectStep(PlanStep):
 
     @alias.setter
     def alias(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._alias = value
 
     @property
@@ -6927,6 +7282,7 @@ cdef class ProjectStep(PlanStep):
 
     @estimated_row_count.setter
     def estimated_row_count(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("ProjectStep.estimated_row_count", value)
         self._estimated_row_count = value
 
@@ -6936,6 +7292,7 @@ cdef class ProjectStep(PlanStep):
 
     @except_columns.setter
     def except_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._except_columns = _require_expression_list("ProjectStep.except_columns", value)
 
     @property
@@ -6944,6 +7301,7 @@ cdef class ProjectStep(PlanStep):
 
     @hidden_columns.setter
     def hidden_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._hidden_columns = _frozen_list("ProjectStep.hidden_columns", value)
 
     @property
@@ -6952,6 +7310,7 @@ cdef class ProjectStep(PlanStep):
 
     @hoisted_columns.setter
     def hoisted_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._hoisted_columns = _require_expression_list("ProjectStep.hoisted_columns", value)
 
     @property
@@ -6960,6 +7319,7 @@ cdef class ProjectStep(PlanStep):
 
     @passthrough_columns.setter
     def passthrough_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._passthrough_columns = _require_expression_list("ProjectStep.passthrough_columns", value)
 
     @property
@@ -6968,6 +7328,7 @@ cdef class ProjectStep(PlanStep):
 
     @schema.setter
     def schema(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._schema = value
 
     @property
@@ -6976,6 +7337,7 @@ cdef class ProjectStep(PlanStep):
 
     @sources.setter
     def sources(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._sources = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -7064,6 +7426,7 @@ cdef class RenameColumnStep(PlanStep):
 
     @column_name.setter
     def column_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._column_name = value
 
     @property
@@ -7072,6 +7435,7 @@ cdef class RenameColumnStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -7080,6 +7444,7 @@ cdef class RenameColumnStep(PlanStep):
 
     @if_exists.setter
     def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("RenameColumnStep.if_exists", value)
         self._if_exists = value
 
@@ -7089,6 +7454,7 @@ cdef class RenameColumnStep(PlanStep):
 
     @new_column_name.setter
     def new_column_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._new_column_name = value
 
     @property
@@ -7097,6 +7463,7 @@ cdef class RenameColumnStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -7168,6 +7535,7 @@ cdef class RenameRelationStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -7176,6 +7544,7 @@ cdef class RenameRelationStep(PlanStep):
 
     @if_exists.setter
     def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("RenameRelationStep.if_exists", value)
         self._if_exists = value
 
@@ -7185,6 +7554,7 @@ cdef class RenameRelationStep(PlanStep):
 
     @new_relation_name.setter
     def new_relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._new_relation_name = value
 
     @property
@@ -7193,6 +7563,7 @@ cdef class RenameRelationStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -7259,6 +7630,7 @@ cdef class ResyncRelationStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -7267,6 +7639,7 @@ cdef class ResyncRelationStep(PlanStep):
 
     @force.setter
     def force(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("ResyncRelationStep.force", value)
         self._force = value
 
@@ -7276,6 +7649,7 @@ cdef class ResyncRelationStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -7345,6 +7719,7 @@ cdef class RevokeAccessStep(PlanStep):
 
     @execution_context.setter
     def execution_context(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._execution_context = value
 
     @property
@@ -7353,6 +7728,7 @@ cdef class RevokeAccessStep(PlanStep):
 
     @object_kind.setter
     def object_kind(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._object_kind = value
 
     @property
@@ -7361,6 +7737,7 @@ cdef class RevokeAccessStep(PlanStep):
 
     @object_name.setter
     def object_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._object_name = value
 
     @property
@@ -7369,6 +7746,7 @@ cdef class RevokeAccessStep(PlanStep):
 
     @pattern.setter
     def pattern(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._pattern = value
 
     @property
@@ -7377,6 +7755,7 @@ cdef class RevokeAccessStep(PlanStep):
 
     @principal.setter
     def principal(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._principal = value
 
     @property
@@ -7385,6 +7764,7 @@ cdef class RevokeAccessStep(PlanStep):
 
     @role.setter
     def role(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._role = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -7459,6 +7839,7 @@ cdef class RollbackRelationStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -7467,6 +7848,7 @@ cdef class RollbackRelationStep(PlanStep):
 
     @if_exists.setter
     def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("RollbackRelationStep.if_exists", value)
         self._if_exists = value
 
@@ -7476,6 +7858,7 @@ cdef class RollbackRelationStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     @property
@@ -7484,6 +7867,7 @@ cdef class RollbackRelationStep(PlanStep):
 
     @version_spec.setter
     def version_spec(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._version_spec = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -7600,6 +7984,7 @@ cdef class ScanStep(PlanStep):
     cdef str _source
     cdef object _start_date
     cdef object _topn_descending
+    cdef object _topn_nulls_first
     cdef object _topn_limit
     cdef tuple _topn_order_by
     cdef bytes _topn_sort_identity
@@ -7609,7 +7994,7 @@ cdef class ScanStep(PlanStep):
     cdef str _version_tag
     cdef str _via_view
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, at_date=None, connector=None, dataset_committed_at=None, emit_row_identity=None, end_date=None, for_manifest_only=None, for_snapshots_only=None, hint_settings=None, hints=None, history_view=None, internal_relation=None, length_only_columns=None, limit=None, manifest=None, pending_cte_key=None, predicates=None, pushed_aggregates=None, pushed_distinct=None, pushed_groups=None, relation=None, resolved_dataset=None, row_identity_statement=None, schema=None, source=None, start_date=None, topn_descending=None, topn_limit=None, topn_order_by=None, topn_sort_identity=None, topn_sort_name=None, unpruned_columns=None, version=None, version_tag=None, via_view=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, at_date=None, connector=None, dataset_committed_at=None, emit_row_identity=None, end_date=None, for_manifest_only=None, for_snapshots_only=None, hint_settings=None, hints=None, history_view=None, internal_relation=None, length_only_columns=None, limit=None, manifest=None, pending_cte_key=None, predicates=None, pushed_aggregates=None, pushed_distinct=None, pushed_groups=None, relation=None, resolved_dataset=None, row_identity_statement=None, schema=None, source=None, start_date=None, topn_descending=None, topn_limit=None, topn_nulls_first=None, topn_order_by=None, topn_sort_identity=None, topn_sort_name=None, unpruned_columns=None, version=None, version_tag=None, via_view=None):
         self.node_type = _step_types().Scan
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.alias = alias
@@ -7639,6 +8024,7 @@ cdef class ScanStep(PlanStep):
         self.source = source
         self.start_date = start_date
         self.topn_descending = topn_descending
+        self.topn_nulls_first = topn_nulls_first
         self.topn_limit = topn_limit
         self.topn_order_by = topn_order_by
         self.topn_sort_identity = topn_sort_identity
@@ -7654,6 +8040,7 @@ cdef class ScanStep(PlanStep):
 
     @alias.setter
     def alias(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._alias = value
 
     @property
@@ -7662,6 +8049,7 @@ cdef class ScanStep(PlanStep):
 
     @at_date.setter
     def at_date(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._at_date = value
 
     @property
@@ -7670,6 +8058,7 @@ cdef class ScanStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -7678,6 +8067,7 @@ cdef class ScanStep(PlanStep):
 
     @dataset_committed_at.setter
     def dataset_committed_at(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("ScanStep.dataset_committed_at", value)
         self._dataset_committed_at = value
 
@@ -7687,6 +8077,7 @@ cdef class ScanStep(PlanStep):
 
     @emit_row_identity.setter
     def emit_row_identity(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("ScanStep.emit_row_identity", value)
         self._emit_row_identity = value
 
@@ -7696,6 +8087,7 @@ cdef class ScanStep(PlanStep):
 
     @end_date.setter
     def end_date(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._end_date = value
 
     @property
@@ -7704,6 +8096,7 @@ cdef class ScanStep(PlanStep):
 
     @for_manifest_only.setter
     def for_manifest_only(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("ScanStep.for_manifest_only", value)
         self._for_manifest_only = value
 
@@ -7713,6 +8106,7 @@ cdef class ScanStep(PlanStep):
 
     @for_snapshots_only.setter
     def for_snapshots_only(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("ScanStep.for_snapshots_only", value)
         self._for_snapshots_only = value
 
@@ -7722,6 +8116,7 @@ cdef class ScanStep(PlanStep):
 
     @hint_settings.setter
     def hint_settings(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._hint_settings = _require_expression_dict("ScanStep.hint_settings", value)
 
     @property
@@ -7730,6 +8125,7 @@ cdef class ScanStep(PlanStep):
 
     @hints.setter
     def hints(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._hints = _frozen_list("ScanStep.hints", value)
 
     @property
@@ -7738,6 +8134,7 @@ cdef class ScanStep(PlanStep):
 
     @history_view.setter
     def history_view(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._history_view = value
 
     @property
@@ -7746,6 +8143,7 @@ cdef class ScanStep(PlanStep):
 
     @internal_relation.setter
     def internal_relation(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("ScanStep.internal_relation", value)
         self._internal_relation = value
 
@@ -7755,6 +8153,7 @@ cdef class ScanStep(PlanStep):
 
     @length_only_columns.setter
     def length_only_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._length_only_columns = value
 
     @property
@@ -7763,6 +8162,7 @@ cdef class ScanStep(PlanStep):
 
     @limit.setter
     def limit(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("ScanStep.limit", value)
         self._limit = value
 
@@ -7772,6 +8172,7 @@ cdef class ScanStep(PlanStep):
 
     @manifest.setter
     def manifest(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._manifest = value
 
     @property
@@ -7780,6 +8181,7 @@ cdef class ScanStep(PlanStep):
 
     @pending_cte_key.setter
     def pending_cte_key(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._pending_cte_key = value
 
     @property
@@ -7788,6 +8190,7 @@ cdef class ScanStep(PlanStep):
 
     @predicates.setter
     def predicates(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._predicates = _require_expression_list("ScanStep.predicates", value)
 
     @property
@@ -7796,6 +8199,7 @@ cdef class ScanStep(PlanStep):
 
     @pushed_aggregates.setter
     def pushed_aggregates(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._pushed_aggregates = _require_expression_list("ScanStep.pushed_aggregates", value)
 
     @property
@@ -7804,6 +8208,7 @@ cdef class ScanStep(PlanStep):
 
     @pushed_distinct.setter
     def pushed_distinct(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("ScanStep.pushed_distinct", value)
         self._pushed_distinct = value
 
@@ -7813,6 +8218,7 @@ cdef class ScanStep(PlanStep):
 
     @pushed_groups.setter
     def pushed_groups(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._pushed_groups = _require_expression_list("ScanStep.pushed_groups", value)
 
     @property
@@ -7821,6 +8227,7 @@ cdef class ScanStep(PlanStep):
 
     @relation.setter
     def relation(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation = value
 
     @property
@@ -7829,6 +8236,7 @@ cdef class ScanStep(PlanStep):
 
     @resolved_dataset.setter
     def resolved_dataset(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._resolved_dataset = value
 
     @property
@@ -7837,6 +8245,7 @@ cdef class ScanStep(PlanStep):
 
     @row_identity_statement.setter
     def row_identity_statement(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._row_identity_statement = value
 
     @property
@@ -7845,6 +8254,7 @@ cdef class ScanStep(PlanStep):
 
     @schema.setter
     def schema(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._schema = value
 
     @property
@@ -7853,6 +8263,7 @@ cdef class ScanStep(PlanStep):
 
     @source.setter
     def source(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._source = value
 
     @property
@@ -7861,6 +8272,7 @@ cdef class ScanStep(PlanStep):
 
     @start_date.setter
     def start_date(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._start_date = value
 
     @property
@@ -7869,8 +8281,19 @@ cdef class ScanStep(PlanStep):
 
     @topn_descending.setter
     def topn_descending(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("ScanStep.topn_descending", value)
         self._topn_descending = value
+
+    @property
+    def topn_nulls_first(self):
+        return self._topn_nulls_first
+
+    @topn_nulls_first.setter
+    def topn_nulls_first(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        _require_optional_bool("ScanStep.topn_nulls_first", value)
+        self._topn_nulls_first = value
 
     @property
     def topn_limit(self):
@@ -7878,6 +8301,7 @@ cdef class ScanStep(PlanStep):
 
     @topn_limit.setter
     def topn_limit(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("ScanStep.topn_limit", value)
         self._topn_limit = value
 
@@ -7887,6 +8311,7 @@ cdef class ScanStep(PlanStep):
 
     @topn_order_by.setter
     def topn_order_by(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._topn_order_by = _frozen_list("ScanStep.topn_order_by", value)
 
     @property
@@ -7895,6 +8320,7 @@ cdef class ScanStep(PlanStep):
 
     @topn_sort_identity.setter
     def topn_sort_identity(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._topn_sort_identity = value
 
     @property
@@ -7903,6 +8329,7 @@ cdef class ScanStep(PlanStep):
 
     @topn_sort_name.setter
     def topn_sort_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._topn_sort_name = value
 
     @property
@@ -7911,6 +8338,7 @@ cdef class ScanStep(PlanStep):
 
     @unpruned_columns.setter
     def unpruned_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._unpruned_columns = _frozen_list("ScanStep.unpruned_columns", value)
 
     @property
@@ -7919,6 +8347,7 @@ cdef class ScanStep(PlanStep):
 
     @version.setter
     def version(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("ScanStep.version", value)
         self._version = value
 
@@ -7928,6 +8357,7 @@ cdef class ScanStep(PlanStep):
 
     @version_tag.setter
     def version_tag(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._version_tag = value
 
     @property
@@ -7936,6 +8366,7 @@ cdef class ScanStep(PlanStep):
 
     @via_view.setter
     def via_view(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._via_view = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -7984,6 +8415,7 @@ cdef class ScanStep(PlanStep):
         out["source"] = self._source
         out["start_date"] = self._start_date
         out["topn_descending"] = self._topn_descending
+        out["topn_nulls_first"] = self._topn_nulls_first
         out["topn_limit"] = self._topn_limit
         out["topn_order_by"] = self._topn_order_by
         out["topn_sort_identity"] = self._topn_sort_identity
@@ -8031,6 +8463,7 @@ cdef class ScanStep(PlanStep):
         new._source = _copy_field(self._source, memo)
         new._start_date = _copy_field(self._start_date, memo)
         new._topn_descending = _copy_field(self._topn_descending, memo)
+        new._topn_nulls_first = _copy_field(self._topn_nulls_first, memo)
         new._topn_limit = _copy_field(self._topn_limit, memo)
         new._topn_order_by = _copy_field(self._topn_order_by, memo)
         new._topn_sort_identity = _copy_field(self._topn_sort_identity, memo)
@@ -8072,6 +8505,7 @@ cdef class ScanStep(PlanStep):
         new._source = self._source
         new._start_date = self._start_date
         new._topn_descending = self._topn_descending
+        new._topn_nulls_first = self._topn_nulls_first
         new._topn_limit = self._topn_limit
         new._topn_order_by = self._topn_order_by
         new._topn_sort_identity = self._topn_sort_identity
@@ -8103,6 +8537,7 @@ cdef class SetStep(PlanStep):
 
     @value.setter
     def value(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_expression("SetStep.value", value)
         self._value = value
 
@@ -8112,6 +8547,7 @@ cdef class SetStep(PlanStep):
 
     @variable.setter
     def variable(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._variable = value
 
     @property
@@ -8120,6 +8556,7 @@ cdef class SetStep(PlanStep):
 
     @variables.setter
     def variables(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._variables = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -8187,6 +8624,7 @@ cdef class ShowStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -8195,6 +8633,7 @@ cdef class ShowStep(PlanStep):
 
     @object_name.setter
     def object_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._object_name = value
 
     @property
@@ -8203,6 +8642,7 @@ cdef class ShowStep(PlanStep):
 
     @object_type.setter
     def object_type(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._object_type = value
 
     @property
@@ -8211,6 +8651,7 @@ cdef class ShowStep(PlanStep):
 
     @trigger_name.setter
     def trigger_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._trigger_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -8279,6 +8720,7 @@ cdef class ShowColumnsStep(PlanStep):
 
     @extended.setter
     def extended(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("ShowColumnsStep.extended", value)
         self._extended = value
 
@@ -8288,6 +8730,7 @@ cdef class ShowColumnsStep(PlanStep):
 
     @full.setter
     def full(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("ShowColumnsStep.full", value)
         self._full = value
 
@@ -8297,6 +8740,7 @@ cdef class ShowColumnsStep(PlanStep):
 
     @relation.setter
     def relation(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation = value
 
     @property
@@ -8305,6 +8749,7 @@ cdef class ShowColumnsStep(PlanStep):
 
     @schema.setter
     def schema(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._schema = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -8375,6 +8820,7 @@ cdef class ShowEffectiveGrantsOnStep(PlanStep):
 
     @effective.setter
     def effective(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("ShowEffectiveGrantsOnStep.effective", value)
         self._effective = value
 
@@ -8384,6 +8830,7 @@ cdef class ShowEffectiveGrantsOnStep(PlanStep):
 
     @execution_context.setter
     def execution_context(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._execution_context = value
 
     @property
@@ -8392,6 +8839,7 @@ cdef class ShowEffectiveGrantsOnStep(PlanStep):
 
     @object_kind.setter
     def object_kind(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._object_kind = value
 
     @property
@@ -8400,6 +8848,7 @@ cdef class ShowEffectiveGrantsOnStep(PlanStep):
 
     @object_name.setter
     def object_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._object_name = value
 
     @property
@@ -8408,6 +8857,7 @@ cdef class ShowEffectiveGrantsOnStep(PlanStep):
 
     @pattern.setter
     def pattern(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._pattern = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -8481,6 +8931,7 @@ cdef class ShowGrantsOnStep(PlanStep):
 
     @effective.setter
     def effective(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("ShowGrantsOnStep.effective", value)
         self._effective = value
 
@@ -8490,6 +8941,7 @@ cdef class ShowGrantsOnStep(PlanStep):
 
     @execution_context.setter
     def execution_context(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._execution_context = value
 
     @property
@@ -8498,6 +8950,7 @@ cdef class ShowGrantsOnStep(PlanStep):
 
     @object_kind.setter
     def object_kind(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._object_kind = value
 
     @property
@@ -8506,6 +8959,7 @@ cdef class ShowGrantsOnStep(PlanStep):
 
     @object_name.setter
     def object_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._object_name = value
 
     @property
@@ -8514,6 +8968,7 @@ cdef class ShowGrantsOnStep(PlanStep):
 
     @pattern.setter
     def pattern(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._pattern = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -8585,6 +9040,7 @@ cdef class ShowLineageStep(PlanStep):
 
     @history_view.setter
     def history_view(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._history_view = value
 
     @property
@@ -8593,6 +9049,7 @@ cdef class ShowLineageStep(PlanStep):
 
     @lineage.setter
     def lineage(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._lineage = _frozen_list("ShowLineageStep.lineage", value)
 
     @property
@@ -8601,6 +9058,7 @@ cdef class ShowLineageStep(PlanStep):
 
     @relation.setter
     def relation(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation = value
 
     @property
@@ -8609,6 +9067,7 @@ cdef class ShowLineageStep(PlanStep):
 
     @schema.setter
     def schema(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._schema = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -8675,6 +9134,7 @@ cdef class ShowManifestStep(PlanStep):
 
     @manifest.setter
     def manifest(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._manifest = value
 
     @property
@@ -8683,6 +9143,7 @@ cdef class ShowManifestStep(PlanStep):
 
     @relation.setter
     def relation(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation = value
 
     @property
@@ -8691,6 +9152,7 @@ cdef class ShowManifestStep(PlanStep):
 
     @schema.setter
     def schema(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._schema = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -8756,6 +9218,7 @@ cdef class ShowSnapshotsStep(PlanStep):
 
     @history_view.setter
     def history_view(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._history_view = value
 
     @property
@@ -8764,6 +9227,7 @@ cdef class ShowSnapshotsStep(PlanStep):
 
     @relation.setter
     def relation(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation = value
 
     @property
@@ -8772,6 +9236,7 @@ cdef class ShowSnapshotsStep(PlanStep):
 
     @schema.setter
     def schema(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._schema = value
 
     @property
@@ -8780,6 +9245,7 @@ cdef class ShowSnapshotsStep(PlanStep):
 
     @snapshots.setter
     def snapshots(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._snapshots = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -8848,6 +9314,7 @@ cdef class ShowSourcesStep(PlanStep):
 
     @history_view.setter
     def history_view(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._history_view = value
 
     @property
@@ -8856,6 +9323,7 @@ cdef class ShowSourcesStep(PlanStep):
 
     @relation.setter
     def relation(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation = value
 
     @property
@@ -8864,6 +9332,7 @@ cdef class ShowSourcesStep(PlanStep):
 
     @schema.setter
     def schema(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._schema = value
 
     @property
@@ -8872,6 +9341,7 @@ cdef class ShowSourcesStep(PlanStep):
 
     @sources.setter
     def sources(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._sources = _frozen_list("ShowSourcesStep.sources", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -8946,6 +9416,7 @@ cdef class SubqueryStep(PlanStep):
 
     @alias.setter
     def alias(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._alias = value
 
     @property
@@ -8954,6 +9425,7 @@ cdef class SubqueryStep(PlanStep):
 
     @hint_settings.setter
     def hint_settings(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._hint_settings = _require_expression_dict("SubqueryStep.hint_settings", value)
 
     @property
@@ -8962,6 +9434,7 @@ cdef class SubqueryStep(PlanStep):
 
     @hints.setter
     def hints(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._hints = _frozen_list("SubqueryStep.hints", value)
 
     @property
@@ -8970,6 +9443,7 @@ cdef class SubqueryStep(PlanStep):
 
     @relation.setter
     def relation(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation = value
 
     @property
@@ -8978,6 +9452,7 @@ cdef class SubqueryStep(PlanStep):
 
     @schema.setter
     def schema(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._schema = value
 
     @property
@@ -8986,6 +9461,7 @@ cdef class SubqueryStep(PlanStep):
 
     @source_relations.setter
     def source_relations(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._source_relations = value
 
     @property
@@ -8994,6 +9470,7 @@ cdef class SubqueryStep(PlanStep):
 
     @unpruned_columns.setter
     def unpruned_columns(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._unpruned_columns = _frozen_list("SubqueryStep.unpruned_columns", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -9071,6 +9548,7 @@ cdef class TruncateRelationStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -9079,6 +9557,7 @@ cdef class TruncateRelationStep(PlanStep):
 
     @if_exists.setter
     def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("TruncateRelationStep.if_exists", value)
         self._if_exists = value
 
@@ -9088,6 +9567,7 @@ cdef class TruncateRelationStep(PlanStep):
 
     @relation_name.setter
     def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -9155,6 +9635,7 @@ cdef class UnionStep(PlanStep):
 
     @alias.setter
     def alias(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._alias = value
 
     @property
@@ -9163,6 +9644,7 @@ cdef class UnionStep(PlanStep):
 
     @left_relation_names.setter
     def left_relation_names(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._left_relation_names = _frozen_list("UnionStep.left_relation_names", value)
 
     @property
@@ -9171,6 +9653,7 @@ cdef class UnionStep(PlanStep):
 
     @modifier.setter
     def modifier(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._modifier = value
 
     @property
@@ -9179,6 +9662,7 @@ cdef class UnionStep(PlanStep):
 
     @right_relation_names.setter
     def right_relation_names(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._right_relation_names = _frozen_list("UnionStep.right_relation_names", value)
 
     @property
@@ -9187,6 +9671,7 @@ cdef class UnionStep(PlanStep):
 
     @sources.setter
     def sources(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._sources = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -9258,6 +9743,7 @@ cdef class UnlistenStep(PlanStep):
 
     @connector.setter
     def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
 
     @property
@@ -9266,6 +9752,7 @@ cdef class UnlistenStep(PlanStep):
 
     @execution_context.setter
     def execution_context(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._execution_context = value
 
     @property
@@ -9274,6 +9761,7 @@ cdef class UnlistenStep(PlanStep):
 
     @object_kind.setter
     def object_kind(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._object_kind = value
 
     @property
@@ -9282,6 +9770,7 @@ cdef class UnlistenStep(PlanStep):
 
     @task_name.setter
     def task_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._task_name = value
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -9358,6 +9847,7 @@ cdef class UnnestStep(PlanStep):
 
     @alias.setter
     def alias(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._alias = value
 
     @property
@@ -9366,6 +9856,7 @@ cdef class UnnestStep(PlanStep):
 
     @distinct_target.setter
     def distinct_target(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("UnnestStep.distinct_target", value)
         self._distinct_target = value
 
@@ -9375,6 +9866,7 @@ cdef class UnnestStep(PlanStep):
 
     @filter_conditions.setter
     def filter_conditions(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._filter_conditions = _require_expression_list("UnnestStep.filter_conditions", value)
 
     @property
@@ -9383,6 +9875,7 @@ cdef class UnnestStep(PlanStep):
 
     @type.setter
     def type(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._type = value
 
     @property
@@ -9391,6 +9884,7 @@ cdef class UnnestStep(PlanStep):
 
     @unnest_alias.setter
     def unnest_alias(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._unnest_alias = value
 
     @property
@@ -9399,6 +9893,7 @@ cdef class UnnestStep(PlanStep):
 
     @unnest_column.setter
     def unnest_column(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_expression("UnnestStep.unnest_column", value)
         self._unnest_column = value
 
@@ -9408,6 +9903,7 @@ cdef class UnnestStep(PlanStep):
 
     @unnest_function.setter
     def unnest_function(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._unnest_function = value
 
     @property
@@ -9416,6 +9912,7 @@ cdef class UnnestStep(PlanStep):
 
     @unnest_target.setter
     def unnest_target(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_expression("UnnestStep.unnest_target", value)
         self._unnest_target = value
 
@@ -9509,6 +10006,7 @@ cdef class WindowStep(PlanStep):
 
     @aggregates.setter
     def aggregates(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._aggregates = _require_expression_list("WindowStep.aggregates", value)
 
     @property
@@ -9517,6 +10015,7 @@ cdef class WindowStep(PlanStep):
 
     @order_by.setter
     def order_by(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._order_by = _require_order_list("WindowStep.order_by", value)
 
     @property
@@ -9525,6 +10024,7 @@ cdef class WindowStep(PlanStep):
 
     @output_relation.setter
     def output_relation(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._output_relation = value
 
     @property
@@ -9533,6 +10033,7 @@ cdef class WindowStep(PlanStep):
 
     @outputs.setter
     def outputs(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._outputs = _frozen_list("WindowStep.outputs", value)
 
     @property
@@ -9541,6 +10042,7 @@ cdef class WindowStep(PlanStep):
 
     @partition_by.setter
     def partition_by(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._partition_by = _require_expression_list("WindowStep.partition_by", value)
 
     @property
@@ -9549,6 +10051,7 @@ cdef class WindowStep(PlanStep):
 
     @top_k.setter
     def top_k(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("WindowStep.top_k", value)
         self._top_k = value
 
@@ -9558,6 +10061,7 @@ cdef class WindowStep(PlanStep):
 
     @window_functions.setter
     def window_functions(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._window_functions = _require_window_functions("WindowStep.window_functions", value)
 
     cpdef tuple expressions(self, bint include_columns=True):
@@ -9845,6 +10349,7 @@ cpdef frozenset steps_with(str field):
             "time_zone": frozenset({T.CreateTrigger}),
             "top_k": frozenset({T.Window}),
             "topn_descending": frozenset({T.Scan}),
+            "topn_nulls_first": frozenset({T.Scan}),
             "topn_limit": frozenset({T.Scan}),
             "topn_order_by": frozenset({T.Scan}),
             "topn_sort_identity": frozenset({T.Scan}),

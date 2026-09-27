@@ -47,6 +47,7 @@ def _resolve_wildcard_order_position(node: Expression, context: BindingContext) 
                     source=None,
                     alias=schema_col.name,
                     schema_column=schema_col,
+                    arena=context.plan_context.expressions,
                 )
     raise UnsupportedSyntaxError(
         f"**ORDER BY** position {position} is out of range — **SELECT** has {ordinal} column(s). "
@@ -57,12 +58,12 @@ def _resolve_wildcard_order_position(node: Expression, context: BindingContext) 
 def visit_order(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     order_by = []
     columns = []
-    for column, ascending in node.order_by:
+    for column, ascending, nulls_first in node.order_by:
         if column.node_type == NodeType.LITERAL and column.is_wildcard_order_position:
             column = _resolve_wildcard_order_position(column, context)
         bound_column, context = inner_binder(column, context)
 
-        order_by.append((bound_column, bool(ascending)))
+        order_by.append((bound_column, bool(ascending), bool(nulls_first)))
         columns.append(bound_column)
 
     node.order_by = order_by

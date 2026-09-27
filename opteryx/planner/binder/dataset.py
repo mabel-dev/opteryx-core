@@ -302,6 +302,7 @@ def visit_function_dataset(
                 source_column=column,
                 source=relation_name,
                 schema_column=_build_value_column(column),
+                arena=context.plan_context.expressions,
             )
             for column in node.column_aliases
         ]
@@ -317,14 +318,28 @@ def visit_function_dataset(
         _validate_unnest_argument(node)
         relation_name = node.alias
 
+        # The column is typed by what the literal declares - its ARRAY's element type,
+        # or a single parenthesised value's own type - never guessed from the Python
+        # values (a string literal holds bytes).
+        source = node.args[0].centre if node.args[0].node_type == NodeType.NESTED else node.args[0]
+        source_type = source.type
+        element_type = (
+            source_type.element
+            if source_type is not None and source_type.category == LogicalCategory.ARRAY
+            else source_type
+        )
         columns = [
             LogicalColumn(
                 node_type=NodeType.IDENTIFIER,
                 source_column=node.unnest_target,
                 source=relation_name,
                 schema_column=context.plan_context.columns.relation_column(
-                    relation_name, node.unnest_target, origin=[relation_name]
+                    relation_name,
+                    node.unnest_target,
+                    origin=[relation_name],
+                    column_type=element_type,
                 ),
+                arena=context.plan_context.expressions,
             )
         ]
         schema = RelationSchema(name=relation_name, columns=[c.schema_column for c in columns])
@@ -374,6 +389,7 @@ def visit_function_dataset(
                 source_column=series_column,
                 source=node.relation_name,
                 schema_column=_gs_schema_col,
+                arena=context.plan_context.expressions,
             )
         ]
         schema = RelationSchema(
@@ -393,14 +409,16 @@ def visit_function_dataset(
         path_arg = node.args[0] if node.args else None
         if path_arg is not None and path_arg.node_type == NodeType.NESTED:
             path_arg = path_arg.centre
-        if path_arg is None or path_arg.node_type != NodeType.LITERAL or not isinstance(
-            path_arg.value, str
+        if (
+            path_arg is None
+            or path_arg.node_type != NodeType.LITERAL
+            or type(path_arg.value) is not bytes
         ):
             raise InvalidFunctionParameterError(
                 "READ_JSONL requires a single string literal path, "
                 "e.g. READ_JSONL('file.jsonl')."
             )
-        path = path_arg.value
+        path = path_arg.text()
 
         # Validate READ_JSONL's named options (Stage 3). Only `ignore_errors`,
         # `infer_schema`, and `infer_sample_size` are wired through to rugo. A
@@ -752,14 +770,16 @@ def visit_function_dataset(
         path_arg = node.args[0] if node.args else None
         if path_arg is not None and path_arg.node_type == NodeType.NESTED:
             path_arg = path_arg.centre
-        if path_arg is None or path_arg.node_type != NodeType.LITERAL or not isinstance(
-            path_arg.value, str
+        if (
+            path_arg is None
+            or path_arg.node_type != NodeType.LITERAL
+            or type(path_arg.value) is not bytes
         ):
             raise InvalidFunctionParameterError(
                 "READ_PARQUET requires a single string literal path, "
                 "e.g. READ_PARQUET('file.parquet')."
             )
-        path = path_arg.value
+        path = path_arg.text()
 
         # Unlike READ_JSONL, Parquet's schema is unambiguous (read straight off the
         # file's own footer, not inferred from sample rows), so there is nothing
@@ -918,14 +938,16 @@ def visit_function_dataset(
         path_arg = node.args[0] if node.args else None
         if path_arg is not None and path_arg.node_type == NodeType.NESTED:
             path_arg = path_arg.centre
-        if path_arg is None or path_arg.node_type != NodeType.LITERAL or not isinstance(
-            path_arg.value, str
+        if (
+            path_arg is None
+            or path_arg.node_type != NodeType.LITERAL
+            or type(path_arg.value) is not bytes
         ):
             raise InvalidFunctionParameterError(
                 "READ_CSV requires a single string literal path, "
                 "e.g. READ_CSV('file.csv')."
             )
-        path = path_arg.value
+        path = path_arg.text()
 
         # Validate READ_CSV's named options. `separator`/`has_header_row` map
         # directly to rugo's own `delimiter`/`has_header` params; `ignore_errors`/
@@ -945,13 +967,13 @@ def visit_function_dataset(
             arg = _literal_value("separator")
             if (
                 arg.node_type != NodeType.LITERAL
-                or not isinstance(arg.value, str)
-                or len(arg.value) != 1
+                or type(arg.value) is not bytes
+                or len(arg.text()) != 1
             ):
                 raise InvalidFunctionParameterError(
                     "READ_CSV option 'separator' must be a single-character string literal. It has to be a literal value, not a column or an expression."
                 )
-            separator = arg.value
+            separator = arg.text()
         else:
             separator = ","
 
@@ -1500,6 +1522,7 @@ def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
             source_column=column.name,
             source=(column.origin[0] if column.origin else None),
             schema_column=column,
+            arena=context.plan_context.expressions,
         )
         for column in node.schema.columns
     ]

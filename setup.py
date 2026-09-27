@@ -635,12 +635,15 @@ extensions = [
         ],
     ),
     # Expression nodes with fixed, declared, enforced attributes (one class per
-    # expression NodeType) — replaces the attribute-bag Node for expressions.
+    # expression NodeType), each a view of its row in the query's native
+    # expression arena (src/cpp/planner/expr_arena.hpp).
     Extension(
         "opteryx.compiled.structures.expressions",
         sources=["opteryx/compiled/structures/expressions.pyx"],
         include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        depends=["src/cpp/planner/expr_arena.hpp"],
     ),
     # Typed logical plan steps (one declared class per LogicalPlanStepType) —
     # replaces the attribute-bag Node for plan nodes.
@@ -836,6 +839,31 @@ extensions = [
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
+    ),
+    # A relation's manifest as native rows (src/cpp/planner/native_manifest.hpp),
+    # decoded from the manifest parquet's draken vectors (manifest_decode.hpp).
+    # The draken bridge (draken_vector_unwrap) resolves from draken_native.so,
+    # loaded RTLD_GLOBAL before any consumer extension.
+    Extension(
+        "opteryx.compiled.planner.native_manifest",
+        sources=["opteryx/compiled/planner/native_manifest.pyx", "third_party/ulfjack/ryu/d2s.c"],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=(
+            ["-undefined", "dynamic_lookup"] if is_mac() else ["-Wl,--allow-shlib-undefined"]
+        ),
+        depends=[
+            "src/cpp/planner/native_manifest.hpp",
+            "src/cpp/planner/manifest_decode.hpp",
+            "src/cpp/planner/manifest_footer.hpp",
+            "src/cpp/planner/manifest_sketch.hpp",
+            "src/cpp/planner/manifest_estimates.hpp",
+            "src/cpp/planner/bound_interval.hpp",
+            "src/cpp/planner/predicate_bounds.hpp",
+            "src/cpp/planner/manifest_prune.hpp",
+            "src/cpp/planner/manifest_encode.hpp",
+        ],
     ),
     # Helpers for relation statistics
     Extension(

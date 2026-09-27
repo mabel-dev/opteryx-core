@@ -41,6 +41,10 @@ from opteryx.planner.cost_estimation.selectivity import (
 from opteryx.planner.optimizer.statistics import ColumnStatistics, RelationStatistics
 from opteryx.types.logical_type import NVARCHAR, VARCHAR
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 # Statistics are keyed by the identity of a column minted in a query's ColumnTable.
 _PLAN_CONTEXT = PlanContext()
@@ -75,10 +79,10 @@ def _stats(
 
 
 def _instr_node(needle, decay=0.7, op="InStr", column_type=VARCHAR):
-    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col")
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col", arena=_TEST_ARENA)
     identifier.schema_column = _PLAN_CONTEXT.columns.reference(_IDENTITY, "col", column_type)
-    literal = Literal(value=needle)
-    node = Comparison(value=op, left=identifier, right=literal)
+    literal = Literal(value=needle, arena=_TEST_ARENA)
+    node = Comparison(value=op, left=identifier, right=literal, arena=_TEST_ARENA)
     node.like_selectivity_decay = decay
     return node
 
@@ -215,10 +219,10 @@ def test_selectivity_instr_falls_back_when_avg_length_is_zero():
 
 def test_selectivity_instr_falls_back_for_unknown_column():
     stats = _stats()
-    unknown_identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="other")
+    unknown_identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="other", arena=_TEST_ARENA)
     unknown_identifier.schema_column = _PLAN_CONTEXT.columns.relation_column("t", "other")
-    literal = Literal(value="hello")
-    node = Comparison(value="InStr", left=unknown_identifier, right=literal)
+    literal = Literal(value="hello", arena=_TEST_ARENA)
+    node = Comparison(value="InStr", left=unknown_identifier, right=literal, arena=_TEST_ARENA)
     node.like_selectivity_decay = 0.7
     s = _selectivity_instr(b"tes_other_0000", "hello", node, stats)
     assert s == _LIKE_INFIX_SELECTIVITY
@@ -226,10 +230,10 @@ def test_selectivity_instr_falls_back_for_unknown_column():
 
 def test_predicate_estimator_tag_none_for_non_instr_predicate():
     stats = _stats()
-    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col")
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col", arena=_TEST_ARENA)
     identifier.schema_column = _PLAN_CONTEXT.columns.reference(_IDENTITY, "col", None)
-    literal = Literal(value="hello")
-    node = Comparison(value="Eq", left=identifier, right=literal)
+    literal = Literal(value="hello", arena=_TEST_ARENA)
+    node = Comparison(value="Eq", left=identifier, right=literal, arena=_TEST_ARENA)
     assert predicate_estimator_tag(node, stats) is None
 
 

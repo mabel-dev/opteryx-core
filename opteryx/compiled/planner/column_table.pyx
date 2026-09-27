@@ -43,35 +43,6 @@ from opteryx.exceptions import InvalidInternalStateError
 from opteryx.utils import random_string
 
 
-cdef extern from "planner/column_table.hpp":
-    const uint32_t kNoSlot "opteryx::planner::kNoSlot"
-    const uint32_t kNoColumnType "opteryx::planner::kNoColumnType"
-    const uint8_t COLUMN_PLAIN "opteryx::planner::COLUMN_PLAIN"
-    const uint8_t COLUMN_CONSTANT "opteryx::planner::COLUMN_CONSTANT"
-    const uint8_t COLUMN_FUNCTION "opteryx::planner::COLUMN_FUNCTION"
-    const uint8_t COLUMN_EXPRESSION "opteryx::planner::COLUMN_EXPRESSION"
-
-    cdef cppclass ColumnRow "opteryx::planner::ColumnRow":
-        string name
-        string identity
-        vector[string] aliases
-        vector[string] origin
-        cbool has_aliases
-        cbool has_origin
-        cbool nullable
-        cbool has_field_id
-        int64_t field_id
-        uint32_t type_id
-        uint8_t kind
-        uint32_t alias_of
-
-    cdef cppclass ColumnRows "opteryx::planner::ColumnRows":
-        uint32_t append(ColumnRow row)
-        const ColumnRow& row(uint32_t slot)
-        size_t size()
-        uint32_t root(uint32_t slot)
-
-
 def mint_column_identity(relation, column) -> bytes:
     """Mint a unique, opaque column identity with a traceable prefix.
 
@@ -98,16 +69,6 @@ cdef class SchemaColumn:
     Minted by the table, never constructed directly, and fixed once minted. The
     attributes are the row's Python views, built when the row was.
     """
-
-    cdef readonly str name
-    cdef readonly bytes identity
-    cdef readonly tuple aliases
-    cdef readonly tuple origin
-    cdef readonly bint nullable
-    cdef readonly ColumnType column_type
-    cdef readonly uint32_t slot
-    cdef bint _has_field_id
-    cdef int64_t _field_id
 
     def __init__(self, *args, **kwargs):
         raise InvalidInternalStateError(
@@ -223,10 +184,6 @@ cdef dict _fields_of(SchemaColumn column):
 cdef class ColumnTable:
     """Every bound column of one query, in the order it was minted — a column's
     `slot` is its position here. See the module docstring."""
-
-    cdef ColumnRows _rows
-    cdef list _columns   # the façade of each slot
-    cdef dict _slot_of   # identity -> ROOT slot (the slot that minted it)
 
     def __cinit__(self):
         self._columns = []

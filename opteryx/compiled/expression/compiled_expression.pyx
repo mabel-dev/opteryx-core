@@ -632,6 +632,12 @@ def _pack_membership_blob(vals, int kind, int negate):
         items = sorted(set(int(v) for v in vals))
         blob = _struct.pack("<IBBH", len(items), 3, negate, 0)
         return blob + b"".join(_struct.pack("<Q", v) for v in items)
+    if kind == 4:
+        # int128 (DECIMAL128 raw), 16-byte little-endian two's complement,
+        # SORTED ASCENDING — draken_in_list binary-searches it like kind 0.
+        items = sorted(set(int(v) for v in vals))
+        blob = _struct.pack("<IBBH", len(items), 4, negate, 0)
+        return blob + b"".join(v.to_bytes(16, "little", signed=True) for v in items)
     if kind == 2:
         items = sorted(set(float(v) for v in vals))
         blob = _struct.pack("<IBBH", len(items), 2, negate, 0)
@@ -642,6 +648,40 @@ def _pack_membership_blob(vals, int kind, int negate):
     for e in entries:
         blob += _struct.pack("<I", len(e)) + e
     return blob
+
+
+# Spelled as literals, not shifts: Cython may fold `1 << 127` as a C integer
+# constant, which overflows; a literal this size is always a Python int.
+_INT64_MIN = -9223372036854775808
+_INT64_MAX = 9223372036854775807
+_INT128_MIN = -170141183460469231731687303715884105728
+_INT128_MAX = 170141183460469231731687303715884105727
+
+
+def _decimal_unscaled(value, int scale, lo, hi):
+    """`value` (int / float / Decimal) as the unscaled integer a DECIMAL column of
+    `scale` stores, or None when no stored value can equal it.
+
+    A float is taken at its shortest round-trip repr (the decimal the user wrote).
+    The rescale runs in a wide context so it is exact, never rounded by the
+    default 28-digit context before the checks see it. A value off the scale grid,
+    non-finite, or outside [lo, hi] (the storage integer's range) can never equal
+    a stored value — None, never a rounded neighbour. Shared by the IN-list and
+    `= ANY(array)` packers so they cannot disagree on what a literal means.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, _decimal.Decimal)):
+        return None
+    ctx = _decimal.Context(prec=1000)
+    exact = _decimal.Decimal(repr(value)) if isinstance(value, float) else _decimal.Decimal(value)
+    if not exact.is_finite():
+        return None
+    scaled = exact.scaleb(scale, context=ctx)
+    if scaled != scaled.to_integral_value(context=ctx):
+        return None
+    raw = int(scaled)
+    if raw < lo or raw > hi:
+        return None
+    return raw
 
 
 def _membership_values(values):
@@ -728,6 +768,24 @@ def _build_in_list_blob(values, left_type, int negate):
     if phys in ("VARCHAR", "NVARCHAR") and all(
             isinstance(v, (str, bytes)) for v in vals):
         return _pack_membership_blob(vals, 1, negate)
+    if phys in ("DECIMAL", "DECIMAL128"):
+        # A DECIMAL column stores the UNSCALED integer at its scale (int64 for
+        # DECIMAL, int128 for DECIMAL128); each literal is rescaled to that grid
+        # here, at bind time. A literal no stored value can equal (off the scale
+        # grid, or beyond the storage range) is dropped - exact, like the UINT
+        # out-of-range drop above; an empty set is "matches nothing"
+        # (negate=True -> "matches everything"). A literal that is not a number
+        # at all declines the whole list.
+        if left_type.logical is None or left_type.logical.scale is None:
+            return None
+        if not all(isinstance(v, (int, float, _decimal.Decimal)) and not isinstance(v, bool)
+                   for v in vals):
+            return None
+        wide = phys == "DECIMAL128"
+        lo, hi = (_INT128_MIN, _INT128_MAX) if wide else (_INT64_MIN, _INT64_MAX)
+        scale = int(left_type.logical.scale)
+        raws = [_decimal_unscaled(v, scale, lo, hi) for v in vals]
+        return _pack_membership_blob([r for r in raws if r is not None], 4 if wide else 0, negate)
     return None
 
 
@@ -825,19 +883,8 @@ def _build_single_item_blob(value, item_ct, element_ct):
             return None
         if element_ct.logical is None or element_ct.logical.scale is None:
             return None
-        # Wide context: the rescale must be exact, never rounded by the default
-        # 28-digit context before the representability check below sees it.
-        ctx = _decimal.Context(prec=1000)
-        exact = _decimal.Decimal(repr(value)) if isinstance(value, float) else _decimal.Decimal(value)
-        if not exact.is_finite():
-            return _pack_membership_blob([], 0, 0)
-        scaled = exact.scaleb(int(element_ct.logical.scale), context=ctx)
-        if scaled != scaled.to_integral_value(context=ctx):
-            return _pack_membership_blob([], 0, 0)
-        raw = int(scaled)
-        if raw < -9223372036854775808 or raw > 9223372036854775807:
-            return _pack_membership_blob([], 0, 0)
-        return _pack_membership_blob([raw], 0, 0)
+        raw = _decimal_unscaled(value, int(element_ct.logical.scale), _INT64_MIN, _INT64_MAX)
+        return _pack_membership_blob([] if raw is None else [raw], 0, 0)
     if elem == "DECIMAL128":
         return None
     if isinstance(value, bool):
@@ -3888,9 +3935,9 @@ def expand_between(node):
         lower_incl, upper_incl = node.value
         operand = expand_between(node.left)
         # right = the lower-bound literal node, centre = the upper; reused as-is.
-        lo = Comparison(value=("GtEq" if lower_incl else "Gt"), left=operand, right=node.right)
-        hi = Comparison(value=("LtEq" if upper_incl else "Lt"), left=operand, right=node.centre)
-        return And(left=lo, right=hi)
+        lo = Comparison(value=("GtEq" if lower_incl else "Gt"), left=operand, right=node.right, arena=node.arena)
+        hi = Comparison(value=("LtEq" if upper_incl else "Lt"), left=operand, right=node.centre, arena=node.arena)
+        return And(left=lo, right=hi, arena=node.arena)
 
     return rewrite_children(node, expand_between)
 

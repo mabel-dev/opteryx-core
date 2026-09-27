@@ -54,7 +54,7 @@ from opteryx.compiled.structures.plan_steps import ProjectStep
 from opteryx.compiled.structures.plan_steps import steps_with
 
 
-def passthrough_column(schema_column, source: Optional[str] = None) -> LogicalColumn:
+def passthrough_column(schema_column, source: Optional[str] = None, *, arena) -> LogicalColumn:
     """A bare IDENTIFIER referencing an already-computed column by identity.
 
     `source` defaults to the column's own origin, but the caller may pin it
@@ -71,6 +71,7 @@ def passthrough_column(schema_column, source: Optional[str] = None) -> LogicalCo
         if source is not None
         else (schema_column.origin[0] if schema_column.origin else None),
         schema_column=schema_column,
+        arena=arena,
     )
 
 
@@ -103,13 +104,13 @@ def materialize_operand_as_column(
     columns = getattr(schema, "columns", None)
     if not columns or not relation_names:
         return None
-    project_columns: List[Expression] = [passthrough_column(col) for col in columns]
+    project_columns: List[Expression] = [passthrough_column(col, arena=expr.arena) for col in columns]
     project_columns.append(expr)
     project_node = ProjectStep()
     project_node.columns = project_columns
     project_node.passthrough_columns = []
     plan.insert_node_after(project_node, child_id)
-    return passthrough_column(expr.schema_column, source=relation_names[0])
+    return passthrough_column(expr.schema_column, source=relation_names[0], arena=expr.arena)
 
 
 def split_and_conditions(node: Optional[Expression]) -> List[Expression]:
@@ -215,7 +216,7 @@ class JoinKeyMaterializationStrategy(OptimizationStrategy):
 
         on_condition = conjuncts[0]
         for conjunct in conjuncts[1:]:
-            on_condition = And(left=on_condition, right=conjunct)
+            on_condition = And(left=on_condition, right=conjunct, arena=plan.plan_context.expressions)
         node.on = on_condition
 
         # Rebuild the join's bookkeeping from the rewritten condition. Every

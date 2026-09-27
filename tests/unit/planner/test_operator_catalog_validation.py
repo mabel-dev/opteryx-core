@@ -13,13 +13,18 @@ from opteryx.planner.logical_planner.logical_planner_builders import binary_op
 from opteryx.planner.binder.operator_map import determine_type
 from opteryx.types.logical_type import INT64
 from opteryx.planner.plan_context import PlanContext
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 
 def test_binder_rejects_operators_not_in_catalog():
     node = BinaryOperator(
         value="TotallyUnsupported",
-        left=Literal(type=INT64, value=1),
-        right=Literal(type=INT64, value=2),
+        left=Literal(type=INT64, value=1, arena=_TEST_ARENA),
+        right=Literal(type=INT64, value=2, arena=_TEST_ARENA),
+        arena=_TEST_ARENA,
     )
 
     with pytest.raises(UnsupportedSyntaxError, match="Unsupported operator 'TotallyUnsupported'"):

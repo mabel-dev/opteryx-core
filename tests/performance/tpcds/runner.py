@@ -45,6 +45,7 @@ sys.path.insert(0, _REPO_ROOT)
 
 sys.path.insert(0, os.path.join(_REPO_ROOT, "tests", "performance"))
 from _common import (  # noqa: E402
+    AISTOR_WORKSPACE,
     open_results_csv,
     print_banner,
     print_error_row,
@@ -63,7 +64,11 @@ def _dataset_suffix(scale: str, variant: str) -> str:
 
 
 def _load_queries(scale: str, only: str = "", variant: str = "") -> list[tuple[str, str]]:
-    dataset = f"testdata.{_dataset_suffix(scale, variant)}"
+    # `aistor` is the remote Iceberg copy of the parquet source, not a local mirror.
+    if variant == AISTOR_WORKSPACE:
+        dataset = f"{AISTOR_WORKSPACE}.tpcds_sf{scale}"
+    else:
+        dataset = f"testdata.{_dataset_suffix(scale, variant)}"
     queries: list[tuple[str, str]] = []
     for path in sorted(glob.glob(os.path.join(_QUERY_DIR, "query*.sql"))):
         name = os.path.splitext(os.path.basename(path))[0]
@@ -76,13 +81,14 @@ def _load_queries(scale: str, only: str = "", variant: str = "") -> list[tuple[s
     return queries
 
 
-def _run_query(sql: str, timeout_s: float) -> tuple[str, float, int, str]:
+def _run_query(sql: str, timeout_s: float, variant: str) -> tuple[str, float, int, str]:
     """Run one query in a subprocess. Returns (status, elapsed_ms, rows, error)
     with status in {"ok", "error", "timeout"}."""
+    worker_args = ["--aistor"] if variant == AISTOR_WORKSPACE else []
     t0 = time.monotonic_ns()
     try:
         proc = subprocess.run(
-            [sys.executable, _WORKER_PATH],
+            [sys.executable, _WORKER_PATH, *worker_args],
             input=sql,
             capture_output=True,
             text=True,
@@ -116,7 +122,8 @@ def main() -> int:
         type=str,
         default="",
         help="Dataset format variant: runs against testdata/tpcds_<scale>_<variant> "
-        "(e.g. `skene` for the skene v2 mirror; default: the parquet dataset)",
+        "(e.g. `skene` for the skene v2 mirror; default: the parquet dataset). "
+        "`aistor` runs against the parquet source on AIStor (aistor.tpcds_sf<scale>).",
     )
     parser.add_argument(
         "--timeout", type=float, default=30.0, help="Per-query wall-clock timeout in seconds (default: 30)"
@@ -125,7 +132,8 @@ def main() -> int:
 
     suffix = _dataset_suffix(args.scale, args.variant)
     dataset_path = os.path.join(_REPO_ROOT, "testdata", suffix)
-    if not os.path.isdir(dataset_path):
+    # Remote existence is the catalog's to answer, per query, in the worker.
+    if args.variant != AISTOR_WORKSPACE and not os.path.isdir(dataset_path):
         print(f"ERROR: dataset not found at {dataset_path}")
         print(f"       expected: testdata/{suffix}")
         if args.variant:
@@ -163,7 +171,7 @@ def main() -> int:
 
     try:
         for name, sql in queries:
-            status, elapsed_ms, rows, err = _run_query(sql, args.timeout)
+            status, elapsed_ms, rows, err = _run_query(sql, args.timeout, args.variant)
             if status == "ok":
                 passed += 1
                 print(f"{name:<8} \033[38;2;26;185;67mOK\033[0m     {elapsed_ms:>10.1f}ms   {rows:>12,} rows")

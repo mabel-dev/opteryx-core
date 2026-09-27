@@ -38,6 +38,10 @@ from opteryx.variables import (
     VariableOwner,
     Visibility,
 )
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 ADMIN = [PLATFORM_ADMIN_ENTITLEMENT]
 
@@ -152,19 +156,19 @@ def test_restricted_user_owned_variable_requires_admin_to_set():
     # "hidden", while staying freely changeable by anyone who knows the name.
     container = _container_with_restricted_var()
     with pytest.raises(PermissionsError):
-        container["a_restricted_knob"] = Literal(type=BOOLEAN, value=True)
+        container["a_restricted_knob"] = Literal(type=BOOLEAN, value=True, arena=_TEST_ARENA)
 
 
 def test_restricted_user_owned_variable_settable_by_admin():
     container = _container_with_restricted_var(entitlements=ADMIN)
-    container["a_restricted_knob"] = Literal(type=BOOLEAN, value=True)
+    container["a_restricted_knob"] = Literal(type=BOOLEAN, value=True, arena=_TEST_ARENA)
     assert container["a_restricted_knob"] is True
 
 
 def test_wrong_entitlement_cannot_set_restricted_variable():
     container = _container_with_restricted_var(entitlements=["data_admin"])
     with pytest.raises(PermissionsError):
-        container["a_restricted_knob"] = Literal(type=BOOLEAN, value=True)
+        container["a_restricted_knob"] = Literal(type=BOOLEAN, value=True, arena=_TEST_ARENA)
 
 
 def test_informational_variables_declare_system_behaviour():

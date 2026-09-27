@@ -1,6 +1,5 @@
 import os
 import sys
-from types import SimpleNamespace
 
 import draken.draken_native as dn
 from opteryx.compiled.structures.expressions import ExtractionOperator
@@ -14,31 +13,38 @@ from opteryx.expression.evaluator import compile_eval_nodes, execute_and_append
 from opteryx.types.logical_type import INT64, VARCHAR
 import opteryx
 from opteryx.compiled.structures.expressions import LogicalColumn
-
-
-def _schema(identity: str, value_type):
-    return SimpleNamespace(identity=identity.encode(), column_type=value_type, name=identity)
+from opteryx.planner.plan_context import PlanContext
+from opteryx.expression.formatter import ExpressionColumn
 
 
 def test_map_access_string_projection_returns_draken_vector():
+    # one query's columns and expressions
+    context = PlanContext()
+    arena = context.expressions
+    user_name_column = context.columns.relation_column("t", "user_name", column_type=VARCHAR)
+    first_char_column = context.columns.computed(ExpressionColumn, "a", column_type=VARCHAR)
+
     morsel = Morsel.from_vectors(
-        ["user_name"], [dn.vector_from_string_sequence([b"alice", b"bob", None])]
+        [user_name_column.identity], [dn.vector_from_string_sequence([b"alice", b"bob", None])]
     )
 
-    user_name = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="user_name", schema_column=_schema("user_name", VARCHAR))
+    user_name = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="user_name", schema_column=user_name_column, arena=arena)
     zero = Literal(
         value=0,
-        schema_column=_schema("zero", INT64),
+        type=INT64,
+        schema_column=context.columns.constant("zero", column_type=INT64, value=0),
+        arena=arena,
     )
     first_char = ExtractionOperator(
         value="MapAccess",
         left=user_name,
         right=zero,
-        schema_column=_schema("a", VARCHAR),
+        schema_column=first_char_column,
+        arena=arena,
     )
 
     out = execute_and_append(compile_eval_nodes([first_char]), morsel)
-    values = out.column(b"a").to_pylist()
+    values = out.column(first_char_column.identity).to_pylist()
     normalized = [v.decode("utf-8") if isinstance(v, (bytes, bytearray)) else v for v in values]
 
     assert normalized == ["a", "b", None]

@@ -170,7 +170,7 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # UNRESTRICTED: a caller seeing their own identity is not a disclosure — it is
     # already theirs, and `SHOW USER` reports it regardless.
     "external_user": (VARCHAR, "", VariableOwner.INTERNAL, Visibility.UNRESTRICTED),
-    "user_memberships": (ARRAY(VARIANT), [[]], VariableOwner.INTERNAL, Visibility.UNRESTRICTED),
+    "user_memberships": (ARRAY(VARCHAR), [[]], VariableOwner.INTERNAL, Visibility.UNRESTRICTED),
     # Platform capabilities held by the caller (e.g. `data_admin`). Defaults to EMPTY —
     # an unset entitlement list must never be read as "has everything".
     "user_entitlements": (ARRAY(VARIANT), [[]], VariableOwner.INTERNAL, Visibility.UNRESTRICTED),

@@ -769,6 +769,107 @@ h2o: ## Run H2O db-benchmark on the skene mirror (groupby + join, medium; genera
 h2o-duckdb: ## Re-run DuckDB H2O calibration (regenerates duckdb/results.<size>.json)
 	@$(PYTHON) tests/performance/h2o/duckdb/runner.py --size medium --workload both
 
+# ── Remote variants: the same suites against Iceberg tables on AIStor ─────────
+#
+# Workspace `aistor` -> the `benchmarks` warehouse on the AIStor box (AISTOR_* in
+# .env; tests/performance/_common.py register_aistor_workspace). The tables are
+# the PARQUET corpora the local targets are built from, registered as-is with
+# pyiceberg's add_files - same files, same row groups - so a difference against a
+# local `--variant parquet` run is the remote path. Skene has no Iceberg form
+# (data files must be parquet/orc/avro), so there is no remote skene variant, and
+# these numbers compare with the parquet variants, not the skene figures the
+# plain targets print.
+#
+# Nothing is generated or uploaded here. A table missing from the catalog fails
+# the run; it is never replaced by the local copy.
+
+tpch-sf10-aistor: ## Run TPC-H SF10 vs DuckDB against the parquet source on AIStor (remote Iceberg)
+	$(call print_blue,Running TPC-H SF10 benchmark vs DuckDB (AIStor)...)
+	@test -s tests/performance/tpch/duckdb/results.sf10.json || { \
+		echo "ERROR: no DuckDB baseline at tests/performance/tpch/duckdb/results.sf10.json"; \
+		echo "       generate it with:  make tpch-sf10-duckdb"; \
+		exit 1; \
+	}
+	@clear || true
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py --scale 10 --variant aistor
+
+tpcds-sf10-aistor: ## Run the TPC-DS SF10 smoke suite against the parquet source on AIStor (coverage, not performance; 300s/query)
+	$(call print_blue,Running TPC-DS SF10 smoke suite (AIStor)...)
+	@# 300s, not the runner's 30s default: at SF10 over high-latency storage the
+	@# multi-fact-table queries (Q04/05/14/33/54/75/76/80) legitimately run past
+	@# 30s, and a timeout records no time at all.
+	@clear || true
+	@$(PYTHON) tests/performance/tpcds/runner.py --scale 10 --variant aistor --timeout 300
+
+clickbench-aistor-canon-split: ## Run ClickBench against upstream's 100-file split on AIStor (remote Iceberg)
+	$(call print_blue,Running ClickBench on AIStor (canon split)...)
+	@clear || true
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant aistor-canon-split
+
+clickbench-aistor-canon-single: ## Run ClickBench against upstream's single hits.parquet on AIStor (remote Iceberg)
+	$(call print_blue,Running ClickBench on AIStor (canon single)...)
+	@clear || true
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant aistor-canon-single
+
+clickbench-aistor-rugo-split: ## Run ClickBench against the rugo 262k-row-group split on AIStor (remote Iceberg)
+	$(call print_blue,Running ClickBench on AIStor (rugo split)...)
+	@clear || true
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant aistor-rugo-split
+
+h2o-aistor: ## Run H2O db-benchmark (groupby + join, medium) against the parquet tree on AIStor (remote Iceberg)
+	$(call print_blue,"Running H2O on AIStor...")
+	@clear || true
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/h2o/runner.py --variant aistor --size medium --workload both
+
+job-aistor: ## Run Join Order Benchmark (JOB) against the parquet corpus on AIStor (remote Iceberg)
+	$(call print_blue,"Running JOB on AIStor...")
+	@clear || true
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/job/runner.py --variant aistor
+
+# ── Quick remote variants: SF0.1-sized, for iteration in minutes ─────────────
+#
+# The full remote suites take hours (ClickBench alone runs for most of a day at
+# 30ms latency). These carry the same shapes at about a tenth of the data:
+# TPC-H/TPC-DS SF0.1 (testdata/tpch_01, tpcds_01), H2O small (1e7 rows), and
+# ClickBench files hits_0..hits_9 of each split (10M rows, identical rows in
+# both). JOB has no scale - its IMDB corpus is fixed - so it has no quick variant.
+# Each is compared against a DuckDB baseline over the SAME rows.
+
+tpch-sf01-aistor: ## Quick: TPC-H SF0.1 vs DuckDB on AIStor (remote Iceberg)
+	$(call print_blue,Running TPC-H SF0.1 benchmark vs DuckDB (AIStor)...)
+	@test -s tests/performance/tpch/duckdb/results.sf01.json || { \
+		echo "ERROR: no DuckDB baseline at tests/performance/tpch/duckdb/results.sf01.json"; \
+		echo "       generate it with:  $(PYTHON) tests/performance/tpch/duckdb/runner.py --scale 01"; \
+		exit 1; \
+	}
+	@clear || true
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py --scale 01 --variant aistor
+
+tpcds-sf01-aistor: ## Quick: TPC-DS SF0.1 smoke suite on AIStor (coverage, not performance)
+	$(call print_blue,Running TPC-DS SF0.1 smoke suite (AIStor)...)
+	@clear || true
+	@$(PYTHON) tests/performance/tpcds/runner.py --scale 01 --variant aistor
+
+clickbench-aistor-canon-split-10: ## Quick: ClickBench on upstream's files hits_0..9 (10M rows) on AIStor
+	$(call print_blue,Running ClickBench on AIStor (canon split, 10 files)...)
+	@clear || true
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant aistor-canon-split-10 \
+		--duckdb-baseline tests/performance/clickbench/duckdb/results.local.hits10.json
+
+clickbench-aistor-rugo-split-10: ## Quick: ClickBench on the rugo split's files hits_0..9 (10M rows) on AIStor
+	$(call print_blue,Running ClickBench on AIStor (rugo split, 10 files)...)
+	@clear || true
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant aistor-rugo-split-10 \
+		--duckdb-baseline tests/performance/clickbench/duckdb/results.local.hits10.json
+
+h2o-small-aistor: ## Quick: H2O db-benchmark (groupby + join, small = 1e7 rows) on AIStor
+	$(call print_blue,Running H2O small on AIStor...)
+	@clear || true
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/h2o/runner.py --variant aistor --size small --workload both
+
+.PHONY: tpch-sf10-aistor tpcds-sf10-aistor clickbench-aistor-canon-split clickbench-aistor-canon-single clickbench-aistor-rugo-split h2o-aistor job-aistor
+.PHONY: tpch-sf01-aistor tpcds-sf01-aistor clickbench-aistor-canon-split-10 clickbench-aistor-rugo-split-10 h2o-small-aistor
+
 signals: ## Run signals benchmark suite (synthetic security-findings dataset, no DuckDB baseline)
 	@clear || true
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/signals/runner.py

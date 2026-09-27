@@ -608,12 +608,15 @@ def extract_variable(clause):
 
 def extract_simple_filter(filters, identifier: str = "Name", *, plan_context):
     if "Like" in filters:
-        left = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=identifier)
-        right = Literal(type=_plt.VARCHAR, value=filters["Like"])
+        left = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=identifier, arena=plan_context.expressions)
+        right = Literal(
+            type=_plt.VARCHAR, value=filters["Like"].encode("utf-8"), arena=plan_context.expressions
+        )
         root = Comparison(
             value="ILike",  # we're case insensitive for SHOW filters
             left=left,
             right=right,
+            arena=plan_context.expressions,
         )
         return root
     if "Where" in filters:
@@ -1032,7 +1035,7 @@ def _rendered_window(window, *, plan_context) -> str:
         if _nested is window or _nested.over is None:
             continue
         _nested_display = _rendered_window(_nested, plan_context=plan_context)
-        _nested_ref = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=_nested_display)
+        _nested_ref = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=_nested_display, arena=plan_context.expressions)
         _nested_ref.query_column = _nested_display
         _replace_node(window, _nested, _nested_ref)
     _partition_by, _order_by = _window_spec_nodes(window.over, plan_context=plan_context)
@@ -1057,7 +1060,7 @@ def _refuse_nested_window(tree, window, *, plan_context) -> None:
         return
 
     _window_display = _rendered_window(window, plan_context=plan_context)
-    _display_ref = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=_window_display)
+    _display_ref = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=_window_display, arena=plan_context.expressions)
     _display_ref.query_column = _window_display
     _replace_node(_enclosing, window, _display_ref)
 
@@ -1506,7 +1509,9 @@ def _window_display_name(
     frame onto the SAME minted column.
 
     `partition_by` and `window_order_by` are the already-built nodes, not the parser's
-    branches; `window_order_by` is a list of (expression, ascending).
+    branches; `window_order_by` is a list of (expression, ascending, nulls_first).
+    A window only ever holds the default null placement (`_window_spec_nodes` refuses
+    any other), so the placement adds nothing to the name.
     """
     _parts = []
     if partition_by:
@@ -1516,7 +1521,7 @@ def _window_display_name(
             "ORDER BY "
             + ", ".join(
                 format_expression(_col) + ("" if _ascending else " DESC")
-                for _col, _ascending in window_order_by
+                for _col, _ascending, _nulls_first in window_order_by
             )
         )
     if frame is not None:
@@ -1541,13 +1546,18 @@ def _window_spec_nodes(over: Optional[dict], *, plan_context) -> Tuple[list, lis
         _strip_outer_nesting(logical_planner_builders.build(pb, plan_context=plan_context))
         for pb in _over.get("partition_by", [])
     ]
-    _window_order_by = [
-        (
-            _strip_outer_nesting(logical_planner_builders.build(item["expr"], plan_context=plan_context)),
-            logical_planner_builders.sort_is_ascending(item["options"]),
+    for item in _over.get("order_by", []):
+        logical_planner_builders.refuse_non_default_nulls(item["options"], "a window's **ORDER BY**")
+    _window_order_by = []
+    for item in _over.get("order_by", []):
+        _ascending = logical_planner_builders.sort_is_ascending(item["options"])
+        _window_order_by.append(
+            (
+                _strip_outer_nesting(logical_planner_builders.build(item["expr"], plan_context=plan_context)),
+                _ascending,
+                logical_planner_builders.sort_nulls_first(item["options"], _ascending),
+            )
         )
-        for item in _over.get("order_by", [])
-    ]
     return _partition_by, _window_order_by
 
 
@@ -1748,7 +1758,7 @@ def _hoist_windows(
         # parser's dict, not part of the expression tree — so it is tested here, where it
         # has just become nodes.
         _refuse_window_in_window_spec(_partition_by, "PARTITION BY", plan_context=plan_context)
-        _refuse_window_in_window_spec([_col for _col, _asc in _window_order_by], "ORDER BY", plan_context=plan_context)
+        _refuse_window_in_window_spec([_col for _col, _asc, _nf in _window_order_by], "ORDER BY", plan_context=plan_context)
 
         # A framed aggregate window's FrameSpec — see `_build_window_frame`. None
         # (including for every ranking/navigation window) means "no ORDER BY, no
@@ -1795,6 +1805,7 @@ def _hoist_windows(
             node_type=NodeType.IDENTIFIER,
             source_column=_win_display,
             alias=_user_alias,
+            arena=plan_context.expressions,
         )
         _ref.query_column = _win_display
         item = _replace_node(item, _window, _ref)
@@ -1967,6 +1978,7 @@ def _rebase_over_aggregate(tree, names: dict, skipped: set, passthrough: set, me
             source_column=_name,
             alias=tree.alias,
             span=tree.span if tree.node_type in _SPANNED_NODE_TYPES else None,
+            arena=tree.arena,
         )
         # The name the CALLER sees is the expression they wrote, not the grouped
         # relation's internal column name — `SELECT SUM(x)` answers `SUM(x)` whether or
@@ -2372,13 +2384,20 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
     _order_by_columns_not_in_projection: list = []
     _order_by_columns: list = []
     if _order_by and _order_by.get("kind") and _order_by["kind"].get("Expressions"):
-        _order_by = [
-            (
-                _strip_outer_nesting(logical_planner_builders.build(item["expr"], plan_context=plan_context)),
-                logical_planner_builders.sort_is_ascending(item["options"]),
+        # (expression, ascending, nulls_first) — the null placement is resolved to an
+        # explicit bool here (the default when no NULLS clause is written), never
+        # left for a later stage to infer from the direction.
+        _order_by_items = _order_by["kind"]["Expressions"]
+        _order_by = []
+        for item in _order_by_items:
+            _ascending = logical_planner_builders.sort_is_ascending(item["options"])
+            _order_by.append(
+                (
+                    _strip_outer_nesting(logical_planner_builders.build(item["expr"], plan_context=plan_context)),
+                    _ascending,
+                    logical_planner_builders.sort_nulls_first(item["options"], _ascending),
+                )
             )
-            for item in _order_by["kind"]["Expressions"]
-        ]
         # Resolve positional ORDER BY (SQL-92): an integer literal refers to the
         # 1-based position in the SELECT list. Replace it with the projection
         # expression so downstream stages see a normal column reference.
@@ -2398,7 +2417,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
             and _projection[0].value is None
         )
         rewritten = []
-        for expr, ascending in _order_by:
+        for expr, ascending, nulls_first in _order_by:
             if expr.node_type == NodeType.LITERAL:
                 _expr_cat = expr.type.category if isinstance(expr.type, ColumnType) else expr.type
                 if _expr_cat != LogicalCategory.INTEGER:
@@ -2416,7 +2435,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
                     )
                 else:
                     expr = _projection[position - 1]
-            rewritten.append((expr, ascending))
+            rewritten.append((expr, ascending, nulls_first))
         _order_by = rewritten
 
         # A window in ORDER BY is LEGAL SQL — windows are computed before the sort, so
@@ -2444,7 +2463,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
         # caller. A window that dedups onto a SELECTED one mints nothing, so it is neither
         # passed through nor hidden; it is already in the projection.
         _hoisted_order_by = []
-        for _expr, _ascending in _order_by:
+        for _expr, _ascending, _nulls_first in _order_by:
             _newly_minted: list = []
             _expr = _hoist_windows(
                 _expr,
@@ -2453,7 +2472,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
                 _minted,
                 _newly_minted, plan_context=plan_context)
             _hidden_window_columns.extend(_newly_minted)
-            _hoisted_order_by.append((_expr, _ascending))
+            _hoisted_order_by.append((_expr, _ascending, _nulls_first))
         _order_by = _hoisted_order_by
         _order_by_columns = [exp[0] for exp in _order_by]
 
@@ -2814,10 +2833,10 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
             _window_operands.extend(_agg_node.parameters or [])
             _window_operands.extend(_partition_by)
             if _wob:
-                _window_operands.extend(_column for _column, _ascending in _wob)
+                _window_operands.extend(_column for _column, _ascending, _nulls_first in _wob)
         for _kind, _partition_by, _window_order_by, _win_alias, _params in _ranking_specs:
             _window_operands.extend(_partition_by)
-            _window_operands.extend(_column for _column, _ascending in _window_order_by)
+            _window_operands.extend(_column for _column, _ascending, _nulls_first in _window_order_by)
             _window_operands.extend(_params or [])
         for _operand in _window_operands:
             _aggregates.extend(_outermost_aggregates(_operand))
@@ -2906,7 +2925,8 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
         _qualify = _rebase(_qualify)
         if isinstance(_order_by, list):
             _order_by = [
-                (_rebase(_expression), _ascending) for _expression, _ascending in _order_by
+                (_rebase(_expression), _ascending, _nulls_first)
+                for _expression, _ascending, _nulls_first in _order_by
             ]
             _order_by_columns = [_item[0] for _item in _order_by]
         for _index, (_agg_node, _partition_by, _wob, _frame) in enumerate(_window_specs):
@@ -2914,7 +2934,8 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
                 _rebase(_parameter) for _parameter in (_agg_node.parameters or [])
             ]
             _rebased_wob = (
-                [(_rebase(_column), _ascending) for _column, _ascending in _wob] if _wob else _wob
+                [(_rebase(_column), _ascending, _nulls_first) for _column, _ascending, _nulls_first in _wob]
+                if _wob else _wob
             )
             _window_specs[_index] = (
                 _agg_node, [_rebase(_pb) for _pb in _partition_by], _rebased_wob, _frame
@@ -2929,7 +2950,8 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
             _ranking_specs[_index] = (
                 _kind,
                 [_rebase(_pb) for _pb in _partition_by],
-                [(_rebase(_column), _ascending) for _column, _ascending in _window_order_by],
+                [(_rebase(_column), _ascending, _nulls_first)
+                 for _column, _ascending, _nulls_first in _window_order_by],
                 _win_alias,
                 [_rebase(_parameter) for _parameter in (_params or [])],
             )
@@ -2985,7 +3007,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
 
         _grouped_relation = SubqueryStep()
         _grouped_relation.alias = f"{GROUPED_AGGREGATE_ALIAS_PREFIX}{random_string(6)}"
-        _grouped_relation.columns = [Wildcard()]
+        _grouped_relation.columns = [Wildcard(arena=plan_context.expressions)]
         previous_step_id, step_id = step_id, inner_plan.add_node(_grouped_relation)
         inner_plan.add_edge(previous_step_id, step_id)
 
@@ -3071,7 +3093,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
             _by_fspec: dict = {}
             for _agg_node, _partition_by, _wob, _frame in _framed_specs:
                 _pkey = tuple(format_expression(pb) for pb in _partition_by)
-                _okey = tuple((format_expression(c), bool(a)) for c, a in _wob)
+                _okey = tuple((format_expression(c), bool(a), bool(nf)) for c, a, nf in _wob)
                 _spec_key = (_pkey, _okey)
                 if _spec_key not in _by_fspec:
                     _by_fspec[_spec_key] = (_partition_by, _wob, [])
@@ -3114,7 +3136,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
         _by_spec: dict = {}
         for _kind, _partition_by, _window_order_by, _win_alias, _params in _ranking_specs:
             _pkey = tuple(format_expression(pb) for pb in _partition_by)
-            _okey = tuple((format_expression(c), bool(a)) for c, a in _window_order_by)
+            _okey = tuple((format_expression(c), bool(a), bool(nf)) for c, a, nf in _window_order_by)
             _spec_key = (_pkey, _okey)
             if _spec_key not in _by_spec:
                 _by_spec[_spec_key] = (_partition_by, _window_order_by, [])
@@ -3980,7 +4002,7 @@ def plan_query(statement: dict, *, plan_context) -> LogicalPlan:
         # origin matches `value[0]` — `(None,)` matches no relation, so the EXIT bound
         # to zero columns and the set operation failed with that same misleading error.
         # Reached when the left leg declares no columns at all.
-        columns = _set_operation_leg_columns(left_plan) or [Wildcard()]
+        columns = _set_operation_leg_columns(left_plan) or [Wildcard(arena=plan_context.expressions)]
         exit_node.columns = columns
         head_nid, step_id = step_id, plan.add_node(exit_node)
         if head_nid is not None:
@@ -4077,7 +4099,7 @@ def _plan_virtual_dataset_scan(relation: str, internal_relation: bool, *, plan_c
     # A BARE wildcard: `value` must be None. A non-None `value` marks a QUALIFIED
     # wildcard (`rel.*`) and binder.visit_exit then expands only columns whose
     # origin matches `value[0]` — so `(None,)` silently expands to nothing.
-    exit_node.columns = [Wildcard()]
+    exit_node.columns = [Wildcard(arena=plan_context.expressions)]
     previous_step_id, step_id = step_id, plan.add_node(exit_node)
     plan.add_edge(previous_step_id, step_id)
 
@@ -4237,7 +4259,7 @@ def _plan_show_triggers(table_name: str, *, plan_context) -> LogicalPlan:
     plan.add_edge(previous_step_id, step_id)
 
     exit_node = ExitStep()
-    exit_node.columns = [Wildcard()]
+    exit_node.columns = [Wildcard(arena=plan_context.expressions)]
     previous_step_id, step_id = step_id, plan.add_node(exit_node)
     plan.add_edge(previous_step_id, step_id)
 
@@ -7231,7 +7253,7 @@ def build_expression_tree(relation, dnf_list, *, plan_context):
         common_clause, or_clauses = dnf_list
         left = build_expression_tree(relation, common_clause, plan_context=plan_context)
         right = build_expression_tree(relation, or_clauses, plan_context=plan_context)
-        return And(left=left, right=right)
+        return And(left=left, right=right, arena=plan_context.expressions)
 
     # --- Case: flat clause (AND of tuples) ---
     if all(isinstance(x, tuple) for x in dnf_list):
@@ -7241,12 +7263,13 @@ def build_expression_tree(relation, dnf_list, *, plan_context):
                 left_node = build_literal_node(identifier, plan_context=plan_context)
             else:
                 left_node = LogicalColumn(
-                    NodeType.IDENTIFIER, source_column=identifier, source=relation
-                )
+                    NodeType.IDENTIFIER, source_column=identifier, source=relation, 
+                arena=plan_context.expressions)
             comparison_node = Comparison(
                 value=operator,
                 left=left_node,
                 right=build_literal_node(value, plan_context=plan_context),
+                arena=plan_context.expressions,
             )
             if operator.startswith("AnyOp"):
                 comparison_node.left, comparison_node.right = (
@@ -7256,7 +7279,7 @@ def build_expression_tree(relation, dnf_list, *, plan_context):
             and_node = (
                 comparison_node
                 if and_node is None
-                else And(left=and_node, right=comparison_node)
+                else And(left=and_node, right=comparison_node, arena=plan_context.expressions)
             )
         return and_node
 
@@ -7268,7 +7291,7 @@ def build_expression_tree(relation, dnf_list, *, plan_context):
             or_node = (
                 clause_node
                 if or_node is None
-                else Or(left=or_node, right=clause_node)
+                else Or(left=or_node, right=clause_node, arena=plan_context.expressions)
             )
         return or_node
 
@@ -7278,7 +7301,7 @@ def build_expression_tree(relation, dnf_list, *, plan_context):
         subgroups = [x for x in dnf_list if isinstance(x, list)]
         left = build_expression_tree(relation, flat_preds, plan_context=plan_context)
         right = build_expression_tree(relation, subgroups, plan_context=plan_context)
-        return And(left=left, right=right)
+        return And(left=left, right=right, arena=plan_context.expressions)
 
     # --- Case: fallback, treat as OR of subgroups ---
     if isinstance(dnf_list, list):
@@ -7288,7 +7311,7 @@ def build_expression_tree(relation, dnf_list, *, plan_context):
             or_node = (
                 subgroup_node
                 if or_node is None
-                else Or(left=or_node, right=subgroup_node)
+                else Or(left=or_node, right=subgroup_node, arena=plan_context.expressions)
             )
         return or_node
 
@@ -7439,7 +7462,8 @@ def plan_call(statement, *, plan_context, **kwargs) -> LogicalPlan:
                     "beneath it, so an argument cannot reference a column. Pass a value.",
                 )
             )
-        values.append(argument.value)
+        # A procedure is host Python: a string argument reaches it as text.
+        values.append(argument.text() if type(argument.value) is bytes else argument.value)
 
     procedure = get_procedure(procedure_name)
     if procedure is None:
@@ -7554,6 +7578,7 @@ def _insert_visibility_filter(logical_plan, nid, node, filter_dnf, telemetry, *,
             value="Eq",
             left=build_literal_node(True, plan_context=plan_context),
             right=build_literal_node(False, plan_context=plan_context),
+            arena=plan_context.expressions,
         )
 
         # If the filter is an empty list, it means that the relation should not be visible

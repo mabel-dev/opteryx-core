@@ -24,23 +24,21 @@ appended after the simple predicates in their original order.
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.planner.cost_estimation import PredicateStats, order_predicates as _order_predicates
 from opteryx.planner.cost_estimation.predicate_cost import (
-    BASIC_COMPARISON_COSTS,
-    OPERATION_COSTS,
     base_cost as _base_cost,
     predicate_cost as _predicate_cost,
 )
 from opteryx.planner.cost_estimation.fallback_selectivity import DEFAULT_SELECTIVITY
 from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
-from opteryx.types.logical_type import LogicalCategory, ColumnType
+from opteryx.types.logical_type import ColumnType
 from opteryx.types import logical_type as _lt
-from opteryx.utils import random_string
 from .optimization_strategy import (
     OptimizationStrategy,
     OptimizerContext,
     get_nodes_of_type_from_logical_plan,
 )
 from opteryx.compiled.structures.expressions import Dnf
+from opteryx.types.literal_values import literal_order_key
 from opteryx.compiled.structures.plan_steps import FilterStep
 
 # If we have no data, we assume these default selectivities. Defined ONCE in
@@ -197,8 +195,10 @@ def rewrite_anded_any_eq_to_contains_all(predicate, telemetry, *, plan_context):
         if len(data["values"]) > 1:
             telemetry.optimization_predicate_rewriter_anyeq_to_contains_all += 1
             first = data["nodes"][0]
-            # An ARRAY constant of unique values (a set: order does not matter)
-            values_set = set(data["values"])
+            # An ARRAY constant of unique values: order does not matter to the
+            # test, but the literal is a tuple, sorted so the plan is the same on
+            # every run.
+            values_set = tuple(sorted(set(data["values"]), key=literal_order_key))
             # Phase 2: build ARRAY ColumnType directly from old element type.
             _old_elem_ct_po = first.left.type
             _arr_ct_po = (
@@ -280,14 +280,16 @@ class PredicateOrderingStrategy(OptimizationStrategy):
                 return context
 
             new_node = FilterStep()
-            new_node.condition = Dnf()
             # `node` is the node feeding the collected filter chain; its refreshed
             # statistics are the input relation the predicates filter against.
             relation_stats = context.plan_context.statistics(node)
             context.collected_predicates = order_predicates(
                 context.collected_predicates, self.telemetry, relation_stats
             )
-            new_node.condition.parameters = [c.condition for c in context.collected_predicates]
+            new_node.condition = Dnf(
+                parameters=[c.condition for c in context.collected_predicates],
+                arena=context.plan_context.expressions,
+            )
             new_node.relations = set()
             new_node.all_relations = set()
 

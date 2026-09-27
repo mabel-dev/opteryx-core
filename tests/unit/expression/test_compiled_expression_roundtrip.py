@@ -23,6 +23,10 @@ from opteryx.compiled.expression.compiled_expression import expand_between
 from opteryx.compiled.expression.compiled_expression import lower
 from opteryx.expression import NodeType
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 
 def _python_walk(node):
@@ -61,47 +65,48 @@ def _roundtrip(node):
 
 
 def test_literal():
-    _roundtrip(Literal(value=42))
+    _roundtrip(Literal(value=42, arena=_TEST_ARENA))
 
 
 def test_identifier():
-    _roundtrip(LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="x"))
+    _roundtrip(LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="x", arena=_TEST_ARENA))
 
 
 def test_unary():
-    centre = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="x")
-    _roundtrip(UnaryOperator(value="IsNull", centre=centre))
+    centre = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="x", arena=_TEST_ARENA)
+    _roundtrip(UnaryOperator(value="IsNull", centre=centre, arena=_TEST_ARENA))
 
 
 def test_binary_compare():
-    a = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="a")
-    one = Literal(value=1)
-    _roundtrip(Comparison(value="Eq", left=a, right=one))
+    a = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="a", arena=_TEST_ARENA)
+    one = Literal(value=1, arena=_TEST_ARENA)
+    _roundtrip(Comparison(value="Eq", left=a, right=one, arena=_TEST_ARENA))
 
 
 def test_and_of_compares():
-    a = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="a")
-    b = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="b")
-    one = Literal(value=1)
-    two = Literal(value=2)
-    c1 = Comparison(value="Eq", left=a, right=one)
-    c2 = Comparison(value="Gt", left=b, right=two)
-    _roundtrip(And(left=c1, right=c2))
+    a = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="a", arena=_TEST_ARENA)
+    b = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="b", arena=_TEST_ARENA)
+    one = Literal(value=1, arena=_TEST_ARENA)
+    two = Literal(value=2, arena=_TEST_ARENA)
+    c1 = Comparison(value="Eq", left=a, right=one, arena=_TEST_ARENA)
+    c2 = Comparison(value="Gt", left=b, right=two, arena=_TEST_ARENA)
+    _roundtrip(And(left=c1, right=c2, arena=_TEST_ARENA))
 
 
 def test_function_with_parameters():
-    a = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="a")
-    b = Literal(value="suffix")
-    _roundtrip(Function(value="CONCAT", parameters=[a, b]))
+    a = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="a", arena=_TEST_ARENA)
+    b = Literal(value="suffix", arena=_TEST_ARENA)
+    _roundtrip(Function(value="CONCAT", parameters=[a, b], arena=_TEST_ARENA))
 
 
 def _between(lower_incl, upper_incl):
     """BETWEEN packs the lower bound into .right and the upper into .centre."""
     return Between(
         value=(lower_incl, upper_incl),
-        left=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="age"),
-        right=Literal(value=18),
-        centre=Literal(value=65),
+        left=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="age", arena=_TEST_ARENA),
+        right=Literal(value=18, arena=_TEST_ARENA),
+        centre=Literal(value=65, arena=_TEST_ARENA),
+        arena=_TEST_ARENA,
     )
 
 
@@ -138,19 +143,19 @@ def test_expand_between_is_idempotent():
 
 
 def test_dnf_uses_parameters():
-    a = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="a")
-    one = Literal(value=1)
-    two = Literal(value=2)
-    c1 = Comparison(value="Eq", left=a, right=one)
-    c2 = Comparison(value="Eq", left=a, right=two)
-    _roundtrip(Dnf(parameters=[c1, c2]))
+    a = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="a", arena=_TEST_ARENA)
+    one = Literal(value=1, arena=_TEST_ARENA)
+    two = Literal(value=2, arena=_TEST_ARENA)
+    c1 = Comparison(value="Eq", left=a, right=one, arena=_TEST_ARENA)
+    c2 = Comparison(value="Eq", left=a, right=two, arena=_TEST_ARENA)
+    _roundtrip(Dnf(parameters=[c1, c2], arena=_TEST_ARENA))
 
 
 def test_deeply_nested():
     # Chain of NESTED wrappers around a LITERAL.
-    n = Literal(value=1)
+    n = Literal(value=1, arena=_TEST_ARENA)
     for _ in range(20):
-        n = Nested(centre=n)
+        n = Nested(centre=n, arena=_TEST_ARENA)
     _roundtrip(n)
 
 
@@ -182,20 +187,25 @@ def test_real_query_expressions():
     big = And(
         left=Comparison(
             value="Eq",
-            left=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="x"),
-            right=Literal(value=1),
+            left=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="x", arena=_TEST_ARENA),
+            right=Literal(value=1, arena=_TEST_ARENA),
+            arena=_TEST_ARENA,
         ),
         right=Or(
             left=Comparison(
                 value="Lt",
-                left=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="y"),
-                right=Literal(value=10),
+                left=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="y", arena=_TEST_ARENA),
+                right=Literal(value=10, arena=_TEST_ARENA),
+                arena=_TEST_ARENA,
             ),
             right=UnaryOperator(
                 value="IsNull",
-                centre=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="z"),
+                centre=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="z", arena=_TEST_ARENA),
+                arena=_TEST_ARENA,
             ),
+            arena=_TEST_ARENA,
         ),
+        arena=_TEST_ARENA,
     )
     _roundtrip(big)
 

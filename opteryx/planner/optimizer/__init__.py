@@ -84,7 +84,6 @@ from opteryx.planner.optimizer.strategies import (
 )
 
 from .statistics_refresh import refresh_statistics
-from .strategies.optimization_strategy import CopyOnWritePlan
 from .strategies.optimization_strategy import OptimizerContext
 
 __all__ = ["do_optimizer"]
@@ -381,25 +380,26 @@ class OptimizerVisitor:
             # of the input plan — see OptimizationStrategy.rebuilds_plan.
             context.optimized_plan = LogicalPlan(context.plan_context)
 
-        def _inner(nid, parent_nid, context):
-            node = context.pre_optimized_tree[nid]
+        working_plan = context.optimized_plan
+        # The walk is fixed up front, natively: top-down from the head, each node
+        # before its producers, producers in ingoing order. Strategies mutate the
+        # WORKING plan, never `plan`, so the order cannot change under the walk.
+        pre_optimized_tree = context.pre_optimized_tree
+        visit = strategy.visit
+        for nid, parent_nid in plan.visit_order(root_nid):
             context.node_id = nid
             context.parent_nid = parent_nid
-            context = strategy.visit(node, context)
+            context = visit(pre_optimized_tree[nid], context)
 
-            for child, _, _ in plan.ingoing_edges(nid):
-                _inner(child, nid, context)
-
-        _inner(root_nid, None, context)
         # some strategies operate on the entire plan at once, or need to be told
         # there's no more nodes, we handle both with the .complete
         optimized_plan = strategy.complete(context.optimized_plan, context)
-        if isinstance(optimized_plan, CopyOnWritePlan):
-            # A pass that never mutated hands the input plan back untouched
-            # (no copy was ever taken); a pass that did hands back the
-            # materialized working copy. Strategies that build and assign a
-            # whole new plan themselves bypass the wrapper and land below.
-            return optimized_plan.unwrap(plan)
+        if optimized_plan is working_plan:
+            # The copy-on-write view (PlanGraph.cow_view): a pass that never
+            # mutated hands the input plan back untouched (no copy was ever
+            # taken); a pass that did hands back the materialized working copy.
+            # A rebuild-from-empty plan is its own unwrap and lands below.
+            optimized_plan = working_plan.unwrap()
         if not optimized_plan:
             # A rebuild-from-empty strategy whose every visit early-returned
             # (e.g. nothing in the plan concerned it) never added a node; an
@@ -440,9 +440,10 @@ class OptimizerVisitor:
                 ):
                     current_plan = refresh_statistics(current_plan, self.plan_context)
                     self.refreshed_statistics = True
-                before = (len(current_plan), len(current_plan.edges()))
+                before = (len(current_plan), current_plan.edge_count())
                 previous_plan = current_plan
                 pre_epoch = current_plan.mutation_epoch
+                pre_writes = _step_writes(current_plan)
                 current_plan = self.traverse(current_plan, strategy)
                 # Did the strategy actually change anything? Every plan change
                 # goes through a Graph mutator (node replace, add/remove of
@@ -451,10 +452,16 @@ class OptimizerVisitor:
                 # copy (or freshly built plan) back -> any mutation after the
                 # copy was taken. A strategy handing back an untouched copy
                 # counts as unchanged.
+                #
+                # A strategy can also change a step's FIELDS without touching the
+                # graph; every field setter bumps the step's write_count, so a moved
+                # sum of write counts is a changed plan too (architect ruling Q2:
+                # typed-field writes mark statistics stale).
+                step_written = _step_writes(current_plan) != pre_writes
                 if current_plan is previous_plan:
-                    plan_changed = current_plan.mutation_epoch != pre_epoch
+                    plan_changed = current_plan.mutation_epoch != pre_epoch or step_written
                 else:
-                    plan_changed = current_plan.mutation_epoch > 0
+                    plan_changed = current_plan.mutation_epoch > 0 or step_written
                     # Graph.copy() does not carry instance attributes, so a
                     # strategy that hands back a copy silently drops the
                     # staleness flag and the getattr default (True) forces a
@@ -467,7 +474,7 @@ class OptimizerVisitor:
                     "optimizer",
                     strategy.__class__.__name__,
                     before,
-                    (len(current_plan), len(current_plan.edges())),
+                    (len(current_plan), current_plan.edge_count()),
                 )
                 if config.VALIDATE_OPTIMIZER_PLANS:
                     # Debug guardrail (WP-3): localise plan corruption to the
@@ -485,6 +492,11 @@ class OptimizerVisitor:
         # DEBUG: print("AFTER OPTIMIZATION")
         # DEBUG: print(current_plan.draw())
         return current_plan
+
+
+def _step_writes(plan) -> int:
+    """The total field writes of `plan`'s steps (see PlanStep.write_count)."""
+    return sum(step.write_count for _nid, step in plan.nodes(True))
 
 
 def do_optimizer(

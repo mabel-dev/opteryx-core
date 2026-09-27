@@ -37,6 +37,10 @@ from opteryx.planner.optimizer.strategies.predicate_ordering import _resolve_pre
 from opteryx.third_party.maki_nage.distogram import load_counts_i64
 from opteryx.types.logical_type import VARCHAR
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 
 # RelationStatistics is keyed by column identity, never by name — a name is not
@@ -146,16 +150,16 @@ _SW_IDENTITY = _PLAN_CONTEXT.columns.relation_column("t", "sw").identity
 
 
 def _varchar_identifier(col_identity, col_name="col"):
-    n = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=col_name)
+    n = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=col_name, arena=_TEST_ARENA)
     n.schema_column = _PLAN_CONTEXT.columns.reference(col_identity, "col", VARCHAR)
     return n
 
 
 def _starts_with_pred(prefix: bytes, col_identity=_SW_IDENTITY):
-    literal = Literal(value=prefix)
+    literal = Literal(value=prefix, arena=_TEST_ARENA)
     condition = Function(
-        value="_STARTS_WITH", parameters=[_varchar_identifier(col_identity), literal]
-    )
+        value="_STARTS_WITH", parameters=[_varchar_identifier(col_identity), literal], 
+    arena=_TEST_ARENA)
     return _pred(condition)
 
 
@@ -164,9 +168,9 @@ def _cheap_no_model_func_pred(col_identity=_LOW):
     # so estimate_selectivity falls through to 1.0 -- and its real catalog
     # cost is far below _STARTS_WITH's, so pre-change cost-only ordering
     # would always place it first.
-    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col2")
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col2", arena=_TEST_ARENA)
     identifier.schema_column = _PLAN_CONTEXT.columns.reference(col_identity, "col", None)
-    condition = Function(value="LENGTH", parameters=[identifier])
+    condition = Function(value="LENGTH", parameters=[identifier], arena=_TEST_ARENA)
     return _pred(condition)
 
 
@@ -211,7 +215,8 @@ def test_complex_ordering_no_model_predicates_keep_cost_order_even_with_statisti
     a = _cheap_no_model_func_pred(col_identity=_LOW)
     b_condition = Function(
         value="UPPER",
-        parameters=[LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col3", schema_column=_PLAN_CONTEXT.columns.reference(_HIGH, "col", None))],
+        parameters=[LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col3", schema_column=_PLAN_CONTEXT.columns.reference(_HIGH, "col", None), arena=_TEST_ARENA)],
+        arena=_TEST_ARENA,
     )
     b = _pred(b_condition)
     telemetry = QueryTelemetry.detached()

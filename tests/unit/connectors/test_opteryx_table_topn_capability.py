@@ -30,12 +30,12 @@ def test_opteryx_table_declares_topn_pushdown():
 def test_opteryx_table_accepts_a_single_column_key():
     # can_push_topn does not touch instance state; called unbound so no catalog
     # is needed to construct the table.
-    assert OpteryxTable.can_push_topn(None, [(_key(), False)]) is True
+    assert OpteryxTable.can_push_topn(None, [(_key(), False, False)]) is True
 
 
 def test_opteryx_table_declines_what_the_parquet_reader_cannot_sort_by():
-    assert OpteryxTable.can_push_topn(None, [(_key(), False), (_key(name="id"), True)]) is False
-    assert OpteryxTable.can_push_topn(None, [(_key(node_type=NodeType.FUNCTION), True)]) is False
+    assert OpteryxTable.can_push_topn(None, [(_key(), False, False), (_key(name="id"), True, True)]) is False
+    assert OpteryxTable.can_push_topn(None, [(_key(node_type=NodeType.FUNCTION), True, True)]) is False
 
 
 if __name__ == "__main__":  # pragma: no cover

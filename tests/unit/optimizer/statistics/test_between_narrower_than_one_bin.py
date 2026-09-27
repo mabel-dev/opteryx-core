@@ -54,6 +54,10 @@ from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.third_party.maki_nage import distogram as dg
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 # One bound column, minted the way a query mints it; statistics are keyed by its identity.
 _PLAN_CONTEXT = PlanContext()
@@ -94,7 +98,7 @@ def _stats(histogram):
 
 
 def _identifier():
-    node = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="src_addr")
+    node = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="src_addr", arena=_TEST_ARENA)
     node.schema_column = _PLAN_CONTEXT.columns.reference(_SRC, "col", None)
     return node
 
@@ -104,8 +108,9 @@ def _between(lo, hi):
     # `_selectivity_between`. `centre` is a real operand here, not decoration.
     return Between(
         left=_identifier(),
-        right=Literal(value=lo),
-        centre=Literal(value=hi),
+        right=Literal(value=lo, arena=_TEST_ARENA),
+        centre=Literal(value=hi, arena=_TEST_ARENA),
+        arena=_TEST_ARENA,
     )
 
 

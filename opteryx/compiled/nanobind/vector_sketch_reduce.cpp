@@ -31,79 +31,35 @@
 #include "core/buffers.h"
 #include "core/draken_bridge.h"
 #include "core/kmv_sketch.h"
+#include "planner/manifest_sketch.hpp"
 
 namespace nb = nanobind;
 
-// THE sketch — draken/core/kmv_sketch.h, shared with skene's value-ordering
-// decline and rugo's dictionary-encoding decision. The family tag is a
-// correctness discriminant: these hashes are draken's Vector.hash(), which does
-// NOT interchange with skene's XXH3-over-value-bytes sketches (they disagree
-// about nulls and about decimal identity, so a cross-family union is a number
-// with no meaning — architect ruling 2026-08-21). Making the family part of the
-// TYPE means such a merge cannot compile.
-using ManifestSketch =
-    draken::KmvSketch<32u, draken::KmvHashFamily::kDrakenVectorHash>;
+using opteryx::planner::ManifestSketch;
+using opteryx::planner::NestedArrayView;
 
 // KMV sketch width — must match the writer (opteryx_catalog manifest.MIN_K_HASHES)
 // and the Python reader (manifest.estimate_cardinality K=32).
 static const uint32_t KMV_K = static_cast<uint32_t>(ManifestSketch::kK);
 
-static inline bool bit_valid(const uint8_t* validity, uint32_t idx) {
-    // validity == NULL means "all valid" (unified-format convention).
-    return validity == nullptr || ((validity[idx >> 3] >> (idx & 7u)) & 1u);
-}
-
-// Read-only view over a two-level array<array<T>> Vector (outer=files,
-// middle=columns, leaf=values). Centralizes the offset/selection composition —
-// the one part of these kernels that segfaults if an index expression is wrong —
-// so it is written and reviewed once, not re-derived per kernel. Leaf typing and
-// per-value null handling stay with each kernel (they differ: hashes skip nulls,
-// histogram bins read null as 0), so the view stops at the leaf index range.
-struct NestedArrayView {
-    const DrakenVector* outer;
-    const DrakenVector* mid;
-    const DrakenVector* leaf;
-    const int32_t*  poff;   // outer offsets
-    const uint32_t* psel;   // outer selection
-    const int32_t*  moff;   // middle offsets
-    const uint32_t* msel;   // middle selection
-    const uint32_t* lsel;   // leaf selection
-
-    uint32_t n_files() const { return outer->length; }
-    bool leaf_valid(int32_t g) const { return bit_valid(leaf->validity, static_cast<uint32_t>(g)); }
-};
-
+// The shared view (src/cpp/planner/manifest_sketch.hpp) over a Python Vector.
 static NestedArrayView make_nested_view(nb::object column) {
-    NestedArrayView v;
-    v.outer = draken_vector_unwrap(column.ptr());
-    if (!v.outer) throw nb::python_error();
-    v.mid = draken_array_child_unwrap(column.ptr());
-    if (!v.mid) throw nb::python_error();
-    v.leaf = draken_array_grandchild_unwrap(column.ptr());
-    if (!v.leaf) throw nb::python_error();
-    v.poff = static_cast<const int32_t*>(v.outer->data);
-    v.psel = v.outer->selection;
-    v.moff = static_cast<const int32_t*>(v.mid->data);
-    v.msel = v.mid->selection;
-    v.lsel = v.leaf->selection;
-    return v;
+    const DrakenVector* outer = draken_vector_unwrap(column.ptr());
+    if (!outer) throw nb::python_error();
+    const DrakenVector* mid = draken_array_child_unwrap(column.ptr());
+    if (!mid) throw nb::python_error();
+    const DrakenVector* leaf = draken_array_grandchild_unwrap(column.ptr());
+    if (!leaf) throw nb::python_error();
+    return NestedArrayView(outer, mid, leaf);
 }
 
-// Resolve file `i`'s field_id slice to a leaf index range [g0, g1); calls
-// fn(g0, g1) once, or not at all when the file has no slice for that column
-// (null outer/middle row or column out of range). The caller iterates the range
-// with the leaf typing/null policy it needs.
-template <typename Fn>
-static inline void with_field_slice(const NestedArrayView& v, uint32_t i,
-                                    int64_t field_id, Fn&& fn) {
-    if (i >= v.outer->length) return;
-    if (!bit_valid(v.outer->validity, i)) return;
-    const uint32_t pi = v.psel[i];
-    const int64_t  mrow = static_cast<int64_t>(v.poff[pi]) + field_id;
-    if (mrow >= v.poff[pi + 1u]) return;
-    if (!bit_valid(v.mid->validity, static_cast<uint32_t>(mrow))) return;
-    const uint32_t mj = v.msel[static_cast<uint32_t>(mrow)];
-    fn(v.moff[mj], v.moff[mj + 1u]);
+// Every outer row, or the caller's.
+static std::vector<uint32_t> rows_or_all(const NestedArrayView& v,
+                                         std::optional<std::vector<uint32_t>> rows) {
+    if (rows.has_value()) return std::move(*rows);
+    std::vector<uint32_t> all(v.n_files());
+    for (uint32_t i = 0; i < all.size(); ++i) all[i] = i;
+    return all;
 }
 
 // kmv_ndv(column, field_id) -> Optional[int]
@@ -136,24 +92,8 @@ static nb::object kmv_ndv(nb::object column, int64_t field_id,
     if (field_id < 0)
         return nb::none();
 
-    const uint64_t* ldata = static_cast<const uint64_t*>(v.leaf->data);
-
     ManifestSketch kmin;       // the K smallest distinct hashes seen so far
-
-    auto merge_row = [&](uint32_t i) {
-        with_field_slice(v, i, field_id, [&](int32_t g0, int32_t g1) {
-            for (int32_t g = g0; g < g1; ++g) {
-                if (!v.leaf_valid(g)) continue;
-                kmin.add(ldata[v.lsel[static_cast<uint32_t>(g)]]);
-            }
-        });
-    };
-
-    if (rows.has_value()) {
-        for (uint32_t i : *rows) merge_row(i);
-    } else {
-        for (uint32_t i = 0, n = v.n_files(); i < n; ++i) merge_row(i);
-    }
+    opteryx::planner::kmv_union(v, field_id, rows_or_all(v, std::move(rows)), kmin);
 
     if (kmin.size() == 0u)
         return nb::none();
@@ -196,17 +136,16 @@ static nb::object sketch_keep_mask(nb::object column, int64_t field_id,
         return nb::bytes(mask.data(), mask.size());
 
     const std::unordered_set<uint64_t> probes(probe_hashes.begin(), probe_hashes.end());
-    const uint64_t* ldata = static_cast<const uint64_t*>(v.leaf->data);
 
     for (uint32_t i = 0, n = v.n_files(); i < n; ++i) {
-        with_field_slice(v, i, field_id, [&](int32_t g0, int32_t g1) {
+        v.with_field_slice(i, field_id, [&](int32_t g0, int32_t g1) {
             const uint32_t count = static_cast<uint32_t>(g1 - g0);
             // Empty (ambiguous) or saturated (truncated sample) → cannot rule out → keep.
             if (count == 0 || count >= KMV_K) return;
             // Unsaturated complete set: eliminate iff no probe hash is present.
             for (int32_t g = g0; g < g1; ++g) {
                 if (!v.leaf_valid(g)) continue;
-                if (probes.count(ldata[v.lsel[static_cast<uint32_t>(g)]])) return;  // present → keep
+                if (probes.count(v.u64(g))) return;  // present → keep
             }
             mask[i] = static_cast<char>(0);                            // provably absent → drop
         });
@@ -230,19 +169,13 @@ static nb::object histogram_field_slices(nb::object column, int64_t field_id) {
     if (v.leaf->type != DRAKEN_INT64)
         throw nb::type_error("histogram_field_slices: leaf type must be INT64");
 
-    const int64_t* ldata = static_cast<const int64_t*>(v.leaf->data);
-
     std::vector<int64_t> counts;
     std::vector<int32_t> offsets;
     offsets.reserve(v.n_files() + 1);
     offsets.push_back(0);
 
     for (uint32_t i = 0, n = v.n_files(); i < n; ++i) {
-        with_field_slice(v, i, field_id, [&](int32_t g0, int32_t g1) {
-            for (int32_t g = g0; g < g1; ++g) {
-                counts.push_back(v.leaf_valid(g) ? ldata[v.lsel[static_cast<uint32_t>(g)]] : 0);
-            }
-        });
+        opteryx::planner::histogram_slice(v, field_id, i, counts);
         offsets.push_back(static_cast<int32_t>(counts.size()));
     }
 
@@ -273,28 +206,8 @@ static nb::object char_class_field_totals(nb::object column, int64_t field_id,
     const NestedArrayView v = make_nested_view(column);
     if (v.leaf->type != DRAKEN_INT64)
         throw nb::type_error("char_class_field_totals: leaf type must be INT64");
-    if (field_id < 0)
-        return nb::none();
-
-    const int64_t* ldata = static_cast<const int64_t*>(v.leaf->data);
-    int64_t totals[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-    bool any = false;
-
-    auto sum_row = [&](uint32_t i) {
-        with_field_slice(v, i, field_id, [&](int32_t g0, int32_t g1) {
-            if (g1 - g0 != 8) return;   // absent/malformed slice for this file -- skip
-            any = true;
-            for (int32_t g = g0; g < g1; ++g) {
-                totals[g - g0] += v.leaf_valid(g) ? ldata[v.lsel[static_cast<uint32_t>(g)]] : 0;
-            }
-        });
-    };
-
-    if (rows.has_value()) {
-        for (uint32_t i : *rows) sum_row(i);
-    } else {
-        for (uint32_t i = 0, n = v.n_files(); i < n; ++i) sum_row(i);
-    }
+    int64_t totals[8];
+    const bool any = opteryx::planner::char_class_totals(v, field_id, rows_or_all(v, std::move(rows)), totals);
 
     if (!any) return nb::none();
     nb::list out;
@@ -361,16 +274,11 @@ static std::vector<uint64_t> merge_min_k(
 // load-bearing for nothing but bit-for-bit continuity of numbers the planner
 // already consumes, so it is preserved verbatim rather than harmonised.
 static nb::object estimate_from_min_k(const std::vector<uint64_t>& min_k) {
-    if (min_k.size() < ManifestSketch::kK)
-        return nb::make_tuple(nb::int_(static_cast<int64_t>(min_k.size())), true);
-    const double v =
-        static_cast<double>(min_k[ManifestSketch::kK - 1u]) / draken::kKmvHashSpace;
-    if (v <= 0.0)
-        // Needs the K-th smallest hash to be 0 — report K rather than infinity,
-        // matching the shared estimator's own guard.
-        return nb::make_tuple(nb::int_(static_cast<int64_t>(ManifestSketch::kK)), false);
-    const double est = static_cast<double>(ManifestSketch::kK - 1u) / v;
-    return nb::make_tuple(nb::steal<nb::object>(PyLong_FromDouble(est + 0.5)), false);
+    ManifestSketch sketch;
+    for (const uint64_t hash : min_k) sketch.add(hash);
+    bool exact = false;
+    const double count = opteryx::planner::rounded_estimate(sketch, exact);
+    return nb::make_tuple(nb::steal<nb::object>(PyLong_FromDouble(count)), exact);
 }
 
 void register_vector_sketch_reduce(nb::module_ &m) {

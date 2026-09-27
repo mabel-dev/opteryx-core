@@ -184,6 +184,12 @@ struct case_ctx {
  *         unsigned column value, so dropping it is exact, not a degradation.
  *         kind 0 accepts SIGNED operands only and kind 3 UNSIGNED only; a
  *         mismatched operand is a loud error, never a reinterpretation.
+ * kind 4: count x int128 (16-byte little-endian two's complement) SORTED
+ *         ASCENDING — DECIMAL128 raw values quantized to the column's scale at
+ *         bind time. Accepts a DECIMAL128 operand only. The payload is not
+ *         16-byte aligned (it follows this 8-byte header), so the kernel copies
+ *         it to aligned storage before reading it as __int128.
+ * Any other kind is a loud error in draken_in_list.
  * The list never contains NULL (the plan compiler rejects those lists).
  */
 struct in_list_ctx {

@@ -29,6 +29,10 @@ import pytest
 import opteryx
 from opteryx.planner.plan_context import PlanContext
 from opteryx.expression import NodeType
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 
 def _bind(sql, ctx, run_optimizer=True):
@@ -131,7 +135,7 @@ def test_unset_decay_is_none_not_a_default_guess():
     # A comparison nothing captured a decay onto reads None -- confirms the
     # estimator's fallback trigger (decay is None -> flat constant) is
     # reachable, not just theoretical.
-    fresh_node = Comparison(value="InStr")
+    fresh_node = Comparison(value="InStr", arena=_TEST_ARENA)
     assert fresh_node.like_selectivity_decay is None
 
 

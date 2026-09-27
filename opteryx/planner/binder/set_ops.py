@@ -175,7 +175,7 @@ def _branch_owns_a_relation(graph, start_nid: str, relation_names: set) -> bool:
     return False
 
 
-def _positional_setop_on_condition(left_columns, right_columns) -> Expression:
+def _positional_setop_on_condition(left_columns, right_columns, arena) -> Expression:
     """AND-tree of `left[i] = right[i]`, one equality per output position.
 
     The identifiers are handed over ALREADY BOUND - `inner_binder` returns early on
@@ -195,18 +195,21 @@ def _positional_setop_on_condition(left_columns, right_columns) -> Expression:
         equality = Comparison(
             value="Eq",
             do_not_create_column=True,
+            arena=arena,
         )
         equality.left = LogicalColumn(
             node_type=NodeType.IDENTIFIER,
             source=left_relation,
             source_column=left_column.name,
             schema_column=left_column,
+            arena=arena,
         )
         equality.right = LogicalColumn(
             node_type=NodeType.IDENTIFIER,
             source=right_relation,
             source_column=right_column.name,
             schema_column=right_column,
+            arena=arena,
         )
         conditions.append(equality)
 
@@ -214,7 +217,7 @@ def _positional_setop_on_condition(left_columns, right_columns) -> Expression:
         paired = []
         for i in range(0, len(conditions), 2):
             if i + 1 < len(conditions):
-                and_node = And(do_not_create_column=True)
+                and_node = And(do_not_create_column=True, arena=arena)
                 and_node.left = conditions[i]
                 and_node.right = conditions[i + 1]
                 paired.append(and_node)
@@ -261,7 +264,9 @@ def _rewrite_setop_to_join(self, node: PlanStep, context: BindingContext, join_t
 
     join_node = JoinStep()
     join_node.type = join_type
-    join_node.on = _positional_setop_on_condition(left_columns, right_columns)
+    join_node.on = _positional_setop_on_condition(
+        left_columns, right_columns, context.plan_context.expressions
+    )
     join_node.using = None
     join_node.left_relation_names = node.left_relation_names
     join_node.right_relation_names = node.right_relation_names
@@ -808,6 +813,7 @@ def visit_union(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep
                         node_type=NodeType.IDENTIFIER,  # column type
                         source_column=schema_column.name,  # the source column
                         schema_column=schema_column,
+                        arena=context.plan_context.expressions,
                     )
                 )
         node.columns = columns
@@ -866,6 +872,7 @@ def visit_intersect(self, node: PlanStep, context: BindingContext) -> Tuple[Plan
                         node_type=NodeType.IDENTIFIER,
                         source_column=schema_column.name,
                         schema_column=schema_column,
+                        arena=context.plan_context.expressions,
                     )
                 )
         node.columns = columns
@@ -902,6 +909,7 @@ def visit_except(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
                         node_type=NodeType.IDENTIFIER,
                         source_column=schema_column.name,
                         schema_column=schema_column,
+                        arena=context.plan_context.expressions,
                     )
                 )
         node.columns = columns
@@ -979,6 +987,7 @@ def visit_unnest(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
             source_column=node.unnest_alias,
             source=unnest_schema,
             schema_column=schema_column,
+            arena=context.plan_context.expressions,
         )
         context.schemas[unnest_schema] = RelationSchema(
             name=unnest_schema, columns=[schema_column]
@@ -1010,6 +1019,7 @@ def visit_unnest(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
             source_column=node.unnest_alias,
             source=unnest_schema,
             schema_column=schema_column,
+            arena=context.plan_context.expressions,
         )
         # create the schema for the unnested column
         context.schemas[unnest_schema] = RelationSchema(name=unnest_schema, columns=[schema_column])
@@ -1072,6 +1082,7 @@ def visit_unnest(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
             source_column=node.unnest_alias,
             source=unnest_schema,
             schema_column=schema_column,
+            arena=context.plan_context.expressions,
         )
 
         # create the schema for the unnested column

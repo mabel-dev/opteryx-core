@@ -23,8 +23,9 @@ def visit_show_columns(self, node: PlanStep, context: BindingContext) -> Tuple[P
             source_column=schema_column.name,  # the source column
             source=node.relation,  # the source relation
             schema_column=schema_column,
+            arena=context.plan_context.expressions,
         )
-        node.columns.append(column_reference)
+        node.columns = (*node.columns, column_reference)
     return node, context
 
 
@@ -70,8 +71,9 @@ def visit_show_manifest(self, node: PlanStep, context: BindingContext) -> Tuple[
             source_column=schema_column.name,
             source=node.relation,
             schema_column=schema_column,
+            arena=context.plan_context.expressions,
         )
-        node.columns.append(column_reference)
+        node.columns = (*node.columns, column_reference)
     return node, context
 
 
@@ -120,8 +122,9 @@ def visit_show_snapshots(self, node: PlanStep, context: BindingContext) -> Tuple
             source_column=schema_column.name,
             source=node.relation,
             schema_column=schema_column,
+            arena=context.plan_context.expressions,
         )
-        node.columns.append(column_reference)
+        node.columns = (*node.columns, column_reference)
     return node, context
 
 
@@ -167,8 +170,9 @@ def visit_show_lineage(self, node: PlanStep, context: BindingContext) -> Tuple[P
             source_column=schema_column.name,
             source=node.relation,
             schema_column=schema_column,
+            arena=context.plan_context.expressions,
         )
-        node.columns.append(column_reference)
+        node.columns = (*node.columns, column_reference)
     return node, context
 
 
@@ -204,8 +208,9 @@ def visit_show_sources(self, node: PlanStep, context: BindingContext) -> Tuple[P
             source_column=schema_column.name,
             source=node.relation,
             schema_column=schema_column,
+            arena=context.plan_context.expressions,
         )
-        node.columns.append(column_reference)
+        node.columns = (*node.columns, column_reference)
     return node, context
 
 

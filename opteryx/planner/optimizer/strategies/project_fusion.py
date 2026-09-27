@@ -82,7 +82,7 @@ def _substitute_column(col, inline_map):
     if col.node_type == NodeType.IDENTIFIER:
         ident = _identity_of(col)
         if ident in inline_map:
-            nested = Nested()
+            nested = Nested(arena=col.arena)
             nested.centre = inline_map[ident].copy()
             nested.schema_column = col.schema_column
             nested.alias = col.alias

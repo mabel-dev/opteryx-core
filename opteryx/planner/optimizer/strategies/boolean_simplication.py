@@ -23,6 +23,7 @@ from .optimization_strategy import predicate_key
 from opteryx.compiled.structures.expressions import And
 from opteryx.compiled.structures.expressions import Not
 from opteryx.compiled.structures.expressions import Or
+from opteryx.compiled.structures.expressions import rewrite_children
 
 # Operations safe to invert.
 HALF_INVERSIONS: dict = {
@@ -204,7 +205,7 @@ def _rebuild_and_chain(conditions: list) -> PlanStep:
 
     result = conditions[0]
     for condition in conditions[1:]:
-        result = And(left=result, right=condition)
+        result = And(left=result, right=condition, arena=conditions[0].arena)
     return result
 
 
@@ -303,7 +304,7 @@ def _rebuild_or_chain(conditions: list) -> PlanStep:
 
     result = conditions[0]
     for condition in conditions[1:]:
-        result = Or(left=result, right=condition)
+        result = Or(left=result, right=condition, arena=conditions[0].arena)
     return result
 
 
@@ -330,13 +331,13 @@ def update_expression_tree(node: PlanStep, telemetry: QueryTelemetry):
             if len(or_conditions) >= 2:
                 # Create NOT of each condition
                 not_conditions = [
-                    Not(centre=condition) for condition in or_conditions
+                    Not(centre=condition, arena=condition.arena) for condition in or_conditions
                 ]
 
                 # Rebuild as AND chain (highly pushable!)
                 result = not_conditions[0]
                 for condition in not_conditions[1:]:
-                    result = And(left=result, right=condition)
+                    result = And(left=result, right=condition, arena=result.arena)
 
                 # Track statistic based on chain length
                 if len(or_conditions) > 2:
@@ -357,7 +358,7 @@ def update_expression_tree(node: PlanStep, telemetry: QueryTelemetry):
                 _directly_invertible(condition) for condition in and_conditions
             ):
                 not_conditions = [
-                    Not(centre=condition) for condition in and_conditions
+                    Not(centre=condition, arena=condition.arena) for condition in and_conditions
                 ]
                 telemetry.optimization_boolean_rewrite_demorgan_and += 1
                 return update_expression_tree(_rebuild_or_chain(not_conditions), telemetry)
@@ -379,5 +380,6 @@ def update_expression_tree(node: PlanStep, telemetry: QueryTelemetry):
         return _simplify_and_chain(node, telemetry)
 
     # traverse the expression tree
-    node.map_children(lambda child: update_expression_tree(child, telemetry))
-    return node
+    return rewrite_children(
+        node, lambda child: update_expression_tree(child, telemetry), share=True
+    )

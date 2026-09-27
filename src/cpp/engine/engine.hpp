@@ -891,7 +891,7 @@ public:
                                       void* pred_fn, void* pred_ctx,
                                       const std::vector<int>* pred_col_to_p1,
                                       int sort_p1_index, bool sort_ascending,
-                                      int64_t topn_limit,
+                                      bool sort_nulls_first, int64_t topn_limit,
                                       const std::vector<std::string>* zone_columns,
                                       const std::vector<int>* zone_ops,
                                       const std::vector<int64_t>* zone_ordinals,
@@ -908,7 +908,8 @@ public:
                            p1_length_only, out_column_names, out_identities,
                            out_column_types, out_retag_units, out_length_only,
                            reinterpret_cast<SkeneLatmatPredFn>(pred_fn), pred_ctx,
-                           pred_col_to_p1, sort_p1_index, sort_ascending, topn_limit,
+                           pred_col_to_p1, sort_p1_index, sort_ascending, sort_nulls_first,
+                           topn_limit,
                            zone, row_groups_total, row_groups_pruned,
                            bytes_claimed, io));
     }
@@ -968,7 +969,7 @@ public:
             const std::vector<uint8_t>* p2_hash_key_columns,
             const std::vector<uint8_t>* p2_array_columns,
             void* pred_fn, void* pred_ctx, std::vector<int> pred_col_to_p1,
-            int sort_p1_index, bool sort_ascending, int64_t topn_limit,
+            int sort_p1_index, bool sort_ascending, bool sort_nulls_first, int64_t topn_limit,
             std::vector<int> out_from_p1, std::vector<int> out_from_p2,
             std::vector<std::string> out_names) {
         latmat_owned_ints.push_back(
@@ -1009,6 +1010,7 @@ public:
         src->pred_col_to_p1 = pred_map;
         src->sort_p1_index = sort_p1_index;
         src->sort_ascending = sort_ascending;
+        src->sort_nulls_first = sort_nulls_first;
         src->topn_limit = topn_limit;
         src->out_from_p1 = from_p1;
         src->out_from_p2 = from_p2;

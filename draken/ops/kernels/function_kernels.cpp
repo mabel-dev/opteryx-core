@@ -2281,7 +2281,26 @@ VecResult draken_in_list(void* ctx, const DrakenVector* const* args, uint32_t na
             bool hit = std::binary_search(items, items + c->count, val);
             if (hit != negate) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
         }
-    } else {              // string entries: (u32 len + bytes), linear scan
+    } else if (c->kind == 4) {   // int128 raw (DECIMAL128), sorted ascending
+        if (v->type != DRAKEN_DECIMAL128) {
+            draken_free(out);
+            if (validity != nullptr) draken_free(validity);
+            return draken_error_sentinel(
+                "draken_in_list: DECIMAL128 operand required for kind-4 set");
+        }
+        // The payload follows an 8-byte header, so it is NOT 16-byte aligned and
+        // an __int128 load straight from it would be misaligned. Copy the (small,
+        // bind-time) set once into aligned storage and binary-search that.
+        std::vector<__int128> items(c->count);
+        if (c->count > 0)
+            std::memcpy(items.data(), payload, static_cast<size_t>(c->count) * sizeof(__int128));
+        const auto* data = static_cast<const __int128*>(v->data);
+        for (uint32_t i = 0; i < n; ++i) {
+            if (!fk_row_valid(v, i)) continue;
+            bool hit = std::binary_search(items.begin(), items.end(), data[v->selection[i]]);
+            if (hit != negate) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        }
+    } else if (c->kind == 1) {   // string entries: (u32 len + bytes), linear scan
         if (!fk_is_string(v->type)) {
             draken_free(out);
             if (validity != nullptr) draken_free(validity);
@@ -2305,6 +2324,12 @@ VecResult draken_in_list(void* ctx, const DrakenVector* const* args, uint32_t na
             }
             if (hit != negate) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
         }
+    } else {
+        // Every kind is dispatched explicitly: this used to be a bare `else` that
+        // read ANY unrecognised kind (including kind 2, float64) as string entries.
+        draken_free(out);
+        if (validity != nullptr) draken_free(validity);
+        return draken_error_sentinel("draken_in_list: unsupported membership-set kind");
     }
     VecResult r{};
     r.data = out;

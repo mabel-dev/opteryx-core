@@ -44,9 +44,9 @@ def visit_framed_window(self, node: PlanStep, context: BindingContext) -> Tuple[
     # Bind the window's own ORDER BY. A framed window always has one — the
     # logical planner refuses a FRAME with no ORDER BY before this node exists.
     bound_order = []
-    for col, ascending in node.order_by or []:
+    for col, ascending, nulls_first in node.order_by or []:
         bound, context = inner_binder(col, context)
-        bound_order.append((bound, ascending))
+        bound_order.append((bound, ascending, nulls_first))
     node.order_by = bound_order
 
     # `outputs` is a list of (kind, pre-minted SchemaColumn, params, frame). `params`
@@ -64,6 +64,7 @@ def visit_framed_window(self, node: PlanStep, context: BindingContext) -> Tuple[
         _probe = Aggregator(
             value=kind,
             parameters=[arg_node] if arg_node is not None else [],
+            arena=context.plan_context.expressions,
         )
         result_type = _aggregate_return_type(_probe)
         if result_type is not None:
@@ -88,6 +89,7 @@ def visit_framed_window(self, node: PlanStep, context: BindingContext) -> Tuple[
             source=node.output_relation,
             source_column=sc.name,
             schema_column=sc,
+            arena=context.plan_context.expressions,
         )
         for _, sc, _params, _frame in node.outputs
     ]

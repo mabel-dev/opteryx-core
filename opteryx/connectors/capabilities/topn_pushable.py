@@ -25,8 +25,8 @@ from opteryx.expression import NodeType
 class TopNPushable:
     supports_topn_pushdown: bool = False
 
-    def can_push_topn(self, order_by: List[Tuple[Any, bool]]) -> bool:
-        """`order_by` is the HeapSort's list of (expression, ascending). Return
+    def can_push_topn(self, order_by: List[Tuple[Any, bool, bool]]) -> bool:
+        """`order_by` is the HeapSort's list of (expression, ascending, nulls_first). Return
         True only when every key can be honoured by this reader."""
         return False
 
@@ -37,7 +37,7 @@ def single_physical_column_topn(order_by) -> bool:
     Shared by every table whose scan is served by ParquetReadNode."""
     if not order_by or len(order_by) != 1:
         return False
-    expression, _ascending = order_by[0]
+    expression, _ascending, _nulls_first = order_by[0]
     if expression.node_type != NodeType.IDENTIFIER:
         return False
     schema_column = expression.schema_column

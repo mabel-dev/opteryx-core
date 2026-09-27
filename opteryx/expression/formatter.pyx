@@ -181,11 +181,10 @@ cdef str _format_literal(root):
         return ipv4_format(value)
 
     if physical == DrakenType.VARCHAR or physical == DrakenType.NVARCHAR:
-        # Bound VARCHAR literals carry bytes, unbound ones str — this runs on both
-        # sides of the binder. Quoting is what keeps a string literal distinct from
-        # anything else that renders the same text: without it `'192.168.1.1'` and
-        # an IPv4 literal are the same expression.
-        text = value.decode("utf-8") if isinstance(value, bytes) else value
+        # A string literal holds UTF-8 bytes (P3-c). Quoting is what keeps a string
+        # literal distinct from anything else that renders the same text: without it
+        # `'192.168.1.1'` and an IPv4 literal are the same expression.
+        text = (<bytes?>value).decode("utf-8")
         return "'" + text.replace("'", "''") + "'"
 
     # Temporal literals carry their type word. Quoting alone is not enough: the
@@ -198,13 +197,25 @@ cdef str _format_literal(root):
     if physical == DrakenType.DATE32 and isinstance(value, int):
         return "DATE '" + _format_date_days(value) + "'"
 
-    if (physical == DrakenType.TIME32 or physical == DrakenType.TIME64) and isinstance(
-        value, datetime.time
-    ):
-        return "TIME '" + value.isoformat() + "'"
+    if (physical == DrakenType.TIME32 or physical == DrakenType.TIME64) and type(value) is int:
+        # a TIME literal holds its physical value, microseconds since midnight
+        seconds, microsecond = divmod(value, 1_000_000)
+        minutes, second = divmod(seconds, 60)
+        hour, minute = divmod(minutes, 60)
+        return "TIME '" + datetime.time(hour, minute, second, microsecond).isoformat() + "'"
 
     if physical == DrakenType.INTERVAL and isinstance(value, tuple):
         return _format_interval(value)
+
+    if physical == DrakenType.ARRAY and type(value) is tuple:
+        # An ARRAY literal renders as the list it was written as; string elements
+        # (UTF-8 bytes, P3-c) as their text.
+        element = literal_type.element
+        if element is not None and (
+            element.physical == DrakenType.VARCHAR or element.physical == DrakenType.NVARCHAR
+        ):
+            return str([None if item is None else (<bytes?>item).decode("utf-8") for item in value])
+        return str(list(value))
 
     # BOOL, the integer and float widths, DECIMAL, VARBINARY and ARRAY already
     # render as themselves, and their `str()` is injective.
@@ -434,9 +445,9 @@ def _format_expression_inner(root, qualify, cache):
         # Two DIFFERENT subqueries of the same size then render identically, and the
         # binder uses this rendering as an expression's identity: the second
         # subquery resolves to the first one's column and the two collapse into one.
-        # `uuid` is unique per node and preserved across plan copies, so it
+        # `origin_id` is the written expression's id, shared by its copies, so it
         # distinguishes them without depending on the plan's shape.
-        return f"SUBQUERY-{root.uuid}"
+        return f"SUBQUERY-{root.origin_id}"
     if node_type == NodeType.BETWEEN:
         col = format_expression(root.left, qualify_b, cache)
         lower = format_expression(root.right, qualify_b, cache)

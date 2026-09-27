@@ -801,6 +801,19 @@ class CidrAggTypeError(IncorrectTypeError):
         super().__init__(compose(requires, rest))
 
 
+def _literal_display(value, column_type):
+    """A literal's value as a message shows it. A VARCHAR / NVARCHAR literal holds
+    UTF-8 bytes (native plan graph P3-c) and is shown as its text; an array as the
+    list of its elements; anything else as itself."""
+    if column_type is None:
+        return value
+    if type(value) is tuple:
+        return str([_literal_display(item, column_type.element) for item in value])
+    if type(value) is bytes and column_type.physical.name in ("VARCHAR", "NVARCHAR"):
+        return value.decode("utf-8")
+    return value
+
+
 class IncompatibleTypesError(Exception):
     """
     Raised when attempting to join fields of incompatible types.
@@ -838,7 +851,7 @@ class IncompatibleTypesError(Exception):
     ):
         def _format_col(_type, _node, _name):
             if _node.node_type == 42:
-                return f"literal {md_code(_node.value)} ({md_code(_type)})"
+                return f"literal {md_code(_literal_display(_node.value, _node.type))} ({md_code(_type)})"
             if _node.node_type == 38:
                 return f"column {md_column(_name)} ({md_code(_type)})"
             return md_column(_name)

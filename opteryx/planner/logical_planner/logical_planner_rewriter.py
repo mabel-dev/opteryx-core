@@ -63,6 +63,17 @@ def _dedup_key(aggregate):
     )
 
 
+def _substitute_in_place(projection, aggregate, calculation_node):
+    """Put the decomposed calculation in the SELECT-list slot the aggregate held.
+
+    The projection order IS the result's column order; clients read columns by
+    position. Filtering the aggregate out and appending its replacement moved every
+    decomposed aggregate to the end, so `SELECT SUM(i + 1), SUM(i * 2)` came back
+    as `SUM(i * 2), SUM(i + 1)` — right values, wrong headings.
+    """
+    return [calculation_node if p is aggregate else p for p in projection]
+
+
 def decompose_aggregates(aggregates, projection):
     """
     decompose aggregates into parts:
@@ -73,6 +84,16 @@ def decompose_aggregates(aggregates, projection):
     result_projection = projection
 
     for aggregate in aggregates:
+        if aggregate.parameters[0].node_type == NodeType.BINARY_OPERATOR and not any(
+            p is aggregate for p in result_projection
+        ):
+            # Only a top-level SELECT item has a slot to take the calculation. Nested
+            # (`SUM(i + 1) * 2`) there is nowhere to substitute it: the old code
+            # appended a stray column and left the nested aggregate referencing a
+            # column nothing computed, so the query died at compile time. Compute
+            # the aggregate as written instead.
+            result_aggregates.append(aggregate)
+            continue
         if aggregate.parameters[0].node_type != NodeType.BINARY_OPERATOR:
             if aggregate.parameters[0].node_type == NodeType.IDENTIFIER:
                 key = _dedup_key(aggregate)
@@ -98,8 +119,8 @@ def decompose_aggregates(aggregates, projection):
 
             if f"{aggregate.value}_{identifier.qualified_name}" not in aggregate_set:
                 minmax_node = Aggregator(
-                    value=aggregate.value, parameters=[identifier]
-                )
+                    value=aggregate.value, parameters=[identifier], 
+                arena=aggregate.arena)
                 result_aggregates.append(minmax_node)
                 aggregate_set[f"{aggregate.value}_{identifier.qualified_name}"] = minmax_node
             else:
@@ -110,10 +131,9 @@ def decompose_aggregates(aggregates, projection):
                 left=minmax_node,
                 right=literal,
                 alias=aggregate.alias or aggregate.qualified_name,
+                arena=aggregate.arena,
             )
-            result_projection = [p for p in result_projection if p != aggregate]
-
-            result_projection.append(calculation_node)
+            result_projection = _substitute_in_place(result_projection, aggregate, calculation_node)
 
         elif aggregate.value == "SUM":
             identifier = aggregate.parameters[0].left
@@ -131,7 +151,7 @@ def decompose_aggregates(aggregates, projection):
                 continue
 
             if f"SUM_{identifier.qualified_name}" not in aggregate_set:
-                sum_node = Aggregator(value="SUM", parameters=[identifier])
+                sum_node = Aggregator(value="SUM", parameters=[identifier], arena=aggregate.arena)
                 result_aggregates.append(sum_node)
                 aggregate_set[f"SUM_{identifier.qualified_name}"] = sum_node
             else:
@@ -139,25 +159,25 @@ def decompose_aggregates(aggregates, projection):
 
             if f"COUNT_{identifier.qualified_name}" not in aggregate_set:
                 count_node = Aggregator(
-                    value="COUNT", parameters=[identifier]
-                )
+                    value="COUNT", parameters=[identifier], 
+                arena=aggregate.arena)
                 result_aggregates.append(count_node)
                 aggregate_set[f"COUNT_{identifier.qualified_name}"] = count_node
             else:
                 count_node = aggregate_set[f"COUNT_{identifier.qualified_name}"]
 
             scaling_node = BinaryOperator(
-                value="Multiply", left=count_node, right=literal
-            )
+                value="Multiply", left=count_node, right=literal, 
+            arena=aggregate.arena)
             calculation_node = BinaryOperator(
                 value=operator,
                 left=sum_node,
                 right=scaling_node,
                 alias=aggregate.alias or aggregate.qualified_name,
+                arena=aggregate.arena,
             )
 
-            result_projection = [p for p in result_projection if p != aggregate]
-            result_projection.append(calculation_node)
+            result_projection = _substitute_in_place(result_projection, aggregate, calculation_node)
 
         else:
             result_aggregates.append(aggregate)

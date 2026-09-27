@@ -565,6 +565,7 @@ def _range_conditions(target_col, value_range, *, plan_context):
                 right=build_literal_node(
                     bound, suggested_type=target_type, plan_context=plan_context
                 ),
+                arena=plan_context.expressions,
             )
         )
     return conditions
@@ -685,6 +686,7 @@ def _constant_condition(target_col, literal, *, plan_context):
         value="Eq",
         left=target_col,
         right=build_literal_node(value, suggested_type=target_type, plan_context=plan_context),
+        arena=plan_context.expressions,
     )
 
 

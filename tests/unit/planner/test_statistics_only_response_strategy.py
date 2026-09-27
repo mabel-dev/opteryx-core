@@ -32,6 +32,10 @@ from opteryx.planner.optimizer.strategies.optimization_strategy import Optimizer
 from opteryx.planner.plan_context import PlanContext
 from opteryx.types.schema import FunctionColumn
 
+# One query context for the expressions this module builds outside a plan.
+_TEST_CONTEXT = PlanContext()
+_TEST_ARENA = _TEST_CONTEXT.expressions
+
 def _telemetry():
     return types.SimpleNamespace(optimization_statistics_only_response=0)
 
@@ -62,17 +66,19 @@ def _count_star(plan_context):
     """COUNT(*) — the aggregate shape the strategy answers from the manifest."""
     return Aggregator(
         value="COUNT",
-        parameters=[Wildcard()],
+        parameters=[Wildcard(arena=plan_context.expressions)],
         schema_column=plan_context.columns.computed(FunctionColumn, "COUNT(*)"),
+        arena=plan_context.expressions,
     )
 
 
 def _count_distinct():
     return Aggregator(
         value="COUNT",
-        parameters=[LogicalColumn(NodeType.IDENTIFIER, "x")],
+        parameters=[LogicalColumn(NodeType.IDENTIFIER, "x", arena=_TEST_ARENA)],
         duplicate_treatment="Distinct",
-        schema_column=types.SimpleNamespace(identity=b"$COUNT(*)", column_type=None, slot=None),
+        schema_column=_TEST_CONTEXT.columns.computed(FunctionColumn, "COUNT(*)"),
+        arena=_TEST_ARENA,
     )
 
 
@@ -99,7 +105,8 @@ def make_simple_count_plan(plan_context, count=9, alias="my_count"):
             NodeType.IDENTIFIER,
             None,
             alias=alias,
-            schema_column=types.SimpleNamespace(identity=aggregator.schema_column.identity),
+            schema_column=aggregator.schema_column,
+            arena=plan_context.expressions,
         )
     ]
 

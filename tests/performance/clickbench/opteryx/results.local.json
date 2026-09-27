@@ -1,11 +1,11 @@
 make clickbench (9.75s seconds) [256K rg] (26-SEP) [0.92x]
-make clickbench-skene (7.35s) (26-SEP) [0.69x]
+make clickbench-skene (7.10s) (27-SEP) [0.67x]
 
 (125.6 seconds) <- Opteryx 0.26.8
 (11.59 seconds) <- best on clickbench parquet files (26-SEP) [1.09x]
 (10.65 seconds) <- DuckDB Baseline
 
-make tpch-sf1    (458.8ms) (26-SEP) [SF1] [1.32x]
+make tpch-sf1    (448.0ms) (27-SEP) [SF1] [1.29x]
 make tpch-sf10   (2772.5ms) (26-SEP) [SF10] [0.66x]
 make tpch-sf100  (30042.0ms) (26-SEP) [SF100] [0.98x]
 make tpcds-sf1   (24.1s) (25-SEP) [1 fails] [SF1]
@@ -16,3 +16,17 @@ make h2o         (33.2s) (26-SEP) [medium]
 make jsonbench   (5510.6ms) (16-AUG) [10m] [2.12x]
 make dash        (130.1ms) (26-SEP) [1.43x]
 make signals     (0.7s) [only two tests] (25-SEP)
+
+make tpch-sf10-aistor - 151426.7ms - 36.28x
+make tpcds-sf10-aistor - 1063.7s - [1 fails (Q51), 8 timeouts at 30s]
+make clickbench-aistor-canon-split
+make clickbench-aistor-canon-single
+make clickbench-aistor-rugo-split
+make h2o-aistor - 205794.3ms - [medium] (no DuckDB medium baseline)
+make job-aistor - 844999.9ms - 125.19x
+
+make tpch-sf01-aistor - 33813.9ms - 298.04x
+make tpcds-sf01-aistor - 455.5s - [1 fails (Q51)]
+make clickbench-aistor-canon-split-10
+make clickbench-aistor-rugo-split-10
+make h2o-small-aistor - 27898.4ms - 9.88x

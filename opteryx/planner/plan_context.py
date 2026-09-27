@@ -31,6 +31,7 @@ from typing import Tuple
 
 from opteryx.compiled.planner.column_table import ColumnTable
 from opteryx.compiled.planner.plan_graph import NodeIds
+from opteryx.compiled.structures.expressions import ExprArena
 
 if TYPE_CHECKING:  # annotation only: importing the optimizer package here is a cycle
     from opteryx.planner.optimizer.statistics import RelationStatistics
@@ -43,6 +44,8 @@ class PlanContext:
         "scan_stats_cache",
         "columns",
         "node_ids",
+        "expressions",
+        "constant_folded",
         "shared_ctes",
         "physical_shared_ctes",
         "recursive_ctes",
@@ -57,6 +60,13 @@ class PlanContext:
         # draws from this one counter, so plans merge without colliding (native
         # plan graph P2, architect rulings 2026-09-27).
         self.node_ids = NodeIds()
+        # The query's expressions - every expression is minted in this arena and
+        # identified by the int id it mints (native plan graph P3, architect
+        # rulings 2026-09-27).
+        self.expressions = ExprArena()
+        # expr_ids of the trees constant folding has folded - its second pass skips
+        # them. Pass state, so it is held here, not on the expressions.
+        self.constant_folded: set = set()
         # The query's shared CTE bodies - CTEs referenced 2+ times, executed once
         # (relation_resolver) - keyed by cte_key, dependencies first. Each planning
         # phase (resolver, rewriter, binder, optimizer) replaces the bodies it

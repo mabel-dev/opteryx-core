@@ -21,6 +21,26 @@ class Dataset(enum.Enum):
     FULL_SPLIT_RUGO_262K = "scratch.hits_rugo_262k" # preferred
     FULL_SINGLE = "scratch.hits_single"
     FULL_SPLIT_SKENE = "scratch.hits_skene"
+    # Remote Iceberg tables on AIStor (tests/performance/_common.py). Canon split and
+    # rugo split are the same files as FULL_SPLIT / FULL_SPLIT_RUGO_262K; canon single
+    # is upstream's hits.parquet. Skene has no Iceberg form, so no remote skene.
+    AISTOR_CANON_SPLIT = "aistor.clickbench.hits_canon_split"
+    AISTOR_CANON_SINGLE = "aistor.clickbench.hits_canon_single"
+    AISTOR_RUGO_SPLIT = "aistor.clickbench.hits_rugo_split"
+    # Quick remote variants: files hits_0..hits_9 of each split (10M rows, the
+    # same rows in both), for iteration in minutes rather than hours. Compare
+    # against duckdb/results.local.hits10.json, not the full-dataset baseline.
+    AISTOR_CANON_SPLIT_10 = "aistor.clickbench.hits_canon_split_10"
+    AISTOR_RUGO_SPLIT_10 = "aistor.clickbench.hits_rugo_split_10"
+
+
+REMOTE_DATASETS = {
+    Dataset.AISTOR_CANON_SPLIT,
+    Dataset.AISTOR_CANON_SINGLE,
+    Dataset.AISTOR_RUGO_SPLIT,
+    Dataset.AISTOR_CANON_SPLIT_10,
+    Dataset.AISTOR_RUGO_SPLIT_10,
+}
 
 
 DATASET = Dataset.FULL_SPLIT_RUGO_262K
@@ -39,6 +59,11 @@ DATASET = Dataset.FULL_SPLIT_RUGO_262K
 VARIANT_DATASETS = {
     "": DATASET,
     "skene": Dataset.FULL_SPLIT_SKENE,
+    "aistor-canon-split": Dataset.AISTOR_CANON_SPLIT,
+    "aistor-canon-single": Dataset.AISTOR_CANON_SINGLE,
+    "aistor-rugo-split": Dataset.AISTOR_RUGO_SPLIT,
+    "aistor-canon-split-10": Dataset.AISTOR_CANON_SPLIT_10,
+    "aistor-rugo-split-10": Dataset.AISTOR_RUGO_SPLIT_10,
 }
 
 # Queries whose per-round spread exceeds this fraction of their own minimum are
@@ -166,7 +191,9 @@ if __name__ == "__main__":  # pragma: no cover
 
     # Shared with the JOB/TPC-H runners so one analysis tool reads every history.
     sys.path.insert(1, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
+    from _common import AISTOR_WAREHOUSE
     from _common import open_results_csv
+    from _common import register_aistor_workspace
 
     parser = argparse.ArgumentParser(description="ClickBench Performance Test")
     parser.add_argument(
@@ -199,17 +226,26 @@ if __name__ == "__main__":  # pragma: no cover
         type=str,
         default="",
         choices=sorted(VARIANT_DATASETS),
-        help="Dataset format variant: `skene` runs against the skene mirror "
+        help="Dataset format variant: `skene` runs against the skene mirror; "
+        "`aistor-*` against the remote Iceberg tables on AIStor "
         "(default: the parquet dataset)",
     )
     args = parser.parse_args()
 
     DATASET = VARIANT_DATASETS[args.variant]
-    # Hard-fails if the variant's dataset is absent or empty. `--variant skene`
-    # silently ran against parquet for as long as the mapping was wrong; the only
-    # defence against the next mis-wiring is refusing to run on a dataset we
-    # cannot locate.
-    dataset_path = resolve_dataset_path(DATASET)
+    if DATASET in REMOTE_DATASETS:
+        # Remote: the catalog answers whether the table exists - a missing one
+        # fails every query, it is never swapped for a local copy.
+        register_aistor_workspace()
+        dataset_path = f"iceberg {os.environ['AISTOR_ENDPOINT']} warehouse {AISTOR_WAREHOUSE}"
+        dataset_entries = "remote"
+    else:
+        # Hard-fails if the variant's dataset is absent or empty. `--variant skene`
+        # silently ran against parquet for as long as the mapping was wrong; the only
+        # defence against the next mis-wiring is refusing to run on a dataset we
+        # cannot locate.
+        dataset_path = resolve_dataset_path(DATASET)
+        dataset_entries = len(os.listdir(dataset_path))
     repo_root = os.path.abspath(
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../..")
     )
@@ -238,6 +274,11 @@ if __name__ == "__main__":  # pragma: no cover
 
     def format_ratio(opteryx_ms: float, duckdb_ms: float) -> str:
         """Format ratio with color coding based on performance."""
+        # DuckDB records seconds to the millisecond, and answers some queries
+        # (Q01's COUNT(*)) from metadata in under 1ms - a 0.0 baseline. There is
+        # no ratio to a time below the baseline's resolution.
+        if duckdb_ms <= 0:
+            return "[n/a]"
         ratio = opteryx_ms / duckdb_ms
         ratio_str = f"[{ratio:.2f}x]"
 
@@ -280,7 +321,7 @@ if __name__ == "__main__":  # pragma: no cover
         "dataset": DATASET.name,
         "dataset_relation": DATASET.value,
         "dataset_path": dataset_path,
-        "dataset_entries": len(os.listdir(dataset_path)),
+        "dataset_entries": dataset_entries,
         "rounds": args.iterations,
         "preload": os.environ.get("DYLD_INSERT_LIBRARIES") or os.environ.get("LD_PRELOAD") or "none",
         "env_lto": os.environ.get("OPTERYX_ENABLE_LTO", "unset"),

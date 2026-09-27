@@ -34,6 +34,7 @@ Design contract
 from __future__ import annotations
 
 import datetime
+import decimal
 from typing import Any
 from typing import List
 from typing import Optional
@@ -188,6 +189,44 @@ _INVERT_OP = {
 }
 
 
+_DECLINE = object()
+
+
+def _decimal_bound_literal(col_node, value: Any) -> Any:
+    """`value` in the domain a DECIMAL column's decoded bounds live in, or _DECLINE.
+
+    rugo decodes DECIMAL statistics to exact `decimal.Decimal` (`decode_value`),
+    but a decimal-point literal arrives as a Python float, and a float compares
+    against a Decimal by its exact binary value: 7.70 is 7.7000000000000001776...,
+    which is ABOVE a row group's `Decimal('7.70')` max, so `d = 7.70` pruned the
+    one row group holding the value. The literal is taken as `Decimal(str(value))`
+    - the same reading `rescale_decimal_literal` gives the predicate the engine
+    actually runs (shortest-roundtrip repr recovers the decimal as written) - so
+    the pruner and the filter agree on what the literal means. No rounding is
+    needed for soundness: the column's values lie on its scale grid, and an exact
+    comparison against an exact literal never excludes a value the filter keeps.
+
+    DECIMAL128 declines: the engine's decimal-literal rewrite does not cover it,
+    so there is no established reading of the literal to agree with, and a pruner
+    that guesses differently from the filter drops rows. Declining only loses
+    pruning. Non-DECIMAL columns pass through unchanged.
+    """
+    col_sc = col_node.schema_column
+    col_ct = col_sc.column_type if col_sc is not None else None
+    physical = getattr(getattr(col_ct, "physical", None), "name", "")
+    if physical == "DECIMAL128":
+        return _DECLINE
+    if physical != "DECIMAL":
+        return value
+    if isinstance(value, bool):
+        return _DECLINE
+    if isinstance(value, decimal.Decimal):
+        return value
+    if isinstance(value, (int, float)):
+        return decimal.Decimal(str(value))
+    return _DECLINE
+
+
 def extract_predicate_stats(conditions) -> List[Tuple[str, str, Any]]:
     """Convert pushed-down condition Nodes to ``(col_name, op, value)`` triples.
 
@@ -336,6 +375,9 @@ def _try_extract_in(node) -> Optional[Tuple[str, str, Any]]:
     for value in values:
         if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
             value = datetime.datetime.combine(value, datetime.time.min)
+        value = _decimal_bound_literal(left, value)
+        if value is _DECLINE:
+            return None  # one unreadable member makes the whole list unprovable
         normalized.append(value)
 
     return (col_name, op, normalized)
@@ -384,6 +426,11 @@ def _try_extract_between(node) -> List[Tuple[str, str, Any]]:
         upper_val = datetime.datetime.combine(upper_val, datetime.time.min)
 
     if _nan_literal(lower_val) or _nan_literal(upper_val):
+        return []
+
+    lower_val = _decimal_bound_literal(node.left, lower_val)
+    upper_val = _decimal_bound_literal(node.left, upper_val)
+    if lower_val is _DECLINE or upper_val is _DECLINE:
         return []
 
     # The arms are independent conjuncts, so they are declined independently. On
@@ -450,6 +497,10 @@ def _try_extract(node) -> Optional[Tuple[str, str, Any]]:
     # A NaN the bounds cannot see would satisfy this op, or the literal is itself
     # a NaN — either way min/max cannot disprove the predicate.
     if _nan_invisible_to_bounds(left, op) or _nan_literal(value):
+        return None
+
+    value = _decimal_bound_literal(left, value)
+    if value is _DECLINE:
         return None
 
     return (col_name, op, value)

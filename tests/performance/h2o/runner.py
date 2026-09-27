@@ -35,6 +35,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "tests" / "performance"))
 
 from _common import (  # noqa: E402
+    AISTOR_WORKSPACE,
     load_duckdb_baseline,
     open_results_csv,
     print_banner,
@@ -43,6 +44,7 @@ from _common import (  # noqa: E402
     print_row,
     print_skip_row,
     print_total_row,
+    register_aistor_workspace,
 )
 
 import opteryx  # noqa: E402
@@ -59,16 +61,22 @@ def _query_sort_key(path: Path):
 
 
 def _dataset_prefix(variant: str, size: str) -> str:
-    """`testdata.h2o_skene.` or `testdata.h2o.<size>.` — never a silent fallback.
+    """`testdata.h2o_skene.`, `testdata.h2o.<size>.` or `aistor.h2o_<size>.` —
+    never a silent fallback.
 
     The skene mirror is built at one size (medium), so it carries no size level:
-    `testdata.h2o_skene.<table>`. The parquet tree keeps its per-size layout.
+    `testdata.h2o_skene.<table>`. The parquet tree keeps its per-size layout, and
+    `aistor` is that parquet tree registered as Iceberg tables on AIStor.
     An unknown variant is a hard failure rather than a fallback to the other
     corpus.
     """
-    if variant not in ("skene", "parquet"):
-        raise ValueError(f"unknown variant {variant!r}; expected 'skene' or 'parquet'")
-    return "testdata.h2o_skene." if variant == "skene" else f"testdata.h2o.{size}."
+    if variant == "skene":
+        return "testdata.h2o_skene."
+    if variant == "parquet":
+        return f"testdata.h2o.{size}."
+    if variant == AISTOR_WORKSPACE:
+        return f"{AISTOR_WORKSPACE}.h2o_{size}."
+    raise ValueError(f"unknown variant {variant!r}; expected 'skene', 'parquet' or 'aistor'")
 
 
 def _rewrite_query(sql: str, size: str, workload: str, variant: str = "skene") -> str:
@@ -130,10 +138,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--size",
-        # `small` is gone. At 1e7 rows it is 630MB, which sits entirely in page
-        # cache on any development machine, so it measured compute with the
+        # `small` is gone LOCALLY. At 1e7 rows it is 630MB, which sits entirely in
+        # page cache on any development machine, so it measured compute with the
         # storage layer removed — and the skene mirror is built at medium only.
-        choices=["medium", "large"],
+        # It is allowed for `--variant aistor` only: remote reads have no page
+        # cache to hide in, so there it is the quick remote scale (checked below).
+        choices=["small", "medium", "large"],
         default="medium",
     )
     parser.add_argument(
@@ -150,9 +160,9 @@ def main() -> int:
         "--variant",
         type=str,
         default="skene",
-        choices=("skene", "parquet"),
-        help="dataset format: runs against testdata/h2o_skene or testdata/h2o/<size> "
-             "(default: skene)",
+        choices=("skene", "parquet", AISTOR_WORKSPACE),
+        help="dataset format: runs against testdata/h2o_skene, testdata/h2o/<size>, "
+             "or the parquet tree on AIStor (aistor.h2o_<size>) (default: skene)",
     )
     parser.add_argument(
         "--timeout",
@@ -173,13 +183,18 @@ def main() -> int:
         help="iterations per query (default: 2 — cold + warm, H2O convention)",
     )
     args = parser.parse_args()
+    if args.size == "small" and args.variant != AISTOR_WORKSPACE:
+        parser.error("--size small is only benchmarked remotely (--variant aistor); "
+                     "locally it sits in page cache and measures no storage layer")
 
     workloads = ["groupby", "join"] if args.workload == "both" else [args.workload]
 
-    warm_table = (
-        f"testdata.h2o.{args.size}.x_groupby"
-        if "groupby" in workloads
-        else f"testdata.h2o.{args.size}.x"
+    if args.variant == AISTOR_WORKSPACE:
+        register_aistor_workspace()
+
+    # The cold start reads the corpus the run benchmarks, not a fixed one.
+    warm_table = _dataset_prefix(args.variant, args.size) + (
+        "x_groupby" if "groupby" in workloads else "x"
     )
     print("Warming up (cold start)...")
     start = time.monotonic()

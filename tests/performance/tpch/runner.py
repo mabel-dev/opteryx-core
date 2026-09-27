@@ -36,6 +36,7 @@ sys.path.insert(0, _REPO_ROOT)
 # Performance helpers (shared display + CSV layout)
 sys.path.insert(0, os.path.join(_REPO_ROOT, "tests", "performance"))
 from _common import (  # noqa: E402
+    AISTOR_WORKSPACE,
     load_duckdb_baseline,
     load_duckdb_shapes,
     open_results_csv,
@@ -44,6 +45,7 @@ from _common import (  # noqa: E402
     print_header,
     print_row,
     print_total_row,
+    register_aistor_workspace,
 )
 
 import opteryx  # noqa: E402
@@ -63,7 +65,11 @@ def _dataset_suffix(scale: str, variant: str) -> str:
 
 
 def _scale_to_dataset(scale: str, variant: str = "") -> str:
-    """Map CLI scale token (`1`, `001`, …) to the testdata workspace path."""
+    """Map CLI scale token (`1`, `001`, …) to the dataset path: the testdata
+    workspace, or for variant `aistor` the remote Iceberg copy of the parquet
+    source (`aistor.tpch_sf<scale>`)."""
+    if variant == AISTOR_WORKSPACE:
+        return f"{AISTOR_WORKSPACE}.tpch_sf{scale}"
     return f"testdata.{_dataset_suffix(scale, variant)}"
 
 
@@ -317,7 +323,8 @@ def main() -> int:
         type=str,
         default="",
         help="Dataset format variant: runs against testdata/tpch_<scale>_<variant> "
-        "(e.g. `skene` for the skene mirror; default: the parquet dataset)",
+        "(e.g. `skene` for the skene mirror; default: the parquet dataset). "
+        "`aistor` runs against the parquet source on AIStor (aistor.tpch_sf<scale>).",
     )
     parser.add_argument(
         "--queries",
@@ -337,14 +344,21 @@ def main() -> int:
 
     suffix = _dataset_suffix(args.scale, args.variant)
     dataset = _scale_to_dataset(args.scale, args.variant)
-    dataset_path = os.path.join(_REPO_ROOT, "testdata", suffix)
-    if not os.path.isdir(dataset_path):
-        print(f"ERROR: dataset not found at {dataset_path}")
-        print(f"       expected: testdata/{suffix}")
-        if args.variant:
-            print(f"       generate it: python dev/parquet_to_skene.py "
-                  f"testdata/tpch_{args.scale} testdata/{suffix}")
-        return 1
+    if args.variant == AISTOR_WORKSPACE:
+        # Remote: existence is the catalog's to answer - a missing table fails the
+        # cold start and every query, it is never swapped for the local copy.
+        register_aistor_workspace()
+        warm_relation = f"{dataset}.lineitem"
+    else:
+        dataset_path = os.path.join(_REPO_ROOT, "testdata", suffix)
+        if not os.path.isdir(dataset_path):
+            print(f"ERROR: dataset not found at {dataset_path}")
+            print(f"       expected: testdata/{suffix}")
+            if args.variant:
+                print(f"       generate it: python dev/parquet_to_skene.py "
+                      f"testdata/tpch_{args.scale} testdata/{suffix}")
+            return 1
+        warm_relation = f"testdata.{suffix}"
 
     queries = _load_queries(args.scale, args.variant)
     if not queries:
@@ -377,7 +391,7 @@ def main() -> int:
     try:
         warm_session = opteryx.session()
         for _ in warm_session.execute_to_morsels(
-            f"SELECT COUNT(*) FROM testdata.{suffix};"
+            f"SELECT COUNT(*) FROM {warm_relation};"
         ):
             pass
         cold_time_ms = (time.monotonic_ns() - start) / 1e6

@@ -32,8 +32,9 @@ case-insensitive lowerings (ILIKE's `_CI_*` / `IInStr`) are NOT pushed: the serv
 folds case by its locale and the engine folds it its own way.
 
 Every pushed shape is rendered with the ENGINE's semantics spelled out where
-PostgreSQL's defaults differ: NULLS FIRST under ASC and NULLS LAST under DESC
-(draken sorts NULL below every value), `COLLATE "C"` on text sort keys and text
+PostgreSQL's defaults differ: every sort key's resolved null placement is written
+as an explicit NULLS FIRST/LAST (the engine's default, NULL lowest, is the inverse of
+PostgreSQL's in both directions), `COLLATE "C"` on text sort keys and text
 MIN/MAX (draken compares bytes; the server would use the column's collation),
 and an explicit cast wherever the server's result type is not the type the
 binder bound the aggregate to. A shape that cannot be spelled that way is
@@ -928,7 +929,9 @@ class PostgresTable(
         about the key's type beyond PUSHABLE_TYPES needs declining here."""
         if not order_by:
             return False
-        return all(self._is_own_column(expression) for expression, _ascending in order_by)
+        return all(
+            self._is_own_column(expression) for expression, _ascending, _nulls_first in order_by
+        )
 
     def can_push_aggregate(self, groups, aggregates) -> bool:
         """The renderer is the gate (see `_remote_aggregate`): a shape is pushable
@@ -1352,15 +1355,17 @@ def _key_sql(table: PostgresTable, schema_column: SchemaColumn) -> str:
 
 
 def _order_by_sql(table: PostgresTable, order_by) -> str:
-    """`order_by` is the scan's stamped spec: [(SchemaColumn, ascending), ...].
+    """`order_by` is the scan's stamped spec: [(SchemaColumn, ascending, nulls_first), ...].
 
-    draken: NULL sorts below every value (draken/morsels/sort.hpp), so ASC is
-    NULLS FIRST and DESC is NULLS LAST. PostgreSQL's defaults are the inverse in
-    BOTH directions, so the null placement is always written out."""
+    The null placement is the planner's resolved one (default: NULL lowest - ASC
+    NULLS FIRST, DESC NULLS LAST). PostgreSQL's defaults are the inverse in BOTH
+    directions, so the placement is always written out."""
     parts = []
-    for schema_column, ascending in order_by:
+    for schema_column, ascending, nulls_first in order_by:
         key = _key_sql(table, schema_column)
-        parts.append(f"{key} ASC NULLS FIRST" if ascending else f"{key} DESC NULLS LAST")
+        direction = "ASC" if ascending else "DESC"
+        placement = "NULLS FIRST" if nulls_first else "NULLS LAST"
+        parts.append(f"{key} {direction} {placement}")
     return ", ".join(parts)
 
 

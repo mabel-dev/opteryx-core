@@ -41,6 +41,7 @@ cdef extern from "morsels/sort.hpp" nogil:
     cdef cppclass SortKeySpec:
         size_t col_idx
         bint ascending
+        bint nulls_first
 
     cdef cppclass SortKeyColumn:
         SortKeyColumn()
@@ -105,6 +106,9 @@ cdef vector[SortKeySpec] _resolve_spec(list names, list column_names, list ascen
             raise ValueError(f"unknown sort column {name!r}")
         item.col_idx = <size_t>idx
         item.ascending = bool(asc)
+        # This standalone API has no NULLS clause: it always uses the default
+        # placement (NULL lowest — first ascending, last descending).
+        item.nulls_first = item.ascending
         spec.push_back(item)
     return spec
 
@@ -122,6 +126,7 @@ def sort_morsels(list morsels, list column_names, list ascending, limit=None,
         ORDER BY columns, most significant first.
     ascending : list[bool]
         Sort direction per column; True = ascending, False = descending.
+        NULLs sort as the lowest value (first ascending, last descending).
     limit : int | None
         Keep only the first `limit` rows after sorting (TopN fusion). None = full sort.
     chunk_rows : int

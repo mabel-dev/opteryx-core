@@ -39,6 +39,10 @@ from opteryx.compiled.structures.expressions import Not
 from opteryx.compiled.structures.expressions import Or
 from opteryx.compiled.structures.expressions import UnaryOperator
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 
 # ---------------------------------------------------------------------------
@@ -117,17 +121,18 @@ def _identifier(name: str) -> Expression:
         node_type=NodeType.IDENTIFIER,
         source_column=name,
         schema_column=_reference(name, INT64),
+        arena=_TEST_ARENA,
     )
 
 
 def _literal(value) -> Expression:
-    n = Literal()
+    n = Literal(arena=_TEST_ARENA)
     n.value = value
     return n
 
 
 def _cmp(op: str, col: str, value) -> Expression:
-    n = Comparison()
+    n = Comparison(arena=_TEST_ARENA)
     n.value = op
     n.left = _identifier(col)
     n.right = _literal(value)
@@ -135,7 +140,7 @@ def _cmp(op: str, col: str, value) -> Expression:
 
 
 def _between(col: str, low, high) -> Expression:
-    n = Between()
+    n = Between(arena=_TEST_ARENA)
     n.left = _identifier(col)
     # Mirror manifest.prune_files convention: right=lower, centre=upper.
     n.right = _literal(low)
@@ -144,28 +149,28 @@ def _between(col: str, low, high) -> Expression:
 
 
 def _unary(op: str, col: str) -> Expression:
-    n = UnaryOperator()
+    n = UnaryOperator(arena=_TEST_ARENA)
     n.value = op
     n.centre = _identifier(col)
     return n
 
 
 def _and(a: Expression, b: Expression) -> Expression:
-    n = And()
+    n = And(arena=_TEST_ARENA)
     n.left = a
     n.right = b
     return n
 
 
 def _or(a: Expression, b: Expression) -> Expression:
-    n = Or()
+    n = Or(arena=_TEST_ARENA)
     n.left = a
     n.right = b
     return n
 
 
 def _not(inner: Expression) -> Expression:
-    n = Not()
+    n = Not(arena=_TEST_ARENA)
     n.centre = inner
     return n
 
@@ -395,11 +400,12 @@ def _varchar_identifier(name: str) -> Expression:
         node_type=NodeType.IDENTIFIER,
         source_column=name,
         schema_column=_reference(name, VARCHAR),
+        arena=_TEST_ARENA,
     )
 
 
 def _starts_with(op: str, col: str, prefix: bytes) -> Expression:
-    n = Function()
+    n = Function(arena=_TEST_ARENA)
     n.value = op
     n.parameters = [_varchar_identifier(col), _literal(prefix)]
     return n
@@ -532,14 +538,14 @@ class TestCompound:
 class TestDefensive:
     def test_unknown_node_returns_one(self):
         m = _bare_manifest()
-        node = Function()
+        node = Function(arena=_TEST_ARENA)
         node.value = "FOO"
         assert m.estimate_selectivity(node) == 1.0
 
     def test_swapped_operands(self):
         # `1 < x` should be treated like `x > 1` → 0.25 fallback (same as Gt).
         m = _bare_manifest()
-        node = Comparison()
+        node = Comparison(arena=_TEST_ARENA)
         node.value = "Lt"
         node.left = _literal(1)
         node.right = _identifier("x")

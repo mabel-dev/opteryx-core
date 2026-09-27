@@ -40,8 +40,14 @@ from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.third_party.maki_nage import distogram as dg
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.planner.plan_context import PlanContext
 
-_COL = b"tes_col_00000001"
+# One query context for everything this module builds: its columns and its expressions.
+_CONTEXT = PlanContext()
+_TEST_ARENA = _CONTEXT.expressions
+
+_COLUMN = _CONTEXT.columns.relation_column("tes", "col")
+_COL = _COLUMN.identity
 
 _BINS = 32
 _ROWS = 100_000
@@ -81,23 +87,24 @@ def _stats(histogram, ndv: int) -> RelationStatistics:
 
 def _identifier() -> Expression:
     return LogicalColumn(
-        node_type=NodeType.IDENTIFIER, source_column=None, schema_column=type("_S", (), {"identity": _COL})()
+        node_type=NodeType.IDENTIFIER, source_column=None, schema_column=_COLUMN,
+        arena=_TEST_ARENA,
     )
 
 
 def _eq(value) -> Expression:
-    n = Comparison()
+    n = Comparison(arena=_TEST_ARENA)
     n.value = "Eq"
     n.left = _identifier()
-    n.right = Literal(value=value)
+    n.right = Literal(value=value, arena=_TEST_ARENA)
     return n
 
 
 def _in_list(values) -> Expression:
-    n = Comparison()
+    n = Comparison(arena=_TEST_ARENA)
     n.value = "InList"
     n.left = _identifier()
-    n.right = Literal(value=tuple(values))
+    n.right = Literal(value=tuple(values), arena=_TEST_ARENA)
     return n
 
 

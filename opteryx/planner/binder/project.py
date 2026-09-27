@@ -84,6 +84,7 @@ def visit_exit(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
                                     source=None,
                                     alias=schema_col.name,
                                     schema_column=schema_col,
+                                    arena=context.plan_context.expressions,
                                 )
                             )
                             seen_identities.add((schema_col.identity, schema_col.name))
@@ -125,6 +126,7 @@ def visit_exit(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
                             source=None,
                             alias=output_name,
                             schema_column=schema_col,
+                            arena=context.plan_context.expressions,
                         )
                     )
             continue
@@ -143,6 +145,7 @@ def visit_exit(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
                 source=None,
                 alias=column_name,
                 schema_column=schema_col,
+                arena=context.plan_context.expressions,
             )
         )
 
@@ -189,6 +192,7 @@ def visit_project(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSt
                         source_column=schema_column.name,  # the source column
                         source=name,  # the source relation
                         schema_column=schema_column,
+                        arena=context.plan_context.expressions,
                     )
                     columns.append(column_reference)
                 if name.startswith("$shared") and f"^{name}#" in schema.name:
@@ -272,6 +276,7 @@ def visit_project(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSt
                             source_column=schema_column.name,  # the source column
                             source=canonical_name,  # the source relation
                             schema_column=schema_column,
+                            arena=context.plan_context.expressions,
                         )
                         columns.append(column_reference)
 

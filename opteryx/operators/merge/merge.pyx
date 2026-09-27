@@ -95,7 +95,8 @@ class MergeNode(BasePlanNode):
         # dragged through the join for no information gain.
         self.file_paths = step.file_paths
         # The provenance receipt and its producer - see InsertNode.
-        self.read_sources = step.read_sources
+        # The connector API takes a list (None: not recorded); step lists are tuples.
+        self.read_sources = None if step.read_sources is None else list(step.read_sources)
         self.produced_by = step.produced_by
 
         # Every acted-on address lives in NATIVE state for the whole statement

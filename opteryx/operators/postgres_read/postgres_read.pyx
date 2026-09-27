@@ -34,7 +34,7 @@ cdef class PostgresReadNode(ReaderNode):
     cdef public object scan_plan
     # Pushed shapes the optimizer stamped on the logical Scan (each None when
     # not pushed). The compiler renders them into the statement; the node only
-    # carries them. `topn_order_by` is [(schema_column, ascending), ...];
+    # carries them. `topn_order_by` is [(schema_column, ascending, nulls_first), ...];
     # `pushed_groups` / `pushed_aggregates` the GROUP BY keys and AGGREGATOR
     # nodes of an absorbed Aggregate; `pushed_distinct` True for an absorbed
     # DISTINCT over the projection.

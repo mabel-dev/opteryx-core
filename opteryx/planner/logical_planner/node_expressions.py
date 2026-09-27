@@ -13,7 +13,7 @@ Logical plan nodes hold their expression trees in ad-hoc, per-node-type
 attributes: a Filter's predicate is in ``condition``, a Join's in ``on`` /
 ``using`` / ``asof_condition``, an AggregateAndGroup's in ``groups`` /
 ``aggregates`` / ``having_condition``, an Order's in ``order_by`` (a list of
-``(expr, ascending)`` tuples), a Scan's pushed predicates in ``predicates``,
+``(expr, ascending, nulls_first)`` tuples), a Scan's pushed predicates in ``predicates``,
 and so on. Historically each optimizer strategy re-derived "what does this node
 touch" by calling ``get_all_nodes_of_type`` on whatever fields *that* strategy
 happened to know about. That scatter is a latent correctness hazard: a strategy

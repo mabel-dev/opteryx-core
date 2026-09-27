@@ -116,7 +116,7 @@ def _source_relation(plan: LogicalPlan) -> PlanStep:
 
 
 def _build_eq_condition(left_col: Expression, right_col: Expression) -> Expression:
-    eq = Comparison(value="Eq", do_not_create_column=True)
+    eq = Comparison(value="Eq", do_not_create_column=True, arena=left_col.arena)
     eq.left = left_col
     eq.right = right_col
     return eq
@@ -125,7 +125,7 @@ def _build_eq_condition(left_col: Expression, right_col: Expression) -> Expressi
 def _and_conditions(conditions: list) -> Expression:
     result = conditions[0]
     for cond in conditions[1:]:
-        and_node = And(do_not_create_column=True)
+        and_node = And(do_not_create_column=True, arena=conditions[0].arena)
         and_node.left = result
         and_node.right = cond
         result = and_node
@@ -185,6 +185,7 @@ def _build_window_cte(
             node_type=NodeType.IDENTIFIER,
             source=cte_src_alias,
             source_column=col_name,
+            arena=plan_context.expressions,
         )
         inner_pb.query_column = col_name
         inner_partition_by.append(inner_pb)
@@ -222,7 +223,7 @@ def _build_window_cte(
     # Wrap in a Subquery node so the binder treats it as a named relation.
     subquery_wrapper = SubqueryStep()
     subquery_wrapper.alias = subquery_alias
-    subquery_wrapper.columns = [Wildcard()]
+    subquery_wrapper.columns = [Wildcard(arena=plan_context.expressions)]
 
     # Merge CTE inner plan into main plan.
     plan.absorb(inner_plan)
@@ -261,7 +262,7 @@ def _rewrite_window_chain(plan: LogicalPlan, chain: list, *, plan_context) -> Lo
     # of the partition columns are never projected, so the parent sees each name once.
     # ONE Project for the whole chain, not one per join — a second `source.*` expands the
     # source relation a second time, which is the same ambiguity by another route.
-    outer_wildcard = Wildcard()
+    outer_wildcard = Wildcard(arena=plan_context.expressions)
     outer_wildcard.value = [source_alias]  # qualified wildcard: outer_scan.*
     win_refs = []
 
@@ -281,6 +282,7 @@ def _rewrite_window_chain(plan: LogicalPlan, chain: list, *, plan_context) -> Lo
                 source=subquery_alias,
                 source_column=agg.alias,
                 alias=agg.alias,
+                arena=plan_context.expressions,
             )
             win_ref.query_column = agg.alias
             win_refs.append(win_ref)
@@ -321,11 +323,13 @@ def _replace_window_with_join(
             node_type=NodeType.IDENTIFIER,
             source=source_alias,
             source_column=col_name,
+            arena=plan.plan_context.expressions,
         )
         inner_col = LogicalColumn(
             node_type=NodeType.IDENTIFIER,
             source=subquery_alias,
             source_column=col_name,
+            arena=plan.plan_context.expressions,
         )
         on_parts.append(_build_eq_condition(outer_col, inner_col))
 

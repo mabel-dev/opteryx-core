@@ -115,6 +115,7 @@ def visit_materialized_cte_ref(
             source_column=column.name,
             source=node.alias,
             schema_column=column,
+            arena=context.plan_context.expressions,
         )
         for column in schema.columns
     ]

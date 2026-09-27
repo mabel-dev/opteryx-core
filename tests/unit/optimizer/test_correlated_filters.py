@@ -25,6 +25,10 @@ import pytest
 
 import opteryx
 from opteryx.planner.plan_context import PlanContext
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 
 def _optimized_plan(sql):
@@ -154,18 +158,20 @@ def test_pushed_range_preserves_results():
 # `ExprFilterOperator: predicate evaluation failed (err_op=11)`.
 
 
-def _column(column_type):
+def _column(column_type, plan_context):
+    """A reference to a column `k` of `plan_context`'s query - the rewrite under
+    test builds its conditions in that same query."""
     from opteryx.expression import NodeType
     from opteryx.models import LogicalColumn
-    from opteryx.planner.plan_context import PlanContext
     from opteryx.types.schema import FunctionColumn
 
     return LogicalColumn(
         node_type=NodeType.IDENTIFIER,
         source_column="k",
-        schema_column=PlanContext().columns.computed(
+        schema_column=plan_context.columns.computed(
             FunctionColumn, "k", column_type=column_type, aliases=[]
         ),
+        arena=plan_context.expressions,
     )
 
 
@@ -193,7 +199,7 @@ def test_derived_bound_matches_the_target_type(
 
     column_type = getattr(logical_type, column_type_name)
     conditions = cf._range_conditions(
-        _column(column_type), type("R", (), {"upper_bound": upper, "lower_bound": lower})(), 
+        _column(column_type, plan_context), type("R", (), {"upper_bound": upper, "lower_bound": lower})(), 
     plan_context=plan_context)
     by_op = {c.value: c.right for c in conditions}
     assert by_op["LtEq"].value == expected_upper
@@ -214,7 +220,7 @@ def test_derived_bound_is_dropped_when_it_cannot_be_carried():
     # A float bound onto a DECIMAL key would have to be quantized to the
     # column's declared scale, rounding in a direction this layer cannot see.
     conditions = cf._range_conditions(
-        _column(logical_type.DECIMAL(18, 6)),
+        _column(logical_type.DECIMAL(18, 6), plan_context),
         type("R", (), {"upper_bound": 4.5, "lower_bound": 2.5})(), plan_context=plan_context)
     assert conditions == []
 

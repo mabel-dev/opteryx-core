@@ -80,6 +80,13 @@ cdef str _join_condition_config(PhysicalStep node, bint with_using):
     return join_type
 
 
+cdef str _null_placement_suffix(bint ascending, bint nulls_first):
+    """The NULLS clause, only when it is not the default (FIRST under ASC, LAST under DESC)."""
+    if nulls_first == ascending:
+        return ""
+    return " NULLS FIRST" if nulls_first else " NULLS LAST"
+
+
 cdef object _config(PhysicalStep node):
     """The one-line EXPLAIN detail for each kind."""
     cdef str kind = node._kind
@@ -97,13 +104,14 @@ cdef object _config(PhysicalStep node):
         )
     if kind == "SortNode":
         return ", ".join(
-            f"{column.value} {'ASC' if ascending else 'DESC'}"
-            for column, ascending in step.order_by or []
+            f"{column.value} {'ASC' if ascending else 'DESC'}{_null_placement_suffix(ascending, nulls_first)}"
+            for column, ascending, nulls_first in step.order_by or []
         )
     if kind == "HeapSortNode":
         order = ", ".join(
             f"{column.schema_column.name} {'ASC' if ascending else 'DESC'}"
-            for column, ascending in step.order_by or []
+            f"{_null_placement_suffix(ascending, nulls_first)}"
+            for column, ascending, nulls_first in step.order_by or []
         )
         return f"LIMIT = {-1 if step.limit is None else step.limit}, ORDER = {order}"
     if kind == "LimitNode":

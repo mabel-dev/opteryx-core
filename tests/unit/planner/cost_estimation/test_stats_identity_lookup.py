@@ -40,6 +40,10 @@ from opteryx.planner.plan_context import PlanContext
 from opteryx.types.schema import RelationSchema
 from opteryx.types.schema import SchemaColumn
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 # Bound columns are minted by a query's ColumnTable; these tests share one.
 _PLAN_CONTEXT = PlanContext()
@@ -91,11 +95,11 @@ def _make_scan(
 
 def _identifier(source: str, schema_column: SchemaColumn) -> Expression:
     """A bound identifier — carries ``schema_column`` as the binder leaves it."""
-    return LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=schema_column.name, source=source, schema_column=schema_column)
+    return LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=schema_column.name, source=source, schema_column=schema_column, arena=_TEST_ARENA)
 
 
 def _eq_predicate(left: Expression, right: Expression) -> Expression:
-    return Comparison(value="Eq", left=left, right=right)
+    return Comparison(value="Eq", left=left, right=right, arena=_TEST_ARENA)
 
 
 def test_stats_columns_are_keyed_by_bytes_identity_not_name():
@@ -117,7 +121,7 @@ def test_identifier_identity_resolves_bound_column_and_refuses_names():
     bound = _identifier("orders", columns["o_custkey"])
     assert plan_adapter._identifier_identity(bound) == columns["o_custkey"].identity
     # An unbound identifier resolves to None — never to its name.
-    unbound = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="o_custkey", source="orders")
+    unbound = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="o_custkey", source="orders", arena=_TEST_ARENA)
     assert plan_adapter._identifier_identity(unbound) is None
 
 

@@ -29,10 +29,10 @@ from opteryx.compiled.structures.expressions import Expression
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
-from opteryx.utils import random_string
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext, get_nodes_of_type_from_logical_plan
 from opteryx.compiled.structures.expressions import Literal
+from opteryx.types.literal_values import native_literal_value
 from opteryx.compiled.structures.plan_steps import ProjectStep
 
 _STOP_TYPES = frozenset(
@@ -117,15 +117,20 @@ def _make_passthrough(original: Expression) -> Expression:
             original.schema_column.name if original.schema_column else getattr(original, "value", None)
         ),
         schema_column=original.schema_column,
+        arena=original.arena,
     )
 
 
 def _make_constant_literal(original: Expression, value) -> Expression:
-    """Create a LITERAL node that emits value under the original column's schema identity."""
-    lit = Literal()
-    lit.value = value
-    lit.schema_column = original.schema_column
-    return lit
+    """Create a LITERAL node that emits value under the original column's schema
+    identity, typed as that column (a literal is never untyped)."""
+    column_type = original.schema_column.column_type
+    return Literal(
+        value=native_literal_value(value, column_type),
+        type=column_type,
+        schema_column=original.schema_column,
+        arena=original.arena,
+    )
 
 
 class FilterImpliedGroupKeyReductionStrategy(OptimizationStrategy):

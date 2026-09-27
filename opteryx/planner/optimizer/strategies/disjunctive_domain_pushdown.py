@@ -74,6 +74,7 @@ condition to be OR-rooted.
 from typing import Dict, List, Optional, Set, Tuple
 
 from opteryx.compiled.structures.expressions import Expression
+from opteryx.types.literal_values import literal_order_key
 from opteryx.expression import ExpressionColumn, NodeType, get_all_nodes_of_type
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.types.logical_type import ARRAY as _CT_ARRAY
@@ -257,7 +258,7 @@ def _literal_node(value, column_type, *, plan_context) -> Expression:
     from WAS explicitly cast. A bound literal always carries both, so a
     synthesized one must too.
     """
-    lit = Literal(type=column_type, value=value)
+    lit = Literal(type=column_type, value=value, arena=plan_context.expressions)
     lit.schema_column = plan_context.columns.constant("", column_type=column_type, value=value)
     return lit
 
@@ -271,11 +272,12 @@ def _comparison_node(op: str, ident: Expression, lit: Expression, *, plan_contex
         left=ident.copy(),
         right=lit,
         schema_column=plan_context.columns.computed(ExpressionColumn, "", column_type=_CT_BOOLEAN),
+        arena=plan_context.expressions,
     )
 
 
 def _build_points_node(ident: Expression, values: Set, element_type, *, plan_context) -> Expression:
-    ordered = sorted(values, key=str)
+    ordered = tuple(sorted(values, key=literal_order_key))
     if len(ordered) == 1:
         return _comparison_node(
             "Eq",

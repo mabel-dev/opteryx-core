@@ -575,14 +575,15 @@ def collect_plan_telemetry(plan: PhysicalPlan) -> dict:
                 from opteryx.expression import format_expression
 
                 keys = []
-                for entry in order_by:
-                    try:
-                        column, ascending = entry
-                    except (TypeError, ValueError):  # pragma: no cover
-                        continue
+                for column, ascending, nulls_first in order_by:
                     rendered = str(format_expression(column)).strip()
                     if rendered:
-                        keys.append(f"{rendered} {'ASC' if ascending else 'DESC'}")
+                        # The placement is named only when it is not the default
+                        # (NULLS FIRST under ASC, NULLS LAST under DESC).
+                        placement = ""
+                        if bool(nulls_first) != bool(ascending):
+                            placement = " NULLS FIRST" if nulls_first else " NULLS LAST"
+                        keys.append(f"{rendered} {'ASC' if ascending else 'DESC'}{placement}")
                 if keys:
                     node_stat["sort_keys"] = keys
             # A join's condition and which leg it materialises. `config` is no

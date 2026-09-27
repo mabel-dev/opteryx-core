@@ -112,101 +112,6 @@ def flip_join_leg_labels(plan: LogicalPlan, join_nid: str) -> None:
     plan.add_edge(right, join_nid, EdgeRole.LEFT)
 
 
-class CopyOnWritePlan:
-    """The working plan a strategy visits, with the copy deferred until the
-    first mutation.
-
-    Every strategy used to open its visit with `optimized_plan =
-    pre_optimized_tree.copy()` — a full deep copy of the plan, paid whether or
-    not the strategy went on to change anything (~19 copies per query, most of
-    them for passes that did nothing). This stand-in delegates every READ to
-    the pristine input plan and takes the copy only when a strategy performs a
-    graph MUTATION (node replace, add/remove of nodes or edges). A pass that
-    never mutates never copies, and `unwrap()` hands the untouched input plan
-    back to the optimizer — which also keeps the plan's statistics valid, so
-    the next cost-based strategy skips its refresh.
-
-    The materialized copy is `shallow_copy()`: fresh structure, SHARED node
-    objects. The input plan is discarded the moment the pass completes, so
-    the structure is the only thing the walk needs protected; sharing the
-    nodes means an in-place node edit lands identically whether it happens
-    before or after the copy is taken.
-
-    Reads and writes of plain attributes (e.g. `statistics_are_stale`) pass
-    through to the underlying plan — they are metadata, not plan mutations,
-    and do not trigger the copy.
-    """
-
-    __slots__ = ("_source", "_materialized")
-
-    def __init__(self, source: LogicalPlan):
-        object.__setattr__(self, "_source", source)
-        object.__setattr__(self, "_materialized", None)
-
-    # -- materialization ---------------------------------------------------
-    def _plan(self) -> LogicalPlan:
-        materialized = self._materialized
-        return self._source if materialized is None else materialized
-
-    def _mutable(self) -> LogicalPlan:
-        if self._materialized is None:
-            object.__setattr__(self, "_materialized", self._source.shallow_copy())
-        return self._materialized
-
-    def unwrap(self, unchanged: LogicalPlan) -> LogicalPlan:
-        """The real plan to hand onward: the materialized copy when a mutation
-        happened, otherwise `unchanged` (the pass's input plan)."""
-        materialized = self._materialized
-        return unchanged if materialized is None else materialized
-
-    # -- reads: delegate to whichever plan is current ------------------------
-    def __getattr__(self, name):
-        return getattr(self._plan(), name)
-
-    def __setattr__(self, name, value):
-        setattr(self._plan(), name, value)
-
-    def __getitem__(self, nid):
-        return self._plan()[nid]
-
-    def __len__(self):
-        return len(self._plan())
-
-    def __bool__(self):
-        return bool(self._plan())
-
-    def __contains__(self, nid):
-        return nid in self._plan()
-
-    def __repr__(self):  # pragma: no cover
-        return f"CopyOnWrite({self._plan()!r})"
-
-    # -- mutations: take the copy first --------------------------------------
-    def __setitem__(self, nid, node):
-        self._mutable()[nid] = node
-
-    def absorb(self, other):
-        self._mutable().absorb(other)
-
-    def add_node(self, node, nid=None):
-        return self._mutable().add_node(node, nid=nid)
-
-    def add_edge(self, source, target, relationship=None):
-        return self._mutable().add_edge(source, target, relationship)
-
-    def remove_node(self, nid, heal: bool = False):
-        return self._mutable().remove_node(nid, heal)
-
-    def remove_edge(self, source, target, relationship):
-        return self._mutable().remove_edge(source, target, relationship)
-
-    def insert_node_before(self, node, before_nid, *, nid=None):
-        return self._mutable().insert_node_before(node, before_nid, nid=nid)
-
-    def insert_node_after(self, node, after_nid, *, nid=None):
-        return self._mutable().insert_node_after(node, after_nid, nid=nid)
-
-
 class OptimizerContext:
     """Context object to carry state"""
 
@@ -217,7 +122,11 @@ class OptimizerContext:
         self.parent_nid = None
         self.last_nid = None
         self.pre_optimized_tree = tree
-        self.optimized_plan = CopyOnWritePlan(tree)
+        self.optimized_plan = tree.cow_view()
+        """The working plan: a copy-on-write view of `tree` (PlanGraph.cow_view).
+        Reads are the input plan's; the first graph mutation takes the view its
+        own structural copy, sharing the steps. `unwrap()` tells the optimizer
+        which happened."""
 
         self.seen_projections: int = 0
         self.seen_unions: int = 0
@@ -270,7 +179,7 @@ class OptimizationStrategy:
     graph operation on `context.optimized_plan` — replacing a node
     (`plan[nid] = node`, the idiomatic write-back after an in-place edit),
     or adding/removing nodes and edges. The working plan is copy-on-write
-    (see CopyOnWritePlan) and the optimizer detects "did this pass change
+    (see PlanGraph.cow_view) and the optimizer detects "did this pass change
     anything?" purely from those operations: an in-place node edit with no
     write-back neither materializes the working copy nor marks the plan's
     statistics stale, so it is a defect, not a shortcut.

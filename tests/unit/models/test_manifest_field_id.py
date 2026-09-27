@@ -25,6 +25,10 @@ from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 # Bound columns are minted by a query's ColumnTable; these tests share one.
 _PLAN_CONTEXT = PlanContext()
@@ -139,9 +143,9 @@ def test_prune_files_resolves_field_id_after_projection_pushdown():
     # `followers > 100` should prune the file (max is 42), not silently read
     # field_id=0 (which doesn't exist in lower_bounds/upper_bounds) and skip
     # pruning.
-    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="followers")
-    literal = Literal(type=INT64, value=100)
-    predicate = Comparison(value="Gt", left=identifier, right=literal)
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="followers", arena=_TEST_ARENA)
+    literal = Literal(type=INT64, value=100, arena=_TEST_ARENA)
+    predicate = Comparison(value="Gt", left=identifier, right=literal, arena=_TEST_ARENA)
 
     manifest = manifest.prune_files([predicate], plan_context=plan_context)
 

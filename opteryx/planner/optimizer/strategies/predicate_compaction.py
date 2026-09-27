@@ -46,6 +46,7 @@ from typing import Set
 from typing import Tuple
 
 from opteryx.compiled.structures.expressions import Expression
+from opteryx.types.literal_values import literal_order_key
 from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import PlanStep
@@ -283,13 +284,15 @@ def _within(value, value_range: ValueRange) -> bool:
     return True
 
 
-def _retype_literal(literal: Expression, column_type, value, *, plan_context) -> None:
-    """Stamp a literal with a new value AND matching type — `.type` and
-    `schema_column` are read by different consumers (row-group pruner vs the
-    bytecode compiler), so both must agree or the node is half-bound."""
-    literal.value = value
-    literal.type = column_type
-    literal.schema_column = plan_context.columns.constant("", column_type=column_type, value=value)
+def _retyped_literal(literal: Expression, column_type, value, *, plan_context) -> Expression:
+    """`literal` with a new value AND matching type — `.type` and `schema_column`
+    are read by different consumers (row-group pruner vs the bytecode compiler), so
+    both must agree or the node is half-bound."""
+    return literal.replace(
+        value=value,
+        type=column_type,
+        schema_column=plan_context.columns.constant("", column_type=column_type, value=value),
+    )
 
 
 class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
@@ -430,7 +433,9 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
 
             if filter_nid in filters_to_false:
                 filter_node = optimized_plan[filter_nid]
-                filter_node.condition = Literal(value=False)
+                filter_node.condition = Literal(
+                    value=False, type=_lt.BOOLEAN, arena=context.plan_context.expressions
+                )
                 filter_node.columns = []
                 filter_node.relations = set()
                 optimized_plan[filter_nid] = filter_node
@@ -602,6 +607,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
                     centre=best_upper.occurrence.predicate.right.copy(),
                     # value encodes bound inclusivity: (lower_inclusive, upper_inclusive)
                     value=(best_lower.inclusive, best_upper.inclusive),
+                    arena=plan_context.expressions,
                 )
             )
         elif best_lower:
@@ -655,15 +661,21 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         element_type = self._point_element_type(points)
         if element_type is None:
             return None
-        node = points[0].predicate.copy()
-        ordered = sorted(surviving, key=str)
+        predicate = points[0].predicate
+        ordered = tuple(sorted(surviving, key=literal_order_key))
         if len(ordered) == 1:
-            node.value = "Eq"
-            _retype_literal(node.right, element_type, ordered[0], plan_context=plan_context)
-        else:
-            node.value = "InList"
-            _retype_literal(node.right, _lt.ARRAY(element_type), ordered, plan_context=plan_context)
-        return node
+            return predicate.replace(
+                value="Eq",
+                right=_retyped_literal(
+                    predicate.right, element_type, ordered[0], plan_context=plan_context
+                ),
+            )
+        return predicate.replace(
+            value="InList",
+            right=_retyped_literal(
+                predicate.right, _lt.ARRAY(element_type), ordered, plan_context=plan_context
+            ),
+        )
 
     def _build_not_in_list_node(
         self, exclusions: List[PredicateOccurrence], *, plan_context
@@ -672,13 +684,16 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         element_type = exclusions[0].predicate.right.type
         if not isinstance(element_type, _lt.ColumnType):
             return None
-        node = exclusions[0].predicate.copy()
-        node.value = "NotInList"
-        _retype_literal(
-            node.right, _lt.ARRAY(element_type), sorted((occ.value for occ in exclusions), key=str),
-            plan_context=plan_context,
+        predicate = exclusions[0].predicate
+        return predicate.replace(
+            value="NotInList",
+            right=_retyped_literal(
+                predicate.right,
+                _lt.ARRAY(element_type),
+                tuple(sorted((occ.value for occ in exclusions), key=literal_order_key)),
+                plan_context=plan_context,
+            ),
         )
-        return node
 
     @staticmethod
     def _is_better_lower(candidate: BoundCandidate, current: Optional[BoundCandidate]) -> bool:
@@ -934,18 +949,19 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         """
         col = col_node.copy()
         if lower is not None and upper is not None and lower.value == upper.value:
-            return Comparison(value="Eq", left=col, right=lower_node.copy())
+            return Comparison(value="Eq", left=col, right=lower_node.copy(), arena=col_node.arena)
         if lower is None:
             op = "LtEq" if upper.inclusive else "Lt"
-            return Comparison(value=op, left=col, right=upper_node.copy())
+            return Comparison(value=op, left=col, right=upper_node.copy(), arena=col_node.arena)
         if upper is None:
             op = "GtEq" if lower.inclusive else "Gt"
-            return Comparison(value=op, left=col, right=lower_node.copy())
+            return Comparison(value=op, left=col, right=lower_node.copy(), arena=col_node.arena)
         return Between(
             left=col,
             right=lower_node.copy(),
             centre=upper_node.copy(),
             value=(lower.inclusive, upper.inclusive),
+            arena=col_node.arena,
         )
 
     def _try_collapse_or_range(self, node: Expression) -> Optional[Expression]:
@@ -1039,11 +1055,11 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         if len(new_nodes) == 1:
             return new_nodes[0]
         if len(new_nodes) == 2:
-            return Or(left=new_nodes[0], right=new_nodes[1])
+            return Or(left=new_nodes[0], right=new_nodes[1], arena=node.arena)
 
         # 3+ surviving branches: match DisjunctionSimplificationStrategy's
         # flattened n-ary representation rather than a nested binary OR tree.
-        cnf = Cnf()
+        cnf = Cnf(arena=node.arena)
         cnf.parameters = new_nodes
         return cnf
 
@@ -1064,5 +1080,5 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
 
         result = predicates[0]
         for pred in predicates[1:]:
-            result = And(left=result, right=pred)
+            result = And(left=result, right=pred, arena=predicates[0].arena)
         return result

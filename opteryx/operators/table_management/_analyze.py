@@ -41,18 +41,14 @@ from typing import Optional
 from typing import Sequence
 from typing import Tuple
 
+from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
+from opteryx.compiled.planner.native_manifest import decode_manifest_parquet
 from opteryx.connectors.io_systems.local_filesystem import OpteryxLocalFileSystem
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest_io import DATASET_MANIFEST_NAME
 from opteryx.models.manifest_io import HISTOGRAM_BINS
 from opteryx.models.manifest_io import is_dataset_manifest
-from opteryx.models.manifest_io import read_manifest_char_classes
-from opteryx.models.manifest_io import read_manifest_file_entries
-from opteryx.models.manifest_io import read_manifest_histograms
-from opteryx.models.manifest_io import read_manifest_sketches
-from opteryx.models.manifest_io import write_manifest_parquet
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.utils.kmv import ColumnSketch
 
@@ -112,42 +108,25 @@ def _resolve_targets(field_ids: Dict[str, int], columns: Optional[Sequence[str]]
     return targets
 
 
-def _empty_nested(column_count: int) -> List[list]:
-    return [[] for _ in range(column_count)]
+def _schema_layout(schema) -> Tuple[tuple, tuple]:
+    """The dataset's columns and their physical types, in load-time order - the
+    positions every manifest list is keyed by."""
+    return (
+        tuple(col.name for col in schema.columns),
+        tuple(col.column_type.physical for col in schema.columns),
+    )
 
 
-def _empty_scalar(column_count: int) -> List[Optional[int]]:
-    return [None] * column_count
-
-
-def _read_existing_stats(manifest_path: str, column_count: int) -> dict:
-    """Existing per-file statistics from the dataset manifest — every nested
-    stat (KMV sketch, histogram, char-class counts) plus the scalar-per-column
-    stats already boxed on FileEntry (null_counts, min/max values, min/max
-    lengths, char_total_bytes). A column-subset ANALYZE/DROP STATISTICS merges
-    against this so a file's untouched columns survive.
-
-    A file whose stored width no longer matches the current schema is dropped
-    entirely: it was computed against a different column set, so its
-    positional field_ids are meaningless now (the same staleness rule the
-    previous sidecar format applied).
-    """
-    empty = {"sketch": {}, "histogram": {}, "char_class": {}, "entries": {}}
+def _read_prior_manifest(manifest_path: str, schema):
+    """The dataset manifest ANALYZE / DROP STATISTICS last wrote, decoded
+    natively, or None when there is none. A column-subset run carries its
+    untouched columns' statistics forward from it."""
     if not os.path.exists(manifest_path):
-        return empty
+        return None
     with open(manifest_path, "rb") as handle:
         data = handle.read()
-
-    def _filtered(d):
-        return {path: v for path, v in d.items() if len(v) == column_count}
-
-    entries, _native = read_manifest_file_entries(data)
-    return {
-        "sketch": _filtered(read_manifest_sketches(data)),
-        "histogram": _filtered(read_manifest_histograms(data)),
-        "char_class": _filtered(read_manifest_char_classes(data)),
-        "entries": {e.file_path: e for e in entries},
-    }
+    names, physical = _schema_layout(schema)
+    return decode_manifest_parquet(data, names, physical, {}, True, True)
 
 
 def _target_categories(schema, targets: List[str]) -> Dict[str, LogicalCategory]:
@@ -302,17 +281,8 @@ def _worker_count(n_files: int) -> int:
     return max(1, min(n_files, (os.cpu_count() or 1)))
 
 
-def _write_manifest_atomic(
-    manifest_path: str,
-    entries: List[FileEntry],
-    schema,
-    sketches,
-    histograms=None,
-    char_classes=None,
-) -> None:
-    data = write_manifest_parquet(
-        entries, schema, sketches=sketches, histograms=histograms, char_classes=char_classes
-    )
+def _write_manifest_atomic(manifest_path: str, manifest) -> None:
+    data = manifest.to_parquet()
     tmp = manifest_path + ".tmp"
     with open(tmp, "wb") as handle:
         handle.write(data)
@@ -361,7 +331,7 @@ def analyze_table(
         return 0
 
     manifest_path = _manifest_path(table_engine)
-    existing = _read_existing_stats(manifest_path, column_count)
+    prior = _read_prior_manifest(manifest_path, schema)
     file_sizes = _footer_size_stats(table_engine, blobs, schema)
 
     workers = _worker_count(len(blobs))
@@ -374,104 +344,51 @@ def analyze_table(
                 pool.map(lambda b: _analyze_one_file(b, targets, categories), blobs)
             )
 
-    entries: List[FileEntry] = []
-    sketches: Dict[str, List[List[int]]] = {}
-    histograms: Dict[str, List[List[int]]] = {}
-    char_classes: Dict[str, List[List[int]]] = {}
+    names, physical = _schema_layout(schema)
+    builder = NativeManifestBuilder(names, physical, True, True)
     for blob, result in zip(blobs, results):
-        prior_entry = existing["entries"].get(blob)
-
-        sketch = list(existing["sketch"].get(blob) or _empty_nested(column_count))
-        histogram = list(existing["histogram"].get(blob) or _empty_nested(column_count))
-        char_class = list(existing["char_class"].get(blob) or _empty_nested(column_count))
-
-        null_counts = list(prior_entry.null_counts) if prior_entry and prior_entry.null_counts else _empty_scalar(column_count)
-        min_values = list(prior_entry.min_values) if prior_entry and prior_entry.min_values else _empty_scalar(column_count)
-        max_values = list(prior_entry.max_values) if prior_entry and prior_entry.max_values else _empty_scalar(column_count)
-        min_lengths = list(prior_entry.min_lengths) if prior_entry and prior_entry.min_lengths else _empty_scalar(column_count)
-        max_lengths = list(prior_entry.max_lengths) if prior_entry and prior_entry.max_lengths else _empty_scalar(column_count)
-        char_total_bytes = list(prior_entry.char_total_bytes) if prior_entry and prior_entry.char_total_bytes else _empty_scalar(column_count)
+        uncompressed_size, column_sizes = file_sizes[blob]
+        row = builder.add_file(
+            blob,
+            "PARQUET",
+            result["record_count"],
+            os.path.getsize(blob),
+            -1,
+            -1 if uncompressed_size is None else uncompressed_size,
+            HISTOGRAM_BINS,
+        )
+        prior_row = None if prior is None else prior.find_file(blob)
+        if prior_row is not None:
+            builder.carry_statistics(row, prior, prior_row)
+        builder.start_sketch_rows(row)
+        for position, size in enumerate(column_sizes or ()):
+            if size is not None:
+                builder.set_counts(row, position, uncompressed_size=size)
 
         for name in targets:
             fid = field_ids[name]
             col_stats = result["columns"][name]
+            builder.clear_statistics(row, fid)
 
-            sketch[fid] = list(col_stats["sketch"])
-            null_counts[fid] = col_stats["null_count"]
-
+            builder.set_sketch(row, fid, "min_k", list(col_stats["sketch"]))
+            builder.set_counts(row, fid, null_count=col_stats["null_count"])
             if col_stats["min_max"] is not None:
-                min_values[fid], max_values[fid] = col_stats["min_max"]
-            else:
-                min_values[fid] = None
-                max_values[fid] = None
-
-            histogram[fid] = list(col_stats["histogram"]) if col_stats["histogram"] is not None else []
-
+                low, high = col_stats["min_max"]
+                builder.set_ordinal_bound(row, fid, True, low)
+                builder.set_ordinal_bound(row, fid, False, high)
+            if col_stats["histogram"] is not None:
+                builder.set_sketch(row, fid, "histogram", list(col_stats["histogram"]))
+            # A column that is not a string (or was re-typed since a prior
+            # ANALYZE) keeps no char-class data under this position.
             if col_stats["char_class_counts"] is not None:
-                char_class[fid] = list(col_stats["char_class_counts"])
-                char_total_bytes[fid] = col_stats["char_total_bytes"]
+                builder.set_sketch(row, fid, "char_class", list(col_stats["char_class_counts"]))
+                builder.set_counts(row, fid, char_total_bytes=col_stats["char_total_bytes"])
                 if col_stats["length_range"] is not None:
-                    min_lengths[fid], max_lengths[fid] = col_stats["length_range"]
-                else:
-                    min_lengths[fid] = None
-                    max_lengths[fid] = None
-            else:
-                # Not a string column (or column re-typed since a prior
-                # ANALYZE) — no stale char-class data survives under this id.
-                char_class[fid] = []
-                char_total_bytes[fid] = None
-                min_lengths[fid] = None
-                max_lengths[fid] = None
+                    low, high = col_stats["length_range"]
+                    builder.set_counts(row, fid, min_length=low, max_length=high)
 
-        sketches[blob] = sketch
-        histograms[blob] = histogram
-        char_classes[blob] = char_class
-        uncompressed_size, column_sizes = file_sizes[blob]
-        entries.append(
-            FileEntry(
-                file_path=blob,
-                file_format="PARQUET",
-                record_count=result["record_count"],
-                file_size_in_bytes=os.path.getsize(blob),
-                uncompressed_size_in_bytes=uncompressed_size,
-                column_uncompressed_sizes_in_bytes=column_sizes,
-                null_counts=null_counts,
-                min_values=min_values,
-                max_values=max_values,
-                min_lengths=min_lengths,
-                max_lengths=max_lengths,
-                char_total_bytes=char_total_bytes,
-                # The width the bins above were actually built with — recorded
-                # so the writer stamps the real number and the reader can check
-                # the counts it reads back against it.
-                histogram_bins=HISTOGRAM_BINS,
-            )
-        )
-
-    _write_manifest_atomic(manifest_path, entries, schema, sketches, histograms, char_classes)
+    _write_manifest_atomic(manifest_path, builder.build({}))
     return len(blobs)
-
-
-def _clear_nested(col_list: List[list], drop_ids: set) -> List[list]:
-    return [[] if idx in drop_ids else list(col) for idx, col in enumerate(col_list)]
-
-
-def _clear_scalar(values: List, drop_ids: set) -> List:
-    return [None if idx in drop_ids else v for idx, v in enumerate(values)]
-
-
-def _entry_has_any_stats(entry: FileEntry) -> bool:
-    for lst in (
-        entry.null_counts,
-        entry.min_values,
-        entry.max_values,
-        entry.min_lengths,
-        entry.max_lengths,
-        entry.char_total_bytes,
-    ):
-        if lst and any(v is not None for v in lst):
-            return True
-    return False
 
 
 def drop_statistics(table_engine, columns: Optional[Sequence[str]]) -> int:
@@ -498,84 +415,49 @@ def drop_statistics(table_engine, columns: Optional[Sequence[str]]) -> int:
         return 0
 
     schema = table_engine.get_dataset_schema()
-    column_count = len(schema.columns)
+    prior = _read_prior_manifest(manifest_path, schema)
 
     if not columns:
-        existing = _read_existing_stats(manifest_path, column_count)
-        touched = len(existing["entries"])
         os.remove(manifest_path)
-        return touched
+        return len(prior)
 
     field_ids = _field_ids(table_engine)
-    drop_ids = {field_ids[name] for name in _resolve_targets(field_ids, columns)}
+    drop_ids = sorted({field_ids[name] for name in _resolve_targets(field_ids, columns)})
 
-    existing = _read_existing_stats(manifest_path, column_count)
-    entries = list(existing["entries"].values())
-
+    names, physical = _schema_layout(schema)
+    builder = NativeManifestBuilder(names, physical, True, True)
     touched = 0
-    sketches: Dict[str, List[List[int]]] = {}
-    histograms: Dict[str, List[List[int]]] = {}
-    char_classes: Dict[str, List[List[int]]] = {}
-    kept_entries: List[FileEntry] = []
-    for entry in entries:
-        sketch = existing["sketch"].get(entry.file_path)
-        histogram = existing["histogram"].get(entry.file_path)
-        char_class = existing["char_class"].get(entry.file_path)
-        if sketch is None or histogram is None or char_class is None:
-            # Width mismatch against the current schema — _read_existing_stats
-            # already filtered these out; stale, don't carry forward.
+    for prior_row in range(len(prior)):
+        if prior.sketch_row_widths(prior_row) != (len(names),) * 3:
+            # Statistics computed against a different column set - stale, so
+            # not carried forward.
             touched += 1
             continue
-
-        cleared_sketch = _clear_nested(sketch, drop_ids)
-        cleared_histogram = _clear_nested(histogram, drop_ids)
-        cleared_char_class = _clear_nested(char_class, drop_ids)
-        cleared_entry = FileEntry(
-            file_path=entry.file_path,
-            file_format=entry.file_format,
-            record_count=entry.record_count,
-            file_size_in_bytes=entry.file_size_in_bytes,
-            # Sizes are facts about the FILE, not statistics about the values in
-            # a column, so DROP STATISTICS FOR COLUMNS leaves them alone — same
-            # treatment the file-level size and record_count already get. The
-            # per-column list must survive whole: clearing some slots would leave
-            # a list that is still read positionally, with holes where columns
-            # still have real bytes on disk.
-            uncompressed_size_in_bytes=entry.uncompressed_size_in_bytes,
-            column_uncompressed_sizes_in_bytes=entry.column_uncompressed_sizes_in_bytes,
-            null_counts=_clear_scalar(entry.null_counts or _empty_scalar(column_count), drop_ids),
-            min_values=_clear_scalar(entry.min_values or _empty_scalar(column_count), drop_ids),
-            max_values=_clear_scalar(entry.max_values or _empty_scalar(column_count), drop_ids),
-            min_lengths=_clear_scalar(entry.min_lengths or _empty_scalar(column_count), drop_ids),
-            max_lengths=_clear_scalar(entry.max_lengths or _empty_scalar(column_count), drop_ids),
-            # Clearing SOME columns' histograms does not change how wide the
-            # surviving ones are — carry the recorded width, don't re-stamp it.
-            histogram_bins=entry.histogram_bins,
-            char_total_bytes=_clear_scalar(
-                entry.char_total_bytes or _empty_scalar(column_count), drop_ids
-            ),
+        file = prior.file_row(prior_row)
+        # Sizes and counts are facts about the FILE, not statistics about the
+        # values in a column, so DROP STATISTICS leaves them alone.
+        row = builder.add_file(
+            file["file_path"],
+            file["file_format"],
+            -1 if file["record_count"] is None else file["record_count"],
+            file["file_size_in_bytes"],
+            -1,
+            -1 if file["uncompressed_size_in_bytes"] is None else file["uncompressed_size_in_bytes"],
+            -1 if file["histogram_bins"] is None else file["histogram_bins"],
         )
-        if (
-            cleared_sketch != sketch
-            or cleared_histogram != histogram
-            or cleared_char_class != char_class
-        ):
+        builder.carry_statistics(row, prior, prior_row)
+        for position in range(len(names)):
+            size = prior.cell(prior_row, position)["uncompressed_size"]
+            if size is not None:
+                builder.set_counts(row, position, uncompressed_size=size)
+        cleared = False
+        for fid in drop_ids:
+            cleared = builder.clear_statistics(row, fid) or cleared
+        if cleared:
             touched += 1
 
-        sketches[entry.file_path] = cleared_sketch
-        histograms[entry.file_path] = cleared_histogram
-        char_classes[entry.file_path] = cleared_char_class
-        kept_entries.append(cleared_entry)
-
-    any_survives = any(
-        any(col for col in sketches[e.file_path])
-        or any(col for col in histograms[e.file_path])
-        or any(col for col in char_classes[e.file_path])
-        or _entry_has_any_stats(e)
-        for e in kept_entries
-    )
-    if any_survives:
-        _write_manifest_atomic(manifest_path, kept_entries, schema, sketches, histograms, char_classes)
+    if builder.has_statistics():
+        _write_manifest_atomic(manifest_path, builder.build({}))
     else:
         os.remove(manifest_path)
 

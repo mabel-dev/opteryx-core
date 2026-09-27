@@ -200,7 +200,7 @@ def test_vector_topk_sort_key_is_never_a_topn_pushdown_candidate():
     from opteryx.planner.optimizer.strategies.operator_fusion import OperatorFusionStrategy
 
     sort_key = _cosine_node()
-    assert OperatorFusionStrategy._is_vector_topk_candidate([(sort_key, True)])
+    assert OperatorFusionStrategy._is_vector_topk_candidate([(sort_key, True, True)])
 
     # TopNScanPushdownStrategy stamps a scan only when the sort key is IDENTIFIER
     # ("the sort key must be a plain column reference"). A vector candidate never is.

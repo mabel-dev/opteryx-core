@@ -38,6 +38,10 @@ from opteryx.types.logical_type import DATE, DECIMAL, FLOAT64, INT64, TIMESTAMP,
 from opteryx.types.schema import RelationSchema
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 # Bound columns are minted by a query's ColumnTable; these tests share one.
 _PLAN_CONTEXT = PlanContext()
@@ -69,9 +73,9 @@ def _manifest(column_type, ordinal_min, ordinal_max, *, bounds_are_ordinal=True)
 
 
 def _predicate(op, value, column_type):
-    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="c")
-    literal = Literal(type=column_type, value=value)
-    return Comparison(value=op, left=identifier, right=literal)
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="c", arena=_TEST_ARENA)
+    literal = Literal(type=column_type, value=value, arena=_TEST_ARENA)
+    return Comparison(value=op, left=identifier, right=literal, arena=_TEST_ARENA)
 
 
 def _survives(manifest, op, value, column_type):

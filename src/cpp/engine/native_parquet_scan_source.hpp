@@ -28,9 +28,9 @@
 //   - No schema evolution: every projected column must be present in every
 //     scanned row group (a NativeScanPlan built from a uniform file set).
 //   - Fixed-width direct columns: DK_INT64/FLOAT32/FLOAT64/DK_BOOL (dense or
-//     dict-shaped, DK_BOOL dense) plus DK_DECIMAL128 (dense only — rugo's decode
-//     layer has no "dict-encoded DECIMAL128" direct kind; a dictionary-encoded
-//     DECIMAL128 column classifies as DK_POOL and is NOT handled here). A DK_POOL
+//     dict-shaped, DK_BOOL dense) plus DECIMAL128, dense (DK_DECIMAL128) or
+//     dict-shaped (DK_DECIMAL128_DICT — pyarrow's default encoding for precision
+//     > 18; __int128 dictionary + uint32 codes). A DK_POOL
 //     column is decoded only when the plan flagged what it is (decimal / varchar /
 //     array, below); an unflagged one sets ErrCtx and stops the scan rather than
 //     guessing.
@@ -300,7 +300,7 @@ struct NativeScanColumnBuilder {
         switch (dk) {
             case rugo::DK_INT64: case rugo::DK_FLOAT32: case rugo::DK_FLOAT64:
             case rugo::DK_INT64_DICT: case rugo::DK_FLOAT64_DICT: case rugo::DK_FLOAT32_DICT:
-            case rugo::DK_DECIMAL128: case rugo::DK_BOOL:
+            case rugo::DK_DECIMAL128: case rugo::DK_DECIMAL128_DICT: case rugo::DK_BOOL:
             // A1 (E33): exact-width integer direct kinds — dense
             // (DK_UINT8/16/32/64, DK_INT8/16/32) and dict-shaped (DK_*_DICT).
             // Signed narrow ints no longer widen to DK_INT64, so the signed
@@ -322,7 +322,7 @@ struct NativeScanColumnBuilder {
         switch (dk) {
             case rugo::DK_INT64:      case rugo::DK_INT64_DICT:   return DRAKEN_INT64;
             case rugo::DK_FLOAT32:    case rugo::DK_FLOAT32_DICT: return DRAKEN_FLOAT32;
-            case rugo::DK_DECIMAL128:                             return DRAKEN_DECIMAL128;
+            case rugo::DK_DECIMAL128: case rugo::DK_DECIMAL128_DICT: return DRAKEN_DECIMAL128;
             case rugo::DK_BOOL:                                   return DRAKEN_BOOL;
             // A1 (E33): preserve the exact declared width and signedness (dense + dict
             // share the tag), byte-identical to the trampoline's _wrap_direct /
@@ -347,6 +347,7 @@ struct NativeScanColumnBuilder {
             case rugo::DK_UINT32_DICT: case rugo::DK_UINT64_DICT:
             case rugo::DK_INT8_DICT:   case rugo::DK_INT16_DICT:
             case rugo::DK_INT32_DICT:
+            case rugo::DK_DECIMAL128_DICT:
                 return true;
             default:
                 return false;
@@ -645,7 +646,7 @@ struct NativeScanColumnBuilder {
             out.own = std::shared_ptr<VectorOwner>(draken_vecresult_child_owner_new_c(wr));
             dtype = want;
         }
-        if (dk == rugo::DK_DECIMAL128) {
+        if (dk == rugo::DK_DECIMAL128 || dk == rugo::DK_DECIMAL128_DICT) {
             // WP-11: DECIMAL128 carries its precision/scale on the footer (rugo's
             // parse_decimal_ps fills ColumnOut.dec_*); attach it so a projected
             // decimal128 reaches output byte-identically to the trampoline's

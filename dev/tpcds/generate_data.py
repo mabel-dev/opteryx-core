@@ -26,9 +26,11 @@ import duckdb  # dev/test data generator only — never imported by production c
 # Directory-label -> numeric SF passed to dsdgen. "001" is the one precedent
 # already in this repo (tests/integration/sql_battery/_tpch_golden.py:
 # `TPCH_SCALE = "001"  # 0.01 scale factor`) — matched exactly so tpcds_001
-# means the same thing tpch_001 does. Anything else is parsed as a literal
-# float (e.g. "1" -> 1.0, "10" -> 10.0).
-_SCALE_LABELS = {"001": 0.01}
+# means the same thing tpch_001 does. "01" is SF0.1 by the same convention
+# (the quick remote-benchmark scale) - without it, float("01") would silently
+# generate SF1 into a directory labelled 01. Anything else is parsed as a
+# literal float (e.g. "1" -> 1.0, "10" -> 10.0).
+_SCALE_LABELS = {"001": 0.01, "01": 0.1}
 
 
 def _scale_factor(label: str) -> float:

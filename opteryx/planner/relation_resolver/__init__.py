@@ -62,6 +62,7 @@ from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.logical_planner import RecursiveCteDefinition
 from opteryx.compiled.structures.expressions import Wildcard
+from opteryx.compiled.structures.expressions import rewrite_children
 from opteryx.compiled.structures.plan_steps import steps_with
 from opteryx.compiled.structures.plan_steps import MaterializedCteRefStep
 from opteryx.compiled.structures.plan_steps import SubqueryStep
@@ -121,12 +122,11 @@ def copy_sub_plan(plan: LogicalPlan) -> LogicalPlan:
         if isinstance(value, dict):
             return {k: _rekey_embedded(v) for k, v in value.items()}
         if is_expression(value):
-            # The only plan an expression holds is a SUBQUERY's `value`.
+            # The only plan an expression holds is a SUBQUERY's `value`. Expressions
+            # may be shared with the plan copied from, so a changed one is rebuilt.
             if value.node_type == NodeType.SUBQUERY:
-                value.value = _rekey_embedded(value.value)
-            else:
-                value.map_children(_rekey_embedded)
-            return value
+                return value.with_fields(value=_rekey_embedded(value.value))
+            return rewrite_children(value, _rekey_embedded)
         return value
 
     # The only plans a step holds are inside its expressions (a SUBQUERY's value).
@@ -218,10 +218,12 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX, *, plan
         plan[nid] = node
 
     def _prop(property):
+        # Expressions may be shared with the plan this one was copied from, so a
+        # renamed expression is a new one (copy-on-write), returned to its holder.
         if type(property) is LogicalColumn and property.source is not None:
             mapped = relations.get(property.source.lower())
             if mapped is not None:
-                property.source = mapped
+                property = property.with_fields(source=mapped)
         # A QUALIFIED wildcard (`p.*`) names a relation too, and names it as a plain
         # string in `value` rather than as a LogicalColumn.source — so nothing above
         # reaches it, and the tuple branch below walks straight past a bare string. Left
@@ -236,26 +238,24 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX, *, plan
             and property.node_type == NodeType.WILDCARD
             and property.value
         ):
-            property.value = type(property.value)(
-                relations.get(q.lower(), q) for q in property.value
+            property = property.with_fields(
+                value=type(property.value)(relations.get(q.lower(), q) for q in property.value)
             )
         if isinstance(property, list):
             return [_prop(p) for p in property]
         if isinstance(property, tuple):
-            # ORDER BY entries are (expr, ascending) tuples — recurse into them too,
+            # ORDER BY entries are (expr, ascending, nulls_first) tuples — recurse into them too,
             # or a spliced view/CTE keeps a dangling reference to its old alias
             # (e.g. `ORDER BY o.observed_at` after `o`'s Scan is renamed away).
             return tuple(_prop(p) for p in property)
         if isinstance(property, dict):
             return {k: _prop(v) for k, v in property.items()}
         if is_expression(property):
-            for child in property.children():
-                _prop(child)
+            return rewrite_children(property, _prop)
         return property
 
     for nid, node in plan.nodes(True):
-        for expression in node.expressions():
-            _prop(expression)
+        node.map_expressions(_prop)
 
     # Window and FramedWindow nodes carry a pre-minted output relation
     # (`$window-XXXXXX` / `$framedwindow-XXXXXX`) and pre-minted SchemaColumn
@@ -455,7 +455,7 @@ def _boundary_columns(sub_plan: LogicalPlan, head_nid: str, relation: str) -> li
     output columns, or the wildcard when its head projects everything it produces.
     (A step's `columns` holds only expressions — the typed step refuses anything
     else where it is written.)"""
-    return list(_output_columns(sub_plan, head_nid) or [Wildcard()])
+    return list(_output_columns(sub_plan, head_nid) or [Wildcard(arena=sub_plan.plan_context.expressions)])
 
 
 def _splice(plan: LogicalPlan, nid: str, node, sub_plan: LogicalPlan, *, plan_context) -> LogicalPlan:
@@ -983,8 +983,6 @@ def _finalize_cte_sharing(
     # Head each shared body (and each recursive leg) with a Subquery boundary
     # (alias = the CTE's declared name) so binding it standalone produces the
     # body's output schema exactly as visit_subquery does for a derived table.
-    from opteryx.utils import random_string
-
     def _add_boundary(body: LogicalPlan, alias: str):
         head = body.exit_point()
         boundary = SubqueryStep()

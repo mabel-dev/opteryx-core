@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace opteryx { namespace planner {
@@ -81,6 +82,14 @@ public:
 
     size_t size() const { return nodes_.size(); }
     uint64_t epoch() const { return epoch_; }
+
+    size_t edge_count() const {
+        size_t count = 0;
+        for (const PlanNode& node : nodes_) {
+            count += node.out.size();
+        }
+        return count;
+    }
 
     bool contains(NodeId id) const {
         return id < index_.size() && index_[id] >= 0;
@@ -284,6 +293,44 @@ public:
         }
         out->next_stamp_ = next_stamp_;
         out->epoch_ = 0;
+        return out;
+    }
+
+    // The order a visitor walks the plan from `root` toward the producers: each
+    // node before its producers, producers in the canonical in-edge order, a node
+    // reached by two consumers visited once per consumer (no visited set — this is
+    // the walk the optimizer's strategies see, node by node). Each entry is
+    // (node, the consumer it was reached from); the root's consumer is `root`
+    // itself. Throws rather than loop forever when the plan has a cycle.
+    std::vector<std::pair<NodeId, NodeId>> visit_order(NodeId root) const {
+        struct Frame {
+            size_t at;    // position of the node
+            size_t next;  // the next in-edge to descend
+        };
+        std::vector<std::pair<NodeId, NodeId>> out;
+        std::vector<Frame> path;
+        std::vector<uint8_t> on_path(nodes_.size(), 0);
+        out.reserve(nodes_.size());
+        out.emplace_back(root, root);
+        path.push_back(Frame{position(root), 0});
+        on_path[path.back().at] = 1;
+        while (!path.empty()) {
+            Frame& frame = path.back();
+            const PlanNode& node = nodes_[frame.at];
+            if (frame.next == node.in.size()) {
+                on_path[frame.at] = 0;
+                path.pop_back();
+                continue;
+            }
+            const size_t child = position(node.in[frame.next++].other);
+            if (on_path[child]) {
+                throw std::logic_error("plan graph: node " + std::to_string(nodes_[child].id) +
+                                       " feeds itself; the plan has a cycle");
+            }
+            out.emplace_back(nodes_[child].id, node.id);
+            on_path[child] = 1;
+            path.push_back(Frame{child, 0});
+        }
         return out;
     }
 

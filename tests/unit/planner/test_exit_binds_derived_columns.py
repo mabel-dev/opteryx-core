@@ -30,6 +30,10 @@ from opteryx.compiled.structures.expressions import Wildcard
 from opteryx.compiled.structures.plan_steps import AggregateStep
 from opteryx.compiled.structures.plan_steps import ExitStep
 from opteryx.compiled.structures.plan_steps import ScanStep
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 # A view whose body carries an IN-subquery — the shape the plan rewriter lowers to a
 # LEFT SEMI join, and the shape a real semi-join view (e.g. exploited_vulnerabilities) has.
@@ -70,8 +74,8 @@ def odata_style_count_plan(relation):
     scan_id = plan.add_node(scan)
 
     count = Aggregator(
-        value="COUNT", parameters=[Wildcard()]
-    )
+        value="COUNT", parameters=[Wildcard(arena=_TEST_ARENA)], 
+    arena=_TEST_ARENA)
     count.alias = "count"
     aggregate = AggregateStep()
     aggregate.groups = []
@@ -116,7 +120,7 @@ def test_view_rows_still_read(view_in_catalog):
     scan_id = plan.add_node(scan)
 
     exit_node = ExitStep()
-    exit_node.columns = [Wildcard()]
+    exit_node.columns = [Wildcard(arena=_TEST_ARENA)]
     exit_id = plan.add_node(exit_node)
     plan.add_edge(scan_id, exit_id)
 

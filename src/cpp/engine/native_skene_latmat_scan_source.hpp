@@ -206,7 +206,7 @@ class NativeSkeneLatmatScanSource : public Source {
                                 SkeneLatmatPredFn pred_fn, void* pred_ctx,
                                 const std::vector<int>* pred_col_to_p1,
                                 int sort_p1_index, bool sort_ascending,
-                                int64_t topn_limit,
+                                bool sort_nulls_first, int64_t topn_limit,
                                 SkeneZoneMap zone,
                                 int64_t* row_groups_total,
                                 int64_t* row_groups_pruned,
@@ -233,6 +233,7 @@ class NativeSkeneLatmatScanSource : public Source {
           pred_col_to_p1_(pred_col_to_p1),
           sort_p1_index_(sort_p1_index),
           sort_ascending_(sort_ascending),
+          sort_nulls_first_(sort_nulls_first),
           topn_limit_(topn_limit),
           zone_(zone),
           row_groups_total_(row_groups_total),
@@ -520,7 +521,7 @@ class NativeSkeneLatmatScanSource : public Source {
             return;
         }
         if (n < total) {
-            std::vector<SortKeySpec> spec{SortKeySpec{0, sort_ascending_}};
+            std::vector<SortKeySpec> spec{SortKeySpec{0, sort_ascending_, sort_nulls_first_}};
             std::vector<SortKeyColumn> keys;
             ErrCtx kerr;
             if (!build_sort_keys(ms, spec, total, keys, kerr)) {
@@ -654,6 +655,7 @@ class NativeSkeneLatmatScanSource : public Source {
 
     int     sort_p1_index_;     // the sort key's position within the pass-1 columns
     bool    sort_ascending_;
+    bool    sort_nulls_first_;  // resolved by the planner, independent of direction
     int64_t topn_limit_;
     // ROW-GROUP zone terms and the run-time counts the shared claim builder writes
     // back. Pruning happens once, at claim time, and therefore covers both passes:

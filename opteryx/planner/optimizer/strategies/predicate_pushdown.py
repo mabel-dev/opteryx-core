@@ -25,7 +25,6 @@ after a join, we add conditions to the JOIN.
 from draken.draken_native import TimestampUnit
 
 from opteryx.compiled.structures.expressions import Expression
-from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import (
@@ -39,9 +38,7 @@ from opteryx.expression.formatter import ExpressionColumn
 from opteryx.models import is_expression
 from opteryx.planner.binder.common import extract_join_fields
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
-from opteryx.types.logical_type import LogicalCategory, ColumnType, BOOLEAN as _CT_BOOLEAN
-from opteryx.types.logical_type import LogicalCategory as LC
-from opteryx.utils import random_string
+from opteryx.types.logical_type import LogicalCategory, BOOLEAN as _CT_BOOLEAN
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
 from .predicate_rewriter import rewrite_date_trunc_to_range
@@ -326,8 +323,9 @@ def _restore_at_original_position(plan, predicate, predicate_nid: str, plan_path
     return False
 
 
-def _detach_aliases(expression, *, plan_context) -> None:
-    """Give an inlined expression copy its OWN column, with no aliases.
+def _detached(expression, *, plan_context):
+    """An inlined copy of `expression`: no alias, no query column, and its OWN
+    column, with no aliases.
 
     The inlined copy must not answer to the alias it was defined under. But
     `Node.copy` does not copy a node's schema_column (SchemaColumn has no `.copy`)
@@ -339,10 +337,16 @@ def _detach_aliases(expression, *, plan_context) -> None:
     is untouched.
     """
     schema_column = expression.schema_column
-    if schema_column is None:
-        return
-    expression.schema_column = plan_context.columns.alias(
-        schema_column, schema_column.name, aliases=[], origin=schema_column.origin
+    return expression.replace(
+        alias=None,
+        query_column=None,
+        schema_column=(
+            None
+            if schema_column is None
+            else plan_context.columns.alias(
+                schema_column, schema_column.name, aliases=[], origin=schema_column.origin
+            )
+        ),
     )
 
 
@@ -492,7 +496,7 @@ def _is_absorbable_theta(condition) -> bool:
 def _add_condition(existing_condition, new_condition):
     if not existing_condition:
         return new_condition
-    _and = And()
+    _and = And(arena=new_condition.arena)
     _and.left = new_condition
     _and.right = existing_condition
     return _and
@@ -686,7 +690,7 @@ def _normalize_col_op_lit(condition):
 
 def _make_implied_filter(op, target_col, lit_node):
     """Build a Filter PlanStep applying op between target_col and lit_node."""
-    new_cond = Comparison(value=op, left=target_col, right=lit_node)
+    new_cond = Comparison(value=op, left=target_col, right=lit_node, arena=target_col.arena)
     return FilterStep(
         condition=new_cond,
         columns=[target_col],
@@ -822,7 +826,7 @@ def _try_normalize_cast_predicate(condition: Expression):
         else:
             return None
 
-    new_literal = Literal()
+    new_literal = Literal(arena=condition.arena)
     new_literal.value = rescaled
     new_literal.schema_column = col_sc
     # The rescaled value is expressed in the COLUMN's own units, so the column's
@@ -836,7 +840,7 @@ def _try_normalize_cast_predicate(condition: Expression):
     # accept (err_op=11), it is a dead query.
     new_literal.type = col_sc.column_type
 
-    new_condition = Comparison()
+    new_condition = Comparison(arena=condition.arena)
     new_condition.value = adjusted_op
     new_condition.left = identifier
     new_condition.right = new_literal
@@ -1248,7 +1252,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 combined = conditions[0]
                 for cond in conditions[1:]:
 
-                    and_node = And()
+                    and_node = And(arena=context.plan_context.expressions)
                     and_node.left = combined
                     and_node.right = cond
                     combined = and_node
@@ -1332,7 +1336,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     return None
                 result = leaves[0]
                 for leaf in leaves[1:]:
-                    result = And(left=result, right=leaf)
+                    result = And(left=result, right=leaf, arena=context.plan_context.expressions)
                 return result
 
             def _is_collectable(predicate):
@@ -2004,25 +2008,21 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 ):
                     continue
 
-                # Always a copy: both expression carriers (Node, LogicalColumn) have
-                # one, and the fields below must never be cleared on the template.
-                expression = expression_template.copy()
-
-                if is_expression(expression):
-                    expression.alias = None
-                    expression.query_column = None
-                _detach_aliases(expression, plan_context=context.plan_context)
+                # A new expression: the template's alias and columns must never be
+                # cleared on the template itself.
+                expression = _detached(expression_template, plan_context=context.plan_context)
 
                 literal_value = literal_candidate.value
-                if isinstance(literal_value, str):
-                    literal_is_true = literal_value.strip().lower() in {"true", "t", "1"}
+                if type(literal_value) is bytes:
+                    # a string literal (UTF-8 bytes): its text decides
+                    literal_is_true = literal_value.strip().lower() in {b"true", b"t", b"1"}
                 else:
                     literal_is_true = bool(literal_value)
 
                 negate = (not literal_is_true) if condition.value == "Eq" else literal_is_true
 
                 if negate:
-                    new_condition = Not(centre=expression)
+                    new_condition = Not(centre=expression, arena=context.plan_context.expressions)
                     expr_name = f"NOT {format_expression(expression)}"
                     new_condition.schema_column = context.plan_context.columns.computed(
                         ExpressionColumn,
@@ -2127,14 +2127,12 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         lower_inclusive, upper_inclusive = condition.value
 
         def _make_side(op, literal, *, plan_context):
-            trunc_expression = expression_template.copy()
-            trunc_expression.alias = None
-            trunc_expression.query_column = None
-            _detach_aliases(trunc_expression, plan_context=plan_context)
+            trunc_expression = _detached(expression_template, plan_context=plan_context)
             side_condition = Comparison(
                 value=op,
                 left=trunc_expression,
                 right=literal,
+                arena=plan_context.expressions,
             )
             side_condition.schema_column = plan_context.columns.computed(
                 ExpressionColumn, format_expression(side_condition, True), column_type=_CT_BOOLEAN
@@ -2170,7 +2168,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             self.telemetry.optimization_predicate_pushdown_trunc_alias_inline_declined += 1
             return False
 
-        combined = And(left=rewritten_lower, right=rewritten_upper)
+        combined = And(left=rewritten_lower, right=rewritten_upper, arena=plan_context.expressions)
 
         identifiers = get_all_nodes_of_type(combined, (NodeType.IDENTIFIER,))
         rewritten_ids = {
@@ -2282,15 +2280,13 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             if get_all_nodes_of_type(expression_template, (NodeType.AGGREGATOR,)):
                 continue
 
-            trunc_expression = expression_template.copy()
-            trunc_expression.alias = None
-            trunc_expression.query_column = None
-            _detach_aliases(trunc_expression, plan_context=plan_context)
+            trunc_expression = _detached(expression_template, plan_context=plan_context)
 
             new_condition = Comparison(
                 value=op_with_alias_on_left,
                 left=trunc_expression,
                 right=literal_candidate,
+                arena=plan_context.expressions,
             )
             new_condition.schema_column = plan_context.columns.computed(
                 ExpressionColumn, format_expression(new_condition, True), column_type=_CT_BOOLEAN

@@ -27,6 +27,10 @@ from opteryx.planner.optimizer.strategies.optimization_strategy import Optimizer
 from opteryx.types.logical_type import INT64
 from tests.helpers import execute_and_get_rowcount
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 
 def _physical_node_types(sql: str):
@@ -39,7 +43,7 @@ def _physical_node_types(sql: str):
 def _column(name):
     """Build an IDENTIFIER Node over a freshly minted bound column."""
     schema_column = PlanContext().columns.relation_column("fake", name, column_type=INT64)
-    return LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=None, schema_column=schema_column)
+    return LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=None, schema_column=schema_column, arena=_TEST_ARENA)
 
 
 def _scan(columns):

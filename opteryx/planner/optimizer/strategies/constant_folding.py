@@ -31,11 +31,13 @@ from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.types.logical_type import BOOLEAN, LogicalCategory
 from opteryx.types.logical_type import LogicalCategory as LC
+from opteryx.types.literal_values import native_literal_value
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
 from opteryx.compiled.structures.expressions import Nested
 from opteryx.compiled.structures.expressions import UnaryOperator
 from opteryx.compiled.structures.expressions import Function
+from opteryx.compiled.structures.expressions import rewrite_children
 
 
 def _is_rewrite_only(node) -> bool:
@@ -74,8 +76,10 @@ def _desugar_rewrite_only(node, telemetry: QueryTelemetry, *, plan_context):
     """
     from .predicate_rewriter import _rewrite_function
 
-    node.map_children(
-        lambda child: _desugar_rewrite_only(child, telemetry, plan_context=plan_context)
+    node = rewrite_children(
+        node,
+        lambda child: _desugar_rewrite_only(child, telemetry, plan_context=plan_context),
+        share=True,
     )
     if _is_rewrite_only(node):
         return _rewrite_function(node, telemetry, plan_context=plan_context)
@@ -85,18 +89,13 @@ def _desugar_rewrite_only(node, telemetry: QueryTelemetry, *, plan_context):
 def _build_if_not_null_node(root, value, value_if_not_null, *, plan_context) -> Expression:
     from opteryx.expression.functions import get_catalog
 
-    node = Function()
-    node.value = "IFNOTNULL"
-    node.parameters = [value, value_if_not_null]
-    node.schema_column = root.schema_column
-    node.query_column = root.query_column
+    parameters = [value, value_if_not_null]
 
     # The binder runs before the optimizer, so a node minted here is never bound.
     # Resolve the catalog entry directly — the executor requires function_ref.
-    resolved = get_catalog().resolve(node.value, list(node.parameters))
+    resolved = get_catalog().resolve("IFNOTNULL", parameters)
     if resolved is None:
-        raise ValueError(f"Unable to resolve folded function '{node.value}'")
-    node.function_ref = resolved
+        raise ValueError("Unable to resolve folded function 'IFNOTNULL'")
 
     # Mirror the binder's literal coercion for IFNOTNULL: both branches feed
     # vector_iif, which rejects mismatched fixed-width types. Coerce literal
@@ -106,19 +105,32 @@ def _build_if_not_null_node(root, value, value_if_not_null, *, plan_context) -> 
     if result_lc not in (None, LogicalCategory.NULL):
         from opteryx.types.scalars.value_parsing import parse_value
 
-        for param in node.parameters:
+        parameters = [
+            param.replace(
+                value=native_literal_value(parse_value(result_lc, param.value), result_type),
+                type=result_type,
+                schema_column=(
+                    None
+                    if param.schema_column is None
+                    else plan_context.columns.retype(param.schema_column, result_type)
+                ),
+            )
             if (
                 param.node_type == NodeType.LITERAL
                 and param.value is not None
                 and param.value != set()
-            ):
-                param.value = parse_value(result_lc, param.value)
-                param.type = result_type
-                if param.schema_column is not None:
-                    param.schema_column = plan_context.columns.retype(
-                        param.schema_column, result_type
-                    )
-    return node
+            )
+            else param
+            for param in parameters
+        ]
+    return Function(
+        value="IFNOTNULL",
+        parameters=parameters,
+        function_ref=resolved,
+        schema_column=root.schema_column,
+        query_column=root.query_column,
+        arena=plan_context.expressions,
+    )
 
 
 def _keeps_result_type(root, operand) -> bool:
@@ -148,7 +160,7 @@ def _build_transparent_node(root, value, telemetry, *, plan_context) -> Expressi
     # to its centre at compile time and every predicate strategy sees through it,
     # so the identity survives with no runtime cost (same mechanism as
     # redundant_cast's identity-context rewrite).
-    node = Nested()
+    node = Nested(arena=plan_context.expressions)
     node.centre = value
     node.schema_column = root.schema_column
     node.query_column = root.query_column
@@ -200,7 +212,7 @@ def _canonical_predicate_key(node):
         schema_column = node.schema_column
         identity = schema_column.identity if schema_column is not None else None
         # Identity, not name: two different columns can share a name across relations.
-        return None if identity is None else f"~col[{identity}]"
+        return None if identity is None else f"~col[{identity!r}]"
 
     if node_type in (NodeType.AND, NodeType.OR, NodeType.XOR):
         keys = [_canonical_predicate_key(node.left), _canonical_predicate_key(node.right)]
@@ -290,9 +302,11 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
         return root
 
     if root.node_type in (NodeType.DNF, NodeType.CNF):
-        root.parameters = _dedupe_branches(
-            [fold_constants(p, telemetry, plan_context=plan_context) for p in root.parameters],
-            telemetry,
+        root = root.with_fields(
+            parameters=_dedupe_branches(
+                [fold_constants(p, telemetry, plan_context=plan_context) for p in root.parameters],
+                telemetry,
+            )
         )
         if len(root.parameters) == 1:
             # Don't leave a one-branch DNF/CNF behind — a bare condition is the shape
@@ -306,8 +320,10 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
         NodeType.EXTRACTION_OPERATOR,
     }:
         # if we have a binary expression, try to fold each side
-        root.left = fold_constants(root.left, telemetry, plan_context=plan_context)
-        root.right = fold_constants(root.right, telemetry, plan_context=plan_context)
+        root = root.with_fields(
+            left=fold_constants(root.left, telemetry, plan_context=plan_context),
+            right=fold_constants(root.right, telemetry, plan_context=plan_context),
+        )
 
         # some expressions we can simplify to x or 0.
         if root.node_type == NodeType.BINARY_OPERATOR:
@@ -413,10 +429,10 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
                 root.value in ("Like", "ILike")
                 and root.left.node_type == NodeType.IDENTIFIER
                 and root.right.node_type == NodeType.LITERAL
-                and root.right.value == "%"
+                and root.right.value == b"%"
             ):
                 # column LIKE '%' is True
-                node = UnaryOperator()
+                node = UnaryOperator(arena=plan_context.expressions)
                 node.value = "IsNotNull"
                 node.schema_column = root.schema_column
                 node.centre = root.left
@@ -427,10 +443,18 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
 
     if root.node_type in {NodeType.AND, NodeType.OR, NodeType.XOR}:
         # try to fold each side of logical operators
-        if root.left is not None:
-            root.left = fold_constants(root.left, telemetry, plan_context=plan_context)
-        if root.right is not None:
-            root.right = fold_constants(root.right, telemetry, plan_context=plan_context)
+        root = root.with_fields(
+            left=(
+                None
+                if root.left is None
+                else fold_constants(root.left, telemetry, plan_context=plan_context)
+            ),
+            right=(
+                None
+                if root.right is None
+                else fold_constants(root.right, telemetry, plan_context=plan_context)
+            ),
+        )
 
         # If we have a logical expression and one side is a constant,
         # we can simplify further
@@ -538,10 +562,12 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
 
     # fold costants in function parameters - this is generally aggregations we're affecting here
     if root.node_type in _PARAMETER_CARRIERS and root.parameters:
-        if isinstance(root.parameters, tuple):
-            root.parameters = list(root.parameters)
-        for i, param in enumerate(root.parameters):
-            root.parameters[i] = fold_constants(param, telemetry, plan_context=plan_context)
+        root = root.with_fields(
+            parameters=[
+                fold_constants(param, telemetry, plan_context=plan_context)
+                for param in root.parameters
+            ]
+        )
 
     _root_ct = (
         root.schema_column.column_type if root.schema_column is not None else None
@@ -642,18 +668,16 @@ def _fold(expression: Expression, telemetry: QueryTelemetry, *, plan_context) ->
 
     The strategy deliberately runs TWICE (early, then after the rewrite
     strategies), and the second pass exists for expressions the rewrites
-    CREATED — which are new, unstamped node objects. A tree that still carries
-    the first pass's stamp cannot have grown a new foldable subexpression at
-    its root without being rebuilt or rewrapped (both produce unstamped
-    roots), so re-walking it is pure repeat work. An in-place child swap under
-    a kept, stamped root would be missed — that is a missed optimization on
-    that subtree, never a wrong answer, and the rewrite strategies build new
-    roots rather than splicing children.
+    CREATED — which are new expressions with new ids. Expressions are immutable
+    once bound (P3), so a tree the first pass folded is unchanged and re-walking
+    it is pure repeat work. The folded ids are pass state, kept on the
+    PlanContext.
     """
-    if expression.folded_by_constant_folding:
+    folded_ids = plan_context.constant_folded
+    if expression.expr_id in folded_ids:
         return expression
     folded = fold_constants(expression, telemetry, plan_context=plan_context)
-    folded.folded_by_constant_folding = True
+    folded_ids.add(folded.expr_id)
     return folded
 
 
@@ -696,10 +720,10 @@ class ConstantFoldingStrategy(OptimizationStrategy):
         # remove nesting in order by and group by clauses
         if node.node_type == LogicalPlanStepType.Order:
             new_order_by = []
-            for field, order in node.order_by:
+            for field, order, nulls_first in node.order_by:
                 while field.node_type == NodeType.NESTED:
                     field = field.centre
-                new_order_by.append((field, order))
+                new_order_by.append((field, order, nulls_first))
             node.order_by = new_order_by
             context.optimized_plan[context.node_id] = node
 

@@ -62,6 +62,7 @@ from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanSt
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
 from opteryx.compiled.structures.expressions import Nested
+from opteryx.compiled.structures.expressions import rewrite_children
 
 
 def _eliminate_redundant_casts(node, telemetry, value_context=False):
@@ -76,7 +77,9 @@ def _eliminate_redundant_casts(node, telemetry, value_context=False):
         return node
 
     # Recurse into children first so nested casts collapse bottom-up.
-    node.map_children(lambda child: _eliminate_redundant_casts(child, telemetry, value_context))
+    node = rewrite_children(
+        node, lambda child: _eliminate_redundant_casts(child, telemetry, value_context), share=True
+    )
 
     if node.node_type != NodeType.CAST:
         return node
@@ -110,7 +113,7 @@ def _eliminate_redundant_casts(node, telemetry, value_context=False):
     # identity, so a transparent NESTED wrapper carries the cast's schema_column (keeping its
     # identity and name) while lowering to just its centre operand — the evaluator aliases
     # the operand's buffer onto the cast column's identity, with no cast kernel.
-    nested = Nested()
+    nested = Nested(arena=node.arena)
     nested.centre = operand
     nested.schema_column = node.schema_column
     nested.query_column = node.query_column

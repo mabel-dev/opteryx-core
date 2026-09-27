@@ -4743,7 +4743,7 @@ struct GroupBySink : Sink {
                           "invariant violated";
                 return 0;
             }
-            kspec.push_back(SortKeySpec{km->columns.size(), tk.ascending});
+            kspec.push_back(SortKeySpec{km->columns.size(), tk.ascending, tk.nulls_first});
             km->columns.push_back(emit_lane_column(g.meta[s], g.kinds[s],
                                                    lane_view(g, merged, s, 0), N, err));
             if (err.code != 0) return 0;

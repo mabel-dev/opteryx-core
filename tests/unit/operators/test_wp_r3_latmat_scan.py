@@ -568,3 +568,46 @@ def test_pass1_gate_admits_descriptor_free_types_and_refuses_the_rest():
 if __name__ == "__main__":  # pragma: no cover
     import pytest as _p
     raise SystemExit(_p.main([__file__, "-q"]))
+
+
+def _null_placement_keys():
+    """Nullable sort key with MORE than n non-null survivors AND more than n NULL
+    survivors, spread over every row group — so the placement alone decides whether
+    the top 10 is all NULLs or all values, and a reduction that ranks NULL on the
+    wrong end returns a different key multiset."""
+    keys = []
+    for i in range(N):
+        if not _MATCH[i]:
+            keys.append(7)
+        elif (i // 4) % 2 == 0:
+            keys.append(None)
+        else:
+            keys.append(10000 + i)
+    return keys
+
+
+@pytest.mark.parametrize(
+    "order, expect_nulls",
+    [
+        ("", 10),                      # default ASC: NULL lowest -> first
+        (" NULLS FIRST", 10),
+        (" NULLS LAST", 0),
+        (" DESC", 0),                  # default DESC: NULL lowest -> last
+        (" DESC NULLS LAST", 0),
+        (" DESC NULLS FIRST", 10),
+    ],
+)
+def test_latmat_explicit_null_placement(tmp_path, monkeypatch, order, expect_nulls):
+    """ORDER BY <nullable> [ASC|DESC] [NULLS FIRST|LAST] LIMIT n through BOTH reduced
+    paths (native LatmatScanSource and the trampoline's `_apply_topn`) against the
+    un-pushed plan — and by VALUE, so a placement all three got wrong the same way
+    cannot pass on parity alone."""
+    name = "nulls" + order.replace(" ", "_")
+    rows, names = _assert_latmat_parity(
+        tmp_path, name, _dataset(_null_placement_keys()),
+        "* FROM {DATASET} WHERE tag LIKE '" + NEEDLE + "' ORDER BY k" + order + " LIMIT 10",
+        monkeypatch)
+    k = names.index("k")
+    assert len(rows) == 10
+    assert sum(1 for r in rows if r[k] == "None") == expect_nulls, (order, [r[k] for r in rows])
+

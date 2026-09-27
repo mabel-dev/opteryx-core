@@ -45,10 +45,28 @@ from opteryx.planner.relation_resolver import do_resolve_relations
 from opteryx.planner.sql_rewriter import do_sql_rewrite
 from opteryx.third_party import sqloxide
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.planner.plan_context import PlanContext
+
+# One query context for everything this module builds: its columns and its expressions.
+_CONTEXT = PlanContext()
+_TEST_ARENA = _CONTEXT.expressions
+_COLUMNS: dict = {}
 
 
-def _ident(identity: str) -> Expression:
-    return LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=None, schema_column=SimpleNamespace(identity=identity))
+def _column(name: str):
+    """The module query's column `name` (minted once)."""
+    column = _COLUMNS.get(name)
+    if column is None:
+        column = _COLUMNS[name] = _CONTEXT.columns.relation_column("t", name)
+    return column
+
+
+def _id(name: str) -> bytes:
+    return _column(name).identity
+
+
+def _ident(name: str) -> Expression:
+    return LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=None, schema_column=_column(name), arena=_TEST_ARENA)
 
 
 # ---------------------------------------------------------------------------
@@ -57,37 +75,37 @@ def _ident(identity: str) -> Expression:
 
 
 def test_single_expression_field():
-    cmp = Comparison(left=_ident("a"), right=_ident("b"), value="Gt")
+    cmp = Comparison(left=_ident("a"), right=_ident("b"), value="Gt", arena=_TEST_ARENA)
     node = FilterStep(condition=cmp)
     assert expression_roots(node) == [cmp]
-    assert referenced_identities(node) == {"a", "b"}
+    assert referenced_identities(node) == {_id("a"), _id("b")}
 
 
 def test_order_by_tuple_shape():
-    # Order/HeapSort hold a list of (expression, ascending) tuples — the
-    # accessor must descend the tuple and ignore the bool.
+    # Order/HeapSort hold a list of (expression, ascending, nulls_first) tuples —
+    # the accessor must descend the tuple and ignore the bools.
     node = OrderStep(
-        order_by=[(_ident("c"), True), (_ident("d"), False)],
+        order_by=[(_ident("c"), True, True), (_ident("d"), False, False)],
     )
-    assert referenced_identities(node) == {"c", "d"}
+    assert referenced_identities(node) == {_id("c"), _id("d")}
 
 
 def test_multiple_list_and_single_fields():
-    having = Comparison(left=_ident("h"), right=_ident("k"), value="Gt")
-    agg = Aggregator(value="SUM", parameters=[_ident("s")])
+    having = Comparison(left=_ident("h"), right=_ident("k"), value="Gt", arena=_TEST_ARENA)
+    agg = Aggregator(value="SUM", parameters=[_ident("s")], arena=_TEST_ARENA)
     node = AggregateAndGroupStep(
         groups=[_ident("g")],
         aggregates=[agg],
         having_condition=having,
     )
-    assert referenced_identities(node) == {"g", "s", "h", "k"}
+    assert referenced_identities(node) == {_id("g"), _id("s"), _id("h"), _id("k")}
 
 
 def test_nested_container_descent():
     # FunctionDataset VALUES rows are a list of tuples of expressions.
     lits = [
-        (Literal(value=1), Literal(value=2)),
-        (Literal(value=3),),
+        (Literal(value=1, arena=_TEST_ARENA), Literal(value=2, arena=_TEST_ARENA)),
+        (Literal(value=3, arena=_TEST_ARENA),),
     ]
     node = FunctionDatasetStep(values=lits)
     assert len(expression_roots(node)) == 3
@@ -154,7 +172,7 @@ def test_real_order_by_tuple_captured():
     )
     sort_nodes = _nodes(plan, LogicalPlanStepType.Order) + _nodes(plan, LogicalPlanStepType.HeapSort)
     assert sort_nodes, "expected an Order/HeapSort node"
-    # order_by is a [(expr, ascending)] list — the accessor must descend the
+    # order_by is a [(expr, ascending, nulls_first)] list — the accessor must descend the
     # tuple. The sort key column must appear.
     assert any(referenced_identities(n) for n in sort_nodes)
 

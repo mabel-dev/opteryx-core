@@ -110,6 +110,7 @@ cdef extern from "engine/native_sort.hpp" namespace "opteryx::engine" nogil:
     cdef struct SortKeySpec:
         size_t col_idx
         bint ascending
+        bint nulls_first
 
 # The engine's general expression operators (native_expression.hpp): programs are
 # lowered + resolved at PLAN time; execution calls back into the pure-nogil spans
@@ -411,7 +412,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                           void* pred_fn, void* pred_ctx,
                                           const cppvector[int]* pred_col_to_p1,
                                           int sort_p1_index, bint sort_ascending,
-                                          int64_t topn_limit,
+                                          bint sort_nulls_first, int64_t topn_limit,
                                           const cppvector[string]* zone_columns,
                                           const cppvector[int]* zone_ops,
                                           const cppvector[int64_t]* zone_ordinals,
@@ -454,7 +455,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                     void* pred_fn, void* pred_ctx,
                                     cppvector[int] pred_col_to_p1,
                                     int sort_p1_index, bint sort_ascending,
-                                    int64_t topn_limit,
+                                    bint sort_nulls_first, int64_t topn_limit,
                                     cppvector[int] out_from_p1,
                                     cppvector[int] out_from_p2,
                                     cppvector[string] out_names)
@@ -2841,7 +2842,8 @@ cdef class NativePlan:
     def set_skene_latmat_scan_source(self, size_t p, SkeneLatmatScanPlan splan,
                                      size_t pred_fn, size_t pred_ctx,
                                      object pred_anchor, int sort_p1_index,
-                                     bint sort_ascending, int64_t topn_limit):
+                                     bint sort_ascending, bint sort_nulls_first,
+                                     int64_t topn_limit):
         """Source = the two-pass late-materialization skene scan
         (NativeSkeneLatmatScanSource): pass 1 decodes only the predicate columns +
         the sort key over every file and reduces the survivors to the top-n
@@ -2860,7 +2862,7 @@ cdef class NativePlan:
             &splan.out_identities, &splan.out_column_types, &splan.out_retag_units,
             &splan.out_length_only,
             <void*>pred_fn, <void*>pred_ctx, &splan.pred_col_to_p1,
-            sort_p1_index, sort_ascending, topn_limit,
+            sort_p1_index, sort_ascending, sort_nulls_first, topn_limit,
             &splan.zone_columns, &splan.zone_ops, &splan.zone_ordinals,
             &splan.row_groups_total, &splan.row_groups_pruned,
             &splan.bytes_claimed, &splan.io)
@@ -2908,6 +2910,7 @@ cdef class NativePlan:
                                NativeScanPlan p2_plan, size_t pred_fn, size_t pred_ctx,
                                object pred_anchor, list pred_col_to_p1,
                                int sort_p1_index, bint sort_ascending,
+                               bint sort_nulls_first,
                                int64_t topn_limit, list out_from_p1, list out_from_p2,
                                list out_names):
         """Source = the R3 two-pass late-materialization parquet scan
@@ -2952,7 +2955,7 @@ cdef class NativePlan:
             &p2_plan.string_types, &p2_plan.decimal_columns, &p2_plan.logical_coerce,
             &p2_plan.hash_key_columns, &p2_plan.array_columns,
             <void*>pred_fn, <void*>pred_ctx, c_pred_map,
-            sort_p1_index, sort_ascending, topn_limit,
+            sort_p1_index, sort_ascending, sort_nulls_first, topn_limit,
             c_from_p1, c_from_p2, c_names)
 
     def close_scan_plans(self):
@@ -3033,7 +3036,7 @@ cdef class NativePlan:
     def set_groupby_topk(self, size_t p, list keys, size_t k, bint ties):
         """Arm the GROUP BY sink on pipeline ``p`` to emit only each hash partition's
         top ``k`` groups (docs/GROUPBY_TOPK_FUSION_DESIGN.md). ``keys`` =
-        [(aggregate spec index, ascending), ...] — the ORDER BY's leading aggregate
+        [(aggregate spec index, ascending, nulls_first), ...] — the ORDER BY's leading aggregate
         keys; ``ties`` = the ORDER BY continues past them, so groups tied with the
         k-th are kept for the HeapSort above to order."""
         self._e.set_groupby_topk(p, _sort_spec_from_list(keys), k, ties)
@@ -3688,9 +3691,10 @@ cdef class NativePlan:
 cdef cppvector[SortKeySpec] _sort_spec_from_list(list spec) except *:
     cdef cppvector[SortKeySpec] out
     cdef SortKeySpec s
-    for col_idx, ascending in spec:
+    for col_idx, ascending, nulls_first in spec:
         s.col_idx = <size_t>col_idx
         s.ascending = bool(ascending)
+        s.nulls_first = bool(nulls_first)
         out.push_back(s)
     return out
 

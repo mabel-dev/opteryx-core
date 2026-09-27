@@ -374,18 +374,19 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
                 source_col, target_col = second, first
             else:
                 return plan
-            copied = source_col.copy()
-            copied.source = alias_map.get(source_col.source, source_col.source)
-            equals = Comparison(
-                value="Eq", do_not_create_column=True
+            copied = source_col.replace(
+                source=alias_map.get(source_col.source, source_col.source)
             )
+            equals = Comparison(
+                value="Eq", do_not_create_column=True, 
+            arena=plan_context.expressions)
             equals.left = target_col.copy()
             equals.right = copied
             join_columns.extend((target_col.copy(), copied))
             if on_condition is None:
                 on_condition = equals
             else:
-                conjunction = And(do_not_create_column=True)
+                conjunction = And(do_not_create_column=True, arena=plan_context.expressions)
                 conjunction.left = on_condition
                 conjunction.right = equals
                 on_condition = conjunction

@@ -56,6 +56,10 @@ from opteryx.types.logical_type import (
     LogicalCategory,
     TIMESTAMP,
 )
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 # The categories the strategy admits today. Spelled out rather than imported so
 # widening the production list has to be a deliberate, visible change here too.
@@ -95,9 +99,10 @@ def _aggregate(func, category):
         duplicate_treatment=None,
         parameters=[
             LogicalColumn(
-                node_type=NodeType.IDENTIFIER, schema_column=schema_column, source_column="c"
-            )
+                node_type=NodeType.IDENTIFIER, schema_column=schema_column, source_column="c", 
+            arena=_TEST_ARENA)
         ],
+        arena=_TEST_ARENA,
     )
 
 

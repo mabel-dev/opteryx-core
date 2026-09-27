@@ -35,6 +35,10 @@ from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.planner.optimizer.strategies.join_algorithm import JoinAlgorithmStrategy
 from opteryx.planner.optimizer.strategies.join_algorithm import _decide_swap_reasoned
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 
 def _decide_swap(*args):
@@ -128,7 +132,7 @@ def _scan_with_stats(relation, row_count, plan_context):
 def _inner_join_node():
     n = JoinStep()
     n.type = "inner"
-    n.on = Comparison(value="Eq")
+    n.on = Comparison(value="Eq", arena=_TEST_ARENA)
     # Join keys are raw column identities, matching how RelationStatistics is keyed.
     n.left_columns = [_K]
     n.right_columns = [_K]

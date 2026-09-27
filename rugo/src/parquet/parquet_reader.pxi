@@ -44,6 +44,7 @@
 # feeds the engine — it does not.
 # =============================================================================
 import datetime
+import decimal
 import os
 import struct
 import time as _time
@@ -246,6 +247,32 @@ cdef inline bint _logical_is_string(str logical_str):
     )
 
 
+cdef object _decode_decimal_stat(str type_str, str logical_str, bytes b):
+    """A DECIMAL statistic's bytes as an exact `decimal.Decimal` at the column's scale.
+
+    `logical_str` is metadata.cpp's "decimal(P,S)" spelling. A form that will not
+    parse, or a physical type DECIMAL cannot be stored in, raises: returning the
+    raw integer instead is exactly the wrong-bounds defect this exists to stop.
+    """
+    # Explicit end index and an explicit length check: this module compiles with
+    # wraparound=False and boundscheck=False, so a negative slice bound or an
+    # out-of-range list index is undefined behaviour, not an exception.
+    cdef list parts = logical_str[len("decimal("):len(logical_str) - 1].split(",")
+    if not logical_str.endswith(")") or len(parts) != 2 or not parts[1].strip().isdigit():
+        raise ValueError(f"Unparseable DECIMAL logical type {logical_str!r}")
+    cdef int scale = int(parts[1])
+
+    if type_str == "int32":
+        unscaled = struct.unpack("<i", b)[0]
+    elif type_str == "int64":
+        unscaled = struct.unpack("<q", b)[0]
+    elif type_str in ("byte_array", "fixed_len_byte_array"):
+        unscaled = int.from_bytes(b, "big", signed=True)
+    else:
+        raise ValueError(f"DECIMAL statistic stored as unsupported physical type {type_str!r}")
+    return decimal.Decimal(unscaled).scaleb(-scale)
+
+
 def decode_value(
         string physical_type,
         string logical_type,
@@ -280,6 +307,18 @@ def decode_value(
             if is_string_logical or prefer_text:
                 return ""
         return b""
+
+    # A DECIMAL(P,S) column stores the UNSCALED integer: INT32/INT64 little-endian,
+    # BYTE_ARRAY/FIXED_LEN_BYTE_ARRAY big-endian two's complement. Handing that
+    # integer back as-is made 1.10 a min of 110, and callers that prune by
+    # comparing a predicate against these bounds then discarded row groups that
+    # genuinely match — `d = 3.30` over [1.10, 7.70] tested 3.30 < 110 and
+    # returned nothing (every `=`, `<`, `<=`, IN and BETWEEN did; `>` survived
+    # only because 770 happens to exceed the literal). Same failure class as the
+    # E33 unsigned case above: the annotation changes what the bytes mean, so it
+    # is decided here, once, for every statistics consumer.
+    if logical_str.startswith("decimal("):
+        return _decode_decimal_stat(type_str, logical_str, b)
 
     if type_str == "int32":
         return struct.unpack("<I" if is_unsigned_logical else "<i", b)[0]

@@ -101,7 +101,6 @@ def test_where_label_is_included_in_message():
 
 
 def test_real_optimized_plan_is_valid():
-    plan_context = PlanContext()
     from opteryx.models import ExecutionContext, QueryTelemetry
     from opteryx.planner.ast_rewriter import do_ast_rewriter
     from opteryx.planner.binder import do_bind_phase
@@ -120,6 +119,7 @@ def test_real_optimized_plan_is_valid():
         "SELECT name FROM $planets ORDER BY id DESC LIMIT 3",
     ]
     for sql in queries:
+        plan_context = PlanContext()  # one per query
         telemetry = QueryTelemetry.detached()
         ctx = ExecutionContext(access_policies=[{"pattern": "testdata.*", "role": "reader"}])
         ast = do_ast_rewriter(

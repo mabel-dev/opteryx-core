@@ -15,6 +15,10 @@ from opteryx.planner.optimizer.strategies.predicate_ordering import order_predic
 from opteryx.types.logical_type import ARRAY, INT64, VARCHAR
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 
 def _literal(value_type, value):
@@ -22,12 +26,13 @@ def _literal(value_type, value):
         type=value_type,
         value=value,
         schema_column=PlanContext().columns.constant("literal", column_type=value_type, value=value),
+        arena=_TEST_ARENA,
     )
 
 
 def _identifier(name, value_type):
     column = PlanContext().columns.relation_column("t", name, column_type=value_type)
-    return LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=None, schema_column=column)
+    return LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=None, schema_column=column, arena=_TEST_ARENA)
 
 
 def _filter(condition):
@@ -48,6 +53,7 @@ def test_constant_folding_folds_constant_map_access_expression():
         left=_literal(ARRAY(INT64), [10, 20, 30]),
         right=_literal(INT64, 1),
         schema_column=PlanContext().columns.constant("result", column_type=INT64),
+        arena=_TEST_ARENA,
     )
 
     folded = fold_constants(expr, telemetry, plan_context=plan_context)
@@ -64,22 +70,26 @@ def test_predicate_ordering_treats_nested_function_map_access_as_complex():
         value="Eq",
         left=_identifier("id", INT64),
         right=_literal(INT64, 1),
+        arena=_TEST_ARENA,
     )
 
     split_fn = Function(
         value="SPLIT",
         parameters=[_identifier("name", VARCHAR), _literal(VARCHAR, " ")],
+        arena=_TEST_ARENA,
     )
     map_access = ExtractionOperator(
         value="MapAccess",
         left=split_fn,
         right=_literal(INT64, 0),
         schema_column=PlanContext().columns.constant("first_part", column_type=VARCHAR),
+        arena=_TEST_ARENA,
     )
     complex_condition = Comparison(
         value="Eq",
         left=map_access,
         right=_literal(VARCHAR, "Neil"),
+        arena=_TEST_ARENA,
     )
 
     ordered = order_predicates(

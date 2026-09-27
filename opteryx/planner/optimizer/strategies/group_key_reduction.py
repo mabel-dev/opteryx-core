@@ -60,6 +60,7 @@ def _make_passthrough(original: Expression) -> Expression:
             original.schema_column.name if original.schema_column else original.value
         ),
         schema_column=original.schema_column,
+        arena=original.arena,
     )
 
 

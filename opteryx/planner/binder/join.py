@@ -156,6 +156,7 @@ def visit_join(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
                 node.left_relation_names,
                 node.right_relation_names,
                 context.schemas,
+                arena=context.plan_context.expressions,
             )
         if node.on:
             node.on, context = inner_binder(node.on, context)
@@ -188,7 +189,7 @@ def visit_join(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
         ]
         # The same column references an explicit USING (...) builds.
         node.using = [
-            LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=n)
+            LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=n, arena=context.plan_context.expressions)
             for n in set(left_columns).intersection(right_columns)
         ]
         node.type = "inner"
@@ -199,6 +200,7 @@ def visit_join(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
             node.left_relation_names,
             node.right_relation_names,
             context.schemas,
+            arena=context.plan_context.expressions,
         )
     if node.on:
         # All conditions have been mapped to 'on' conditions

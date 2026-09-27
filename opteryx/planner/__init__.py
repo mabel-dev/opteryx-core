@@ -66,6 +66,7 @@ from opteryx.types.logical_type import (
     LogicalCategory,
 )
 from opteryx.planner.plan_context import PlanContext
+from opteryx.types.literal_values import native_literal_value
 from opteryx.compiled.structures.expressions import Literal
 
 # Mirrors `GRAMMAR_ERROR_PREFIX` in src/aside/cursor.rs. The aside parser has one
@@ -91,13 +92,7 @@ def _infer_collection_literal(value: Any, *, plan_context):
     element_ct = element_types.pop()
     if element_ct is None:
         return ARRAY(VARIANT), None
-    # Numeric homogeneous array → treat as ARRAY<FLOAT64> at binder time
-    if element_ct.category in (
-        LogicalCategory.INTEGER,
-        LogicalCategory.FLOAT,
-        LogicalCategory.DECIMAL,
-    ):
-        return ARRAY(FLOAT64), None
+    # Typed by its elements, which it holds as they are.
     return ARRAY(element_ct), None
 
 
@@ -105,7 +100,7 @@ def build_literal_node(value: Any, identity_of: Optional[Expression] = None, sug
     """
     Build a NEW literal node with the appropriate type based on the value.
 
-    `identity_of`: an expression whose identity the literal takes over — its uuid,
+    `identity_of`: an expression whose identity the literal takes over — its origin_id,
     alias, query_column, schema_column and relations — so references to that
     expression's bound column resolve to the literal (constant folding). Nothing
     else of it is carried, and it is not modified: when the literal's type differs
@@ -133,7 +128,8 @@ def build_literal_node(value: Any, identity_of: Optional[Expression] = None, sug
     ):
         value = value.item()
 
-    constant_name = str(value)
+    # A column named after its value: text as it was written; bytes as they print.
+    constant_name = repr(value) if type(value) is bytes else str(value)
 
     def settled_column(column_type):
         """The literal's column, typed `column_type`."""
@@ -145,14 +141,15 @@ def build_literal_node(value: Any, identity_of: Optional[Expression] = None, sug
         return plan_context.columns.retype(column, column_type)
 
     if identity_of is None:
-        root = Literal()
+        root = Literal(arena=plan_context.expressions)
     else:
         root = Literal(
-            uuid=identity_of.uuid,
+            origin=identity_of.origin_id,
             alias=identity_of.alias,
             query_column=identity_of.query_column,
             relations=identity_of.relations,
             do_not_create_column=identity_of.do_not_create_column is True,
+            arena=plan_context.expressions,
         )
 
     if value is None:
@@ -169,6 +166,7 @@ def build_literal_node(value: Any, identity_of: Optional[Expression] = None, sug
     collection_ct = None
     if suggested_type is None:
         collection_ct, _ = _infer_collection_literal(value, plan_context=plan_context)
+
 
     # Define a mapping of Python types to canonical ColumnType instances.
     type_mapping = {
@@ -190,16 +188,8 @@ def build_literal_node(value: Any, identity_of: Optional[Expression] = None, sug
     if value_type in type_mapping or suggested_type is not None:
         if suggested_type is not None and suggested_type == INTERVAL:
             value = normalize_interval_value(value)
-        if isinstance(value, datetime.datetime):
-            from opteryx.types.timestamps._datetime_conversion import timestamp_to_int64_us
-
-            value = timestamp_to_int64_us(value)
-        elif isinstance(value, datetime.date):
-            from opteryx.types.timestamps._datetime_conversion import date_to_int64_days
-
-            value = date_to_int64_days(value)
-        root.value = value
         root.type = suggested_type if suggested_type is not None else type_mapping[value_type]
+        root.value = native_literal_value(value, root.type)
         root.schema_column = settled_column(root.type)
         return root
 

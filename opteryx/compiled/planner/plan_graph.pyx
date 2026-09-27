@@ -30,6 +30,7 @@ from libc.stdint cimport uint8_t
 from libc.stdint cimport uint32_t
 from libc.stdint cimport uint64_t
 from libcpp cimport bool as cbool
+from libcpp.pair cimport pair
 from libcpp.vector cimport vector
 from cpython.ref cimport PyObject
 
@@ -56,6 +57,7 @@ cdef extern from "planner/plan_graph.hpp":
         CPlanGraph() except +
         CPlanGraph(const CPlanGraph&) except +
         size_t size()
+        size_t edge_count()
         uint64_t epoch()
         cbool contains(uint32_t id)
         const CPlanNode& node_at(size_t position)
@@ -72,6 +74,7 @@ cdef extern from "planner/plan_graph.hpp":
         void insert_after(uint32_t id, PyObject* step, uint32_t after) except +
         void absorb(const CPlanGraph& other) except +
         CPlanGraph* remapped(const vector[uint32_t]& ids, const vector[PyObject*]& steps) except +
+        vector[pair[uint32_t, uint32_t]] visit_order(uint32_t root) except +
         vector[uint32_t] exit_points()
 
 
@@ -136,12 +139,18 @@ cdef class PlanGraph:
     cdef CPlanGraph* _graph
     cdef readonly object plan_context
     cdef NodeIds _node_ids
+    # A copy-on-write view (`cow_view`) borrows its source's native graph until
+    # the first mutator, which takes the view its own structural copy. `_source`
+    # keeps the borrowed graph alive and is what `unwrap` hands back untouched.
+    cdef bint _borrowed
+    cdef object _source
 
     def __cinit__(self, *args, **kwargs):
         self._graph = new CPlanGraph()
 
     def __dealloc__(self):
-        del self._graph
+        if not self._borrowed:
+            del self._graph
 
     def __init__(self, plan_context):
         self._bind(plan_context)
@@ -156,6 +165,39 @@ cdef class PlanGraph:
         cdef PlanGraph graph = type(self).__new__(type(self))
         graph._bind(self.plan_context)
         return graph
+
+    cdef inline int _own(self) except -1:
+        """Before a mutation: a borrowed view takes its own copy of the structure
+        (same nodes and edges, SHARED steps, epoch 0) and lets go of its source."""
+        if self._borrowed:
+            self._graph = new CPlanGraph(self._graph[0])
+            self._borrowed = False
+            self._source = None
+        return 0
+
+    # -- copy on write ------------------------------------------------------------
+    def cow_view(self):
+        """A working view of this plan for a pass that may or may not change it.
+
+        Reads go straight to this plan's structure - no copy, no wrapper. The first
+        mutator (node replace, add/remove of nodes or edges, merge) takes the view a
+        `shallow_copy` of the structure and every later read and write is on that.
+        `unwrap()` then says which happened. The steps are shared either way, so an
+        in-place step edit lands identically before or after the copy is taken."""
+        cdef PlanGraph view = self._empty_like()
+        del view._graph
+        view._graph = self._graph
+        view._borrowed = True
+        view._source = self
+        return view
+
+    def unwrap(self):
+        """The plan a pass hands onward: this plan's source, untouched, when no
+        mutation happened; this plan itself (the materialized copy) otherwise. A
+        plan that is not a view is its own answer."""
+        if self._borrowed:
+            return self._source
+        return self
 
     cdef inline uint32_t _present(self, object nid) except? 0:
         if type(nid) is not int or nid < 0 or not self._graph.contains(<uint32_t>nid):
@@ -183,6 +225,7 @@ cdef class PlanGraph:
         step under an id this query already minted (architect ruling 2026-09-27:
         the plan allocates node ids)."""
         cdef uint32_t placed = self._allocate(nid)
+        self._own()
         self._graph.add(placed, <PyObject*>step)
         return placed
 
@@ -191,7 +234,9 @@ cdef class PlanGraph:
 
     def __setitem__(self, nid, step):
         """Replace the step behind `nid`, which must be in the plan."""
-        self._graph.replace(self._present(nid), <PyObject*>step)
+        cdef uint32_t placed = self._present(nid)
+        self._own()
+        self._graph.replace(placed, <PyObject*>step)
 
     def __contains__(self, nid) -> bool:
         return type(nid) is int and nid >= 0 and self._graph.contains(<uint32_t>nid)
@@ -203,7 +248,7 @@ cdef class PlanGraph:
         return self._graph.size() != 0
 
     def __repr__(self):
-        return f"{type(self).__name__} - {self._graph.size()} nodes, {len(self.edges())} edges"
+        return f"{type(self).__name__} - {self._graph.size()} nodes, {self._graph.edge_count()} edges"
 
     def nodes(self, data=False) -> list:
         """The node ids in insertion order, or `(id, step)` pairs with `data`."""
@@ -221,13 +266,16 @@ cdef class PlanGraph:
     def remove_node(self, nid, heal: bool = False):
         """Remove a node and its edges; with `heal`, wire each of its producers to
         each of its consumers."""
-        self._graph.remove(self._present(nid), heal)
+        cdef uint32_t placed = self._present(nid)
+        self._own()
+        self._graph.remove(placed, heal)
 
     def insert_node_before(self, step, before_nid, *, nid=None) -> int:
         """Put `step` between `before_nid` and everything feeding it; its id (new,
         or `nid` for a re-add) is returned."""
         cdef uint32_t before = self._present(before_nid)
         cdef uint32_t placed = self._allocate(nid)
+        self._own()
         self._graph.insert_before(placed, <PyObject*>step, before)
         return placed
 
@@ -236,18 +284,25 @@ cdef class PlanGraph:
         `nid` for a re-add) is returned."""
         cdef uint32_t after = self._present(after_nid)
         cdef uint32_t placed = self._allocate(nid)
+        self._own()
         self._graph.insert_after(placed, <PyObject*>step, after)
         return placed
 
     # -- edges ------------------------------------------------------------------
     def add_edge(self, source, target, relationship=None):
         """Add the edge source -> target, or set the role of the one already there."""
-        self._graph.add_edge(self._present(source), self._present(target), _role_code(relationship))
+        cdef uint32_t producer = self._present(source)
+        cdef uint32_t consumer = self._present(target)
+        cdef CEdgeRole role = _role_code(relationship)
+        self._own()
+        self._graph.add_edge(producer, consumer, role)
 
     def remove_edge(self, source, target, relationship):
-        if not self._graph.remove_edge(
-            self._present(source), self._present(target), _role_code(relationship)
-        ):
+        cdef uint32_t producer = self._present(source)
+        cdef uint32_t consumer = self._present(target)
+        cdef CEdgeRole role = _role_code(relationship)
+        self._own()
+        if not self._graph.remove_edge(producer, consumer, role):
             raise InvalidInternalStateError(
                 f"Plan has no edge {source!r} -> {target!r} ({relationship!r}) to remove."
             )
@@ -303,6 +358,23 @@ cdef class PlanGraph:
             node = &self._graph.node_at(i)
             for j in range(node.out.size()):
                 out.append((node.id, node.out[j].other, _role_name(node.out[j].role)))
+        return out
+
+    def edge_count(self) -> int:
+        """How many edges the plan has - `len(edges())` without building them."""
+        return self._graph.edge_count()
+
+    def visit_order(self, root) -> list:
+        """`(nid, consumer)` for every visit a top-down walk from `root` makes:
+        each node before its producers, producers in ingoing order, a node with
+        two consumers visited once per consumer. The root's consumer is None.
+        Raises when the plan has a cycle."""
+        cdef uint32_t start = self._present(root)
+        cdef vector[pair[uint32_t, uint32_t]] visits = self._graph.visit_order(start)
+        cdef size_t i
+        out = [(start, None)]
+        for i in range(1, visits.size()):
+            out.append((visits[i].first, visits[i].second))
         return out
 
     def get_exit_points(self) -> list:
@@ -466,4 +538,5 @@ cdef class PlanGraph:
                 raise InvalidInternalStateError(
                     f"Cannot merge plans that share node {other._graph.node_at(i).id}."
                 )
+        self._own()
         self._graph.absorb(other._graph[0])

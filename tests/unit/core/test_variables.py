@@ -14,6 +14,10 @@ from opteryx.variables import (
     VariableOwner,
     Visibility,
 )
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 
 def _a_variable_owned_by(owner, visibility=None):
@@ -38,14 +42,14 @@ def test_variables_permissions():
     # a USER-owned session snapshot, so neither may write it.
     server_var = _a_variable_owned_by(VariableOwner.SERVER)
     with pytest.raises(PermissionsError):
-        SystemVariables[server_var] = Literal(type=VARCHAR, value="system")
+        SystemVariables[server_var] = Literal(type=VARCHAR, value="system", arena=_TEST_ARENA)
     with pytest.raises(PermissionsError):
-        connection_vars[server_var] = Literal(type=VARCHAR, value="system")
+        connection_vars[server_var] = Literal(type=VARCHAR, value="system", arena=_TEST_ARENA)
 
     # we shouldn't be able to set the user
     with pytest.raises(PermissionsError):
-        connection_vars["external_user"] = Literal(type=VARCHAR, value="user"
-        )
+        connection_vars["external_user"] = Literal(type=VARCHAR, value="user", 
+        arena=_TEST_ARENA)
 
 
 def test_restricted_variable_needs_entitlement_even_when_owner_allows():
@@ -58,8 +62,8 @@ def test_restricted_variable_needs_entitlement_even_when_owner_allows():
         VARCHAR, "", VariableOwner.USER, Visibility.RESTRICTED,
     )
     with pytest.raises(PermissionsError):
-        session_vars["a_restricted_knob"] = Literal(type=VARCHAR, value="anything"
-        )
+        session_vars["a_restricted_knob"] = Literal(type=VARCHAR, value="anything", 
+        arena=_TEST_ARENA)
 
 
 if __name__ == "__main__":  # pragma: no cover

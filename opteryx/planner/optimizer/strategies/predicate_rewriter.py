@@ -63,6 +63,7 @@ from opteryx.utils.dates import add_single_unit, parse_iso, truncate_single
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext, get_nodes_of_type_from_logical_plan
 from opteryx.compiled.structures.expressions import Between
+from opteryx.types.literal_values import literal_order_key
 from opteryx.compiled.structures.expressions import BinaryOperator
 from opteryx.compiled.structures.expressions import Cnf
 from opteryx.compiled.structures.expressions import Nested
@@ -74,6 +75,7 @@ from opteryx.compiled.structures.expressions import Cast
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import Function
+from opteryx.compiled.structures.expressions import rewrite_children
 
 # fmt: off
 IN_REWRITES = {"InList": "Eq", "NotInList": "NotEq"}
@@ -142,6 +144,7 @@ def reorder_interval_calc(predicate, *, plan_context):
         value="Plus",
         left=date_start,
         right=interval,
+        arena=plan_context.expressions,
     )
     binary_op_column_name = format_expression(new_binary_op, True)
     new_binary_op.schema_column = plan_context.columns.computed(
@@ -269,6 +272,7 @@ def _like_as_function(predicate, fn_node, negated):
         "query_column": predicate.query_column,
         "schema_column": predicate.schema_column,
         "relations": predicate.relations,
+        "arena": predicate.arena,
     }
     if negated:
         return Not(centre=fn_node, **identity)
@@ -293,11 +297,12 @@ def _connective_in_place_of(predicate, node_type, value, left, right):
         query_column=predicate.query_column,
         schema_column=predicate.schema_column,
         relations=predicate.relations,
+        arena=predicate.arena,
     )
 
 
-def _false_literal():
-    return Literal(value=False, type=_lt.BOOLEAN)
+def _false_literal(arena):
+    return Literal(value=False, type=_lt.BOOLEAN, arena=arena)
 
 
 def _substitute_in_or(node, replacements):
@@ -387,7 +392,7 @@ def rewrite_ored_like_to_any(predicate, telemetry):
             # The now-redundant branches become FALSE (X OR False == X), pruned by
             # `_prune_false_or_branches`.
             for node in group["nodes"][1:]:
-                replacements[id(node)] = _false_literal()
+                replacements[id(node)] = _false_literal(node.arena)
 
     if not replacements:
         return predicate
@@ -468,7 +473,7 @@ def _fused_not_like(first_node, patterns, is_ci):
     """
     return first_node.replace(
         value="AllOpNotILike" if is_ci else "AllOpNotLike",
-        right=first_node.right.replace(value=list(patterns), type=_lt.ARRAY(_lt.VARCHAR)),
+        right=first_node.right.replace(value=tuple(patterns), type=_lt.ARRAY(_lt.VARCHAR)),
     )
 
 
@@ -479,7 +484,7 @@ def _fused_like(first_node, patterns, is_ci):
     carried over. The input nodes are not modified - see `Expression.replace`."""
     return first_node.replace(
         value="AnyOpILike" if is_ci else "AnyOpLike",
-        right=first_node.right.replace(value=list(patterns), type=_lt.ARRAY(_lt.VARCHAR)),
+        right=first_node.right.replace(value=tuple(patterns), type=_lt.ARRAY(_lt.VARCHAR)),
     )
 
 
@@ -523,7 +528,7 @@ def rewrite_cnf_like_to_any(condition, telemetry):
         return condition
     if len(new_params) == 1:
         return new_params[0]
-    result = Cnf()
+    result = Cnf(arena=condition.arena)
     result.parameters = new_params
     return result
 
@@ -574,7 +579,7 @@ def rewrite_ored_any_eq_to_contains(predicate, telemetry, *, plan_context):
                 plan_context=plan_context,
             )
             for node in data["nodes"][1:]:
-                replacements[id(node)] = _false_literal()
+                replacements[id(node)] = _false_literal(node.arena)
 
     if not replacements:
         return predicate
@@ -584,11 +589,11 @@ def rewrite_ored_any_eq_to_contains(predicate, telemetry, *, plan_context):
 def _contains_node(first, column_node, values, *, plan_context):
     """A NEW `column @> [values]` node from a group's first `lit = ANY(column)`.
 
-    Values are sorted by string repr for a deterministic order across mixed literal
+    Values are sorted by `literal_order_key` for a deterministic order across mixed literal
     types while keeping the actual typed values (VARCHAR literals are bytes by this
     point). AtArrow reads container-on-the-left: `alma_mater @> ['MIT', ...]`.
     """
-    ordered = sorted(set(values), key=str)
+    ordered = tuple(sorted(set(values), key=literal_order_key))
     element_type = first.left.type
     array_type = _lt.ARRAY(element_type if isinstance(element_type, ColumnType) else _lt.VARIANT)
     literal = first.left.replace(
@@ -667,7 +672,7 @@ def rewrite_cnf_any_eq_to_contains(condition, telemetry, *, plan_context):
     if len(new_params) == 1:
         return new_params[0]
 
-    result = Cnf()
+    result = Cnf(arena=plan_context.expressions)
     result.parameters = new_params
     return result
 
@@ -711,7 +716,7 @@ def _make_inlist_node(node, column, values, element_type, *, plan_context):
     """A NEW `column IN (values)` node built from `node` (an Eq or InList).
 
     `node` and its literal are not modified - see `Expression.replace`."""
-    ordered = sorted(set(values), key=str)
+    ordered = tuple(sorted(set(values), key=literal_order_key))
     if node.value == "Eq" and node.left is not column:
         # literal-left spelling: `'x' = col` — put the column where InList reads it
         column_side, literal = node.right, node.left
@@ -780,7 +785,7 @@ def rewrite_ored_eq_to_inlist(predicate, telemetry, *, plan_context):
                 plan_context=plan_context,
             )
             for node in group["nodes"][1:]:
-                replacements[id(node)] = _false_literal()
+                replacements[id(node)] = _false_literal(node.arena)
 
     if not replacements:
         return predicate
@@ -827,12 +832,12 @@ def _prune_false_or_branches(predicate):
     # for `x OR False` — and the Filter visitor strips the wrapper again, where
     # the identity is not needed and a bare root is what pushdown keys on.
     if len(branches) == 1:
-        result = Nested()
+        result = Nested(arena=predicate.arena)
         result.centre = branches[0]
     else:
         result = branches[0]
         for branch in branches[1:]:
-            result = Or(left=result, right=branch)
+            result = Or(left=result, right=branch, arena=predicate.arena)
     result.schema_column = predicate.schema_column
     result.query_column = predicate.query_column
     result.alias = predicate.alias
@@ -926,7 +931,7 @@ def rewrite_cnf_eq_to_inlist(condition, telemetry, *, plan_context):
     if len(new_params) == 1:
         return new_params[0]
 
-    result = Cnf()
+    result = Cnf(arena=plan_context.expressions)
     result.parameters = new_params
     return result
 
@@ -961,6 +966,7 @@ def _build_emptiness_node(ident, op_name, *, plan_context):
     new_node = UnaryOperator(
         value=op_name,
         centre=ident,
+        arena=plan_context.expressions,
     )
     new_node.schema_column = plan_context.columns.computed(
         ExpressionColumn,
@@ -1015,7 +1021,7 @@ def rewrite_string_empty_compare(predicate, telemetry, *, plan_context):
             if (
                 col_type in {LogicalCategory.VARCHAR, LogicalCategory.VARBINARY}
                 and val is not None
-                and val in ("", b"")
+                and val == b""
             ):
                 op_name = "IsEmpty" if predicate.value == "Eq" else "IsNotEmpty"
                 telemetry.optimization_predicate_rewriter_string_empty_compare += 1
@@ -1140,10 +1146,10 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry, *, plan_co
     unit_node = func_node.parameters[1]
 
     # Unit must be a literal string
-    if unit_node.node_type != NodeType.LITERAL or not isinstance(unit_node.value, str):
+    if unit_node.node_type != NodeType.LITERAL or type(unit_node.value) is not bytes:
         return predicate
 
-    unit = unit_node.value.lower()
+    unit = unit_node.text().lower()
 
     # Literal must be a string or timestamp
     if literal_node.node_type != NodeType.LITERAL:
@@ -1202,6 +1208,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry, *, plan_co
         lit = Literal(
             value=_canonical_temporal_literal_value(dt, column_ct),
             type=column_ct,
+            arena=plan_context.expressions,
         )
         lit.schema_column = plan_context.columns.computed(
             ExpressionColumn, "", column_type=column_ct
@@ -1227,6 +1234,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry, *, plan_co
             schema_column=plan_context.columns.computed(
                 ExpressionColumn, "", column_type=_lt.BOOLEAN
             ),
+            arena=plan_context.expressions,
         )
 
         lt_pred = Comparison(
@@ -1236,6 +1244,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry, *, plan_co
             schema_column=plan_context.columns.computed(
                 ExpressionColumn, "", column_type=_lt.BOOLEAN
             ),
+            arena=plan_context.expressions,
         )
 
         return _connective_in_place_of(predicate, NodeType.AND, "And", gte_pred, lt_pred)
@@ -1290,6 +1299,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry, *, plan_co
             schema_column=plan_context.columns.computed(
                 ExpressionColumn, "", column_type=_lt.BOOLEAN
             ),
+            arena=plan_context.expressions,
         )
 
         gte_pred = Comparison(
@@ -1299,6 +1309,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry, *, plan_co
             schema_column=plan_context.columns.computed(
                 ExpressionColumn, "", column_type=_lt.BOOLEAN
             ),
+            arena=plan_context.expressions,
         )
 
         return _connective_in_place_of(predicate, NodeType.OR, "Or", lt_pred, gte_pred)
@@ -1473,6 +1484,7 @@ def rewrite_cidr_to_range(predicate, telemetry: QueryTelemetry, *, plan_context)
         query_column=predicate.query_column,
         schema_column=predicate.schema_column,
         relations=predicate.relations,
+        arena=plan_context.expressions,
     )
 
 
@@ -1545,10 +1557,11 @@ def rewrite_int_vs_fractional_const(predicate, telemetry: QueryTelemetry, *, pla
     else:  # Lt, LtEq
         final_op, bound = "LtEq", lo
 
-    predicate.left = col_node
-    predicate.right = build_literal_node(int(bound), plan_context=plan_context)
-    predicate.value = final_op
-    return predicate
+    return predicate.with_fields(
+        left=col_node,
+        right=build_literal_node(int(bound), plan_context=plan_context),
+        value=final_op,
+    )
 
 
 def _decided_unless_null(predicate, operand, value: bool):
@@ -1579,6 +1592,7 @@ def _decided_unless_null(predicate, operand, value: bool):
         schema_column=predicate.schema_column,
         query_column=predicate.query_column,
         alias=predicate.alias,
+        arena=predicate.arena,
     )
 
 
@@ -1822,6 +1836,7 @@ def _rewrite_case_node(node, telemetry: QueryTelemetry):
                 parameters=[else_, then_],
                 alias=node.alias,
                 schema_column=node.schema_column,
+                arena=node.arena,
             )
             _rebind_function_node(new_node, origin="CASE")
             return new_node
@@ -1834,6 +1849,7 @@ def _rewrite_case_node(node, telemetry: QueryTelemetry):
             parameters=[cond, then_, else_],
             alias=node.alias,
             schema_column=node.schema_column,
+            arena=node.arena,
         )
         _rebind_function_node(new_node, origin="CASE")
         return new_node
@@ -1866,18 +1882,19 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry, *, plan_context):
         predicate = _prune_false_or_branches(predicate)
         if predicate.node_type == NodeType.NESTED:
             # one survivor: keep the identity-carrying wrapper, rewrite what is inside
-            predicate.centre = _rewrite_predicate(
-                predicate.centre, telemetry, plan_context=plan_context
+            return predicate.with_fields(
+                centre=_rewrite_predicate(predicate.centre, telemetry, plan_context=plan_context)
             )
-            return predicate
 
     if predicate.node_type == NodeType.CNF:
         predicate = rewrite_cnf_eq_to_inlist(predicate, telemetry, plan_context=plan_context)
         predicate = rewrite_cnf_like_to_any(predicate, telemetry)
         predicate = rewrite_cnf_any_eq_to_contains(predicate, telemetry, plan_context=plan_context)
 
-    predicate.map_children(
-        lambda child: _rewrite_predicate(child, telemetry, plan_context=plan_context)
+    predicate = rewrite_children(
+        predicate,
+        lambda child: _rewrite_predicate(child, telemetry, plan_context=plan_context),
+        share=True,
     )
 
     if predicate.node_type not in {NodeType.BINARY_OPERATOR, NodeType.COMPARISON_OPERATOR}:
@@ -1924,94 +1941,23 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry, *, plan_context):
         if predicate.node_type != NodeType.COMPARISON_OPERATOR:
             return predicate
 
-    if predicate.right.node_type == NodeType.LITERAL and predicate.right.type == _lt.VARCHAR:
-        if predicate.value in {"Like", "ILike", "NotLike", "NotILike"}:
-            if "%%" in predicate.right.value:
-                telemetry.optimization_predicate_rewriter_remove_adjacent_wildcards += 1
-                # A new literal: the pattern node may be held elsewhere.
-                predicate.right = predicate.right.replace(value=re.sub(r"%+", "%", predicate.right.value)
-                )
-
-        if predicate.value in LIKE_REWRITES:
-            if "%" not in predicate.right.value and "_" not in predicate.right.value:
-                telemetry.optimization_predicate_rewriter_remove_redundant_like += 1
-                predicate.value = LIKE_REWRITES[predicate.value]
-
-        if predicate.value in INSTR_REWRITES:
-            if (
-                "_" not in predicate.right.value
-                and predicate.right.value.endswith("%")
-                and predicate.right.value.startswith("%")
-                and "%" not in predicate.right.value[1:-1]
-            ):
-                telemetry.optimization_predicate_rewriter_replace_like_with_in_string += 1
-                predicate.right = predicate.right.replace(value=predicate.right.value[1:-1])
-                predicate.value = INSTR_REWRITES[predicate.value]
-
-        if predicate.value in {"Like", "ILike", "NotLike", "NotILike"}:
-            # The minted function node carries a BOOLEAN schema_column: the positive
-            # form takes over the comparison's own column, but the negated form
-            # wraps a FRESH node in NOT, and a boolean function with no
-            # column reads as "not a predicate" to the pushdown gate — which left
-            # every `NOT LIKE 'x%'` stranded above its join.
-            if (
-                predicate.right.value.endswith("%")
-                and "%" not in predicate.right.value[:-1]
-                and "_" not in predicate.right.value
-            ):
-                telemetry.optimization_predicate_rewriter_replace_like_with_starts_with += 1
-                pattern_bytes = predicate.right.value[:-1].encode()
-                negated = predicate.value in {"NotLike", "NotILike"}
-                func_name = "_CI_STARTS_WITH" if predicate.value in {"ILike", "NotILike"} else "_STARTS_WITH"
-                fn_node = Function(
-                    value=func_name,
-                    parameters=[
-                        predicate.left,
-                        build_literal_node(pattern_bytes, plan_context=plan_context),
-                    ],
-                    schema_column=plan_context.columns.computed(
-                        ExpressionColumn, "", column_type=_lt.BOOLEAN
-                    ),
-                )
-                _rebind_function_node(fn_node)
-                predicate = _like_as_function(predicate, fn_node, negated)
-            elif (
-                predicate.right.value.startswith("%")
-                and "%" not in predicate.right.value[1:]
-                and "_" not in predicate.right.value
-            ):
-                telemetry.optimization_predicate_rewriter_replace_like_with_ends_with += 1
-                pattern_bytes = predicate.right.value[1:].encode()
-                negated = predicate.value in {"NotLike", "NotILike"}
-                func_name = "_CI_ENDS_WITH" if predicate.value in {"ILike", "NotILike"} else "_ENDS_WITH"
-                fn_node = Function(
-                    value=func_name,
-                    parameters=[
-                        predicate.left,
-                        build_literal_node(pattern_bytes, plan_context=plan_context),
-                    ],
-                    schema_column=plan_context.columns.computed(
-                        ExpressionColumn, "", column_type=_lt.BOOLEAN
-                    ),
-                )
-                _rebind_function_node(fn_node)
-                predicate = _like_as_function(predicate, fn_node, negated)
-
-    # If the predicate was transformed to a FUNCTION or NOT node, return early
-    if predicate.node_type in {NodeType.FUNCTION, NodeType.NOT}:
-        return predicate
-
-    if predicate.right.node_type == NodeType.LITERAL and predicate.right.type == _lt.VARBINARY:
+    # String literals hold bytes (P3-c), so one branch serves VARCHAR and VARBINARY
+    # patterns alike.
+    if predicate.right.node_type == NodeType.LITERAL and predicate.right.type in (
+        _lt.VARCHAR,
+        _lt.VARBINARY,
+    ):
         if predicate.value in {"Like", "ILike", "NotLike", "NotILike"}:
             if b"%%" in predicate.right.value:
                 telemetry.optimization_predicate_rewriter_remove_adjacent_wildcards += 1
-                predicate.right = predicate.right.replace(value=re.sub(b"%+", b"%", predicate.right.value)
+                predicate = predicate.with_fields(
+                    right=predicate.right.replace(value=re.sub(b"%+", b"%", predicate.right.value))
                 )
 
         if predicate.value in LIKE_REWRITES:
             if b"%" not in predicate.right.value and b"_" not in predicate.right.value:
                 telemetry.optimization_predicate_rewriter_remove_redundant_like += 1
-                predicate.value = LIKE_REWRITES[predicate.value]
+                predicate = predicate.with_fields(value=LIKE_REWRITES[predicate.value])
 
         if predicate.value in INSTR_REWRITES:
             if (
@@ -2019,13 +1965,14 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry, *, plan_context):
                 and predicate.right.value.endswith(b"%")
                 and predicate.right.value.startswith(b"%")
                 # An inner `%` is a wildcard, not text: without this `b'%a%b%'`
-                # became a substring search for the three bytes `a%b`. The VARCHAR
-                # branch above has always carried the same guard.
+                # became a substring search for the three bytes `a%b`.
                 and b"%" not in predicate.right.value[1:-1]
             ):
                 telemetry.optimization_predicate_rewriter_replace_like_with_in_string += 1
-                predicate.right = predicate.right.replace(value=predicate.right.value[1:-1])
-                predicate.value = INSTR_REWRITES[predicate.value]
+                predicate = predicate.with_fields(
+                    right=predicate.right.replace(value=predicate.right.value[1:-1]),
+                    value=INSTR_REWRITES[predicate.value],
+                )
 
         if predicate.value in {"Like", "ILike", "NotLike", "NotILike"}:
             if (
@@ -2046,6 +1993,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry, *, plan_context):
                     schema_column=plan_context.columns.computed(
                         ExpressionColumn, "", column_type=_lt.BOOLEAN
                     ),
+                    arena=plan_context.expressions,
                 )
                 _rebind_function_node(fn_node)
                 predicate = _like_as_function(predicate, fn_node, negated)
@@ -2067,6 +2015,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry, *, plan_context):
                     schema_column=plan_context.columns.computed(
                         ExpressionColumn, "", column_type=_lt.BOOLEAN
                     ),
+                    arena=plan_context.expressions,
                 )
                 _rebind_function_node(fn_node)
                 predicate = _like_as_function(predicate, fn_node, negated)
@@ -2078,12 +2027,12 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry, *, plan_context):
     if predicate.value == "AnyOpEq":
         if predicate.right.node_type == NodeType.LITERAL:
             telemetry.optimization_predicate_rewriter_any_to_inlist += 1
-            predicate.value = "InList"
+            predicate = predicate.with_fields(value="InList")
 
     if predicate.value == "AnyOpNotEq":
         if predicate.right.node_type == NodeType.LITERAL:
             telemetry.optimization_predicate_rewriter_any_to_inlist += 1
-            predicate.value = "NotInList"
+            predicate = predicate.with_fields(value="NotInList")
 
     if predicate.value in IN_REWRITES:
         # The binder may have pre-baked the IN-list into a CarcharSetWrapper
@@ -2157,6 +2106,7 @@ def _stringify_for_concat(node, *, plan_context):
         parameters=[],
         alias=None,
         schema_column=plan_context.columns.computed(ExpressionColumn, "", column_type=_lt.VARCHAR),
+        arena=plan_context.expressions,
     )
 
 
@@ -2223,20 +2173,22 @@ def _concat_chain_type(function):
 
 
 def _rewrite_function(function, telemetry: QueryTelemetry, *, plan_context):
-    def _rebind_function_ref():
-        # Rebind the function reference when the function name or parameters have been rewritten.
-        # The binder runs before the optimizer, so we must update node.function_ref here.
+    def _rebound(rewritten):
+        # `rewritten` with its function reference re-resolved: its name or parameters
+        # changed. The binder runs before the optimizer, so the reference is resolved
+        # here.
         from opteryx.expression.functions import get_catalog
 
-        resolved = get_catalog().resolve(function.value, list(function.parameters))
+        resolved = get_catalog().resolve(rewritten.value, list(rewritten.parameters))
         if resolved is None:
-            raise ValueError(f"Unable to resolve rewritten function '{function.value}'")
-        function.function_ref = resolved
-        if function.schema_column is not None and resolved.inferred_return_type:
+            raise ValueError(f"Unable to resolve rewritten function '{rewritten.value}'")
+        schema_column = rewritten.schema_column
+        if schema_column is not None and resolved.inferred_return_type:
             # Phase 5: inferred_return_type is ColumnType — use directly.
-            function.schema_column = plan_context.columns.retype(
-                function.schema_column, resolved.inferred_return_type
+            schema_column = plan_context.columns.retype(
+                schema_column, resolved.inferred_return_type
             )
+        return rewritten.with_fields(function_ref=resolved, schema_column=schema_column)
 
     def _normalise_dfa_replacement(value):
         if isinstance(value, bytes):
@@ -2281,16 +2233,18 @@ def _rewrite_function(function, telemetry: QueryTelemetry, *, plan_context):
             return None
 
         telemetry.optimization_predicate_rewriter_regex_replace_to_dfa += 1
-        function.value = "_DFA_EXTRACT"
-        function.parameters = [
-            function.parameters[0],
-            build_literal_node(
-                compiled_program,
-                identity_of=_fresh_literal(function.parameters[1], plan_context=plan_context),
-                suggested_type=_lt.VARBINARY, plan_context=plan_context),
-        ]
-        _rebind_function_ref()
-        return function
+        return _rebound(
+            function.with_fields(
+                value="_DFA_EXTRACT",
+                parameters=[
+                    function.parameters[0],
+                    build_literal_node(
+                        compiled_program,
+                        identity_of=_fresh_literal(function.parameters[1], plan_context=plan_context),
+                        suggested_type=_lt.VARBINARY, plan_context=plan_context),
+                ],
+            )
+        )
 
     rewritten = _rewrite_regexp_replace_to_dfa(plan_context=plan_context)
     if rewritten is not None:
@@ -2300,9 +2254,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry, *, plan_context):
     if function.value == "COALESCE":
         if len(function.parameters) == 2:
             telemetry.optimization_predicate_rewriter_coalesce_to_ifnull += 1
-            function.value = "IFNULL"
-            _rebind_function_ref()
-            return function
+            return _rebound(function.with_fields(value="IFNULL"))
     # SUBSTRING(x, 1, n) → LEFT(x, n). Arity-guarded: the two-argument form
     # SUBSTRING(x, 1) has no length to hand LEFT (it means "the whole string"),
     # and reading parameters[2] there is an IndexError.
@@ -2313,10 +2265,11 @@ def _rewrite_function(function, telemetry: QueryTelemetry, *, plan_context):
         and function.parameters[1].value == 1
     ):
         telemetry.optimization_predicate_rewriter_substring_to_left += 1
-        function.value = "LEFT"
-        function.parameters = [function.parameters[0], function.parameters[2]]
-        _rebind_function_ref()
-        return function
+        return _rebound(
+            function.with_fields(
+                value="LEFT", parameters=[function.parameters[0], function.parameters[2]]
+            )
+        )
     # CONCAT(x, y, z) → x || y || z. Each operand is stringified first
     # (_stringify_for_concat) — StringConcat is string-only natively, so a
     # non-string operand (CONCAT(id, name)) was refused family-wide before this.
@@ -2332,10 +2285,12 @@ def _rewrite_function(function, telemetry: QueryTelemetry, *, plan_context):
     # kernel set.
     if function.value == "CONCAT" and len(function.parameters) > 1:
         telemetry.optimization_predicate_rewriter_concat_to_double_pipe += 1
-        function.parameters = [
-            _rewrite_predicate(param, telemetry, plan_context=plan_context)
-            for param in function.parameters
-        ]
+        function = function.with_fields(
+            parameters=[
+                _rewrite_predicate(param, telemetry, plan_context=plan_context)
+                for param in function.parameters
+            ]
+        )
         _chain_ct = _concat_chain_type(function)
         left_node = _stringify_for_concat(function.parameters[0], plan_context=plan_context)
         for param in function.parameters[1:]:
@@ -2346,6 +2301,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry, *, plan_context):
                 schema_column=plan_context.columns.computed(
                     ExpressionColumn, "", column_type=_chain_ct
                 ),
+                arena=plan_context.expressions,
             )
         left_node.alias = function.alias
         left_node.schema_column = function.schema_column
@@ -2354,10 +2310,12 @@ def _rewrite_function(function, telemetry: QueryTelemetry, *, plan_context):
     # as CONCAT above, applied to the separator and every value.
     if function.value == "CONCAT_WS" and len(function.parameters) > 2:
         telemetry.optimization_predicate_rewriter_concatws_to_double_pipe += 1
-        function.parameters = [
-            _rewrite_predicate(param, telemetry, plan_context=plan_context)
-            for param in function.parameters
-        ]
+        function = function.with_fields(
+            parameters=[
+                _rewrite_predicate(param, telemetry, plan_context=plan_context)
+                for param in function.parameters
+            ]
+        )
         _chain_ct = _concat_chain_type(function)
         separator = _stringify_for_concat(function.parameters[0], plan_context=plan_context)
         left_node = _stringify_for_concat(function.parameters[1], plan_context=plan_context)
@@ -2369,6 +2327,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry, *, plan_context):
                 schema_column=plan_context.columns.computed(
                     ExpressionColumn, "", column_type=_chain_ct
                 ),
+                arena=plan_context.expressions,
             )
             left_node = BinaryOperator(
                 value="StringConcat",
@@ -2377,6 +2336,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry, *, plan_context):
                 schema_column=plan_context.columns.computed(
                     ExpressionColumn, "", column_type=_chain_ct
                 ),
+                arena=plan_context.expressions,
             )
         left_node.alias = function.alias
         left_node.schema_column = function.schema_column
@@ -2394,10 +2354,12 @@ def _rewrite_function(function, telemetry: QueryTelemetry, *, plan_context):
     # dependency (the architect's choice) rather than removing it with a kernel.
     if function.value == "CONCAT_WS" and len(function.parameters) == 2:
         telemetry.optimization_predicate_rewriter_concatws_to_double_pipe += 1
-        function.parameters = [
-            _rewrite_predicate(param, telemetry, plan_context=plan_context)
-            for param in function.parameters
-        ]
+        function = function.with_fields(
+            parameters=[
+                _rewrite_predicate(param, telemetry, plan_context=plan_context)
+                for param in function.parameters
+            ]
+        )
         _chain_ct = _concat_chain_type(function)
         value_node = _stringify_for_concat(function.parameters[1], plan_context=plan_context)
         # The empty literal must carry the CHAIN's string type, not a hardcoded
@@ -2419,6 +2381,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry, *, plan_context):
             schema_column=plan_context.columns.computed(
                 ExpressionColumn, "", column_type=_chain_ct
             ),
+            arena=plan_context.expressions,
         )
         left_node.alias = function.alias
         left_node.schema_column = function.schema_column

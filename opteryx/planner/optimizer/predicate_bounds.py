@@ -146,6 +146,7 @@ def _comparison_node(identifier, operator: str, value, literal_type, *, plan_con
         value=operator,
         left=identifier,
         right=build_literal_node(value, suggested_type=literal_type, plan_context=plan_context),
+        arena=plan_context.expressions,
     )
 
 
@@ -403,6 +404,15 @@ def _literal_value(node):
     if node is None or node.node_type != NodeType.LITERAL:
         return _NOT_A_LITERAL
     return _scalar(node.value)
+
+
+def _literal_text(node):
+    """Text of `node` when it is a string LITERAL (which holds UTF-8 bytes), else
+    None - a date part or unit name is read as text."""
+    node = _unwrap(node)
+    if node is None or node.node_type != NodeType.LITERAL or type(node.value) is not bytes:
+        return None
+    return node.text()
 
 
 class _NotALiteral:
@@ -800,8 +810,8 @@ def _preimage_function(expr, interval: Interval, column_type_for):
     if name == "EXTRACT":
         if len(parameters) != 2:
             return None
-        part = _literal_value(parameters[0])
-        if not isinstance(part, str) or part.lower() != "year":
+        part = _literal_text(parameters[0])
+        if part is None or part.lower() != "year":
             return None
         identifier = _unwrap(parameters[1])
         if identifier is None or identifier.node_type != NodeType.IDENTIFIER:
@@ -872,8 +882,8 @@ def _time_bucket_preimage(parameters, interval: Interval, column_type_for):
     if len(parameters) != 3:
         return None
     magnitude = _literal_value(parameters[0])
-    unit = _literal_value(parameters[1])
-    if not _is_number(magnitude) or not 1 <= magnitude <= 100_000 or not isinstance(unit, str):
+    unit = _literal_text(parameters[1])
+    if not _is_number(magnitude) or not 1 <= magnitude <= 100_000 or unit is None:
         return None
     unit = unit.lower()
     # Checked against the allowlist rather than relying on `add_single_unit` to
@@ -1340,12 +1350,12 @@ def derive_case_fold_conjuncts(
                 and _is_ascii_text(_scalar(right.value))
             ):
                 folded_pattern = Literal(
-                    value=_scalar(right.value).lower(), type=right.type
-                )
+                    value=_scalar(right.value).lower(), type=right.type, 
+                arena=plan_context.expressions)
                 identifier = left
                 fold = "LOWER"
                 interval = _like_interval(
-                    Comparison(value="Like", left=left, right=folded_pattern)
+                    Comparison(value="Like", left=left, right=folded_pattern, arena=plan_context.expressions)
                 )
 
         elif conjunct.node_type == NodeType.COMPARISON_OPERATOR:

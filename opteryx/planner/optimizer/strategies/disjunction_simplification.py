@@ -65,7 +65,7 @@ def _build_and(predicates: List[Expression]) -> Optional[Expression]:
         return None
     result = predicates[0]
     for pred in predicates[1:]:
-        n = And()
+        n = And(arena=predicates[0].arena)
         n.left = result
         n.right = pred
         result = n
@@ -77,7 +77,7 @@ def _build_or(predicates: List[Expression]) -> Optional[Expression]:
         return None
     result = predicates[0]
     for pred in predicates[1:]:
-        n = Or()
+        n = Or(arena=predicates[0].arena)
         n.left = result
         n.right = pred
         result = n
@@ -189,7 +189,7 @@ def _simplify_or_conjunct(condition: Expression) -> Optional[Expression]:
         # when there are 3+ branches for efficient n-ary evaluation.
         branches = _split_or(condition)
         if len(branches) >= 3:
-            cnf = Cnf()
+            cnf = Cnf(arena=condition.arena)
             cnf.parameters = branches
             simplified = cnf
     return simplified

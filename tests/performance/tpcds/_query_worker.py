@@ -33,6 +33,13 @@ from opteryx.connectors import DiskConnector  # noqa: E402
 
 opteryx.register_workspace("testdata", DiskConnector)
 
+# `--aistor`: the runner's `--variant aistor` - bind the remote Iceberg workspace.
+if "--aistor" in sys.argv[1:]:
+    sys.path.insert(0, os.path.join(_REPO_ROOT, "tests", "performance"))
+    from _common import register_aistor_workspace  # noqa: E402
+
+    register_aistor_workspace()
+
 
 def main() -> int:
     sql = sys.stdin.read()

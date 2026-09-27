@@ -128,7 +128,7 @@ def test_runtime_cast_carries_the_element_type_in_parameters(sql):
     node = _projection(_logical_plan(sql)[0], NodeType.CAST)
     assert node is not None, f"expected a runtime CAST node for {sql!r}"
     assert node.value == "ARRAY", node.value
-    assert [p.value for p in node.parameters] == ["VARCHAR"], node.parameters
+    assert [p.value for p in node.parameters] == [b"VARCHAR"], node.parameters
 
 
 @pytest.mark.parametrize("sql", RUNTIME_SOURCES)

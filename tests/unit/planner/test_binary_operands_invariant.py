@@ -49,6 +49,10 @@ from opteryx.compiled.structures.expressions import (
     Wildcard,
     Xor,
 )
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 # The expression class for each node type these tests build.
 _CLASS_OF = {
@@ -61,13 +65,14 @@ _CLASS_OF = {
 
 
 def _literal(value):
-    return Literal(value=value)
+    return Literal(value=value, arena=_TEST_ARENA)
 
 
 def _binary(node_type, left=True, right=True):
     return _CLASS_OF[node_type](
         left=_literal(1) if left else None,
         right=_literal(2) if right else None,
+        arena=_TEST_ARENA,
     )
 
 
@@ -90,19 +95,19 @@ def test_rejects_node_types_with_no_operand_pair():
     to `_ENDS_WITH`); NOT and UNARY_OPERATOR carry their operand on `.centre`.
     """
     for node in (
-        Function(value="x"),
-        Not(),
-        UnaryOperator(value="x"),
-        LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="x"),
-        Literal(value="x"),
-        Cast(),
-        Nested(),
-        Dnf(),
-        Cnf(),
-        Case(),
-        Subquery(),
-        Aggregator(value="x"),
-        Wildcard(),
+        Function(value="x", arena=_TEST_ARENA),
+        Not(arena=_TEST_ARENA),
+        UnaryOperator(value="x", arena=_TEST_ARENA),
+        LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="x", arena=_TEST_ARENA),
+        Literal(value="x", arena=_TEST_ARENA),
+        Cast(arena=_TEST_ARENA),
+        Nested(arena=_TEST_ARENA),
+        Dnf(arena=_TEST_ARENA),
+        Cnf(arena=_TEST_ARENA),
+        Case(arena=_TEST_ARENA),
+        Subquery(arena=_TEST_ARENA),
+        Aggregator(value="x", arena=_TEST_ARENA),
+        Wildcard(arena=_TEST_ARENA),
     ):
         node_type = node.node_type
         try:

@@ -51,9 +51,9 @@ def visit_window(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
 
     # Bind the order-by expressions (user-facing ranking windows; empty internally).
     bound_order = []
-    for col, ascending in node.order_by or []:
+    for col, ascending, nulls_first in node.order_by or []:
         bound, context = inner_binder(col, context)
-        bound_order.append((bound, ascending))
+        bound_order.append((bound, ascending, nulls_first))
     node.order_by = bound_order
 
     # `outputs` is a list of (kind, pre-minted SchemaColumn, params). What the
@@ -116,6 +116,7 @@ def visit_window(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
             source=node.output_relation,
             source_column=sc.name,
             schema_column=sc,
+            arena=context.plan_context.expressions,
         )
         for _, sc, _params in node.outputs
     ]

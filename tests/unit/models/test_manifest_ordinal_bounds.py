@@ -42,6 +42,10 @@ from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 # Bound columns are minted by a query's ColumnTable; these tests share one.
 _PLAN_CONTEXT = PlanContext()
@@ -58,17 +62,18 @@ def _schema(column_type, name="value"):
 
 
 def _comparison(column_name, op, value):
-    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name)
-    literal = Literal(value=value)
-    return Comparison(value=op, left=identifier, right=literal)
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name, arena=_TEST_ARENA)
+    literal = Literal(value=value, arena=_TEST_ARENA)
+    return Comparison(value=op, left=identifier, right=literal, arena=_TEST_ARENA)
 
 
 def _between(column_name, lower, upper):
-    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name)
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name, arena=_TEST_ARENA)
     return Between(
         left=identifier,
-        right=Literal(value=lower),
-        centre=Literal(value=upper),
+        right=Literal(value=lower, arena=_TEST_ARENA),
+        centre=Literal(value=upper, arena=_TEST_ARENA),
+        arena=_TEST_ARENA,
     )
 
 

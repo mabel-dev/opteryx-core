@@ -81,7 +81,7 @@ def _build_and(conjuncts):
         return conjuncts[0]
     result = conjuncts[0]
     for c in conjuncts[1:]:
-        n = And()
+        n = And(arena=conjuncts[0].arena)
         n.left = result
         n.right = c
         result = n

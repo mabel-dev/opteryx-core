@@ -218,9 +218,10 @@ typedef struct {
                                            // own — a fast path built on it must self-verify or
                                            // fall back on the first observed violation.
 #define DRAKEN_ROW_SORTED_DESC  (1u << 5)  // direction; meaningful only with ROW_SORTED set.
-                                           // NULLS FIRST under ascending, NULLS LAST under
-                                           // descending (draken's one sort null-ordering rule —
-                                           // see draken/morsels/sort.hpp).
+                                           // Implies NULLS FIRST under ascending, NULLS LAST
+                                           // under descending; a sort with the other null
+                                           // placement never sets ROW_SORTED (sort_morsels,
+                                           // draken/morsels/sort.hpp).
 // bits 6..7 reserved for future layout hints
 
 // Shape predicates — canonical tests for the encoding shapes.

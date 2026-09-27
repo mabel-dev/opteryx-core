@@ -38,19 +38,33 @@ from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
 from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.planner.plan_context import PlanContext
 
-_X = b"tes_x_00000001"
-_Y = b"tes_y_00000002"
+# One query context for everything this module builds: its columns and its
+# expressions belong to one query, as a plan's always do.
+_CONTEXT = PlanContext()
+_TEST_ARENA = _CONTEXT.expressions
+_COLUMNS = {
+    column.identity: column
+    for column in (
+        _CONTEXT.columns.relation_column("tes", "x"),
+        _CONTEXT.columns.relation_column("tes", "y"),
+    )
+}
+_X, _Y = list(_COLUMNS)
 
 
 def _identifier(identity: bytes) -> Expression:
     return LogicalColumn(
-        node_type=NodeType.IDENTIFIER, source_column=None, schema_column=type("_S", (), {"identity": identity})()
+        node_type=NodeType.IDENTIFIER,
+        source_column=None,
+        schema_column=_COLUMNS[identity],
+        arena=_TEST_ARENA,
     )
 
 
 def _cmp(op: str, left_identity: bytes, right_identity: bytes) -> Expression:
-    n = Comparison()
+    n = Comparison(arena=_TEST_ARENA)
     n.value = op
     n.left = _identifier(left_identity)
     n.right = _identifier(right_identity)

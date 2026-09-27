@@ -40,6 +40,7 @@ from opteryx.expression import get_all_nodes_of_type
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.relation_resolver import iter_plan_forest
+from opteryx.compiled.structures.expressions import rewrite_children
 from opteryx.compiled.structures.plan_steps import FilterStep
 
 __all__ = ["coordinate_shared_cte", "strip_body_boundary"]
@@ -204,18 +205,22 @@ def _filters_above(plan: LogicalPlan, nid: str):
 
 
 def _translate_condition(condition, mapping: Dict[bytes, bytes], body_columns_by_identity):
-    """Deep-copy `condition`, re-pointing every identifier at the body's own
-    bound schema column (by mapped identity). The copy is what gets inserted
-    into the body — the original, still keyed by the reference's identities,
-    stays with its reference until removal."""
-    translated = condition.copy()
-    for identifier in get_all_nodes_of_type(
-        translated, (NodeType.IDENTIFIER, NodeType.AGGREGATOR, NodeType.EVALUATED)
-    ):
-        body_identity = mapping[identifier.schema_column.identity]
-        identifier.schema_column = body_columns_by_identity[body_identity]
-        identifier.source = None
-    return translated
+    """`condition` rebuilt with every identifier re-pointed at the body's own bound
+    schema column (by mapped identity). The rebuilt tree is what gets inserted into
+    the body — the original, still keyed by the reference's identities, stays with
+    its reference until removal."""
+
+    def _translate(node):
+        node = rewrite_children(node, _translate, share=True)
+        if node.node_type in (NodeType.IDENTIFIER, NodeType.AGGREGATOR, NodeType.EVALUATED):
+            body_identity = mapping[node.schema_column.identity]
+            changes = {"schema_column": body_columns_by_identity[body_identity]}
+            if node.node_type == NodeType.IDENTIFIER:
+                changes["source"] = None
+            node = node.replace(**changes)
+        return node
+
+    return _translate(condition)
 
 
 def _push_common_predicates(body: LogicalPlan, refs, body_schema, telemetry) -> None:

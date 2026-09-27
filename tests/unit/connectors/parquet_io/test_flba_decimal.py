@@ -82,17 +82,39 @@ def test_flba_decimal_dict_encoded():
         assert rows == [Decimal("3.14")] * 100
 
 
-def test_flba_unsupported_widths_fail_cleanly():
-    """FLBA wider than 8 bytes (DECIMAL(20,0) -> FLBA(9)) and non-DECIMAL FLBA
-    (UUID-style FLBA(16)) must raise rather than silently produce garbage."""
+def test_flba_wide_decimal_reads_exactly():
+    """FLBA wider than 8 bytes (DECIMAL(20,0) -> FLBA(9)) decodes to DECIMAL128.
+
+    pyarrow DICTIONARY-encodes it by default, which rugo used to route to the pool
+    path the native scan could not consume ("unsupported column encoding"); it is
+    now the DK_DECIMAL128_DICT direct kind. This test used to assert that the read
+    raised - it now asserts the exact values, dictionary-encoded and plain."""
+    from decimal import Decimal
+
+    values = [1, 2, 3, 2, 1, None, 10**19 + 7]
+    for use_dictionary in (True, False):
+        with tempfile.TemporaryDirectory() as tmp:
+            # A distinct workspace per iteration: _read_one_column resolves a
+            # RELATIVE path, and footers are cached per path within the process.
+            workspace = "flba_wide_dict" if use_dictionary else "flba_wide_plain"
+            path = os.path.join(tmp, workspace, "wide_dec", "data.parquet")
+            os.makedirs(os.path.dirname(path))
+            pq.write_table(
+                pa.table({"y": pa.array(values, type=pa.decimal128(20, 0))}),
+                path,
+                use_dictionary=use_dictionary,
+            )
+            rows = _read_one_column(path, "y")
+            expected = [None if v is None else Decimal(v) for v in values]
+            assert rows == expected, (use_dictionary, rows)
+
+
+def test_flba_non_decimal_fails_cleanly():
+    """Non-DECIMAL FLBA (UUID-style FLBA(16)) must raise rather than silently
+    produce garbage."""
     with tempfile.TemporaryDirectory() as tmp:
         ws_dir = os.path.join(tmp, "flba_unsupported")
-        os.makedirs(os.path.join(ws_dir, "wide_dec"))
         os.makedirs(os.path.join(ws_dir, "uuid"))
-        pq.write_table(
-            pa.table({"y": pa.array([1, 2, 3], type=pa.decimal128(20, 0))}),
-            os.path.join(ws_dir, "wide_dec", "data.parquet"),
-        )
         pq.write_table(
             pa.table({"x": pa.array([b"\x01" * 16, b"\x02" * 16], type=pa.binary(16))}),
             os.path.join(ws_dir, "uuid", "data.parquet"),
@@ -102,16 +124,15 @@ def test_flba_unsupported_widths_fail_cleanly():
         os.chdir(tmp)
         try:
             opteryx.register_workspace("flba_unsupported", DiskConnector)
-            for table in ("wide_dec", "uuid"):
-                raised = False
-                try:
-                    for _ in opteryx.session().execute_to_morsels(
-                        f"SELECT * FROM flba_unsupported.{table}"
-                    ):
-                        pass
-                except Exception:
-                    raised = True
-                assert raised, f"unsupported FLBA in {table} silently succeeded"
+            raised = False
+            try:
+                for _ in opteryx.session().execute_to_morsels(
+                    "SELECT * FROM flba_unsupported.uuid"
+                ):
+                    pass
+            except Exception:
+                raised = True
+            assert raised, "unsupported FLBA in uuid silently succeeded"
         finally:
             os.chdir(cwd)
 
@@ -119,5 +140,6 @@ def test_flba_unsupported_widths_fail_cleanly():
 if __name__ == "__main__":
     test_flba_decimal_roundtrip()
     test_flba_decimal_dict_encoded()
-    test_flba_unsupported_widths_fail_cleanly()
+    test_flba_wide_decimal_reads_exactly()
+    test_flba_non_decimal_fails_cleanly()
     print("✅ FLBA DECIMAL regression tests passed")

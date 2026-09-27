@@ -32,6 +32,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "tests" / "performance"))
 
 from _common import (  # noqa: E402
+    AISTOR_WORKSPACE,
     load_duckdb_baseline,
     open_results_csv,
     print_banner,
@@ -40,6 +41,7 @@ from _common import (  # noqa: E402
     print_row,
     print_skip_row,
     print_total_row,
+    register_aistor_workspace,
 )
 
 import opteryx  # noqa: E402
@@ -78,15 +80,20 @@ DATASET_PREFIX = "testdata.job_skene."
 
 
 def _dataset_prefix(variant: str) -> str:
-    """`testdata.job_skene.` or `testdata.job.` — never a silent fallback.
+    """`testdata.job_skene.`, `testdata.job.` or `aistor.job.` — never a silent
+    fallback. `aistor` is the parquet corpus registered as Iceberg on AIStor.
 
     An unknown variant is a hard failure: a run that quietly benchmarks a
     different corpus than the one it names is exactly the defect this argument
     exists to prevent.
     """
-    if variant not in ("skene", "parquet"):
-        raise ValueError(f"unknown variant {variant!r}; expected 'skene' or 'parquet'")
-    return "testdata.job_skene." if variant == "skene" else "testdata.job."
+    if variant == "skene":
+        return "testdata.job_skene."
+    if variant == "parquet":
+        return "testdata.job."
+    if variant == AISTOR_WORKSPACE:
+        return f"{AISTOR_WORKSPACE}.job."
+    raise ValueError(f"unknown variant {variant!r}; expected 'skene', 'parquet' or 'aistor'")
 QUERY_RE = re.compile(r"^([0-9]+)([a-z])\.sql$")
 _TABLE_ALT = "|".join(re.escape(t) for t in TABLES)
 # Rewrite is scoped to the FROM clause: only tokens immediately following
@@ -162,8 +169,9 @@ def main() -> int:
         "--variant",
         type=str,
         default="skene",
-        choices=("skene", "parquet"),
-        help="dataset format: runs against testdata/job_skene or testdata/job (default: skene)",
+        choices=("skene", "parquet", AISTOR_WORKSPACE),
+        help="dataset format: runs against testdata/job_skene, testdata/job, or the "
+        "parquet corpus on AIStor (aistor.job) (default: skene)",
     )
     parser.add_argument(
         "--timeout",
@@ -198,12 +206,18 @@ def main() -> int:
         if not queries:
             sys.exit(f"--filter {args.filter!r} matched zero queries")
 
+    if args.variant == AISTOR_WORKSPACE:
+        register_aistor_workspace()
+
+    # The cold start reads the corpus the run benchmarks, not a fixed one.
     print("Warming up (cold start)...")
     start = time.monotonic()
     warm_session = None
     try:
         warm_session = opteryx.session()
-        for _ in warm_session.execute_to_morsels(f"SELECT COUNT(*) FROM {DATASET_PREFIX}title;"):
+        for _ in warm_session.execute_to_morsels(
+            f"SELECT COUNT(*) FROM {_dataset_prefix(args.variant)}title;"
+        ):
             pass
         cold_time_ms = (time.monotonic() - start) * 1000.0
         print(f"Cold start: {cold_time_ms:.2f}ms\n")

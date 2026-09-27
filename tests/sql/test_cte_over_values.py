@@ -34,6 +34,11 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 import opteryx
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn
+from opteryx.compiled.structures.expressions import ExprArena
+from opteryx.planner.plan_context import PlanContext
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 
 def results(sql):
@@ -162,6 +167,7 @@ def test_a_well_formed_projection_passes_the_guard():
     class _FakePlan:
         def __init__(self, node):
             self._node = node
+            self.plan_context = PlanContext()
 
         def __getitem__(self, _nid):
             return self._node
@@ -170,7 +176,7 @@ def test_a_well_formed_projection_passes_the_guard():
             return []
 
     node = ProjectStep()
-    node.columns = [LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="c")]
+    node.columns = [LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="c", arena=_TEST_ARENA)]
     assert _boundary_columns(_FakePlan(node), "nid", "brands") == list(node.columns)
 
     # a leaf with no projection at all is the wildcard, not an error

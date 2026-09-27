@@ -32,7 +32,10 @@ def post_bind(self, node, context):
                 # once per repeat.
                 branch = seen[branch.schema_column.identity].copy()
         elif branch.schema_column:
-            seen[branch.schema_column.identity] = branch.copy()
+            # The template is the expression itself; a repeat takes a copy of it when
+            # one turns up. Copying every bound expression up front, in case a repeat
+            # appeared, minted ~1,000 throwaway expressions per JOB query.
+            seen[branch.schema_column.identity] = branch
         branch.map_children(_inner)
         return branch
 

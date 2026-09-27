@@ -48,7 +48,7 @@ def _build_and_condition_tree(predicates: List[Expression]) -> Optional[Expressi
 
     result = predicates[0]
     for pred in predicates[1:]:
-        and_node = And()
+        and_node = And(arena=predicates[0].arena)
         and_node.left = result
         and_node.right = pred
         result = and_node

@@ -276,3 +276,76 @@ def print_banner(
         print(f"  {'Baseline':<14} (no DuckDB baseline available)")
     print(bar)
     print()
+
+
+# ---------------------------------------------------------------------------
+# AIStor (remote Iceberg) workspace — the `--variant aistor` runs
+# ---------------------------------------------------------------------------
+
+# `aistor.<namespace>.<table>` -> warehouse `benchmarks`, one namespace per suite
+# (tpch_sf10, tpcds_sf10, clickbench, h2o_medium, job). The tables are the SAME
+# parquet files the local parquet variants read, registered with pyiceberg's
+# add_files rather than rewritten, so a remote-vs-local difference is the remote
+# path and not a different layout. Skene has no Iceberg form (data files must be
+# parquet/orc/avro), so there is no remote skene variant.
+AISTOR_WORKSPACE = "aistor"
+AISTOR_WAREHOUSE = "benchmarks"
+AISTOR_REGION = "us-east-1"
+
+
+def register_aistor_workspace() -> None:
+    """Bind workspace `aistor` to the AIStor Iceberg REST catalog.
+
+    Reads AISTOR_ENDPOINT, AISTOR_ACCESS_KEY_ID and AISTOR_SECRET_ACCESS_KEY from
+    the environment (.env, loaded by `import opteryx` — call this after it). A
+    missing key raises KeyError: a remote benchmark with no remote configured
+    must not run.
+
+    Two clients are configured, because two different readers are involved:
+    the catalog, metadata and manifests go through pyiceberg (the kwargs below,
+    SigV4-signed as service `s3tables`); the data files are read by core's own
+    S3 filesystem, which takes its endpoint and keys from the PROCESS
+    environment. Setting those points every s3:// read in this process at
+    AIStor, which is why this belongs to benchmark processes only.
+
+    opteryx-iceberg and opteryx-catalog are resolved from sibling checkouts
+    (../opteryx-iceberg, ../opteryx-catalog), the same convention scratch/brace.py
+    and opteryx-iceberg's own tests use; an absent checkout fails at import.
+    """
+    endpoint = os.environ["AISTOR_ENDPOINT"].rstrip("/")
+    access_key = os.environ["AISTOR_ACCESS_KEY_ID"]
+    secret_key = os.environ["AISTOR_SECRET_ACCESS_KEY"]
+
+    os.environ["AWS_S3_ENDPOINT"] = endpoint
+    os.environ["AWS_REGION"] = AISTOR_REGION
+    os.environ["AWS_ACCESS_KEY_ID"] = access_key
+    os.environ["AWS_SECRET_ACCESS_KEY"] = secret_key
+
+    repo_parent = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    for sibling in ("opteryx-iceberg", "opteryx-catalog"):
+        path = os.path.join(repo_parent, sibling)
+        if path not in sys.path:
+            sys.path.insert(1, path)
+
+    from opteryx_iceberg import IcebergMetastore
+
+    from opteryx.connectors import register_workspace
+    from opteryx.connectors.opteryx_connector import OpteryxConnector
+
+    register_workspace(
+        AISTOR_WORKSPACE,
+        OpteryxConnector,
+        catalog=IcebergMetastore,
+        catalog_type="rest",
+        uri=f"{endpoint}/_iceberg",
+        warehouse=AISTOR_WAREHOUSE,
+        **{
+            "rest.sigv4-enabled": "true",
+            "rest.signing-name": "s3tables",
+            "rest.signing-region": AISTOR_REGION,
+            "s3.endpoint": endpoint,
+            "s3.access-key-id": access_key,
+            "s3.secret-access-key": secret_key,
+            "s3.region": AISTOR_REGION,
+        },
+    )

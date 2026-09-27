@@ -23,15 +23,15 @@ class PlanRewriterVisitor:
         root_nid = plan.exit_point()
         context = PlanRewriteContext(plan, ctes, self.plan_context)
 
-        def _inner(nid, parent_nid, context):
-            node = context.pre_rewrite_tree[nid]
+        # The walk is fixed up front, natively: top-down from the head, each node
+        # before its producers, producers in ingoing order. Strategies write to
+        # `rewritten_plan`, never `plan`, so the order cannot change under the walk.
+        pre_rewrite_tree = context.pre_rewrite_tree
+        visit = strategy.visit
+        for nid, parent_nid in plan.visit_order(root_nid):
             context.node_id = nid
             context.parent_nid = parent_nid
-            context = strategy.visit(node, context)
-            for child, _, _ in plan.ingoing_edges(nid):
-                _inner(child, nid, context)
-
-        _inner(root_nid, None, context)
+            context = visit(pre_rewrite_tree[nid], context)
         return strategy.complete(context.rewritten_plan, context)
 
     #  A pass that rewrites nothing means the fixed point is reached, so this only
@@ -71,9 +71,9 @@ class PlanRewriterVisitor:
             changed = False
             for strategy in self.strategies:
                 if strategy.should_i_run(current):
-                    before = (len(current), len(current.edges()))
+                    before = (len(current), current.edge_count())
                     current = self.traverse(current, strategy, ctes)
-                    after = (len(current), len(current.edges()))
+                    after = (len(current), current.edge_count())
                     self.telemetry.add_plan_rewrite(
                         "plan_rewriter",
                         strategy.__class__.__name__,

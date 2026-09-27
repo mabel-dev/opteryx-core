@@ -12,11 +12,11 @@ Goal: Reduce Rows read for ORDER BY ... LIMIT n
 When a HeapSort (a fused Order+Limit) reads directly from a Scan whose
 connector can honour the sort spec, the spec is stamped on the Scan:
 
-    scan.topn_order_by = [(schema_column, ascending), ...]
+    scan.topn_order_by = [(schema_column, ascending, nulls_first), ...]
     scan.topn_limit    = n
 
 and, for a single key, the physical-name form the parquet reader consumes
-(`topn_sort_name` / `topn_sort_identity` / `topn_descending`). The parquet
+(`topn_sort_name` / `topn_sort_identity` / `topn_descending` / `topn_nulls_first`). The parquet
 reader uses it to cut pass-2 work to rows that can be in the top-n; a SQL
 connector renders it as ORDER BY ... LIMIT on the server.
 
@@ -87,7 +87,8 @@ class TopNScanPushdownStrategy(OptimizationStrategy):
             return context
 
         source_node.topn_order_by = [
-            (expression.schema_column, bool(ascending)) for expression, ascending in order_by
+            (expression.schema_column, bool(ascending), bool(nulls_first))
+            for expression, ascending, nulls_first in order_by
         ]
         source_node.topn_limit = int(limit)
         if len(order_by) == 1 and order_by[0][0].node_type == NodeType.IDENTIFIER:
@@ -97,6 +98,7 @@ class TopNScanPushdownStrategy(OptimizationStrategy):
             source_node.topn_sort_name = schema_column.name
             source_node.topn_sort_identity = schema_column.identity
             source_node.topn_descending = not order_by[0][1]
+            source_node.topn_nulls_first = order_by[0][2]
         context.optimized_plan[source_nid] = source_node
         self.telemetry.optimization_topn_scan_pushdown += 1
 

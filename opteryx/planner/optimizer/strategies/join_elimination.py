@@ -57,7 +57,7 @@ def _right_columns_used_above(plan: LogicalPlan, join_nid: str, right_relations:
                 continue
             exprs = expr if type(expr) is tuple else (expr,)  # a list field, or one expression
             for e in exprs:
-                # order_by items are (column_node, ascending_bool) tuples
+                # order_by items are (column_node, ascending, nulls_first) tuples
                 if isinstance(e, tuple):
                     e = e[0]
                 for ident in get_all_nodes_of_type(e, (NodeType.IDENTIFIER,)):

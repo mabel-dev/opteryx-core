@@ -360,3 +360,37 @@ def test_pushed_predicate_is_the_only_filter(tmp_path, monkeypatch):
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+@pytest.mark.parametrize(
+    "order, expect_nulls",
+    [
+        ("", 10),                      # default ASC: NULL lowest -> first
+        (" NULLS FIRST", 10),
+        (" NULLS LAST", 0),
+        (" DESC", 0),                  # default DESC: NULL lowest -> last
+        (" DESC NULLS LAST", 0),
+        (" DESC NULLS FIRST", 10),
+    ],
+)
+def test_skene_latmat_explicit_null_placement(tmp_path, monkeypatch, order, expect_nulls):
+    """The skene two-pass Source reduces with the key's resolved null placement: more
+    than n NULL and more than n non-null survivors, so the placement alone decides
+    the top 10. Checked against the single-pass reference AND by value."""
+    keys = []
+    for i in range(N):
+        if not _MATCH[i]:
+            keys.append(7)
+        elif (i // 4) % 2 == 0:
+            keys.append(None)
+        else:
+            keys.append(10000 + i)
+    name = "nulls" + order.replace(" ", "_")
+    rows, names = _assert_latmat_parity(
+        tmp_path, name, _base(pa.int64(), keys),
+        "* FROM {DATASET} WHERE tag LIKE '" + NEEDLE + "' ORDER BY k" + order + " LIMIT 10",
+        monkeypatch)
+    k = names.index("k")
+    assert len(rows) == 10
+    assert sum(1 for r in rows if r[k] == "None") == expect_nulls, (order, [r[k] for r in rows])
+

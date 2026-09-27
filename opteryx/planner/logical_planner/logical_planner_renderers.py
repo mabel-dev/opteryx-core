@@ -204,11 +204,20 @@ def _render_bare_reader(node: PlanStep, label: str, auto_alias_prefix: str) -> s
     return f"{label}{path}{alias}{columns}{predicates}"
 
 
+def _sort_key_suffix(ascending: bool, nulls_first: bool) -> str:
+    """` DESC` for a descending key; the null placement only when it is NOT the
+    default (NULLS FIRST under ASC, NULLS LAST under DESC)."""
+    suffix = "" if ascending else " DESC"
+    if nulls_first != ascending:
+        suffix += " NULLS FIRST" if nulls_first else " NULLS LAST"
+    return suffix
+
+
 @register_render(LogicalPlanStepType.HeapSort)
 def render_heapsort(node: PlanStep) -> str:
     order = ", ".join(
-        format_expression(expr) + ("" if ascending else " DESC")
-        for expr, ascending in node.order_by
+        format_expression(expr) + _sort_key_suffix(ascending, nulls_first)
+        for expr, ascending, nulls_first in node.order_by
     )
     qualifier = " VECTOR TOPK" if node.vector_topk_candidate else ""
     return f"HEAP SORT{qualifier} (LIMIT {node.limit}, ORDER BY [{order}])"
@@ -229,8 +238,8 @@ def render_limit(node: PlanStep) -> str:
 @register_render(LogicalPlanStepType.Order)
 def render_order(node: PlanStep) -> str:
     order = ", ".join(
-        format_expression(expr) + ("" if ascending else " DESC")
-        for expr, ascending in node.order_by
+        format_expression(expr) + _sort_key_suffix(ascending, nulls_first)
+        for expr, ascending, nulls_first in node.order_by
     )
     return f"ORDER BY [{order}]"
 
@@ -277,7 +286,8 @@ def render_scan(node: PlanStep) -> str:
     # would make the plan understate what this scan actually runs with.
     _hint_parts = list(node.hints or [])
     _hint_parts.extend(
-        f"{name}={literal.value}"
+        # a string setting holds UTF-8 bytes; it is shown as the text it was written as
+        f"{name}={literal.text() if type(literal.value) is bytes else literal.value}"
         for name, literal in sorted((node.hint_settings or {}).items())
     )
     hints = f" WITH({','.join(_hint_parts)})" if _hint_parts else ""
@@ -294,7 +304,8 @@ def render_scan(node: PlanStep) -> str:
         pushed += " DISTINCT"
     if node.topn_order_by and node.topn_limit:
         order = ", ".join(
-            f"{sc.name}{'' if ascending else ' DESC'}" for sc, ascending in node.topn_order_by
+            f"{sc.name}{_sort_key_suffix(ascending, nulls_first)}"
+            for sc, ascending, nulls_first in node.topn_order_by
         )
         pushed += f" ORDER BY [{order}] LIMIT {node.topn_limit}"
     return f"SCAN{connector}({node.relation}{alias}{date_range}{hints}){columns}{predicates}{pushed}{limit}"
@@ -510,5 +521,5 @@ def render_window(node: PlanStep) -> str:
 def render_framed_window(node: PlanStep) -> str:
     fns = ", ".join(kind for kind, *_rest in (node.outputs or []))
     parts = ", ".join(format_expression(p) for p in (node.partition_by or []))
-    order = ", ".join(format_expression(c) for c, _asc in (node.order_by or []))
+    order = ", ".join(format_expression(c) for c, _asc, _nf in (node.order_by or []))
     return f"FRAMED WINDOW [{fns}] OVER (PARTITION BY [{parts}] ORDER BY [{order}])"

@@ -27,6 +27,10 @@ from opteryx.models.manifest_io import read_manifest_sketches
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 DATASET = "testdata.satellites"
 _MANIFEST_GLOB = f"testdata/satellites/{DATASET_MANIFEST_NAME}"
@@ -164,9 +168,9 @@ def test_drop_statistics_bad_syntax_fails_loud():
 
 
 def _comparison(column_name, op, value):
-    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name)
-    literal = Literal(value=value)
-    return Comparison(value=op, left=identifier, right=literal)
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name, arena=_TEST_ARENA)
+    literal = Literal(value=value, arena=_TEST_ARENA)
+    return Comparison(value=op, left=identifier, right=literal, arena=_TEST_ARENA)
 
 
 # satellites.id ranges [1, 177], gm ranges [0.0, 9887.834], name ranges
@@ -462,10 +466,17 @@ def test_drop_statistics_for_columns_clears_all_new_stat_types():
         id_idx = next(i for i, c in enumerate(schema.columns) if c.name == "id")
         name_idx = next(i for i, c in enumerate(schema.columns) if c.name == "name")
 
-        assert entries[0].null_counts[name_idx] is None
-        assert entries[0].min_lengths[name_idx] is None
-        assert entries[0].max_lengths[name_idx] is None
-        assert entries[0].min_values[name_idx] is None
+        # A list no column of the file records a value in is written EMPTY
+        # (the manifest's "not tracked"), which reads back as None; otherwise
+        # it is positional with None for the dropped column. Either way nothing
+        # survives for `name`.
+        def _unrecorded(values, index):
+            return not values or values[index] is None
+
+        assert _unrecorded(entries[0].null_counts, name_idx)
+        assert _unrecorded(entries[0].min_lengths, name_idx)
+        assert _unrecorded(entries[0].max_lengths, name_idx)
+        assert _unrecorded(entries[0].min_values, name_idx)
 
         # id survives untouched.
         assert entries[0].null_counts[id_idx] == 0

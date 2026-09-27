@@ -80,6 +80,10 @@ ARMED = [
     # below values ascending, so ASC must return the NULL groups first.
     (f"SELECT g % 100003 AS k, SUM(CASE WHEN g % 100003 < 20 THEN NULL ELSE g END) AS s FROM {SERIES} GROUP BY g % 100003 ORDER BY s ASC LIMIT 25", 1, False),
     (f"SELECT g % 100003 AS k, SUM(CASE WHEN g % 100003 < 20 THEN NULL ELSE g END) AS s FROM {SERIES} GROUP BY g % 100003 ORDER BY s DESC LIMIT 25", 1, True),
+    # Explicit, non-default null placement: ASC NULLS LAST keeps NULL groups OUT of
+    # the top 25; DESC NULLS FIRST puts all 20 of them IN, ahead of every value.
+    (f"SELECT g % 100003 AS k, SUM(CASE WHEN g % 100003 < 20 THEN NULL ELSE g END) AS s FROM {SERIES} GROUP BY g % 100003 ORDER BY s ASC NULLS LAST LIMIT 25", 1, True),
+    (f"SELECT g % 100003 AS k, SUM(CASE WHEN g % 100003 < 20 THEN NULL ELSE g END) AS s FROM {SERIES} GROUP BY g % 100003 ORDER BY s DESC NULLS FIRST LIMIT 25", 1, False),
     # ORDER BY continues onto a group key: heavy ties on c, broken by k — the
     # tie-inclusive cut must keep every tied group, so the result is a total order.
     (f"SELECT g % 100003 AS k, COUNT(*) AS c FROM {SERIES} GROUP BY g % 100003 ORDER BY c DESC, k ASC LIMIT 10", 1, True),
@@ -170,3 +174,36 @@ def test_limit_larger_than_group_count():
 
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+_NULL_SUM = (
+    f"SELECT g % 100003 AS k, SUM(CASE WHEN g % 100003 < 20 THEN NULL ELSE g END) AS s "
+    f"FROM {SERIES} GROUP BY g % 100003 ORDER BY s"
+)
+
+
+@pytest.mark.parametrize(
+    "order, nulls_in_answer, nulls_lead",
+    [
+        ("ASC", 20, True),                 # default: NULL lowest -> first
+        ("ASC NULLS FIRST", 20, True),
+        ("ASC NULLS LAST", 0, None),       # 100k+ non-null groups beat every NULL
+        ("DESC", 0, None),                 # default: NULL lowest -> last
+        ("DESC NULLS LAST", 0, None),
+        ("DESC NULLS FIRST", 20, True),
+    ],
+)
+def test_armed_null_placement_by_value(order, nulls_in_answer, nulls_lead):
+    """The armed top-k cut honours the ORDER BY's null placement, pinned by VALUE: a
+    parity check alone would pass if the armed and unarmed plans shared the same wrong
+    placement (which is exactly what an ignored NULLS clause looked like)."""
+    rows, pruned = _run(f"{_NULL_SUM} {order} LIMIT 25", armed=True)
+    assert pruned > 0, f"expected the top-k fusion to arm for ORDER BY s {order}"
+    values = [r[1] for r in rows]
+    assert len(values) == 25
+    assert sum(v is None for v in values) == nulls_in_answer, (order, values)
+    if nulls_lead:
+        assert all(v is None for v in values[:nulls_in_answer]), (order, values)
+    non_null = [v for v in values if v is not None]
+    descending = order.startswith("DESC")
+    assert non_null == sorted(non_null, reverse=descending), (order, values)

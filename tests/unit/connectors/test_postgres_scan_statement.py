@@ -32,6 +32,10 @@ from opteryx.expression import NodeType
 from opteryx.types import logical_type as _lt
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 # Bound columns are minted by a query's ColumnTable; these tests share one.
 _PLAN_CONTEXT = PlanContext()
@@ -240,15 +244,16 @@ def test_can_push_declines_a_predicate_holding_an_unrenderable_literal():
         return types.SimpleNamespace(
             condition=Comparison(
                 value="Gt",
-                left=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="id", schema_column=_schema_column("id")),
+                left=LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="id", schema_column=_schema_column("id"), arena=_TEST_ARENA),
                 right=literal,
+                arena=_TEST_ARENA,
             )
         )
 
     table = _table()
     # A pre-1 CE DATE is the shape the builder cannot spell.
-    assert table.can_push(_predicate(Literal(value=-800000, type=_lt.DATE))) is False
-    assert table.can_push(_predicate(Literal(value=10470, type=_lt.DATE))) is True
+    assert table.can_push(_predicate(Literal(value=-800000, type=_lt.DATE, arena=_TEST_ARENA))) is False
+    assert table.can_push(_predicate(Literal(value=10470, type=_lt.DATE, arena=_TEST_ARENA))) is True
 
 
 # ---- relation names ----------------------------------------------------------
@@ -521,7 +526,8 @@ def test_emit_describes_the_plain_projection():
 
 
 def test_topn_renders_explicit_null_order_and_c_collation_for_text():
-    order_by = [(_key("mass", _lt.INT64), False), (_key("name", _lt.VARCHAR), True)]
+    # Default placement (NULL lowest), which is the inverse of PostgreSQL's.
+    order_by = [(_key("mass", _lt.INT64), False, False), (_key("name", _lt.VARCHAR), True, True)]
     statement = build_scan_statement(
         _table(), _projection("id"), None, None, order_by=order_by, topn_limit=7
     )
@@ -531,10 +537,23 @@ def test_topn_renders_explicit_null_order_and_c_collation_for_text():
     )
 
 
+def test_topn_renders_the_resolved_non_default_null_placement():
+    # An explicit ASC NULLS LAST / DESC NULLS FIRST is what the server is told —
+    # the renderer writes the resolved placement, never re-derives it from direction.
+    order_by = [(_key("mass", _lt.INT64), False, True), (_key("name", _lt.VARCHAR), True, False)]
+    statement = build_scan_statement(
+        _table(), _projection("id"), None, None, order_by=order_by, topn_limit=7
+    )
+    assert statement.sql == (
+        'SELECT "id" FROM "public"."planets" '
+        'ORDER BY "mass" DESC NULLS FIRST, "name" COLLATE "C" ASC NULLS LAST LIMIT 7'
+    )
+
+
 def test_topn_after_predicates_is_one_statement():
     statement = build_scan_statement(
         _table(), _projection("id"), [_cmp("Eq", _col("id"), _lit(1))], None,
-        order_by=[(_key("id", _lt.INT64), True)], topn_limit=3,
+        order_by=[(_key("id", _lt.INT64), True, True)], topn_limit=3,
     )
     assert statement.sql.endswith('WHERE ("id" = $1) ORDER BY "id" ASC NULLS FIRST LIMIT 3')
 
@@ -543,23 +562,23 @@ def test_topn_and_limit_together_is_an_internal_error():
     with pytest.raises(InvalidInternalStateError):
         build_scan_statement(
             _table(), _projection("id"), None, 5,
-            order_by=[(_key("id", _lt.INT64), True)], topn_limit=3,
+            order_by=[(_key("id", _lt.INT64), True, True)], topn_limit=3,
         )
 
 
 def test_order_by_without_a_limit_is_an_internal_error():
     with pytest.raises(InvalidInternalStateError):
         build_scan_statement(
-            _table(), _projection("id"), None, None, order_by=[(_key("id", _lt.INT64), True)]
+            _table(), _projection("id"), None, None, order_by=[(_key("id", _lt.INT64), True, True)]
         )
 
 
 def test_can_push_topn_requires_own_pushable_columns():
     table = _table()
-    assert table.can_push_topn([(_typed_col("id", _lt.INT64), True)]) is True
-    assert table.can_push_topn([(_typed_col("id", _lt.INT64), True), (_typed_col("name", _lt.VARCHAR), False)]) is True
-    assert table.can_push_topn([(_typed_col("nope", _lt.INT64), True)]) is False
-    assert table.can_push_topn([(_lit(1), True)]) is False
+    assert table.can_push_topn([(_typed_col("id", _lt.INT64), True, True)]) is True
+    assert table.can_push_topn([(_typed_col("id", _lt.INT64), True, True), (_typed_col("name", _lt.VARCHAR), False, False)]) is True
+    assert table.can_push_topn([(_typed_col("nope", _lt.INT64), True, True)]) is False
+    assert table.can_push_topn([(_lit(1), True, True)]) is False
     assert table.can_push_topn([]) is False
 
 
@@ -651,7 +670,7 @@ def test_nothing_about_a_char_n_value_is_pushed():
     assert table.can_push_aggregate([], [_agg("MAX", padded, _lt.VARCHAR)]) is False
     assert table.can_push_aggregate([padded], [_agg("COUNT", _wild(), _lt.INT64)]) is False
     assert table.can_push_distinct([padded]) is False
-    assert table.can_push_topn([(padded, True)]) is False
+    assert table.can_push_topn([(padded, True, True)]) is False
     for predicate in (
         _cmp("Eq", _col("padded", _lt.VARCHAR), _lit(b"ab", _lt.VARCHAR)),
         _cmp("Like", _col("padded", _lt.VARCHAR), _lit(b"ab%", _lt.VARCHAR)),
@@ -866,40 +885,44 @@ def test_the_gate_admits_exactly_what_the_builder_can_spell():
         return types.SimpleNamespace(condition=condition)
 
     def _rcol(name, column_type=_lt.VARCHAR):
-        return LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=name, schema_column=_schema_column(name, column_type))
+        return LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=name, schema_column=_schema_column(name, column_type), arena=_TEST_ARENA)
 
     def _rlit(value, column_type):
-        return Literal(value=value, type=column_type)
+        return Literal(value=value, type=column_type, arena=_TEST_ARENA)
 
     boolean = _schema_column("", _lt.BOOLEAN)
     starts_with = Function(
         value="_STARTS_WITH",
         parameters=[_rcol("name"), _rlit(b"Ea", _lt.VARBINARY)],
         schema_column=boolean,
+        arena=_TEST_ARENA,
     )
     ci_starts_with = Function(
         value="_CI_STARTS_WITH",
         parameters=[_rcol("name"), _rlit(b"ea", _lt.VARBINARY)],
         schema_column=boolean,
+        arena=_TEST_ARENA,
     )
     in_list = Comparison(
         value="InList",
         left=_rcol("name"),
         right=_rlit([b"Earth"], _lt.ARRAY(_lt.VARCHAR)),
+        arena=_TEST_ARENA,
     )
     instr = Comparison(
         value="InStr",
         left=_rcol("name"),
         right=_rlit("art", _lt.VARCHAR),
+        arena=_TEST_ARENA,
     )
 
     assert table.can_push(_predicate(starts_with)) is True
-    assert table.can_push(_predicate(Not(centre=starts_with))) is True
+    assert table.can_push(_predicate(Not(centre=starts_with, arena=_TEST_ARENA))) is True
     assert table.can_push(_predicate(instr)) is True
     assert table.can_push(_predicate(in_list)) is True
     # ... and the declines.
     assert table.can_push(_predicate(ci_starts_with)) is False
-    assert table.can_push(_predicate(Not(centre=ci_starts_with))) is False
+    assert table.can_push(_predicate(Not(centre=ci_starts_with, arena=_TEST_ARENA))) is False
     assert (
         table.can_push(
             _predicate(
@@ -907,6 +930,7 @@ def test_the_gate_admits_exactly_what_the_builder_can_spell():
                     value="InList",
                     left=_rcol("name"),
                     right=_rlit([10470, -800000], _lt.ARRAY(_lt.DATE)),
+                    arena=_TEST_ARENA,
                 )
             )
         )
@@ -920,6 +944,7 @@ def test_the_gate_admits_exactly_what_the_builder_can_spell():
                     value="ARRAY_CONTAINS",
                     parameters=[_rcol("name"), _rlit(b"x", _lt.VARBINARY)],
                     schema_column=boolean,
+                    arena=_TEST_ARENA,
                 )
             )
         )

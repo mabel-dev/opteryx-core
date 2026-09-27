@@ -466,13 +466,13 @@ cdef inline void _coerce_logical_types(
                 row_group[col_name] = _widen_vector(v_nb, plan[0])
 
 
-cdef inline tuple _topn_rank(object v):
+cdef inline tuple _topn_rank(object v, bint null_high):
     """Order-preserving sort rank for one top-n candidate value.
 
-    A three-tier universal scale, lowest to highest: NULL (tag 0) < any real value
-    (tag 1) < NaN (tag 2) — draken's actual ordering (`draken/morsels/sort.hpp`):
-    `SortKeyCmp` sorts NULL below every value (NULLs FIRST ascending, LAST
-    descending, via the `cmp = va ? 1 : -1` validity check), and `sort_num_key`
+    A universal scale, lowest to highest: NULL (tag 0, when not `null_high`) < any
+    real value (tag 1) < NaN (tag 2) < NULL (tag 3, when `null_high`) — draken's
+    actual ordering (`draken/morsels/sort.hpp`): `SortKeyCmp` places NULL per the
+    key's `nulls_first`, independent of direction, and `sort_num_key`
     maps NaN to `UINT64_MAX` so it sorts as the single highest key regardless of
     sign (NaN LAST ascending, FIRST descending — "sorts highest" applied through
     whichever direction flip is in effect). The downstream HeapSort applies both
@@ -493,7 +493,7 @@ cdef inline tuple _topn_rank(object v):
     evaluated.
     """
     if v is None:
-        return (0,)
+        return (3,) if null_high else (0,)
     if v != v:   # true only for NaN — every other value in this column is self-equal
         return (2,)
     return (1, v)
@@ -760,6 +760,7 @@ cdef class ParquetReadNode(ReaderNode):
     # WP-2 top-N scan pushdown spec (set by TopNScanPushdownStrategy via node properties).
     cdef public object _topn_sort_name
     cdef public bint _topn_descending
+    cdef public bint _topn_nulls_first
     cdef public object _topn_limit
     # Column identities proven to be read only through length-answerable
     # operations (set by LengthOnlyColumnStrategy via node properties). The
@@ -809,6 +810,11 @@ cdef class ParquetReadNode(ReaderNode):
         is_scan_step = step.node_type in steps_with("topn_sort_name")
         self._topn_sort_name = step.topn_sort_name if is_scan_step else None
         self._topn_descending = bool(step.topn_descending) if is_scan_step else False
+        if self._topn_sort_name is not None and step.topn_nulls_first is None:
+            raise RuntimeError(
+                "ScanStep carries a top-n sort key without its resolved null placement"
+            )
+        self._topn_nulls_first = bool(step.topn_nulls_first) if is_scan_step else False
         self._topn_limit = step.topn_limit if is_scan_step else None
         self._length_only_columns = step.length_only_columns if is_scan_step else None
         self._scan_mtx = new cpp_mutex()
@@ -1076,7 +1082,7 @@ cdef class ParquetReadNode(ReaderNode):
         self._mark_file_seen(r.path)
 
     def _apply_topn(self, list pass2_work, dict p1_cache, object sort_identity,
-                    int n, bint descending):
+                    int n, bint descending, bint nulls_first):
         """WP-2: shrink pass-2 work to only the rows that can be in the top-n.
 
         Keeps every surviving row whose sort key is at-least-as-good as the n-th
@@ -1093,11 +1099,12 @@ cdef class ParquetReadNode(ReaderNode):
             to gather the matching pass-1 column values for assembly.
 
         ── NULL ordering ────────────────────────────────────────────────────────
-        NULL sorts BELOW every value, so `ORDER BY col` puts NULLs FIRST and
-        `ORDER BY col DESC` puts them LAST. That is what the downstream HeapSort
-        actually does — draken's `SortKeyCmp` (draken/morsels/sort.hpp) compares
-        validity first with `cmp = va ? 1 : -1`, and DESC flips the whole
-        comparator, null arm included.
+        NULLs go first or last exactly as the key's resolved `nulls_first` says,
+        independent of direction (default: NULLS FIRST ascending, LAST
+        descending). That is what the downstream HeapSort actually does —
+        draken's `SortKeyCmp` (draken/morsels/sort.hpp). On the rank scale below
+        "first" means the best end: the low end ascending, the high end
+        descending — so NULL ranks high exactly when `nulls_first == descending`.
 
         This used to read "NULLs sort last" in BOTH directions and dropped every
         NULL survivor whenever more than n non-null survivors existed. Ascending,
@@ -1130,11 +1137,12 @@ cdef class ParquetReadNode(ReaderNode):
         """
         cdef list candidates = []          # (rank, (path, rg_idx), survivor_idx)
         cdef Py_ssize_t i
+        cdef bint null_high = nulls_first == descending
         for key in p1_cache:
             p1_filtered = p1_cache[key][0]
             vals = p1_filtered.column(sort_identity).to_pylist()
             for i in range(len(vals)):
-                candidates.append((_topn_rank(vals[i]), key, i))
+                candidates.append((_topn_rank(vals[i], null_high), key, i))
 
         cdef dict winners_by_rg = {}
         if len(candidates) <= n:
@@ -2192,7 +2200,7 @@ cdef class ParquetReadNode(ReaderNode):
             topn_sort_identity = self._sp_planner_identity[self._topn_sort_name]
             pass2_work, self._lm_topn_winners = self._apply_topn(
                 pass2_work, p1_cache, topn_sort_identity,
-                int(self._topn_limit), self._topn_descending,
+                int(self._topn_limit), self._topn_descending, self._topn_nulls_first,
             )
 
         self._lm_pass2_work = pass2_work

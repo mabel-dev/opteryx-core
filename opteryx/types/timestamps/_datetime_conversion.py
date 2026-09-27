@@ -119,6 +119,15 @@ def date_to_int64_days(value: Any) -> int:
     )
 
 
+def time_to_int64_us(value: datetime.time) -> int:
+    """A time of day as int64 microseconds since midnight (TIME[us]'s physical
+    value)."""
+    return (
+        (value.hour * 3600 + value.minute * 60 + value.second) * 1_000_000
+        + value.microsecond
+    )
+
+
 def int64_us_to_datetime(value: int) -> datetime.datetime:
     """
     Convert int64 microseconds since epoch to datetime.datetime (UTC).

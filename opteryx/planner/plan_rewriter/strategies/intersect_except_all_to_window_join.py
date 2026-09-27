@@ -59,21 +59,21 @@ def _and(conditions: list) -> Expression:
     """Left-deep AND tree over a non-empty list of conditions."""
     node = conditions[0]
     for cond in conditions[1:]:
-        and_node = And(do_not_create_column=True)
+        and_node = And(do_not_create_column=True, arena=conditions[0].arena)
         and_node.left = node
         and_node.right = cond
         node = and_node
     return node
 
 
-def _eq(left_rel: str, left_col: str, right_rel: str, right_col: str) -> Expression:
-    eq = Comparison(value="Eq", do_not_create_column=True)
+def _eq(left_rel: str, left_col: str, right_rel: str, right_col: str, *, arena) -> Expression:
+    eq = Comparison(value="Eq", do_not_create_column=True, arena=arena)
     eq.left = LogicalColumn(
-        node_type=NodeType.IDENTIFIER, source=left_rel, source_column=left_col
-    )
+        node_type=NodeType.IDENTIFIER, source=left_rel, source_column=left_col, 
+    arena=arena)
     eq.right = LogicalColumn(
-        node_type=NodeType.IDENTIFIER, source=right_rel, source_column=right_col
-    )
+        node_type=NodeType.IDENTIFIER, source=right_rel, source_column=right_col, 
+    arena=arena)
     return eq
 
 
@@ -104,8 +104,8 @@ def _make_window(partition_relation: str, col_names: list, plan_context):
     window = WindowStep()
     window.partition_by = [
         LogicalColumn(
-            node_type=NodeType.IDENTIFIER, source=partition_relation, source_column=c
-        )
+            node_type=NodeType.IDENTIFIER, source=partition_relation, source_column=c, 
+        arena=plan_context.expressions)
         for c in col_names
     ]
     window.order_by = []  # internal ROW_NUMBER has no ORDER BY
@@ -179,8 +179,10 @@ class IntersectExceptAllToWindowJoinStrategy(PlanRewriteStrategy):
             for left_rel in live_left:
                 for right_rel in live_right:
                     for col in col_names:
-                        conditions.append(_eq(left_rel, col, right_rel, col))
-            conditions.append(_eq(left_rn_rel, _ROW_NUMBER_NAME, right_rn_rel, _ROW_NUMBER_NAME))
+                        conditions.append(_eq(left_rel, col, right_rel, col, arena=plan.plan_context.expressions))
+            conditions.append(
+                _eq(left_rn_rel, _ROW_NUMBER_NAME, right_rn_rel, _ROW_NUMBER_NAME, arena=plan.plan_context.expressions)
+            )
 
             join = JoinStep()
             # not-distinct on BOTH the value columns and $row_number: the ALL forms
@@ -199,7 +201,7 @@ class IntersectExceptAllToWindowJoinStrategy(PlanRewriteStrategy):
             # Drop the row-number column from the output.
             project = ProjectStep()
             project.columns = [
-                LogicalColumn(node_type=NodeType.IDENTIFIER, source=None, source_column=c)
+                LogicalColumn(node_type=NodeType.IDENTIFIER, source=None, source_column=c, arena=context.plan_context.expressions)
                 for c in col_names
             ]
             project.passthrough_columns = []

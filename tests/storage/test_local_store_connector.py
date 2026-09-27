@@ -24,6 +24,10 @@ from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 
 @pytest.fixture
@@ -317,9 +321,9 @@ def test_local_store_bounds_prune_correctly_as_real_values_not_ordinal(connector
     assert manifest.bounds_are_ordinal is False
 
     def _comparison(column_name, op, value):
-        identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name)
-        literal = Literal(value=value)
-        return Comparison(value=op, left=identifier, right=literal)
+        identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name, arena=_TEST_ARENA)
+        literal = Literal(value=value, arena=_TEST_ARENA)
+        return Comparison(value=op, left=identifier, right=literal, arena=_TEST_ARENA)
 
     # id's real range is [5, 95] — 1000 is out of range and must prune.
     manifest = manifest.prune_files([_comparison("id", "Gt", 1000)], plan_context=plan_context)

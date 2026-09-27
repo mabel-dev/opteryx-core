@@ -144,7 +144,15 @@ enum DirectKind {
     DK_INT8 = 19, DK_INT16 = 20, DK_INT32 = 21,
     // Signed narrow "compressed" (Dict-shaped) direct path, mirroring
     // DK_UINT*_DICT: dictionary at the exact declared width + uint32_t codes.
-    DK_INT8_DICT = 22, DK_INT16_DICT = 23, DK_INT32_DICT = 24
+    DK_INT8_DICT = 22, DK_INT16_DICT = 23, DK_INT32_DICT = 24,
+    // DECIMAL128 "compressed" (Dict-shaped) direct path: `data` is a draken_alloc'd
+    // __int128[data_length] dictionary of unscaled values, `codes` the uint32_t[length]
+    // per-row selection, dec_* the descriptor (as DK_DECIMAL128). A dictionary-encoded
+    // FLBA/BYTE_ARRAY decimal wider than 8 bytes - pyarrow's DEFAULT encoding for
+    // precision > 18 - used to fall to DK_POOL, which the native Source cannot consume
+    // ("unsupported column encoding") and which the pool serializer read from the
+    // EMPTY int128_values.
+    DK_DECIMAL128_DICT = 25
 };
 
 struct ColumnOut {
@@ -553,6 +561,11 @@ static inline DirectKind direct_kind_for(const DecodedColumn& d) {
         !d.dict_float32_values.empty() &&
         (!d.dict_indices.empty() || !d.dict_codes_array.empty()))
         return DK_FLOAT32_DICT;
+    // Dictionary-encoded int128 (DECIMAL128): the dictionary payload + a per-row code
+    // source, and NOT a mixed/plain chunk (int128_values empty).
+    if (d.int128_values.empty() && !d.dict_int128_values.empty() && d.rle_run_lengths.empty() &&
+        (!d.dict_indices.empty() || !d.dict_codes_array.empty()))
+        return DK_DECIMAL128_DICT;
     if (!d.dict_indices.empty() || !d.dict_codes_array.empty()) return DK_POOL;
     // RLE skip-dense NUMERIC → §11 Dict-shaped direct, rebuilt from the run table
     // by build_direct_rle_dict. Previously this fell to DK_POOL below, and the
@@ -1312,6 +1325,52 @@ static inline bool build_direct_float_dict(const DecodedColumn& d, bool is_f32,
     const uint8_t cw = d.code_width;
     if (!d.dict_codes_array.empty()) {
         expand_packed_codes(d.dict_codes_array.data(), n, cw, codes);
+    } else {
+        int32_t di = 0;
+        for (uint32_t row = 0; row < n; ++row) {
+            if (nullable && !((nb[row >> 3] >> (row & 7)) & 1))
+                codes[row] = 0u;
+            else
+                codes[row] = static_cast<uint32_t>(d.dict_indices[di++]);
+        }
+    }
+
+    uint8_t* validity = nullptr;
+    if (nullable) {
+        validity = static_cast<uint8_t*>(alloc(d.valid_bits.size()));
+        if (!validity) { freefn(codes); freefn(dict); return false; }
+        std::memcpy(validity, d.valid_bits.data(), d.valid_bits.size());
+    }
+
+    out.data = dict;
+    out.data_length = dsz;
+    out.codes = codes;
+    out.validity = validity;
+    out.length = n;
+    return true;
+}
+
+// DK_DECIMAL128_DICT: the __int128 dictionary + uint32 per-row codes (+ validity),
+// the same shape build_direct_float_dict emits for floats. Null rows carry code 0,
+// masked by validity. There is no RLE skip-dense form for int128, so direct_kind_for
+// never routes one here.
+static inline bool build_direct_int128_dict(const DecodedColumn& d,
+                                            void* (*alloc)(size_t), void (*freefn)(void*),
+                                            ColumnOut& out) {
+    const uint32_t n = static_cast<uint32_t>(d.num_rows);
+    const uint32_t dsz = static_cast<uint32_t>(d.dict_int128_values.size());
+    const bool nullable = !d.valid_bits.empty();
+    const uint8_t* nb = nullable ? d.valid_bits.data() : nullptr;
+
+    void* dict = alloc((dsz ? dsz : 1u) * sizeof(__int128));
+    if (!dict) return false;
+    if (dsz)
+        std::memcpy(dict, d.dict_int128_values.data(), static_cast<size_t>(dsz) * sizeof(__int128));
+
+    uint32_t* codes = static_cast<uint32_t*>(alloc((n ? n : 1u) * sizeof(uint32_t)));
+    if (!codes) { freefn(dict); return false; }
+    if (!d.dict_codes_array.empty()) {
+        expand_packed_codes(d.dict_codes_array.data(), n, d.code_width, codes);
     } else {
         int32_t di = 0;
         for (uint32_t row = 0; row < n; ++row) {
@@ -3134,7 +3193,8 @@ class ParquetIOPipeline {
                                                   // models no TIME coercion) — direct-eligible
                                                   // exactly like date/timestamp.
                     lt.rfind("uint", 0) == 0 ||  // E33: uint8/16/32/64 direct kinds
-                    (lt.rfind("decimal", 0) == 0 && !decoded.int128_values.empty());
+                    (lt.rfind("decimal", 0) == 0 &&
+                     (!decoded.int128_values.empty() || !decoded.dict_int128_values.empty()));
                 DirectKind dk = pool_sink_.draken_alloc ? direct_kind_for(decoded) : DK_POOL;
                 // The logical-type gate applies only to FIXED-WIDTH direct (date/
                 // timestamp OK; int-backed decimal stays pool). DK_VARCHAR needs no
@@ -3180,6 +3240,8 @@ class ParquetIOPipeline {
                         ok = build_direct_narrow_dict(decoded, 4, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     else if (dk == DK_UINT64_DICT)
                         ok = build_direct_narrow_dict(decoded, 8, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
+                    else if (dk == DK_DECIMAL128_DICT)
+                        ok = build_direct_int128_dict(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     else
                         ok = build_direct_fixed(decoded, dk, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     if (!ok) {
@@ -3188,7 +3250,7 @@ class ParquetIOPipeline {
                         break;
                     }
                     cout.direct_kind = dk;
-                    if (dk == DK_DECIMAL128)
+                    if (dk == DK_DECIMAL128 || dk == DK_DECIMAL128_DICT)
                         parse_decimal_ps(col_stats.logical_type, cout.dec_precision, cout.dec_scale);
                     // Direct path emits no IPC bytes — ipc_bytes_serialized only
                     // accrues for pool-path columns, so its drop is the WP-6b signal.

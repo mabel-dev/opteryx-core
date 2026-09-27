@@ -39,6 +39,7 @@ from .optimization_strategy import (
     get_nodes_of_type_from_logical_plan,
 )
 from opteryx.compiled.structures.expressions import expressions_with
+from opteryx.compiled.structures.expressions import rewrite_children
 from opteryx.compiled.structures.plan_steps import ProjectStep
 
 
@@ -381,9 +382,11 @@ def _replace_nested_aggregators(node, agg_identity_to_literal: dict):
         agg_id = node.schema_column.identity if node.schema_column is not None else None
         return agg_identity_to_literal.get(agg_id, node)
 
-    node.map_children(lambda child: _replace_nested_aggregators(child, agg_identity_to_literal))
-
-    return node
+    return rewrite_children(
+        node,
+        lambda child: _replace_nested_aggregators(child, agg_identity_to_literal),
+        share=True,
+    )
 
 
 def get_count_from_manifest(manifest) -> Optional[int]:
@@ -842,6 +845,7 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
                 source_column=col.name,
                 source=(col.origin[0] if col.origin else None),
                 schema_column=col,
+                arena=context.plan_context.expressions,
             )
             for col in getattr(scan_node.schema, "columns", []) or []
         ]

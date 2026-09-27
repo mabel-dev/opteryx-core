@@ -36,6 +36,10 @@ from opteryx.types.logical_type import INT64
 from opteryx.types.schema import RelationSchema
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
+from opteryx.compiled.structures.expressions import ExprArena
+
+# One expression arena for the expressions this module builds outside any query.
+_TEST_ARENA = ExprArena()
 
 # Bound columns are minted by a query's ColumnTable; these tests share one.
 _PLAN_CONTEXT = PlanContext()
@@ -66,9 +70,9 @@ def _file(path, lo, hi, record_count):
 
 
 def _comparison(op, value):
-    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="value")
-    literal = Literal(value=value)
-    return Comparison(value=op, left=identifier, right=literal)
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="value", arena=_TEST_ARENA)
+    literal = Literal(value=value, arena=_TEST_ARENA)
+    return Comparison(value=op, left=identifier, right=literal, arena=_TEST_ARENA)
 
 
 def _scan_node(manifest, schema):

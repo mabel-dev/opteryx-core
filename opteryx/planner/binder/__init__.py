@@ -186,4 +186,8 @@ def do_bind_phase(
 
     plan, _ = binder_visitor.traverse(plan, root_node, context=context)
 
+    # Binding is done: every expression now in the query's plans is immutable, and a
+    # later change is a new expression (native plan graph P3, architect ruling
+    # 2026-09-27).
+    plan_context.expressions.seal([plan, *plan_context.shared_ctes.values()])
     return plan

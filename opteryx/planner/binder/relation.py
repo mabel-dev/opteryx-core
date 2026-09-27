@@ -2524,6 +2524,7 @@ def visit_insert(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
                 source_column=col.name,
                 source=target_relation_name,
                 schema_column=col,
+                arena=context.plan_context.expressions,
             )
             for col in bound_target.columns
         ]

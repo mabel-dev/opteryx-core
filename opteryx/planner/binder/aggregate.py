@@ -150,6 +150,7 @@ def visit_aggregate_and_group(
                         source=None,
                         alias=schema_col.name,
                         schema_column=schema_col,
+                        arena=context.plan_context.expressions,
                     )
                 )
                 seen_identities.add(schema_col.identity)

@@ -22,8 +22,10 @@
 // separate array. Everything else (string keys, DECIMAL128, 5+ columns) uses
 // SortKeyCmp, which is the same ordering by a slower route — never a different answer.
 //
-// Ordering contract (unchanged from the pre-unification engine sort):
-//   - NULLS FIRST under ASC (null key < every value); DESC flips → NULLS LAST.
+// Ordering contract:
+//   - Null placement is PER KEY and independent of direction (SortKeySpec::nulls_first).
+//     The SQL default the planner resolves when no NULLS clause is written is
+//     "NULL is the lowest value": NULLS FIRST under ASC, NULLS LAST under DESC.
 //   - Floats: IEEE total order -inf .. -0.0==+0.0 .. +inf, NaN sorts HIGHEST
 //     (draken rule; -0.0 canonicalized to +0.0).
 //   - Strings (VARCHAR/NVARCHAR/VARBINARY): unsigned byte-wise comparison
@@ -52,9 +54,16 @@
 
 using MorselPtr = std::shared_ptr<CxxMorsel>;
 
+// Every field is REQUIRED: the explicit constructor makes a two-field brace init
+// (`SortKeySpec{idx, asc}`) a compile error instead of a silent nulls_first=false.
+// The default constructor exists only for Cython's declare-then-assign pattern,
+// which must set all three fields.
 struct SortKeySpec {
     size_t col_idx;
     bool ascending;
+    bool nulls_first;   // resolved by the planner; never implied by `ascending` here
+    SortKeySpec() = default;
+    SortKeySpec(size_t c, bool asc, bool nf) : col_idx(c), ascending(asc), nulls_first(nf) {}
 };
 
 // CANONICAL string layout (buffers.h / draken's own kernels, e.g.
@@ -149,6 +158,7 @@ inline uint64_t sort_num_key(const DrakenVector& v, uint32_t row) {
 
 struct SortKeyColumn {
     bool asc = true;
+    bool nulls_first = true;
     bool is_str = false;
     bool is_i128 = false;
     std::vector<uint8_t> valid;
@@ -167,6 +177,7 @@ inline bool build_sort_keys(const std::vector<MorselPtr>& ms,
     for (size_t k = 0; k < spec.size(); ++k) {
         SortKeyColumn& col = out[k];
         col.asc = spec[k].ascending;
+        col.nulls_first = spec[k].nulls_first;
         col.valid.reserve(n);
         bool typed = false;
         for (const MorselPtr& m : ms) {
@@ -234,7 +245,10 @@ struct SortKeyCmp {
             int cmp;
             uint8_t va = c.valid[a], vb = c.valid[b];
             if (!va || !vb) {
-                cmp = (va == vb) ? 0 : (va ? 1 : -1);   // NULL below values (asc)
+                if (va == vb) continue;                 // both NULL: equal on this key
+                // Null placement is NOT subject to direction: a precedes b exactly
+                // when a is the NULL and NULLs go first.
+                return (!va) == c.nulls_first;
             } else if (c.is_str) {
                 uint32_t la = c.slen[a], lb = c.slen[b];
                 uint32_t common = la < lb ? la : lb;
@@ -274,12 +288,9 @@ static_assert(sizeof(RowKeyN<2>) == 16, "RowKeyN<2> must be unpadded");
 static_assert(sizeof(RowKeyN<3>) == 24, "RowKeyN<3> must be unpadded");
 static_assert(sizeof(RowKeyN<4>) == 32, "RowKeyN<4> must be unpadded");
 
-// Mirrors SortKeyCmp's null semantics exactly. SortKeyCmp does:
-//     cmp = (va == vb) ? 0 : (va ? 1 : -1);            // invalid sorts "less" (raw)
-//     if (cmp != 0) return asc ? (cmp < 0) : (cmp > 0);  // desc flips it
-// With a_first := !va, `asc ? (cmp<0) : (cmp>0)` evaluates to `asc ? a_first
-// : !a_first` for both cmp=-1 (a invalid) and cmp=+1 (b invalid) — which is what
-// this returns.
+// Mirrors SortKeyCmp's null semantics exactly: both NULL -> next part; one NULL ->
+// a precedes b iff a is the NULL and that part's NULLs go first. Direction never
+// touches the null arm.
 //
 // The hot (no-null) path is a plain `parts[k] < parts[k]` with NO direction branch
 // (direction is baked into the value at construction) and NO type branch (the key
@@ -289,7 +300,7 @@ template <int NPARTS>
 struct AoSKeyCmpN {
     const RowKeyN<NPARTS>* rows;
     const uint8_t* valid_masks;
-    std::array<bool, NPARTS> asc;
+    std::array<bool, NPARTS> nulls_first;
     bool operator()(uint32_t a, uint32_t b) const {
         const RowKeyN<NPARTS>& ra = rows[a];
         const RowKeyN<NPARTS>& rb = rows[b];
@@ -299,8 +310,7 @@ struct AoSKeyCmpN {
             bool vb = (mb >> k) & 1u;
             if (!va || !vb) {
                 if (va == vb) continue;              // both null here -> next part
-                bool a_first = !va;
-                return asc[k] ? a_first : !a_first;
+                return (!va) == nulls_first[k];
             }
             if (ra.parts[k] != rb.parts[k]) return ra.parts[k] < rb.parts[k];
         }
@@ -346,10 +356,10 @@ template <int NPARTS>
 inline void build_aos_keys(const std::vector<SortKeyColumn>& keys, size_t n,
                            std::vector<RowKeyN<NPARTS>>& rows_out,
                            std::vector<uint8_t>& masks_out,
-                           std::array<bool, NPARTS>& asc_out) {
+                           std::array<bool, NPARTS>& nulls_first_out) {
     rows_out.resize(n);
     masks_out.resize(n);
-    for (int k = 0; k < NPARTS; ++k) asc_out[k] = keys[k].asc;
+    for (int k = 0; k < NPARTS; ++k) nulls_first_out[k] = keys[k].nulls_first;
     for (size_t i = 0; i < n; ++i) {
         uint8_t mask = 0;
         for (int k = 0; k < NPARTS; ++k) {
@@ -513,9 +523,9 @@ inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32
             case NP: {                                                           \
                 std::vector<RowKeyN<NP>> rows;                                   \
                 std::vector<uint8_t> masks;                                      \
-                std::array<bool, NP> asc{};                                      \
-                build_aos_keys<NP>(keys, n, rows, masks, asc);                   \
-                sort_perm_cmp(AoSKeyCmpN<NP>{rows.data(), masks.data(), asc},    \
+                std::array<bool, NP> nf{};                                       \
+                build_aos_keys<NP>(keys, n, rows, masks, nf);                    \
+                sort_perm_cmp(AoSKeyCmpN<NP>{rows.data(), masks.data(), nf},     \
                               perm, take_first, nthreads);                       \
                 return;                                                          \
             }
@@ -1043,8 +1053,12 @@ inline bool sort_morsels(const std::vector<MorselPtr>& ms,
     // output column (or none at all), and stamping it would claim a column is sorted
     // when it is not — a silent wrong answer downstream, not a slowdown. SIZE_MAX =
     // the key is not emitted, so there is nothing to stamp.
+    //
+    // The flag's meaning pins null placement to the default (NULLS FIRST under ASC,
+    // NULLS LAST under DESC — buffers.h). A key sorted with the other placement is
+    // NOT what the flag claims, so it is left unstamped rather than mislabelled.
     size_t sorted_out_idx = SIZE_MAX;
-    if (!spec.empty()) {
+    if (!spec.empty() && spec[0].nulls_first == spec[0].ascending) {
         if (emit_cols == nullptr) {
             sorted_out_idx = spec[0].col_idx;
         } else {

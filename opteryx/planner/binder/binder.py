@@ -59,6 +59,7 @@ from opteryx.types.logical_type import (
 from opteryx.types.scalars.value_parsing import parse_value
 from opteryx.types.schema import ConstantColumn, FunctionColumn, RelationSchema, SchemaColumn
 from opteryx.types.type_unification import NOT_LITERAL, compute_selection_result_type
+from opteryx.types.literal_values import native_literal_value
 from opteryx.compiled.structures.expressions import Cast
 from opteryx.compiled.structures.expressions import Literal
 
@@ -225,8 +226,8 @@ def _bound_cast_node(source, target, *, plan_context):
     if target.category == LogicalCategory.DECIMAL:
         value = "DECIMAL"
         parameters = [
-            Literal(value=int(target.logical.precision), type=_lt.INT64),
-            Literal(value=int(target.logical.scale), type=_lt.INT64),
+            Literal(value=int(target.logical.precision), type=_lt.INT64, arena=plan_context.expressions),
+            Literal(value=int(target.logical.scale), type=_lt.INT64, arena=plan_context.expressions),
         ]
     elif target.category in (LogicalCategory.TIMESTAMP, LogicalCategory.TIME):
         # Same rule as DECIMAL above, for the same reason. `str(ColumnType)` now
@@ -244,6 +245,7 @@ def _bound_cast_node(source, target, *, plan_context):
         parameters=parameters,
         alias=source.alias,
         schema_column=plan_context.columns.computed(ExpressionColumn, "", column_type=target),
+        arena=plan_context.expressions,
     )
 
 
@@ -624,9 +626,10 @@ def locate_identifier(node: Expression, context: Any) -> Tuple[Expression, Dict]
         new_node = Literal(
             schema_column=schema_column,
             type=schema_column.column_type,
-            value=schema_column.value,
+            value=native_literal_value(schema_column.value, schema_column.column_type),
             alias=node.alias,
             relations=set(),
+            arena=context.plan_context.expressions,
         )
         return new_node
 
@@ -741,8 +744,9 @@ def locate_identifier(node: Expression, context: Any) -> Tuple[Expression, Dict]
         new_node = Literal(
             schema_column=column,
             type=column.column_type,
-            value=column.value,
+            value=native_literal_value(column.value, column.column_type),
             alias=node.alias,
+            arena=context.plan_context.expressions,
         )
         return new_node, context
 
@@ -962,13 +966,14 @@ def inner_binder(
                 # A repeat of a constant (a nullary constant function — PI(), E() —
                 # folded to its value) IS that constant: a new LITERAL in its place.
                 node = Literal(
-                    value=found_column.value,
+                    value=native_literal_value(found_column.value, found_column.column_type),
                     type=found_column.column_type,
-                    uuid=node.uuid,
+                    origin=node.origin_id,
                     alias=node.alias,
                     query_column=node.query_column,
                     schema_column=found_column,
                     relations=node.relations,
+                    arena=context.plan_context.expressions,
                 )
             context.reused_expressions[id(node)] = node
 
@@ -1039,11 +1044,12 @@ def inner_binder(
                 # A fixed-value function IS its value: a new LITERAL in its place.
                 node = Literal(
                     type=result_type,
-                    value=fixed_function_result,
-                    uuid=node.uuid,
+                    value=native_literal_value(fixed_function_result, result_type),
+                    origin=node.origin_id,
                     alias=node.alias,
                     query_column=node.query_column,
                     relations=node.relations,
+                    arena=context.plan_context.expressions,
                 )
             else:
                 element_type = None  # for types with elements (ARRAYs)
@@ -1111,7 +1117,9 @@ def inner_binder(
                             and param.value != set()
                         ):
                             continue
-                        _new_value = parse_value(_result_type_lc, param.value)
+                        _new_value = native_literal_value(
+                            parse_value(_result_type_lc, param.value), result_type
+                        )
                         if _result_type_lc == LogicalCategory.DECIMAL and result_type.logical is not None:
                             # A written literal's digits are not re-quantized to the
                             # declared scale by parse_value/_parse_decimal (it keeps
@@ -1288,7 +1296,9 @@ def inner_binder(
                     if sc is None or sc.column_type is None or sc.column_type == _CT_NULL:
                         return branch
                     if branch.node_type == NodeType.LITERAL and branch.value is not None:
-                        branch.value = parse_value(_result_cat, branch.value)
+                        branch.value = native_literal_value(
+                            parse_value(_result_cat, branch.value), result_ct
+                        )
                         branch.type = result_ct  # ColumnType
                         branch.schema_column = context.plan_context.columns.retype(
                             sc, result_ct
@@ -1397,7 +1407,7 @@ def inner_binder(
                 # CAST(expr AS ARRAY(element_type)) - extract the element type
                 element_param = node.parameters[0]
                 if element_param.node_type == NodeType.LITERAL and element_param.value is not None:
-                    element_type = parse_column_type(str(element_param.value).upper())
+                    element_type = parse_column_type(element_param.text().upper())
                 else:
                     element_type = _lt.VARIANT
 
@@ -1450,9 +1460,9 @@ def inner_binder(
             )
         ):
             if node.right.node_type == NodeType.LITERAL:
-                if not isinstance(node.right.value, list):
+                if type(node.right.value) is not tuple:
                     try:
-                        node.right.value = list(node.right.value)
+                        node.right.value = tuple(node.right.value)
                     except TypeError as e:
                         raise IncompatibleTypesError(
                             message=f"Cannot construct ARRAY from incompatible types."

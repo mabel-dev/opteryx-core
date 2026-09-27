@@ -150,6 +150,7 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
                     source_column=col.name,
                     source=(col.origin[0] if col.origin else None),
                     schema_column=col,
+                    arena=context.plan_context.expressions,
                 )
                 for col in node.schema.columns
                 if col.identity in context.collected_identities
@@ -226,6 +227,7 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
                             source_column=col.name,
                             source=(col.origin[0] if col.origin else None),
                             schema_column=col,
+                            arena=context.plan_context.expressions,
                         )
                         for col in node.schema.columns[:width]
                     ]
@@ -266,6 +268,7 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
                             source_column=col.name,
                             source=(col.origin[0] if col.origin else None),
                             schema_column=col,
+                            arena=context.plan_context.expressions,
                         )
                         for col in schema.columns
                         if col.identity in node.pre_update_columns
@@ -353,7 +356,7 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
             for col in node.partition_by or []:
                 if col.schema_column:
                     identities.add(col.schema_column.identity)
-            for col, _ in node.order_by or []:
+            for col, _asc, _nf in node.order_by or []:
                 if col.schema_column:
                     identities.add(col.schema_column.identity)
             for _kind, _identity, arg_node, _offset in node.window_functions or []:
@@ -371,7 +374,7 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
             for col in node.partition_by or []:
                 if col.schema_column:
                     identities.add(col.schema_column.identity)
-            for col, _ in node.order_by or []:
+            for col, _asc, _nf in node.order_by or []:
                 if col.schema_column:
                     identities.add(col.schema_column.identity)
             for _kind, _identity, arg_node, _frame in node.window_functions or []:
