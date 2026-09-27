@@ -346,6 +346,26 @@ def get_subplan_schemas(sub_plan: Graph) -> List[str]:
 
 
 def get_subplan_reads(sub_plan: Graph) -> List[str]:
+    """The uuids of the Scan and FunctionDataset nodes under a join leg — the seed
+    of a Join's `left_readers` / `right_readers`.
+
+    What a reader list holds by the time the optimizer sees it is WIDER than what
+    this function puts there, and consumers must dispatch on the node type:
+
+    - Scan / FunctionDataset — from here.
+    - MaterializedCteRef — added by `join_leg_preprocess` (relation_resolver).
+    - Subquery — a CTE or view reference is still a Scan when this runs; `_splice`
+      (relation_resolver) turns it into a Subquery boundary that KEEPS the Scan's
+      uuid, so the uuid stays listed. `join_leg_preprocess` then adds the body's own
+      Scans alongside it. This entry is load-bearing: the body's Scans are renamed
+      (`$view-XXXX`), so the boundary is the only reader carrying the alias the
+      leg's columns name — correlated_filters places its Filter above it.
+
+    A listed uuid may also no longer be in the plan (Subquery boundaries are
+    removed during optimization), and the optimizer rewrites that rebuild these
+    lists (`_collect_scan_uuids`) list Scans only.
+    """
+
     def collect_reads(node: dict) -> List[str]:
         current_node = sub_plan[node["name"]]
 

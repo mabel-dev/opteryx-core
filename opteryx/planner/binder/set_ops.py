@@ -3,7 +3,6 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-from copy import copy
 from typing import List, Tuple
 
 from opteryx.compiled.structures.expressions import Expression
@@ -587,8 +586,15 @@ def _retype_declared_columns(columns: List[Expression], context: BindingContext,
         if schema_column.column_type == target and identity not in claimed_identities:
             claimed_identities.add(identity)
             continue
-        replacement = copy(schema_column)
-        replacement.column_type = target
+        # A retyped output column is a retyped ALIAS row: its own slot and type,
+        # the leg column's identity (architect ruling 2026-09-27).
+        replacement = context.plan_context.columns.alias(
+            schema_column,
+            schema_column.name,
+            aliases=schema_column.aliases,
+            origin=schema_column.origin,
+            column_type=target,
+        )
         if identity in claimed_identities:
             # Two OUTPUT positions cannot share one identity once they carry different
             # columns: identity is the engine's column key, so `UnionNode.column_ids`

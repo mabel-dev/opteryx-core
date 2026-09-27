@@ -3,7 +3,6 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-import copy
 from typing import Tuple
 
 from opteryx.compiled.structures.plan_steps import PlanStep
@@ -198,19 +197,23 @@ def visit_subquery(self, node: PlanStep, context: BindingContext) -> Tuple[PlanS
         # resolution. Mutating the shared column in place renamed the scan column
         # too, leaving the reader unable to find the physical column (it then
         # emitted a NULL placeholder of the wrong width).
-        out_column = copy.copy(schema_column)
+        #
+        # It is an ALIAS slot (architect ruling 2026-09-27): a new slot with its own
+        # single name set and the underlying column's identity - the stream key
+        # the data is carried under.
         projection_column.source = node.alias
-        out_column.origin = list(schema_column.origin or []) + [node.alias]
-
-        out_column.name = projection_column.current_name
-
-        if "." in out_column.name:
+        out_name = projection_column.current_name
+        if "." in out_name:
             # a qualified reference (`t.id`) names the output column `id`
-            out_column.name = out_column.name.split(".")[-1]
-
+            out_name = out_name.split(".")[-1]
         # The output name is the only name this column answers to; the
         # underlying column's aliases are not the derived relation's.
-        out_column.aliases = []
+        out_column = context.plan_context.columns.alias(
+            schema_column,
+            out_name,
+            aliases=[],
+            origin=list(schema_column.origin or []) + [node.alias],
+        )
         columns.append(out_column)
 
     schema = RelationSchema(name=node.alias, columns=columns)

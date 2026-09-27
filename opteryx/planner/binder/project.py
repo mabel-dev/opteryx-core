@@ -392,16 +392,21 @@ def visit_project(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSt
                 # for each column in the schema, find the (first) node column with
                 # the same identity via the prebuilt map (was a linear scan).
                 node_column = first_node_column_by_identity.get(column.identity)
-                # update the column reference with any AS aliases
-                if node_column and node_column.alias:
-                    if node_column.schema_column.aliases:
-                        node_column.schema_column.aliases.append(node_column.alias)
-                    else:
-                        node_column.schema_column.aliases = [node_column.alias]
-                    if column.aliases:
-                        column.aliases.append(node_column.alias)
-                    else:
-                        column.aliases = [node_column.alias]
+                # publish any AS alias: a new ALIAS slot carrying the name, swapped
+                # into this scope and onto the projected expression (a slot has one
+                # name set - architect ruling 2026-09-27)
+                if node_column and node_column.alias and node_column.alias not in column.all_names:
+                    renamed = context.plan_context.columns.alias(
+                        column,
+                        column.name,
+                        aliases=[*(column.aliases or []), node_column.alias],
+                        origin=column.origin,
+                    )
+                    schema_columns = [
+                        renamed if candidate is column else candidate
+                        for candidate in schema_columns
+                    ]
+                    node_column.schema_column = renamed
             # update the schema with columns we have references to, removing redundant columns
             schema.columns = schema_columns
             schema_column_identities = {i.identity for i in schema_columns}

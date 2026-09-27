@@ -202,7 +202,9 @@ def _hoist_arithmetic_join_key(
 
 
 def _collect_scan_uuids(plan: LogicalPlan, root_id: str) -> List[str]:
-    """Walk the subplan rooted at root_id and collect all Scan node UUIDs."""
+    """Walk the subplan rooted at root_id and collect all Scan node UUIDs. Scans
+    only — narrower than what a join's `*_readers` lists can hold (see
+    `get_subplan_reads`)."""
     uuids: List[str] = []
     visited: Set[str] = set()
     frontier = [root_id]
@@ -394,7 +396,7 @@ def _try_dissolve_cross_join_in_inner_join(
     plan.add_edge(cross_right_id, inner_join_id, None)
 
     # Rebuild readers from the actual scan nodes now under each side.
-    # left_readers/right_readers contain scan UUIDs used by label_join_legs in the
+    # left_readers/right_readers hold reader UUIDs used by label_join_legs in the
     # physical plan to assign LEFT/RIGHT leg labels — they must reflect the new structure.
     cross_join_node.left_readers = _collect_scan_uuids(plan, cross_left_id)
     cross_join_node.right_readers = _collect_scan_uuids(plan, other_child_id)

@@ -355,15 +355,18 @@ cdef class LogicalColumn(Expression):
         return new
 
     cpdef Expression copy(self, dict memo=None):
-        # A column reference copies as a FRESH reference with a detached plain
-        # schema column (to_schema_column), exactly as the pre-typed class did;
-        # it is not memoized, matching that class's memo-less copy().
+        # A column reference copies as a FRESH reference with a detached copy of
+        # its schema column; it is not memoized, matching the memo-less copy().
+        # The copy keeps the column's KIND (its subclass): it is the same slot, and
+        # a slot is one row with one kind (architect ruling 2026-09-27) - stripping
+        # a FunctionColumn/ConstantColumn to a plain SchemaColumn here gave one slot
+        # two kinds.
         return LogicalColumn(
             self.node_type,
             self._source_column,
             self._source,
             self.alias,
-            None if self.schema_column is None else self.schema_column.to_schema_column(),
+            None if self.schema_column is None else self.schema_column.branch_copy({}),
             self.query_column,
             self._is_outer_reference,
             self._outer_relation,

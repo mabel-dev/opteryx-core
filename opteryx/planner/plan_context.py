@@ -36,6 +36,9 @@ if TYPE_CHECKING:  # annotation only: importing the optimizer package here is a 
     from opteryx.types.schema import SchemaColumn
 
 
+_KEEP = object()  # alias(): "keep the source column's type"
+
+
 class ColumnTable:
     """Every bound column of one query, in the order it was minted — a column's
     `slot` is its position here.
@@ -51,15 +54,24 @@ class ColumnTable:
     A copy of a column that keeps its identity (a binder branch copy, a
     subclass stripped to a plain column) is the same column and keeps its slot.
     A copy that takes a NEW identity is a new column, and `remint` makes it.
+
+    A column seen under a different NAME in another scope (a subquery or view
+    output, a SELECT alias) is a new slot too - `alias` makes it - so that every
+    slot has exactly one name set (architect ruling 2026-09-27, native plan
+    graph P1). The alias keeps its source's identity: identity is the STREAM key,
+    the handle the data is carried under, and an alias carries no data of its
+    own. `alias_of` records the slot it renames.
     """
 
-    __slots__ = ("_columns", "_slot_of")
+    __slots__ = ("_columns", "_slot_of", "_alias_of")
 
     def __init__(self) -> None:
         self._columns: List["SchemaColumn"] = []
-        # identity -> slot. A function: a copy that keeps an identity keeps its
-        # slot, and a new identity is only ever minted together with a new slot.
+        # identity -> ROOT slot (the slot that minted the identity). Aliases share
+        # their root's identity and never replace this entry.
         self._slot_of: Dict[bytes, int] = {}
+        # slot -> the slot it renames; absent for a root slot.
+        self._alias_of: Dict[int, int] = {}
 
     def __len__(self) -> int:
         return len(self._columns)
@@ -68,10 +80,20 @@ class ColumnTable:
         return len(self._columns)
 
     def _register(self, column):
-        """Record a column constructed with `slot=self._next_slot()`."""
+        """Record a ROOT column constructed with `slot=self._next_slot()`."""
         self._columns.append(column)
         self._slot_of[column.identity] = column.slot
         return column
+
+    def alias_of(self, slot: int) -> Optional[int]:
+        """The slot `slot` renames, or None for a root slot."""
+        return self._alias_of.get(slot)
+
+    def root_slot(self, slot: int) -> int:
+        """The root of `slot`'s alias chain - the slot that minted its identity."""
+        while slot in self._alias_of:
+            slot = self._alias_of[slot]
+        return slot
 
     def relation_column(self, relation: Optional[str], name: str, **fields) -> "SchemaColumn":
         """A column read from (or produced as) `relation`: identity `rel_col_…`."""
@@ -127,6 +149,29 @@ class ColumnTable:
         fresh.slot = self._next_slot()
         return self._register(fresh)
 
+    def alias(
+        self, column, name: str, *, aliases=None, origin=None, column_type=_KEEP
+    ) -> "SchemaColumn":
+        """`column` seen under another name in another scope: a NEW slot with its
+        own name set, the same identity (the stream key) and type facts, and
+        `alias_of` pointing at `column`'s slot. `column` is not modified.
+
+        `column_type` retypes the alias - a set operation's output settled to the
+        type its legs were coerced to (architect ruling 2026-09-27: a retype is a
+        retyped alias row, so each slot keeps one type)."""
+        import copy
+
+        renamed = copy.copy(column)
+        renamed.name = name
+        renamed.aliases = list(aliases) if aliases is not None else []
+        renamed.origin = list(origin) if origin is not None else None
+        if column_type is not _KEEP:
+            renamed.column_type = column_type
+        renamed.slot = self._next_slot()
+        self._columns.append(renamed)
+        self._alias_of[renamed.slot] = column.slot
+        return renamed
+
     def reference(self, identity: bytes, name: str, column_type) -> "SchemaColumn":
         """A plain column REFERRING to the already-minted column `identity` - its
         identity and slot, with the name and type the caller reads it under (e.g.
@@ -167,9 +212,6 @@ class ColumnTable:
                 column_type=column.column_type,
                 nullable=column.nullable,
                 field_id=column.field_id,
-                default=column.default,
-                description=column.description,
-                disposition=column.disposition,
             )
             bound.origin = [alias]
             columns.append(bound)
@@ -185,14 +227,18 @@ class ColumnTable:
         )
 
     def adopt(self, column, owner) -> "SchemaColumn":
-        """A copy of `column` that IS `owner`'s column: `owner`'s identity and slot,
-        `column`'s metadata (e.g. a folded literal standing in for the aggregate it
-        answers). Nothing is registered and neither argument is modified."""
+        """`column` standing in for `owner` (e.g. a folded literal answering the
+        aggregate it replaces): `column`'s kind and metadata carried under
+        `owner`'s identity - the stream key consumers match on - as a NEW slot
+        aliasing `owner`'s. A new slot, because a slot is one row with one kind
+        (architect ruling 2026-09-27); neither argument is modified."""
         import copy
 
         adopted = copy.copy(column)
         adopted.identity = owner.identity
-        adopted.slot = owner.slot
+        adopted.slot = self._next_slot()
+        self._columns.append(adopted)
+        self._alias_of[adopted.slot] = owner.slot
         return adopted
 
 

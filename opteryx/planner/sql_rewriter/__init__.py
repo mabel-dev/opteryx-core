@@ -17,7 +17,7 @@ Responsibilities:
 - Rewrites b-string literals (b'...' -> CAST(... AS VARBINARY)) and r-string literals
   (r'...' -> BASE64_DECODE(...)), which the parser's tokenizer will not produce for
   this dialect
-- Rejects EXPLAIN FORMAT GRAPHVIZ, FORMAT JSON and FORMAT MERMAID explicitly
+- Rejects EXPLAIN FORMAT GRAPHVIZ and FORMAT JSON explicitly
 - Rewrites CREATE/DROP COLLECTION to CREATE/DROP SCHEMA, and ALTER/DROP WORKSPACE
   to ALTER/DROP FUNCTION, so the parser accepts statements whose object types it
   has no grammar for
@@ -345,9 +345,8 @@ def _rewrite_prefixed_strings(text: str) -> Tuple[str, List[Edit]]:
 def _refuse_explain_formats(text: str) -> Tuple[str, List[Edit]]:
     """Refuse the EXPLAIN formats Opteryx does not produce.
 
-    FORMAT GRAPHVIZ, FORMAT JSON and FORMAT MERMAID are unsupported and raise. MERMAID
-    is not in the parser's grammar at all, so without this it would surface as a raw
-    parse error rather than naming the unsupported format.
+    FORMAT GRAPHVIZ and FORMAT JSON are in the parser's grammar but unsupported, so
+    they raise here.
 
     Only the statement's head is scanned, and only its SYNTAX: for
     `SET @a = 'FORMAT JSON'; SELECT @a;` the literal sits in the head, and reading it as
@@ -367,8 +366,6 @@ def _refuse_explain_formats(text: str) -> Tuple[str, List[Edit]]:
             raise UnsupportedSyntaxError("GRAPHVIZ format is not supported")
         if requested == "JSON":
             raise UnsupportedSyntaxError("JSON format is not supported")
-        if requested == "MERMAID":
-            raise UnsupportedSyntaxError("MERMAID format is not supported")
         return None
 
     return _substitute(text, _EXPLAIN_FORMAT, replace)

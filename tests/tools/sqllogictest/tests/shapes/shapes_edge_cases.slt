@@ -150,7 +150,7 @@ SELECT * FROM $planets ANTI JOIN testdata.satellites USING(id) WHERE name IS NOT
 query shape 0
 SELECT * FROM $planets AS P ANTI JOIN testdata.satellites AS S ON P.id = S.id WHERE P.name != 'Earth'
 
-query shape 10 9
+query shape 10 10
 EXPLAIN ANALYZE FORMAT TEXT SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id)
 
 statement error UnsupportedSyntaxError
@@ -159,7 +159,7 @@ EXPLAIN ANALYZE FORMAT JSON SELECT * FROM $planets AS a INNER JOIN (SELECT id FR
 statement error UnsupportedSyntaxError
 EXPLAIN ANALYZE FORMAT GRAPHVIZ SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id)
 
-statement error UnsupportedSyntaxError
+statement error QueryParseError
 EXPLAIN ANALYZE FORMAT MERMAID SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id)
 
 query shape 7 2

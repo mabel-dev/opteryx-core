@@ -128,7 +128,8 @@ def _label_join_legs(plan, join_nid):
 
 
 def _collect_scan_uuids(plan, root_nid):
-    """Scan node UUIDs under a subtree — what a join's `*_readers` lists hold."""
+    """Scan node UUIDs under a subtree. Scans only — narrower than what a join's
+    `*_readers` lists can hold (see `get_subplan_reads`)."""
     uuids = []
     visited = set()
     frontier = [root_nid]

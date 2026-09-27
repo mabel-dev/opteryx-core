@@ -797,12 +797,23 @@ def locate_identifier(node: Expression, context: Any) -> Tuple[Expression, Dict]
     else:
         node.source = found_source_relation.name
 
-    # if we have an alias for a column not known about in the schema, add it
+    # if we have an alias for a column not known about in the schema, add it.
+    # A SELECT alias is another NAME for the column in this scope, and a slot has
+    # exactly one name set (architect ruling 2026-09-27): the named column is a new
+    # ALIAS slot, swapped into the scope it was found in, rather than a rename of
+    # whichever copy of the column this scope happens to hold.
     if node.alias and node.alias not in column.all_names:
-        if column.aliases:
-            column.aliases.append(node.alias)
-        else:
-            column.aliases = [node.alias]
+        renamed = context.plan_context.columns.alias(
+            column,
+            column.name,
+            aliases=[*(column.aliases or []), node.alias],
+            origin=column.origin,
+        )
+        found_source_relation.columns = [
+            renamed if candidate is column else candidate
+            for candidate in found_source_relation.columns
+        ]
+        column = renamed
 
     # Update node.schema_column with the found column
     node.schema_column = column
@@ -955,11 +966,21 @@ def inner_binder(
             # without recording `b`, and visit_project re-publishes only the FIRST
             # node's alias per identity — so nothing above the Project could resolve
             # `b` and ORDER BY raised ColumnNotFoundError.
+            # (An alias is a new ALIAS slot swapped into the scope - see
+            # locate_identifier.)
             if node.alias and node.alias not in found_column.all_names:
-                if found_column.aliases:
-                    found_column.aliases.append(node.alias)
-                else:
-                    found_column.aliases = [node.alias]
+                renamed = context.plan_context.columns.alias(
+                    found_column,
+                    found_column.name,
+                    aliases=[*(found_column.aliases or []), node.alias],
+                    origin=found_column.origin,
+                )
+                schema.columns = [
+                    renamed if candidate is found_column else candidate
+                    for candidate in schema.columns
+                ]
+                found_column = renamed
+                node.schema_column = found_column
 
             if isinstance(found_column, ConstantColumn):
                 # A repeat of a constant (a nullary constant function — PI(), E() —

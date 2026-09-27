@@ -67,7 +67,7 @@ SELECT * FROM $planets AS P SEMI JOIN testdata.satellites AS S USING(id)
 
 
 # EXPLAIN FORMAT
-statement error UnsupportedSyntaxError
+statement error QueryParseError
 EXPLAIN ANALYZE FORMAT MERMAID SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id)
 
 

@@ -187,7 +187,7 @@ def test_explain_analyze_filter_applies_predicate():
     assert rows[filter_idx] == 7, rows
 
 
-@pytest.mark.parametrize("fmt", ["MERMAID", "TREE", "GRAPHVIZ", "JSON"])
+@pytest.mark.parametrize("fmt", ["TREE", "GRAPHVIZ", "JSON"])
 def test_explain_non_text_formats_are_refused(fmt):
     # The tabular operator tree is the only EXPLAIN output; every other FORMAT
     # fails clean rather than being answered with something else.

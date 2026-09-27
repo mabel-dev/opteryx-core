@@ -85,9 +85,6 @@ class SchemaColumn:
         column_type: Unified ColumnType carrier (physical DrakenType + optional logical descriptor)
         identity: Unique identifier for this column (default: auto-generated from name)
         nullable: Whether NULL values are allowed (default: True)
-        default: Default value if not provided (default: None)
-        description: Human-readable description (default: None)
-        disposition: Special treatment flag (default: None)
         aliases: Alternative names for this column (default: None)
         origin: The relation(s) the column is read through
 
@@ -106,9 +103,6 @@ class SchemaColumn:
     # without positional drift. None for sources with no catalog-assigned id
     # (e.g. ad-hoc Arrow/pandas inputs, or catalog schemas predating this).
     field_id: Optional[int] = None
-    default: Optional[Any] = None
-    description: Optional[str] = None
-    disposition: Optional[str] = None
     aliases: Optional[List[str]] = dataclasses.field(default_factory=lambda: None)
     origin: Optional[List[str]] = None
     # column_type is the authoritative unified type carrier (physical DrakenType +
@@ -196,41 +190,6 @@ class SchemaColumn:
             return f"{self.name}:{ct}"
         return self.name
 
-    def _to_plain_flatcolumn(self) -> "SchemaColumn":
-        """Build a plain SchemaColumn mirroring this column's type + metadata."""
-        common = dict(
-            identity=self.identity,
-            nullable=self.nullable,
-            default=self.default,
-            description=self.description,
-            disposition=self.disposition,
-            aliases=self.aliases,
-            origin=self.origin,
-            # The same column, stripped of its subclass: same identity, same slot.
-            slot=self.slot,
-        )
-        return SchemaColumn(name=self.name, column_type=self.column_type, **common)
-
-    def describe(self) -> "ColumnDescriptor":
-        """What this bound column says about its values, as a source would describe
-        it - for handing a bound shape BACK to a source (a CTAS target, a view's
-        recorded schema). Engine state (identity, slot, origin, aliases) stays behind."""
-        return ColumnDescriptor(
-            name=self.name,
-            column_type=self.column_type,
-            nullable=self.nullable,
-            field_id=self.field_id,
-            default=self.default,
-            description=self.description,
-            disposition=self.disposition,
-        )
-
-    def to_schema_column(self) -> "SchemaColumn":
-        """Convert to a SchemaColumn (returns self when already a plain SchemaColumn)."""
-        if type(self) is SchemaColumn:
-            return self
-        return self._to_plain_flatcolumn()
-
     def __repr__(self) -> str:
         return f"SchemaColumn(name={self.name!r}, column_type={self.column_type}, nullable={self.nullable})"
 
@@ -257,10 +216,6 @@ class ConstantColumn(SchemaColumn):
         """String representation: name = value."""
         return f"{self.name}={self.value}"
 
-    def to_schema_column(self) -> SchemaColumn:
-        """Convert to a SchemaColumn, stripping constant value."""
-        return self._to_plain_flatcolumn()
-
 
 @dataclasses.dataclass
 class FunctionColumn(SchemaColumn):
@@ -273,10 +228,6 @@ class FunctionColumn(SchemaColumn):
     def __str__(self) -> str:
         """String representation: name (computed)."""
         return f"{self.name}(computed)"
-
-    def to_schema_column(self) -> SchemaColumn:
-        """Convert to a SchemaColumn, stripping function metadata."""
-        return self._to_plain_flatcolumn()
 
 
 
@@ -335,19 +286,6 @@ class RelationSchema:
         clone.columns = [c.branch_copy(memo) for c in self.columns]
         clone.aliases = list(self.aliases)
         return clone
-
-    def describe(self) -> "RelationDescriptor":
-        """This bound relation as a source would describe it - see SchemaColumn.describe."""
-        return RelationDescriptor(
-            name=self.name,
-            columns=[column.describe() for column in self.columns],
-            aliases=list(self.aliases),
-            primary_key=self.primary_key,
-            row_count_metric=self.row_count_metric,
-            row_count_estimate=self.row_count_estimate,
-            data_size_metric=self.data_size_metric,
-            data_size_estimate=self.data_size_estimate,
-        )
 
     @property
     def column_names(self) -> List[str]:

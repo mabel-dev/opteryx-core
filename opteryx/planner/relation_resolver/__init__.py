@@ -219,10 +219,12 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX, *, plan
         # `_candidates`), done here too because this runs BEFORE binding, on a
         # spliced CTE/view/set-op-leg copy the binder never sees pre-rename.
         relations[node.alias.lower()] = alias
-        # Only scan-like nodes are READERS: join_leg_preprocess walks Scan nodes and
-        # collects their uuids into left_readers/right_readers, so those are the uuids
-        # that have to be made unique per copy. A Subquery's uuid reaches no such list,
-        # and minting a new one for it would be churn with nothing reading it.
+        # Scan-like uuids are re-minted so each copy's readers are unique. A Subquery's
+        # uuid is NOT re-minted, although it can sit in a join's reader list: `_splice`
+        # hands the replaced Scan's uuid to its Subquery boundary (see
+        # `get_subplan_reads` for the reader contract). Every view / CTE body / recursive
+        # leg is copied BEFORE its nested references are spliced, so each boundary
+        # inherits the uuid of a Scan that lives in exactly one copy.
         if node.node_type != LogicalPlanStepType.Subquery:
             unique_id = random_string(32)
             uuid_remap[node.uuid] = unique_id
@@ -469,7 +471,9 @@ def _splice(plan: LogicalPlan, nid: str, node, sub_plan: LogicalPlan, *, plan_co
     """Replace a Scan node with a sub-plan, in place.
 
     The Scan becomes a Subquery boundary node keeping its alias — that alias is how the
-    outer query addresses the expanded relation.
+    outer query addresses the expanded relation. It keeps the Scan's uuid too, and that
+    uuid is already in the enclosing join's reader list, so the boundary stays listed as
+    a reader (see `get_subplan_reads`).
     """
     sub_plan = rename_relations(sub_plan, plan_context=plan_context)
     sub_plan_head = sub_plan.get_exit_points()[0]
