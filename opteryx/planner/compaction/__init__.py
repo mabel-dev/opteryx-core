@@ -32,15 +32,19 @@ from .constants import PASS_BUDGET_RATIO
 from .constants import SMALL_FILE_BYTES
 from .constants import SORT_AWARE_FLOOR_BYTES
 from .constants import TARGET_SIZE_BYTES
+from .selection import CompactionFile
 from .selection import CompactionPlan
 from .selection import FileRange
 from .selection import SelectionOutcome
 from .selection import SelectionResult
+from .selection import compaction_files
 from .selection import entry_size
 from .selection import select_compaction_plan
 
 __all__ = [
+    "CompactionFile",
     "CompactionPlan",
+    "compaction_files",
     "FileRange",
     "SelectionOutcome",
     "SelectionResult",

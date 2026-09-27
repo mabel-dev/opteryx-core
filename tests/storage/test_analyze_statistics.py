@@ -20,10 +20,7 @@ import opteryx
 from opteryx.connectors import connector_factory
 from opteryx.expression import NodeType
 from opteryx.models.manifest_io import DATASET_MANIFEST_NAME
-from opteryx.models.manifest_io import read_manifest_char_classes
 from opteryx.models.manifest_io import read_manifest_file_entries
-from opteryx.models.manifest_io import read_manifest_histograms
-from opteryx.models.manifest_io import read_manifest_sketches
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
@@ -53,10 +50,23 @@ def _manifests():
     return glob.glob(_MANIFEST_GLOB)
 
 
+def _nested(data, column):
+    """{file_path: positional per-column list} of one nested statistic
+    (min_k_hashes / histogram_counts / char_class_counts) - the manifest's
+    native vector for it, row by row."""
+    entries, native = read_manifest_file_entries(data)
+    vector = native.get(column)
+    rows = [] if vector is None else vector.to_pylist()
+    return {
+        entry.file_path: [list(values or []) for values in (rows[i] or [])]
+        for i, entry in enumerate(entries)
+    }
+
+
 def _sketches():
     """{file_path: positional per-column sketch} from the dataset manifest."""
     with open(_manifests()[0], "rb") as handle:
-        return read_manifest_sketches(handle.read())
+        return _nested(handle.read(), "min_k_hashes")
 
 
 def _analyzed_column_count(sketch) -> int:
@@ -366,7 +376,7 @@ def test_histogram_bins_populated_and_sum_to_record_count():
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS gm")
         data = open(_manifests()[0], "rb").read()
-        histograms = read_manifest_histograms(data)
+        histograms = _nested(data, "histogram_counts")
         schema, _ = _metadata()
         gm_idx = next(i for i, c in enumerate(schema.columns) if c.name == "gm")
         entries, _native = _entries()
@@ -401,7 +411,7 @@ def test_char_class_counts_populated_for_string_columns_only():
     try:
         _run("ANALYZE TABLE testdata.satellites")
         data = open(_manifests()[0], "rb").read()
-        char_classes = read_manifest_char_classes(data)
+        char_classes = _nested(data, "char_class_counts")
         schema, _ = _metadata()
         name_idx = next(i for i, c in enumerate(schema.columns) if c.name == "name")
         gm_idx = next(i for i, c in enumerate(schema.columns) if c.name == "gm")
@@ -419,7 +429,7 @@ def test_char_total_bytes_equals_sum_of_char_class_counts():
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS name")
         data = open(_manifests()[0], "rb").read()
-        char_classes = read_manifest_char_classes(data)
+        char_classes = _nested(data, "char_class_counts")
         entries, _native = _entries()
         schema, _ = _metadata()
         name_idx = next(i for i, c in enumerate(schema.columns) if c.name == "name")
@@ -483,7 +493,7 @@ def test_drop_statistics_for_columns_clears_all_new_stat_types():
         assert entries[0].min_values[id_idx] is not None
 
         data = open(_manifests()[0], "rb").read()
-        char_classes = read_manifest_char_classes(data)
+        char_classes = _nested(data, "char_class_counts")
         assert char_classes[entries[0].file_path][name_idx] == []
     finally:
         _clean()

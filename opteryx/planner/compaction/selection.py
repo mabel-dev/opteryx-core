@@ -6,7 +6,8 @@
 """
 Compaction file selection.
 
-Pure functions over ``FileEntry`` statistics. No storage access, no data
+Pure functions over ``CompactionFile`` records - one per manifest file, the
+facts the rules read plus the file's manifest row. No storage access, no data
 movement — everything read here came off the manifest the binder already
 fetched.
 
@@ -36,8 +37,6 @@ from typing import Optional
 from typing import Sequence
 from typing import Tuple
 
-from opteryx.models.file_entry import FileEntry
-
 from .constants import DELETE_DEBT_THRESHOLD
 from .constants import MIN_FILE_SIZE_BYTES
 from .constants import MIN_SIZE_BYTES
@@ -45,6 +44,40 @@ from .constants import PASS_BUDGET_BYTES
 from .constants import SMALL_FILE_BYTES
 from .constants import SORT_AWARE_FLOOR_BYTES
 from .constants import TARGET_SIZE_BYTES
+
+
+@dataclass(eq=False)
+class CompactionFile:
+    """One manifest file as selection sees it. Compared by identity: two files
+    with the same facts are still two files."""
+
+    row: int
+    """The file's row in the manifest it came from - what ``Manifest.subset`` takes."""
+
+    file_path: str
+    record_count: Optional[int]
+    """None is UNKNOWN, never zero."""
+
+    uncompressed_size: Optional[int]
+    """None for files written before it was recorded."""
+
+    deleted_record_count: int = 0
+
+
+def compaction_files(manifest) -> List[CompactionFile]:
+    """The manifest's files, in manifest order, as selection reads them."""
+    return [
+        CompactionFile(row, path, records, size, deleted)
+        for row, (path, records, size, deleted) in enumerate(
+            zip(
+                manifest.get_file_paths(),
+                manifest.record_counts(),
+                manifest.uncompressed_sizes(),
+                manifest.deleted_record_counts(),
+                strict=True,
+            )
+        )
+    ]
 
 
 class SelectionOutcome(Enum):
@@ -67,7 +100,7 @@ class CompactionPlan:
     mode: str
     """``brute`` or ``sort-aware``. ``brute`` never sorts."""
 
-    files: List[FileEntry] = field(default_factory=list)
+    files: List[CompactionFile] = field(default_factory=list)
     reason: str = ""
     sort_column: Optional[str] = None
     expected_outputs: int = 1
@@ -80,8 +113,8 @@ class CompactionPlan:
     def input_records(self) -> Optional[int]:
         """Total rows rewritten, or None when any file's count is unknown.
 
-        None is not zero. ``FileEntry.record_count`` is ``Optional[int]`` and a
-        producer with no count passes None, so summing with a 0 default would
+        None is not zero. ``CompactionFile.record_count`` is ``Optional[int]`` and a
+        producer with no count gives None, so summing with a 0 default would
         report a confident row count for files nobody counted.
         """
         counts = [entry.record_count for entry in self.files]
@@ -104,7 +137,7 @@ class SelectionResult:
 class FileRange:
     """A file's extent on the sort key."""
 
-    entry: FileEntry
+    entry: CompactionFile
     low: Any
     high: Any
 
@@ -118,20 +151,20 @@ class FileRange:
         return self.low == self.high
 
 
-def entry_size(entry: FileEntry) -> int:
+def entry_size(entry: CompactionFile) -> int:
     """A file's size in the budget unit, NULL-safe.
 
-    ``uncompressed_size_in_bytes`` is ``Optional[int]`` and is None for files
-    written before it was recorded. Those read as 0, which is what the catalog
+    ``uncompressed_size`` is ``Optional[int]`` and is None for files written
+    before it was recorded. Those read as 0, which is what the catalog
     did — a file of unknown size never blocks a merge by looking enormous.
     """
-    return int(entry.uncompressed_size_in_bytes or 0)
+    return int(entry.uncompressed_size or 0)
 
 
 # --- Rule A: brute -----------------------------------------------------------
 
 
-def _select_combine_small(entries: Sequence[FileEntry]) -> Optional[CompactionPlan]:
+def _select_combine_small(entries: Sequence[CompactionFile]) -> Optional[CompactionPlan]:
     """Combine sub-``SMALL_FILE_BYTES`` files toward ``TARGET_SIZE_BYTES``.
 
     The no-sort-key path. Smallest first, accumulate while the pass budget
@@ -142,7 +175,7 @@ def _select_combine_small(entries: Sequence[FileEntry]) -> Optional[CompactionPl
     if len(small_files) < 2:
         return None
 
-    selected: List[FileEntry] = []
+    selected: List[CompactionFile] = []
     total_size = 0
 
     for entry in sorted(small_files, key=entry_size):
@@ -163,7 +196,7 @@ def _select_combine_small(entries: Sequence[FileEntry]) -> Optional[CompactionPl
 
 
 def _select_brute_consolidation(
-    sub_floor: Sequence[FileEntry], sort_column: Optional[str]
+    sub_floor: Sequence[CompactionFile], sort_column: Optional[str]
 ) -> Optional[CompactionPlan]:
     """Merge two or more sub-floor files, smallest first, toward TARGET.
 
@@ -178,7 +211,7 @@ def _select_brute_consolidation(
     if len(sub_floor) < 2:
         return None
 
-    selected: List[FileEntry] = []
+    selected: List[CompactionFile] = []
     total = 0
     for entry in sorted(sub_floor, key=entry_size):
         size = entry_size(entry)
@@ -341,7 +374,7 @@ def _select_binpack(
 
 
 def _select_sort_aware(
-    key_ranges: Sequence[Tuple[FileEntry, Any, Any]], sort_column: str, rng=None
+    key_ranges: Sequence[Tuple[CompactionFile, Any, Any]], sort_column: str, rng=None
 ) -> Optional[CompactionPlan]:
     """Rule B: decluster an overlapping group, else pack a disjoint run.
 
@@ -367,7 +400,7 @@ def _select_sort_aware(
 
 
 def _select_delete_debt(
-    entries: Sequence[FileEntry],
+    entries: Sequence[CompactionFile],
     sort_column: Optional[str],
     threshold: float = DELETE_DEBT_THRESHOLD,
 ) -> Optional[CompactionPlan]:
@@ -381,7 +414,7 @@ def _select_delete_debt(
     A single-file ``combine`` preserves the file's existing row order, so a
     sorted file comes out still sorted and no sort is needed or wanted.
     """
-    worst: Optional[FileEntry] = None
+    worst: Optional[CompactionFile] = None
     worst_ratio = 0.0
 
     for entry in entries:
@@ -412,9 +445,9 @@ def _select_delete_debt(
 
 
 def select_compaction_plan(
-    entries: Sequence[FileEntry],
+    entries: Sequence[CompactionFile],
     sort_column: Optional[str] = None,
-    key_ranges: Optional[Sequence[Tuple[FileEntry, Any, Any]]] = None,
+    key_ranges: Optional[Sequence[Tuple[CompactionFile, Any, Any]]] = None,
     delete_debt_threshold: float = DELETE_DEBT_THRESHOLD,
     rng=None,
 ) -> SelectionResult:

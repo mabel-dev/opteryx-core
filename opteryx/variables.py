@@ -241,6 +241,14 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     "disable_runtime_minmax_join_filter": (
         BOOLEAN, FromConfig("DISABLE_RUNTIME_MINMAX_JOIN_FILTER"),
         VariableOwner.USER, Visibility.UNRESTRICTED),
+    # Top-N runtime boundary (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md), read at COMPILE
+    # time. USER-owned and UNRESTRICTED for the same reasons as the join filter just
+    # above: it is pure skipping (off can only read more, never answer differently),
+    # whether it pays is a property of the data layout (is the table clustered by
+    # the sort key?), and measuring it needs the off arm.
+    "disable_topn_runtime_boundary": (
+        BOOLEAN, FromConfig("DISABLE_TOPN_RUNTIME_BOUNDARY"),
+        VariableOwner.USER, Visibility.UNRESTRICTED),
     # Bind-time only (see binder.py's COMPARISON_OPERATOR handling), same
     # capture-at-bind reasoning as match_threshold above. UNRESTRICTED: tuning
     # a cost-estimation coefficient for one's own query is not a data-access

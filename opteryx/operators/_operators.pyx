@@ -397,6 +397,15 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void add_skene_runtime_bound(size_t p, size_t bound_idx, string column)
         void add_parquet_runtime_bound(size_t p, size_t bound_idx, string column,
                                        int64_t* pruned_slot)
+        # Top-N runtime boundary (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md). `except +`:
+        # each wiring call throws when the plan and the compiler's eligibility test
+        # disagree, and that must surface as an error, not a terminate.
+        size_t new_topn_boundary(bint ascending)
+        void arm_topn_sink_boundary(size_t p, size_t idx) except +
+        void add_parquet_topn_boundary(size_t p, size_t idx, string column,
+                                       bint nulls_first) except +
+        void arm_latmat_topn_boundary(size_t p, size_t idx) except +
+        int64_t topn_boundary_skipped(size_t idx) except +
         void set_native_postgres_scan_source(size_t p, const PgScanSpec* spec)
         void set_skene_latmat_scan_source(size_t p,
                                           const cppvector[string]* files,
@@ -2539,6 +2548,10 @@ cdef class NativePlan:
     # SkeneScanPlan / SkeneLatmatScanPlan objects the skene Sources borrow
     cdef public list skene_scan_plans
     cdef public list postgres_scan_plans  # PostgresScanPlan objects the Postgres Source borrows
+    # Top-N runtime boundaries armed on this plan: (scan identity, boundary slot).
+    # Read after the run to report each scan's `row_groups_pruned_topn`; empty for
+    # every plan that armed none.
+    cdef public list topn_boundary_scans
 
     def __cinit__(self):
         self._e = new Engine()
@@ -2547,6 +2560,7 @@ cdef class NativePlan:
         self.scan_plans = []
         self.skene_scan_plans = []
         self.postgres_scan_plans = []
+        self.topn_boundary_scans = []
         # Spill root for this plan's MorselBuffers (docs/MORSEL_SPILL_DESIGN.md).
         # KVSTORE_LOCATION is the per-query spill store the config has always
         # documented; the native SpillStore is its first-party caller. Only a
@@ -2838,6 +2852,38 @@ cdef class NativePlan:
         cdef bytes name = column.encode("utf-8") if isinstance(column, str) else column
         self._e.add_parquet_runtime_bound(p, bound_idx, <string>name,
                                           &splan.row_groups_pruned_runtime)
+
+    def arm_parquet_topn_boundary(self, size_t sink_pipeline, str column, bint ascending,
+                                  bint nulls_first, str scan_identity):
+        """Top-N runtime boundary, single-pass parquet (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md
+        §4.1): pipeline ``sink_pipeline``'s TopNSink PRODUCES the boundary from the
+        rows it receives, and the same pipeline's native parquet scan CONSUMES it,
+        testing physical column ``column`` before submitting each row group.
+
+        Must be called after both ``set_native_scan_source`` and ``set_topn_sink``
+        for that pipeline; raises when either is not what the compiler said it was.
+        Returns the boundary slot."""
+        cdef size_t idx = self._e.new_topn_boundary(ascending)
+        self._e.arm_topn_sink_boundary(sink_pipeline, idx)
+        self._e.add_parquet_topn_boundary(sink_pipeline, idx, <string>column.encode("utf-8"),
+                                          nulls_first)
+        self.topn_boundary_scans.append((scan_identity, idx))
+        return idx
+
+    def arm_latmat_topn_boundary(self, size_t p, bint ascending, str scan_identity):
+        """Top-N runtime boundary, two-pass latmat parquet (§4.2): the scan's own
+        pass 1 both produces the boundary and consumes it. Raises when pipeline
+        ``p``'s source is not a latmat scan or its sort direction disagrees.
+        Returns the boundary slot."""
+        cdef size_t idx = self._e.new_topn_boundary(ascending)
+        self._e.arm_latmat_topn_boundary(p, idx)
+        self.topn_boundary_scans.append((scan_identity, idx))
+        return idx
+
+    def topn_boundary_skipped(self, size_t idx):
+        """Row groups the consumers skipped because of boundary ``idx``. Read after
+        the run has drained."""
+        return int(self._e.topn_boundary_skipped(idx))
 
     def set_skene_latmat_scan_source(self, size_t p, SkeneLatmatScanPlan splan,
                                      size_t pred_fn, size_t pred_ctx,

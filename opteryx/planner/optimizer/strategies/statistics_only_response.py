@@ -30,6 +30,7 @@ from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import LogicalColumn
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
+from opteryx.types.logical_type import DrakenType
 from opteryx.types.logical_type import LogicalCategory, INT64 as _CT_INT64
 
 # Strategy-style Optimization Class
@@ -175,6 +176,11 @@ def is_simple_aggregate(aggregate_node) -> bool:
             # asserts both invariants against the list, so widening it without
             # satisfying them fails rather than silently answering wrongly.
             if col_type not in (LogicalCategory.DATE, LogicalCategory.INTEGER, LogicalCategory.TIMESTAMP):
+                return False
+            # Invariant 1 fails for ONE integer width: UINT64's ordinal key is
+            # sign-biased (draken/ops/ordinalize.h `ordinalize_scalar_u64`), so
+            # an ordinal bound of a UINT64 column is not its value.
+            if expr.schema_column.column_type.physical == DrakenType.UINT64:
                 return False
             continue
 
@@ -521,39 +527,11 @@ def get_min_max_from_manifest(manifest, column_name: str, operation: str):
     if not manifest.stats_are_authoritative:
         return None
 
-    # The manifest owns this mapping: per-file stats are keyed by the column's
-    # LOAD-TIME position, and by now projection pushdown has pruned
-    # manifest.schema to just the referenced columns. Resolving the position here
-    # against that pruned schema silently read a different column's bounds —
-    # MAX(followers) answered with MAX(tweet_id) once followers was the only
-    # column left (index 0, the file's tweet_id slot).
-    field_id = manifest._resolve_field_id(column_name)
-    if field_id is None:
-        return None
-
-    # Aggregate min/max across all files
-    min_val = None
-    max_val = None
-
-    for file_entry in manifest.files:
-        if file_entry.column_stats is not None:
-            file_min = file_entry.column_stats.get_min(field_id)
-            file_max = file_entry.column_stats.get_max(field_id)
-        elif file_entry.lower_bounds is not None or file_entry.upper_bounds is not None:
-            # lower_bounds/upper_bounds are keyed by field_id (not raw list
-            # position) — see FileEntry.from_datafile. Indexing the positional
-            # min_values/max_values lists by field_id here would be wrong
-            # whenever field_id isn't a small schema-start-relative position,
-            # which is exactly the bug this field-id scheme fixes.
-            file_min = (file_entry.lower_bounds or {}).get(field_id)
-            file_max = (file_entry.upper_bounds or {}).get(field_id)
-        else:
-            continue
-
-        if file_min is not None and (min_val is None or file_min < min_val):
-            min_val = file_min
-        if file_max is not None and (max_val is None or file_max > max_val):
-            max_val = file_max
+    # The manifest owns the column -> load-time position mapping: by now
+    # projection pushdown has pruned manifest.schema to just the referenced
+    # columns, and resolving a position against that pruned schema read a
+    # different column's bounds (MAX(followers) answered with MAX(tweet_id)).
+    min_val, max_val = manifest.min_max(column_name)
 
     if operation == "MIN":
         return min_val

@@ -4,7 +4,6 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 from opteryx.models.execution_context import ExecutionContext
-from opteryx.models.file_entry import FileEntry
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.compiled.structures.expressions import current_name_of
 from opteryx.compiled.structures.expressions import is_expression
@@ -21,7 +20,6 @@ from opteryx.models.trace_bundle import TraceBundle
 
 __all__ = (
     "ExecutionContext",
-    "FileEntry",
     "LogicalColumn",
     "Manifest",
     "NonTabularResult",

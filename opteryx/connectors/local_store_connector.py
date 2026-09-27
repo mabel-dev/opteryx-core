@@ -24,10 +24,7 @@ from opteryx.connectors.capabilities import Writable
 from opteryx.connectors.capabilities.eidetic import ViewDefinition
 from opteryx.exceptions import ColumnNotFoundError, ConcurrentModificationError, DatasetNotFoundError
 from opteryx.models.dataset_descriptor import DatasetDescriptor
-from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
-from opteryx.models.manifest_io import read_manifest_file_entries
-from opteryx.models.manifest_io import write_manifest_parquet
 from opteryx.types.schema import ColumnDescriptor
 from opteryx.types.schema import RelationDescriptor
 
@@ -69,6 +66,44 @@ def _ts_for_filename(iso: str) -> str:
 # so a sidecar and a catalog record read the same for the same statement; the
 # local store records it and does not fire, so nothing here enforces it.
 DEFAULT_MINIMUM_INTERVAL_SECONDS = 120
+
+
+def _schema_layout(schema: RelationDescriptor):
+    """A relation's column names and physical types, in position order - the
+    key every manifest statistic is stored under."""
+    return (
+        tuple(c.name for c in schema.columns),
+        tuple(c.column_type.physical for c in schema.columns),
+    )
+
+
+def _assemble(schema: RelationDescriptor, carried=None, carried_positions=None, relocated=None, rows=None):
+    """A snapshot's complete file list as native rows over `schema`: the
+    `carried` rows first (column k taking their column `carried_positions[k]`;
+    `relocated` gives each one a new (path, size) when its file was rewritten),
+    then the new `rows`, re-keyed by column name. A new row over a column the
+    relation does not have is refused - it would be statistics for nothing."""
+    from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
+
+    names, physical = _schema_layout(schema)
+    builder = NativeManifestBuilder(names, physical, True, True)
+    if carried is not None:
+        for source_row in range(len(carried)):
+            row = builder.add_file_from(carried, source_row, carried_positions)
+            if relocated is not None:
+                path, size = relocated[source_row]
+                builder.relocate_file(row, path, size)
+    if rows is not None and len(rows):
+        strangers = [name for name in rows.columns if name not in names]
+        if strangers:
+            raise ValueError(
+                f"data files carry columns {strangers} that {schema.name} does not have"
+            )
+        index = {name: position for position, name in enumerate(rows.columns)}
+        positions = [index.get(name) for name in names]
+        for source_row in range(len(rows)):
+            builder.add_file_from(rows, source_row, positions)
+    return builder.build({})
 
 
 class LocalStoreConnector(Eidetic, Writable, BaseConnector):
@@ -185,18 +220,27 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         with open(snapshot_path, "r") as f:
             return json.load(f)
 
-    def _read_current_file_entries(
-        self, relation_dir: str, descriptor: DatasetDescriptor
-    ) -> List[FileEntry]:
-        """Resolve a dataset's current file list via its snapshot pointer + manifest Parquet."""
+    def _read_current_rows(self, relation_dir: str, descriptor: DatasetDescriptor):
+        """The dataset's current files as native rows over its schema (its
+        snapshot's manifest, decoded natively), or None when the snapshot has
+        no manifest. A manifest written before this store recorded ordinal
+        bounds reads in the decoded dialect it was written in."""
+        from opteryx.compiled.planner.native_manifest import decode_manifest_parquet
+
         snapshot = self._read_snapshot(relation_dir, descriptor.current_snapshot)
         manifest_file = snapshot.get("manifest_file")
         if not manifest_file:
-            return []
+            return None
         with open(os.path.join(relation_dir, manifest_file), "rb") as f:
             manifest_bytes = f.read()
-        entries, _native = read_manifest_file_entries(manifest_bytes)
-        return entries
+        names, physical = _schema_layout(descriptor.schema)
+        return decode_manifest_parquet(
+            manifest_bytes, names, physical, {}, snapshot.get("bounds_are_ordinal", False), True
+        )
+
+    def _current_file_count(self, relation_dir: str, descriptor: DatasetDescriptor) -> int:
+        rows = self._read_current_rows(relation_dir, descriptor)
+        return 0 if rows is None else len(rows)
 
     def create_relation(
         self, relation_name: str, schema: RelationDescriptor, author: Optional[str] = None
@@ -280,7 +324,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
                 dataset=relation_name, connector=self.__class__.__name__
             )
 
-        self._commit(relation_name, [])
+        self._commit(relation_name, _assemble(self._read_dataset_json(relation_dir).schema))
 
     def relation_exists(self, relation_name: str) -> bool:
         """Check if a relation exists.
@@ -1125,7 +1169,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
     def insert(
         self,
         relation_name: str,
-        file_entries: List[FileEntry],
+        rows,
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
         read_sources: Optional[list] = None,
@@ -1139,7 +1183,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
 
         Args:
             relation_name: Fully-qualified relation name
-            file_entries: List of FileEntry objects to append to the relation
+            rows: native file rows for the files to append to the relation
             author: session user, unused by this store (see create_relation)
             commit_message: what this append was, unused by this store - its
                 snapshot records carry no author or message (see `_commit`)
@@ -1156,18 +1200,20 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
                 dataset=relation_name, connector=self.__class__.__name__
             )
 
-        # Read current file list and append new entries
+        # The current files, carried as they are, then the new ones
         base_descriptor = self._read_dataset_json(relation_dir)
-        current_files = self._read_current_file_entries(relation_dir, base_descriptor)
-
-        new_files = current_files + file_entries
-        self._commit(relation_name, new_files)
+        current = self._read_current_rows(relation_dir, base_descriptor)
+        schema = base_descriptor.schema
+        self._commit(
+            relation_name,
+            _assemble(schema, carried=current, carried_positions=list(range(len(schema.columns))), rows=rows),
+        )
 
     def replace_relation(
         self,
         relation_name: str,
         schema: RelationDescriptor,
-        file_entries: List[FileEntry],
+        rows,
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
         read_sources: Optional[list] = None,
@@ -1183,7 +1229,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         Args:
             relation_name: Fully-qualified relation name
             schema: RelationDescriptor the new data conforms to (may differ from current)
-            file_entries: List of FileEntry objects that become the relation's entire contents
+            rows: native file rows for the files that become the relation's entire contents
             author: session user, unused by this store (see create_relation)
             commit_message: what this replace was, unused by this store - its
                 snapshot records carry no author or message (see `_commit`)
@@ -1200,7 +1246,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
                 dataset=relation_name, connector=self.__class__.__name__
             )
 
-        self._commit(relation_name, file_entries, schema=schema)
+        self._commit(relation_name, _assemble(schema, rows=rows), schema=schema)
 
     def relation_column_names(self, relation_name: str) -> List[str]:
         """Return the relation's current column names only (not full type fidelity)."""
@@ -1252,8 +1298,6 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         leaving them alone would silently attribute one column's min/max to
         another.
         """
-        import dataclasses
-
         import rugo.parquet as _rugo_parquet
 
         relation_dir = self._relation_dir(relation_name)
@@ -1263,21 +1307,20 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
                 dataset=relation_name, connector=self.__class__.__name__
             )
 
-        current_files = self._read_current_file_entries(relation_dir, descriptor)
+        current = self._read_current_rows(relation_dir, descriptor)
+        new_schema = RelationDescriptor(name=relation_name, columns=new_columns)
+        # each surviving column's source position (statistics are keyed by
+        # position, so a drop shifts every later column's); an added column
+        # has none - its files record nothing for it yet
+        if keep is None:
+            carried_width = 0 if current is None else len(current.columns)
+            positions = [k if k < carried_width else None for k in range(len(new_columns))]
+        else:
+            positions = list(keep)
 
-        def _remap_dict(mapping):
-            if mapping is None or keep is None:
-                return mapping
-            return {j: mapping[s] for j, s in enumerate(keep) if s in mapping}
-
-        def _remap_list(values):
-            if values is None or keep is None:
-                return values
-            return [values[s] if s < len(values) else None for s in keep]
-
-        new_entries: List[FileEntry] = []
-        for entry in current_files:
-            source_path = os.path.join(relation_dir, entry.file_path)
+        patched_files = []
+        for path in ([] if current is None else current.file_paths()):
+            source_path = os.path.join(relation_dir, path)
             with open(source_path, "rb") as f:
                 patched = _rugo_parquet.patch_columns(
                     f.read(), drop=drop, rename=rename, add=add, retype=retype
@@ -1289,35 +1332,18 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             with open(tmp_path, "wb") as f:
                 f.write(patched)
             os.replace(tmp_path, full_path)
+            patched_files.append((file_name, os.path.getsize(full_path)))
 
-            new_entries.append(
-                dataclasses.replace(
-                    entry,
-                    file_path=file_name,
-                    file_size_in_bytes=os.path.getsize(full_path),
-                    lower_bounds=_remap_dict(entry.lower_bounds),
-                    upper_bounds=_remap_dict(entry.upper_bounds),
-                    null_value_counts=_remap_dict(entry.null_value_counts),
-                    min_length_bounds=_remap_dict(entry.min_length_bounds),
-                    max_length_bounds=_remap_dict(entry.max_length_bounds),
-                    min_values=_remap_list(entry.min_values),
-                    max_values=_remap_list(entry.max_values),
-                    null_counts=_remap_list(entry.null_counts),
-                    min_lengths=_remap_list(entry.min_lengths),
-                    max_lengths=_remap_list(entry.max_lengths),
-                    char_total_bytes=_remap_list(entry.char_total_bytes),
-                    column_uncompressed_sizes_in_bytes=_remap_list(
-                        entry.column_uncompressed_sizes_in_bytes
-                    ),
-                    # A prebuilt native stats accelerator is keyed by the OLD
-                    # column positions. Dropping it costs a rebuild; keeping a
-                    # stale one would answer for the wrong column.
-                    column_stats=entry.column_stats if keep is None else None,
-                )
-            )
-
-        new_schema = RelationDescriptor(name=relation_name, columns=new_columns)
-        self._commit(relation_name, new_entries, schema=new_schema)
+        self._commit(
+            relation_name,
+            _assemble(
+                new_schema,
+                carried=current,
+                carried_positions=positions,
+                relocated=patched_files,
+            ),
+            schema=new_schema,
+        )
 
     def add_column(
         self,
@@ -1359,7 +1385,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         # and building one for a type the patcher could not synthesise anyway
         # would refuse a statement that has no data to write.
         donors = None
-        if self._read_current_file_entries(relation_dir, descriptor):
+        if self._current_file_count(relation_dir, descriptor):
             donors = [build_column_donor(column_name, column_type, default)]
 
         columns.append(
@@ -1510,7 +1536,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         # Only files need a donor; on an empty relation this is a pure schema
         # change, the same posture add_column takes.
         donors = None
-        if self._read_current_file_entries(relation_dir, descriptor):
+        if self._current_file_count(relation_dir, descriptor):
             donors = {column_name: build_column_donor(column_name, new_type, None)}
 
         new_columns = [
@@ -1569,7 +1595,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
     def _commit(
         self,
         relation_name: str,
-        new_files: List[FileEntry],
+        manifest,
         schema: Optional[RelationDescriptor] = None,
     ) -> None:
         """Optimistic concurrency control commit protocol.
@@ -1579,7 +1605,8 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
 
         Args:
             relation_name: Fully-qualified relation name
-            new_files: Complete list of files for the new snapshot
+            manifest: the new snapshot's complete file list, as a NativeManifest
+                over the snapshot's schema (see `_assemble`)
             schema: Schema for the new snapshot; defaults to the relation's current
                 schema (pass explicitly only when the schema is changing, e.g. REPLACE)
 
@@ -1599,7 +1626,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         created_at = _now_utc_iso()
         ts = _ts_for_filename(created_at)
 
-        manifest_bytes = write_manifest_parquet(new_files, new_schema)
+        manifest_bytes = manifest.to_parquet()
 
         manifest_name = f"manifest-{ts}.parquet"
         counter = 1
@@ -1619,6 +1646,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             "created_at": created_at,
             "parent_snapshot": base_snapshot,
             "manifest_file": manifest_name,
+            # the manifest's bounds are ordinal keys (the native writer's
+            # dialect); a snapshot without this was written with decoded ones
+            "bounds_are_ordinal": True,
         }
 
         # Step 3: Choose snapshot name with collision guard
@@ -1828,31 +1858,16 @@ class LocalStoreTable(BaseTable):
         descriptor = DatasetDescriptor.from_dict(descriptor_dict)
         self.schema = descriptor.schema
 
-        file_entries: List[FileEntry] = []
-        min_k_vector = None
-        histogram_vector = None
-        char_class_vector = None
+        native = None
         if descriptor.current_snapshot is not None:
-            snapshot_path = os.path.join(relation_dir, descriptor.current_snapshot)
-            with open(snapshot_path, "r") as f:
-                snapshot = json.load(f)
-            manifest_file = snapshot.get("manifest_file")
-            if manifest_file:
-                with open(os.path.join(relation_dir, manifest_file), "rb") as f:
-                    manifest_bytes = f.read()
-                file_entries, native = read_manifest_file_entries(manifest_bytes)
-                for fe in file_entries:
-                    fe.file_path = os.path.join(relation_dir, fe.file_path)
-                min_k_vector = native.get("min_k_hashes")
-                histogram_vector = native.get("histogram_counts")
-                char_class_vector = native.get("char_class_counts")
-
-        self.manifest = Manifest(
-            file_entries,
-            self.schema,
-            min_k_vector=min_k_vector,
-            histogram_vector=histogram_vector,
-            char_class_vector=char_class_vector,
-            stats_are_authoritative=True,  # read from the files' own footers
-        )
+            native = self._read_current_rows(relation_dir, descriptor)
+        if native is None:
+            native = _assemble(self.schema)
+        else:
+            # the manifest names each file relative to the relation's directory
+            native = native.with_paths(
+                [os.path.join(relation_dir, path) for path in native.file_paths()]
+            )
+        # read from the files' own footers
+        self.manifest = Manifest(native, self.schema)
         return self.schema, self.manifest

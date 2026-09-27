@@ -763,7 +763,7 @@ def visit_function_dataset(
         from opteryx.exceptions import DatasetNotFoundError
         from opteryx.exceptions import DatasetReadError
         from opteryx.exceptions import NotSupportedError
-        from opteryx.models.file_entry import FileEntry
+        from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
         from opteryx.models.manifest import Manifest
         from rugo.parquet import read_metadata_from_memoryview
 
@@ -895,16 +895,15 @@ def visit_function_dataset(
         # correctness-affecting kind) already applies generically to FunctionDataset
         # nodes the same as Scan.
         file_infos = filesystem.get_file_info(parquet_files)
-        file_entries = [
-            FileEntry(
-                file_path=f,
-                file_format="PARQUET",
-                record_count=0,
-                file_size_in_bytes=getattr(info, "size", 0) or 0,
-            )
-            for f, info in zip(parquet_files, file_infos)
-        ]
-        manifest = Manifest(file_entries, schema, stats_are_authoritative=True)
+        builder = NativeManifestBuilder(
+            tuple(column.name for column in schema.columns),
+            tuple(column.column_type.physical for column in schema.columns),
+            False,
+            True,
+        )
+        for f, info in zip(parquet_files, file_infos):
+            builder.add_file(f, "PARQUET", 0, getattr(info, "size", 0) or 0)
+        manifest = Manifest(builder.build({}), schema)
 
         # node.connector is a real FileSystemTable (not just a predicate-pushdown
         # capability marker the way JsonlPredicatePushable is for READ_JSONL) --

@@ -743,7 +743,7 @@
     },
     "user_memberships": {
         "name": "user_memberships",
-        "type": "ARRAY<VARIANT>",
+        "type": "ARRAY<VARCHAR>",
         "owner": "INTERNAL",
         "visibility": "UNRESTRICTED",
         "settable": false,

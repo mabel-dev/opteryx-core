@@ -10,9 +10,11 @@
  *   provides shared connection/DNS cache across threads. Per-data-type mutexes are
  *   required because libcurl may lock DNS and CONNECT independently in one operation;
  *   a single mutex would deadlock on the second acquire from the same thread.
- * - get_many(): creates a local CURLM* per call, runs all N transfers on one
- *   thread without CURLOPT_SHARE. The local CURLM already reuses connections
- *   within the batch; CURLSH is not used to avoid any cross-thread mutex contention.
+ * - get_many() / head_many(): drive the calling thread's persistent CURLM*,
+ *   running all N transfers on that thread without CURLOPT_SHARE. The CURLM's
+ *   connection cache persists across calls on the thread, so consecutive
+ *   batches reuse warm connections; CURLSH is not used to avoid any
+ *   cross-thread mutex contention.
  */
 
 #pragma once
@@ -82,7 +84,7 @@ struct HttpTuning {
     //     (cap=1 30.28s vs cap=16 30.06s). Connection count appears to matter
     //     only while there is bandwidth headroom.
     //  2. PIPEWAIT IS NOT A FREE WAY TO GET THAT WIN. Capping connections costs
-    //     nothing extra; PIPEWAIT costs a serialised handshake per batch (see
+    //     nothing extra; PIPEWAIT can cost a serialised handshake (see
     //     use_pipewait below). The proxy measurement says nothing about whether
     //     PIPEWAIT nets out positive — that is still unmeasured.
     // NOTE these are two INDEPENDENT settings and conflating them (as an earlier
@@ -91,13 +93,13 @@ struct HttpTuning {
     //   use_multiplexing = CURLMOPT_PIPELINING. libcurl >= 7.62 already defaults
     //     this to CURLPIPE_MULTIPLEX, so `true` here == the historical default.
     //   use_pipewait     = CURLOPT_PIPEWAIT. NOT the historical default, and not
-    //     free: get_many() builds a FRESH CURLM per batch with no CURLOPT_SHARE
-    //     (see the comment at the curl_multi_init call), so connections are never
-    //     reused ACROSS batches. PIPEWAIT therefore serialises
-    //     [TCP + TLS + h2 negotiate] ahead of the batch's transfers on EVERY
-    //     row-group fetch, where without it the handshakes overlap. Whether the
-    //     multiplexing win exceeds that per-batch latency is exactly what has to
-    //     be measured — hence default false, opt-in.
+    //     free: on a batch that finds no warm connection in the thread's CURLM
+    //     (the thread's first batch, or after the server closed idle ones),
+    //     PIPEWAIT serialises [TCP + TLS + h2 negotiate] ahead of the batch's
+    //     transfers, where without it the handshakes overlap. (The measurements
+    //     above predate the per-thread CURLM, when EVERY batch dialled fresh.)
+    //     Whether the multiplexing win exceeds that latency is exactly what has
+    //     to be measured — hence default false, opt-in.
     bool   use_multiplexing           = true;             // CURLMOPT_PIPELINING
     bool   use_pipewait               = false;            // CURLOPT_PIPEWAIT
     // Diagnostic escape hatch: pin to HTTP/1.1. Only reason to set this is to
@@ -165,8 +167,10 @@ public:
     /**
      * Perform multiple HTTP GET requests concurrently (single-threaded CURLM).
      *
-     * Creates a local CURLM* event loop for this call only — never shared
-     * across threads. All N transfers run concurrently on the calling thread.
+     * Drives the calling thread's persistent CURLM* event loop — never shared
+     * across threads, and its connection cache survives across calls, so
+     * consecutive batches reuse warm connections. All N transfers run
+     * concurrently on the calling thread.
      * This is what CURLM is designed for: one thread, N concurrent transfers.
      *
      * GIL should be released by the Cython caller for the entire duration
@@ -185,7 +189,7 @@ public:
     /**
      * Perform multiple HTTP HEAD requests concurrently (single-threaded CURLM).
      *
-     * Mirrors get_many(): a local CURLM* event loop for this call only, all N
+     * Mirrors get_many(): the calling thread's persistent CURLM*, all N
      * HEAD requests run concurrently on the calling thread. This is the batch
      * counterpart to head() — callers resolving metadata for many objects
      * (e.g. a manifest fan-out) must use this instead of dispatching per-path

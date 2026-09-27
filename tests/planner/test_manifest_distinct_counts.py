@@ -21,9 +21,10 @@ import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
-from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
-from opteryx.models.manifest_io import read_manifest_file_entries, write_manifest_parquet
+from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
+from opteryx.models.file_entry import FileEntry
+from opteryx.models.manifest_io import read_manifest_file_entries
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import RelationSchema
 from opteryx.planner.plan_context import PlanContext
@@ -46,20 +47,29 @@ def _schema(*names):
     )
 
 
+
+def _manifest_bytes(schema, path, file_format, record_count, file_size, distinct=None, null_counts=None):
+    """One file's manifest, written by the manifest writer (NativeManifest.to_parquet):
+    `distinct` is {position: (count, is_exact)}, `null_counts` positional."""
+    names = tuple(c.name for c in schema.columns)
+    physical = tuple(c.column_type.physical for c in schema.columns)
+    builder = NativeManifestBuilder(names, physical, True, True)
+    row = builder.add_file(path, file_format, record_count, file_size)
+    for position, (count, exact) in (distinct or {}).items():
+        builder.set_distinct_count(row, position, count, exact)
+    for position, nulls in enumerate(null_counts or []):
+        if nulls is not None:
+            builder.set_counts(row, position, null_count=nulls)
+    return builder.build({}).to_parquet()
+
 def test_distinct_counts_round_trip_positionally():
     """Position IS field id, the same convention `null_counts` and `min_values`
     use. A sparse dict must come back attached to the columns it was keyed to -
     keying from 1, or writing a gap, silently attaches every count to the NEXT
     column."""
     schema = _schema("a", "b", "c")
-    entry = FileEntry(
-        file_path="postgres://t",
-        file_format="POSTGRES",
-        record_count=1000,
-        file_size_in_bytes=0,
-        distinct_value_counts={0: (50, False), 2: (7, False)},
-    )
-    back, _native = read_manifest_file_entries(write_manifest_parquet([entry], schema))
+    data = _manifest_bytes(schema, "postgres://t", "POSTGRES", 1000, 0, distinct={0: (50, False), 2: (7, False)})
+    back, _native = read_manifest_file_entries(data)
     assert back[0].distinct_value_counts == {0: (50, False), 2: (7, False)}
 
 
@@ -68,10 +78,7 @@ def test_a_producer_with_no_distinct_counts_writes_none():
     instead. The column is written empty, the way min_k_hashes and
     histogram_counts are by producers that do not compute them."""
     schema = _schema("a")
-    entry = FileEntry(
-        file_path="a.parquet", file_format="PARQUET", record_count=10, file_size_in_bytes=1
-    )
-    back, _native = read_manifest_file_entries(write_manifest_parquet([entry], schema))
+    back, _native = read_manifest_file_entries(_manifest_bytes(schema, "a.parquet", "PARQUET", 10, 1))
     assert back[0].distinct_value_counts is None
 
 
@@ -79,15 +86,9 @@ def test_exactness_is_not_persisted_and_reads_back_as_an_estimate():
     """The safe direction. An exact count read back as an estimate loses an
     optimisation; an estimate read back as exact would lose ROWS."""
     schema = _schema("a")
-    entry = FileEntry(
-        file_path="postgres://t",
-        file_format="POSTGRES",
-        record_count=100,
-        file_size_in_bytes=0,
-        # written as EXACT ...
-        distinct_value_counts={0: (9, True)},
-    )
-    back, _native = read_manifest_file_entries(write_manifest_parquet([entry], schema))
+    # written as EXACT ...
+    data = _manifest_bytes(schema, "postgres://t", "POSTGRES", 100, 0, distinct={0: (9, True)})
+    back, _native = read_manifest_file_entries(data)
     # ... and read back as an estimate, never the other way round.
     assert back[0].distinct_value_counts == {0: (9, False)}
 
@@ -103,28 +104,16 @@ def test_a_manifest_without_the_column_still_reads():
     the format, and no stored manifest is rewritten for it. A manifest that
     predates the column must read as "no counts", not raise."""
     schema = _schema("a")
-    entry = FileEntry(
-        file_path="a.parquet",
-        file_format="PARQUET",
-        record_count=10,
-        file_size_in_bytes=1,
-        null_counts=[2],
-    )
-    data = write_manifest_parquet([entry], schema)
+    data = _manifest_bytes(schema, "a.parquet", "PARQUET", 10, 1, null_counts=[2])
 
-    # Rebuild the manifest bytes WITHOUT the column, the way an older writer
-    # produced them, rather than asserting against a checked-in binary.
-    from opteryx.models import manifest_io
+    # The same manifest WITHOUT the column, the way an older writer produced
+    # it, rather than asserting against a checked-in binary.
+    import rugo.parquet as rugo_parquet
 
-    original = dict(manifest_io._MANIFEST_COLUMNS)
-    without = {k: v for k, v in original.items() if k != "distinct_counts"}
-    manifest_io._MANIFEST_COLUMNS.clear()
-    manifest_io._MANIFEST_COLUMNS.update(without)
-    try:
-        old_format = write_manifest_parquet([entry], schema)
-    finally:
-        manifest_io._MANIFEST_COLUMNS.clear()
-        manifest_io._MANIFEST_COLUMNS.update(original)
+    with rugo_parquet.read_parquet(data) as reader:
+        morsel = next(iter(reader))
+    keep = [name for name in morsel.column_names if name not in (b"distinct_counts", "distinct_counts")]
+    old_format = rugo_parquet.write_parquet(morsel.select(keep), compression="zstd")
 
     assert len(old_format) < len(data), "the old format really is missing a column"
     back, _native = read_manifest_file_entries(old_format)

@@ -38,6 +38,7 @@ from typing import Optional
 
 from opteryx.planner.compaction import CompactionPlan
 from opteryx.planner.compaction import SelectionOutcome
+from opteryx.planner.compaction import compaction_files
 from opteryx.planner.compaction import select_compaction_plan
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
@@ -103,16 +104,19 @@ class CompactionPlanningStrategy(OptimizationStrategy):
 
             manifest = scan.manifest
             sort_column = self._sort_column(sink, scan)
-            key_ranges = manifest.file_key_ranges(sort_column) if sort_column else None
+            files = compaction_files(manifest)
+            key_ranges = (
+                [(files[row], low, high) for row, low, high in manifest.file_key_ranges(sort_column)]
+                if sort_column
+                else None
+            )
 
             # ⛔ KNOWN GAP: the delete-debt threshold is per-dataset overridable
             # in the catalog (`maintenance_policy["delete-debt-threshold"]`) and
             # the engine has no reader for maintenance policy at all, so every
             # dataset gets the default. A dataset that set its own threshold is
             # planned against the wrong one.
-            result = select_compaction_plan(
-                manifest.files, sort_column=sort_column, key_ranges=key_ranges
-            )
+            result = select_compaction_plan(files, sort_column=sort_column, key_ranges=key_ranges)
 
             if result.outcome is not SelectionOutcome.PLANNED:
                 # Nothing to do. The sink retires no files and commits nothing,
@@ -137,9 +141,7 @@ class CompactionPlanningStrategy(OptimizationStrategy):
 
             selected: CompactionPlan = result.plan
             chosen = {entry.file_path for entry in selected.files}
-            positions = [
-                index for index, entry in enumerate(manifest.files) if entry.file_path in chosen
-            ]
+            positions = sorted(entry.row for entry in selected.files)
 
             # THE PIN. `subset` keeps the sketch vectors positionally aligned
             # with the surviving file list, which is why the file set is narrowed
@@ -166,7 +168,7 @@ class CompactionPlanningStrategy(OptimizationStrategy):
             self.record_decision(
                 "compaction",
                 f"{selected.strategy}/{selected.mode} on {sink.relation_name}: "
-                f"{len(selected)} of {len(manifest.files)} files, "
+                f"{len(selected)} of {len(files)} files, "
                 f"{selected.input_bytes >> 20} MB, -> {selected.expected_outputs} output(s), "
                 f"reason {selected.reason}",
             )

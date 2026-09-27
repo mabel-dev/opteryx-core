@@ -84,20 +84,20 @@ class CompactionCommitNode(BasePlanNode):
             return
 
         try:
-            entries = self._stream.finish()
+            rows = self._stream.finish()
         except Exception:
             self._stream.abandon()
             raise
 
         if not self.retired_files:
-            if entries:
+            if rows:
                 # Rows arrived for a pass that retires nothing: the scan was
                 # not narrowed to the selection. Committing would duplicate
                 # every row; a quiet success would hide the planner bug.
                 self._stream.discard_outputs()
                 raise RuntimeError(
                     f"Compaction Commit: {self.relation_name} wrote "
-                    f"{len(entries)} file(s) but retires none"
+                    f"{len(rows)} file(s) but retires none"
                 )
             # Selection found nothing worth rewriting. A pass that did no
             # work is a success, and committing a snapshot describing
@@ -112,7 +112,7 @@ class CompactionCommitNode(BasePlanNode):
         try:
             self.connector.compaction_commit(
                 self.relation_name,
-                entries,
+                rows,
                 self.retired_files,
                 author=self._author,
                 baseline_snapshot_id=self.baseline_snapshot_id,
@@ -130,10 +130,10 @@ class CompactionCommitNode(BasePlanNode):
         # change - and calling them rows would report the one number a
         # compaction never moves.
         self.result = NonTabularResult(
-            record_count=len(entries),
+            record_count=len(rows),
             status=QueryStatus.SQL_SUCCESS,
             message=(
-                f"{len(entries):,} file(s) written to {md_code(self.relation_name)}, "
+                f"{len(rows):,} file(s) written to {md_code(self.relation_name)}, "
                 f"{len(self.retired_files):,} retired"
             ),
         )

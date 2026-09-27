@@ -118,7 +118,8 @@ cdef class HttpClient:
         own CURL* easy handle. A CURLSH* share handle provides shared
         connection/DNS cache across threads.
       - get_many() / head_many(): run all N requests concurrently on the calling
-        thread via a local CURLM event loop. GIL is released for the entire
+        thread via that thread's persistent CURLM event loop (its connections
+        are reused by the thread's later batches). GIL is released for the entire
         batch. Callers resolving many URLs at once (e.g. a manifest fan-out)
         MUST use these instead of looping a thread pool over get()/head() --
         that pattern forces each worker thread to cross back into the
@@ -195,7 +196,7 @@ cdef class HttpClient:
             requests: list of (url: str, headers: dict) tuples
 
         GIL is released for the entire batch — all N transfers run concurrently
-        in C++ via a local CURLM event loop. No Python thread-pool overhead.
+        in C++ via the calling thread's CURLM event loop. No Python thread-pool overhead.
         """
         if self._closed:
             raise RuntimeError("HttpClient is closed")
@@ -227,7 +228,7 @@ cdef class HttpClient:
             requests: list of (url: str, headers: dict) tuples
 
         GIL is released for the entire batch -- all N HEAD requests run
-        concurrently in C++ via a local CURLM event loop, same as get_many().
+        concurrently in C++ via the calling thread's CURLM event loop, same as get_many().
         This is the batch counterpart callers MUST use instead of dispatching
         per-path head() calls onto a Python-level thread pool.
         """

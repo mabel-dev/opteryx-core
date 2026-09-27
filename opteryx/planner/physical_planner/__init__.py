@@ -148,7 +148,7 @@ def _jsonl_scan_inputs(scan):
                 physical_by_identity.setdefault(schema_column.identity, schema_column.name)
 
     return (
-        [f.file_path for f in scan.manifest.files],
+        scan.manifest.get_file_paths(),
         [c.schema_column.name for c in columns],
         _translate_jsonl_predicates(predicates, physical_by_identity),
     )
@@ -176,12 +176,12 @@ def _skene_scan_inputs(scan):
                 read_identities.add(schema_column.identity)
                 read_schema_columns.append(schema_column)
 
-    return [f.file_path for f in scan.manifest.files], read_schema_columns
+    return scan.manifest.get_file_paths(), read_schema_columns
 
 
 def _scan_reader_for_manifest(manifest, dataset: str) -> str:
     """Operator-registry name for a manifest-backed Scan, dispatched on the
-    dataset's format (FileEntry.file_format — datasets are single-format).
+    dataset's format (Manifest.file_formats — datasets are single-format).
 
     An empty manifest is an empty relation: any reader yields nothing, so the
     parquet reader serves it. A mixed manifest raises in manifest_format; a

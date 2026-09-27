@@ -80,7 +80,7 @@ def test_bounds_of_mixed_types_render_as_text():
         max_values=[1975, "Soyuz", None],
     )
 
-    morsel = file_entries_to_manifest_morsel([entry], schema, bounds_as_text=True)
+    morsel = file_entries_to_manifest_morsel([entry], schema)
 
     assert morsel.column(b"min_values").to_pylist() == [["1961", "Apollo", "1.5"]]
     assert morsel.column(b"max_values").to_pylist() == [["1975", "Soyuz", None]]
@@ -91,37 +91,24 @@ def test_bounds_of_mixed_types_render_as_text():
 
 
 def test_the_persisted_manifest_keeps_typed_bounds():
-    """The text rendering is SHOW MANIFEST's alone. write_manifest_parquet goes
-    through the same builder, and the bounds it writes are read back into
-    FileEntry.lower_bounds/upper_bounds and COMPARED AGAINST PREDICATE LITERALS
-    by Manifest.prune_files - stringifying them there would turn every numeric
-    comparison into a lexicographic one and prune the wrong files."""
-    from opteryx.models.file_entry import FileEntry
-    from opteryx.models.manifest_io import file_entries_to_manifest_morsel
+    """The text rendering is SHOW MANIFEST's alone. The persisted manifest is
+    written natively, and the bounds it writes are read back and COMPARED
+    AGAINST PREDICATE LITERALS by file pruning - stringifying them there would
+    turn every numeric comparison into a lexicographic one and prune the wrong
+    files."""
+    import rugo.parquet as rugo_parquet
+
+    from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
     from opteryx.types import logical_type as lt
-    from opteryx.types.schema import ColumnDescriptor
-    from opteryx.types.schema import RelationDescriptor
 
-    schema = RelationDescriptor(
-        name="t",
-        columns=[
-            ColumnDescriptor(
-                name=name,
-                column_type=lt.INT64,
-            )
-            for name in ("a", "b")
-        ],
-    )
-    entry = FileEntry(
-        file_path="a.parquet",
-        file_format="parquet",
-        record_count=2,
-        file_size_in_bytes=100,
-        min_values=[1, 2],
-        max_values=[3, 4],
-    )
+    builder = NativeManifestBuilder(("a", "b"), (lt.INT64.physical, lt.INT64.physical), True, True)
+    row = builder.add_file("a.parquet", "parquet", 2, 100)
+    for position, (low, high) in enumerate(((1, 3), (2, 4))):
+        builder.set_ordinal_bound(row, position, True, low)
+        builder.set_ordinal_bound(row, position, False, high)
+    data = builder.build({}).to_parquet()
 
-    morsel = file_entries_to_manifest_morsel([entry], schema)
-
+    with rugo_parquet.read_parquet(data) as reader:
+        morsel = next(iter(reader))
     assert morsel.column(b"min_values").to_pylist() == [[1, 2]]
     assert morsel.column(b"max_values").to_pylist() == [[3, 4]]

@@ -137,10 +137,11 @@ class Writable:
             write_row_group(morsel)      encode + stream one row group
             uncompressed_size_in_bytes   running total, in the manifest's unit,
                                          so a caller can roll files at a target
-            close() -> FileEntry         finish the file; the entry carries the
-                                         store's own manifest row in
-                                         `catalog_entry`, so the commit does
-                                         not read the file back
+            close() -> NativeManifest    finish the file; it comes back as a
+                                         native file row (a one-file
+                                         NativeManifest carrying the file's
+                                         statistics), so the commit does not
+                                         read the file back
             abort()                      discard the file; no object remains
 
         `sorted_by` is the caller's claim that every row group it will write is
@@ -164,7 +165,7 @@ class Writable:
     def insert(
         self,
         relation_name: str,
-        file_entries: "List[FileEntry]",
+        rows: "NativeManifest",
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
         read_sources: Optional[List[dict]] = None,
@@ -178,7 +179,8 @@ class Writable:
 
         Args:
             relation_name: Fully-qualified relation name
-            file_entries: List of FileEntry objects to commit
+            rows: the files to commit - one batch of native file rows (the
+                data file writers' `close()` results, concatenated)
             author: session user this append is attributed to (see create_relation)
             commit_message: what the reader of the snapshot history should be
                 told this append WAS. Carries no identity - attribution is
@@ -210,7 +212,7 @@ class Writable:
     def merge_commit(
         self,
         relation_name: str,
-        file_entries: "List[FileEntry]",
+        rows: "NativeManifest",
         delete_positions: "Dict[str, List[int]]",
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
@@ -232,8 +234,8 @@ class Writable:
 
         Args:
             relation_name: Fully-qualified relation name
-            file_entries: FileEntry objects for the files to register. May be
-                empty for a merge whose every arm deleted.
+            rows: native file rows for the files to register. May be empty
+                for a merge whose every arm deleted.
             delete_positions: data-file path -> file-local, zero-based row
                 ordinals in physical row order. Paths are as they appear in the
                 relation's CURRENT manifest. May be empty for a merge whose
@@ -261,7 +263,7 @@ class Writable:
         self,
         relation_name: str,
         schema: "RelationDescriptor",
-        file_entries: "List[FileEntry]",
+        rows: "NativeManifest",
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
         read_sources: Optional[List[dict]] = None,
@@ -279,7 +281,7 @@ class Writable:
         Args:
             relation_name: Fully-qualified relation name
             schema: RelationDescriptor the new data conforms to (unchanged from current)
-            file_entries: List of FileEntry objects that become the relation's entire contents
+            rows: native file rows for the files that become the relation's entire contents
             author: session user this replace is attributed to (see create_relation)
             commit_message: what the reader of the snapshot history should be told
                 this replace WAS. None means the statement has nothing to add
@@ -706,7 +708,7 @@ class Writable:
     def compaction_commit(
         self,
         relation_name: str,
-        file_entries,
+        rows,
         retired_files,
         author: Optional[str] = None,
         baseline_snapshot_id: Optional[int] = None,
@@ -714,7 +716,7 @@ class Writable:
     ) -> None:
         """Retire whole data files and add their replacements as ONE snapshot.
 
-        The commit half of OPTIMIZE. `file_entries` are outputs the caller has
+        The commit half of OPTIMIZE. `rows` are outputs the caller has
         already written; `retired_files` are the manifest paths they replace.
 
         Overriding this is what DECLARES a connector able to compact — the
@@ -724,7 +726,7 @@ class Writable:
 
         Args:
             relation_name: Fully-qualified relation name
-            file_entries: FileEntry objects for the files just written
+            rows: native file rows for the files just written
             retired_files: manifest paths the new files replace
             author: session user this compaction is attributed to
             baseline_snapshot_id: snapshot the pass was planned against; the

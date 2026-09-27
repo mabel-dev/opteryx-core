@@ -41,7 +41,7 @@ from opteryx.connectors import register_workspace
 from opteryx.connectors.base.base_connector import BaseConnector
 from opteryx.connectors.capabilities import Writable
 from opteryx.connectors.opteryx_connector import OpteryxTable
-from opteryx.models.file_entry import FileEntry
+from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
 
 _OWNER_POLICY = [{"pattern": "*", "role": "owner"}]
 
@@ -53,6 +53,13 @@ _COLUMNS = [
 _RELATION = "cat.ops.compaction_log"
 _DATASET = "ops.compaction_log"
 
+
+
+def _file_row(path, record_count, file_size, uncompressed_size=-1, row_group_count=-1):
+    """A data file writer's close() result: the file as a native file row."""
+    builder = NativeManifestBuilder((), (), True, True)
+    builder.add_file(path, "PARQUET", record_count, file_size, row_group_count, uncompressed_size)
+    return builder.build({})
 
 class _UncommittedDataset:
     """A catalog dataset with a schema and no snapshots - what CREATE TABLE
@@ -121,13 +128,7 @@ class _StreamedDataFile:
         self._writer.close()
         data = bytes(self._buffer)
         self._files_written.append(data)
-        return FileEntry(
-            file_path=self.path,
-            file_format="PARQUET",
-            record_count=self.rows,
-            file_size_in_bytes=len(data),
-            catalog_entry={"file_path": self.path, "record_count": self.rows},
-        )
+        return _file_row(self.path, self.rows, len(data))
 
     def abort(self):
         self._writer = None
@@ -172,7 +173,7 @@ class _UncommittedConnector(BaseConnector, Writable):
     def merge_commit(
         self,
         relation_name,
-        file_entries,
+        rows,
         delete_positions,
         author=None,
         commit_message=None,
@@ -181,7 +182,7 @@ class _UncommittedConnector(BaseConnector, Writable):
     ):
         _UncommittedConnector.commits.append(
             {
-                "files": [entry.file_path for entry in file_entries],
+                "files": rows.file_paths(),
                 "positions": dict(delete_positions),
                 "operation": operation,
                 "author": author,

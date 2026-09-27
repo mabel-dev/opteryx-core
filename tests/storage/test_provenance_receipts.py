@@ -29,7 +29,7 @@ from opteryx.connectors import register_workspace
 from opteryx.connectors.base.base_connector import BaseConnector
 from opteryx.connectors.capabilities import Writable
 from opteryx.connectors.opteryx_connector import OpteryxTable
-from opteryx.models.file_entry import FileEntry
+from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
 
 _OWNER_POLICY = [{"pattern": "*", "role": "owner"}]
 
@@ -40,6 +40,13 @@ _OLDER = 7283449002
 _T_OLDER = 1786421691019
 _T_HEAD = 1786587302881
 
+
+
+def _file_row(path, record_count, file_size, uncompressed_size=-1, row_group_count=-1):
+    """A data file writer's close() result: the file as a native file row."""
+    builder = NativeManifestBuilder((), (), True, True)
+    builder.add_file(path, "PARQUET", record_count, file_size, row_group_count, uncompressed_size)
+    return builder.build({})
 
 def _snapshot(snapshot_id, timestamp_ms, parent=None):
     return SimpleNamespace(
@@ -121,7 +128,7 @@ class _Catalog:
 
 
 class _RecordedDataFile:
-    """Stands in for a streaming data file: counts rows, hands back a FileEntry."""
+    """Stands in for a streaming data file: counts rows, hands back a native file row."""
 
     def __init__(self, path):
         self.path = path
@@ -133,13 +140,7 @@ class _RecordedDataFile:
         self.uncompressed_size_in_bytes += morsel.nbytes
 
     def close(self):
-        return FileEntry(
-            file_path=self.path,
-            file_format="PARQUET",
-            record_count=self.rows,
-            file_size_in_bytes=1,
-            catalog_entry={"file_path": self.path, "record_count": self.rows},
-        )
+        return _file_row(self.path, self.rows, 1)
 
     def abort(self):
         pass
@@ -184,10 +185,10 @@ class _Connector(BaseConnector, Writable):
     def create_relation(self, relation_name, schema, author=None):
         pass
 
-    def insert(self, relation_name, file_entries, author=None, commit_message=None, read_sources=None, produced_by=None):
+    def insert(self, relation_name, rows, author=None, commit_message=None, read_sources=None, produced_by=None):
         _Connector.commits.append(("insert", relation_name, read_sources, produced_by))
 
-    def replace_relation(self, relation_name, schema, file_entries, author=None, commit_message=None, read_sources=None, produced_by=None):
+    def replace_relation(self, relation_name, schema, rows, author=None, commit_message=None, read_sources=None, produced_by=None):
         _Connector.commits.append(("replace", relation_name, read_sources, produced_by))
 
 

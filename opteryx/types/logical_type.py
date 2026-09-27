@@ -611,8 +611,13 @@ def is_legal_widen(old: "ColumnType", new: "ColumnType") -> bool:
     Directional — unlike `find_compatible_type`, which blends N values to a common
     supertype and deliberately falls back to VARCHAR for anything it doesn't
     recognise. This never falls back: an unrecognised pair is illegal, not "coerce
-    to string". Legal only within one ladder — signed int, unsigned int, or float —
-    strictly widening. Everything else is rejected: integer->float (not exact
+    to string". Legal within one ladder — signed int, unsigned int, or float —
+    strictly widening, plus one cross-ladder step: unsigned -> a STRICTLY WIDER
+    signed int (UINT8 -> INT16/32/64, UINT16 -> INT32/64, UINT32 -> INT64), which
+    holds every value exactly. That is how an Iceberg table sees an unsigned
+    parquet column (Iceberg has no unsigned types, so the catalog declares the
+    wider signed int), and the scan must deliver the declared type. UINT64 has no
+    wider signed int and never widens across. Everything else is rejected: integer->float (not exact
     across the full range at the top of the ladder), any type carrying a `logical`
     descriptor (DECIMAL/TIMESTAMP/TIME/VECTOR are a separate, not-yet-designed
     lattice; IPV4 is a UINT32 descriptor, not a plain integer — widening it away
@@ -626,6 +631,9 @@ def is_legal_widen(old: "ColumnType", new: "ColumnType") -> bool:
     for ladder in (_SIGNED_INT_LADDER, _UNSIGNED_INT_LADDER, _FLOAT_LADDER):
         if old.physical in ladder and new.physical in ladder:
             return ladder.index(new.physical) > ladder.index(old.physical)
+    if old.physical in _UNSIGNED_INT_LADDER and new.physical in _SIGNED_INT_LADDER:
+        # Same width rank means same byte width (UINT16/INT16); strictly wider only.
+        return _SIGNED_INT_LADDER.index(new.physical) > _UNSIGNED_INT_LADDER.index(old.physical)
     return False
 
 

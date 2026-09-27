@@ -31,8 +31,15 @@ from opteryx.connectors import register_workspace
 from opteryx.connectors.base.base_connector import BaseConnector
 from opteryx.connectors.base.base_connector import BaseTable
 from opteryx.connectors.capabilities import Writable
-from opteryx.models.file_entry import FileEntry
+from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
 
+
+
+def _file_row(path, record_count, file_size, uncompressed_size=-1, row_group_count=-1):
+    """A data file writer's close() result: the file as a native file row."""
+    builder = NativeManifestBuilder((), (), True, True)
+    builder.add_file(path, "PARQUET", record_count, file_size, row_group_count, uncompressed_size)
+    return builder.build({})
 
 class _RegistryTable(BaseTable):
     def __init__(self, schema):
@@ -57,13 +64,7 @@ class _RecordedDataFile:
         self.uncompressed_size_in_bytes += morsel.nbytes
 
     def close(self):
-        return FileEntry(
-            file_path=self.path,
-            file_format="PARQUET",
-            record_count=self.rows,
-            file_size_in_bytes=1,
-            catalog_entry={"file_path": self.path, "record_count": self.rows},
-        )
+        return _file_row(self.path, self.rows, 1)
 
     def abort(self):
         pass
@@ -116,13 +117,13 @@ class _CatalogShapedConnector(BaseConnector, Writable):
             f"memory://{relation_name}", [c.name for c in schema.columns]
         )
 
-    def insert(self, relation_name, file_entries, author=None, **kwargs):
-        self._relations[relation_name][1] += sum(fe.record_count for fe in file_entries)
+    def insert(self, relation_name, rows, author=None, **kwargs):
+        self._relations[relation_name][1] += rows.record_count()
 
-    def replace_relation(self, relation_name, schema, file_entries, author=None, **kwargs):
+    def replace_relation(self, relation_name, schema, rows, author=None, **kwargs):
         self._relations[relation_name] = [
             schema,
-            sum(fe.record_count for fe in file_entries),
+            rows.record_count(),
         ]
 
 

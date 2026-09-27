@@ -18,9 +18,11 @@
 #include <nanobind/stl/vector.h>
 #include <nanobind/stl/shared_ptr.h>   // S0: shared_ptr<VectorOwner> seam (CxxMorsel)
 
+#include <algorithm>  // std::push_heap / std::pop_heap (cxx_ordinal_topn_c)
 #include <atomic>
 #include <chrono>
 #include <climits>
+#include <functional>  // std::greater (cxx_ordinal_topn_c)
 // E37 TEMP diagnostic counter (declared early so own_string + hash_shaped_impl both see it).
 namespace { std::atomic<uint64_t> g_e37_carried_hits{0}; }
 #include <cmath>
@@ -7130,6 +7132,83 @@ extern "C" int cxx_ordinal_bounds_c(const CxxMorsel* m, int32_t col_idx,
     return 1;
 }
 
+// cxx_ordinal_topn_c — keep the n BEST non-null ordinals of one column, across
+// calls. The producer half of the Top-N runtime boundary
+// (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md §3): the caller owns the heap and feeds
+// it morsel after morsel; once it holds n entries, heap[0] is the n-th best value
+// seen so far — the boundary.
+//
+// Lives here for the same reason as cxx_ordinal_bounds_c above: one ops table,
+// one definition of a value's ordinal, the one the file statistics are written in.
+//
+// State: `heap` is caller-owned with room for min(n, *heap_len + rows) entries
+// (this call never writes past that); `*heap_len` is how many are valid, in
+// heap order, on entry and on exit. `ascending != 0` keeps the n SMALLEST — a
+// max-heap, so heap[0] is the worst kept (the largest). `ascending == 0` keeps
+// the n LARGEST — a min-heap, heap[0] the smallest. Once full, a value is
+// admitted only when STRICTLY better than heap[0]: an equal value would replace
+// the boundary with itself.
+//
+// Returns 1 when the column has an ordinal (the heap may be unchanged), 0 for a
+// type with no ordinalize kernel, ARRAY / VECTOR_FP16 / NULL, or a bad column
+// index — with the heap untouched, which the caller treats as "no boundary".
+//
+// Uniform access only (§11): ordinals come from draken_ordinalize over the
+// logical rows, whatever the shape. Nulls are excluded by VALIDITY, not by the
+// ORDINAL_NULL sentinel, for the reason cxx_ordinal_bounds_c documents: the
+// sentinel is also the honest ordinal of INT64_MIN. The per-thread scratch keeps
+// the ordinal buffer from being reallocated on every morsel.
+extern "C" int cxx_ordinal_topn_c(const CxxMorsel* m, int32_t col_idx, uint32_t n,
+                                  int ascending, int64_t* heap, uint32_t* heap_len) {
+    if (m == nullptr || heap == nullptr || heap_len == nullptr) return 0;
+    if (col_idx < 0 || static_cast<size_t>(col_idx) >= m->columns.size()) return 0;
+    const DrakenVector& v = m->columns[static_cast<size_t>(col_idx)].view;
+    if (v.type == DRAKEN_ARRAY || v.type == DRAKEN_VECTOR_FP16 || v.type == DRAKEN_NULL)
+        return 0;
+    const unsigned type_idx = static_cast<unsigned>(v.type);
+    if (type_idx >= OpsTable::kSize || g_ops_table().entries[type_idx].ordinalize == nullptr)
+        return 0;
+    const uint32_t rows = v.length;
+    if (n == 0u || rows == 0u) return 1;
+
+    thread_local std::vector<int64_t> scratch;
+    if (scratch.size() < rows) scratch.resize(rows);
+    draken_ordinalize(v, scratch.data(), rows);
+
+    const uint8_t* validity = v.validity;
+    uint32_t len = *heap_len;
+    if (ascending != 0) {
+        for (uint32_t i = 0u; i < rows; ++i) {
+            if (validity != nullptr && ((validity[i >> 3] >> (i & 7u)) & 1u) == 0u) continue;
+            const int64_t o = scratch[i];
+            if (len < n) {
+                heap[len++] = o;
+                std::push_heap(heap, heap + len);
+            } else if (o < heap[0]) {
+                std::pop_heap(heap, heap + len);
+                heap[len - 1u] = o;
+                std::push_heap(heap, heap + len);
+            }
+        }
+    } else {
+        const std::greater<int64_t> worse_on_top{};
+        for (uint32_t i = 0u; i < rows; ++i) {
+            if (validity != nullptr && ((validity[i >> 3] >> (i & 7u)) & 1u) == 0u) continue;
+            const int64_t o = scratch[i];
+            if (len < n) {
+                heap[len++] = o;
+                std::push_heap(heap, heap + len, worse_on_top);
+            } else if (o > heap[0]) {
+                std::pop_heap(heap, heap + len, worse_on_top);
+                heap[len - 1u] = o;
+                std::push_heap(heap, heap + len, worse_on_top);
+            }
+        }
+    }
+    *heap_len = len;
+    return 1;
+}
+
 // Row-routing scatter — partition a morsel into W disjoint sub-morsels by
 // hash(group-key) % W. Reuses cxx_hash (the SAME keying hash, so every
 // occurrence of a key routes to one bin ⇒ the bins share no keys ⇒ a parallel
@@ -7215,7 +7294,8 @@ extern "C" PyObject* cxx_morsel_to_handle(const CxxMorsel* m) {
 // by construction, not by a kernel's second opinion.
 //
 // Ladders are signed int / unsigned int / float, and widening is strictly up one
-// ladder. A source carrying a logical-type descriptor is refused outright: DECIMAL
+// ladder, or unsigned -> a strictly wider signed int (how an Iceberg catalog
+// declares an unsigned parquet column). A source carrying a logical-type descriptor is refused outright: DECIMAL
 // scale, a TIMESTAMP unit and IPv4-ness all live beside the physical tag, and a
 // width cast would drop them -- which is why is_legal_widen refuses those too.
 static bool ladder_position(DrakenType t, int& ladder, int& rank) noexcept {
@@ -7241,17 +7321,33 @@ static VectorOwner widen_owner(const VectorOwner& src, DrakenType target) {
             std::string("vector_widen: source carries a logical-type descriptor (") +
             type_display_name(s, src.logical_type) + "); widening would drop it");
     int s_ladder = 0, s_rank = 0, t_ladder = 0, t_rank = 0;
-    if (!ladder_position(s, s_ladder, s_rank) || !ladder_position(target, t_ladder, t_rank) ||
-        s_ladder != t_ladder || t_rank <= s_rank)
+    // Strictly up one ladder, or unsigned -> a strictly wider signed int (ladder
+    // 1 -> ladder 0) — the cross-ladder step `is_legal_widen` also admits, and
+    // exact: every UINT8/16/32 value fits the next-wider-or-more signed int.
+    const bool positioned =
+        ladder_position(s, s_ladder, s_rank) && ladder_position(target, t_ladder, t_rank);
+    const bool same_ladder_up = positioned && s_ladder == t_ladder && t_rank > s_rank;
+    const bool unsigned_to_wider_signed =
+        positioned && s_ladder == 1 && t_ladder == 0 && t_rank > s_rank;
+    if (!same_ladder_up && !unsigned_to_wider_signed)
         throw std::invalid_argument(
             std::string("vector_widen: ") + type_display_name(s, nullptr) + " -> " +
             type_display_name(target, nullptr) + " is not a widening");
 
     VecResult r;
     switch (target) {
-        case DRAKEN_INT16:   r = draken_cast_integer_to_int16(nullptr, &src.vec); break;
-        case DRAKEN_INT32:   r = draken_cast_integer_to_int32(nullptr, &src.vec); break;
-        case DRAKEN_INT64:   r = draken_cast_integer_to_int64(nullptr, &src.vec); break;
+        case DRAKEN_INT16:
+            r = unsigned_to_wider_signed ? draken_cast_uint_to_int16(nullptr, &src.vec)
+                                         : draken_cast_integer_to_int16(nullptr, &src.vec);
+            break;
+        case DRAKEN_INT32:
+            r = unsigned_to_wider_signed ? draken_cast_uint_to_int32(nullptr, &src.vec)
+                                         : draken_cast_integer_to_int32(nullptr, &src.vec);
+            break;
+        case DRAKEN_INT64:
+            r = unsigned_to_wider_signed ? draken_cast_uint_to_int64(nullptr, &src.vec)
+                                         : draken_cast_integer_to_int64(nullptr, &src.vec);
+            break;
         case DRAKEN_UINT16:  r = draken_cast_uint_to_uint16(nullptr, &src.vec); break;
         case DRAKEN_UINT32:  r = draken_cast_uint_to_uint32(nullptr, &src.vec); break;
         case DRAKEN_UINT64:  r = draken_cast_uint_to_uint64(nullptr, &src.vec); break;

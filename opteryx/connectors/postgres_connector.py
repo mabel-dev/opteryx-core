@@ -729,7 +729,7 @@ class PostgresTable(
         from opteryx.compiled.http_client import HttpStatusError
         from opteryx.connectors.io_systems.gcs_filesystem import OpteryxGcsFileSystem
         from opteryx.models.manifest import Manifest
-        from opteryx.models.manifest_io import read_manifest_file_entries
+        from opteryx.compiled.planner.native_manifest import decode_manifest_parquet
 
         filesystem = OpteryxGcsFileSystem(bucket=self.gateway.gcs_bucket)
 
@@ -769,19 +769,22 @@ class PostgresTable(
             data = bytes(handle.memoryview)
         finally:
             handle.close()
-        file_entries, _ = read_manifest_file_entries(data)
-
-        if not file_entries:
-            return None
-        # `bounds_are_ordinal=True` because the refresh writes them that way, and
-        # it MUST travel with them: `prune_files` ordinalizes a predicate literal
-        # before comparing only when this is set, so a manifest carrying ordinals
-        # without it compares a real value against an ordinal and matches
-        # nothing. The bounds are ordinals for the reason the writer records -
-        # one typed ARRAY column cannot hold a relation's mixed value types.
-        return Manifest(
-            file_entries, schema, stats_are_authoritative=False, bounds_are_ordinal=True
+        # The refresh writes this manifest's per-column lists in schema order
+        # (positional; no field ids). `bounds_are_ordinal=True` because the
+        # refresh writes them that way - one typed ARRAY column cannot hold a
+        # relation's mixed value types - and it MUST travel with them: pruning
+        # ordinalizes a predicate literal only when it is set.
+        native = decode_manifest_parquet(
+            data,
+            tuple(column.name for column in schema.columns),
+            tuple(column.column_type.physical for column in schema.columns),
+            {},
+            True,
+            False,
         )
+        if len(native) == 0:
+            return None
+        return Manifest(native, schema)
 
     def _row_estimate(self, query_text) -> Optional[int]:
         """The server's own row count for this relation, or None if it has none.

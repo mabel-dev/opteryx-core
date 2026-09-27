@@ -8,8 +8,8 @@ ANALYZE / DROP STATISTICS orchestration for filesystem datasets.
 
 ``ANALYZE TABLE t [FOR COLUMNS …]`` computes, per file and per named column (or
 all columns): a KMV sketch, null count, min/max (as ``Vector.ordinalize()``
-ordinal keys — see ``opteryx.models.manifest_io.write_manifest_parquet``'s
-docstring for what that means and does not mean), a 32-bin equi-width
+ordinal keys — ``draken/ops/ordinalize.h`` states what that means and does
+not mean), a 32-bin equi-width
 histogram, record count, uncompressed byte size (per column and per file, read
 off the footer), and — for VARCHAR/NVARCHAR/VARBINARY columns — byte-class
 counts, total byte count, and min/max string length. All of it is
@@ -41,8 +41,6 @@ from typing import Optional
 from typing import Sequence
 from typing import Tuple
 
-from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
-from opteryx.compiled.planner.native_manifest import decode_manifest_parquet
 from opteryx.connectors.io_systems.local_filesystem import OpteryxLocalFileSystem
 from opteryx.exceptions import ColumnNotFoundError
 from opteryx.exceptions import UnsupportedSyntaxError
@@ -121,6 +119,8 @@ def _read_prior_manifest(manifest_path: str, schema):
     """The dataset manifest ANALYZE / DROP STATISTICS last wrote, decoded
     natively, or None when there is none. A column-subset run carries its
     untouched columns' statistics forward from it."""
+    from opteryx.compiled.planner.native_manifest import decode_manifest_parquet
+
     if not os.path.exists(manifest_path):
         return None
     with open(manifest_path, "rb") as handle:
@@ -187,7 +187,7 @@ def _footer_size_stats(
 def _analyze_one_file(blob: str, targets: List[str], categories: Dict[str, LogicalCategory]) -> dict:
     """Compute this file's full native statistics pass for each target column:
     KMV sketch, null count, min/max (ordinalize() ordinal keys — see
-    manifest_io.write_manifest_parquet's docstring), a HISTOGRAM_BINS-wide
+    draken/ops/ordinalize.h), a HISTOGRAM_BINS-wide
     equi-width histogram, record count, and — for string-family columns —
     byte-class counts, total byte count, and min/max string length.
     Self-contained (own reader, no shared state) so files analyze concurrently.
@@ -344,6 +344,8 @@ def analyze_table(
                 pool.map(lambda b: _analyze_one_file(b, targets, categories), blobs)
             )
 
+    from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
+
     names, physical = _schema_layout(schema)
     builder = NativeManifestBuilder(names, physical, True, True)
     for blob, result in zip(blobs, results):
@@ -423,6 +425,8 @@ def drop_statistics(table_engine, columns: Optional[Sequence[str]]) -> int:
 
     field_ids = _field_ids(table_engine)
     drop_ids = sorted({field_ids[name] for name in _resolve_targets(field_ids, columns)})
+
+    from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
 
     names, physical = _schema_layout(schema)
     builder = NativeManifestBuilder(names, physical, True, True)

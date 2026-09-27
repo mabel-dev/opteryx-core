@@ -11,11 +11,9 @@ serialized straight to well-formed, PyArrow-readable parquet bytes.
 """
 
 import os
-import struct
-from typing import Dict, Optional, Tuple
+from typing import Optional
 
 from draken.morsels.morsel import Morsel
-from opteryx.models.file_entry import FileEntry
 from opteryx.utils import unique_id
 
 
@@ -26,20 +24,20 @@ class LocalDataFileWriter:
     renamed into place on `close`, so a reader never sees a partial file.
     `abort` removes the temporary file; nothing is left behind.
 
-    Per-column bounds are folded in per row group for INT64 and FLOAT64
-    columns - the two the native min/max kernels answer for. The whole-morsel
-    writer this replaced took bounds from the parquet statistics of single-
-    row-group files, which also covered BOOL and UTF8; those two columns kinds
-    carry no bounds on this connector now. This store has no catalog and no
-    statistics pass, so bounds here are a pruning convenience, not a contract.
+    Every row group is folded into the file's native statistics (`FileStats`:
+    per column the ordinal min / max and the null count - the dialect ANALYZE
+    records), and `close` hands the file back as a native file row.
     """
 
     def __init__(self, relation_dir: str, sorted_by: Optional[str], sorted_descending: bool,
                  write_profile: str):
-        from draken.draken_native import DrakenType
         from rugo.parquet import open_parquet_writer
 
-        self._bounded_types = (DrakenType.INT64, DrakenType.FLOAT64)
+        # lazy: the native manifest module must not be the first thing to load
+        # opteryx.compiled.planner.column_type (it imports opteryx.types, which
+        # imports it back)
+        from opteryx.compiled.planner.native_manifest import FileStats
+
         self.file_name = f"data-{unique_id()}.parquet"
         self._full_path = os.path.join(relation_dir, self.file_name)
         self._tmp_path = f"{self._full_path}.tmp"
@@ -55,7 +53,7 @@ class LocalDataFileWriter:
         self._rows = 0
         self._bytes = 0
         self._row_groups = 0
-        self._bounds: Dict[int, Tuple[object, object]] = {}
+        self._stats = FileStats()
         self._done = False
 
     @property
@@ -79,24 +77,11 @@ class LocalDataFileWriter:
         self._rows += len(morsel)
         self._bytes += morsel.nbytes
         self._row_groups += 1
-        self._fold_bounds(morsel)
+        self._stats.add_row_group(morsel)
 
-    def _fold_bounds(self, morsel: Morsel) -> None:
-        rows = len(morsel)
-        for index, name in enumerate(morsel.column_names):
-            # `_cxx_column`: the engine's morsels are substrate-backed and
-            # refuse PyObject column access; this reads either backing.
-            vec = morsel._cxx_column(name)
-            if vec.type not in self._bounded_types or vec.null_count() == rows:
-                continue
-            lo, hi = vec.min(), vec.max()
-            held = self._bounds.get(index)
-            if held is None:
-                self._bounds[index] = (lo, hi)
-            else:
-                self._bounds[index] = (min(held[0], lo), max(held[1], hi))
-
-    def close(self) -> FileEntry:
+    def close(self):
+        """Finish the file; it becomes visible under its name. Returns the
+        file as a native file row (a one-file NativeManifest)."""
         if self._done:
             raise ValueError(f"close on a finished writer for '{self.file_name}'")
         if self._row_groups == 0:
@@ -105,20 +90,13 @@ class LocalDataFileWriter:
         self._writer.close()
         self._fh.close()
         os.replace(self._tmp_path, self._full_path)
-        lower_bounds, upper_bounds = _bounds_to_entry(self._bounds)
-        return FileEntry(
-            file_path=self.file_name,
-            file_format="PARQUET",
-            record_count=self._rows,
-            file_size_in_bytes=os.path.getsize(self._full_path),
-            uncompressed_size_in_bytes=self._bytes,
-            row_group_count=self._row_groups,
-            lower_bounds=lower_bounds,
-            upper_bounds=upper_bounds,
-            null_value_counts=None,
-            min_values=None,
-            max_values=None,
-            column_uncompressed_sizes_in_bytes=None,
+        return self._stats.file_row(
+            self.file_name,
+            "PARQUET",
+            self._rows,
+            os.path.getsize(self._full_path),
+            self._row_groups,
+            self._bytes,
         )
 
     def abort(self) -> None:
@@ -141,37 +119,3 @@ def open_data_file_writer(
 
     See Writable.open_data_file_writer for the handle's contract."""
     return LocalDataFileWriter(relation_dir, sorted_by, sorted_descending, write_profile)
-
-
-def _bounds_to_entry(
-    bounds: Dict[int, Tuple[object, object]],
-) -> Tuple[Optional[Dict[int, bytes]], Optional[Dict[int, bytes]]]:
-    """Serialize {col_index: (min, max)} typed values into the FileEntry bound
-    byte format (keyed by column index). Returns (None, None) if empty."""
-    if not bounds:
-        return (None, None)
-    lower: Dict[int, bytes] = {}
-    upper: Dict[int, bytes] = {}
-    for idx, (col_min, col_max) in bounds.items():
-        lower[idx] = _serialize_bound(col_min)
-        upper[idx] = _serialize_bound(col_max)
-    return (lower or None, upper or None)
-
-
-def _serialize_bound(value) -> bytes:
-    """Serialize a min/max value to bytes for storage.
-
-    Handles int, float, bool, str, bytes types.
-    """
-    if isinstance(value, bool):
-        return b"\x01" if value else b"\x00"
-    elif isinstance(value, int):
-        return value.to_bytes(8, "big", signed=True)
-    elif isinstance(value, float):
-        return struct.pack(">d", value)
-    elif isinstance(value, str):
-        return value.encode("utf-8")
-    elif isinstance(value, bytes):
-        return value
-    else:
-        raise ValueError(f"Cannot serialize bound value of type {type(value)}: {value}")

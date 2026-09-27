@@ -83,7 +83,24 @@ class TopNScanPushdownStrategy(OptimizationStrategy):
         connector = source_node.connector
         if connector is None or not connector.supports_topn_pushdown:
             return context
+
+        # Top-N runtime boundary (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md): the LEADING
+        # key alone, for ANY number of keys. It is stamped before — and independently
+        # of — `can_push_topn`, whose single-key rule is the parquet READER's need, not
+        # the boundary's: the boundary argument uses only the leading key, strictly, so
+        # `ORDER BY a, b LIMIT n` (ClickBench Q27) qualifies. This stamp is also the
+        # record that the HeapSort reads DIRECTLY from this scan, which the boundary's
+        # soundness rests on; the compiler decides whether the scan can use it.
+        leading, leading_ascending, leading_nulls_first = order_by[0]
+        stamped_boundary = False
+        if leading.node_type == NodeType.IDENTIFIER and leading.schema_column is not None:
+            source_node.topn_boundary_key = (
+                leading.schema_column, bool(leading_ascending), bool(leading_nulls_first))
+            stamped_boundary = True
+
         if not connector.can_push_topn(order_by):
+            if stamped_boundary:
+                context.optimized_plan[source_nid] = source_node
             return context
 
         source_node.topn_order_by = [

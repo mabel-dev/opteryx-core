@@ -11,9 +11,9 @@ A dataset is SINGLE-FORMAT by decree: format is a property of the dataset, not
 of individual files, and a dataset whose data files disagree is a hard error at
 discovery — never a silent drop of the minority files, never a pick-a-winner.
 
-`FileEntry.file_format` carries these strings in manifests. The physical
+A manifest's file rows carry these strings as their format. The physical
 planner dispatches Scan nodes on the manifest's format through SCAN_READERS —
-adding a reader for a new format means a FileEntry stamp, a suffix here, and a
+adding a reader for a new format means a producer stamp, a suffix here, and a
 registry-name entry here; nothing else grows an if/elif chain.
 """
 
@@ -91,13 +91,16 @@ def manifest_format(manifest, dataset: str = "") -> Optional[str]:
     nothing). Raises MixedFormatDatasetError when entries disagree: a mixed
     manifest describes a malformed dataset.
     """
-    if manifest is None or not manifest.files:
+    if manifest is None:
         return None
-    found = manifest.files[0].file_format
-    for entry in manifest.files[1:]:
-        if entry.file_format != found:
+    formats = manifest.file_formats()
+    if not formats:
+        return None
+    found = formats[0]
+    for file_format in formats[1:]:
+        if file_format != found:
             raise MixedFormatDatasetError(
                 f"Dataset {dataset or '(unnamed)'} manifest mixes {found} and "
-                f"{entry.file_format} files. Datasets are single-format."
+                f"{file_format} files. Datasets are single-format."
             )
     return found

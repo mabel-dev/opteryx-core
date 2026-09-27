@@ -40,6 +40,7 @@ struct End {
     DecodedTag tag = DECODED_NONE;
     int64_t i = 0;
     double d = 0.0;
+    int32_t scale = 0;                  // DECIMAL: value = i * 10^-scale
     const std::string* text = nullptr;
 
     bool present() const { return tag != DECODED_NONE; }
@@ -65,6 +66,7 @@ inline End decoded_end(const Bounds& b, bool is_min) {
     e.tag = is_min ? b.min_tag : b.max_tag;
     e.i = is_min ? b.min_int : b.max_int;
     e.d = is_min ? b.min_double : b.max_double;
+    e.scale = is_min ? b.min_scale : b.max_scale;
     e.text = is_min ? &b.min_text : &b.max_text;
     return e;
 }
@@ -499,6 +501,43 @@ inline bool value_range(const NativeManifest& m, size_t position, bool identity_
         }
     }
     return min_value.numeric() && max_value.numeric();
+}
+
+// The relation's (min, max) for the column as the statistics-only MIN/MAX
+// answer reads it: every file's ends (footer's first, else the manifest's)
+// folded, whatever their type. False when two ends never compared (the
+// Python compare raised). An end nothing bounded is absent (tag NONE).
+inline bool extreme_ends(const NativeManifest& m, size_t position,
+                         estimate_detail::End& min_value, estimate_detail::End& max_value) {
+    using estimate_detail::End;
+    min_value = End();
+    max_value = End();
+    for (size_t f = 0; f < m.file_count(); ++f) {
+        End lo, hi;
+        estimate_detail::file_ends(m, f, position, lo, hi);
+        if (lo.present()) {
+            if (min_value.present() && !estimate_detail::comparable(lo, min_value)) return false;
+            if (!min_value.present() || estimate_detail::less(lo, min_value)) min_value = lo;
+        }
+        if (hi.present()) {
+            if (max_value.present() && !estimate_detail::comparable(hi, max_value)) return false;
+            if (!max_value.present() || estimate_detail::less(max_value, hi)) max_value = hi;
+        }
+    }
+    return true;
+}
+
+// Whether any file records a null count for any column - in its footer or in
+// the manifest, either one - the gate the statistics refresh puts on null
+// fractions.
+inline bool has_null_counts(const NativeManifest& m) {
+    for (size_t f = 0; f < m.file_count(); ++f) {
+        for (size_t c = 0; c < m.column_count(); ++c) {
+            const ManifestCell& cell = m.cell(f, c);
+            if (cell.footer.null_count != kUnknown || cell.null_count != kUnknown) return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace opteryx::planner

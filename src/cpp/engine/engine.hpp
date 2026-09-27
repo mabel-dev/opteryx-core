@@ -267,6 +267,11 @@ public:
     // on the driver thread between two pipelines — never concurrently with any
     // reader.
     std::vector<std::unique_ptr<RuntimeKeyBound>> runtime_bounds;
+    // Top-N runtime boundary slots (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md). unique_ptr
+    // for the same address-stability reason as runtime_bounds; unlike those, these are
+    // written WHILE their scan runs (the producer is in the same pipeline), which is
+    // sound because the value only ever tightens — see topn_boundary.hpp.
+    std::vector<std::unique_ptr<TopNBoundary>> topn_boundaries;
     // R3 latmat: the plan-time vectors a LatmatScanSource borrows that have no
     // NativeScanPlan of their own (predicate column map, output-assembly maps, output
     // names). Owned here so they outlive the run; unique_ptr keeps the addresses
@@ -575,6 +580,72 @@ public:
                 "add_parquet_runtime_bound: pipeline source is not a native parquet scan");
         src->add_runtime_bound(std::move(column), runtime_bounds[bound_idx].get());
         src->set_runtime_pruned_counter(pruned_slot);
+    }
+
+    // ── Top-N runtime boundary (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md) ──────────────
+    // A fresh boundary for a Top-N whose LEADING key sorts `ascending`. Unpublished,
+    // it skips nothing (topn_boundary.hpp).
+    size_t new_topn_boundary(bool ascending) {
+        topn_boundaries.push_back(std::make_unique<TopNBoundary>(ascending));
+        return topn_boundaries.size() - 1;
+    }
+    TopNBoundary* topn_boundary_slot(size_t idx, const char* who) {
+        if (idx >= topn_boundaries.size())
+            throw std::runtime_error(std::string(who) + ": no such Top-N boundary slot");
+        return topn_boundaries[idx].get();
+    }
+    // Arm pipeline `p`'s TopNSink as the PRODUCER. Its leading key and direction are
+    // the sink's own spec[0]; a boundary built for the other direction is a compiler
+    // bug and fails loud rather than publishing "tighter" the wrong way.
+    void arm_topn_sink_boundary(size_t p, size_t idx) {
+        auto* sink = dynamic_cast<TopNSink*>(pipelines[p]->sink.get());
+        if (sink == nullptr)
+            throw std::runtime_error("arm_topn_sink_boundary: pipeline sink is not a TopNSink");
+        TopNBoundary* b = topn_boundary_slot(idx, "arm_topn_sink_boundary");
+        if (sink->spec.empty() || sink->spec[0].ascending != b->ascending)
+            throw std::runtime_error(
+                "arm_topn_sink_boundary: boundary direction does not match the sink's "
+                "leading key");
+        // The tracker counts in uint32; a truncated n would publish a boundary that
+        // is TOO TIGHT and skip row groups holding real answers.
+        if (sink->n_limit < 1 || sink->n_limit > static_cast<size_t>(UINT32_MAX))
+            throw std::runtime_error(
+                "arm_topn_sink_boundary: LIMIT outside the tracker's range");
+        sink->boundary = b;
+        sink->boundary_col = static_cast<int32_t>(sink->spec[0].col_idx);
+    }
+    // Arm pipeline `p`'s native parquet scan as the CONSUMER, testing `column` (the
+    // leading key's PHYSICAL name) under its NULL placement.
+    void add_parquet_topn_boundary(size_t p, size_t idx, std::string column,
+                                   bool nulls_first) {
+        auto* src = dynamic_cast<NativeParquetScanSource*>(pipelines[p]->source.get());
+        if (src == nullptr)
+            throw std::runtime_error(
+                "add_parquet_topn_boundary: pipeline source is not a native parquet scan");
+        src->set_topn_boundary(topn_boundary_slot(idx, "add_parquet_topn_boundary"),
+                               std::move(column), nulls_first);
+    }
+    // Arm pipeline `p`'s two-pass latmat scan, which is producer AND consumer (its
+    // pass 1 sees the survivors and submits the row groups).
+    void arm_latmat_topn_boundary(size_t p, size_t idx) {
+        auto* src = dynamic_cast<LatmatScanSource*>(pipelines[p]->source.get());
+        if (src == nullptr)
+            throw std::runtime_error(
+                "arm_latmat_topn_boundary: pipeline source is not a latmat scan");
+        TopNBoundary* b = topn_boundary_slot(idx, "arm_latmat_topn_boundary");
+        if (src->sort_ascending != b->ascending)
+            throw std::runtime_error(
+                "arm_latmat_topn_boundary: boundary direction does not match the scan's "
+                "sort key");
+        if (src->topn_limit < 1 || src->topn_limit > static_cast<int64_t>(UINT32_MAX))
+            throw std::runtime_error(
+                "arm_latmat_topn_boundary: LIMIT outside the tracker's range");
+        src->topn_boundary_ = b;
+    }
+    // Row groups the consumers skipped because of boundary `idx`. Read after run().
+    int64_t topn_boundary_skipped(size_t idx) {
+        return topn_boundary_slot(idx, "topn_boundary_skipped")
+            ->row_groups_skipped.load(std::memory_order_relaxed);
     }
     // payload_types/lt_* are the build-side payload columns' PLAN-KNOWN physical +
     // logical types (same shape as set_final_schema) — sized/typed into the build

@@ -700,7 +700,7 @@ cdef class ParquetReadNode(ReaderNode):
                                            # the value $file carries.
     cdef dict _sp_delete_positions        # path -> sorted tuple of file-global deleted
                                            # row ordinals (merge-on-read delete vectors,
-                                           # resolved onto FileEntry at binding). Empty
+                                           # resolved onto the manifest at binding). Empty
                                            # dict when the scan has no delete debt.
     cdef dict _sp_rg_offset_cache         # path -> (prefix_offsets, rg_row_counts)
     cdef int64_t _sp_claims_pending       # row groups claimed via next_vectors() but not
@@ -1528,29 +1528,18 @@ cdef class ParquetReadNode(ReaderNode):
                 _selectivity_estimate = None
 
         # ── Merge-on-read delete vectors ──────────────────────────────────────
-        # Collected once per scan from the manifest's FileEntry rows. A file
-        # that reports delete debt without resolved positions is refused —
-        # scanning it would serve the deleted rows back. When ANY file carries
-        # deletes the whole scan takes the single-pass path (the latmat gate
-        # below): pass-1/pass-2 masks compose with the delete filter at the
-        # worker layer, which is machinery the debt does not yet justify —
-        # correctness first, the two-pass optimisation can learn deletes later.
+        # Collected once per scan from the manifest's file rows. A file that
+        # reports delete debt without resolved positions is refused (the
+        # manifest raises) - scanning it would serve the deleted rows back.
+        # When ANY file carries deletes the whole scan takes the single-pass
+        # path (the latmat gate below): pass-1/pass-2 masks compose with the
+        # delete filter at the worker layer, which is machinery the debt does
+        # not yet justify - correctness first, the two-pass optimisation can
+        # learn deletes later.
         self._sp_delete_positions = {}
         self._sp_rg_offset_cache = {}
-        _mf_files = getattr(self.manifest, "files", None) if self.manifest else None
-        if _mf_files:
-            for _fe in _mf_files:
-                _drc = getattr(_fe, "deleted_record_count", 0)
-                if not _drc:
-                    continue
-                _pos = getattr(_fe, "delete_positions", None)
-                if _pos is None:
-                    raise RuntimeError(
-                        f"ParquetReadNode: {_fe.file_path} reports {_drc} deleted rows but "
-                        "no delete vector was resolved at binding; refusing to scan and "
-                        "serve deleted rows."
-                    )
-                self._sp_delete_positions[_fe.file_path] = tuple(_pos)
+        if self.manifest is not None:
+            self._sp_delete_positions = self.manifest.delete_positions()
         if self._sp_delete_positions:
             self.scan_readings.record_mor_delete_files(len(self._sp_delete_positions))
 
@@ -1617,12 +1606,9 @@ cdef class ParquetReadNode(ReaderNode):
         blob_paths = self.manifest.get_file_paths()
         self._sp_blob_paths = blob_paths
         file_sizes = {}
-        files = getattr(self.manifest, "files", None)
-        if files:
-            for file_entry in files:
-                size = getattr(file_entry, "file_size_in_bytes", None)
-                if isinstance(size, int) and size > 0:
-                    file_sizes.setdefault(file_entry.file_path, size)
+        for path, size in zip(blob_paths, self.manifest.file_sizes()):
+            if size > 0:
+                file_sizes.setdefault(path, size)
         self._sp_file_sizes = file_sizes
 
         filesystem, connector_type = resolve_scan_filesystem(self.connector, blob_paths)

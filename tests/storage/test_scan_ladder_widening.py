@@ -166,6 +166,55 @@ def test_widening_preserves_nulls_and_values():
     assert [widened[i] for i in range(3)] == [1, None, 3]
 
 
+@pytest.mark.parametrize(
+    "old, new, legal",
+    [
+        ("UINT8", "INT16", True),
+        ("UINT8", "INT64", True),
+        ("UINT16", "INT32", True),
+        ("UINT32", "INT64", True),
+        ("UINT16", "INT16", False),  # same byte width: UINT16 max does not fit
+        ("UINT32", "INT32", False),
+        ("UINT64", "INT64", False),  # no wider signed int exists
+        ("INT16", "UINT32", False),  # signed -> unsigned never widens (negatives)
+    ],
+)
+def test_unsigned_to_wider_signed_is_the_one_cross_ladder_widening(old, new, legal):
+    """Iceberg has no unsigned types, so a catalog declares an unsigned parquet
+    column as the next wider signed int (ClickBench's uint16 EventDate arrives
+    declared INT32). Unsigned -> STRICTLY wider signed is exact; nothing else
+    crosses a ladder."""
+    from opteryx.types.logical_type import ColumnType, is_legal_widen
+    from draken.draken_native import DrakenType
+
+    assert is_legal_widen(
+        ColumnType(physical=getattr(DrakenType, old)), ColumnType(physical=getattr(DrakenType, new))
+    ) is legal
+
+
+@pytest.mark.parametrize("force_trampoline", [False, True], ids=["native", "trampoline"])
+def test_uint16_file_under_an_int32_relation(force_trampoline, monkeypatch):
+    """One file stores the column int32 (it declares the relation's type: INT32),
+    another stores it uint16. The uint16 file must arrive as INT32 - a concat and
+    a DATE cast both depend on it - with the top of its range intact (65535, never
+    -1: the widening takes the unsigned-source kernel). Both scan paths: the
+    native Source widens in C++, the trampoline through draken's vector_widen."""
+    if force_trampoline:
+        from opteryx.connectors.parquet_io import pool_reader
+
+        monkeypatch.setattr(pool_reader, "native_scan_supported", lambda *a, **k: False)
+    folder = f"widen_uint_tmp_{int(force_trampoline)}"
+    try:
+        _write(folder, "a.parquet", [-5, 20], pa.int32())
+        _write(folder, "b.parquet", [15888, None, 65535], pa.uint16())
+        values, types = _read(folder)
+        assert types == {"INT32"}, types
+        assert sorted(v for v in values if v is not None) == [-5, 20, 15888, 65535]
+        assert values.count(None) == 1
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 

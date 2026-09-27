@@ -134,7 +134,7 @@ class MergeNode(BasePlanNode):
     def _push_impl(self, morsel):
         if morsel is _EOS_SENTINEL:
             try:
-                file_entries = self._stream.finish()
+                rows = self._stream.finish()
             except Exception:
                 self._stream.abandon()
                 raise
@@ -147,7 +147,7 @@ class MergeNode(BasePlanNode):
             except Exception:
                 self._stream.discard_outputs()
                 raise
-            if not file_entries and not delete_positions:
+            if not rows and not delete_positions:
                 # Every row was NOOP - a feed that republished nothing changed.
                 # That is a successful merge that did no work, not a failure,
                 # and committing a snapshot describing nothing would be a lie
@@ -161,7 +161,7 @@ class MergeNode(BasePlanNode):
             try:
                 self.connector.merge_commit(
                     self.relation_name,
-                    file_entries,
+                    rows,
                     delete_positions,
                     author=self._author,
                     operation=self.operation,

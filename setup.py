@@ -846,8 +846,38 @@ extensions = [
     # loaded RTLD_GLOBAL before any consumer extension.
     Extension(
         "opteryx.compiled.planner.native_manifest",
-        sources=["opteryx/compiled/planner/native_manifest.pyx", "third_party/ulfjack/ryu/d2s.c"],
-        include_dirs=include_dirs,
+        sources=[
+            "opteryx/compiled/planner/native_manifest.pyx",
+            "third_party/ulfjack/ryu/d2s.c",
+            # A .skene file's footer statistics are aggregated natively
+            # (planner/skene_stats.hpp) from skene's own footer parse, so this
+            # extension compiles skene's READER in - its own copy, as the
+            # operators extension does (skene's reader is stateless functions
+            # over a caller's buffer: no registry, no split-state hazard).
+            "skene/src/checksum.cpp",
+            "skene/src/probe.cpp",
+            "skene/src/reader.cpp",
+            "skene/src/reader_v2.cpp",
+            "skene/src/reader_v3.cpp",
+            "skene/src/chunk_decode.cpp",
+            "skene/src/footer_common.cpp",
+            "skene/src/encoding.cpp",
+            "skene/src/bloom.cpp",
+        ]
+        + get_zstd_vendor_sources()
+        + get_zstd_compress_sources()
+        + get_lz4_vendor_sources(),
+        include_dirs=include_dirs
+        + [
+            "skene/include",
+            "skene/src",
+            "third_party/zstd",
+            "third_party/zstd/common",
+            "third_party/zstd/decompress",
+            "third_party/zstd/compress",
+            "third_party/lz4",
+        ],
+        define_macros=[("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1")],
         language="c++",
         extra_compile_args=CPP_FLAGS,
         extra_link_args=(
@@ -863,6 +893,8 @@ extensions = [
             "src/cpp/planner/predicate_bounds.hpp",
             "src/cpp/planner/manifest_prune.hpp",
             "src/cpp/planner/manifest_encode.hpp",
+            "src/cpp/planner/file_stats.hpp",
+            "src/cpp/planner/skene_stats.hpp",
         ],
     ),
     # Helpers for relation statistics

@@ -80,8 +80,7 @@ class LimitFilesPruningStrategy(OptimizationStrategy):
 
             # A limit-pushable reader with no file manifest (the PostgreSQL
             # connector: the LIMIT went into the statement) has no files to
-            # prune. Reading `node.manifest.files` here would be an
-            # AttributeError, not a no-op.
+            # prune.
             if node.manifest is None:
                 return context
 
@@ -91,13 +90,17 @@ class LimitFilesPruningStrategy(OptimizationStrategy):
             if not node.manifest.stats_are_authoritative:
                 return context
 
-            # Sort file POSITIONS by row count descending — positions, not the
-            # FileEntry objects, so the surviving set can be handed to
-            # Manifest.subset, which keeps the sketch-vector row mapping
-            # aligned with the reordered/truncated file list.
+            # A file whose row count is UNKNOWN (mabel) supplies no rows to
+            # count on: nothing can be dropped against it.
+            record_counts = node.manifest.record_counts()
+            if any(count is None for count in record_counts):
+                return context
+
+            # Sort file POSITIONS by row count descending, so the surviving set
+            # can be handed to Manifest.subset.
             sorted_positions = sorted(
-                range(len(node.manifest.files)),
-                key=lambda p: node.manifest.files[p].record_count,
+                range(len(record_counts)),
+                key=lambda p: record_counts[p],
                 reverse=True,
             )
 
@@ -106,11 +109,11 @@ class LimitFilesPruningStrategy(OptimizationStrategy):
 
             for position in sorted_positions:
                 selected_positions.append(position)
-                accumulated_rows += node.manifest.files[position].record_count
+                accumulated_rows += record_counts[position]
                 if accumulated_rows >= limit_value:
                     break
 
-            if len(selected_positions) == len(node.manifest.files):
+            if len(selected_positions) == len(record_counts):
                 # Nothing dropped — a pure reorder changes no answer, and
                 # writing the node back would force a redundant statistics
                 # refresh for a plan that didn't change.

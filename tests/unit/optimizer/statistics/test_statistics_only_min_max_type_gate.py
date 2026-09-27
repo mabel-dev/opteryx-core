@@ -55,6 +55,7 @@ from opteryx.types.logical_type import (
     INT64,
     LogicalCategory,
     TIMESTAMP,
+    UINT64,
 )
 from opteryx.compiled.structures.expressions import ExprArena
 
@@ -175,3 +176,23 @@ def test_float_is_refused(func):
 )
 def test_other_categories_are_refused(category):
     assert is_simple_aggregate(_agg_node("MAX", category)) is False
+
+
+@pytest.mark.parametrize("func", ["MIN", "MAX"])
+def test_uint64_is_refused(func):
+    # The one INTEGER width invariant 1 does not hold for: its ordinal key is
+    # sign-biased, so an ordinal bound is not the value.
+    assert UINT64.ordinalize(5) != 5
+    schema_column = PlanContext().columns.relation_column("t", "c", column_type=UINT64)
+    aggregate = Aggregator(
+        value=func,
+        duplicate_treatment=None,
+        parameters=[
+            LogicalColumn(
+                node_type=NodeType.IDENTIFIER, schema_column=schema_column, source_column="c",
+                arena=_TEST_ARENA,
+            )
+        ],
+        arena=_TEST_ARENA,
+    )
+    assert is_simple_aggregate(AggregateStep(aggregates=[aggregate], groups=None)) is False

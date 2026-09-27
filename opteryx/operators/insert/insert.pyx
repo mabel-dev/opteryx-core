@@ -34,11 +34,6 @@ from opteryx.models import rows_message
 # BasePlanNode and Morsel in scope via _operators.pyx include (the latter
 # cimported there from draken.morsels.morsel).
 
-# rugo's write_parquet_with_bounds default (rugo/parquet.py) - the coalescing
-# buffer below is capped here so a flushed file never spans more than one row
-# group. That path only populates FileEntry bounds for single-row-group files,
-# so staying within one row group keeps catalog pruning working unchanged.
-# Move this together with rugo's default if that ever changes.
 class InsertNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, step):
         BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
@@ -177,7 +172,7 @@ class InsertNode(BasePlanNode):
 
         if morsel is _EOS_SENTINEL:
             try:
-                file_entries = self._stream.finish()
+                rows = self._stream.finish()
             except Exception:
                 self._stream.abandon()
                 raise
@@ -188,7 +183,7 @@ class InsertNode(BasePlanNode):
             try:
                 if self.is_replace:
                     self.connector.replace_relation(
-                        self.relation_name, self.target_schema, file_entries,
+                        self.relation_name, self.target_schema, rows,
                         author=self._author,
                         commit_message=self._commit_message,
                         read_sources=self.read_sources,
@@ -199,14 +194,14 @@ class InsertNode(BasePlanNode):
                         self.relation_name, self.target_schema, author=self._author
                     )
                     self.connector.insert(
-                        self.relation_name, file_entries, author=self._author,
+                        self.relation_name, rows, author=self._author,
                         commit_message=self._commit_message,
                         read_sources=self.read_sources,
                         produced_by=self.produced_by,
                     )
                 else:
                     self.connector.insert(
-                        self.relation_name, file_entries, author=self._author,
+                        self.relation_name, rows, author=self._author,
                         read_sources=self.read_sources,
                         produced_by=self.produced_by,
                     )

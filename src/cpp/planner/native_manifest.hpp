@@ -346,6 +346,40 @@ public:
         for (size_t k = 0; k < columns_.size(); ++k) positions_.emplace(columns_[k], k);
     }
 
+    // Whether file `row` holds any sketch value (a non-empty slice of any kind).
+    bool row_has_sketch_values(size_t row) const {
+        const uint32_t vector_row = files_.at(row).vector_row;
+        for (const NestedArrayView* v : {&min_k, &histogram, &char_class}) {
+            if (!v->present() || vector_row >= v->n_files() || !sketch_bit_valid(v->outer->validity, vector_row)) continue;
+            const int32_t* poff = static_cast<const int32_t*>(v->outer->data);
+            const uint32_t pi = v->outer->selection[vector_row];
+            for (int64_t c = 0; c < static_cast<int64_t>(poff[pi + 1]) - poff[pi]; ++c) {
+                bool any = false;
+                v->with_field_slice(vector_row, c, [&](int32_t g0, int32_t g1) { any = g1 > g0; });
+                if (any) return true;
+            }
+        }
+        return false;
+    }
+
+    // File `row` of `src` as a new row here, each column k taking `src`'s column
+    // positions[k] (-1: nothing recorded). Sketches do not travel this way: a
+    // source row holding any is refused rather than silently losing them.
+    size_t add_file_from(const NativeManifest& src, size_t row, const std::vector<int64_t>& positions) {
+        if (positions.size() != columns_.size()) throw std::invalid_argument("one source position per column");
+        if (src.row_has_sketch_values(row)) {
+            throw std::invalid_argument("a file row holding sketches cannot be re-keyed; its sketches would be lost");
+        }
+        ManifestFile file = src.files_.at(row);
+        file.vector_row = 0;
+        const size_t added = add_file(std::move(file));
+        for (size_t k = 0; k < columns_.size(); ++k) {
+            if (positions[k] < 0) continue;
+            cell(added, k) = src.cell(row, static_cast<size_t>(positions[k]));
+        }
+        return added;
+    }
+
     // The row of the file at `path`, or -1.
     int64_t find_file(const std::string& path) const {
         for (size_t f = 0; f < files_.size(); ++f) {
@@ -370,6 +404,9 @@ public:
     // What the manifest's bounds hold: ordinal keys (ANALYZE manifests, skene
     // footers) or decoded values. One dialect per manifest, never mixed.
     bool bounds_are_ordinal() const { return bounds_are_ordinal_; }
+    // Set by a producer that learns its dialect only while building (a skene
+    // dataset is ordinal when any file bounds anything).
+    void set_bounds_are_ordinal(bool ordinal) { bounds_are_ordinal_ = ordinal; }
     bool stats_are_authoritative() const { return stats_are_authoritative_; }
 
     // The whole-column sketch vectors, borrowed: the Python NativeManifest holds

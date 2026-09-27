@@ -419,14 +419,7 @@ def _scan_base_stats(node: PlanStep, wanted=None) -> RelationStatistics:
         row_count_is_metric = False
 
     columns: dict = {}
-    has_null_counts = (
-        manifest is not None
-        and any(
-            (f.column_stats is not None and f.column_stats.has_any_null_counts())
-            or bool(f.null_value_counts)
-            for f in (manifest.files or [])
-        )
-    )
+    has_null_counts = manifest is not None and manifest.has_null_counts()
     if schema is not None:
         for col in schema.columns:
             col_name = col.name

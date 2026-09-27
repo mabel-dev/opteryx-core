@@ -141,7 +141,7 @@ def _skene_row_group_count(manifest, file_count: int) -> int:
     A .skene file holds up to 16 row groups and the scan claims row groups, so
     reporting the file count here would understate the work by the packing
     factor. The manifest knows because the connector reads every file's footer to
-    build it (FileEntry.row_group_count).
+    build it (each file row's row_group_count).
 
     The fallback is the file count, and it is a FLOOR rather than a guess: every
     file holds at least one row group. It is only reachable from a manifest
@@ -211,6 +211,13 @@ def _fold_skene_scan_facts(nplan, telemetry) -> None:
         telemetry._reading["io_skene_metadata_requests"] = sum(c[1] for c in io_counts)
         telemetry._reading["io_skene_bytes_fetched"] = sum(c[2] for c in io_counts)
 
+    # TOP-N RUNTIME BOUNDARY: how many boundaries this plan armed — recorded before
+    # the facts guard below and only when non-zero, like runtime_minmax_bounds_wired,
+    # so "never armed" stays distinguishable from "armed and skipped nothing".
+    topn_armed = nplan.topn_boundary_scans
+    if topn_armed:
+        telemetry._reading["topn_runtime_boundaries_armed"] = len(topn_armed)
+
     facts = telemetry._reading.get("native_scan_facts")
     if not facts:
         return
@@ -263,6 +270,19 @@ def _fold_skene_scan_facts(nplan, telemetry) -> None:
         entry["row_groups_read"] = max(
             0, entry.get("row_groups_read", 0) - runtime_pruned
         )
+
+    # The Top-N runtime boundary's share: row groups its consumer walked past
+    # without submitting, counted AFTER plan-time and runtime-join pruning, so it is
+    # this mechanism's marginal saving only (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md §7).
+    # Present only for a scan a boundary was armed on — absent, not 0, otherwise.
+    for identity, idx in topn_armed:
+        entry = facts.get(identity)
+        if entry is None:
+            continue
+        skipped = nplan.topn_boundary_skipped(idx)
+        entry["row_groups_pruned_topn"] = skipped
+        entry["row_groups_pruned"] = entry.get("row_groups_pruned", 0) + skipped
+        entry["row_groups_read"] = max(0, entry.get("row_groups_read", 0) - skipped)
 
 
 def _and_conjuncts(node):
@@ -925,6 +945,18 @@ class _Compiler:
         # plan-time fact, folded into telemetry so "the filter did not fire" is
         # distinguishable from "the filter fired and pruned nothing".
         self.runtime_bounds_wired: int = 0
+        # Top-N runtime boundary (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md): resolved once
+        # per compile through the same variable chain, for the same reason.
+        self.topn_boundary_enabled: bool = not _resolve_variable(
+            "disable_topn_runtime_boundary",
+            _variables,
+            _config.DISABLE_TOPN_RUNTIME_BOUNDARY,
+        )
+        # pipeline index -> scan identity, for every two-pass latmat parquet scan.
+        # The latmat twin of parquet_scan_pipelines, for the one consumer that needs
+        # it: a HeapSort compiled over this pipeline can only arm the latmat
+        # boundary if the pipeline's source IS that scan.
+        self.latmat_scan_pipelines: dict = {}
 
     # ---- expression lowering ------------------------------------------------------
     # Expressions are lowered ONCE, at plan time, to the phase-9 flat bytecode whose
@@ -2506,6 +2538,7 @@ class _Compiler:
             self._arm_groupby_topk(in_edges[0][0], node.step.order_by, int(limit))
             buf = self.nplan.new_buffer()
             self.nplan.set_topn_sink(p, spec, int(limit), buf, emit)
+            self._arm_topn_boundary(p, in_edges[0][0], node, int(limit))
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             self.nplan.set_pipeline_dop(p2, 1)
@@ -3694,7 +3727,7 @@ class _Compiler:
         # is exactly what they see when a predicate filters every row of every file
         # — a shape they already handle.
         #
-        # Reachable since 2026-09-14: predicate_bounds.py derives bounds for IS
+        # Reachable since 2026-09-14: predicate_bounds.hpp derives bounds for IS
         # NULL / IS NOT NULL (via per-file null counts) and other non-canonical
         # shapes, so `... WHERE <never-null col> IS NULL` now prunes to zero files.
         # Before that no battery query could prune this hard and the conflation was
@@ -4342,6 +4375,7 @@ class _Compiler:
                 p, p1_plan, p2_plan, get_pass1_eval_fn_ptr(), resolver.ctx_ptr(),
                 resolver, pred_col_to_p1, sort_p1_index, sort_ascending, sort_nulls_first,
                 topn_limit, out_from_p1, out_from_p2, emit_ids)
+            self.latmat_scan_pipelines[p] = scan.identity
             self._remember_types(scan.columns)
             # The predicate is fully applied in pass 1, and the Source emits the
             # projection directly — no relocated ExprFilter, no trailing Select.
@@ -5798,6 +5832,111 @@ class _Compiler:
     #                                  they are excluded by `existence_name`
     #                                  at the call site, NOT by this set.
     _RUNTIME_BOUND_MODES = (0, 2)
+
+    # Top-N runtime boundary type allow-list (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md §6,
+    # D6): the types whose footer statistic and decoded value land on the SAME draken
+    # ordinal. Every refusal costs a read, never an answer.
+    _TOPN_BOUNDARY_TYPES = frozenset({
+        DrakenType.INT8, DrakenType.INT16, DrakenType.INT32, DrakenType.INT64,
+        DrakenType.UINT8, DrakenType.UINT16, DrakenType.UINT32,
+        DrakenType.DATE32,
+    })
+
+    def _topn_boundary_type_ok(self, schema_column):
+        """True when a Top-N's leading key can be tested against parquet footer
+        statistics in draken's ordinal space (§6 conditions 4 and 5).
+
+        * The type is on `_TOPN_BOUNDARY_TYPES`. Refused, and why: FLOAT32/64
+          (NaN is highest to the sort, invisible to parquet's min/max);
+          TIMESTAMP64 / TIME32 / TIME64 (the unit lives in the logical type);
+          DECIMAL / DECIMAL128 (scale; no ordinal kernel); strings (no parquet
+          stat converter); BOOL (admissible, pointless).
+        * UINT64 is refused too, because of width widening. A file may store the
+          column narrower than declared and the Source widens it losslessly — which
+          keeps the VALUE, and for every other integer type the ORDINAL, since both
+          sides are a plain widen. UINT64 alone ordinalizes through a sign-bit bias
+          (ordinalize_scalar_u64), while a narrower unsigned footer statistic is only
+          widened (stat_bytes_to_ordinal), so the two would be in different spaces.
+          Admitting it needs the consumer to know the declared type.
+        * The decode does not otherwise change the value: `logical_coerce` must be 0,
+          except DATE32's LC_DATE retag, which preserves it — a 32-bit DATE is
+          retagged only, a 64-bit one is cast to 32 bits, and either way the day
+          count the footer records is the day count decoded. (`widen_types` is not
+          tested: it is the DECLARED width for every integer column, not a flag that
+          widening happens — see the UINT64 note for why widening is sound here.)
+          `_classify_scan_columns` is the SAME classifier the scan's own plan used,
+          so the two cannot disagree.
+        """
+        column_type = schema_column.column_type
+        if column_type is None:
+            return False
+        physical = column_type.physical
+        if physical not in self._TOPN_BOUNDARY_TYPES:
+            return False
+        (_kinds, _string_types, _decimals, logical_coerce, _widen_types,
+         bad_type) = self._classify_scan_columns([schema_column])
+        if bad_type is not None:
+            return False
+        allowed_coerce = _LC_DATE if physical == DrakenType.DATE32 else 0
+        return logical_coerce[0] in (0, allowed_coerce)
+
+    def _arm_topn_boundary(self, p, child_nid, node, limit):
+        """Arm the Top-N runtime boundary for the HeapSort `node` just compiled
+        into pipeline `p`, or do nothing. Returns nothing; a HeapSort that cannot
+        use it is compiled exactly as before.
+
+        All necessary (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md §6):
+
+        1. The HeapSort reads DIRECTLY from the scan: its child IS the node that
+           sources pipeline `p`, and the optimizer stamped `topn_boundary_key` on
+           it (TopNScanPushdownStrategy, which requires that adjacency). Every row
+           the Top-N sees therefore came from this scan with its key unchanged.
+        2. The pipeline's source is a native single-pass parquet scan or a
+           two-pass latmat parquet scan. Skene is not in v1 (D2).
+        3. The leading key is a direct column of the scan's read set.
+        4-5. Its type and decode pass `_topn_boundary_type_ok`.
+        6. 1 <= LIMIT <= 2**32 - 1, the tracker's counting range.
+        """
+        if not self.topn_boundary_enabled:
+            return
+        if limit < 1 or limit > 0xFFFFFFFF:
+            return
+        latmat_identity = self.latmat_scan_pipelines.get(p)
+        parquet_entry = self.parquet_scan_pipelines.get(p)
+        if latmat_identity is not None:
+            scan_identity = latmat_identity
+        elif parquet_entry is not None:
+            scan_identity = parquet_entry[1].scan_identity
+        else:
+            return
+        child = self.plan[child_nid]
+        if child is None or child.identity != scan_identity:
+            return
+        key = child.step.topn_boundary_key
+        if key is None:
+            return
+        schema_column, ascending, nulls_first = key
+        # The stamp describes this HeapSort's leading key; a disagreement is a
+        # planner bug, and arming on it would test the wrong column or direction.
+        lead_expression, lead_ascending, lead_nulls_first = node.step.order_by[0]
+        if (lead_expression.node_type != NodeType.IDENTIFIER
+                or lead_expression.schema_column.identity != schema_column.identity
+                or bool(lead_ascending) != ascending
+                or bool(lead_nulls_first) != nulls_first):
+            raise InvalidInternalStateError(
+                "Top-N runtime boundary: the scan's topn_boundary_key does not describe "
+                "the HeapSort that reads from it"
+            )
+        if not self._topn_boundary_type_ok(schema_column):
+            return
+        if latmat_identity is not None:
+            self.nplan.arm_latmat_topn_boundary(p, ascending, scan_identity)
+            return
+        physical = parquet_entry[0].get(schema_column.identity)
+        if physical is None:
+            return
+        self.nplan.arm_parquet_topn_boundary(p, physical, ascending, nulls_first,
+                                             scan_identity)
 
     def _runtime_bound_type_ok(self, build_identity, probe_identity):
         """True when the two sides' values are comparable IN DRAKEN'S ORDINAL

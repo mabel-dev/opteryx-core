@@ -105,6 +105,7 @@
 #include "engine/parquet_footer_map.hpp"  // ParquetFooterMap: shared, never-copied footers
 #include "runtime_bound.hpp"       // RuntimeKeyBound — runtime min/max join filter
 #include "parquet_stat_ordinal.hpp"  // stat_bytes_to_ordinal — footer stats -> draken ordinal
+#include "topn_boundary.hpp"         // TopNBoundary — Top-N runtime boundary
 #include "core/vector_alloc.h"    // draken_vector_from_dense / draken_vector_from_dict
 #include "core/vector_owner.h"    // VectorOwner, OwnedBuffer
 #include "memory_pool.hpp"        // opteryx::MemoryPool
@@ -270,7 +271,11 @@ struct NativeScanColumnBuilder {
             }
         };
         int fl = 0, fr = 0, tl = 0, tr = 0;
-        return pos(from, fl, fr) && pos(to, tl, tr) && fl == tl && tr > fr;
+        if (!pos(from, fl, fr) || !pos(to, tl, tr)) return false;
+        // Strictly up one ladder, or unsigned -> a strictly wider signed int
+        // (ladder 1 -> ladder 0; equal rank is equal byte width, so strictly wider
+        // only) — the same policy as opteryx's `is_legal_widen`.
+        return (fl == tl && tr > fr) || (fl == 1 && tl == 0 && tr > fr);
     }
 
     // The cast kernels are shape-preserving (kernel_preserve_shape): they convert
@@ -278,10 +283,17 @@ struct NativeScanColumnBuilder {
     // column widens to a dict-shaped column with widened dictionary values -- the
     // uniform access pattern is unchanged.
     static VecResult widen_kernel(DrakenType to, const DrakenVector* v) {
+        // A signed target takes the unsigned-source kernel when the column decoded
+        // unsigned (the cross-ladder widening); the signed kernel refuses one.
+        const bool from_unsigned = v->type == DRAKEN_UINT8 || v->type == DRAKEN_UINT16 ||
+                                   v->type == DRAKEN_UINT32 || v->type == DRAKEN_UINT64;
         switch (to) {
-            case DRAKEN_INT16:   return draken_cast_integer_to_int16(nullptr, v);
-            case DRAKEN_INT32:   return draken_cast_integer_to_int32(nullptr, v);
-            case DRAKEN_INT64:   return draken_cast_integer_to_int64(nullptr, v);
+            case DRAKEN_INT16:   return from_unsigned ? draken_cast_uint_to_int16(nullptr, v)
+                                                      : draken_cast_integer_to_int16(nullptr, v);
+            case DRAKEN_INT32:   return from_unsigned ? draken_cast_uint_to_int32(nullptr, v)
+                                                      : draken_cast_integer_to_int32(nullptr, v);
+            case DRAKEN_INT64:   return from_unsigned ? draken_cast_uint_to_int64(nullptr, v)
+                                                      : draken_cast_integer_to_int64(nullptr, v);
             case DRAKEN_UINT16:  return draken_cast_uint_to_uint16(nullptr, v);
             case DRAKEN_UINT32:  return draken_cast_uint_to_uint32(nullptr, v);
             case DRAKEN_UINT64:  return draken_cast_uint_to_uint64(nullptr, v);
@@ -688,6 +700,46 @@ struct NativeScanColumnBuilder {
     }
 };
 
+// THE parquet row-group skip test for the Top-N runtime boundary
+// (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md §2.2), shared by NativeParquetScanSource and
+// LatmatScanSource so the two consumers cannot disagree. True iff no row of this row group can reach the
+// top n, given boundary `boundary` on physical column `column`:
+//
+//   stats present  ∧  ord(min) > boundary  (ascending; ord(max) < boundary descending)
+//                  ∧  (NULLS LAST  ∨  null_count is known and == 0)
+//
+// Strict on purpose: a row EQUAL to the boundary may tie for n-th place and is never
+// skipped. Every reason we cannot decide — column absent from the footer, no
+// statistic, an unconvertible type, an unknown null count under NULLS FIRST — keeps
+// the row group. A test we cannot evaluate costs a read; one evaluated wrongly costs
+// an answer.
+inline bool topn_excludes_row_group(const RowGroupStats& rg, const std::string& column,
+                                    bool ascending, bool nulls_first, int64_t boundary) {
+    // Unpublished: the loosest ordinal, which the strict test below can never beat
+    // anyway — this only saves the column lookup.
+    if (ascending ? boundary == std::numeric_limits<int64_t>::max()
+                  : boundary == std::numeric_limits<int64_t>::min())
+        return false;
+    for (const ColumnStats& cs : rg.columns) {
+        if (cs.name != column) continue;
+        // NULLS FIRST: a NULL beats every value, so the footer must PROVE there are
+        // none (-1 = unknown keeps the row group, as does any real null).
+        if (nulls_first && cs.null_count != 0) return false;
+        int64_t ord = 0;
+        if (ascending) {
+            if (!cs.has_min) return false;
+            if (!stat_bytes_to_ordinal(cs.physical_type, cs.logical_type, cs.min, &ord))
+                return false;
+            return ord > boundary;
+        }
+        if (!cs.has_max) return false;
+        if (!stat_bytes_to_ordinal(cs.physical_type, cs.logical_type, cs.max, &ord))
+            return false;
+        return ord < boundary;
+    }
+    return false;
+}
+
 struct NativeParquetScanGlobal : GlobalSourceState {
     std::mutex mtx;
     int next_to_submit = 0;
@@ -707,6 +759,16 @@ struct NativeParquetScanGlobal : GlobalSourceState {
     // size 0 with `pruned_applied` set. Read-only after make_global.
     std::vector<int> kept;
     bool pruned_applied = false;
+    // Top-N runtime boundary (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md §4.1): one flag
+    // per submittable unit the boundary excluded, and how many. EMPTY when no
+    // boundary is armed. A skipped unit is walked past but never submitted, so it
+    // produces no result: the in-flight window and the FINISHED test count
+    // `next_to_submit - topn_skipped`, never `next_to_submit` alone — counting a
+    // skipped unit as outstanding would wait forever for a result that never comes.
+    // Entries are written under `mtx` by the worker that walks that unit, and read
+    // back (outside the lock) only by that same worker when it submits its range.
+    std::vector<uint8_t> topn_skip;
+    int topn_skipped = 0;
     // Fetch-block id of every work item (parallel to `work_items`), inferred per
     // file from the chunk offsets (rugo::ParquetIOPipeline::infer_fetch_blocks):
     // consecutive submittable units with the same path and block id are one
@@ -776,6 +838,35 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
     }
 
     void set_runtime_pruned_counter(int64_t* slot) { row_groups_pruned_runtime_ = slot; }
+
+    // Top-N runtime boundary consumer (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md §4.1):
+    // the engine-owned boundary the TopNSink fed by this scan publishes into, the
+    // PHYSICAL (in-file) name of the Top-N's leading key, and its NULL placement.
+    // nullptr = not armed, which is every scan the compiler did not find eligible.
+    TopNBoundary* topn_boundary_ = nullptr;
+    std::string topn_column_;
+    bool topn_nulls_first_ = false;
+
+    // Plan-time only, on the compiler's thread, before run() is entered.
+    void set_topn_boundary(TopNBoundary* boundary, std::string physical_column,
+                           bool nulls_first) {
+        topn_boundary_ = boundary;
+        topn_column_ = std::move(physical_column);
+        topn_nulls_first_ = nulls_first;
+    }
+
+    // Whether submittable unit `u` is excluded by boundary value `b`. A unit this
+    // cannot resolve is kept — submit_block fails loud on it, which is the right
+    // place for that error.
+    bool topn_unit_excluded(const NativeParquetScanGlobal& g, int u, int64_t b) const {
+        const size_t idx = static_cast<size_t>(g.item_index(u));
+        auto fit = footer_map->find((*work_items)[idx].first);
+        if (fit == footer_map->end()) return false;
+        const size_t rg_idx = static_cast<size_t>((*work_items)[idx].second);
+        if (rg_idx >= fit->second->row_groups.size()) return false;
+        return topn_excludes_row_group(fit->second->row_groups[rg_idx], topn_column_,
+                                       topn_boundary_->ascending, topn_nulls_first_, b);
+    }
 
     NativeParquetScanSource(rugo::ParquetIOPipeline* pipeline_,
                             const ParquetFooterMap* footer_map_,
@@ -852,6 +943,11 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
         apply_runtime_bounds(*g);
         g->submit_cap = limit_submit_cap(*g);
         assign_fetch_blocks(*g);
+        // The Top-N boundary is NOT applied here: it does not exist yet — the sink
+        // this scan feeds produces it while the scan runs. It is tested per unit in
+        // get_morsel's submit loop, over whatever the runtime bound kept.
+        if (topn_boundary_ != nullptr)
+            g->topn_skip.assign(static_cast<size_t>(g->item_count(work_items->size())), 0u);
         return g;
     }
 
@@ -971,6 +1067,10 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
         rg_idxs.reserve(static_cast<size_t>(last - first));
         stats.reserve(static_cast<size_t>(last - first));
         for (int u = first; u < last; ++u) {
+            // Excluded by the Top-N boundary when this unit was walked: never
+            // submitted, so it produces no result (see NativeParquetScanGlobal::
+            // topn_skip for why the counters already exclude it).
+            if (!g.topn_skip.empty() && g.topn_skip[static_cast<size_t>(u)] != 0u) continue;
             const size_t idx = static_cast<size_t>(g.item_index(u));
             const int rg_idx = (*work_items)[idx].second;
             const RowGroupStats& rg = fit->second->row_groups[static_cast<size_t>(rg_idx)];
@@ -996,6 +1096,7 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
             rg_idxs.push_back(rg_idx);
             stats.push_back(std::move(col_stats_vec));
         }
+        if (rg_idxs.empty()) return;   // every member skipped by the Top-N boundary
         pipeline->submit_block(path, rg_idxs, *column_names, stats);
     }
 
@@ -1027,18 +1128,42 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                 // straddles the window overshoots it by at most (block - 1) row
                 // groups; the frontier (n_items) is never crossed, so a LIMIT-capped
                 // or pruned block is submitted partially, still as one fetch.
+                //
+                // Top-N runtime boundary: every unit walked here is tested against
+                // the boundary as it stands NOW (read once per walk — a value that
+                // tightens meanwhile only means this walk skips a little less), and
+                // an excluded unit is flagged and counted instead of submitted. The
+                // window counts only what was actually submitted, so skipping never
+                // consumes in-flight capacity.
+                const bool topn_armed = topn_boundary_ != nullptr;
+                const int64_t topn_b = topn_armed ? topn_boundary_->load() : 0;
+                int64_t topn_skipped_now = 0;
                 while (!limit_met && submit_end < n_items &&
-                       (submit_end - g.results_received) < in_flight_limit) {
+                       (submit_end - g.topn_skipped - g.results_received) < in_flight_limit) {
                     int e = submit_end + 1;
                     while (e < n_items && same_block(g, e - 1, e)) ++e;
+                    if (topn_armed) {
+                        for (int u = submit_end; u < e; ++u) {
+                            if (topn_unit_excluded(g, u, topn_b)) {
+                                g.topn_skip[static_cast<size_t>(u)] = 1u;
+                                g.topn_skipped += 1;
+                                topn_skipped_now += 1;
+                            }
+                        }
+                    }
                     submit_end = e;
                 }
                 g.next_to_submit = submit_end;
+                if (topn_skipped_now != 0)
+                    topn_boundary_->row_groups_skipped.fetch_add(topn_skipped_now,
+                                                                 std::memory_order_relaxed);
                 // Done when every row group we actually submitted has been
                 // accounted for. With no limit `next_to_submit` reaches `n_items`,
                 // so this is identical to the pre-R2 `results_received >= n_items`;
                 // with a limit it also terminates on the frozen submit frontier.
-                if (g.results_received >= g.next_to_submit) {
+                // Units the Top-N boundary skipped were never submitted and are
+                // excluded (topn_skipped is 0 when no boundary is armed).
+                if (g.results_received >= g.next_to_submit - g.topn_skipped) {
                     return SourceResult::FINISHED;
                 }
                 g.results_received += 1;

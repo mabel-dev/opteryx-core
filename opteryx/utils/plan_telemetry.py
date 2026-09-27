@@ -482,6 +482,13 @@ def collect_plan_telemetry(plan: PhysicalPlan) -> dict:
                             node_stat["row_groups_pruned_runtime"] = facts[
                                 "row_groups_pruned_runtime"
                             ]
+                        # TOP-N RUNTIME BOUNDARY: same contract — present only when
+                        # a boundary was armed on THIS scan, and then only the row
+                        # groups it skipped that no earlier pruning had dropped.
+                        if "row_groups_pruned_topn" in facts:
+                            node_stat["row_groups_pruned_topn"] = facts[
+                                "row_groups_pruned_topn"
+                            ]
                         node_stat["parquet_rows_before_filter"] = facts["parquet_rows_before_filter"]
                         node_stat["columns_read"] = facts["columns_read"]
                         # No pushed predicates on the native path → every column

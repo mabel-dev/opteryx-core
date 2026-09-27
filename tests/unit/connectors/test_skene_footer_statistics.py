@@ -21,7 +21,8 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.connectors.skene_io import skene_aggregate_row_group_statistics
+import opteryx.types  # noqa: F401  (never enter the native manifest module through column_type)
+from opteryx.compiled.planner.native_manifest import aggregate_skene_blobs as skene_aggregate_row_group_statistics
 from opteryx.planner.plan_context import PlanContext
 
 # skene format.h StatFlag

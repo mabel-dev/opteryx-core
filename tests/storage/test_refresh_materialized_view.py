@@ -141,18 +141,18 @@ class _RecordingStore(LocalStoreConnector):
 
     commits = []
 
-    def insert(self, relation_name, file_entries, author=None, commit_message=None, **kwargs):
+    def insert(self, relation_name, rows, author=None, commit_message=None, **kwargs):
         _RecordingStore.commits.append((relation_name, commit_message))
         super().insert(
-            relation_name, file_entries, author=author, commit_message=commit_message, **kwargs
+            relation_name, rows, author=author, commit_message=commit_message, **kwargs
         )
 
     def replace_relation(
-        self, relation_name, schema, file_entries, author=None, commit_message=None, **kwargs
+        self, relation_name, schema, rows, author=None, commit_message=None, **kwargs
     ):
         _RecordingStore.commits.append((relation_name, commit_message))
         super().replace_relation(
-            relation_name, schema, file_entries, author=author, commit_message=commit_message
+            relation_name, schema, rows, author=author, commit_message=commit_message
         )
 
 

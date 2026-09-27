@@ -27,6 +27,6 @@ make job-aistor - 844999.9ms - 125.19x
 
 make tpch-sf01-aistor - 33813.9ms - 298.04x
 make tpcds-sf01-aistor - 455.5s - [1 fails (Q51)]
-make clickbench-aistor-canon-split-10
-make clickbench-aistor-rugo-split-10
+make clickbench-aistor-canon-split-10 - 61992ms - 32.83x [10M rows]
+make clickbench-aistor-rugo-split-10 - 61605ms - 32.63x [10M rows]
 make h2o-small-aistor - 27898.4ms - 9.88x

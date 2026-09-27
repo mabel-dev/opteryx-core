@@ -32,8 +32,7 @@ from opteryx.types.schema import RelationDescriptor
 
 OS_SEP = os.sep
 
-# Process-global manifest cache: dataset -> (signature, file_entries, min_k,
-# histogram, bounds_are_ordinal, char_class).
+# Process-global manifest cache: dataset -> (signature, NativeManifest).
 # The gateway connector is recreated per query, so the built manifest (list +
 # stat + per-file footer-stats parse, ~5ms on a 99-file dataset) would otherwise
 # be rebuilt every time. Keyed on a (name, size, mtime) file-set signature, so
@@ -664,7 +663,6 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         Returns:
             Tuple of (RelationDescriptor, Manifest)
         """
-        from opteryx.models.file_entry import FileEntry
         from opteryx.models.manifest import Manifest
         from opteryx.models.manifest_io import DATASET_MANIFEST_NAME
         from opteryx.models.manifest_io import is_dataset_manifest
@@ -722,345 +720,107 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         if cached is not None and cached[0] == signature:
             # Refresh LRU position (dicts preserve insertion order; eviction
             # below pops the oldest entry, so a re-insert on hit makes this a
-            # true LRU rather than FIFO).
+            # true LRU rather than FIFO). A built NativeManifest is immutable -
+            # every narrowing returns a new one - so the cached one is shared.
             _MANIFEST_CACHE.pop(self.dataset, None)
             _MANIFEST_CACHE[self.dataset] = cached
-            # Fresh Manifest over a COPY of the cached file list — optimizer
-            # strategies reassign manifest.files (prune, limit, statistics-only
-            # COUNT(*) sets it to []), so the cached list is never handed out raw.
-            # The sketch vectors are immutable and shared (kernels only read them).
-            return schema, Manifest(
-                list(cached[1]),
-                schema,
-                min_k_vector=cached[2],
-                histogram_vector=cached[3],
-                bounds_are_ordinal=cached[4],
-                char_class_vector=cached[5],
-                stats_are_authoritative=True,  # cached copy of the file-derived manifest below
-            )
+            return schema, Manifest(cached[1], schema)
 
-        # ANALYZE's per-dataset manifest, when it describes exactly this file set.
-        # Order matters: the sketch vectors' rows are positional to the manifest's
-        # rows, so file_entries must be built in that same order to stay aligned.
-        (
-            ordered_names,
-            min_k_vector,
-            histogram_vector,
-            char_class_vector,
-            manifest_bounds,
-            manifest_stats,
-        ) = self._read_dataset_manifest(manifest_path, data_names)
-        # manifest_bounds' lower/upper bounds (when present) are ANALYZE's
-        # Vector.ordinalize() ordinal keys, not real values — this Manifest's
-        # bounds_are_ordinal flag must travel with them so prune_files knows to
-        # ordinalize predicate literals before comparing (see Manifest.__init__).
-        bounds_are_ordinal = bool(manifest_bounds)
-
-        # Miss (or first build): build the manifest from file metadata.
-        #
-        # ONE batched acquisition for the whole file set, not a fetch per file. A
-        # gs:// dataset (this connector backs `gcs_connector()`) REQUIRES it: the
-        # C++ footer fetches carry no Authorization header, so each path has to be
-        # rewritten to a signed URL before it reaches C++ while the caches stay
-        # keyed by the original path. fetch_column_stats_many owns that split, and
-        # fetches the whole set concurrently with the GIL released instead of one
-        # serial, GIL-held round trip (plus a signing round trip) per file.
-        # Footer statistics per format. Formats without a footer (JSONL) take
-        # the stats-absent path below (record_count=None — UNKNOWN, never 0).
-        stats_by_name: Dict[str, tuple] = {}
-        # Row groups per file. A .skene file holds up to 16 of them, a parquet file
-        # holds as many as its writer chose, and the scan's unit of work is the row
-        # group — so this is not derivable from the file count for either. Both are
-        # read off the footer that branch already parses. Left empty for formats
-        # whose producer does not report it (JSONL/CSV have no footer), which keeps
-        # FileEntry.row_group_count None — UNKNOWN, never a fabricated 1.
-        row_groups_by_name: Dict[str, int] = {}
-        # Per-column null counts and distinct counts, per file, keyed by the
-        # column's SCHEMA POSITION — the key space Manifest._resolve_field_id
-        # resolves to on this path (no field_ids here), same as the bounds
-        # dicts below. Only the SKENE branch fills these; the parquet branch
-        # carries both inside its FileColumnStats object instead.
-        skene_null_counts: Dict[str, dict] = {}
-        skene_distinct_counts: Dict[str, dict] = {}
-        skene_sketches: Dict[str, tuple] = {}   # blob -> (sketches, hash family)
-        skene_floors: Dict[str, dict] = {}
-        if dataset_fmt == SKENE:
-            # Skene's footer carries an exact row_count and per-column min/max
-            # ORDINALS (draken ordinalize dialect — format.h ColumnStatistics:
-            # "the same dialect the catalog manifest speaks").
-            #
-            # row_count: without it the join ordering optimizer is blind —
-            # measured on TPC-H Q9, the unordered plan put a 6M-row table on a
-            # join BUILD side and ran ~10x slower than the ordered plan.
-            #
-            # bounds: feed the SAME manifest slots ANALYZE's ordinal bounds use
-            # (FileEntry.lower/upper_bounds + bounds_are_ordinal=True), so the
-            # optimizer's manifest pruning drops provably-excluded files with
-            # no skene-specific pruning code. Bounds are keyed by the column's
-            # SCHEMA position — resolved by NAME from each file's own footer,
-            # never by footer position, so a file whose column order diverges
-            # from the schema cannot land bounds on the wrong column. Only
-            # columns with BOTH kStatMin and kStatMax are emitted (an all-null
-            # column carries neither; emitting a half-bound would prune wrong).
-            #
-            # read_metadata parses only the footer; the mmap'd open touches
-            # footer pages, not the data region.
-            from opteryx.connectors.skene_io import (
-                skene_aggregate_row_group_statistics as _skene_aggregate_row_group_statistics,
-            )
-            from opteryx.connectors.skene_io import (
-                skene_statistics_positions as _skene_statistics_positions,
-            )
-            from skene import SkeneError
-            from skene import read_metadata as _skene_read_metadata
-
-            _KSTAT_NULL_COUNT = 0x4  # kStatNullCount
-            position_by_name = {col.name: idx for idx, col in enumerate(schema.columns)}
-            skene_bounds: Dict[str, tuple] = {}
-            for blob_name in ordered_names:
-                file_obj = self.filesystem.open_input_file(blob_name)
-                try:
-                    footer = _skene_read_metadata(file_obj.memoryview)
-                except SkeneError as err:
-                    raise DataError(f"The skene file {md_code(blob_name)} could not be read. {md_cause(err)}") from err
-                finally:
-                    file_obj.close()
-                row_groups = footer["row_groups"]
-                stats_by_name[blob_name] = (footer["row_count"], None)
-                row_groups_by_name[blob_name] = len(row_groups)
-
-                # FILE-level bounds are the UNION over the file's row groups.
-                #
-                # A .skene file holds up to 16 row groups, so a file-level bound
-                # is necessarily wider than any one row group's — that coarsening
-                # is expected and correct, not a regression to fight. It costs
-                # only the files a predicate can no longer prove empty; the row
-                # groups inside a surviving file are still eliminated, from the
-                # per-row-group statistics the file footer carries (which is why
-                # they are in the file footer at all). Measured across real
-                # ClickBench predicates, the number of row groups actually READ
-                # is identical at every packing level.
-                #
-                # A column is only bounded when EVERY row group bounds it: one
-                # row group that tracked nothing (all-null, say) means the file's
-                # bound is unknown, and a union over the rest would be a bound
-                # that excludes rows the file actually holds.
-                # Slots are DEPTH FIRST over `columns`, ARRAY children
-                # included — the same order skene writes the statistics in.
-                positions = _skene_statistics_positions(footer["columns"], position_by_name)
-                # Per-row-group blobs aggregated to file level: bounds (union),
-                # null counts (sum) and NDV (disjoint-sum / overlap-max), each
-                # with its own independent "unknown" state. The three rules and
-                # why they differ are in the helper's docstring.
-                lower, upper, nulls, distincts, sketches, sketch_family, floors = (
-                    _skene_aggregate_row_group_statistics(
-                        row_groups, positions, footer["sketches"]
-                    )
-                )
-                if lower:
-                    skene_bounds[blob_name] = (lower, upper)
-                # Empty means "nothing tracked for any column", which is the same
-                # signal as absent — store nothing so the has_null_counts gates in
-                # statistics_refresh read no signal rather than an empty one.
-                if nulls:
-                    skene_null_counts[blob_name] = nulls
-                if distincts:
-                    skene_distinct_counts[blob_name] = distincts
-                if sketches:
-                    skene_sketches[blob_name] = (sketches, sketch_family)
-                if floors:
-                    skene_floors[blob_name] = floors
-            if skene_bounds:
-                manifest_bounds = skene_bounds
-                bounds_are_ordinal = True
-        elif dataset_fmt == PARQUET:
-            try:
-                from opteryx.connectors.parquet_io.pool_reader import fetch_column_stats_many
-
-                schema_column_names = [col.name for col in schema.columns]
-                # strict: the returned list is parallel to ordered_names by contract,
-                # and a silent zip truncation here would hand a file another file's
-                # statistics from that point on.
-                for blob_name, (record_count, row_group_count, column_stats) in zip(
-                    ordered_names,
-                    fetch_column_stats_many(self.filesystem, ordered_names, sizes),
-                    strict=True,
-                ):
-                    column_stats.bind_schema(schema_column_names)
-                    stats_by_name[blob_name] = (record_count, column_stats)
-                    # Off the footer this call already parsed — not a second read.
-                    # A parquet file holds one row group per ~256k rows here, so
-                    # this is no more derivable from the file count than skene's is.
-                    row_groups_by_name[blob_name] = row_group_count
-            except (OSError, ValueError, RuntimeError):
-                # No statistics for this dataset. The C++ footer batch is
-                # all-or-nothing, so one unreadable file costs the whole set, and
-                # every entry below falls back to record_count=None — UNKNOWN, never
-                # a fabricated 0, which would let the optimizer answer COUNT(*) as 0
-                # and delete LIMIT nodes. Files are still listed and still read.
-                stats_by_name = {}
-                # Same footers, same all-or-nothing: partially-filled row group
-                # counts would make get_row_group_count() sum a subset of the
-                # files and report it as the total.
-                row_groups_by_name = {}
-
-        # Build FileEntry objects from file metadata. Every name in ordered_names
-        # yields exactly one entry, in order, whether or not it has statistics —
-        # the sketch vectors are positional to this list (row i describes
-        # ordered_names[i]), so skipping an entry here would read one file's
-        # sketch against another's.
-        file_entries = []
-        for blob_name in ordered_names:
-            record_count, column_stats = stats_by_name.get(blob_name, (None, None))
-            manifest_lower, manifest_upper = manifest_bounds.get(blob_name, (None, None))
-            # ANALYZE's per-column statistics for this file, when the manifest
-            # describes exactly this file set (None otherwise). record_count is
-            # deliberately NOT taken from here: the footer read above is the
-            # current file's own count, while the manifest's is only as fresh as
-            # the last ANALYZE and the drift check compares PATH SETS, not
-            # contents -- a file rewritten in place would answer COUNT(*) with a
-            # stale number.
-            analyzed = manifest_stats.get(blob_name)
-            file_entries.append(
-                FileEntry(
-                    file_path=blob_name,
-                    file_format=dataset_fmt,
-                    record_count=record_count,
-                    row_group_count=row_groups_by_name.get(blob_name),
-                    file_size_in_bytes=sizes.get(blob_name, 0),
-                    column_stats=column_stats,
-                    lower_bounds=manifest_lower,
-                    upper_bounds=manifest_upper,
-                    null_counts=analyzed.null_counts if analyzed else None,
-                    # The file's OWN footer wins over ANALYZE's manifest, on the
-                    # same freshness argument record_count makes above: the skene
-                    # footer describes this file as it is now, the manifest only
-                    # as of the last ANALYZE. Membership, not truthiness — a file
-                    # whose every column is all-non-null maps to a dict of zeros,
-                    # which is a real answer and must not fall through.
-                    null_value_counts=(
-                        skene_null_counts[blob_name]
-                        if blob_name in skene_null_counts
-                        else (analyzed.null_value_counts if analyzed else None)
-                    ),
-                    distinct_value_counts=skene_distinct_counts.get(blob_name),
-                    distinct_sketches=(
-                        skene_sketches[blob_name][0] if blob_name in skene_sketches else None
-                    ),
-                    distinct_sketch_family=(
-                        skene_sketches[blob_name][1] if blob_name in skene_sketches else None
-                    ),
-                    distinct_floors=skene_floors.get(blob_name),
-                    min_lengths=analyzed.min_lengths if analyzed else None,
-                    max_lengths=analyzed.max_lengths if analyzed else None,
-                    min_length_bounds=analyzed.min_length_bounds if analyzed else None,
-                    max_length_bounds=analyzed.max_length_bounds if analyzed else None,
-                    char_total_bytes=analyzed.char_total_bytes if analyzed else None,
-                    histogram_bins=analyzed.histogram_bins if analyzed else None,
-                    uncompressed_size_in_bytes=(
-                        analyzed.uncompressed_size_in_bytes if analyzed else None
-                    ),
-                    column_uncompressed_sizes_in_bytes=(
-                        analyzed.column_uncompressed_sizes_in_bytes if analyzed else None
-                    ),
-                )
-            )
-
-        # Cache an INDEPENDENT copy of the file list (the returned manifest below
-        # may be mutated by the optimizer); hand the caller its own Manifest.
+        native = self._native_manifest(
+            schema, dataset_fmt, [info.path for info in data_infos], sizes, manifest_path
+        )
         if self.dataset not in _MANIFEST_CACHE and len(_MANIFEST_CACHE) >= _MANIFEST_CACHE_MAX:
             # FIFO evict the oldest entry to bound memory.
             _MANIFEST_CACHE.pop(next(iter(_MANIFEST_CACHE)), None)
-        _MANIFEST_CACHE[self.dataset] = (
-            signature,
-            list(file_entries),
-            min_k_vector,
-            histogram_vector,
-            bounds_are_ordinal,
-            char_class_vector,
-        )
-        return schema, Manifest(
-            file_entries,
-            schema,
-            min_k_vector=min_k_vector,
-            histogram_vector=histogram_vector,
-            bounds_are_ordinal=bounds_are_ordinal,
-            char_class_vector=char_class_vector,
-            # Bounds come from the files themselves (parquet footers, or
-            # ANALYZE's pass over them), so pruning on them cannot drop a row
-            # the predicate would have matched.
-            stats_are_authoritative=True,
-        )
+        _MANIFEST_CACHE[self.dataset] = (signature, native)
+        return schema, Manifest(native, schema)
 
-    def _read_dataset_manifest(self, manifest_path, parquet_names):
-        """ANALYZE's per-dataset manifest, as
-        ``(ordered_names, min_k, histogram, char_class, bounds_by_path,
-        stats_by_path)``.
+    def _native_manifest(self, schema, dataset_fmt, data_names, sizes, manifest_path):
+        """The dataset's files as a NativeManifest: each file described from its
+        own footer (parquet's, natively; skene's, aggregated natively from its
+        row groups), plus what the dataset's ANALYZE manifest adds when it
+        describes exactly this file set. See get_dataset_metadata for why each
+        source wins where it does."""
+        from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
 
-        Returns the data files in the manifest's own row order — the sketch vectors
-        are positional to those rows, so the caller must build its FileEntry list in
-        this order to keep row i describing ordered_names[i].
+        names = tuple(column.name for column in schema.columns)
+        physical = tuple(column.column_type.physical for column in schema.columns)
+        analyzed = self._read_native_dataset_manifest(manifest_path, data_names, names, physical)
+        # The sketch vectors' rows are positional to the manifest's rows, so an
+        # analyzed dataset's files keep the manifest's order.
+        ordered = data_names if analyzed is None else analyzed.file_paths()
 
-        `bounds_by_path` maps each file's path to its
-        ``(lower_bounds, upper_bounds)`` dicts as read straight off the manifest —
-        ANALYZE's `Vector.ordinalize()` ordinal int64 keys, NOT real decoded
-        values (see manifest_io.write_manifest_parquet's docstring). The caller
-        must pair this with `Manifest(bounds_are_ordinal=True)` so `prune_files`
-        ordinalizes predicate literals before comparing; it must never be merged
-        with a real-value bounds source (e.g. LocalStoreConnector's footer
-        bounds) within one Manifest.
+        builder = NativeManifestBuilder(names, physical, analyzed is not None, True)
+        rows = {}
+        for path in ordered:
+            rows[path] = builder.add_file(path, dataset_fmt, -1, sizes.get(path, 0))
 
-        The sketches (and bounds) are used ONLY when the manifest describes
-        exactly the current file set. A dataset directory is ad-hoc: files can be
-        added or removed under it at any time, and a manifest that has drifted
-        `stats_by_path` maps each file's path to the whole FileEntry read back
-        from the manifest, so the caller can carry the per-column statistics
-        ANALYZE computed (null counts, string-length bounds, char totals) onto
-        the FileEntry it builds from footers. Without this they were decoded and
-        dropped: `Manifest.get_length_bounds` returned None for EVERY filesystem
-        dataset however recently ANALYZE'd, and `get_char_class_stats`' avg_length
-        divided by the raw record count instead of the non-null count.
+        skene_bounded = False
+        skene_nulls = set()
+        if dataset_fmt == SKENE:
+            for path in ordered:
+                file_obj = self.filesystem.open_input_file(path)
+                try:
+                    any_bounds, any_nulls = builder.set_skene_footer(rows[path], file_obj.memoryview)
+                except ValueError as err:
+                    raise DataError(
+                        f"The skene file {md_code(path)} could not be read. {md_cause(err)}"
+                    ) from err
+                finally:
+                    file_obj.close()
+                skene_bounded = skene_bounded or any_bounds
+                if any_nulls:
+                    skene_nulls.add(path)
+            if skene_bounded:
+                builder.set_bounds_are_ordinal(True)
+        elif dataset_fmt == PARQUET:
+            from opteryx.connectors.parquet_io.pool_reader import fetch_column_stats_many
 
-        holds an INCOMPLETE picture — `estimate_cardinality` returns an EXACT
-        count when the merged sketch is under K, so serving it from a partial
-        file set would be a wrong answer, not a worse estimate. On any drift (or
-        no manifest) the sketches and bounds are dropped and the globbed order is
-        returned; ANALYZE re-run restores them.
-        """
-        from opteryx.models.manifest_io import read_manifest_file_entries
+            try:
+                # strict: the returned list is parallel to `ordered` by contract
+                footers = list(
+                    zip(ordered, fetch_column_stats_many(self.filesystem, ordered, sizes), strict=True)
+                )
+            except (OSError, ValueError, RuntimeError):
+                # The C++ footer batch is all-or-nothing: one unreadable file
+                # costs the whole set, and every file's counts stay UNKNOWN.
+                footers = []
+            for path, (record_count, row_group_count, column_stats) in footers:
+                builder.set_file_counts(rows[path], record_count, row_group_count)
+                builder.set_footer(rows[path], column_stats)
+
+        if analyzed is not None:
+            for analyzed_row, path in enumerate(analyzed.file_paths()):
+                builder.carry_analyzed(
+                    rows[path],
+                    analyzed,
+                    analyzed_row,
+                    bounds=not skene_bounded,
+                    null_counts=path not in skene_nulls,
+                )
+        return builder.build({} if analyzed is None else analyzed.sketches)
+
+    def _read_native_dataset_manifest(self, manifest_path, data_names, names, physical):
+        """ANALYZE's per-dataset manifest decoded natively over the schema, or
+        None when there is none or it does not describe exactly `data_names`:
+        a drifted manifest holds an incomplete picture, and an EXACT sketch
+        count served from a partial file set would be a wrong answer."""
+        from opteryx.compiled.planner.native_manifest import decode_manifest_parquet
 
         # No manifest is the norm (a dataset nobody has ANALYZE'd) — an explicit
         # check, not an exception, so a genuine read failure below stays visible.
         if not os.path.isfile(manifest_path):
-            return parquet_names, None, None, None, {}, {}
-
+            return None
         try:
             stream = self.filesystem.open_input_stream(manifest_path)
-            try:
-                payload = bytes(stream.memoryview)
-            except AttributeError:
-                payload = stream.read()
+            payload = bytes(stream.memoryview)
             stream.close()
-            entries, native = read_manifest_file_entries(payload)
+            analyzed = decode_manifest_parquet(payload, names, physical, {}, True, True)
         except (OSError, ValueError, RuntimeError):
-            return parquet_names, None, None, None, {}, {}
-
-        ordered = [entry.file_path for entry in entries]
-        if set(ordered) != set(parquet_names):
-            return parquet_names, None, None, None, {}, {}
-
-        bounds_by_path = {
-            entry.file_path: (entry.lower_bounds, entry.upper_bounds) for entry in entries
-        }
-        return (
-            ordered,
-            native.get("min_k_hashes"),
-            native.get("histogram_counts"),
-            native.get("char_class_counts"),
-            bounds_by_path,
-            {entry.file_path: entry for entry in entries},
-        )
-
+            return None
+        if set(analyzed.file_paths()) != set(data_names):
+            return None
+        return analyzed
 
 class FileSystemConnector(BaseConnector):
     """

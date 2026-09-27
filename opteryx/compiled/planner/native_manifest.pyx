@@ -24,6 +24,7 @@ column's load-time position (native plan graph Q8, architect rulings
 """
 
 from cpython.ref cimport PyObject
+from cython.operator cimport dereference as deref
 from cpython.ref cimport Py_DECREF
 from libc.stdint cimport int32_t
 from libc.stdint cimport int64_t
@@ -37,7 +38,10 @@ from libcpp.optional cimport optional
 from libcpp.unordered_map cimport unordered_map
 from libcpp.vector cimport vector
 
+from draken.draken_native import DrakenType as _PyDrakenType
 from draken.draken_native import Vector as _NativeVector
+
+_INT64 = _PyDrakenType.INT64
 
 from opteryx.compiled.planner.column_table cimport ColumnRows
 from opteryx.compiled.planner.column_table cimport ColumnTable
@@ -159,6 +163,7 @@ cdef extern from "planner/native_manifest.hpp" namespace "opteryx::planner":
 
     cdef cppclass CNativeManifest "opteryx::planner::NativeManifest":
         CNativeManifest(vector[string] columns, cbool bounds_are_ordinal, cbool stats_are_authoritative)
+        void set_bounds_are_ordinal(cbool ordinal)
         size_t add_file(ManifestFile file) except +
         size_t file_count()
         size_t column_count()
@@ -166,6 +171,8 @@ cdef extern from "planner/native_manifest.hpp" namespace "opteryx::planner":
         cbool stats_are_authoritative()
         const unordered_map[string, size_t]& positions()
         int64_t find_file(const string& path)
+        cbool row_has_sketch_values(size_t row) except +
+        size_t add_file_from(const CNativeManifest& src, size_t row, const vector[int64_t]& positions) except +
         void own_sketches(shared_ptr[const OwnedNested] k, shared_ptr[const OwnedNested] h,
                           shared_ptr[const OwnedNested] c)
         NestedArrayView min_k
@@ -191,6 +198,8 @@ cdef extern from "planner/manifest_estimates.hpp" namespace "opteryx::planner":
         DecodedTag tag
         int64_t i
         double d
+        int32_t scale
+        const string* text
 
     cdef cppclass HistogramPart:
         size_t begin
@@ -212,6 +221,8 @@ cdef extern from "planner/manifest_estimates.hpp" namespace "opteryx::planner":
     cbool null_fraction(const CNativeManifest& m, size_t position, double& fraction) except +
     int64_t total_uncompressed_size(const CNativeManifest& m, size_t position) except +
     cbool value_range(const CNativeManifest& m, size_t position, cbool identity_category, End& min_value, End& max_value) except +
+    cbool extreme_ends(const CNativeManifest& m, size_t position, End& min_value, End& max_value) except +
+    cbool has_null_counts(const CNativeManifest& m) except +
 
 
 cdef extern from "planner/predicate_bounds.hpp" namespace "opteryx::planner":
@@ -308,6 +319,7 @@ cdef extern from "planner/manifest_prune.hpp" namespace "opteryx::planner":
                                 const vector[int64_t]& predicates) except +
     vector[size_t] prune_files_for_topn(const CNativeManifest& m, const PruneColumns& columns, const string& column,
                                         cbool descending, int64_t limit) except +
+    cbool file_key_range(const CNativeManifest& m, size_t row, size_t position, End& lo, End& hi) except +
 
 
 cdef extern from *:
@@ -370,6 +382,57 @@ cdef extern from "planner/manifest_encode.hpp" namespace "opteryx::planner":
         EncodedList distinct_counts
 
     EncodedManifest encode_manifest(const CNativeManifest& m) except +
+
+
+cdef extern from "planner/file_stats.hpp" namespace "opteryx::planner":
+    cdef cppclass FileStatsAccumulator:
+        FileStatsAccumulator(vector[DrakenType] physical)
+        size_t column_count()
+        void add(size_t position, const DrakenVector& v) except +
+        void write(CNativeManifest& m, size_t row) except +
+
+
+cdef extern from "skene/format.h" namespace "skene":
+    cdef uint32_t kStatNdv "skene::kStatNdv"
+    cdef uint32_t kStatNdvExact "skene::kStatNdvExact"
+
+    cdef cppclass SkeneColumnStatistics "skene::ColumnStatistics":
+        uint32_t flags
+        int64_t min_ordinal
+        int64_t max_ordinal
+        uint64_t null_count
+        uint64_t ndv
+
+
+cdef extern from "skene/reader.h" namespace "skene":
+    cdef cppclass SkeneRowGroupColumnStatistics "skene::RowGroupColumnStatistics":
+        cbool present
+        SkeneColumnStatistics statistics
+
+    cdef cppclass SkeneRowGroupSummary "skene::RowGroupSummary":
+        uint64_t row_count
+        vector[SkeneRowGroupColumnStatistics] column_statistics
+
+    cdef cppclass SkeneColumnSketch "skene::ColumnSketch":
+        uint8_t hash_family
+        uint32_t k
+        vector[uint64_t] hashes
+
+    cdef cppclass SkeneFileMetadata "skene::FileMetadata":
+        uint64_t row_count
+        vector[SkeneRowGroupSummary] row_groups
+        vector[SkeneColumnSketch] sketches
+
+
+cdef extern from "planner/skene_stats.hpp" namespace "opteryx::planner":
+    cdef cppclass SkeneApplied:
+        cbool any_bounds
+        cbool any_nulls
+
+    string read_skene_footer_into(CNativeManifest& m, size_t row, const void* file, size_t bytes,
+                                  const vector[DrakenType]& physical, SkeneApplied& applied) except +
+    SkeneApplied apply_skene_footer(CNativeManifest& m, size_t row, const SkeneFileMetadata& meta,
+                                    const vector[DrakenType]& physical, const vector[int64_t]& positions) except +
 
 
 cdef extern from "planner/manifest_footer.hpp" namespace "opteryx::planner":
@@ -446,6 +509,7 @@ cdef class NativeManifest:
 
     cdef CNativeManifest* _manifest
     cdef readonly tuple columns
+    cdef readonly tuple physical   # each column's DrakenType, in load-time order
     cdef readonly dict sketches
 
     def __dealloc__(self):
@@ -562,6 +626,19 @@ cdef class NativeManifest:
             _row_width(self._manifest.char_class, self._manifest.file(row).vector_row),
         )
 
+    def position_of(self, str column):
+        """The column's load-time position, or None."""
+        cdef string key = column.encode("utf-8")
+        cdef unordered_map[string, size_t].const_iterator found = self._manifest.positions().find(key)
+        if found == self._manifest.positions().end():
+            return None
+        return deref(found).second
+
+    def file_paths(self):
+        """Every file's path, in row order."""
+        cdef size_t row
+        return [self._manifest.file(row).path.decode("utf-8") for row in range(self._manifest.file_count())]
+
     def find_file(self, str path):
         """The row of the file at `path`, or None."""
         cdef int64_t row = self._manifest.find_file(path.encode("utf-8"))
@@ -573,11 +650,30 @@ cdef class NativeManifest:
         """The manifest parquet for these rows - the shared manifest format
         (the catalog's column set bar the ARRAY element_* statistics, which no
         native row carries), bounds in the ORDINAL dialect - as bytes."""
-        from draken.morsels.morsel import Morsel
         from rugo import parquet as rugo_parquet
+
+        return rugo_parquet.write_parquet(self._morsel(False), compression="zstd", bloom_filters=True)
+
+    def show_morsel(self):
+        """SHOW MANIFEST's rows: the manifest's columns (manifest_io._MANIFEST_COLUMNS),
+        with min_values / max_values rendered as TEXT - one row's bounds span
+        every column's type, which no typed ARRAY holds (manifest_io._bound_as_text)."""
+        return self._morsel(True)
+
+    cdef _morsel(self, bint bounds_as_text):
+        from draken.morsels.morsel import Morsel
 
         cdef EncodedManifest e = encode_manifest(self._manifest[0])
         cdef uint32_t n = e.rows
+        # every encoded buffer is adopted, used or not - the bridge owns them
+        min_values = _list_vector(e.min_values, n)
+        max_values = _list_vector(e.max_values, n)
+        delete_paths = _adopt(draken_vector_own_string(e.delete_file_path.slots, e.delete_file_path.arena,
+                                                       e.delete_file_path.arena_len, e.delete_file_path_validity, n,
+                                                       DRAKEN_VARCHAR))
+        deleted = _scalar_vector(e.deleted_record_count, n)
+        if bounds_as_text:
+            min_values, max_values = self._text_bounds()
         morsel = Morsel()
         # the order of manifest_io._MANIFEST_COLUMNS
         morsel.append_vector("file_path", _strings(e.file_path, n))
@@ -590,24 +686,151 @@ cdef class NativeManifest:
         morsel.append_vector("min_k_hashes", _list_vector(e.min_k, n))
         morsel.append_vector("histogram_counts", _list_vector(e.histogram_counts, n))
         morsel.append_vector("histogram_bins", _scalar_vector(e.histogram_bins, n))
-        morsel.append_vector("min_values", _list_vector(e.min_values, n))
-        morsel.append_vector("max_values", _list_vector(e.max_values, n))
+        morsel.append_vector("min_values", min_values)
+        morsel.append_vector("max_values", max_values)
         morsel.append_vector("field_ids", _list_vector(e.field_ids, n))
         morsel.append_vector("min_lengths", _list_vector(e.min_lengths, n))
         morsel.append_vector("max_lengths", _list_vector(e.max_lengths, n))
         morsel.append_vector("char_class_counts", _list_vector(e.char_class_counts, n))
         morsel.append_vector("char_total_bytes", _list_vector(e.char_total_bytes, n))
         morsel.append_vector("distinct_counts", _list_vector(e.distinct_counts, n))
-        morsel.append_vector(
-            "delete_file_path",
-            _adopt(draken_vector_own_string(e.delete_file_path.slots, e.delete_file_path.arena,
-                                            e.delete_file_path.arena_len, e.delete_file_path_validity, n,
-                                            DRAKEN_VARCHAR)),
-        )
-        morsel.append_vector("deleted_record_count", _scalar_vector(e.deleted_record_count, n))
-        return rugo_parquet.write_parquet(morsel, compression="zstd", bloom_filters=True)
+        if not bounds_as_text:
+            # the catalog's merge-on-read columns; SHOW MANIFEST's schema has none
+            morsel.append_vector("delete_file_path", delete_paths)
+            morsel.append_vector("deleted_record_count", deleted)
+        return morsel
 
-    # --- pruning (manifest_prune.hpp) ---------------------------------------
+    cdef tuple _text_bounds(self):
+        """min_values / max_values as ARRAY<VARCHAR>: per file, each column's
+        bound as text (the ordinal key in the ordinal dialect, the decoded value
+        otherwise), or an empty list for a file with no bound at all."""
+        from draken import draken_native as dn
+        from opteryx.models.manifest_io import _bound_as_text
+
+        cdef size_t row, position
+        cdef size_t columns = self._manifest.column_count()
+        cdef cbool ordinal = self._manifest.bounds_are_ordinal()
+        cdef Bounds* b
+        cdef End end
+        lows = []
+        highs = []
+        for row in range(self._manifest.file_count()):
+            low_row = []
+            high_row = []
+            for position in range(columns):
+                b = &self._manifest.cell(row, position).bounds
+                if ordinal:
+                    low_row.append(None if b.min_ordinal == kNoBound else str(b.min_ordinal))
+                    high_row.append(None if b.max_ordinal == kNoBound else str(b.max_ordinal))
+                else:
+                    low_row.append(_bound_as_text(_end_value(_decoded(b[0], True))))
+                    high_row.append(_bound_as_text(_end_value(_decoded(b[0], False))))
+            if all(value is None for value in low_row) and all(value is None for value in high_row):
+                low_row = []
+                high_row = []
+            lows.append(low_row)
+            highs.append(high_row)
+        varchar = dn.DrakenType.VARCHAR.value
+        return (
+            dn.vector_array_from_sequence(lows, element_type=varchar, nesting_depth=1),
+            dn.vector_array_from_sequence(highs, element_type=varchar, nesting_depth=1),
+        )
+
+    # --- file facts, as batches in row order --------------------------------
+
+    def file_formats(self):
+        cdef size_t row
+        return [self._manifest.file(row).format.decode("utf-8") for row in range(self._manifest.file_count())]
+
+    def record_counts(self):
+        """Each file's PHYSICAL row count; None where unknown."""
+        cdef size_t row
+        return [_optional(self._manifest.file(row).record_count) for row in range(self._manifest.file_count())]
+
+    def file_sizes(self):
+        cdef size_t row
+        return [self._manifest.file(row).file_size for row in range(self._manifest.file_count())]
+
+    def uncompressed_sizes(self):
+        cdef size_t row
+        return [_optional(self._manifest.file(row).uncompressed_size) for row in range(self._manifest.file_count())]
+
+    def deleted_record_counts(self):
+        cdef size_t row
+        return [self._manifest.file(row).deleted_record_count for row in range(self._manifest.file_count())]
+
+    def delete_positions(self):
+        """{path: file-local deleted row ordinals} for every file carrying
+        merge-on-read deletes. A file whose deletes were never resolved raises:
+        serving it would resurrect deleted rows."""
+        cdef size_t row
+        cdef ManifestFile* file
+        out = {}
+        for row in range(self._manifest.file_count()):
+            file = &self._manifest.file(row)
+            if file.deleted_record_count == 0:
+                continue
+            path = file.path.decode("utf-8")
+            if not file.delete_positions_resolved:
+                raise ValueError(
+                    f"{path} reports {file.deleted_record_count} deleted rows but no delete vector "
+                    "was resolved at binding; refusing to scan and serve deleted rows."
+                )
+            out[path] = tuple(file.delete_positions)
+        return out
+
+    def with_paths(self, list paths):
+        """A copy of this manifest whose files live at `paths` (one per file,
+        in order) - the same rows, statistics and sketches."""
+        cdef size_t row
+        if len(paths) != self._manifest.file_count():
+            raise ValueError("one path per file")
+        cdef NativeManifest out = self.subset(list(range(self._manifest.file_count())))
+        for row in range(out._manifest.file_count()):
+            out._manifest.file(row).path = (<str?>paths[row]).encode("utf-8")
+        return out
+
+    def subset(self, list rows):
+        """A manifest of the files at `rows` (indexes into this one, in the
+        order given), sharing the sketch vectors. This one is untouched."""
+        cdef vector[size_t] at
+        for row in rows:
+            at.push_back(<size_t?>row)
+        cdef NativeManifest out = NativeManifest.__new__(NativeManifest)
+        out._manifest = _new_subset(self._manifest[0], at)
+        out.columns = self.columns
+        out.physical = self.physical
+        out.sketches = self.sketches
+        return out
+
+    # --- answers read straight off the statistics ----------------------------
+
+    def has_null_counts(self):
+        """Whether any file records a null count for any column."""
+        return has_null_counts(self._manifest[0])
+
+    def extremes(self, size_t position):
+        """(min, max) of the column across every file (footer bounds first),
+        as Python values - for the statistics-only MIN/MAX answer, whose gate
+        admits only types whose bound IS the value. (None, None) when nothing
+        bounds it or two files' bounds never compared."""
+        cdef End lo, hi
+        if not extreme_ends(self._manifest[0], self._position(position), lo, hi):
+            return None, None
+        return _end_value(lo), _end_value(hi)
+
+    def key_ranges(self, size_t position):
+        """[(row, low, high)] for the files whose MANIFEST bounds the column
+        (real bounds only), for compaction planning's overlap reasoning."""
+        cdef size_t row
+        cdef End lo, hi
+        out = []
+        for row in range(self._manifest.file_count()):
+            if file_key_range(self._manifest[0], row, self._position(position), lo, hi):
+                out.append((row, _end_value(lo), _end_value(hi)))
+        return out
+
+    # --- pruning (manifest_prune.hpp) ---------------------------------------    # --- pruning (manifest_prune.hpp) ---------------------------------------
 
     def prune_files(self, ExprArena arena not None, ColumnTable columns not None, list predicate_ids, dict live_types):
         """The rows of the files `predicate_ids` (placed expressions of `arena`)
@@ -715,6 +938,7 @@ def decode_manifest_parquet(
     cdef ManifestSchemaIn schema_in
     cdef NativeManifest out = NativeManifest.__new__(NativeManifest)
     out.columns = columns
+    out.physical = physical
     out.sketches = {
         name: combined.column(name.encode("utf-8")) for name in SKETCH_COLUMNS if name in vectors
     } if rows else {}
@@ -752,6 +976,48 @@ def decode_manifest_parquet(
     # the decoded rows are copies; the vectors only need to outlive the decode,
     # except the sketches, held above
     return out
+
+
+cdef extern from *:
+    """
+    static inline opteryx::planner::estimate_detail::End
+    decoded_end_of(const opteryx::planner::Bounds& b, bool is_min) {
+        return opteryx::planner::estimate_detail::decoded_end(b, is_min);
+    }
+    // A heap copy of `m` narrowed to `rows` (a NativeManifest the Python
+    // object then owns).
+    static inline opteryx::planner::NativeManifest*
+    new_subset(const opteryx::planner::NativeManifest& m, const std::vector<size_t>& rows) {
+        return new opteryx::planner::NativeManifest(m.subset(rows));
+    }
+    """
+    End _decoded "decoded_end_of"(const Bounds& b, cbool is_min)
+    CNativeManifest* _new_subset "new_subset"(const CNativeManifest& m, const vector[size_t]& rows) except +
+
+
+from decimal import Decimal as _Decimal
+
+
+cdef _end_value(const End& end):
+    """An End as the Python value it stands for (None for an absent end)."""
+    cdef string text
+    if end.tag == DECODED_INT64:
+        return end.i
+    if end.tag == DECODED_UINT64:
+        return <uint64_t>end.i
+    if end.tag == DECODED_DOUBLE:
+        return end.d
+    if end.tag == DECODED_TEXT or end.tag == DECODED_OTHER:
+        text = end.text[0]
+        return text.decode("utf-8")
+    if end.tag == DECODED_BYTES:
+        text = end.text[0]
+        return <bytes>text
+    if end.tag == DECODED_DECIMAL:
+        return _Decimal(end.i).scaleb(-end.scale)
+    if end.tag == DECODED_BOOL:
+        return end.i != 0
+    return None
 
 
 cdef _number(End& end):
@@ -977,12 +1243,13 @@ cdef void _bind_sketch_views(NativeManifest manifest) except *:
 
 cdef class NativeManifestBuilder:
     """Builds a NativeManifest file by file: the native builder the in-process
-    producers (footer readers, listings, writers) use in place of Python
-    FileEntry objects (Q8 M-c). Columns are addressed by load-time position;
+    producers (footer readers, listings, writers, catalog rows) use (Q8 M-c).
+    Columns are addressed by load-time position;
     mapping a producer's own keys to positions is the producer's job."""
 
     cdef CNativeManifest* _manifest
     cdef tuple _columns
+    cdef tuple _physical_types
     cdef vector[DrakenType] _physical
     # sketch rows this builder owns (min-k, histogram, char-class)
     cdef SketchStaging _min_k
@@ -999,6 +1266,7 @@ cdef class NativeManifestBuilder:
             self._physical.push_back(<DrakenType><int>draken_type.value)
         self._manifest = new CNativeManifest(names, bounds_are_ordinal, stats_are_authoritative)
         self._columns = columns
+        self._physical_types = physical
 
     def __dealloc__(self):
         del self._manifest
@@ -1162,6 +1430,87 @@ cdef class NativeManifestBuilder:
             slice.push_back(<uint64_t>(<int64_t?>value) if value < 0 else <uint64_t?>value)
         slices[0][position] = slice
 
+    def carry_analyzed(self, size_t row, NativeManifest analyzed not None, size_t analyzed_row,
+                       bint bounds, bint null_counts):
+        """What a dataset's ANALYZE manifest (decoded over the same columns)
+        adds to a file described from its own footer: per column the string
+        lengths, char byte totals and uncompressed sizes - and its bounds and
+        null counts only when asked (a skene footer's own outrank them) - and
+        the file's uncompressed size and histogram width. ANALYZE's distinct
+        counts are NOT carried. The file's sketch-vector row becomes its
+        ANALYZE row."""
+        cdef size_t columns = len(self._columns)
+        cdef size_t position
+        cdef ManifestCell* target
+        cdef ManifestCell* source
+        cdef ManifestFile* file = &self._manifest.file(row)
+        cdef ManifestFile* source_file = &analyzed._manifest.file(analyzed_row)
+        if analyzed._manifest.column_count() != columns:
+            raise ValueError("the ANALYZE manifest describes different columns")
+        for position in range(columns):
+            target = &self._manifest.cell(row, position)
+            source = &analyzed._manifest.cell(analyzed_row, position)
+            target.min_length = source.min_length
+            target.max_length = source.max_length
+            target.char_total_bytes = source.char_total_bytes
+            target.uncompressed_size = source.uncompressed_size
+            if bounds:
+                target.bounds = source.bounds
+            if null_counts:
+                target.null_count = source.null_count
+        file.uncompressed_size = source_file.uncompressed_size
+        file.histogram_bins = source_file.histogram_bins
+        file.vector_row = source_file.vector_row
+
+    def add_file_from(self, NativeManifest source not None, size_t source_row, list positions):
+        """File `source_row` of `source` as a new file row; column k takes
+        `source`'s column positions[k] (None: nothing recorded). Its row."""
+        cdef vector[int64_t] at
+        for position in positions:
+            at.push_back(-1 if position is None else <int64_t?>position)
+        return self._manifest.add_file_from(source._manifest[0], source_row, at)
+
+    def set_skene_footer(self, size_t row, const unsigned char[::1] file not None):
+        """The .skene file's footer statistics (skene_stats.hpp) into file
+        `row`: its record and row group counts, and per column the union of the
+        row groups' ordinal bounds, the summed null count, the NDV and its floor,
+        and the file's own KMV sketch. `file` is the file's bytes. Returns
+        (any column bounded, any column's null count recorded). Raises
+        ValueError with skene's message when the footer cannot be read."""
+        cdef SkeneApplied applied
+        cdef string failure = read_skene_footer_into(
+            self._manifest[0], row, <const void*>&file[0], <size_t>file.shape[0], self._physical, applied
+        )
+        if not failure.empty():
+            raise ValueError(failure.decode("utf-8", "replace"))
+        return applied.any_bounds, applied.any_nulls
+
+    def set_file_counts(self, size_t row, record_count, row_group_count):
+        """File `row`'s record and row group counts; None is UNKNOWN."""
+        cdef ManifestFile* file = &self._manifest.file(row)
+        file.record_count = kUnknown if record_count is None else <int64_t?>record_count
+        file.row_group_count = kUnknown if row_group_count is None else <int64_t?>row_group_count
+
+    def set_bounds_are_ordinal(self, bint ordinal):
+        """The dialect the manifest's bounds are in, for a producer that learns
+        it while building (a skene dataset: ordinal when any file bounds anything)."""
+        self._manifest.set_bounds_are_ordinal(ordinal)
+
+    def set_delete_positions(self, size_t row, tuple positions):
+        """File `row`'s merge-on-read deletes, resolved: file-local row ordinals."""
+        cdef ManifestFile* file = &self._manifest.file(row)
+        file.delete_positions.clear()
+        for position in positions:
+            file.delete_positions.push_back(<int64_t?>position)
+        file.delete_positions_resolved = True
+
+    def relocate_file(self, size_t row, str path, int64_t file_size):
+        """File `row` now lives at `path` and is `file_size` bytes (its file was
+        rewritten - the statistics describe the same rows)."""
+        cdef ManifestFile* file = &self._manifest.file(row)
+        file.path = path.encode("utf-8")
+        file.file_size = file_size
+
     def carry_statistics(self, size_t row, NativeManifest source not None, size_t source_row):
         """A prior manifest's statistics of one file into this file's row: the
         value statistics (bounds, null counts, lengths, char bytes) of every
@@ -1232,6 +1581,7 @@ cdef class NativeManifestBuilder:
         out._manifest = self._manifest
         self._manifest = new CNativeManifest(vector[string](), False, False)
         out.columns = self._columns
+        out.physical = self._physical_types
         out.sketches = sketches
         cdef size_t row
         if staged_rows:
@@ -1242,3 +1592,140 @@ cdef class NativeManifestBuilder:
         else:
             _bind_sketch_views(out)
         return out
+
+
+
+cdef class FileStats:
+    """One data file's statistics, fed row group by row group by the writer
+    that writes it (file_stats.hpp): per column, the ordinal min / max and the
+    null count. The columns are the first row group's; every later row group
+    must carry the same ones."""
+
+    cdef FileStatsAccumulator* _accumulator
+    cdef tuple _columns
+    cdef tuple _physical
+
+    def __cinit__(self):
+        self._accumulator = NULL
+
+    def __dealloc__(self):
+        del self._accumulator
+
+    def add_row_group(self, morsel):
+        cdef vector[DrakenType] physical
+        cdef size_t position
+        cdef PyObject* handle
+        names = tuple(name.decode("utf-8") if type(name) is bytes else name for name in morsel.column_names)
+        vectors = [morsel._cxx_column(name) for name in morsel.column_names]
+        if self._accumulator == NULL:
+            self._columns = names
+            self._physical = tuple(vector.type for vector in vectors)
+            for draken_type in self._physical:
+                physical.push_back(<DrakenType><int>draken_type.value)
+            self._accumulator = new FileStatsAccumulator(physical)
+        elif names != self._columns:
+            raise ValueError(f"a row group of columns {names} in a file of columns {self._columns}")
+        for position in range(len(vectors)):
+            vector = vectors[position]
+            # a draken Vector wrapper or the native Vector itself
+            native = vector if type(vector) is _NativeVector else vector._nb
+            handle = <PyObject*>native
+            self._accumulator.add(position, draken_vector_unwrap(handle)[0])
+
+    def file_row(self, str path, str file_format, int64_t record_count, int64_t file_size,
+                 int64_t row_group_count, int64_t uncompressed_size):
+        """The finished file as a native file row: a NativeManifest of one file
+        over the columns written, bounds in the ordinal dialect."""
+        if self._accumulator == NULL:
+            raise ValueError(f"no row group was written to '{path}'")
+        cdef NativeManifestBuilder builder = NativeManifestBuilder(self._columns, self._physical, True, True)
+        cdef size_t row = builder.add_file(path, file_format, record_count, file_size, row_group_count, uncompressed_size)
+        self._accumulator.write(builder._manifest[0], row)
+        return builder.build({})
+
+
+def concat_rows(list batches):
+    """Native file rows (NativeManifests over the same columns, no sketches) as
+    one batch, in order. An empty list is an empty batch over no columns."""
+    if not batches:
+        return NativeManifestBuilder((), (), True, True).build({})
+    cdef NativeManifest first = batches[0]
+    cdef NativeManifest batch
+    cdef size_t row
+    identity = list(range(len(first.columns)))
+    cdef NativeManifestBuilder builder = NativeManifestBuilder(first.columns, first.physical, True, True)
+    for batch in batches:
+        if batch.columns != first.columns:
+            raise ValueError(f"file rows over columns {batch.columns} and {first.columns} are not one batch")
+        for row in range(len(batch)):
+            builder.add_file_from(batch, row, identity)
+    return builder.build({})
+
+
+
+def aggregate_skene_blobs(list row_groups, list positions, list sketches):
+    """What skene_stats.hpp aggregates from per-row-group statistics blobs in
+    the shape skene.read_metadata() emits (`row_groups[i]["column_statistics"]`,
+    one blob or None per slot; `sketches` one {hash_family, hashes} or None per
+    slot; `positions` each slot's column or None) - for checking the native
+    rules against hand-built footers. Returns (lower, upper, nulls, distincts,
+    sketches, family, floors), each keyed by column position."""
+    cdef SkeneFileMetadata meta
+    cdef SkeneRowGroupSummary summary
+    cdef SkeneRowGroupColumnStatistics slot
+    cdef SkeneColumnSketch sketch
+    cdef vector[int64_t] at
+    cdef vector[DrakenType] physical
+    cdef size_t k
+    for group in row_groups:
+        summary.column_statistics.clear()
+        for blob in group["column_statistics"]:
+            slot.present = blob is not None
+            if blob is not None:
+                slot.statistics.flags = blob["flags"] & ~(kStatNdv | kStatNdvExact)
+                slot.statistics.min_ordinal = blob["min_ordinal"]
+                slot.statistics.max_ordinal = blob["max_ordinal"]
+                slot.statistics.null_count = blob["null_count"]
+                # None is skene's "not tracked": the flag, not the number, says so
+                if blob["ndv"] is not None:
+                    slot.statistics.flags |= kStatNdv
+                    slot.statistics.ndv = blob["ndv"]
+                    if blob["ndv_exact"]:
+                        slot.statistics.flags |= kStatNdvExact
+            summary.column_statistics.push_back(slot)
+        meta.row_groups.push_back(summary)
+    for entry in sketches:
+        sketch.hashes.clear()
+        sketch.hash_family = 0
+        if entry is not None:
+            sketch.hash_family = entry["hash_family"]
+            for value in entry["hashes"]:
+                sketch.hashes.push_back(<uint64_t?>value)
+        meta.sketches.push_back(sketch)
+    width = 1 + max([p for p in positions if p is not None], default=-1)
+    for position in positions:
+        at.push_back(-1 if position is None else <int64_t?>position)
+    for k in range(<size_t>width):
+        physical.push_back(DRAKEN_INT64)
+    cdef NativeManifestBuilder builder = NativeManifestBuilder(
+        tuple(f"c{k}" for k in range(width)), tuple(_INT64 for _ in range(width)), True, True
+    )
+    cdef size_t row = builder.add_file("f", "SKENE", 0, 0)
+    apply_skene_footer(builder._manifest[0], row, meta, physical, at)
+    cdef NativeManifest out = builder.build({})
+    lower, upper, nulls, distincts, file_sketches, floors = {}, {}, {}, {}, {}, {}
+    for k in range(<size_t>width):
+        cell = out.cell(0, k)
+        if cell["bounds"]["min_ordinal"] is not None:
+            lower[k] = cell["bounds"]["min_ordinal"]
+            upper[k] = cell["bounds"]["max_ordinal"]
+        if cell["null_count"] is not None:
+            nulls[k] = cell["null_count"]
+        if cell["distinct_count"] is not None:
+            distincts[k] = cell["distinct_count"]
+        if cell["distinct_sketch"] is not None:
+            file_sketches[k] = list(cell["distinct_sketch"])
+        if cell["distinct_floor"] is not None:
+            floors[k] = cell["distinct_floor"]
+    families = {entry["hash_family"] for entry in sketches if entry is not None}
+    return lower, upper, nulls, distincts, file_sketches, (families.pop() if families else None), floors

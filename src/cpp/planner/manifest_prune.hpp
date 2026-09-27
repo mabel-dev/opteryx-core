@@ -739,4 +739,24 @@ inline std::vector<ZoneTerm> zone_terms(const NativeManifest& m, const DeriveInp
     return zone_map_terms(m, cols, terms);
 }
 
+// File `row`'s key range on the column at `position`, as compaction planning
+// reads it (`file_key_ranges`): the MANIFEST's bounds only, both ends real (no
+// "no bound" sentinel) - ordinal keys in the ordinal dialect, the decoded ends
+// otherwise. False when the file has none.
+inline bool file_key_range(const NativeManifest& m, size_t row, size_t position,
+                           estimate_detail::End& lo, estimate_detail::End& hi) {
+    using namespace prune_detail;
+    Cmp low, high;
+    if (!file_bounds(m, row, position, low, high)) return false;
+    const Bounds& b = m.cell(row, position).bounds;
+    if (m.bounds_are_ordinal()) {
+        lo = estimate_detail::ordinal_end(b.min_ordinal);
+        hi = estimate_detail::ordinal_end(b.max_ordinal);
+    } else {
+        lo = estimate_detail::decoded_end(b, true);
+        hi = estimate_detail::decoded_end(b, false);
+    }
+    return lo.present() && hi.present();
+}
+
 }  // namespace opteryx::planner

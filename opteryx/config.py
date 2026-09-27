@@ -133,6 +133,21 @@ gate runs every eligible shape both ways and asserts the results are identical
 attribute a measurement, since the plan-time correlated filter pushes range
 predicates onto the same scans."""
 
+DISABLE_TOPN_RUNTIME_BOUNDARY: bool = get_bool("DISABLE_TOPN_RUNTIME_BOUNDARY", False)
+"""Turn OFF the Top-N runtime boundary — the running n-th best leading-key value of
+a `... ORDER BY k LIMIT n` query, fed back into the parquet scan below it so row
+groups whose footer statistics prove they cannot reach the result are never read
+(docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md).
+
+Named for the state the caller probably does not want, per variables.py's
+convention for feature flags, and mirrored as the session variable
+`disable_topn_runtime_boundary` so it can be flipped per query.
+
+Pure skipping: disabling it can only make a query read MORE, never return a
+different answer — which is what the on/off oracle
+(tests/integration/test_topn_runtime_boundary.py) asserts, and what makes the off
+arm the honest baseline for measuring it."""
+
 VALIDATE_OPTIMIZER_PLANS: bool = get_bool("VALIDATE_OPTIMIZER_PLANS", False)
 """Debug guardrail: when set, the optimizer checks plan structural invariants
 after every strategy and raises (naming the offending strategy) on corruption.

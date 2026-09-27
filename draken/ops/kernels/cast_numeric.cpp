@@ -603,6 +603,27 @@ VecResult draken_cast_integer_to_int64(void* ctx, const DrakenVector* v) {
     });
 }
 
+// Which PHYSICAL slots (0 .. data_length) at least one VALID logical row reads,
+// via the uniform `selection` mapping (CLAUDE.md §11). Empty = no validity, every
+// slot live. The range-checked casts below convert data_length physical values,
+// but validity is one bit per LOGICAL row: reading `validity[j]` for physical
+// slot j is only right when selection is the identity. On a dict-shaped vector it
+// skipped the dictionary value whose index happened to match a NULL row - so
+// CAST(x AS INT32) over a dictionary-encoded column with a NULL in row 1 turned
+// every row holding dictionary value 1 into 0 (and the widening a catalog-declared
+// type needs did the same to ClickBench's uint16 EventDate). A slot no valid row
+// reads may hold anything (a null row's placeholder), so it is still skipped
+// rather than range-checked; a slot any valid row reads is always converted.
+static inline std::vector<uint8_t> cast_live_slots(const DrakenVector* v) {
+    std::vector<uint8_t> live;
+    if (v->validity == nullptr) return live;
+    live.assign(v->data_length > 0u ? v->data_length : 1u, 0u);
+    for (uint32_t i = 0u; i < v->length; ++i)
+        if ((v->validity[i >> 3] >> (i & 7u)) & 1u)
+            live[v->selection[i]] = 1u;
+    return live;
+}
+
 // E33 — read the j-th physical value of ANY signed integer vector (INT8/16/32/64)
 // as int64_t, sign-extending narrower widths (mirrors draken_cast_integer_to_int64's
 // per-width read, generalized to include INT64 itself so one helper covers all
@@ -634,9 +655,10 @@ VecResult fn_name(void* ctx, const DrakenVector* v) {                           
         const bool is_safe = kernel_cast_is_safe(ctx);                                  \
         std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);                                  \
         bool any_bad = false;                                                           \
-        const bool has_nulls = (v->validity != nullptr);                                \
+        const std::vector<uint8_t> live = cast_live_slots(v);                           \
+        const bool has_nulls = !live.empty();                                           \
         for (uint32_t j = 0u; j < k; ++j) {                                             \
-            if (has_nulls && !((v->validity[j >> 3] >> (j & 7u)) & 1u)) {                \
+            if (has_nulls && !live[j]) {                                                 \
                 out[j] = 0; continue;                                                    \
             }                                                                            \
             const int64_t val = cast_read_signed_i64(v, j);                              \
@@ -1356,9 +1378,10 @@ VecResult fn_name(void* ctx, const DrakenVector* v) {                           
         const bool is_safe = kernel_cast_is_safe(ctx);                                  \
         std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);                                  \
         bool any_bad = false;                                                           \
-        const bool has_nulls = (v->validity != nullptr);                                \
+        const std::vector<uint8_t> live = cast_live_slots(v);                           \
+        const bool has_nulls = !live.empty();                                           \
         for (uint32_t j = 0u; j < k; ++j) {                                             \
-            if (has_nulls && !((v->validity[j >> 3] >> (j & 7u)) & 1u)) {                \
+            if (has_nulls && !live[j]) {                                                 \
                 out[j] = 0; continue;                                                    \
             }                                                                            \
             const uint64_t uv = cast_read_unsigned_u64(v, j);                            \
@@ -1532,9 +1555,10 @@ VecResult fn_name(void* ctx, const DrakenVector* v) {                           
         const bool is_safe = kernel_cast_is_safe(ctx);                                  \
         std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);                                  \
         bool any_bad = false;                                                           \
-        const bool has_nulls = (v->validity != nullptr);                                \
+        const std::vector<uint8_t> live = cast_live_slots(v);                           \
+        const bool has_nulls = !live.empty();                                           \
         for (uint32_t j = 0u; j < k; ++j) {                                             \
-            if (has_nulls && !((v->validity[j >> 3] >> (j & 7u)) & 1u)) {                \
+            if (has_nulls && !live[j]) {                                                 \
                 out[j] = 0; continue;                                                    \
             }                                                                            \
             const int64_t val = cast_read_signed_i64(v, j);                              \
@@ -1587,9 +1611,10 @@ VecResult fn_name(void* ctx, const DrakenVector* v) {                           
         const bool is_safe = kernel_cast_is_safe(ctx);                                  \
         std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);                                  \
         bool any_bad = false;                                                           \
-        const bool has_nulls = (v->validity != nullptr);                                \
+        const std::vector<uint8_t> live = cast_live_slots(v);                           \
+        const bool has_nulls = !live.empty();                                           \
         for (uint32_t j = 0u; j < k; ++j) {                                             \
-            if (has_nulls && !((v->validity[j >> 3] >> (j & 7u)) & 1u)) {                \
+            if (has_nulls && !live[j]) {                                                 \
                 out[j] = 0; continue;                                                    \
             }                                                                            \
             const uint64_t uv = cast_read_unsigned_u64(v, j);                            \

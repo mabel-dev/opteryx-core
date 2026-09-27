@@ -7,8 +7,10 @@
  * Thread-safety:
  *   get() / head()  — curl_easy_perform(), each call owns its CURL* easy handle.
  *                     CURLSH provides shared connection/DNS cache with mutex.
- *   get_many()      — local CURLM* per call, all N transfers on calling thread.
- *                     CURLOPT_SHARE set so warm connections from get() are reused.
+ *   get_many() /    — the calling thread's persistent CURLM* (thread_multi),
+ *   head_many()       all N transfers on the calling thread; its connection
+ *                     cache survives across batches. No CURLOPT_SHARE, so these
+ *                     connections are not shared with get()/head().
  */
 
 #include "http_client.hpp"
@@ -73,7 +75,7 @@ bool http_use_multiplexing_env() {
 // CURLOPT_PIPEWAIT — SEPARATE from multiplexing above, and OFF by default so the
 // default path is byte-for-byte the historical behaviour (libcurl's own
 // CURLPIPE_MULTIPLEX default, no pipewait). Opt-in only: see HttpTuning for why
-// this is not free given get_many() builds a fresh CURLM per batch.
+// this is not free on a batch that finds no warm connection to reuse.
 bool http_use_pipewait_env() {
     static bool v = []() {
         const char* e = std::getenv("OPTERYX_HTTP_PIPEWAIT");
@@ -213,6 +215,44 @@ void ensure_curl_global_init() {
     // could still be mid-transfer is unsafe. The process exiting reclaims the
     // resources; this trades a harmless exit-time leak for never tearing down
     // libcurl out from under a live transfer.
+}
+
+// The calling thread's CURLM for get_many()/head_many(). A CURLM owns its own
+// connection cache, so a CURLM built per batch (the previous design) closed
+// every connection when the batch ended and the next batch — the next row
+// group, the next table's scan — dialled fresh: a TCP (+TLS) handshake and a
+// cold congestion window on EVERY range request. Keeping one CURLM per thread
+// for the thread's lifetime lets consecutive batches reuse warm connections.
+//
+// Per OS THREAD, not per HttpClient: the Cython HttpClient wrapper may call
+// get_many() on one instance from several threads at once (GIL released), and
+// a CURLM must only ever be driven by one thread. A thread runs one batch at a
+// time, so batches never overlap on it. Per-call settings (host cap, pipelining)
+// are re-applied to the multi handle at the start of every batch.
+struct ThreadMulti {
+    CURLM* handle = nullptr;
+    ~ThreadMulti() { if (handle) curl_multi_cleanup(handle); }
+};
+
+thread_local ThreadMulti tl_multi;
+
+CURLM* thread_multi(const char* who) {
+    if (!tl_multi.handle) {
+        tl_multi.handle = curl_multi_init();
+        if (!tl_multi.handle)
+            throw std::runtime_error(std::string(who) + ": curl_multi_init() failed");
+    }
+    return tl_multi.handle;
+}
+
+// A CURLM-level error (not a per-transfer one) leaves the multi handle in an
+// unknown state; drop it, and its connection cache, so the thread's next batch
+// starts from a fresh handle rather than reusing a broken one.
+void discard_thread_multi() {
+    if (tl_multi.handle) {
+        curl_multi_cleanup(tl_multi.handle);
+        tl_multi.handle = nullptr;
+    }
 }
 
 }  // namespace
@@ -511,13 +551,14 @@ std::map<std::string, std::string> HttpClient::head(
 }
 
 // ---------------------------------------------------------------------------
-// get_many() — concurrent batch GET via a local CURLM event loop
+// get_many() — concurrent batch GET via the calling thread's CURLM event loop
 //
 // Design:
-//   - Creates a local CURLM* for this call only; never shared across threads.
+//   - Drives the calling thread's persistent CURLM* (thread_multi); never
+//     shared across threads. Its connection cache persists across calls, so
+//     consecutive batches on a thread reuse warm connections.
 //   - All N easy handles are added at once; CURLM multiplexes them concurrently.
-//   - Sets CURLOPT_SHARE on every easy handle so warm connections from
-//     previous get() / get_many() calls can be reused.
+//   - No CURLOPT_SHARE: connections are not shared with get()/head().
 //   - Results are returned in the same order as the input requests vector.
 //   - On any error (CURL, HTTP 4xx/5xx), throws std::runtime_error and cleans up.
 // ---------------------------------------------------------------------------
@@ -545,7 +586,7 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
     size_t last_batch_n     = 0;
     long   last_batch_bytes = 0;
 
-    // Fetch a subset of requests (by index) concurrently via one local CURLM,
+    // Fetch a subset of requests (by index) concurrently via the thread's CURLM,
     // harvesting result + status into ctx[idx]. Resets each buffer first so a
     // retry does not append to a partial body. Throws only on CURLM-setup
     // failures (not per-request transport errors — those land in ctx).
@@ -553,8 +594,7 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
         std::vector<CURL*>       handles(idxs.size(), nullptr);
         std::vector<curl_slist*> hlists(idxs.size(), nullptr);
 
-        CURLM* multi = curl_multi_init();
-        if (!multi) throw std::runtime_error("get_many: curl_multi_init() failed");
+        CURLM* multi = thread_multi("get_many");
         long host_cap = std::min(tuning.max_host_connections, (long)max_connections_);
         curl_multi_setopt(multi, CURLMOPT_MAX_HOST_CONNECTIONS, host_cap);
         curl_multi_setopt(multi, CURLMOPT_MAXCONNECTS,          (long)(max_connections_ * 2));
@@ -589,8 +629,10 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
                 }
                 if (hlists[j]) { curl_slist_free_all(hlists[j]); hlists[j] = nullptr; }
             }
-            curl_multi_cleanup(multi);
         };
+        // CURLM-level failure: release this batch's handles, then drop the
+        // thread's multi handle (see discard_thread_multi).
+        auto fail_multi = [&]() { cleanup(); discard_thread_multi(); };
 
         for (size_t j = 0; j < idxs.size(); ++j) {
             const size_t i = idxs[j];
@@ -624,8 +666,8 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
                 curl_easy_setopt(easy, CURLOPT_HTTP_VERSION,
                                  (long)CURL_HTTP_VERSION_1_1);
             configure_ssl(easy);
-            // No CURLOPT_SHARE: the local CURLM reuses connections within the
-            // batch; CURLSH from multi+other-thread-get() could deadlock.
+            // No CURLOPT_SHARE: the thread's CURLM keeps its own connection
+            // cache; CURLSH from multi+other-thread-get() could deadlock.
 
             for (const auto& kv : req_hdrs) {
                 std::string line = kv.first + ": " + kv.second;
@@ -635,7 +677,7 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
 
             CURLMcode mc = curl_multi_add_handle(multi, easy);
             if (mc != CURLM_OK) {
-                cleanup();
+                fail_multi();
                 throw std::runtime_error(
                     std::string("get_many: curl_multi_add_handle: ") + curl_multi_strerror(mc));
             }
@@ -645,7 +687,7 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
         while (running > 0) {
             CURLMcode mc = curl_multi_perform(multi, &running);
             if (mc != CURLM_OK) {
-                cleanup();
+                fail_multi();
                 throw std::runtime_error(
                     std::string("get_many: curl_multi_perform: ") + curl_multi_strerror(mc));
             }
@@ -737,9 +779,9 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
 }
 
 // ---------------------------------------------------------------------------
-// head_many() — concurrent batch HEAD via a local CURLM event loop
+// head_many() — concurrent batch HEAD via the calling thread's CURLM event loop
 //
-// Deliberate near-mirror of get_many() above (same CURLM-per-call, same
+// Deliberate near-mirror of get_many() above (same per-thread CURLM, same
 // retry/backoff policy) — see get_many()'s design comment. The only
 // differences: CURLOPT_NOBODY + CURLOPT_HEADERFUNCTION instead of a body
 // writer, and the per-request result is a parsed header map instead of raw
@@ -771,8 +813,7 @@ std::vector<std::map<std::string, std::string>> HttpClient::head_many(
         std::vector<CURL*>       handles(idxs.size(), nullptr);
         std::vector<curl_slist*> hlists(idxs.size(), nullptr);
 
-        CURLM* multi = curl_multi_init();
-        if (!multi) throw std::runtime_error("head_many: curl_multi_init() failed");
+        CURLM* multi = thread_multi("head_many");
         long host_cap = std::min(tuning.max_host_connections, (long)max_connections_);
         curl_multi_setopt(multi, CURLMOPT_MAX_HOST_CONNECTIONS, host_cap);
         curl_multi_setopt(multi, CURLMOPT_MAXCONNECTS,          (long)(max_connections_ * 2));
@@ -788,8 +829,10 @@ std::vector<std::map<std::string, std::string>> HttpClient::head_many(
                 }
                 if (hlists[j]) { curl_slist_free_all(hlists[j]); hlists[j] = nullptr; }
             }
-            curl_multi_cleanup(multi);
         };
+        // CURLM-level failure: release this batch's handles, then drop the
+        // thread's multi handle (see discard_thread_multi).
+        auto fail_multi = [&]() { cleanup(); discard_thread_multi(); };
 
         for (size_t j = 0; j < idxs.size(); ++j) {
             const size_t i = idxs[j];
@@ -816,8 +859,7 @@ std::vector<std::map<std::string, std::string>> HttpClient::head_many(
                 curl_easy_setopt(easy, CURLOPT_HTTP_VERSION,
                                  (long)CURL_HTTP_VERSION_1_1);
             configure_ssl(easy);
-            // No CURLOPT_SHARE: same rationale as get_many() — the local CURLM
-            // reuses connections within this batch only.
+            // No CURLOPT_SHARE: same rationale as get_many().
 
             for (const auto& kv : req_hdrs) {
                 std::string line = kv.first + ": " + kv.second;
@@ -827,7 +869,7 @@ std::vector<std::map<std::string, std::string>> HttpClient::head_many(
 
             CURLMcode mc = curl_multi_add_handle(multi, easy);
             if (mc != CURLM_OK) {
-                cleanup();
+                fail_multi();
                 throw std::runtime_error(
                     std::string("head_many: curl_multi_add_handle: ") + curl_multi_strerror(mc));
             }
@@ -837,7 +879,7 @@ std::vector<std::map<std::string, std::string>> HttpClient::head_many(
         while (running > 0) {
             CURLMcode mc = curl_multi_perform(multi, &running);
             if (mc != CURLM_OK) {
-                cleanup();
+                fail_multi();
                 throw std::runtime_error(
                     std::string("head_many: curl_multi_perform: ") + curl_multi_strerror(mc));
             }

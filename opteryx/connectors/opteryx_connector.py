@@ -11,7 +11,9 @@ Architecture:
 - OpteryxTable: Transient table-specific engine (handles data reading for one table)
 """
 
+import decimal
 import logging
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from opteryx.connectors import TableType
@@ -86,7 +88,7 @@ from opteryx.exceptions import (
     UnsupportedSyntaxError,
 )
 from opteryx.exceptions import md_code
-from opteryx.models import FileEntry, Manifest
+from opteryx.models import Manifest
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import SchemaColumn, RelationSchema, ColumnDescriptor, RelationDescriptor
 
@@ -147,9 +149,9 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
     # top-N spec; the stamp also arms TopNManifestPruningStrategy.
     supports_topn_pushdown = True
     # The reader that serves a catalog scan is not this class - it is chosen
-    # from the manifest's FileEntry.file_format (physical_planner
+    # from the manifest's file formats (physical_planner
     # `_scan_reader_for_manifest`), and a catalog manifest is parquet-only
-    # (`FileEntry.from_datafile` types every entry PARQUET). That reader is
+    # (`_catalog_manifest` types every file PARQUET). That reader is
     # ParquetReadNode, which honours a scan-declared TIMESTAMP64 on an
     # int64-stored column. If the catalog ever hands back a non-parquet format,
     # this has to become format-aware the way FileSystemTable's is.
@@ -905,14 +907,9 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
                     "opteryx-catalog's `Dataset` must set it (True for Vector.ordinalize() keys, "
                     "False for real decoded values); guessing either way silently corrupts pruning."
                 )
-            self.manifest = Manifest(
-                files=[],
-                schema=self.schema,
-                bounds_are_ordinal=bounds_are_ordinal,
-                # A relation with no committed snapshot genuinely HAS no rows -
-                # that is a fact about the catalog, not a stale reading.
-                stats_are_authoritative=True,
-            )
+            # A relation with no committed snapshot genuinely HAS no rows - that
+            # is a fact about the catalog, not a stale reading: authoritative.
+            self.manifest = _catalog_manifest(self.schema, bounds_are_ordinal, [], {}, None)
             return self.schema, self.manifest
 
         raw_schema = self.table.schema(self.snapshot.schema_id)
@@ -923,26 +920,16 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
         # scan() returns an iterable of DataFile objects
         scan = self.table.scan(snapshot_id=self.snapshot_id)
 
-        # Build FileEntry for each file
-        file_entries = []
+        entries = []
         protocols = set()
-
-        # The manifest rows carry per-column stats as POSITIONAL lists in the
-        # FILE's column order, keyed by the row's own `field_ids`. Every reader
-        # of those stats resolves a column through `Manifest._resolve_field_id`,
-        # which returns the catalog field_id this schema assigns. The schema's
-        # field ids are handed down only for rows with no `field_ids` of their
-        # own - see the keying note in `FileEntry.from_datafile`.
-        schema_field_ids = [column.field_id for column in self.schema.columns]
-
         for data_file in scan:
-            file_entry = FileEntry.from_datafile(data_file, schema_field_ids=schema_field_ids)
-            file_entries.append(file_entry)
-
-            # Extract protocol for validation (gs://, s3://, file://)
-            if "://" in file_entry.file_path:
-                protocol = file_entry.file_path.split("://")[0]
-                protocols.add(protocol)
+            # Both producers (opteryx_catalog, opteryx_iceberg) yield a
+            # `Datafile` whose `entry` is the manifest row, dict-like.
+            entry = data_file.entry
+            entries.append(entry)
+            file_path = entry.get("file_path")
+            if "://" in file_path:
+                protocols.add(file_path.split("://")[0])
 
         # Validate all files use same protocol
         if len(protocols) > 1:
@@ -950,16 +937,11 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
                 f"Mixed protocols in manifest: {protocols}. All files must use the same protocol."
             )
 
-        # Whole-column native sketch vectors (min_k_hashes / histogram_counts) from
-        # the same cached manifest read, so the planner reduces them with native
-        # kernels instead of the per-file boxed lists. A backend that does not
-        # implement the accessor keeps working - via the Manifest's Python
-        # fallback if it emits per-file sketch stats, and with no sketches at all
-        # if it does not - and _warn_no_native_sketches reports which of those it
-        # is, once per backend class, at a severity matching whether it is
-        # actually fixable. Note this branch is NOT reached by a backend that
-        # implements the accessor and returns {} to declare "no sketches"; that
-        # is the supported way to say so and is not reported at all.
+        # Whole-column native sketch vectors (min_k_hashes / histogram_counts /
+        # char_class_counts) from the same cached manifest read. A backend that
+        # does not implement the accessor has no sketches, and
+        # _warn_no_native_sketches reports it once per backend class. A backend
+        # that returns {} has declared "no sketches" and is not reported.
         sketch_vectors_fn = getattr(self.table, "manifest_sketch_vectors", None)
         if sketch_vectors_fn is not None:
             sketch_vectors = sketch_vectors_fn(self.snapshot_id)
@@ -967,48 +949,30 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
             sketch_vectors = {}
             _warn_no_native_sketches(self.table)
 
-        # Merge-on-read deletes: resolve each delete-bearing file's row
-        # ordinals NOW, at binding, from the dataset's sidecar(s) — one small
-        # cached read via the same manifest LRU the scan itself warmed. The
-        # positions ride on the FileEntry so the read node can subtract them
-        # per row group without any further catalog round-trip. Resolution is
-        # fail-closed on both sides: the dataset raises if a referenced
-        # sidecar is unreadable, and a FileEntry left with
-        # deleted_record_count > 0 but no positions is refused by the reader
-        # — either way deleted rows are never silently served.
-        if any(fe.deleted_record_count for fe in file_entries):
+        # Merge-on-read deletes: each delete-bearing file's row ordinals are
+        # resolved NOW, at binding, from the dataset's sidecar(s) - one small
+        # cached read via the same manifest LRU the scan itself warmed. They
+        # ride on the manifest row so the read node subtracts them per row group
+        # with no further catalog round-trip. Fail-closed on both sides: the
+        # dataset raises if a sidecar is unreadable, and _catalog_manifest
+        # raises for a file with deletes but no vector.
+        resolved_deletes = None
+        if any(entry.get("deleted_record_count") for entry in entries):
             delete_vectors_fn = getattr(self.table, "delete_vectors", None)
             if delete_vectors_fn is None:
                 raise DatasetReadError(
                     f"{type(self.table).__name__} reports merge-on-read deletes but does not "
                     "implement delete_vectors(); refusing to scan and resurrect deleted rows."
                 )
-            resolved = delete_vectors_fn(self.snapshot_id)
-            for fe in file_entries:
-                if not fe.deleted_record_count:
-                    continue
-                positions = resolved.get(fe.file_path)
-                if positions is None:
-                    raise DatasetReadError(
-                        f"Manifest attributes {fe.deleted_record_count} deleted rows to "
-                        f"{fe.file_path} but the delete sidecar holds no vector for it."
-                    )
-                fe.delete_positions = tuple(positions)
+            resolved_deletes = delete_vectors_fn(self.snapshot_id)
 
-        # Create Manifest with files and schema.
-        #
         # bounds_are_ordinal is asked of the DATASET, never assumed here. This
         # connector serves every metastore opteryx-catalog's `Dataset` interface
         # covers -- the native catalog (ordinal keys) and external catalogs such
         # as opteryx-iceberg (real decoded values, `from_bytes` off the Iceberg
         # manifest) -- and the encoding travels with whoever produced the bounds.
-        # Hardcoding True here read an Iceberg VARCHAR's real `str` bound as an
-        # ordinal int64: `SELECT * ... WHERE <int col> ... ORDER BY ... LIMIT n`
-        # raised "'<' not supported between instances of 'str' and 'int'" out of
-        # the unguarded max/min in the planner's _narrow_filter_columns, and --
-        # worse, because it was silent -- `WHERE <double col> >= 250.0` pruned
-        # every file and returned ZERO rows.
-        #
+        # Hardcoding True read an Iceberg VARCHAR's real `str` bound as an
+        # ordinal and pruned every file of `WHERE <double col> >= 250.0`.
         # A dataset that declares nothing is an ERROR, not a defaulting case:
         # True and False are each silently wrong for one of the two producers.
         bounds_are_ordinal = getattr(self.table, "bounds_are_ordinal", None)
@@ -1019,33 +983,146 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
                 "opteryx-catalog's `Dataset` must set it (True for Vector.ordinalize() keys, "
                 "False for real decoded values); guessing either way silently corrupts pruning."
             )
-        #
-        # For the native catalog (True) the stats builder stores min/max as
-        # `Vector.ordinalize()` keys, not real values (see the catalog's
-        # _compute_column_stats). For most types that key IS the value — an
-        # identity widen for signed ints, and for DATE/TIMESTAMP/TIME the raw
-        # physical integer, which is also what the binder normalises those
-        # literals to — which is why pruning appeared to work. FLOAT is the
-        # exception and was silently WRONG: its ordinal key is an
-        # order-preserving BIT transform, so a file whose gm ranges 0.1..0.9
-        # stored bounds of 4591870180066957722..4606281698874543309, and
-        # `WHERE gm = 0.5` compared 0.5 against those and pruned the file that
-        # actually held the matching rows. Declaring the encoding sends
-        # predicate literals through ColumnType.ordinalize first, so both
-        # sides are in the same space.
-        self.manifest = Manifest(
-            files=file_entries,
-            schema=self.schema,
-            min_k_vector=sketch_vectors.get("min_k_hashes"),
-            histogram_vector=sketch_vectors.get("histogram_counts"),
-            char_class_vector=sketch_vectors.get("char_class_counts"),
-            bounds_are_ordinal=bounds_are_ordinal,
-            # Written by the commit that produced these files; they cannot
-            # disagree with the data.
-            stats_are_authoritative=True,
+
+        # Written by the commit that produced these files; they cannot
+        # disagree with the data: authoritative.
+        self.manifest = _catalog_manifest(
+            self.schema, bounds_are_ordinal, entries, sketch_vectors, resolved_deletes
         )
 
         return self.schema, self.manifest
+
+
+_NO_BOUND = -(1 << 63)          # the ordinal NULL_FLAG: "no bound"
+_INT64_MIN = -(1 << 63)
+_INT64_MAX = (1 << 63) - 1
+
+
+def _catalog_manifest(schema, bounds_are_ordinal, entries, sketch_vectors, resolved_deletes):
+    """The Manifest for a catalog snapshot: its manifest rows (`Datafile.entry`
+    dicts) into the native builder.
+
+    INTERIM (architect ruling 2026-09-27 (5c)): M-e replaces this with the
+    catalog's raw manifest bytes decoded natively.
+
+    Every per-column stat a row carries (min/max values, lengths, null counts,
+    distinct counts, char bytes, column sizes) is a POSITIONAL list in the
+    row's own column order, keyed by the row's `field_ids`. Each maps to its
+    load-time position through the schema's field ids - one key space. A row
+    with no `field_ids` of its own was written in schema order, so its lists
+    are positional. A list that cannot be lined up with its keys is DROPPED:
+    no stats is correct but slower, keyed by the wrong column is a wrong answer.
+    """
+    from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
+
+    columns = schema.columns
+    builder = NativeManifestBuilder(
+        tuple(column.name for column in columns),
+        tuple(column.column_type.physical for column in columns),
+        bounds_are_ordinal,
+        True,
+    )
+    width = len(columns)
+    position_of_field = {
+        column.field_id: position for position, column in enumerate(columns) if column.field_id is not None
+    }
+    schema_fully_keyed = len(position_of_field) == width
+
+    for vector_row, entry in enumerate(entries):
+        file_path = entry.get("file_path")
+        deleted = int(entry.get("deleted_record_count") or 0)
+        delete_positions = None
+        if deleted:
+            vector = resolved_deletes.get(file_path)
+            if vector is None:
+                raise DatasetReadError(
+                    f"Manifest attributes {deleted} deleted rows to "
+                    f"{file_path} but the delete sidecar holds no vector for it."
+                )
+            delete_positions = tuple(vector)
+        uncompressed = entry.get("uncompressed_size_in_bytes")
+        row = builder.add_file(
+            file_path,
+            "PARQUET",
+            entry.get("record_count", 0),
+            entry.get("file_size_in_bytes", 0),
+            -1,
+            -1 if uncompressed is None else uncompressed,
+            # 0 is the writer's "no histogram" marker, not a bin count
+            entry.get("histogram_bins") or -1,
+            deleted,
+            entry.get("delete_file_path"),
+            delete_positions,
+            vector_row,
+        )
+
+        row_field_ids = entry.get("field_ids")
+        if row_field_ids and type(row_field_ids) in (list, tuple):
+            keys = [position_of_field.get(fid) for fid in row_field_ids]
+            strict = True
+        else:
+            keys = range(width)
+            strict = schema_fully_keyed
+
+        def keyed(name):
+            values = entry.get(name)
+            if not values or type(values) not in (list, tuple):
+                return ()
+            if strict and len(values) != len(keys):
+                return ()
+            return [(position, value) for position, value in zip(keys, values)
+                    if position is not None and value is not None]
+
+        for is_min, name in ((True, "min_values"), (False, "max_values")):
+            for position, value in keyed(name):
+                _set_catalog_bound(builder, row, position, is_min, value, bounds_are_ordinal)
+        for name, argument in (
+            ("null_counts", "null_count"),
+            ("min_lengths", "min_length"),
+            ("max_lengths", "max_length"),
+            ("char_total_bytes", "char_total_bytes"),
+            ("column_uncompressed_sizes_in_bytes", "uncompressed_size"),
+        ):
+            for position, value in keyed(name):
+                builder.set_counts(row, position, **{argument: value})
+        # ESTIMATE-ONLY: the format does not persist exactness, so never exact.
+        for position, value in keyed("distinct_counts"):
+            builder.set_distinct_count(row, position, value, False)
+
+    return Manifest(builder.build(dict(sketch_vectors)), schema)
+
+
+def _set_catalog_bound(builder, row, position, is_min, value, bounds_are_ordinal):
+    """One catalog bound into the builder, in the manifest's declared dialect."""
+    kind = type(value)
+    if bounds_are_ordinal:
+        if kind is not int:
+            raise DatasetReadError(f"An ordinal-dialect manifest bound of type {kind.__name__} ({value!r}).")
+        if value != _NO_BOUND:
+            builder.set_ordinal_bound(row, position, is_min, value)
+    elif kind is bool:
+        builder.set_bool_bound(row, position, is_min, value)
+    elif kind is int and value > _INT64_MAX:
+        builder.set_uint_bound(row, position, is_min, value)
+    elif kind is int:
+        builder.set_int_bound(row, position, is_min, value)
+    elif kind is float:
+        builder.set_double_bound(row, position, is_min, value)
+    elif kind is str:
+        builder.set_text_bound(row, position, is_min, value)
+    elif kind is bytes:
+        builder.set_bytes_bound(row, position, is_min, value)
+    elif kind is decimal.Decimal:
+        sign, digits, exponent = value.as_tuple()
+        unscaled = int("".join(map(str, digits)) or "0") * (-1 if sign else 1)
+        # A DECIMAL128-range bound has no int64 home; like the writers, which
+        # key no DECIMAL128, the column is left unbounded (no stats, not wrong).
+        if _INT64_MIN <= unscaled <= _INT64_MAX:
+            builder.set_decimal_bound(row, position, is_min, unscaled, -exponent, float(value))
+    else:
+        raise DatasetReadError(
+            f"A decoded manifest bound of type {kind.__name__} ({value!r}) has no manifest representation."
+        )
 
 
 def _normalized_view_schema(stored, view_name: str) -> Optional[RelationDescriptor]:
@@ -1128,6 +1205,12 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         self.kwargs.pop("connector", None)
         self.kwargs.pop("prefix", None)
         self.catalog_factory = catalog
+        # The catalog's own manifest row of each data file this connector has
+        # written and not yet committed or deleted, by path: the commit hands
+        # the catalog these (see _catalog_entries). This connector is shared
+        # across queries, hence the lock.
+        self._written_entries: dict = {}
+        self._written_lock = threading.Lock()
 
     def _get_catalog(self, catalog_name: str):
         """
@@ -1456,7 +1539,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
 
         The catalog owns the file's name, its storage stream and its manifest
         entry (`Dataset.open_data_file_writer`); this wraps that handle so the
-        engine sees a FileEntry on close. The two write profiles are the
+        engine sees a native file row on close. The two write profiles are the
         catalog's own two option sets: "fast" for ingest and CTAS, "storage"
         for a compaction rewrite that is read many times.
 
@@ -1500,23 +1583,29 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 sorted_descending=sorted_descending,
                 write_options=options,
             )
-        return _DataFileWriterHandle(handle)
+        return _DataFileWriterHandle(handle, self)
 
-    @staticmethod
-    def _catalog_entries(operation: str, file_entries) -> list:
-        """The manifest rows the writer built as the files streamed out.
+    def _record_written(self, file_path: str, catalog_entry: dict) -> None:
+        with self._written_lock:
+            self._written_entries[file_path] = catalog_entry
+
+    def _catalog_entries(self, operation: str, rows) -> list:
+        """The manifest rows the catalog's writer built as the files streamed
+        out, for the batch `rows` (native file rows), taken off the record.
 
         Handing them to the commit is what stops the catalog downloading and
-        decoding every output to describe it; an entry without one came from
+        decoding every output to describe it; a file with none came from
         somewhere other than open_data_file_writer, and that is a bug to name.
         """
-        missing = [fe.file_path for fe in file_entries if fe.catalog_entry is None]
-        if missing:
-            raise ValueError(
-                f"{operation}: {len(missing)} output file(s) carry no manifest entry "
-                f"({missing[:3]}); outputs must be written through open_data_file_writer"
-            )
-        return [fe.catalog_entry for fe in file_entries]
+        paths = rows.file_paths()
+        with self._written_lock:
+            missing = [path for path in paths if path not in self._written_entries]
+            if missing:
+                raise ValueError(
+                    f"{operation}: {len(missing)} output file(s) carry no manifest entry "
+                    f"({missing[:3]}); outputs must be written through open_data_file_writer"
+                )
+            return [self._written_entries.pop(path) for path in paths]
 
     def delete_data_file(self, relation_name: str, file_path: str) -> None:
         """Remove one data file this session wrote, through the catalog's FileIO.
@@ -1528,6 +1617,8 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         """
         workspace, _ = self._parse_identifier(relation_name)
         self._get_catalog(workspace).io.delete(file_path)
+        with self._written_lock:
+            self._written_entries.pop(file_path, None)
 
     def create_relation(self, relation_name: str, schema, author: Optional[str] = None) -> None:
         """Create a new dataset in the catalog."""
@@ -1946,7 +2037,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
     def insert(
         self,
         relation_name: str,
-        file_entries,
+        rows,
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
         read_sources: Optional[list] = None,
@@ -1960,7 +2051,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         has nothing more specific to say."""
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
-        entries = self._catalog_entries("insert", file_entries)
+        entries = self._catalog_entries("insert", rows)
 
         def _commit_add_files():
             dataset = catalog.load_dataset(relative_id)
@@ -1997,7 +2088,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
     def merge_commit(
         self,
         relation_name: str,
-        file_entries,
+        rows,
         delete_positions,
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
@@ -2020,7 +2111,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         and the audit record, and validates it against its own vocabulary."""
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
-        entries = self._catalog_entries("merge_commit", file_entries)
+        entries = self._catalog_entries("merge_commit", rows)
 
         def _commit_merge():
             dataset = catalog.load_dataset(relative_id)
@@ -2038,7 +2129,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
     def compaction_commit(
         self,
         relation_name: str,
-        file_entries,
+        rows,
         retired_files,
         author: Optional[str] = None,
         baseline_snapshot_id: Optional[int] = None,
@@ -2046,7 +2137,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
     ) -> None:
         """Retire whole data files and add their replacements as ONE snapshot.
 
-        The commit half of OPTIMIZE. `file_entries` are the outputs the sink
+        The commit half of OPTIMIZE. `rows` are the outputs the sink
         already wrote; `retired_files` are the manifest paths they replace.
 
         Whole-file retirement rather than `merge_commit`'s row ordinals: a
@@ -2057,7 +2148,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         """
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
-        entries = self._catalog_entries("compaction_commit", file_entries)
+        entries = self._catalog_entries("compaction_commit", rows)
         self._commit(
             relation_name,
             lambda: catalog.load_dataset(relative_id).compaction_commit(
@@ -2073,7 +2164,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         self,
         relation_name: str,
         schema,
-        file_entries,
+        rows,
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
         read_sources: Optional[list] = None,
@@ -2088,7 +2179,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         replace that has nothing more specific to say."""
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
-        entries = self._catalog_entries("replace_relation", file_entries)
+        entries = self._catalog_entries("replace_relation", rows)
 
         def _commit_replace():
             dataset = catalog.load_dataset(relative_id)
@@ -3407,12 +3498,17 @@ class _DataFileWriterHandle:
     """The engine's view of one streaming data file (Writable.open_data_file_writer).
 
     Wraps the catalog's DataFileWriter: same three operations, but `close`
-    answers with the engine's FileEntry, carrying the catalog's own manifest
-    row in `catalog_entry` for the commit.
+    answers with the engine's native file row - its statistics folded natively
+    as the row groups stream out - and records the catalog's own manifest row
+    on the connector for the commit.
     """
 
-    def __init__(self, inner):
+    def __init__(self, inner, connector):
+        from opteryx.compiled.planner.native_manifest import FileStats
+
         self._inner = inner
+        self._connector = connector
+        self._stats = FileStats()
 
     @property
     def file_path(self) -> str:
@@ -3428,17 +3524,18 @@ class _DataFileWriterHandle:
 
     def write_row_group(self, morsel) -> None:
         self._inner.write_row_group(morsel)
+        self._stats.add_row_group(morsel)
 
-    def close(self) -> FileEntry:
+    def close(self):
         entry = self._inner.close()
-        return FileEntry(
-            file_path=entry.file_path,
-            file_format="PARQUET",
-            record_count=int(entry.record_count),
-            file_size_in_bytes=int(entry.file_size_in_bytes),
-            uncompressed_size_in_bytes=int(entry.uncompressed_size_in_bytes),
-            row_group_count=self._inner.row_group_count,
-            catalog_entry=entry.to_dict(),
+        self._connector._record_written(entry.file_path, entry.to_dict())
+        return self._stats.file_row(
+            entry.file_path,
+            "PARQUET",
+            int(entry.record_count),
+            int(entry.file_size_in_bytes),
+            self._inner.row_group_count,
+            int(entry.uncompressed_size_in_bytes),
         )
 
     def abort(self) -> None:

@@ -7983,6 +7983,7 @@ cdef class ScanStep(PlanStep):
     cdef object _schema
     cdef str _source
     cdef object _start_date
+    cdef tuple _topn_boundary_key
     cdef object _topn_descending
     cdef object _topn_nulls_first
     cdef object _topn_limit
@@ -7994,7 +7995,7 @@ cdef class ScanStep(PlanStep):
     cdef str _version_tag
     cdef str _via_view
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, at_date=None, connector=None, dataset_committed_at=None, emit_row_identity=None, end_date=None, for_manifest_only=None, for_snapshots_only=None, hint_settings=None, hints=None, history_view=None, internal_relation=None, length_only_columns=None, limit=None, manifest=None, pending_cte_key=None, predicates=None, pushed_aggregates=None, pushed_distinct=None, pushed_groups=None, relation=None, resolved_dataset=None, row_identity_statement=None, schema=None, source=None, start_date=None, topn_descending=None, topn_limit=None, topn_nulls_first=None, topn_order_by=None, topn_sort_identity=None, topn_sort_name=None, unpruned_columns=None, version=None, version_tag=None, via_view=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, at_date=None, connector=None, dataset_committed_at=None, emit_row_identity=None, end_date=None, for_manifest_only=None, for_snapshots_only=None, hint_settings=None, hints=None, history_view=None, internal_relation=None, length_only_columns=None, limit=None, manifest=None, pending_cte_key=None, predicates=None, pushed_aggregates=None, pushed_distinct=None, pushed_groups=None, relation=None, resolved_dataset=None, row_identity_statement=None, schema=None, source=None, start_date=None, topn_boundary_key=None, topn_descending=None, topn_limit=None, topn_nulls_first=None, topn_order_by=None, topn_sort_identity=None, topn_sort_name=None, unpruned_columns=None, version=None, version_tag=None, via_view=None):
         self.node_type = _step_types().Scan
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.alias = alias
@@ -8023,6 +8024,7 @@ cdef class ScanStep(PlanStep):
         self.schema = schema
         self.source = source
         self.start_date = start_date
+        self.topn_boundary_key = topn_boundary_key
         self.topn_descending = topn_descending
         self.topn_nulls_first = topn_nulls_first
         self.topn_limit = topn_limit
@@ -8276,6 +8278,24 @@ cdef class ScanStep(PlanStep):
         self._start_date = value
 
     @property
+    def topn_boundary_key(self):
+        return self._topn_boundary_key
+
+    @topn_boundary_key.setter
+    def topn_boundary_key(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        # (schema_column, ascending, nulls_first) of the LEADING key of a Top-N that
+        # reads directly from this scan — stamped by TopNScanPushdownStrategy for any
+        # key count, independently of the connector's own single-key spec. Consumed
+        # by the Top-N runtime boundary (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md).
+        frozen = _frozen_list("ScanStep.topn_boundary_key", value)
+        if frozen is not None and (len(frozen) != 3 or type(frozen[1]) is not bool
+                                   or type(frozen[2]) is not bool):
+            raise TypeError(
+                "ScanStep.topn_boundary_key must be (schema_column, ascending, nulls_first)")
+        self._topn_boundary_key = frozen
+
+    @property
     def topn_descending(self):
         return self._topn_descending
 
@@ -8414,6 +8434,7 @@ cdef class ScanStep(PlanStep):
         out["schema"] = self._schema
         out["source"] = self._source
         out["start_date"] = self._start_date
+        out["topn_boundary_key"] = self._topn_boundary_key
         out["topn_descending"] = self._topn_descending
         out["topn_nulls_first"] = self._topn_nulls_first
         out["topn_limit"] = self._topn_limit
@@ -8462,6 +8483,7 @@ cdef class ScanStep(PlanStep):
         new._schema = _copy_field(self._schema, memo)
         new._source = _copy_field(self._source, memo)
         new._start_date = _copy_field(self._start_date, memo)
+        new._topn_boundary_key = _copy_field(self._topn_boundary_key, memo)
         new._topn_descending = _copy_field(self._topn_descending, memo)
         new._topn_nulls_first = _copy_field(self._topn_nulls_first, memo)
         new._topn_limit = _copy_field(self._topn_limit, memo)
@@ -8504,6 +8526,7 @@ cdef class ScanStep(PlanStep):
         new._schema = self._schema
         new._source = self._source
         new._start_date = self._start_date
+        new._topn_boundary_key = self._topn_boundary_key
         new._topn_descending = self._topn_descending
         new._topn_nulls_first = self._topn_nulls_first
         new._topn_limit = self._topn_limit
@@ -10348,6 +10371,7 @@ cpdef frozenset steps_with(str field):
             "task_name": frozenset({T.AlterTask, T.CreateTask, T.CreateTrigger, T.DropTask, T.Listen, T.Unlisten}),
             "time_zone": frozenset({T.CreateTrigger}),
             "top_k": frozenset({T.Window}),
+            "topn_boundary_key": frozenset({T.Scan}),
             "topn_descending": frozenset({T.Scan}),
             "topn_nulls_first": frozenset({T.Scan}),
             "topn_limit": frozenset({T.Scan}),

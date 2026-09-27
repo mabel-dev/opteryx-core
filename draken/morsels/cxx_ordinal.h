@@ -25,3 +25,13 @@
 
 extern "C" int cxx_ordinal_bounds_c(const CxxMorsel* m, int32_t col_idx,
                                     int64_t* out_lo, int64_t* out_hi);
+
+// cxx_ordinal_topn_c(m, col_idx, n, ascending, heap, &heap_len) keeps the n BEST
+// non-null ordinals of column `col_idx` across calls, in caller-owned heap state
+// (room for min(n, heap_len + rows) entries). Once heap_len == n, heap[0] is the
+// n-th best value seen — the Top-N runtime boundary
+// (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md §3). Returns 1 when the column has an
+// ordinal, 0 (heap untouched) when it does not. Never throws on a type it
+// refuses; allocation failure of its per-thread scratch is the only throw.
+extern "C" int cxx_ordinal_topn_c(const CxxMorsel* m, int32_t col_idx, uint32_t n,
+                                  int ascending, int64_t* heap, uint32_t* heap_len);

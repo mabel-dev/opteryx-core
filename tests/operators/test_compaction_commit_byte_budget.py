@@ -34,13 +34,20 @@ from draken.morsels.morsel import MORSEL_MAX_ARENA_BYTES, Morsel, MorselBatcher
 
 from opteryx.compiled.structures.plan_steps import CompactionCommitStep
 from opteryx.models import QueryProperties
-from opteryx.models.file_entry import FileEntry
+from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
 from opteryx.operators._operators import CompactionCommitNode, DataFileStream
 
 ROW_BYTES = 4096
 ROWS_PER_MORSEL = 32
 BUDGET = 256 * 1024  # ~2 morsels' worth of arena
 
+
+
+def _file_row(path, record_count, file_size, uncompressed_size=-1, row_group_count=-1):
+    """A data file writer's close() result: the file as a native file row."""
+    builder = NativeManifestBuilder((), (), True, True)
+    builder.add_file(path, "PARQUET", record_count, file_size, row_group_count, uncompressed_size)
+    return builder.build({})
 
 class _RecordingWriter:
     """One open data file: records the row groups it was handed."""
@@ -66,15 +73,7 @@ class _RecordingWriter:
     def close(self):
         self.closed = True
         self.connector.closed.append(self)
-        return FileEntry(
-            file_path=self.file_path,
-            file_format="PARQUET",
-            record_count=sum(m.num_rows for m in self.row_groups),
-            file_size_in_bytes=self.uncompressed_size_in_bytes,
-            uncompressed_size_in_bytes=self.uncompressed_size_in_bytes,
-            row_group_count=len(self.row_groups),
-            catalog_entry={"file_path": self.file_path},
-        )
+        return _file_row(self.file_path, sum(m.num_rows for m in self.row_groups), self.uncompressed_size_in_bytes, uncompressed_size=self.uncompressed_size_in_bytes, row_group_count=len(self.row_groups))
 
     def abort(self):
         self.aborted = True
@@ -109,8 +108,8 @@ class _RecordingConnector:
     def delete_data_file(self, relation_name, file_path):
         self.deleted.append(file_path)
 
-    def compaction_commit(self, relation_name, file_entries, retired_files, **kwargs):
-        self.commits.append((list(file_entries), list(retired_files)))
+    def compaction_commit(self, relation_name, rows, retired_files, **kwargs):
+        self.commits.append((rows, list(retired_files)))
 
 
 def _wide_morsel(seed):
@@ -197,8 +196,8 @@ def test_files_roll_at_the_target_and_the_last_closes_at_eos():
     assert all(w.uncompressed_size_in_bytes >= 2 * one for w in connector.closed)
     assert _all_rows(connector) == expected
     assert len(connector.commits) == 1
-    entries, retired = connector.commits[0]
-    assert [e.file_path for e in entries] == [w.file_path for w in connector.closed]
+    rows, retired = connector.commits[0]
+    assert rows.file_paths() == [w.file_path for w in connector.closed]
     assert retired == ["old_1.parquet"]
     assert node.result.record_count == 5
 
@@ -222,8 +221,8 @@ def test_a_plain_stream_makes_no_sort_claim_and_writes_fast():
     stream._batcher = MorselBatcher(ROWS_PER_MORSEL)
     for seed in range(2):
         stream.push(_wide_morsel(seed))
-    entries = stream.finish()
-    assert len(entries) == 2
+    rows = stream.finish()
+    assert len(rows) == 2
     assert [w.sorted_by for w in connector.opened] == [None, None]
     assert [w.write_profile for w in connector.opened] == ["fast", "fast"]
 
@@ -242,7 +241,7 @@ def test_a_failure_mid_stream_aborts_the_open_file_and_removes_closed_ones():
     assert connector.aborted == [connector.opened[0]]
     assert connector.closed == []
     assert node._stream._writer is None
-    assert node._stream.entries == []
+    assert node._stream.rows == []
     assert connector.commits == []
 
 

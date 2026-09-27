@@ -185,20 +185,24 @@ def test_truncate_creates_empty_snapshot(connector, simple_schema):
     assert entries == []
 
 
+def _rows(*files):
+    """Data files as the batch of native file rows a commit takes:
+    (path, record_count, size) each, over no columns."""
+    from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
+
+    builder = NativeManifestBuilder((), (), True, True)
+    for path, record_count, size in files:
+        builder.add_file(path, "PARQUET", record_count, size)
+    return builder.build({})
+
+
 def test_insert_appends_to_snapshot_chain(connector, simple_schema):
     """Test insert creates snapshot chain with parent references."""
     connector.create_relation("test_table", simple_schema)
 
     # Create first file entry
-    entry1 = FileEntry(
-        file_path="data-001.parquet",
-        file_format="PARQUET",
-        record_count=100,
-        file_size_in_bytes=5000,
-    )
-
-    # Insert first entry
-    connector.insert("test_table", [entry1])
+    # Insert first file
+    connector.insert("test_table", _rows(("data-001.parquet", 100, 5000)))
 
     table_dir = connector._relation_dir("test_table")
     with open(os.path.join(table_dir, "dataset.json"), "r") as f:
@@ -206,13 +210,7 @@ def test_insert_appends_to_snapshot_chain(connector, simple_schema):
     snapshot_name1 = descriptor1["current_snapshot"]
 
     # Insert second entry
-    entry2 = FileEntry(
-        file_path="data-002.parquet",
-        file_format="PARQUET",
-        record_count=150,
-        file_size_in_bytes=7000,
-    )
-    connector.insert("test_table", [entry2])
+    connector.insert("test_table", _rows(("data-002.parquet", 150, 7000)))
 
     with open(os.path.join(table_dir, "dataset.json"), "r") as f:
         descriptor2 = json.load(f)
@@ -254,82 +252,105 @@ def test_concurrent_commit_aborts(connector, simple_schema):
     connector._pre_commit_recheck_hook = simulate_concurrent_mod
 
     # Try to insert - should detect concurrent modification
-    entry = FileEntry(
-        file_path="data-001.parquet",
-        file_format="PARQUET",
-        record_count=100,
-        file_size_in_bytes=5000,
-    )
-
     with pytest.raises(ConcurrentModificationError, match="modified concurrently"):
-        connector.insert("test_table", [entry])
+        connector.insert("test_table", _rows(("data-001.parquet", 100, 5000)))
 
     connector._pre_commit_recheck_hook = None
 
 
-def test_file_entry_manifest_round_trip(connector, simple_schema):
-    """FileEntry now round-trips through the Parquet manifest, not JSON."""
-    entry = FileEntry(
-        file_path="data.parquet",
-        file_format="PARQUET",
-        record_count=1000,
-        file_size_in_bytes=50000,
-        uncompressed_size_in_bytes=60000,
-        lower_bounds={0: (5).to_bytes(8, "big", signed=True)},
-        upper_bounds={0: (95).to_bytes(8, "big", signed=True)},
-    )
+def _one_file_manifest(schema, bounds):
+    """One file's manifest as this store writes it (NativeManifest.to_parquet),
+    `bounds` {position: (low ordinal, high ordinal)}."""
+    from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
 
-    from opteryx.models.manifest_io import write_manifest_parquet
+    names = tuple(c.name for c in schema.columns)
+    physical = tuple(c.column_type.physical for c in schema.columns)
+    builder = NativeManifestBuilder(names, physical, True, True)
+    row = builder.add_file("data.parquet", "PARQUET", 1000, 50000, -1, 60000)
+    for position, (low, high) in bounds.items():
+        builder.set_ordinal_bound(row, position, True, low)
+        builder.set_ordinal_bound(row, position, False, high)
+    return builder.build({}).to_parquet()
 
-    data = write_manifest_parquet([entry], simple_schema)
+
+def test_file_row_manifest_round_trip(simple_schema):
+    """A file's row round-trips through the Parquet manifest."""
+    data = _one_file_manifest(simple_schema, {0: (5, 95)})
     restored_entries, _native = read_manifest_file_entries(data)
     restored = restored_entries[0]
 
-    assert restored.file_path == entry.file_path
-    assert restored.file_format == entry.file_format
-    assert restored.record_count == entry.record_count
-    assert restored.file_size_in_bytes == entry.file_size_in_bytes
-    assert restored.uncompressed_size_in_bytes == entry.uncompressed_size_in_bytes
+    assert restored.file_path == "data.parquet"
+    assert restored.file_format == "PARQUET"
+    assert restored.record_count == 1000
+    assert restored.file_size_in_bytes == 50000
+    assert restored.uncompressed_size_in_bytes == 60000
     assert restored.lower_bounds[0] == 5
     assert restored.upper_bounds[0] == 95
 
 
-def test_local_store_bounds_prune_correctly_as_real_values_not_ordinal(connector, simple_schema):
-    """LocalStoreConnector's manifest bounds are real decoded values
-    (parquet_writer._serialize_bound / manifest_io._decode_bound) — a
-    physically separate path from ANALYZE's ordinal-encoded filesystem-
-    connector manifest (opteryx/models/manifest.py's `bounds_are_ordinal`).
-    A Manifest built from this round-trip must default bounds_are_ordinal to
-    False and prune using the literal AS-IS, exactly as before that flag
-    existed."""
+def _comparison(column_name, op, value):
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name, arena=_TEST_ARENA)
+    literal = Literal(value=value, arena=_TEST_ARENA)
+    return Comparison(value=op, left=identifier, right=literal, arena=_TEST_ARENA)
+
+
+def test_local_store_bounds_are_ordinal_and_prune_through_ordinalize(simple_schema):
+    """This store writes its manifests in the ORDINAL dialect (the native
+    writer's, the one ANALYZE writes) and says so in the snapshot; a Manifest
+    read with that marker ordinalizes predicate literals before comparing."""
     plan_context = PlanContext()
-    entry = FileEntry(
-        file_path="data.parquet",
-        file_format="PARQUET",
-        record_count=1000,
-        file_size_in_bytes=50000,
-        lower_bounds={0: (5).to_bytes(8, "big", signed=True)},
-        upper_bounds={0: (95).to_bytes(8, "big", signed=True)},
-    )
+    restored_entries, _native = read_manifest_file_entries(_one_file_manifest(simple_schema, {0: (5, 95)}))
 
-    from opteryx.models.manifest_io import write_manifest_parquet
-
-    data = write_manifest_parquet([entry], simple_schema)
-    restored_entries, _native = read_manifest_file_entries(data)
-
-    manifest = Manifest(files=restored_entries, schema=simple_schema)
-    assert manifest.bounds_are_ordinal is False
-
-    def _comparison(column_name, op, value):
-        identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=column_name, arena=_TEST_ARENA)
-        literal = Literal(value=value, arena=_TEST_ARENA)
-        return Comparison(value=op, left=identifier, right=literal, arena=_TEST_ARENA)
-
-    # id's real range is [5, 95] — 1000 is out of range and must prune.
+    # id's range is [5, 95] — 1000 is out of range and must prune.
+    manifest = Manifest(files=restored_entries, schema=simple_schema, bounds_are_ordinal=True)
     manifest = manifest.prune_files([_comparison("id", "Gt", 1000)], plan_context=plan_context)
     assert manifest.files == []
 
-    manifest = Manifest(files=restored_entries, schema=simple_schema)
     # 50 is within [5, 95] and must be kept.
+    manifest = Manifest(files=restored_entries, schema=simple_schema, bounds_are_ordinal=True)
     manifest = manifest.prune_files([_comparison("id", "Eq", 50)], plan_context=plan_context)
     assert len(manifest.files) == 1
+
+
+def test_a_manifest_from_before_the_ordinal_marker_is_rewritten_ordinal():
+    """A snapshot written before this store recorded ordinal bounds holds REAL
+    values (a FLOAT64 column's bound is the double itself). It still decodes in
+    that dialect, and the next commit carries it forward re-encoded as ordinal
+    keys - so the dialect a relation's manifest is in never mixes."""
+    import rugo.parquet as rugo_parquet
+    from draken.interop.vector_sequence import vector_from_sequence
+    from draken.morsels.morsel import Morsel
+
+    from opteryx.compiled.planner.native_manifest import decode_manifest_parquet
+    from opteryx.connectors.local_store_connector import _assemble
+    from opteryx.models.manifest_io import _MANIFEST_COLUMNS
+    from opteryx.types.logical_type import FLOAT64
+
+    schema = RelationDescriptor(name="t", columns=[ColumnDescriptor(name="f", column_type=FLOAT64)])
+    # the old writer's encoding: every column through vector_from_sequence
+    old_row = {
+        "file_path": "data.parquet", "file_format": "PARQUET", "record_count": 10,
+        "file_size_in_bytes": 100, "uncompressed_size_in_bytes": 120,
+        "column_uncompressed_sizes_in_bytes": [], "null_counts": [], "min_k_hashes": [],
+        "histogram_counts": [], "histogram_bins": 0, "min_values": [0.5], "max_values": [9.5],
+        "field_ids": [0], "min_lengths": [], "max_lengths": [], "char_class_counts": [],
+        "char_total_bytes": [], "distinct_counts": [],
+    }
+    from draken import draken_native as dn
+
+    morsel = Morsel()
+    for name, dtype in _MANIFEST_COLUMNS.items():
+        if name in ("min_k_hashes", "histogram_counts", "char_class_counts"):
+            leaf = dn.DrakenType.UINT64 if name == "min_k_hashes" else dn.DrakenType.INT64
+            vector = dn.vector_array_from_sequence([old_row[name]], element_type=leaf.value, nesting_depth=2)
+        else:
+            vector = vector_from_sequence([old_row[name]], dtype=dtype)
+        morsel.append_vector(name, vector)
+    old_manifest = rugo_parquet.write_parquet(morsel, compression="zstd")
+
+    carried = decode_manifest_parquet(old_manifest, ("f",), (FLOAT64.physical,), {}, False, True)
+    rewritten = _assemble(schema, carried=carried, carried_positions=[0]).to_parquet()
+
+    entries, _native = read_manifest_file_entries(rewritten)
+    assert entries[0].min_values == [FLOAT64.ordinalize(0.5)]
+    assert entries[0].max_values == [FLOAT64.ordinalize(9.5)]

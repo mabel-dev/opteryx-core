@@ -75,7 +75,7 @@ class DataFileStream:
         self.coalesce_rows = min(rows, DEFAULT_ROWS_PER_ROW_GROUP)
         self._batcher = MorselBatcher(self.coalesce_rows)
         self._writer = None
-        self.entries = []
+        self.rows = []   # one native file row per closed file
 
     def push(self, morsel):
         """Buffer a morsel by REFERENCE; write whole batches as they fill.
@@ -88,11 +88,14 @@ class DataFileStream:
             self._write_batch(batch)
 
     def finish(self):
-        """Write what the batcher holds, close the open file, return the entries."""
+        """Write what the batcher holds, close the open file, and return every
+        closed file as one batch of native file rows."""
+        from opteryx.compiled.planner.native_manifest import concat_rows
+
         for batch in self._batcher.finish():
             self._write_batch(batch)
         self._close_writer()
-        return self.entries
+        return concat_rows(self.rows)
 
     def abandon(self):
         """A failure landed mid-stream: leave nothing behind."""
@@ -106,12 +109,13 @@ class DataFileStream:
 
     def discard_outputs(self):
         """Remove every closed file. For after a commit the store refused."""
-        for entry in self.entries:
-            try:
-                self.connector.delete_data_file(self.relation_name, entry.file_path)
-            except Exception:  # noqa: BLE001 - storage boundary, see module docstring
-                pass
-        self.entries = []
+        for row in self.rows:
+            for path in row.file_paths():
+                try:
+                    self.connector.delete_data_file(self.relation_name, path)
+                except Exception:  # noqa: BLE001 - storage boundary, see module docstring
+                    pass
+        self.rows = []
 
     def _write_batch(self, batch):
         if self._writer is None:
@@ -130,4 +134,4 @@ class DataFileStream:
         if self._writer is None:
             return
         writer, self._writer = self._writer, None
-        self.entries.append(writer.close())
+        self.rows.append(writer.close())

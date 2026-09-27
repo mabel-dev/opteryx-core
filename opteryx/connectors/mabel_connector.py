@@ -32,7 +32,7 @@ full-day range behaviour.
 
 Partition pruning and as_at/frame.complete resolution happen here, entirely at
 plan time. All data reading is native: this connector's only job is to build a
-Manifest of FileEntry blob paths + footer stats and hand it to ParquetReadNode -
+Manifest of blob paths + footer stats and hand it to ParquetReadNode -
 the same modern parquet path every other connector uses.
 
 Case mapping: the binder lowercases every SQL table identifier before any
@@ -183,7 +183,7 @@ class MabelTable(BaseTable, Diachronic):
 
     Transient, created per query. Resolves the year/month/day[/by_hour] partition
     and as_at/frame.complete snapshot for the query's point-in-time, then builds a
-    Manifest of FileEntry blob paths + footer stats for ParquetReadNode. Performs
+    Manifest of blob paths + footer stats for ParquetReadNode. Performs
     no data reading itself.
     """
 
@@ -195,7 +195,7 @@ class MabelTable(BaseTable, Diachronic):
 
     # Unconditional, unlike FileSystemTable's per-format property: a Mabel
     # dataset is always parquet. Only `.parquet` blobs are collected, and every
-    # FileEntry this builds is stamped file_format="PARQUET", so the physical
+    # manifest file this builds is stamped file_format="PARQUET", so the physical
     # planner's manifest-format dispatch (_scan_reader_for_manifest) can only
     # ever select ParquetReadNode — the reader that implements the retag.
     supports_int64_timestamp_retag = True
@@ -259,7 +259,7 @@ class MabelTable(BaseTable, Diachronic):
         from rugo.parquet import read_metadata_from_memoryview  # type: ignore[import]
 
         from opteryx.connectors._rugo_schema import rugo_to_relation_schema
-        from opteryx.models.file_entry import FileEntry
+        from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
         from opteryx.models.manifest import Manifest
         from opteryx.models.manifest_io import is_dataset_manifest
 
@@ -301,21 +301,20 @@ class MabelTable(BaseTable, Diachronic):
 
         # Mabel computes NO plan-time statistics. The manifest lists the files and
         # their sizes; every row count and column bound comes from reading them.
-        # record_count is therefore None — UNKNOWN, not 0 (see FileEntry): a
-        # fabricated 0 would let the optimizer answer COUNT(*) from the manifest
-        # without scanning, and delete LIMIT nodes as already-satisfied.
-        file_entries = [
-            FileEntry(
-                file_path=blob_name,
-                file_format="PARQUET",
-                record_count=None,
-                file_size_in_bytes=sizes.get(blob_name, 0),
-            )
-            for blob_name in data_blobs
-        ]
+        # Every record count is therefore UNKNOWN (-1), not 0: a fabricated 0
+        # would let the optimizer answer COUNT(*) from the manifest without
+        # scanning, and delete LIMIT nodes as already-satisfied.
+        builder = NativeManifestBuilder(
+            tuple(column.name for column in schema.columns),
+            tuple(column.column_type.physical for column in schema.columns),
+            False,
+            True,
+        )
+        for blob_name in data_blobs:
+            builder.add_file(blob_name, "PARQUET", -1, sizes.get(blob_name, 0))
 
         self.schema = schema
-        self._manifest = Manifest(file_entries, schema, stats_are_authoritative=True)
+        self._manifest = Manifest(builder.build({}), schema)
         return self.schema, self._manifest
 
     def read_dataset(self, **kwargs):

@@ -9,7 +9,7 @@ Regression tests for Manifest's `bounds_are_ordinal` flag and its use in
 
 ANALYZE's native per-file statistics pass writes min_values/max_values into
 the dataset manifest as `Vector.ordinalize()` ordinal int64 keys, not real
-decoded values (see manifest_io.write_manifest_parquet's docstring). A
+decoded values (draken/ops/ordinalize.h states what they are). A
 predicate literal must be run through the SAME `ColumnType.ordinalize`
 transform before it is comparable to those bounds. These tests exercise
 `Manifest.prune_files` directly (no filesystem/ANALYZE I/O) so the pruning

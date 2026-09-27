@@ -154,6 +154,13 @@ struct LatmatScanSource : Source {
     bool    sort_nulls_first;  // resolved by the planner, independent of direction
     int64_t topn_limit;
 
+    // ── Top-N runtime boundary (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md §4.2) ──────────
+    // Pass 1 is BOTH producer and consumer: it sees every survivor's sort key, and it
+    // submits the row groups. So the tracker is a local of run_pass1 (one thread, no
+    // sharing); the engine-owned boundary is still used, for the published value and
+    // the skip count the telemetry reads. nullptr = not armed.
+    TopNBoundary* topn_boundary_ = nullptr;
+
     // ── output assembly ────────────────────────────────────────────────────────────
     // For output column j exactly one of these is >= 0: the source column's index in
     // the pass-1 or pass-2 layout. Built at plan time from the scan's projection.
@@ -275,28 +282,73 @@ struct LatmatScanSource : Source {
     // Drain every pruned-surviving row group through the pass-1 pipeline, evaluate the
     // predicate, and collect the survivors. Runs once, on whichever worker gets here
     // first, holding g.mtx.
+    // Whether pass-1 work item (path, rg_idx) is excluded by Top-N boundary value `b`.
+    // An item this cannot resolve is kept — submit() fails loud on it.
+    bool topn_item_excluded(const std::pair<std::string, int>& item,
+                            const std::string& column, int64_t b) const {
+        auto fit = footer_map->find(item.first);
+        if (fit == footer_map->end()) return false;
+        const size_t rg_idx = static_cast<size_t>(item.second);
+        if (rg_idx >= fit->second->row_groups.size()) return false;
+        return topn_excludes_row_group(fit->second->row_groups[rg_idx], column,
+                                       sort_ascending, sort_nulls_first, b);
+    }
+
     void run_pass1(std::vector<LatmatRowGroup>& out, ErrCtx& err) {
         const int n_items = static_cast<int>(work_items->size());
         const std::vector<int32_t> block_ids = fetch_block_ids(*work_items, *p1_column_names);
-        int submitted = 0, received = 0;
-        while (received < n_items) {
+        // The drain below ends when nothing is owed, which only means "every unit was
+        // walked" while the window can hold at least one row group. A zero window
+        // would end pass 1 before it read anything — an empty answer, not a slow one.
+        if (in_flight_limit < 1) {
+            err.code = 1;
+            err.msg = "LatmatScanSource: in_flight_limit must be at least 1";
+            return;
+        }
+        // Top-N runtime boundary (§4.2): the tracker sees every survivor's sort key,
+        // and each unit is tested against the boundary before it is submitted.
+        const bool topn_armed = topn_boundary_ != nullptr;
+        const std::string* topn_column =
+            topn_armed ? &(*p1_column_names)[static_cast<size_t>(sort_p1_index)] : nullptr;
+        TopNBoundaryTracker tracker;
+        // `submitted` counts units WALKED (submitted, or skipped by the boundary);
+        // `sent` counts row groups actually submitted — the results owed.
+        int submitted = 0, sent = 0, received = 0;
+        while (true) {
             // A whole fetch block per submission (see NativeParquetScanSource::
             // get_morsel): the window may overshoot by at most block - 1 row groups.
-            while (submitted < n_items && (submitted - received) < in_flight_limit) {
+            while (submitted < n_items && (sent - received) < in_flight_limit) {
                 int e = submitted + 1;
                 while (e < n_items &&
                        same_block(*work_items, block_ids, static_cast<size_t>(e - 1),
                                   static_cast<size_t>(e)))
                     ++e;
+                const int64_t topn_b = topn_armed ? topn_boundary_->load() : 0;
+                int64_t topn_skipped_now = 0;
                 std::vector<int> rg_idxs;
-                for (int u = submitted; u < e; ++u)
-                    rg_idxs.push_back((*work_items)[static_cast<size_t>(u)].second);
-                if (!submit(p1_pipeline, *p1_column_names,
-                            (*work_items)[static_cast<size_t>(submitted)].first,
-                            rg_idxs, {}, err))
-                    return;
+                for (int u = submitted; u < e; ++u) {
+                    const auto& item = (*work_items)[static_cast<size_t>(u)];
+                    if (topn_armed && topn_item_excluded(item, *topn_column, topn_b)) {
+                        topn_skipped_now += 1;
+                        continue;
+                    }
+                    rg_idxs.push_back(item.second);
+                }
+                if (topn_skipped_now != 0)
+                    topn_boundary_->row_groups_skipped.fetch_add(topn_skipped_now,
+                                                                 std::memory_order_relaxed);
+                if (!rg_idxs.empty()) {
+                    if (!submit(p1_pipeline, *p1_column_names,
+                                (*work_items)[static_cast<size_t>(submitted)].first,
+                                rg_idxs, {}, err))
+                        return;
+                    sent += static_cast<int>(rg_idxs.size());
+                }
                 submitted = e;
             }
+            // The walk above stops early only when the window is full, i.e. while
+            // results are owed; so nothing owed means every unit has been walked.
+            if (received >= sent) break;
             rugo::MorselRef result;
             const auto _tr_idx = BS::this_thread::get_index();
             const uint16_t _tr_worker =
@@ -385,6 +437,10 @@ struct LatmatScanSource : Source {
             if (rg.positions.empty()) continue;
             rg.p1 = take_rows(p1m, rg.positions, err);
             if (err.code != 0) return;
+            // Exactly the rows reduce_to_topn will see: the predicate survivors.
+            if (topn_armed)
+                tracker.observe(rg.p1.get(), static_cast<int32_t>(sort_p1_index),
+                                static_cast<uint32_t>(topn_limit), *topn_boundary_);
             out.push_back(std::move(rg));
         }
     }

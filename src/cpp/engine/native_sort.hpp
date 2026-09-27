@@ -34,6 +34,7 @@
 #include "operator.hpp"
 #include "pipeline_buffers.hpp"
 #include "morsels/sort.hpp"      // THE sort (build: -Idraken)
+#include "topn_boundary.hpp"     // TopNBoundary / TopNBoundaryTracker (Top-N runtime boundary)
 
 namespace opteryx::engine {
 
@@ -150,6 +151,8 @@ struct SortSink : Sink, EmitSubset {
 struct TopNLocal : LocalSinkState {
     std::vector<MorselPtr> morsels;
     size_t rows = 0;
+    // Top-N runtime boundary producer (only used when the sink is armed).
+    TopNBoundaryTracker tracker;
 };
 struct TopNGlobal : GlobalSinkState {
     std::mutex mtx;
@@ -161,6 +164,15 @@ struct TopNSink : Sink, EmitSubset {
     size_t n_limit;
     MorselBuffer* out;
     size_t compact_threshold;
+    // Top-N runtime boundary (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md). When armed, every
+    // worker tracks the n best non-null values of the LEADING key over the rows it
+    // receives and publishes the n-th into `boundary`, which the scan feeding this
+    // sink reads before it submits each row group. It cannot be derived from
+    // compact(): that only runs every max(4n, 65536) buffered rows, which a selective
+    // scan never reaches mid-flight. nullptr = not armed (every pre-feature plan).
+    // `boundary_col` is spec[0].col_idx; Engine::arm_topn_sink_boundary sets both.
+    TopNBoundary* boundary = nullptr;
+    int32_t boundary_col = -1;
 
     TopNSink(std::vector<SortKeySpec> s, size_t n, MorselBuffer* b,
              bool prune = false, std::vector<uint32_t> emit = {})
@@ -197,6 +209,9 @@ struct TopNSink : Sink, EmitSubset {
                     ErrCtx& err) override {
         auto& l = static_cast<TopNLocal&>(ls);
         if (in->num_rows() == 0) return SinkResult::CONTINUE;
+        if (boundary != nullptr)
+            l.tracker.observe(in.get(), boundary_col, static_cast<uint32_t>(n_limit),
+                              *boundary);
         l.morsels.push_back(in);
         l.rows += in->num_rows();
         if (l.rows > compact_threshold) compact(l, err);
