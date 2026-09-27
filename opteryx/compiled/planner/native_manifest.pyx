@@ -392,14 +392,18 @@ cdef extern from "planner/manifest_encode.hpp" namespace "opteryx::planner":
         EncodedList char_class_counts
         EncodedList char_total_bytes
         EncodedList distinct_counts
+        EncodedList element_min_values
+        EncodedList element_max_values
+        EncodedList element_min_k_hashes
 
-    EncodedManifest encode_manifest(const CNativeManifest& m) except +
+    EncodedManifest encode_manifest(const CNativeManifest& m, const vector[int64_t]& field_ids) except +
 
 
 cdef extern from "planner/file_stats.hpp" namespace "opteryx::planner":
     cdef cppclass FileStatsAccumulator:
         FileStatsAccumulator(vector[DrakenType] physical)
         size_t column_count()
+        int64_t uncompressed_size()
         void add(size_t position, const VectorOwner& owner) except +
         void write(CNativeManifest& m, size_t row, vector[vector[uint64_t]]& min_k,
                    vector[vector[int64_t]]& histogram, vector[vector[int64_t]]& char_class) except +
@@ -477,6 +481,7 @@ cdef extern from "planner/manifest_decode.hpp" namespace "opteryx::planner":
     cdef cppclass ManifestArrayColumn:
         const DrakenVector* outer
         const DrakenVector* child
+        const DrakenVector* grandchild
 
     cdef cppclass ManifestColumnsIn:
         const DrakenVector* file_path
@@ -496,6 +501,9 @@ cdef extern from "planner/manifest_decode.hpp" namespace "opteryx::planner":
         ManifestArrayColumn field_ids
         ManifestArrayColumn char_total_bytes
         ManifestArrayColumn distinct_counts
+        ManifestArrayColumn element_min_values
+        ManifestArrayColumn element_max_values
+        ManifestArrayColumn element_min_k_hashes
 
     cdef cppclass ManifestSchemaIn:
         vector[string] columns
@@ -531,6 +539,25 @@ cdef inline void _array(ManifestArrayColumn& out, dict vectors, str name, bint r
         return
     out.outer = draken_vector_unwrap(<PyObject*>vector_object)
     out.child = draken_array_child_unwrap(<PyObject*>vector_object)
+
+
+cdef inline void _nested_array(ManifestArrayColumn& out, dict vectors, str name) except *:
+    """An OPTIONAL array<array<T>> column; absent - or holding no list at all,
+    which a writer types with no element shape - leaves `out` empty."""
+    vector_object = vectors.get(name)
+    out.outer = NULL
+    out.child = NULL
+    out.grandchild = NULL
+    if vector_object is None:
+        return
+    cdef const DrakenVector* outer = draken_vector_unwrap(<PyObject*>vector_object)
+    if outer.length == 0 or outer.type != DRAKEN_ARRAY:
+        return
+    if draken_array_child_unwrap(<PyObject*>vector_object).length == 0:
+        return
+    out.outer = outer
+    out.child = draken_array_child_unwrap(<PyObject*>vector_object)
+    out.grandchild = draken_array_grandchild_unwrap(<PyObject*>vector_object)
 
 
 cdef object _optional(int64_t value):
@@ -685,24 +712,31 @@ cdef class NativeManifest:
 
     # --- writing (manifest_encode.hpp) --------------------------------------
 
-    def to_parquet(self):
-        """The manifest parquet for these rows - the shared manifest format
-        (the catalog's column set bar the ARRAY element_* statistics, which no
-        native row carries), bounds in the ORDINAL dialect - as bytes."""
+    def to_parquet(self, list field_ids=None):
+        """The manifest parquet for these rows - the shared manifest format, the
+        catalog's full column set, bounds in the ORDINAL dialect - as bytes.
+        `field_ids` (one per column; None for a column with no id) keys each
+        row's lists; omitted, they are keyed by load-time position (core's own
+        manifests). A catalog's manifest carries the catalog's ids."""
         from rugo import parquet as rugo_parquet
 
-        return rugo_parquet.write_parquet(self._morsel(False), compression="zstd", bloom_filters=True)
+        cdef vector[int64_t] ids
+        if field_ids is not None:
+            for field_id in field_ids:
+                ids.push_back(-1 if field_id is None else <int64_t?>field_id)
+        return rugo_parquet.write_parquet(self._morsel(False, ids), compression="zstd", bloom_filters=True)
 
     def show_morsel(self):
         """SHOW MANIFEST's rows: the manifest's columns (manifest_io._MANIFEST_COLUMNS),
         with min_values / max_values rendered as TEXT - one row's bounds span
         every column's type, which no typed ARRAY holds (manifest_io._bound_as_text)."""
-        return self._morsel(True)
+        cdef vector[int64_t] positions
+        return self._morsel(True, positions)
 
-    cdef _morsel(self, bint bounds_as_text):
+    cdef _morsel(self, bint bounds_as_text, const vector[int64_t]& field_ids):
         from draken.morsels.morsel import Morsel
 
-        cdef EncodedManifest e = encode_manifest(self._manifest[0])
+        cdef EncodedManifest e = encode_manifest(self._manifest[0], field_ids)
         cdef uint32_t n = e.rows
         # every encoded buffer is adopted, used or not - the bridge owns them
         min_values = _list_vector(e.min_values, n)
@@ -711,6 +745,9 @@ cdef class NativeManifest:
                                                        e.delete_file_path.arena_len, e.delete_file_path_validity, n,
                                                        DRAKEN_VARCHAR))
         deleted = _scalar_vector(e.deleted_record_count, n)
+        element_min_values = _list_vector(e.element_min_values, n)
+        element_max_values = _list_vector(e.element_max_values, n)
+        element_min_k_hashes = _list_vector(e.element_min_k_hashes, n)
         if bounds_as_text:
             min_values, max_values = self._text_bounds()
         morsel = Morsel()
@@ -734,7 +771,11 @@ cdef class NativeManifest:
         morsel.append_vector("char_total_bytes", _list_vector(e.char_total_bytes, n))
         morsel.append_vector("distinct_counts", _list_vector(e.distinct_counts, n))
         if not bounds_as_text:
-            # the catalog's merge-on-read columns; SHOW MANIFEST's schema has none
+            # the catalog's ARRAY element statistics and merge-on-read columns;
+            # SHOW MANIFEST's schema has none of them
+            morsel.append_vector("element_min_values", element_min_values)
+            morsel.append_vector("element_max_values", element_max_values)
+            morsel.append_vector("element_min_k_hashes", element_min_k_hashes)
             morsel.append_vector("delete_file_path", delete_paths)
             morsel.append_vector("deleted_record_count", deleted)
         return morsel
@@ -1052,6 +1093,9 @@ def decode_manifest_parquet(
         _array(columns_in.field_ids, vectors, "field_ids", True)
         _array(columns_in.char_total_bytes, vectors, "char_total_bytes", True)
         _array(columns_in.distinct_counts, vectors, "distinct_counts", False)
+        _array(columns_in.element_min_values, vectors, "element_min_values", False)
+        _array(columns_in.element_max_values, vectors, "element_max_values", False)
+        _nested_array(columns_in.element_min_k_hashes, vectors, "element_min_k_hashes")
 
     out._manifest = new_decoded_manifest(columns_in, schema_in, rows)
     _bind_sketch_views(out)
@@ -1730,6 +1774,12 @@ cdef class FileStats:
             native = vector if type(vector) is _NativeVector else vector._nb
             handle = <PyObject*>native
             self._accumulator.add(position, draken_owner_unwrap(handle)[0])
+
+    @property
+    def uncompressed_size(self):
+        """The in-memory byte footprint of every row group added so far - the
+        manifest's size unit (Morsel.nbytes' accounting, column by column)."""
+        return 0 if self._accumulator == NULL else self._accumulator.uncompressed_size()
 
     def file_row(self, str path, str file_format, int64_t record_count, int64_t file_size,
                  int64_t row_group_count, int64_t uncompressed_size):

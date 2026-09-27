@@ -12,7 +12,8 @@
 // filled from the native rows into draken_malloc'd buffers that the draken
 // bridge adopts as Vectors (see native_manifest.pyx), and rugo writes. Bounds
 // are written in the ORDINAL dialect, for every column; `field_ids` is the
-// load-time position. A per-column list a file tracks nothing for is written
+// catalog's ids when given, else the load-time position. A per-column list a
+// file tracks nothing for is written
 // EMPTY (the format's "not tracked"), otherwise positionally with a null for
 // each unknown column - never a zero.
 
@@ -21,6 +22,7 @@
 #include <cstdint>
 #include <cstring>
 #include <new>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -67,6 +69,7 @@ struct EncodedManifest {
     EncodedScalar record_count, file_size, uncompressed_size, histogram_bins;
     EncodedList column_sizes, null_counts, min_k, histogram_counts, min_values, max_values, field_ids;
     EncodedList min_lengths, max_lengths, char_class_counts, char_total_bytes, distinct_counts;
+    EncodedList element_min_values, element_max_values, element_min_k_hashes;
 };
 
 namespace encode_detail {
@@ -214,6 +217,44 @@ inline EncodedList nested(const NativeManifest& m, const NestedArrayView& v, Dra
     return out;
 }
 
+// A depth-2 uint64 list per file from the cells' per-column hash lists: EMPTY
+// for a file none of whose columns holds one, else one list per column.
+inline EncodedList cell_hash_lists(const NativeManifest& m,
+                                   const std::vector<uint64_t>& (*read)(const ManifestCell&)) {
+    const size_t rows = m.file_count(), columns = m.column_count();
+    std::vector<int32_t> offsets{0}, mid_offsets{0};
+    std::vector<uint64_t> leaf;
+    for (size_t f = 0; f < rows; ++f) {
+        bool tracked = false;
+        for (size_t c = 0; c < columns && !tracked; ++c) tracked = !read(m.cell(f, c)).empty();
+        if (tracked) {
+            for (size_t c = 0; c < columns; ++c) {
+                const std::vector<uint64_t>& hashes = read(m.cell(f, c));
+                leaf.insert(leaf.end(), hashes.begin(), hashes.end());
+                mid_offsets.push_back(static_cast<int32_t>(leaf.size()));
+            }
+        }
+        offsets.push_back(static_cast<int32_t>(mid_offsets.size() - 1));
+    }
+    EncodedList out;
+    out.depth = 2;
+    out.offsets = alloc<int32_t>(offsets.size());
+    std::memcpy(out.offsets, offsets.data(), offsets.size() * sizeof(int32_t));
+    out.mid_offsets = alloc<int32_t>(mid_offsets.size());
+    std::memcpy(out.mid_offsets, mid_offsets.data(), mid_offsets.size() * sizeof(int32_t));
+    out.mid_length = static_cast<uint32_t>(mid_offsets.size() - 1);
+    out.mid_validity = bits(out.mid_length);
+    for (uint32_t k = 0; k < out.mid_length; ++k) set_bit(out.mid_validity, k);
+    auto* leaf_data = alloc<uint64_t>(leaf.size());
+    if (!leaf.empty()) std::memcpy(leaf_data, leaf.data(), leaf.size() * sizeof(uint64_t));
+    out.leaf = leaf_data;
+    out.leaf_length = static_cast<uint32_t>(leaf.size());
+    out.leaf_validity = bits(leaf.size());
+    for (size_t k = 0; k < leaf.size(); ++k) set_bit(out.leaf_validity, k);
+    out.leaf_type = DRAKEN_UINT64;
+    return out;
+}
+
 // `_histogram_bins_of`: the one width every non-empty histogram slice of the
 // file shares, else 0.
 inline int64_t histogram_bins(const NativeManifest& m, size_t f) {
@@ -236,8 +277,11 @@ inline int64_t histogram_bins(const NativeManifest& m, size_t f) {
 }  // namespace encode_detail
 
 // Every manifest column of `m`, in draken_malloc'd buffers the caller hands to
-// the draken bridge (which takes ownership).
-inline EncodedManifest encode_manifest(const NativeManifest& m) {
+// the draken bridge (which takes ownership). `field_ids`, one per column, keys
+// each row's lists (-1: a column with no id, written null); empty keys them by
+// load-time position - core's own manifests. A catalog's manifest carries the
+// catalog's ids.
+inline EncodedManifest encode_manifest(const NativeManifest& m, const std::vector<int64_t>& field_ids) {
     using namespace encode_detail;
     EncodedManifest out;
     const size_t rows = m.file_count();
@@ -299,13 +343,31 @@ inline EncodedManifest encode_manifest(const NativeManifest& m) {
         return n.cell(f, c).distinct_count;
     });
 
-    // field_ids: the load-time positions, on every row
+    out.element_min_values = positional(m, kNoBound, [](const NativeManifest& n, size_t f, size_t c) {
+        return n.cell(f, c).element_min;
+    });
+    out.element_max_values = positional(m, kNoBound, [](const NativeManifest& n, size_t f, size_t c) {
+        return n.cell(f, c).element_max;
+    });
+    out.element_min_k_hashes = cell_hash_lists(m, [](const ManifestCell& c) -> const std::vector<uint64_t>& {
+        return c.element_min_k;
+    });
+
+    // field_ids, on every row: the given ids, or the load-time positions
     const size_t columns = m.column_count();
+    if (!field_ids.empty() && field_ids.size() != columns) {
+        throw std::invalid_argument("encode_manifest: one field id per column");
+    }
     out.field_ids.depth = 1;
     out.field_ids.offsets = alloc<int32_t>(rows + 1);
     auto* ids = alloc<int64_t>(rows * columns);
+    out.field_ids.leaf_validity = bits(rows * columns);
     for (size_t f = 0; f <= rows; ++f) out.field_ids.offsets[f] = static_cast<int32_t>(f * columns);
-    for (size_t k = 0; k < rows * columns; ++k) ids[k] = static_cast<int64_t>(k % columns);
+    for (size_t k = 0; k < rows * columns; ++k) {
+        const int64_t id = field_ids.empty() ? static_cast<int64_t>(k % columns) : field_ids[k % columns];
+        ids[k] = id < 0 ? 0 : id;
+        if (id >= 0) set_bit(out.field_ids.leaf_validity, k);
+    }
     out.field_ids.leaf = ids;
     out.field_ids.leaf_length = static_cast<uint32_t>(rows * columns);
 

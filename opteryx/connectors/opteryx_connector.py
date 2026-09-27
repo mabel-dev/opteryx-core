@@ -1284,11 +1284,12 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         self.kwargs.pop("connector", None)
         self.kwargs.pop("prefix", None)
         self.catalog_factory = catalog
-        # The catalog's own manifest row of each data file this connector has
-        # written and not yet committed or deleted, by path: the commit hands
-        # the catalog these (see _catalog_entries). This connector is shared
-        # across queries, hence the lock.
-        self._written_entries: dict = {}
+        # The field-ids the catalog keys each data file this connector has
+        # written (and not yet committed or deleted) by, by path: the commit
+        # writes them into the manifest it hands the catalog (see
+        # _catalog_manifest_bytes). This connector is shared across queries,
+        # hence the lock.
+        self._written_field_ids: dict = {}
         self._written_lock = threading.Lock()
 
     def _get_catalog(self, catalog_name: str):
@@ -1647,6 +1648,8 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
 
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
+        # statistics=False: the engine describes its own files natively
+        # (_DataFileWriterHandle) and commits them as a manifest.
         if pending_schema is not None:
             handle = catalog.open_pending_data_file_writer(
                 relative_id,
@@ -1654,6 +1657,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 sorted_by=sorted_by,
                 sorted_descending=sorted_descending,
                 write_options=options,
+                statistics=False,
             )
         else:
             dataset = catalog.load_dataset(relative_id)
@@ -1661,30 +1665,36 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 sorted_by=sorted_by,
                 sorted_descending=sorted_descending,
                 write_options=options,
+                statistics=False,
             )
         return _DataFileWriterHandle(handle, self)
 
-    def _record_written(self, file_path: str, catalog_entry: dict) -> None:
+    def _record_written(self, file_path: str, field_id_by_name: dict) -> None:
         with self._written_lock:
-            self._written_entries[file_path] = catalog_entry
+            self._written_field_ids[file_path] = field_id_by_name
 
-    def _catalog_entries(self, operation: str, rows) -> list:
-        """The manifest rows the catalog's writer built as the files streamed
-        out, for the batch `rows` (native file rows), taken off the record.
+    def _catalog_manifest_bytes(self, operation: str, rows) -> bytes:
+        """The batch `rows` (native file rows, statistics computed as the files
+        streamed out) as the manifest parquet the catalog commits, keyed by the
+        field-ids the catalog gave the files, taken off the record.
 
-        Handing them to the commit is what stops the catalog downloading and
-        decoding every output to describe it; a file with none came from
-        somewhere other than open_data_file_writer, and that is a bug to name.
+        A file with no record came from somewhere other than
+        open_data_file_writer, and that is a bug to name; files of one commit
+        keyed by two different field-id maps describe two different schemas.
         """
         paths = rows.file_paths()
         with self._written_lock:
-            missing = [path for path in paths if path not in self._written_entries]
+            missing = [path for path in paths if path not in self._written_field_ids]
             if missing:
                 raise ValueError(
-                    f"{operation}: {len(missing)} output file(s) carry no manifest entry "
-                    f"({missing[:3]}); outputs must be written through open_data_file_writer"
+                    f"{operation}: {len(missing)} output file(s) were not written through "
+                    f"open_data_file_writer ({missing[:3]})"
                 )
-            return [self._written_entries.pop(path) for path in paths]
+            maps = [self._written_field_ids.pop(path) for path in paths]
+        if any(field_ids != maps[0] for field_ids in maps[1:]):
+            raise ValueError(f"{operation}: the output files are keyed by different field-ids")
+        field_id_by_name = maps[0] if maps else {}
+        return rows.to_parquet([field_id_by_name.get(name) for name in rows.columns])
 
     def delete_data_file(self, relation_name: str, file_path: str) -> None:
         """Remove one data file this session wrote, through the catalog's FileIO.
@@ -1697,7 +1707,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         workspace, _ = self._parse_identifier(relation_name)
         self._get_catalog(workspace).io.delete(file_path)
         with self._written_lock:
-            self._written_entries.pop(file_path, None)
+            self._written_field_ids.pop(file_path, None)
 
     def create_relation(self, relation_name: str, schema, author: Optional[str] = None) -> None:
         """Create a new dataset in the catalog."""
@@ -2130,12 +2140,12 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         has nothing more specific to say."""
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
-        entries = self._catalog_entries("insert", rows)
+        manifest = self._catalog_manifest_bytes("insert", rows)
 
         def _commit_add_files():
             dataset = catalog.load_dataset(relative_id)
             return dataset.add_files(
-                entries=entries,
+                manifest=manifest,
                 author=author,
                 commit_message=commit_message,
                 **self._provenance_kwargs(dataset.add_files, read_sources, produced_by),
@@ -2190,12 +2200,12 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         and the audit record, and validates it against its own vocabulary."""
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
-        entries = self._catalog_entries("merge_commit", rows)
+        manifest = self._catalog_manifest_bytes("merge_commit", rows)
 
         def _commit_merge():
             dataset = catalog.load_dataset(relative_id)
             return dataset.merge_commit(
-                entries=entries,
+                manifest=manifest,
                 positions=delete_positions,
                 author=author,
                 commit_message=commit_message,
@@ -2227,11 +2237,11 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         """
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
-        entries = self._catalog_entries("compaction_commit", rows)
+        manifest = self._catalog_manifest_bytes("compaction_commit", rows)
         self._commit(
             relation_name,
             lambda: catalog.load_dataset(relative_id).compaction_commit(
-                entries=entries,
+                manifest=manifest,
                 retired_files=retired_files,
                 author=author,
                 baseline_snapshot_id=baseline_snapshot_id,
@@ -2258,12 +2268,12 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         replace that has nothing more specific to say."""
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
-        entries = self._catalog_entries("replace_relation", rows)
+        manifest = self._catalog_manifest_bytes("replace_relation", rows)
 
         def _commit_replace():
             dataset = catalog.load_dataset(relative_id)
             return dataset.truncate_and_add_files(
-                entries=entries,
+                manifest=manifest,
                 author=author,
                 commit_message=commit_message,
                 **self._provenance_kwargs(
@@ -3576,10 +3586,12 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
 class _DataFileWriterHandle:
     """The engine's view of one streaming data file (Writable.open_data_file_writer).
 
-    Wraps the catalog's DataFileWriter: same three operations, but `close`
-    answers with the engine's native file row - its statistics folded natively
-    as the row groups stream out - and records the catalog's own manifest row
-    on the connector for the commit.
+    Wraps the catalog's DataFileWriter opened WITHOUT statistics: the engine
+    describes every file itself, natively (FileStats - the catalog manifest's
+    full statistic set), as the row groups stream out. `close` answers with the
+    native file row and records, on the connector, the field-ids the catalog
+    keys this file's statistics by - which the commit writes into the manifest
+    it hands the catalog.
     """
 
     def __init__(self, inner, connector):
@@ -3595,26 +3607,28 @@ class _DataFileWriterHandle:
 
     @property
     def uncompressed_size_in_bytes(self) -> int:
-        return self._inner.uncompressed_size_in_bytes
+        return self._stats.uncompressed_size
 
     @property
     def record_count(self) -> int:
         return self._inner.record_count
 
     def write_row_group(self, morsel) -> None:
-        self._inner.write_row_group(morsel)
+        # Statistics first: a column the kernels refuse is found before any
+        # bytes of this row group are encoded or sent.
         self._stats.add_row_group(morsel)
+        self._inner.write_row_group(morsel)
 
     def close(self):
-        entry = self._inner.close()
-        self._connector._record_written(entry.file_path, entry.to_dict())
+        written = self._inner.close()
+        self._connector._record_written(written.file_path, self._inner.field_id_by_name)
         return self._stats.file_row(
-            entry.file_path,
+            written.file_path,
             "PARQUET",
-            int(entry.record_count),
-            int(entry.file_size_in_bytes),
-            self._inner.row_group_count,
-            int(entry.uncompressed_size_in_bytes),
+            written.record_count,
+            written.file_size_in_bytes,
+            written.row_group_count,
+            self._stats.uncompressed_size,
         )
 
     def abort(self) -> None:

@@ -38,10 +38,12 @@
 
 namespace opteryx::planner {
 
-// An ARRAY column: the outer vector (one row per file) and its child values.
+// An ARRAY column: the outer vector (one row per file) and its child values
+// (for an array<array<T>> column, the middle lists and their `grandchild` values).
 struct ManifestArrayColumn {
     const DrakenVector* outer = nullptr;
     const DrakenVector* child = nullptr;
+    const DrakenVector* grandchild = nullptr;
 };
 
 struct ManifestColumnsIn {
@@ -62,6 +64,10 @@ struct ManifestColumnsIn {
     ManifestArrayColumn field_ids;
     ManifestArrayColumn char_total_bytes;
     ManifestArrayColumn distinct_counts;                  // optional column
+    // ARRAY columns' element statistics - optional columns (the catalog's)
+    ManifestArrayColumn element_min_values;
+    ManifestArrayColumn element_max_values;
+    ManifestArrayColumn element_min_k_hashes;             // array<array<uint64>>
 };
 
 struct ManifestSchemaIn {
@@ -189,6 +195,29 @@ inline void scatter_ints(NativeManifest& manifest, size_t file, const ManifestCo
     }
 }
 
+// Each element of row `row` of an array<array<uint64>> column - one hash list
+// per column - into cell field `field`. A null list stays unset.
+template <typename Store>
+inline void scatter_hash_lists(NativeManifest& manifest, size_t file, const ManifestColumnsIn& in,
+                               const ManifestSchemaIn& schema, const ManifestArrayColumn& col,
+                               uint32_t row, Store store) {
+    int32_t begin = 0, end = 0;
+    if (col.outer == nullptr || col.grandchild == nullptr || !array_range(col, row, begin, end)) return;
+    std::vector<int64_t> positions = positions_of(in, schema, row, static_cast<size_t>(end - begin));
+    const int32_t* middle = static_cast<const int32_t*>(col.child->data);
+    for (int32_t g = begin; g < end; ++g) {
+        const int64_t position = positions[static_cast<size_t>(g - begin)];
+        if (position < 0 || !valid_at(col.child, static_cast<uint32_t>(g))) continue;
+        const uint32_t k = col.child->selection[static_cast<uint32_t>(g)];
+        std::vector<uint64_t> hashes;
+        for (int32_t h = middle[k]; h < middle[k + 1]; ++h) {
+            if (!valid_at(col.grandchild, static_cast<uint32_t>(h))) continue;
+            hashes.push_back(static_cast<uint64_t>(int_at(col.grandchild, col.grandchild->selection[static_cast<uint32_t>(h)])));
+        }
+        store(manifest.cell(file, static_cast<size_t>(position)), std::move(hashes));
+    }
+}
+
 // min_values or max_values of row `row`: the ordinal key and, where the column
 // has one, the decoded value.
 inline void scatter_bounds(NativeManifest& manifest, size_t file, const ManifestColumnsIn& in,
@@ -259,6 +288,15 @@ inline NativeManifest decode_manifest(const ManifestColumnsIn& in, const Manifes
                      [](ManifestCell& c, int64_t v) { c.char_total_bytes = v; });
         scatter_ints(manifest, f, in, schema, in.column_uncompressed_sizes, row,
                      [](ManifestCell& c, int64_t v) { c.uncompressed_size = v; });
+        // INT64_MIN is the catalog's "no bound" here as in min_values
+        scatter_ints(manifest, f, in, schema, in.element_min_values, row, [](ManifestCell& c, int64_t v) {
+            if (v != kNoBound) c.element_min = v;
+        });
+        scatter_ints(manifest, f, in, schema, in.element_max_values, row, [](ManifestCell& c, int64_t v) {
+            if (v != kNoBound) c.element_max = v;
+        });
+        scatter_hash_lists(manifest, f, in, schema, in.element_min_k_hashes, row,
+                           [](ManifestCell& c, std::vector<uint64_t> v) { c.element_min_k = std::move(v); });
         scatter_ints(manifest, f, in, schema, in.distinct_counts, row, [](ManifestCell& c, int64_t v) {
             c.distinct_count = v;
             c.distinct_exact = false;   // the manifest does not persist exactness
