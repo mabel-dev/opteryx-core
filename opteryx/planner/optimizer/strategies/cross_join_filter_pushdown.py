@@ -390,14 +390,17 @@ def _try_dissolve_cross_join_in_inner_join(
         if child_id == cross_right_id:
             plan.remove_edge(child_id, target, rel)
             break
-    # Add: C -> cross_join (C is now right child of the new inner join)
-    plan.add_edge(other_child_id, cross_join_id, None)
-    # Add: B -> inner_join (B is now right child of the outer inner join)
-    plan.add_edge(cross_right_id, inner_join_id, None)
+    # Legs are labelled at creation (architect ruling 2026-09-27). The cross join
+    # becomes (A LEFT, C RIGHT) and feeds the outer join as its LEFT; B is the
+    # outer join's RIGHT. Existing edges are relabelled in place.
+    plan.add_edge(cross_left_id, cross_join_id, "left")
+    plan.add_edge(other_child_id, cross_join_id, "right")
+    plan.add_edge(cross_join_id, inner_join_id, "left")
+    plan.add_edge(cross_right_id, inner_join_id, "right")
 
     # Rebuild readers from the actual scan nodes now under each side.
-    # left_readers/right_readers hold reader UUIDs used by label_join_legs in the
-    # physical plan to assign LEFT/RIGHT leg labels — they must reflect the new structure.
+    # left_readers/right_readers name the scans under each leg — they must reflect
+    # the new structure.
     cross_join_node.left_readers = _collect_scan_uuids(plan, cross_left_id)
     cross_join_node.right_readers = _collect_scan_uuids(plan, other_child_id)
     inner_join_node.left_readers = _collect_scan_uuids(plan, cross_join_id)

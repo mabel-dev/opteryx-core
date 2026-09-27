@@ -92,7 +92,9 @@ def traverse(
         graph, context = traverse(self, graph, children[0][0], context)
     elif children:
         exit_context = context.copy()
-        for child in children:
+        # A branching node is a join or set operation: its legs, left then right,
+        # by label (graph.legs refuses unlabelled legs).
+        for child_nid in graph.legs(node):
             # Each peer is bound against its own copy, so a peer's SCHEMAS never reach
             # another peer - they are accumulated into `exit_context` and only merged
             # back into `context` once every peer has been bound.
@@ -102,9 +104,9 @@ def traverse(
             # thing that makes `FROM t, t` ambiguous is the second scan finding the
             # first scan's name already registered (see visit_scan). Peers are opaque
             # to each other for name RESOLUTION and transparent for name COLLISION.
-            _, child_context = traverse(self, graph, child[0], context.copy())
+            _, child_context = traverse(self, graph, child_nid, context.copy())
             # merges the schemas from two contexts. The accumulator goes FIRST so the
-            # merged dict keeps children in edge order (left leg, then right leg) —
+            # merged dict keeps the legs in order (left leg, then right leg) —
             # `SELECT *` expands schemas in dict order, and SQL requires the left
             # relation's columns before the right's.
             exit_context.schemas = merge_schemas(exit_context.schemas, child_context.schemas)

@@ -64,6 +64,7 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
+from opteryx.exceptions import InvalidInternalStateError
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -1744,19 +1745,24 @@ def _first_child_stats(
 def _split_join_children(
     child_stats: List[Tuple[Optional[RelationStatistics], str]],
 ) -> Tuple[Optional[RelationStatistics], Optional[RelationStatistics]]:
+    """(left, right) child statistics of a join or set operation, by EDGE LABEL.
+
+    A single input (CROSS JOIN UNNEST) is the left side with no right. Two inputs
+    must be one LEFT and one RIGHT: legs are labelled where they are made and
+    nothing reads a leg from edge order (architect ruling 2026-09-27)."""
+    if len(child_stats) == 1:
+        return child_stats[0][0], None
+    labels = [rel for _, rel in child_stats]
+    if sorted(str(label) for label in labels) != ["left", "right"]:
+        raise InvalidInternalStateError(
+            f"A two-input node's legs must be labelled LEFT and RIGHT; got {labels}."
+        )
     left = right = None
     for cs, rel in child_stats:
-        if rel == "left" and left is None:
+        if rel == "left":
             left = cs
-        elif rel == "right" and right is None:
+        else:
             right = cs
-    if left is None or right is None:
-        # Edge labels missing — fall back to insertion order.
-        ordered = [cs for cs, _ in child_stats]
-        if left is None and ordered:
-            left = ordered[0]
-        if right is None and len(ordered) > 1:
-            right = ordered[1]
     return left, right
 
 

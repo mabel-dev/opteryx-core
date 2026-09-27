@@ -853,30 +853,15 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
     @staticmethod
     def _side_statistics(plan, join_nid, plan_context: PlanContext):
         """Return (left_stats, right_stats) RelationStatistics for the join's two
-        inputs, identified by the 'left'/'right' edge labels. Either may be None
-        when statistics are absent or a side is unlabelled.
-
-        Cross-join→inner-converted joins carry unlabelled ingoing edges
-        (label ``None``); without a fallback every such join would read the
-        binder's pre-filter size estimate instead of the refreshed post-filter
-        statistics. When labels are missing we fall back to ingoing-edge
-        insertion order (left, then right) — mirroring
-        ``statistics_refresh._split_join_children``.
+        inputs, identified by the 'left'/'right' edge labels (plan.legs refuses a
+        join whose legs are not labelled). Either may be None when statistics are
+        absent.
         """
-        left = right = None
-        ordered = []
-        for child_nid, _, label in plan.ingoing_edges(join_nid):
-            stats = plan_context.statistics(plan[child_nid])
-            ordered.append(stats)
-            if label == "left":
-                left = stats
-            elif label == "right":
-                right = stats
-        if left is None and ordered:
-            left = ordered[0]
-        if right is None and len(ordered) > 1:
-            right = ordered[1]
-        return left, right
+        left_nid, right_nid = plan.legs(join_nid)
+        return (
+            plan_context.statistics(plan[left_nid]),
+            plan_context.statistics(plan[right_nid]),
+        )
 
     @staticmethod
     def _side_rows(stats):

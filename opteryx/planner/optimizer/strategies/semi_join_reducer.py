@@ -395,7 +395,7 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
         target_relations, target_schemas = _collect_relations(plan, right_root)
         reducer_exit = reducer_source.get_exit_points()[0]
         # ⛔ Collect from `reducer_source` BEFORE merging, and do not merge until every
-        # guard below has passed. `plan += reducer_source` with a later `return plan`
+        # guard below has passed. `plan.absorb(reducer_source)` with a later `return plan`
         # leaves the copy in the plan with nothing consuming it — a second exit point,
         # which surfaces as the opaque "a plan headed by FilterJoinNode is not
         # supported" rather than as the declined optimization it actually is.
@@ -422,12 +422,12 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
             return plan
 
         # Every guard has passed — only now does the copy enter the plan.
-        plan += reducer_source
+        plan.absorb(reducer_source)
         reducer_nid = random_string()
         plan.add_node(reducer_nid, reducer)
         plan.remove_edge(target_child, target_parent, parent_rel)
-        plan.add_edge(target_child, reducer_nid, None)
-        plan.add_edge(reducer_exit, reducer_nid, None)
+        plan.add_edge(target_child, reducer_nid, "left")
+        plan.add_edge(reducer_exit, reducer_nid, "right")
         plan.add_edge(reducer_nid, target_parent, parent_rel)
 
         join.reducer_applied = True

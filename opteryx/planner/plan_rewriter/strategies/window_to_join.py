@@ -227,7 +227,7 @@ def _build_window_cte(
     subquery_wrapper_nid = random_string()
 
     # Merge CTE inner plan into main plan.
-    plan += inner_plan
+    plan.absorb(inner_plan)
     plan.add_node(subquery_wrapper_nid, subquery_wrapper)
     plan.add_edge(project_nid, subquery_wrapper_nid)
 

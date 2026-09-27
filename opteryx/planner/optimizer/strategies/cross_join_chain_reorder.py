@@ -373,8 +373,9 @@ def _rewire_chain(
     # Step 2: rewire bottom join with two new leaves.
     bottom_left = new_leaves[0]
     bottom_right = new_leaves[1]
-    plan.add_edge(bottom_left.subplan_id, bottom_id, None)
-    plan.add_edge(bottom_right.subplan_id, bottom_id, None)
+    # Legs are labelled at creation (architect ruling 2026-09-27).
+    plan.add_edge(bottom_left.subplan_id, bottom_id, "left")
+    plan.add_edge(bottom_right.subplan_id, bottom_id, "right")
 
     bottom_node.left_relation_names = list(bottom_left.rel_names)
     bottom_node.left_readers = list(bottom_left.readers)
@@ -397,7 +398,11 @@ def _rewire_chain(
     leaf_cursor = 2
     for jid, jnode in reversed(chain[:-1]):
         leaf = new_leaves[leaf_cursor]
-        plan.add_edge(leaf.subplan_id, jid, None)
+        plan.add_edge(leaf.subplan_id, jid, "right")
+        # The join below is this join's LEFT: the running accumulator.
+        for child_id, _target, _relationship in list(plan.ingoing_edges(jid)):
+            if child_id in chain_ids:
+                plan.add_edge(child_id, jid, "left")
 
         jnode.left_relation_names = list(accumulated_names)
         jnode.left_readers = list(accumulated_readers)

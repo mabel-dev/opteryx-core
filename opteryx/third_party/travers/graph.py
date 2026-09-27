@@ -344,6 +344,31 @@ class Graph(object):
         """
         return list(self._ingoing_edges().get(target, ()))
 
+    def legs(self, nid) -> Tuple[str, str]:
+        """The (left, right) inputs of a two-input node - a join or a set
+        operation - read from its edge labels.
+
+        Legs are labelled where they are made and nothing reads a leg from edge
+        order (architect ruling 2026-09-27), so anything but exactly one LEFT and
+        one RIGHT edge into `nid` is refused.
+        """
+        left = right = None
+        edges = self._ingoing_edges().get(nid, ())
+        for source, _target, relationship in edges:
+            if relationship == "left" and left is None:
+                left = source
+            elif relationship == "right" and right is None:
+                right = source
+            else:
+                left = right = None
+                break
+        if len(edges) != 2 or left is None or right is None:
+            raise InvalidInternalStateError(
+                f"Node {nid!r} does not have exactly one LEFT and one RIGHT input: "
+                f"{[(source, relationship) for source, _t, relationship in edges]}."
+            )
+        return left, right
+
     def is_acyclic(self):
         """
         Test if the Graph is acyclic
@@ -592,11 +617,30 @@ class Graph(object):
         self._nodes[nid] = node
         self._mutation_epoch += 1
 
-    def __add__(self, other):
+    def absorb(self, other: "Graph") -> None:
+        """
+        Merge `other`'s nodes and edges into this graph.
+
+        The two graphs must be DISJOINT: no node id in both, and every edge of
+        `other` between two of `other`'s own nodes. A shared id would make one
+        node silently overwrite the other (and one side's edges replace the
+        other's), so it raises instead — copy a sub-plan with
+        `copy(fresh_ids=True)` before merging it twice.
+        """
+        shared = self._nodes.keys() & other._nodes.keys()
+        if shared:
+            raise InvalidInternalStateError(
+                f"Cannot merge plans that share node ids: {sorted(shared)}."
+            )
+        for source, target, _ in other.edges():
+            if source not in other._nodes or target not in other._nodes:
+                raise InvalidInternalStateError(
+                    f"Cannot merge a plan holding an edge to a node it does not contain: "
+                    f"{source!r} -> {target!r}."
+                )
         self._edges.update(other._edges)
         self._nodes.update(other._nodes)
         self._invalidate_caches()
-        return self
 
     def __contains__(self, nid: str) -> bool:
         return nid in self._nodes
@@ -605,10 +649,15 @@ class Graph(object):
         tree = self.depth_first_search()
         return "".join(print_tree_inner(tree, ascii_safe=ascii_safe))
 
-    def copy(self) -> "Graph":
+    def copy(self, fresh_ids: bool = False):
         """
         Intelligently make a copy of this Graph, avoiding __init__ and handling
         deepcopy-resistant structures.
+
+        With `fresh_ids`, every node of the copy gets a new id and the result is
+        `(copy, id_map)`, `id_map` mapping each original id to its new one — the
+        form to take before merging a copy into a plan that may already hold the
+        original (see `absorb`).
         """
         import copy
 
@@ -654,7 +703,26 @@ class Graph(object):
         # after it was taken (see the slot's docstring).
         graph._mutation_epoch = 0
 
-        return graph
+        if not fresh_ids:
+            return graph
+
+        from opteryx.utils import random_string
+
+        id_map = {old_id: random_string() for old_id in graph._nodes}
+        graph._nodes = {id_map[old_id]: node for old_id, node in graph._nodes.items()}
+        new_edges: dict = {}
+        for source, records in graph._edges.items():
+            for target, _ in records:
+                if source not in id_map or target not in id_map:
+                    raise InvalidInternalStateError(
+                        f"Cannot re-id a plan holding an edge to a node it does not "
+                        f"contain: {source!r} -> {target!r}."
+                    )
+            new_edges[id_map[source]] = [
+                (id_map[target], relationship) for target, relationship in records
+            ]
+        graph._edges = new_edges
+        return graph, id_map
 
     def shallow_copy(self) -> "Graph":
         """

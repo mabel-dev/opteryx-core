@@ -101,32 +101,16 @@ def copy_sub_plan(plan: LogicalPlan) -> LogicalPlan:
     """
     Copy a sub-plan with fresh node IDs — including any plan EMBEDDED in an expression.
 
-    Merging is a dict update (Graph.__add__), so two expansions of the SAME view or CTE
-    would share node IDs and silently overwrite each other in the merged plan. Fresh IDs
-    make each expansion independent.
+    Two expansions of the SAME view or CTE would otherwise share node IDs, and merging
+    plans that share IDs is refused (`Graph.absorb`). Fresh IDs make each expansion
+    independent.
 
     An un-rewritten subquery expression (IN / EXISTS / scalar) hangs a whole LogicalPlan
     off the expression node. Those inner nodes need fresh IDs too: the Plan Rewriter later
     merges the inner plan into the main plan when it turns the subquery into a join, and
-    if both copies carry inner nodes with identical IDs the second merge overwrites the
-    first — silently truncating one leg to a childless Subquery node.
+    both copies must be mergeable.
     """
-    from opteryx.utils import random_string
-
-    id_map = {old_id: random_string() for old_id in plan.nodes(data=False)}
-
-    base = plan.copy()
-    new_plan = plan.__class__.__new__(plan.__class__)
-    new_plan._nodes = {id_map[old_id]: node for old_id, node in base._nodes.items()}
-
-    new_plan._edges = {}
-    for src, targets in base._edges.items():
-        new_src = id_map.get(src, src)
-        new_plan._edges[new_src] = tuple((id_map.get(tgt, tgt), rel) for tgt, rel in targets)
-
-    new_plan._cached_edges = None
-    new_plan._cached_ingoing_edges = None
-    new_plan._mutation_epoch = 0
+    new_plan, _ = plan.copy(fresh_ids=True)
 
     def _rekey_embedded(value):
         if isinstance(value, LogicalPlan):
@@ -495,7 +479,7 @@ def _splice(plan: LogicalPlan, nid: str, node, sub_plan: LogicalPlan, *, plan_co
         pre_update_columns=node.pre_update_columns,
         columns=_boundary_columns(sub_plan, sub_plan_head, node.relation or node.alias),
     )
-    plan += sub_plan
+    plan.absorb(sub_plan)
     plan.add_edge(sub_plan_head, nid, outgoing[0][2])
     return join_leg_preprocess(plan)
 

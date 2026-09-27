@@ -188,8 +188,8 @@ class CopyOnWritePlan:
     def __setitem__(self, nid, node):
         self._mutable()[nid] = node
 
-    def __add__(self, other):
-        return self._mutable() + other
+    def absorb(self, other):
+        self._mutable().absorb(other)
 
     def add_node(self, nid, node):
         return self._mutable().add_node(nid, node)

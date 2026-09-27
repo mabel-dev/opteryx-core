@@ -13,7 +13,7 @@ import copy
 import fnmatch
 import time
 from enum import Enum, auto
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from opteryx.compiled.structures.expressions import Expression
 from opteryx.compiled.structures.expressions import expressions_with
@@ -271,6 +271,31 @@ def _set_operation_leg_arity(leg_plan: Graph) -> Optional[int]:
     return len(columns)
 
 
+def _depth_first_children(sub_plan: Graph) -> Tuple[str, Dict[str, List[str]]]:
+    """The sub-plan as a depth-first tree from its exit point: `(root, children)`,
+    `children` mapping each visited node id to the ids first reached through it.
+
+    A node reachable along two paths belongs to the first path the walk takes
+    (ingoing edges in order, children before siblings) and appears under that
+    parent only — the shape the sub-plan walkers below prune over.
+    """
+    root = sub_plan.get_exit_points()[0]
+    children: Dict[str, List[str]] = {}
+    visited = {root}
+
+    def visit(nid: str) -> None:
+        reached: List[str] = []
+        children[nid] = reached
+        for source, _, _ in sub_plan.ingoing_edges(nid):
+            if source not in visited:
+                visited.add(source)
+                reached.append(source)
+                visit(source)
+
+    visit(root)
+    return root, children
+
+
 def get_subplan_schemas(sub_plan: Graph) -> List[str]:
     """
     Collects all schema aliases used within a given sub-plan.
@@ -287,19 +312,11 @@ def get_subplan_schemas(sub_plan: Graph) -> List[str]:
             A sorted list of unique schema aliases found within the sub-plan.
     """
 
-    def collect_aliases(node: dict) -> List[str]:
-        """
-        Recursively traverse the graph to collect schema aliases.
+    root, children = _depth_first_children(sub_plan)
 
-        Parameters:
-            node: dict
-                The current node in the graph.
-
-        Returns:
-            List[str]:
-                A list of unique schema aliases collected from the current node and its children.
-        """
-        current_node = sub_plan[node["name"]]
+    def collect_aliases(nid: str) -> List[str]:
+        """The schema aliases of `nid` and the part of the tree below it."""
+        current_node = sub_plan[nid]
 
         # Start with the alias of the current node, if it exists
         aliases = (
@@ -332,14 +349,12 @@ def get_subplan_schemas(sub_plan: Graph) -> List[str]:
             return aliases + list(current_node.left_relation_names or [])
 
         # Recursively collect aliases from children
-        for child in node.get("children", []):
+        for child in children[nid]:
             aliases.extend(collect_aliases(child))
 
         return aliases
 
-    # Start the traversal from the root node
-    root_node = sub_plan.depth_first_search()
-    aliases = collect_aliases(root_node)
+    aliases = collect_aliases(root)
 
     # Return sorted list of unique aliases
     return sorted(set(aliases))
@@ -366,8 +381,10 @@ def get_subplan_reads(sub_plan: Graph) -> List[str]:
     lists (`_collect_scan_uuids`) list Scans only.
     """
 
-    def collect_reads(node: dict) -> List[str]:
-        current_node = sub_plan[node["name"]]
+    root, children = _depth_first_children(sub_plan)
+
+    def collect_reads(nid: str) -> List[str]:
+        current_node = sub_plan[nid]
 
         # If this node is a subquery, stop traversal here
         if current_node.node_type in (
@@ -378,14 +395,12 @@ def get_subplan_reads(sub_plan: Graph) -> List[str]:
 
         readers = []
         # Recursively collect aliases from children
-        for child in node.get("children", []):
+        for child in children[nid]:
             readers.extend(collect_reads(child))
 
         return readers
 
-    # Start the traversal from the root node
-    root_node = sub_plan.depth_first_search()
-    readers = collect_reads(root_node)
+    readers = collect_reads(root)
 
     # Return sorted list of unique aliases
     return sorted(set(readers))
@@ -2160,7 +2175,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
     # Process first relation if any
     if len(_relations) > 0:
         step_id, sub_plan = create_node_relation(_relations[0], plan_context=plan_context)
-        inner_plan += sub_plan
+        inner_plan.absorb(sub_plan)
 
         # If there are multiple relations, build sequential binary implicit cross joins
         # This converts FROM A, B, C into A CROSS JOIN B CROSS JOIN C
@@ -2189,7 +2204,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
                 join_step.relation_names = [left_relation_names, right_relation_names]
 
                 # Add the right sub_plan to inner_plan
-                inner_plan += right_sub_plan
+                inner_plan.absorb(right_sub_plan)
 
                 # Add join node and wire it
                 join_step_id = random_string()
@@ -2215,7 +2230,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
             },
             plan_context=plan_context,
         )
-        inner_plan += sub_plan
+        inner_plan.absorb(sub_plan)
 
     # selection
     _selection = _strip_outer_nesting(
@@ -3626,7 +3641,7 @@ def create_node_relation(relation: dict, *, plan_context):
                 subquery_step.columns = subquery_plan[exit_node].columns
                 subquery_plan.remove_node(exit_node, heal=True)
 
-                sub_plan += subquery_plan
+                sub_plan.absorb(subquery_plan)
                 subquery_entry_id = subquery_plan.get_exit_points()[0]
                 sub_plan.add_edge(subquery_entry_id, step_id)
 
@@ -3823,7 +3838,7 @@ def create_node_relation(relation: dict, *, plan_context):
         join_step.right_readers = get_subplan_reads(right_plan)
 
         # add the right side of the join
-        sub_plan += right_plan
+        sub_plan.absorb(right_plan)
 
         join_step_id = random_string()
         sub_plan.add_node(join_step_id, join_step)
@@ -3876,7 +3891,7 @@ def plan_explain(statement, *, plan_context, **kwargs) -> LogicalPlan:
         )
     sub_plan = builder(inner, plan_context=plan_context)
     sub_plan_id = sub_plan.get_exit_points()[0]
-    plan += sub_plan
+    plan.absorb(sub_plan)
     plan.add_edge(sub_plan_id, explain_id)
 
     return plan
@@ -3916,9 +3931,12 @@ def plan_query(statement: dict, *, plan_context) -> LogicalPlan:
         from opteryx.planner.relation_resolver import rename_relations
 
         left_plan = rename_relations(left_plan, prefix=UNION_ALIAS_PREFIX, plan_context=plan_context)
-        plan += left_plan
+        plan.absorb(left_plan)
         subquery_entry_id = left_plan.get_exit_points()[0]
-        plan.add_edge(subquery_entry_id, step_id)
+        # Legs are labelled at creation (architect ruling 2026-09-27): EXCEPT and
+        # INTERSECT are not symmetric, and a UNION's output columns are its LEFT
+        # leg's. The heal below carries the label onto the leg's real input.
+        plan.add_edge(subquery_entry_id, step_id, "left")
         # remove the exit node
         plan.remove_node(subquery_entry_id, heal=True)
 
@@ -3947,9 +3965,9 @@ def plan_query(statement: dict, *, plan_context) -> LogicalPlan:
             )
 
         right_plan = rename_relations(right_plan, prefix=UNION_ALIAS_PREFIX, plan_context=plan_context)
-        plan += right_plan
+        plan.absorb(right_plan)
         subquery_entry_id = right_plan.get_exit_points()[0]
-        plan.add_edge(subquery_entry_id, step_id)
+        plan.add_edge(subquery_entry_id, step_id, "right")
         # remove the exit node
         plan.remove_node(subquery_entry_id, heal=True)
 
@@ -6109,7 +6127,7 @@ def _plan_ctas(
 
     source_plan = plan_query(query_ast, plan_context=plan_context)
     exit_node_id = source_plan.get_exit_points()[0]
-    plan += source_plan
+    plan.absorb(source_plan)
     source_tail_id = exit_node_id
 
     insert_step = InsertStep()
@@ -6583,7 +6601,7 @@ def plan_insert(statement, *, plan_context, **kwargs):
         source_plan = plan_query(insert_stmt["source"], plan_context=plan_context)
         exit_node_id = source_plan.get_exit_points()[0]
 
-        plan += source_plan
+        plan.absorb(source_plan)
         source_tail_id = exit_node_id
 
         insert_step = InsertStep()

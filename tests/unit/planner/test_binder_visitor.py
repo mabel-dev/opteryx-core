@@ -35,8 +35,8 @@ def test_logical_plan_visitor():
     plan.add_node(5, scan_node_right)
     plan.add_edge(1, 3)
     plan.add_edge(3, 2)
-    plan.add_edge(2, 4)
-    plan.add_edge(5, 4)
+    plan.add_edge(2, 4, "left")
+    plan.add_edge(5, 4, "right")
 
     # does this look right?
     print(plan.draw())

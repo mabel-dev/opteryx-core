@@ -891,7 +891,7 @@ def _graft_key_reducer(
 
     left_relations, left_schemas = _collect_relations(inner_plan, providers[0][0])
     reducer_exit = reducer_source.get_exit_points()[0]
-    inner_plan += reducer_source
+    inner_plan.absorb(reducer_source)
     right_relations, right_schemas = _collect_relations(inner_plan, reducer_exit)
 
     reducer = JoinStep()
@@ -915,7 +915,7 @@ def _graft_key_reducer(
 
     reducer_nid = random_string()
     inner_plan.insert_node_before(reducer_nid, reducer, target_nid)
-    inner_plan.add_edge(reducer_exit, reducer_nid)
+    _label_inserted_join_legs(inner_plan, reducer_nid, reducer_exit)
     return True
 
 
@@ -1289,6 +1289,22 @@ def _projecting_node(plan: LogicalPlan):
             return candidate
         frontier.extend(child for child, _t, _r in plan.ingoing_edges(nid))
     return None
+
+
+def _label_inserted_join_legs(plan: LogicalPlan, join_nid, inner_exit) -> None:
+    """Wire the decorrelated subquery in as a join's RIGHT leg, and label the
+    join's existing input - the outer rows, which reached `join_nid` through
+    `insert_node_before` or by the node being replaced in place - as its LEFT.
+
+    Legs are labelled at creation (architect ruling 2026-09-27): nothing reads a
+    leg from edge order."""
+    outer = plan.ingoing_edges(join_nid)
+    if len(outer) != 1:
+        raise InvalidInternalStateError(
+            f"a decorrelated join needs exactly one outer input, found {len(outer)}"
+        )
+    plan.add_edge(outer[0][0], join_nid, "left")
+    plan.add_edge(inner_exit, join_nid, "right")
 
 
 def _output_column(plan: LogicalPlan):
@@ -1722,7 +1738,7 @@ def _graft_existence_join(
     flag.query_column = remove.query_column
 
     inner_exit = inner_plan.get_exit_points()[0]
-    plan += inner_plan
+    plan.absorb(inner_plan)
     inner_relations, inner_schemas = _collect_relations(plan, inner_exit)
     for inner_key, _outer_key in key_pairs:
         origin = inner_key.schema_column.origin if inner_key.schema_column is not None else None
@@ -1762,7 +1778,7 @@ def _graft_existence_join(
 
     join_nid = random_string()
     plan.insert_node_before(join_nid, join, anchor_nid)
-    plan.add_edge(inner_exit, join_nid)
+    _label_inserted_join_legs(plan, join_nid, inner_exit)
 
     return flag
 
@@ -1807,7 +1823,7 @@ def _project_uncorrelated_exists(plan, project_nid, inner_plan, remove, replace_
         outer_relations |= found_relations
         outer_schemas.update(found_schemas)
 
-    plan += inner_plan
+    plan.absorb(inner_plan)
     inner_relations, inner_schemas = _collect_relations(plan, agg_nid)
     inner_relations.add(count_relation)
 
@@ -1824,7 +1840,7 @@ def _project_uncorrelated_exists(plan, project_nid, inner_plan, remove, replace_
 
     join_nid = random_string()
     plan.insert_node_before(join_nid, join, project_nid)
-    plan.add_edge(agg_nid, join_nid)
+    _label_inserted_join_legs(plan, join_nid, agg_nid)
 
     telemetry.optimization_decorrelate_select_list_existence = (
         getattr(telemetry, "optimization_decorrelate_select_list_existence", 0) + 1
@@ -2409,7 +2425,7 @@ def _build_filter_join(
             deferred_pairs.append((inner_key, outer_key))
 
     inner_exit = inner_plan.get_exit_points()[0]
-    plan += inner_plan
+    plan.absorb(inner_plan)
     inner_relations, inner_schemas = _collect_relations(plan, inner_exit)
     # Any relation named by a key that this leg supplies must be known as one of
     # its names, or the key resolves to neither side (see the `$in-` stamp above).
@@ -2532,7 +2548,7 @@ def _build_filter_join(
         # Deleting it and healing instead leaves other passes holding a node id
         # that no longer resolves (redundant_operators then reads None.alias).
         plan[filter_nid] = join
-        plan.add_edge(inner_exit, filter_nid)
+        _label_inserted_join_legs(plan, filter_nid, inner_exit)
         join_nid = filter_nid
     else:
         filter_node.condition = remaining
@@ -2543,7 +2559,7 @@ def _build_filter_join(
         ]
         join_nid = random_string()
         plan.insert_node_before(join_nid, join, filter_nid)
-        plan.add_edge(inner_exit, join_nid)
+        _label_inserted_join_legs(plan, join_nid, inner_exit)
 
     # Bind deferred correlations on the ancestor existence join. Must run AFTER
     # insertion — the walk starts from this join's position in the plan. The
@@ -2765,7 +2781,7 @@ def _materialize_boolean_value(
             on_condition = conjunction
 
     # --- graft the subquery in as a LEFT OUTER join's right leg ---------------
-    plan += inner_plan
+    plan.absorb(inner_plan)
     inner_relations, inner_schemas = _collect_relations(plan, agg_nid)
     inner_relations.add(count_relation)
     # An IN's membership key can be a computed inner expression minted with a
@@ -2800,7 +2816,7 @@ def _materialize_boolean_value(
 
     join_nid = random_string()
     plan.insert_node_before(join_nid, join, filter_nid)
-    plan.add_edge(agg_nid, join_nid)
+    _label_inserted_join_legs(plan, join_nid, agg_nid)
 
     # --- substitute the EXISTS/IN node with the boolean value, in place -------
     # A LEFT JOIN's own "no match" NULL already encodes non-existence, so the
@@ -3154,7 +3170,7 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
         )
 
     inner_exit = inner_plan.get_exit_points()[0]
-    plan += inner_plan
+    plan.absorb(inner_plan)
     inner_relations, inner_schemas = _collect_relations(plan, inner_exit)
     # The alias stamped onto the value column above has to be a known name of this
     # leg, or a reference carrying it still resolves to neither side.
@@ -3223,7 +3239,7 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
 
     join_nid = random_string()
     plan.insert_node_before(join_nid, join, filter_nid)
-    plan.add_edge(inner_exit, join_nid)
+    _label_inserted_join_legs(plan, join_nid, inner_exit)
 
     # --- narrow back to the pre-decorrelation shape ---------------------------
     # The join above attached the subquery's value as an extra column purely so
@@ -3371,7 +3387,7 @@ def _decorrelate_projection(
         outer_schemas.update(found_schemas)
 
     inner_exit = inner_plan.get_exit_points()[0]
-    plan += inner_plan
+    plan.absorb(inner_plan)
     inner_relations, inner_schemas = _collect_relations(plan, inner_exit)
     inner_relations.add(scalar_alias)
 
@@ -3394,7 +3410,7 @@ def _decorrelate_projection(
 
     join_nid = random_string()
     plan.insert_node_before(join_nid, join, project_nid)
-    plan.add_edge(inner_exit, join_nid)
+    _label_inserted_join_legs(plan, join_nid, inner_exit)
 
     telemetry.optimization_decorrelate_scalar_subquery = (
         getattr(telemetry, "optimization_decorrelate_scalar_subquery", 0) + 1

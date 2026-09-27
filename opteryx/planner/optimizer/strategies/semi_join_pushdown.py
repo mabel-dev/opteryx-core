@@ -95,36 +95,11 @@ def _est_rows(node, plan_context: PlanContext) -> int:
 
 
 def _resolve_legs(plan, join_nid):
-    """A join's (left_edge, right_edge) exactly as compiler.py will read them:
-    the edge label wins, insertion order is the fallback for unlabelled edges.
-    Each element is the full (source, target, relation) tuple; None if the node
-    does not have exactly one leg per side."""
-    in_edges = plan.ingoing_edges(join_nid)
-    if len(in_edges) != 2:
-        return None
-    legs = {}
-    for idx, edge in enumerate(in_edges):
-        label = edge[2] or ("left" if idx == 0 else "right")
-        legs[label] = edge
-    if "left" not in legs or "right" not in legs:
-        return None
-    return legs["left"], legs["right"]
-
-
-def _label_join_legs(plan, join_nid):
-    """Stamp a join's resolved leg labels onto its edges explicitly.
-
-    ⛔ Unlabelled join edges resolve by INSERTION ORDER (compiler.py falls back
-    to `left if idx == 0 else right`), and this strategy's re-wiring changes
-    insertion order. Any join whose edges the surgery touches gets its CURRENT
-    resolution made explicit first, so leg identity survives the re-wire. Must
-    only run once every guard has passed — add_edge relabelling is a mutation.
-    """
-    legs = _resolve_legs(plan, join_nid)
-    if legs is None:
-        return
-    for edge, label in zip(legs, ("left", "right")):
-        plan.add_edge(edge[0], join_nid, label)  # in-place relabel, order unchanged
+    """A join's (left_edge, right_edge), each the full (source, target, relation)
+    tuple, read from the edge labels - plan.legs refuses a join whose legs are
+    not labelled (architect ruling 2026-09-27)."""
+    left, right = plan.legs(join_nid)
+    return (left, join_nid, "left"), (right, join_nid, "right")
 
 
 def _collect_scan_uuids(plan, root_nid):
@@ -164,8 +139,6 @@ class SemiJoinPushdownStrategy(OptimizationStrategy):
             if node.type not in _PUSHABLE_TYPES:
                 continue
             legs = _resolve_legs(plan, nid)
-            if legs is None:
-                continue
             probe = plan[legs[0][0]]
             if probe.node_type == LogicalPlanStepType.Join and probe.type == "inner":
                 return True
@@ -223,8 +196,6 @@ class SemiJoinPushdownStrategy(OptimizationStrategy):
         detail string when the COST gate said no, and None when the shape was
         never a candidate. Every guard runs before the first mutation."""
         legs = _resolve_legs(plan, join_nid)
-        if legs is None:
-            return None
         (probe_root, _pt, probe_label), (build_root, _bt, _build_label) = legs
 
         below = plan[probe_root]
@@ -239,8 +210,6 @@ class SemiJoinPushdownStrategy(OptimizationStrategy):
         _join_src, parent_nid, parent_label = out_edges[0]
 
         below_legs = _resolve_legs(plan, probe_root)
-        if below_legs is None:
-            return None
 
         # Every probe-side column the semi's condition reads must resolve to ONE
         # leg of the join below — keys and residual conjuncts alike.
@@ -332,20 +301,8 @@ class SemiJoinPushdownStrategy(OptimizationStrategy):
 
         # ── Surgery: J drops from above `below` onto its `target` leg ───────
         #     before:  target → below → J → parent      after:  target → J → below → parent
-        # Every join whose edges move is labelled explicitly FIRST (see
-        # _label_join_legs) — leg identity must never rest on edge insertion
-        # order, which the re-wiring below changes.
-        _label_join_legs(plan, probe_root)
-        parent = plan[parent_nid]
-        if parent.node_type == LogicalPlanStepType.Join:
-            _label_join_legs(plan, parent_nid)
-            # The relabel just rewrote the J→parent edge's label; re-read it —
-            # remove_edge silently no-ops on a label that doesn't match.
-            parent_label = next(
-                relation
-                for source, _target, relation in plan.ingoing_edges(parent_nid)
-                if source == join_nid
-            )
+        # Every join leg is labelled where it is made, so each edge that moves
+        # carries its label across.
         target_resolved = "left" if target_edge is below_legs[0] else "right"
         plan.remove_edge(probe_root, join_nid, probe_label)
         plan.remove_edge(target_root, probe_root, target_resolved)

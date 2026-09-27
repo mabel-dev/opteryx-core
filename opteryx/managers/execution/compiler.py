@@ -2808,7 +2808,7 @@ class _Compiler:
             return self._compile_unnest(in_edges, node)
 
         if node.is_join:
-            return self._compile_join(nid, node, in_edges)
+            return self._compile_join(nid, node)
 
         _unsupported(f"the {kind} operator")
 
@@ -4407,7 +4407,7 @@ class _Compiler:
         self._remember_types(scan.columns)
         return p, layout
 
-    def _compile_join(self, nid, node, in_edges):
+    def _compile_join(self, nid, node):
         """Hash joins via the generalized native join (serialized multi-column keys
         of any supported type; INNER / LEFT OUTER / FULL OUTER / SEMI / null-aware
         ANTI modes). The PROBE side is always the streamed side; for LEFT OUTER the
@@ -4420,9 +4420,9 @@ class _Compiler:
         with a residual `on` predicate applied as a post-join filter."""
         join_type = node.join_type
         if join_type == "asof":
-            return self._compile_asof_join(node, in_edges)
+            return self._compile_asof_join(nid, node)
         if join_type == "band":
-            return self._compile_band_join(node, in_edges)
+            return self._compile_band_join(nid, node)
         # THREE key rules live here and none of them is interchangeable with another;
         # each disagrees with the others only on NULL, which is why substituting one
         # for another is a silent wrong answer rather than an error.
@@ -4469,13 +4469,10 @@ class _Compiler:
         # UNKNOWN is a NULL in the flag (projected IN / NOT IN); EXISTS is two-valued.
         existence_three_valued = bool(node.step.existence_three_valued)
         is_cross = join_type == "cross"
-        legs = {}
-        for idx, (provider, _target, label) in enumerate(in_edges):
-            if not label:
-                label = "left" if idx == 0 else "right"
-            legs[label] = provider
-        if "left" not in legs or "right" not in legs:
-            _unsupported("a join without labelled left/right legs")
+        # Legs by label; plan.legs refuses a join whose legs are not labelled
+        # (architect ruling 2026-09-27: nothing reads a leg from edge order).
+        left_leg, right_leg = self.plan.legs(nid)
+        legs = {"left": left_leg, "right": right_leg}
 
         left_cols = list(node.step.left_columns or [])
         right_cols = list(node.step.right_columns or [])
@@ -5438,7 +5435,7 @@ class _Compiler:
         self.nplan.add_unnest_literal(p, literal_morsel, target_identity)
         return p, list(layout) + [target_identity]
 
-    def _compile_asof_join(self, node, in_edges):
+    def _compile_asof_join(self, nid, node):
         """ASOF JOIN: LEFT-preserving nearest-match by the MATCH_CONDITION column
         within optional USING equi partitions (mirrors the legacy operator's bisect
         semantics). LEFT leg = probe/preserved, RIGHT leg = build; per probe row
@@ -5453,13 +5450,8 @@ class _Compiler:
         right_cols = list(node.step.right_columns or [])
         if len(left_cols) != len(right_cols):
             _unsupported("an ASOF join with unaligned USING key lists")
-        legs = {}
-        for idx, (provider, _target, label) in enumerate(in_edges):
-            if not label:
-                label = "left" if idx == 0 else "right"
-            legs[label] = provider
-        if "left" not in legs or "right" not in legs:
-            _unsupported("an ASOF join without labelled left/right legs")
+        left_leg, right_leg = self.plan.legs(nid)
+        legs = {"left": left_leg, "right": right_leg}
 
         # BOTH legs are compiled before anything is wired. The match-column coercion
         # below reads each side's ColumnType out of the compiler's identity->type map,
@@ -5528,7 +5520,7 @@ class _Compiler:
         # unchanged by the coercion.
         return pp, list(blayout) + list(playout)
 
-    def _compile_band_join(self, node, in_edges):
+    def _compile_band_join(self, nid, node):
         """BAND JOIN: an INNER equi-join that additionally emits only the build rows
         whose band column falls between two per-probe-row bounds.
 
@@ -5551,13 +5543,8 @@ class _Compiler:
         if not left_cols or len(left_cols) != len(right_cols):
             _unsupported("a band join without aligned equi-key lists")
 
-        legs = {}
-        for idx, (provider, _target, label) in enumerate(in_edges):
-            if not label:
-                label = "left" if idx == 0 else "right"
-            legs[label] = provider
-        if "left" not in legs or "right" not in legs:
-            _unsupported("a band join without labelled left/right legs")
+        left_leg, right_leg = self.plan.legs(nid)
+        legs = {"left": left_leg, "right": right_leg}
 
         bp, blayout = self.compile_node(legs["left"])
         build_key_idx = []

@@ -120,10 +120,12 @@ def _make_window(partition_relation: str, col_names: list, plan_context):
 def _insert_window_on_edge(plan: LogicalPlan, leg_nid: str, setop_nid: str, window) -> str:
     """Splice a Window node onto the edge leg_nid -> setop_nid."""
     window_nid = random_string()
+    leg = plan.relationship(leg_nid, setop_nid)
     plan.add_node(window_nid, window)
-    plan.remove_edge(leg_nid, setop_nid, None)
+    plan.remove_edge(leg_nid, setop_nid, leg)
     plan.add_edge(leg_nid, window_nid)
-    plan.add_edge(window_nid, setop_nid)
+    # The Window takes the leg's place, and its label.
+    plan.add_edge(window_nid, setop_nid, leg)
     return window_nid
 
 

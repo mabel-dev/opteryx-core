@@ -181,12 +181,8 @@ class JoinKeyMaterializationStrategy(OptimizationStrategy):
         # folded into that leg, including ones a Subquery boundary hides — which a
         # child-subtree relation-name walk does not reproduce; those lists say which
         # names COUNT as that leg, not which child is it.
-        children = {
-            relationship: child_id
-            for child_id, _, relationship in plan.ingoing_edges(join_id)
-        }
-        if "left" not in children or "right" not in children:
-            return
+        left_child, right_child = plan.legs(join_id)
+        children = {"left": left_child, "right": right_child}
 
         rewrote = False
         conjuncts = []
