@@ -70,7 +70,7 @@ dictionary-encoded string column.
   `OPTERYX_INSTRUMENT_ENGINE=1`. Reads `trampoline_calls`, `gil_held_ns`,
   worker-purity, pruning facts (`native_scan_facts.row_groups_read/pruned`,
   read from the raw telemetry `_reading` dict — `as_dict()` deliberately strips
-  this key since it's normally overlaid onto the operator row by mermaid), and
+  this key since it's normally overlaid onto the operator row by plan_telemetry), and
   asserts row-count parity native vs trampoline.
 - **Part B** — concurrent-query sweep: `Q` ∈ {1,2,4,8} **identical queries
   launched simultaneously in separate threads**, per-query `dop` fixed at 2,

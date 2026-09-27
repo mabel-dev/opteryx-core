@@ -32,6 +32,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 import pytest
 
 import opteryx
+from opteryx.exceptions import UnsupportedSyntaxError
 
 
 def _explain(sql):
@@ -186,10 +187,12 @@ def test_explain_analyze_filter_applies_predicate():
     assert rows[filter_idx] == 7, rows
 
 
-def test_explain_mermaid_unchanged():
-    names, data = _explain("EXPLAIN ANALYZE FORMAT MERMAID SELECT name FROM $planets")
-    assert names == ["plan"]
-    assert data["plan"][0].startswith("flowchart")
+@pytest.mark.parametrize("fmt", ["MERMAID", "TREE", "GRAPHVIZ", "JSON"])
+def test_explain_non_text_formats_are_refused(fmt):
+    # The tabular operator tree is the only EXPLAIN output; every other FORMAT
+    # fails clean rather than being answered with something else.
+    with pytest.raises(UnsupportedSyntaxError, match=f"{fmt} format is not supported"):
+        _explain(f"EXPLAIN ANALYZE FORMAT {fmt} SELECT name FROM $planets")
 
 
 if __name__ == "__main__":  # pragma: no cover

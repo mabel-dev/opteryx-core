@@ -1168,11 +1168,6 @@ cdef class BasePlanNode:
         with a class of its own."""
         return type(self).__name__
 
-    def to_mermaid(self, nid):
-        mermaid = f'NODE_{nid}["**{self.node_type.upper()}**<br />'
-        mermaid += f"({self.execution_time / 1_000_000:,.2f}ms)"
-        return mermaid + '"]'
-
     def __str__(self) -> str:
         return f"{self.name} {self.sensors()}"
 

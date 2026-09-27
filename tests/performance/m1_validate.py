@@ -231,7 +231,7 @@ def _measure(sql: str, force_tramp: bool, dop: int, repeats: int) -> dict:
                 if x.get("site") == "_scan_pull_run")
     # pruning facts (native path exposes native_scan_facts; both expose files_pruned).
     # native_scan_facts is intentionally stripped from as_dict() (it is overlaid onto
-    # the scan's operation row by mermaid), so read it from the raw _reading dict.
+    # the scan's operation row by plan_telemetry), so read it from the raw _reading dict.
     dop_used = s._telemetry._reading.get("native_engine_dop")
     facts = s._telemetry._reading.get("native_scan_facts", {})
     rg_read = sum(v.get("row_groups_read", 0) for v in facts.values()) if facts else None

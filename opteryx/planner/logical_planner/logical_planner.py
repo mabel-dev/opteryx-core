@@ -3821,17 +3821,14 @@ def plan_explain(statement, *, plan_context, **kwargs) -> LogicalPlan:
     plan = LogicalPlan()
     explain_node = ExplainStep()
     explain_node.analyze = statement["Explain"]["analyze"]
+    # The tabular operator tree is the only EXPLAIN output. Any other FORMAT
+    # the parser accepts (e.g. TREE) is refused rather than silently answered
+    # with the tree.
     explain_format = statement["Explain"].get("format")
-
-    if explain_format is None:
-        explain_node.format = "TEXT"
-    else:
-        explain_node.format = explain_format.get("Keyword", "TEXT").upper()
-    # GRAPHVIZ is the carrier token, not a request: the parser has no MERMAID
-    # keyword, so sql_rewriter.rewrite_explain sends MERMAID through as GRAPHVIZ
-    # (and rejects a genuine FORMAT GRAPHVIZ before parsing). This maps it back.
-    if explain_node.format == "GRAPHVIZ":
-        explain_node.format = "MERMAID"
+    if explain_format is not None:
+        requested = str(explain_format.get("Keyword")).upper()
+        if requested != "TEXT":
+            raise UnsupportedSyntaxError(f"{requested} format is not supported")
 
     explain_id = random_string()
     plan.add_node(explain_id, explain_node)

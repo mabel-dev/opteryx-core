@@ -681,8 +681,8 @@ CLAUSE_DEFINITIONS = {
         "status": "supported",
         "syntax_forms": ["EXPLAIN [ANALYZE] query"],
         "summary": "Explain a query plan.",
-        "documentation": "Supports textual and Mermaid output formats.",
-        "notes": "GRAPHVIZ is normalized to MERMAID in the planner.",
+        "documentation": "Renders the plan as a tabular operator tree; ANALYZE adds runtime statistics.",
+        "notes": "Any FORMAT other than TEXT is refused.",
     },
     "from": {
         "canonical_name": "FROM",

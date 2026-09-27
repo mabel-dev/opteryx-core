@@ -840,7 +840,7 @@ class _Compiler:
         # Per-native-scan plan-time facts, keyed by scan node identity. On the
         # native path the Cython ParquetReadNode never executes, so its
         # ScanReadings (row_groups_read/files_read/…) stay zero — these carry the
-        # real values, harvested into telemetry and overlaid by mermaid.py.
+        # real values, harvested into telemetry and overlaid by plan_telemetry.py.
         self.scan_facts: dict = {}
         # A0 acceptance gate: per-scan residual-reason code, keyed by scan node
         # identity, recorded when a parquet scan falls back to the per-morsel
@@ -6205,7 +6205,7 @@ def execute_native(plan, telemetry=None, trace_sink=None):
         if scan_residual_reasons:
             telemetry._reading["scan_residual_reasons"] = dict(scan_residual_reasons)
         # Native-scan plan-time facts (files/row-groups/columns read), keyed by
-        # scan identity — overlaid onto the scan's sensor row by mermaid.py to
+        # scan identity — overlaid onto the scan's sensor row by plan_telemetry.py to
         # replace the always-zero ScanReadings fields on the native path.
         if scan_facts:
             telemetry._reading["native_scan_facts"] = dict(scan_facts)
@@ -6313,7 +6313,7 @@ def execute_native(plan, telemetry=None, trace_sink=None):
             # which the native engine's pull loop never calls (it just detects EOS).
             # The driver is done (queue FINISHED, or wait_finished returned → every
             # worker finished), so it is safe to close each scan on this thread:
-            # flush_into populates the readings sensors()/mermaid read, and the source
+            # flush_into populates the readings sensors()/plan_telemetry read, and the source
             # is released. Idempotent
             # (close_source guards on _scan_finished), so scans that self-closed are
             # untouched. Native-parquet scans have no ScanReadings to flush — their
@@ -6341,7 +6341,7 @@ def execute_native(plan, telemetry=None, trace_sink=None):
             _fold_skene_scan_facts(nplan, telemetry)
             # The driver is done, so every operator's counters are final: harvest the
             # per-operator telemetry and fold it onto the session telemetry, keyed by
-            # plan-node identity (mermaid's get_node_stats reads it back for the
+            # plan-node identity (plan_telemetry's get_node_stats reads it back for the
             # ``operations`` breakdown). Several native operators/sources/sinks can
             # share one identity: either a sequential chain within one pipeline (a
             # scan with its residual filter relocated onto it, WP-02 — source ->

@@ -110,7 +110,7 @@ def execute(
     # ── Non-pipeline special cases ───────────────────────────────────────────
     if isinstance(head_node, ExplainNode):
         return (
-            explain(plan, analyze=head_node.analyze, _format=head_node.format, telemetry=telemetry),
+            explain(plan, analyze=head_node.analyze, telemetry=telemetry),
             ResultType.TABULAR,
         )
     if isinstance(head_node, SetVariableNode):
@@ -236,37 +236,9 @@ def _drain_pipeline(plan: PhysicalPlan, enable_tracing: bool = False):
 def explain(
     plan: PhysicalPlan,
     analyze: bool,
-    _format: str,
     telemetry: QueryTelemetry = None,
 ) -> Generator[Morsel, None, None]:
     from opteryx.operators import BasePlanNode
-
-    # Record stream consumed by the MERMAID renderer (one dict per operator).
-    def _inner_explain(node, depth):
-        incoming_operators = plan.ingoing_edges(node)
-        for operator_name in incoming_operators:
-            operator = plan[operator_name[0]]
-            if operator.kind in ("ExitNode", "ExplainNode"):
-                yield from _inner_explain(operator_name[0], depth)
-                continue
-            elif isinstance(operator, BasePlanNode):
-                record = {
-                    "identity": operator.identity,
-                    "tree": depth,
-                    "operator": operator.name,
-                    "config": operator.config,
-                }
-                if analyze:
-                    record["time_ms"] = operator.execution_time / 1e6
-                    sensors = operator.sensors()
-                    record["self_time_ms"] = sensors.get("self_time", operator.execution_time) / 1e6
-                    record["records_in"] = operator.records_in
-                    record["records_out"] = operator.records_out
-                    record["bytes_in"] = operator.bytes_in
-                    record["bytes_out"] = operator.bytes_out
-                    record["calls"] = operator.calls
-                yield record
-                yield from _inner_explain(operator_name[0], depth + 1)
 
     # Real operator children of a node, transparently skipping the Exit/Explain
     # wrappers so the rendered tree starts at the first data operator.
@@ -319,7 +291,7 @@ def explain(
         # ExitNode as the sole exit point) and hand that to execute_native;
         # native per-operator stats land in telemetry._reading["native_op_stats"],
         # keyed by node identity, which _row_count/_self_ms below read via the
-        # same overlay mermaid.py already uses for the MERMAID format.
+        # plan-telemetry overlay.
         query_head_edges = plan.ingoing_edges(head[0])
         if query_head_edges:
             from opteryx.managers.execution.compiler import execute_native
@@ -334,17 +306,7 @@ def explain(
             for _ in generator:
                 pass
 
-    if _format != "TEXT":
-        explained = list(_inner_explain(head[0], 1))
-        from opteryx.utils import mermaid
-
-        mermaid_plan = mermaid.plan_to_mermaid(plan, explained)
-        yield Morsel.from_vectors(
-            ["plan"], [vector_from_sequence([mermaid_plan], dtype=DrakenType.VARCHAR)]
-        )
-        return
-
-    # ── TEXT: tabular operator tree ──────────────────────────────────────────
+    # ── Tabular operator tree ────────────────────────────────────────────────
     op_rows: list = []
     tops = _real_children(head[0])
     for index, top in enumerate(tops):
@@ -352,19 +314,19 @@ def explain(
 
     # The query now always runs on the native engine (see the `analyze` branch
     # above) — per-operator stats live in telemetry._reading["native_op_stats"],
-    # keyed by node identity. Reuse mermaid.py's overlay (the same one the
-    # MERMAID format and the general `.telemetry` property already read)
-    # instead of re-deriving the lookup here.
+    # keyed by node identity. Reuse the plan-telemetry overlay (the same one
+    # the general `.telemetry` property reads) instead of re-deriving the
+    # lookup here.
     node_stats_by_nid: dict = {}
     if analyze:
-        from opteryx.utils import mermaid as _mermaid
+        from opteryx.utils.plan_telemetry import collect_plan_telemetry
 
-        node_stats_by_nid, _, _ = _mermaid._collect_node_stats(plan)
+        node_stats_by_nid = collect_plan_telemetry(plan)
         # Shared/recursive CTE bodies ran in the same engine and their operators
         # carry readings under their own identities; fold them in so the
         # RECURSIVE CTE section below renders real numbers, not zeros.
         for _body in (getattr(plan, "shared_ctes", None) or {}).values():
-            _body_stats, _, _ = _mermaid._collect_node_stats(_body)
+            _body_stats = collect_plan_telemetry(_body)
             node_stats_by_nid.update(_body_stats)
 
     def _row_count(node_id):
@@ -378,7 +340,7 @@ def explain(
     def _self_ms(node_id):
         # self_ms == time_ms on the native path — the executor times each
         # operator's own call only, so there is no separate downstream
-        # component to subtract (see mermaid.py's get_node_stats).
+        # component to subtract (see plan_telemetry.py's get_node_stats).
         stat = node_stats_by_nid.get(node_id)
         return round((stat.get("self_time", 0) or 0) / 1e6, 3) if stat else 0.0
 

@@ -24,7 +24,7 @@ records to those edges, and nothing downstream records them.
 Each operator entry carries the fields the q-error report needs, read from
 ``session.telemetry["operations"]`` (the definitive per-node record — the
 native engine's ``records_out`` actuals overlaid with the planner's
-``est_rows``/``est_rows_kind`` estimates by ``mermaid._collect_node_stats``).
+``est_rows``/``est_rows_kind`` estimates by ``plan_telemetry.collect_plan_telemetry``).
 Operators the statistics refresh never reached have ``est_rows: null`` —
 "no estimate was made", never "estimated zero".
 """

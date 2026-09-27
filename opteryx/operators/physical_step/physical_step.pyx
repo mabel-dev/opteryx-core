@@ -67,13 +67,6 @@ cdef dict _NAMES = {
     "ExistenceJoinNode": None,
 }
 
-# The two-input joins, which draw as `JOIN (<type>)` in the mermaid diagram. A
-# CROSS JOIN UNNEST is registered as a join but has one input, and draws by name.
-cdef frozenset _TWO_INPUT_JOINS = frozenset({
-    "AsofJoinNode", "BandJoinNode", "DrakenInnerJoinNode", "CrossJoinNode",
-    "NestedLoopJoinNode", "OuterJoinNode", "FilterJoinNode", "ExistenceJoinNode",
-})
-
 cdef dict _ASOF_OPERATORS = {"Lt": "<", "LtEq": "<=", "Gt": ">", "GtEq": ">="}
 
 
@@ -202,14 +195,6 @@ cdef class PhysicalStep(BasePlanNode):
     @property
     def config(self):
         return _config(self)
-
-    def to_mermaid(self, nid):
-        if self._kind in _TWO_INPUT_JOINS:
-            mermaid = f'NODE_{nid}["**JOIN ({self.join_type.upper()})**<br />'
-        else:
-            mermaid = f'NODE_{nid}["**{self.name.upper()}**<br />'
-        mermaid += f"({self.execution_time / 1_000_000:,.2f}ms)"
-        return mermaid + '"]'
 
     def __repr__(self):
         return f"<PhysicalStep {self._kind}>"

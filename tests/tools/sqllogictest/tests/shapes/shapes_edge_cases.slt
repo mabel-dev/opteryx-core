@@ -159,7 +159,7 @@ EXPLAIN ANALYZE FORMAT JSON SELECT * FROM $planets AS a INNER JOIN (SELECT id FR
 statement error UnsupportedSyntaxError
 EXPLAIN ANALYZE FORMAT GRAPHVIZ SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id)
 
-query shape 1 1
+statement error UnsupportedSyntaxError
 EXPLAIN ANALYZE FORMAT MERMAID SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id)
 
 query shape 7 2

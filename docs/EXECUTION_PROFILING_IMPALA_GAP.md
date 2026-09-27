@@ -109,7 +109,7 @@ Heap Sort                     | LIMIT = 5, ORDER = COUNT(*) DESC |        5 |   
 ```
 
 plus `OPTIMIZATIONS` and `REWRITE TRACE` blocks. Also available:
-`opteryx/utils/mermaid.py` (per-node overlay, incl. `cpu_time_ms`) and the raw
+`opteryx/utils/plan_telemetry.py` (per-node overlay, incl. `cpu_time_ms`) and the raw
 `Session.telemetry` dict.
 
 ---
@@ -668,7 +668,7 @@ execution path reads back.
   sites, which is how the two columns drifted apart in the first place.
 
 * **Unresolved, one layer down: a plan node with no native reading is still
-  indistinguishable from one that read zero.** `mermaid._collect_node_stats`
+  indistinguishable from one that read zero.** `plan_telemetry.collect_plan_telemetry`
   always returns a dict per explained node and overlays `native_op_stats` onto
   it only when that identity was harvested, so `records_out` is `0` both for a
   node that genuinely emitted no rows and for one the native harvest never

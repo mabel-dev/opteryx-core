@@ -32,7 +32,6 @@ class ExplainNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, step):
         BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
         self.analyze = bool(step.analyze)
-        self.format = step.format or "TEXT"
 
     @property
     def name(self):  # pragma: no cover

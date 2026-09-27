@@ -57,12 +57,6 @@ cdef class PostgresReadNode(ReaderNode):
     def name(self) -> str:  # pragma: no cover
         return "Postgres Reader"
 
-    def to_mermaid(self, nid):  # pragma: no cover
-        mermaid = f'NODE_{nid}[("**{self.name.upper()}**<br />'
-        mermaid += f"{self.relation}<br />"
-        mermaid += f"({self.execution_time / 1_000_000:,.2f}ms)"
-        return mermaid + '")]'
-
     def read_morsels(self):
         from opteryx.exceptions import InvalidInternalStateError
 

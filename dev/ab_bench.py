@@ -127,11 +127,11 @@ def _worker(args: argparse.Namespace) -> None:
     if args.profile:
         # Separate tracing pass — the timed numbers above stay tracing-free.
         # Same mechanism as the ClickBench runner's --profile: EXPLAIN ANALYZE,
-        # then mermaid._collect_node_stats overlays the native engine's
+        # then plan_telemetry.collect_plan_telemetry overlays the native engine's
         # per-identity self-time back onto the plan nodes.
         import collections
 
-        from opteryx.utils import mermaid as _mermaid
+        from opteryx.utils.plan_telemetry import collect_plan_telemetry
 
         for name, sql in queries:
             gc.collect()
@@ -139,7 +139,7 @@ def _worker(args: argparse.Namespace) -> None:
             try:
                 for _ in session.execute_to_morsels(f"EXPLAIN ANALYZE {sql}"):
                     pass
-                node_stats_by_nid, _, _ = _mermaid._collect_node_stats(session._plan)
+                node_stats_by_nid = collect_plan_telemetry(session._plan)
                 op_self = collections.defaultdict(int)
                 for nid in session._plan.nodes():
                     node = session._plan[nid]

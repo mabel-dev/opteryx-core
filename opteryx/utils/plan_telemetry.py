@@ -353,20 +353,17 @@ def _get_operator_label(node):
     return _OPERATOR_LABELS.get(class_name)
 
 
-def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
+def collect_plan_telemetry(plan: PhysicalPlan) -> dict:
     """Build the per-node stats (keyed by node UID) and edge list for a plan.
 
     This is the definitive per-node/edge record: native op stats overlaid onto
     the plan-node identity, harvested after the run. As a side effect it
     populates ``node.telemetry.operations`` and the shared ``telemetry.edges``
-    list — the structured source consumers should read instead of parsing a
-    rendered diagram.
+    list — the structured source consumers read.
 
-    Returns ``(node_stats_by_nid, node_map, excluded_nodes)`` for callers that
-    still need to render a diagram from this data (e.g. EXPLAIN).
+    Returns ``node_stats_by_nid`` for callers that read the per-node numbers
+    directly (EXPLAIN ANALYZE's TEXT tree, the benchmark harnesses).
     """
-    # Map node ids to node objects for telemetry fallbacks
-    node_map = {nid: node for nid, node in plan.nodes(True)}
 
     def get_node_stats(plan: PhysicalPlan):
         stats = []
@@ -608,10 +605,6 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
                 schema_columns = getattr(schema, "columns", None)
                 if schema_columns:
                     node_stat["columns_total"] = len(schema_columns)
-            if getattr(node, "at_date", None):
-                node_stat["at_date"] = str(node.at_date)
-            if getattr(node, "committed_at", None):
-                node_stat["committed_at"] = node.committed_at
 
             # Field dedup (architect decision): the scan-specific readings duplicate
             # the generic operator counters. Collapse each pair onto the generic
@@ -666,18 +659,13 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
         return stats
 
     node_stats = {x["identity"]: x for x in get_node_stats(plan)}
-    if stats:
-        for stat in stats:
-            node_stats[stat["identity"]] = stat
 
     # ExitNode is an internal engine relation, not a user-facing operator — it
     # carries no useful telemetry of its own (a pure pass-through) and every
     # consumer (EXPLAIN's own tree builder, Studio's operator-tree renderer)
     # already splices it out and treats its child as the root. Drop it (and
     # the edge into it) from the structured telemetry entirely, rather than
-    # emitting it for every consumer to filter back out. This is scoped to
-    # telemetry.operations/.edges only — plan_to_mermaid's own diagram string
-    # (EXPLAIN) still draws it, unchanged, via node_stats/excluded_nodes below.
+    # emitting it for every consumer to filter back out.
     exit_nids = {nid for nid, node in plan.nodes(True) if node.kind == "ExitNode"}
 
     # Planner row-count estimates, recorded by StatisticsRefreshVisitor.
@@ -721,8 +709,8 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
                 # Use node UID (nid) as the key
                 node.telemetry.operations[nid] = stat
 
-    # Build a structured edge list so consumers can reconstruct the plan DAG
-    # without parsing the Mermaid string. Direction: from = producer, to = consumer.
+    # Build a structured edge list so consumers can reconstruct the plan DAG.
+    # Direction: from = producer, to = consumer.
     _raw_edges = list(plan.edges())
 
     excluded_nodes = []
@@ -743,79 +731,4 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
             if s not in excluded_nodes and t not in excluded_nodes and t not in exit_nids
         ]
 
-    return node_stats, node_map, excluded_nodes
-
-
-def collect_plan_telemetry(plan: PhysicalPlan, stats: list = None) -> None:
-    """Populate node.telemetry.operations/.edges from the plan.
-
-    This is the data source for callers that need the plan's structure and
-    metrics (e.g. per-query telemetry sent to worker/jobs) but not a rendered
-    diagram — no mermaid string is built here.
-    """
-    _collect_node_stats(plan, stats)
-
-
-def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
-    node_stats, node_map, excluded_nodes = _collect_node_stats(plan, stats)
-    builder = ""
-
-    for nid, node in plan.nodes(True):
-        if node.is_not_explained:
-            continue
-        builder += f"  {node.to_mermaid(nid)}\n"
-    builder += "\n"
-
-    for s, t, r in plan.edges():
-        if t in excluded_nodes:
-            continue
-        stats_ = node_stats.get(s) or {}
-        # Prefer node-specific stats (records_out/bytes_out). Only fall back to
-        # the node's telemetry for reader/scan nodes or when the stats are
-        # missing/zero. This avoids propagating reader telemetry across
-        # non-scan nodes which can produce misleading arrow labels.
-        source_node = node_map.get(s)
-        records = stats_.get("records_out")
-        bytes_ = stats_.get("bytes_out")
-        if source_node is not None:
-            # Use telemetry only for scan nodes or when summary stats are absent/zero.
-            # Only rows: the telemetry's byte totals (`billing_bytes`, plan-time
-            # logical; `io_bytes_fetched`, compressed IO) are query-wide, so using one
-            # as this edge's payload size would label one edge with the whole query.
-            telemetry_rows = getattr(source_node.telemetry, "rows_read", None)
-            if (
-                (records is None or records == 0)
-                and source_node.is_scan
-                and telemetry_rows not in (None, 0)
-            ):
-                records = telemetry_rows
-
-        records = 0 if records is None else records
-        bytes_ = 0 if bytes_ is None else bytes_
-        join_leg = f"**{r.upper()}**<br />" if r else ""
-        builder += (
-            f'  NODE_{s} -- "{join_leg} {records:,} rows<br />{bytes_:,} bytes" --> NODE_{t}\n'
-        )
-
-    # Add termination node
-    exit_points = plan.get_exit_points()
-    if exit_points:
-        exit_node = plan[exit_points[0]]
-        total_duration = sum(node.execution_time for nid, node in plan.nodes(True)) / 1e6
-        # Prefer telemetry for final counts when present. The telemetry byte totals
-        # are NOT usable here: they are query-wide (billing meter / fetched IO), not
-        # this node's output size, so the terminus edge takes the exit operator's
-        # own bytes_out.
-        final_rows = getattr(exit_node.telemetry, "rows_read", None) or exit_node.records_out
-        final_bytes = exit_node.bytes_out
-        final_columns = len(exit_node.columns) if exit_node.columns is not None else 0
-
-        builder += f'  NODE_TERMINUS(["{final_rows} rows<br />{final_columns} columns<br />({total_duration:,.2f}ms)"])\n'
-
-        # Find the node feeding into ExitNode
-        ingoing = plan.ingoing_edges(exit_points[0])
-        if ingoing:
-            source_nid = ingoing[0][0]
-            builder += f'  NODE_{source_nid} -- "{final_rows:,} rows<br />{final_bytes:,} bytes" --> NODE_TERMINUS\n'
-
-    return "flowchart LR\n\n" + builder
+    return node_stats

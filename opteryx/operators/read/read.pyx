@@ -126,16 +126,6 @@ cdef class ReaderNode(BasePlanNode):
         self.limit = step.limit if step_type in steps_with("limit") else None
         self.schema = step.schema
 
-    def to_mermaid(self, nid):
-        """
-        Generic method to convert a node to a mermaid entry
-        """
-        dataset_name = str(self.dataset)
-
-        mermaid = f'NODE_{nid}["**READ** ({dataset_name})<br />'
-        mermaid += f"({self.execution_time / 1_000_000:,.2f}ms)"
-        return mermaid + '"]'
-
     @property
     def name(self):  # pragma: no cover
         """Friendly name for this step"""
@@ -245,7 +235,7 @@ cdef class ReaderNode(BasePlanNode):
             self.telemetry.time_reading_blobs += time.monotonic_ns() - start_clock
             self.telemetry.blobs_read += 1
             self.telemetry.rows_read += result_morsel.num_rows
-            # Per-node only (sensors/mermaid, remapped to bytes_in). This is the
+            # Per-node only (sensors/plan telemetry, remapped to bytes_in). This is the
             # morsel's MATERIALIZED in-memory size, not a quantity the billing
             # meter can use — `billing_bytes` on the shared telemetry is dense
             # logical bytes measured at plan time (planner/data_processed.py),

@@ -223,7 +223,7 @@ def data_processed_by_scan(
     DATA_PROCESSED_BYTES meter — keyed by `node.uuid`, which
     `create_physical_plan` copies from the logical node onto the compiled
     operator. That shared key is what lets a consumer keyed by the
-    physical/EXPLAIN plan (e.g. `mermaid.py`) look up the SAME number the bill
+    physical plan (e.g. `plan_telemetry.py`) look up the SAME number the bill
     was computed from, rather than a second, disagreeing estimate.
 
     NOT `node.identity`: an identity is minted by the OPERATOR's constructor,

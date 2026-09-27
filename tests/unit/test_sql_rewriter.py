@@ -14,11 +14,9 @@ def test_rewrite_explain_graphviz_unsupported():
         do_sql_rewrite("EXPLAIN ANALYZE FORMAT GRAPHVIZ SELECT 1")
 
 
-def test_rewrite_explain_mermaid_rewrites_to_graphviz():
-    out = do_sql_rewrite("EXPLAIN ANALYZE FORMAT MERMAID SELECT 1")
-    assert "FORMAT GRAPHVIZ" in out
-    # ensure we didn't accidentally raise
-    assert "MERMAID" not in out
+def test_rewrite_explain_mermaid_unsupported():
+    with pytest.raises(UnsupportedSyntaxError):
+        do_sql_rewrite("EXPLAIN ANALYZE FORMAT MERMAID SELECT 1")
 
 
 def test_real_tab_in_string_literal_survives():

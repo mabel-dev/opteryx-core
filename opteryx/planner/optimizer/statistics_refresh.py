@@ -146,7 +146,7 @@ def _split_and_conjuncts(node):
     """Split an AND-tree into a flat list of conjuncts. Returns [node] for non-AND.
 
     Delegates to ``_inner_split`` — the one existing definition of this split
-    (split_conjunctive_predicates.py), also used by compiler.py and mermaid.py —
+    (split_conjunctive_predicates.py), also used by compiler.py and plan_telemetry.py —
     so the statistics pass sees the same terms the physical FILTER does.
 
     Writing the AND recursion here a second time is what caused the gap this

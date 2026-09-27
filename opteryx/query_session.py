@@ -614,20 +614,13 @@ class Session(DataFrame):
             self._telemetry.end_time = time.time_ns()
 
         # Populate per-node/edge telemetry from the plan (operations + edges).
-        # This is the definitive structured record; no mermaid string is built
-        # or stored here — EXPLAIN renders the diagram separately, on demand.
+        # This is the definitive structured record.
         if self._plan is not None:
-            from opteryx.utils import mermaid
+            from opteryx.utils.plan_telemetry import collect_plan_telemetry
 
-            mermaid.collect_plan_telemetry(self._plan)
+            collect_plan_telemetry(self._plan)
 
         return self._telemetry.as_dict()
-
-    def mermaid(self) -> str:
-        """Render the current plan as a mermaid diagram string."""
-        from opteryx.utils import mermaid
-
-        return mermaid.plan_to_mermaid(self._plan)
 
     def __repr__(self):  # pragma: no cover - helpful for debugging
         return f"<opteryx.Session (QID:{self.query_id})>"

@@ -111,12 +111,6 @@ cdef class JsonlReadNode(ReaderNode):
     def name(self) -> str:  # pragma: no cover
         return "JSONL Reader"
 
-    def to_mermaid(self, nid):  # pragma: no cover
-        mermaid = f'NODE_{nid}[("**{self.name.upper()}**<br />'
-        mermaid += f"{self.dataset}<br />"
-        mermaid += f"({self.execution_time / 1_000_000:,.2f}ms)"
-        return mermaid + '")]'
-
     cdef object _ensure_filesystem(self):
         if self._filesystem is None:
             # Dataset Scans attach a connector table that already holds the

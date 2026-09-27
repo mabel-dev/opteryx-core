@@ -106,9 +106,9 @@ def _profile_pass(queries: list[tuple[str, str]]) -> None:
     Real per-operator self-time only exists once the query has actually run: the
     physical-plan Python objects never execute on the native engine (the C++ engine
     does), so their own execution_time/sensors() counters stay zero.
-    `mermaid._collect_node_stats()` is what overlays the native engine's per-identity
+    `plan_telemetry.collect_plan_telemetry()` is what overlays the native engine's per-identity
     readings (`telemetry._reading["native_op_stats"]`) back onto the plan nodes - the
-    same lookup EXPLAIN ANALYZE (TEXT format) uses for its own self-time column.
+    same lookup EXPLAIN ANALYZE uses for its own self-time column.
 
     Driven via EXPLAIN ANALYZE in a pass of its own so the benchmark timings above
     stay tracing-free and honest.
@@ -125,7 +125,7 @@ def _profile_pass(queries: list[tuple[str, str]]) -> None:
     from rugo.rugo_native import get_cpp_telemetry
     from rugo.rugo_native import reset_cpp_telemetry
 
-    from opteryx.utils import mermaid as _mermaid
+    from opteryx.utils.plan_telemetry import collect_plan_telemetry
 
     print(f"\n{'=' * 100}")
     print("PER-OPERATOR PROFILE (tracing pass - EXPLAIN ANALYZE self-time)")
@@ -148,7 +148,7 @@ def _profile_pass(queries: list[tuple[str, str]]) -> None:
             for _ in session.execute_to_morsels(f"EXPLAIN ANALYZE {sql}"):
                 pass
 
-            node_stats_by_nid, _, _ = _mermaid._collect_node_stats(session._plan)
+            node_stats_by_nid = collect_plan_telemetry(session._plan)
 
             rows = []
             op_self: dict = collections.defaultdict(int)
