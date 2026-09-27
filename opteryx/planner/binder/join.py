@@ -321,15 +321,25 @@ def visit_join(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
             origins = merged_origins
 
             if coalesces:
-                merged = context.plan_context.columns.remint(left_column, "$shared")
-                merged.aliases = None
-                merged.nullable = left_column.nullable or right_column.nullable
+                merged = context.plan_context.columns.remint(
+                    left_column,
+                    "$shared",
+                    aliases=None,
+                    nullable=left_column.nullable or right_column.nullable,
+                    origin=merged_origins,
+                )
                 using_merged.append(
                     (merged.identity, left_column.identity, right_column.identity)
                 )
             else:
-                merged = left_column
-            merged.origin = merged_origins
+                # The left column, seen in the `$shared` scope: an alias row
+                # (architect ruling 2026-09-27, join USING is a scope rename).
+                merged = context.plan_context.columns.alias(
+                    left_column,
+                    left_column.name,
+                    aliases=left_column.aliases,
+                    origin=merged_origins,
+                )
             columns.append(merged)
 
         if using_merged:

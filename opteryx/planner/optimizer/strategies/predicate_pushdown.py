@@ -326,23 +326,24 @@ def _restore_at_original_position(plan, predicate, predicate_nid: str, plan_path
     return False
 
 
-def _detach_aliases(expression) -> None:
-    """Give an inlined expression copy its OWN column object, with no aliases.
+def _detach_aliases(expression, *, plan_context) -> None:
+    """Give an inlined expression copy its OWN column, with no aliases.
 
     The inlined copy must not answer to the alias it was defined under. But
     `Node.copy` does not copy a node's schema_column (SchemaColumn has no `.copy`)
     and `LogicalColumn.copy` hands back the same plain SchemaColumn, so clearing
     `schema_column.aliases` on the copy cleared them on the alias-defining
     Project's own output column - for a plain rename, the base relation's column -
-    and did so even when the rewrite was then declined. `branch_copy` detaches the
-    aliases list while keeping the column's identity and subclass.
+    and did so even when the rewrite was then declined. The copy takes an alias row
+    with no aliases - same identity and kind, its own slot - and the original row
+    is untouched.
     """
     schema_column = expression.schema_column
     if schema_column is None:
         return
-    detached = schema_column.branch_copy({})
-    detached.aliases = []
-    expression.schema_column = detached
+    expression.schema_column = plan_context.columns.alias(
+        schema_column, schema_column.name, aliases=[], origin=schema_column.origin
+    )
 
 
 def _stamp_inlined_predicate(node, condition, identifiers, target) -> None:
@@ -1999,7 +2000,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 if is_expression(expression):
                     expression.alias = None
                     expression.query_column = None
-                _detach_aliases(expression)
+                _detach_aliases(expression, plan_context=context.plan_context)
 
                 literal_value = literal_candidate.value
                 if isinstance(literal_value, str):
@@ -2118,7 +2119,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             trunc_expression = expression_template.copy()
             trunc_expression.alias = None
             trunc_expression.query_column = None
-            _detach_aliases(trunc_expression)
+            _detach_aliases(trunc_expression, plan_context=plan_context)
             side_condition = Comparison(
                 value=op,
                 left=trunc_expression,
@@ -2273,7 +2274,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             trunc_expression = expression_template.copy()
             trunc_expression.alias = None
             trunc_expression.query_column = None
-            _detach_aliases(trunc_expression)
+            _detach_aliases(trunc_expression, plan_context=plan_context)
 
             new_condition = Comparison(
                 value=op_with_alias_on_left,

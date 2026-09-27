@@ -93,9 +93,9 @@ def visit_materialized_cte_ref(
     columns = []
     mapping = {}
     for body_column in boundary_schema.columns:
-        out_column = context.plan_context.columns.remint(body_column, node.alias)
-        out_column.origin = [node.alias]
-        out_column.aliases = []
+        out_column = context.plan_context.columns.remint(
+            body_column, node.alias, origin=[node.alias], aliases=[]
+        )
         columns.append(out_column)
         mapping[out_column.identity] = body_column.identity
 

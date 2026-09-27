@@ -73,9 +73,6 @@ def visit_exit(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
                         if (schema_col.identity, schema_col.name) in seen_identities:
                             continue
                         origin = schema_col.origin
-                        if isinstance(origin, str):
-                            origin = [origin]
-                            schema_col.origin = origin
                         # Case-folded: `origin` holds the relation's own-cased alias
                         # (from dataset.py/subquery.py), `qualifier` is the user's
                         # typed qualifier - same fold as `_candidates` in binder.py.

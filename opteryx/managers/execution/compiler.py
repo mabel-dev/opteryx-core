@@ -2341,6 +2341,11 @@ class _Compiler:
                     _estimate_to_int64(ndv_estimate, "group-count estimate for GROUP BY"))
                 p2 = self.nplan.new_pipeline()
                 self.nplan.set_buffer_source(p2, buf)
+                # Registered with no aggregate specs: a HeapSort above finds nothing
+                # to rank, so the top-k fusion stays unarmed (every GROUP BY is
+                # registered — an absent entry is a compile-order bug).
+                self._groupby_sinks[node.identity] = (
+                    p, [], [], True, frozenset(layout))
                 return p2, list(layout)
             layout = self._project_agg_operands(p, raw_aggs, layout)
             specs = self._parse_aggregates(aggs, layout)

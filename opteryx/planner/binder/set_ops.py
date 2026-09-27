@@ -482,7 +482,8 @@ def _cast_leg_columns_to(
     matches no resolver arm — a UNION coercing any leg to DECIMAL died with
     "CAST INT64 → DECIMAL(22, 2) is not supported".
 
-    A NULL-typed LITERAL is retyped in place instead of CAST-wrapped: there is
+    A NULL-typed LITERAL takes a retyped row (ColumnTable.retype) instead of a
+    CAST wrapper: there is
     no NULL-to-anything native cast kernel (a NULL literal carries no value to
     convert), and none is needed — `CAST(NULL AS VARCHAR)` and "a VARCHAR-typed
     NULL literal" are the same thing. `visit_case`'s LITERAL-branch coercion
@@ -520,7 +521,7 @@ def _cast_leg_columns_to(
                 continue
         if col.node_type == NodeType.LITERAL and col.value is None:
             col.type = target
-            schema_column.column_type = target
+            col.schema_column = plan_context.columns.retype(schema_column, target)
             continue
         columns[i] = _bound_cast_node(col, target, plan_context=plan_context)
 

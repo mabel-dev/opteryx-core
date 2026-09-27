@@ -137,17 +137,23 @@ class ColumnTable:
             )
         )
 
-    def remint(self, column, relation: Optional[str]) -> "SchemaColumn":
-        """A copy of `column` that is a NEW column of `relation`: same metadata,
-        fresh identity and slot. `column` is not modified."""
-        import copy
+    def remint(self, column, relation: Optional[str], **fields) -> "SchemaColumn":
+        """A copy of `column` that is a NEW column of `relation`: same metadata
+        except `fields`, fresh identity and slot. `column` is not modified - a row
+        is fixed once minted (architect ruling 2026-09-27), so a caller states
+        what differs here rather than writing it afterwards."""
+        import dataclasses
 
         from opteryx.types.schema import mint_column_identity
 
-        fresh = copy.copy(column)
-        fresh.identity = mint_column_identity(relation, column.name)
-        fresh.slot = self._next_slot()
-        return self._register(fresh)
+        return self._register(
+            dataclasses.replace(
+                column,
+                identity=mint_column_identity(relation, column.name),
+                slot=self._next_slot(),
+                **fields,
+            )
+        )
 
     def alias(
         self, column, name: str, *, aliases=None, origin=None, column_type=_KEEP
@@ -171,6 +177,23 @@ class ColumnTable:
         self._columns.append(renamed)
         self._alias_of[renamed.slot] = column.slot
         return renamed
+
+    def retype(self, column, column_type) -> "SchemaColumn":
+        """`column` settled to `column_type`: a retyped alias row - a new slot with
+        `column`'s identity and names, `alias_of` its slot (architect ruling
+        2026-09-27: a retype is a retyped alias row, so each slot keeps one type).
+        `column` is not modified; the caller puts the new row wherever the settled
+        type must be seen. A column already of `column_type` is returned as is:
+        it is already that row."""
+        if column.column_type == column_type:
+            return column
+        return self.alias(
+            column,
+            column.name,
+            aliases=column.aliases,
+            origin=column.origin,
+            column_type=column_type,
+        )
 
     def reference(self, identity: bytes, name: str, column_type) -> "SchemaColumn":
         """A plain column REFERRING to the already-minted column `identity` - its
@@ -212,8 +235,8 @@ class ColumnTable:
                 column_type=column.column_type,
                 nullable=column.nullable,
                 field_id=column.field_id,
+                origin=[alias],
             )
-            bound.origin = [alias]
             columns.append(bound)
         return RelationSchema(
             name=descriptor.name,
@@ -226,16 +249,19 @@ class ColumnTable:
             data_size_estimate=descriptor.data_size_estimate,
         )
 
-    def adopt(self, column, owner) -> "SchemaColumn":
+    def adopt(self, column, owner, *, column_type=_KEEP) -> "SchemaColumn":
         """`column` standing in for `owner` (e.g. a folded literal answering the
         aggregate it replaces): `column`'s kind and metadata carried under
         `owner`'s identity - the stream key consumers match on - as a NEW slot
-        aliasing `owner`'s. A new slot, because a slot is one row with one kind
-        (architect ruling 2026-09-27); neither argument is modified."""
+        aliasing `owner`'s, typed `column_type` when given. A new slot, because a
+        slot is one row with one kind (architect ruling 2026-09-27); neither
+        argument is modified."""
         import copy
 
         adopted = copy.copy(column)
         adopted.identity = owner.identity
+        if column_type is not _KEEP:
+            adopted.column_type = column_type
         adopted.slot = self._next_slot()
         self._columns.append(adopted)
         self._alias_of[adopted.slot] = owner.slot

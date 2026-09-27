@@ -52,9 +52,10 @@ def visit_framed_window(self, node: PlanStep, context: BindingContext) -> Tuple[
     # `outputs` is a list of (kind, pre-minted SchemaColumn, params, frame). `params`
     # is the aggregate's argument list — `[]` or `[WILDCARD]` for COUNT(*), `[expr]`
     # for SUM/COUNT/AVG/MIN/MAX otherwise. The argument is bound here, and — same
-    # move as the ranking binder's LAG/LEAD — the pre-minted INT64 placeholder type
-    # is overwritten with the aggregate's TRUE result type before the schema is
-    # registered, so everything downstream sees it.
+    # move as the ranking binder's LAG/LEAD — the pre-minted INT64 placeholder is
+    # replaced by a row retyped to the aggregate's TRUE result type
+    # (ColumnTable.retype) before the schema is registered, so everything
+    # downstream sees it.
     bound_outputs = []
     for kind, sc, params, frame in node.outputs:
         arg_node = None
@@ -66,7 +67,7 @@ def visit_framed_window(self, node: PlanStep, context: BindingContext) -> Tuple[
         )
         result_type = _aggregate_return_type(_probe)
         if result_type is not None:
-            sc.column_type = result_type
+            sc = context.plan_context.columns.retype(sc, result_type)
         bound_outputs.append((kind, sc, arg_node, frame))
     node.outputs = [(kind, sc, [a] if a is not None else [], frame) for kind, sc, a, frame in bound_outputs]
 

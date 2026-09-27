@@ -3076,8 +3076,8 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
                 # aggregate AND its argument's type (SUM(int) is INT64, SUM(float)
                 # is FLOAT64, AVG is always FLOAT64, SUM/MIN/MAX(DECIMAL128) stays
                 # DECIMAL128, ...) and is not resolved until binding — the framed
-                # window binder overwrites `column_type` there, mirroring how the
-                # ranking window binder overwrites LAG/LEAD's placeholder.
+                # window binder retypes the column there (ColumnTable.retype),
+                # mirroring how the ranking window binder settles LAG/LEAD's.
                 _outputs = [
                     (
                         _agg_node.value,
@@ -3118,7 +3118,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
             _win_rel = f"$window-{random_string(6)}"
             # INT64 is the true type for the ranking functions. For LAG/LEAD it is a
             # placeholder: the output's type is the ARGUMENT's, which is not resolved
-            # until binding — the window binder overwrites `column_type` there.
+            # until binding — the window binder retypes the column there.
             _outputs = [
                 (
                     _kind,

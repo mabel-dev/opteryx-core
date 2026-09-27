@@ -71,8 +71,9 @@ def visit_window(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
     #     TAKES ITS TYPE. params[1], where present, is the constant offset
     #     (LAG/LEAD) or 1-based position (NTH_VALUE).
     #
-    # Every overwrite happens before the schema is registered below, so everything
-    # downstream sees the true type.
+    # A settled type is a retyped row (ColumnTable.retype) taken in place of the
+    # placeholder before the schema is registered below, so everything downstream
+    # sees the true type.
     bound_outputs = []
     rebuilt_outputs = []
     for kind, sc, params in node.outputs:
@@ -82,11 +83,11 @@ def visit_window(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
             arg_node, context = inner_binder(params[0], context)
             if len(params) > 1:
                 offset = int(params[1].value)
-            sc.column_type = arg_node.schema_column.column_type
+            sc = context.plan_context.columns.retype(sc, arg_node.schema_column.column_type)
         elif kind == "NTILE":
             offset = int(params[0].value)
         elif kind in FLOAT_VALUED:
-            sc.column_type = _plt.FLOAT64
+            sc = context.plan_context.columns.retype(sc, _plt.FLOAT64)
         bound_outputs.append((kind, sc, arg_node, offset))
         # `outputs` is rebuilt with the argument expression REPLACED BY ITS BOUND
         # form, and every other param left exactly as it was — the constants

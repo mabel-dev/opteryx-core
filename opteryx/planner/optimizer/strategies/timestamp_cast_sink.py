@@ -58,6 +58,7 @@ from draken.draken_native import LogicalKind
 from draken.draken_native import LogicalType
 from draken.draken_native import TimestampUnit
 
+from opteryx.compiled.structures.plan_steps import steps_with
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.planner.logical_planner import LogicalPlan
@@ -204,23 +205,39 @@ class TimestampCastSinkStrategy(OptimizationStrategy):
         if not eligible:
             return plan
 
-        # Retype every schema-column object carrying an eligible identity — the
-        # scan's emitted column (so the reader retags it) and every cast operand
-        # (so the cast resolves to identity). These are usually the same shared
-        # object, but updating all is robust to any copy that broke sharing.
+        # Every holder of an eligible identity takes a retyped row of the column it
+        # holds — the scan's emitted column (so the reader retags it) and every
+        # cast operand (so the cast resolves to identity). A row is fixed once
+        # minted (architect ruling 2026-09-27), so each holder is repointed; one
+        # retyped row per SLOT, since scope rows of one identity carry different
+        # names.
+        columns = context.plan_context.columns
+        retyped: dict = {}
+
+        def settled(column):
+            row = retyped.get(column.slot)
+            if row is None:
+                row = columns.retype(column, eligible[column.identity])
+                retyped[column.slot] = row
+            return row
+
+        schema_steps = steps_with("schema")
         for _, node in plan.nodes(True):
-            if node.node_type == LogicalPlanStepType.Scan and node.schema is not None:
-                for col in node.schema.columns or []:
+            # The bound schema of every step that carries one - the Scan's emitted
+            # columns first among them.
+            if node.node_type in schema_steps and node.schema is not None:
+                schema_columns = node.schema.columns or []
+                for position, col in enumerate(schema_columns):
                     if col.identity in eligible:
-                        col.column_type = eligible[col.identity]
+                        schema_columns[position] = settled(col)
             for root in expression_roots(node):
                 if root.node_type == NodeType.IDENTIFIER and root.schema_column is not None:
                     if root.schema_column.identity in eligible:
-                        root.schema_column.column_type = eligible[root.schema_column.identity]
+                        root.schema_column = settled(root.schema_column)
                 else:
                     for ident in get_all_nodes_of_type(root, (NodeType.IDENTIFIER,)):
                         if ident.schema_column is not None and ident.schema_column.identity in eligible:
-                            ident.schema_column.column_type = eligible[ident.schema_column.identity]
+                            ident.schema_column = settled(ident.schema_column)
 
         self.telemetry.optimization_timestamp_cast_sink = (
             getattr(self.telemetry, "optimization_timestamp_cast_sink", 0) + len(eligible)

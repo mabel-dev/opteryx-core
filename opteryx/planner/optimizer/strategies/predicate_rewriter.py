@@ -2230,7 +2230,9 @@ def _rewrite_function(function, telemetry: QueryTelemetry, *, plan_context):
         function.function_ref = resolved
         if function.schema_column is not None and resolved.inferred_return_type:
             # Phase 5: inferred_return_type is ColumnType — use directly.
-            function.schema_column.column_type = resolved.inferred_return_type
+            function.schema_column = plan_context.columns.retype(
+                function.schema_column, resolved.inferred_return_type
+            )
 
     def _normalise_dfa_replacement(value):
         if isinstance(value, bytes):

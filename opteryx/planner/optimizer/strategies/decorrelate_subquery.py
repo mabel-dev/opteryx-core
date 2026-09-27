@@ -1576,7 +1576,14 @@ def _decorrelate_projection_existence(
         # also the "exactly one column" rule for an IN subquery.
         membership_column = _output_column(inner_plan)
         if not membership_column.origin:
-            membership_column.origin = [f"$in-{random_string(6)}"]
+            # Named as the decorrelated relation: an alias row, the subquery's own
+            # column is not modified (architect ruling 2026-09-27).
+            membership_column = plan_context.columns.alias(
+                membership_column,
+                membership_column.name,
+                aliases=membership_column.aliases,
+                origin=[f"$in-{random_string(6)}"],
+            )
         key_pairs, residual = _lift_correlations(inner_plan)
         if key_pairs or residual is not None:
             raise UnsupportedSyntaxError(_SELECT_LIST_EXISTENCE_REFUSAL)
@@ -1957,7 +1964,9 @@ class DecorrelateSubqueryStrategy(OptimizationStrategy):
                     plan_context=plan_context,
                 )
             while project_nid in plan and _node_has_subquery(plan[project_nid]):
-                plan = _decorrelate_projection(plan, project_nid, self.telemetry)
+                plan = _decorrelate_projection(
+                    plan, project_nid, self.telemetry, plan_context=plan_context
+                )
         return plan
 
 
@@ -2185,7 +2194,14 @@ def _decorrelate_in(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_conte
     # origin, and a key reference with no source is attributed to neither leg — the
     # join then comes out with empty key lists and is rejected. Name the relation.
     if not membership_column.origin:
-        membership_column.origin = [f"$in-{random_string(6)}"]
+        # An alias row: the subquery's own column is not modified (architect
+        # ruling 2026-09-27).
+        membership_column = plan_context.columns.alias(
+            membership_column,
+            membership_column.name,
+            aliases=membership_column.aliases,
+            origin=[f"$in-{random_string(6)}"],
+        )
 
     key_pairs, residual = _lift_correlations(inner_plan)
     key_pairs = [(_reference_to(membership_column), in_node.left)] + key_pairs
@@ -3043,7 +3059,14 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
     # `CROSS JOIN + WHERE x = <value>` into an equi-join.
     scalar_alias = f"$scalar-{random_string(6)}"
     if not value_column.origin:
-        value_column.origin = [scalar_alias]
+        # The value read as a column of the decorrelated relation: an alias row,
+        # the subquery's own column is not modified (architect ruling 2026-09-27).
+        value_column = plan_context.columns.alias(
+            value_column,
+            value_column.name,
+            aliases=value_column.aliases,
+            origin=[scalar_alias],
+        )
 
     for inner_key, _outer_key in key_pairs:
         if window_rewritten:
@@ -3254,7 +3277,9 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
     return plan
 
 
-def _decorrelate_projection(plan: LogicalPlan, project_nid: str, telemetry) -> LogicalPlan:
+def _decorrelate_projection(
+    plan: LogicalPlan, project_nid: str, telemetry, *, plan_context
+) -> LogicalPlan:
     """
     Rewrite one scalar subquery out of a Project's SELECT list.
 
@@ -3318,7 +3343,14 @@ def _decorrelate_projection(plan: LogicalPlan, project_nid: str, telemetry) -> L
     # the join operator is concerned.
     scalar_alias = f"$scalar-{random_string(6)}"
     if not value_column.origin:
-        value_column.origin = [scalar_alias]
+        # The value read as a column of the decorrelated relation: an alias row,
+        # the subquery's own column is not modified (architect ruling 2026-09-27).
+        value_column = plan_context.columns.alias(
+            value_column,
+            value_column.name,
+            aliases=value_column.aliases,
+            origin=[scalar_alias],
+        )
 
     # --- the subquery's value becomes an ordinary column ----------------------
     for attribute in _SUBQUERY_BEARING_ATTRS.get(project_node.node_type, ()):

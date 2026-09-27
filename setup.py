@@ -808,6 +808,16 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
+    # Native ColumnType: process-wide interned column types (header-only core in
+    # src/cpp/planner/column_type.hpp); the table lives in this one extension and
+    # other extensions reach it through column_type.pxd.
+    Extension(
+        "opteryx.compiled.planner.column_type",
+        sources=["opteryx/compiled/planner/column_type.pyx"],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
     # Helpers for relation statistics
     Extension(
         "opteryx.compiled.structures.relation_statistics",

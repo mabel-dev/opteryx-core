@@ -107,6 +107,8 @@ NOT_ARMED = [
     f"SELECT k, s + 1 AS t FROM (SELECT g % 100003 AS k, SUM(g) AS s FROM {SERIES} GROUP BY g % 100003) AS x ORDER BY s DESC LIMIT 10",
     # A state-consuming aggregate as the ORDER BY key.
     f"SELECT g % 100003 AS k, MEDIAN(g) AS m FROM {SERIES} GROUP BY g % 100003 ORDER BY m DESC LIMIT 10",
+    # A no-aggregate GROUP BY (a DISTINCT over the keys): nothing to rank.
+    f"SELECT g % 100003 AS k FROM {SERIES} GROUP BY g % 100003 ORDER BY k LIMIT 10",
 ]
 # fmt:on
 

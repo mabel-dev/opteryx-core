@@ -106,10 +106,11 @@ def build_literal_node(value: Any, identity_of: Optional[Expression] = None, sug
     Build a NEW literal node with the appropriate type based on the value.
 
     `identity_of`: an expression whose identity the literal takes over — its uuid,
-    alias, query_column, schema_column (retyped to the literal's type) and
-    relations — so references to that expression's bound column resolve to the
-    literal (constant folding). Nothing else of it is carried, and it is not
-    modified (its schema_column object is, being shared).
+    alias, query_column, schema_column and relations — so references to that
+    expression's bound column resolve to the literal (constant folding). Nothing
+    else of it is carried, and it is not modified: when the literal's type differs
+    from the column's, the literal takes a retyped row of it (ColumnTable.retype;
+    a row is fixed once minted, architect ruling 2026-09-27).
     """
     # Normalise scalar wrappers to native Python types.
     _PYTHON_NATIVE = (
@@ -132,16 +133,24 @@ def build_literal_node(value: Any, identity_of: Optional[Expression] = None, sug
     ):
         value = value.item()
 
+    constant_name = str(value)
+
+    def settled_column(column_type):
+        """The literal's column, typed `column_type`."""
+        if identity_of is None:
+            return plan_context.columns.constant(constant_name, column_type=column_type)
+        column = identity_of.schema_column
+        if column is None:
+            return None
+        return plan_context.columns.retype(column, column_type)
+
     if identity_of is None:
-        root = Literal(
-            schema_column=plan_context.columns.constant(str(value)),
-        )
+        root = Literal()
     else:
         root = Literal(
             uuid=identity_of.uuid,
             alias=identity_of.alias,
             query_column=identity_of.query_column,
-            schema_column=identity_of.schema_column,
             relations=identity_of.relations,
             do_not_create_column=identity_of.do_not_create_column is True,
         )
@@ -154,8 +163,7 @@ def build_literal_node(value: Any, identity_of: Optional[Expression] = None, sug
         # no suggestion the literal stays untyped NULL.
         root.value = None
         root.type = suggested_type if suggested_type is not None else NULL
-        if root.schema_column is not None:
-            root.schema_column.column_type = root.type
+        root.schema_column = settled_column(root.type)
         return root
 
     collection_ct = None
@@ -192,13 +200,15 @@ def build_literal_node(value: Any, identity_of: Optional[Expression] = None, sug
             value = date_to_int64_days(value)
         root.value = value
         root.type = suggested_type if suggested_type is not None else type_mapping[value_type]
-        if root.schema_column is not None:
-            root.schema_column.column_type = root.type
+        root.schema_column = settled_column(root.type)
         return root
 
     # No literal type for this value: nothing is built. The expression it would
     # have replaced stands.
-    return identity_of if identity_of is not None else root
+    if identity_of is not None:
+        return identity_of
+    root.schema_column = plan_context.columns.constant(constant_name)
+    return root
 
 
 def attach_source_position(error, statement) -> None:

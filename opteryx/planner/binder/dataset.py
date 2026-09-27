@@ -323,15 +323,12 @@ def visit_function_dataset(
                 source_column=node.unnest_target,
                 source=relation_name,
                 schema_column=context.plan_context.columns.relation_column(
-                    relation_name, node.unnest_target
+                    relation_name, node.unnest_target, origin=[relation_name]
                 ),
             )
         ]
         schema = RelationSchema(name=relation_name, columns=[c.schema_column for c in columns])
         context.schemas[relation_name] = schema
-        # ensure origin is set so later passes (projection pushdown, etc.)
-        for column in schema.columns:
-            column.origin = [relation_name]
         node.columns = columns
         node.schema = schema
     elif node.function == "GENERATE_SERIES":
@@ -369,6 +366,7 @@ def visit_function_dataset(
             node.relation_name,
             series_column,
             column_type=element_type if isinstance(element_type, ColumnType) else None,
+            origin=[node.relation_name],
         )
         columns = [
             LogicalColumn(
@@ -383,10 +381,6 @@ def visit_function_dataset(
             columns=[c.schema_column for c in columns],
         )
         context.schemas[node.relation_name] = schema
-        # tag generated columns with their origin relation name so downstream
-        # binder/optimizer logic can detect their source
-        for column in schema.columns:
-            column.origin = [node.relation_name]
         node.columns = columns
         node.schema = schema
     elif node.function == "READ_JSONL":
@@ -692,13 +686,12 @@ def visit_function_dataset(
                     relation_name,
                     external_name,
                     column_type=column_type_from_vector(vector),
+                    origin=[relation_name],
                 )
             )
 
         schema = RelationSchema(name=relation_name, columns=schema_columns)
         context.schemas[relation_name] = schema
-        for column in schema.columns:
-            column.origin = [relation_name]
 
         node.alias = relation_name
         # node.columns is deliberately left unset here (matching visit_scan's Scan
@@ -866,13 +859,12 @@ def visit_function_dataset(
                 relation_name,
                 external_name,
                 column_type=physical_column.column_type,
+                origin=[relation_name],
             )
             for physical_column, external_name in zip(physical_schema.columns, external_names)
         ]
         schema = RelationSchema(name=relation_name, columns=schema_columns)
         context.schemas[relation_name] = schema
-        for column in schema.columns:
-            column.origin = [relation_name]
 
         # Manifest: file_path/file_format/file_size_in_bytes only. record_count and
         # column_stats are left at their defaults (0/None) -- they're pruning
@@ -1128,13 +1120,12 @@ def visit_function_dataset(
                     relation_name,
                     external_name,
                     column_type=ColumnType(physical=physical_type),
+                    origin=[relation_name],
                 )
             )
 
         schema = RelationSchema(name=relation_name, columns=schema_columns)
         context.schemas[relation_name] = schema
-        for column in schema.columns:
-            column.origin = [relation_name]
 
         node.alias = relation_name
         # node.columns deliberately left unset -- see the identical comment on the
@@ -1449,18 +1440,18 @@ def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
                     ROW_IDENTITY_FILE,
                     column_type=ColumnType(physical=DrakenType.INT64),
                     nullable=False,
+                    origin=[node.alias],
                 ),
                 context.plan_context.columns.relation_column(
                     node.alias,
                     ROW_IDENTITY_ORDINAL,
                     column_type=ColumnType(physical=DrakenType.INT64),
                     nullable=False,
+                    origin=[node.alias],
                 ),
             ]
 
         context.schemas[node.alias] = node.schema
-        for column in node.schema.columns:
-            column.origin = [node.alias]
 
         if context.schema_only:
             # What the relation HAS, recorded before anything narrows it.

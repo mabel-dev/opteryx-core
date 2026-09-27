@@ -82,7 +82,7 @@ def _desugar_rewrite_only(node, telemetry: QueryTelemetry, *, plan_context):
     return node
 
 
-def _build_if_not_null_node(root, value, value_if_not_null) -> Expression:
+def _build_if_not_null_node(root, value, value_if_not_null, *, plan_context) -> Expression:
     from opteryx.expression.functions import get_catalog
 
     node = Function()
@@ -115,7 +115,9 @@ def _build_if_not_null_node(root, value, value_if_not_null) -> Expression:
                 param.value = parse_value(result_lc, param.value)
                 param.type = result_type
                 if param.schema_column is not None:
-                    param.schema_column.column_type = result_type
+                    param.schema_column = plan_context.columns.retype(
+                        param.schema_column, result_type
+                    )
     return node
 
 
@@ -317,7 +319,10 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
             ):
                 # 0 * anything = 0 (except NULL)
                 node = _build_if_not_null_node(
-                    root, root.right, build_literal_node(0, plan_context=plan_context)
+                    root,
+                    root.right,
+                    build_literal_node(0, plan_context=plan_context),
+                    plan_context=plan_context,
                 )
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
@@ -329,7 +334,10 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
             ):
                 # anything * 0 = 0 (except NULL)
                 node = _build_if_not_null_node(
-                    root, root.left, build_literal_node(0, plan_context=plan_context)
+                    root,
+                    root.left,
+                    build_literal_node(0, plan_context=plan_context),
+                    plan_context=plan_context,
                 )
                 telemetry.optimization_constant_fold_reduce += 1
                 return node

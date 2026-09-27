@@ -2346,6 +2346,34 @@ cdef Py_ssize_t _linearize(
                 "query is compiled, once for the whole column, so it cannot vary per row."
             )
 
+        # `domain` is ENFORCED too, at the same point and for the same reason:
+        # constant folding lowers through here BEFORE it calls the kernel, so a
+        # part outside the closed set is refused at plan time with a typed error
+        # whether it was written as a literal or folded into one. It used to be
+        # declaration-only, and the kernel was the enforcer — which surfaced
+        # `EXTRACT('row', ts)` as a bare ValueError out of vector_date_part during
+        # constant folding (fuzzer seed 6860829805210140717).
+        for _co_i in range(min(n, <Py_ssize_t>len(_co_params))):
+            _dm_domain = _co_params[_co_i].domain
+            if not _dm_domain:
+                continue
+            # Only a constant can be checked against a closed set before a row is
+            # read; the loop above has already proven this argument is a literal.
+            if not _co_params[_co_i].constant_only:
+                raise InvalidInternalStateError(
+                    f"{func_val} parameter `{_co_params[_co_i].name}` declares a domain "
+                    "but is not constant_only"
+                )
+            _dm_val = <object>node.parameters[_co_i].value
+            if isinstance(_dm_val, bytes):
+                _dm_val = _dm_val.decode("utf-8")
+            if isinstance(_dm_val, str) and _dm_val.lower() in _dm_domain:
+                continue
+            raise InvalidFunctionParameterError(
+                f"**{func_val}** argument {_co_i + 1} (`{_co_params[_co_i].name}`) must be one "
+                f"of {', '.join(_dm_domain)}, but `{_dm_val!r}` was given."
+            )
+
         # SUBSTRING(str, start[, count]) / LEFT(str, n) / RIGHT(str, n) — all lower to
         # the one draken_substring kernel (LEFT = start 1 count n; RIGHT = start -n to
         # end). start/count are LITERALS consumed into a substring_ctx; only the string

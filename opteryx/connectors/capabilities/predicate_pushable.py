@@ -15,14 +15,11 @@ loading and filtering. We do this because we have a single file interface and so
 accept filters and others don't so we 'fake' the read-time filtering.
 """
 
-import datetime
 from typing import Dict
 
 from opteryx.compiled.structures.expressions import Expression
-from opteryx.exceptions import NotSupportedError
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.types.logical_type import LogicalCategory
-from opteryx.utils import single_item_cache
 
 
 class PredicatePushable:
@@ -149,78 +146,3 @@ class PredicatePushable:
 
     def __init__(self, **kwargs):
         pass
-
-    @staticmethod
-    @single_item_cache
-    def to_dnf(root):
-        """
-        Convert a filter to DNF form, this is the form used by PyArrow.
-
-        This is specifically opinionated for the Parquet reader for PyArrow.
-        """
-
-        def _predicate_to_dnf(root):
-            # Reduce look-ahead effort by using Exceptions to control flow
-            if root.node_type == NodeType.AND:  # pragma: no cover
-                left = _predicate_to_dnf(root.left)
-                right = _predicate_to_dnf(root.right)
-                if not isinstance(left, list):
-                    left = [left]
-                if not isinstance(right, list):
-                    right = [right]
-                left.extend(right)
-                return left
-            if root.node_type != NodeType.COMPARISON_OPERATOR:
-                raise NotSupportedError()
-
-            # If identifier is on the right, swap sides and invert operator
-            op = root.value
-            if root.left.node_type != NodeType.IDENTIFIER:
-                root.left, root.right = root.right, root.left
-                INVERT_OP = {
-                    "Gt": "Lt",
-                    "GtEq": "LtEq",
-                    "Lt": "Gt",
-                    "LtEq": "GtEq",
-                    "Eq": "Eq",
-                    "NotEq": "NotEq",
-                    "InList": "InList",
-                    "NotInList": "NotInList",
-                }
-                op = INVERT_OP.get(op, op)
-
-            from opteryx.types.logical_type import TIMESTAMP, VARBINARY
-
-            if root.right.schema_column.category == LogicalCategory.DATE:
-                date_val = root.right.value
-                if getattr(date_val, "item", None) is not None:
-                    date_val = date_val.item()
-                root.right.value = datetime.datetime.combine(date_val, datetime.time.min)
-                root.right.schema_column.column_type = TIMESTAMP()
-            if root.left.node_type != NodeType.IDENTIFIER:
-                raise NotSupportedError()
-            if root.right.node_type != NodeType.LITERAL:
-                raise NotSupportedError()
-            if root.left.schema_column.category == LogicalCategory.VARCHAR:
-                root.left.schema_column.column_type = VARBINARY
-            if root.right.schema_column.category == LogicalCategory.VARCHAR:
-                root.right.schema_column.column_type = VARBINARY
-            if root.right.schema_column.category != root.left.schema_column.category:
-                raise NotSupportedError()
-            return (
-                root.left.value,
-                PredicatePushable.OPS_XLAT[op],
-                root.right.value,
-            )
-
-        not_converted = []
-        dnf = []
-        if not isinstance(root, list):
-            root = [root]
-        for predicate in root:
-            try:
-                converted = _predicate_to_dnf(predicate)
-                dnf.append(converted)
-            except NotSupportedError:
-                not_converted.append(predicate)
-        return dnf if dnf else None, not_converted

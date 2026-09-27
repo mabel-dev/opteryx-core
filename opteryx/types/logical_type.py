@@ -28,17 +28,21 @@ from __future__ import annotations
 
 import datetime
 import decimal
-from dataclasses import dataclass
-from enum import Enum
-from typing import Any, Callable, Dict, Optional, Tuple, Type
+from typing import Dict, Optional, Type
 
 from draken.draken_native import DrakenType
 from draken.draken_native import LogicalKind
-# Draken owns the physical+descriptor -> SQL name mapping; this is the one
-# entry point onto it. Never reimplement the table here (see __str__).
-from draken.vectors.vector import type_display_name as _draken_type_display_name
 from draken.draken_native import LogicalType
 from draken.draken_native import TimestampUnit
+
+# The type itself, its dispatch projection and the unit spellings are native
+# (opteryx/compiled/planner/column_type.pyx, architect ruling 2026-09-27); this
+# module re-exports them and keeps the factories, canonical instances and parsing.
+from opteryx.compiled.planner.column_type import ColumnType
+from opteryx.types.logical_category import LogicalCategory
+from opteryx.compiled.planner.column_type import _CATEGORY_OF
+from opteryx.compiled.planner.column_type import _UNIT_TO_SQL
+from opteryx.compiled.planner.column_type import physical_is_parameterized
 
 __all__ = [
     "LogicalCategory",
@@ -66,97 +70,6 @@ __all__ = [
 ]
 
 
-class LogicalCategory(Enum):
-    """The Opteryx SQL type vocabulary AND the operator-dispatch key (Decision B).
-
-    Pure projection enum — reachable only via `ColumnType.category`. 15 canonical
-    members; no aliases, no behaviours. Integer/float widths collapse to INTEGER/FLOAT
-    (the actual physical width lives on `ColumnType.physical`).
-
-    Unknown/unresolved types are represented by Python `None`, not by a sentinel
-    enum member. Check `x is None` rather than comparing against a sentinel.
-    """
-
-    NULL = "NULL"
-    BOOLEAN = "BOOLEAN"
-    INTEGER = "INTEGER"
-    FLOAT = "FLOAT"
-    DECIMAL = "DECIMAL"
-    DATE = "DATE"
-    TIME = "TIME"
-    TIMESTAMP = "TIMESTAMP"
-    INTERVAL = "INTERVAL"
-    VARCHAR = "VARCHAR"
-    NVARCHAR = "NVARCHAR"
-    VARBINARY = "VARBINARY"
-    VARIANT = "VARIANT"
-    ARRAY = "ARRAY"
-    VECTOR = "VECTOR"
-
-# Physical type -> dispatch category. Integer/float widths collapse here.
-_CATEGORY_OF: dict = {
-    DrakenType.INT8: LogicalCategory.INTEGER,
-    DrakenType.INT16: LogicalCategory.INTEGER,
-    DrakenType.INT32: LogicalCategory.INTEGER,
-    DrakenType.INT64: LogicalCategory.INTEGER,
-    DrakenType.UINT8: LogicalCategory.INTEGER,
-    DrakenType.UINT16: LogicalCategory.INTEGER,
-    DrakenType.UINT32: LogicalCategory.INTEGER,
-    DrakenType.UINT64: LogicalCategory.INTEGER,
-    DrakenType.DECIMAL: LogicalCategory.DECIMAL,
-    DrakenType.DECIMAL128: LogicalCategory.DECIMAL,
-    DrakenType.FLOAT32: LogicalCategory.FLOAT,
-    DrakenType.FLOAT64: LogicalCategory.FLOAT,
-    DrakenType.DATE32: LogicalCategory.DATE,
-    DrakenType.TIMESTAMP64: LogicalCategory.TIMESTAMP,
-    DrakenType.TIME32: LogicalCategory.TIME,
-    DrakenType.TIME64: LogicalCategory.TIME,
-    DrakenType.INTERVAL: LogicalCategory.INTERVAL,
-    DrakenType.BOOL: LogicalCategory.BOOLEAN,
-    DrakenType.VARCHAR: LogicalCategory.VARCHAR,
-    DrakenType.NVARCHAR: LogicalCategory.NVARCHAR,
-    DrakenType.VARBINARY: LogicalCategory.VARBINARY,
-    DrakenType.VARIANT: LogicalCategory.VARIANT,
-    DrakenType.ARRAY: LogicalCategory.ARRAY,
-    DrakenType.VECTOR_FP16: LogicalCategory.VECTOR,
-    DrakenType.NULL: LogicalCategory.NULL,
-}
-
-# Physical types that REQUIRE a LogicalType descriptor (LogicalKind != NONE).
-# Mirrors logical_type.h: DECIMAL, TIMESTAMP, TIME, VECTOR carry params; everything
-# else (including DATE32 and INTERVAL) does not.
-_PARAMETERIZED_PHYSICAL = frozenset(
-    {
-        DrakenType.DECIMAL,
-        DrakenType.DECIMAL128,  # int128-backed; same (precision, scale) descriptor
-        DrakenType.TIMESTAMP64,
-        DrakenType.TIME32,
-        DrakenType.TIME64,
-        DrakenType.VECTOR_FP16,
-    }
-)
-
-# Physical types that PERMIT a LogicalType descriptor without requiring one.
-#
-# Until IPv4 the rule was a biconditional: a descriptor was present if and only
-# if the physical type was parameterized. IPv4 breaks that in one direction and
-# one direction only — it REFINES an otherwise-complete physical type rather
-# than completing an incomplete one. A UINT32 with no descriptor is a valid
-# unsigned integer column; the same UINT32 carrying LogicalKind.IPV4 is the
-# same 32 bits with a narrower meaning (see draken/logical_type.h).
-#
-# The two sets must stay disjoint: a physical type is either incomplete without
-# a descriptor (_PARAMETERIZED_PHYSICAL, absence is an error) or complete
-# without one (_REFINABLE_PHYSICAL, absence is just the unrefined type). A type
-# in both would have no defined meaning for a missing descriptor.
-#
-# Kept deliberately tight. This is not an invitation to hang arbitrary logical
-# meanings off physical types — each entry needs the architect's agreement, and
-# each one costs a second dispatch axis at the render and cast edges.
-_REFINABLE_PHYSICAL: dict = {
-    DrakenType.UINT32: frozenset({LogicalKind.IPV4}),
-}
-
 # Physical type -> SQL display name for the unparameterized cases.
 _NAME_OF: dict = {
     DrakenType.INT8: "INT8",
@@ -183,221 +96,6 @@ _NAME_OF: dict = {
     DrakenType.VARIANT: "VARIANT",
     DrakenType.NULL: "NULL",
 }
-
-
-@dataclass(frozen=True)
-class ColumnType:
-    """An Opteryx column/value type: a physical tag + optional logical descriptor (D1).
-
-    `logical` is a Draken `LogicalType` for parameterized physical types
-    (DECIMAL, TIMESTAMP, TIME, VECTOR_FP16); `None` otherwise.
-
-    `element` is a child `ColumnType` for ARRAY (the array's element type);
-    `None` otherwise. ARRAY isn't carried in Draken's `LogicalType` — the
-    array child is held structurally in the vector itself, but at plan time
-    we need to know `ARRAY<element>` for type-checking, and `element` carries it.
-
-    Frozen + hashable (all fields are hashable), so it is usable directly as a
-    schema column type and in dict/set membership.
-    """
-
-    physical: DrakenType
-    logical: Optional[LogicalType] = None
-    element: Optional["ColumnType"] = None
-
-    def __post_init__(self) -> None:
-        # DECIMAL/TIMESTAMP/TIME/VECTOR require a LogicalType descriptor; element None.
-        needs_logical = self.physical in _PARAMETERIZED_PHYSICAL
-        if needs_logical:
-            if self.logical is None:
-                raise ValueError(
-                    f"{self.physical!r} is a parameterized physical type and requires a "
-                    f"LogicalType descriptor"
-                )
-            if self.element is not None:
-                raise ValueError(
-                    f"{self.physical!r} must not carry an `element` (that is ARRAY-only)"
-                )
-            return
-        # ARRAY requires an element ColumnType; logical None.
-        if self.physical == DrakenType.ARRAY:
-            if self.element is None:
-                raise ValueError(
-                    "ARRAY physical type requires an `element` ColumnType descriptor"
-                )
-            if self.logical is not None:
-                raise ValueError(
-                    "ARRAY must not carry a LogicalType (the array child lives in `element`)"
-                )
-            return
-        # Refinable physical types (UINT32/IPv4): a descriptor is optional, but
-        # when present it must be one this physical type actually permits — a
-        # UINT32 carrying LogicalKind.DECIMAL is nonsense, and accepting it here
-        # would surface as a wrong rendering much further downstream.
-        permitted = _REFINABLE_PHYSICAL.get(self.physical)
-        if permitted is not None and self.logical is not None:
-            if self.logical.kind not in permitted:
-                raise ValueError(
-                    f"{self.physical!r} permits only "
-                    f"{sorted(k.name for k in permitted)} as a LogicalType kind; "
-                    f"got {self.logical.kind!r}"
-                )
-            if self.element is not None:
-                raise ValueError(
-                    f"{self.physical!r} must not carry an `element` (that is ARRAY-only)"
-                )
-            return
-
-        # Unparameterized physical types: both descriptors must be None.
-        if self.logical is not None:
-            raise ValueError(
-                f"{self.physical!r} is unparameterized and must not carry a LogicalType "
-                f"descriptor"
-            )
-        if self.element is not None:
-            raise ValueError(
-                f"{self.physical!r} is unparameterized and must not carry an `element`"
-            )
-
-    @property
-    def category(self) -> LogicalCategory:
-        """Operator-dispatch category (Decision B)."""
-        try:
-            return _CATEGORY_OF[self.physical]
-        except KeyError:
-            raise NotImplementedError(
-                f"no dispatch category for physical type {self.physical!r} "
-                f"(unsupported)"
-            )
-
-    def ordinalize(self, value) -> int:
-        """Scalar ordinal key for `value`, in the same int64 space
-        `Vector.ordinalize()` produces for a column of this physical type
-        (see draken/ops/ordinalize.h). Lets plan-time code — file pruning
-        against ordinalize()-encoded manifest min/max bounds — compare a
-        predicate literal against those bounds without materialising a
-        Vector.
-
-        Mostly a passthrough to `DrakenType.ordinalize`, with two cases that
-        physical-only entry point deliberately refuses because it cannot see
-        the `LogicalType` descriptor this class carries:
-
-        DATE32/TIMESTAMP64/TIME32/TIME64 — the physical entry point wants a
-        `datetime.date`/`datetime`/`time` OBJECT (and refuses TIMESTAMP/TIME
-        outright, since their unit lives on `LogicalType` and cannot be
-        guessed from the physical tag). That is not the situation here: by
-        the time a literal reaches file pruning the binder has already
-        normalised it to the column's own raw physical integer — a DATE
-        literal binds to `-7305`, days since epoch, NOT a `datetime.date`;
-        a TIMESTAMP literal binds to raw micros. For all four types
-        `ordinalize` is an identity widen from INT32/INT64, so that
-        already-raw integer IS the ordinal key and no conversion is wanted.
-        Passing it to the physical entry point would raise, and pruning would
-        silently stop happening on exactly the columns most often filtered
-        (dates and timestamps on log tables). A non-integer reaching here
-        means the bind-time normalisation assumption no longer holds, so it
-        raises rather than guessing a unit — the caller then skips pruning,
-        which costs speed, never correctness.
-
-        DECIMAL — rescales. A stored DECIMAL bound is the unscaled mantissa at
-        the COLUMN's scale, while `DrakenType.DECIMAL.ordinalize` returns the
-        mantissa at the LITERAL's own natural scale (`Decimal("1.5")` -> 15,
-        never 1500 for a scale-2 column), so the literal is put on the column's
-        gridline first, via `rescale_decimal_literal`. Returns None (caller
-        skips pruning) when it does not land there exactly.
-
-        This used to refuse outright, on the grounds that rescaling semantics
-        "are not pinned down anywhere". They are: the compiler's
-        `_rewrite_decimal_compares` has pinned them down since it shipped, and
-        it is the rewrite that decides what the literal means to the ENGINE.
-        That rule now lives in `rescale_decimal_literal` and both call it, which
-        is the property that matters — a bound pruner disagreeing with the filter
-        it runs ahead of would drop rows the filter would have kept.
-
-        DECIMAL128 — still raises. Not a rescaling question: draken produces no
-        ordinal key for it at all, so no stored bound in this space exists to
-        compare against.
-        """
-        physical = self.physical
-
-        if physical in (
-            DrakenType.DATE32,
-            DrakenType.TIMESTAMP64,
-            DrakenType.TIME32,
-            DrakenType.TIME64,
-        ):
-            if isinstance(value, int) and not isinstance(value, bool):
-                return value
-            raise ValueError(
-                f"ordinalize: {physical!r} expects a bind-normalised integer literal "
-                f"(the raw physical value at the column's unit); got "
-                f"{type(value).__name__}"
-            )
-
-        if physical == DrakenType.DECIMAL:
-            # A stored DECIMAL bound is the mantissa at the COLUMN's scale, so the
-            # literal has to be put on that same gridline first —
-            # `DrakenType.DECIMAL.ordinalize` would give its own-scale mantissa
-            # (`Decimal("1.5")` -> 15, never 1500 for a scale-2 column), which is a
-            # different number in the same int64 space.
-            #
-            # No operator context here, so this is the EXACT case only: a literal
-            # that does not land on the gridline returns None and the caller skips
-            # pruning. `rescale_decimal_literal` can also round an off-gridline
-            # ORDERING bound direction-aware — exactly, not approximately — but that
-            # needs the operator, so it is available to callers that have one and
-            # deliberately not assumed here.
-            rescaled = rescale_decimal_literal(self, value)
-            if rescaled is None:
-                return None
-            return int(rescaled.scaleb(int(self.logical.scale)))
-
-        if physical == DrakenType.DECIMAL128:
-            # draken has no ordinalize entry for DECIMAL128 at all, deliberately:
-            # a saturated low-resolution int64 proxy for a 128-bit type is worse
-            # than refusing (draken/ops/ordinalize.h). Nothing to compare against,
-            # so nothing to rescale to.
-            raise ValueError(
-                f"ordinalize: {physical!r} is not supported — draken produces no "
-                "ordinal key for it, so a stored bound in this space cannot exist"
-            )
-
-        return physical.ordinalize(value)
-
-    def __str__(self) -> str:
-        """The SQL type name — DELEGATED to draken, which owns that mapping.
-
-        Draken is the single source (architect's ruling, 2026-08-08): the
-        descriptor is what decides the name, and draken owns LogicalType. Keeping
-        a second table here is how one surface renders a column `UINT32` while
-        another renders the same column `IPV4` — which is exactly the defect this
-        replaced, in draken's own Morsel renderer.
-
-        This string is PERSISTED into stored schemas, so it is a format, not a
-        display choice: a TIMESTAMP stored at ms and read back as the us default
-        reads every value 1000x off, silently. Delegation was gated on a parity
-        check over every constructible type — see
-        tests/unit/types/test_type_name_parity.py, which also pins `_NAME_OF`
-        (still the source of the PARSE direction, `_NAME_TO_PHYSICAL`) against
-        draken, so the two directions cannot drift apart.
-
-        ARRAY stays here: its element is a nested ColumnType, which draken has no
-        concept of, so draken names the tag and this composes the rest.
-        """
-        if self.physical == DrakenType.ARRAY:
-            return f"ARRAY<{self.element}>"
-        logical = self.logical
-        name = _draken_type_display_name(
-            self.physical,
-            kind=(logical.kind if logical is not None else None),
-            unit=(_UNIT_TO_SQL.get(logical.unit) if logical is not None else None),
-            precision=(logical.precision if logical is not None else 0),
-            scale=(logical.scale if logical is not None else 0),
-            dimension=(logical.dimension if logical is not None else 0),
-        )
-        if not name:
-            raise NotImplementedError(f"no display name for {self.physical!r}")
-        return name
 
 
 # ---------------------------------------------------------------------------
@@ -617,15 +315,6 @@ _SQL_NAME_ALIASES: dict = {
 }
 
 
-# The canonical spelling of a TimestampUnit, both directions. It matches the SQL
-# surface (`TIMESTAMP[ms]`), so a serialized type string is also a valid declared
-# type — the property DECIMAL(p, s), ARRAY<T> and VECTOR(n) already have.
-_UNIT_TO_SQL = {
-    TimestampUnit.SECONDS: "s",
-    TimestampUnit.MILLISECONDS: "ms",
-    TimestampUnit.MICROSECONDS: "us",
-    TimestampUnit.NANOSECONDS: "ns",
-}
 _SQL_TO_UNIT = {v: k for k, v in _UNIT_TO_SQL.items()}
 
 
@@ -788,7 +477,7 @@ def column_type_from_vector(vector) -> ColumnType:
         child = nb.array_child_type
         if (
             child is None
-            or child in _PARAMETERIZED_PHYSICAL
+            or physical_is_parameterized(child)
             or child == DrakenType.ARRAY
         ):
             return ARRAY(VARIANT)

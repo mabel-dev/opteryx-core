@@ -25,9 +25,9 @@ _MAX_TRANSPOSITION_ARGC = 5
 class ParameterSpec:
     """Specification for a single function parameter.
 
-    VALUE CONSTRAINTS (`domain`, `minimum`, `maximum`, `value_format`,
-    `element_of`, `excludes`) are DECLARATIVE ONLY. Nothing in overload
-    resolution, binding or execution reads them: they exist so that
+    VALUE CONSTRAINTS (`minimum`, `maximum`, `value_format`, `element_of`,
+    `excludes`) are DECLARATIVE ONLY. Nothing in overload resolution, binding or
+    execution reads them: they exist so that
     `reference/function_signatures.json` states restrictions the `type_family`
     cannot express, instead of leaving them in prose or in nothing at all.
 
@@ -40,6 +40,13 @@ class ParameterSpec:
 
     Keeping them declarative is the point: the kernel is still the enforcer, so
     a constraint stated here can be stale but can never make the engine wrong.
+
+    `domain` is the exception: it is ENFORCED, when the expression is lowered to
+    bytecode (compiled_expression.pyx, beside `constant_only`) — which constant
+    folding also does before it calls a kernel — so a value outside the set is
+    refused at plan time with InvalidFunctionParameterError. A `domain` must
+    therefore be exactly the set the lowering accepts, and requires
+    `constant_only`.
     """
 
     name: str
@@ -51,7 +58,8 @@ class ParameterSpec:
     documentation: str = ""
     #: The complete set of legal values, for a parameter whose domain is an
     #: enumeration rather than a type — a date part, a format mode. Compared
-    #: case-insensitively, which is how the engine reads them.
+    #: case-insensitively, which is how the engine reads them; spelled lower
+    #: case here. ENFORCED (see above).
     domain: Tuple[str, ...] = ()
     #: Inclusive bounds on the VALUE (not the width of its type). `minimum=1` on
     #: TIME_BUCKET's magnitude, the year 1..9999 epoch window on FROM_UNIXTIME.

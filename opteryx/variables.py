@@ -638,7 +638,7 @@ class SystemVariablesContainer:
     def snapshot(self, owner: VariableOwner = VariableOwner.USER) -> "SystemVariablesContainer":
         return SystemVariablesContainer(owner)
 
-    def as_column(self, key: str, *, plan_context):
+    def as_column(self, key: str, *, plan_context, aliases=None):
         """Return a variable as a CONSTANT column.
 
         This is the `SELECT @@name` read path (binder.create_variable_node), and it
@@ -647,7 +647,8 @@ class SystemVariablesContainer:
         variables never reach the check — they are registered UNRESTRICTED by
         __setitem__ and belong to the caller who set them.
 
-        The column is minted in the query's column table (`plan_context`).
+        The column is minted in the query's column table (`plan_context`), with
+        `aliases` (the `AS` name it is read under) - a row is fixed once minted.
         """
         # system variables aren't stored with the @@
         #
@@ -675,7 +676,9 @@ class SystemVariablesContainer:
                 f"{md_code(PLATFORM_ADMIN_ENTITLEMENT)} entitlement, which this session "
                 f"does not hold."
             )
-        return plan_context.columns.constant(key, column_type=variable[0], value=variable[1])
+        return plan_context.columns.constant(
+            key, column_type=variable[0], value=variable[1], aliases=aliases
+        )
 
 
 # load the base set

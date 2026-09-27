@@ -371,28 +371,12 @@ def _bind_function_reference(node: Expression, context: Any):
 def _copy_relation_schema(schema: RelationSchema) -> RelationSchema:
     """Copy a RelationSchema for branch isolation during expression binding.
 
-    ``merge_schemas`` previously ``deepcopy``'d each schema, which recursed into
-    every column's ``column_type`` (ColumnType + LogicalType) — by far the most
-    expensive part of binding a wide relation. That deep recursion is
-    unnecessary: ``column_type`` is only ever *replaced* on a column during
-    binding (binder.py rebinds the attribute), never mutated in place, so the
-    type carrier can be shared by reference.
-
-    What *is* mutated in place during binding is the column's own metadata —
-    ``identity``, ``aliases`` (appended to), and ``origin`` (assigned). Each
-    column therefore gets its own ``SchemaColumn`` with detached mutable lists,
-    while the immutable ``column_type`` is shared.
+    Only the schema's own lists are copied: a column is a row of the query's
+    ColumnTable, fixed once minted (architect ruling 2026-09-27), so the columns
+    are shared.
     """
     new_schema = copy.copy(schema)  # shallow: shares the columns/aliases lists we overwrite below
-    new_columns = []
-    for col in schema.columns:
-        c = copy.copy(col)  # new column object; shares column_type, aliases, origin refs
-        if c.aliases is not None:
-            c.aliases = list(c.aliases)
-        if c.origin is not None:
-            c.origin = list(c.origin)
-        new_columns.append(c)
-    new_schema.columns = new_columns
+    new_schema.columns = list(schema.columns)
     if schema.aliases is not None:
         new_schema.aliases = list(schema.aliases)
     return new_schema
@@ -637,10 +621,10 @@ def locate_identifier(node: Expression, context: Any) -> Tuple[Expression, Dict]
         aliased literal gets in `inner_binder`.
         """
         schema_column = context.execution_context.variables.as_column(
-            node.source_column, plan_context=context.plan_context
+            node.source_column,
+            plan_context=context.plan_context,
+            aliases=[node.alias] if node.alias else None,
         )
-        if node.alias:
-            schema_column.aliases = [*(schema_column.aliases or []), node.alias]
         new_node = Literal(
             schema_column=schema_column,
             type=schema_column.column_type,
@@ -1314,7 +1298,9 @@ def inner_binder(
                     if branch.node_type == NodeType.LITERAL and branch.value is not None:
                         branch.value = parse_value(_result_cat, branch.value)
                         branch.type = result_ct  # ColumnType
-                        sc.column_type = result_ct
+                        branch.schema_column = context.plan_context.columns.retype(
+                            sc, result_ct
+                        )
                         return branch
                     if sc.column_type == result_ct:
                         return branch

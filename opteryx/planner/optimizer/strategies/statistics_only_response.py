@@ -688,10 +688,14 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
             agg_schema = agg_node.schema_column
             if agg_schema is not None and literal.schema_column is not None:
                 literal.schema_column = context.plan_context.columns.adopt(
-                    literal.schema_column, agg_schema
+                    literal.schema_column,
+                    agg_schema,
+                    column_type=(
+                        agg_schema.column_type
+                        if agg_schema.column_type is not None
+                        else literal.schema_column.column_type
+                    ),
                 )
-                if agg_schema.column_type is not None:
-                    literal.schema_column.column_type = agg_schema.column_type
 
             literals.append(literal)
 
