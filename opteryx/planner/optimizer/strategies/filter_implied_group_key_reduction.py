@@ -191,7 +191,7 @@ class FilterImpliedGroupKeyReductionStrategy(OptimizationStrategy):
         project_node.passthrough_columns = []
 
         context.optimized_plan.insert_node_after(
-            random_string(), project_node, context.node_id
+            context.plan_context.node_ids.mint(), project_node, context.node_id
         )
         self.telemetry.optimization_filter_implied_group_key_reduction = (
             getattr(self.telemetry, "optimization_filter_implied_group_key_reduction", 0)

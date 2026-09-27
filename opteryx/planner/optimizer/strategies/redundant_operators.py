@@ -115,7 +115,7 @@ class RedundantOperationsStrategy(OptimizationStrategy):
                             provider_node.all_relations.add(source_node_alias)
                         else:
                             provider_node.all_relations = {source_node_alias}
-                        context.optimized_plan.add_node(provider_nid, provider_node)
+                        context.optimized_plan[provider_nid] = provider_node
                         # remove the node
                         context.optimized_plan.remove_node(context.node_id, heal=True)
                         self.telemetry.optimization_remove_redundant_operators_project += 1
@@ -135,7 +135,7 @@ class RedundantOperationsStrategy(OptimizationStrategy):
                 updated_node.all_relations.add(alias)
             else:
                 updated_node.all_relations = {alias}
-            context.optimized_plan.add_node(nid, updated_node)
+            context.optimized_plan[nid] = updated_node
             context.optimized_plan.remove_node(context.node_id, heal=True)
             self.telemetry.optimization_remove_redundant_operators_subquery += 1
 

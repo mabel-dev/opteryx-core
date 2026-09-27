@@ -108,7 +108,7 @@ def materialize_operand_as_column(
     project_node = ProjectStep()
     project_node.columns = project_columns
     project_node.passthrough_columns = []
-    plan.insert_node_after(random_string(), project_node, child_id)
+    plan.insert_node_after(plan.plan_context.node_ids.mint(), project_node, child_id)
     return passthrough_column(expr.schema_column, source=relation_names[0])
 
 
@@ -229,7 +229,7 @@ class JoinKeyMaterializationStrategy(OptimizationStrategy):
         plan[join_id] = node
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
-        for node in plan._nodes.values():
+        for _nid, node in plan.nodes(True):
             if node.node_type == LogicalPlanStepType.Join and node.on is not None:
                 return True
         return False

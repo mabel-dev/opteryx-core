@@ -45,7 +45,7 @@ from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import logical_planner_builders
 from opteryx.planner.logical_planner.logical_planner_rewriter import decompose_aggregates
-from opteryx.third_party.travers import Graph
+from opteryx.compiled.planner.plan_graph import PlanGraph
 from opteryx.types import logical_type as _plt
 from opteryx.types.logical_type import ColumnType, LogicalCategory
 from opteryx.types.vectors.vector_types import (
@@ -226,11 +226,11 @@ class LogicalPlanStepType(int, Enum):
     DetachRelation = auto()  # ALTER TABLE <fork> DETACH
 
 
-class LogicalPlan(Graph):
-    pass
+class LogicalPlan(PlanGraph):
+    """A logical plan: typed plan steps in the query's native plan graph."""
 
 
-def _set_operation_leg_columns(leg_plan: Graph) -> Optional[list]:
+def _set_operation_leg_columns(leg_plan: LogicalPlan) -> Optional[list]:
     """The columns one leg of a set operation projects — its own EXIT node's columns.
 
     Every leg plan ends in an EXIT whose `columns` are that leg's declared projection:
@@ -253,7 +253,7 @@ def _set_operation_leg_columns(leg_plan: Graph) -> Optional[list]:
     return leg_plan[exit_points[0]].columns or None
 
 
-def _set_operation_leg_arity(leg_plan: Graph) -> Optional[int]:
+def _set_operation_leg_arity(leg_plan: LogicalPlan) -> Optional[int]:
     """How many columns one leg of a set operation projects, or None when only the
     binder can say.
 
@@ -271,7 +271,7 @@ def _set_operation_leg_arity(leg_plan: Graph) -> Optional[int]:
     return len(columns)
 
 
-def _depth_first_children(sub_plan: Graph) -> Tuple[str, Dict[str, List[str]]]:
+def _depth_first_children(sub_plan: LogicalPlan) -> Tuple[int, Dict[int, List[int]]]:
     """The sub-plan as a depth-first tree from its exit point: `(root, children)`,
     `children` mapping each visited node id to the ids first reached through it.
 
@@ -280,11 +280,11 @@ def _depth_first_children(sub_plan: Graph) -> Tuple[str, Dict[str, List[str]]]:
     parent only — the shape the sub-plan walkers below prune over.
     """
     root = sub_plan.get_exit_points()[0]
-    children: Dict[str, List[str]] = {}
+    children: Dict[int, List[int]] = {}
     visited = {root}
 
-    def visit(nid: str) -> None:
-        reached: List[str] = []
+    def visit(nid: int) -> None:
+        reached: List[int] = []
         children[nid] = reached
         for source, _, _ in sub_plan.ingoing_edges(nid):
             if source not in visited:
@@ -296,7 +296,7 @@ def _depth_first_children(sub_plan: Graph) -> Tuple[str, Dict[str, List[str]]]:
     return root, children
 
 
-def get_subplan_schemas(sub_plan: Graph) -> List[str]:
+def get_subplan_schemas(sub_plan: LogicalPlan) -> List[str]:
     """
     Collects all schema aliases used within a given sub-plan.
 
@@ -304,7 +304,7 @@ def get_subplan_schemas(sub_plan: Graph) -> List[str]:
     Aliases define the schemas used at exit and entry points of the sub-plan.
 
     Parameters:
-        sub_plan: Graph
+        sub_plan: LogicalPlan
             The sub-plan object representing a branch of the logical plan.
 
     Returns:
@@ -314,7 +314,7 @@ def get_subplan_schemas(sub_plan: Graph) -> List[str]:
 
     root, children = _depth_first_children(sub_plan)
 
-    def collect_aliases(nid: str) -> List[str]:
+    def collect_aliases(nid: int) -> List[str]:
         """The schema aliases of `nid` and the part of the tree below it."""
         current_node = sub_plan[nid]
 
@@ -360,7 +360,7 @@ def get_subplan_schemas(sub_plan: Graph) -> List[str]:
     return sorted(set(aliases))
 
 
-def get_subplan_reads(sub_plan: Graph) -> List[str]:
+def get_subplan_reads(sub_plan: LogicalPlan) -> List[str]:
     """The uuids of the Scan and FunctionDataset nodes under a join leg — the seed
     of a Join's `left_readers` / `right_readers`.
 
@@ -383,7 +383,7 @@ def get_subplan_reads(sub_plan: Graph) -> List[str]:
 
     root, children = _depth_first_children(sub_plan)
 
-    def collect_reads(nid: str) -> List[str]:
+    def collect_reads(nid: int) -> List[str]:
         current_node = sub_plan[nid]
 
         # If this node is a subquery, stop traversal here
@@ -2155,7 +2155,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
         # Recursively call plan_query to handle the nested set operation
         return plan_query({"Query": {"body": ast_branch}}, plan_context=plan_context)
 
-    inner_plan = LogicalPlan()
+    inner_plan = LogicalPlan(plan_context)
     step_id = None
 
     # The WINDOW clause is resolved into the windows that reference it BEFORE anything is
@@ -2207,8 +2207,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
                 inner_plan.absorb(right_sub_plan)
 
                 # Add join node and wire it
-                join_step_id = random_string()
-                inner_plan.add_node(join_step_id, join_step)
+                join_step_id = inner_plan.add_node(join_step)
                 inner_plan.add_edge(step_id, join_step_id, "left")
                 inner_plan.add_edge(right_step_id, join_step_id, "right")
 
@@ -2242,8 +2241,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
         _validate_where_clause_expression(_selection)
         selection_step = FilterStep()
         selection_step.condition = _selection
-        previous_step_id, step_id = step_id, random_string()
-        inner_plan.add_node(step_id, selection_step)
+        previous_step_id, step_id = step_id, inner_plan.add_node(selection_step)
         if previous_step_id is not None:
             inner_plan.add_edge(previous_step_id, step_id)
 
@@ -2954,8 +2952,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
             _grouped_step = AggregateStep()
             _grouped_step.groups = []
             _grouped_step.aggregates = _grouped_aggregates
-        previous_step_id, step_id = step_id, random_string()
-        inner_plan.add_node(step_id, _grouped_step)
+        previous_step_id, step_id = step_id, inner_plan.add_node(_grouped_step)
         inner_plan.add_edge(previous_step_id, step_id)
 
         # A Project between the aggregate and the boundary. The aggregate's outputs live
@@ -2967,8 +2964,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
         _grouped_project.columns = list(_grouped_columns)
         _grouped_project.passthrough_columns = []
         _grouped_project.except_columns = None
-        previous_step_id, step_id = step_id, random_string()
-        inner_plan.add_node(step_id, _grouped_project)
+        previous_step_id, step_id = step_id, inner_plan.add_node(_grouped_project)
         inner_plan.add_edge(previous_step_id, step_id)
 
         if _having:
@@ -2984,8 +2980,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
             # un-windowed path it needs no pass-through columns above.
             _having_step = FilterStep()
             _having_step.condition = _having
-            previous_step_id, step_id = step_id, random_string()
-            inner_plan.add_node(step_id, _having_step)
+            previous_step_id, step_id = step_id, inner_plan.add_node(_having_step)
             inner_plan.add_edge(previous_step_id, step_id)
             _having = None
             _having_passthrough = []
@@ -2993,8 +2988,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
         _grouped_relation = SubqueryStep()
         _grouped_relation.alias = f"{GROUPED_AGGREGATE_ALIAS_PREFIX}{random_string(6)}"
         _grouped_relation.columns = [Wildcard()]
-        previous_step_id, step_id = step_id, random_string()
-        inner_plan.add_node(step_id, _grouped_relation)
+        previous_step_id, step_id = step_id, inner_plan.add_node(_grouped_relation)
         inner_plan.add_edge(previous_step_id, step_id)
 
         # The grouping has been planned. Emptied so the aggregate steps further down do
@@ -3049,8 +3043,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
                 _window_step = WindowStep()
                 _window_step.aggregates = _agg_nodes
                 _window_step.partition_by = _partition_by
-                previous_step_id, step_id = step_id, random_string()
-                inner_plan.add_node(step_id, _window_step)
+                previous_step_id, step_id = step_id, inner_plan.add_node(_window_step)
                 inner_plan.add_edge(previous_step_id, step_id)
 
         if _framed_specs:
@@ -3110,8 +3103,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
                 _win_step.outputs = _outputs
                 _win_step.output_relation = _win_rel
                 _win_step.columns = []
-                previous_step_id, step_id = step_id, random_string()
-                inner_plan.add_node(step_id, _win_step)
+                previous_step_id, step_id = step_id, inner_plan.add_node(_win_step)
                 inner_plan.add_edge(previous_step_id, step_id)
 
     if _ranking_specs:
@@ -3150,8 +3142,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
             _win_step.outputs = _outputs
             _win_step.output_relation = _win_rel
             _win_step.columns = []
-            previous_step_id, step_id = step_id, random_string()
-            inner_plan.add_node(step_id, _win_step)
+            previous_step_id, step_id = step_id, inner_plan.add_node(_win_step)
             inner_plan.add_edge(previous_step_id, step_id)
 
     if _qualify is not None:
@@ -3166,8 +3157,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
 
         qualify_step = FilterStep()
         qualify_step.condition = _qualify
-        previous_step_id, step_id = step_id, random_string()
-        inner_plan.add_node(step_id, qualify_step)
+        previous_step_id, step_id = step_id, inner_plan.add_node(qualify_step)
         inner_plan.add_edge(previous_step_id, step_id)
 
         # Drop the window columns QUALIFY borrowed. They were only ever in
@@ -3205,8 +3195,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
         # None = one set over every key (a plain GROUP BY). Otherwise the explicit set
         # list, as index tuples into `groups` — see `_expand_grouping_elements`.
         group_step.grouping_sets = _grouping_sets
-        previous_step_id, step_id = step_id, random_string()
-        inner_plan.add_node(step_id, group_step)
+        previous_step_id, step_id = step_id, inner_plan.add_node(group_step)
         if previous_step_id is not None:
             inner_plan.add_edge(previous_step_id, step_id)
     # aggregates
@@ -3238,8 +3227,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
             error = f"Column '{column}' must appear in the `GROUP BY` clause or must be part of an aggregate function. Either add it to the `GROUP BY` list, or add an aggregation such as `MIN({column})`."
             raise SqlError(error)
 
-        previous_step_id, step_id = step_id, random_string()
-        inner_plan.add_node(step_id, aggregate_step)
+        previous_step_id, step_id = step_id, inner_plan.add_node(aggregate_step)
         if previous_step_id is not None:
             inner_plan.add_edge(previous_step_id, step_id)
 
@@ -3362,8 +3350,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
         project_step.passthrough_columns = _order_by_columns_not_in_projection
         project_step.except_columns = _projection_except_columns(_projection)
         project_step.hidden_columns = _hidden_window_columns
-        previous_step_id, step_id = step_id, random_string()
-        inner_plan.add_node(step_id, project_step)
+        previous_step_id, step_id = step_id, inner_plan.add_node(project_step)
         if previous_step_id is not None:
             inner_plan.add_edge(previous_step_id, step_id)
 
@@ -3399,8 +3386,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
     if _having:
         having_step = FilterStep()
         having_step.condition = _having
-        previous_step_id, step_id = step_id, random_string()
-        inner_plan.add_node(step_id, having_step)
+        previous_step_id, step_id = step_id, inner_plan.add_node(having_step)
         if previous_step_id is not None:
             inner_plan.add_edge(previous_step_id, step_id)
 
@@ -3422,8 +3408,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
                 "rows being returned. Add the expression to the **SELECT** list, or drop "
                 "**DISTINCT**."
             )
-        previous_step_id, step_id = step_id, random_string()
-        inner_plan.add_node(step_id, distinct_step)
+        previous_step_id, step_id = step_id, inner_plan.add_node(distinct_step)
         if previous_step_id is not None:
             inner_plan.add_edge(previous_step_id, step_id)
 
@@ -3431,8 +3416,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
     if _order_by:
         order_step = OrderStep()
         order_step.order_by = _order_by
-        previous_step_id, step_id = step_id, random_string()
-        inner_plan.add_node(step_id, order_step)
+        previous_step_id, step_id = step_id, inner_plan.add_node(order_step)
         if previous_step_id is not None:
             inner_plan.add_edge(previous_step_id, step_id)
 
@@ -3443,8 +3427,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
         limit_step = LimitStep()
         limit_step.limit = _limit_value(_limit, "LIMIT", plan_context=plan_context)
         limit_step.offset = _limit_value(_offset, "OFFSET", plan_context=plan_context)
-        previous_step_id, step_id = step_id, random_string()
-        inner_plan.add_node(step_id, limit_step)
+        previous_step_id, step_id = step_id, inner_plan.add_node(limit_step)
         if previous_step_id is not None:
             inner_plan.add_edge(previous_step_id, step_id)
 
@@ -3452,8 +3435,7 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
     exit_node = ExitStep()
     exit_node.columns = _projection
     exit_node.hidden_columns = _hidden_window_columns
-    previous_step_id, step_id = step_id, random_string()
-    inner_plan.add_node(step_id, exit_node)
+    previous_step_id, step_id = step_id, inner_plan.add_node(exit_node)
     if previous_step_id is not None:
         inner_plan.add_edge(previous_step_id, step_id)
 
@@ -3613,7 +3595,7 @@ def process_join_tree(join: dict, *, plan_context) -> PlanStep:
 
 
 def create_node_relation(relation: dict, *, plan_context):
-    sub_plan = LogicalPlan()
+    sub_plan = LogicalPlan(plan_context)
     root_node = None
 
     relation_name = None
@@ -3633,8 +3615,7 @@ def create_node_relation(relation: dict, *, plan_context):
                     subquery_step.alias = f"$subquery-{random_string(6)}"
                 else:
                     subquery_step.alias = subquery["alias"]["name"]["value"]
-                step_id = random_string()
-                sub_plan.add_node(step_id, subquery_step)
+                step_id = sub_plan.add_node(subquery_step)
 
                 subquery_plan = plan_query(subquery["subquery"], plan_context=plan_context)
                 exit_node = subquery_plan.get_exit_points()[0]
@@ -3664,8 +3645,7 @@ def create_node_relation(relation: dict, *, plan_context):
                     tuple(logical_planner_builders.build(value, plan_context=plan_context) for value in row["content"])
                     for row in subquery["subquery"]["body"]["Values"]["rows"]
                 ]
-                step_id = random_string()
-                sub_plan.add_node(step_id, values_step)
+                step_id = sub_plan.add_node(values_step)
                 root_node = step_id
         else:  # pragma: no cover
             raise NotImplementedError(relation["relation"]["Derived"])
@@ -3765,8 +3745,7 @@ def create_node_relation(relation: dict, *, plan_context):
                 col["name"]["value"] for col in function["alias"]["columns"]
             )
 
-        step_id = random_string()
-        sub_plan.add_node(step_id, function_step)
+        step_id = sub_plan.add_node(function_step)
         root_node = step_id
         relation["step_id"] = step_id
     else:
@@ -3808,8 +3787,7 @@ def create_node_relation(relation: dict, *, plan_context):
                     plan_context=plan_context,
                 )
 
-        step_id = random_string()
-        sub_plan.add_node(step_id, from_step)
+        step_id = sub_plan.add_node(from_step)
 
         root_node = step_id
         relation["step_id"] = step_id
@@ -3823,8 +3801,7 @@ def create_node_relation(relation: dict, *, plan_context):
 
         if join_step.node_type == LogicalPlanStepType.Unnest:
             # UNNEST joins don't have a LEFT and RIGHT side
-            join_step_id = random_string()
-            sub_plan.add_node(join_step_id, join_step)
+            join_step_id = sub_plan.add_node(join_step)
             sub_plan.add_edge(root_node, join_step_id, "left")
             root_node = join_step_id
             continue
@@ -3840,8 +3817,7 @@ def create_node_relation(relation: dict, *, plan_context):
         # add the right side of the join
         sub_plan.absorb(right_plan)
 
-        join_step_id = random_string()
-        sub_plan.add_node(join_step_id, join_step)
+        join_step_id = sub_plan.add_node(join_step)
 
         # add the from table as the left side of the join
         sub_plan.add_edge(root_node, join_step_id, "left")
@@ -3853,7 +3829,7 @@ def create_node_relation(relation: dict, *, plan_context):
 
 
 def plan_explain(statement, *, plan_context, **kwargs) -> LogicalPlan:
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
     explain_node = ExplainStep()
     explain_node.analyze = statement["Explain"]["analyze"]
     # The tabular operator tree is the only EXPLAIN output. Any other FORMAT
@@ -3865,8 +3841,7 @@ def plan_explain(statement, *, plan_context, **kwargs) -> LogicalPlan:
         if requested != "TEXT":
             raise UnsupportedSyntaxError(f"{requested} format is not supported")
 
-    explain_id = random_string()
-    plan.add_node(explain_id, explain_node)
+    explain_id = plan.add_node(explain_node)
 
     # The explained statement is not necessarily a SELECT. Dispatch it through
     # the same builder table the top level uses rather than assuming plan_query:
@@ -3921,9 +3896,8 @@ def plan_query(statement: dict, *, plan_context) -> LogicalPlan:
         set_op_node.modifier = (
             None if set_operation["set_quantifier"] == "None" else set_operation["set_quantifier"]
         )
-        step_id = random_string()
-        plan = LogicalPlan()
-        plan.add_node(step_id, set_op_node)
+        plan = LogicalPlan(plan_context)
+        step_id = plan.add_node(set_op_node)
         head_nid = step_id
 
         left_plan = inner_query_planner(set_operation["left"], plan_context=plan_context)
@@ -3974,8 +3948,7 @@ def plan_query(statement: dict, *, plan_context) -> LogicalPlan:
         # UNION ALL
         if set_op_node.modifier != "All":
             distinct = DistinctStep()
-            head_nid, step_id = step_id, random_string()
-            plan.add_node(step_id, distinct)
+            head_nid, step_id = step_id, plan.add_node(distinct)
             plan.add_edge(head_nid, step_id)
 
         # limit/offset
@@ -3989,8 +3962,7 @@ def plan_query(statement: dict, *, plan_context) -> LogicalPlan:
                 limit_step = LimitStep()
                 limit_step.limit = _limit_value(_limit, "LIMIT", plan_context=plan_context)
                 limit_step.offset = _limit_value(_offset, "OFFSET", plan_context=plan_context)
-                head_nid, step_id = step_id, random_string()
-                plan.add_node(step_id, limit_step)
+                head_nid, step_id = step_id, plan.add_node(limit_step)
                 if head_nid is not None:
                     plan.add_edge(head_nid, step_id)
 
@@ -4012,8 +3984,7 @@ def plan_query(statement: dict, *, plan_context) -> LogicalPlan:
         # Reached when the left leg declares no columns at all.
         columns = _set_operation_leg_columns(left_plan) or [Wildcard()]
         exit_node.columns = columns
-        head_nid, step_id = step_id, random_string()
-        plan.add_node(step_id, exit_node)
+        head_nid, step_id = step_id, plan.add_node(exit_node)
         if head_nid is not None:
             plan.add_edge(head_nid, step_id)
 
@@ -4040,32 +4011,30 @@ def plan_query(statement: dict, *, plan_context) -> LogicalPlan:
 def plan_set_variable(statement, *, plan_context, **kwargs):
     root_node = "SingleAssignment"
     statement = statement["Set"]
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
     set_step = SetStep(
         variable=extract_variable(statement[root_node]["variable"]),
         value=extract_value(statement[root_node]["values"], plan_context=plan_context),
     )
-    plan.add_node(random_string(), set_step)
+    plan.add_node(set_step)
     return plan
 
 
 def plan_show_columns(statement, *, plan_context, **kwargs):
     root_node = "ShowColumns"
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
 
     from_step = ScanStep()
     table = statement[root_node]["show_options"]["show_in"]["parent_name"]
     from_step.relation = ".".join(part["Identifier"]["value"] for part in table)
     from_step.alias = from_step.relation
-    step_id = random_string()
-    plan.add_node(step_id, from_step)
+    step_id = plan.add_node(from_step)
 
     show_step = ShowColumnsStep()
     show_step.extended = statement[root_node]["extended"]
     show_step.full = statement[root_node]["full"]
     show_step.relation = from_step.relation
-    previous_step_id, step_id = step_id, random_string()
-    plan.add_node(step_id, show_step)
+    previous_step_id, step_id = step_id, plan.add_node(show_step)
     plan.add_edge(previous_step_id, step_id)
 
     _filter = statement[root_node]["show_options"].get("filter_position")
@@ -4073,8 +4042,7 @@ def plan_show_columns(statement, *, plan_context, **kwargs):
         _filter = _filter["Suffix"]
         filter_node = FilterStep()
         filter_node.condition = extract_simple_filter(_filter, "name", plan_context=plan_context)
-        previous_step_id, step_id = step_id, random_string()
-        plan.add_node(step_id, filter_node)
+        previous_step_id, step_id = step_id, plan.add_node(filter_node)
         plan.add_edge(previous_step_id, step_id)
         raise UnsupportedSyntaxError(
             compose(
@@ -4088,14 +4056,14 @@ def plan_show_columns(statement, *, plan_context, **kwargs):
     return plan
 
 
-def _plan_virtual_dataset_scan(relation: str, internal_relation: bool) -> LogicalPlan:
+def _plan_virtual_dataset_scan(relation: str, internal_relation: bool, *, plan_context) -> LogicalPlan:
     """`SELECT * FROM <virtual dataset>`, built by the planner rather than typed.
 
     Shared by the `SHOW` forms that are just a wildcard read of a virtual dataset,
     so `SHOW VARIABLES` and `SHOW USER` cannot drift into producing different plan
     shapes for the same job.
     """
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
 
     from_step = ScanStep()
     from_step.relation = relation
@@ -4103,22 +4071,20 @@ def _plan_virtual_dataset_scan(relation: str, internal_relation: bool) -> Logica
     # For a relation in INTERNAL_ONLY_DATASETS, binder.visit_scan rejects the scan
     # unless this flag marks it as planner-built rather than user-typed.
     from_step.internal_relation = internal_relation
-    step_id = random_string()
-    plan.add_node(step_id, from_step)
+    step_id = plan.add_node(from_step)
 
     exit_node = ExitStep()
     # A BARE wildcard: `value` must be None. A non-None `value` marks a QUALIFIED
     # wildcard (`rel.*`) and binder.visit_exit then expands only columns whose
     # origin matches `value[0]` — so `(None,)` silently expands to nothing.
     exit_node.columns = [Wildcard()]
-    previous_step_id, step_id = step_id, random_string()
-    plan.add_node(step_id, exit_node)
+    previous_step_id, step_id = step_id, plan.add_node(exit_node)
     plan.add_edge(previous_step_id, step_id)
 
     return plan
 
 
-def _plan_show_manifest(table_name: str) -> LogicalPlan:
+def _plan_show_manifest(table_name: str, *, plan_context) -> LogicalPlan:
     """`SHOW MANIFEST FOR <table>` — Scan (bound for permission/manifest loading
     only, never read) -> ShowManifest (materializes the already-bound Manifest).
 
@@ -4133,7 +4099,7 @@ def _plan_show_manifest(table_name: str) -> LogicalPlan:
     `SHOW` has no WHERE/column-list grammar in the first place, so there is
     no filter/projection this builder needs to guard against.
     """
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
 
     from_step = ScanStep()
     from_step.relation = table_name
@@ -4143,13 +4109,11 @@ def _plan_show_manifest(table_name: str) -> LogicalPlan:
     # MANIFEST permission beside the normal READ gate and (b) never compile a
     # real file scan for this Scan — the bound Manifest IS the answer.
     from_step.for_manifest_only = True
-    step_id = random_string()
-    plan.add_node(step_id, from_step)
+    step_id = plan.add_node(from_step)
 
     show_step = ShowManifestStep()
     show_step.relation = table_name
-    previous_step_id, step_id = step_id, random_string()
-    plan.add_node(step_id, show_step)
+    previous_step_id, step_id = step_id, plan.add_node(show_step)
     plan.add_edge(previous_step_id, step_id)
 
     return plan
@@ -4172,7 +4136,7 @@ _HISTORY_STATEMENTS = {
 
 
 def _plan_show_history(
-    table_name: str, word: str, include_expired: bool = False
+    table_name: str, word: str, include_expired: bool = False, *, plan_context
 ) -> LogicalPlan:
     """`SHOW [ALL] SNAPSHOTS|LINEAGE|SOURCES FOR <table>` — Scan (bound for the
     commit history only, never read) -> ShowSnapshots / ShowLineage /
@@ -4197,7 +4161,7 @@ def _plan_show_history(
     # connector the loader that reads tombstones.
     if include_expired:
         history_view = "snapshots_all"
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
 
     from_step = ScanStep()
     from_step.relation = table_name
@@ -4213,8 +4177,7 @@ def _plan_show_history(
     # that is done where the rows are consumed, not by a stricter gate here.
     from_step.for_snapshots_only = True
     from_step.history_view = history_view
-    step_id = random_string()
-    plan.add_node(step_id, from_step)
+    step_id = plan.add_node(from_step)
 
     show_step = step_classes()[node_type]()
     show_step.relation = table_name
@@ -4223,8 +4186,7 @@ def _plan_show_history(
     # from the same place is what stops the rows and the schema disagreeing
     # about which shape the statement is.
     show_step.history_view = history_view
-    previous_step_id, step_id = step_id, random_string()
-    plan.add_node(step_id, show_step)
+    previous_step_id, step_id = step_id, plan.add_node(show_step)
     plan.add_edge(previous_step_id, step_id)
 
     return plan
@@ -4259,27 +4221,24 @@ def _plan_show_triggers(table_name: str, *, plan_context) -> LogicalPlan:
         )
     relation = f"{workspace}.information_schema.triggers"
 
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
 
     from_step = ScanStep()
     from_step.relation = relation
     from_step.alias = relation
     from_step.hints = []
-    step_id = random_string()
-    plan.add_node(step_id, from_step)
+    step_id = plan.add_node(from_step)
 
     filter_node = FilterStep()
     filter_node.condition = build_expression_tree(
         relation, [("trigger_holder", "Eq", relative)], plan_context=plan_context
     )
-    previous_step_id, step_id = step_id, random_string()
-    plan.add_node(step_id, filter_node)
+    previous_step_id, step_id = step_id, plan.add_node(filter_node)
     plan.add_edge(previous_step_id, step_id)
 
     exit_node = ExitStep()
     exit_node.columns = [Wildcard()]
-    previous_step_id, step_id = step_id, random_string()
-    plan.add_node(step_id, exit_node)
+    previous_step_id, step_id = step_id, plan.add_node(exit_node)
     plan.add_edge(previous_step_id, step_id)
 
     return plan
@@ -4310,17 +4269,17 @@ def plan_show_variables(statement, *, plan_context, **kwargs):
     words = [part["value"].upper() for part in parts]
     if not words:
         # `$variables` is INTERNAL_ONLY_DATASETS: SHOW VARIABLES is its only surface.
-        return _plan_virtual_dataset_scan("$variables", internal_relation=True)
+        return _plan_virtual_dataset_scan("$variables", internal_relation=True, plan_context=plan_context)
     if words == ["USER"]:
         # `$user` is INTERNAL_ONLY_DATASETS on the same rule as `$variables`:
         # SHOW USER is its only surface.
-        return _plan_virtual_dataset_scan("$user", internal_relation=True)
+        return _plan_virtual_dataset_scan("$user", internal_relation=True, plan_context=plan_context)
     if words == ["GRANTS"]:
         # `$grants` is INTERNAL_ONLY_DATASETS on the same rule: SHOW GRANTS is
         # its only surface. It reports the session's own policies and confers
         # nothing; grant administration is the separate `GRANT`/`REVOKE`/
         # `SHOW GRANTS ON` surface, intercepted pre-parse and never routed here.
-        return _plan_virtual_dataset_scan("$grants", internal_relation=True)
+        return _plan_virtual_dataset_scan("$grants", internal_relation=True, plan_context=plan_context)
     if words == ["LIKE"]:
         # The parser discards the pattern, so we cannot apply it.
         raise UnsupportedSyntaxError(
@@ -4336,7 +4295,7 @@ def plan_show_variables(statement, *, plan_context, **kwargs):
         # the MANIFEST/FOR control words above were matched via the uppercased
         # `words` list; catalog/schema/table names are case-sensitive.
         table_name = ".".join(part["value"] for part in parts[2:])
-        return _plan_show_manifest(table_name)
+        return _plan_show_manifest(table_name, plan_context=plan_context)
     if words[0] == "ALL":
         # `SHOW ALL SNAPSHOTS FOR <table>`: the live history AND the tombstones
         # expiration has retired but not yet purged. sqlparser hands `ALL`
@@ -4357,7 +4316,7 @@ def plan_show_variables(statement, *, plan_context, **kwargs):
             )
         # Original case preserved, as for SHOW MANIFEST FOR above.
         table_name = ".".join(part["value"] for part in parts[3:])
-        return _plan_show_history(table_name, "SNAPSHOTS", include_expired=True)
+        return _plan_show_history(table_name, "SNAPSHOTS", include_expired=True, plan_context=plan_context)
     if words[0] in _HISTORY_STATEMENTS:
         if len(words) < 3 or words[1] != "FOR":
             # Bare SHOW SNAPSHOTS / LINEAGE / SOURCES has nothing to enumerate
@@ -4370,7 +4329,7 @@ def plan_show_variables(statement, *, plan_context, **kwargs):
             )
         # Original case preserved, as for SHOW MANIFEST FOR above.
         table_name = ".".join(part["value"] for part in parts[2:])
-        return _plan_show_history(table_name, words[0])
+        return _plan_show_history(table_name, words[0], plan_context=plan_context)
     if words[0] == "TRIGGERS":
         if len(words) < 3 or words[1] != "FOR":
             # Bare SHOW TRIGGERS cannot be answered: triggers live in a
@@ -4396,7 +4355,7 @@ def plan_show_variables(statement, *, plan_context, **kwargs):
 
 def plan_show_create_query(statement, *, plan_context, **kwargs):
     root_node = "ShowCreate"
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
     show_step = ShowStep()
     # sqlparser spells these `Table`/`View`; MATERIALIZED VIEW and TASK arrive
     # from pre-parse, which has no ShowCreateObject to spell them with (see
@@ -4425,7 +4384,7 @@ def plan_show_create_query(statement, *, plan_context, **kwargs):
     if obj_type == "TRIGGER":
         trigger_name = statement[root_node].get("trigger_name")
         show_step.trigger_name = trigger_name["value"] if trigger_name else None
-    plan.add_node(random_string(), show_step)
+    plan.add_node(show_step)
     return plan
 
 
@@ -4439,7 +4398,7 @@ def plan_create_view(statement, *, plan_context, **kwargs):
     when the view is referenced in a query.
     """
     root_node = "CreateView"
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
 
     create_view_node = CreateViewStep()
 
@@ -4523,7 +4482,7 @@ def plan_create_view(statement, *, plan_context, **kwargs):
     create_view_node.query = statement[root_node]["query"]
 
     # Add the CreateView node
-    plan.add_node(random_string(), create_view_node)
+    plan.add_node(create_view_node)
 
     return plan
 
@@ -4538,7 +4497,7 @@ def plan_alter_view(statement, *, plan_context, **kwargs):
     when the view is referenced in a query.
     """
     root_node = "AlterView"
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
 
     alter_view_node = AlterViewStep()
 
@@ -4581,7 +4540,7 @@ def plan_alter_view(statement, *, plan_context, **kwargs):
     alter_view_node.query = statement[root_node]["query"]
 
     # Add the AlterView node
-    plan.add_node(random_string(), alter_view_node)
+    plan.add_node(alter_view_node)
 
     return plan
 
@@ -4604,7 +4563,7 @@ def plan_alter_table(statement, *, plan_context, **kwargs):
     ALTER TABLE [IF EXISTS] table_name DROP CONSTRAINT [IF EXISTS] name
     """
     root_node = "AlterTable"
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
 
     alter_statement = statement[root_node]
 
@@ -4637,7 +4596,7 @@ def plan_alter_table(statement, *, plan_context, **kwargs):
         alter_relation_node.cluster_columns = cluster_columns
         alter_relation_node.if_exists = if_exists
 
-        plan.add_node(random_string(), alter_relation_node)
+        plan.add_node(alter_relation_node)
         return plan
 
     if "RenameTable" in operation:
@@ -4664,7 +4623,7 @@ def plan_alter_table(statement, *, plan_context, **kwargs):
         rename_relation_node.new_relation_name = new_name
         rename_relation_node.if_exists = if_exists
 
-        plan.add_node(random_string(), rename_relation_node)
+        plan.add_node(rename_relation_node)
         return plan
 
     if "AddColumn" in operation:
@@ -4723,7 +4682,7 @@ def plan_alter_table(statement, *, plan_context, **kwargs):
         add_column_node.default = default_value
         add_column_node.if_not_exists = add_op.get("if_not_exists", False)
 
-        plan.add_node(random_string(), add_column_node)
+        plan.add_node(add_column_node)
         return plan
 
     if "DropColumn" in operation:
@@ -4751,7 +4710,7 @@ def plan_alter_table(statement, *, plan_context, **kwargs):
         drop_column_node.column_name = column_names[0]["value"]
         drop_column_node.column_if_exists = drop_op.get("if_exists", False)
 
-        plan.add_node(random_string(), drop_column_node)
+        plan.add_node(drop_column_node)
         return plan
 
     if "RenameColumn" in operation:
@@ -4763,7 +4722,7 @@ def plan_alter_table(statement, *, plan_context, **kwargs):
         rename_column_node.column_name = rename_op["old_column_name"]["value"]
         rename_column_node.new_column_name = rename_op["new_column_name"]["value"]
 
-        plan.add_node(random_string(), rename_column_node)
+        plan.add_node(rename_column_node)
         return plan
 
     if "AlterColumn" in operation:
@@ -4823,12 +4782,13 @@ def plan_alter_table(statement, *, plan_context, **kwargs):
         alter_column_type_node.column_name = column_name
         alter_column_type_node.new_column_type = new_column_type
 
-        plan.add_node(random_string(), alter_column_type_node)
+        plan.add_node(alter_column_type_node)
         return plan
 
     if "AddConstraint" in operation:
         return _plan_add_constraint(
-            operation["AddConstraint"], relation_name, relation_name_parts, if_exists
+            operation["AddConstraint"], relation_name, relation_name_parts, if_exists,
+            plan_context=plan_context,
         )
 
     if "DropConstraint" in operation:
@@ -4848,7 +4808,7 @@ def plan_alter_table(statement, *, plan_context, **kwargs):
         drop_relationship_node.constraint_name = drop_op["name"]["value"]
         drop_relationship_node.constraint_if_exists = drop_op.get("if_exists", False)
 
-        plan.add_node(random_string(), drop_relationship_node)
+        plan.add_node(drop_relationship_node)
         return plan
 
     if "SetTblProperties" in operation:
@@ -4856,6 +4816,7 @@ def plan_alter_table(statement, *, plan_context, **kwargs):
             operation["SetTblProperties"].get("table_properties") or [],
             relation_name,
             if_exists,
+            plan_context=plan_context,
         )
 
     raise UnsupportedSyntaxError(
@@ -5151,7 +5112,7 @@ def _validate_foreign_key(
     }
 
 
-def _plan_add_constraint(add_op, relation_name: str, relation_name_parts, if_exists: bool):
+def _plan_add_constraint(add_op, relation_name: str, relation_name_parts, if_exists: bool, *, plan_context):
     """`ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY ... NOT ENFORCED`.
 
     Opteryx enforces no constraints, and for that reason ADD CONSTRAINT was
@@ -5201,8 +5162,8 @@ def _plan_add_constraint(add_op, relation_name: str, relation_name_parts, if_exi
     add_relationship_node.references_column_name = declaration["references_column_name"]
     add_relationship_node.cardinality = declaration["cardinality"]
 
-    plan = LogicalPlan()
-    plan.add_node(random_string(), add_relationship_node)
+    plan = LogicalPlan(plan_context)
+    plan.add_node(add_relationship_node)
     return plan
 
 
@@ -5216,7 +5177,7 @@ _TAG_VERSION_KEY = "__opteryx.tag.version"
 _ROLLBACK_VERSION_KEY = "__opteryx.rollback.version"
 
 
-def _plan_reserved_property_ddl(properties, relation_name: str, if_exists: bool):
+def _plan_reserved_property_ddl(properties, relation_name: str, if_exists: bool, *, plan_context):
     """`ALTER TABLE ... CREATE TAG` / `DROP TAG` / `ROLLBACK TO VERSION`.
 
     All three arrive as table properties.
@@ -5249,7 +5210,7 @@ def _plan_reserved_property_ddl(properties, relation_name: str, if_exists: bool)
             )
         values[name] = key_value["value"]["Value"]["value"]["SingleQuotedString"]
 
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
 
     if _ROLLBACK_VERSION_KEY in values:
         node = RollbackRelationStep()
@@ -5260,7 +5221,7 @@ def _plan_reserved_property_ddl(properties, relation_name: str, if_exists: bool)
         node.version_spec = values[_ROLLBACK_VERSION_KEY]
         node.relation_name = relation_name
         node.if_exists = if_exists
-        plan.add_node(random_string(), node)
+        plan.add_node(node)
         return plan
 
     if _TAG_ACTION_KEY not in values:
@@ -5281,7 +5242,7 @@ def _plan_reserved_property_ddl(properties, relation_name: str, if_exists: bool)
     node.if_exists = if_exists
     node.tag_name = values[_TAG_NAME_KEY]
 
-    plan.add_node(random_string(), node)
+    plan.add_node(node)
     return plan
 
 
@@ -5354,7 +5315,7 @@ def plan_alter_workspace(statement, *, plan_context, **kwargs):
     which parses to the same `<name> SET <property> TO <value>` shape.
     """
     root_node = "AlterFunction"
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
 
     alter_statement = statement[root_node]
 
@@ -5398,7 +5359,7 @@ def plan_alter_workspace(statement, *, plan_context, **kwargs):
     alter_workspace_node.property_name = property_name
     alter_workspace_node.property_value = parser(property_name, values[0])
 
-    plan.add_node(random_string(), alter_workspace_node)
+    plan.add_node(alter_workspace_node)
 
     return plan
 
@@ -5452,8 +5413,8 @@ def plan_alter_workspace_secure(statement, *, plan_context, **kwargs) -> Logical
     # None means DROP SECURE - withdraw the sanction.
     node.secure_destinations = destinations
 
-    plan = LogicalPlan()
-    plan.add_node(random_string(), node)
+    plan = LogicalPlan(plan_context)
+    plan.add_node(node)
     return plan
 
 
@@ -5469,7 +5430,7 @@ def plan_create_collection(statement, *, plan_context, **kwargs):
     the same aliasing DROP SCHEMA already has for DROP COLLECTION.
     """
     root_node = "CreateSchema"
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
 
     create_statement = statement[root_node]
 
@@ -5515,14 +5476,14 @@ def plan_create_collection(statement, *, plan_context, **kwargs):
         clone_node = CloneCollectionStep()
         clone_node.collection_name = collection_name
         clone_node.source_collection = source_collection
-        plan.add_node(random_string(), clone_node)
+        plan.add_node(clone_node)
         return plan
 
     create_collection_node = CreateCollectionStep()
     create_collection_node.collection_name = collection_name
     create_collection_node.if_not_exists = create_statement.get("if_not_exists", False)
 
-    plan.add_node(random_string(), create_collection_node)
+    plan.add_node(create_collection_node)
 
     return plan
 
@@ -5535,7 +5496,7 @@ def plan_drop(statement, *, plan_context, **kwargs):
     DROP TABLE [IF EXISTS] table_name
     """
     root_node = "Drop"
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
 
     drop_statement = statement[root_node]
     object_type = drop_statement.get("object_type")
@@ -5569,7 +5530,7 @@ def plan_drop(statement, *, plan_context, **kwargs):
         # Extract IF EXISTS flag
         drop_view_node.if_exists = drop_statement.get("if_exists", False)
 
-        plan.add_node(random_string(), drop_view_node)
+        plan.add_node(drop_view_node)
         return plan
 
     elif object_type == "Table":
@@ -5590,7 +5551,7 @@ def plan_drop(statement, *, plan_context, **kwargs):
         # Extract IF EXISTS flag
         drop_relation_node.if_exists = drop_statement.get("if_exists", False)
 
-        plan.add_node(random_string(), drop_relation_node)
+        plan.add_node(drop_relation_node)
         return plan
 
     elif object_type == "MaterializedView":
@@ -5613,7 +5574,7 @@ def plan_drop(statement, *, plan_context, **kwargs):
         drop_relation_node.is_materialized_view = True
         drop_relation_node.if_exists = drop_statement.get("if_exists", False)
 
-        plan.add_node(random_string(), drop_relation_node)
+        plan.add_node(drop_relation_node)
         return plan
 
     elif object_type == "Schema":
@@ -5633,7 +5594,7 @@ def plan_drop(statement, *, plan_context, **kwargs):
         drop_collection_node.collection_names = collection_names
         drop_collection_node.if_exists = drop_statement.get("if_exists", False)
 
-        plan.add_node(random_string(), drop_collection_node)
+        plan.add_node(drop_collection_node)
         return plan
 
     else:
@@ -5656,7 +5617,7 @@ def plan_drop_workspace(statement, *, plan_context, **kwargs):
     dedicated plan function instead of another branch in plan_drop.
     """
     root_node = "DropFunction"
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
 
     drop_statement = statement[root_node]
 
@@ -5676,7 +5637,7 @@ def plan_drop_workspace(statement, *, plan_context, **kwargs):
     drop_workspace_node.workspace_name = workspace_name
     drop_workspace_node.if_exists = drop_statement.get("if_exists", False)
 
-    plan.add_node(random_string(), drop_workspace_node)
+    plan.add_node(drop_workspace_node)
 
     return plan
 
@@ -6118,7 +6079,7 @@ def _plan_ctas(
     an InsertNode sink attached anywhere else. Target schema is derived at bind
     time from the SELECT's exit columns.
     """
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
 
     # Snapshot the defining query BEFORE planning it - plan_query annotates
     # the AST dicts in place, and sqloxide.ast_to_sql rejects the mutated
@@ -6150,13 +6111,12 @@ def _plan_ctas(
         # same trick view_management uses for CREATE VIEW.
         insert_step.defining_query = defining_query
 
-    insert_id = random_string()
-    plan.add_node(insert_id, insert_step)
+    insert_id = plan.add_node(insert_step)
     plan.add_edge(source_tail_id, insert_id)
     return plan
 
 
-def _plan_clone(create_statement, target_name: str, clone_parts):
+def _plan_clone(create_statement, target_name: str, clone_parts, *, plan_context):
     """Plan `CREATE TABLE <target> CLONE <upstream>`.
 
     A fork: the target's first manifest names the upstream's files, so nothing
@@ -6201,12 +6161,12 @@ def _plan_clone(create_statement, target_name: str, clone_parts):
             f"(got {md_code(str(target_name))} and {md_code(str(source_name))})."
         )
 
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
     clone_node = CloneRelationStep()
     clone_node.relation_name = target_name
     clone_node.source_relation = source_name
     clone_node.if_not_exists = bool(create_statement.get("if_not_exists", False))
-    plan.add_node(random_string(), clone_node)
+    plan.add_node(clone_node)
     return plan
 
 
@@ -6230,11 +6190,11 @@ def plan_resync_relation(statement, *, plan_context, **kwargs):
             f"{md_code('<collection>.<dataset>')} (got {md_code(str(relation_name))})."
         )
 
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
     node = ResyncRelationStep()
     node.relation_name = relation_name
     node.force = bool(load_statement.get("force", False))
-    plan.add_node(random_string(), node)
+    plan.add_node(node)
     return plan
 
 
@@ -6253,10 +6213,10 @@ def plan_detach_relation(statement, *, plan_context, **kwargs):
             f"{md_code('<collection>.<dataset>')} (got {md_code(str(relation_name))})."
         )
 
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
     node = DetachRelationStep()
     node.relation_name = relation_name
-    plan.add_node(random_string(), node)
+    plan.add_node(node)
     return plan
 
 
@@ -6275,7 +6235,7 @@ def plan_create_table(statement, *, plan_context, **kwargs):
     from opteryx.types.schema import RelationDescriptor
 
     root_node = "CreateTable"
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
 
     create_table_node = CreateRelationStep()
 
@@ -6300,6 +6260,7 @@ def plan_create_table(statement, *, plan_context, **kwargs):
             statement[root_node],
             target_name=create_table_node.relation_name,
             clone_parts=clone_parts,
+            plan_context=plan_context,
         )
 
     relationships = _read_table_constraints(
@@ -6385,7 +6346,7 @@ def plan_create_table(statement, *, plan_context, **kwargs):
     create_table_node.relationships = relationships
     _reject_duplicate_constraint_names(relationships)
 
-    plan.add_node(random_string(), create_table_node)
+    plan.add_node(create_table_node)
     return plan
 
 
@@ -6409,12 +6370,12 @@ def plan_truncate(statement, *, plan_context, **kwargs):
     name_parts = table_names[0].get("name", [])
     relation_name = ".".join(p["Identifier"]["value"] for p in name_parts)
 
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
     node = TruncateRelationStep()
     node.relation_name = relation_name
     node.if_exists = truncate_stmt.get("if_exists", False)
 
-    plan.add_node(random_string(), node)
+    plan.add_node(node)
     return plan
 
 
@@ -6560,7 +6521,7 @@ def plan_insert(statement, *, plan_context, **kwargs):
             )
     explicit_columns_tuple = tuple(explicit_columns) if explicit_columns else None
 
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
 
     if "Values" in body:
         # VALUES source — mirror the existing FromClause VALUES path.
@@ -6580,16 +6541,14 @@ def plan_insert(statement, *, plan_context, **kwargs):
         else:
             values_step.column_aliases = ()
 
-        values_id = random_string()
-        plan.add_node(values_id, values_step)
+        values_id = plan.add_node(values_step)
 
         insert_step = InsertStep()
         insert_step.relation_name = relation_name
         insert_step.values_feeder = values_step
         insert_step.source_tail_id = None
         insert_step.explicit_columns = explicit_columns_tuple
-        insert_id = random_string()
-        plan.add_node(insert_id, insert_step)
+        insert_id = plan.add_node(insert_step)
         plan.add_edge(values_id, insert_id)
     else:
         # SELECT source — plan the sub-query and keep its Exit node (it already
@@ -6609,8 +6568,7 @@ def plan_insert(statement, *, plan_context, **kwargs):
         insert_step.values_feeder = None
         insert_step.source_tail_id = source_tail_id
         insert_step.explicit_columns = explicit_columns_tuple
-        insert_id = random_string()
-        plan.add_node(insert_id, insert_step)
+        insert_id = plan.add_node(insert_step)
         plan.add_edge(source_tail_id, insert_id)
 
     return plan
@@ -6622,7 +6580,7 @@ def plan_analyze_query(statement, *, plan_context, **kwargs) -> LogicalPlan:
     if not statement[root]["has_table_keyword"]:
         raise UnsupportedSyntaxError("**ANALYZE** without TABLE keyword is not supported. Write `ANALYZE TABLE <table>`.")
 
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
     analyze_node = AnalyzeStep()
     analyze_node.action = "analyze_table"
     analyze_node.table_name = ".".join(
@@ -6633,8 +6591,7 @@ def plan_analyze_query(statement, *, plan_context, **kwargs) -> LogicalPlan:
     # projection columns (post_bind expects bound column objects there).
     analyze_node.analyze_columns = [c["value"] for c in statement[root].get("columns") or []]
 
-    analyze_id = random_string()
-    plan.add_node(analyze_id, analyze_node)
+    analyze_id = plan.add_node(analyze_node)
 
     return plan
 
@@ -6644,14 +6601,13 @@ def plan_drop_statistics(statement, *, plan_context, **kwargs) -> LogicalPlan:
     pre-parse interception (no native sqlparser grammar). Reuses the Analyze
     logical node / Table Management physical node, dispatching on `action`."""
     root = "DropStatistics"
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
     node = AnalyzeStep()
     node.action = "drop_statistics"
     node.table_name = _aside_object_name(statement[root]["table_name"])
     node.analyze_columns = list(statement[root].get("columns") or [])
 
-    node_id = random_string()
-    plan.add_node(node_id, node)
+    node_id = plan.add_node(node)
 
     return plan
 
@@ -6820,8 +6776,8 @@ def plan_create_task(statement, *, plan_context, **kwargs) -> LogicalPlan:
     node.target_tables = targets
     node.source_tables = [r for r in _extract_tables_from_ast(inner) if r not in targets]
 
-    plan = LogicalPlan()
-    plan.add_node(random_string(), node)
+    plan = LogicalPlan(plan_context)
+    plan.add_node(node)
     return plan
 
 
@@ -6839,8 +6795,8 @@ def plan_drop_task(statement, *, plan_context, **kwargs) -> LogicalPlan:
     node.task_name = _aside_object_name(statement[root]["name"])
     node.if_exists = statement[root].get("if_exists", False)
 
-    plan = LogicalPlan()
-    plan.add_node(random_string(), node)
+    plan = LogicalPlan(plan_context)
+    plan.add_node(node)
     return plan
 
 
@@ -6897,8 +6853,8 @@ def plan_alter_task(statement, *, plan_context, **kwargs) -> LogicalPlan:
     node.target_tables = targets
     node.source_tables = [r for r in _extract_tables_from_ast(inner) if r not in targets]
 
-    plan = LogicalPlan()
-    plan.add_node(random_string(), node)
+    plan = LogicalPlan(plan_context)
+    plan.add_node(node)
     return plan
 
 
@@ -6933,8 +6889,8 @@ def plan_create_trigger(statement, *, plan_context, **kwargs) -> LogicalPlan:
     node.time_zone = statement[root].get("time_zone")
     node.window_source = _aside_object_name(window_source) if window_source else None
 
-    plan = LogicalPlan()
-    plan.add_node(random_string(), node)
+    plan = LogicalPlan(plan_context)
+    plan.add_node(node)
     return plan
 
 
@@ -6957,8 +6913,8 @@ def plan_alter_trigger_owner(statement, *, plan_context, **kwargs) -> LogicalPla
         else resolve_slot_value(statement[root]["new_owner"], "new owner")
     )
 
-    plan = LogicalPlan()
-    plan.add_node(random_string(), node)
+    plan = LogicalPlan(plan_context)
+    plan.add_node(node)
     return plan
 
 
@@ -6976,8 +6932,8 @@ def plan_alter_trigger_suspended(statement, *, plan_context, **kwargs) -> Logica
     node.table_name = _aside_object_name(statement[root]["table"])
     node.suspended = statement[root]["suspended"]
 
-    plan = LogicalPlan()
-    plan.add_node(random_string(), node)
+    plan = LogicalPlan(plan_context)
+    plan.add_node(node)
     return plan
 
 
@@ -6996,8 +6952,8 @@ def plan_alter_trigger_minimum_interval(statement, *, plan_context, **kwargs) ->
     node.table_name = _aside_object_name(statement[root]["table"])
     node.minimum_interval_seconds = int(statement[root]["minimum_interval_seconds"])
 
-    plan = LogicalPlan()
-    plan.add_node(random_string(), node)
+    plan = LogicalPlan(plan_context)
+    plan.add_node(node)
     return plan
 
 
@@ -7007,13 +6963,13 @@ def plan_drop_trigger(statement, *, plan_context, **kwargs) -> LogicalPlan:
     trigger statements). The table is required: trigger names are only unique
     per dataset, and it is the permission target (WRITE) the binder checks."""
     root = "DropTrigger"
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
     node = DropTriggerStep()
     node.trigger_name = statement[root]["name"]["value"]
     node.table_name = _aside_object_name(statement[root]["table"])
     node.if_exists = statement[root].get("if_exists", False)
 
-    plan.add_node(random_string(), node)
+    plan.add_node(node)
 
     return plan
 
@@ -7028,7 +6984,7 @@ def plan_alter_materialized_view_owner(statement, *, plan_context, **kwargs) -> 
     trigger - so it gets its own node, its own binder visitor, and its own
     permission check."""
     root = "AlterMaterializedViewOwner"
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
     node = AlterMaterializedViewOwnerStep()
     node.relation_name = _aside_object_name(statement[root]["name"])
     new_owner = statement[root]["owner"]
@@ -7039,7 +6995,7 @@ def plan_alter_materialized_view_owner(statement, *, plan_context, **kwargs) -> 
     )
     node.owner_is_current_user = statement[root].get("current_user", False)
 
-    plan.add_node(random_string(), node)
+    plan.add_node(node)
 
     return plan
 
@@ -7052,12 +7008,12 @@ def plan_alter_materialized_view_suspended(statement, *, plan_context, **kwargs)
     refreshing, and left no way to tell "deliberately off" from "quietly
     broken"."""
     root = "AlterMaterializedViewSuspended"
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
     node = AlterMaterializedViewSuspendedStep()
     node.relation_name = _aside_object_name(statement[root]["name"])
     node.suspended = statement[root]["suspended"]
 
-    plan.add_node(random_string(), node)
+    plan.add_node(node)
 
     return plan
 
@@ -7095,8 +7051,8 @@ def _grant_object_pattern(object_kind: str, object_name: str) -> str:
     return template.format(name=object_name)
 
 
-def _plan_grant_statement(statement, root: str, node_type) -> LogicalPlan:
-    plan = LogicalPlan()
+def _plan_grant_statement(statement, root: str, node_type, *, plan_context) -> LogicalPlan:
+    plan = LogicalPlan(plan_context)
     node = step_classes()[node_type]()
     node.object_kind = statement[root]["object_kind"]
     # The object and the principal are value slots: either the literal the
@@ -7108,7 +7064,7 @@ def _plan_grant_statement(statement, root: str, node_type) -> LogicalPlan:
     node.role = statement[root]["role"]
     node.principal = resolve_slot_value(statement[root]["principal"], "principal")
 
-    plan.add_node(random_string(), node)
+    plan.add_node(node)
 
     return plan
 
@@ -7119,7 +7075,7 @@ def plan_grant_access(statement, *, plan_context, **kwargs) -> LogicalPlan:
     Adds exactly ONE policy; the permissions capability owns every rule (owner
     authority, no self-service, conflict refusal, audit). The binder gates it
     for pre-flight; the statement applies at execution."""
-    return _plan_grant_statement(statement, "GrantAccess", LogicalPlanStepType.GrantAccess)
+    return _plan_grant_statement(statement, "GrantAccess", LogicalPlanStepType.GrantAccess, plan_context=plan_context)
 
 
 def plan_revoke_access(statement, *, plan_context, **kwargs) -> LogicalPlan:
@@ -7128,10 +7084,10 @@ def plan_revoke_access(statement, *, plan_context, **kwargs) -> LogicalPlan:
     Deletes exactly ONE policy, resolved 1:1 by (principal, pattern, role) —
     access held through a policy at a different level is reported, never
     narrowed and never silently left in place."""
-    return _plan_grant_statement(statement, "RevokeAccess", LogicalPlanStepType.RevokeAccess)
+    return _plan_grant_statement(statement, "RevokeAccess", LogicalPlanStepType.RevokeAccess, plan_context=plan_context)
 
 
-def _plan_grant_listing(statement, root: str, node_type, effective: bool) -> LogicalPlan:
+def _plan_grant_listing(statement, root: str, node_type, effective: bool, *, plan_context) -> LogicalPlan:
     """The shared plan for the two grant listings.
 
     They differ in one property - `effective` - which selects which question
@@ -7140,14 +7096,14 @@ def _plan_grant_listing(statement, root: str, node_type, effective: bool) -> Log
     the same by construction, which is the point: the two statements are two
     questions about one object, not two features.
     """
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
     node = step_classes()[node_type]()
     node.object_kind = statement[root]["object_kind"]
     node.object_name = resolve_slot_value(statement[root]["object_name"], "granted object")
     node.pattern = _grant_object_pattern(node.object_kind, node.object_name)
     node.effective = effective
 
-    plan.add_node(random_string(), node)
+    plan.add_node(node)
 
     return plan
 
@@ -7160,7 +7116,8 @@ def plan_show_grants_on(statement, *, plan_context, **kwargs) -> LogicalPlan:
     act on. Owner-gated on the same authority a GRANT there would need: who may
     see the grants is who may change them."""
     return _plan_grant_listing(
-        statement, "ShowGrantsOn", LogicalPlanStepType.ShowGrantsOn, effective=False
+        statement, "ShowGrantsOn", LogicalPlanStepType.ShowGrantsOn, effective=False,
+        plan_context=plan_context,
     )
 
 
@@ -7178,6 +7135,7 @@ def plan_show_effective_grants_on(statement, *, plan_context, **kwargs) -> Logic
         "ShowEffectiveGrantsOn",
         LogicalPlanStepType.ShowEffectiveGrantsOn,
         effective=True,
+        plan_context=plan_context,
     )
 
 
@@ -7197,8 +7155,8 @@ def plan_listen(statement, *, plan_context, **kwargs) -> LogicalPlan:
     # missing FOR clause arrives as EVERYTHING rather than as None.
     node.outcome = statement[root]["outcome"]
 
-    plan = LogicalPlan()
-    plan.add_node(random_string(), node)
+    plan = LogicalPlan(plan_context)
+    plan.add_node(node)
     return plan
 
 
@@ -7213,8 +7171,8 @@ def plan_unlisten(statement, *, plan_context, **kwargs) -> LogicalPlan:
     node = UnlistenStep()
     node.task_name = _aside_object_name(statement[root]["name"])
 
-    plan = LogicalPlan()
-    plan.add_node(random_string(), node)
+    plan = LogicalPlan(plan_context)
+    plan.add_node(node)
     return plan
 
 
@@ -7344,7 +7302,7 @@ def plan_comment(statement, *, plan_context, **kwargs):
     COMMENT [ IF EXISTS ] ON { TABLE | VIEW } object_name IS 'comment_text'
     """
     root_node = "Comment"
-    plan = LogicalPlan()
+    plan = LogicalPlan(plan_context)
 
     comment_node = CommentStep()
 
@@ -7380,7 +7338,7 @@ def plan_comment(statement, *, plan_context, **kwargs):
     comment_node.if_exists = statement[root_node].get("if_exists", False)
 
     # Add the Comment node
-    plan.add_node(random_string(), comment_node)
+    plan.add_node(comment_node)
 
     return plan
 
@@ -7501,8 +7459,8 @@ def plan_call(statement, *, plan_context, **kwargs) -> LogicalPlan:
     node.procedure_name = procedure_name
     node.arguments = values
 
-    plan = LogicalPlan()
-    plan.add_node(random_string(), node)
+    plan = LogicalPlan(plan_context)
+    plan.add_node(node)
     return plan
 
 
@@ -7603,7 +7561,7 @@ def _insert_visibility_filter(logical_plan, nid, node, filter_dnf, telemetry, *,
             condition=expression_tree,  # Use the built expression tree
             all_relations={node.relation, node.alias},
         )
-        logical_plan.insert_node_after(random_string(), filter_node, nid)
+        logical_plan.insert_node_after(logical_plan.plan_context.node_ids.mint(), filter_node, nid)
         telemetry.visibility_filters_blank_condition_added += 1
     if filter_dnf:
         # Do some basic simplification early, less binding etc to do if we can
@@ -7619,7 +7577,7 @@ def _insert_visibility_filter(logical_plan, nid, node, filter_dnf, telemetry, *,
             all_relations={node.relation, node.alias},
         )
 
-        logical_plan.insert_node_after(random_string(), filter_node, nid)
+        logical_plan.insert_node_after(logical_plan.plan_context.node_ids.mint(), filter_node, nid)
         telemetry.visibility_filters_condition_added += 1
 
 

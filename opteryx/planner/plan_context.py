@@ -30,18 +30,23 @@ from typing import Optional
 from typing import Tuple
 
 from opteryx.compiled.planner.column_table import ColumnTable
+from opteryx.compiled.planner.plan_graph import NodeIds
 
 if TYPE_CHECKING:  # annotation only: importing the optimizer package here is a cycle
     from opteryx.planner.optimizer.statistics import RelationStatistics
 
 
 class PlanContext:
-    __slots__ = ("_statistics", "_cte_statistics", "scan_stats_cache", "columns")
+    __slots__ = ("_statistics", "_cte_statistics", "scan_stats_cache", "columns", "node_ids")
 
     def __init__(self) -> None:
         # The query's bound columns — see ColumnTable. Created with the context at
         # the start of planning, before anything mints a column.
         self.columns = ColumnTable()
+        # The query's plan node ids — every logical and physical plan of the query
+        # draws from this one counter, so plans merge without colliding (native
+        # plan graph P2, architect rulings 2026-09-27).
+        self.node_ids = NodeIds()
         self._statistics: Dict[int, Tuple[object, "RelationStatistics"]] = {}
         self._cte_statistics: Dict[str, "RelationStatistics"] = {}
         # Memo of each scan's manifest-derived base statistics, shared by every

@@ -144,7 +144,7 @@ def subplan_rooted_at(plan: LogicalPlan, root_nid: str) -> LogicalPlan:
     point: this says WHICH nodes, `copy_sub_plan` makes them independent, and
     `rename_relations` stops the copy claiming the original's relation names.
     """
-    sub = LogicalPlan()
+    sub = LogicalPlan(plan.plan_context)
     seen: set = set()
     stack = [root_nid]
     while stack:
@@ -152,7 +152,7 @@ def subplan_rooted_at(plan: LogicalPlan, root_nid: str) -> LogicalPlan:
         if nid in seen:
             continue
         seen.add(nid)
-        sub.add_node(nid, plan[nid])
+        sub.place(nid, plan[nid])
         for child, _target, _relation in plan.ingoing_edges(nid):
             stack.append(child)
     for nid in seen:
@@ -983,8 +983,7 @@ def _finalize_cte_sharing(
         boundary = SubqueryStep()
         boundary.alias = alias
         boundary.columns = _boundary_columns(body, head, boundary.alias)
-        boundary_nid = random_string()
-        body.add_node(boundary_nid, boundary)
+        boundary_nid = body.add_node(boundary)
         body.add_edge(head, boundary_nid)
 
     for key, body in shared.items():

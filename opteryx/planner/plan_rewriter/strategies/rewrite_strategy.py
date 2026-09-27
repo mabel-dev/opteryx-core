@@ -12,7 +12,7 @@ class PlanRewriteContext:
         self.pre_rewrite_tree: LogicalPlan = plan
         # The query's PlanContext: a strategy that synthesizes a column mints it here.
         self.plan_context = plan_context
-        self.rewritten_plan: LogicalPlan = LogicalPlan()
+        self.rewritten_plan: LogicalPlan = LogicalPlan(plan_context)
         self.ctes: dict = ctes
         self.node_id: str | None = None
         self.parent_nid: str | None = None

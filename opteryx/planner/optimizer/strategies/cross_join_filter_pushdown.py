@@ -581,7 +581,7 @@ class CrossJoinFilterPushdownStrategy(OptimizationStrategy):
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
         """Only run if there are cross joins in the plan."""
-        for node in plan._nodes.values():
+        for _nid, node in plan.nodes(True):
             if (
                 node.node_type == LogicalPlanStepType.Join
                 and node.type == "cross join"

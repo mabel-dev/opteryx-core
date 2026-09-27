@@ -191,8 +191,11 @@ class CopyOnWritePlan:
     def absorb(self, other):
         self._mutable().absorb(other)
 
-    def add_node(self, nid, node):
-        return self._mutable().add_node(nid, node)
+    def add_node(self, node):
+        return self._mutable().add_node(node)
+
+    def place(self, nid, node):
+        self._mutable().place(nid, node)
 
     def add_edge(self, source, target, relationship=None):
         return self._mutable().add_edge(source, target, relationship)

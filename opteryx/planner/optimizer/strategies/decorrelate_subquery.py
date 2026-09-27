@@ -764,8 +764,7 @@ def _guard_scalar_cardinality(inner_plan: LogicalPlan, telemetry) -> None:
         return
     exit_nid = inner_plan.get_exit_points()[0]
     guard = ScalarSubqueryGuardStep()
-    guard_nid = random_string()
-    inner_plan.add_node(guard_nid, guard)
+    guard_nid = inner_plan.add_node(guard)
     inner_plan.add_edge(exit_nid, guard_nid)
     setattr(
         telemetry,
@@ -913,7 +912,7 @@ def _graft_key_reducer(
     ):
         return False
 
-    reducer_nid = random_string()
+    reducer_nid = inner_plan.plan_context.node_ids.mint()
     inner_plan.insert_node_before(reducer_nid, reducer, target_nid)
     _label_inserted_join_legs(inner_plan, reducer_nid, reducer_exit)
     return True
@@ -1776,7 +1775,7 @@ def _graft_existence_join(
             "decorrelation built a join key naming a relation that is on neither leg"
         )
 
-    join_nid = random_string()
+    join_nid = plan.plan_context.node_ids.mint()
     plan.insert_node_before(join_nid, join, anchor_nid)
     _label_inserted_join_legs(plan, join_nid, inner_exit)
 
@@ -1838,7 +1837,7 @@ def _project_uncorrelated_exists(plan, project_nid, inner_plan, remove, replace_
     join.schemas = {**outer_schemas, **inner_schemas}
     join.left_columns, join.right_columns = [], []
 
-    join_nid = random_string()
+    join_nid = plan.plan_context.node_ids.mint()
     plan.insert_node_before(join_nid, join, project_nid)
     _label_inserted_join_legs(plan, join_nid, agg_nid)
 
@@ -2557,7 +2556,7 @@ def _build_filter_join(
             for column in (filter_node.columns or [])
             if column.node_type == NodeType.IDENTIFIER
         ]
-        join_nid = random_string()
+        join_nid = plan.plan_context.node_ids.mint()
         plan.insert_node_before(join_nid, join, filter_nid)
         _label_inserted_join_legs(plan, join_nid, inner_exit)
 
@@ -2623,7 +2622,7 @@ def _synthesize_count_aggregate(inner_plan: LogicalPlan, groups: list, *, plan_c
     aggregate.schema = RelationSchema(name=count_relation, columns=[count_schema_column])
 
     inner_exit = inner_plan.get_exit_points()[0]
-    agg_nid = random_string()
+    agg_nid = inner_plan.plan_context.node_ids.mint()
     inner_plan.insert_node_after(agg_nid, aggregate, inner_exit)
     return agg_nid, count_relation, _count_reference
 
@@ -2814,7 +2813,7 @@ def _materialize_boolean_value(
             "decorrelation built a join key naming a relation that is on neither leg"
         )
 
-    join_nid = random_string()
+    join_nid = plan.plan_context.node_ids.mint()
     plan.insert_node_before(join_nid, join, filter_nid)
     _label_inserted_join_legs(plan, join_nid, agg_nid)
 
@@ -3237,7 +3236,7 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
     else:
         join.left_columns, join.right_columns = [], []
 
-    join_nid = random_string()
+    join_nid = plan.plan_context.node_ids.mint()
     plan.insert_node_before(join_nid, join, filter_nid)
     _label_inserted_join_legs(plan, join_nid, inner_exit)
 
@@ -3273,7 +3272,7 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
         narrow_back = ProjectStep()
         narrow_back.columns = [_local_copy(col) for col in pre_decorrelation_columns]
         narrow_back.passthrough_columns = []
-        plan.insert_node_after(random_string(), narrow_back, filter_nid)
+        plan.insert_node_after(plan.plan_context.node_ids.mint(), narrow_back, filter_nid)
 
     # Correlations reaching past the enclosing scope are bound on the ancestor join
     # that owns their relation. This has to run AFTER the join is in the plan, since
@@ -3408,7 +3407,7 @@ def _decorrelate_projection(
     join.schemas = {**outer_schemas, **inner_schemas}
     join.left_columns, join.right_columns = [], []
 
-    join_nid = random_string()
+    join_nid = plan.plan_context.node_ids.mint()
     plan.insert_node_before(join_nid, join, project_nid)
     _label_inserted_join_legs(plan, join_nid, inner_exit)
 

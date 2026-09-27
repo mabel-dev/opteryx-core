@@ -130,7 +130,7 @@ class TimestampCastSinkStrategy(OptimizationStrategy):
     def visit(self, node: PlanStep, context: OptimizerContext) -> OptimizerContext:
         if node is None:
             return context
-        context.optimized_plan.add_node(context.node_id, node.shallow_copy())
+        context.optimized_plan[context.node_id] = node.shallow_copy()
         if context.parent_nid:
             # Re-adding the edge must preserve its relationship: a join leg label
             # records which side of the parent join this branch feeds.

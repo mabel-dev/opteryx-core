@@ -318,7 +318,7 @@ def _restore_at_original_position(plan, predicate, predicate_nid: str, plan_path
                 f"inputs carry the columns the filter reads, and exactly one must."
             )
         source, relationship = legs[0]
-        plan.add_node(predicate_nid, predicate)
+        plan.place(predicate_nid, predicate)
         plan.remove_edge(source, nid, relationship)
         plan.add_edge(source, predicate_nid)
         plan.add_edge(predicate_nid, nid, relationship)
@@ -867,7 +867,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         ):
             # Handle predicates specific to node types
             context = self._handle_predicates(node, context)
-            context.optimized_plan.add_node(context.node_id, node.shallow_copy())
+            context.optimized_plan[context.node_id] = node.shallow_copy()
             if context.last_nid:
                 context.optimized_plan.add_edge(context.node_id, context.last_nid)
 
@@ -953,7 +953,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     # predicate is put back above this node rather than pushed.
                     self.telemetry.optimization_predicate_pushdown_declined += 1
                     context.optimized_plan.insert_node_after(
-                        random_string(), predicate, context.node_id
+                        context.plan_context.node_ids.mint(), predicate, context.node_id
                     )
                 elif id(predicate) in context.predicate_paths:
                     self.telemetry.optimization_predicate_pushdown_unplaced += 1
@@ -1256,14 +1256,19 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 with_having = node.shallow_copy()
                 with_having.having_condition = combined
 
-                context.optimized_plan.add_node(context.node_id, with_having)
+                context.optimized_plan[context.node_id] = with_having
 
-                # Remove the Filter nodes from the plan
+                # Remove the Filter nodes from the plan. A predicate synthesized by
+                # this pass (a join's ON filter, an implied filter) was never given a
+                # Filter node — its id is pre-minted, not in the plan — so there is
+                # nothing to remove for it.
                 for predicate in having_predicates:
-                    context.optimized_plan.remove_node(context.collected_nids[id(predicate)], heal=True)
+                    predicate_nid = context.collected_nids[id(predicate)]
+                    if predicate_nid in context.optimized_plan:
+                        context.optimized_plan.remove_node(predicate_nid, heal=True)
                     self.telemetry.optimization_predicate_pushdown += 1
             else:
-                context.optimized_plan.add_node(context.node_id, node.shallow_copy())
+                context.optimized_plan[context.node_id] = node.shallow_copy()
 
             # Non-HAVING predicates left in remaining_predicates are simply left
             # to keep flowing in collected_predicates, exactly as before this
@@ -1391,7 +1396,9 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     for node in new_predicates
                 ]
                 for on_filter in on_filters:
-                    context.collected_nids[id(on_filter)] = random_string()
+                    # Pre-minted: this predicate has no Filter node yet; the id is
+                    # the one it gets if it is inserted.
+                    context.collected_nids[id(on_filter)] = context.plan_context.node_ids.mint()
                 context.collected_predicates.extend(on_filters)
 
             if context.collected_predicates:
@@ -1697,7 +1704,8 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                                     continue
                                 existing_keys.add(dedup_key)
                                 implied = _make_implied_filter(op, target_col, lit)
-                                context.collected_nids[id(implied)] = random_string()
+                                # Pre-minted, as for a join's ON filters above.
+                                context.collected_nids[id(implied)] = context.plan_context.node_ids.mint()
                                 derived.append(implied)
                                 self.telemetry.optimization_predicate_pullup_implied += 1
                         context.collected_predicates.extend(derived)
@@ -1707,7 +1715,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 # rather than an optimization. The real join outcomes are counted
                 # where they happen — _into_join, _add_to_inner_join,
                 # _cross_join_to_inner_join, _pullup_implied, _declined.
-                context.optimized_plan.add_node(context.node_id, node)
+                context.optimized_plan[context.node_id] = node
 
             if node.on is None and node.type == ("inner"):
                 raise UnsupportedSyntaxError(

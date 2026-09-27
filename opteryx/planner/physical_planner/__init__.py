@@ -996,7 +996,7 @@ def create_physical_plan(
             node.manifest = logical_node.manifest
         node.uuid = logical_node.uuid
 
-        plan.add_node(nid, node)
+        plan.place(nid, node)
 
     for source, destination, relation in logical_plan.edges():
         plan.add_edge(source, destination, relation)

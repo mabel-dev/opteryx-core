@@ -279,7 +279,7 @@ class JoinPlanningStrategy(OptimizationStrategy):
     def should_i_run(self, plan: LogicalPlan) -> bool:
         if not features.enable_dpccp_join_planning:
             return False
-        for node in plan._nodes.values():
+        for _nid, node in plan.nodes(True):
             if _is_unconverted_cross_join(node):
                 return True
         return False

@@ -827,6 +827,16 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
+    # The plan graph behind every logical and physical plan: node ids, edges and
+    # edge roles native (src/cpp/planner/plan_graph.hpp); steps are its Python
+    # payload.
+    Extension(
+        "opteryx.compiled.planner.plan_graph",
+        sources=["opteryx/compiled/planner/plan_graph.pyx"],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+    ),
     # Helpers for relation statistics
     Extension(
         "opteryx.compiled.structures.relation_statistics",

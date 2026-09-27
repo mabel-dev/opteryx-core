@@ -117,8 +117,12 @@ class SplitConjunctivePredicatesStrategy(OptimizationStrategy):
         )
 
         for i, new_node in enumerate(new_nodes):
-            nid = random_string() if (i + 1) < len(new_nodes) else context.node_id
-            context.optimized_plan.add_node(nid, new_node.shallow_copy())
+            nid = (
+                context.plan_context.node_ids.mint()
+                if (i + 1) < len(new_nodes)
+                else context.node_id
+            )
+            context.optimized_plan.place(nid, new_node.shallow_copy())
             if context.parent_nid:
                 context.optimized_plan.add_edge(
                     nid, context.parent_nid, parent_relationship if i == 0 else None

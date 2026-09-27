@@ -119,9 +119,8 @@ def _make_window(partition_relation: str, col_names: list, plan_context):
 
 def _insert_window_on_edge(plan: LogicalPlan, leg_nid: str, setop_nid: str, window) -> str:
     """Splice a Window node onto the edge leg_nid -> setop_nid."""
-    window_nid = random_string()
     leg = plan.relationship(leg_nid, setop_nid)
-    plan.add_node(window_nid, window)
+    window_nid = plan.add_node(window)
     plan.remove_edge(leg_nid, setop_nid, leg)
     plan.add_edge(leg_nid, window_nid)
     # The Window takes the leg's place, and its label.
@@ -204,6 +203,6 @@ class IntersectExceptAllToWindowJoinStrategy(PlanRewriteStrategy):
                 for c in col_names
             ]
             project.passthrough_columns = []
-            plan.insert_node_after(random_string(), project, nid)
+            plan.insert_node_after(plan.plan_context.node_ids.mint(), project, nid)
 
         return plan

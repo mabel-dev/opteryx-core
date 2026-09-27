@@ -423,8 +423,7 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
 
         # Every guard has passed — only now does the copy enter the plan.
         plan.absorb(reducer_source)
-        reducer_nid = random_string()
-        plan.add_node(reducer_nid, reducer)
+        reducer_nid = plan.add_node(reducer)
         plan.remove_edge(target_child, target_parent, parent_rel)
         plan.add_edge(target_child, reducer_nid, "left")
         plan.add_edge(reducer_exit, reducer_nid, "right")

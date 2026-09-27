@@ -381,7 +381,7 @@ class OptimizerVisitor:
             # Rebuild-from-empty strategies re-add every surviving node and
             # edge themselves; they must start from nothing, not from a view
             # of the input plan — see OptimizationStrategy.rebuilds_plan.
-            context.optimized_plan = LogicalPlan()
+            context.optimized_plan = LogicalPlan(context.plan_context)
 
         def _inner(nid, parent_nid, context):
             node = context.pre_optimized_tree[nid]
@@ -444,19 +444,19 @@ class OptimizerVisitor:
                     self.refreshed_statistics = True
                 before = (len(current_plan), len(current_plan.edges()))
                 previous_plan = current_plan
-                pre_epoch = current_plan._mutation_epoch
+                pre_epoch = current_plan.mutation_epoch
                 current_plan = self.traverse(current_plan, strategy)
                 # Did the strategy actually change anything? Every plan change
                 # goes through a Graph mutator (node replace, add/remove of
-                # nodes or edges), each of which bumps _mutation_epoch. A copy
+                # nodes or edges), each of which bumps mutation_epoch. A copy
                 # starts at epoch 0, so: same object back -> epoch moved; a
                 # copy (or freshly built plan) back -> any mutation after the
                 # copy was taken. A strategy handing back an untouched copy
                 # counts as unchanged.
                 if current_plan is previous_plan:
-                    plan_changed = current_plan._mutation_epoch != pre_epoch
+                    plan_changed = current_plan.mutation_epoch != pre_epoch
                 else:
-                    plan_changed = current_plan._mutation_epoch > 0
+                    plan_changed = current_plan.mutation_epoch > 0
                     # Graph.copy() does not carry instance attributes, so a
                     # strategy that hands back a copy silently drops the
                     # staleness flag and the getattr default (True) forces a

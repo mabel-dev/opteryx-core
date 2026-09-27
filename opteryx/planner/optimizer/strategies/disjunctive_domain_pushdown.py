@@ -401,7 +401,7 @@ class DisjunctiveDomainPushdownStrategy(OptimizationStrategy):
         return plan
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
-        for node in plan._nodes.values():
+        for _nid, node in plan.nodes(True):
             if node.node_type == LogicalPlanStepType.Filter and node.condition is not None:
                 for conjunct in _split_and(node.condition):
                     while conjunct is not None and conjunct.node_type == NodeType.NESTED:

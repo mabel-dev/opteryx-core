@@ -963,7 +963,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
                         all_relations={target_relation},
                     )
                     context.optimized_plan.insert_node_after(
-                        random_string(), filter_node, reader_nid
+                        context.plan_context.node_ids.mint(), filter_node, reader_nid
                     )
                     self.telemetry.increase(telemetry_reading)
 

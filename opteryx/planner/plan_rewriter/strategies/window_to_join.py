@@ -204,8 +204,7 @@ def _build_window_cte(
         agg_step = AggregateStep()
         agg_step.groups = []
         agg_step.aggregates = list(agg_nodes)
-    agg_nid = random_string()
-    inner_plan.add_node(agg_nid, agg_step)
+    agg_nid = inner_plan.add_node(agg_step)
     inner_plan.add_edge(cte_root_nid, agg_nid)
 
     # Project node above the AggAndGroup — required so the binder renames $derived to
@@ -216,19 +215,17 @@ def _build_window_cte(
     project_step.columns = list(inner_partition_by) + list(agg_nodes)
     project_step.passthrough_columns = []
     project_step.except_columns = None
-    project_nid = random_string()
-    inner_plan.add_node(project_nid, project_step)
+    project_nid = inner_plan.add_node(project_step)
     inner_plan.add_edge(agg_nid, project_nid)
 
     # Wrap in a Subquery node so the binder treats it as a named relation.
     subquery_wrapper = SubqueryStep()
     subquery_wrapper.alias = subquery_alias
     subquery_wrapper.columns = [Wildcard()]
-    subquery_wrapper_nid = random_string()
 
     # Merge CTE inner plan into main plan.
     plan.absorb(inner_plan)
-    plan.add_node(subquery_wrapper_nid, subquery_wrapper)
+    subquery_wrapper_nid = plan.add_node(subquery_wrapper)
     plan.add_edge(project_nid, subquery_wrapper_nid)
 
     return subquery_wrapper_nid, subquery_alias
@@ -292,7 +289,7 @@ def _rewrite_window_chain(plan: LogicalPlan, chain: list, *, plan_context) -> Lo
     filter_step.passthrough_columns = []
     filter_step.except_columns = None
     filter_step.columns = [outer_wildcard] + win_refs
-    filter_nid = random_string()
+    filter_nid = plan.plan_context.node_ids.mint()
     plan.insert_node_after(filter_nid, filter_step, chain[-1])
 
     return plan

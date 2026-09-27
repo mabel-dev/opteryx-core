@@ -737,8 +737,7 @@ def plan_merge(statement, *, plan_context, **kwargs):
     merge_step.statement_name = "MERGE INTO"
     merge_step.operation = "merge"
 
-    merge_id = random_string()
-    plan.add_node(merge_id, merge_step)
+    merge_id = plan.add_node(merge_step)
     plan.add_edge(exit_node_id, merge_id)
 
     return plan
@@ -932,12 +931,9 @@ def _sink_node(relation_name: str, target_columns, alias: str, keyword: str, ope
 
 
 def _attach_sink(plan, step):
-    from opteryx.utils import random_string
-
     exit_node_id = plan.get_exit_points()[0]
     step.source_tail_id = exit_node_id
-    node_id = random_string()
-    plan.add_node(node_id, step)
+    node_id = plan.add_node(step)
     plan.add_edge(exit_node_id, node_id)
     return plan
 

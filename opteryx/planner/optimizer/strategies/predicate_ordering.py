@@ -304,7 +304,7 @@ class PredicateOrderingStrategy(OptimizationStrategy):
                 plan_context=context.plan_context,
             )
 
-            context.optimized_plan.insert_node_after(random_string(), new_node, context.node_id)
+            context.optimized_plan.insert_node_after(context.optimized_plan.plan_context.node_ids.mint(), new_node, context.node_id)
             context.collected_predicates.clear()
 
         return context

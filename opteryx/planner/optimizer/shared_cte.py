@@ -256,8 +256,7 @@ def _push_common_predicates(body: LogicalPlan, refs, body_schema, telemetry) -> 
         )
         body_filter.relations = set()
         body_filter.all_relations = set()
-        filter_nid = random_string()
-        body.add_node(filter_nid, body_filter)
+        filter_nid = body.add_node(body_filter)
         body.add_edge(head_nid, filter_nid)
         head_nid = filter_nid
 

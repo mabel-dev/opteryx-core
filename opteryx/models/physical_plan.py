@@ -7,39 +7,21 @@
 The Physical Plan is a tree of nodes that represent the execution plan for a query.
 """
 
-from typing import TYPE_CHECKING
 from typing import Optional
 
-from opteryx.third_party.travers import Graph
+from opteryx.compiled.planner.plan_graph import PlanGraph
 
-if TYPE_CHECKING:  # pragma: no cover
-    from opteryx.planner.plan_context import PlanContext
 
-class PhysicalPlan(Graph):
+class PhysicalPlan(PlanGraph):
     """
     The execution tree is defined separately to the planner to simplify the
     complex code which is the planner from the tree that describes the plan.
 
-    It carries the query's PlanContext: the compiler lowers it at execution time and
-    mints the columns it needs (join-key coercions, zone-map terms) in the same
-    column table planning used (architect, 2026-09-26).
+    It carries the query's PlanContext (the PlanGraph base binds it, copies
+    included): the compiler lowers it at execution time and mints the columns it
+    needs (join-key coercions, zone-map terms) in the same column table planning
+    used (architect, 2026-09-26).
     """
-
-    def __init__(self, plan_context: "PlanContext"):
-        super().__init__()
-        self.plan_context = plan_context
-
-    # Graph's copies build through __new__, skipping __init__; a copy is still
-    # the same query, so it carries the same context.
-    def copy(self) -> "PhysicalPlan":
-        clone = super().copy()
-        clone.plan_context = self.plan_context
-        return clone
-
-    def shallow_copy(self) -> "PhysicalPlan":
-        clone = super().shallow_copy()
-        clone.plan_context = self.plan_context
-        return clone
 
     def depth_first_search_flat(
         self, node: Optional[str] = None, visited: Optional[set] = None
@@ -96,6 +78,3 @@ class PhysicalPlan(Graph):
             node = self[nid]
             readings[node.identity] = node.sensors()
         return readings
-
-    def __del__(self):
-        pass
