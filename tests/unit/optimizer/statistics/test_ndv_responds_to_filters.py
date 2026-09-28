@@ -3,7 +3,7 @@
 A filter drops ROWS. A distinct value disappears only when every row carrying
 it is dropped, so NDV falls far more slowly than the row count
 (`surviving_distinct_count`), and it can never exceed the row count that
-remains (`_cap_ndvs`). Before this, neither happened: `l_orderkey` came out of
+remains (`cap_ndvs`, src/cpp/planner/statistics_refresh.hpp). Before this, neither happened: `l_orderkey` came out of
 a scan reporting 60,000 distinct values against 20,058 rows.
 
 The second half of this file is the trap. Scaling `distinct_count` in place
@@ -21,31 +21,57 @@ import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
+# Importing opteryx.planner.optimizer (the package) first resolves the
+# pre-existing import cycle a compiled planner module hits when imported first.
+import opteryx.planner.optimizer  # noqa: F401
+from opteryx.compiled.planner.plan_graph import EdgeRole
+from opteryx.compiled.planner.statistics import StatisticsInput
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
+from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.compiled.structures.plan_steps import FilterStep
+from opteryx.compiled.structures.plan_steps import JoinStep
+from opteryx.compiled.structures.plan_steps import ScanStep
+from opteryx.expression import NodeType
 from opteryx.planner.cost_estimation import surviving_distinct_count
-from opteryx.planner.optimizer.statistics import ColumnRange
-from opteryx.planner.optimizer.statistics import ColumnStatistics
-from opteryx.planner.optimizer.statistics import RelationStatistics
-from opteryx.planner.optimizer.statistics_refresh import _equi_key_classes
-from opteryx.planner.optimizer.statistics_refresh import _scale_ndvs
-
-KEY = b"key_left________"
-OTHER_KEY = b"key_right_______"
+from opteryx.planner.logical_planner import LogicalPlan
+from opteryx.planner.plan_context import PlanContext
+from opteryx.types.logical_type import INT64
 
 
-def _relation(rows, ndv, base_ndv=None, base_rows=None, key=KEY):
-    return RelationStatistics(
+def _relation(plan_context, rows, ndv, key, base_ndv=None, base_rows=None, extra=None):
+    column_stats = {key: {"distinct_count": ndv, "base_distinct_count": base_ndv}}
+    column_stats.update(extra or {})
+    return StatisticsInput(
+        plan_context.columns,
         row_count_estimate=rows,
-        columns={
-            key: ColumnStatistics(
-                column_name="k",
-                data_type="INT64",
-                distinct_count=ndv,
-                base_distinct_count=base_ndv,
-                value_range=ColumnRange(),
-            )
-        },
+        column_stats=column_stats,
         base_row_count=base_rows,
     )
+
+
+def _join_divisor(plan_context, left, right, left_key, right_key):
+    """The divisor the inner-join estimate applied: |L| x |R| / estimate.
+
+    The key classes' KeyStats are internal to the native join propagator; the
+    number they produce is the join's row count, |L| x |R| / max(ndv_l, ndv_r)
+    for one null-free key class, so the divisor is recovered from it (exactly:
+    these fixtures divide evenly)."""
+    join = JoinStep()
+    join.type = "inner"
+    join.left_columns = [left_key]
+    join.right_columns = [right_key]
+    plan = LogicalPlan(plan_context)
+    left_nid = plan.add_node(ScanStep())
+    right_nid = plan.add_node(ScanStep())
+    join_nid = plan.add_node(join)
+    plan.add_edge(left_nid, join_nid, EdgeRole.LEFT)
+    plan.add_edge(right_nid, join_nid, EdgeRole.RIGHT)
+    store = plan_context.statistics
+    store.seed(left_nid, left)
+    store.seed(right_nid, right)
+    store.compute(plan, join_nid)
+    return store.row_count(left_nid) * store.row_count(right_nid) / store.row_count(join_nid)
 
 
 def test_a_value_survives_while_any_of_its_rows_does():
@@ -64,11 +90,34 @@ def test_scaling_never_grows_or_invents():
 
 
 def test_scaling_reduces_the_live_count_and_keeps_the_domain():
-    base = _relation(600_000, ndv=150_000)
-    scaled = _scale_ndvs(base.columns, base, 0.63)[KEY]
+    """A Filter of selectivity 0.63 on ANOTHER column (`o < 63` over o in
+    [0, 100]) scales the key's NDV -- the Filter propagator's NDV scaling, with
+    no range narrowing or equality capping on the key itself."""
+    plan_context = PlanContext()
+    key = plan_context.columns.relation_column("t", "k", column_type=INT64)
+    other = plan_context.columns.relation_column("t", "o", column_type=INT64)
+    base = _relation(
+        plan_context, 600_000, ndv=150_000, key=key.identity, extra={other.identity: {"value_range": (0, 100)}}
+    )
 
-    assert scaled.distinct_count < 150_000, "the live count must respond to the filter"
-    assert scaled.domain_distinct_count == 150_000, "the domain is not a filterable thing"
+    arena = plan_context.expressions
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="o", arena=arena)
+    identifier.schema_column = other
+    condition = Comparison(value="Lt", left=identifier, right=Literal(value=63, type=INT64, arena=arena), arena=arena)
+    step = FilterStep()
+    step.condition = condition
+
+    plan = LogicalPlan(plan_context)
+    child_nid = plan.add_node(ScanStep())
+    filter_nid = plan.add_node(step)
+    plan.add_edge(child_nid, filter_nid)
+    store = plan_context.statistics
+    store.seed(child_nid, base)
+    assert store.estimate_selectivity(child_nid, condition) == 0.63
+    store.compute(plan, filter_nid)
+
+    assert store.distinct_count(filter_nid, key.identity) < 150_000, "the live count must respond to the filter"
+    assert store.domain_distinct_count(filter_nid, key.identity) == 150_000, "the domain is not a filterable thing"
 
 
 def test_a_filter_does_not_move_the_join_divisor():
@@ -76,21 +125,23 @@ def test_a_filter_does_not_move_the_join_divisor():
     one side must not move it -- otherwise the filter's selectivity is charged a
     second time inside the divisor and a filtered dimension predicts no
     reduction at all."""
-    right = _relation(100_000, ndv=100_000, key=OTHER_KEY)
+    plan_context = PlanContext()
+    key = plan_context.columns.relation_column("l", "k").identity
+    other_key = plan_context.columns.relation_column("r", "k").identity
+    right = _relation(plan_context, 100_000, ndv=100_000, key=other_key)
 
-    unfiltered = _relation(200_000, ndv=200_000)
+    unfiltered = _relation(plan_context, 200_000, ndv=200_000, key=key)
     # Same relation after a filter: rows and the live NDV both fell, the domain
-    # did not -- exactly what _scale_ndvs produces.
-    filtered = _relation(20_000, ndv=20_000, base_ndv=200_000, base_rows=200_000)
+    # did not -- exactly what the Filter's NDV scaling produces.
+    filtered = _relation(plan_context, 20_000, ndv=20_000, key=key, base_ndv=200_000, base_rows=200_000)
 
-    before = _equi_key_classes([KEY], [OTHER_KEY], unfiltered, right)[0]
-    after = _equi_key_classes([KEY], [OTHER_KEY], filtered, right)[0]
+    before = _join_divisor(plan_context, unfiltered, right, key, other_key)
+    after = _join_divisor(plan_context, filtered, right, key, other_key)
 
-    assert max(k.ndv for k in before) == max(k.ndv for k in after), (
-        f"filtering moved the divisor {max(k.ndv for k in before)} -> "
-        f"{max(k.ndv for k in after)}; the post-filter NDV reached the divisor"
+    assert before == after, (
+        f"filtering moved the divisor {before} -> {after}; the post-filter NDV reached the divisor"
     )
-    assert max(k.ndv for k in after) == 200_000
+    assert after == 200_000
 
 
 if __name__ == "__main__":  # pragma: no cover

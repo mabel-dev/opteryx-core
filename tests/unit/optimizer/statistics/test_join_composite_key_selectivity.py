@@ -32,53 +32,63 @@ not bind, so neither property can mask a regression in the other.
 
 import os
 import sys
-from types import SimpleNamespace
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
 import pytest
 
+# Importing opteryx.planner.optimizer (the package) first resolves the
+# pre-existing import cycle a compiled planner module hits when imported first.
+import opteryx.planner.optimizer  # noqa: F401
 from opteryx.compiled.planner.plan_graph import EdgeRole
-from opteryx.planner.optimizer.statistics import ColumnStatistics
-from opteryx.planner.optimizer.statistics import RelationStatistics
-from opteryx.planner.optimizer.statistics_refresh import _join_stats
-
-# Join keys reach _join_stats as raw column identities (opaque bytes) -- see
-# test_join_keystats_null_fraction.py for why name-shaped keys would silently
-# hide a dead-lookup bug.
-_LK1 = b"tes_lk_00000001"
-_LK2 = b"tes_lk_00000002"
-_RK1 = b"tes_rk_00000003"
-_RK2 = b"tes_rk_00000004"
-
-
-def _join_node(n_keys):
-    return SimpleNamespace(
-        type="inner",
-        left_columns=[_LK1, _LK2][:n_keys],
-        right_columns=[_RK1, _RK2][:n_keys],
-    )
+from opteryx.compiled.planner.statistics import StatisticsInput
+from opteryx.compiled.structures.plan_steps import JoinStep
+from opteryx.compiled.structures.plan_steps import ScanStep
+from opteryx.planner.logical_planner import LogicalPlan
+from opteryx.planner.plan_context import PlanContext
 
 
 def _estimate(n_keys, rows):
     """Both sides `rows` rows; each key column has NDV 100 (per-key selectivity
-    1/100), independent of the other key."""
-    left = RelationStatistics(
-        row_count_estimate=rows,
-        columns={
-            _LK1: ColumnStatistics(column_name="lk1", data_type="INTEGER", distinct_count=100, null_fraction=0.0),
-            _LK2: ColumnStatistics(column_name="lk2", data_type="INTEGER", distinct_count=100, null_fraction=0.0),
-        },
+    1/100), independent of the other key.
+
+    The join's native propagator runs alone (`StatisticsStore.compute`) over
+    the two legs' seeded statistics. Join keys are raw column identities
+    minted in the query's ColumnTable -- see test_join_keystats_null_fraction.py
+    for why name-shaped keys would silently hide a dead-lookup bug."""
+    plan_context = PlanContext()
+    columns = plan_context.columns
+    left_keys = [columns.relation_column("l", name).identity for name in ("lk1", "lk2")]
+    right_keys = [columns.relation_column("r", name).identity for name in ("rk1", "rk2")]
+
+    join = JoinStep()
+    join.type = "inner"
+    join.left_columns = left_keys[:n_keys]
+    join.right_columns = right_keys[:n_keys]
+
+    plan = LogicalPlan(plan_context)
+    left_nid = plan.add_node(ScanStep())
+    right_nid = plan.add_node(ScanStep())
+    join_nid = plan.add_node(join)
+    plan.add_edge(left_nid, join_nid, EdgeRole.LEFT)
+    plan.add_edge(right_nid, join_nid, EdgeRole.RIGHT)
+
+    key_stats = {"distinct_count": 100, "null_fraction": 0.0}
+    store = plan_context.statistics
+    store.seed(
+        left_nid,
+        StatisticsInput(
+            columns, row_count_estimate=rows, column_stats={key: dict(key_stats) for key in left_keys}
+        ),
     )
-    right = RelationStatistics(
-        row_count_estimate=rows,
-        columns={
-            _RK1: ColumnStatistics(column_name="rk1", data_type="INTEGER", distinct_count=100, null_fraction=0.0),
-            _RK2: ColumnStatistics(column_name="rk2", data_type="INTEGER", distinct_count=100, null_fraction=0.0),
-        },
+    store.seed(
+        right_nid,
+        StatisticsInput(
+            columns, row_count_estimate=rows, column_stats={key: dict(key_stats) for key in right_keys}
+        ),
     )
-    child_stats = [(left, EdgeRole.LEFT), (right, EdgeRole.RIGHT)]
-    return _join_stats(_join_node(n_keys), child_stats).row_count
+    store.compute(plan, join_nid)
+    return store.row_count(join_nid)
 
 
 def test_second_key_column_further_reduces_the_estimate():
@@ -97,7 +107,7 @@ def test_second_key_column_further_reduces_the_estimate():
     # dropped (the bug), composite_key == single_key instead.
     assert composite_key < single_key, (
         f"second join-key column did not reduce the estimate at all "
-        f"({composite_key} == {single_key}) -- _join_stats is only using "
+        f"({composite_key} == {single_key}) -- the join propagator is only using "
         f"the first equi-join key"
     )
     assert composite_key == pytest.approx(1e8, rel=0.05), composite_key

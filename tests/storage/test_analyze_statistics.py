@@ -26,6 +26,12 @@ from opteryx.types.logical_type import VARCHAR
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
+from opteryx.compiled.planner.statistics import StatisticsStore
+from opteryx.compiled.structures.plan_steps import ExitStep
+from opteryx.compiled.structures.plan_steps import ScanStep
+from opteryx.models.manifest import Manifest
+from opteryx.planner.logical_planner import LogicalPlan
+from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
 
 DATASET = "testdata.satellites"
 _MANIFEST_GLOB = f"testdata/satellites/{DATASET_MANIFEST_NAME}"
@@ -91,6 +97,28 @@ def _analyzed_column_count(sketch) -> int:
 def _metadata():
     eng = connector_factory(DATASET, None).table_engine(DATASET, telemetry=None)
     return eng.get_dataset_metadata()
+
+
+def _scan_statistics(described, manifest, dataset=DATASET):
+    """(store, scan nid, bound schema): the statistics the planner reads of
+    `manifest` - bound the way binder/dataset.py::visit_scan binds a scan (the
+    connector's descriptor bound in the query's ColumnTable, the manifest rebound
+    over it), then the base statistics the statistics refresh gives a Scan over
+    it (all of its columns), keyed by BOUND column identity."""
+    plan_context = PlanContext()
+    schema = plan_context.columns.bind_relation(described, dataset)
+    plan = LogicalPlan(plan_context)
+    scan = plan.add_node(ScanStep(relation=dataset, schema=schema, manifest=Manifest(manifest.native, schema)))
+    plan.add_edge(scan, plan.add_node(ExitStep()))
+    refresh_statistics(plan, plan_context)
+    return plan_context.statistics, scan, schema
+
+
+def _column_statistic(described, manifest, accessor, name, dataset=DATASET):
+    """`accessor` (a StatisticsStore column reader) of column `name` at a Scan
+    over `manifest` - see _scan_statistics."""
+    store, scan, schema = _scan_statistics(described, manifest, dataset)
+    return accessor(store, scan, schema.find_column(name).identity)
 
 
 def test_analyze_for_columns_writes_scoped_manifest():
@@ -214,10 +242,10 @@ def test_prune_files_wired_from_analyze_manifest_int_column():
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS id")
-        _, manifest = _metadata()
+        described, manifest = _metadata()
 
         assert manifest.bounds_are_ordinal is True
-        assert manifest.get_ordinal_bounds("id") is not None
+        assert _column_statistic(described, manifest, StatisticsStore.ordinal_bounds, "id") is not None
 
         # id's real range is [1, 177] — 10000 is far outside it.
         manifest = manifest.prune_files(
@@ -251,12 +279,12 @@ def test_prune_files_wired_from_analyze_manifest_float_column():
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS gm")
-        _, manifest = _metadata()
+        described, manifest = _metadata()
 
         # The stored bound is an ordinal key, not the real value. (gm's real
         # min happens to be exactly 0.0, whose ordinal key is also 0 — use
         # the max bound, where the transform is unambiguously visible.)
-        _, stored_max = manifest.get_ordinal_bounds("gm")
+        _, stored_max = _column_statistic(described, manifest, StatisticsStore.ordinal_bounds, "gm")
         assert stored_max != 9887.834  # real max is 9887.834; ordinal key is not
 
         # gm's real range is [0.0, 9887.834] — 1e12 is far outside it.
@@ -290,9 +318,9 @@ def test_prune_files_wired_from_analyze_manifest_varchar_column():
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS name")
-        _, manifest = _metadata()
+        described, manifest = _metadata()
 
-        stored_min, _ = manifest.get_ordinal_bounds("name")
+        stored_min, _ = _column_statistic(described, manifest, StatisticsStore.ordinal_bounds, "name")
         assert stored_min != "Adrastea"
         assert type(stored_min) is int
 
@@ -517,17 +545,20 @@ def test_drop_statistics_for_columns_clears_all_new_stat_types():
 
 
 def test_char_class_stats_light_up_the_selectivity_estimator():
-    """End-to-end: ANALYZE a real VARCHAR column and confirm
-    Manifest.get_char_class_stats returns usable (proportions, avg_length),
-    the closest in-engine reproduction of the offline experiment's own
-    validation against real data."""
+    """End-to-end: ANALYZE a real VARCHAR column and confirm the planner's
+    statistics for it (a Scan's base statistics) carry usable class
+    proportions and avg_length, the closest in-engine reproduction of the
+    offline experiment's own validation against real data."""
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS name")
-        _, manifest = _metadata()
-        result = manifest.get_char_class_stats("name")
-        assert result is not None
-        class_proportions, avg_length = result
+        described, manifest = _metadata()
+        store, scan, schema = _scan_statistics(described, manifest)
+        identity = schema.find_column("name").identity
+        class_proportions = store.class_proportions(scan, identity)
+        avg_length = store.avg_length(scan, identity)
+        assert class_proportions is not None
+        assert avg_length is not None
         assert set(class_proportions.keys()) == {
             "upper", "lower", "digit", "whitespace", "punct_text",
             "semantic", "extended", "control",
@@ -542,8 +573,12 @@ def test_no_char_class_stats_for_non_string_column():
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS gm")
-        _, manifest = _metadata()
-        assert manifest.get_char_class_stats("gm") is None
+        described, manifest = _metadata()
+        store, scan, schema = _scan_statistics(described, manifest)
+        identity = schema.find_column("gm").identity
+        # the class proportions and avg_length are recorded together or not at all
+        assert store.class_proportions(scan, identity) is None
+        assert store.avg_length(scan, identity) is None
     finally:
         _clean()
 
@@ -624,18 +659,18 @@ def _clean_nullable():
 
 
 def test_length_bounds_reach_the_manifest_from_an_analyzed_dataset():
-    """get_length_bounds returned None for EVERY filesystem dataset, however
-    recently ANALYZE'd, because min_length_bounds/max_length_bounds were never
-    carried from the manifest onto the planner's file rows."""
+    """The planner's length bounds were None for EVERY filesystem dataset,
+    however recently ANALYZE'd, because min_length_bounds/max_length_bounds were
+    never carried from the manifest onto the planner's file rows."""
     _clean()
     try:
-        _, manifest = _fresh_metadata(DATASET)
+        described, manifest = _fresh_metadata(DATASET)
         # Nothing ANALYZE'd: no length statistics exist at all.
-        assert manifest.get_length_bounds("name") is None
+        assert _column_statistic(described, manifest, StatisticsStore.length_bounds, "name") is None
 
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS name")
-        _, manifest = _fresh_metadata(DATASET)
-        bounds = manifest.get_length_bounds("name")
+        described, manifest = _fresh_metadata(DATASET)
+        bounds = _column_statistic(described, manifest, StatisticsStore.length_bounds, "name")
         assert bounds is not None, "ANALYZE'd string column still has no length bounds"
         min_length, max_length = bounds
         assert 0 < min_length <= max_length
@@ -652,8 +687,7 @@ def test_null_counts_reach_the_manifest_from_an_analyzed_dataset():
     _clean_nullable()
     try:
         _run(f"ANALYZE TABLE {NULLABLE_DATASET}")
-        _, manifest = _astronauts_metadata()
-        assert manifest.has_null_counts()
+        described, manifest = _astronauts_metadata()
         # death_date is mostly null in this dataset — a real count, not zeros.
         position = manifest.position_of("death_date")
         null_count = manifest.native.cell(0, position)["null_count"]
@@ -662,35 +696,38 @@ def test_null_counts_reach_the_manifest_from_an_analyzed_dataset():
         assert null_count == _manifest_rows(glob.glob(_NULLABLE_MANIFEST_GLOB)[0])[0]["null_counts"][position]
         assert manifest.get_total_null_count("death_date") == null_count
 
-        null_fraction = manifest.estimate_null_fraction("death_date")
+        # The planner records a null fraction only when the manifest counts
+        # nulls at all (the old `has_null_counts()` gate) - so a recorded one
+        # is also that fact.
+        null_fraction = _column_statistic(
+            described, manifest, StatisticsStore.null_fraction, "death_date", NULLABLE_DATASET
+        )
         assert null_fraction is not None and 0.0 < null_fraction < 1.0
     finally:
         _clean_nullable()
 
 
 def test_relation_statistics_carry_length_bounds_and_null_fraction():
-    """End-to-end at the surface the planner actually reads: the
-    RelationStatistics snapshot the selectivity estimators are handed."""
+    """End-to-end at the surface the planner actually reads: the statistics
+    the selectivity estimators are handed (a Scan's base statistics)."""
     _clean_nullable()
     try:
         _run(f"ANALYZE TABLE {NULLABLE_DATASET}")
         described, manifest = _astronauts_metadata()
-        # Bound the way binder/dataset.py::visit_scan binds a scan: statistics are
-        # keyed by BOUND column identity, so the manifest reads the bound schema.
-        manifest.schema = PlanContext().columns.bind_relation(described, NULLABLE_DATASET)
-        stats = manifest._as_relation_statistics()
+        store, scan, schema = _scan_statistics(described, manifest, NULLABLE_DATASET)
 
-        column = next(
-            c for c in manifest.schema.columns if c.name == "death_mission"
-        )
-        column_stats = stats.columns[column.identity]
-        assert column_stats.length_bounds is not None
-        assert column_stats.null_fraction is not None and column_stats.null_fraction > 0
+        identity = schema.find_column("death_mission").identity
+        assert store.has_column(scan, identity)
+        length_bounds = store.length_bounds(scan, identity)
+        null_fraction = store.null_fraction(scan, identity)
+        avg_length = store.avg_length(scan, identity)
+        assert length_bounds is not None
+        assert null_fraction is not None and null_fraction > 0
         # avg_length divides char_total_bytes by the NON-NULL row count; with
         # ~95% of this column null, the raw-record_count denominator produced a
         # value an order of magnitude too small.
-        assert column_stats.avg_length is not None
-        assert column_stats.avg_length >= column_stats.length_bounds[0]
+        assert avg_length is not None
+        assert avg_length >= length_bounds[0]
     finally:
         _clean_nullable()
 
@@ -703,10 +740,10 @@ def test_histogram_bin_count_is_read_back_not_assumed():
     _clean()
     try:
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS id")
-        _, manifest = _metadata()
+        described, manifest = _metadata()
         assert manifest.native.file_row(0)["histogram_bins"] == HISTOGRAM_BINS
         # ... and the histogram still folds cleanly against it.
-        assert manifest.get_distogram("id") is not None
+        assert _column_statistic(described, manifest, StatisticsStore.has_histogram, "id") is True
     finally:
         _clean()
 
@@ -748,7 +785,7 @@ def test_stale_row_bin_count_does_not_block_the_fold():
             sketches=manifest.native.sketches,
         )
         assert probe.native.file_row(0)["histogram_bins"] == 17
-        assert probe.get_distogram("id") is not None
+        assert _column_statistic(schema, probe, StatisticsStore.has_histogram, "id") is True
     finally:
         _clean()
 
@@ -825,9 +862,18 @@ def test_analyze_records_uncompressed_sizes():
 
         # ... and they are the SAME bytes the footer reports, positionally by
         # load-time position — a size list keyed one column out would be
-        # silently wrong, never visibly so.
+        # silently wrong, never visibly so. (Read per file from the manifest's
+        # cells: the planner's column bytes are dense logical bytes - fixed
+        # width, else average length, times rows - never the footer's size.)
+        native = manifest.native
+        for row in range(manifest.get_file_count()):
+            assert native.file_row(row)["has_footer"] is True
         for position, column in enumerate(schema.columns):
-            assert sizes[position] == manifest.get_total_uncompressed_size(column.name), column.name
+            footer_size = sum(
+                native.cell(row, position)["footer"]["uncompressed_size"]
+                for row in range(manifest.get_file_count())
+            )
+            assert sizes[position] == footer_size, column.name
     finally:
         _clean()
 

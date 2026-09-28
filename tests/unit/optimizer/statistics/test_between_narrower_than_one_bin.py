@@ -37,30 +37,31 @@ hold.
 
 import os
 import sys
-from opteryx.planner.plan_context import PlanContext
-from opteryx.compiled.structures.expressions import Between
-from opteryx.compiled.structures.expressions import Literal
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
 import pytest
 
-# `selectivity` participates in an import cycle with `planner.optimizer`.
+# Importing opteryx.planner.optimizer (the package) first resolves the
+# pre-existing import cycle a compiled planner module hits when imported first.
 import opteryx.planner.optimizer  # noqa: F401
 
-from opteryx.expression import NodeType
-from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
-from opteryx.planner.optimizer.statistics import ColumnStatistics
-from opteryx.planner.optimizer.statistics import RelationStatistics
-from opteryx.third_party.maki_nage import distogram as dg
+from opteryx.compiled.planner.statistics import StatisticsInput
+from opteryx.compiled.planner.statistics import estimate_selectivity
+from opteryx.compiled.structures.expressions import Between
+from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import LogicalColumn
-from opteryx.compiled.structures.expressions import ExprArena
+from opteryx.expression import NodeType
+from opteryx.planner.plan_context import PlanContext
+from opteryx.third_party.maki_nage import distogram as dg
+from opteryx.types.logical_type import FLOAT64
+from opteryx.types.logical_type import INT64
 
-# One expression arena for the expressions this module builds outside any query.
-_TEST_ARENA = ExprArena()
-
-# One bound column, minted the way a query mints it; statistics are keyed by its identity.
+# One query context for the columns AND the expressions this module builds:
+# the native estimator resolves a predicate's columns through its arena's
+# bound ColumnTable. Statistics are keyed by the bound column's identity.
 _PLAN_CONTEXT = PlanContext()
+_TEST_ARENA = _PLAN_CONTEXT.expressions
 _SRC = _PLAN_CONTEXT.columns.relation_column("net", "src").identity
 
 # 192.168.0.0/16 as the rewriter emits it.
@@ -88,13 +89,11 @@ def _histogram():
 
 
 def _stats(histogram):
-    col = ColumnStatistics(
-        column_name="src_addr",
-        data_type="int",
-        distinct_count=10_653,
-        histogram=histogram,
+    return StatisticsInput(
+        _PLAN_CONTEXT.columns,
+        row_count_estimate=120_000,
+        column_stats={_SRC: {"distinct_count": 10_653, "histogram": histogram}},
     )
-    return RelationStatistics(row_count_estimate=120_000, columns={_SRC: col})
 
 
 def _identifier():
@@ -103,13 +102,13 @@ def _identifier():
     return node
 
 
-def _between(lo, hi):
+def _between(lo, hi, literal_type=INT64):
     # BETWEEN carries its bounds as `right` (low) and `centre` (high) -- see
-    # `_selectivity_between`. `centre` is a real operand here, not decoration.
+    # `between` in selectivity.hpp. `centre` is a real operand here, not decoration.
     return Between(
         left=_identifier(),
-        right=Literal(value=lo, arena=_TEST_ARENA),
-        centre=Literal(value=hi, arena=_TEST_ARENA),
+        right=Literal(value=lo, type=literal_type, arena=_TEST_ARENA),
+        centre=Literal(value=hi, type=literal_type, arena=_TEST_ARENA),
         arena=_TEST_ARENA,
     )
 
@@ -167,7 +166,7 @@ def test_a_window_wider_than_a_bin_is_left_alone():
     expected = (dg.count_up_to(histogram, hi) - dg.count_up_to(histogram, lo)) / float(
         histogram.count()
     )
-    assert estimate_selectivity(_between(lo, hi), stats) == pytest.approx(expected)
+    assert estimate_selectivity(_between(lo, hi, FLOAT64), stats) == pytest.approx(expected)
 
 
 if __name__ == "__main__":  # pragma: no cover

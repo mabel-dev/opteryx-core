@@ -3,7 +3,9 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-"""Manifest.estimate_range_cardinality — the dataless NDV fallback.
+"""The range-derived NDV fallback — the dataless NDV a scan's base statistics
+carry when the manifest has no sketch (native: statistics_refresh.hpp
+manifest_column_stats -> estimate_range_cardinality).
 
 Un-ANALYZE'd relations (plain parquet — the norm) have no KMV sketches, so
 ``estimate_cardinality`` returns None and, before this fallback existed, every
@@ -27,9 +29,13 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
+from opteryx.compiled.structures.plan_steps import ExitStep
+from opteryx.compiled.structures.plan_steps import ScanStep
+from opteryx.planner.logical_planner import LogicalPlan
+from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
+from opteryx.planner.plan_context import PlanContext
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import RelationSchema
-from opteryx.planner.plan_context import PlanContext
 from tests.manifests import FileSpec
 from tests.manifests import build_manifest
 
@@ -51,6 +57,17 @@ def _schema(*cols):
     )
 
 
+def _distinct_count(manifest, name):
+    """The NDV the statistics refresh gives column `name` of a Scan over
+    `manifest` (the scan's base statistics, keyed by the column's identity)."""
+    plan = LogicalPlan(_PLAN_CONTEXT)
+    scan = plan.add_node(ScanStep(relation="t", schema=manifest.schema, manifest=manifest))
+    plan.add_edge(scan, plan.add_node(ExitStep()))
+    refresh_statistics(plan, _PLAN_CONTEXT)
+    identity = manifest.schema.find_column(name).identity
+    return _PLAN_CONTEXT.statistics.distinct_count(scan, identity)
+
+
 def _file(rows, bounds_by_position):
     """A file with `rows` rows and {position: (lo, hi)} bounds."""
     return FileSpec(
@@ -67,20 +84,20 @@ def test_single_file_integer_span():
     # Architect's example: 1M rows, ints 0..100 -> the range can hold 101
     # distinct values, and NDV can never exceed that.
     manifest = build_manifest(_schema(("k", _lt.INT64)), [_file(1_000_000, {0: (0, 100)})])
-    assert manifest.estimate_range_cardinality("k") == 101
+    assert _distinct_count(manifest, "k") == 101
 
 
 def test_integer_span_capped_at_file_rows():
     # 10 rows spanning 0..1000000: at most 10 distinct values can exist.
     manifest = build_manifest(_schema(("k", _lt.INT64)), [_file(10, {0: (0, 1_000_000)})])
-    assert manifest.estimate_range_cardinality("k") == 10
+    assert _distinct_count(manifest, "k") == 10
 
 
 def test_single_file_float_is_half_the_rows():
     manifest = build_manifest(
         _schema(("k", _lt.FLOAT64)), [_file(1_000_000, {0: (0.0, 100.0)})]
     )
-    assert manifest.estimate_range_cardinality("k") == 500_000
+    assert _distinct_count(manifest, "k") == 500_000
 
 
 def test_integer_overlap_merge():
@@ -91,7 +108,7 @@ def test_integer_overlap_merge():
         _schema(("k", _lt.INT64)),
         [_file(1_000_000, {0: (0, 100)}), _file(1_000_000, {0: (20, 120)})],
     )
-    assert manifest.estimate_range_cardinality("k") == 121
+    assert _distinct_count(manifest, "k") == 121
 
 
 def test_float_overlap_merge():
@@ -100,7 +117,7 @@ def test_float_overlap_merge():
         _schema(("k", _lt.FLOAT64)),
         [_file(1_000_000, {0: (0.0, 100.0)}), _file(1_000_000, {0: (20.0, 120.0)})],
     )
-    assert manifest.estimate_range_cardinality("k") == 600_000
+    assert _distinct_count(manifest, "k") == 600_000
 
 
 def test_fully_covered_file_adds_nothing():
@@ -109,7 +126,7 @@ def test_fully_covered_file_adds_nothing():
         _schema(("k", _lt.INT64)),
         [_file(1000, {0: (0, 999)}), _file(1000, {0: (100, 200)})],
     )
-    assert manifest.estimate_range_cardinality("k") == 1000
+    assert _distinct_count(manifest, "k") == 1000
 
 
 def test_non_numeric_without_footer_ndv_is_unknown():
@@ -121,7 +138,7 @@ def test_non_numeric_without_footer_ndv_is_unknown():
         _schema(("k", _lt.VARCHAR)),
         [_file(1000, {0: (b"aaa", b"zzz")}), _file(1000, {0: (b"aaa", b"mmm")})],
     )
-    assert manifest.estimate_range_cardinality("k") is None
+    assert _distinct_count(manifest, "k") is None
 
 
 def test_missing_bounds_on_one_file_poisons_the_merge():
@@ -131,7 +148,7 @@ def test_missing_bounds_on_one_file_poisons_the_merge():
         _schema(("k", _lt.INT64)),
         [_file(1000, {0: (0, 100)}), _file(1000, {})],
     )
-    assert manifest.estimate_range_cardinality("k") is None
+    assert _distinct_count(manifest, "k") is None
 
 
 def _footer_file(rows, ndv, lo, hi):
@@ -160,7 +177,7 @@ def test_footer_distinct_count_is_preferred_for_strings():
             _footer_file(1000, ndv=5, lo=b"D", hi=b"W"),
         ],
     )
-    assert manifest.estimate_range_cardinality("k") == 5
+    assert _distinct_count(manifest, "k") == 5
 
 
 def test_footer_distinct_count_disjoint_string_ranges_sum():
@@ -171,7 +188,7 @@ def test_footer_distinct_count_disjoint_string_ranges_sum():
             _footer_file(1000, ndv=200, lo=b"nnn", hi=b"zzz"),
         ],
     )
-    assert manifest.estimate_range_cardinality("k") == 300
+    assert _distinct_count(manifest, "k") == 300
 
 
 def test_footer_distinct_count_beats_the_integer_span():
@@ -181,14 +198,14 @@ def test_footer_distinct_count_beats_the_integer_span():
         _schema(("k", _lt.INT64)),
         [_footer_file(1000, ndv=42, lo=0, hi=1_000_000)],
     )
-    assert manifest.estimate_range_cardinality("k") == 42
+    assert _distinct_count(manifest, "k") == 42
 
 
 def test_unknown_record_count_returns_none():
     # Unknown is not zero: no denominator, no estimate — the caller must treat
     # the NDV as unknown rather than adopt a fabrication.
     manifest = build_manifest(_schema(("k", _lt.INT64)), [_file(None, {0: (0, 100)})])
-    assert manifest.estimate_range_cardinality("k") is None
+    assert _distinct_count(manifest, "k") is None
 
 
 def test_result_never_exceeds_total_rows():
@@ -196,7 +213,7 @@ def test_result_never_exceeds_total_rows():
         _schema(("k", _lt.INT64)),
         [_file(10, {0: (0, 5)}), _file(10, {0: (1_000_000, 2_000_000)})],
     )
-    estimate = manifest.estimate_range_cardinality("k")
+    estimate = _distinct_count(manifest, "k")
     assert 1 <= estimate <= 20
 
 

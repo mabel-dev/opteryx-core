@@ -111,6 +111,8 @@ cdef extern from "planner/join_estimator.hpp" nogil:
     cbool c_apply_occupancy_bound "opteryx::planner::apply_occupancy_bound"(
         const CKeyPair* keys, size_t n, int64_t left_domain_rows, int64_t right_domain_rows,
         CKeyPair* collapsed) except +
+    cbool c_composite_key_ndv "opteryx::planner::composite_key_ndv"(
+        const int64_t* ndvs, const uint8_t* known, size_t n, int64_t* out)
     int64_t c_estimate_after_filter "opteryx::planner::estimate_after_filter"(
         int64_t input_rows, double selectivity)
     int64_t c_surviving_distinct_count "opteryx::planner::surviving_distinct_count"(
@@ -545,17 +547,15 @@ def apply_occupancy_bound(list equi_keys, int64_t left_domain_rows, int64_t righ
 def composite_key_ndv(ndvs):
     """Compose one side's per-column key NDVs: ``max`` of the known ones
     (architect ruling 2026-08-21), None when none is known."""
+    cdef vector[int64_t] values
+    cdef vector[uint8_t] known
     cdef int64_t best = 0
-    cdef cbool found = False
-    cdef int64_t value
     for ndv in ndvs:
-        if ndv is None:
-            continue
-        value = ndv
-        if not found or value > best:
-            best = value
-            found = True
-    return best if found else None
+        known.push_back(ndv is not None)
+        values.push_back(0 if ndv is None else ndv)
+    if not c_composite_key_ndv(values.data(), known.data(), values.size(), &best):
+        return None
+    return best
 
 
 def estimate_after_filter(int64_t input_rows, double selectivity) -> int:

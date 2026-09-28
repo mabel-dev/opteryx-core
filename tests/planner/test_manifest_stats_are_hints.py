@@ -106,26 +106,31 @@ def test_a_hint_count_is_an_estimate_not_a_metric():
     """The number is still used - filter selectivity, join ordering and
     distinct-value estimates all read it. What changes is the PROVENANCE: a
     metric claims to be known, and `result_size_guard` reads that claim."""
-    from opteryx.planner.optimizer.statistics_refresh import _scan_base_stats
+    from opteryx.compiled.structures.plan_steps import ExitStep
+    from opteryx.compiled.structures.plan_steps import ScanStep
+    from opteryx.planner.logical_planner import LogicalPlan
+    from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
 
-    class _Node:
-        def __init__(self, manifest):
-            self.manifest = manifest
-            self.schema = _schema()
-            self.uuid = "n1"
-            self.columns = []
+    def _scan_statistics(manifest):
+        """(store, scan nid): the statistics refresh of a Scan (no predicate,
+        so its statistics are its base statistics) over `manifest`."""
+        plan = LogicalPlan(_PLAN_CONTEXT)
+        scan = plan.add_node(ScanStep(relation="t", schema=manifest.schema, manifest=manifest))
+        plan.add_edge(scan, plan.add_node(ExitStep()))
+        refresh_statistics(plan, _PLAN_CONTEXT)
+        return _PLAN_CONTEXT.statistics, scan
 
-    measured = _scan_base_stats(_Node(_manifest(True)))
-    assert measured.row_count_metric == 100
-    assert measured.row_count_estimate is None
+    store, measured = _scan_statistics(_manifest(True))
+    assert store.row_count_metric(measured) == 100
+    assert store.row_count_estimate(measured) is None
 
-    hinted = _scan_base_stats(_Node(_manifest(False)))
-    assert hinted.row_count_estimate == 100
-    assert hinted.row_count_metric is None
+    store, hinted = _scan_statistics(_manifest(False))
+    assert store.row_count_metric(hinted) is None
+    assert store.row_count_estimate(hinted) == 100
     # Still a real number, so join-cardinality estimation does not decline it -
     # `_subtree_sources_are_backed` accepts `row_count_metric or row_count_estimate`
     # and refuses only the fabricated placeholder.
-    assert hinted.row_count == 100
+    assert store.row_count(hinted) == 100
 
 
 if __name__ == "__main__":  # pragma: no cover

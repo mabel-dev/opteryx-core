@@ -32,8 +32,12 @@ from __future__ import annotations
 
 import decimal
 
+from opteryx.compiled.structures.plan_steps import ExitStep
+from opteryx.compiled.structures.plan_steps import ScanStep
 from opteryx.connectors.opteryx_connector import _catalog_manifest
 from opteryx.expression import NodeType
+from opteryx.planner.logical_planner import LogicalPlan
+from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
 from opteryx.types.logical_type import DECIMAL, FLOAT64, INT64, VARCHAR
 from opteryx.types.schema import RelationSchema
 from opteryx.compiled.structures.expressions import Between
@@ -41,6 +45,9 @@ from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
+# after opteryx.types: entering through the compiled planner first trips the
+# column_type <-> opteryx.types import cycle
+from opteryx.compiled.planner.statistics import StatisticsStore
 from tests.manifests import NULL_FLAG
 from tests.manifests import FileSpec
 from tests.manifests import build_manifest
@@ -397,8 +404,9 @@ def test_unsupported_ordinalize_type_skips_pruning_without_crashing():
 
 
 # ---------------------------------------------------------------------------
-# Manifest.get_ordinal_bounds — backs the STARTS_WITH ordinal-bounds
-# selectivity estimator tier. field_id is the trap: a catalog-backed dataset
+# A scan's ordinal bounds (its base statistics' `ordinal_bounds`, computed
+# natively from the manifest by the statistics refresh) — back the STARTS_WITH
+# ordinal-bounds selectivity estimator tier. field_id is the trap: a catalog-backed dataset
 # assigns real, non-positional field_ids (observed live: insert_id=1,
 # labels=2, log_name=3, receive_timestamp=4, ...) and a catalog row's
 # min_values/max_values lists are keyed by the row's own `field_ids`, never
@@ -407,6 +415,32 @@ def test_unsupported_ordinalize_type_skips_pruning_without_crashing():
 # list by field_id instead silently reads a DIFFERENT column's bound whenever
 # field_id != position — this is exactly the bug this section pins down.
 # ---------------------------------------------------------------------------
+
+
+def _scan_column_statistics(plan_context, manifest, accessor, name, schema=None):
+    """`accessor` (a StatisticsStore column reader, e.g. its ordinal_bounds) of
+    column `name` in the base statistics of a Scan over `manifest`, refreshed
+    in `plan_context` - the query whose ColumnTable minted the schema's columns.
+    `schema` is the scan's schema (default: the manifest's)."""
+    schema = manifest.schema if schema is None else schema
+    plan = LogicalPlan(plan_context)
+    scan = plan.add_node(ScanStep(relation="t", schema=schema, manifest=manifest))
+    plan.add_edge(scan, plan.add_node(ExitStep()))
+    refresh_statistics(plan, plan_context)
+    identity = schema.find_column(name).identity
+    return accessor(plan_context.statistics, scan, identity)
+
+
+def _with_missing_column(plan_context, schema):
+    """`schema` plus a column named "missing" the manifest does not hold - a
+    scan column with no manifest statistics."""
+    return RelationSchema(
+        name="t",
+        columns=[
+            *schema.columns,
+            plan_context.columns.relation_column("t", "missing", column_type=VARCHAR),
+        ],
+    )
 
 
 def _multi_col_schema(plan_context, *, names_and_field_ids):
@@ -446,7 +480,7 @@ def _ordinal_bounded_file(lower, upper):
     )
 
 
-def test_get_ordinal_bounds_uses_real_field_id_not_position():
+def test_ordinal_bounds_uses_real_field_id_not_position():
     plan_context = PlanContext()
     # Three columns; field_ids deliberately offset/non-sequential from
     # position, mirroring the live catalog schema that exposed this bug
@@ -469,7 +503,7 @@ def test_get_ordinal_bounds_uses_real_field_id_not_position():
     )
     manifest = _catalog_manifest(schema, True, [row], {}, None)
 
-    bounds = manifest.get_ordinal_bounds("log_name")
+    bounds = _scan_column_statistics(plan_context, manifest, StatisticsStore.ordinal_bounds, "log_name")
 
     assert bounds == (VARCHAR.ordinalize("log-alpha"), VARCHAR.ordinalize("log-omega"))
     # Not column "a"'s or "c"'s bounds — the exact failure mode of indexing
@@ -478,7 +512,7 @@ def test_get_ordinal_bounds_uses_real_field_id_not_position():
     assert bounds != (VARCHAR.ordinalize("ccc"), VARCHAR.ordinalize("czz"))
 
 
-def test_get_ordinal_bounds_aggregates_across_files():
+def test_ordinal_bounds_aggregates_across_files():
     plan_context = PlanContext()
     schema = _multi_col_schema(plan_context, names_and_field_ids=[("value", 0)])
     lo1, hi1 = VARCHAR.ordinalize("mango"), VARCHAR.ordinalize("peach")
@@ -486,10 +520,13 @@ def test_get_ordinal_bounds_aggregates_across_files():
     files = [_ordinal_bounded_file(lo1, hi1), _ordinal_bounded_file(lo2, hi2)]
     manifest = build_manifest(schema, files, bounds_are_ordinal=True)
 
-    assert manifest.get_ordinal_bounds("value") == (min(lo1, lo2), max(hi1, hi2))
+    assert _scan_column_statistics(plan_context, manifest, StatisticsStore.ordinal_bounds, "value") == (
+        min(lo1, lo2),
+        max(hi1, hi2),
+    )
 
 
-def test_get_ordinal_bounds_excludes_negative_sentinel():
+def test_ordinal_bounds_excludes_negative_sentinel():
     # A negative bound can only be a producer's own "no real bound" sentinel
     # (e.g. the catalog manifest builder's NULL_FLAG = -(1<<63) for a column
     # outside its compressible-categories set) — never a genuine
@@ -505,43 +542,44 @@ def test_get_ordinal_bounds_excludes_negative_sentinel():
     ]
     manifest = build_manifest(schema, files, bounds_are_ordinal=True)
 
-    assert manifest.get_ordinal_bounds("value") == (real_lo, real_hi)
+    assert _scan_column_statistics(plan_context, manifest, StatisticsStore.ordinal_bounds, "value") == (real_lo, real_hi)
 
 
-def test_get_ordinal_bounds_all_sentinel_returns_none():
+def test_ordinal_bounds_all_sentinel_returns_none():
     plan_context = PlanContext()
     schema = _multi_col_schema(plan_context, names_and_field_ids=[("value", 0)])
     files = [_ordinal_bounded_file(NULL_FLAG, NULL_FLAG)]
     manifest = build_manifest(schema, files, bounds_are_ordinal=True)
 
-    assert manifest.get_ordinal_bounds("value") is None
+    assert _scan_column_statistics(plan_context, manifest, StatisticsStore.ordinal_bounds, "value") is None
 
 
-def test_get_ordinal_bounds_none_when_bounds_not_ordinal():
+def test_ordinal_bounds_none_when_bounds_not_ordinal():
     plan_context = PlanContext()
     schema = _multi_col_schema(plan_context, names_and_field_ids=[("value", 0)])
     manifest = build_manifest(schema, [_ordinal_bounded_file(10, 20)], bounds_are_ordinal=False)
 
-    assert manifest.get_ordinal_bounds("value") is None
+    assert _scan_column_statistics(plan_context, manifest, StatisticsStore.ordinal_bounds, "value") is None
 
 
-def test_get_ordinal_bounds_none_for_unknown_column():
+def test_ordinal_bounds_none_for_unknown_column():
     plan_context = PlanContext()
     schema = _multi_col_schema(plan_context, names_and_field_ids=[("value", 0)])
     manifest = build_manifest(schema, [_ordinal_bounded_file(10, 20)], bounds_are_ordinal=True)
 
-    assert manifest.get_ordinal_bounds("missing") is None
+    scan_schema = _with_missing_column(plan_context, schema)
+    assert _scan_column_statistics(plan_context, manifest, StatisticsStore.ordinal_bounds, "missing", scan_schema) is None
 
 
 # ---------------------------------------------------------------------------
-# Manifest.get_length_bounds — backs the length-aware hard-impossibility
-# guard shared by STARTS_WITH/INSTR/ENDS_WITH selectivity estimation. Same
-# field_id-vs-position trap as get_ordinal_bounds: a catalog row's
+# A scan's length bounds (its base statistics' `length_bounds`) — back the
+# length-aware hard-impossibility guard shared by STARTS_WITH/INSTR/ENDS_WITH
+# selectivity estimation. Same field_id-vs-position trap as ordinal bounds: a catalog row's
 # min_lengths/max_lengths lists are keyed by the row's own `field_ids`, and
 # `_catalog_manifest` maps them to load-time positions. No bounds_are_ordinal
 # gate (lengths are plain integers regardless); non-positive bounds are
 # excluded instead (0 is ambiguous between "no data" and "genuinely empty
-# string" — see get_length_bounds' own docstring).
+# string" — see length_bounds in src/cpp/planner/manifest_estimates.hpp).
 # ---------------------------------------------------------------------------
 
 
@@ -555,7 +593,7 @@ def _length_bounded_file(min_length, max_length):
     )
 
 
-def test_get_length_bounds_uses_real_field_id_not_position():
+def test_length_bounds_uses_real_field_id_not_position():
     plan_context = PlanContext()
     schema = _multi_col_schema(
         plan_context, names_and_field_ids=[("a", 1), ("log_name", 3), ("c", 4)]
@@ -563,23 +601,23 @@ def test_get_length_bounds_uses_real_field_id_not_position():
     row = _catalog_row([1, 3, 4], min_lengths=[2, 40, 7], max_lengths=[5, 60, 9])
     manifest = _catalog_manifest(schema, False, [row], {}, None)
 
-    bounds = manifest.get_length_bounds("log_name")
+    bounds = _scan_column_statistics(plan_context, manifest, StatisticsStore.length_bounds, "log_name")
 
     assert bounds == (40, 60)
     assert bounds != (2, 5)
     assert bounds != (7, 9)
 
 
-def test_get_length_bounds_aggregates_across_files():
+def test_length_bounds_aggregates_across_files():
     plan_context = PlanContext()
     schema = _multi_col_schema(plan_context, names_and_field_ids=[("value", 0)])
     files = [_length_bounded_file(10, 25), _length_bounded_file(5, 30)]
     manifest = build_manifest(schema, files)
 
-    assert manifest.get_length_bounds("value") == (5, 30)
+    assert _scan_column_statistics(plan_context, manifest, StatisticsStore.length_bounds, "value") == (5, 30)
 
 
-def test_get_length_bounds_excludes_non_positive_values():
+def test_length_bounds_excludes_non_positive_values():
     # 0 is the catalog's "no data computed for this file" default (min_len =
     # max_len = 0, only overwritten when the file has a non-null value) --
     # ambiguous with a genuinely empty string, so treated as no signal, not
@@ -592,32 +630,33 @@ def test_get_length_bounds_excludes_non_positive_values():
     ]
     manifest = build_manifest(schema, files)
 
-    assert manifest.get_length_bounds("value") == (8, 12)
+    assert _scan_column_statistics(plan_context, manifest, StatisticsStore.length_bounds, "value") == (8, 12)
 
 
-def test_get_length_bounds_all_non_positive_returns_none():
+def test_length_bounds_all_non_positive_returns_none():
     plan_context = PlanContext()
     schema = _multi_col_schema(plan_context, names_and_field_ids=[("value", 0)])
     manifest = build_manifest(schema, [_length_bounded_file(0, 0)])
 
-    assert manifest.get_length_bounds("value") is None
+    assert _scan_column_statistics(plan_context, manifest, StatisticsStore.length_bounds, "value") is None
 
 
-def test_get_length_bounds_does_not_require_bounds_are_ordinal():
-    # Unlike get_ordinal_bounds, lengths are never ordinal-encoded -- must
+def test_length_bounds_does_not_require_bounds_are_ordinal():
+    # Unlike ordinal bounds, lengths are never ordinal-encoded -- must
     # work identically regardless of bounds_are_ordinal.
     plan_context = PlanContext()
     schema = _multi_col_schema(plan_context, names_and_field_ids=[("value", 0)])
     manifest_ordinal = build_manifest(schema, [_length_bounded_file(8, 12)], bounds_are_ordinal=True)
     manifest_real = build_manifest(schema, [_length_bounded_file(8, 12)], bounds_are_ordinal=False)
 
-    assert manifest_ordinal.get_length_bounds("value") == (8, 12)
-    assert manifest_real.get_length_bounds("value") == (8, 12)
+    assert _scan_column_statistics(plan_context, manifest_ordinal, StatisticsStore.length_bounds, "value") == (8, 12)
+    assert _scan_column_statistics(plan_context, manifest_real, StatisticsStore.length_bounds, "value") == (8, 12)
 
 
-def test_get_length_bounds_none_for_unknown_column():
+def test_length_bounds_none_for_unknown_column():
     plan_context = PlanContext()
     schema = _multi_col_schema(plan_context, names_and_field_ids=[("value", 0)])
     manifest = build_manifest(schema, [_length_bounded_file(8, 12)])
 
-    assert manifest.get_length_bounds("missing") is None
+    scan_schema = _with_missing_column(plan_context, schema)
+    assert _scan_column_statistics(plan_context, manifest, StatisticsStore.length_bounds, "missing", scan_schema) is None

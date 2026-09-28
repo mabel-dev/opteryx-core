@@ -592,6 +592,11 @@ clickbench:
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py
 
+clickbench-canon: ## Run ClickBench on the upstream 100-file split (scratch/hits) instead of the rugo 262k mirror
+	@clear || true
+	@$(PYTHON) -c "import sys; print(f'Running ClickBench (canon) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant canon
+
 clickbench-skene: ## Run ClickBench on the skene mirror of the dataset (generates scratch/hits_skene, lz4 (performance posture), from scratch/hits_rugo_262k on first run)
 	$(call print_blue,"Running ClickBench benchmark on skene...")
 	@# Gate on a completion stamp, not on the directory: an interrupted conversion

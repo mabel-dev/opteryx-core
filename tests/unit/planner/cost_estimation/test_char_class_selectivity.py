@@ -5,49 +5,47 @@
 
 """
 Unit-level coverage for the infix LIKE '%needle%' char-class selectivity
-estimator (opteryx/planner/cost_estimation/selectivity.py), ported verbatim
-from scratch/like_selectivity/estimators.py's decayed_char_class_selectivity.
+estimator (src/cpp/planner/selectivity.hpp, reached through
+opteryx.compiled.planner.statistics), ported from
+scratch/like_selectivity/estimators.py's decayed_char_class_selectivity.
 
-Exercises the estimator's own math directly (no manifest/ANALYZE plumbing —
-see tests/storage/test_analyze_statistics.py and tests/compiled/ for the
-native-kernel/end-to-end coverage) plus the _selectivity_instr /
-predicate_estimator_tag tier-selection logic against hand-built
-ColumnStatistics.
+Exercises the estimator's own math through `estimate_selectivity` on an InStr
+predicate (no manifest/ANALYZE plumbing — see
+tests/storage/test_analyze_statistics.py and tests/compiled/ for the
+native-kernel/end-to-end coverage) plus the instr / predicate_estimator_tag
+tier-selection logic against hand-built StatisticsInput.
 """
 
+import math
 import os
 import sys
-from opteryx.planner.plan_context import PlanContext
-from opteryx.compiled.structures.expressions import Comparison
-from opteryx.compiled.structures.expressions import Literal
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
-# Importing opteryx.planner.optimizer (the package) resolves the optimizer <->
-# cost_estimation.selectivity import cycle first.
+# Importing opteryx.planner.optimizer (the package) first resolves the
+# pre-existing import cycle a compiled planner module hits when imported first.
 import opteryx.planner.optimizer  # noqa: F401
-from opteryx.expression import NodeType
-from opteryx.planner.cost_estimation.selectivity import (
-    _CHAR_CLASSES,
-    _CLASS_CARDINALITY,
-    _classify_char,
-    _decayed_char_class_selectivity,
-    _LIKE_INFIX_SELECTIVITY,
-    _like_needle_str,
-    _selectivity_instr,
-    estimate_selectivity,
-    predicate_estimator_tag,
-)
-from opteryx.planner.optimizer.statistics import ColumnStatistics, RelationStatistics
-from opteryx.types.logical_type import NVARCHAR, VARCHAR
+from opteryx.compiled.planner.statistics import BYTE_CLASS
+from opteryx.compiled.planner.statistics import CHAR_CLASSES
+from opteryx.compiled.planner.statistics import CLASS_CARDINALITY
+from opteryx.compiled.planner.statistics import LIKE_INFIX_SELECTIVITY
+from opteryx.compiled.planner.statistics import StatisticsInput
+from opteryx.compiled.planner.statistics import estimate_selectivity
+from opteryx.compiled.planner.statistics import predicate_estimator_tag
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import LogicalColumn
-from opteryx.compiled.structures.expressions import ExprArena
+from opteryx.expression import NodeType
+from opteryx.planner.plan_context import PlanContext
+from opteryx.types.logical_type import INT64, NVARCHAR, VARCHAR
 
-# One expression arena for the expressions this module builds outside any query.
-_TEST_ARENA = ExprArena()
+# One query context for the columns AND the expressions this module builds:
+# the native estimator resolves a predicate's columns through its arena's
+# bound ColumnTable.
+_PLAN_CONTEXT = PlanContext()
+_ARENA = _PLAN_CONTEXT.expressions
 
 # Statistics are keyed by the identity of a column minted in a query's ColumnTable.
-_PLAN_CONTEXT = PlanContext()
 _IDENTITY = _PLAN_CONTEXT.columns.relation_column("t", "col").identity
 
 # A uniform-ish column: every class present with a plausible proportion,
@@ -67,27 +65,42 @@ _UNIFORM_PROPORTIONS = {
 def _stats(
     class_proportions=_UNIFORM_PROPORTIONS, avg_length=50.0, distinct_count=None, length_bounds=None
 ):
-    col = ColumnStatistics(
-        column_name="col",
-        data_type="VARCHAR",
-        class_proportions=class_proportions,
-        avg_length=avg_length,
-        distinct_count=distinct_count,
-        length_bounds=length_bounds,
+    return StatisticsInput(
+        _PLAN_CONTEXT.columns,
+        row_count_estimate=1000,
+        column_stats={
+            _IDENTITY: {
+                "class_proportions": class_proportions,
+                "avg_length": avg_length,
+                "distinct_count": distinct_count,
+                "length_bounds": length_bounds,
+            }
+        },
     )
-    return RelationStatistics(row_count_estimate=1000, columns={_IDENTITY: col})
 
 
-def _instr_node(needle, decay=0.7, op="InStr", column_type=VARCHAR):
-    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col", arena=_TEST_ARENA)
+def _instr_node(needle, decay=0.7, op="InStr", column_type=VARCHAR, literal_type=VARCHAR):
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col", arena=_ARENA)
     identifier.schema_column = _PLAN_CONTEXT.columns.reference(_IDENTITY, "col", column_type)
-    literal = Literal(value=needle, arena=_TEST_ARENA)
-    node = Comparison(value=op, left=identifier, right=literal, arena=_TEST_ARENA)
+    literal = Literal(value=needle, type=literal_type, arena=_ARENA)
+    node = Comparison(value=op, left=identifier, right=literal, arena=_ARENA)
     node.like_selectivity_decay = decay
     return node
 
 
-# ── _decayed_char_class_selectivity direct math ─────────────────────────────
+def _decayed_char_class_selectivity(needle, class_proportions, avg_length, decay):
+    """The decayed char-class infix model, observed through the estimator: an
+    InStr predicate carrying `decay` against a column with these byte-class
+    statistics (no length bounds, so no hard length guard)."""
+    stats = _stats(class_proportions=class_proportions, avg_length=avg_length)
+    return estimate_selectivity(_instr_node(needle.encode(), decay=decay), stats)
+
+
+def _classify_char(c):
+    return CHAR_CLASSES[BYTE_CLASS[ord(c)]]
+
+
+# ── decayed char-class model math ─────────────────────────────
 
 
 def test_empty_needle_matches_everything():
@@ -107,9 +120,11 @@ def test_longer_needle_is_never_more_selective_than_its_own_prefix():
 
 
 def test_zero_avg_length_or_negative_n_positions_yields_zero():
-    assert _decayed_char_class_selectivity("hello", _UNIFORM_PROPORTIONS, 0.0, 0.7) == 0.0
     # needle longer than avg_length -> n_positions clamps to 0.
     assert _decayed_char_class_selectivity("verylongneedle", _UNIFORM_PROPORTIONS, 3.0, 0.7) == 0.0
+    # (avg_length == 0 never reaches the containment math: the estimator's
+    # avg_length guard answers LIKE_INFIX_SELECTIVITY first - see
+    # test_selectivity_instr_falls_back_when_avg_length_is_zero.)
 
 
 def test_missing_class_proportion_uses_the_log_probability_floor_not_a_hard_zero():
@@ -128,14 +143,12 @@ def test_missing_class_proportion_uses_the_log_probability_floor_not_a_hard_zero
 def test_decay_one_is_the_undamped_product_model():
     # decay**i == 1 for every i when decay == 1.0 -- every position gets full
     # weight, matching the undamped char_class_selectivity model exactly.
-    import math
-
     needle = "abc"
     s = _decayed_char_class_selectivity(needle, _UNIFORM_PROPORTIONS, 200.0, 1.0)
     p_pos = 1.0
     for c in needle:
         cls = _classify_char(c)
-        p_pos *= _UNIFORM_PROPORTIONS[cls] / _CLASS_CARDINALITY[cls]
+        p_pos *= _UNIFORM_PROPORTIONS[cls] / CLASS_CARDINALITY[cls]
     expected = 1.0 - math.exp(-max(200.0 - len(needle) + 1, 0.0) * p_pos)
     assert s == pytest_approx(expected)
 
@@ -158,7 +171,7 @@ def test_result_always_in_unit_interval():
         assert 0.0 <= s <= 1.0
 
 
-# ── _classify_char / _CHAR_CLASSES / _CLASS_CARDINALITY sanity ──────────────
+# ── BYTE_CLASS / CHAR_CLASSES / CLASS_CARDINALITY sanity ──────────────
 
 
 def test_classify_char_known_examples():
@@ -169,78 +182,85 @@ def test_classify_char_known_examples():
 
 
 def test_class_cardinality_keys_match_char_classes():
-    assert set(_CLASS_CARDINALITY.keys()) == set(_CHAR_CLASSES)
-    assert all(v > 0 for v in _CLASS_CARDINALITY.values())
+    assert set(CLASS_CARDINALITY.keys()) == set(CHAR_CLASSES)
+    assert all(v > 0 for v in CLASS_CARDINALITY.values())
 
 
-# ── _like_needle_str coercion ────────────────────────────────────────────────
+# ── needle coercion ─────────────────────────────────────────────────────────
+#
+# A bytes or str needle is the same needle; a non-string or NULL literal has
+# no needle, so the flat infix constant prices it.
 
 
 def test_like_needle_str_decodes_bytes():
-    assert _like_needle_str(b"hello") == "hello"
-    assert _like_needle_str("hello") == "hello"
-    assert _like_needle_str(123) is None
-    assert _like_needle_str(None) is None
+    stats = _stats()
+    from_bytes = estimate_selectivity(_instr_node(b"hello"), stats)
+    assert from_bytes != LIKE_INFIX_SELECTIVITY
+    assert estimate_selectivity(_instr_node(123, literal_type=INT64), stats) == LIKE_INFIX_SELECTIVITY
+    assert estimate_selectivity(_instr_node(None), stats) == LIKE_INFIX_SELECTIVITY
+    # (a VARCHAR literal's native value is bytes; a str is not a literal form)
 
 
-# ── _selectivity_instr / predicate_estimator_tag tier selection ─────────────
+# ── instr / predicate_estimator_tag tier selection ─────────────
 
 
 def test_selectivity_instr_uses_char_class_when_stats_and_decay_present():
     stats = _stats()
-    node = _instr_node("hello", decay=0.7)
-    s = _selectivity_instr(_IDENTITY, "hello", node, stats)
-    assert s != _LIKE_INFIX_SELECTIVITY
+    node = _instr_node(b"hello", decay=0.7)
+    s = estimate_selectivity(node, stats)
+    assert s != LIKE_INFIX_SELECTIVITY
     assert predicate_estimator_tag(node, stats) == "char_class_decay"
 
 
 def test_selectivity_instr_falls_back_without_decay():
     stats = _stats()
-    node = _instr_node("hello", decay=None)
-    s = _selectivity_instr(_IDENTITY, "hello", node, stats)
-    assert s == _LIKE_INFIX_SELECTIVITY
+    node = _instr_node(b"hello", decay=None)
+    s = estimate_selectivity(node, stats)
+    assert s == LIKE_INFIX_SELECTIVITY
     assert predicate_estimator_tag(node, stats) == "flat_fallback"
 
 
 def test_selectivity_instr_falls_back_without_class_proportions():
-    stats = _stats(class_proportions=None)
-    node = _instr_node("hello", decay=0.7)
-    s = _selectivity_instr(_IDENTITY, "hello", node, stats)
-    assert s == _LIKE_INFIX_SELECTIVITY
+    # class_proportions and avg_length are recorded together (StatisticsInput
+    # refuses one without the other): no byte-class statistics at all.
+    stats = _stats(class_proportions=None, avg_length=None)
+    node = _instr_node(b"hello", decay=0.7)
+    s = estimate_selectivity(node, stats)
+    assert s == LIKE_INFIX_SELECTIVITY
     assert predicate_estimator_tag(node, stats) == "flat_fallback"
 
 
 def test_selectivity_instr_falls_back_when_avg_length_is_zero():
     stats = _stats(avg_length=0.0)
-    node = _instr_node("hello", decay=0.7)
-    s = _selectivity_instr(_IDENTITY, "hello", node, stats)
-    assert s == _LIKE_INFIX_SELECTIVITY
+    node = _instr_node(b"hello", decay=0.7)
+    s = estimate_selectivity(node, stats)
+    assert s == LIKE_INFIX_SELECTIVITY
 
 
 def test_selectivity_instr_falls_back_for_unknown_column():
     stats = _stats()
-    unknown_identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="other", arena=_TEST_ARENA)
+    unknown_identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="other", arena=_ARENA)
     unknown_identifier.schema_column = _PLAN_CONTEXT.columns.relation_column("t", "other")
-    literal = Literal(value="hello", arena=_TEST_ARENA)
-    node = Comparison(value="InStr", left=unknown_identifier, right=literal, arena=_TEST_ARENA)
+    literal = Literal(value=b"hello", type=VARCHAR, arena=_ARENA)
+    node = Comparison(value="InStr", left=unknown_identifier, right=literal, arena=_ARENA)
     node.like_selectivity_decay = 0.7
-    s = _selectivity_instr(b"tes_other_0000", "hello", node, stats)
-    assert s == _LIKE_INFIX_SELECTIVITY
+    s = estimate_selectivity(node, stats)
+    assert s == LIKE_INFIX_SELECTIVITY
 
 
 def test_predicate_estimator_tag_none_for_non_instr_predicate():
     stats = _stats()
-    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col", arena=_TEST_ARENA)
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col", arena=_ARENA)
     identifier.schema_column = _PLAN_CONTEXT.columns.reference(_IDENTITY, "col", None)
-    literal = Literal(value="hello", arena=_TEST_ARENA)
-    node = Comparison(value="Eq", left=identifier, right=literal, arena=_TEST_ARENA)
+    literal = Literal(value=b"hello", type=VARCHAR, arena=_ARENA)
+    node = Comparison(value="Eq", left=identifier, right=literal, arena=_ARENA)
     assert predicate_estimator_tag(node, stats) is None
 
 
 def test_not_instr_is_the_complement_of_instr():
     stats = _stats()
-    node = _instr_node("hello", decay=0.7, op="InStr")
-    not_node = _instr_node("hello", decay=0.7, op="NotInStr")
+    node = _instr_node(b"hello", decay=0.7, op="InStr")
+    not_node = _instr_node(b"hello", decay=0.7, op="NotInStr")
     s = estimate_selectivity(node, stats)
     not_s = estimate_selectivity(not_node, stats)
     assert s == pytest_approx(1.0 - not_s)
@@ -248,7 +268,7 @@ def test_not_instr_is_the_complement_of_instr():
 
 # ── hard length guard: needle longer than the column's real max ────────────
 #
-# _containment_selectivity's n_positions already tends toward 0 as needle_len
+# the containment model's n_positions already tends toward 0 as needle_len
 # approaches avg_length, but that's a SOFT, probabilistic mechanism keyed on
 # the AVERAGE -- it can (a) coincidentally still be nonzero for a needle just
 # past avg_length but under max_length (which is correct, still possible),
@@ -259,15 +279,15 @@ def test_not_instr_is_the_complement_of_instr():
 
 def test_selectivity_instr_hard_zero_when_needle_exceeds_max_length():
     stats = _stats(length_bounds=(3, 10))
-    node = _instr_node("this needle is far longer than ten bytes", decay=0.7)
-    s = _selectivity_instr(_IDENTITY, "this needle is far longer than ten bytes", node, stats)
+    node = _instr_node(b"this needle is far longer than ten bytes", decay=0.7)
+    s = estimate_selectivity(node, stats)
     assert s == 0.0
 
 
 def test_selectivity_instr_not_hard_zeroed_within_max_length():
     stats = _stats(length_bounds=(3, 50))
-    node = _instr_node("hello", decay=0.7)
-    s = _selectivity_instr(_IDENTITY, "hello", node, stats)
+    node = _instr_node(b"hello", decay=0.7)
+    s = estimate_selectivity(node, stats)
     assert s != 0.0
 
 
@@ -276,16 +296,14 @@ def test_selectivity_instr_hard_guard_skipped_for_nvarchar():
     # stats from the external catalog producer are character-based, so the
     # guard must not fire even when needle_len appears to exceed max_length.
     stats = _stats(length_bounds=(1, 3))
-    node = _instr_node("this needle is far longer than three bytes", decay=0.7, column_type=NVARCHAR)
-    s = _selectivity_instr(
-        _IDENTITY, "this needle is far longer than three bytes", node, stats
-    )
+    node = _instr_node(b"this needle is far longer than three bytes", decay=0.7, column_type=NVARCHAR)
+    s = estimate_selectivity(node, stats)
     assert s != 0.0  # falls through to the normal char-class/decay math instead
 
 
 def test_not_instr_hard_zero_complements_to_one():
     stats = _stats(length_bounds=(3, 10))
-    needle = "this needle is far longer than ten bytes"
+    needle = b"this needle is far longer than ten bytes"
     node = _instr_node(needle, decay=0.7, op="InStr")
     not_node = _instr_node(needle, decay=0.7, op="NotInStr")
     assert estimate_selectivity(node, stats) == 0.0

@@ -58,6 +58,7 @@ DATASET = Dataset.FULL_SPLIT_RUGO_262K
 # fallback to another dataset.
 VARIANT_DATASETS = {
     "": DATASET,
+    "canon": Dataset.FULL_SPLIT,
     "skene": Dataset.FULL_SPLIT_SKENE,
     "aistor-canon-split": Dataset.AISTOR_CANON_SPLIT,
     "aistor-canon-single": Dataset.AISTOR_CANON_SINGLE,
@@ -226,9 +227,10 @@ if __name__ == "__main__":  # pragma: no cover
         type=str,
         default="",
         choices=sorted(VARIANT_DATASETS),
-        help="Dataset format variant: `skene` runs against the skene mirror; "
+        help="Dataset format variant: `canon` runs against the upstream 100-file "
+        "split (scratch/hits); `skene` runs against the skene mirror; "
         "`aistor-*` against the remote Iceberg tables on AIStor "
-        "(default: the parquet dataset)",
+        "(default: the rugo 262k-row-group split, scratch/hits_rugo_262k)",
     )
     args = parser.parse_args()
 

@@ -101,9 +101,9 @@ def test_omitting_telemetry_does_not_change_the_computed_statistics():
     optimized = do_optimizer(bound, telemetry, plan_context)
     refresh_statistics(optimized, plan_context)  # no telemetry argument at all
 
-    for _nid, node in optimized.nodes(True):
+    for nid, node in optimized.nodes(True):
         if node.node_type == LogicalPlanStepType.Scan:
-            assert plan_context.statistics(node).row_count == 2
+            assert plan_context.statistics.row_count(nid) == 2
     assert telemetry._reading.get("estimated_row_counts", 0) == 0, (
         "estimated_row_counts must not appear when telemetry isn't passed to refresh_statistics"
     )

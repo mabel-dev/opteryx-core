@@ -2,7 +2,7 @@
 Parity + correctness for the native ``Vector.char_class_stats()`` /
 ``Vector.null_count()`` / ``Vector.ordinal_min_max()`` / ``Vector.histogram_bucket()``
 kernels (draken/draken_native.cpp), added to back the LIKE '%needle%' selectivity
-char-class estimator (opteryx/planner/cost_estimation/selectivity.py).
+char-class estimator (src/cpp/planner/selectivity.hpp).
 
 Three independent copies of the same 256-entry byte-classification table must
 agree byte-for-byte, or the estimator's stored proportions and its needle
@@ -12,8 +12,9 @@ classification at estimate time silently disagree:
      offline-validated experiment this whole feature is ported from.
   2. draken_native.cpp's `char_class_stats` binding's static `BYTE_CLASS` array
      (C++, exercised here only indirectly via the kernel's actual output).
-  3. opteryx/planner/cost_estimation/selectivity.py's `_BYTE_CLASS` tuple (a
-     literal copy, since scratch/ is unpackaged and cannot be imported from
+  3. src/cpp/planner/selectivity.hpp's `kAsciiClass` table (every byte >= 0x80
+     is "extended"), exposed as opteryx.compiled.planner.statistics.BYTE_CLASS
+     (a literal copy, since scratch/ is unpackaged and cannot be imported from
      production code).
 
 This file checks (2) against (1) by construction (one row per class, decode
@@ -30,14 +31,12 @@ import pytest
 
 from draken.interop.vector_sequence import vector_from_sequence
 
-# Importing opteryx.planner.optimizer (the package) resolves the optimizer <->
-# cost_estimation.selectivity import cycle first — see
-# tests/unit/planner/cost_estimation/test_selectivity_column_vs_column.py for
-# why this matters.
+# Importing opteryx.planner.optimizer (the package) first resolves the
+# pre-existing import cycle a compiled planner module hits when imported first.
 import opteryx.planner.optimizer  # noqa: F401
-from opteryx.planner.cost_estimation.selectivity import _BYTE_CLASS as _SELECTIVITY_BYTE_CLASS
-from opteryx.planner.cost_estimation.selectivity import _CHAR_CLASSES
-from opteryx.planner.cost_estimation.selectivity import _CLASS_CARDINALITY
+from opteryx.compiled.planner.statistics import BYTE_CLASS as _SELECTIVITY_BYTE_CLASS
+from opteryx.compiled.planner.statistics import CHAR_CLASSES as _CHAR_CLASSES
+from opteryx.compiled.planner.statistics import CLASS_CARDINALITY as _CLASS_CARDINALITY
 
 _SCRATCH = os.path.join(os.path.dirname(__file__), "..", "..", "scratch", "like_selectivity")
 
@@ -45,7 +44,7 @@ _SCRATCH = os.path.join(os.path.dirname(__file__), "..", "..", "scratch", "like_
 def _load_scratch_byte_class():
     """The offline-validated source table — scratch/ is not importable from
     production code, but a TEST reading it for a parity check is exactly the
-    enforcement mechanism this table's own comment (in selectivity.py) points at."""
+    enforcement mechanism this table's own comment (in selectivity.hpp) points at."""
     if not os.path.isdir(_SCRATCH):
         pytest.skip("scratch/like_selectivity not present")
     sys.path.insert(0, _SCRATCH)
@@ -79,7 +78,7 @@ def _char_class_stats_for_bytes(payload: bytes):
 
 def test_native_kernel_agrees_with_selectivity_table_for_every_byte():
     """One row per byte value 0-255; the kernel's single-class count must land
-    in the SAME class index selectivity.py's own table assigns that byte."""
+    in the SAME class index selectivity.hpp's own table assigns that byte."""
     for byte_val in range(256):
         counts, total_bytes, length_range = _char_class_stats_for_bytes(bytes([byte_val]))
         assert total_bytes == 1

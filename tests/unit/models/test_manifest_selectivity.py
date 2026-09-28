@@ -21,14 +21,13 @@ from typing import List, Optional
 
 import pytest
 
-# Importing opteryx.planner.optimizer (the package) resolves the optimizer <->
-# cost_estimation.selectivity import cycle first (see the same workaround in
-# tests/unit/planner/cost_estimation/test_char_class_selectivity.py).
+# Importing opteryx.planner.optimizer (the package) first resolves the
+# pre-existing import cycle a compiled planner module hits when imported first.
 import opteryx.planner.optimizer  # noqa: F401
 from opteryx.expression import NodeType
 from opteryx.compiled.structures.expressions import Expression
 from opteryx.models.manifest import Manifest
-from opteryx.types.logical_type import INT64, VARCHAR
+from opteryx.types.logical_type import ARRAY, INT64, VARCHAR
 from opteryx.planner.plan_context import PlanContext
 from opteryx.types.schema import RelationSchema
 from opteryx.compiled.structures.expressions import And
@@ -40,12 +39,8 @@ from opteryx.compiled.structures.expressions import Not
 from opteryx.compiled.structures.expressions import Or
 from opteryx.compiled.structures.expressions import UnaryOperator
 from opteryx.compiled.structures.expressions import LogicalColumn
-from opteryx.compiled.structures.expressions import ExprArena
 from tests.manifests import FileSpec
 from tests.manifests import build_manifest
-
-# One expression arena for the expressions this module builds outside any query.
-_TEST_ARENA = ExprArena()
 
 
 # ---------------------------------------------------------------------------
@@ -56,8 +51,11 @@ _TEST_ARENA = ExprArena()
 # Selectivity estimation keys statistics on column *identity*, never on name
 # (names are not unique across a plan). In a real plan a bound identifier refers
 # to its scan column; these fixtures mint ONE bound column per name in a query's
-# ColumnTable and have `_identifier` refer to it, so the two agree.
+# ColumnTable and have `_identifier` refer to it, so the two agree. The native
+# estimator resolves a predicate's columns through its arena's bound
+# ColumnTable, so the expressions are built in the same query's arena.
 _PLAN_CONTEXT = PlanContext()
+_TEST_ARENA = _PLAN_CONTEXT.expressions
 _MINTED: dict = {}
 
 
@@ -126,17 +124,17 @@ def _identifier(name: str) -> Expression:
     )
 
 
-def _literal(value) -> Expression:
-    n = Literal(arena=_TEST_ARENA)
-    n.value = value
-    return n
+def _literal(value, column_type) -> Expression:
+    # A literal carries its type: an untyped literal records no native value,
+    # so the estimator would see no literal at all.
+    return Literal(value=value, type=column_type, arena=_TEST_ARENA)
 
 
-def _cmp(op: str, col: str, value) -> Expression:
+def _cmp(op: str, col: str, value, value_type=INT64) -> Expression:
     n = Comparison(arena=_TEST_ARENA)
     n.value = op
     n.left = _identifier(col)
-    n.right = _literal(value)
+    n.right = _literal(value, value_type)
     return n
 
 
@@ -144,8 +142,8 @@ def _between(col: str, low, high) -> Expression:
     n = Between(arena=_TEST_ARENA)
     n.left = _identifier(col)
     # Mirror manifest.prune_files convention: right=lower, centre=upper.
-    n.right = _literal(low)
-    n.centre = _literal(high)
+    n.right = _literal(low, INT64)
+    n.centre = _literal(high, INT64)
     return n
 
 
@@ -309,28 +307,28 @@ class TestRange:
 class TestInList:
     def test_in_with_histogram(self):
         m = _histogram_manifest()
-        s = m.estimate_selectivity(_cmp("InList", "x", [10, 20, 30]))
+        s = m.estimate_selectivity(_cmp("InList", "x", (10, 20, 30), ARRAY(INT64)))
         # Sum of three bin densities, each ≈ 0.02, so ≈ 0.06.
         assert 0.0 < s < 0.5
 
     def test_in_with_ndv(self):
         m = _ndv_manifest(ndv=20)
-        s = m.estimate_selectivity(_cmp("InList", "x", [1, 2, 3, 4]))
+        s = m.estimate_selectivity(_cmp("InList", "x", (1, 2, 3, 4), ARRAY(INT64)))
         assert s == pytest.approx(0.2, rel=0.01)
 
     def test_in_capped_at_one(self):
         m = _ndv_manifest(ndv=2)
-        s = m.estimate_selectivity(_cmp("InList", "x", [1, 2, 3, 4, 5]))
+        s = m.estimate_selectivity(_cmp("InList", "x", (1, 2, 3, 4, 5), ARRAY(INT64)))
         assert s == 1.0
 
     def test_in_no_stats(self):
         m = _bare_manifest()
-        s = m.estimate_selectivity(_cmp("InList", "x", [1, 2]))
+        s = m.estimate_selectivity(_cmp("InList", "x", (1, 2), ARRAY(INT64)))
         assert s == pytest.approx(0.2)
 
     def test_not_in_with_ndv(self):
         m = _ndv_manifest(ndv=10)
-        s = m.estimate_selectivity(_cmp("NotInList", "x", [1, 2]))
+        s = m.estimate_selectivity(_cmp("NotInList", "x", (1, 2), ARRAY(INT64)))
         assert s == pytest.approx(0.8, rel=0.01)
 
 
@@ -365,15 +363,15 @@ class TestBetween:
 class TestLike:
     def test_prefix_like(self):
         m = _bare_manifest()
-        assert m.estimate_selectivity(_cmp("Like", "x", "abc%")) == 0.25
+        assert m.estimate_selectivity(_cmp("Like", "x", b"abc%", VARCHAR)) == 0.25
 
     def test_substring_like(self):
         m = _bare_manifest()
-        assert m.estimate_selectivity(_cmp("Like", "x", "%abc%")) == 0.1
+        assert m.estimate_selectivity(_cmp("Like", "x", b"%abc%", VARCHAR)) == 0.1
 
     def test_not_like_prefix(self):
         m = _bare_manifest()
-        assert m.estimate_selectivity(_cmp("NotLike", "x", "abc%")) == 0.75
+        assert m.estimate_selectivity(_cmp("NotLike", "x", b"abc%", VARCHAR)) == 0.75
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +380,7 @@ class TestLike:
 # Manifest.get_distogram already bins VARCHAR histograms in ColumnType.
 # ordinalize()'s ordinal-key space (_analyze.py ordinalizes every morsel
 # before binning) -- these tests exercise that real fold, not a synthetic
-# Distogram, to pin down the assumption _selectivity_starts_with depends on:
+# Distogram, to pin down the assumption the prefix estimator depends on:
 # a VARCHAR column's histogram min/max are ALREADY ordinal keys, so the
 # predicate's literal just needs the same ColumnType.ordinalize() transform
 # before being compared against it.
@@ -408,7 +406,7 @@ def _varchar_identifier(name: str) -> Expression:
 def _starts_with(op: str, col: str, prefix: bytes) -> Expression:
     n = Function(arena=_TEST_ARENA)
     n.value = op
-    n.parameters = [_varchar_identifier(col), _literal(prefix)]
+    n.parameters = [_varchar_identifier(col), _literal(prefix, VARCHAR)]
     return n
 
 
@@ -549,7 +547,7 @@ class TestDefensive:
         m = _bare_manifest()
         node = Comparison(arena=_TEST_ARENA)
         node.value = "Lt"
-        node.left = _literal(1)
+        node.left = _literal(1, INT64)
         node.right = _identifier("x")
         s = m.estimate_selectivity(node)
         assert s == 0.25

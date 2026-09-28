@@ -18,7 +18,11 @@ Two layers:
 import os
 import sys
 
+# Importing opteryx.planner.optimizer (the package) first resolves the
+# pre-existing import cycle a compiled planner module hits when imported first.
+import opteryx.planner.optimizer  # noqa: F401
 from opteryx.compiled.planner.plan_graph import EdgeRole
+from opteryx.compiled.planner.statistics import StatisticsInput
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.plan_steps import ExitStep
 from opteryx.compiled.structures.plan_steps import JoinStep
@@ -31,14 +35,8 @@ import pytest
 from opteryx.models import QueryTelemetry
 from opteryx.planner.plan_context import PlanContext
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan
-from opteryx.planner.optimizer.statistics import ColumnStatistics
-from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.planner.optimizer.strategies.join_algorithm import JoinAlgorithmStrategy
 from opteryx.planner.optimizer.strategies.join_algorithm import _decide_swap_reasoned
-from opteryx.compiled.structures.expressions import ExprArena
-
-# One expression arena for the expressions this module builds outside any query.
-_TEST_ARENA = ExprArena()
 
 
 def _decide_swap(*args):
@@ -108,36 +106,35 @@ def test_decide_swap_null_fraction_breaks_cardinality_tie():
 # --- end-to-end through visit ------------------------------------------------
 
 
-# RelationStatistics.columns is keyed by column identity, never by name.
-_K = b"tes_k_000000001"
+# The statistics store keys columns by identity (minted - once per query - in the
+# query's ColumnTable), never by name.
+def _key(plan_context):
+    return plan_context.columns.relation_column("t", "k").identity
 
 
-def _scan_with_stats(relation, row_count, plan_context):
+def _scan_with_stats(relation, row_count, plan_context, key):
+    """(scan, its statistics): recorded in the store once the scan is a plan node."""
     n = ScanStep()
     n.relation = relation
     n.all_relations = {relation}
     n.columns = []
-    plan_context.set_statistics(
-        n,
-        RelationStatistics(
-            row_count_estimate=row_count,
-            columns={
-                _K: ColumnStatistics(column_name="k", data_type="INTEGER")
-            },
-        ),
+    stats = StatisticsInput(
+        plan_context.columns,
+        row_count_estimate=row_count,
+        column_stats={key: {}},
     )
-    return n
+    return n, stats
 
 
-def _inner_join_node():
+def _inner_join_node(plan_context, key):
     n = JoinStep()
     n.type = "inner"
-    n.on = Comparison(value="Eq", arena=_TEST_ARENA)
-    # Join keys are raw column identities, matching how RelationStatistics is keyed.
-    n.left_columns = [_K]
-    n.right_columns = [_K]
-    n.left_column = _K
-    n.right_column = _K
+    n.on = Comparison(value="Eq", arena=plan_context.expressions)
+    # Join keys are raw column identities, matching how the statistics store keys columns.
+    n.left_columns = [key]
+    n.right_columns = [key]
+    n.left_column = key
+    n.right_column = key
     n.left_relation_names = ["big"]
     n.right_relation_names = ["small"]
     # left_readers/right_readers are attached by _build_join_plan, from the scans
@@ -145,8 +142,12 @@ def _inner_join_node():
     return n
 
 
-def _build_join_plan(join_node, left_scan, right_scan, plan_context):
-    """(plan, ids): the join plan and each node's id by its label."""
+def _build_join_plan(join_node, left, right, plan_context):
+    """(plan, ids): the join plan and each node's id by its label. `left` and
+    `right` are (scan, statistics); each scan's statistics are seeded into the
+    store as the refresh would have left them."""
+    left_scan, left_stats = left
+    right_scan, right_stats = right
     plan = LogicalPlan(plan_context)
     # The swap is gated on both legs carrying reader UUIDs, as the binder's
     # join_leg_preprocess attaches for any join over real scans. Without them
@@ -162,6 +163,8 @@ def _build_join_plan(join_node, left_scan, right_scan, plan_context):
     exit_node.columns = []
     e_nid = plan.add_node(exit_node)
     plan.add_edge(j_nid, e_nid)
+    plan_context.statistics.seed(l_nid, left_stats)
+    plan_context.statistics.seed(r_nid, right_stats)
     return plan, {"j": j_nid, "l": l_nid, "r": r_nid, "e": e_nid}
 
 
@@ -177,10 +180,11 @@ def test_visit_swaps_on_post_filter_statistics_not_pre_filter_size():
     # Post-filter statistics say the LEFT side is only 50 rows (a selective filter)
     # and the right is 1000: the left is already the smaller side, so NO swap.
     plan_context = PlanContext()
-    join_node = _inner_join_node()
-    left_scan = _scan_with_stats("big", row_count=50, plan_context=plan_context)  # post-filter: tiny
-    right_scan = _scan_with_stats("small", row_count=1000, plan_context=plan_context)
-    plan, ids = _build_join_plan(join_node, left_scan, right_scan, plan_context)
+    key = _key(plan_context)
+    join_node = _inner_join_node(plan_context, key)
+    left = _scan_with_stats("big", row_count=50, plan_context=plan_context, key=key)  # post-filter: tiny
+    right = _scan_with_stats("small", row_count=1000, plan_context=plan_context, key=key)
+    plan, ids = _build_join_plan(join_node, left, right, plan_context)
 
     strategy = JoinAlgorithmStrategy(telemetry=QueryTelemetry.detached())
     context = OptimizerContext(plan, plan_context)
@@ -198,10 +202,11 @@ def test_visit_swaps_on_post_filter_statistics_not_pre_filter_size():
 def test_visit_swaps_when_statistics_show_left_is_larger():
     # Mirror: post-filter statistics show the left side is the big one.
     plan_context = PlanContext()
-    join_node = _inner_join_node()
-    left_scan = _scan_with_stats("big", row_count=100_000, plan_context=plan_context)
-    right_scan = _scan_with_stats("small", row_count=100, plan_context=plan_context)
-    plan, ids = _build_join_plan(join_node, left_scan, right_scan, plan_context)
+    key = _key(plan_context)
+    join_node = _inner_join_node(plan_context, key)
+    left = _scan_with_stats("big", row_count=100_000, plan_context=plan_context, key=key)
+    right = _scan_with_stats("small", row_count=100, plan_context=plan_context, key=key)
+    plan, ids = _build_join_plan(join_node, left, right, plan_context)
 
     strategy = JoinAlgorithmStrategy(telemetry=QueryTelemetry.detached())
     context = OptimizerContext(plan, plan_context)

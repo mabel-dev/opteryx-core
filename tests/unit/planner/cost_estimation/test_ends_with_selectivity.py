@@ -5,57 +5,53 @@
 
 """
 Unit-level coverage for the suffix LIKE ('%foo') selectivity estimators
-(opteryx/planner/cost_estimation/selectivity.py): `_selectivity_ends_with`
-(case-sensitive) and `_selectivity_ci_ends_with` (case-insensitive) -- both
-char-class, single-anchor-position estimators. See
+(src/cpp/planner/selectivity.hpp, reached through
+opteryx.compiled.planner.statistics): `ends_with` case-sensitive and
+case-insensitive -- both char-class, single-anchor-position estimators. See
 tests/unit/planner/cost_estimation/test_starts_with_selectivity.py for the
 prefix-side counterpart; unlike STARTS_WITH, there is no ordinal-range tier
 here at all -- a suffix has no relationship to a column's ordinal-key
-min/max/histogram (see the module comment above _selectivity_ends_with in
-selectivity.py), so char-class is the ONLY real tier for both case
-variants.
+min/max/histogram (see the comment above `ends_with` in selectivity.hpp), so
+char-class is the ONLY real tier for both case variants.
 
 predicate_rewriter.py rewrites "x LIKE '%foo'" / "x ILIKE '%foo'" into a
 `_ENDS_WITH`/`_CI_ENDS_WITH` FUNCTION node before selectivity estimation ever
 runs, so these estimators are reached via `estimate_selectivity`'s
-NodeType.FUNCTION dispatch branch, not `_selectivity_comparison`.
+FUNCTION dispatch branch, not the comparison branch.
 
 Exercises the estimators' own math directly against hand-built
-ColumnStatistics (no manifest/ANALYZE plumbing).
+StatisticsInput (no manifest/ANALYZE plumbing).
 """
 
 import os
 import sys
-from opteryx.planner.plan_context import PlanContext
-from opteryx.compiled.structures.expressions import Function
-from opteryx.compiled.structures.expressions import Literal
-from opteryx.compiled.structures.expressions import Not
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
 import pytest
 
-# Importing opteryx.planner.optimizer (the package) resolves the optimizer <->
-# cost_estimation.selectivity import cycle first.
+# Importing opteryx.planner.optimizer (the package) first resolves the
+# pre-existing import cycle a compiled planner module hits when imported first.
 import opteryx.planner.optimizer  # noqa: F401
-from opteryx.expression import NodeType
-from opteryx.planner.cost_estimation.selectivity import (
-    _LIKE_PREFIX_SELECTIVITY,
-    _selectivity_ci_ends_with,
-    _selectivity_ends_with,
-    estimate_selectivity,
-    predicate_estimator_tag,
-)
-from opteryx.planner.optimizer.statistics import ColumnStatistics, RelationStatistics
-from opteryx.types.logical_type import NVARCHAR, VARCHAR
+from opteryx.compiled.planner.statistics import LIKE_PREFIX_SELECTIVITY
+from opteryx.compiled.planner.statistics import StatisticsInput
+from opteryx.compiled.planner.statistics import estimate_selectivity
+from opteryx.compiled.planner.statistics import predicate_estimator_tag
+from opteryx.compiled.structures.expressions import Function
+from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import LogicalColumn
-from opteryx.compiled.structures.expressions import ExprArena
+from opteryx.compiled.structures.expressions import Not
+from opteryx.expression import NodeType
+from opteryx.planner.plan_context import PlanContext
+from opteryx.types.logical_type import NVARCHAR, VARCHAR
 
-# One expression arena for the expressions this module builds outside any query.
-_TEST_ARENA = ExprArena()
+# One query context for the columns AND the expressions this module builds:
+# the native estimator resolves a predicate's columns through its arena's
+# bound ColumnTable.
+_PLAN_CONTEXT = PlanContext()
+_ARENA = _PLAN_CONTEXT.expressions
 
 # Statistics are keyed by the identity of a column minted in a query's ColumnTable.
-_PLAN_CONTEXT = PlanContext()
 _IDENTITY = _PLAN_CONTEXT.columns.relation_column("t", "col").identity
 
 _UNIFORM_PROPORTIONS = {
@@ -71,35 +67,38 @@ _UNIFORM_PROPORTIONS = {
 
 
 def _column_node(identity=_IDENTITY, column_type=VARCHAR):
-    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col", arena=_TEST_ARENA)
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="col", arena=_ARENA)
     identifier.schema_column = _PLAN_CONTEXT.columns.reference(identity, "col", column_type)
     return identifier
 
 
 def _func_node(suffix, op="_ENDS_WITH", identity=_IDENTITY, column_type=VARCHAR):
-    literal = Literal(value=suffix, arena=_TEST_ARENA)
-    return Function(value=op, parameters=[_column_node(identity, column_type), literal], arena=_TEST_ARENA)
+    literal = Literal(value=suffix, type=VARCHAR, arena=_ARENA)
+    return Function(value=op, parameters=[_column_node(identity, column_type), literal], arena=_ARENA)
 
 
 def _stats_with_char_class(
     class_proportions=_UNIFORM_PROPORTIONS, avg_length=50.0, identity=_IDENTITY, length_bounds=None
 ):
-    col = ColumnStatistics(
-        column_name="col",
-        data_type="VARCHAR",
-        class_proportions=class_proportions,
-        avg_length=avg_length,
-        length_bounds=length_bounds,
+    return StatisticsInput(
+        _PLAN_CONTEXT.columns,
+        row_count_estimate=1000,
+        column_stats={
+            identity: {
+                "class_proportions": class_proportions,
+                "avg_length": avg_length,
+                "length_bounds": length_bounds,
+            }
+        },
     )
-    return RelationStatistics(row_count_estimate=1000, columns={identity: col})
 
 
-# ── _selectivity_ends_with (case-sensitive, char-class) ─────────────────────
+# ── ends_with (case-sensitive, char-class) ─────────────────────
 
 
 def test_basic_match_is_selective():
     stats = _stats_with_char_class()
-    s = _selectivity_ends_with(_func_node(b"foo"), stats)
+    s = estimate_selectivity(_func_node(b"foo"), stats)
     assert 0.0 < s < 1.0
 
 
@@ -109,22 +108,22 @@ def test_upper_and_lower_needle_give_different_selectivity():
     # fixture), so they must NOT collapse to the same estimate the way the
     # case-insensitive variant does.
     stats = _stats_with_char_class()
-    s_lower = _selectivity_ends_with(_func_node(b"foo"), stats)
-    s_upper = _selectivity_ends_with(_func_node(b"FOO"), stats)
+    s_lower = estimate_selectivity(_func_node(b"foo"), stats)
+    s_upper = estimate_selectivity(_func_node(b"FOO"), stats)
     assert s_lower != pytest.approx(s_upper)
 
 
 def test_longer_needle_is_never_more_selective_than_its_own_suffix():
     # Monotonicity: appending a character in FRONT of an already-anchored
     # suffix (extending the needle) must never raise the estimate, mirroring
-    # _decayed_char_class_selectivity's own monotonicity guarantee and
-    # _selectivity_ci_starts_with's prefix-side analogue.
+    # the decayed infix char-class estimator's own monotonicity guarantee and
+    # the case-insensitive prefix estimator's analogue.
     stats = _stats_with_char_class(avg_length=200.0)
     prev = 1.0
     needle = ""
     for c in "abcdefgh":
         needle = c + needle
-        s = _selectivity_ends_with(_func_node(needle.encode()), stats)
+        s = estimate_selectivity(_func_node(needle.encode()), stats)
         assert s <= prev + 1e-12, (needle, s, prev)
         prev = s
 
@@ -133,32 +132,32 @@ def test_length_discount_when_needle_longer_than_avg_length():
     # avg_length=3, needle="abcdefgh" (8 chars) -- soft discount
     # min(1, 3/8), not a hard floor to 0.
     stats = _stats_with_char_class(avg_length=3.0)
-    s = _selectivity_ends_with(_func_node(b"abcdefgh"), stats)
+    s = estimate_selectivity(_func_node(b"abcdefgh"), stats)
     assert s > 0.0
 
 
 def test_empty_needle_matches_everything():
     stats = _stats_with_char_class()
-    s = _selectivity_ends_with(_func_node(b""), stats)
+    s = estimate_selectivity(_func_node(b""), stats)
     assert s == 1.0
 
 
 def test_falls_back_without_class_proportions():
-    stats = _stats_with_char_class(class_proportions=None)
-    s = _selectivity_ends_with(_func_node(b"foo"), stats)
-    assert s == _LIKE_PREFIX_SELECTIVITY
+    stats = _stats_with_char_class(class_proportions=None, avg_length=None)
+    s = estimate_selectivity(_func_node(b"foo"), stats)
+    assert s == LIKE_PREFIX_SELECTIVITY
 
 
 def test_falls_back_when_avg_length_is_zero():
     stats = _stats_with_char_class(avg_length=0.0)
-    s = _selectivity_ends_with(_func_node(b"foo"), stats)
-    assert s == _LIKE_PREFIX_SELECTIVITY
+    s = estimate_selectivity(_func_node(b"foo"), stats)
+    assert s == LIKE_PREFIX_SELECTIVITY
 
 
 def test_unknown_column_falls_back():
     stats = _stats_with_char_class(identity=_IDENTITY)
     node = _func_node(b"foo", identity=_PLAN_CONTEXT.columns.relation_column("t", "other").identity)
-    assert _selectivity_ends_with(node, stats) == _LIKE_PREFIX_SELECTIVITY
+    assert estimate_selectivity(node, stats) == LIKE_PREFIX_SELECTIVITY
 
 
 def test_result_always_in_unit_interval():
@@ -168,19 +167,19 @@ def test_result_always_in_unit_interval():
     stats = _stats_with_char_class()
     for _ in range(100):
         needle = "".join(chr(rng.randint(97, 122)) for _ in range(rng.randint(0, 12)))
-        s = _selectivity_ends_with(_func_node(needle.encode()), stats)
+        s = estimate_selectivity(_func_node(needle.encode()), stats)
         assert 0.0 <= s <= 1.0
 
 
-# ── _selectivity_ci_ends_with (case-insensitive, char-class) ────────────────
+# ── ci_ends_with (case-insensitive, char-class) ────────────────
 
 
 def test_ci_upper_and_lower_needle_give_same_selectivity():
     # Case-insensitivity must be blind to the needle's own casing -- 'FOO' and
     # 'foo' should estimate identically against the same column stats.
     stats = _stats_with_char_class()
-    s_lower = _selectivity_ci_ends_with(_func_node(b"foo", op="_CI_ENDS_WITH"), stats)
-    s_upper = _selectivity_ci_ends_with(_func_node(b"FOO", op="_CI_ENDS_WITH"), stats)
+    s_lower = estimate_selectivity(_func_node(b"foo", op="_CI_ENDS_WITH"), stats)
+    s_upper = estimate_selectivity(_func_node(b"FOO", op="_CI_ENDS_WITH"), stats)
     assert s_lower == pytest.approx(s_upper)
 
 
@@ -190,33 +189,33 @@ def test_ci_longer_needle_is_never_more_selective_than_its_own_suffix():
     needle = ""
     for c in "abcdefgh":
         needle = c + needle
-        s = _selectivity_ci_ends_with(_func_node(needle.encode(), op="_CI_ENDS_WITH"), stats)
+        s = estimate_selectivity(_func_node(needle.encode(), op="_CI_ENDS_WITH"), stats)
         assert s <= prev + 1e-12, (needle, s, prev)
         prev = s
 
 
 def test_ci_length_discount_when_needle_longer_than_avg_length():
     stats = _stats_with_char_class(avg_length=3.0)
-    s = _selectivity_ci_ends_with(_func_node(b"abcdefgh", op="_CI_ENDS_WITH"), stats)
+    s = estimate_selectivity(_func_node(b"abcdefgh", op="_CI_ENDS_WITH"), stats)
     assert s > 0.0
 
 
 def test_ci_empty_needle_matches_everything():
     stats = _stats_with_char_class()
-    s = _selectivity_ci_ends_with(_func_node(b"", op="_CI_ENDS_WITH"), stats)
+    s = estimate_selectivity(_func_node(b"", op="_CI_ENDS_WITH"), stats)
     assert s == 1.0
 
 
 def test_ci_falls_back_without_class_proportions():
-    stats = _stats_with_char_class(class_proportions=None)
-    s = _selectivity_ci_ends_with(_func_node(b"foo", op="_CI_ENDS_WITH"), stats)
-    assert s == _LIKE_PREFIX_SELECTIVITY
+    stats = _stats_with_char_class(class_proportions=None, avg_length=None)
+    s = estimate_selectivity(_func_node(b"foo", op="_CI_ENDS_WITH"), stats)
+    assert s == LIKE_PREFIX_SELECTIVITY
 
 
 def test_ci_falls_back_when_avg_length_is_zero():
     stats = _stats_with_char_class(avg_length=0.0)
-    s = _selectivity_ci_ends_with(_func_node(b"foo", op="_CI_ENDS_WITH"), stats)
-    assert s == _LIKE_PREFIX_SELECTIVITY
+    s = estimate_selectivity(_func_node(b"foo", op="_CI_ENDS_WITH"), stats)
+    assert s == LIKE_PREFIX_SELECTIVITY
 
 
 def test_ci_result_always_in_unit_interval():
@@ -226,7 +225,7 @@ def test_ci_result_always_in_unit_interval():
     stats = _stats_with_char_class()
     for _ in range(100):
         needle = "".join(chr(rng.randint(97, 122)) for _ in range(rng.randint(0, 12)))
-        s = _selectivity_ci_ends_with(_func_node(needle.encode(), op="_CI_ENDS_WITH"), stats)
+        s = estimate_selectivity(_func_node(needle.encode(), op="_CI_ENDS_WITH"), stats)
         assert 0.0 <= s <= 1.0
 
 
@@ -238,11 +237,9 @@ def test_ci_ends_with_and_ci_starts_with_agree_on_uniform_stats():
     # shape; against IDENTICAL uniform stats and needle, they must produce
     # the same number even though they model opposite ends of the string --
     # a real difference here would mean the two implementations drifted.
-    from opteryx.planner.cost_estimation.selectivity import _selectivity_ci_starts_with
-
     stats = _stats_with_char_class()
-    s_ends = _selectivity_ci_ends_with(_func_node(b"foo", op="_CI_ENDS_WITH"), stats)
-    s_starts = _selectivity_ci_starts_with(_func_node(b"foo", op="_CI_STARTS_WITH"), stats)
+    s_ends = estimate_selectivity(_func_node(b"foo", op="_CI_ENDS_WITH"), stats)
+    s_starts = estimate_selectivity(_func_node(b"foo", op="_CI_STARTS_WITH"), stats)
     assert s_ends == pytest.approx(s_starts)
 
 
@@ -259,19 +256,19 @@ def test_ci_ends_with_and_ci_starts_with_agree_on_uniform_stats():
 def test_ends_with_hard_zero_when_needle_exceeds_max_length():
     stats = _stats_with_char_class(avg_length=20.0, length_bounds=(3, 22))
     node = _func_node(b"x" * 25)  # 25 bytes > max_length 22
-    assert _selectivity_ends_with(node, stats) == 0.0
+    assert estimate_selectivity(node, stats) == 0.0
 
 
 def test_ci_ends_with_hard_zero_when_needle_exceeds_max_length():
     stats = _stats_with_char_class(avg_length=20.0, length_bounds=(3, 22))
     node = _func_node(b"x" * 25, op="_CI_ENDS_WITH")
-    assert _selectivity_ci_ends_with(node, stats) == 0.0
+    assert estimate_selectivity(node, stats) == 0.0
 
 
 def test_ends_with_not_hard_zeroed_within_max_length():
     stats = _stats_with_char_class(length_bounds=(1, 50))
     node = _func_node(b"foo")
-    assert _selectivity_ends_with(node, stats) != 0.0
+    assert estimate_selectivity(node, stats) != 0.0
 
 
 def test_ends_with_hard_guard_skipped_for_nvarchar():
@@ -279,13 +276,13 @@ def test_ends_with_hard_guard_skipped_for_nvarchar():
     # stats from the external catalog producer are character-based.
     stats = _stats_with_char_class(avg_length=20.0, length_bounds=(1, 3))
     node = _func_node(b"x" * 25, column_type=NVARCHAR)
-    assert _selectivity_ends_with(node, stats) != 0.0
+    assert estimate_selectivity(node, stats) != 0.0
 
 
 def test_not_ends_with_hard_zero_complements_to_one():
     stats = _stats_with_char_class(avg_length=20.0, length_bounds=(3, 22))
     inner = _func_node(b"x" * 25)
-    not_node = Not(centre=inner, arena=_TEST_ARENA)
+    not_node = Not(centre=inner, arena=_ARENA)
     assert estimate_selectivity(inner, stats) == 0.0
     assert estimate_selectivity(not_node, stats) == 1.0
 
@@ -308,7 +305,7 @@ def test_estimate_selectivity_dispatches_ci_ends_with():
 def test_not_ends_with_is_the_complement():
     stats = _stats_with_char_class()
     inner = _func_node(b"foo")
-    not_node = Not(centre=inner, arena=_TEST_ARENA)
+    not_node = Not(centre=inner, arena=_ARENA)
     s = estimate_selectivity(inner, stats)
     not_s = estimate_selectivity(not_node, stats)
     assert s == pytest.approx(1.0 - not_s)
@@ -337,7 +334,7 @@ def test_predicate_estimator_tag_char_class_suffix_when_stats_present():
 
 
 def test_predicate_estimator_tag_flat_fallback_without_char_class_stats():
-    stats = _stats_with_char_class(class_proportions=None)
+    stats = _stats_with_char_class(class_proportions=None, avg_length=None)
     assert predicate_estimator_tag(_func_node(b"foo"), stats) == "flat_fallback"
     assert (
         predicate_estimator_tag(_func_node(b"foo", op="_CI_ENDS_WITH"), stats)
@@ -347,7 +344,7 @@ def test_predicate_estimator_tag_flat_fallback_without_char_class_stats():
 
 def test_predicate_estimator_tag_none_for_unrelated_function():
     stats = _stats_with_char_class()
-    node = Function(value="SOMETHING_ELSE", parameters=[], arena=_TEST_ARENA)
+    node = Function(value="SOMETHING_ELSE", parameters=[], arena=_ARENA)
     assert predicate_estimator_tag(node, stats) is None
 
 

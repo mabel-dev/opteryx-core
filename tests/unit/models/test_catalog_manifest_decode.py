@@ -21,7 +21,11 @@ import opteryx.types  # noqa: F401  (enter through opteryx.types: column_type <-
 from opteryx_catalog.opteryx_catalog import OpteryxCatalog
 
 from opteryx.compiled.planner.native_manifest import decode_manifest_parquet
+from opteryx.compiled.structures.plan_steps import ExitStep
+from opteryx.compiled.structures.plan_steps import ScanStep
 from opteryx.models.manifest import Manifest
+from opteryx.planner.logical_planner import LogicalPlan
+from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
 from opteryx.planner.plan_context import PlanContext
 from opteryx.types.logical_type import INT64
 from opteryx.types.schema import RelationSchema
@@ -84,12 +88,15 @@ def _entry(field_ids, mins, maxes, nulls):
     }
 
 
+# Bound columns are minted by a query's ColumnTable; these tests share one.
+_PLAN_CONTEXT = PlanContext()
+
+
 def _schema(field_ids):
-    pc = PlanContext()
     return RelationSchema(
         name="t",
         columns=[
-            pc.columns.relation_column("t", name, column_type=INT64, field_id=field_id)
+            _PLAN_CONTEXT.columns.relation_column("t", name, column_type=INT64, field_id=field_id)
             for name, field_id in zip(("a", "b"), field_ids)
         ],
     )
@@ -108,12 +115,23 @@ def _decode(schema, entry):
     return Manifest(native, schema)
 
 
+def _ordinal_bounds(manifest, name):
+    """Column `name`'s relation-wide ordinal bounds as the planner reads them:
+    the base statistics the statistics refresh gives a Scan over `manifest`
+    (all of its columns) in _PLAN_CONTEXT."""
+    plan = LogicalPlan(_PLAN_CONTEXT)
+    scan = plan.add_node(ScanStep(relation="t", schema=manifest.schema, manifest=manifest))
+    plan.add_edge(scan, plan.add_node(ExitStep()))
+    refresh_statistics(plan, _PLAN_CONTEXT)
+    return _PLAN_CONTEXT.statistics.ordinal_bounds(scan, manifest.schema.find_column(name).identity)
+
+
 def test_row_field_ids_key_the_lists_whatever_their_order():
     """Written in the FILE's column order (b then a): each element lands on the
     column its id names, not on the column at its index."""
     manifest = _decode(_schema([1, 5]), _entry([5, 1], [50, 10], [59, 19], [2, 1]))
-    assert manifest.get_ordinal_bounds("a") == (10, 19)
-    assert manifest.get_ordinal_bounds("b") == (50, 59)
+    assert _ordinal_bounds(manifest, "a") == (10, 19)
+    assert _ordinal_bounds(manifest, "b") == (50, 59)
     assert manifest.get_total_null_count("a") == 1
     assert manifest.get_total_null_count("b") == 2
 
@@ -122,23 +140,23 @@ def test_a_list_that_does_not_line_up_with_the_ids_is_dropped():
     """Two ids, one bound each way: which column the bound belongs to is
     unknowable, so there is none - the null counts, which DO line up, stay."""
     manifest = _decode(_schema([1, 5]), _entry([5, 1], [50], [59], [2, 1]))
-    assert manifest.get_ordinal_bounds("a") is None
-    assert manifest.get_ordinal_bounds("b") is None
+    assert _ordinal_bounds(manifest, "a") is None
+    assert _ordinal_bounds(manifest, "b") is None
     assert manifest.get_total_null_count("a") == 1
 
 
 def test_a_row_with_no_field_ids_is_positional():
     manifest = _decode(_schema([1, 5]), _entry([], [10, 50], [19, 59], [1, 2]))
-    assert manifest.get_ordinal_bounds("a") == (10, 19)
-    assert manifest.get_ordinal_bounds("b") == (50, 59)
+    assert _ordinal_bounds(manifest, "a") == (10, 19)
+    assert _ordinal_bounds(manifest, "b") == (50, 59)
 
 
 def test_a_short_positional_list_under_a_keyed_schema_is_dropped():
     """No ids, and a list covering fewer columns than the schema has: it could
     belong to any of them."""
     manifest = _decode(_schema([1, 5]), _entry([], [10], [19], [1, 2]))
-    assert manifest.get_ordinal_bounds("a") is None
-    assert manifest.get_ordinal_bounds("b") is None
+    assert _ordinal_bounds(manifest, "a") is None
+    assert _ordinal_bounds(manifest, "b") is None
     assert manifest.get_total_null_count("b") == 2
 
 

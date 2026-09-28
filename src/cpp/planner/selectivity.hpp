@@ -78,7 +78,7 @@ enum CharClass : int { UPPER = 0, LOWER = 1, DIGIT = 2, WHITESPACE = 3, PUNCT_TE
 // probability, assuming uniformity within the class).
 inline constexpr double kClassCardinality[kCharClasses] = {26, 26, 10, 6, 10, 22, 128, 28};
 
-// Byte -> class for ASCII; tests/unit/compiled/test_char_class_stats_parity.py
+// Byte -> class for ASCII; tests/compiled/test_char_class_stats_parity.py
 // keeps the Python table, the native kernel's and scratch/like_selectivity's in
 // step - this is the Python table's ASCII half (every byte >= 0x80, and every
 // code point beyond, is EXTENDED).

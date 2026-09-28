@@ -1,8 +1,8 @@
-make clickbench (9.47s seconds) [256K rg] (27-SEP) [0.89x]
+make clickbench (8.76s seconds) [256K rg] (28-SEP) [0.82x]
 make clickbench-skene (7.10s) (27-SEP) [0.67x]
+make clickbench-canon (10.91) (27-SEP) [1.02x]
 
 (125.6 seconds) <- Opteryx 0.26.8
-(10.91 seconds) <- best on clickbench parquet files (27-SEP) [1.02x]
 (10.65 seconds) <- DuckDB Baseline
 
 make tpch-sf1    (448.0ms) (27-SEP) [SF1] [1.29x]

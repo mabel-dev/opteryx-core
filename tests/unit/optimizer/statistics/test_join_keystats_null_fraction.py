@@ -5,7 +5,8 @@
 
 """WP-6: join cardinality must consume join-key null fractions.
 
-``_join_stats`` builds ``KeyStats`` from each join key's ``ColumnStatistics``.
+The join's statistics propagator builds ``KeyStats`` from each join key's column
+statistics (``equi_key_classes`` in src/cpp/planner/statistics_refresh.hpp).
 The null fraction was previously hard-coded to ``None`` even when the column
 carried one, so the estimator's null discount (``_effective_rows``) never fired.
 These tests pin the wiring: a null-heavy join key now reduces the estimated
@@ -14,53 +15,67 @@ output cardinality.
 
 import os
 import sys
-from types import SimpleNamespace
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
 import pytest
 
+# Importing opteryx.planner.optimizer (the package) first resolves the
+# pre-existing import cycle a compiled planner module hits when imported first.
+import opteryx.planner.optimizer  # noqa: F401
 from opteryx.compiled.planner.plan_graph import EdgeRole
-from opteryx.planner.optimizer.statistics import ColumnStatistics
-from opteryx.planner.optimizer.statistics import RelationStatistics
-from opteryx.planner.optimizer.statistics_refresh import _join_stats
-
-
-# Join keys reach _join_stats as raw column *identities* (opaque bytes), which
-# is also how RelationStatistics.columns is keyed. Anything name-shaped here
-# would not resolve — and would silently re-create the dead-lookup bug where
-# every join-key NDV read returned None and the estimator fell back to tdom.
-_LK = b"tes_lk_00000001"
-_RK = b"tes_rk_00000002"
-
-
-def _join_node():
-    return SimpleNamespace(
-        type="inner",
-        left_columns=[_LK],
-        right_columns=[_RK],
-    )
+from opteryx.compiled.planner.statistics import StatisticsInput
+from opteryx.compiled.structures.plan_steps import JoinStep
+from opteryx.compiled.structures.plan_steps import ScanStep
+from opteryx.planner.logical_planner import LogicalPlan
+from opteryx.planner.plan_context import PlanContext
 
 
 def _estimate(left_null_fraction):
     """Estimate inner-join row_count with the left key carrying the given null
-    fraction; both sides 1000 rows, NDV 100 (so per-key selectivity 1/100)."""
-    left = RelationStatistics(
-        row_count_estimate=1000,
-        columns={
-            _LK: ColumnStatistics(
-                column_name="lk", data_type="INTEGER", distinct_count=100, null_fraction=left_null_fraction
-            )
-        },
+    fraction; both sides 1000 rows, NDV 100 (so per-key selectivity 1/100).
+
+    Join keys reach the join as raw column *identities* minted in the query's
+    ColumnTable, which is also how the statistics store keys columns. Anything
+    name-shaped would not resolve -- and would silently re-create the
+    dead-lookup bug where every join-key NDV read returned None and the
+    estimator fell back to tdom."""
+    plan_context = PlanContext()
+    columns = plan_context.columns
+    left_key = columns.relation_column("l", "lk").identity
+    right_key = columns.relation_column("r", "rk").identity
+
+    join = JoinStep()
+    join.type = "inner"
+    join.left_columns = [left_key]
+    join.right_columns = [right_key]
+
+    plan = LogicalPlan(plan_context)
+    left_nid = plan.add_node(ScanStep())
+    right_nid = plan.add_node(ScanStep())
+    join_nid = plan.add_node(join)
+    plan.add_edge(left_nid, join_nid, EdgeRole.LEFT)
+    plan.add_edge(right_nid, join_nid, EdgeRole.RIGHT)
+
+    store = plan_context.statistics
+    store.seed(
+        left_nid,
+        StatisticsInput(
+            columns,
+            row_count_estimate=1000,
+            column_stats={left_key: {"distinct_count": 100, "null_fraction": left_null_fraction}},
+        ),
     )
-    right = RelationStatistics(
-        row_count_estimate=1000,
-        columns={
-            _RK: ColumnStatistics(column_name="rk", data_type="INTEGER", distinct_count=100, null_fraction=0.0)
-        },
+    store.seed(
+        right_nid,
+        StatisticsInput(
+            columns,
+            row_count_estimate=1000,
+            column_stats={right_key: {"distinct_count": 100, "null_fraction": 0.0}},
+        ),
     )
-    child_stats = [(left, EdgeRole.LEFT), (right, EdgeRole.RIGHT)]
-    return _join_stats(_join_node(), child_stats).row_count
+    store.compute(plan, join_nid)
+    return store.row_count(join_nid)
 
 
 def test_null_fraction_halves_effective_rows():

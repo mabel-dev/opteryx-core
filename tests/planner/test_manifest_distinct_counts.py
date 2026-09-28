@@ -24,6 +24,10 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 from opteryx.models.manifest import Manifest
 from opteryx.compiled.planner.native_manifest import decode_manifest_parquet
+from opteryx.compiled.structures.plan_steps import ExitStep
+from opteryx.compiled.structures.plan_steps import ScanStep
+from opteryx.planner.logical_planner import LogicalPlan
+from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import RelationSchema
 from opteryx.planner.plan_context import PlanContext
@@ -77,6 +81,17 @@ def _read_back(schema, data, stats_are_authoritative=True):
     )
 
 
+def _costing_distinct_count(manifest, name):
+    """The NDV the planner COSTS with for column `name`: the base statistics the
+    statistics refresh gives a Scan over `manifest` in _PLAN_CONTEXT (the
+    estimate_cardinality answer, else the range/count-derived fallback)."""
+    plan = LogicalPlan(_PLAN_CONTEXT)
+    scan = plan.add_node(ScanStep(relation="t", schema=manifest.schema, manifest=manifest))
+    plan.add_edge(scan, plan.add_node(ExitStep()))
+    refresh_statistics(plan, _PLAN_CONTEXT)
+    return _PLAN_CONTEXT.statistics.distinct_count(scan, manifest.schema.find_column(name).identity)
+
+
 def test_distinct_counts_round_trip_positionally():
     """Position IS field id, the same convention `null_counts` and `min_values`
     use. A sparse dict must come back attached to the columns it was keyed to -
@@ -116,7 +131,7 @@ def test_exactness_is_not_persisted_and_reads_back_as_an_estimate():
     # counts or sketches only, and there are no sketches here ...
     assert manifest.estimate_cardinality("a") is None
     # ... but it is reachable for COSTING, which is the whole point.
-    assert manifest.estimate_range_cardinality("a") == 9
+    assert _costing_distinct_count(manifest, "a") == 9
 
 
 def test_a_manifest_without_the_column_still_reads():

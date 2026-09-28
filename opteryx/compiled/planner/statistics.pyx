@@ -104,6 +104,7 @@ cdef extern from "planner/stats_store.hpp" namespace "opteryx::planner":
 
     cdef cppclass StatsStore:
         const RelationStats* node(uint32_t nid)
+        const RelationStats* cte(const string& key)
         void set_node(uint32_t nid, shared_ptr[RelationStats] stats) except +
 
 
@@ -633,6 +634,15 @@ cdef class StatisticsStore:
         """The node's working row count, whatever its provenance; None without statistics."""
         cdef const RelationStats* rel = self._store.node(nid)
         return None if rel == NULL else rel.row_count()
+
+    def row_count_estimate(self, uint32_t nid):
+        """The row count when it is an ESTIMATE, else None."""
+        cdef const RelationStats* rel = self._store.node(nid)
+        return None if rel == NULL else _stat(rel.row_count_estimate)
+
+    def has_cte(self, str cte_key not None):
+        """Whether shared CTE `cte_key`'s output statistics were recorded."""
+        return self._store.cte(cte_key.encode("utf-8")) != NULL
 
     def row_count_metric(self, uint32_t nid):
         """The row count when it is a METRIC (a number we claim to know), else None."""

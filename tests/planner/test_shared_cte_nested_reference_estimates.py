@@ -88,11 +88,12 @@ def _optimized(sql):
 
 
 def _references(plan, shared):
+    """(member plan, node id, node) for every MaterializedCteRef in the forest."""
     for candidate in [plan, *shared.values()]:
         for member in iter_plan_forest(candidate):
-            for _nid, node in member.nodes(True):
+            for nid, node in member.nodes(True):
                 if node.node_type == LogicalPlanStepType.MaterializedCteRef:
-                    yield node
+                    yield member, nid, node
 
 
 @pytest.mark.parametrize(
@@ -114,7 +115,8 @@ def test_every_nested_cte_reference_is_stamped(sql, expected_bodies, expected_re
     assert len(references) == expected_refs, (
         f"expected {expected_refs} MaterializedCteRef leaves, got {len(references)}"
     )
-    unstamped = [n for n in references if plan_context.cte_statistics(n.cte_key) is None]
+    store = plan_context.statistics
+    unstamped = [node for _member, _nid, node in references if not store.has_cte(node.cte_key)]
     assert not unstamped, (
         f"{len(unstamped)} of {len(references)} references have no CTE estimate — "
         "_refs_of is not reaching references held in embedded (expression-subquery) "

@@ -6,9 +6,10 @@
 """WP-5: PredicateOrdering consumes statistics-driven selectivity.
 
 Previously the strategy ordered filters with a hard-coded ``DEFAULT_SELECTIVITY``
-table keyed only on the operator. It now calls ``estimate_selectivity`` against
-the input relation's ``RelationStatistics`` (histograms / NDV / null fractions)
-when available, falling back to the constants only when no statistics exist.
+table keyed only on the operator. It now takes ``estimate`` -- a predicate's
+selectivity against the input relation's statistics (histograms / NDV / null
+fractions), the native estimator -- when available, falling back to the
+constants only when no statistics exist.
 
 Selectivity affects filter *order*, never results, so these tests assert the
 ordering inputs and the resulting order — not query output.
@@ -18,67 +19,82 @@ import array
 import os
 import sys
 from types import SimpleNamespace
-from opteryx.planner.plan_context import PlanContext
-from opteryx.compiled.structures.expressions import Function
-from opteryx.compiled.structures.expressions import Literal
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import pytest
 
+# Importing opteryx.planner.optimizer (the package) first resolves the
+# pre-existing import cycle a compiled planner module hits when imported first.
+import opteryx.planner.optimizer  # noqa: F401
+from opteryx.compiled.planner.statistics import StatisticsInput
+from opteryx.compiled.planner.statistics import estimate_selectivity
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Function
+from opteryx.compiled.structures.expressions import Literal
+from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.expression import NodeType
 from opteryx.models import QueryTelemetry
-from opteryx.planner.optimizer.statistics import ColumnRange
-from opteryx.planner.optimizer.statistics import ColumnStatistics
-from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.planner.optimizer.strategies.predicate_ordering import _order_complex_predicates
 from opteryx.planner.optimizer.strategies.predicate_ordering import _order_simple_predicates
 from opteryx.planner.optimizer.strategies.predicate_ordering import _resolve_predicate_stats
+from opteryx.planner.plan_context import PlanContext
 from opteryx.third_party.maki_nage.distogram import load_counts_i64
+from opteryx.types.logical_type import INT64
 from opteryx.types.logical_type import VARCHAR
-from opteryx.compiled.structures.expressions import LogicalColumn
-from opteryx.compiled.structures.expressions import ExprArena
-
-# One expression arena for the expressions this module builds outside any query.
-_TEST_ARENA = ExprArena()
 
 
-# RelationStatistics is keyed by column identity, never by name — a name is not
-# unique across a plan. The identifier nodes below therefore carry an identity
-# on their schema_column, exactly as bound identifiers do.
-# Statistics are keyed by the identity of a column minted in a query's ColumnTable.
+# Statistics are keyed by column identity, never by name — a name is not
+# unique across a plan. The identifier nodes below therefore carry a column
+# minted in the query's ColumnTable, exactly as bound identifiers do; the
+# native estimator resolves them through the expression arena's bound
+# ColumnTable, so one query context holds the columns AND the expressions.
 _PLAN_CONTEXT = PlanContext()
-_LOW = _PLAN_CONTEXT.columns.relation_column("t", "low").identity
-_HIGH = _PLAN_CONTEXT.columns.relation_column("t", "high").identity
-_MISSING = _PLAN_CONTEXT.columns.relation_column("t", "msg").identity
+_TEST_ARENA = _PLAN_CONTEXT.expressions
+_COLUMNS = {
+    column.identity: column
+    for column in (
+        _PLAN_CONTEXT.columns.relation_column("t", "low"),
+        _PLAN_CONTEXT.columns.relation_column("t", "high"),
+        _PLAN_CONTEXT.columns.relation_column("t", "msg"),
+    )
+}
+_LOW, _HIGH, _MISSING = list(_COLUMNS)
 
 
 def _cmp(op, col_identity, literal, col_name="col"):
-    """A minimal COMPARISON_OPERATOR node: <col> <op> <literal>."""
-    node = SimpleNamespace(node_type=NodeType.COMPARISON_OPERATOR, value=op)
-    node.left = SimpleNamespace(
+    """A minimal COMPARISON_OPERATOR node: <col> <op> <literal>. The column
+    carries no type (as the fixture's category=None did)."""
+    left = LogicalColumn(
         node_type=NodeType.IDENTIFIER,
         source_column=col_name,
-        value=col_name,
-        schema_column=SimpleNamespace(category=None, identity=col_identity),
+        schema_column=_COLUMNS[col_identity],
+        arena=_TEST_ARENA,
     )
-    node.right = SimpleNamespace(node_type=NodeType.LITERAL, value=literal)
-    node.centre = None
-    return node
+    right = Literal(value=literal, type=INT64, arena=_TEST_ARENA)
+    return Comparison(value=op, left=left, right=right, arena=_TEST_ARENA)
 
 
 def _pred(condition):
     return SimpleNamespace(condition=condition)
 
 
-_STATS = RelationStatistics(
-    row_count_estimate=1000,
-    columns={
-        # low-cardinality column: Eq matches ~1/2 of rows
-        _LOW: ColumnStatistics(column_name="low", data_type="INTEGER", distinct_count=2),
-        # high-cardinality column: Eq matches ~1/1000 of rows
-        _HIGH: ColumnStatistics(column_name="high", data_type="INTEGER", distinct_count=1000),
-    },
+def _estimate(stats):
+    """The strategy's `estimate`: a predicate's selectivity against `stats`."""
+    return lambda condition: estimate_selectivity(condition, stats)
+
+
+_STATS = _estimate(
+    StatisticsInput(
+        _PLAN_CONTEXT.columns,
+        row_count_estimate=1000,
+        column_stats={
+            # low-cardinality column: Eq matches ~1/2 of rows
+            _LOW: {"distinct_count": 2},
+            # high-cardinality column: Eq matches ~1/1000 of rows
+            _HIGH: {"distinct_count": 1000},
+        },
+    )
 )
 
 
@@ -156,7 +172,7 @@ def _varchar_identifier(col_identity, col_name="col"):
 
 
 def _starts_with_pred(prefix: bytes, col_identity=_SW_IDENTITY):
-    literal = Literal(value=prefix, arena=_TEST_ARENA)
+    literal = Literal(value=prefix, type=VARCHAR, arena=_TEST_ARENA)
     condition = Function(
         value="_STARTS_WITH", parameters=[_varchar_identifier(col_identity), literal], 
     arena=_TEST_ARENA)
@@ -175,12 +191,18 @@ def _cheap_no_model_func_pred(col_identity=_LOW):
 
 
 def _sw_stats(col_min="a", col_max="m", identity=_SW_IDENTITY):
-    """RelationStatistics whose VARCHAR column spans [col_min, col_max] in
-    ordinal-key space -- a prefix well outside that range estimates near 0."""
+    """Statistics (as the strategy's `estimate`) whose VARCHAR column spans
+    [col_min, col_max] in ordinal-key space -- a prefix well outside that range
+    estimates near 0."""
     lo, hi = VARCHAR.ordinalize(col_min), VARCHAR.ordinalize(col_max)
     dgram = load_counts_i64(array.array("q", [0] * 63 + [1000]), float(lo), float(hi))
-    col = ColumnStatistics(column_name="col", data_type="VARCHAR", histogram=dgram)
-    return RelationStatistics(row_count_estimate=1000, columns={identity: col})
+    return _estimate(
+        StatisticsInput(
+            _PLAN_CONTEXT.columns,
+            row_count_estimate=1000,
+            column_stats={identity: {"histogram": dgram}},
+        )
+    )
 
 
 def test_selective_starts_with_moves_ahead_of_cheaper_function_with_statistics():
@@ -208,7 +230,7 @@ def test_complex_ordering_without_statistics_keeps_cost_only_order():
 
 
 def test_complex_ordering_no_model_predicates_keep_cost_order_even_with_statistics():
-    # Two predicates neither of which _selectivity_starts_with/_ci_starts_with
+    # Two predicates neither of which the prefix estimators
     # can model (both fall through to 1.0) -- statistics being present must
     # not disturb the cost-only tie-break among them.
     stats = _sw_stats()

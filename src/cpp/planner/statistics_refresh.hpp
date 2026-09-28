@@ -303,17 +303,11 @@ inline bool value_range_span(const ColumnStats& col, __int128& span) {
     return true;
 }
 
-// composite_key_ndv: the max of the known ones.
-inline int64_t composite_key_ndv(const std::vector<int64_t>& ndvs) {
-    bool found = false;
-    int64_t best = 0;
-    for (int64_t v : ndvs) {
-        if (!found || v > best) {
-            best = v;
-            found = true;
-        }
-    }
-    return found ? best : kNoStat;
+// join_estimator's composite_key_ndv over a list of known NDVs; kNoStat when empty.
+inline int64_t known_key_ndv(const std::vector<int64_t>& ndvs) {
+    const std::vector<uint8_t> known(ndvs.size(), 1);
+    int64_t out = 0;
+    return opteryx::planner::composite_key_ndv(ndvs.data(), known.data(), ndvs.size(), &out) ? out : kNoStat;
 }
 
 // Python's max() over a non-empty list of floats.
@@ -1141,7 +1135,7 @@ private:
             const int64_t fallback = std::min(left.domain_row_count(), right.domain_row_count());
             KeyStats sides[2];
             for (int side = 0; side < 2; ++side) {
-                const int64_t side_ndv = composite_key_ndv(known[side]);
+                const int64_t side_ndv = known_key_ndv(known[side]);
                 bool measured = side_ndv != kNoStat;
                 int64_t tdom = side_ndv != kNoStat ? side_ndv : fallback;
                 if (!spans[side].empty()) {
@@ -1155,7 +1149,7 @@ private:
                     tdom = 1;
                     measured = false;
                 }
-                const int64_t live_ndv = composite_key_ndv(live[side]);
+                const int64_t live_ndv = known_key_ndv(live[side]);
                 KeyStats& k = sides[side];
                 k.ndv = tdom;
                 k.has_ndv = true;

@@ -38,18 +38,17 @@ def _build_refreshed_plan(sql):
     plan = do_resolve_relations(plan, ctes, telemetry, plan_context=plan_context)
     plan = do_plan_rewrite(plan, telemetry, plan_context=plan_context)
     bound = do_bind_phase(plan, execution_context=ctx, query_id=query_id, telemetry=telemetry, plan_context=plan_context)
-    plan_context = PlanContext()
     return refresh_statistics(bound, plan_context), plan_context
 
 
 def _stats_by_node_type(plan, plan_context):
     """Map node_type name -> list of estimated row_count for that type."""
     out = {}
+    store = plan_context.statistics
     for nid, node in plan.nodes(True):
-        st = plan_context.statistics(node)
-        if st is None:
+        if not store.has(nid):
             continue
-        out.setdefault(node.node_type.name, []).append(st.row_count)
+        out.setdefault(node.node_type.name, []).append(store.row_count(nid))
     return out
 
 

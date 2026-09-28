@@ -126,10 +126,11 @@ def test_plan_adapter_tdom_fallback_is_marked_as_a_standin():
 
     from opteryx.planner.plan_context import PlanContext
 
-    class _NoStatsScan:
-        """A scan the statistics refresh never reached: nothing recorded."""
+    # A scan node the statistics refresh never reached: nothing recorded for
+    # its node id in the query's statistics store.
+    no_stats_scan_nid = 1
 
-    stats = plan_adapter._key_stats(_NoStatsScan(), b"k", PlanContext())
+    stats = plan_adapter._key_stats(no_stats_scan_nid, b"k", PlanContext())
     assert stats.ndv is None
     assert stats.ndv_provenance is NdvProvenance.UNKNOWN
 

@@ -100,11 +100,11 @@ def test_arithmetic_join_key_estimate_is_not_the_naive_cross_product():
     plan, plan_context = _plan_for(sql)
     plan = refresh_statistics(plan, plan_context)
     joins = _join_nodes(plan)
-    inner = [node for _, node in joins if node.type == "inner"]
+    inner = [nid for nid, node in joins if node.type == "inner"]
     assert inner
-    stats = plan_context.statistics(inner[0])
-    assert stats is not None
-    assert stats.row_count < 9 * 177
+    row_count = plan_context.statistics.row_count(inner[0])
+    assert row_count is not None
+    assert row_count < 9 * 177
 
 
 def test_arithmetic_join_key_result_matches_hoist_free_rewrite():

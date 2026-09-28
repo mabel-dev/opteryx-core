@@ -6,12 +6,13 @@
 """Regression: the scan statistics cache must not serve pre-pruning statistics
 after a pruning strategy shrinks the scan's manifest.
 
-_scan_stats memoises each scan's base statistics keyed by
-(node.uuid, id(node.schema), id(node.manifest), wanted) on the invariant that
-a Manifest attached to a plan node is immutable. The pruning operations
+The statistics refresh memoises each scan's base statistics in the query's
+StatisticsStore, keyed by (the manifest's identity, the schemas, the consulted
+columns) - `scan_base_statistics` in src/cpp/planner/statistics_refresh.hpp -
+on the invariant that a Manifest attached to a plan node is immutable. The pruning operations
 (prune_files / prune_files_for_topn / subset) are therefore copy-on-write:
 they return a NEW Manifest which the strategy assigns to node.manifest, so
-the id()-keyed cache misses and recomputes over the pruned file set. Before
+the identity-keyed cache misses and recomputes over the pruned file set. Before
 that contract, ManifestPruning/TopNManifestPruning/LimitFilesPruning mutated
 the manifest in place (same id) and every later refresh with an unchanged
 `wanted` set re-served PRE-pruning record counts and bounds — feeding
@@ -22,14 +23,18 @@ from __future__ import annotations
 
 import os
 import sys
-from opteryx.compiled.structures.expressions import Comparison
-from opteryx.compiled.structures.expressions import Literal
-from opteryx.compiled.structures.plan_steps import ScanStep
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
+# Importing opteryx.planner.optimizer (the package) first resolves the
+# pre-existing import cycle a compiled planner module hits when imported first.
+import opteryx.planner.optimizer  # noqa: F401
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
+from opteryx.compiled.structures.plan_steps import ScanStep
 from opteryx.expression import NodeType
-from opteryx.planner.optimizer.statistics_refresh import _scan_stats
+from opteryx.planner.logical_planner import LogicalPlan
+from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
 from opteryx.types.logical_type import INT64
 from opteryx.types.schema import RelationSchema
 from opteryx.compiled.structures.expressions import LogicalColumn
@@ -83,10 +88,12 @@ def test_refresh_after_prune_reflects_pruned_file_set():
     schema = _schema(plan_context)
     manifest = build_manifest(schema, [_file("low", 0, 100, 10), _file("high", 1000, 2000, 20)])
     node = _scan_node(manifest, schema)
-    cache: dict = {}
+    plan = LogicalPlan(plan_context)
+    nid = plan.add_node(node)
+    store = plan_context.statistics  # holds the scan base memo across refreshes
 
-    before = _scan_stats(node, base_stats_cache=cache)
-    assert before.row_count == 30
+    refresh_statistics(plan, plan_context)
+    assert store.row_count(nid) == 30
 
     # What ManifestPruningStrategy does: copy-on-write prune, re-assign.
     node.manifest = node.manifest.prune_files(
@@ -94,9 +101,10 @@ def test_refresh_after_prune_reflects_pruned_file_set():
     )
     assert node.manifest.get_file_count() == 1
 
-    after = _scan_stats(node, base_stats_cache=cache)
-    assert after.row_count == 20, (
-        f"cache served pre-pruning statistics: got {after.row_count}, want 20"
+    refresh_statistics(plan, plan_context)
+    after = store.row_count(nid)
+    assert after == 20, (
+        f"cache served pre-pruning statistics: got {after}, want 20"
     )
 
 

@@ -55,7 +55,7 @@ from opteryx import config
 from opteryx.planner.optimizer.strategies.correlated_filters import _coerce_temporal_bound
 from opteryx.planner.optimizer.strategies.correlated_filters import _resolve_offset
 from opteryx.planner.optimizer.strategies.correlated_filters import _shifted
-from opteryx.planner.optimizer.statistics import ColumnRange
+from opteryx.planner.optimizer.strategies.correlated_filters import ValueRange
 from opteryx.types.logical_type import DATE
 from opteryx.types.logical_type import INT64
 from opteryx.types.logical_type import TIMESTAMP
@@ -383,27 +383,27 @@ def test_shift_crosses_a_day_boundary_in_both_directions():
     """2024-03-10 00:00:10 UTC, shifted back 20 seconds, is on 2024-03-09."""
     start = datetime.datetime(2024, 3, 10, 0, 0, 10, tzinfo=datetime.timezone.utc)
     start_us = int(start.timestamp()) * 1_000_000
-    shifted = _shifted(ColumnRange(lower_bound=start_us, upper_bound=start_us), -20_000_000, "both")
+    shifted = _shifted(ValueRange(lower_bound=start_us, upper_bound=start_us), -20_000_000, "both")
     expected = datetime.datetime(2024, 3, 9, 23, 59, 50, tzinfo=datetime.timezone.utc)
     assert shifted.lower_bound == int(expected.timestamp()) * 1_000_000
     assert shifted.upper_bound == shifted.lower_bound
 
-    forward = _shifted(ColumnRange(lower_bound=start_us, upper_bound=start_us), +20_000_000, "both")
+    forward = _shifted(ValueRange(lower_bound=start_us, upper_bound=start_us), +20_000_000, "both")
     assert forward.lower_bound == start_us + 20_000_000
 
     # DATE32, in days, over the same boundary.
     march_10 = (datetime.date(2024, 3, 10) - datetime.date(1970, 1, 1)).days
-    back = _shifted(ColumnRange(lower_bound=march_10, upper_bound=march_10), -2, "both")
+    back = _shifted(ValueRange(lower_bound=march_10, upper_bound=march_10), -2, "both")
     assert back.lower_bound == (datetime.date(2024, 3, 8) - datetime.date(1970, 1, 1)).days
 
 
 def test_shift_keeps_only_the_bound_the_comparator_establishes():
-    original = ColumnRange(lower_bound=10, upper_bound=20)
-    assert _shifted(original, 5, "both") == ColumnRange(lower_bound=15, upper_bound=25)
-    assert _shifted(original, 5, "upper") == ColumnRange(lower_bound=None, upper_bound=25)
-    assert _shifted(original, 5, "lower") == ColumnRange(lower_bound=15, upper_bound=None)
+    original = ValueRange(lower_bound=10, upper_bound=20)
+    assert _shifted(original, 5, "both") == ValueRange(lower_bound=15, upper_bound=25)
+    assert _shifted(original, 5, "upper") == ValueRange(lower_bound=None, upper_bound=25)
+    assert _shifted(original, 5, "lower") == ValueRange(lower_bound=15, upper_bound=None)
     # A one-sided source range narrowed to its missing end has nothing to transport.
-    assert _shifted(ColumnRange(lower_bound=10, upper_bound=None), 5, "upper") is None
+    assert _shifted(ValueRange(lower_bound=10, upper_bound=None), 5, "upper") is None
 
 
 def test_temporal_bounds_are_carried_in_their_native_encoding():

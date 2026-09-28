@@ -44,7 +44,6 @@ def _build_refreshed_plan(sql):
     plan = do_resolve_relations(plan, ctes, telemetry, plan_context=plan_context)
     plan = do_plan_rewrite(plan, telemetry, plan_context=plan_context)
     bound = do_bind_phase(plan, execution_context=ctx, query_id=query_id, telemetry=telemetry, plan_context=plan_context)
-    plan_context = PlanContext()
     return refresh_statistics(bound, plan_context), plan_context
 
 
@@ -94,9 +93,8 @@ def _scan_row_counts(plan, plan_context):
     for nid, node in plan.nodes(True):
         if node.node_type == LogicalPlanStepType.Scan:
             rel = getattr(node, "relation", None) or getattr(node, "alias", None)
-            stats = plan_context.statistics(node)
-            if rel and stats is not None:
-                out[rel] = stats.row_count
+            if rel and plan_context.statistics.has(nid):
+                out[rel] = plan_context.statistics.row_count(nid)
     return out
 
 
@@ -139,10 +137,10 @@ def test_no_filter_leaves_row_count_at_manifest():
 def _find_scan(plan):
     from opteryx.planner.logical_planner import LogicalPlanStepType
 
-    for _nid, node in plan.nodes(True):
+    for nid, node in plan.nodes(True):
         if node.node_type == LogicalPlanStepType.Scan:
-            return node
-    return None
+            return nid, node
+    return None, None
 
 
 @pytest.mark.skipif(
@@ -153,7 +151,7 @@ def test_pushed_down_equality_predicate_still_reduces_row_count():
     plan, plan_context = _build_optimized_and_refreshed_plan(
         "SELECT n_name FROM testdata.tpch_001.nation WHERE n_name = 'BRAZIL'"
     )
-    scan = _find_scan(plan)
+    scan_nid, scan = _find_scan(plan)
     assert scan is not None, "expected a Scan node"
     # Prove this test is actually exercising the post-pushdown path, not a
     # Filter node that happened to survive optimization.
@@ -162,9 +160,11 @@ def test_pushed_down_equality_predicate_still_reduces_row_count():
         "-- if this is empty, the optimizer stopped pushing this predicate and "
         "this test is no longer reproducing the reported bug"
     )
-    assert plan_context.statistics(scan).row_count < 25, (
+    scan_rows = plan_context.statistics.row_count(scan_nid)
+    assert scan_rows is not None, "expected the Scan node to have statistics"
+    assert scan_rows < 25, (
         f"pushed-down equality predicate did not reduce the estimate; "
-        f"got {plan_context.statistics(scan).row_count} (full manifest count is 25)"
+        f"got {scan_rows} (full manifest count is 25)"
     )
 
 
@@ -179,9 +179,9 @@ def test_distinct_over_pushed_down_predicate_is_not_full_table():
     from opteryx.planner.logical_planner import LogicalPlanStepType
 
     exit_row_count = None
-    for _nid, node in plan.nodes(True):
+    for nid, node in plan.nodes(True):
         if node.node_type == LogicalPlanStepType.Exit:
-            exit_row_count = plan_context.statistics(node).row_count
+            exit_row_count = plan_context.statistics.row_count(nid)
     assert exit_row_count is not None, "expected an Exit node with statistics"
     # Only one nation is named BRAZIL; the estimate must reflect that it was
     # filtered before DISTINCT, not the unfiltered 25-row table.
@@ -219,9 +219,9 @@ def test_distinct_ndv_scoped_to_selected_column_not_whole_relation():
     from opteryx.planner.logical_planner import LogicalPlanStepType
 
     exit_row_count = None
-    for _nid, node in plan.nodes(True):
+    for nid, node in plan.nodes(True):
         if node.node_type == LogicalPlanStepType.Exit:
-            exit_row_count = plan_context.statistics(node).row_count
+            exit_row_count = plan_context.statistics.row_count(nid)
     assert exit_row_count is not None, "expected an Exit node with statistics"
     assert exit_row_count < 25, (
         f"DISTINCT on a single low-cardinality column estimated {exit_row_count} "

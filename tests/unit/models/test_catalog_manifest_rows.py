@@ -7,7 +7,8 @@
 _catalog_manifest — the Manifest built from a catalog snapshot's manifest rows
 (opteryx/connectors/opteryx_connector.py; it replaced FileEntry.from_datafile).
 
-Covers the min_lengths/max_lengths extraction backing the length-aware
+Covers the min_lengths/max_lengths extraction (read back through a Scan's
+base statistics, as the planner reads them) backing the length-aware
 selectivity guard (STARTS_WITH/INSTR/ENDS_WITH): the catalog's own manifest
 entry dict carries them (opteryx_catalog's ParquetManifestEntry.to_dict()
 includes "min_lengths"/"max_lengths" as positional lists parallel to
@@ -21,7 +22,11 @@ with no `field_ids` is positional (schema order).
 
 from __future__ import annotations
 
+from opteryx.compiled.structures.plan_steps import ExitStep
+from opteryx.compiled.structures.plan_steps import ScanStep
 from opteryx.connectors.opteryx_connector import _catalog_manifest
+from opteryx.planner.logical_planner import LogicalPlan
+from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
 from opteryx.planner.plan_context import PlanContext
 from opteryx.types.logical_type import INT64
 from opteryx.types.logical_type import VARCHAR
@@ -46,6 +51,25 @@ def _manifest(schema, entry, bounds_are_ordinal=True):
     return _catalog_manifest(schema, bounds_are_ordinal, [entry], {}, None)
 
 
+def _scan_statistics(manifest):
+    """(store, scan nid): the statistics refresh of a Scan over `manifest`
+    (all of its schema's columns) in _PLAN_CONTEXT - the query whose
+    ColumnTable minted the schema's columns. The scan's base statistics are
+    what the planner reads of the manifest, keyed by column identity."""
+    plan = LogicalPlan(_PLAN_CONTEXT)
+    scan = plan.add_node(ScanStep(relation="t", schema=manifest.schema, manifest=manifest))
+    plan.add_edge(scan, plan.add_node(ExitStep()))
+    refresh_statistics(plan, _PLAN_CONTEXT)
+    return _PLAN_CONTEXT.statistics, scan
+
+
+def _length_bounds(manifest, name):
+    """Column `name`'s length bounds as the planner reads them: the base
+    statistics of a Scan over `manifest`."""
+    store, scan = _scan_statistics(manifest)
+    return store.length_bounds(scan, manifest.schema.find_column(name).identity)
+
+
 def test_length_bounds_keyed_by_real_field_id():
     # field_ids deliberately non-sequential/offset from position, mirroring
     # the live catalog schema that exposed the ordinal_bounds field_id bug.
@@ -62,9 +86,9 @@ def test_length_bounds_keyed_by_real_field_id():
     }
     manifest = _manifest(schema, entry)
 
-    assert manifest.get_length_bounds("a") == (2, 5)
-    assert manifest.get_length_bounds("b") == (40, 60)
-    assert manifest.get_length_bounds("c") == (7, 9)
+    assert _length_bounds(manifest, "a") == (2, 5)
+    assert _length_bounds(manifest, "b") == (40, 60)
+    assert _length_bounds(manifest, "c") == (7, 9)
 
 
 def test_length_bounds_positional_without_field_ids():
@@ -82,8 +106,8 @@ def test_length_bounds_positional_without_field_ids():
     }
     manifest = _manifest(schema, entry)
 
-    assert manifest.get_length_bounds("a") == (3, 6)
-    assert manifest.get_length_bounds("b") == (11, 20)
+    assert _length_bounds(manifest, "a") == (3, 6)
+    assert _length_bounds(manifest, "b") == (11, 20)
 
 
 def test_length_bounds_none_when_absent():
@@ -97,7 +121,7 @@ def test_length_bounds_none_when_absent():
     }
     manifest = _manifest(schema, entry)
 
-    assert manifest.get_length_bounds("a") is None
+    assert _length_bounds(manifest, "a") is None
 
 
 def test_keys_by_the_rows_own_tuple_field_ids_in_file_order():

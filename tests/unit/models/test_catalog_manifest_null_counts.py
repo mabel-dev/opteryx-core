@@ -22,7 +22,11 @@ NULL-safety check - silently never fired for catalog-backed tables.
 
 from __future__ import annotations
 
+from opteryx.compiled.structures.plan_steps import ExitStep
+from opteryx.compiled.structures.plan_steps import ScanStep
 from opteryx.connectors.opteryx_connector import _catalog_manifest
+from opteryx.planner.logical_planner import LogicalPlan
+from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
 from opteryx.planner.plan_context import PlanContext
 from opteryx.types.logical_type import INT64
 from opteryx.types.schema import RelationSchema
@@ -59,6 +63,18 @@ def _manifest(schema, entry):
     return _catalog_manifest(schema, True, [entry], {}, None)
 
 
+def _scan_statistics(manifest):
+    """(store, scan nid): the statistics refresh of a Scan over `manifest`
+    (all of its schema's columns) in _PLAN_CONTEXT - the query whose
+    ColumnTable minted the schema's columns. The scan's base statistics are
+    what the planner reads of the manifest, keyed by column identity."""
+    plan = LogicalPlan(_PLAN_CONTEXT)
+    scan = plan.add_node(ScanStep(relation="t", schema=manifest.schema, manifest=manifest))
+    plan.add_edge(scan, plan.add_node(ExitStep()))
+    refresh_statistics(plan, _PLAN_CONTEXT)
+    return _PLAN_CONTEXT.statistics, scan
+
+
 def test_null_counts_keyed_by_real_field_id():
     # field_ids order is [tweet_id=1, followers=5]; null_counts must land on
     # the SAME field_id, not the position in some other column ordering.
@@ -73,7 +89,13 @@ def test_no_null_counts_key_stays_unknown():
     # "unknown", never guessed as zero.
     manifest = _manifest(_schema(("tweet_id", 1), ("followers", 5)), _entry())
 
-    assert manifest.has_null_counts() is False
+    # No file counts nulls: the planner records no null fraction for any
+    # column (the refresh records one for every column whenever any file of a
+    # manifest with a known row count counts nulls - it would be 0.0 here, a
+    # guess of "no nulls").
+    store, scan = _scan_statistics(manifest)
+    for column in manifest.schema.columns:
+        assert store.null_fraction(scan, column.identity) is None
     assert manifest.get_total_null_count("tweet_id") is None
     assert manifest.get_total_null_count("followers") is None
 

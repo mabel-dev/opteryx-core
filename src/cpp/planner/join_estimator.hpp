@@ -336,6 +336,22 @@ inline bool apply_occupancy_bound(const KeyPair* keys, size_t n, int64_t left_do
     return true;
 }
 
+// One side's per-column key NDVs composed: the max of the known ones
+// (architect ruling 2026-08-21); false when none is known.
+inline bool composite_key_ndv(const int64_t* ndvs, const uint8_t* known, size_t n, int64_t* out) {
+    bool found = false;
+    int64_t best = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (!known[i]) continue;
+        if (!found || ndvs[i] > best) {
+            best = ndvs[i];
+            found = true;
+        }
+    }
+    *out = best;
+    return found;
+}
+
 inline int64_t estimate_after_filter(int64_t input_rows, double selectivity) {
     return std::max<int64_t>(1, cap_i64(static_cast<double>(input_rows) * selectivity));
 }

@@ -5,7 +5,7 @@
 
 """Column-vs-column comparisons (`a.x = b.y`, no literal on either side).
 
-Found during a stats-system review: `_selectivity_comparison` required a
+Found during a stats-system review: the comparison estimator required a
 LITERAL on one side and returned 1.0 (no reduction) whenever both sides were
 columns. Most column-vs-column equalities are extracted as equi-join keys
 before they ever reach this estimator, but two shapes aren't:
@@ -26,17 +26,13 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
 import pytest
 
-# Importing opteryx.planner.optimizer (the package) resolves the
-# optimizer <-> cost_estimation.selectivity import cycle first: strategies
-# under this package import `estimate_selectivity` from the selectivity
-# module below, so that module must not be the first thing to touch it.
+# Importing opteryx.planner.optimizer (the package) first resolves the
+# pre-existing import cycle a compiled planner module hits when imported first.
 import opteryx.planner.optimizer  # noqa: F401
-from opteryx.planner.plan_context import PlanContext
+from opteryx.compiled.planner.statistics import StatisticsInput
+from opteryx.compiled.planner.statistics import estimate_selectivity
 from opteryx.expression import NodeType
 from opteryx.compiled.structures.expressions import Expression
-from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
-from opteryx.planner.optimizer.statistics import ColumnStatistics
-from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
 
@@ -71,13 +67,13 @@ def _cmp(op: str, left_identity: bytes, right_identity: bytes) -> Expression:
     return n
 
 
-def _stats(x_ndv, y_ndv) -> RelationStatistics:
+def _stats(x_ndv, y_ndv) -> StatisticsInput:
     columns = {}
     if x_ndv is not None:
-        columns[_X] = ColumnStatistics(column_name="x", data_type="INTEGER", distinct_count=x_ndv)
+        columns[_X] = {"distinct_count": x_ndv}
     if y_ndv is not None:
-        columns[_Y] = ColumnStatistics(column_name="y", data_type="INTEGER", distinct_count=y_ndv)
-    return RelationStatistics(row_count_estimate=1000, columns=columns)
+        columns[_Y] = {"distinct_count": y_ndv}
+    return StatisticsInput(_CONTEXT.columns, row_count_estimate=1000, column_stats=columns)
 
 
 def test_eq_uses_ndv_formula_like_a_join_key():
@@ -175,7 +171,7 @@ def _optimized_and_refreshed_scan_row_count(sql):
 
     for _nid, node in refreshed.nodes(True):
         if node.node_type == LogicalPlanStepType.Scan:
-            return plan_context.statistics(node).row_count, bool(getattr(node, "predicates", None))
+            return plan_context.statistics.row_count(_nid), bool(getattr(node, "predicates", None))
     return None, False
 
 

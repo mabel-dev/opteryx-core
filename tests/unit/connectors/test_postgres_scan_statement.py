@@ -449,6 +449,26 @@ def _stats_manifest_bytes(files):
     return build_manifest(_stats_schema(), files, bounds_are_ordinal=True).native.to_parquet()
 
 
+def _scan_ordinal_bounds(manifest, name):
+    """Column `name`'s relation-wide ordinal bounds as the planner reads them:
+    the manifest rebound over the schema bound in _PLAN_CONTEXT (as the binder's
+    visit_scan rebinds a connector's manifest), then the base statistics the
+    statistics refresh gives a Scan over it."""
+    from opteryx.compiled.structures.plan_steps import ExitStep
+    from opteryx.compiled.structures.plan_steps import ScanStep
+    from opteryx.models.manifest import Manifest
+    from opteryx.planner.logical_planner import LogicalPlan
+    from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
+
+    schema = _PLAN_CONTEXT.columns.bind_relation(manifest.schema, "planets")
+    bound = Manifest(manifest.native, schema)
+    plan = LogicalPlan(_PLAN_CONTEXT)
+    scan = plan.add_node(ScanStep(relation="planets", schema=schema, manifest=bound))
+    plan.add_edge(scan, plan.add_node(ExitStep()))
+    refresh_statistics(plan, _PLAN_CONTEXT)
+    return _PLAN_CONTEXT.statistics.ordinal_bounds(scan, schema.find_column(name).identity)
+
+
 def test_a_present_manifest_is_actually_read(monkeypatch):
     """The read path runs and releases the handle. It could not before: GcsFile
     is not a context manager, so the `with` that used to wrap this raised
@@ -465,7 +485,7 @@ def test_a_present_manifest_is_actually_read(monkeypatch):
 
     assert manifest.get_file_paths() == ["planets"]
     assert manifest.record_counts() == [9]
-    assert manifest.get_ordinal_bounds("id") == (1, 9)
+    assert _scan_ordinal_bounds(manifest, "id") == (1, 9)
     # the refresh's bounds are ordinal keys, and they describe the server as it
     # was at the last refresh - hints, never law
     assert manifest.bounds_are_ordinal is True

@@ -10,12 +10,14 @@ pruning, which gates on `get_total_null_count`, could never fire on skene.
 
 These tests pin the three things that must not silently regress: the flag-gated
 exact-vs-estimate spelling of NDV, the FILE-level aggregation rules over the
-per-ROW-GROUP blobs, and the end-to-end arrival of both statistics in
-RelationStatistics.
+per-ROW-GROUP blobs, and the end-to-end arrival of both statistics in the
+planner's statistics (a Scan's base statistics, computed natively by the
+statistics refresh).
 """
 
 import os
 import sys
+from dataclasses import dataclass
 
 import pytest
 
@@ -23,6 +25,10 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx.types  # noqa: F401  (never enter the native manifest module through column_type)
 from opteryx.compiled.planner.native_manifest import aggregate_skene_blobs as skene_aggregate_row_group_statistics
+from opteryx.compiled.structures.plan_steps import ExitStep
+from opteryx.compiled.structures.plan_steps import ScanStep
+from opteryx.planner.logical_planner import LogicalPlan
+from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
 from opteryx.planner.plan_context import PlanContext
 
 # skene format.h StatFlag
@@ -310,10 +316,41 @@ def test_a_row_group_tracking_nothing_voids_every_aggregation():
     assert (lower, upper, nulls, distincts) == ({}, {}, {}, {})
 
 
-# ── Task B: end to end into RelationStatistics ───────────────────────────────
+# ── Task B: end to end into the planner's statistics ─────────────────────────
+
+
+@dataclass
+class _ColumnStatistics:
+    """One column's base statistics at a Scan, as the planner reads them."""
+
+    distinct_count: object
+    null_fraction: object
+    ordinal_bounds: object
+
+
+def _scan_columns(plan_context, manifest):
+    """{name: _ColumnStatistics} of a Scan over `manifest` (all of its schema's
+    columns), from the statistics refresh in `plan_context` - the query whose
+    ColumnTable bound the schema."""
+    schema = manifest.schema
+    plan = LogicalPlan(plan_context)
+    scan = plan.add_node(ScanStep(relation=schema.name, schema=schema, manifest=manifest))
+    plan.add_edge(scan, plan.add_node(ExitStep()))
+    refresh_statistics(plan, plan_context)
+    store = plan_context.statistics
+    return {
+        column.name: _ColumnStatistics(
+            distinct_count=store.distinct_count(scan, column.identity),
+            null_fraction=store.null_fraction(scan, column.identity),
+            ordinal_bounds=store.ordinal_bounds(scan, column.identity),
+        )
+        for column in schema.columns
+        if store.has_column(scan, column.identity)
+    }
 
 
 def _relation_statistics(dataset):
+    """(manifest, {name: _ColumnStatistics}, plan_context) of `dataset`."""
     from opteryx.connectors import connector_factory
 
     connector = connector_factory(dataset, telemetry=None)
@@ -321,15 +358,10 @@ def _relation_statistics(dataset):
     described, manifest = table.get_dataset_metadata()
     # Bound the way binder/dataset.py::visit_scan binds a scan: the statistics
     # are keyed by BOUND column identity, so the manifest reads the bound schema.
-    schema = PlanContext().columns.bind_relation(described, dataset)
+    plan_context = PlanContext()
+    schema = plan_context.columns.bind_relation(described, dataset)
     manifest.schema = schema
-    stats = manifest._as_relation_statistics()
-    by_name = {
-        column.name: stats.columns.get(column.identity)
-        for column in schema.columns
-        if column.identity in stats.columns
-    }
-    return manifest, by_name
+    return manifest, _scan_columns(plan_context, manifest), plan_context
 
 
 @needs_tpch
@@ -337,7 +369,7 @@ def test_skene_varchar_columns_now_have_a_distinct_count():
     """Before this wiring, distinct_count came only from the integer bounds-span
     heuristic, which is None for every VARCHAR (a prefix-packed string ordinal
     span says nothing about cardinality)."""
-    _, columns = _relation_statistics(os.path.join(TPCH_SKENE, "part"))
+    _, columns, _ = _relation_statistics(os.path.join(TPCH_SKENE, "part"))
 
     assert columns["p_comment"].distinct_count is not None
     # p_mfgr/p_brand/p_type/p_container are TPC-H generator constants. `part`
@@ -356,7 +388,7 @@ def test_skene_varchar_columns_now_have_a_distinct_count():
 def test_skene_columns_now_have_a_null_fraction():
     """`has_null_counts` was False for every skene relation, so null_fraction
     was None for every skene column regardless of what the footer stored."""
-    manifest, columns = _relation_statistics(os.path.join(TPCH_SKENE, "part"))
+    manifest, columns, _ = _relation_statistics(os.path.join(TPCH_SKENE, "part"))
 
     assert columns["p_comment"].null_fraction == 0.0
     assert columns["p_partkey"].null_fraction == 0.0
@@ -369,7 +401,7 @@ def test_multi_row_group_ndv_is_not_summed():
     """lineitem is 16 row groups over 2 files. l_returnflag has 3 distinct
     values in TPC-H at any scale; a per-row-group sum would report ~48 and a
     per-file sum ~6."""
-    _, columns = _relation_statistics(os.path.join(TPCH_SKENE, "lineitem"))
+    _, columns, _ = _relation_statistics(os.path.join(TPCH_SKENE, "lineitem"))
 
     assert columns["l_returnflag"].distinct_count == 3
     assert columns["l_linestatus"].distinct_count == 2
@@ -382,7 +414,7 @@ def test_distinct_counts_never_exceed_the_row_count():
     """The KMV sketch can overshoot (c_phone estimates 150400 for a 150000-row
     file); the cap is what keeps a cardinality above the relation's own size out
     of the planner."""
-    manifest, columns = _relation_statistics(os.path.join(TPCH_SKENE, "customer"))
+    manifest, columns, _ = _relation_statistics(os.path.join(TPCH_SKENE, "customer"))
     rows = manifest.get_record_count()
 
     for name, column in columns.items():
@@ -433,16 +465,16 @@ def test_null_counts_match_the_data():
         ("web_sales", ["ws_ship_customer_sk", "ws_promo_sk"]),  # 3 row groups
     ]
     for table, columns in cases:
-        manifest, _ = _relation_statistics(os.path.join(TPCDS_SKENE, table))
+        manifest, statistics, _ = _relation_statistics(os.path.join(TPCDS_SKENE, table))
         rows = manifest.get_record_count()
         for column in columns:
             nulls = count_nulls_by_reading(table, column)
             assert manifest.get_total_null_count(column) == nulls, f"{table}.{column}"
-            assert manifest.estimate_null_fraction(column) == pytest.approx(nulls / rows)
+            assert statistics[column].null_fraction == pytest.approx(nulls / rows)
 
     # cc_closed_date_sk is all-null: the bound is absent, the count is not.
-    manifest, _ = _relation_statistics(os.path.join(TPCDS_SKENE, "call_center"))
-    assert manifest.estimate_null_fraction("cc_closed_date_sk") == 1.0
+    _, statistics, _ = _relation_statistics(os.path.join(TPCDS_SKENE, "call_center"))
+    assert statistics["cc_closed_date_sk"].null_fraction == 1.0
 
 
 @pytest.fixture
@@ -472,7 +504,7 @@ def test_topn_manifest_pruning_can_now_fire_on_skene(disjoint_skene_files):
     (Built here: the benchmark mirrors pack a table into as few 4 GiB files as
     its rows allow, so none of their tables is reliably multi-file.)
     """
-    manifest, _ = _relation_statistics(str(disjoint_skene_files))
+    manifest, columns, plan_context = _relation_statistics(str(disjoint_skene_files))
     assert manifest.get_file_count() > 1, "fixture is meant to be multi-file"
 
     # The precondition the strategy gates on — None before this wiring.
@@ -484,8 +516,8 @@ def test_topn_manifest_pruning_can_now_fire_on_skene(disjoint_skene_files):
 
     # The survivors must still cover the rows the query will return: the file
     # holding the global minimum cannot have been dropped.
-    lowest, _ = manifest.get_ordinal_bounds("id")
-    assert pruned.get_ordinal_bounds("id")[0] == lowest
+    lowest, _ = columns["id"].ordinal_bounds
+    assert _scan_columns(plan_context, pruned)["id"].ordinal_bounds[0] == lowest
 
 
 # ── The stored KMV sketch ────────────────────────────────────────────────────

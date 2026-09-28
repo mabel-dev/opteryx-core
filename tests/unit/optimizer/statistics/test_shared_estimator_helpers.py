@@ -37,17 +37,15 @@ import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
-# The optimizer package must initialize before cost_estimation.selectivity is
-# imported directly: selectivity imports optimizer.statistics, whose package
-# __init__ imports the strategies, and strategies.predicate_ordering imports
-# selectivity back -- a pre-existing cycle that resolves only in this order.
+# The optimizer package must initialize before a compiled planner module is
+# imported directly: a pre-existing import cycle resolves only in this order.
 from opteryx.planner.optimizer import statistics_refresh
 from opteryx.planner.optimizer.strategies import join_algorithm
 from opteryx.planner.optimizer.strategies import predicate_ordering as strategy_predicate_ordering
 from opteryx.compiled.planner import join_estimator
+from opteryx.compiled.planner import statistics as selectivity_module
 from opteryx.planner import cost_estimation
 from opteryx.planner.cost_estimation import fallback_selectivity
-from opteryx.planner.cost_estimation import selectivity as selectivity_module
 
 from opteryx.planner.cost_estimation import KeyStats
 from opteryx.planner.cost_estimation import NdvProvenance
@@ -61,47 +59,49 @@ from opteryx.planner.cost_estimation import composite_key_ndv
 def test_composite_key_ndv_is_the_single_composition():
     """Both consumers bind the ONE (native) helper, not local copies."""
     assert composite_key_ndv is join_estimator.composite_key_ndv
-    assert statistics_refresh.composite_key_ndv is composite_key_ndv
     assert join_algorithm.composite_key_ndv is composite_key_ndv
+    # The native refresh calls the same C++ composite_key_ndv
+    # (src/cpp/planner/join_estimator.hpp) this Python helper wraps.
+    assert "composite_key_ndv" not in vars(statistics_refresh)
 
 
 def test_occupancy_bound_is_the_single_function():
     """statistics_refresh binds the ONE native bound — the same C++ function the
     native DPccp calls — and no local copy exists."""
     assert apply_occupancy_bound is join_estimator.apply_occupancy_bound
-    assert statistics_refresh.apply_occupancy_bound is apply_occupancy_bound
     assert "_apply_occupancy_bound" not in vars(statistics_refresh)
     assert "_apply_occupancy_bound" not in vars(cost_estimation)
+    # The native refresh calls join_estimator.hpp's apply_occupancy_bound directly.
+    assert "apply_occupancy_bound" not in vars(statistics_refresh)
 
 
 def test_fallback_constants_have_one_definition():
-    """selectivity.py, the native join estimator and the ordering strategy all
-    read ONE set of values -- no independently declared duplicates. The
-    equality fallback is declared natively and read back by fallback_selectivity."""
+    """The native selectivity estimator, the native join estimator and the
+    ordering strategy all read ONE set of values -- no independently declared
+    duplicates. The constants are declared natively and read back by
+    fallback_selectivity."""
     assert (
         join_estimator.EQ_UNKNOWN_NDV_FALLBACK
         is fallback_selectivity.EQ_UNKNOWN_NDV_FALLBACK
     )
     assert (
-        selectivity_module._EQ_UNKNOWN_NDV_FALLBACK
-        is fallback_selectivity.EQ_UNKNOWN_NDV_FALLBACK
-    )
-    assert (
-        selectivity_module._LIKE_PREFIX_SELECTIVITY
+        selectivity_module.LIKE_PREFIX_SELECTIVITY
         is fallback_selectivity.LIKE_PREFIX_SELECTIVITY
     )
     assert (
-        selectivity_module._LIKE_INFIX_SELECTIVITY
+        selectivity_module.LIKE_INFIX_SELECTIVITY
         is fallback_selectivity.LIKE_INFIX_SELECTIVITY
     )
     assert (
-        selectivity_module._RANGE_FALLBACK_SELECTIVITY
+        selectivity_module.RANGE_FALLBACK_SELECTIVITY
         is fallback_selectivity.RANGE_FALLBACK_SELECTIVITY
     )
     assert (
         strategy_predicate_ordering.DEFAULT_SELECTIVITY
         is fallback_selectivity.DEFAULT_SELECTIVITY
     )
+    # The native selectivity estimator reads kEqUnknownNdvFallback from
+    # join_estimator.hpp - the value join_estimator.EQ_UNKNOWN_NDV_FALLBACK exports.
 
 
 def test_default_selectivity_table_is_built_from_the_scalars():

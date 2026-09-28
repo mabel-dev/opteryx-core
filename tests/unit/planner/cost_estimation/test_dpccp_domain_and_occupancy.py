@@ -116,12 +116,12 @@ def test_tdom_fallback_uses_pre_filter_rows_so_a_filter_stays_selective():
     nothing, and the one join that must happen first stops looking cheap.
     """
 
-    class _NoStatsScan:
-        """A scan whose manifest carried no distinct_count — the common
-        Parquet case, and the only one that reaches the fallback. Nothing is
-        recorded for it in the (empty) PlanContext."""
+    # Scans whose manifests carried no distinct_count — the common Parquet
+    # case, and the only one that reaches the fallback. Nothing is recorded for
+    # their node ids in the (empty) PlanContext's statistics store.
+    part_scan_nid, lineitem_scan_nid = 1, 2
 
-    per_leaf_scans = [{"part": _NoStatsScan()}, {"lineitem": _NoStatsScan()}]
+    per_leaf_scans = [{"part": part_scan_nid}, {"lineitem": lineitem_scan_nid}]
     vertices = [
         JoinVertex(id=0, name="part", row_count=200_000, base_row_count=2_000_000),
         JoinVertex(id=1, name="lineitem", row_count=59_986_052),
@@ -136,7 +136,7 @@ def test_tdom_fallback_uses_pre_filter_rows_so_a_filter_stays_selective():
 
 
 def test_join_subtree_domain_composes_as_max_of_its_sides():
-    """Matches ``statistics_refresh._join_stats``, which sets a join's
+    """Matches the native refresh's ``join_stats`` (src/cpp/planner/statistics_refresh.hpp), which sets a join's
     base_row_count to ``max(left.domain_row_count, right.domain_row_count)``."""
     node = _join(200_000, 59_986_052, (_edge(0, 1, 2_000_000, class_id=0),), left_base=2_000_000)
 

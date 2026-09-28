@@ -14,7 +14,7 @@ invisible (the 2026-08-21 estimator audit's "eq tier ceilinged by 1/ndv"
 defect, observed live in the build-3247 JOB regression: a value holding 36% of
 a 215-NDV column estimated at 0.47%).
 
-The replacement, ``_bin_mass_point_share``, scales the bin-width probe's mass
+The replacement (``point_share`` in src/cpp/planner/selectivity.hpp) scales the bin-width probe's mass
 to ONE value's share of its bin (``density * bin_count / ndv``, raw density
 when ``ndv <= bin_count`` or NDV is unknown). These tests pin both directions:
 a dominant value must estimate ABOVE uniform, and a value in a high-NDV column
@@ -23,24 +23,26 @@ must not be handed its whole bin.
 
 import os
 import sys
-from opteryx.compiled.structures.expressions import Comparison
-from opteryx.compiled.structures.expressions import Literal
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 
 import pytest
 
-# `selectivity` participates in an import cycle with `planner.optimizer`.
+# Importing opteryx.planner.optimizer (the package) first resolves the
+# pre-existing import cycle a compiled planner module hits when imported first.
 import opteryx.planner.optimizer  # noqa: F401
 
-from opteryx.expression import NodeType
+from opteryx.compiled.planner.statistics import StatisticsInput
+from opteryx.compiled.planner.statistics import estimate_selectivity
+from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Expression
-from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
-from opteryx.planner.optimizer.statistics import ColumnStatistics
-from opteryx.planner.optimizer.statistics import RelationStatistics
-from opteryx.third_party.maki_nage import distogram as dg
+from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.expression import NodeType
 from opteryx.planner.plan_context import PlanContext
+from opteryx.third_party.maki_nage import distogram as dg
+from opteryx.types.logical_type import ARRAY
+from opteryx.types.logical_type import INT64
 
 # One query context for everything this module builds: its columns and its expressions.
 _CONTEXT = PlanContext()
@@ -75,14 +77,12 @@ def _uniform_histogram(ndv: int):
     return h
 
 
-def _stats(histogram, ndv: int) -> RelationStatistics:
-    col = ColumnStatistics(
-        column_name="col",
-        data_type="int",
-        distinct_count=ndv,
-        histogram=histogram,
+def _stats(histogram, ndv: int) -> StatisticsInput:
+    return StatisticsInput(
+        _CONTEXT.columns,
+        row_count_estimate=_ROWS,
+        column_stats={_COL: {"distinct_count": ndv, "histogram": histogram}},
     )
-    return RelationStatistics(row_count_estimate=_ROWS, columns={_COL: col})
 
 
 def _identifier() -> Expression:
@@ -96,7 +96,7 @@ def _eq(value) -> Expression:
     n = Comparison(arena=_TEST_ARENA)
     n.value = "Eq"
     n.left = _identifier()
-    n.right = Literal(value=value, arena=_TEST_ARENA)
+    n.right = Literal(value=value, type=INT64, arena=_TEST_ARENA)
     return n
 
 
@@ -104,7 +104,7 @@ def _in_list(values) -> Expression:
     n = Comparison(arena=_TEST_ARENA)
     n.value = "InList"
     n.left = _identifier()
-    n.right = Literal(value=tuple(values), arena=_TEST_ARENA)
+    n.right = Literal(value=tuple(values), type=ARRAY(INT64), arena=_TEST_ARENA)
     return n
 
 
@@ -144,7 +144,7 @@ def test_the_share_is_the_probe_mass_scaled_by_bins_over_ndv():
 def test_a_high_ndv_column_is_not_handed_its_whole_bin():
     """A 50,000-NDV uniform column: the whole bin is ~1/32 of the rows, the
     honest per-value share is ~1/50,000. Raw bin density (the
-    _selectivity_starts_with posture, option (b)) would be ~1,500x over."""
+    prefix estimator's posture, option (b)) would be ~1,500x over."""
     ndv = 50_000
     stats = _stats(_uniform_histogram(ndv), ndv)
     selectivity = estimate_selectivity(_eq(25_000), stats)

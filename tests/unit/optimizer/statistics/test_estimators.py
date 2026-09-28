@@ -2,230 +2,220 @@
 Comprehensive tests for statistics estimation primitives.
 
 Tests cover:
-- ColumnRange intersection and width calculations
-- ColumnStatistics selectivity estimation (uniform and histogram-backed)
+- Value-range intersection (the join's key narrowing) and width (the range
+  interpolation a comparison's selectivity is computed by)
+- Column and relation statistics as the native StatisticsStore holds them
 - CardinalityEstimator for GROUP BY and JOINs
+
+The statistics are native (src/cpp/planner/stats_store.hpp): statistics are
+seeded into a query's StatisticsStore as INPUTS (StatisticsInput) and read back
+through its accessors, keyed by node id and column identity.
 """
 
+import os
+import sys
+
+sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
+
 import pytest
-from opteryx.planner.optimizer.statistics import (
-    ColumnRange,
-    ColumnStatistics,
-    RelationStatistics,
-)
+
+# Importing opteryx.planner.optimizer (the package) first resolves the
+# pre-existing import cycle a compiled planner module hits when imported first.
+import opteryx.planner.optimizer  # noqa: F401
+from opteryx.compiled.planner.plan_graph import EdgeRole
+from opteryx.compiled.planner.statistics import RANGE_FALLBACK_SELECTIVITY
+from opteryx.compiled.planner.statistics import StatisticsInput
+from opteryx.compiled.structures.expressions import Comparison
+from opteryx.compiled.structures.expressions import Literal
+from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.compiled.structures.plan_steps import JoinStep
+from opteryx.compiled.structures.plan_steps import ScanStep
+from opteryx.expression import NodeType
+from opteryx.planner.logical_planner import LogicalPlan
+from opteryx.planner.plan_context import PlanContext
+from opteryx.types.logical_type import FLOAT64
+from opteryx.types.logical_type import INT64
+
+
+class _Seeded:
+    """One node's statistics seeded into a fresh query's store: `columns` maps a
+    column name to its statistics fields; each column is minted in the query's
+    ColumnTable (statistics are keyed by opaque identity, never by name)."""
+
+    def __init__(self, columns, row_count_estimate=10000, column_type=INT64):
+        self.plan_context = PlanContext()
+        self.column = {
+            name: self.plan_context.columns.relation_column("t", name, column_type=column_type)
+            for name in columns
+        }
+        plan = LogicalPlan(self.plan_context)
+        self.nid = plan.add_node(ScanStep())
+        self.store = self.plan_context.statistics
+        self.store.seed(
+            self.nid,
+            StatisticsInput(
+                self.plan_context.columns,
+                row_count_estimate=row_count_estimate,
+                column_stats={self.column[name].identity: fields for name, fields in columns.items()},
+            ),
+        )
+
+    def identity(self, name):
+        return self.column[name].identity
+
+
+def _range_selectivity(value_range, literal, column_type=INT64):
+    """The selectivity of `x < literal` against a column whose value range is
+    `value_range` (no histogram): (literal - lower) / (upper - lower) - the
+    range's WIDTH is the divisor - or the fallback when the width is unknown."""
+    seeded = _Seeded({"x": {"value_range": value_range}}, column_type=column_type)
+    arena = seeded.plan_context.expressions
+    identifier = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column="x", arena=arena)
+    identifier.schema_column = seeded.column["x"]
+    predicate = Comparison(
+        value="Lt", left=identifier, right=Literal(value=literal, type=column_type, arena=arena), arena=arena
+    )
+    return seeded.store.estimate_selectivity(seeded.nid, predicate)
+
+
+def _intersect(left_range, right_range):
+    """The value range an inner equi-join publishes for its key: the two keys'
+    ranges intersected (the join's key narrowing, `intersect_join_keys`)."""
+    plan_context = PlanContext()
+    left_key = plan_context.columns.relation_column("l", "k", column_type=INT64).identity
+    right_key = plan_context.columns.relation_column("r", "k", column_type=INT64).identity
+    join = JoinStep()
+    join.type = "inner"
+    join.left_columns = [left_key]
+    join.right_columns = [right_key]
+    plan = LogicalPlan(plan_context)
+    left_nid = plan.add_node(ScanStep())
+    right_nid = plan.add_node(ScanStep())
+    join_nid = plan.add_node(join)
+    plan.add_edge(left_nid, join_nid, EdgeRole.LEFT)
+    plan.add_edge(right_nid, join_nid, EdgeRole.RIGHT)
+    store = plan_context.statistics
+    for nid, key, value_range in ((left_nid, left_key, left_range), (right_nid, right_key, right_range)):
+        store.seed(
+            nid,
+            StatisticsInput(
+                plan_context.columns, row_count_estimate=1000, column_stats={key: {"value_range": value_range}}
+            ),
+        )
+    store.compute(plan, join_nid)
+    # an inner join narrows BOTH keys to the intersection
+    assert store.value_range(join_nid, left_key) == store.value_range(join_nid, right_key)
+    return store.value_range(join_nid, left_key)
 
 
 class TestColumnRange:
-    """Tests for ColumnRange class."""
+    """Tests for a column's value range."""
 
     def test_range_creation(self):
         """Test creating a range with bounds."""
-        r = ColumnRange(lower_bound=10, upper_bound=100)
-        assert r.lower_bound == 10
-        assert r.upper_bound == 100
+        seeded = _Seeded({"x": {"value_range": (10, 100)}})
+        assert seeded.store.value_range(seeded.nid, seeded.identity("x")) == (10, 100)
 
     def test_range_open_ended_lower(self):
         """Test range with open lower bound."""
-        r = ColumnRange(upper_bound=100)
-        assert r.lower_bound is None
-        assert r.upper_bound == 100
+        seeded = _Seeded({"x": {"value_range": (None, 100)}})
+        lower, upper = seeded.store.value_range(seeded.nid, seeded.identity("x"))
+        assert lower is None
+        assert upper == 100
 
     def test_range_open_ended_upper(self):
         """Test range with open upper bound."""
-        r = ColumnRange(lower_bound=10)
-        assert r.lower_bound == 10
-        assert r.upper_bound is None
+        seeded = _Seeded({"x": {"value_range": (10, None)}})
+        lower, upper = seeded.store.value_range(seeded.nid, seeded.identity("x"))
+        assert lower == 10
+        assert upper is None
 
     def test_range_width_calculation(self):
-        """Test width calculation for numeric ranges."""
-        r = ColumnRange(lower_bound=10, upper_bound=100)
-        assert r.width() == 90.0
+        """Test width calculation for numeric ranges: width 90, so a probe 45
+        above the lower bound selects half."""
+        assert _range_selectivity((10, 100), 55) == 0.5
 
     def test_range_width_with_floats(self):
-        """Test width calculation with float bounds."""
-        r = ColumnRange(lower_bound=10.5, upper_bound=20.5)
-        assert r.width() == 10.0
+        """Test width calculation with float bounds: width 10.0."""
+        assert _range_selectivity((10.5, 20.5), 15.5, column_type=FLOAT64) == 0.5
 
     def test_range_width_with_no_bounds(self):
-        """Test width returns None when bounds are missing."""
-        r1 = ColumnRange()
-        assert r1.width() is None
-
-        r2 = ColumnRange(lower_bound=10)
-        assert r2.width() is None
-
-        r3 = ColumnRange(upper_bound=100)
-        assert r3.width() is None
-
-    def test_range_width_with_strings(self):
-        """Test width returns None for non-numeric ranges."""
-        r = ColumnRange(lower_bound="a", upper_bound="z")
-        assert r.width() is None
+        """Test width is unknown when bounds are missing: the estimate falls back."""
+        assert _range_selectivity(None, 55) == RANGE_FALLBACK_SELECTIVITY
+        assert _range_selectivity((10, None), 55) == RANGE_FALLBACK_SELECTIVITY
+        assert _range_selectivity((None, 100), 55) == RANGE_FALLBACK_SELECTIVITY
 
     def test_range_width_negative(self):
-        """Test width with negative numbers."""
-        r = ColumnRange(lower_bound=-100, upper_bound=-10)
-        assert r.width() == 90.0
+        """Test width with negative numbers: width 90."""
+        assert _range_selectivity((-100, -10), -55) == 0.5
 
     def test_range_width_crossing_zero(self):
-        """Test width for range that crosses zero."""
-        r = ColumnRange(lower_bound=-50, upper_bound=50)
-        assert r.width() == 100.0
+        """Test width for range that crosses zero: width 100."""
+        assert _range_selectivity((-50, 50), 0) == 0.5
 
     def test_range_intersection_both_bounded(self):
         """Test intersection of two fully bounded ranges."""
-        r1 = ColumnRange(lower_bound=10, upper_bound=100)
-        r2 = ColumnRange(lower_bound=50, upper_bound=150)
-
-        result = r1.intersect(r2)
-        assert result.lower_bound == 50
-        assert result.upper_bound == 100
+        assert _intersect((10, 100), (50, 150)) == (50, 100)
 
     def test_range_intersection_no_overlap(self):
         """Test intersection of non-overlapping ranges."""
-        r1 = ColumnRange(lower_bound=10, upper_bound=50)
-        r2 = ColumnRange(lower_bound=60, upper_bound=100)
-
-        result = r1.intersect(r2)
-        assert result.lower_bound == 60
-        assert result.upper_bound == 50  # Invalid range (lower > upper)
+        # Invalid range (lower > upper)
+        assert _intersect((10, 50), (60, 100)) == (60, 50)
 
     def test_range_intersection_one_open_lower(self):
         """Test intersection when one range has open lower bound."""
-        r1 = ColumnRange(upper_bound=100)
-        r2 = ColumnRange(lower_bound=50, upper_bound=150)
-
-        result = r1.intersect(r2)
-        assert result.lower_bound == 50
-        assert result.upper_bound == 100
+        assert _intersect((None, 100), (50, 150)) == (50, 100)
 
     def test_range_intersection_one_open_upper(self):
         """Test intersection when one range has open upper bound."""
-        r1 = ColumnRange(lower_bound=10)
-        r2 = ColumnRange(lower_bound=50, upper_bound=150)
-
-        result = r1.intersect(r2)
-        assert result.lower_bound == 50
-        assert result.upper_bound == 150
+        assert _intersect((10, None), (50, 150)) == (50, 150)
 
     def test_range_intersection_both_open(self):
         """Test intersection when both ranges are open on same side."""
-        r1 = ColumnRange(lower_bound=None, upper_bound=100)
-        r2 = ColumnRange(lower_bound=None, upper_bound=150)
-
-        result = r1.intersect(r2)
-        assert result.lower_bound is None
-        assert result.upper_bound == 100
+        assert _intersect((None, 100), (None, 150)) == (None, 100)
 
     def test_range_intersection_identical(self):
         """Test intersection of identical ranges."""
-        r = ColumnRange(lower_bound=10, upper_bound=100)
-        result = r.intersect(r)
-
-        assert result.lower_bound == 10
-        assert result.upper_bound == 100
-
-
-# RelationStatistics.columns is keyed by opaque column identity (bytes), not by
-# name — names are not unique across a plan.
-_AGE = b"tes_age_00000001"
-_NAME = b"tes_nam_00000002"
+        assert _intersect((10, 100), (10, 100)) == (10, 100)
 
 
 class TestColumnStatistics:
-    """Tests for ColumnStatistics class."""
+    """Tests for a column's statistics."""
 
     def test_column_statistics_creation(self):
-        """Test creating column statistics."""
-        col = ColumnStatistics(
-            column_name="age",
-            data_type="int",
-            distinct_count=100,
-            value_range=ColumnRange(lower_bound=0, upper_bound=120),
-        )
-        assert col.column_name == "age"
-        assert col.data_type == "int"
-        assert col.distinct_count == 100
+        """Test creating column statistics.
+
+        The column's name and type are the ColumnTable's, not the statistics'
+        (the original `column_name == "age"` / `data_type == "int"` assertions
+        have no native statistics equivalent)."""
+        seeded = _Seeded({"age": {"distinct_count": 100, "value_range": (0, 120)}})
+        assert seeded.store.distinct_count(seeded.nid, seeded.identity("age")) == 100
+        assert seeded.store.value_range(seeded.nid, seeded.identity("age")) == (0, 120)
 
 
 class TestRelationStatistics:
-    """Tests for RelationStatistics class."""
+    """Tests for a relation's statistics."""
 
     def test_relation_statistics_creation(self):
         """Test creating relation statistics."""
-        col1 = ColumnStatistics(
-            column_name="age",
-            data_type="int",
-            distinct_count=100,
-            value_range=ColumnRange(lower_bound=0, upper_bound=120),
-        )
-        col2 = ColumnStatistics(
-            column_name="name",
-            data_type="string",
-        )
-        stats = RelationStatistics(row_count_estimate=10000, columns={_AGE: col1, _NAME: col2})
+        seeded = _Seeded({"age": {"distinct_count": 100, "value_range": (0, 120)}, "name": {}})
 
-        assert stats.row_count == 10000
-        assert len(stats.columns) == 2
+        assert seeded.store.row_count(seeded.nid) == 10000
+        assert seeded.store.has_column(seeded.nid, seeded.identity("age"))
+        assert seeded.store.has_column(seeded.nid, seeded.identity("name"))
 
     def test_relation_statistics_get_column(self):
         """Test retrieving column statistics."""
-        col = ColumnStatistics(
-            column_name="age",
-            data_type="int",
-        )
-        stats = RelationStatistics(row_count_estimate=10000, columns={_AGE: col})
-
-        retrieved = stats.get_column(_AGE)
-        assert retrieved is not None
-        assert retrieved.column_name == "age"
+        seeded = _Seeded({"age": {"distinct_count": 100}})
+        assert seeded.store.has_column(seeded.nid, seeded.identity("age"))
+        assert seeded.store.distinct_count(seeded.nid, seeded.identity("age")) == 100
 
     def test_relation_statistics_get_nonexistent_column(self):
         """Test retrieving nonexistent column."""
-        stats = RelationStatistics(row_count_estimate=10000, columns={})
-        retrieved = stats.get_column(_AGE)
-        assert retrieved is None
-
-    def test_relation_statistics_copy(self):
-        """Test copying relation statistics."""
-        col = ColumnStatistics(
-            column_name="age",
-            data_type="int",
-        )
-        stats = RelationStatistics(row_count_estimate=10000, columns={_AGE: col})
-        stats_copy = stats.copy()
-
-        assert stats_copy.row_count == 10000
-        assert stats_copy is not stats
-        assert stats_copy.columns is not stats.columns
-
-    def test_relation_statistics_with_row_count(self):
-        """Test updating row count."""
-        col = ColumnStatistics(
-            column_name="age",
-            data_type="int",
-        )
-        stats = RelationStatistics(row_count_estimate=10000, columns={_AGE: col})
-        new_stats = stats.with_row_count(5000)
-
-        assert stats.row_count == 10000  # Original unchanged
-        assert new_stats.row_count == 5000
-
-    def test_relation_statistics_update_column_range(self):
-        """Test updating column range."""
-        col = ColumnStatistics(
-            column_name="age",
-            data_type="int",
-            value_range=ColumnRange(lower_bound=0, upper_bound=120),
-        )
-        stats = RelationStatistics(row_count_estimate=10000, columns={_AGE: col})
-
-        new_range = ColumnRange(lower_bound=18, upper_bound=65)
-        new_stats = stats.update_column_range(_AGE, new_range)
-
-        assert stats.columns[_AGE].value_range.lower_bound == 0  # Original unchanged
-        assert new_stats.columns[_AGE].value_range.lower_bound == 18
-
+        seeded = _Seeded({})
+        age = seeded.plan_context.columns.relation_column("t", "age").identity
+        assert not seeded.store.has_column(seeded.nid, age)
+        assert seeded.store.distinct_count(seeded.nid, age) is None
 
 class TestCardinalityFunctions:
     """Tests for the pure cardinality functions in cost_estimation."""
@@ -238,7 +228,6 @@ class TestCardinalityFunctions:
         assert estimate_after_filter(0, 0.5) == 1     # floored at 1
 
     def test_estimate_after_filter_rejects_negative(self):
-        import pytest
         from opteryx.planner.cost_estimation import estimate_after_filter
         with pytest.raises(ValueError):
             estimate_after_filter(-1, 0.5)
@@ -263,4 +252,3 @@ class TestCardinalityFunctions:
         assert estimate_group_by_cardinality(100, [3, None]) == 100
         assert estimate_group_by_cardinality(100, []) == 1
         assert estimate_group_by_cardinality(0, [10]) == 1
-
