@@ -82,6 +82,13 @@ struct ColumnStats {
   // Raw key/value metadata (flattened for now)
   std::unordered_map<std::string, std::string> key_value_metadata;
 
+  // The chunk's exact integer sum (`rugo.sum`, chunk_sum.hpp), decoded from the
+  // key_value_metadata above. has_sum is false when the chunk carries none, when
+  // the text does not parse, and ALWAYS in a file rugo did not write (same trust
+  // gate as is_sorted below) — false means NOT TRACKED, never zero.
+  bool has_sum = false;
+  __int128 sum = 0;
+
   // Clustering: set from the row group's SortingColumn (parquet.thrift) ONLY
   // when the file's `created_by` footer field identifies rugo as the writer
   // (see ParseFileMeta in metadata.cpp) — a foreign-written file's claimed
@@ -237,6 +244,12 @@ struct AggColumnStat {
   bool has_min = false;
   bool has_max = false;
   bool null_count_complete = true;
+  // File-level exact integer sum: the sum of every row group's `rugo.sum`
+  // (ColumnStats::has_sum). has_sum is false when ANY row group's chunk lacks
+  // one, for a nested leaf, or when the fold overflows __int128 — a partial sum
+  // is not a sum, and unknown is not zero.
+  bool has_sum = false;
+  __int128 sum = 0;
 };
 
 // Aggregate column statistics across all row groups in a single C++ pass.

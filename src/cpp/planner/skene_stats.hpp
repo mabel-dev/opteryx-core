@@ -99,12 +99,17 @@ inline SkeneApplied apply_skene_footer(NativeManifest& m, size_t row, const sken
         bool ndv_range = false;
         int64_t ndv_lo = 0, ndv_hi = 0;
         int64_t ndv_floor = 0;
+        // The exact sum (kStatSum, int128): the SUM over row groups, only when
+        // every row group carries one and the fold stays inside __int128.
+        bool sum_known = !meta.row_groups.empty();
+        __int128 sum_total = 0;
 
         for (const skene::RowGroupSummary& group : meta.row_groups) {
             if (slot >= group.column_statistics.size() || !group.column_statistics[slot].present) {
                 bounded = false;
                 nulls_known = false;
                 ndv_known = false;
+                sum_known = false;
                 break;
             }
             const skene::ColumnStatistics& s = group.column_statistics[slot].statistics;
@@ -124,6 +129,14 @@ inline SkeneApplied apply_skene_footer(NativeManifest& m, size_t row, const sken
             if (nulls_known) {
                 if (s.flags & skene::kStatNullCount) null_total += s.null_count;
                 else nulls_known = false;
+            }
+            if (sum_known) {
+                const __int128 group_sum =
+                    (static_cast<__int128>(s.sum_high) << 64) | static_cast<uint64_t>(s.sum_low);
+                if ((s.flags & skene::kStatSum) == 0
+                        || __builtin_add_overflow(sum_total, group_sum, &sum_total)) {
+                    sum_known = false;
+                }
             }
             const bool tracked = (s.flags & skene::kStatNdv) != 0;
             const bool exact = (s.flags & skene::kStatNdvExact) != 0;
@@ -178,6 +191,10 @@ inline SkeneApplied apply_skene_footer(NativeManifest& m, size_t row, const sken
             cell.distinct_exact = ndv_exact;
         }
         if (ndv_floor > 0) cell.distinct_floor = ndv_floor;
+        if (sum_known) {
+            cell.has_sum = true;
+            cell.sum = sum_total;
+        }
     }
     if (any_sketch) file.distinct_sketch_family = family;
     return applied;

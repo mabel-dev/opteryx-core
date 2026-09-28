@@ -42,6 +42,7 @@
 #include "core/kmv_sketch.h"
 #include "core/vector_owner.h"
 #include "ops/column_profile.h"
+#include "ops/exact_sum.h"
 #include "ops/hash.h"
 #include "ops/ordinalize.h"
 #include "planner/native_manifest.hpp"
@@ -180,6 +181,7 @@ public:
 
         if (v.type != DRAKEN_ARRAY) hash_into(owner, c.kmv);
         if (v.validity != nullptr) c.nulls += count_nulls(v);
+        if (is_integer(category) && c.sum_ok) fold_sum(c, v);
 
         const int64_t bytes = column_nbytes(owner);
         c.nbytes += bytes;
@@ -228,6 +230,10 @@ public:
             ManifestCell& cell = m.cell(row, k);
             cell.null_count = c.nulls;
             cell.uncompressed_size = c.nbytes;
+            if (is_integer(category) && c.sum_ok) {
+                cell.has_sum = true;
+                cell.sum = c.sum;
+            }
             min_k[k] = c.kmv.min_k(kMinK);
             if (c.any) {
                 set_ordinal_bound(cell.bounds, category, true, c.lo);
@@ -274,7 +280,22 @@ private:
         file_stats_detail::Kmv element_kmv;
         bool element_any = false;
         int64_t element_min = 0, element_max = 0;
+        // Integer columns: the exact sum of the non-null values
+        // (draken/ops/exact_sum.h); sum_ok falls for good on a row group whose
+        // vector is not an integer one, or an overflowing fold.
+        bool sum_ok = true;
+        __int128 sum = 0;
     };
+
+    static void fold_sum(Column& c, const DrakenVector& v) {
+        __int128 part = 0;
+        uint64_t valid = 0;
+        if ((!is_integer(v.type) && v.type != DRAKEN_NULL)
+                || !draken::ops::exact_sum(v, &part, &valid)
+                || __builtin_add_overflow(c.sum, part, &c.sum)) {
+            c.sum_ok = false;
+        }
+    }
 
     // Vector.null_count(): rows minus valid rows; no validity means no nulls.
     static int64_t count_nulls(const DrakenVector& v) {

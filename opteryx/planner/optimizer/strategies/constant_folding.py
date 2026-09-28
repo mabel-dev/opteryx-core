@@ -19,6 +19,10 @@ entered expressions we can optimize, and again at the end which handles where
 we've rewritten expressions at part of other optimizations which can be folded.
 """
 
+import math
+import operator
+from decimal import Decimal
+
 from draken.draken_native import LogicalKind
 from draken.draken_native import vector_attach_logical_type
 from opteryx.compiled.structures.expressions import Expression
@@ -29,7 +33,7 @@ from opteryx.managers.virtual_datasets import one_row_data
 from opteryx.models import QueryTelemetry
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
-from opteryx.types.logical_type import BOOLEAN, LogicalCategory
+from opteryx.types.logical_type import BOOLEAN, FLOAT64, LogicalCategory
 from opteryx.types.logical_type import LogicalCategory as LC
 from opteryx.types.literal_values import native_literal_value
 
@@ -285,6 +289,72 @@ def _dedupe_branches(parameters: list, telemetry) -> list:
 _PARAMETER_CARRIERS = frozenset(
     {NodeType.FUNCTION, NodeType.AGGREGATOR, NodeType.CAST, NodeType.DNF, NodeType.CNF}
 )
+
+
+_EXACT_ARITHMETIC = {
+    "Plus": operator.add,
+    "Minus": operator.sub,
+    "Multiply": operator.mul,
+    "Divide": operator.truediv,
+}
+
+
+def _fold_exact_literal_arithmetic(root, telemetry: QueryTelemetry, *, plan_context):
+    """Fold `literal <op> literal` for float literals in exact decimal arithmetic.
+
+    A numeric literal written with a decimal point ("0.06") is stored as a FLOAT64,
+    so evaluating `0.06 + 0.01` in floating point gives 0.06999999999999999, not the
+    0.07 the SQL text says. Folded into a filter bound that is wrong by one ulp in
+    the direction that matters: TPC-H Q6's `l_discount between 0.06 - 0.01 and
+    0.06 + 0.01` became `<= 0.06999999999999999`, which excludes every DECIMAL(15,2)
+    row whose discount is 0.07 and returned 75,207,768 instead of 123,141,078.
+
+    SQL defines a decimal-point literal as an exact numeric, so the constant is
+    computed exactly (from each literal's shortest round-trip text) and rounded to
+    the nearest FLOAT64 once. `0.06 + 0.01` therefore folds to the double nearest
+    0.07, the same value the literal `0.07` parses to. Runs at plan time, once per
+    constant expression; expressions involving a column are untouched.
+
+    Returns None whenever the exact path does not apply, and the general
+    evaluation below runs as before: not two literals, a bool/None/non-numeric
+    operand, no float operand (integer arithmetic keeps its own semantics), a
+    division by zero, a non-finite input or result, or a result type that is not
+    FLOAT64.
+    """
+    if root.node_type != NodeType.BINARY_OPERATOR or root.value not in _EXACT_ARITHMETIC:
+        return None
+    if root.left.node_type != NodeType.LITERAL or root.right.node_type != NodeType.LITERAL:
+        return None
+    if root.schema_column is None or root.schema_column.column_type != FLOAT64:
+        return None
+
+    operands = []
+    saw_float = False
+    for side in (root.left, root.right):
+        value = side.value
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                return None
+            saw_float = True
+            operands.append(Decimal(repr(value)))
+        elif isinstance(value, int):
+            operands.append(Decimal(value))
+        else:
+            return None
+    if not saw_float:
+        return None
+    if root.value == "Divide" and operands[1] == 0:
+        return None
+
+    result = float(_EXACT_ARITHMETIC[root.value](operands[0], operands[1]))
+    if not math.isfinite(result):
+        return None
+    telemetry.optimization_constant_fold_expression += 1
+    return build_literal_node(
+        result, identity_of=root, suggested_type=FLOAT64, plan_context=plan_context
+    )
 
 
 def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context) -> Expression:
@@ -602,6 +672,10 @@ def fold_constants(root: Expression, telemetry: QueryTelemetry, *, plan_context)
         rewritten = _desugar_rewrite_only(root, telemetry, plan_context=plan_context)
         if rewritten is not root:
             return fold_constants(rewritten, telemetry, plan_context=plan_context)
+
+        exact = _fold_exact_literal_arithmetic(root, telemetry, plan_context=plan_context)
+        if exact is not None:
+            return exact
 
         table = one_row_data.read()
         bc = build_bytecode(lower(root))

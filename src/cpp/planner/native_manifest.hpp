@@ -90,6 +90,9 @@ struct FooterStats {
     int64_t null_count = kUnknown;
     int64_t distinct_count = kUnknown;
     int64_t uncompressed_size = kUnknown;
+    // rugo's `rugo.sum`, summed over the file's row groups (AggColumnStat).
+    bool has_sum = false;
+    __int128 sum = 0;
 };
 
 struct ManifestCell {
@@ -104,6 +107,12 @@ struct ManifestCell {
     int64_t distinct_floor = kUnknown;
     bool has_distinct_sketch = false;
     std::vector<uint64_t> distinct_sketch;   // a skene file's own KMV sketch (may be empty)
+    // The EXACT sum of the column's non-null values in this file
+    // (draken/ops/exact_sum.h): integer columns, and DECIMAL from skene (unscaled,
+    // at the column's scale). has_sum false = NOT TRACKED, never zero. A parquet
+    // footer's sum sits in `footer` instead, like every other footer statistic.
+    bool has_sum = false;
+    __int128 sum = 0;
     FooterStats footer;
     // ARRAY columns: statistics over the flat child - the elements of every
     // list - which the catalog's manifest carries (element_min_values /

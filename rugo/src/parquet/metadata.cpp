@@ -1,5 +1,6 @@
 #include "metadata.hpp"
 #include "thrift.hpp"
+#include "chunk_sum.hpp"
 #include <algorithm>
 #include <cstring>
 #include <fstream>
@@ -643,6 +644,13 @@ static void ParseColumnMeta(TInput &in, ColumnStats &cs,
             break;
           }
         }
+        if (key == rugo_parquet::kChunkSumKey) {
+          __int128 parsed = 0;
+          if (rugo_parquet::parse_chunk_sum(value, &parsed)) {
+            cs.has_sum = true;   // revoked below for a file rugo did not write
+            cs.sum = parsed;
+          }
+        }
         if (!key.empty()) {
           cs.key_value_metadata.emplace(std::move(key), std::move(value));
         }
@@ -1134,6 +1142,8 @@ static FileStats ParseFileMeta(TInput &in, const MetadataParseOptions &opts) {
         col.is_sorted = false;
         col.sort_descending = false;
         col.sort_nulls_first = false;
+        col.has_sum = false;   // a foreign writer's `rugo.sum` is not ours
+        col.sum = 0;
       }
     }
   }
@@ -1508,6 +1518,10 @@ std::vector<AggColumnStat> AggregateColumnStats(const FileStats &fs) {
   // without the statistic, or a nested leaf (leaf-level NDVs say nothing about
   // the display column). Parallel to `result`.
   std::vector<uint8_t> distinct_poisoned(result.size(), 0);
+  // Same idea for the sum: poisoned by any chunk without one (or a nested leaf,
+  // or an overflowing fold). `sum_seen` starts every column unknown until its
+  // first chunk contributes.
+  std::vector<uint8_t> sum_poisoned(result.size(), 0);
 
   for (const auto &rg : fs.row_groups) {
     for (const auto &col : rg.columns) {
@@ -1551,6 +1565,20 @@ std::vector<AggColumnStat> AggregateColumnStats(const FileStats &fs) {
           } else if (col.distinct_count > agg.distinct_count) {
             agg.distinct_count = col.distinct_count;
           }
+        }
+      }
+
+      // Aggregate sum (see AggColumnStat::has_sum).
+      if (!sum_poisoned[it->second]) {
+        __int128 folded = 0;
+        if (dot != std::string::npos || !col.has_sum ||
+            __builtin_add_overflow(agg.sum, col.sum, &folded)) {
+          sum_poisoned[it->second] = 1;
+          agg.has_sum = false;
+          agg.sum = 0;
+        } else {
+          agg.sum = folded;
+          agg.has_sum = true;
         }
       }
 

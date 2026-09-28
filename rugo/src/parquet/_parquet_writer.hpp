@@ -20,6 +20,7 @@
 #include "_thrift_writer.hpp"
 #include "page_index_writer.hpp"
 #include "_bloom_writer.hpp"
+#include "chunk_sum.hpp"
 
 #include "core/kmv_sketch.h"  // THE shared KMV sketch (draken, header-only)
 
@@ -509,7 +510,18 @@ struct ColumnStats {
   // present. Hash-distinct, so a collision (xxhash64, vanishingly rare at these
   // counts) would undercount — same hash-only equality basis as the bloom.
   int64_t distinct_count = -1;
+  // Exact sum of the chunk's non-null values — integer columns only (see
+  // chunk_sum.hpp). Written as the chunk's `rugo.sum` key_value_metadata entry.
+  bool has_sum = false;
+  __int128 sum = 0;
 };
+
+// Does this column chunk get a `rugo.sum`? A scalar INT32/INT64 chunk with no
+// logical annotation beyond an integer width/sign one (chunk_sum.hpp).
+inline bool chunk_has_sum(const ColumnInput &col) {
+  return !col.is_array && col.logical == LK_NONE &&
+         (col.type == PT_INT32 || col.type == PT_INT64);
+}
 
 // unsigned-byte lexicographic compare (memcmp + shorter-is-smaller tiebreak),
 // matching how the reader (Python bytes) orders BYTE_ARRAY stats.
@@ -521,7 +533,10 @@ inline bool str_lt(const StrSlice &a, const StrSlice &b) {
   return a.len < b.len;
 }
 
-inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows) {
+// `with_sum`: false for the page index's per-page bounds, which never carry a
+// sum — only chunk statistics do.
+inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows,
+                                 bool with_sum = true) {
   ColumnStats st;
   for (size_t i = 0; i < num_rows; i++)
     if (!is_valid(col.validity, i))
@@ -541,10 +556,14 @@ inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows) {
   case PT_INT32: {
     bool any = false;
     int32_t lo = 0, hi = 0;
+    const bool want_sum = with_sum && chunk_has_sum(col);
+    __int128 total = 0;
     for (size_t i = 0; i < num_rows; i++) {
       if (!is_valid(col.validity, i))
         continue;
       int32_t v = col.i32[codes ? codes[i] : i];
+      if (want_sum)
+        total += col.is_unsigned ? (__int128)(uint32_t)v : (__int128)v;
       if (!any) { lo = hi = v; any = true; }
       else if (col.is_unsigned) {
         if ((uint32_t)v < (uint32_t)lo) lo = v;
@@ -559,15 +578,21 @@ inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows) {
       put_u32_le(st.min_bytes, (uint32_t)lo);
       put_u32_le(st.max_bytes, (uint32_t)hi);
     }
+    st.has_sum = want_sum;
+    st.sum = total;
     break;
   }
   case PT_INT64: {
     bool any = false;
     int64_t lo = 0, hi = 0;
+    const bool want_sum = with_sum && chunk_has_sum(col);
+    __int128 total = 0;
     for (size_t i = 0; i < num_rows; i++) {
       if (!is_valid(col.validity, i))
         continue;
       int64_t v = col.i64[codes ? codes[i] : i];
+      if (want_sum)
+        total += col.is_unsigned ? (__int128)(uint64_t)v : (__int128)v;
       if (!any) {
         lo = hi = v;
         any = true;
@@ -584,6 +609,8 @@ inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows) {
       put_u64_le(st.min_bytes, (uint64_t)lo);
       put_u64_le(st.max_bytes, (uint64_t)hi);
     }
+    st.has_sum = want_sum;
+    st.sum = total;
     break;
   }
   case PT_FLBA: { // DECIMAL: numeric min/max of the unscaled value, BE-encoded
@@ -871,7 +898,7 @@ struct PageBuild {
 // carries — a page bound that disagreed with the chunk bound would be a bug.
 inline PageMeta make_page_meta(const ColumnInput &sub, size_t count,
                                int64_t first_row, const PageBuild &pb, int codec) {
-  const ColumnStats ps = compute_stats(sub, count);
+  const ColumnStats ps = compute_stats(sub, count, /*with_sum=*/false);
   PageMeta pm;
   pm.first_row_index = first_row;
   pm.null_count = ps.null_count;
@@ -2176,6 +2203,15 @@ inline void write_column_chunk(TCompactWriter &w, const ColumnInput &c,
     w.writeI64Field(5, (int64_t)(c.is_array ? c.num_levels : num_rows)); // num_values
     w.writeI64Field(6, (int64_t)uncompressed_total); // total_uncompressed_size
     w.writeI64Field(7, (int64_t)compressed_total);   // total_compressed_size
+    // key_value_metadata (field 8): the chunk's exact integer sum (chunk_sum.hpp).
+    if (stats.has_sum) {
+      w.writeFieldHeader(CT_LIST, 8);
+      w.writeListHeader(CT_STRUCT, 1);
+      w.structBegin(); // KeyValue
+      w.writeStringField(1, rugo_parquet::kChunkSumKey);
+      w.writeStringField(2, rugo_parquet::format_chunk_sum(stats.sum));
+      w.structEnd();
+    }
     w.writeI64Field(9, data_page_offset);          // data_page_offset
     if (dict_page_offset >= 0)
       w.writeI64Field(11, dict_page_offset);       // dictionary_page_offset
