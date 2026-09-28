@@ -45,7 +45,7 @@ def _identifier_source(expr: Optional[Expression]) -> Optional[str]:
 
 def _identifier_identity(expr: Optional[Expression]) -> Optional[bytes]:
     """Identity of an identifier's bound column, matching how
-    ``RelationStatistics.columns`` is keyed (see that class's docstring and
+    the statistics store keys columns (by identity; see
     ``join_algorithm._join_key_identity``).
 
     Returns None when the expression carries no bound ``schema_column``
@@ -84,15 +84,15 @@ def _find_scan_for_relation(
 ):
     """Find the Scan node inside ``subplan_id`` whose relation matches.
 
-    Returns the PlanStep or None if no Scan with a manifest is present.
+    Returns its node id, or None if no such Scan is present.
     """
-    for _, node in _walk_subplan(plan, subplan_id):
+    for nid, node in _walk_subplan(plan, subplan_id):
         if node.node_type != LogicalPlanStepType.Scan:
             continue
         rel = node.relation
         alias = node.alias
         if rel == relation_name or alias == relation_name:
-            return node
+            return nid
     return None
 
 
@@ -123,7 +123,7 @@ def _walk_subplan_through_subqueries(
 def _subtree_sources_are_backed(plan: LogicalPlan, root_id: str) -> bool:
     """True iff every Scan/FunctionDataset reachable under `root_id` reports a
     REAL row count (manifest or schema estimate) -- never the
-    `statistics_refresh._UNKNOWN_ROW_COUNT` placeholder substituted for one
+    refresh's kUnknownRowCount placeholder substituted for one
     that can't report a size.
 
     Mirrors `result_size_guard._declared_row_count`'s precedence, which
@@ -152,31 +152,29 @@ def _subtree_sources_are_backed(plan: LogicalPlan, root_id: str) -> bool:
     return saw_a_source
 
 
-def _key_stats(scan_node, column_identity: Optional[bytes], plan_context: PlanContext) -> KeyStats:
+def _key_stats(scan_nid, column_identity: Optional[bytes], plan_context: PlanContext) -> KeyStats:
     """Resolve KeyStats for a column by reading the refreshed Scan stats.
 
     ``column_identity`` is the ``SchemaColumn.identity`` bytes the statistics
-    dict is keyed by — never a column name (see ``_identifier_identity``).
+    are keyed by — never a column name (see ``_identifier_identity``).
     """
-    if scan_node is None or column_identity is None:
+    if scan_nid is None or column_identity is None:
         return KeyStats(ndv=None, null_fraction=None)
-    stats = plan_context.statistics(scan_node)
-    if stats is None:
+    store = plan_context.statistics
+    if not store.has(scan_nid) or not store.has_column(scan_nid, column_identity):
         return KeyStats(ndv=None, null_fraction=None)
-    col = stats.columns.get(column_identity)
-    if col is None:
-        return KeyStats(ndv=None, null_fraction=None)
+    null_fraction = store.null_fraction(scan_nid, column_identity)
     # The DOMAIN count, not the live one: a key domain is a property of the
     # relation as stored, and a filter removes ROWS, not the values the key
     # column could hold. Reading the post-filter count here charges the
     # filter's selectivity a second time inside the divisor -- see
     # _build_equiv_tdoms for the measured cost of that exact error.
-    ndv = col.domain_distinct_count
+    ndv = store.domain_distinct_count(scan_nid, column_identity)
     if ndv is None:
-        return KeyStats(ndv=None, null_fraction=col.null_fraction)
+        return KeyStats(ndv=None, null_fraction=null_fraction)
     return KeyStats(
         ndv=ndv,
-        null_fraction=col.null_fraction,
+        null_fraction=null_fraction,
         ndv_provenance=NdvProvenance.MEASURED,
     )
 
@@ -184,12 +182,12 @@ def _key_stats(scan_node, column_identity: Optional[bytes], plan_context: PlanCo
 def _leaf_relation_to_scan(
     plan: LogicalPlan, leaf_subplan_id: str, leaf_rel_names: List[str]
 ) -> Dict[str, Any]:
-    """Map relation_name → scan node for a leaf's subplan."""
+    """Map relation_name → scan node id for a leaf's subplan."""
     out: Dict[str, Any] = {}
     for rel in leaf_rel_names:
-        scan = _find_scan_for_relation(plan, leaf_subplan_id, rel)
-        if scan is not None:
-            out[rel] = scan
+        scan_nid = _find_scan_for_relation(plan, leaf_subplan_id, rel)
+        if scan_nid is not None:
+            out[rel] = scan_nid
     return out
 
 
@@ -217,10 +215,10 @@ def _leaf_row_count(
     """
     if not _subtree_sources_are_backed(plan, leaf_subplan_id):
         return None
-    stats = plan_context.statistics(plan[leaf_subplan_id])
-    if stats is None:
+    rows = plan_context.statistics.row_count(leaf_subplan_id)
+    if rows is None:
         return None
-    return max(1, int(stats.row_count))
+    return max(1, int(rows))
 
 
 def _leaf_domain_row_count(
@@ -228,7 +226,7 @@ def _leaf_domain_row_count(
 ) -> Optional[int]:
     """PRE-filter row count for a leaf — the ``_leaf_row_count`` counterpart.
 
-    Reads ``RelationStatistics.domain_row_count`` (the base count refresh
+    Reads the leaf's ``domain_row_count`` (the base count refresh
     recorded before any selectivity was folded in) rather than ``row_count``,
     off the same leaf-subtree statistics ``_leaf_row_count`` reads. Returns
     None on the same terms so the caller's existing "no statistics → no
@@ -236,10 +234,10 @@ def _leaf_domain_row_count(
     """
     if not _subtree_sources_are_backed(plan, leaf_subplan_id):
         return None
-    stats = plan_context.statistics(plan[leaf_subplan_id])
-    if stats is None:
+    rows = plan_context.statistics.domain_row_count(leaf_subplan_id)
+    if rows is None:
         return None
-    return max(1, int(stats.domain_row_count))
+    return max(1, int(rows))
 
 
 def _classify_predicate(
@@ -337,7 +335,7 @@ def _build_equiv_tdoms(
     other, so DPccp applied the query's only selective filter LAST and drove
     60M rows through four joins (1688ms; 567ms once this and the occupancy
     bound in ``dpccp._combine`` are both in). This mirrors the identical
-    fallback in ``statistics_refresh._equi_key_classes``; the two paths must
+    fallback in the refresh's equi_key_classes; the two paths must
     agree, or the tree-picker and the build-side chooser cost the same join
     differently.
 
@@ -346,23 +344,20 @@ def _build_equiv_tdoms(
     join predicate and are unaffected.
     """
     result: Dict[Tuple[int, bytes], int] = {}
+    store = plan_context.statistics
     for members in equivalence_classes:
         known_ndvs: List[int] = []
         leaf_set: set = set()
         for leaf_idx, col_identity in members:
             leaf_set.add(leaf_idx)
-            for scan in per_leaf_scans[leaf_idx].values():
-                stats = plan_context.statistics(scan)
-                if stats is None:
-                    continue
-                col_stat = stats.columns.get(col_identity)
-                if col_stat is None:
+            for scan_nid in per_leaf_scans[leaf_idx].values():
+                if not store.has(scan_nid):
                     continue
                 # The DOMAIN count, for the same reason the fallback below
                 # reads domain_row_count: the warning in this docstring is
                 # about a post-filter number in the divisor, and it applies
                 # whichever field carries it.
-                col_ndv = col_stat.domain_distinct_count
+                col_ndv = store.domain_distinct_count(scan_nid, col_identity)
                 if col_ndv is not None:
                     known_ndvs.append(col_ndv)
 
@@ -520,8 +515,8 @@ def build_join_graph(
         for member in members
     }
 
-    def _key_stats_with_tdom(scan_node, col_identity: Optional[bytes], leaf_idx: int) -> KeyStats:
-        ks = _key_stats(scan_node, col_identity, plan_context)
+    def _key_stats_with_tdom(scan_nid, col_identity: Optional[bytes], leaf_idx: int) -> KeyStats:
+        ks = _key_stats(scan_nid, col_identity, plan_context)
         if ks.ndv is None and col_identity is not None:
             tdom = equiv_tdoms.get((leaf_idx, col_identity))
             if tdom is not None:

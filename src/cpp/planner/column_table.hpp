@@ -23,6 +23,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -60,8 +61,10 @@ struct ColumnRow {
 class ColumnRows {
 public:
     Slot append(ColumnRow&& row) {
+        const Slot slot = static_cast<Slot>(rows_.size());
+        if (row.alias_of == kNoSlot) root_of_identity_[row.identity] = slot;
         rows_.push_back(std::move(row));
-        return static_cast<Slot>(rows_.size() - 1);
+        return slot;
     }
 
     const ColumnRow& row(Slot slot) const noexcept { return rows_[slot]; }
@@ -73,8 +76,16 @@ public:
         return slot;
     }
 
+    // The ROOT slot that minted `identity`, or kNoSlot for an identity this
+    // query never minted.
+    Slot root_of(const std::string& identity) const {
+        auto found = root_of_identity_.find(identity);
+        return found == root_of_identity_.end() ? kNoSlot : found->second;
+    }
+
 private:
     std::vector<ColumnRow> rows_;
+    std::unordered_map<std::string, Slot> root_of_identity_;
 };
 
 }  // namespace opteryx::planner

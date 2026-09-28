@@ -187,7 +187,6 @@ cdef class ColumnTable:
 
     def __cinit__(self):
         self._columns = []
-        self._slot_of = {}
 
     def __len__(self):
         return self._rows.size()
@@ -257,8 +256,6 @@ cdef class ColumnTable:
 
         column.slot = self._rows.append(move(row))
         self._columns.append(column)
-        if alias_of == kNoSlot:
-            self._slot_of[identity] = column.slot
         return column
 
     def relation_column(self, relation, str name not None, **fields):
@@ -313,8 +310,8 @@ cdef class ColumnTable:
         (e.g. a join key the compiler casts): an alias row of the column that
         minted the identity. An identity this query never minted is refused: it
         would be a column from some other binding."""
-        slot = self._slot_of.get(identity)
-        if slot is None:
+        cdef uint32_t slot = self._rows.root_of(identity)
+        if slot == kNoSlot:
             raise InvalidInternalStateError(
                 f"Column {name!r} ({identity!r}) was not minted in this query's column table."
             )

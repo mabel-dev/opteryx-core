@@ -542,8 +542,7 @@ def do_optimizer(
         # referencing another shared CTE already sees ITS estimate.
         for key, body in shared.items():
             body = refresh_statistics(body, plan_context)
-            head = body.exit_point()
-            plan_context.set_cte_statistics(key, plan_context.statistics(body[head]))
+            plan_context.statistics.set_cte(key, body.exit_point())
 
         # A recursive CTE's references carry its ANCHOR's estimate: the fixpoint's
         # true cardinality has no model yet (docs/RECURSIVE_CTE_DESIGN.md §5.4)
@@ -553,8 +552,7 @@ def do_optimizer(
             anchor_body = shared.get(meta["anchor_key"])
             if anchor_body is None:
                 continue
-            head = anchor_body.exit_point()
-            plan_context.set_cte_statistics(rkey, plan_context.statistics(anchor_body[head]))
+            plan_context.statistics.set_cte(rkey, anchor_body.exit_point())
 
     plan = optimizer.optimize(plan)
 

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import copy as copy_module
 import dataclasses
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Bound columns are rows of the query's native ColumnTable; their façade classes
 # live with it (opteryx/compiled/planner/column_table.pyx, native plan graph P1).
@@ -60,16 +60,20 @@ class ColumnDisposition:
     AGE = "AGE"
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class RelationSchema:
     """Table/relation schema definition.
 
-    Opteryx relation schema.
+    Opteryx relation schema. IMMUTABLE (architect ruling 2026-09-28, native plan
+    graph P5): a plan step's native row mirrors the schema it holds, so an edit is
+    a NEW schema (`dataclasses.replace`) assigned through the step - and, in the
+    binder, re-bound wherever the old one was shared
+    (BindingContext.rebind_schema). `columns` and `aliases` are tuples.
 
     Attributes:
         name: Schema/table name (required)
-        columns: List of SchemaColumn definitions (required)
-        aliases: Alternative names for this schema (default: [])
+        columns: SchemaColumn definitions (required)
+        aliases: Alternative names for this schema (default: ())
         primary_key: Name of primary key column (default: None)
         row_count_metric: Actual row count if known (default: None)
         row_count_estimate: Estimated row count (default: None)
@@ -78,13 +82,33 @@ class RelationSchema:
     """
 
     name: str
-    columns: List[SchemaColumn] = dataclasses.field(default_factory=list)
-    aliases: List[str] = dataclasses.field(default_factory=list)
+    columns: Tuple[SchemaColumn, ...] = ()
+    aliases: Tuple[str, ...] = ()
     primary_key: Optional[str] = None
     row_count_metric: Optional[int] = None
     row_count_estimate: Optional[int] = None
     data_size_metric: Optional[int] = None
     data_size_estimate: Optional[int] = None
+
+    def __post_init__(self):
+        # A list given for either sequence is held as a tuple: the schema is a value.
+        object.__setattr__(self, "columns", tuple(self.columns))
+        object.__setattr__(self, "aliases", tuple(self.aliases))
+
+    def clone(self) -> "RelationSchema":
+        """A distinct schema object of the same value. The fields are values
+        (tuples, scalars), so the new object shares them; built straight from
+        the instance dict - the binder copies schemas per branch, and
+        `dataclasses.replace` re-runs __init__ and __post_init__ each time."""
+        new = object.__new__(RelationSchema)
+        new.__dict__.update(self.__dict__)
+        return new
+
+    def with_columns(self, columns) -> "RelationSchema":
+        """This schema with `columns` in place of its own - a new schema."""
+        new = self.clone()
+        new.__dict__["columns"] = tuple(columns)
+        return new
 
     def __str__(self) -> str:
         """String representation: schema_name(col1, col2, ...)."""
@@ -96,24 +120,22 @@ class RelationSchema:
         return f"RelationSchema(name={self.name!r}, num_columns={len(self.columns)})"
 
     def branch_copy(self, memo: dict) -> "RelationSchema":
-        """Copy for binder branch isolation.
+        """A distinct schema object of the same value, for binder branch isolation.
 
         The binder binds a join's two legs (and a filter's guarded scope)
-        against independent copies of the in-scope schemas, because binding
-        replaces a schema's columns (narrowing, alias rows swapped in). The
-        columns themselves are SHARED: a column is a row of the query's
-        ColumnTable and is fixed once minted (architect ruling 2026-09-27), so
-        there is nothing in one to isolate. One shared `memo` per
-        BindingContext.copy keeps a schema reachable under two keys copying to
-        one new schema.
+        against their own schema objects, because binding RE-BINDS a scope's
+        schema (narrowing, alias rows swapped in) and BindingContext.rebind_schema
+        replaces a schema by object IDENTITY wherever it is shared: a branch's
+        object must not be the scan's, or a branch's narrowing would reach the
+        scan. The columns themselves are shared - a column is a row of the
+        query's ColumnTable. One shared `memo` per BindingContext.copy keeps a
+        schema reachable under two keys copying to one new schema.
         """
         cached = memo.get(id(self))
         if cached is not None:
             return cached
-        clone = copy_module.copy(self)
+        clone = self.clone()
         memo[id(self)] = clone
-        clone.columns = list(self.columns)
-        clone.aliases = list(self.aliases)
         return clone
 
     @property
@@ -163,19 +185,13 @@ class RelationSchema:
         """Alias for column() for API compatibility."""
         return self.column(name, case_insensitive=case_insensitive)
 
-    def pop_column(self, name: str) -> Optional[SchemaColumn]:
-        """Remove and return column by name.
-
-        Args:
-            name: Column name to remove
-
-        Returns:
-            Removed SchemaColumn if found, None otherwise
-        """
+    def without_column(self, name: str) -> "RelationSchema":
+        """This schema without its first column named `name` - a new schema (or
+        this one, when it has no such column)."""
         for i, col in enumerate(self.columns):
             if col.name == name:
-                return self.columns.pop(i)
-        return None
+                return self.with_columns(self.columns[:i] + self.columns[i + 1 :])
+        return self
 
 
 def _column_type_from_dict(data: Dict[str, Any]) -> Any:

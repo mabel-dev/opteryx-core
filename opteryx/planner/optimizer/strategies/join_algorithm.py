@@ -263,8 +263,8 @@ def _recognize_band(node):
 
 
 def _join_key_identity(col):
-    """Identity of a join-key column, matching how RelationStatistics.columns
-    is keyed (see statistics_refresh._column_identity).
+    """Identity of a join-key column, matching how the statistics store keys
+    columns.
 
     Join keys arrive as raw identity ``bytes``; nodes carry theirs on
     ``.schema_column``. Returns None when none can be resolved (NDV/null then
@@ -852,15 +852,16 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
 
     @staticmethod
     def _side_statistics(plan, join_nid, plan_context: PlanContext):
-        """Return (left_stats, right_stats) RelationStatistics for the join's two
-        inputs, identified by the 'left'/'right' edge labels (plan.legs refuses a
-        join whose legs are not labelled). Either may be None when statistics are
-        absent.
+        """Return (left, right) for the join's two inputs, identified by the
+        'left'/'right' edge labels (plan.legs refuses a join whose legs are not
+        labelled): each the (statistics store, node id) its estimates are read
+        from, or None when the leg has no statistics.
         """
+        store = plan_context.statistics
         left_nid, right_nid = plan.legs(join_nid)
         return (
-            plan_context.statistics(plan[left_nid]),
-            plan_context.statistics(plan[right_nid]),
+            (store, left_nid) if store.has(left_nid) else None,
+            (store, right_nid) if store.has(right_nid) else None,
         )
 
     @staticmethod
@@ -876,7 +877,8 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
                 "JoinAlgorithmStrategy reached a join leg with no statistics; the "
                 "statistics refresh must run before every cost-based strategy."
             )
-        return stats.row_count
+        store, nid = stats
+        return store.row_count(nid)
 
     def _leg_rows(self, context: OptimizerContext):
         """(left rows, right rows) for the join being visited."""
@@ -897,12 +899,13 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
         """
         if stats is None:
             return None
+        store, nid = stats
         ndvs = []
         for col in key_columns or []:
             identity = _join_key_identity(col)
-            col_stats = stats.get_column(identity) if identity is not None else None
-            if col_stats is not None and col_stats.distinct_count is not None:
-                ndvs.append(col_stats.distinct_count)
+            ndv = store.distinct_count(nid, identity) if identity is not None else None
+            if ndv is not None:
+                ndvs.append(ndv)
         return composite_key_ndv(ndvs)
 
     @staticmethod
@@ -910,10 +913,11 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
         """Worst-case (highest) join-key null fraction for a side, or None."""
         if stats is None:
             return None
+        store, nid = stats
         fractions = []
         for col in key_columns or []:
             identity = _join_key_identity(col)
-            col_stats = stats.get_column(identity) if identity is not None else None
-            if col_stats is not None and col_stats.null_fraction is not None:
-                fractions.append(col_stats.null_fraction)
+            fraction = store.null_fraction(nid, identity) if identity is not None else None
+            if fraction is not None:
+                fractions.append(fraction)
         return max(fractions) if fractions else None

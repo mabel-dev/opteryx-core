@@ -24,11 +24,11 @@ That definition rules out both numbers this meter used to carry:
     reports ABOVE dense.
 
 A column with neither a fixed width nor ANALYZE'd string stats still falls back
-to that footer figure (see ColumnStatistics.total_bytes), so ANALYZE is what
+to that footer figure (see ColumnStats::total_bytes), so ANALYZE is what
 makes a variable-width column's billing figure correct rather than approximate.
 
 So the meter is computed here instead, at PLAN TIME, from the per-column dense
-widths the estimator already derives (`ColumnStatistics.total_bytes`, whose
+widths the estimator already derives (`ColumnStats::total_bytes`, whose
 source order is dense-first precisely so this can read it).
 
 WHY PLAN TIME. jobs.opteryx enforces usage limits at submit time and must
@@ -45,8 +45,9 @@ time, and dynamic filters narrow nothing at plan time. The customer is charged
 for those rows. Plan-time file/manifest pruning IS reflected, because the
 pruned Manifest is what the scan carries by then.
 
-WHAT IS COUNTED. Per Scan, the pre-filter relation: `scan_base_statistics`
-(rows after manifest pruning, before any predicate) summed over the columns the
+WHAT IS COUNTED. Per Scan, the pre-filter relation: its base statistics
+(src/cpp/planner/statistics_refresh.hpp `scan_base_statistics`: rows after
+manifest pruning, before any predicate) summed over the columns the
 query REFERENCES — the projection plus any column a pushed predicate reads.
 Nothing else in the plan contributes: bytes materialised by a join, an
 aggregate or a sort are work the engine does, not data entering the system.
@@ -89,24 +90,15 @@ __all__ = [
 _ONE_ROW = "$one_row"
 
 
-def _scan_bytes(node, base_stats_cache: Optional[dict]) -> int:
-    """Dense logical bytes read by one Scan node."""
-    from opteryx.planner.optimizer.statistics_refresh import scan_base_statistics
-
+def _scan_bytes(node, plan_context) -> int:
+    """Dense logical bytes read by one Scan node: its base statistics (the
+    query's memo, shared with the statistics refresh) summed over the columns
+    with a known size. A column with no signal contributes nothing — see the
+    module docstring; it is not an excuse to abandon the whole scan, and it is
+    not a licence to invent a width."""
     if node.relation == _ONE_ROW:
         return 0
-
-    stats = scan_base_statistics(node, base_stats_cache)
-    if stats is None:
-        return 0
-    # Sum only the columns with a known size. A column with no signal
-    # contributes nothing — see the module docstring; it is not an excuse to
-    # abandon the whole scan, and it is not a licence to invent a width.
-    return sum(
-        column.total_bytes
-        for column in stats.columns.values()
-        if column.total_bytes is not None
-    )
+    return plan_context.statistics.scan_read_bytes(node)
 
 
 def iter_scan_nodes(plan: LogicalPlan, shared_ctes: Optional[dict] = None):
@@ -212,11 +204,7 @@ def plan_relations(plan: LogicalPlan, shared_ctes: Optional[dict] = None) -> lis
     )
 
 
-def data_processed_by_scan(
-    plan: LogicalPlan,
-    base_stats_cache: Optional[dict] = None,
-    shared_ctes: Optional[dict] = None,
-) -> dict:
+def data_processed_by_scan(plan: LogicalPlan, shared_ctes: Optional[dict] = None) -> dict:
     """Dense logical bytes this plan will read, per Scan node.
 
     Same walk and same per-scan figure `measure_data_processed` sums into the
@@ -241,24 +229,20 @@ def data_processed_by_scan(
     what EXPLAIN draws.
     """
     return {
-        node.uuid: _scan_bytes(node, base_stats_cache)
+        node.uuid: _scan_bytes(node, plan.plan_context)
         for node in iter_scan_nodes(plan, shared_ctes)
     }
 
 
-def measure_data_processed(
-    plan: LogicalPlan,
-    base_stats_cache: Optional[dict] = None,
-    shared_ctes: Optional[dict] = None,
-) -> int:
+def measure_data_processed(plan: LogicalPlan, shared_ctes: Optional[dict] = None) -> int:
     """Dense logical bytes this plan will read — the DATA_PROCESSED_BYTES meter.
 
     Call on the FINAL optimized logical plan: manifest pruning, projection
     pushdown and predicate pushdown all change the answer, and all of them run
     inside the optimizer.
 
-    `base_stats_cache` is the query's scan-statistics memo (threaded from
-    `plan_query`); passing it makes this walk effectively free when the
+    Each scan's base statistics come from the query's memo
+    (`PlanContext.statistics`), so this walk is effectively free when the
     optimizer has already costed the same scans.
 
     Summed over every Scan node `iter_scan_nodes` yields, NOT over
@@ -267,9 +251,4 @@ def measure_data_processed(
     SELECT ... FROM t` reads the same relation twice and must be billed
     twice), and a dict keyed by identity collapses that pair into one entry.
     """
-    return int(
-        sum(
-            _scan_bytes(node, base_stats_cache)
-            for node in iter_scan_nodes(plan, shared_ctes)
-        )
-    )
+    return int(sum(_scan_bytes(node, plan.plan_context) for node in iter_scan_nodes(plan, shared_ctes)))

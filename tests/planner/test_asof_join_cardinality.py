@@ -16,6 +16,7 @@ used to keep reporting the full relation size — the reason the refusal above
 quoted the two tables' FULL cardinalities despite `LIMIT 5` / `LIMIT 50`.
 """
 
+import dataclasses
 import os
 import sys
 
@@ -80,8 +81,7 @@ def _inflate_scans(plan, rows):
         if node.node_type != LogicalPlanStepType.Scan:
             continue
         assert node.manifest is None, "virtual scan grew a manifest; inflate that instead"
-        node.schema.row_count_metric = rows
-        node.schema.row_count_estimate = None
+        node.schema = dataclasses.replace(node.schema, row_count_metric=rows, row_count_estimate=None)
     plan.statistics_are_stale = True
     return plan
 

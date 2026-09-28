@@ -391,7 +391,7 @@ struct Vertex {
     int64_t domain_rows;  // PRE-filter row count (base, or row_count when absent)
 };
 
-struct Edge {
+struct JoinEdge {
     int32_t left;
     int32_t right;
     int32_t class_id;
@@ -405,7 +405,7 @@ inline int lowest_bit(uint64_t m) { return __builtin_ctzll(m); }
 
 struct Graph {
     std::vector<Vertex> vertices;
-    std::vector<Edge> edges;
+    std::vector<JoinEdge> edges;
     std::vector<KeyPair> keys;
     std::vector<uint64_t> adj;
     // Edges grouped by unordered endpoint pair, insertion order within a pair.
@@ -430,7 +430,7 @@ struct Graph {
         adj.assign(count, 0);
         pair_begin.assign(static_cast<size_t>(count) * count, 0);
         pair_count.assign(static_cast<size_t>(count) * count, 0);
-        for (const Edge& e : edges) {
+        for (const JoinEdge& e : edges) {
             if (!(0 <= e.left && e.left < count && 0 <= e.right && e.right < count)) {
                 throw std::invalid_argument("edge endpoints out of range: " +
                                             std::to_string(e.left) + ", " +
@@ -452,7 +452,7 @@ struct Graph {
         pair_edges.assign(running, 0);
         std::vector<uint32_t> fill(pair_count.size(), 0);
         for (uint32_t idx = 0; idx < edges.size(); ++idx) {
-            const Edge& e = edges[idx];
+            const JoinEdge& e = edges[idx];
             const int lo = std::min(e.left, e.right), hi = std::max(e.left, e.right);
             const size_t slot = static_cast<size_t>(lo) * count + hi;
             pair_edges[pair_begin[slot] + fill[slot]++] = idx;
@@ -530,7 +530,7 @@ struct Graph {
 // ---- join trees -------------------------------------------------------------
 
 // A tree node in a Tree's arena. Leaves have vertex >= 0 and left == right ==
-// -1. Edge references index Graph::edges when >= 0; a negative reference r is
+// -1. JoinEdge references index Graph::edges when >= 0; a negative reference r is
 // the tree-owned synthetic cartesian edge Tree::synthetic[-1 - r].
 struct TreeNode {
     int32_t left;
@@ -546,7 +546,7 @@ struct TreeNode {
 struct Tree {
     std::vector<TreeNode> nodes;
     std::vector<int32_t> edge_refs;
-    std::vector<Edge> synthetic;
+    std::vector<JoinEdge> synthetic;
     int32_t root = -1;
 };
 
@@ -578,7 +578,7 @@ public:
         seen_classes_.clear();
         double extra_sel = 1.0;
         for (int32_t ref : edges) {
-            const Edge& e = edge(ref);
+            const JoinEdge& e = edge(ref);
             if (e.has_class) {
                 if (std::find(seen_classes_.begin(), seen_classes_.end(), e.class_id) !=
                     seen_classes_.end()) {
@@ -616,7 +616,7 @@ public:
     }
 
     int32_t add_synthetic_edge(int32_t left_vertex, int32_t right_vertex) {
-        tree_.synthetic.push_back(Edge{left_vertex, right_vertex, 0, false, 1.0, 0, 0});
+        tree_.synthetic.push_back(JoinEdge{left_vertex, right_vertex, 0, false, 1.0, 0, 0});
         return -static_cast<int32_t>(tree_.synthetic.size());
     }
 
@@ -626,7 +626,7 @@ public:
     }
 
 private:
-    const Edge& edge(int32_t ref) const {
+    const JoinEdge& edge(int32_t ref) const {
         return ref >= 0 ? g_.edges[ref] : tree_.synthetic[-1 - ref];
     }
 

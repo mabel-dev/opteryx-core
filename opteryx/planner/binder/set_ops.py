@@ -628,11 +628,18 @@ def _retype_declared_columns(columns: List[Expression], context: BindingContext,
     if not retyped_by_identity:
         return
 
-    for schema in context.schemas.values():
-        for position, schema_column in enumerate(schema.columns):
+    for schema in list(context.schemas.values()):
+        retyped = []
+        changed = False
+        for schema_column in schema.columns:
             replacement = retyped_by_identity.get(schema_column.identity)
             if replacement is not None and replacement.identity == schema_column.identity:
-                schema.columns[position] = replacement
+                retyped.append(replacement)
+                changed = True
+            else:
+                retyped.append(schema_column)
+        if changed:
+            context.rebind_schema(schema, schema.with_columns(retyped))
 
 
 def _steps_sharing_columns(graph, node) -> list:

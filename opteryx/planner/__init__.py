@@ -663,9 +663,7 @@ def query_planner(
 
         telemetry.increase(
             "billing_bytes",
-            measure_data_processed(
-                optimized_plan, plan_context.scan_stats_cache, plan_context.shared_ctes
-            ),
+            measure_data_processed(optimized_plan, plan_context.shared_ctes),
         )
         # Per-scan breakdown of that same figure, keyed by the `uuid` the physical
         # planner carries from the logical node onto the compiled scan node —
@@ -675,7 +673,7 @@ def query_planner(
         # are two entries, matching the two scan nodes in the physical plan and the
         # two `billing_bytes` above counts.
         telemetry._reading["billing_bytes_by_scan"] = data_processed_by_scan(
-            optimized_plan, plan_context.scan_stats_cache, plan_context.shared_ctes
+            optimized_plan, plan_context.shared_ctes
         )
         # The relations that figure was measured over, recorded from the SAME plan
         # and the same scan walk. Downstream this is what attributes a query to the

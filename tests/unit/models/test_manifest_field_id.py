@@ -17,6 +17,7 @@ column's bounds.
 """
 
 from __future__ import annotations
+from opteryx.models.manifest import Manifest
 
 from opteryx.expression import NodeType
 from opteryx.connectors.opteryx_connector import _catalog_manifest
@@ -119,7 +120,7 @@ def test_prune_files_resolves_field_id_after_projection_pushdown():
     # position 0, which holds tweet_id's bounds.
     schema = _schema_with_field_ids(plan_context, [("tweet_id", 1), ("followers", 5)])
     manifest = _manifest(schema, [_row([1, 5], [100, 7], [999, 42])])
-    manifest.schema.columns = [manifest.schema.columns[1]]
+    manifest = Manifest(manifest.native, manifest.schema.with_columns([manifest.schema.columns[1]]))
 
     # `followers > 100` should prune the file (max is 42), not read tweet_id's
     # bounds (max 999) and keep it.

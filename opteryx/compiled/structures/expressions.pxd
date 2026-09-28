@@ -93,10 +93,35 @@ cdef extern from "planner/expr_arena.hpp" namespace "opteryx::planner":
     cdef uint32_t kNoColumnSlot
     cdef uint32_t kNoTypeId
 
+    cdef cppclass NodeKinds:
+        int32_t and_ "and_"
+        int32_t or_ "or_"
+        int32_t xor_ "xor_"
+        int32_t not_ "not_"
+        int32_t dnf
+        int32_t cnf
+        int32_t case_ "case_"
+        int32_t comparison
+        int32_t binary
+        int32_t unary
+        int32_t function
+        int32_t identifier
+        int32_t nested
+        int32_t aggregator
+        int32_t literal
+        int32_t cast
+        int32_t extraction
+        int32_t between
+
+
+# opteryx.expression.NodeType's values as native code reads them (loaded once).
+cdef const NodeKinds* node_kinds() except NULL
+
 
 cdef class ExprArena:
     cdef ExprTable* _table
     cdef bint _sealed
+    cdef object _columns   # the query's ColumnTable: every row's column_slot is a slot of it
 
     cdef inline int64_t _mint(self):
         return self._table.add()

@@ -31,6 +31,7 @@ from libc.stdint cimport int64_t
 from libc.stdint cimport uint8_t
 from libc.stdint cimport uint32_t
 from libc.stdint cimport uint64_t
+from libc.stdint cimport uintptr_t
 from libcpp cimport bool as cbool
 from libcpp.string cimport string
 from libcpp.memory cimport shared_ptr
@@ -50,6 +51,8 @@ from opteryx.compiled.planner.column_type cimport column_type_table
 from opteryx.compiled.structures.column_stats cimport FileColumnStats
 from opteryx.compiled.structures.expressions cimport ExprArena
 from opteryx.compiled.structures.expressions cimport ExprTable
+from opteryx.compiled.structures.expressions cimport NodeKinds
+from opteryx.compiled.structures.expressions cimport node_kinds
 from rugo.parquet_reader cimport AggColumnStat
 
 
@@ -213,45 +216,16 @@ cdef extern from "planner/manifest_estimates.hpp" namespace "opteryx::planner":
         int32_t scale
         const string* text
 
-    cdef cppclass HistogramPart:
-        size_t begin
-        size_t end
-        double lo
-        double hi
-
     int64_t row_group_count(const CNativeManifest& m)
     cbool has_deletes(const CNativeManifest& m)
-    cbool ordinal_bounds(const CNativeManifest& m, size_t position, int64_t& lo, int64_t& hi) except +
-    cbool length_bounds(const CNativeManifest& m, size_t position, int64_t& lo, int64_t& hi) except +
-    cbool char_class_stats(const CNativeManifest& m, size_t position, int64_t (&totals)[8], int64_t& non_null_rows) except +
-    void histogram_parts(const CNativeManifest& m, size_t position, vector[int64_t]& counts, vector[HistogramPart]& parts) except +
     int64_t exact_cardinality_from_footers(const CNativeManifest& m, size_t position) except +
     int64_t cardinality_from_sketches(const CNativeManifest& m, size_t position) except +
     int64_t estimate_cardinality(const CNativeManifest& m, size_t position, double& estimate) except +
-    int64_t estimate_range_cardinality(const CNativeManifest& m, size_t position, cbool identity_category) except +
     int64_t total_null_count(const CNativeManifest& m, size_t position) except +
-    cbool null_fraction(const CNativeManifest& m, size_t position, double& fraction) except +
-    int64_t total_uncompressed_size(const CNativeManifest& m, size_t position) except +
-    cbool value_range(const CNativeManifest& m, size_t position, cbool identity_category, End& min_value, End& max_value) except +
     cbool extreme_ends(const CNativeManifest& m, size_t position, End& min_value, End& max_value) except +
-    cbool has_null_counts(const CNativeManifest& m) except +
 
 
 cdef extern from "planner/predicate_bounds.hpp" namespace "opteryx::planner":
-    cdef cppclass NodeKinds:
-        int32_t and_ "and_"
-        int32_t or_ "or_"
-        int32_t dnf
-        int32_t cnf
-        int32_t comparison
-        int32_t binary
-        int32_t unary
-        int32_t function
-        int32_t identifier
-        int32_t nested
-        int32_t literal
-        int32_t between
-
     cdef cppclass DeriveInputs:
         const ExprTable* exprs
         const ColumnRows* columns
@@ -593,6 +567,12 @@ cdef class NativeManifest:
     def total_size(self):
         return self._manifest.total_size()
 
+    def borrowed_address(self):
+        """The address of the C++ manifest this object owns, for a plan step's
+        native row (step_row.hpp), which borrows it: the step holds this object,
+        so the pointer lives exactly as long as the step's own field."""
+        return <uintptr_t>self._manifest
+
     def resident_bytes(self):
         """The memory this manifest holds resident (file rows, cells, the
         sketch vectors it views) - what a cache of decoded manifests budgets by."""
@@ -615,45 +595,6 @@ cdef class NativeManifest:
     def has_deletes(self):
         return has_deletes(self._manifest[0])
 
-    def ordinal_bounds(self, size_t position):
-        cdef int64_t lo = 0, hi = 0
-        if not ordinal_bounds(self._manifest[0], self._position(position), lo, hi):
-            return None
-        return lo, hi
-
-    def length_bounds(self, size_t position):
-        cdef int64_t lo = 0, hi = 0
-        if not length_bounds(self._manifest[0], self._position(position), lo, hi):
-            return None
-        return lo, hi
-
-    def char_class_totals(self, size_t position):
-        """(the 8 class byte totals, non-null rows), or None without char-class
-        statistics for the column."""
-        cdef int64_t totals[8]
-        cdef int64_t non_null_rows = 0
-        if not char_class_stats(self._manifest[0], self._position(position), totals, non_null_rows):
-            return None
-        return tuple(totals[k] for k in range(8)), non_null_rows
-
-    def distogram(self, size_t position):
-        """The column's per-file histograms folded into one Distogram, or None."""
-        from opteryx.third_party.maki_nage.distogram import load_counts_i64
-        from opteryx.third_party.maki_nage.distogram import merge
-
-        cdef vector[int64_t] counts
-        cdef vector[HistogramPart] parts
-        histogram_parts(self._manifest[0], self._position(position), counts, parts)
-        if parts.empty():
-            return None
-        cdef int64_t[::1] view = <int64_t[:counts.size()]> counts.data()
-        cdef size_t k
-        combined = None
-        for k in range(parts.size()):
-            dgram = load_counts_i64(view[parts[k].begin:parts[k].end], parts[k].lo, parts[k].hi)
-            combined = dgram if combined is None else merge(combined, dgram)
-        return combined
-
     def estimate_cardinality(self, size_t position):
         cdef double estimate = -1.0
         cdef int64_t count = estimate_cardinality(self._manifest[0], self._position(position), estimate)
@@ -661,27 +602,8 @@ cdef class NativeManifest:
             return int(estimate)
         return _optional(count)
 
-    def estimate_range_cardinality(self, size_t position, bint identity_category):
-        return _optional(estimate_range_cardinality(self._manifest[0], self._position(position), identity_category))
-
     def total_null_count(self, size_t position):
         return _optional(total_null_count(self._manifest[0], self._position(position)))
-
-    def null_fraction(self, size_t position):
-        cdef double fraction = 0.0
-        if not null_fraction(self._manifest[0], self._position(position), fraction):
-            return None
-        return fraction
-
-    def total_uncompressed_size(self, size_t position):
-        return _optional(total_uncompressed_size(self._manifest[0], self._position(position)))
-
-    def value_range(self, size_t position, bint identity_category):
-        """The column's numeric (min, max), or None."""
-        cdef End lo, hi
-        if not value_range(self._manifest[0], self._position(position), identity_category, lo, hi):
-            return None
-        return _number(lo), _number(hi)
 
     def sketch_row_widths(self, size_t row):
         """How many column slices file `row` has in each sketch (min-k,
@@ -926,10 +848,6 @@ cdef class NativeManifest:
 
     # --- answers read straight off the statistics ----------------------------
 
-    def has_null_counts(self):
-        """Whether any file records a null count for any column."""
-        return has_null_counts(self._manifest[0])
-
     def extremes(self, size_t position):
         """(min, max) of the column across every file (footer bounds first),
         as Python values - for the statistics-only MIN/MAX answer, whose gate
@@ -1146,15 +1064,6 @@ cdef _end_value(const End& end):
     return None
 
 
-cdef _number(End& end):
-    """A numeric End as the Python number it stands for."""
-    if end.tag == DECODED_INT64:
-        return end.i
-    if end.tag == DECODED_UINT64:
-        return <uint64_t>end.i
-    return end.d
-
-
 cdef tuple _bound_end(DecodedTag tag, int64_t as_int, double as_double, const string& as_text):
     """One decoded end as a (kind, value) pair, for the debug views."""
     if tag == DECODED_NONE:
@@ -1185,32 +1094,6 @@ cdef dict _bounds_view(Bounds* b):
     }
 
 
-cdef NodeKinds _KINDS
-cdef bint _KINDS_LOADED = False
-
-
-cdef void _load_kinds() except *:
-    """opteryx.expression.NodeType's values, read once - never restated."""
-    global _KINDS_LOADED
-    if _KINDS_LOADED:
-        return
-    from opteryx.expression import NodeType
-
-    _KINDS.and_ = NodeType.AND.value
-    _KINDS.or_ = NodeType.OR.value
-    _KINDS.dnf = NodeType.DNF.value
-    _KINDS.cnf = NodeType.CNF.value
-    _KINDS.comparison = NodeType.COMPARISON_OPERATOR.value
-    _KINDS.binary = NodeType.BINARY_OPERATOR.value
-    _KINDS.unary = NodeType.UNARY_OPERATOR.value
-    _KINDS.function = NodeType.FUNCTION.value
-    _KINDS.identifier = NodeType.IDENTIFIER.value
-    _KINDS.nested = NodeType.NESTED.value
-    _KINDS.literal = NodeType.LITERAL.value
-    _KINDS.between = NodeType.BETWEEN.value
-    _KINDS_LOADED = True
-
-
 cdef void _fill_live_types(unordered_map[string, uint32_t]& out, dict live_types) except *:
     for name, type_id in live_types.items():
         out[(<str?>name).encode("utf-8")] = <uint32_t>type_id
@@ -1227,7 +1110,6 @@ cdef class _PruneCall:
     cdef ColumnTable columns
 
     def __cinit__(self, NativeManifest manifest, ExprArena arena, ColumnTable columns, list predicate_ids, dict live_types):
-        _load_kinds()
         self.arena = arena
         self.columns = columns
         _fill_live_types(self.live, live_types)
@@ -1236,7 +1118,7 @@ cdef class _PruneCall:
         self.inputs.exprs = arena._table
         self.inputs.columns = &columns._rows
         self.inputs.types = column_type_table()
-        self.inputs.kinds = &_KINDS
+        self.inputs.kinds = node_kinds()
         self.inputs.live_types = &self.live
         self.cols.position = &manifest._manifest.positions()
         self.cols.live_types = &self.live
@@ -1313,7 +1195,6 @@ def derivation(ExprArena arena not None, ColumnTable columns not None, list pred
     """What predicate_bounds.hpp derives from `predicate_ids` - for checking it
     against another reader: {"terms": [(column, op, value, upper, derived)],
     "nulls": [(column, requires_null)], "folds": [(column, lower, [term])]}."""
-    _load_kinds()
     cdef unordered_map[string, uint32_t] live
     cdef DeriveInputs inputs
     cdef vector[int64_t] ids
@@ -1323,7 +1204,7 @@ def derivation(ExprArena arena not None, ColumnTable columns not None, list pred
     inputs.exprs = arena._table
     inputs.columns = &columns._rows
     inputs.types = column_type_table()
-    inputs.kinds = &_KINDS
+    inputs.kinds = node_kinds()
     inputs.live_types = &live
     cdef vector[int64_t] conjuncts = split_conjuncts(inputs, ids)
     cdef vector[BoundTerm] terms = derive_bound_terms(inputs, conjuncts)

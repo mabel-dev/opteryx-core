@@ -108,7 +108,7 @@ so a SET past the ceiling gets the ceiling. Tune per workload with
 LIKE_SELECTIVITY_DECAY: float = float(get("LIKE_SELECTIVITY_DECAY", 0.7))
 """Geometric decay applied per-position when estimating infix `LIKE '%needle%'`
 selectivity from a column's char-class statistics (see
-opteryx.planner.cost_estimation.selectivity._decayed_char_class_selectivity).
+the decayed char-class estimator in src/cpp/planner/selectivity.hpp).
 0.7 is the value validated offline against 371K real NVD VARCHAR rows (see
 scratch/like_selectivity's report) — lower values discount later needle
 characters faster, blunting how far a long needle can drive the estimate

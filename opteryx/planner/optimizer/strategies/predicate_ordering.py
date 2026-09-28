@@ -14,7 +14,7 @@ filtering step. We order the filters by estimated cost-per-row weighted by
 selectivity, so the cheapest, most-reducing predicates run first.
 
 Selectivity is statistics-driven (histograms / NDV / null fractions) when the
-input relation carries refreshed ``RelationStatistics``; otherwise it falls
+input relation has refreshed statistics; otherwise it falls
 back to conservative operator-keyed constants.
 
 NOTE: still limited for ORed conditions and complex sub-conditions, which are
@@ -23,12 +23,9 @@ appended after the simple predicates in their original order.
 
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.planner.cost_estimation import PredicateStats, order_predicates as _order_predicates
-from opteryx.planner.cost_estimation.predicate_cost import (
-    base_cost as _base_cost,
-    predicate_cost as _predicate_cost,
-)
+from opteryx.compiled.planner.statistics import predicate_base_cost as _base_cost
+from opteryx.compiled.planner.statistics import predicate_cost as _predicate_cost
 from opteryx.planner.cost_estimation.fallback_selectivity import DEFAULT_SELECTIVITY
-from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
 from opteryx.types.logical_type import ColumnType
 from opteryx.types import logical_type as _lt
@@ -60,7 +57,7 @@ def _estimate_selectivity(condition):
     return DEFAULT_SELECTIVITY.get(op, 0.5)
 
 
-def _order_complex_predicates(predicates, telemetry, relation_stats=None):
+def _order_complex_predicates(predicates, telemetry, estimate=None):
     """Order complex predicates by selectivity/cost when a predicate's
     selectivity is estimable, falling back to cost alone otherwise.
 
@@ -75,7 +72,7 @@ def _order_complex_predicates(predicates, telemetry, relation_stats=None):
 
     Ranks by the same ``(selectivity - 1.0) / cost`` formula
     ``cost_estimation.predicate_ordering`` uses for simple predicates, with
-    cost as an explicit secondary key. Predicates ``estimate_selectivity``
+    cost as an explicit secondary key. Predicates the estimator
     has no model for (e.g. most FUNCTION calls) resolve to selectivity 1.0,
     so the primary key ties at 0 for all of them and the secondary (cost) key
     orders them cheapest-first. Only predicates with a real estimator
@@ -86,8 +83,8 @@ def _order_complex_predicates(predicates, telemetry, relation_stats=None):
         return predicates
 
     costs = [_predicate_cost(p.condition) for p in predicates]
-    if relation_stats is not None:
-        selectivities = [estimate_selectivity(p.condition, relation_stats) for p in predicates]
+    if estimate is not None:
+        selectivities = [estimate(p.condition) for p in predicates]
     else:
         selectivities = [1.0] * len(predicates)
     order = sorted(
@@ -102,19 +99,19 @@ def _order_complex_predicates(predicates, telemetry, relation_stats=None):
     return ordered
 
 
-def _resolve_predicate_stats(condition, relation_stats=None) -> PredicateStats:
+def _resolve_predicate_stats(condition, estimate=None) -> PredicateStats:
     """Build pre-resolved selectivity/cost for a single simple predicate.
 
-    Selectivity is statistics-driven when ``relation_stats`` (the input
-    relation's ``RelationStatistics``) is available: ``estimate_selectivity``
+    Selectivity is statistics-driven when ``estimate`` (selectivity against
+    the input relation's statistics) is available: the native estimator
     consults histograms, NDV and null fractions, degrading internally to
     textbook constants. When no statistics are attached we fall back to the
     operator-keyed ``DEFAULT_SELECTIVITY`` constants. Cost comes from
     ``OPERATION_COSTS`` (op-specific override) or ``BASIC_COMPARISON_COSTS``
     keyed on the column type.
     """
-    if relation_stats is not None:
-        selectivity = estimate_selectivity(condition, relation_stats)
+    if estimate is not None:
+        selectivity = estimate(condition)
     else:
         selectivity = _estimate_selectivity(condition)
     return PredicateStats(
@@ -123,14 +120,14 @@ def _resolve_predicate_stats(condition, relation_stats=None) -> PredicateStats:
     )
 
 
-def _order_simple_predicates(predicates, telemetry, relation_stats=None):
+def _order_simple_predicates(predicates, telemetry, estimate=None):
     """Order simple (non-function) predicates via the cost-estimation module."""
 
     if len(predicates) <= 1:
         return predicates
 
     indexed = [
-        (i, _resolve_predicate_stats(p.condition, relation_stats))
+        (i, _resolve_predicate_stats(p.condition, estimate))
         for i, p in enumerate(predicates)
     ]
     order = _order_predicates(indexed)
@@ -232,14 +229,14 @@ def rewrite_anded_any_eq_to_contains_all(predicate, telemetry, *, plan_context):
     )
 
 
-def order_predicates(predicates: list, telemetry, relation_stats=None) -> list:
+def order_predicates(predicates: list, telemetry, estimate=None) -> list:
     """
     Order predicates using selectivity/cost heuristics.
 
     - Simple column-vs-literal comparisons are ordered first using brute-force
-      (up to small N). Selectivity is statistics-driven via ``relation_stats``
-      (the input relation's ``RelationStatistics``) when available, else
-      conservative constants.
+      (up to small N). Selectivity is statistics-driven via ``estimate`` (a
+      predicate's selectivity against the input relation's statistics) when
+      available, else conservative constants.
     - Predicates involving functions (or non-comparison forms) are appended
       after the ordered simple predicates, preserving their original order.
     """
@@ -258,8 +255,8 @@ def order_predicates(predicates: list, telemetry, relation_stats=None) -> list:
 
         simple.append(pred)
 
-    ordered_simple = _order_simple_predicates(simple, telemetry, relation_stats)
-    ordered_complex = _order_complex_predicates(complex_preds, telemetry, relation_stats)
+    ordered_simple = _order_simple_predicates(simple, telemetry, estimate)
+    ordered_complex = _order_complex_predicates(complex_preds, telemetry, estimate)
 
     # Maintain original order for complex/function predicates appended after simples
     return ordered_simple + ordered_complex
@@ -282,9 +279,15 @@ class PredicateOrderingStrategy(OptimizationStrategy):
             new_node = FilterStep()
             # `node` is the node feeding the collected filter chain; its refreshed
             # statistics are the input relation the predicates filter against.
-            relation_stats = context.plan_context.statistics(node)
+            store = context.plan_context.statistics
+            nid = context.node_id
+            estimate = (
+                (lambda condition: store.estimate_selectivity(nid, condition))
+                if store.has(nid)
+                else None
+            )
             context.collected_predicates = order_predicates(
-                context.collected_predicates, self.telemetry, relation_stats
+                context.collected_predicates, self.telemetry, estimate
             )
             new_node.condition = Dnf(
                 parameters=[c.condition for c in context.collected_predicates],

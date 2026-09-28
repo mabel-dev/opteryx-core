@@ -37,7 +37,6 @@ between I/O and decode across all files and row groups simultaneously.
 import heapq as _heapq
 import time
 from bisect import bisect_left
-from copy import deepcopy
 from typing import Generator
 
 from opteryx.compiled.structures.footer_cache import ParquetFooterBytesCache
@@ -1395,8 +1394,9 @@ cdef class ParquetReadNode(ReaderNode):
         _read_name_to_identity.update(_planner_name_to_identity)
 
         # Select physical columns to read by NAME, not by identity.
-        read_schema = deepcopy(base_schema)
-        read_schema.columns = [c for c in base_schema.columns if c.name in required_names]
+        read_schema = base_schema.with_columns(
+            c for c in base_schema.columns if c.name in required_names
+        )
         # Row identity ($file/$ordinal) is SYNTHESIZED, not read: the columns are
         # not in the data file. Resolved here, before the two-pass gate below
         # consults it — a scan emitting an ordinal cannot use the two-pass path.
@@ -1410,7 +1410,7 @@ cdef class ParquetReadNode(ReaderNode):
 
         if not read_schema.columns and base_schema.columns:
             # Zero-projection/no-filter scans still need one physical column for row counts.
-            read_schema.columns = [base_schema.columns[0]]
+            read_schema = read_schema.with_columns((base_schema.columns[0],))
 
         # output_identity_order: planner identities in self.columns order.
         self._sp_output_identity_order = [
@@ -1516,7 +1516,7 @@ cdef class ParquetReadNode(ReaderNode):
         # through to the estimator's "unknown -> assume everything matches"
         # default (1.0) regardless of the actual predicate. Estimate each
         # conjunct separately and combine like AND does elsewhere in
-        # cost_estimation/selectivity.py (multiply independent selectivities).
+        # the native estimator (multiply independent selectivities).
         cdef object _selectivity_estimate = None
         cdef object _pred_node
         if has_predicates and self.manifest is not None:

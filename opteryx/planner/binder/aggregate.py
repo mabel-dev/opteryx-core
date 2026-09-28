@@ -180,7 +180,7 @@ def visit_aggregate_and_group(
     for name, schema in list(context.schemas.items()):
         schema_columns = [column for column in schema.columns if column.identity in columns_to_keep]
         if schema_columns:
-            context.schemas[name].columns = schema_columns
+            context.rebind_schema(schema, schema.with_columns(schema_columns))
         else:
             context.schemas.pop(name)
 
@@ -206,7 +206,13 @@ def visit_aggregate_and_group(
         context.schemas["$derived"] = derived.schema()
 
     # the aggregates and any calculated expressions in the SELECT should be in $derived
-    context.schemas["$derived"].columns.extend(col.schema_column for col in node.aggregates)
+    derived_schema = context.schemas["$derived"]
+    context.rebind_schema(
+        derived_schema,
+        derived_schema.with_columns(
+            derived_schema.columns + tuple(col.schema_column for col in node.aggregates)
+        ),
+    )
     node.schema = context.schemas["$derived"]
     return node, context
 

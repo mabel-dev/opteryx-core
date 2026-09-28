@@ -66,6 +66,7 @@ from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import PlanStep
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.logical_planner.node_expressions import expression_roots
+from opteryx.models.manifest import Manifest
 from opteryx.types.logical_type import ColumnType
 
 from .optimization_strategy import OptimizationStrategy
@@ -243,14 +244,37 @@ class TimestampCastSinkStrategy(OptimizationStrategy):
             return done
 
         schema_steps = steps_with("schema")
+        manifest_steps = steps_with("manifest")
+        # RelationSchema is immutable (architect ruling 2026-09-28): each schema the
+        # plan holds is replaced ONCE by its settled copy, so steps (and a scan's
+        # manifest) that shared one schema share its replacement.
+        resettled_schemas: dict = {}
+        rebound_manifests: dict = {}
         for _, node in plan.nodes(True):
             # The bound schema of every step that carries one - the Scan's emitted
             # columns first among them.
             if node.node_type in schema_steps and node.schema is not None:
-                schema_columns = node.schema.columns or []
-                for position, col in enumerate(schema_columns):
-                    if col.identity in eligible:
-                        schema_columns[position] = settled(col)
+                old_schema = node.schema
+                new_schema = resettled_schemas.get(id(old_schema))
+                if new_schema is None:
+                    if any(col.identity in eligible for col in old_schema.columns):
+                        new_schema = old_schema.with_columns(
+                            settled(col) if col.identity in eligible else col
+                            for col in old_schema.columns
+                        )
+                    else:
+                        new_schema = old_schema
+                    resettled_schemas[id(old_schema)] = new_schema
+                if new_schema is not old_schema:
+                    node.schema = new_schema
+                    if node.node_type in manifest_steps:
+                        manifest = node.manifest
+                        if manifest is not None and manifest.schema is old_schema:
+                            rebound = rebound_manifests.get(id(manifest))
+                            if rebound is None:
+                                rebound = Manifest(manifest.native, new_schema)
+                                rebound_manifests[id(manifest)] = rebound
+                            node.manifest = rebound
             node.map_expressions(_resettle)
 
         self.telemetry.optimization_timestamp_cast_sink = (

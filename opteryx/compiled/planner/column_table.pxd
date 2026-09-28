@@ -41,6 +41,7 @@ cdef extern from "planner/column_table.hpp":
         const ColumnRow& row(uint32_t slot)
         size_t size()
         uint32_t root(uint32_t slot)
+        uint32_t root_of(const string& identity)
 
 
 cdef class SchemaColumn:
@@ -58,6 +59,5 @@ cdef class SchemaColumn:
 cdef class ColumnTable:
     cdef ColumnRows _rows
     cdef list _columns   # the façade of each slot
-    cdef dict _slot_of   # identity -> ROOT slot (the slot that minted it)
 
     cdef SchemaColumn _mint(self, type cls, str name, bytes identity, dict fields, uint32_t alias_of)

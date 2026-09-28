@@ -205,12 +205,13 @@ cdef class ReaderNode(BasePlanNode):
                 "Use ParquetReadNode for external table scans."
             )
 
-        relation_schema = self.schema
         relation_schema_cols = []
-        for col in relation_schema.columns:
+        for col in self.schema.columns:
             if col.identity in [c.schema_column.identity for c in self.columns]:
                 relation_schema_cols.append(col)
-        relation_schema.columns = relation_schema_cols
+        # RelationSchema is immutable: the read narrows to a new one
+        relation_schema = self.schema.with_columns(relation_schema_cols)
+        self.schema = relation_schema
         start_clock = time.monotonic_ns()
         # The LIMIT is still applied below; it is passed so a reader that pays
         # per row fetched (Firestore bills per document) can size its read.

@@ -162,5 +162,9 @@ def traverse(
             return_node.all_relations.update(plan_node.all_relations)
 
     return_node = post_bind(self, return_node, context)
+    # A step bound with a schema is re-bound whenever that schema is (RelationSchema
+    # is immutable - see BindingContext.rebind_schema).
+    if return_node.node_type in steps_with("schema"):
+        context.schema_steps.append(return_node)
     graph[node] = return_node
     return graph, context

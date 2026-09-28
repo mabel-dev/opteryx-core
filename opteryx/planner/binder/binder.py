@@ -4,7 +4,6 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 
-import copy
 import decimal
 from contextlib import suppress
 from typing import Any, Dict, Optional, Tuple
@@ -371,17 +370,29 @@ def _bind_function_reference(node: Expression, context: Any):
 
 
 def _copy_relation_schema(schema: RelationSchema) -> RelationSchema:
-    """Copy a RelationSchema for branch isolation during expression binding.
-
-    Only the schema's own lists are copied: a column is a row of the query's
-    ColumnTable, fixed once minted (architect ruling 2026-09-27), so the columns
-    are shared.
+    """A distinct schema object of the same value, for branch isolation during
+    expression binding: re-binding is by object identity (see
+    BindingContext.rebind_schema), so a branch must not hold the object it was
+    copied from. The columns are shared - a column is a row of the query's
+    ColumnTable, fixed once minted (architect ruling 2026-09-27).
     """
-    new_schema = copy.copy(schema)  # shallow: shares the columns/aliases lists we overwrite below
-    new_schema.columns = list(schema.columns)
-    if schema.aliases is not None:
-        new_schema.aliases = list(schema.aliases)
-    return new_schema
+    return schema.clone()
+
+
+def _rebind(context, schemas: Dict[str, RelationSchema], old: RelationSchema, new: RelationSchema) -> None:
+    """Replace schema `old` by `new` in `schemas` (the dict it was read from) and
+    wherever this bind shares it (BindingContext.rebind_schema). RelationSchema is
+    immutable (architect ruling 2026-09-28): this is how a scope's schema changes."""
+    for key, schema in list(schemas.items()):
+        if schema is old:
+            schemas[key] = new
+    context.rebind_schema(old, new)
+
+
+def _append_derived(context, schemas: Dict[str, RelationSchema], column) -> None:
+    """Add `column` to the scope's `$derived` schema."""
+    derived_schema = schemas["$derived"]
+    _rebind(context, schemas, derived_schema, derived_schema.with_columns(derived_schema.columns + (column,)))
 
 
 def merge_schemas(*schemas: Dict[str, RelationSchema]) -> Dict[str, RelationSchema]:
@@ -419,7 +430,9 @@ def merge_schemas(*schemas: Dict[str, RelationSchema]) -> Dict[str, RelationSche
                 seen = identities[key]
                 new_columns = [column for column in value.columns if column.identity not in seen]
                 seen.update(column.identity for column in new_columns)
-                merged_dict[key].columns.extend(new_columns)
+                merged_dict[key] = merged_dict[key].with_columns(
+                    merged_dict[key].columns + tuple(new_columns)
+                )
             else:
                 merged_dict[key] = _copy_relation_schema(value)
                 identities[key] = {column.identity for column in merged_dict[key].columns}
@@ -722,7 +735,7 @@ def locate_identifier(node: Expression, context: Any) -> Tuple[Expression, Dict]
         # falls through to ColumnNotFoundError.
         if node.source_column[0] == "@":
             node = create_variable_node(node, context)
-            context.schemas["$derived"].columns.append(node.schema_column)
+            _append_derived(context, context.schemas, node.schema_column)
             return node, context
 
         from opteryx.utils import suggest_alternative
@@ -789,10 +802,15 @@ def locate_identifier(node: Expression, context: Any) -> Tuple[Expression, Dict]
             aliases=[*(column.aliases or []), node.alias],
             origin=column.origin,
         )
-        found_source_relation.columns = [
-            renamed if candidate is column else candidate
-            for candidate in found_source_relation.columns
-        ]
+        _rebind(
+            context,
+            context.schemas,
+            found_source_relation,
+            found_source_relation.with_columns(
+                renamed if candidate is column else candidate
+                for candidate in found_source_relation.columns
+            ),
+        )
         column = renamed
 
     # Update node.schema_column with the found column
@@ -955,10 +973,15 @@ def inner_binder(
                     aliases=[*(found_column.aliases or []), node.alias],
                     origin=found_column.origin,
                 )
-                schema.columns = [
-                    renamed if candidate is found_column else candidate
-                    for candidate in schema.columns
-                ]
+                _rebind(
+                    context,
+                    context.schemas,
+                    schema,
+                    schema.with_columns(
+                        renamed if candidate is found_column else candidate
+                        for candidate in schema.columns
+                    ),
+                )
                 found_column = renamed
                 node.schema_column = found_column
 
@@ -1020,7 +1043,7 @@ def inner_binder(
             value=node.value,
             nullable=False,
         )
-        schemas["$derived"].columns.append(schema_column)
+        _append_derived(context, schemas, schema_column)
         node.schema_column = schema_column
         node.query_column = node.alias or column_name
 
@@ -1222,7 +1245,7 @@ def inner_binder(
                     column_type=_ct,
                     aliases=aliases,
                 )
-            schemas["$derived"].columns.append(schema_column)
+            _append_derived(context, schemas, schema_column)
             node.schema_column = schema_column
             node.query_column = node.alias or column_name
 
@@ -1328,7 +1351,7 @@ def inner_binder(
                 column_type=result_ct,
                 aliases=aliases,
             )
-            schemas["$derived"].columns.append(schema_column)
+            _append_derived(context, schemas, schema_column)
             node.schema_column = schema_column
             node.query_column = node.alias or column_name
 
@@ -1449,7 +1472,7 @@ def inner_binder(
             # emitted one leg's values for both columns: a SILENT wrong answer.
             # Expression REUSE is matched by NAME (the `schema.find_column(column_name)`
             # lookup above), never by identity, so minting is safe here.
-            schemas["$derived"].columns.append(schema_column)
+            _append_derived(context, schemas, schema_column)
             node.schema_column = schema_column
             node.query_column = node.alias or column_name
 
@@ -1494,7 +1517,7 @@ def inner_binder(
                 ExpressionColumn, column_name, column_type=_lt.BOOLEAN
             )
             node.schema_column = schema_column
-            schemas["$derived"].columns.append(schema_column)
+            _append_derived(context, schemas, schema_column)
         else:
             # VARCHAR/NVARCHAR/VARBINARY literals must be coerced to bytes at bind
             # time, on EVERY comparison operator — not just InList/NotInList. The
@@ -1571,7 +1594,7 @@ def inner_binder(
             # later mutates node.value from Like/ILike/NotLike/NotILike to
             # InStr/IInStr/NotInStr/NotIInStr IN PLACE ON THIS SAME NODE (see
             # predicate_rewriter.INSTR_REWRITES) — the char-class LIKE selectivity
-            # estimator (opteryx.planner.cost_estimation.selectivity._selectivity_instr)
+            # estimator (the native instr estimator, src/cpp/planner/selectivity.hpp)
             # reads it via plain attribute access. Same reasoning as match_threshold's
             # bind-time capture above: a compiled plan must keep answering the
             # selectivity question it was compiled for, so a later SET cannot reach
@@ -1635,7 +1658,7 @@ def inner_binder(
                 column_type=_schema_ct,
                 aliases=[node.alias] if node.alias else [],
             )
-            schemas["$derived"].columns.append(schema_column)
+            _append_derived(context, schemas, schema_column)
             node.schema_column = schema_column
             node.query_column = node.alias or column_name
 

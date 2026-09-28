@@ -45,6 +45,7 @@
 #include "ops/hash.h"
 #include "ops/ordinalize.h"
 #include "planner/native_manifest.hpp"
+#include "planner/py_numeric.hpp"
 
 namespace opteryx::planner {
 
@@ -78,51 +79,6 @@ inline bool has_ordinal_kernel(DrakenType t) {
     return idx < OpsTable::kSize && g_ops_table().entries[idx].ordinalize != nullptr;
 }
 
-inline int bit_length(unsigned __int128 x) {
-    int n = 0;
-    while (x != 0) {
-        x >>= 1;
-        ++n;
-    }
-    return n;
-}
-
-// Python's `a / b` for integers: the exact quotient, correctly rounded (half to
-// even) to a double. The histogram redistribution below divides ordinal keys
-// this way, and a double division of the converted operands can round
-// differently once they pass 2^53.
-inline double true_divide(__int128 a, __int128 b) {
-    if (b == 0) throw std::domain_error("true_divide: division by zero");
-    const bool negative = (a < 0) != (b < 0);
-    unsigned __int128 ua = a < 0 ? static_cast<unsigned __int128>(-a) : static_cast<unsigned __int128>(a);
-    unsigned __int128 ub = b < 0 ? static_cast<unsigned __int128>(-b) : static_cast<unsigned __int128>(b);
-    if (ua == 0) return negative ? -0.0 : 0.0;
-    constexpr unsigned __int128 kExact = static_cast<unsigned __int128>(1) << 53;
-    if (ua < kExact && ub < kExact) {
-        const double q = static_cast<double>(ua) / static_cast<double>(ub);
-        return negative ? -q : q;
-    }
-    // Scale so the integer quotient holds 54 or 55 bits, then round to 53.
-    const int shift = 54 - (bit_length(ua) - bit_length(ub));
-    if (shift > 0) {
-        ua <<= shift;
-    } else if (shift < 0) {
-        ub <<= -shift;
-    }
-    unsigned __int128 q = ua / ub;
-    const bool sticky = (ua % ub) != 0;
-    const int extra = bit_length(q) - 53;
-    unsigned __int128 mantissa = q >> extra;
-    const unsigned __int128 dropped = q & ((static_cast<unsigned __int128>(1) << extra) - 1);
-    const unsigned __int128 half = static_cast<unsigned __int128>(1) << (extra - 1);
-    if (dropped > half || (dropped == half && (sticky || (mantissa & 1)))) mantissa += 1;
-    const double result = std::ldexp(static_cast<double>(mantissa), extra - shift);
-    return negative ? -result : result;
-}
-
-// Python's int(x) for a finite double: truncation toward zero.
-inline int64_t py_int(double x) { return static_cast<int64_t>(x); }
-
 // opteryx_catalog's _redistribute_histograms: a kHistogramBins histogram over
 // [vmin, vmax] assembled from per-row-group fine histograms, each over its own
 // [gmin, gmax] (a single-valued group has no fine histogram). Counts are
@@ -143,11 +99,11 @@ inline std::vector<int64_t> redistribute(const std::vector<Group>& groups, int64
     int64_t total = 0;
 
     auto target_of_int = [&](int64_t value) {
-        return true_divide(static_cast<__int128>(value) - vmin, span) * static_cast<double>(bins - 1);
+        return py::true_divide(static_cast<__int128>(value) - vmin, span) * static_cast<double>(bins - 1);
     };
     auto target_of_float = [&](double value) { return (value - vmin_d) / span_d * static_cast<double>(bins - 1); };
     auto clamp = [&](double index) -> size_t {
-        const int64_t b = py_int(index);
+        const int64_t b = py::int_of(index);
         return static_cast<size_t>(b < 0 ? 0 : (b >= bins ? bins - 1 : b));
     };
 
@@ -168,8 +124,8 @@ inline std::vector<int64_t> redistribute(const std::vector<Group>& groups, int64
                 acc[clamp(target_of_int(g.gmax))] += static_cast<double>(count);
                 continue;
             }
-            const double v_lo = gmin_d + true_divide(gspan * j, fine_bins - 1);
-            const double v_hi = gmin_d + true_divide(gspan * (j + 1), fine_bins - 1);
+            const double v_lo = gmin_d + py::true_divide(gspan * j, fine_bins - 1);
+            const double v_hi = gmin_d + py::true_divide(gspan * (j + 1), fine_bins - 1);
             const double t_lo = target_of_float(v_lo);
             const double t_hi = target_of_float(v_hi);
             if (t_hi <= t_lo) {
@@ -177,7 +133,7 @@ inline std::vector<int64_t> redistribute(const std::vector<Group>& groups, int64
                 continue;
             }
             const double width = t_hi - t_lo;
-            for (int64_t b = py_int(t_lo); b < bins && static_cast<double>(b) <= t_hi; ++b) {
+            for (int64_t b = py::int_of(t_lo); b < bins && static_cast<double>(b) <= t_hi; ++b) {
                 const double seg_lo = std::max(t_lo, static_cast<double>(b));
                 const double seg_hi = std::min(t_hi, static_cast<double>(b + 1));
                 if (seg_hi > seg_lo) acc[static_cast<size_t>(b)] += static_cast<double>(count) * (seg_hi - seg_lo) / width;
@@ -188,7 +144,7 @@ inline std::vector<int64_t> redistribute(const std::vector<Group>& groups, int64
     std::vector<int64_t> floors(static_cast<size_t>(bins));
     int64_t floor_sum = 0;
     for (size_t i = 0; i < floors.size(); ++i) {
-        floors[i] = py_int(acc[i]);
+        floors[i] = py::int_of(acc[i]);
         floor_sum += floors[i];
     }
     int64_t remainder = total - floor_sum;

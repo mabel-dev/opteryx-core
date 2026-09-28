@@ -31,6 +31,9 @@ from opteryx.compiled.structures.plan_steps import ScanStep
 from opteryx.planner.optimizer.strategies.optimization_strategy import OptimizerContext
 from opteryx.planner.plan_context import PlanContext
 from opteryx.types.schema import FunctionColumn
+from opteryx.types.schema import RelationSchema
+from tests.manifests import FileSpec
+from tests.manifests import build_manifest
 
 # One query context for the expressions this module builds outside a plan.
 _TEST_CONTEXT = PlanContext()
@@ -40,26 +43,12 @@ def _telemetry():
     return types.SimpleNamespace(optimization_statistics_only_response=0)
 
 
-class MockManifest:
-    def __init__(self, count):
-        # mimic Manifest.files list of FileEntry-like objects
-        self.files = [__import__("types").SimpleNamespace(record_count=count, file_size_in_bytes=0)]
-        # Commit-written statistics: the only kind the strategy may answer from.
-        self.stats_are_authoritative = True
-
-    def get_record_count(self):
-        return sum(f.record_count for f in self.files)
-
-    def get_file_count(self):
-        return len(self.files)
-
-    def subset(self, positions):
-        # Mirror Manifest.subset's copy-on-write contract: a NEW manifest over
-        # the selected files, the original untouched.
-        clone = MockManifest.__new__(MockManifest)
-        clone.files = [self.files[p] for p in positions]
-        clone.stats_are_authoritative = self.stats_are_authoritative
-        return clone
+def _manifest(count):
+    """A one-file manifest of `count` rows, written by a commit (authoritative):
+    the only kind the strategy may answer from."""
+    return build_manifest(
+        RelationSchema(name="planets"), [FileSpec("planets.parquet", record_count=count)]
+    )
 
 
 def _count_star(plan_context):
@@ -89,7 +78,7 @@ def make_simple_count_plan(plan_context, count=9, alias="my_count"):
     scan = ScanStep()
     scan.relation = "planets"
     scan.alias = "planets"
-    scan.manifest = MockManifest(count)
+    scan.manifest = _manifest(count)
 
     # Aggregate node representing `SELECT COUNT(*) AS alias` over the scan
     agg = AggregateStep()
@@ -203,7 +192,7 @@ def test_strategy_no_manifest_leaves_plan_unchanged():
 
 
 def test_get_count_from_manifest():
-    m = MockManifest(123)
+    m = _manifest(123)
     assert get_count_from_manifest(m) == 123
     # A missing manifest is UNKNOWN, not 0. This number is handed straight back
     # as the answer to COUNT(*) with the scan deleted, so reporting 0 for "nobody

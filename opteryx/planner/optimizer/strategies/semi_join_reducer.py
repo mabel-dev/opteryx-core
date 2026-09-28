@@ -119,10 +119,9 @@ def _scan_rows(plan: LogicalPlan, plan_context: PlanContext):
     Unknown is fail-safe: no reducer. A missing count must never be read as "cheap".
     """
     total = 0
-    for _nid, node in plan.nodes(True):
+    for nid, node in plan.nodes(True):
         if node.node_type == LogicalPlanStepType.Scan:
-            stats = plan_context.statistics(node)
-            rows = None if stats is None else stats.base_row_count
+            rows = plan_context.statistics.base_row_count(nid)
             if not rows:
                 return None
             total += rows

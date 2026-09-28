@@ -37,14 +37,6 @@
 
 namespace opteryx::planner {
 
-// opteryx.expression.NodeType values, handed over from Python once (never
-// restated here, so the enum has one definition).
-struct NodeKinds {
-    int32_t and_ = 0, or_ = 0, dnf = 0, cnf = 0;
-    int32_t comparison = 0, binary = 0, unary = 0, function = 0;
-    int32_t identifier = 0, nested = 0, literal = 0, between = 0;
-};
-
 enum TermOp : uint8_t { OP_EQ, OP_NOTEQ, OP_GT, OP_GTEQ, OP_LT, OP_LTEQ, OP_BETWEEN, OP_NONE };
 
 inline TermOp term_op(const std::string& name) {

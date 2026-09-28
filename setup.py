@@ -20,6 +20,7 @@ from build_common import (
     COMMON_SIMD_SOURCES,
     CPP_FLAGS,
     C_FLAGS,
+    ESTIMATOR_FP_FLAGS,
     FREE_THREADED_BUILD,
     LD_EXTRA,
     WARNING_FLAGS,
@@ -522,8 +523,10 @@ extensions = [
             "opteryx/third_party/maki_nage/_distogram_rvv.cpp",
         ],
         include_dirs=include_dirs,
-        extra_compile_args=CPP_FLAGS,
+        # estimator arithmetic is never fused (see ESTIMATOR_FP_FLAGS)
+        extra_compile_args=CPP_FLAGS + ESTIMATOR_FP_FLAGS,
         language="c++",
+        depends=["opteryx/third_party/maki_nage/_distogram.hpp"],
     ),
     # Core compiled components
     Extension(
@@ -651,7 +654,14 @@ extensions = [
         "opteryx.compiled.structures.plan_steps",
         sources=["opteryx/compiled/structures/plan_steps.pyx"],
         include_dirs=include_dirs,
-        extra_compile_args=C_FLAGS,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        # each step owns a native row (step_row.hpp) the statistics refresh reads
+        depends=[
+            "src/cpp/planner/step_row.hpp",
+            "src/cpp/planner/expr_arena.hpp",
+            "src/cpp/planner/native_manifest.hpp",
+        ],
     ),
     Extension(
         "opteryx.compiled.structures.perfect_hash_set",
@@ -809,7 +819,7 @@ extensions = [
         sources=["opteryx/compiled/planner/join_estimator.pyx"],
         include_dirs=include_dirs,
         language="c++",
-        extra_compile_args=CPP_FLAGS,
+        extra_compile_args=CPP_FLAGS + ESTIMATOR_FP_FLAGS,
     ),
     # Native ColumnType: process-wide interned column types (header-only core in
     # src/cpp/planner/column_type.hpp); the table lives in this one extension and
@@ -839,6 +849,36 @@ extensions = [
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
+    ),
+    # The query's estimated statistics: the store (src/cpp/planner/stats_store.hpp)
+    # and predicate selectivity / cost (selectivity.hpp) over the expression arena.
+    Extension(
+        "opteryx.compiled.planner.statistics",
+        sources=[
+            "opteryx/compiled/planner/statistics.pyx",
+            "opteryx/third_party/maki_nage/_distogram_core.cpp",
+            "opteryx/third_party/maki_nage/_distogram_avx2.cpp",
+            "opteryx/third_party/maki_nage/_distogram_neon.cpp",
+            "opteryx/third_party/maki_nage/_distogram_rvv.cpp",
+        ],
+        include_dirs=include_dirs,
+        language="c++",
+        # estimator arithmetic is never fused (see ESTIMATOR_FP_FLAGS)
+        extra_compile_args=CPP_FLAGS + ESTIMATOR_FP_FLAGS,
+        depends=[
+            "src/cpp/planner/stats_store.hpp",
+            "src/cpp/planner/selectivity.hpp",
+            "src/cpp/planner/py_numeric.hpp",
+            "src/cpp/planner/expr_arena.hpp",
+            "src/cpp/planner/column_table.hpp",
+            "src/cpp/planner/join_estimator.hpp",
+            "opteryx/third_party/maki_nage/_distogram.hpp",
+            "src/cpp/planner/statistics_refresh.hpp",
+            "src/cpp/planner/step_row.hpp",
+            "src/cpp/planner/plan_graph.hpp",
+            "src/cpp/planner/native_manifest.hpp",
+            "src/cpp/planner/manifest_estimates.hpp",
+        ],
     ),
     # A relation's manifest as native rows (src/cpp/planner/native_manifest.hpp),
     # decoded from the manifest parquet's draken vectors (manifest_decode.hpp).
@@ -879,7 +919,7 @@ extensions = [
         ],
         define_macros=[("HAVE_ZSTD", "1"), ("ZSTD_STATIC_LINKING_ONLY", "1")],
         language="c++",
-        extra_compile_args=CPP_FLAGS,
+        extra_compile_args=CPP_FLAGS + ESTIMATOR_FP_FLAGS,
         extra_link_args=(
             ["-undefined", "dynamic_lookup"] if is_mac() else ["-Wl,--allow-shlib-undefined"]
         ),
@@ -895,17 +935,10 @@ extensions = [
             "src/cpp/planner/manifest_encode.hpp",
             "src/cpp/planner/file_stats.hpp",
             "src/cpp/planner/skene_stats.hpp",
+            "opteryx/third_party/maki_nage/_distogram.hpp",
+            "src/cpp/planner/py_numeric.hpp",
+            "src/cpp/planner/expr_arena.hpp",
         ],
-    ),
-    # Helpers for relation statistics
-    Extension(
-        "opteryx.compiled.structures.relation_statistics",
-        sources=[
-            "opteryx/compiled/structures/relation_statistics.pyx",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
     ),
     # Expression evaluator — consolidated .so for all evaluator leaf modules.
     # Leaf .pyx files are textually included by _impl.pyx. yyjson.c used to be

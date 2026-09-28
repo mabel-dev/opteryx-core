@@ -3,6 +3,7 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
+import dataclasses
 from typing import Tuple
 
 from opteryx.compiled.structures.plan_steps import PlanStep
@@ -114,7 +115,7 @@ def visit_show_snapshots(self, node: PlanStep, context: BindingContext) -> Tuple
         node.schema = context.plan_context.columns.bind_relation(
             snapshots_output_schema(node.relation, include_expiry=include_expiry), node.relation
         )
-        node.schema.row_count_estimate = len(snapshots)
+        node.schema = dataclasses.replace(node.schema, row_count_estimate=len(snapshots))
     node.columns = []
     for schema_column in node.schema.columns:
         column_reference = LogicalColumn(
@@ -162,7 +163,7 @@ def visit_show_lineage(self, node: PlanStep, context: BindingContext) -> Tuple[P
         node.schema = context.plan_context.columns.bind_relation(
             lineage_output_schema(node.relation), node.relation
         )
-        node.schema.row_count_estimate = len(rows)
+        node.schema = dataclasses.replace(node.schema, row_count_estimate=len(rows))
     node.columns = []
     for schema_column in node.schema.columns:
         column_reference = LogicalColumn(
@@ -200,7 +201,7 @@ def visit_show_sources(self, node: PlanStep, context: BindingContext) -> Tuple[P
         node.schema = context.plan_context.columns.bind_relation(
             sources_output_schema(node.relation), node.relation
         )
-        node.schema.row_count_estimate = len(rows)
+        node.schema = dataclasses.replace(node.schema, row_count_estimate=len(rows))
     node.columns = []
     for schema_column in node.schema.columns:
         column_reference = LogicalColumn(

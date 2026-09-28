@@ -3,6 +3,7 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
+import dataclasses
 from collections import Counter
 from typing import Tuple
 
@@ -407,8 +408,9 @@ def visit_project(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSt
                         for candidate in schema_columns
                     ]
                     node_column.schema_column = renamed
-            # update the schema with columns we have references to, removing redundant columns
-            schema.columns = schema_columns
+            # update the schema with columns we have references to, removing redundant
+            # columns - re-bound wherever it is shared (the Scan below reads it)
+            context.rebind_schema(schema, schema.with_columns(schema_columns))
             schema_column_identities = {i.identity for i in schema_columns}
             for column in top_level_columns:
                 if column.schema_column.identity in schema_column_identities:
@@ -416,8 +418,9 @@ def visit_project(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSt
 
     # We always have a $derived schema, even if it's empty
     if "$derived" in context.schemas:
-        context.schemas["$project"] = context.schemas.pop("$derived")
-        context.schemas["$project"].name = "$project"
+        derived_schema = context.schemas.pop("$derived")
+        context.schemas["$project"] = derived_schema
+        context.rebind_schema(derived_schema, dataclasses.replace(derived_schema, name="$project"))
     if "$derived" not in context.schemas:
         context.schemas["$derived"] = derived.schema()
 

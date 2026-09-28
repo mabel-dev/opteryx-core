@@ -17,8 +17,8 @@ Two layers:
 import os
 import sys
 import uuid
-from types import SimpleNamespace
 from opteryx.compiled.structures.expressions import Aggregator
+from opteryx.types.schema import RelationSchema
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.plan_steps import AggregateAndGroupStep
@@ -117,7 +117,7 @@ def test_non_expression_properties_ignored():
     node = ScanStep(
         relation="testdata.t",
         connector=object(),
-        schema=SimpleNamespace(columns=[1, 2, 3]),
+        schema=RelationSchema(name="testdata.t"),
         limit=10,
         hints=["NO_PUSH"],
     )

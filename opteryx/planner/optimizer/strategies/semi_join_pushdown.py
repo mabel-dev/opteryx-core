@@ -86,10 +86,9 @@ def _fmt_rows(value: float) -> str:
     return f"{value:.0f}"
 
 
-def _est_rows(node, plan_context: PlanContext) -> int:
+def _est_rows(nid, plan_context: PlanContext) -> int:
     """Estimated output rows from the refreshed statistics, or None if absent."""
-    stats = plan_context.statistics(node)
-    rows = None if stats is None else stats.row_count
+    rows = plan_context.statistics.row_count(nid)
     if not rows or rows <= 0:
         return None
     return rows
@@ -277,8 +276,8 @@ class SemiJoinPushdownStrategy(OptimizationStrategy):
         # Probe rows where the semi stands now vs probe rows on the leg below.
         # `PlanContext.statistics` estimates, refreshed by the driver before this
         # strategy; either one missing is fail-safe: no move.
-        probe_est = _est_rows(below, plan_context)
-        leg_est = _est_rows(plan[target_root], plan_context)
+        probe_est = _est_rows(probe_root, plan_context)
+        leg_est = _est_rows(target_root, plan_context)
         if probe_est is None or leg_est is None:
             return None
         if leg_est > probe_est * _SINK_MARGIN:

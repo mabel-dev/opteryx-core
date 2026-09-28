@@ -58,7 +58,7 @@ _BUILD_PAYLOAD_JOINS = frozenset(
 )
 
 
-def join_output_rows_estimate(node: PlanStep, plan_context: PlanContext) -> Optional[int]:
+def join_output_rows_estimate(nid: int, node: PlanStep, plan_context: PlanContext) -> Optional[int]:
     """The join's estimated output row count, or None when unknown or when the
     join type has no build payload to size.
 
@@ -67,10 +67,7 @@ def join_output_rows_estimate(node: PlanStep, plan_context: PlanContext) -> Opti
     """
     if node.type not in _BUILD_PAYLOAD_JOINS:
         return None
-    stats = plan_context.statistics(node)
-    if stats is None:
-        return None
-    return int(stats.row_count)
+    return plan_context.statistics.row_count(nid)
 
 
 def group_count_estimate(plan: LogicalPlan, nid: str, node: PlanStep) -> Optional[int]:

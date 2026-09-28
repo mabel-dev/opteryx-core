@@ -21,11 +21,13 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "opteryx/third_party/maki_nage/_distogram.hpp"
 #include "planner/manifest_sketch.hpp"
 #include "planner/native_manifest.hpp"
 
@@ -236,6 +238,25 @@ inline void histogram_parts(const NativeManifest& m, size_t position, std::vecto
         }
         parts.push_back(HistogramPart{begin, counts.size(), lo, hi});
     }
+}
+
+// The column's per-file histograms folded into one Distogram, in file order
+// (the first file's, then every other merged into it), or nullptr when no file
+// has one.
+inline std::shared_ptr<maki_nage::Distogram> column_distogram(const NativeManifest& m, size_t position) {
+    std::vector<int64_t> counts;
+    std::vector<HistogramPart> parts;
+    histogram_parts(m, position, counts, parts);
+    if (parts.empty()) return nullptr;
+    auto combined = std::make_shared<maki_nage::Distogram>(maki_nage::Distogram::from_counts(
+        counts.data() + parts[0].begin, static_cast<int64_t>(parts[0].end - parts[0].begin), parts[0].lo,
+        parts[0].hi));
+    for (size_t k = 1; k < parts.size(); ++k) {
+        combined->merge(maki_nage::Distogram::from_counts(counts.data() + parts[k].begin,
+                                                          static_cast<int64_t>(parts[k].end - parts[k].begin),
+                                                          parts[k].lo, parts[k].hi));
+    }
+    return combined;
 }
 
 // The relation's EXACT distinct count from the files' exact footer counts, or

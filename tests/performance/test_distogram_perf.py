@@ -11,12 +11,9 @@ Usage:
 
 The benchmark measures:
 - scalar streaming updates
-- bulk loading
-- manifest-style histogram loading
 - native-buffer histogram loading
 - merge throughput
 - query-time count_up_to
-- query-time quantile
 """
 
 from __future__ import annotations
@@ -72,12 +69,9 @@ def _print_results(results: dict[str, float], baseline: dict[str, float] | None)
     print("=" * 72)
     for key in (
         "scalar_update_time",
-        "bulkload_time",
-        "load_counts_time",
         "load_counts_i64_time",
         "merge_time",
         "count_up_to_time",
-        "quantile_time",
     ):
         value = results[key]
         print(f"{key:<20} {value:>12.6f}s")
@@ -90,12 +84,9 @@ def _print_results(results: dict[str, float], baseline: dict[str, float] | None)
     print("=" * 72)
     for key in (
         "scalar_update_time",
-        "bulkload_time",
-        "load_counts_time",
         "load_counts_i64_time",
         "merge_time",
         "count_up_to_time",
-        "quantile_time",
     ):
         current = results[key]
         base = baseline.get(key)
@@ -127,13 +118,7 @@ def test_distogram_perf():
     scalar_time, _ = _time_call(_scalar_update)
     assert h.count() == n
 
-    # Bulk load path. This is the most obvious place to improve ingestion.
-    h_bulk = distogram.Distogram(bin_count=bin_count)
-    bulk_time, _ = _time_call(lambda: h_bulk.bulkload(values))
-    assert h_bulk.count() == n
-
-    # Manifest histogram path. Statistics arrive as equi-width counts; avoid
-    # constructing Python (center, count) tuples before entering Cython.
+    # Manifest histogram path. Statistics arrive as equi-width counts.
     hist_bucket_count = max(bin_count * 4, 256)
     hist_min = min(values)
     hist_max = max(values)
@@ -146,11 +131,6 @@ def test_distogram_perf():
             hist_counts[-1] += 1
         else:
             hist_counts[int((v - hist_min) / hist_span * hist_bucket_count)] += 1
-
-    load_counts_time, h_counts = _time_call(
-        lambda: distogram.load_counts(hist_counts, hist_min, hist_max)
-    )
-    assert h_counts.count() == n
 
     hist_counts_i64 = array("q", hist_counts)
     load_counts_i64_time, h_counts_i64 = _time_call(
@@ -191,30 +171,17 @@ def test_distogram_perf():
     def _count_queries():
         total = 0.0
         for q in queries:
-            total += distogram.count_up_to(h_bulk, q)
+            total += distogram.count_up_to(h, q)
         return total
 
-    def _quantile_queries():
-        output = []
-        denom = max(1, query_count - 1)
-        for i in range(query_count):
-            output.append(distogram.quantile(h_bulk, i / denom))
-        return output
-
     count_time, count_total = _time_call(_count_queries)
-    quantile_time, quantile_total = _time_call(_quantile_queries)
     assert count_total >= 0
-    assert quantile_total[0] is not None
-    assert quantile_total[-1] is not None
 
     results = {
         "scalar_update_time": scalar_time,
-        "bulkload_time": bulk_time,
-        "load_counts_time": load_counts_time,
         "load_counts_i64_time": load_counts_i64_time,
         "merge_time": merge_time,
         "count_up_to_time": count_time,
-        "quantile_time": quantile_time,
     }
 
     print("=" * 72)
@@ -225,12 +192,9 @@ def test_distogram_perf():
         f"queries={query_count:,} merge_inputs={len(merge_hists):,}"
     )
     print(f"stream update         {n / scalar_time:,.0f} rows/sec")
-    print(f"bulkload              {n / bulk_time:,.0f} rows/sec")
-    print(f"load_counts           {hist_bucket_count / load_counts_time:,.0f} buckets/sec")
     print(f"load_counts_i64       {hist_bucket_count / load_counts_i64_time:,.0f} buckets/sec")
     print(f"merge                 {n / merge_time:,.0f} rows/sec")
     print(f"count_up_to           {query_count / count_time:,.0f} queries/sec")
-    print(f"quantile              {query_count / quantile_time:,.0f} queries/sec")
 
     baseline = None
     if os.environ.get("SAVE_BASELINE"):

@@ -285,6 +285,13 @@ elif is_linux():
     CPP_FLAGS.append("-fvisibility=default")
     C_FLAGS.append("-fvisibility=default")
 
+# The planner's estimator arithmetic (Distogram, selectivity, the statistics
+# propagators) must give the same answer on every target: clang fuses a*b+c
+# into one FMA on ARM by default and x86 builds do not, so the same estimate
+# differed by ULPs across platforms. Extensions compiling estimator code add
+# these flags. (MSVC's /fp:precise does not contract.)
+ESTIMATOR_FP_FLAGS = [] if is_win() else ["-ffp-contract=off"]
+
 # Free-threaded CPython (PEP 703, e.g. 3.14t). When the build interpreter has
 # the GIL disabled, nanobind must be compiled with NB_FREE_THREADED so its
 # internal registries use atomic refcounts and per-object locks, and so each

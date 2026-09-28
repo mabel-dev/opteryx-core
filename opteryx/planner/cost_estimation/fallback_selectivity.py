@@ -6,7 +6,7 @@
 """
 Single source of truth for fallback (no-statistics) selectivity constants.
 
-Two consumers price the same predicates: ``cost_estimation.selectivity``
+Two consumers price the same predicates: the native estimator (src/cpp/planner/selectivity.hpp)
 (statistics attached, degrading internally to textbook constants) and
 ``optimizer.strategies.predicate_ordering`` (no statistics attached at all).
 Until 2026-08-21 each declared its own copies with DIFFERENT values -- range
@@ -20,23 +20,25 @@ the bottom of the cost-estimation dependency graph.
 """
 
 # Equality when NDV is unknown for every relevant side. Shared by the literal
-# (`col = X`) and column-vs-column (`col = col`) paths in selectivity.py and by
+# (`col = X`) and column-vs-column (`col = col`) paths of the native estimator and by
 # the equi-join key fallback in the native join estimator, which DECLARES it
 # (src/cpp/planner/join_estimator.hpp, kEqUnknownNdvFallback) — read back from
 # there so there is one value, not two copies that can drift.
 from opteryx.compiled.planner.join_estimator import EQ_UNKNOWN_NDV_FALLBACK
 
-# Unbounded range comparison (`col < X`) with no histogram or value range, and
-# the BETWEEN fallback (a range predicate). Textbook constant (Selinger et al.).
-RANGE_FALLBACK_SELECTIVITY = 0.25
-
-# LIKE-family predicates with no content stats. "Prefix" = pattern like 'foo%'
-# (still bounds a range, a bit more selective); "infix" = pattern like '%foo%'
-# or unrecognized shapes (no positional anchor at all, least selective).
-# InStr/IInStr (the rewritten form of an infix LIKE -- see
-# predicate_rewriter.INSTR_REWRITES) reuse the infix constant directly.
-LIKE_PREFIX_SELECTIVITY = 0.25
-LIKE_INFIX_SELECTIVITY = 0.1
+# The native estimator's constants (src/cpp/planner/selectivity.hpp), read back
+# the same way:
+#   RANGE - an unbounded range comparison (`col < X`) with no histogram or value
+#           range, and the BETWEEN fallback. Textbook constant (Selinger et al.).
+#   LIKE_PREFIX / LIKE_INFIX - LIKE-family predicates with no content stats.
+#           "Prefix" = pattern like 'foo%' (still bounds a range, a bit more
+#           selective); "infix" = pattern like '%foo%' or unrecognized shapes
+#           (no positional anchor at all, least selective). InStr/IInStr (the
+#           rewritten form of an infix LIKE -- see
+#           predicate_rewriter.INSTR_REWRITES) reuse the infix constant.
+from opteryx.compiled.planner.statistics import LIKE_INFIX_SELECTIVITY
+from opteryx.compiled.planner.statistics import LIKE_PREFIX_SELECTIVITY
+from opteryx.compiled.planner.statistics import RANGE_FALLBACK_SELECTIVITY
 
 # Operator-keyed table for the no-stats ordering path
 # (optimizer.strategies.predicate_ordering). Built from the scalars above so

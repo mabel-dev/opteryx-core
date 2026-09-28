@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
 from typing import Dict
+from typing import List
 from typing import Set
 
 from opteryx.managers.virtual_datasets import derived
@@ -114,6 +115,50 @@ class BindingContext:
     # Populated bottom-up (the binder visits the unnest before the aggregate above
     # it), so by the time a narrowing site runs, every unnest beneath it is recorded.
     retained_columns: Set[Any] = field(default_factory=set)
+    # Every step this bind has bound that carries a schema (steps_with("schema")),
+    # shared by reference with every context derived from this one. RelationSchema
+    # is immutable (architect ruling 2026-09-28): binding RE-BINDS a scope's schema,
+    # and a step that holds the schema being replaced is re-bound with it - see
+    # rebind_schema.
+    schema_steps: List[Any] = field(default_factory=list)
+
+    def rebind_schema(self, old, new) -> None:
+        """Replace schema `old` by `new` everywhere this bind shares it: this
+        scope's and the enclosing scope's schemas, the bound manifests over it,
+        and every bound step holding it (a Scan's manifest re-bound with it).
+
+        By object IDENTITY, which is exactly the sharing an in-place edit reached
+        before schemas were immutable: a branch binds against its own copy
+        (RelationSchema.branch_copy), so a branch's re-bind never reaches the
+        scan it was copied from."""
+        from opteryx.compiled.structures.plan_steps import steps_with
+        from opteryx.models.manifest import Manifest
+
+        if old is new:
+            return
+        for scope in (self.schemas, self.outer_schemas):
+            for key, schema in list(scope.items()):
+                if schema is old:
+                    scope[key] = new
+        rebound: Dict[int, Any] = {}
+
+        def _rebound(manifest):
+            existing = rebound.get(id(manifest))
+            if existing is None:
+                existing = Manifest(manifest.native, new)
+                rebound[id(manifest)] = existing
+            return existing
+
+        for key, manifest in list(self.manifests.items()):
+            if manifest is not None and manifest.schema is old:
+                self.manifests[key] = _rebound(manifest)
+        for step in self.schema_steps:
+            if step.schema is old:
+                step.schema = new
+            if step.node_type in steps_with("manifest"):
+                manifest = step.manifest
+                if manifest is not None and manifest.schema is old:
+                    step.manifest = _rebound(manifest)
 
     @classmethod
     def initialize(
@@ -174,6 +219,7 @@ class BindingContext:
             snapshots={k: v for k, v in self.snapshots.items()},
             schema_only=self.schema_only,
             retained_columns=set(self.retained_columns),
+            schema_steps=self.schema_steps,
         )
 
     def open_correlated_scope(self) -> "BindingContext":
@@ -198,4 +244,5 @@ class BindingContext:
             shared_cte_schemas=self.shared_cte_schemas,
             reused_expressions=self.reused_expressions,
             schema_only=self.schema_only,
+            schema_steps=self.schema_steps,
         )

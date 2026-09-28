@@ -68,7 +68,7 @@ cdef extern from "planner/join_estimator.hpp" nogil:
         int64_t row_count
         int64_t domain_rows
 
-    cdef struct CEdge "opteryx::planner::Edge":
+    cdef struct CEdge "opteryx::planner::JoinEdge":
         int32_t left
         int32_t right
         int32_t class_id

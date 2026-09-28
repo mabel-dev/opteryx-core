@@ -60,6 +60,16 @@ struct LiteralValue {
     std::vector<LiteralValue> items;
 };
 
+// opteryx.expression.NodeType values, handed over from Python once (never
+// restated here, so the enum has one definition): see node_kinds() in
+// opteryx/compiled/structures/expressions.pyx.
+struct NodeKinds {
+    int32_t and_ = 0, or_ = 0, xor_ = 0, not_ = 0, dnf = 0, cnf = 0;
+    int32_t case_ = 0, comparison = 0, binary = 0, unary = 0, function = 0;
+    int32_t identifier = 0, nested = 0, aggregator = 0, literal = 0, cast = 0;
+    int32_t extraction = 0, between = 0;
+};
+
 // Row flags.
 enum ExprFlag : uint16_t {
     FLAG_DRAFT = 1u << 0,
@@ -165,5 +175,41 @@ private:
     std::vector<std::string> relation_names_;
     std::unordered_map<std::string, uint32_t> relation_ids_;
 };
+
+// An expression's children in their declared order (Expression.children): a
+// field holding no expression is skipped; a LIST member holding none is kept
+// as kNoExpr for the caller to refuse (the Python walks failed on one).
+inline void expression_children(const ExprRow& r, const NodeKinds& k, std::vector<ExprId>& out) {
+    out.clear();
+    auto one = [&](ExprId id) {
+        if (id != kNoExpr) out.push_back(id);
+    };
+    auto many = [&](const std::vector<ExprId>& ids) { out.insert(out.end(), ids.begin(), ids.end()); };
+    const int32_t kind = r.kind;
+    if (kind == k.comparison || kind == k.binary || kind == k.extraction || kind == k.and_ || kind == k.or_ ||
+        kind == k.xor_) {
+        one(r.left);
+        one(r.right);
+    } else if (kind == k.unary) {
+        one(r.centre);
+        many(r.parameters);
+    } else if (kind == k.not_ || kind == k.nested) {
+        one(r.centre);
+    } else if (kind == k.dnf || kind == k.cnf || kind == k.function || kind == k.aggregator) {
+        many(r.parameters);
+    } else if (kind == k.between) {
+        one(r.left);
+        one(r.right);
+        one(r.centre);
+    } else if (kind == k.case_) {
+        many(r.conditions);
+        many(r.results);
+        one(r.else_result);
+    } else if (kind == k.cast) {
+        one(r.left);
+        many(r.parameters);
+        one(r.format);
+    }
+}
 
 }  // namespace opteryx::planner

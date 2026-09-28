@@ -29,15 +29,7 @@ pre-pruning numbers. Every narrowing (`prune_files`, `prune_files_for_topn`,
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from opteryx.third_party.maki_nage.distogram import Distogram
-from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import RelationSchema
-
-# Categories whose ordinal key IS the value (an identity widen): the only ones
-# whose ordinal-dialect bounds serve as decoded values (value range, the span
-# rule of range cardinality).
-_IDENTITY_CATEGORIES = (LogicalCategory.INTEGER, LogicalCategory.DATE)
-
 
 class Manifest:
     """A relation's files and statistics: the native rows and the live schema.
@@ -58,12 +50,11 @@ class Manifest:
         ordinalized before they are compared. One dialect per manifest.
     """
 
-    __slots__ = ("native", "schema", "_distograms")
+    __slots__ = ("native", "schema")
 
     def __init__(self, native, schema: RelationSchema):
         self.native = native
         self.schema = schema
-        self._distograms: Dict[int, Optional[Distogram]] = {}
 
     # ================================================================
     # The rows
@@ -140,17 +131,6 @@ class Manifest:
         schema may have been projected down since the manifest was built."""
         name = column.decode("utf-8") if type(column) is bytes else column
         return self.native.position_of(name)
-
-    def _column_type(self, column_name: str):
-        """The ColumnType of `column_name` in the LIVE schema, or None."""
-        for col in self.schema.columns:
-            if col.name == column_name:
-                return col.column_type
-        return None
-
-    def _identity_category(self, column_name: str) -> bool:
-        column_type = self._column_type(column_name)
-        return column_type is not None and column_type.category in _IDENTITY_CATEGORIES
 
     def _live_types(self) -> Dict[str, int]:
         return {
@@ -236,10 +216,6 @@ class Manifest:
             return None, None
         return self.native.extremes(position)
 
-    def has_null_counts(self) -> bool:
-        """Whether any file records a null count for any column."""
-        return self.native.has_null_counts()
-
     def file_key_ranges(self, column: str) -> List[Tuple[int, Any, Any]]:
         """Per-file ``(position, min, max)`` on one column, for the files whose
         manifest bounds it - compaction planning's overlap reasoning. Files with
@@ -257,45 +233,6 @@ class Manifest:
     # Estimates (for cost-based optimization)
     # ================================================================
 
-    def get_char_class_stats(self, column: str) -> Optional[Tuple[dict, float]]:
-        """(class_proportions, avg_length) for `column`, or None - the LIKE
-        '%needle%' selectivity estimator's input (cost_estimation.selectivity).
-        avg_length is the byte total over the column's NON-NULL rows."""
-        position = self.position_of(column)
-        if position is None:
-            return None
-        found = self.native.char_class_totals(position)
-        if found is None:
-            return None
-        totals, non_null_rows = found
-        total_bytes = sum(totals)
-        if total_bytes <= 0:
-            return None
-        from opteryx.planner.cost_estimation.selectivity import _CHAR_CLASSES
-
-        proportions = {name: totals[i] / total_bytes for i, name in enumerate(_CHAR_CLASSES)}
-        return proportions, total_bytes / max(1, non_null_rows)
-
-    def get_ordinal_bounds(self, column: str) -> Optional[Tuple[int, int]]:
-        """Relation-wide (lo, hi) ordinal-key bounds, or None (only for ordinal
-        bounds; a negative key is a "no bound" sentinel, never string data)."""
-        position = self.position_of(column)
-        return None if position is None else self.native.ordinal_bounds(position)
-
-    def get_length_bounds(self, column: str) -> Optional[Tuple[int, int]]:
-        """Relation-wide (min_length, max_length) in bytes, or None."""
-        position = self.position_of(column)
-        return None if position is None else self.native.length_bounds(position)
-
-    def get_distogram(self, column: str) -> Optional[Distogram]:
-        """The column's per-file histograms folded into one, or None."""
-        position = self.position_of(column)
-        if position is None:
-            return None
-        if position not in self._distograms:
-            self._distograms[position] = self.native.distogram(position)
-        return self._distograms[position]
-
     def estimate_cardinality(self, column) -> Optional[int]:
         """Distinct values: a provably EXACT footer count, else the KMV union of
         the sketches (exact below K). The execution-variant strategies
@@ -303,86 +240,15 @@ class Manifest:
         position = self.position_of(column)
         return None if position is None else self.native.estimate_cardinality(position)
 
-    def estimate_range_cardinality(self, column) -> Optional[int]:
-        """NDV from per-file footer statistics - COSTING ONLY, never for the
-        execution-variant strategies. See manifest_estimates.hpp."""
-        position = self.position_of(column)
-        if position is None:
-            return None
-        name = column.decode("utf-8") if type(column) is bytes else column
-        return self.native.estimate_range_cardinality(position, self._identity_category(name))
-
     def get_total_null_count(self, column) -> Optional[int]:
         """Total nulls, or None when any file's count is unknown (a partial
         total would overcount non-null values)."""
         position = self.position_of(column)
         return None if position is None else self.native.total_null_count(position)
 
-    def estimate_null_fraction(self, column) -> Optional[float]:
-        position = self.position_of(column)
-        return None if position is None else self.native.null_fraction(position)
-
-    def get_total_uncompressed_size(self, column) -> Optional[int]:
-        position = self.position_of(column)
-        return None if position is None else self.native.total_uncompressed_size(position)
-
-    def get_value_range(self, column: str) -> Optional[Tuple[Any, Any]]:
-        """The column's NUMERIC (min, max) across every file, or None. In the
-        ordinal dialect only for categories whose key IS the value."""
-        position = self.position_of(column)
-        if position is None:
-            return None
-        return self.native.value_range(position, self._identity_category(column))
-
     def estimate_selectivity(self, predicate) -> float:
-        """Estimated fraction of rows matching `predicate`
-        (cost_estimation.selectivity over this manifest's statistics)."""
-        from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
+        """Estimated fraction of rows matching `predicate`, from this manifest's
+        own statistics (the native estimator, src/cpp/planner/selectivity.hpp)."""
+        from opteryx.compiled.planner.statistics import manifest_selectivity
 
-        return estimate_selectivity(predicate, self._as_relation_statistics())
-
-    def _as_relation_statistics(self):
-        """A fresh RelationStatistics snapshot of this manifest, keyed by column
-        identity (the selectivity walker's key)."""
-        from opteryx.planner.optimizer.statistics import (
-            ColumnRange,
-            ColumnStatistics,
-            RelationStatistics,
-        )
-
-        total_rows = self.get_record_count()
-        row_count_is_metric = total_rows is not None
-        if total_rows is None:
-            # One no-signal constant across the planner (statistics_refresh's).
-            from opteryx.planner.optimizer.statistics_refresh import _UNKNOWN_ROW_COUNT
-
-            total_rows = _UNKNOWN_ROW_COUNT
-        has_null_counts = self.has_null_counts()
-        columns: dict = {}
-        for col in self.schema.columns:
-            col_name = col.name
-            identity = col.identity
-            if not col_name or type(identity) is not bytes:
-                continue
-            null_fraction = self.estimate_null_fraction(col_name) if has_null_counts else None
-            char_class_stats = self.get_char_class_stats(col_name)
-            distinct_count = self.estimate_cardinality(col_name)
-            if distinct_count is None:
-                # Range-derived fallback for un-ANALYZE'd relations — the same
-                # costing-only substitution statistics_refresh makes.
-                distinct_count = self.estimate_range_cardinality(col_name)
-            columns[identity] = ColumnStatistics(
-                column_name=col_name,
-                data_type="",
-                distinct_count=distinct_count,
-                value_range=ColumnRange(),
-                histogram=self.get_distogram(col_name),
-                null_fraction=null_fraction,
-                class_proportions=char_class_stats[0] if char_class_stats else None,
-                avg_length=char_class_stats[1] if char_class_stats else None,
-                ordinal_bounds=self.get_ordinal_bounds(col_name),
-                length_bounds=self.get_length_bounds(col_name),
-            )
-        if row_count_is_metric:
-            return RelationStatistics(columns=columns, row_count_metric=total_rows)
-        return RelationStatistics(columns=columns, row_count_estimate=total_rows)
+        return manifest_selectivity(self, predicate)

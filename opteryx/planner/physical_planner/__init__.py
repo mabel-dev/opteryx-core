@@ -991,7 +991,7 @@ def _physical_plan_of(logical_plan, query_properties, plan_context: PlanContext)
                 logical_node,
                 query_properties,
                 registry,
-                join_output_rows_estimate(logical_node, plan_context),
+                join_output_rows_estimate(nid, logical_node, plan_context),
             )
         elif node_type in (LogicalPlanStepType.AggregateAndGroup, LogicalPlanStepType.Distinct):
             node = creator(

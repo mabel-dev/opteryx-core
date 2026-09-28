@@ -44,7 +44,8 @@ def _pop_using_column(
     schema_key, schema_column = locate_using_column(
         context.schemas, relation_names, column_name, side
     )
-    context.schemas[schema_key].pop_column(schema_column.name)
+    held = context.schemas[schema_key]
+    context.rebind_schema(held, held.without_column(schema_column.name))
     if schema_key.startswith("$shared-"):
         origins = list(schema_column.origin)
     else:
@@ -378,7 +379,12 @@ def visit_join(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
         for right_rel in node.right_relation_names:
             if right_rel in context.schemas:
                 schema = context.schemas[right_rel]
-                schema.columns = [c for c in schema.columns if c.name not in partition_col_names]
+                context.rebind_schema(
+                    schema,
+                    schema.with_columns(
+                        c for c in schema.columns if c.name not in partition_col_names
+                    ),
+                )
 
     if node.type == "inner" and node.on is None:
         from opteryx.exceptions import SqlError, compose, md_syntax

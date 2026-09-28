@@ -372,6 +372,23 @@ struct SketchStaging {
     }
 };
 
+// A manifest's identity for memo keys: an allocation of its own, which a memo
+// keeps alive by holding it - so no later manifest can come to share it, as a
+// freed manifest's ADDRESS can. A copy is a new manifest and takes a new one.
+class ManifestIdentity {
+public:
+    ManifestIdentity() : token_(std::make_shared<char>(0)) {}
+    ManifestIdentity(const ManifestIdentity&) : token_(std::make_shared<char>(0)) {}
+    ManifestIdentity& operator=(const ManifestIdentity&) {
+        token_ = std::make_shared<char>(0);
+        return *this;
+    }
+    const std::shared_ptr<const void>& token() const { return token_; }
+
+private:
+    std::shared_ptr<const void> token_;
+};
+
 class NativeManifest {
 public:
     NativeManifest(std::vector<std::string> columns, bool bounds_are_ordinal, bool stats_are_authoritative)
@@ -404,6 +421,9 @@ public:
         }
         return -1;
     }
+
+    // This manifest's identity token (see ManifestIdentity).
+    const std::shared_ptr<const void>& identity() const { return identity_.token(); }
 
     // A column name's load-time position.
     const std::unordered_map<std::string, size_t>& positions() const { return positions_; }
@@ -521,6 +541,7 @@ private:
     bool stats_are_authoritative_;
     std::vector<ManifestFile> files_;
     std::vector<ManifestCell> cells_;   // files x columns, row-major
+    ManifestIdentity identity_;
 };
 
 }  // namespace opteryx::planner

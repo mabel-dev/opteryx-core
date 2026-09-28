@@ -48,7 +48,7 @@ list (the same channel PredicatePushdown feeds), so no second pushdown pass is
 needed; scans whose connector can't take pushed predicates get a Filter node
 instead. The RANGE transport stays restricted to inner / nested-loop joins: it
 reads its bound from the propagated key statistics, and an outer join's preserved
-key is not narrowed to the match there (see `_intersect_join_keys`), so there is
+key is not narrowed to the match there (the refresh's intersect_join_keys), so there is
 nothing sound for it to carry across one. Constant propagation has no such
 dependency — it reads the plan — and takes the outer-join legs described above.
 """
@@ -56,12 +56,12 @@ dependency — it reads the plan — and takes the outer-join legs described abo
 import decimal
 import math
 import struct
+from typing import NamedTuple
 
 from opteryx.expression import NodeType
 from opteryx.expression.intervals import MICROSECONDS_PER_DAY
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
-from opteryx.planner.optimizer.statistics import ColumnRange
 from opteryx.types.logical_type import INTERVAL
 from opteryx.types.logical_type import DrakenType
 from opteryx.types.logical_type import LogicalCategory
@@ -92,21 +92,21 @@ def _phys_identity(col):
     return identity if isinstance(identity, bytes) else None
 
 
-def _key_value_range(stats, col):
-    """Propagated value_range for *col* from a RelationStatistics, or None when
-    no bound has been established (column absent / range empty)."""
-    if stats is None:
-        return None
+class ValueRange(NamedTuple):
+    """A column's numeric bounds (either may be None)."""
+
+    lower_bound: object
+    upper_bound: object
+
+
+def _key_value_range(plan_context, nid, col):
+    """Propagated value range for *col* at node *nid*, or None when no bound has
+    been established (no statistics / column absent / range empty)."""
     identity = _phys_identity(col)
     if identity is None:
         return None
-    col_stats = stats.columns.get(identity)
-    if col_stats is None:
-        return None
-    value_range = col_stats.value_range
-    if value_range is None or (value_range.lower_bound is None and value_range.upper_bound is None):
-        return None
-    return value_range
+    bounds = plan_context.statistics.value_range(nid, identity)
+    return None if bounds is None else ValueRange(*bounds)
 
 
 def _tightens(candidate, existing) -> bool:
@@ -307,9 +307,9 @@ _TEMPORAL_NATIVE = {
 # µs scale — but it describes what a column STORES, and the two inlets of
 # `value_range` do not agree on that for a non-µs timestamp:
 #
-#   manifest inlet   `_scan_stats` records the parquet footer's raw int, so a
+#   manifest inlet   the scan base records the parquet footer's raw int, so a
 #                    TIMESTAMP[ms] column contributes MILLISECONDS.
-#   predicate inlet  `_narrow_filter_columns` records a literal's value, and
+#   predicate inlet  the refresh's range narrowing records a literal's value, and
 #                    `build_literal_node` has already run `timestamp_to_int64_us`
 #                    on it — so the SAME column contributes MICROSECONDS.
 #
@@ -518,7 +518,7 @@ def _shifted(value_range, offset, keep):
             upper += offset
     if lower is None and upper is None:
         return None
-    return ColumnRange(lower_bound=lower, upper_bound=upper)
+    return ValueRange(lower_bound=lower, upper_bound=upper)
 
 
 def _column_type(col):
@@ -759,7 +759,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
             return context
 
         ranges_eligible = (
-            node.type in ("inner", "nested loop") and context.plan_context.statistics(node) is not None
+            node.type in ("inner", "nested loop") and context.plan_context.statistics.has(context.node_id)
         )
         constants_eligible = bool(_CONSTANT_RECEIVING_LEGS.get(node.type))
         if not ranges_eligible and not constants_eligible:
@@ -842,7 +842,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
     ):
         """Carry *source_col*'s realized range onto *target_col*, displaced by the
         predicate's offset and narrowed to the bounds *keep* names."""
-        source_range = _key_value_range(context.plan_context.statistics(join_node), source_col)
+        source_range = _key_value_range(context.plan_context, context.node_id, source_col)
         if source_range is None:
             return
         target_type = _column_type(target_col)
@@ -869,11 +869,11 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
             conditions,
             uuid_to_nid,
             # REDUNDANCY GUARD: compare against the SCAN's own range, not the
-            # join's. _intersect_join_keys has already replaced both keys'
+            # join's. The refresh's intersect_join_keys has already replaced both keys'
             # ranges on the join node with their intersection, so at that level
             # every pair looks identical and nothing would ever push.
-            skip_scan=lambda scan: not _tightens(
-                value_range, _key_value_range(context.plan_context.statistics(scan), target_col)
+            skip_scan=lambda scan_nid: not _tightens(
+                value_range, _key_value_range(context.plan_context, scan_nid, target_col)
             ),
         )
 
@@ -943,7 +943,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
             if target_identity is None or target_identity not in scan_identities:
                 continue
 
-            if skip_scan is not None and skip_scan(scan):
+            if skip_scan is not None and skip_scan(reader_nid):
                 continue
 
             connector = scan.connector if scan.node_type in steps_with("connector") else None

@@ -1407,7 +1407,9 @@ def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
                 # the bound schema from here on - the same object the scan holds.
                 # Each connector builds its Manifest per call, so nothing shared
                 # is rebound.
-                node.manifest.schema = node.schema
+                from opteryx.models.manifest import Manifest
+
+                node.manifest = Manifest(node.manifest.native, node.schema)
             # Propagate dataset commit timestamp from the connector to the
             # logical node so it becomes available to physical nodes
             # (and ultimately shown as `committed_at` in telemetry).
@@ -1455,7 +1457,7 @@ def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
                         f"{statement} requires a catalog-backed target",
                     )
                 )
-            node.schema.columns = list(node.schema.columns) + [
+            extended = node.schema.with_columns(node.schema.columns + (
                 context.plan_context.columns.relation_column(
                     node.alias,
                     ROW_IDENTITY_FILE,
@@ -1470,7 +1472,13 @@ def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
                     nullable=False,
                     origin=[node.alias],
                 ),
-            ]
+            ))
+            # The manifest reads the scan's schema: both move to the extended one.
+            if node.manifest is not None:
+                from opteryx.models.manifest import Manifest
+
+                node.manifest = Manifest(node.manifest.native, extended)
+            node.schema = extended
 
         context.schemas[node.alias] = node.schema
 
@@ -1486,8 +1494,8 @@ def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
             #
             # For the reader being offered completions that is the wrong set, and
             # wrong in the direction that hides the columns they have not typed yet.
-            # The list is rebound rather than mutated, so holding this one keeps the
-            # full width.
+            # The schema is re-bound rather than mutated, so holding this one keeps
+            # the full width.
             node.unpruned_columns = list(node.schema.columns)
 
         context.manifests[node.alias] = node.manifest

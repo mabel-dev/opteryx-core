@@ -14,34 +14,19 @@ and passed EXPLICITLY to every producer and consumer. There is no global and no
 default instance: a function that reads estimates takes the context that holds
 them.
 
-Keyed by node OBJECT identity, the same identity `node.statistics` had when
-the estimate was an attribute: two nodes are two entries even when a `copy()`
-gave them the same `uuid`. Each entry holds a strong reference to its node, so
-an `id()` cannot be reused by another object while the entry exists.
-
-This is the Python seed of the native per-query PlanContext in the plan-graph
-design (native_plan_graph_proposal): integer NodeIds replace object identity
-there, and the statistics store becomes native.
+The estimated statistics are native (`StatisticsStore`, native plan graph P5):
+keyed by the plan's integer node ids, read through typed accessors.
 """
-
-from typing import TYPE_CHECKING
-from typing import Dict
-from typing import Optional
-from typing import Tuple
 
 from opteryx.compiled.planner.column_table import ColumnTable
 from opteryx.compiled.planner.plan_graph import NodeIds
+from opteryx.compiled.planner.statistics import StatisticsStore
 from opteryx.compiled.structures.expressions import ExprArena
-
-if TYPE_CHECKING:  # annotation only: importing the optimizer package here is a cycle
-    from opteryx.planner.optimizer.statistics import RelationStatistics
 
 
 class PlanContext:
     __slots__ = (
-        "_statistics",
-        "_cte_statistics",
-        "scan_stats_cache",
+        "statistics",
         "columns",
         "node_ids",
         "expressions",
@@ -64,6 +49,11 @@ class PlanContext:
         # identified by the int id it mints (native plan graph P3, architect
         # rulings 2026-09-27).
         self.expressions = ExprArena()
+        self.expressions.bind_columns(self.columns)
+        # The query's estimated statistics: every node the last refresh of its
+        # plan reached (by node id), each shared CTE's output, and the scan base
+        # memo the refreshes and the billing meter share.
+        self.statistics = StatisticsStore(self.expressions)
         # expr_ids of the trees constant folding has folded - its second pass skips
         # them. Pass state, so it is held here, not on the expressions.
         self.constant_folded: set = set()
@@ -81,29 +71,3 @@ class PlanContext:
         # Whether the optimizer refreshed statistics - see
         # OptimizerVisitor.refreshed_statistics.
         self.statistics_estimated_by_optimizer: bool = False
-        self._statistics: Dict[int, Tuple[object, "RelationStatistics"]] = {}
-        self._cte_statistics: Dict[str, "RelationStatistics"] = {}
-        # Memo of each scan's manifest-derived base statistics, shared by every
-        # statistics refresh and the billing meter of one query. See
-        # statistics_refresh.scan_base_statistics for the key.
-        self.scan_stats_cache: dict = {}
-
-    def statistics(self, node) -> Optional["RelationStatistics"]:
-        """The estimate the last statistics refresh attached to `node`, or None
-        when no refresh has reached it."""
-        entry = self._statistics.get(id(node))
-        return None if entry is None else entry[1]
-
-    def set_statistics(self, node, statistics: "RelationStatistics") -> None:
-        self._statistics[id(node)] = (node, statistics)
-
-    def cte_statistics(self, cte_key: str) -> Optional["RelationStatistics"]:
-        """The output estimate of the shared CTE `cte_key` (its body's, or for a
-        recursive CTE its anchor's), or None when none was recorded. Keyed by the
-        CTE, not by a reference node: every MaterializedCteRef naming `cte_key`
-        reads the same body, wherever in the plan forest it sits and however
-        often the optimizer copies it."""
-        return self._cte_statistics.get(cte_key)
-
-    def set_cte_statistics(self, cte_key: str, statistics: "RelationStatistics") -> None:
-        self._cte_statistics[cte_key] = statistics

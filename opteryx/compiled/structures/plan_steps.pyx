@@ -5,6 +5,7 @@
 # cython: infer_types=True
 # cython: wraparound=True
 # cython: boundscheck=False
+# distutils: language = c++
 
 """
 Typed logical plan steps.
@@ -21,6 +22,16 @@ order. A walker descends from those roots with the expressions' own
 `children()`.
 """
 
+from libc.stdint cimport int32_t
+from libc.stdint cimport int64_t
+from libc.stdint cimport uint32_t
+from libc.stdint cimport uintptr_t
+from libcpp.string cimport string
+from libcpp.vector cimport vector
+
+from opteryx.compiled.structures.expressions cimport ExprArena
+from opteryx.compiled.structures.expressions cimport ExprTable
+
 from opteryx.compiled.functions.random_helper import random_string_c
 from opteryx.compiled.structures.expressions import EXPRESSION_TYPES
 from opteryx.compiled.structures.expressions import is_expression
@@ -28,6 +39,8 @@ from opteryx.compiled.structures.expressions import publish
 
 
 cdef object _StepType = None
+cdef object _SchemaColumn = None
+cdef object _RelationSchema = None
 
 
 cdef inline object _step_types():
@@ -270,22 +283,182 @@ cpdef object _copy_field(object value, dict memo):
 # ---------------------------------------------------------------------------
 
 
+# ---- the native row (step_row.hpp) -------------------------------------------
+#
+# Every step owns a StepRow mirroring the fields the native statistics refresh
+# reads (architect rulings 2026-09-28, P5). `_sync_row` rebuilds it from the
+# step's fields; a step calls it after every write to a mirrored field and at
+# the end of every copy, so the row is never stale and nothing lowers a step
+# at read time.
+
+
+cdef inline void _row_arena(StepRow* row, object expression) except *:
+    """Adopt `expression`'s arena as the row's - every expression a step holds is
+    a row of ONE query's table. Another arena flags a conflict: a single field
+    write cannot tell a step re-bound into another query (its old expressions all
+    gone) from one genuinely mixing two, so the step rebuilds its whole row, which
+    raises only for the latter."""
+    cdef ExprArena arena = expression.arena
+    if row.arena == NULL:
+        row.arena = arena._table
+    elif row.arena != arena._table:
+        row.arena_conflict = True
+
+
+cdef inline int64_t _row_expr(StepRow* row, object expression) except? -1:
+    if expression is None:
+        return 0  # kNoExpr
+    _row_arena(row, expression)
+    return <int64_t>expression.expr_id
+
+
+cdef inline void _row_exprs(StepRow* row, tuple expressions, vector[int64_t]& out) except *:
+    out.clear()
+    if expressions is None:
+        return
+    for expression in expressions:
+        out.push_back(_row_expr(row, expression))
+
+
+cdef inline void _row_keys(StepRow* row, object keys, vector[StepKey]& out) except *:
+    """Join / group keys: each an expression, or a column identity given as bytes."""
+    cdef StepKey key
+    out.clear()
+    if keys is None:
+        return
+    for value in keys:
+        key.expr = 0
+        key.identity.clear()
+        if type(value) is bytes:
+            key.identity = <bytes>value
+        else:
+            key.expr = _row_expr(row, value)
+        out.push_back(key)
+
+
+cdef inline void _row_schema_slots(object schema, vector[uint32_t]& out) except *:
+    """The bound columns of `schema` as ColumnTable slots; an unbound descriptor
+    column has none and is not mirrored (the refresh has no identity for it)."""
+    global _SchemaColumn
+    if _SchemaColumn is None:
+        from opteryx.compiled.planner.column_table import SchemaColumn
+
+        _SchemaColumn = SchemaColumn
+    out.clear()
+    if schema is None:
+        return
+    for column in schema.columns:
+        if type(column) is _SchemaColumn:
+            out.push_back(<uint32_t>column.slot)
+
+
+cdef inline void _row_scan_schema(StepRow* row, object schema) except *:
+    """A scan's schema: whether it has one, its bound columns' slots and the row
+    counts it declares."""
+    row.has_schema = schema is not None
+    _row_schema_slots(schema, row.schema_slots)
+    row.schema_row_count_metric = kNoStepValue if schema is None else _row_int(schema.row_count_metric)
+    row.schema_row_count_estimate = kNoStepValue if schema is None else _row_int(schema.row_count_estimate)
+
+
+cdef inline void _row_manifest(StepRow* row, object manifest) except *:
+    """A scan's manifest: the native manifest it wraps (BORROWED - the step holds
+    `manifest`, which owns it) and the slots of the schema it was bound with."""
+    if manifest is None:
+        row.manifest = NULL
+        row.manifest_schema_slots.clear()
+        return
+    row.manifest = <const StepManifest*><uintptr_t>manifest.native.borrowed_address()
+    _row_schema_slots(manifest.schema, row.manifest_schema_slots)
+
+
+cdef list _keys_view(const vector[StepKey]& values):
+    cdef list out = []
+    cdef size_t k
+    for k in range(values.size()):
+        out.append((values[k].expr, (<bytes>values[k].identity) if values[k].expr == 0 else None))
+    return out
+
+
+cdef inline int64_t _row_int(object value):
+    return kNoStepValue if value is None else <int64_t>value
+
+
+cdef inline void _row_str(object value, string& out):
+    out.clear()
+    if type(value) is str:
+        out = (<str>value).encode("utf-8")
+
+
 cdef class PlanStep:
     """What every logical plan step has: its type, identity, output columns and
-    the relation bookkeeping the planner carries on every step."""
+    the relation bookkeeping the planner carries on every step. Fields are
+    declared in plan_steps.pxd.
 
-    cdef readonly object node_type
-    cdef public str uuid
-    # Bumped by every field setter: a plan whose steps' write counts moved was
-    # changed, so its statistics are stale (architect ruling Q2, native plan graph
-    # P2-d). Fields are immutable values (Q3), so a setter is the only way to
-    # change one. Expressions inside a field are not steps and are not counted.
-    cdef readonly unsigned long long write_count
-    cdef tuple _columns
-    cdef set _all_relations
-    cdef set _pre_update_columns
+    `write_count` is bumped by every field setter: a plan whose steps' write
+    counts moved was changed, so its statistics are stale (architect ruling Q2,
+    native plan graph P2-d). Fields are immutable values (Q3), so a setter is the
+    only way to change one. Expressions inside a field are not steps and are not
+    counted."""
+
+    def __cinit__(self, *args, **kwargs):
+        self._row = new StepRow()
+
+    def __dealloc__(self):
+        del self._row
+
+    cdef void _sync_row(self) except *:
+        """Rebuild the native row from the fields it mirrors. A step kind whose
+        fields the refresh reads extends this (and calls `_check_row_arena` last);
+        every step mirrors its kind and output columns."""
+        self._row.arena = NULL
+        self._row.arena_conflict = False
+        self._row.kind = -1 if self.node_type is None else <int32_t>self.node_type.value
+        _row_exprs(self._row, self._columns, self._row.columns)
+        self._check_row_arena()
+
+    cdef void _check_row_arena(self) except *:
+        """After a whole-row rebuild: a conflict now is a step holding expressions
+        of two queries at once."""
+        if self._row.arena_conflict:
+            raise ValueError("a plan step holds expressions of two different queries")
+
+    cdef void _resync_on_arena_conflict(self) except *:
+        """After a single field write: rebuild the row if the write met another
+        arena (see _row_arena)."""
+        if self._row.arena_conflict:
+            self._sync_row()
+
+    def row_view(self):
+        """The native row as a dict - for checking it against the step's fields."""
+        cdef StepRow* r = self._row
+        return {
+            "kind": r.kind,
+            "columns": list(r.columns),
+            "relation": r.relation.decode("utf-8"),
+            "alias": r.alias.decode("utf-8"),
+            "predicates": list(r.predicates),
+            "has_schema": r.has_schema,
+            "schema_slots": list(r.schema_slots),
+            "schema_row_count_metric": None if r.schema_row_count_metric == kNoStepValue else r.schema_row_count_metric,
+            "schema_row_count_estimate": None if r.schema_row_count_estimate == kNoStepValue else r.schema_row_count_estimate,
+            "manifest": <uintptr_t>r.manifest,
+            "manifest_schema_slots": list(r.manifest_schema_slots),
+            "limit": None if r.limit == kNoStepValue else r.limit,
+            "has_pushed_aggregates": r.has_pushed_aggregates,
+            "pushed_groups": _keys_view(r.pushed_groups),
+            "pushed_distinct": r.pushed_distinct,
+            "condition": r.condition,
+            "join_type": r.join_type.decode("utf-8") if r.has_join_type else None,
+            "left_keys": _keys_view(r.left_keys),
+            "right_keys": _keys_view(r.right_keys),
+            "groups": _keys_view(r.groups),
+            "offset": None if r.offset == kNoStepValue else r.offset,
+            "cte_key": r.cte_key.decode("utf-8"),
+        }
 
     cdef void _init_common(self, object columns, object all_relations, object pre_update_columns, object uuid):
+        self._row.kind = <int32_t>self.node_type.value
         self.uuid = random_string_c(32, None) if uuid is None else uuid
         self.columns = columns
         self.all_relations = all_relations
@@ -299,6 +472,8 @@ cdef class PlanStep:
     def columns(self, value):
         self.write_count += 1
         self._columns = _require_expression_list(f"{type(self).__name__}.columns", value)
+        _row_exprs(self._row, self._columns, self._row.columns)
+        self._resync_on_arena_conflict()
 
     @property
     def all_relations(self):
@@ -524,6 +699,7 @@ cdef class AddColumnStep(PlanStep):
         new._if_not_exists = _copy_field(self._if_not_exists, memo)
         new._nullable = _copy_field(self._nullable, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -538,6 +714,7 @@ cdef class AddColumnStep(PlanStep):
         new._if_not_exists = self._if_not_exists
         new._nullable = self._nullable
         new._relation_name = self._relation_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -703,6 +880,7 @@ cdef class AddRelationshipStep(PlanStep):
         new._references_relation_parts = _copy_field(self._references_relation_parts, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
         new._relation_parts = _copy_field(self._relation_parts, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -719,6 +897,7 @@ cdef class AddRelationshipStep(PlanStep):
         new._references_relation_parts = self._references_relation_parts
         new._relation_name = self._relation_name
         new._relation_parts = self._relation_parts
+        new._row[0] = self._row[0]
         return new
 
 
@@ -729,6 +908,11 @@ cdef class AggregateStep(PlanStep):
     cdef tuple _groups
     cdef tuple _projection
     cdef object _schema
+
+    cdef void _sync_row(self) except *:
+        PlanStep._sync_row(self)
+        _row_keys(self._row, self._groups, self._row.groups)
+        self._check_row_arena()
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, aggregates=None, groups=None, projection=None, schema=None):
         self.node_type = _step_types().Aggregate
@@ -755,6 +939,8 @@ cdef class AggregateStep(PlanStep):
     def groups(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._groups = _require_expression_list("AggregateStep.groups", value)
+        _row_keys(self._row, self._groups, self._row.groups)
+        self._resync_on_arena_conflict()
 
     @property
     def projection(self):
@@ -811,6 +997,7 @@ cdef class AggregateStep(PlanStep):
         new._groups = _copy_field(self._groups, memo)
         new._projection = _copy_field(self._projection, memo)
         new._schema = _copy_field(self._schema, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -821,6 +1008,7 @@ cdef class AggregateStep(PlanStep):
         new._groups = self._groups
         new._projection = self._projection
         new._schema = self._schema
+        new._row[0] = self._row[0]
         return new
 
 
@@ -834,6 +1022,11 @@ cdef class AggregateAndGroupStep(PlanStep):
     cdef object _having_condition
     cdef tuple _projection
     cdef object _schema
+
+    cdef void _sync_row(self) except *:
+        PlanStep._sync_row(self)
+        _row_keys(self._row, self._groups, self._row.groups)
+        self._check_row_arena()
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, aggregates=None, grouping_set_identities=None, grouping_sets=None, groups=None, having_condition=None, projection=None, schema=None):
         self.node_type = _step_types().AggregateAndGroup
@@ -881,6 +1074,8 @@ cdef class AggregateAndGroupStep(PlanStep):
     def groups(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._groups = _require_expression_list("AggregateAndGroupStep.groups", value)
+        _row_keys(self._row, self._groups, self._row.groups)
+        self._resync_on_arena_conflict()
 
     @property
     def having_condition(self):
@@ -955,6 +1150,7 @@ cdef class AggregateAndGroupStep(PlanStep):
         new._having_condition = _copy_field(self._having_condition, memo)
         new._projection = _copy_field(self._projection, memo)
         new._schema = _copy_field(self._schema, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -968,6 +1164,7 @@ cdef class AggregateAndGroupStep(PlanStep):
         new._having_condition = self._having_condition
         new._projection = self._projection
         new._schema = self._schema
+        new._row[0] = self._row[0]
         return new
 
 
@@ -1081,6 +1278,7 @@ cdef class AlterColumnTypeStep(PlanStep):
         new._if_exists = _copy_field(self._if_exists, memo)
         new._new_column_type = _copy_field(self._new_column_type, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -1093,6 +1291,7 @@ cdef class AlterColumnTypeStep(PlanStep):
         new._if_exists = self._if_exists
         new._new_column_type = self._new_column_type
         new._relation_name = self._relation_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -1180,6 +1379,7 @@ cdef class AlterMaterializedViewOwnerStep(PlanStep):
         new._new_owner = _copy_field(self._new_owner, memo)
         new._owner_is_current_user = _copy_field(self._owner_is_current_user, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -1190,6 +1390,7 @@ cdef class AlterMaterializedViewOwnerStep(PlanStep):
         new._new_owner = self._new_owner
         new._owner_is_current_user = self._owner_is_current_user
         new._relation_name = self._relation_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -1264,6 +1465,7 @@ cdef class AlterMaterializedViewSuspendedStep(PlanStep):
         new._connector = _copy_field(self._connector, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
         new._suspended = _copy_field(self._suspended, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -1273,6 +1475,7 @@ cdef class AlterMaterializedViewSuspendedStep(PlanStep):
         new._connector = self._connector
         new._relation_name = self._relation_name
         new._suspended = self._suspended
+        new._row[0] = self._row[0]
         return new
 
 
@@ -1360,6 +1563,7 @@ cdef class AlterRelationStep(PlanStep):
         new._connector = _copy_field(self._connector, memo)
         new._if_exists = _copy_field(self._if_exists, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -1370,6 +1574,7 @@ cdef class AlterRelationStep(PlanStep):
         new._connector = self._connector
         new._if_exists = self._if_exists
         new._relation_name = self._relation_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -1469,6 +1674,7 @@ cdef class AlterTaskStep(PlanStep):
         new._statement = _copy_field(self._statement, memo)
         new._target_tables = _copy_field(self._target_tables, memo)
         new._task_name = _copy_field(self._task_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -1480,6 +1686,7 @@ cdef class AlterTaskStep(PlanStep):
         new._statement = self._statement
         new._target_tables = self._target_tables
         new._task_name = self._task_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -1567,6 +1774,7 @@ cdef class AlterTriggerMinimumIntervalStep(PlanStep):
         new._minimum_interval_seconds = _copy_field(self._minimum_interval_seconds, memo)
         new._table_name = _copy_field(self._table_name, memo)
         new._trigger_name = _copy_field(self._trigger_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -1577,6 +1785,7 @@ cdef class AlterTriggerMinimumIntervalStep(PlanStep):
         new._minimum_interval_seconds = self._minimum_interval_seconds
         new._table_name = self._table_name
         new._trigger_name = self._trigger_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -1690,6 +1899,7 @@ cdef class AlterTriggerOwnerStep(PlanStep):
         new._resolved_owner = _copy_field(self._resolved_owner, memo)
         new._table_name = _copy_field(self._table_name, memo)
         new._trigger_name = _copy_field(self._trigger_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -1702,6 +1912,7 @@ cdef class AlterTriggerOwnerStep(PlanStep):
         new._resolved_owner = self._resolved_owner
         new._table_name = self._table_name
         new._trigger_name = self._trigger_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -1789,6 +2000,7 @@ cdef class AlterTriggerSuspendedStep(PlanStep):
         new._suspended = _copy_field(self._suspended, memo)
         new._table_name = _copy_field(self._table_name, memo)
         new._trigger_name = _copy_field(self._trigger_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -1799,6 +2011,7 @@ cdef class AlterTriggerSuspendedStep(PlanStep):
         new._suspended = self._suspended
         new._table_name = self._table_name
         new._trigger_name = self._trigger_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -1898,6 +2111,7 @@ cdef class AlterViewStep(PlanStep):
         new._view_name = _copy_field(self._view_name, memo)
         new._view_schema = _copy_field(self._view_schema, memo)
         new._view_sql = _copy_field(self._view_sql, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -1909,6 +2123,7 @@ cdef class AlterViewStep(PlanStep):
         new._view_name = self._view_name
         new._view_schema = self._view_schema
         new._view_sql = self._view_sql
+        new._row[0] = self._row[0]
         return new
 
 
@@ -2009,6 +2224,7 @@ cdef class AlterWorkspaceStep(PlanStep):
         new._property_name = _copy_field(self._property_name, memo)
         new._property_value = _copy_field(self._property_value, memo)
         new._workspace_name = _copy_field(self._workspace_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -2020,6 +2236,7 @@ cdef class AlterWorkspaceStep(PlanStep):
         new._property_name = self._property_name
         new._property_value = self._property_value
         new._workspace_name = self._workspace_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -2106,6 +2323,7 @@ cdef class AlterWorkspaceSecureStep(PlanStep):
         new._secure_destinations = _copy_field(self._secure_destinations, memo)
         new._secure_object = _copy_field(self._secure_object, memo)
         new._workspace_name = _copy_field(self._workspace_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -2116,6 +2334,7 @@ cdef class AlterWorkspaceSecureStep(PlanStep):
         new._secure_destinations = self._secure_destinations
         new._secure_object = self._secure_object
         new._workspace_name = self._workspace_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -2202,6 +2421,7 @@ cdef class AnalyzeStep(PlanStep):
         new._analyze_columns = _copy_field(self._analyze_columns, memo)
         new._connector = _copy_field(self._connector, memo)
         new._table_name = _copy_field(self._table_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -2212,6 +2432,7 @@ cdef class AnalyzeStep(PlanStep):
         new._analyze_columns = self._analyze_columns
         new._connector = self._connector
         new._table_name = self._table_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -2272,6 +2493,7 @@ cdef class CallProcedureStep(PlanStep):
         self._copy_common_into(new, memo)
         new._arguments = _copy_field(self._arguments, memo)
         new._procedure_name = _copy_field(self._procedure_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -2280,6 +2502,7 @@ cdef class CallProcedureStep(PlanStep):
         self._share_common_into(new)
         new._arguments = self._arguments
         new._procedure_name = self._procedure_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -2353,6 +2576,7 @@ cdef class CloneCollectionStep(PlanStep):
         new._collection_name = _copy_field(self._collection_name, memo)
         new._connector = _copy_field(self._connector, memo)
         new._source_collection = _copy_field(self._source_collection, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -2362,6 +2586,7 @@ cdef class CloneCollectionStep(PlanStep):
         new._collection_name = self._collection_name
         new._connector = self._connector
         new._source_collection = self._source_collection
+        new._row[0] = self._row[0]
         return new
 
 
@@ -2449,6 +2674,7 @@ cdef class CloneRelationStep(PlanStep):
         new._if_not_exists = _copy_field(self._if_not_exists, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
         new._source_relation = _copy_field(self._source_relation, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -2459,6 +2685,7 @@ cdef class CloneRelationStep(PlanStep):
         new._if_not_exists = self._if_not_exists
         new._relation_name = self._relation_name
         new._source_relation = self._source_relation
+        new._row[0] = self._row[0]
         return new
 
 
@@ -2559,6 +2786,7 @@ cdef class CommentStep(PlanStep):
         new._if_exists = _copy_field(self._if_exists, memo)
         new._object_name = _copy_field(self._object_name, memo)
         new._object_type = _copy_field(self._object_type, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -2570,6 +2798,7 @@ cdef class CommentStep(PlanStep):
         new._if_exists = self._if_exists
         new._object_name = self._object_name
         new._object_type = self._object_type
+        new._row[0] = self._row[0]
         return new
 
 
@@ -2684,6 +2913,7 @@ cdef class CompactionCommitStep(PlanStep):
         new._retired_files = _copy_field(self._retired_files, memo)
         new._sorted_by = _copy_field(self._sorted_by, memo)
         new._source_tail_id = _copy_field(self._source_tail_id, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -2696,6 +2926,7 @@ cdef class CompactionCommitStep(PlanStep):
         new._retired_files = self._retired_files
         new._sorted_by = self._sorted_by
         new._source_tail_id = self._source_tail_id
+        new._row[0] = self._row[0]
         return new
 
 
@@ -2770,6 +3001,7 @@ cdef class CreateCollectionStep(PlanStep):
         new._collection_name = _copy_field(self._collection_name, memo)
         new._connector = _copy_field(self._connector, memo)
         new._if_not_exists = _copy_field(self._if_not_exists, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -2779,6 +3011,7 @@ cdef class CreateCollectionStep(PlanStep):
         new._collection_name = self._collection_name
         new._connector = self._connector
         new._if_not_exists = self._if_not_exists
+        new._row[0] = self._row[0]
         return new
 
 
@@ -2879,6 +3112,7 @@ cdef class CreateRelationStep(PlanStep):
         new._relation_name = _copy_field(self._relation_name, memo)
         new._relationships = _copy_field(self._relationships, memo)
         new._schema = _copy_field(self._schema, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -2890,6 +3124,7 @@ cdef class CreateRelationStep(PlanStep):
         new._relation_name = self._relation_name
         new._relationships = self._relationships
         new._schema = self._schema
+        new._row[0] = self._row[0]
         return new
 
 
@@ -2990,6 +3225,7 @@ cdef class CreateTagStep(PlanStep):
         new._relation_name = _copy_field(self._relation_name, memo)
         new._tag_name = _copy_field(self._tag_name, memo)
         new._version_spec = _copy_field(self._version_spec, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -3001,6 +3237,7 @@ cdef class CreateTagStep(PlanStep):
         new._relation_name = self._relation_name
         new._tag_name = self._tag_name
         new._version_spec = self._version_spec
+        new._row[0] = self._row[0]
         return new
 
 
@@ -3141,6 +3378,7 @@ cdef class CreateTaskStep(PlanStep):
         new._statement = _copy_field(self._statement, memo)
         new._target_tables = _copy_field(self._target_tables, memo)
         new._task_name = _copy_field(self._task_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -3155,6 +3393,7 @@ cdef class CreateTaskStep(PlanStep):
         new._statement = self._statement
         new._target_tables = self._target_tables
         new._task_name = self._task_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -3321,6 +3560,7 @@ cdef class CreateTriggerStep(PlanStep):
         new._time_zone = _copy_field(self._time_zone, memo)
         new._trigger_name = _copy_field(self._trigger_name, memo)
         new._window_source = _copy_field(self._window_source, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -3337,6 +3577,7 @@ cdef class CreateTriggerStep(PlanStep):
         new._time_zone = self._time_zone
         new._trigger_name = self._trigger_name
         new._window_source = self._window_source
+        new._row[0] = self._row[0]
         return new
 
 
@@ -3464,6 +3705,7 @@ cdef class CreateViewStep(PlanStep):
         new._view_name = _copy_field(self._view_name, memo)
         new._view_schema = _copy_field(self._view_schema, memo)
         new._view_sql = _copy_field(self._view_sql, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -3477,6 +3719,7 @@ cdef class CreateViewStep(PlanStep):
         new._view_name = self._view_name
         new._view_schema = self._view_schema
         new._view_sql = self._view_sql
+        new._row[0] = self._row[0]
         return new
 
 
@@ -3537,6 +3780,7 @@ cdef class DetachRelationStep(PlanStep):
         self._copy_common_into(new, memo)
         new._connector = _copy_field(self._connector, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -3545,6 +3789,7 @@ cdef class DetachRelationStep(PlanStep):
         self._share_common_into(new)
         new._connector = self._connector
         new._relation_name = self._relation_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -3607,6 +3852,7 @@ cdef class DistinctStep(PlanStep):
         self._copy_common_into(new, memo)
         new._alias = _copy_field(self._alias, memo)
         new._on = _copy_field(self._on, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -3615,6 +3861,7 @@ cdef class DistinctStep(PlanStep):
         self._share_common_into(new)
         new._alias = self._alias
         new._on = self._on
+        new._row[0] = self._row[0]
         return new
 
 
@@ -3689,6 +3936,7 @@ cdef class DropCollectionStep(PlanStep):
         new._collection_names = _copy_field(self._collection_names, memo)
         new._connectors = _copy_field(self._connectors, memo)
         new._if_exists = _copy_field(self._if_exists, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -3698,6 +3946,7 @@ cdef class DropCollectionStep(PlanStep):
         new._collection_names = self._collection_names
         new._connectors = self._connectors
         new._if_exists = self._if_exists
+        new._row[0] = self._row[0]
         return new
 
 
@@ -3799,6 +4048,7 @@ cdef class DropColumnStep(PlanStep):
         new._connector = _copy_field(self._connector, memo)
         new._if_exists = _copy_field(self._if_exists, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -3810,6 +4060,7 @@ cdef class DropColumnStep(PlanStep):
         new._connector = self._connector
         new._if_exists = self._if_exists
         new._relation_name = self._relation_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -3898,6 +4149,7 @@ cdef class DropRelationStep(PlanStep):
         new._if_exists = _copy_field(self._if_exists, memo)
         new._is_materialized_view = _copy_field(self._is_materialized_view, memo)
         new._relation_names = _copy_field(self._relation_names, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -3908,6 +4160,7 @@ cdef class DropRelationStep(PlanStep):
         new._if_exists = self._if_exists
         new._is_materialized_view = self._is_materialized_view
         new._relation_names = self._relation_names
+        new._row[0] = self._row[0]
         return new
 
 
@@ -4022,6 +4275,7 @@ cdef class DropRelationshipStep(PlanStep):
         new._if_exists = _copy_field(self._if_exists, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
         new._relation_parts = _copy_field(self._relation_parts, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -4034,6 +4288,7 @@ cdef class DropRelationshipStep(PlanStep):
         new._if_exists = self._if_exists
         new._relation_name = self._relation_name
         new._relation_parts = self._relation_parts
+        new._row[0] = self._row[0]
         return new
 
 
@@ -4121,6 +4376,7 @@ cdef class DropTagStep(PlanStep):
         new._if_exists = _copy_field(self._if_exists, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
         new._tag_name = _copy_field(self._tag_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -4131,6 +4387,7 @@ cdef class DropTagStep(PlanStep):
         new._if_exists = self._if_exists
         new._relation_name = self._relation_name
         new._tag_name = self._tag_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -4205,6 +4462,7 @@ cdef class DropTaskStep(PlanStep):
         new._connector = _copy_field(self._connector, memo)
         new._if_exists = _copy_field(self._if_exists, memo)
         new._task_name = _copy_field(self._task_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -4214,6 +4472,7 @@ cdef class DropTaskStep(PlanStep):
         new._connector = self._connector
         new._if_exists = self._if_exists
         new._task_name = self._task_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -4301,6 +4560,7 @@ cdef class DropTriggerStep(PlanStep):
         new._if_exists = _copy_field(self._if_exists, memo)
         new._table_name = _copy_field(self._table_name, memo)
         new._trigger_name = _copy_field(self._trigger_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -4311,6 +4571,7 @@ cdef class DropTriggerStep(PlanStep):
         new._if_exists = self._if_exists
         new._table_name = self._table_name
         new._trigger_name = self._trigger_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -4385,6 +4646,7 @@ cdef class DropViewStep(PlanStep):
         new._connectors = _copy_field(self._connectors, memo)
         new._if_exists = _copy_field(self._if_exists, memo)
         new._view_names = _copy_field(self._view_names, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -4394,6 +4656,7 @@ cdef class DropViewStep(PlanStep):
         new._connectors = self._connectors
         new._if_exists = self._if_exists
         new._view_names = self._view_names
+        new._row[0] = self._row[0]
         return new
 
 
@@ -4468,6 +4731,7 @@ cdef class DropWorkspaceStep(PlanStep):
         new._connector = _copy_field(self._connector, memo)
         new._if_exists = _copy_field(self._if_exists, memo)
         new._workspace_name = _copy_field(self._workspace_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -4477,6 +4741,7 @@ cdef class DropWorkspaceStep(PlanStep):
         new._connector = self._connector
         new._if_exists = self._if_exists
         new._workspace_name = self._workspace_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -4550,6 +4815,7 @@ cdef class ExceptStep(PlanStep):
         new._left_relation_names = _copy_field(self._left_relation_names, memo)
         new._modifier = _copy_field(self._modifier, memo)
         new._right_relation_names = _copy_field(self._right_relation_names, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -4559,6 +4825,7 @@ cdef class ExceptStep(PlanStep):
         new._left_relation_names = self._left_relation_names
         new._modifier = self._modifier
         new._right_relation_names = self._right_relation_names
+        new._row[0] = self._row[0]
         return new
 
 
@@ -4619,6 +4886,7 @@ cdef class ExitStep(PlanStep):
         self._copy_common_into(new, memo)
         new._hidden_columns = _copy_field(self._hidden_columns, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -4627,6 +4895,7 @@ cdef class ExitStep(PlanStep):
         self._share_common_into(new)
         new._hidden_columns = self._hidden_columns
         new._relation_name = self._relation_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -4688,6 +4957,7 @@ cdef class ExplainStep(PlanStep):
         self._copy_common_into(new, memo)
         new._analyze = _copy_field(self._analyze, memo)
         new._format = _copy_field(self._format, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -4696,6 +4966,7 @@ cdef class ExplainStep(PlanStep):
         self._share_common_into(new)
         new._analyze = self._analyze
         new._format = self._format
+        new._row[0] = self._row[0]
         return new
 
 
@@ -4711,6 +4982,11 @@ cdef class FilterStep(PlanStep):
     cdef set _pre_inline_relations
     cdef object _relations
     cdef dict _sources
+
+    cdef void _sync_row(self) except *:
+        PlanStep._sync_row(self)
+        self._row.condition = _row_expr(self._row, self._condition)
+        self._check_row_arena()
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, condition=None, deep_restore_target=None, from_join_on=None, pre_inline_columns=None, pre_inline_condition=None, pre_inline_relations=None, relations=None, sources=None):
         self.node_type = _step_types().Filter
@@ -4743,6 +5019,8 @@ cdef class FilterStep(PlanStep):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_expression("FilterStep.condition", value)
         self._condition = value
+        self._row.condition = _row_expr(self._row, self._condition)
+        self._resync_on_arena_conflict()
 
     @property
     def deep_restore_target(self):
@@ -4857,6 +5135,7 @@ cdef class FilterStep(PlanStep):
         new._pre_inline_relations = _copy_field(self._pre_inline_relations, memo)
         new._relations = _copy_field(self._relations, memo)
         new._sources = _copy_field(self._sources, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -4872,6 +5151,7 @@ cdef class FilterStep(PlanStep):
         new._pre_inline_relations = self._pre_inline_relations
         new._relations = self._relations
         new._sources = self._sources
+        new._row[0] = self._row[0]
         return new
 
 
@@ -4977,6 +5257,7 @@ cdef class FramedWindowStep(PlanStep):
         new._outputs = _copy_field(self._outputs, memo)
         new._partition_by = _copy_field(self._partition_by, memo)
         new._window_functions = _copy_field(self._window_functions, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -4988,6 +5269,7 @@ cdef class FramedWindowStep(PlanStep):
         new._outputs = self._outputs
         new._partition_by = self._partition_by
         new._window_functions = self._window_functions
+        new._row[0] = self._row[0]
         return new
 
 
@@ -5023,6 +5305,11 @@ cdef class FunctionDatasetStep(PlanStep):
     cdef str _series_column
     cdef str _unnest_target
     cdef tuple _values
+
+    cdef void _sync_row(self) except *:
+        PlanStep._sync_row(self)
+        _row_str(self._relation, self._row.relation)
+        self._check_row_arena()
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, args=None, column_aliases=None, connector=None, csv_fail_on_error=None, csv_files=None, csv_has_header_row=None, csv_infer_sample_size=None, csv_physical_by_identity=None, csv_physical_columns=None, csv_separator=None, dataset=None, function=None, hints=None, jsonl_fail_on_error=None, jsonl_files=None, jsonl_infer_sample_size=None, jsonl_infer_schema=None, jsonl_physical_by_identity=None, jsonl_physical_columns=None, manifest=None, named_args=None, predicates=None, relation=None, relation_name=None, schema=None, series_column=None, unnest_target=None, values=None):
         self.node_type = _step_types().FunctionDataset
@@ -5278,6 +5565,7 @@ cdef class FunctionDatasetStep(PlanStep):
     def relation(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation = value
+        _row_str(self._relation, self._row.relation)
 
     @property
     def relation_name(self):
@@ -5413,6 +5701,7 @@ cdef class FunctionDatasetStep(PlanStep):
         new._series_column = _copy_field(self._series_column, memo)
         new._unnest_target = _copy_field(self._unnest_target, memo)
         new._values = _copy_field(self._values, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -5448,6 +5737,7 @@ cdef class FunctionDatasetStep(PlanStep):
         new._series_column = self._series_column
         new._unnest_target = self._unnest_target
         new._values = self._values
+        new._row[0] = self._row[0]
         return new
 
 
@@ -5560,6 +5850,7 @@ cdef class GrantAccessStep(PlanStep):
         new._pattern = _copy_field(self._pattern, memo)
         new._principal = _copy_field(self._principal, memo)
         new._role = _copy_field(self._role, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -5572,6 +5863,7 @@ cdef class GrantAccessStep(PlanStep):
         new._pattern = self._pattern
         new._principal = self._principal
         new._role = self._role
+        new._row[0] = self._row[0]
         return new
 
 
@@ -5581,6 +5873,11 @@ cdef class HeapSortStep(PlanStep):
     cdef object _limit
     cdef tuple _order_by
     cdef object _vector_topk_candidate
+
+    cdef void _sync_row(self) except *:
+        PlanStep._sync_row(self)
+        self._row.limit = _row_int(self._limit)
+        self._check_row_arena()
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, limit=None, order_by=None, vector_topk_candidate=None):
         self.node_type = _step_types().HeapSort
@@ -5598,6 +5895,7 @@ cdef class HeapSortStep(PlanStep):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("HeapSortStep.limit", value)
         self._limit = value
+        self._row.limit = _row_int(self._limit)
 
     @property
     def order_by(self):
@@ -5649,6 +5947,7 @@ cdef class HeapSortStep(PlanStep):
         new._limit = _copy_field(self._limit, memo)
         new._order_by = _copy_field(self._order_by, memo)
         new._vector_topk_candidate = _copy_field(self._vector_topk_candidate, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -5658,6 +5957,7 @@ cdef class HeapSortStep(PlanStep):
         new._limit = self._limit
         new._order_by = self._order_by
         new._vector_topk_candidate = self._vector_topk_candidate
+        new._row[0] = self._row[0]
         return new
 
 
@@ -5975,6 +6275,7 @@ cdef class InsertStep(PlanStep):
         new._target_schema = _copy_field(self._target_schema, memo)
         new._values_feeder = _copy_field(self._values_feeder, memo)
         new._write_coalesce_rows = _copy_field(self._write_coalesce_rows, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -6002,6 +6303,7 @@ cdef class InsertStep(PlanStep):
         new._target_schema = self._target_schema
         new._values_feeder = self._values_feeder
         new._write_coalesce_rows = self._write_coalesce_rows
+        new._row[0] = self._row[0]
         return new
 
 
@@ -6075,6 +6377,7 @@ cdef class IntersectStep(PlanStep):
         new._left_relation_names = _copy_field(self._left_relation_names, memo)
         new._modifier = _copy_field(self._modifier, memo)
         new._right_relation_names = _copy_field(self._right_relation_names, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -6084,6 +6387,7 @@ cdef class IntersectStep(PlanStep):
         new._left_relation_names = self._left_relation_names
         new._modifier = self._modifier
         new._right_relation_names = self._right_relation_names
+        new._row[0] = self._row[0]
         return new
 
 
@@ -6123,6 +6427,14 @@ cdef class JoinStep(PlanStep):
     cdef str _type
     cdef tuple _using
     cdef tuple _using_merged
+
+    cdef void _sync_row(self) except *:
+        PlanStep._sync_row(self)
+        self._row.has_join_type = self._type is not None
+        _row_str(self._type, self._row.join_type)
+        _row_keys(self._row, self._left_columns, self._row.left_keys)
+        _row_keys(self._row, self._right_columns, self._row.right_keys)
+        self._check_row_arena()
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, asof_condition=None, asof_left_column=None, asof_op=None, asof_right_column=None, band_column=None, band_column_name=None, band_lower=None, band_lower_closed=None, band_upper=None, band_upper_closed=None, existence_column=None, existence_three_valued=None, implied_join=None, is_window_join=None, left_column=None, left_columns=None, left_readers=None, left_relation_names=None, on=None, reducer_applied=None, relation_names=None, residual=None, right_column=None, right_columns=None, right_readers=None, right_relation_names=None, schemas=None, setop_leg_columns=None, swap_build_side=None, type=None, using=None, using_merged=None):
         self.node_type = _step_types().Join
@@ -6322,6 +6634,8 @@ cdef class JoinStep(PlanStep):
     def left_columns(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._left_columns = _frozen_list("JoinStep.left_columns", value)
+        _row_keys(self._row, self._left_columns, self._row.left_keys)
+        self._resync_on_arena_conflict()
 
     @property
     def left_readers(self):
@@ -6397,6 +6711,8 @@ cdef class JoinStep(PlanStep):
     def right_columns(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._right_columns = _frozen_list("JoinStep.right_columns", value)
+        _row_keys(self._row, self._right_columns, self._row.right_keys)
+        self._resync_on_arena_conflict()
 
     @property
     def right_readers(self):
@@ -6452,6 +6768,8 @@ cdef class JoinStep(PlanStep):
     def type(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._type = value
+        self._row.has_join_type = self._type is not None
+        _row_str(self._type, self._row.join_type)
 
     @property
     def using(self):
@@ -6574,6 +6892,7 @@ cdef class JoinStep(PlanStep):
         new._type = _copy_field(self._type, memo)
         new._using = _copy_field(self._using, memo)
         new._using_merged = _copy_field(self._using_merged, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -6613,6 +6932,7 @@ cdef class JoinStep(PlanStep):
         new._type = self._type
         new._using = self._using
         new._using_merged = self._using_merged
+        new._row[0] = self._row[0]
         return new
 
 
@@ -6622,6 +6942,12 @@ cdef class LimitStep(PlanStep):
     cdef str _alias
     cdef object _limit
     cdef object _offset
+
+    cdef void _sync_row(self) except *:
+        PlanStep._sync_row(self)
+        self._row.limit = _row_int(self._limit)
+        self._row.offset = _row_int(self._offset)
+        self._check_row_arena()
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, limit=None, offset=None):
         self.node_type = _step_types().Limit
@@ -6648,6 +6974,7 @@ cdef class LimitStep(PlanStep):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("LimitStep.limit", value)
         self._limit = value
+        self._row.limit = _row_int(self._limit)
 
     @property
     def offset(self):
@@ -6658,6 +6985,7 @@ cdef class LimitStep(PlanStep):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("LimitStep.offset", value)
         self._offset = value
+        self._row.offset = _row_int(self._offset)
 
     cpdef tuple expressions(self, bint include_columns=True):
         cdef list out = []
@@ -6688,6 +7016,7 @@ cdef class LimitStep(PlanStep):
         new._alias = _copy_field(self._alias, memo)
         new._limit = _copy_field(self._limit, memo)
         new._offset = _copy_field(self._offset, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -6697,6 +7026,7 @@ cdef class LimitStep(PlanStep):
         new._alias = self._alias
         new._limit = self._limit
         new._offset = self._offset
+        new._row[0] = self._row[0]
         return new
 
 
@@ -6796,6 +7126,7 @@ cdef class ListenStep(PlanStep):
         new._object_kind = _copy_field(self._object_kind, memo)
         new._outcome = _copy_field(self._outcome, memo)
         new._task_name = _copy_field(self._task_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -6807,6 +7138,7 @@ cdef class ListenStep(PlanStep):
         new._object_kind = self._object_kind
         new._outcome = self._outcome
         new._task_name = self._task_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -6822,6 +7154,12 @@ cdef class MaterializedCteRefStep(PlanStep):
     cdef str _relation
     cdef object _schema
     cdef tuple _unpruned_columns
+
+    cdef void _sync_row(self) except *:
+        PlanStep._sync_row(self)
+        _row_str(self._relation, self._row.relation)
+        _row_str(self._cte_key, self._row.cte_key)
+        self._check_row_arena()
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, cte_column_map=None, cte_key=None, cte_name=None, hint_settings=None, hints=None, relation=None, schema=None, unpruned_columns=None):
         self.node_type = _step_types().MaterializedCteRef
@@ -6862,6 +7200,7 @@ cdef class MaterializedCteRefStep(PlanStep):
     def cte_key(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._cte_key = value
+        _row_str(self._cte_key, self._row.cte_key)
 
     @property
     def cte_name(self):
@@ -6898,6 +7237,7 @@ cdef class MaterializedCteRefStep(PlanStep):
     def relation(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation = value
+        _row_str(self._relation, self._row.relation)
 
     @property
     def schema(self):
@@ -6960,6 +7300,7 @@ cdef class MaterializedCteRefStep(PlanStep):
         new._relation = _copy_field(self._relation, memo)
         new._schema = _copy_field(self._schema, memo)
         new._unpruned_columns = _copy_field(self._unpruned_columns, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -6975,6 +7316,7 @@ cdef class MaterializedCteRefStep(PlanStep):
         new._relation = self._relation
         new._schema = self._schema
         new._unpruned_columns = self._unpruned_columns
+        new._row[0] = self._row[0]
         return new
 
 
@@ -7153,6 +7495,7 @@ cdef class MergeStep(PlanStep):
         new._target_alias = _copy_field(self._target_alias, memo)
         new._target_column_names = _copy_field(self._target_column_names, memo)
         new._target_schema = _copy_field(self._target_schema, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -7170,6 +7513,7 @@ cdef class MergeStep(PlanStep):
         new._target_alias = self._target_alias
         new._target_column_names = self._target_column_names
         new._target_schema = self._target_schema
+        new._row[0] = self._row[0]
         return new
 
 
@@ -7232,6 +7576,7 @@ cdef class OrderStep(PlanStep):
         self._copy_common_into(new, memo)
         new._alias = _copy_field(self._alias, memo)
         new._order_by = _copy_field(self._order_by, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -7240,6 +7585,7 @@ cdef class OrderStep(PlanStep):
         self._share_common_into(new)
         new._alias = self._alias
         new._order_by = self._order_by
+        new._row[0] = self._row[0]
         return new
 
 
@@ -7385,6 +7731,7 @@ cdef class ProjectStep(PlanStep):
         new._passthrough_columns = _copy_field(self._passthrough_columns, memo)
         new._schema = _copy_field(self._schema, memo)
         new._sources = _copy_field(self._sources, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -7399,6 +7746,7 @@ cdef class ProjectStep(PlanStep):
         new._passthrough_columns = self._passthrough_columns
         new._schema = self._schema
         new._sources = self._sources
+        new._row[0] = self._row[0]
         return new
 
 
@@ -7499,6 +7847,7 @@ cdef class RenameColumnStep(PlanStep):
         new._if_exists = _copy_field(self._if_exists, memo)
         new._new_column_name = _copy_field(self._new_column_name, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -7510,6 +7859,7 @@ cdef class RenameColumnStep(PlanStep):
         new._if_exists = self._if_exists
         new._new_column_name = self._new_column_name
         new._relation_name = self._relation_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -7597,6 +7947,7 @@ cdef class RenameRelationStep(PlanStep):
         new._if_exists = _copy_field(self._if_exists, memo)
         new._new_relation_name = _copy_field(self._new_relation_name, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -7607,6 +7958,7 @@ cdef class RenameRelationStep(PlanStep):
         new._if_exists = self._if_exists
         new._new_relation_name = self._new_relation_name
         new._relation_name = self._relation_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -7681,6 +8033,7 @@ cdef class ResyncRelationStep(PlanStep):
         new._connector = _copy_field(self._connector, memo)
         new._force = _copy_field(self._force, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -7690,6 +8043,7 @@ cdef class ResyncRelationStep(PlanStep):
         new._connector = self._connector
         new._force = self._force
         new._relation_name = self._relation_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -7802,6 +8156,7 @@ cdef class RevokeAccessStep(PlanStep):
         new._pattern = _copy_field(self._pattern, memo)
         new._principal = _copy_field(self._principal, memo)
         new._role = _copy_field(self._role, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -7814,6 +8169,7 @@ cdef class RevokeAccessStep(PlanStep):
         new._pattern = self._pattern
         new._principal = self._principal
         new._role = self._role
+        new._row[0] = self._row[0]
         return new
 
 
@@ -7901,6 +8257,7 @@ cdef class RollbackRelationStep(PlanStep):
         new._if_exists = _copy_field(self._if_exists, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
         new._version_spec = _copy_field(self._version_spec, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -7911,6 +8268,7 @@ cdef class RollbackRelationStep(PlanStep):
         new._if_exists = self._if_exists
         new._relation_name = self._relation_name
         new._version_spec = self._version_spec
+        new._row[0] = self._row[0]
         return new
 
 
@@ -7945,12 +8303,14 @@ cdef class ScalarSubqueryGuardStep(PlanStep):
         new.node_type = self.node_type
         memo[id(self)] = new
         self._copy_common_into(new, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
         cdef ScalarSubqueryGuardStep new = ScalarSubqueryGuardStep.__new__(ScalarSubqueryGuardStep)
         new.node_type = self.node_type
         self._share_common_into(new)
+        new._row[0] = self._row[0]
         return new
 
 
@@ -7994,6 +8354,19 @@ cdef class ScanStep(PlanStep):
     cdef object _version
     cdef str _version_tag
     cdef str _via_view
+
+    cdef void _sync_row(self) except *:
+        PlanStep._sync_row(self)
+        _row_str(self._relation, self._row.relation)
+        _row_str(self._alias, self._row.alias)
+        _row_exprs(self._row, self._predicates, self._row.predicates)
+        _row_scan_schema(self._row, self._schema)
+        _row_manifest(self._row, self._manifest)
+        self._row.limit = _row_int(self._limit)
+        self._row.has_pushed_aggregates = self._pushed_aggregates is not None
+        _row_keys(self._row, self._pushed_groups, self._row.pushed_groups)
+        self._row.pushed_distinct = self._pushed_distinct is True
+        self._check_row_arena()
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, at_date=None, connector=None, dataset_committed_at=None, emit_row_identity=None, end_date=None, for_manifest_only=None, for_snapshots_only=None, hint_settings=None, hints=None, history_view=None, internal_relation=None, length_only_columns=None, limit=None, manifest=None, pending_cte_key=None, predicates=None, pushed_aggregates=None, pushed_distinct=None, pushed_groups=None, relation=None, resolved_dataset=None, row_identity_statement=None, schema=None, source=None, start_date=None, topn_boundary_key=None, topn_descending=None, topn_limit=None, topn_nulls_first=None, topn_order_by=None, topn_sort_identity=None, topn_sort_name=None, unpruned_columns=None, version=None, version_tag=None, via_view=None):
         self.node_type = _step_types().Scan
@@ -8044,6 +8417,7 @@ cdef class ScanStep(PlanStep):
     def alias(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._alias = value
+        _row_str(self._alias, self._row.alias)
 
     @property
     def at_date(self):
@@ -8167,6 +8541,7 @@ cdef class ScanStep(PlanStep):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_int("ScanStep.limit", value)
         self._limit = value
+        self._row.limit = _row_int(self._limit)
 
     @property
     def manifest(self):
@@ -8176,6 +8551,7 @@ cdef class ScanStep(PlanStep):
     def manifest(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._manifest = value
+        _row_manifest(self._row, self._manifest)
 
     @property
     def pending_cte_key(self):
@@ -8194,6 +8570,8 @@ cdef class ScanStep(PlanStep):
     def predicates(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._predicates = _require_expression_list("ScanStep.predicates", value)
+        _row_exprs(self._row, self._predicates, self._row.predicates)
+        self._resync_on_arena_conflict()
 
     @property
     def pushed_aggregates(self):
@@ -8203,6 +8581,7 @@ cdef class ScanStep(PlanStep):
     def pushed_aggregates(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._pushed_aggregates = _require_expression_list("ScanStep.pushed_aggregates", value)
+        self._row.has_pushed_aggregates = self._pushed_aggregates is not None
 
     @property
     def pushed_distinct(self):
@@ -8213,6 +8592,7 @@ cdef class ScanStep(PlanStep):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         _require_optional_bool("ScanStep.pushed_distinct", value)
         self._pushed_distinct = value
+        self._row.pushed_distinct = self._pushed_distinct is True
 
     @property
     def pushed_groups(self):
@@ -8222,6 +8602,8 @@ cdef class ScanStep(PlanStep):
     def pushed_groups(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._pushed_groups = _require_expression_list("ScanStep.pushed_groups", value)
+        _row_keys(self._row, self._pushed_groups, self._row.pushed_groups)
+        self._resync_on_arena_conflict()
 
     @property
     def relation(self):
@@ -8231,6 +8613,7 @@ cdef class ScanStep(PlanStep):
     def relation(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation = value
+        _row_str(self._relation, self._row.relation)
 
     @property
     def resolved_dataset(self):
@@ -8258,6 +8641,7 @@ cdef class ScanStep(PlanStep):
     def schema(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._schema = value
+        _row_scan_schema(self._row, self._schema)
 
     @property
     def source(self):
@@ -8494,6 +8878,7 @@ cdef class ScanStep(PlanStep):
         new._version = _copy_field(self._version, memo)
         new._version_tag = _copy_field(self._version_tag, memo)
         new._via_view = _copy_field(self._via_view, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -8537,6 +8922,7 @@ cdef class ScanStep(PlanStep):
         new._version = self._version
         new._version_tag = self._version_tag
         new._via_view = self._via_view
+        new._row[0] = self._row[0]
         return new
 
 
@@ -8613,6 +8999,7 @@ cdef class SetStep(PlanStep):
         new._value = _copy_field(self._value, memo)
         new._variable = _copy_field(self._variable, memo)
         new._variables = _copy_field(self._variables, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -8622,6 +9009,7 @@ cdef class SetStep(PlanStep):
         new._value = self._value
         new._variable = self._variable
         new._variables = self._variables
+        new._row[0] = self._row[0]
         return new
 
 
@@ -8708,6 +9096,7 @@ cdef class ShowStep(PlanStep):
         new._object_name = _copy_field(self._object_name, memo)
         new._object_type = _copy_field(self._object_type, memo)
         new._trigger_name = _copy_field(self._trigger_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -8718,6 +9107,7 @@ cdef class ShowStep(PlanStep):
         new._object_name = self._object_name
         new._object_type = self._object_type
         new._trigger_name = self._trigger_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -8728,6 +9118,11 @@ cdef class ShowColumnsStep(PlanStep):
     cdef object _full
     cdef str _relation
     cdef object _schema
+
+    cdef void _sync_row(self) except *:
+        PlanStep._sync_row(self)
+        _row_str(self._relation, self._row.relation)
+        self._check_row_arena()
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, extended=None, full=None, relation=None, schema=None):
         self.node_type = _step_types().ShowColumns
@@ -8765,6 +9160,7 @@ cdef class ShowColumnsStep(PlanStep):
     def relation(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation = value
+        _row_str(self._relation, self._row.relation)
 
     @property
     def schema(self):
@@ -8806,6 +9202,7 @@ cdef class ShowColumnsStep(PlanStep):
         new._full = _copy_field(self._full, memo)
         new._relation = _copy_field(self._relation, memo)
         new._schema = _copy_field(self._schema, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -8816,6 +9213,7 @@ cdef class ShowColumnsStep(PlanStep):
         new._full = self._full
         new._relation = self._relation
         new._schema = self._schema
+        new._row[0] = self._row[0]
         return new
 
 
@@ -8916,6 +9314,7 @@ cdef class ShowEffectiveGrantsOnStep(PlanStep):
         new._object_kind = _copy_field(self._object_kind, memo)
         new._object_name = _copy_field(self._object_name, memo)
         new._pattern = _copy_field(self._pattern, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -8927,6 +9326,7 @@ cdef class ShowEffectiveGrantsOnStep(PlanStep):
         new._object_kind = self._object_kind
         new._object_name = self._object_name
         new._pattern = self._pattern
+        new._row[0] = self._row[0]
         return new
 
 
@@ -9027,6 +9427,7 @@ cdef class ShowGrantsOnStep(PlanStep):
         new._object_kind = _copy_field(self._object_kind, memo)
         new._object_name = _copy_field(self._object_name, memo)
         new._pattern = _copy_field(self._pattern, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -9038,6 +9439,7 @@ cdef class ShowGrantsOnStep(PlanStep):
         new._object_kind = self._object_kind
         new._object_name = self._object_name
         new._pattern = self._pattern
+        new._row[0] = self._row[0]
         return new
 
 
@@ -9048,6 +9450,11 @@ cdef class ShowLineageStep(PlanStep):
     cdef tuple _lineage
     cdef str _relation
     cdef object _schema
+
+    cdef void _sync_row(self) except *:
+        PlanStep._sync_row(self)
+        _row_str(self._relation, self._row.relation)
+        self._check_row_arena()
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, history_view=None, lineage=None, relation=None, schema=None):
         self.node_type = _step_types().ShowLineage
@@ -9083,6 +9490,7 @@ cdef class ShowLineageStep(PlanStep):
     def relation(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation = value
+        _row_str(self._relation, self._row.relation)
 
     @property
     def schema(self):
@@ -9124,6 +9532,7 @@ cdef class ShowLineageStep(PlanStep):
         new._lineage = _copy_field(self._lineage, memo)
         new._relation = _copy_field(self._relation, memo)
         new._schema = _copy_field(self._schema, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -9134,6 +9543,7 @@ cdef class ShowLineageStep(PlanStep):
         new._lineage = self._lineage
         new._relation = self._relation
         new._schema = self._schema
+        new._row[0] = self._row[0]
         return new
 
 
@@ -9143,6 +9553,11 @@ cdef class ShowManifestStep(PlanStep):
     cdef object _manifest
     cdef str _relation
     cdef object _schema
+
+    cdef void _sync_row(self) except *:
+        PlanStep._sync_row(self)
+        _row_str(self._relation, self._row.relation)
+        self._check_row_arena()
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, manifest=None, relation=None, schema=None):
         self.node_type = _step_types().ShowManifest
@@ -9168,6 +9583,7 @@ cdef class ShowManifestStep(PlanStep):
     def relation(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation = value
+        _row_str(self._relation, self._row.relation)
 
     @property
     def schema(self):
@@ -9207,6 +9623,7 @@ cdef class ShowManifestStep(PlanStep):
         new._manifest = _copy_field(self._manifest, memo)
         new._relation = _copy_field(self._relation, memo)
         new._schema = _copy_field(self._schema, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -9216,6 +9633,7 @@ cdef class ShowManifestStep(PlanStep):
         new._manifest = self._manifest
         new._relation = self._relation
         new._schema = self._schema
+        new._row[0] = self._row[0]
         return new
 
 
@@ -9226,6 +9644,11 @@ cdef class ShowSnapshotsStep(PlanStep):
     cdef str _relation
     cdef object _schema
     cdef object _snapshots
+
+    cdef void _sync_row(self) except *:
+        PlanStep._sync_row(self)
+        _row_str(self._relation, self._row.relation)
+        self._check_row_arena()
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, history_view=None, relation=None, schema=None, snapshots=None):
         self.node_type = _step_types().ShowSnapshots
@@ -9252,6 +9675,7 @@ cdef class ShowSnapshotsStep(PlanStep):
     def relation(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation = value
+        _row_str(self._relation, self._row.relation)
 
     @property
     def schema(self):
@@ -9302,6 +9726,7 @@ cdef class ShowSnapshotsStep(PlanStep):
         new._relation = _copy_field(self._relation, memo)
         new._schema = _copy_field(self._schema, memo)
         new._snapshots = _copy_field(self._snapshots, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -9312,6 +9737,7 @@ cdef class ShowSnapshotsStep(PlanStep):
         new._relation = self._relation
         new._schema = self._schema
         new._snapshots = self._snapshots
+        new._row[0] = self._row[0]
         return new
 
 
@@ -9322,6 +9748,11 @@ cdef class ShowSourcesStep(PlanStep):
     cdef str _relation
     cdef object _schema
     cdef tuple _sources
+
+    cdef void _sync_row(self) except *:
+        PlanStep._sync_row(self)
+        _row_str(self._relation, self._row.relation)
+        self._check_row_arena()
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, history_view=None, relation=None, schema=None, sources=None):
         self.node_type = _step_types().ShowSources
@@ -9348,6 +9779,7 @@ cdef class ShowSourcesStep(PlanStep):
     def relation(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation = value
+        _row_str(self._relation, self._row.relation)
 
     @property
     def schema(self):
@@ -9398,6 +9830,7 @@ cdef class ShowSourcesStep(PlanStep):
         new._relation = _copy_field(self._relation, memo)
         new._schema = _copy_field(self._schema, memo)
         new._sources = _copy_field(self._sources, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -9408,6 +9841,7 @@ cdef class ShowSourcesStep(PlanStep):
         new._relation = self._relation
         new._schema = self._schema
         new._sources = self._sources
+        new._row[0] = self._row[0]
         return new
 
 
@@ -9421,6 +9855,11 @@ cdef class SubqueryStep(PlanStep):
     cdef object _schema
     cdef set _source_relations
     cdef tuple _unpruned_columns
+
+    cdef void _sync_row(self) except *:
+        PlanStep._sync_row(self)
+        _row_str(self._relation, self._row.relation)
+        self._check_row_arena()
 
     def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, hint_settings=None, hints=None, relation=None, schema=None, source_relations=None, unpruned_columns=None):
         self.node_type = _step_types().Subquery
@@ -9468,6 +9907,7 @@ cdef class SubqueryStep(PlanStep):
     def relation(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._relation = value
+        _row_str(self._relation, self._row.relation)
 
     @property
     def schema(self):
@@ -9535,6 +9975,7 @@ cdef class SubqueryStep(PlanStep):
         new._schema = _copy_field(self._schema, memo)
         new._source_relations = _copy_field(self._source_relations, memo)
         new._unpruned_columns = _copy_field(self._unpruned_columns, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -9548,6 +9989,7 @@ cdef class SubqueryStep(PlanStep):
         new._schema = self._schema
         new._source_relations = self._source_relations
         new._unpruned_columns = self._unpruned_columns
+        new._row[0] = self._row[0]
         return new
 
 
@@ -9622,6 +10064,7 @@ cdef class TruncateRelationStep(PlanStep):
         new._connector = _copy_field(self._connector, memo)
         new._if_exists = _copy_field(self._if_exists, memo)
         new._relation_name = _copy_field(self._relation_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -9631,6 +10074,7 @@ cdef class TruncateRelationStep(PlanStep):
         new._connector = self._connector
         new._if_exists = self._if_exists
         new._relation_name = self._relation_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -9730,6 +10174,7 @@ cdef class UnionStep(PlanStep):
         new._modifier = _copy_field(self._modifier, memo)
         new._right_relation_names = _copy_field(self._right_relation_names, memo)
         new._sources = _copy_field(self._sources, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -9741,6 +10186,7 @@ cdef class UnionStep(PlanStep):
         new._modifier = self._modifier
         new._right_relation_names = self._right_relation_names
         new._sources = self._sources
+        new._row[0] = self._row[0]
         return new
 
 
@@ -9827,6 +10273,7 @@ cdef class UnlistenStep(PlanStep):
         new._execution_context = _copy_field(self._execution_context, memo)
         new._object_kind = _copy_field(self._object_kind, memo)
         new._task_name = _copy_field(self._task_name, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -9837,6 +10284,7 @@ cdef class UnlistenStep(PlanStep):
         new._execution_context = self._execution_context
         new._object_kind = self._object_kind
         new._task_name = self._task_name
+        new._row[0] = self._row[0]
         return new
 
 
@@ -9984,6 +10432,7 @@ cdef class UnnestStep(PlanStep):
         new._unnest_column = _copy_field(self._unnest_column, memo)
         new._unnest_function = _copy_field(self._unnest_function, memo)
         new._unnest_target = _copy_field(self._unnest_target, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -9998,6 +10447,7 @@ cdef class UnnestStep(PlanStep):
         new._unnest_column = self._unnest_column
         new._unnest_function = self._unnest_function
         new._unnest_target = self._unnest_target
+        new._row[0] = self._row[0]
         return new
 
 
@@ -10132,6 +10582,7 @@ cdef class WindowStep(PlanStep):
         new._partition_by = _copy_field(self._partition_by, memo)
         new._top_k = _copy_field(self._top_k, memo)
         new._window_functions = _copy_field(self._window_functions, memo)
+        new._sync_row()
         return new
 
     cdef PlanStep _shallow_copy(self):
@@ -10145,6 +10596,7 @@ cdef class WindowStep(PlanStep):
         new._partition_by = self._partition_by
         new._top_k = self._top_k
         new._window_functions = self._window_functions
+        new._row[0] = self._row[0]
         return new
 
 

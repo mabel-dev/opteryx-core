@@ -94,6 +94,20 @@ cdef class ExprArena:
     def sealed(self):
         return self._sealed
 
+    def bind_columns(self, columns):
+        """Bind the query's ColumnTable: every expression's bound column is a slot
+        of it (PlanContext binds its own table once, at construction)."""
+        if columns is None:
+            raise ValueError("an expression arena binds a column table, not None")
+        if self._columns is not None and self._columns is not columns:
+            raise ValueError("this expression arena is already bound to another query's column table")
+        self._columns = columns
+
+    @property
+    def columns(self):
+        """The query's ColumnTable, or None for an arena no query has bound."""
+        return self._columns
+
     def __len__(self):
         return self._table.size()
 
@@ -387,6 +401,39 @@ cdef inline void _span_into(ExprRow* row, tuple span):
     row.span[1] = span[1]
     row.span[2] = span[2]
     row.span[3] = span[3]
+
+
+cdef NodeKinds _NODE_KINDS
+cdef bint _NODE_KINDS_LOADED = False
+
+
+cdef const NodeKinds* node_kinds() except NULL:
+    """opteryx.expression.NodeType's values, read once - never restated. Loaded
+    on first use: opteryx.expression imports this module."""
+    global _NODE_KINDS_LOADED
+    if not _NODE_KINDS_LOADED:
+        from opteryx.expression import NodeType
+
+        _NODE_KINDS.and_ = NodeType.AND.value
+        _NODE_KINDS.or_ = NodeType.OR.value
+        _NODE_KINDS.xor_ = NodeType.XOR.value
+        _NODE_KINDS.not_ = NodeType.NOT.value
+        _NODE_KINDS.dnf = NodeType.DNF.value
+        _NODE_KINDS.cnf = NodeType.CNF.value
+        _NODE_KINDS.case_ = NodeType.CASE.value
+        _NODE_KINDS.comparison = NodeType.COMPARISON_OPERATOR.value
+        _NODE_KINDS.binary = NodeType.BINARY_OPERATOR.value
+        _NODE_KINDS.unary = NodeType.UNARY_OPERATOR.value
+        _NODE_KINDS.function = NodeType.FUNCTION.value
+        _NODE_KINDS.identifier = NodeType.IDENTIFIER.value
+        _NODE_KINDS.nested = NodeType.NESTED.value
+        _NODE_KINDS.aggregator = NodeType.AGGREGATOR.value
+        _NODE_KINDS.literal = NodeType.LITERAL.value
+        _NODE_KINDS.cast = NodeType.CAST.value
+        _NODE_KINDS.extraction = NodeType.EXTRACTION_OPERATOR.value
+        _NODE_KINDS.between = NodeType.BETWEEN.value
+        _NODE_KINDS_LOADED = True
+    return &_NODE_KINDS
 
 
 cdef object _LC_NATIVE = None

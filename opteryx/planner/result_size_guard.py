@@ -11,7 +11,7 @@ nothing rather than an hour of IO.
 The check is deliberately CONDITIONAL, twice over:
 
   * It only fires when every scanned relation carries a real row count.
-    `statistics_refresh._UNKNOWN_ROW_COUNT` substitutes 1,000,000 for a
+    The statistics refresh's kUnknownRowCount substitutes 1,000,000 for a
     relation that cannot report its size, and that fabrication multiplies
     through joins — before virtual datasets declared their counts, a 2-way
     self cross join of the 9-row `$planets` was estimated at 10**12 rows
@@ -44,8 +44,8 @@ from opteryx.planner.plan_context import PlanContext
 def _declared_row_count(node) -> Optional[int]:
     """The relation's REAL row count, or None when it cannot report one.
 
-    Mirrors the precedence in statistics_refresh._scan_stats, minus its
-    `_UNKNOWN_ROW_COUNT` fallback — the whole purpose here is to detect that the
+    Mirrors the precedence of the refresh's scan base (compute_scan_base in
+    src/cpp/planner/statistics_refresh.hpp), minus its kUnknownRowCount fallback — the whole purpose here is to detect that the
     fallback WOULD have been used, which is information the statistics themselves
     no longer carry once it has been applied.
     """
@@ -116,8 +116,7 @@ def check_estimated_result_size(plan, limit: int, plan_context: PlanContext, tel
     # Enforce ONLY on a metric terminal count — `row_count_metric` is None
     # whenever the number is an estimate, so estimates fall through to the
     # runtime counter without a special case here.
-    exit_statistics = plan_context.statistics(plan[exit_nid])
-    estimate = None if exit_statistics is None else exit_statistics.row_count_metric
+    estimate = plan_context.statistics.row_count_metric(exit_nid)
 
     if estimate is not None and estimate > limit:
         if telemetry is not None:

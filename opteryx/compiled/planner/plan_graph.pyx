@@ -29,6 +29,7 @@ from libc.stdint cimport int32_t
 from libc.stdint cimport uint8_t
 from libc.stdint cimport uint32_t
 from libc.stdint cimport uint64_t
+from libc.stdint cimport uintptr_t
 from libcpp cimport bool as cbool
 from libcpp.pair cimport pair
 from libcpp.vector cimport vector
@@ -376,6 +377,12 @@ cdef class PlanGraph:
         for i in range(1, visits.size()):
             out.append((visits[i].first, visits[i].second))
         return out
+
+    def graph_address(self):
+        """The address of the native graph this plan reads, for native readers
+        within the call that asked (the statistics refresh); the plan keeps it
+        alive. Read-only: a mutation goes through this object."""
+        return <uintptr_t>self._graph
 
     def get_exit_points(self) -> list:
         """The plan's heads: nodes that consume something and feed nothing,

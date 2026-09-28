@@ -198,6 +198,9 @@ class FunctionCatalog:
         """Initialize catalog and load builtin functions."""
         self._functions: Dict[str, FunctionDefinition] = {}
         self._aliases: Dict[str, str] = {}  # alias -> canonical name
+        # Bumped by every register(): readers holding a derived snapshot of the
+        # catalog (the planner's native function cost table) rebuild on change.
+        self.version: int = 0
 
         # Load builtin functions
         self._load_builtin_functions()
@@ -222,6 +225,7 @@ class FunctionCatalog:
             raise ValueError(f"Function '{func_def.name}' already registered.")
 
         self._functions[func_def.name] = func_def
+        self.version += 1
 
         # Register aliases
         for alias in func_def.aliases:
