@@ -10,13 +10,13 @@
 //
 // Two-stage like _dfa_extract: decode() parses the (per-morsel constant) blob
 // ONCE into a LikeProgram stack struct; match() then walks that decoded struct
-// per row with zero blob re-parsing. Each SEARCH is a memchr-anchored substring
-// scan (memchr the first byte, memcmp the rest) — the same shape as
-// fk_contains_hit. libc memchr is SIMD-optimised, so long haystacks stay fast,
-// yet it has near-zero fixed cost, so short haystacks don't pay SIMD-dispatch
-// setup: measured to beat both the scalar glob and the transition-table DFA on
-// short AND long real columns (single-byte segments — the common `%x%y%` shape
-// — are just the rem==0 case). The anchored-prefix LIT is hoisted out of the op
+// per row with zero blob re-parsing. Each SEARCH is a substring scan: on NEON
+// a two-byte (first+last) anchored 16-wide compare for literals of 2+ bytes
+// (see search_neon), otherwise memchr the first byte and memcmp the rest — the
+// same shape as fk_contains_hit. Both have near-zero fixed cost, so short
+// haystacks don't pay SIMD-dispatch setup: measured to beat both the scalar
+// glob and the transition-table DFA on short AND long real columns
+// (single-byte segments — the common `%x%y%` shape — are just the rem==0 case). The anchored-prefix LIT is hoisted out of the op
 // loop with an 8-byte masked word compare so the "doesn't start with the
 // prefix" fast-reject is as tight as glob's.
 //
@@ -57,6 +57,11 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#define DRAKEN_LIKE_PROG_NEON 1
+#endif
 
 namespace draken_like_prog {
 
@@ -111,6 +116,92 @@ struct LikeProgram {
     const uint8_t* prefix_lit;
     uint8_t first_op;       // index of the first op the loop runs (1 if hoisted)
 };
+
+// First occurrence of lit[0..len) starting at any position in [bp, limit), or
+// nullptr. `limit` is one past the last candidate START, so the bytes read are
+// [bp, limit + len - 1) and never beyond the subject.
+//
+// Baseline: memchr the first byte, memcmp the rest. Fine for len == 1, but the
+// first byte of a literal is often a common one ('u', 'a' in prose), so each
+// row pays for many short memchr calls that each end in a failed memcmp.
+inline const uint8_t* search_memchr(const uint8_t* bp, const uint8_t* limit,
+                                    const uint8_t* lit, uint32_t len) {
+    const uint32_t rem = len - 1;
+    const uint8_t first = lit[0];
+    while (bp < limit) {
+        const void* hit = std::memchr(bp, first, static_cast<size_t>(limit - bp));
+        if (hit == nullptr) return nullptr;
+        const uint8_t* h = static_cast<const uint8_t*>(hit);
+        if (rem == 0 || std::memcmp(h + 1, lit + 1, rem) == 0) return h;
+        bp = h + 1;
+    }
+    return nullptr;
+}
+
+#ifdef DRAKEN_LIKE_PROG_NEON
+// Two-byte anchor (len >= 2): 16 candidate starts per step, kept only where
+// BOTH the first and the last byte of the literal line up, so a candidate needs
+// two coincident byte matches instead of one before the memcmp of the middle.
+// One row of the `%a%b%` chain is typically 30-100 bytes, so the vector loop is
+// 2-6 iterations; there is no SIMD-dispatch setup to amortise. A literal of
+// exactly 2 bytes is fully decided by the two anchors, so it skips the memcmp.
+//
+// Measured against the memchr baseline on TPC-H o_comment (48 B average,
+// single thread, Apple M-series): 1.8x on `%unusual%accounts%`. libc memmem was
+// slower than the baseline, and anchoring on a per-literal "rarest byte" won on
+// some patterns and lost on others, so it is not used.
+inline uint64_t nibble_mask(uint8x16_t eq) {
+    // 0xFF/0x00 lanes -> 4 bits per lane, so ctz(mask) >> 2 is the lane index.
+    return vget_lane_u64(vreinterpret_u64_u8(vshrn_n_u16(vreinterpretq_u16_u8(eq), 4)), 0);
+}
+
+inline const uint8_t* search_neon(const uint8_t* bp, const uint8_t* limit,
+                                  const uint8_t* lit, uint32_t len) {
+    const uint32_t last = len - 1;
+    const uint32_t mid = len - 2;
+    const uint8x16_t vfirst = vdupq_n_u8(lit[0]);
+    const uint8x16_t vlast = vdupq_n_u8(lit[last]);
+
+    // Block at `i` reads [i, i + 16) and [i + last, i + last + 16); with
+    // i + 16 <= limit the furthest byte is limit + len - 2, inside the subject.
+    auto scan_block = [&](const uint8_t* i) -> const uint8_t* {
+        uint64_t bits = nibble_mask(vandq_u8(vceqq_u8(vld1q_u8(i), vfirst),
+                                             vceqq_u8(vld1q_u8(i + last), vlast)));
+        while (bits != 0) {
+            const int lane = __builtin_ctzll(bits) >> 2;
+            if (mid == 0 || std::memcmp(i + lane + 1, lit + 1, mid) == 0) return i + lane;
+            bits &= ~(static_cast<uint64_t>(0xF) << (lane * 4));
+        }
+        return nullptr;
+    };
+
+    const uint8_t* i = bp;
+    while (i + 16 <= limit) {
+        if (const uint8_t* hit = scan_block(i)) return hit;
+        i += 16;
+    }
+    if (i == limit) return nullptr;
+    // Fewer than 16 candidate starts left. If the window had at least 16 in
+    // total, re-test the last 16 (an overlap: the earlier starts were already
+    // rejected, so they cannot match now). Otherwise the window is tiny.
+    if (limit - bp >= 16) return scan_block(limit - 16);
+    for (; i < limit; ++i) {
+        if (i[0] == lit[0] && i[last] == lit[last] &&
+            (mid == 0 || std::memcmp(i + 1, lit + 1, mid) == 0)) {
+            return i;
+        }
+    }
+    return nullptr;
+}
+#endif
+
+inline const uint8_t* search_literal(const uint8_t* bp, const uint8_t* limit,
+                                     const uint8_t* lit, uint32_t len) {
+#ifdef DRAKEN_LIKE_PROG_NEON
+    if (len >= 2) return search_neon(bp, limit, lit, len);
+#endif
+    return search_memchr(bp, limit, lit, len);
+}
 
 inline uint32_t read_u32(const uint8_t* p) {
     return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
@@ -235,25 +326,13 @@ __attribute__((always_inline)) inline int match_window(
             // Search region is [cursor, end - tail_reserve): the reserved suffix
             // tail is off-limits so a middle literal can't land inside it.
             if (static_cast<uint64_t>(cursor) + tail_reserve + o.len > end) return 0;
-            // memchr-anchored substring search (same shape as fk_contains_hit):
-            // libc memchr is SIMD-optimised (so long haystacks stay fast) with
-            // near-zero fixed cost (so short haystacks don't pay SIMD setup). A
-            // single-byte segment (the common `%x%y%` shape) is just rem == 0.
-            const uint8_t* bp = s + cursor;
-            const uint8_t* limit = s + (end - tail_reserve) - o.len + 1;  // last start
-            const uint32_t rem = o.len - 1;
-            const uint8_t first = o.lit[0];
-            for (;;) {
-                const void* hit = std::memchr(bp, first,
-                                              static_cast<size_t>(limit - bp));
-                if (hit == nullptr) return 0;
-                const uint8_t* h = static_cast<const uint8_t*>(hit);
-                if (rem == 0 || std::memcmp(h + 1, o.lit + 1, rem) == 0) {
-                    cursor = static_cast<uint32_t>(h - s) + o.len;
-                    break;
-                }
-                bp = h + 1;
-            }
+            // Substring search over the candidate starts [cursor, last start].
+            // len >= 2 uses the two-byte NEON anchor; len == 1 (the common
+            // `%x%y%` shape) and non-NEON builds use memchr + memcmp.
+            const uint8_t* limit = s + (end - tail_reserve) - o.len + 1;  // last start + 1
+            const uint8_t* hit = search_literal(s + cursor, limit, o.lit, o.len);
+            if (hit == nullptr) return 0;
+            cursor = static_cast<uint32_t>(hit - s) + o.len;
 
         } else if (o.type == LMOP_SUFFIX) {
             // Terminal: the last `len` bytes of the window must equal the

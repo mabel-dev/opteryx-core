@@ -4,6 +4,7 @@
 
 #include "core/interval_slot.h"
 #include "core/string_slot.h"
+#include "ops/exact_sum.h"
 #include "ops/ordinalize.h"
 
 namespace skene {
@@ -88,25 +89,6 @@ bool ordinal_of_impl(const DrakenVector& vector, const LogicalType* logical,
     }
 }
 
-// One value, widened to the 128-bit accumulator. Only exact types reach here.
-bool value_as_int128(const DrakenVector& vector, uint32_t code, __int128* out) {
-    const void* data = vector.data;
-    switch (vector.type) {
-        case DRAKEN_INT8:   *out = static_cast<const int8_t*>(data)[code];   return true;
-        case DRAKEN_INT16:  *out = static_cast<const int16_t*>(data)[code];  return true;
-        case DRAKEN_INT32:  *out = static_cast<const int32_t*>(data)[code];  return true;
-        case DRAKEN_INT64:
-        case DRAKEN_DECIMAL: *out = static_cast<const int64_t*>(data)[code]; return true;
-        case DRAKEN_UINT8:  *out = static_cast<const uint8_t*>(data)[code];  return true;
-        case DRAKEN_UINT16: *out = static_cast<const uint16_t*>(data)[code]; return true;
-        case DRAKEN_UINT32: *out = static_cast<const uint32_t*>(data)[code]; return true;
-        case DRAKEN_UINT64:
-            *out = static_cast<__int128>(static_cast<const uint64_t*>(data)[code]);
-            return true;
-        default: return false;
-    }
-}
-
 }  // namespace
 
 bool column_ordinal_at(const DrakenVector& vector, const LogicalType* logical,
@@ -129,15 +111,10 @@ bool type_has_min_max(DrakenType type) {
     }
 }
 
+// The exact-sum rule is draken's (draken/ops/exact_sum.h), shared with every
+// other statistics producer so a sum means the same number whoever wrote it.
 bool type_has_sum(DrakenType type) {
-    switch (type) {
-        case DRAKEN_INT8:  case DRAKEN_INT16: case DRAKEN_INT32: case DRAKEN_INT64:
-        case DRAKEN_UINT8: case DRAKEN_UINT16: case DRAKEN_UINT32: case DRAKEN_UINT64:
-        case DRAKEN_DECIMAL:
-            return true;
-        default:
-            return false;
-    }
+    return draken::ops::exact_sum_type(type);
 }
 
 Status compute_statistics(const DrakenVector& vector, const LogicalType* logical,
@@ -229,7 +206,7 @@ Status compute_statistics(const DrakenVector& vector, const LogicalType* logical
 
         if (want_sum) {
             __int128 value = 0;
-            if (value_as_int128(vector, code, &value)) total += value;
+            if (draken::ops::exact_sum_value(vector, code, &value)) total += value;
         }
         any = true;
     }
