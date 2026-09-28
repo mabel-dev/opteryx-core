@@ -3932,8 +3932,40 @@ class _Compiler:
             # Select would be the identity permutation and is elided (§3).
             need_select = len(read_layout) > len(emit_ids)
             self._relocated_scan_filters[scan.identity] = (
-                filter_bc, read_layout, emit_indices, emit_ids, need_select)
+                filter_bc, read_layout, emit_indices, emit_ids, need_select, read_scs)
         return splan
+
+    def _arm_scan_prefilter(self, p, splan, filter_bc, read_layout, read_scs) -> bool:
+        """Scan prefilter (docs/PARQUET_SELECTIVE_DECODE_DESIGN.md §2.1): make the
+        native parquet scan apply its pushed predicate on the decode workers —
+        predicate columns decode first, the others only for survivors — instead
+        of a relocated ExprFilter. Returns False (and arms nothing) when the
+        predicate cannot run there: a predicate column whose type lives in a
+        logical descriptor (pass1_worker_predicate_admissible), so the caller
+        keeps the ExprFilter. A plan-time decision; nothing is decided at run
+        time. Measured 2026-09-28: removing this costs JOB 14.5%, ClickBench 2.3%."""
+        from opteryx.connectors.parquet_io.pass1_predicate_gate import (
+            pass1_worker_predicate_admissible,
+        )
+        from opteryx.expression.evaluator.evaluation import Pass1PredResolver
+        from opteryx.expression.evaluator.evaluation import get_pass1_eval_fn_ptr
+
+        identity_to_physical = {sc.identity: sc.name for sc in read_scs}
+        identity_to_type = {sc.identity: sc.column_type.physical.value for sc in read_scs}
+        resolver = Pass1PredResolver(filter_bc, identity_to_physical, identity_to_type)
+        sc_by_name = {sc.name: sc for sc in read_scs}
+        if not pass1_worker_predicate_admissible(
+            sc_by_name[n].column_type for n in resolver.col_names
+        ):
+            return False
+        # The resolver owns the ctx the workers dereference; the NativePlan holds it.
+        self.nplan.held.append(resolver)
+        splan.set_scan_prefilter(get_pass1_eval_fn_ptr(), resolver.ctx_ptr(),
+                                 resolver.col_names)
+        pred_names = set(resolver.col_names)
+        is_pred = [sc.name in pred_names for sc in read_scs]
+        self.nplan.set_native_scan_prefilter(p, filter_bc, read_layout, is_pred)
+        return True
 
     def _latmat_scan_plan(self, scan):
         """R3 (`fused_topn`) plan-time setup for the two-pass late-materialization
@@ -4429,8 +4461,9 @@ class _Compiler:
             # residual filter natively over that layout, then Select back to the
             # projection (drops role-3 filter-only columns). The identity Select is
             # elided when read-set == emit-set (need_select False).
-            filter_bc, read_layout, emit_indices, emit_ids, need_select = reloc
-            self.nplan.add_expr_filter(p, filter_bc, read_layout)
+            filter_bc, read_layout, emit_indices, emit_ids, need_select, read_scs = reloc
+            if not self._arm_scan_prefilter(p, splan, filter_bc, read_layout, read_scs):
+                self.nplan.add_expr_filter(p, filter_bc, read_layout)
             if need_select:
                 self.nplan.add_select(p, emit_indices, emit_ids)
             return p, emit_ids

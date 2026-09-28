@@ -117,6 +117,9 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         void add_int_needles(const string& column, const vector[int64_t]& needles) nogil
         void add_str_pred(const string& column, int kind, const vector[string]& vals) nogil
         void set_pass1_predicate(void* fn, void* ctx, const vector[string]& cols) nogil
+        void set_prefilter(bint on) nogil
+        uint64_t prefilter_rows_in() nogil
+        uint64_t prefilter_rows_out() nogil
         void clear_eq_needles() nogil
         bint try_get_result(MorselRef& out) nogil
         bint wait_and_get_result(MorselRef& out) nogil

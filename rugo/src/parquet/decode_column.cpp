@@ -13,7 +13,6 @@
 #include "metadata.hpp"
 #include "telemetry.hpp"
 #include "simd_gather.hpp"
-#include "simd_compact.hpp"
 #include "simd_validity_bitmap.hpp"
 #include "type_widening.hpp"
 #include "thread_pool.hpp"
@@ -155,7 +154,7 @@ inline int32_t InternByteArrayToDictionary(
     const char* value_ptr,
     int32_t value_len,
     StringInternTable& table,
-    std::vector<uint8_t>& arena,
+    rugo::compression::ScratchBuffer& arena,
     std::vector<uint32_t>& offsets,
     std::vector<int32_t>& lens) {
   if (table.slots.empty()) table.resize_to(64);
@@ -193,7 +192,7 @@ inline int32_t InternByteArrayToDictionary(
 
 inline void SeedDictionaryMapFromArena(
     StringInternTable& table,
-    const std::vector<uint8_t>& arena,
+    const rugo::compression::ScratchBuffer& arena,
     const std::vector<uint32_t>& offsets,
     const std::vector<int32_t>& lens) {
   if (lens.empty()) return;
@@ -222,6 +221,22 @@ inline void SeedDictionaryMapFromArena(
 // dominant scan cost on high-NDV columns (one probe/insert per PLAIN value)
 // and could silently truncate codes once interning grew the dictionary past
 // the packed code_width frozen at dict-page decode.
+
+// Selective decode: compact the values appended for one page (v[from..end)) to
+// those whose `sel` byte is set, in place. sel is indexed from the page's first
+// PRESENT value, which is v[from].
+template <typename T>
+inline void compact_page_tail(std::vector<T>& v, size_t from, const uint8_t* sel) {
+  const size_t n = v.size() - from;
+  if (n == 0) return;
+  T* p = v.data() + from;
+  size_t w = 0;
+  for (size_t i = 0; i < n; ++i) {
+    p[w] = p[i];
+    w += sel[i];
+  }
+  v.resize(from + w);
+}
 
 inline void GatherDictValues(const std::vector<int32_t>& dict,
                              const int32_t* codes, size_t n,
@@ -687,20 +702,36 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         const uint8_t *dict_data_ptr;
         size_t         dict_data_size;
 
-        if (target_col->codec == 0) {
+        // Zero-copy byte_array dictionary: the dictionary page is decompressed
+        // (or, uncompressed, copied once) straight into string_dict_arena, which
+        // then IS the arena — entries are located by a length-prefix scan
+        // instead of being copied out one by one (measured 2026-09-28: removing
+        // this costs ClickBench 5.0%, JOB 2.1%).
+        const bool zc_byte_array = result.type == "byte_array";
+
+        if (zc_byte_array && target_col->codec == 0) {
+          RUGO_TEL_START(_zc_t0);
+          result.string_dict_arena.assign(dict_compressed_data,
+                                          dict_compressed_data + dict_compressed_size);
+          RUGO_TEL_ACCUM(rugo_tel::dict_parse_ns, _zc_t0);
+          dict_data_ptr  = result.string_dict_arena.data();
+          dict_data_size = result.string_dict_arena.size();
+        } else if (target_col->codec == 0) {
           dict_data_ptr  = dict_compressed_data;
           dict_data_size = dict_compressed_size;
         } else {
           try {
             auto codec = rugo::compression::CodecFromInt(target_col->codec);
             { RUGO_TEL_START(_dc_t0);
+              rugo::compression::ScratchBuffer& dict_dst =
+                  zc_byte_array ? result.string_dict_arena : dict_decompressed_data;
               rugo::compression::DecompressInto(
                   dict_compressed_data, dict_compressed_size,
                   dict_page_header.uncompressed_page_size, codec,
-                  dict_decompressed_data);
-              RUGO_TEL_ACCUM(rugo_tel::decompress_ns, _dc_t0); }
-            dict_data_ptr  = dict_decompressed_data.data();
-            dict_data_size = dict_decompressed_data.size();
+                  dict_dst);
+              RUGO_TEL_ACCUM(rugo_tel::decompress_ns, _dc_t0);
+              dict_data_ptr  = dict_dst.data();
+              dict_data_size = dict_dst.size(); }
           } catch (const std::exception &e) {
             // Fail loud: surface the specific decompression reason rather than
             // collapsing to a generic "Decode failed" upstream.
@@ -789,20 +820,17 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                 ReadBESignExt128(dict_data_ptr, flba_byte_width));
             dict_data_ptr += flba_byte_width;
           }
-        } else if (result.type == "byte_array") {
-          // Build a flat arena: one allocation for all dict string bytes,
-          // plus offset/length arrays — no per-entry std::string heap alloc.
-          result.string_dict_arena.reserve(dict_data_size);
+        } else if (zc_byte_array) {
+          // The arena already holds the page: record each entry's payload
+          // offset (past its 4-byte length prefix) and length. No bytes move.
+          const uint8_t* arena_base = dict_data_ptr;
           result.string_dict_offsets.reserve(dict_size);
           result.string_dict_lens.reserve(dict_size);
           for (int32_t i = 0; i < dict_size && dict_data_ptr + 4 <= dict_end; i++) {
             int32_t length = ReadLE32(dict_data_ptr);
             dict_data_ptr += 4;
-            if (dict_data_ptr + length > dict_end) break;
-            uint32_t off = (uint32_t)result.string_dict_arena.size();
-            result.string_dict_arena.insert(result.string_dict_arena.end(),
-                                            dict_data_ptr, dict_data_ptr + length);
-            result.string_dict_offsets.push_back(off);
+            if (length < 0 || dict_data_ptr + length > dict_end) break;
+            result.string_dict_offsets.push_back((uint32_t)(dict_data_ptr - arena_base));
             result.string_dict_lens.push_back(length);
             dict_data_ptr += length;
           }
@@ -1102,7 +1130,24 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     // rle resolve-to-values path so the dictionary + per-row codes survive
     // (dict_int64_values/dict_int32_values + dict_indices). Float/string dict
     // columns are unaffected — they keep the rle skip-dense path.
+    // ── Selective decode ────────────────────────────────────────────────────
+    // Under a row mask (scalar columns), every page emits ONLY its selected
+    // rows: dict codes are decoded selectively (bit-packed groups with nothing
+    // selected are never unpacked), PLAIN values are compacted per page while
+    // hot, byte_array values skip unselected entries, and def levels are
+    // compacted per page. There is no post-loop compaction (measured
+    // 2026-09-28: removing this costs JOB 11.4%, ClickBench 2.0%). LIST columns
+    // keep the post-loop logical-row filter.
+    const bool sel_mode = row_mask != nullptr && target_col->max_repetition_level == 0;
+    // Rows emitted under sel_mode (total_collected keeps counting rows WALKED,
+    // which drives the page loop and the success check).
+    int32_t total_emitted = 0;
+
+    // Under sel_mode the run path is off: a masked column's runs were always
+    // expanded to dense after the loop anyway, so the dense-codes path yields
+    // the same final shape without building runs first.
     const bool rle_path =
+        !sel_mode &&
         target_col->max_definition_level == 0 &&
         (byte_array_dict_mode || int32_dict_mode || int64_dict_mode ||
          float32_dict_mode || float64_dict_mode) &&
@@ -1168,10 +1213,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     std::vector<int32_t> _page_rep_levels;
     std::vector<int32_t> _page_def_levels;
     std::vector<int32_t> _page_dict_indices;
-    std::vector<uint8_t> decoded_row_mask;
-    if (row_mask != nullptr) {
-      decoded_row_mask.reserve(total_needed > 0 ? (size_t)total_needed : 65536u);
-    }
+    std::vector<uint8_t> _page_vsel;  // sel_mode: one 0/1 byte per PRESENT value of the page
 
     // ── Tier 3: Parallel page decode ──────────────────────────────────────
     // For non-nullable, non-dict, non-nested, fixed-width columns with more
@@ -1457,6 +1499,11 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       if (compressed_size == 0 || compressed_size > avail)
         compressed_size = avail;
 
+      // sel_mode page state: set by the mask check below.
+      bool           page_selective = false;   // some but not all rows selected
+      int32_t        page_sel_rows  = 0;       // selected rows in this page
+      const uint8_t* page_sel_mask  = nullptr; // row_mask slice for this page
+
       // ── Row-mask page skipping ──────────────────────────────────────
       // LIST columns (max_repetition_level > 0) skip this block: the caller
       // supplies a per-logical-row mask, but page_values counts physical slots.
@@ -1486,10 +1533,11 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           ++result.pages_skipped;
           continue;
         }
-        // Tier 1E: Bulk copy mask bytes instead of per-element push_back.
-        size_t old_sz = decoded_row_mask.size();
-        decoded_row_mask.resize(old_sz + pv);
-        std::memcpy(decoded_row_mask.data() + old_sz, mp, pv);
+        int32_t n_sel = 0;
+        for (size_t k = 0; k < pv; ++k) n_sel += mp[k];
+        page_sel_rows  = n_sel;
+        page_selective = (n_sel < page_values);
+        page_sel_mask  = mp;
         page_row_offset += page_values;
       }
       // ────────────────────────────────────────────────────────────────
@@ -1691,6 +1739,32 @@ void DecodeColumnFromChunk(DecodedColumn &result,
 
       const uint8_t *data_end = data_ptr + data_size;
 
+      // sel_mode: compact this page's def levels to the selected rows and build
+      // the per-PRESENT-value selection the value decoders consume.
+      const uint8_t* page_vsel = nullptr;
+      if (page_selective) {
+        const int32_t max_def = target_col->max_definition_level;
+        if (page_all_present) {
+          // Deferred rows count toward the emitted column: only the selected ones.
+          deferred_all_present_rows -= (page_values - page_sel_rows);
+          page_vsel = page_sel_mask;
+        } else if (def_levels.empty()) {
+          page_vsel = page_sel_mask;  // required column: value i == row i
+        } else {
+          _page_vsel.clear();
+          _page_vsel.reserve((size_t)page_values);
+          const size_t tail = all_def_levels.size() - (size_t)page_values;
+          size_t w = tail;
+          for (int32_t i = 0; i < page_values; ++i) {
+            const int32_t dl = def_levels[i];
+            if (dl == max_def) _page_vsel.push_back(page_sel_mask[i]);
+            if (page_sel_mask[i]) all_def_levels[w++] = dl;
+          }
+          all_def_levels.resize(w);
+          page_vsel = _page_vsel.data();
+        }
+      }
+
       // Compute the number of present (non-null) values in this page.
       // The value stream only contains entries for present slots; null slots
       // are represented solely in the validity bitmap built from def_levels.
@@ -1835,8 +1909,13 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           // ── Dense path: nullable columns or non-RLE-mode dict types ─────
           std::vector<int32_t>& indices = _page_dict_indices;  // chunk-scoped; cleared by the decoder
           { RUGO_TEL_START(_rle_t0);
-            int32_t decoded = DecodeRLEBitPackedIndicesNoPrefix(
-                data_ptr, data_size, present_count, bit_width, indices);
+            // sel_mode: only the selected codes land in `indices`; everything
+            // below then gathers / appends survivors only.
+            int32_t decoded = page_vsel != nullptr
+                ? DecodeRLEBitPackedIndicesSelected(
+                      data_ptr, data_size, present_count, bit_width, page_vsel, indices)
+                : DecodeRLEBitPackedIndicesNoPrefix(
+                      data_ptr, data_size, present_count, bit_width, indices);
             RUGO_TEL_ACCUM(rugo_tel::rle_ns, _rle_t0);
             if (decoded != present_count) { return; } }
 
@@ -2264,6 +2343,16 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         }
         // ──────────────────────────────────────────────────────────────────
 
+        // sel_mode: fixed-width PLAIN/DELTA values are appended whole for the
+        // page and compacted to the selection immediately (cache-hot); strings
+        // skip unselected values while reading (below).
+        const size_t _sz_i32 = result.int32_values.size();
+        const size_t _sz_i64 = result.int64_values.size();
+        const size_t _sz_i128 = result.int128_values.size();
+        const size_t _sz_f32 = result.float32_values.size();
+        const size_t _sz_f64 = result.float64_values.size();
+        const size_t _sz_bool = result.boolean_values.size();
+
         if (result.type == "int32") {
           if (result.ext_int32) {
             if (page_encoding == 5) {
@@ -2504,8 +2593,10 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             int32_t decoded = DecodeDeltaByteArray(data_ptr, data_size,
                                                     present_count, page_strs);
             if (decoded != present_count) return;
-            for (const auto& s : page_strs)
-              result.append_string(s.data(), s.size());
+            for (size_t si = 0; si < page_strs.size(); ++si) {
+              if (page_vsel != nullptr && !page_vsel[si]) continue;
+              result.append_string(page_strs[si].data(), page_strs[si].size());
+            }
           } else {
             // NO per-page reserve() here. reserve(size + page_span) sets capacity
             // to that EXACT size, so the next page reserves again and reallocates
@@ -2541,10 +2632,36 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             // RMWs on a ClickBench string scan — enough to move the very number
             // the counter exists to explain.
             long long _interned_here = 0;
+            // Zero-copy PLAIN page: a dense, unselected page is appended to
+            // string_arena WHOLE in one copy, and each value is recorded by
+            // offset + length into it — no per-value copy. The consumer's slot
+            // build then copies the arena once (build_direct_string_plain).
+            // Measured 2026-09-28: removing this costs JOB 4.0%, ClickBench 2.9%.
+            // Interning and selective pages keep the per-value loop below.
+            if (!interning && page_vsel == nullptr) {
+              const size_t base = result.string_arena.size();
+              const uint8_t* page_start = data_ptr;
+              result.string_arena.insert(result.string_arena.end(), data_ptr, data_end);
+              result.string_offsets.reserve(result.string_offsets.size() + (size_t)present_count);
+              result.string_lens.reserve(result.string_lens.size() + (size_t)present_count);
+              for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
+                int32_t length = ReadLE32(data_ptr);
+                data_ptr += 4;
+                if (length < 0 || data_ptr + length > data_end) break;
+                result.string_offsets.push_back(
+                    static_cast<uint32_t>(base + (size_t)(data_ptr - page_start)));
+                result.string_lens.push_back(length);
+                data_ptr += length;
+              }
+            } else
             for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
               int32_t length = ReadLE32(data_ptr);
               data_ptr += 4;
               if (data_ptr + length > data_end) break;
+              if (page_vsel != nullptr && !page_vsel[i]) {
+                data_ptr += length;
+                continue;
+              }
               if (interning) {
                 const int32_t code = InternByteArrayToDictionary(
                     reinterpret_cast<const char*>(data_ptr), length,
@@ -2656,276 +2773,39 @@ void DecodeColumnFromChunk(DecodedColumn &result,
 #endif
           }
         }
+
+        if (page_vsel != nullptr) {
+          compact_page_tail(result.int32_values, _sz_i32, page_vsel);
+          compact_page_tail(result.int64_values, _sz_i64, page_vsel);
+          compact_page_tail(result.int128_values, _sz_i128, page_vsel);
+          compact_page_tail(result.float32_values, _sz_f32, page_vsel);
+          compact_page_tail(result.float64_values, _sz_f64, page_vsel);
+          compact_page_tail(result.boolean_values, _sz_bool, page_vsel);
+        }
       }
 
       total_collected += page_values;
+      total_emitted += page_selective ? page_sel_rows : page_values;
       cursor = compressed_data + compressed_size;
     }  // end page loop
     }  // end if (!used_parallel_path) [sequential fallback]
 
     const int32_t total_rows_all_pages = total_collected;
+    // sel_mode: every page already emitted only its selected rows.
+    if (sel_mode) total_collected = total_emitted;
 
-    // ── Post-loop row-mask filter ──────────────────────────────────────────
-    // If a row_mask was supplied, filter all accumulated output vectors down
-    // to only the K selected rows.  Pages with zero selections were already
-    // skipped above; here we handle partial selections within decoded pages.
+    // ── Post-loop row-mask filter (LIST columns only) ──────────────────────
+    // Scalar columns emitted only their selected rows page by page (sel_mode).
+    // A LIST column's mask is per logical row while its pages count value
+    // slots, so it is filtered here, walking the repetition levels.
     RUGO_TEL_START(_mf_t0);
-    if (row_mask != nullptr && !decoded_row_mask.empty()) {
-      // ── RLE → dense materialisation ──────────────────────────────────────
-      // The row_mask filter compacts dense vectors; rle_*_values are run-
-      // length encoded and would slip through unfiltered, leaving a column
-      // with rle_total_length entries while the engine sees num_rows = K.
-      // Expand rle runs into the type's natural dense vector first; the
-      // compact pass below then filters them like any other dense vector.
-      if (!result.rle_run_lengths.empty()) {
-        const size_t total = result.rle_total_length;
-        if (!result.rle_int64_values.empty()) {
-          if (result.type == "int32") {
-            result.int32_values.resize(total);
-            int32_t* out = result.int32_values.data();
-            size_t off = 0;
-            for (size_t r = 0; r < result.rle_run_lengths.size(); ++r) {
-              const int32_t v = static_cast<int32_t>(result.rle_int64_values[r]);
-              const int32_t cnt = result.rle_run_lengths[r];
-              for (int32_t j = 0; j < cnt; ++j) out[off + j] = v;
-              off += cnt;
-            }
-          } else {
-            result.int64_values.resize(total);
-            int64_t* out = result.int64_values.data();
-            size_t off = 0;
-            for (size_t r = 0; r < result.rle_run_lengths.size(); ++r) {
-              const int64_t v = result.rle_int64_values[r];
-              const int32_t cnt = result.rle_run_lengths[r];
-              for (int32_t j = 0; j < cnt; ++j) out[off + j] = v;
-              off += cnt;
-            }
-          }
-          result.rle_int64_values.clear();
-        } else if (!result.rle_float64_values.empty()) {
-          if (result.type == "float32") {
-            result.float32_values.resize(total);
-            float* out = result.float32_values.data();
-            size_t off = 0;
-            for (size_t r = 0; r < result.rle_run_lengths.size(); ++r) {
-              const float v = static_cast<float>(result.rle_float64_values[r]);
-              const int32_t cnt = result.rle_run_lengths[r];
-              for (int32_t j = 0; j < cnt; ++j) out[off + j] = v;
-              off += cnt;
-            }
-          } else {
-            result.float64_values.resize(total);
-            double* out = result.float64_values.data();
-            size_t off = 0;
-            for (size_t r = 0; r < result.rle_run_lengths.size(); ++r) {
-              const double v = result.rle_float64_values[r];
-              const int32_t cnt = result.rle_run_lengths[r];
-              for (int32_t j = 0; j < cnt; ++j) out[off + j] = v;
-              off += cnt;
-            }
-          }
-          result.rle_float64_values.clear();
-        } else if (!result.rle_str_lens.empty()) {
-          // Materialise into the unified byte_array dict form: append run
-          // strings into string_dict_arena (interning per run) and emit one
-          // dict_indices entry per logical row.
-          if (unified_dict_map.empty()) {
-            SeedDictionaryMapFromArena(
-                unified_dict_map,
-                result.string_dict_arena,
-                result.string_dict_offsets,
-                result.string_dict_lens);
-          }
-          result.dict_indices.reserve(result.dict_indices.size() + total);
-          // Second intern site: once per RUN, not per row, so the atomic is
-          // added once for the whole run set rather than inside the loop.
-          rugo_tel::ba_intern_values.fetch_add(
-              (long long)result.rle_run_lengths.size(), std::memory_order_relaxed);
-          for (size_t r = 0; r < result.rle_run_lengths.size(); ++r) {
-            const uint32_t off = result.rle_str_offsets[r];
-            const int32_t  len = result.rle_str_lens[r];
-            const int32_t  cnt = result.rle_run_lengths[r];
-            const int32_t  code = InternByteArrayToDictionary(
-                reinterpret_cast<const char*>(result.rle_str_arena.data() + off),
-                len,
-                unified_dict_map,
-                result.string_dict_arena,
-                result.string_dict_offsets,
-                result.string_dict_lens);
-            for (int32_t j = 0; j < cnt; ++j) result.dict_indices.push_back(code);
-          }
-          result.rle_str_arena.clear();
-          result.rle_str_offsets.clear();
-          result.rle_str_lens.clear();
-        }
-        result.rle_run_lengths.clear();
-        result.rle_total_length = 0;
-        result.rle_last_code = -1;
-      }
-
-      const int32_t total_decoded = (int32_t)decoded_row_mask.size();
-      int32_t K = 0;
-      for (uint8_t m : decoded_row_mask) K += (int32_t)m;
-
-      if (K < total_decoded) {
-        const bool has_nulls =
-            (target_col->max_definition_level > 0 && !all_def_levels.empty());
-
-        if (!has_nulls) {
-          // Non-nullable: one value per row — use SIMD-accelerated compaction.
-          const size_t mask_len = std::min((size_t)total_decoded, decoded_row_mask.size());
-
-          // Filter int32_values using SIMD compact
-          if (!result.int32_values.empty()) {
-            std::vector<int32_t> o; o.reserve(K);
-            parquet_simd::compact_int32(result.int32_values.data(), decoded_row_mask.data(),
-                                        std::min((size_t)result.int32_values.size(), mask_len), o);
-            result.int32_values = std::move(o);
-          }
-
-          // Filter int64_values using SIMD compact
-          if (!result.int64_values.empty()) {
-            std::vector<int64_t> o; o.reserve(K);
-            parquet_simd::compact_int64(result.int64_values.data(), decoded_row_mask.data(),
-                                        std::min((size_t)result.int64_values.size(), mask_len), o);
-            result.int64_values = std::move(o);
-          }
-
-          // Filter float32_values using SIMD compact
-          if (!result.float32_values.empty()) {
-            std::vector<float> o; o.reserve(K);
-            parquet_simd::compact_float32(result.float32_values.data(), decoded_row_mask.data(),
-                                          std::min((size_t)result.float32_values.size(), mask_len), o);
-            result.float32_values = std::move(o);
-          }
-
-          // Filter float64_values using SIMD compact
-          if (!result.float64_values.empty()) {
-            std::vector<double> o; o.reserve(K);
-            parquet_simd::compact_float64(result.float64_values.data(), decoded_row_mask.data(),
-                                          std::min((size_t)result.float64_values.size(), mask_len), o);
-            result.float64_values = std::move(o);
-          }
-
-          // Filter dict_indices using SIMD compact
-          if (!result.dict_indices.empty()) {
-            std::vector<int32_t> o; o.reserve(K);
-            parquet_simd::compact_int32(result.dict_indices.data(), decoded_row_mask.data(),
-                                        std::min((size_t)result.dict_indices.size(), mask_len), o);
-            result.dict_indices = std::move(o);
-          }
-
-          // Filter boolean_values using scalar compact (treat uint8_t as int32_t via memcpy)
-          if (!result.boolean_values.empty()) {
-            std::vector<uint8_t> o; o.reserve(K);
-            for (size_t i = 0; i < std::min((size_t)result.boolean_values.size(), mask_len); ++i)
-              if (decoded_row_mask[i]) o.push_back(result.boolean_values[i]);
-            result.boolean_values = std::move(o);
-          }
-
-          // Filter the dense string arena (plain byte_array — high-cardinality
-          // columns that fell out of dictionary encoding). Without this they
-          // slip through unfiltered, leaving the column at total_decoded length
-          // while the engine sees num_rows = K. Survivors' bytes are recompacted
-          // into a fresh arena.
-          if (!result.string_lens.empty()) {
-            std::vector<uint8_t>  oa;
-            std::vector<uint32_t> oo; oo.reserve(K);
-            std::vector<int32_t>  ol; ol.reserve(K);
-            for (size_t i = 0; i < std::min((size_t)result.string_lens.size(), mask_len); ++i)
-              if (decoded_row_mask[i]) {
-                oo.push_back(static_cast<uint32_t>(oa.size()));
-                ol.push_back(result.string_lens[i]);
-                const uint8_t* b = result.string_arena.data() + result.string_offsets[i];
-                oa.insert(oa.end(), b, b + result.string_lens[i]);
-              }
-            result.string_arena   = std::move(oa);
-            result.string_offsets = std::move(oo);
-            result.string_lens    = std::move(ol);
-          }
-        } else {
-          // Nullable: use def_levels to map rows → value positions.
-          // Values in the stream correspond only to non-null rows.
-          const int32_t max_def = target_col->max_definition_level;
-          const bool have_i32   = !result.int32_values.empty();
-          const bool have_i64   = !result.int64_values.empty();
-          const bool have_f32   = !result.float32_values.empty();
-          const bool have_f64   = !result.float64_values.empty();
-          const bool have_dict  = !result.dict_indices.empty();
-          const bool have_bool  = !result.boolean_values.empty();
-          const bool have_str   = !result.string_lens.empty();
-
-          std::vector<int32_t> o_i32;
-          std::vector<int64_t> o_i64;
-          std::vector<float>   o_f32;
-          std::vector<double>  o_f64;
-          std::vector<int32_t> o_dict;
-          std::vector<uint8_t> o_bool;
-          std::vector<uint8_t>  o_str_arena;
-          std::vector<uint32_t> o_str_offsets;
-          std::vector<int32_t>  o_str_lens;
-
-          int32_t val_idx = 0;
-          for (int32_t row_i = 0; row_i < total_decoded; ++row_i) {
-            const bool non_null = (row_i < (int32_t)all_def_levels.size() &&
-                                   all_def_levels[row_i] == max_def);
-            const bool selected = decoded_row_mask[row_i] != 0;
-            if (non_null) {
-              if (selected) {
-                if (have_i32  && val_idx < (int32_t)result.int32_values.size())
-                  o_i32.push_back(result.int32_values[val_idx]);
-                if (have_i64  && val_idx < (int32_t)result.int64_values.size())
-                  o_i64.push_back(result.int64_values[val_idx]);
-                if (have_f32  && val_idx < (int32_t)result.float32_values.size())
-                  o_f32.push_back(result.float32_values[val_idx]);
-                if (have_f64  && val_idx < (int32_t)result.float64_values.size())
-                  o_f64.push_back(result.float64_values[val_idx]);
-                if (have_dict && val_idx < (int32_t)result.dict_indices.size())
-                  o_dict.push_back(result.dict_indices[val_idx]);
-                if (have_bool && val_idx < (int32_t)result.boolean_values.size())
-                  o_bool.push_back(result.boolean_values[val_idx]);
-                if (have_str  && val_idx < (int32_t)result.string_lens.size()) {
-                  o_str_offsets.push_back(static_cast<uint32_t>(o_str_arena.size()));
-                  o_str_lens.push_back(result.string_lens[val_idx]);
-                  const uint8_t* b =
-                      result.string_arena.data() + result.string_offsets[val_idx];
-                  o_str_arena.insert(o_str_arena.end(),
-                                     b, b + result.string_lens[val_idx]);
-                }
-              }
-              ++val_idx;
-            }
-          }
-          if (have_i32)  result.int32_values   = std::move(o_i32);
-          if (have_i64)  result.int64_values   = std::move(o_i64);
-          if (have_f32)  result.float32_values = std::move(o_f32);
-          if (have_f64)  result.float64_values = std::move(o_f64);
-          if (have_dict) result.dict_indices   = std::move(o_dict);
-          if (have_bool) result.boolean_values = std::move(o_bool);
-          if (have_str) {
-            result.string_arena   = std::move(o_str_arena);
-            result.string_offsets = std::move(o_str_offsets);
-            result.string_lens    = std::move(o_str_lens);
-          }
-        }
-
-        // Filter def_levels to selected rows (valid_bits is built from this below).
-        if (!all_def_levels.empty()) {
-          std::vector<int32_t> od; od.reserve(K);
-          const size_t mask_len = std::min((size_t)total_decoded, decoded_row_mask.size());
-          parquet_simd::compact_int32(all_def_levels.data(), decoded_row_mask.data(),
-                                      std::min((size_t)all_def_levels.size(), mask_len), od);
-          all_def_levels = std::move(od);
-        }
-      }
-      total_collected = K;
-    } else if (row_mask != nullptr && target_col->max_repetition_level > 0) {
+    if (row_mask != nullptr && target_col->max_repetition_level > 0) {
       // LIST column: input row_mask is per-logical-row; apply by walking rep_levels.
       // rep_level == 0 marks the start of each new logical row.
       const int32_t max_def_lvl = target_col->max_definition_level;
 
       std::vector<int32_t> new_rep, new_def;
-      std::vector<uint8_t>  new_str_arena;
+      rugo::compression::ScratchBuffer new_str_arena;
       std::vector<uint32_t> new_str_offsets;
       std::vector<int32_t>  new_str_lens;
       std::vector<int32_t> new_dict_indices;
@@ -3043,6 +2923,9 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     } else {
       result.success = (total_collected > 0);
     }
+
+    if (dict_size > 0 && result.pages_decoded == 0 && !result.dict_all_filtered)
+      rugo_tel::dict_pages_parsed_unused.fetch_add(1, std::memory_order_relaxed);
 
     // Diagnostic: the shape this chunk actually emits, for byte_array only.
     // The predicate is copied verbatim from io_pipeline.hpp's direct_kind_for

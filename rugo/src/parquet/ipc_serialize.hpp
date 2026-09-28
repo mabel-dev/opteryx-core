@@ -560,26 +560,38 @@ static void serialize_string_dict(ByteSink& out, const DecodedColumn& col) {
         }
     }
 
-    // Sentinel-terminated offsets: dict_size+1 int32_t values.
-    // col.string_dict_offsets[i] = byte start of entry i in the arena (uint32_t).
-    // sentinel = total arena size.
+    // Sentinel-terminated offsets: dict_size+1 int32_t values over a PACKED
+    // arena (the wire format derives each length from the offset delta). The
+    // decoder's arena is not packed (DecodedColumn::string_dict_arena), so the
+    // entries are written back to back here using offsets + lens.
     uint32_t offsets_count = dict_size + 1;
     write_u32(out, offsets_count);
     // Use memcpy for each 4-byte write: the buffer is not guaranteed to be
     // 4-byte aligned, and reinterpret_cast<int32_t*> would trigger UBSAN
     // "store to misaligned address".
+    size_t packed_len = 0;
+    for (uint32_t i = 0; i < dict_size; ++i)
+        packed_len += static_cast<size_t>(col.string_dict_lens[i]);
     uint8_t* dst_off = out.advance(static_cast<size_t>(offsets_count) * 4);
     if (dst_off) {
+        int32_t pos = 0;
         for (uint32_t i = 0; i < dict_size; ++i) {
-            int32_t tmp = static_cast<int32_t>(col.string_dict_offsets[i]);
-            std::memcpy(dst_off + i * 4, &tmp, sizeof(int32_t));
+            std::memcpy(dst_off + i * 4, &pos, sizeof(int32_t));
+            pos += col.string_dict_lens[i];
         }
-        int32_t tmp = static_cast<int32_t>(col.string_dict_arena.size());
-        std::memcpy(dst_off + dict_size * 4, &tmp, sizeof(int32_t));
+        std::memcpy(dst_off + dict_size * 4, &pos, sizeof(int32_t));
     }
 
-    // Arena
-    write_bytes(out, col.string_dict_arena.data(), col.string_dict_arena.size());
+    // Arena, packed
+    uint8_t* dst_arena = out.advance(packed_len);
+    if (dst_arena) {
+        const uint8_t* src = col.string_dict_arena.data();
+        for (uint32_t i = 0; i < dict_size; ++i) {
+            const size_t ln = static_cast<size_t>(col.string_dict_lens[i]);
+            std::memcpy(dst_arena, src + col.string_dict_offsets[i], ln);
+            dst_arena += ln;
+        }
+    }
 }
 
 static void serialize_string_plain(ByteSink& out, const DecodedColumn& col) {
@@ -1035,7 +1047,7 @@ static void serialize_core(const DecodedColumn& col,
             // arena (old-style producer) — the triples share a layout, so the
             // promotion is a straight copy into the dict fields.
             DecodedColumn promoted = col;
-            promoted.string_dict_arena   = col.string_arena;
+            promoted.string_dict_arena.assign(col.string_arena.begin(), col.string_arena.end());
             promoted.string_dict_offsets = col.string_offsets;
             promoted.string_dict_lens    = col.string_lens;
             promoted.code_width = col.code_width;

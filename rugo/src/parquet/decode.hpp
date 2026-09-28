@@ -1,4 +1,5 @@
 #pragma once
+#include "compression.hpp"
 #include "metadata.hpp"
 #include <cstdint>
 #include <string>
@@ -119,7 +120,11 @@ struct DecodedColumn : DecodedColumnMeta {
   // Flat arena for dense (non-dict) byte_array values — one entry per PRESENT
   // value, in stream order. Mirrors the string_dict_* triple below; replaces the
   // old std::vector<std::string> string_values (one heap allocation per value).
-  std::vector<uint8_t>  string_arena;    // packed bytes for all dense values
+  // Dense byte_array values: value k is string_arena[string_offsets[k] ..
+  // + string_lens[k]). NOT necessarily packed — a PLAIN page may be appended
+  // whole (length prefixes and all) with offsets pointing past each prefix — so
+  // offsets + lens are the only authority for a value's extent.
+  rugo::compression::ScratchBuffer string_arena;
   std::vector<uint32_t> string_offsets;  // byte start offset per value
   std::vector<int32_t>  string_lens;     // byte length per value
   std::vector<int32_t> dict_indices;      // non-empty → dict codes; per-row indices
@@ -159,9 +164,14 @@ struct DecodedColumn : DecodedColumnMeta {
   // A non-empty message means a genuine error the caller should surface verbatim.
   std::string error_message;
 
-  // Flat arena for byte_array dict strings — eliminates one heap allocation per
-  // unique dictionary value (replaces the old std::vector<std::string> dict_string).
-  std::vector<uint8_t>  string_dict_arena;    // packed bytes for all dict entries
+  // Arena for byte_array dict strings. Entry k's bytes are
+  // string_dict_arena[string_dict_offsets[k] .. + string_dict_lens[k]).
+  // The arena is NOT packed: it is the decompressed dictionary page itself
+  // (zero-copy — each entry's 4-byte PLAIN length prefix stays in place between
+  // entries), with any re-interned values appended after it. offsets + lens are
+  // the ONLY authority for an entry's extent; never derive a length from the
+  // distance between two offsets or from the arena size.
+  rugo::compression::ScratchBuffer string_dict_arena;
   std::vector<uint32_t> string_dict_offsets;  // byte start offset per entry
   std::vector<int32_t>  string_dict_lens;     // byte length per entry
 

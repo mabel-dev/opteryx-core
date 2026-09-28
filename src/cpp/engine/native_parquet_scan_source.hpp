@@ -117,11 +117,13 @@
 #include "core/draken_bridge.h"            // draken_vecresult_child_owner_new_c
 #include "logical_type.h"                  // LogicalType / logical_type_intern (WP-11 descriptors)
 #include "core/alloc.h"                    // draken_malloc / draken_free (WP-11 temporal narrow)
+#include "native_expression.hpp"           // ExprProgram / ExprFilterFn — scan prefilter
 
 // R2 (scan-pushed LIMIT) row truncation. Lives in draken next to the take/slice
 // machinery; resolved at load time from draken_native, the same dynamic-lookup
 // path native_unnest.hpp's cxx_unnest_c uses.
 extern "C" CxxMorsel* cxx_slice_c(const CxxMorsel* m, uint32_t start, uint32_t length);
+extern "C" CxxMorsel* cxx_mask_c(const CxxMorsel* m, const DrakenVector* mask);
 extern "C" void cxx_morsel_delete(CxxMorsel* m);
 
 namespace opteryx::engine {
@@ -847,6 +849,27 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
     std::string topn_column_;
     bool topn_nulls_first_ = false;
 
+    // Scan prefilter (docs/PARQUET_SELECTIVE_DECODE_DESIGN.md §2.1): the scan's
+    // pushed predicate is evaluated on the rugo decode workers, which decode the
+    // non-predicate columns for survivors only. This Source gathers the
+    // predicate columns (flagged in prefilter_is_pred_, parallel to
+    // column_names) by the worker's survivor mask; for a row group the worker
+    // could not evaluate (empty survivor_mask — a shape its views decline) it
+    // runs `prefilter_prog_` over the whole row group itself: the same program
+    // the relocated ExprFilter would have run, so errors surface identically.
+    bool prefilter_ = false;
+    ExprProgram prefilter_prog_;
+    ExprFilterFn prefilter_fn_ = nullptr;
+    std::vector<uint8_t> prefilter_is_pred_;
+
+    // Plan-time only, on the compiler's thread, before run() is entered.
+    void set_prefilter(ExprProgram prog, ExprFilterFn fn, std::vector<uint8_t> is_pred) {
+        prefilter_prog_ = std::move(prog);
+        prefilter_fn_ = fn;
+        prefilter_is_pred_ = std::move(is_pred);
+        prefilter_ = true;
+    }
+
     // Plan-time only, on the compiler's thread, before run() is entered.
     void set_topn_boundary(TopNBoundary* boundary, std::string physical_column,
                            bool nulls_first) {
@@ -1229,19 +1252,88 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
             auto m = std::make_shared<CxxMorsel>();
             m->names = *column_names;
             m->columns.reserve(ncols);
-            for (size_t i = 0; i < ncols; ++i) {
-                CxxColumn col;
-                if (!build_column(result, i, col, err)) {
-                    if (err.code == 0) {
-                        err.code = 1;
-                        err.msg = "NativeParquetScanSource: unsupported column encoding "
-                                  "(not a fixed-width numeric direct/dict column, and not "
-                                  "a decimal column recognized via decimal_columns)";
-                    }
+            auto build_err = [&]() {
+                if (err.code == 0) {
+                    err.code = 1;
+                    err.msg = "NativeParquetScanSource: unsupported column encoding "
+                              "(not a fixed-width numeric direct/dict column, and not "
+                              "a decimal column recognized via decimal_columns)";
+                }
+            };
+            if (prefilter_ && !result.survivor_mask.empty()) {
+                // The worker ran the predicate: the predicate columns are full
+                // length, every other column already holds the survivors only.
+                if (prefilter_is_pred_.size() != ncols) {
+                    err.code = 1;
+                    err.msg = "NativeParquetScanSource: prefilter column flags do not "
+                              "match the read set";
                     return SourceResult::FINISHED;
                 }
-                m->columns.push_back(std::move(col));
+                auto pm = std::make_shared<CxxMorsel>();
+                std::vector<int> p_pos(ncols, -1);
+                for (size_t i = 0; i < ncols; ++i) {
+                    if (!prefilter_is_pred_[i]) continue;
+                    CxxColumn col;
+                    if (!build_column(result, i, col, err)) { build_err(); return SourceResult::FINISHED; }
+                    p_pos[i] = static_cast<int>(pm->columns.size());
+                    pm->columns.push_back(std::move(col));
+                }
+                if (pm->columns.empty()) {
+                    err.code = 1;
+                    err.msg = "NativeParquetScanSource: prefilter has no predicate column "
+                              "in the read set";
+                    return SourceResult::FINISHED;
+                }
+                const uint32_t np = pm->columns[0].view.length;
+                DrakenVector mv = draken_vector_from_dense(result.survivor_mask.data(), np,
+                                                           DRAKEN_BOOL, nullptr);
+                CxxMorsel* masked = cxx_mask_c(pm.get(), &mv);
+                if (masked == nullptr) {
+                    err.code = 1;
+                    err.msg = "NativeParquetScanSource: prefilter gather failed";
+                    return SourceResult::FINISHED;
+                }
+                std::unique_ptr<CxxMorsel, void (*)(CxxMorsel*)> masked_owner(masked,
+                                                                             cxx_morsel_delete);
+                for (size_t i = 0; i < ncols; ++i) {
+                    if (p_pos[i] >= 0) {
+                        m->columns.push_back(masked->columns[static_cast<size_t>(p_pos[i])]);
+                        continue;
+                    }
+                    CxxColumn col;
+                    if (!build_column(result, i, col, err)) { build_err(); return SourceResult::FINISHED; }
+                    m->columns.push_back(std::move(col));
+                }
+            } else {
+                for (size_t i = 0; i < ncols; ++i) {
+                    CxxColumn col;
+                    if (!build_column(result, i, col, err)) { build_err(); return SourceResult::FINISHED; }
+                    m->columns.push_back(std::move(col));
+                }
+                if (prefilter_) {
+                    // The worker declined: run the program over the whole row group.
+                    CxxMorsel* filtered = nullptr;
+                    int err_op = 0;
+                    const char* kernel_msg = nullptr;
+                    const int rc = prefilter_fn_(
+                        prefilter_prog_.instrs, prefilter_prog_.count, m.get(),
+                        prefilter_prog_.col_idx.data(), prefilter_prog_.lit_dv.data(),
+                        prefilter_prog_.const_col_idx.data(),
+                        prefilter_prog_.const_scalar_dv.data(),
+                        static_cast<int>(prefilter_prog_.const_col_idx.size()),
+                        &filtered, &err_op, &kernel_msg);
+                    if (rc != 0) {
+                        set_span_error(err, "NativeParquetScanSource: prefilter evaluation failed",
+                                       rc, err_op, kernel_msg);
+                        return SourceResult::FINISHED;
+                    }
+                    std::shared_ptr<CxxMorsel> fm(filtered);
+                    if (fm == nullptr || fm->num_rows() == 0) continue;
+                    m = std::move(fm);
+                }
             }
+            // Every survivor dropped (a morsel with no rows is never emitted).
+            if (prefilter_ && m->num_rows() == 0) continue;
             // R2: claim this morsel's share of the scan-pushed LIMIT. The claim and
             // the truncation must be one atomic decision across workers, otherwise
             // two workers each see "room for 5" and 10 rows escape.

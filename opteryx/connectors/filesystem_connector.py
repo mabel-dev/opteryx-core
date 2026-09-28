@@ -64,6 +64,31 @@ _SCHEMA_CACHE_MAX = _MANIFEST_CACHE_MAX
 
 
 
+# Bytes read from the end of a Parquet file to reach its footer in one request;
+# the same suffix the native pipeline uses (filesystem.hpp kFooterSuffixPrefetch).
+_FOOTER_SUFFIX_BYTES = 65536
+
+
+def _read_parquet_footer_envelope(filesystem, path: str, size: int) -> bytes:
+    """`PAR1` + footer + length + `PAR1` for the Parquet file at `path` (`size`
+    bytes), read with at most two ranged reads — the only bytes a schema needs."""
+    if size < 12:
+        raise DataError(f"{md_code(path)} is too small to be a Parquet file ({size} bytes).")
+    tail_len = min(size, _FOOTER_SUFFIX_BYTES)
+    tail = bytes(filesystem.read_ranges(path, [(size - tail_len, tail_len)])[0])
+    if len(tail) != tail_len or tail[-4:] != b"PAR1":
+        raise DataError(f"{md_code(path)} does not end with a Parquet footer.")
+    footer_len = int.from_bytes(tail[-8:-4], "little")
+    need = footer_len + 8
+    if need > size - 4:
+        raise DataError(f"{md_code(path)} declares a {footer_len}-byte footer in a {size}-byte file.")
+    if need > tail_len:
+        tail = bytes(filesystem.read_ranges(path, [(size - need, need)])[0])
+        if len(tail) != need:
+            raise DataError(f"{md_code(path)}: short read of its {footer_len}-byte footer.")
+    return b"PAR1" + tail[-need:]
+
+
 class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable):
     """
     Transient table reader for filesystem-based datasets.
@@ -378,14 +403,13 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
                 _FOOTER_METADATA_CACHE[cache_key] = rugo_metadata
                 return rugo_to_relation_schema(rugo_metadata, schema_name=blob_name)
 
-            # Open the file and extract metadata from memoryview
-            stream = self.filesystem.open_input_stream(blob_name)
-            try:
-                mv = stream.memoryview
-                rugo_metadata = read_metadata_from_memoryview(mv)
-                schema = rugo_to_relation_schema(rugo_metadata, schema_name=blob_name)
-            finally:
-                stream.close()
+            # Only the footer is read: one ranged read of the file's tail, and a
+            # second exact one when the footer is longer than that tail. A remote
+            # file used to be fetched WHOLE here (open_input_stream is a
+            # full-object GET on GCS/S3/HTTP) just to read its schema.
+            rugo_metadata = read_metadata_from_memoryview(memoryview(
+                _read_parquet_footer_envelope(self.filesystem, blob_name, info.size)))
+            schema = rugo_to_relation_schema(rugo_metadata, schema_name=blob_name)
             if len(_FOOTER_METADATA_CACHE) >= _FOOTER_METADATA_CACHE_MAX:
                 _FOOTER_METADATA_CACHE.pop(next(iter(_FOOTER_METADATA_CACHE)), None)
             _FOOTER_METADATA_CACHE[cache_key] = rugo_metadata

@@ -404,6 +404,9 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void arm_topn_sink_boundary(size_t p, size_t idx) except +
         void add_parquet_topn_boundary(size_t p, size_t idx, string column,
                                        bint nulls_first) except +
+        void set_native_scan_prefilter(size_t p, void* instrs, int count,
+                                       cppvector[int] col_idx, cppvector[void*] lit_dv,
+                                       ExprFilterFn fn, cppvector[uint8_t] is_pred) except +
         void arm_latmat_topn_boundary(size_t p, size_t idx) except +
         int64_t topn_boundary_skipped(size_t idx) except +
         void set_native_postgres_scan_source(size_t p, const PgScanSpec* spec)
@@ -3392,6 +3395,30 @@ cdef class NativePlan:
             self.held.append(const_scalar_vecs)
         self._e.add_expr_filter(p, <void*>bc.instrs, <int>bc.count, col_idx, lit_dv,
                                 _expr_filter_tramp, c_const_col_idx, c_const_scalar_dv)
+
+    def set_native_scan_prefilter(self, size_t p, CompiledBytecode bc, list layout,
+                                  list is_pred):
+        """Scan prefilter (docs/PARQUET_SELECTIVE_DECODE_DESIGN.md §2.1): pipeline
+        `p`'s native parquet scan applies its own pushed predicate — the decode
+        workers evaluate it (the NativeScanPlan was armed with set_scan_prefilter)
+        and the Source gathers the predicate columns (`is_pred`, parallel to
+        `layout`, the read set) by the survivor mask. `bc` is the program the
+        relocated ExprFilter would have run over `layout`; the Source runs it
+        itself for a row group the workers could not evaluate. `bc` is held for
+        the run, as for add_expr_filter."""
+        if not bytecode_is_c_native_predicate(bc):
+            raise ValueError("set_native_scan_prefilter requires a c-native "
+                             "bool-final program — the compiler must reject earlier")
+        cdef cppvector[int] col_idx
+        cdef cppvector[void*] lit_dv
+        cdef cppvector[uint8_t] c_is_pred
+        _resolve_bc_for_layout(bc, layout, col_idx, lit_dv)
+        self.held.append(bc)
+        cdef Py_ssize_t k
+        for k in range(len(is_pred)):
+            c_is_pred.push_back(<uint8_t>(1 if is_pred[k] else 0))
+        self._e.set_native_scan_prefilter(p, <void*>bc.instrs, <int>bc.count, col_idx,
+                                          lit_dv, _expr_filter_tramp, c_is_pred)
 
     def add_expr_project(self, size_t p, CompiledBytecode bc, list layout, name,
                          logical=None, bint preserve_shape=False):

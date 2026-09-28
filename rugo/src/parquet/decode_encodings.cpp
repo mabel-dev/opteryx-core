@@ -499,6 +499,89 @@ int32_t DecodeRLEBitPackedIndicesNoPrefix(const uint8_t *data, size_t data_size,
 }
 
 // ---------------------------------------------------------------------------
+// DecodeRLEBitPackedIndicesSelected
+// ---------------------------------------------------------------------------
+
+// Number of set 0/1 bytes in sel[0..n).
+static inline int32_t count_selected(const uint8_t *sel, int32_t n) {
+  int32_t c = 0;
+  int32_t i = 0;
+  for (; i + 8 <= n; i += 8) {
+    uint64_t w;
+    std::memcpy(&w, sel + i, 8);
+    c += __builtin_popcountll(w);
+  }
+  for (; i < n; ++i) c += sel[i];
+  return c;
+}
+
+int32_t DecodeRLEBitPackedIndicesSelected(const uint8_t *data, size_t data_size,
+                                          int32_t num_values, int bit_width,
+                                          const uint8_t *sel,
+                                          std::vector<int32_t> &out) {
+  if (bit_width > 32) return -1;
+  out.clear();
+  if (bit_width == 0) {
+    // Single-entry dictionary: every value is index 0, no bits on wire.
+    out.assign((size_t)count_selected(sel, num_values), 0);
+    return num_values;
+  }
+  out.reserve((size_t)num_values);
+
+  const uint8_t *ptr = data;
+  const uint8_t *end = data + data_size;
+  const int bpg = (bit_width <= 8) ? bit_width : (8 * bit_width + 7) / 8;
+
+  int32_t walked = 0;
+  while (walked < num_values && ptr < end) {
+    uint32_t header = 0;
+    int shift = 0;
+    while (ptr < end && shift < 32) {
+      uint8_t byte = *ptr++;
+      header |= ((uint32_t)(byte & 0x7F)) << shift;
+      if ((byte & 0x80) == 0) break;
+      shift += 7;
+    }
+
+    if ((header & 1) == 1) {
+      const int32_t num_groups    = (int32_t)(header >> 1);
+      const int32_t values_in_run = num_groups * 8;
+      const int32_t bytes_needed  = (values_in_run * bit_width + 7) / 8;
+      if (ptr + bytes_needed > end) break;
+
+      const int32_t to_walk = std::min(values_in_run, num_values - walked);
+      for (int32_t g = 0; g * 8 < to_walk; ++g) {
+        const int32_t base = walked + g * 8;
+        const int32_t in_group = std::min(8, to_walk - g * 8);
+        uint64_t w = 0;
+        std::memcpy(&w, sel + base, (size_t)in_group);
+        if (w == 0) continue;  // nothing selected: never unpacked
+        int32_t tmp[8];
+        unpack_group_8_scalar(ptr + g * bpg, tmp, bit_width);
+        for (int32_t i = 0; i < in_group; ++i)
+          if (sel[base + i]) out.push_back(tmp[i]);
+      }
+      ptr += bytes_needed;
+      walked += to_walk;
+    } else {
+      const int32_t count        = (int32_t)(header >> 1);
+      const int     bytes_needed = (bit_width + 7) / 8;
+      uint32_t value = 0;
+      for (int i = 0; i < bytes_needed && ptr < end; i++)
+        value |= ((uint32_t)(*ptr++)) << (i * 8);
+      if (bit_width < 32) value &= (1U << bit_width) - 1;
+      if (count <= 0) return -1;
+      const int32_t to_fill = std::min(count, num_values - walked);
+      const int32_t n_sel = count_selected(sel + walked, to_fill);
+      out.insert(out.end(), (size_t)n_sel, (int32_t)value);
+      walked += to_fill;
+    }
+  }
+
+  return (walked == num_values) ? walked : -1;
+}
+
+// ---------------------------------------------------------------------------
 // LevelStreamIsSingleRunOf
 // ---------------------------------------------------------------------------
 // Decides the all-present question from the RLE header alone.  The hybrid

@@ -61,6 +61,7 @@ class RecordingFileSystem:
     def __init__(self, inner):
         self._inner = inner
         self.opened = []
+        self.ranges_read = []
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -80,19 +81,21 @@ class RecordingFileSystem:
     def open_input_stream(self, path, columns=None, filters=None):
         return self._record(path, self._inner.open_input_stream(path, columns=columns, filters=filters))
 
+    def read_ranges(self, path, ranges):
+        self.ranges_read.extend((path, off, ln) for off, ln in ranges)
+        return self._inner.read_ranges(path, ranges)
+
     def open_input_file(self, path, columns=None, filters=None):
         return self._record(path, self._inner.open_input_file(path, columns=columns, filters=filters))
 
 
-def test_read_blob_closes_stream_after_decode():
-    """The schema read must not leak the mapping it decodes the footer from.
+def test_read_blob_reads_only_the_footer():
+    """The schema read opens no handle and reads only the file's footer.
 
-    `read_blob` is schema-only now (data reads raise; parquet scans go through
-    ParquetReadNode), so "after decode" means after rugo has parsed the footer
-    out of the stream's memoryview. The handle is held here for the length of
-    the assertion, which is what gives it teeth: `MemoryMappedFile.__del__`
-    also closes, so an unreferenced handle would report closed whether the
-    connector released it or not.
+    `read_blob` is schema-only (data reads raise; parquet scans go through
+    ParquetReadNode). It reads the footer with ranged reads of the file's tail
+    — a remote file used to be fetched whole here just for its schema — so
+    there is no stream to leak, and the bytes read are bounded by the footer.
     """
     telemetry = QueryTelemetry("test_fs_close_read_blob")
     fs = RecordingFileSystem(OpteryxLocalFileSystem())
@@ -107,9 +110,16 @@ def test_read_blob_closes_stream_after_decode():
     schema = table.read_blob(blob_name=PARQUET_BLOB, just_schema=True)
 
     assert schema.columns, "the footer decode produced no columns"
-    assert len(fs.opened) == 1, f"expected one open, saw {len(fs.opened)}"
-    assert fs.opened[0].close_calls == 1
-    assert fs.opened[0].handle.closed is True
+    assert fs.opened == [], f"expected no handle, saw {len(fs.opened)}"
+    size = os.path.getsize(PARQUET_BLOB)
+    with open(PARQUET_BLOB, "rb") as f:
+        f.seek(size - 8)
+        footer_len = int.from_bytes(f.read(4), "little")
+    assert fs.ranges_read, "the footer was not read"
+    for path, off, ln in fs.ranges_read:
+        assert path == PARQUET_BLOB
+        assert off + ln == size, "every read ends at the end of the file"
+        assert ln <= max(filesystem_connector._FOOTER_SUFFIX_BYTES, footer_len + 8)
 
 
 @needs_skene

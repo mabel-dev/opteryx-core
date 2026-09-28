@@ -5,6 +5,13 @@ from libcpp.vector cimport vector
 from libcpp.unordered_map cimport unordered_map
 
 
+cdef extern from "compression.hpp" namespace "rugo::compression":
+    cdef cppclass ScratchBuffer:
+        uint8_t* data()
+        size_t size()
+        bint empty()
+
+
 cdef extern from "metadata.hpp":
     cdef cppclass MetadataParseOptions:
         bint schema_only
@@ -162,7 +169,7 @@ cdef extern from "decode.hpp":
         vector[int32_t] list_def_thresholds
         vector[int32_t] int32_values
         vector[int64_t] int64_values
-        vector[uint8_t] string_arena
+        ScratchBuffer string_arena  # NOT packed: use string_offsets + string_lens
         vector[uint32_t] string_offsets
         vector[int32_t] string_lens
         vector[int32_t] dict_indices
@@ -190,8 +197,9 @@ cdef extern from "decode.hpp":
         int32_t* ext_int32
         float*   ext_float32
         int32_t  ext_written
-        # Flat arena for byte_array dict values (no per-entry std::string alloc)
-        vector[uint8_t]  string_dict_arena
+        # byte_array dict arena: NOT packed (the decompressed dict page); use
+        # string_dict_offsets + string_dict_lens for every entry's extent.
+        ScratchBuffer    string_dict_arena
         vector[uint32_t] string_dict_offsets
         vector[int32_t]  string_dict_lens
         uint8_t code_width

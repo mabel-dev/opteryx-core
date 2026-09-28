@@ -60,6 +60,9 @@ class AnonymousGcsFileSystem:
     def open_input_stream(self, path: str, columns=None, filters=None):
         return self._http.open_input_stream(self._to_public_https_url(path), columns=columns, filters=filters)
 
+    def read_ranges(self, path: str, ranges):
+        return self._http.read_ranges(self._to_public_https_url(path), ranges)
+
     def get_file_info(self, paths):
         if isinstance(paths, str):
             return self._http.get_file_info(self._to_public_https_url(paths))

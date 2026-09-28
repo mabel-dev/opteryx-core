@@ -614,6 +614,26 @@ public:
         sink->boundary = b;
         sink->boundary_col = static_cast<int32_t>(sink->spec[0].col_idx);
     }
+    // Make pipeline `p`'s native parquet scan apply its pushed predicate itself
+    // (scan prefilter): the decode workers evaluate it (the pipeline was armed
+    // with NativeScanPlan.set_scan_prefilter), the Source gathers the predicate
+    // columns — `is_pred`, parallel to the read set — by the survivor mask, and
+    // runs this program itself for a row group the workers declined. Replaces
+    // the relocated ExprFilter for this scan.
+    void set_native_scan_prefilter(size_t p, void* instrs, int count,
+                                   std::vector<int> col_idx, std::vector<void*> lit_dv,
+                                   ExprFilterFn fn, std::vector<uint8_t> is_pred) {
+        auto* src = dynamic_cast<NativeParquetScanSource*>(pipelines[p]->source.get());
+        if (src == nullptr)
+            throw std::runtime_error(
+                "set_native_scan_prefilter: pipeline source is not a native parquet scan");
+        ExprProgram prog;
+        prog.instrs = instrs;
+        prog.count = count;
+        prog.col_idx = std::move(col_idx);
+        prog.lit_dv = std::move(lit_dv);
+        src->set_prefilter(std::move(prog), fn, std::move(is_pred));
+    }
     // Arm pipeline `p`'s native parquet scan as the CONSUMER, testing `column` (the
     // leading key's PHYSICAL name) under its NULL placement.
     void add_parquet_topn_boundary(size_t p, size_t idx, std::string column,

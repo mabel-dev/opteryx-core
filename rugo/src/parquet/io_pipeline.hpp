@@ -379,10 +379,19 @@ static inline bool pass1_build_dv_view(ColumnOut& co, uint32_t nrows,
 // the decode worker thread.
 static inline void pass1_run_predicate(MorselRef& result, const Pass1Pred& pred) {
     if (!pred.fn || !result.success || result.columns.empty()) return;
-    const uint32_t nrows = result.columns[0].length;
-    if (nrows == 0) return;
     const int ncols = static_cast<int>(pred.cols.size());
     if (ncols == 0 || ncols > 64) return;
+    // Row count from the first predicate column: under the scan prefilter only
+    // the predicate columns are decoded when this runs.
+    uint32_t nrows = 0;
+    {
+        int c0 = -1;
+        for (size_t j = 0; j < result.column_names.size(); ++j)
+            if (result.column_names[j] == pred.cols[0]) { c0 = static_cast<int>(j); break; }
+        if (c0 < 0 || static_cast<size_t>(c0) >= result.columns.size()) return;
+        nrows = result.columns[c0].length;
+    }
+    if (nrows == 0) return;
     DrakenStringArena arenas[64];
     DrakenVector      dvs[64];
     DrakenVector*     dvp[64];
@@ -666,21 +675,18 @@ static inline bool build_direct_string_plain(const DecodedColumn& d,
     const int32_t*  vlens  = d.string_lens.data();
     const size_t    vcount = d.string_lens.size();
 
-    // Pass 1: arena bytes (long, non-null strings only).
-    size_t total_arena = 0;
-    if (!length_only) {
-        for (uint32_t i = 0; i < n; ++i) {
-            if (nullable && !((nb[i >> 3] >> (i & 7)) & 1)) continue;
-            const size_t slen = (i < vcount) ? (size_t)vlens[i] : 0u;
-            if (slen > STR_INLINE_MAX) total_arena += slen;
-        }
-    }
-
+    // The decoder's arena is copied ONCE, whole, and every slot addresses it at
+    // the decoder's own offsets — no per-value copy (measured 2026-09-28:
+    // JOB 4.0%, ClickBench 2.9%). The arena may carry bytes no slot reads (PLAIN
+    // length prefixes, inline values); offsets + lens are authoritative. Under
+    // length_only no payload is ever read, so nothing is copied at all.
+    const size_t arena_len = length_only ? 0u : d.string_arena.size();
     DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(
         alloc((n ? n : 1u) * sizeof(DrakenStringSlot)));
     if (!slots) return false;
-    uint8_t* arena = static_cast<uint8_t*>(alloc(total_arena ? total_arena : 1u));
+    uint8_t* arena = static_cast<uint8_t*>(alloc(arena_len ? arena_len : 1u));
     if (!arena) { freefn(slots); return false; }
+    if (arena_len) std::memcpy(arena, vbytes, arena_len);
     uint8_t* validity = nullptr;
     if (nullable) {
         validity = static_cast<uint8_t*>(alloc(d.valid_bits.size()));
@@ -688,47 +694,41 @@ static inline bool build_direct_string_plain(const DecodedColumn& d,
         std::memcpy(validity, d.valid_bits.data(), d.valid_bits.size());
     }
     // E37: build the hash seed ONLY when the plan marks this column a downstream
-    // key (want_seed). Non-key columns take the cheap builder — NO XXH3 at all —
-    // which is the whole point of the plan-gated hashing. null-row seeds stay 0
-    // (the consumer bakes NULL_HASH from validity, so they are never read).
+    // key (want_seed). Non-key columns take the cheap builder — NO XXH3 at all.
+    // null-row seeds stay 0 (the consumer bakes NULL_HASH from validity).
     uint64_t* keyhash = nullptr;
     if (want_seed) {
         keyhash = static_cast<uint64_t*>(alloc((n ? n : 1u) * sizeof(uint64_t)));
         if (!keyhash) { if (validity) freefn(validity); freefn(arena); freefn(slots); return false; }
     }
-
-    // Pass 2: fill arena + build slots (+ seeds when keyed).
-    uint32_t arena_pos = 0;
     for (uint32_t i = 0; i < n; ++i) {
         DrakenStringSlot* slot = &slots[i];
         if (nullable && !((nb[i >> 3] >> (i & 7)) & 1)) {
             str_init_null(slot);
-            if (keyhash) keyhash[i] = 0u;   // null row: seed unused
+            if (keyhash) keyhash[i] = 0u;
             continue;
+        }
+        if (i >= vcount) {   // fewer values than present rows: a decoder bug
+            if (keyhash) freefn(keyhash);
+            if (validity) freefn(validity);
+            freefn(arena); freefn(slots);
+            return false;
         }
         const uint8_t* sp = vbytes + voffs[i];
         const uint32_t slen = static_cast<uint32_t>(vlens[i]);
-        if (slen > STR_INLINE_MAX && length_only) {
-            if (want_seed) draken::ops::draken_build_string_slot_seed(
-                               slot, sp, slen, STR_ELIDED_PAYLOAD_OFFSET, &keyhash[i]);
-            else           draken_build_string_slot(
-                               slot, sp, slen, STR_ELIDED_PAYLOAD_OFFSET);
-        } else if (slen > STR_INLINE_MAX) {
-            std::memcpy(arena + arena_pos, sp, slen);
-            if (want_seed) draken::ops::draken_build_string_slot_seed(slot, sp, slen, arena_pos, &keyhash[i]);
-            else           draken_build_string_slot(slot, sp, slen, arena_pos);  // no XXH3
-            arena_pos += slen;
-        } else {
-            if (want_seed) draken::ops::draken_build_string_slot_seed(slot, sp, slen, arena_pos, &keyhash[i]);
-            else           draken_build_string_slot(slot, sp, slen, arena_pos);  // inline
-        }
+        // A long value's payload lives at its decoder offset, or nowhere when
+        // elided (STR_ELIDED_PAYLOAD_OFFSET makes any misuse fault).
+        const uint32_t slot_off = (length_only && slen > STR_INLINE_MAX)
+            ? STR_ELIDED_PAYLOAD_OFFSET : voffs[i];
+        if (want_seed) draken::ops::draken_build_string_slot_seed(slot, sp, slen, slot_off, &keyhash[i]);
+        else           draken_build_string_slot(slot, sp, slen, slot_off);
     }
 
     out.data = slots;
     out.validity = validity;
     out.length = n;
     out.arena = arena;
-    out.arena_len = arena_pos;
+    out.arena_len = arena_len;
     out.payloads_elided = length_only;
     out.keyhash = keyhash;
     return true;
@@ -800,8 +800,8 @@ static inline bool build_direct_rle_string_dict(const DecodedColumn& d,
 // Build the DICT-VARCHAR direct buffers for a dict-encoded byte_array column,
 // mirroring _build_string_dict (consumer) + serialize_string_dict (source): a
 // compact value array of `dict_size` unique slots over a verbatim copy of
-// string_dict_arena (slot k references offset string_dict_offsets[k], length =
-// the offset delta — matching the deserializer), plus a per-row uint32 `codes`
+// string_dict_arena (slot k references offset string_dict_offsets[k], length
+// string_dict_lens[k] — the arena is not packed, see DecodedColumn), plus a per-row uint32 `codes`
 // selection from dict_codes_array (packed code_width) or dict_indices (sparse,
 // null rows → code 0). The result is data_length < length (dict shape) but
 // accessed through the same uniform value[codes[i]] path.
@@ -852,9 +852,7 @@ static inline bool build_direct_string_dict(const DecodedColumn& d,
     const uint8_t* src_arena = d.string_dict_arena.data();
     for (uint32_t k = 0; k < dict_size; ++k) {
         const uint32_t s_off = d.string_dict_offsets[k];
-        const uint32_t slen = (k + 1u < dict_size)
-            ? (d.string_dict_offsets[k + 1u] - s_off)
-            : (static_cast<uint32_t>(arena_len) - s_off);
+        const uint32_t slen = static_cast<uint32_t>(d.string_dict_lens[k]);
         const uint8_t* sp = src_arena + s_off;
         const uint32_t slot_off = (slen > STR_INLINE_MAX)
             ? (length_only ? STR_ELIDED_PAYLOAD_OFFSET : s_off)
@@ -1858,6 +1856,12 @@ class ParquetIOPipeline {
     // Q24 latmat: pushed pass-1 predicate (opteryx callback). Set once before any
     // submit; workers read it const, no sync.
     Pass1Pred pass1_pred_;
+    // Scan prefilter: the pushed predicate (pass1_pred_) is THE filter of this
+    // scan — predicate columns decode first, the rest decode for survivors only
+    // (see the worker). Off for latmat pass 1, which wants full columns + a mask.
+    bool prefilter_ = false;
+    std::atomic<uint64_t> prefilter_rows_in_{0};
+    std::atomic<uint64_t> prefilter_rows_out_{0};
 
     // ── PageIndex region cache ───────────────────────────────────────────────
     // A writer lays every ColumnIndex of the file out contiguously, then every
@@ -2970,7 +2974,16 @@ class ParquetIOPipeline {
             // decode stops re-mallocing the DecodedColumn's ~25 buffers. Function-
             // local → one per worker invocation, no cross-thread sharing.
             DecodedColumn scratch;
-            for (size_t i = 0; i < item.column_stats.size() && !result.empty_filtered; ++i) {
+            // One slot per read column, filled in DECODE order (which the scan
+            // prefilter below makes predicate-columns-first), so a column's
+            // position never depends on when it was decoded.
+            const size_t ncols_total = item.column_stats.size();
+            result.columns.assign(ncols_total, ColumnOut{});
+            // Decode column i under `col_mask` (uint8 per row group row, or null)
+            // into result.columns[i]. Returns false when the row group must stop
+            // decoding: an error (result.success = false) or a dictionary miss
+            // that proves it empty (result.empty_filtered).
+            auto decode_col = [&](size_t i, const uint8_t* col_mask) -> bool {
                 const auto& col_stats = item.column_stats[i];
                 // PageIndex jump plan for this column (nullptr = header-walk).
                 const PageJumpPlan* jump_ptr =
@@ -3076,7 +3089,7 @@ class ParquetIOPipeline {
                         static_cast<const uint8_t*>(mmap_base) + (base_offset - mmap_offset);
                     auto t_dec = std::chrono::steady_clock::now();
                     DecodeColumnFromChunk(scratch,
-                        chunk_ptr, static_cast<size_t>(chunk_size), &adjusted, mask_ptr, prefer_dict, skip_ptr, jump_ptr);
+                        chunk_ptr, static_cast<size_t>(chunk_size), &adjusted, col_mask, prefer_dict, skip_ptr, jump_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                     // A jumped-over page is never faulted in from the mapping.
@@ -3092,14 +3105,14 @@ class ParquetIOPipeline {
                         result.success = false;
                         result.error = "coalesced range fetch did not cover column " +
                                        std::to_string(i);
-                        break;
+                        return false;
                     }
                     const uint8_t* raw_data = col_ptr[i];
                     const size_t   raw_size = col_len[i];
                     result.bytes_fetched += col_fetched[i];   // what was actually transferred
                     auto t_dec = std::chrono::steady_clock::now();
                     DecodeColumnFromChunk(scratch,
-                        raw_data, raw_size, &adjusted, mask_ptr, prefer_dict, skip_ptr, jump_ptr);
+                        raw_data, raw_size, &adjusted, col_mask, prefer_dict, skip_ptr, jump_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                 } else {
@@ -3110,7 +3123,7 @@ class ParquetIOPipeline {
                     total_read_ns += read_ns;
                     auto t_dec = std::chrono::steady_clock::now();
                     DecodeColumnFromChunk(scratch,
-                        raw_bytes.data(), raw_bytes.size(), &adjusted, mask_ptr, prefer_dict, skip_ptr, jump_ptr);
+                        raw_bytes.data(), raw_bytes.size(), &adjusted, col_mask, prefer_dict, skip_ptr, jump_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                 }
@@ -3127,7 +3140,7 @@ class ParquetIOPipeline {
                     } else {
                         result.error = "Decode failed for column: " + col_stats.name;
                     }
-                    break;
+                    return false;
                 }
 
                 // Phase 2 fast-exit: a pushed-conjunct equality column whose
@@ -3137,7 +3150,7 @@ class ParquetIOPipeline {
                 if (decoded.dict_all_filtered) {
                     result.empty_filtered = true;
                     result.empty_rows = decoded.num_rows;
-                    break;
+                    return false;
                 }
 
                 ColumnOut cout;
@@ -3247,7 +3260,7 @@ class ParquetIOPipeline {
                     if (!ok) {
                         result.success = false;
                         result.error = "draken_alloc failed for column: " + col_stats.name;
-                        break;
+                        return false;
                     }
                     cout.direct_kind = dk;
                     if (dk == DK_DECIMAL128 || dk == DK_DECIMAL128_DICT)
@@ -3280,7 +3293,7 @@ class ParquetIOPipeline {
                     if (ref_id < 0 || dst == nullptr) {
                         result.success = false;
                         result.error = "MemoryPool exhausted serializing column: " + col_stats.name;
-                        break;
+                        return false;
                     }
                     size_t written = rugo::serialize_decoded_column_into(
                         decoded, static_cast<uint8_t*>(dst), dec_precision, dec_scale);
@@ -3289,7 +3302,73 @@ class ParquetIOPipeline {
                     cout.direct_kind = DK_POOL;
                     cout.ref_id = ref_id;
                 }
-                result.columns.push_back(cout);
+                result.columns[i] = cout;
+                return true;
+            };
+
+            // ── Scan prefilter (docs/PARQUET_SELECTIVE_DECODE_DESIGN.md §2.1) ──
+            // Predicate columns first; the pushed predicate runs here on this
+            // worker; a row group with no survivor stops (empty_filtered) and
+            // never decodes the other columns; otherwise they decode under the
+            // survivor mask (selective decode). The predicate columns stay
+            // full-length — the consumer gathers them by result.survivor_mask.
+            // When the worker cannot evaluate (a shape pass1_build_dv_view
+            // declines) the other columns decode unmasked and the consumer runs
+            // the same program over the whole row group.
+            const bool prefilter = prefilter_ && pass1_pred_.fn != nullptr;
+            if (!prefilter) {
+                for (size_t i = 0; i < ncols_total && !result.empty_filtered; ++i)
+                    if (!decode_col(i, mask_ptr)) break;
+            } else {
+                if (!item.row_mask.empty())
+                    throw std::logic_error("scan prefilter armed on a row-masked work item");
+                std::vector<uint8_t> is_pred(ncols_total, 0);
+                for (size_t i = 0; i < ncols_total; ++i)
+                    for (const auto& pc : pass1_pred_.cols)
+                        if (item.column_stats[i].name == pc) { is_pred[i] = 1; break; }
+                bool ok = true;
+                for (size_t i = 0; i < ncols_total && ok; ++i)
+                    if (is_pred[i]) ok = decode_col(i, mask_ptr);
+                if (ok && !result.empty_filtered) {
+                    pass1_run_predicate(result, pass1_pred_);
+                    std::vector<uint8_t> d_mask;
+                    const uint8_t* d_mask_ptr = mask_ptr;
+                    if (!result.survivor_mask.empty()) {
+                        // Predicate-column length: the page-pruned survivors when a
+                        // page mask is active, else the row group.
+                        uint32_t np = 0;
+                        for (size_t i = 0; i < ncols_total; ++i)
+                            if (is_pred[i]) { np = result.columns[i].length; break; }
+                        const uint8_t* sm = result.survivor_mask.data();
+                        uint32_t kept = 0;
+                        for (uint32_t r = 0; r < np; ++r) kept += (sm[r >> 3] >> (r & 7)) & 1u;
+                        prefilter_rows_in_.fetch_add(np, std::memory_order_relaxed);
+                        prefilter_rows_out_.fetch_add(kept, std::memory_order_relaxed);
+                        if (kept == 0) {
+                            result.empty_filtered = true;
+                            result.empty_rows = np;
+                        } else if (kept < np || mask_ptr != nullptr) {
+                            // Row-group-row mask for the other columns: the survivor
+                            // bit of each row that reached the predicate columns.
+                            const size_t rg_rows = mask_ptr != nullptr
+                                ? pp.row_mask.size() : static_cast<size_t>(np);
+                            d_mask.assign(rg_rows, 0);
+                            uint32_t rank = 0;
+                            for (size_t r = 0; r < rg_rows; ++r) {
+                                if (mask_ptr != nullptr && !mask_ptr[r]) continue;
+                                d_mask[r] = (sm[rank >> 3] >> (rank & 7)) & 1u;
+                                ++rank;
+                            }
+                            if (rank != np)
+                                throw std::logic_error("scan prefilter: page mask and predicate "
+                                                       "column length disagree");
+                            d_mask_ptr = d_mask.data();
+                        }
+                    }
+                    if (!result.empty_filtered)
+                        for (size_t i = 0; i < ncols_total; ++i)
+                            if (!is_pred[i] && !decode_col(i, d_mask_ptr)) break;
+                }
             }
         } catch (const std::exception& e) {
             result.success = false;
@@ -3359,7 +3438,7 @@ class ParquetIOPipeline {
         // Q24 latmat: evaluate the pushed pass-1 predicate on this worker thread
         // (parallel across the decode pool) and attach the survivor bitmap. No-op if
         // no predicate pushed / unsupported shape → consumer falls back to serial.
-        if (pass1_pred_.fn != nullptr)
+        if (pass1_pred_.fn != nullptr && !prefilter_)
             pass1_run_predicate(result, pass1_pred_);
         // Apply soft back-pressure: if the consumer is far behind, block
         // on the condition variable until it drains rather than spin-yielding.
@@ -3609,6 +3688,12 @@ class ParquetIOPipeline {
         pass1_pred_.cols = cols;
     }
     void clear_pass1_predicate() { pass1_pred_.fn = nullptr; pass1_pred_.ctx = nullptr; pass1_pred_.cols.clear(); }
+    // Make the registered pass-1 predicate this scan's filter (scan prefilter).
+    // Set once before submit; requires set_pass1_predicate.
+    void set_prefilter(bool on) { prefilter_ = on; }
+    bool prefilter() const { return prefilter_; }
+    uint64_t prefilter_rows_in() const { return prefilter_rows_in_.load(std::memory_order_relaxed); }
+    uint64_t prefilter_rows_out() const { return prefilter_rows_out_.load(std::memory_order_relaxed); }
 
     // Block ids per row group of `fs` for the projected `column_names`: row
     // group k+1 shares row group k's block when EVERY projected column's chunk

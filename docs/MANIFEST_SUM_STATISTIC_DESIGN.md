@@ -1,299 +1,352 @@
-# Manifest SUM Statistic — Design
+# SUM Statistic and Statistics-Answered Aggregates — Design
 
-Status: PROPOSED (2026-09-27) — decisions D1–D6 open for the architect.
+Status: PROPOSED, revision 2 (2026-09-28). Rulings of 2026-09-28 folded in (§2).
+Open items are listed in §11.
 
 ## 1. Goal
 
-Record an exact per-file, per-column **sum** in the manifest so that the
-optimizer can answer `SUM(col)` and `AVG(col)` from statistics, with no scan.
-This is the same method `StatisticsOnlyResponseStrategy` already uses for
-`COUNT(*)`, `COUNT(col)`, `MIN` and `MAX`.
+Record an exact integer **sum** per column wherever we record per-column
+statistics: per row group in the data file, per file in the manifest. Then
+answer aggregates from statistics **everywhere that is provably sound**:
 
-It also serves consumers beyond this rewrite:
+- unfiltered;
+- filtered (the covered/residual split);
+- grouped (group keys that are constant within a unit);
+- at plan time, per file;
+- at execution time, per row group.
 
-- the covered/residual range-aggregate rewrite (the infino `covered_agg`
-  pattern, §9). There, files wholly inside a filter range contribute their sum
-  from stats, and only boundary files are scanned;
-- any future estimate that wants a column mean.
+"Unit" below means a file (plan time, from the manifest) or a row group
+(execution time, from the file footer).
 
-**Non-goal (v1):** filtered aggregates, `GROUP BY`, and `SUM(DISTINCT)`.
+## 2. Rulings (2026-09-28)
 
-## 2. The contract: a stats answer must equal the engine's answer
+| # | Ruling |
+|---|---|
+| D1 | The manifest stores the sum as a native int128 leaf. Add draken/rugo support where it is missing (§5.3). |
+| D2 | **Integer columns only.** No floats. DECIMAL is also not in scope (read "just int columns" as integers only; say if DECIMAL was meant to be included). |
+| D3 | Asked: is there a slot in the Parquet or skene spec? Answered in §4. |
+| D4 | **Every integer width and signedness:** INT8/16/32/64 and UINT8/16/32/64. |
+| D5 | An overflow is never fatal to the query; it only means the statistic can't be used. |
+| D6 | Use it in **every** instance where it is sound: aggregates, filters, grouping, plan time and execution time. |
 
-The engine's semantics (`src/cpp/engine/native_group_sinks.hpp`) are the
-specification. A statistics answer that differs from the scanned answer is a
-bug, never an optimisation (§11 rule, applied here).
+## 3. The contract: a statistics answer must equal the correct answer
 
-| Operand | Engine accumulator | SUM output | AVG output |
-|---|---|---|---|
-| INT8/16/32/64, UINT8/16/32 | exact `__int128` (`isum`) | INT64. Raises "SUM overflow" if outside INT64 (finalize, line ~2476) | `(double)i128 / (double)valid` |
-| DECIMAL (64), DECIMAL128 | exact `__int128` of unscaled raws | bound DECIMAL type | `(double)i128 / (double)valid / 10^scale` |
-| FLOAT32/64 | `double` `+=` | FLOAT64 | `fsum / valid` |
-| UINT64 | see §10 (suspected engine defect) | — | — |
-| BOOL, DATE32, TIME32/64, TIMESTAMP64 | `__int128` (admitted by `agg2_operand_supported`) | — | — |
-| zero valid values | — | NULL | NULL |
+The engine's semantics (`src/cpp/engine/native_group_sinks.hpp`) define the
+answer. A statistics answer that differs from a correct scan is a bug, never an
+optimisation.
 
-Consequences for the stored statistic:
+| Aggregate over integer column `c` | Engine | From statistics |
+|---|---|---|
+| `SUM(c)` | exact `__int128` accumulation. Output is INT64, and a total outside INT64 raises "SUM overflow" | Σ unit sums (int128). If the total is outside INT64, **decline** (D5): the query takes the scan path, and the engine's own behaviour applies |
+| `AVG(c)` | `(double)i128 / (double)valid`, FLOAT64 | the same expression, from Σ sums and Σ valid. Bit-identical |
+| `COUNT(*)` / `COUNT(c)` | rows / valid rows | Σ rows / Σ(rows − nulls) (exists today, unfiltered only) |
+| `MIN(c)` / `MAX(c)` | raw value at the operand's type | the unit bound, only where the ordinal IS the value (the existing gate in `statistics_only_response.py`) |
+| zero valid values | SUM/AVG/MIN/MAX are NULL | NULL |
 
-- **The integer and decimal sum must be int128 per file.** The only draken
-  reduction today (`draken/ops/int64_reductions.h` `i64_sum`) *wraps* on
-  overflow, so it is unusable here. A per-file int64 is also not enough:
-  `AVG(UserID)` (ClickBench Q4) overflows int64 inside a single file, and the
-  engine explicitly supports that case (the comment at `AvgI` finalize).
-- **AVG needs the valid count.** It is `record_count - null_count`, per file,
-  and both are already in the manifest.
-- **An integer/decimal answer is bit-identical to the engine's.** Integer
-  addition is associative, and the division is the same expression. Floats are
-  not bit-identical (see D2).
+Integer addition is associative, so every row in this table is exact.
 
-## 3. What exists today
+### ⛔ P0 prerequisite: engine `SUM`/`AVG` over UINT64 is wrong today
 
-- **Manifest rows:** `ManifestCell` (`src/cpp/planner/native_manifest.hpp`)
-  holds bounds, `null_count`, lengths, NDV and the sketch. It has no sum.
-- **Persisted format:** `_MANIFEST_COLUMNS` (`opteryx/models/manifest_io.py`).
-  Per-column stats are positional `ARRAY` columns, and an unknown is a null leaf
-  (never zero). `distinct_counts` is the precedent for an **optional column
-  appended last**: old manifests simply do not carry it
-  (`manifest_decode.hpp:63`), and no stored manifest needs rewriting.
-- **Producers of per-file column stats:**
-  1. **Writer:** `FileStats` → `FileStatsAccumulator`
-     (`src/cpp/planner/file_stats.hpp`). It is fed row group by row group by
-     `parquet_writer.py`, and covers INSERT, CTAS and compaction output.
-  2. **ANALYZE:** `_analyze_one_file` (`opteryx/operators/table_management/_analyze.py`).
-     Its per-morsel reductions are native, and it writes through
-     `NativeManifestBuilder.set_counts` / `set_sketch`.
-  3. **Footers:** parquet via `manifest_footer.hpp`, and skene via
-     `skene_stats.hpp`. Neither format carries a sum.
-  4. **Carry paths:** `carry_statistics`, `copy_manifest_row` and
-     `relocate_file` copy an existing file's cells (compaction, snapshot
-     operations).
-- **Consumer:** `statistics_only_response.py`. It handles an unfiltered,
-  ungrouped `Aggregate` directly over a `Scan`. When the manifest has deletes,
-  only a bare `COUNT(*)` is allowed: the per-column stats describe the physical
-  superset.
+- `agg2_read_raw` (`native_group_sinks.hpp` ~l.569) reads a UINT64 as its int64
+  bit pattern.
+- `AggCell::isum` is an `__int128`, so `isum += raw` **sign-extends**. Every
+  value ≥ 2^63 is added as `value − 2^64`.
+- The comment claims "the FINAL reported value is reinterpreted back to
+  uint64_t for output". That does not happen: `SumI` emits `DRAKEN_INT64`
+  (l.1592).
 
-## 4. Design
+Result: `SUM(u64)` over values ≥ 2^63 returns a silently wrong number, and
+`AVG(u64)` does too. This was found by reading the code; it has **not** been
+reproduced.
 
-### 4.1 One native exact-sum reduction (draken)
+D4 includes UINT64, and a correct statistics answer would disagree with the
+engine's wrong one. So **the engine fix lands first**: zero-extend UINT64 into
+the int128 lane. It is a separate, approved change.
 
-New header-only `draken/ops/exact_sum.h`:
+## 4. D3 — does the format have a slot for a sum?
 
-```c
-// Exact sum of the valid rows of an integer-family / DECIMAL / DECIMAL128 vector.
-// Returns false (sum unknown) on int128 overflow — never a wrapped value.
-bool draken_exact_sum_i128(const DrakenVector& v, __int128* sum, uint64_t* valid);
-```
+### skene: yes, and it is already written
 
-- It uses the uniform `data[selection[i]]` path. An identity-selection
-  contiguous loop is allowed under the 2026-08-06 ratification
-  (`count_true`/`mask_indices` class), via the canonical predicate only.
-- Widening is at the operand's own width (sign-extend signed, zero-extend
-  unsigned ≤32 bits), exactly as `agg2_read_raw` does.
-- Overflow is checked with `__builtin_add_overflow` on int128. It is
-  practically unreachable, but checking costs nothing on the hot path if done
-  per block.
+- `skene/include/skene/format.h`, `ColumnStatistics` (per column, per row
+  group, in the file footer): `kStatSum = 1u << 3` ("int128; exact types only,
+  NEVER floats"), stored in `sum_low` / `sum_high`.
+- **The writer already fills it.** `skene/src/statistics.cpp` accumulates
+  `__int128` over non-null values for INT8–64 and UINT8–64 (UINT64
+  zero-extended, correctly), and also DECIMAL.
+- Tests exist: `test_value_order.cpp` covers the sum over non-nulls, a sum past
+  int64, and floats getting no sum.
+- `skene_native.pyx` exposes `"sum"`.
+- **No consumer reads it.** `src/cpp/planner/skene_stats.hpp` (row group →
+  file aggregation into the manifest) ignores `kStatSum`, and so does the skene
+  scan. Every skene mirror already carries row-group sums, at no format change.
 
-There is **one** implementation, used by both the writer accumulator and
-ANALYZE. The engine's `AggCell` keeps its own loop, because it is fused with
-MIN/MAX lanes. Converging the engine onto this reduction is not proposed.
+### Parquet: no sum statistic, but there is a spec-sanctioned per-chunk slot
 
-### 4.2 Manifest cell
+- `Statistics` (parquet.thrift) has only min/max, null_count, distinct_count and
+  the exactness flags. There is no sum, and `SizeStatistics` and
+  `GeospatialStatistics` don't have one either.
+- **The extension slot is `ColumnMetaData.key_value_metadata`** (field 8). It
+  holds one list per column chunk, i.e. per column per row group, which is
+  exactly the granularity we want.
+- **rugo's reader already parses it** (`metadata.cpp:612`, into
+  `ColumnStats.key_value_metadata`) whenever statistics are read.
+- rugo's writer does **not** emit it today. It writes only the file-level
+  field 5, for draken logical descriptors.
+- The 2026-08-19 ruling put *descriptors* at file level because schema-only
+  reads skip the chunk KV. That reasoning does not apply to a sum: a sum is a
+  chunk property, and it is only needed on the statistics read, which does
+  parse field 8.
+
+**Proposal for rugo:**
+- Emit key `rugo.sum` on every integer, non-LIST column chunk.
+- The value is the int128 sum written as signed decimal text. Text is portable
+  to any reader, and parsing it is trivial next to the footer read.
+- A chunk with no key means "not tracked".
+- Trust follows the existing sorting-columns rule: **trusted only when
+  `created_by` identifies rugo.** A foreign writer's `rugo.sum` is ignored.
+- rugo stays opteryx-free: the key is rugo's own name.
+
+## 5. Storage and producers
+
+### 5.1 One exact-sum reduction, shared
+
+skene already has the kernel (`value_as_int128` plus the accumulation loop in
+`skene/src/statistics.cpp`). **Lift it into draken** as a header-only
+`draken/ops/exact_sum.h`, and use it from:
+- the skene writer (replacing its private copy);
+- the rugo parquet writer;
+- the opteryx writer's `FileStatsAccumulator`;
+- ANALYZE.
+
+That gives one implementation (§11 of the contract: no duplication). The
+existing draken `i64_sum` wraps on overflow and is not used for this.
+
+An int128 accumulator cannot overflow at any row count we address:
+|INT64_MIN| × 2^32 = 2^95. Folding across files in the manifest is also int128.
+A theoretical overflow there is detected with `__builtin_add_overflow`, and the
+sum becomes unknown (D5).
+
+### 5.2 Manifest cell
 
 ```c++
 struct ManifestCell {
     ...
-    SumTag   sum_tag = SUM_NONE;   // NONE (unknown) | INT128 | DOUBLE (D2)
-    __int128 sum_i = 0;            // integer family / DECIMAL unscaled, at the column's scale
-    double   sum_f = 0.0;          // FLOAT only, if D2 admits floats
+    bool     has_sum = false;   // false = NOT TRACKED, never zero
+    __int128 sum = 0;           // integer columns only
 };
 ```
 
-`SUM_NONE` means unknown, never zero (the manifest's existing rule).
+A native accessor (`NativeManifest`) folds the per-file sums into a
+relation-wide total.
 
-A native accessor sits beside `total_null_count`:
+### 5.3 Persisted manifest format (D1)
 
-```c++
-// Relation-wide (sum, valid) for `position`, or nullopt when ANY live file's
-// sum or null count is unknown, or any file has deletes.
-std::optional<SumTotal> NativeManifest::total_sum(size_t position) const;
-```
+- Add a **new optional column appended last**, `sums`, following the
+  `distinct_counts` precedent. Its type is `ARRAY(DECIMAL128)` at scale 0 (a
+  scale-0 decimal is an integer, and DECIMAL128 is draken's existing int128
+  physical type).
+- Old manifests decode unchanged, with every sum unknown.
+- **This needs verifying, and building if missing** (per the D1 ruling):
+  - draken can build and view an `ARRAY` vector with a DECIMAL128 leaf;
+  - rugo writes and reads `LIST<FIXED_LEN_BYTE_ARRAY(16) DECIMAL(38,0)>`;
+  - `manifest_encode.hpp` / `manifest_decode.hpp` handle the int128 leaf.
+- No new DrakenType is introduced. The enum is part of the frozen ABI.
+- **Cross-repo:** the catalog shares `_MANIFEST_COLUMNS`, so it must pass
+  `sums` through. That lands in the catalog repo first.
+- `SHOW MANIFEST` renders sums as text, the same way bounds are rendered.
 
-It folds in int128 and returns nullopt on overflow. The `valid` it returns is
-`Σ(record_count − null_count)`.
+### 5.4 Producers
 
-### 4.3 Persisted format
-
-Add **one optional column, appended last**, following the `distinct_counts`
-precedent. Old manifests decode unchanged, with every sum unknown. Encoding is
-D1.
-
-The catalog repository shares this format (`_MANIFEST_COLUMNS` "shared with the
-catalog"). The catalog must pass the new column through untouched. That is a
-cross-repo change and has to land there first, or be verified to be
-format-agnostic.
-
-`SHOW MANIFEST` gains a `sums` column rendered as text, in the same way bounds
-are (`show_morsel`).
-
-### 4.4 Producers
-
-| Producer | v1 | How |
+| Producer | Row-group sum | File sum (manifest) |
 |---|---|---|
-| Writer (`FileStatsAccumulator`) | **yes** | Per-column int128 lane plus a `summable` flag set from the physical type. `add()` calls `draken_exact_sum_i128` per row group, and `write()` sets `sum_tag`. Overflow sets the column to unknown for this file. |
-| ANALYZE | **yes** | Per morsel, call the same reduction through a Vector method (for example `col.exact_sum()`, returning `(hi, lo, valid)` or None), fold in Python across a handful of morsels (the existing pattern), then `builder.set_sum(row, fid, ...)`. |
-| Carry paths | **yes** | `carry_statistics`, `copy_manifest_row` and `relocate_file` copy the sum with the other value statistics. |
-| Parquet footer (external files) | no | Parquet has no sum statistic, so the value is unknown. An external dataset gets sums by running ANALYZE. |
-| rugo-written parquet footer | D3 | rugo could write per-row-group sums into footer key-value metadata, which would let footer-sourced manifests carry sums with no ANALYZE. |
-| skene footer | D3 | This would be a skene format change. It is out of scope unless ratified. |
+| skene writer | **exists** (`kStatSum`) | `skene_stats.hpp`: Σ row-group sums, only if every row group has `kStatSum` |
+| rugo parquet writer | **new:** chunk KV `rugo.sum` (§4) | `manifest_footer.hpp` / rugo `AggColumnStat`: Σ chunk sums, only if every chunk has one and the file is rugo-written |
+| opteryx writer (`FileStatsAccumulator`: INSERT, CTAS, compaction) | via the rugo writer it drives | **new:** int128 lane per integer column |
+| ANALYZE | n/a | **new:** exact-sum per morsel, folded per file, `builder.set_sum` |
+| carry paths (`carry_statistics`, `copy_manifest_row`, `relocate_file`) | n/a | copied with the other value statistics |
+| foreign parquet / Iceberg | none | unknown (ANALYZE fills it) |
 
-### 4.5 Invalidation rules (the stat must never outlive its truth)
+### 5.5 Invalidation (a sum must never outlive its truth)
 
-- **Deletes:** any file with deletes makes `total_sum` nullopt, so the rewrite
-  declines. This is the same stance as MIN/MAX.
-- **ALTER COLUMN TYPE:** widening *within* the integer family keeps the sum,
-  because the value is unchanged. Any other change drops the column's sums to
-  unknown. That includes int→DECIMAL (the scale would change), anything→FLOAT,
-  and DECIMAL precision/scale changes.
-- **ADD COLUMN … DEFAULT:** files written before the column existed have an
-  unknown sum. v1 does not compute `default × record_count`.
-- **Column patch (donor pattern):** the patched file's cell for that column is
-  recomputed by the writer, or unknown. It is never carried from the donor's
-  pre-patch row.
-- **DROP STATISTICS:** clears sums alongside the other value statistics.
+| Change | Effect on sums |
+|---|---|
+| **ALTER COLUMN TYPE** | Integer→integer widening keeps the sum (the value is unchanged). Anything else drops it. |
+| **ADD COLUMN … DEFAULT** | Files written before the column existed have an unknown sum. |
+| **Column patch (donor pattern)** | Recomputed by the writer. Never carried from the pre-patch row. |
+| **DROP STATISTICS** | Clears sums. |
+| **Deletes** | A unit with deletes is never *covered* (§6). It is scanned as a boundary unit with its delete vector. This is better than today's whole-query decline. |
 
-### 4.6 Consumer: `StatisticsOnlyResponseStrategy`
+## 6. The covered / disjoint / boundary classification (shared by every consumer)
 
-Extend `is_simple_aggregate` to admit:
+For a unit U and the query's `WHERE` predicate P, each conjunct is classified
+against U's statistics.
 
-- `SUM(col)`, where the physical type is in the D4 allowlist, not DISTINCT, with
-  no FILTER clause;
-- `AVG(col)` under the same conditions.
+**Admissible conjunct forms**, on a column whose bounds are exact values
+(`ordinal_is_value`: integer family and temporal; UINT64 through its decoded
+bound):
+- `=`, `<>`, `<`, `<=`, `>`, `>=`, `BETWEEN`
+- `IN (literals)`
+- `IS NULL`, `IS NOT NULL`
 
-In `complete()`:
+Strings are never covered: their bounds are 8-byte-prefix ordinals, not values.
 
-- `total_sum(position)` nullopt → leave the plan untouched.
-- `valid == 0` → SUM and AVG are NULL literals of the bound type.
-- **SUM(int family):** if the int128 total is outside INT64, **decline**. The
-  engine then scans and raises its own "SUM overflow" error. One error, one
-  message, one owner; the stats path does not replicate the error. Otherwise
-  emit an INT64 literal.
-- **SUM(DECIMAL):** emit the unscaled int128 at the column's bound DECIMAL type.
-- **AVG:** `(double)i128 / (double)valid`, and for DECIMAL `/ 10^scale`. This is
-  the engine's finalize expression, in the same order.
-- The result is emitted under the aggregate's identity and bound type, through
-  the existing literal-substitution path, so wrappers such as
-  `ROUND(AVG(x), 2)` keep working.
+**Classifying one conjunct** (V = the conjunct's value set, [min, max] = U's
+bounds):
 
-This combines with the existing kinds in the same query: ClickBench Q3 is
-`SUM(AdvEngineID), COUNT(*), AVG(ResolutionWidth)`.
+| Class | Condition |
+|---|---|
+| covered | `null_count == 0` AND [min, max] ⊆ V. For `IS NOT NULL`: `null_count == 0`. For `IS NULL`: `null_count == rows`. |
+| disjoint | [min, max] ∩ V = ∅, OR `null_count == rows` for any conjunct other than `IS NULL` |
+| boundary | anything else, including unknown statistics |
 
-## 5. Cost
+**Combining conjuncts, and other rules:**
+- A conjunction is **covered** if every conjunct is covered.
+- It is **disjoint** if any conjunct is disjoint.
+- Otherwise it is **boundary**.
+- A predicate containing OR, NOT, a function, or a column comparison is
+  **unclassifiable**. The rewrite does not fire, and the plan is unchanged.
+- A unit with deletes is never covered.
+- A unit missing a statistic that an aggregate needs (for example its sum) is
+  demoted to boundary.
 
-- **Writer:** one extra pass over each summable column per row group. It could
-  be fused into `FileStatsAccumulator::add`'s existing ordinalize loop, but that
-  loop reads ordinal keys, not raw values, so fusing it is a second change.
-  **A baseline of writer throughput is required before the first edit**
-  (CTAS of `hits` to a scratch table, ABBA against the pre-change build).
-- **Manifest size:** 16 bytes per summable column per file (int128). Hits has
-  about 105 columns, most numeric, so roughly 1.5 KB per file. That is noise
-  next to the sketches.
-- **Planning:** one int128 fold per referenced column over the live files.
+**Why the null rule matters:** NULLs fail every predicate except `IS NULL`. So a
+unit whose filter column has nulls is never covered by a value predicate.
+Infino's implementation appears to skip this check, and would over-count
+`COUNT(*)`.
 
-## 6. Expected benefit — measure before claiming
+## 7. Consumers (D6)
 
-- **ClickBench Q3 and Q4** (Q4 only because the sum is int128). Each is tens of
-  milliseconds today, so this is small in absolute terms.
-- ⛔ **Prerequisite check:** `scratch/hits_rugo_262k` has no manifest file. The
-  local `make clickbench` dataset gets its manifest from parquet footers, which
-  carry no sums. **Q3 and Q4 would not change locally unless ANALYZE is run or
-  D3 lands.** Before spending, prove this: run ANALYZE on the table, then
-  confirm Q1/Q7 already take the stats path and Q3 flips to it.
-- The larger payoff is the §9 range rewrite on date-ordered tables, where this
-  stat is a precondition.
+### 7.1 Plan time, file granularity (manifest), Python optimizer
 
-## 7. Tests
+Planning is Python by charter; this phase only decides the plan.
 
-- **Equivalence:** for each admitted type, a stats answer equals the answer with
-  `disable_statistics_only_response` set. Cover with nulls, all-null files, an
-  empty table, and mixed file sizes.
-- **Plan assertion:** the Scan is gone. This proves the path fired, not just
-  that the answer matched.
-- **Declines:**
-  - a manifest where one file has no sum (old format, or an external parquet
-    file);
-  - deletes present;
-  - an INT64 total overflow, where the engine raises "SUM overflow";
-  - DISTINCT or FILTER;
-  - UINT64, BOOL and temporal columns (until D4 admits them).
-- **Round trip:** writer → manifest parquet → decode keeps the int128 exactly,
-  including values above INT64 and negatives. An old manifest without the column
-  decodes with all sums unknown.
-- **Invalidation:** ALTER COLUMN widen int32→int64 keeps the sums, int→DECIMAL
-  drops them, and DROP STATISTICS clears them.
-- **AVG bit-identity:** a stats AVG equals the engine AVG with `==` on the
-  double, for the integer and decimal cases.
-- `make q` passes.
+- **A. Unfiltered.** Extend `StatisticsOnlyResponseStrategy` with `SUM` and
+  `AVG` on integer columns. Deletes still decline this whole-query literal
+  form.
+- **B. Filtered, ungrouped.** `Aggregate(Filter(P), Scan)` becomes
 
-## 8. Decisions for the architect
+  ```
+  Project(combine(literal partials of covered files, residual partials))
+    └─ Aggregate(partials) ← Filter(P) ← Scan(boundary files only)
+  ```
 
-- **D1 — Encoding of the int128 sum in the manifest parquet.** Options:
-  - (a) two optional positional `ARRAY(INT64)` columns, `sums_hi` and
-    `sums_lo`. This uses existing encode/decode machinery (same shape as
-    `null_counts`);
-  - (b) one `ARRAY(DECIMAL128)` column, if draken ARRAY and rugo support a
-    DECIMAL128 leaf (not verified);
-  - (c) one `ARRAY(ARRAY(INT64))` column of `[hi, lo]` pairs.
+  - Disjoint files are dropped. This extends manifest pruning to `<>`, IN and
+    IS NULL where it doesn't already cover them.
+  - Partials: COUNT → Σ, SUM → Σ (with an INT64 check, else decline), AVG →
+    (Σsum, Σvalid), MIN/MAX → min/max of bounds.
+  - When every file is covered or disjoint, the scan disappears.
+- **C. Grouped, constant keys.** For `GROUP BY k1..kn` with aggregates
+  admissible under B, a covered file where every key column has
+  `min == max` and `null_count == 0` contributes one group partial,
+  `(k-values, partials)`. A file where a key column has `null_count == rows`
+  contributes the NULL group. Such files leave the scan; everything else is
+  residual. The final step merges the literal group partials with the
+  residual's group partials by key.
+  This needs a **partial→final aggregate plan shape** (§11, O2).
 
-  *Recommend (a), unless (b) is confirmed working end to end.* A float sum (D2)
-  would need an additional `ARRAY(DOUBLE)`.
-- **D2 — FLOAT columns.** A manifest float sum adds values in a different order
-  from a scan, so the last bits can differ. The engine's own parallel float SUM
-  is already order-dependent across partitions, so no bit-exact float contract
-  exists today. Options:
-  - (a) exclude floats (exact types only);
-  - (b) include them, and document that stats-answered float SUM/AVG is as
-    order-dependent as a scan.
+### 7.2 Execution time, row-group granularity (native scan)
 
-  *Recommend (a) for v1.* Also note that ClickBench Q3's `ResolutionWidth` is an
-  integer.
-- **D3 — Producer reach.** Should rugo write per-row-group sums into its parquet
-  footer key-value metadata, so that rugo-written files carry sums without
-  ANALYZE? Same question for skene (a format change). *Recommend: v1 = writer +
-  ANALYZE + carry; decide D3 after measuring v1.*
-- **D4 — Type allowlist.**
-  - *Recommend v1:* signed integers, UINT8/16/32, DECIMAL and DECIMAL128.
-  - *Exclude:* UINT64 (§10), BOOL, and the temporal types. The engine admits
-    them to SUM, but stats support for them buys nothing.
-- **D5 — Overflow in the stats path.** *Recommend:* decline and let the engine
-  raise (§4.6), rather than raising from the optimizer.
-- **D6 — Scope of the first increment.** *Recommend:* unfiltered SUM/AVG only.
-  The covered/residual range rewrite (§9) is a separate design that consumes
-  this stat.
+This is native by charter, the Python/native boundary is crossed once, and it
+is where most of the win is. It works on footer statistics alone, so it needs
+no manifest and no ANALYZE. It covers every rugo-written parquet file (once §4
+lands) and every existing skene file.
 
-## 9. Follow-on (not this design)
+- **Planning** hands the scan: the classifiable predicate (the scan already
+  receives pushed predicates natively), the aggregate spec, and the target
+  sink.
+- **Per row group, before any fetch or decode**, the scan classifies it by the
+  §6 rules, using that row group's footer statistics (parquet row-group
+  Statistics plus `rugo.sum`, or skene `ColumnStatistics`):
+  - **disjoint:** skip. This is already done where pruning covers the form.
+  - **covered:** hand the sink a **statistics partial** (rows, valid, int128
+    sum, min, max per aggregate), plus the constant group key for the grouped
+    form. No fetch, no decode.
+  - **boundary:** decode normally, filter, and feed rows.
+- The ungrouped sink merges statistics partials through the same `AggCell`
+  merge it uses between workers. The grouped sink needs a
+  "merge one partial row into group k" entry (§11, O3).
+- **This supersedes 7.1-B/C wherever the scan is native.** 7.1 still matters for
+  whole files: dropping them avoids even opening the footer. The two layers
+  compose: files by the manifest, then row groups by the footer.
 
-The covered/residual rewrite. For `Aggregate(Filter(range on one column), Scan)`,
-classify each file by its bounds on the filter column:
+### 7.3 What this means for ClickBench
 
-- **disjoint:** contributes nothing;
-- **covered:** contributes from stats;
-- **boundary:** scanned with the original predicate.
+- **Q3** (`SUM(AdvEngineID), COUNT(*), AVG(ResolutionWidth)`, unfiltered) and
+  **Q4** (`AVG(UserID)`, needs the int128 sum): every row group is covered, so
+  there is no decode at all.
+- **Q2** (`COUNT(*) WHERE AdvEngineID <> 0`) and **Q8** (`GROUP BY AdvEngineID
+  WHERE AdvEngineID <> 0`): row groups that are all zero are disjoint, row
+  groups with `min > 0` are covered, and constant-key row groups are covered
+  groups. How much this buys depends on how AdvEngineID is laid out, and is
+  **unmeasured**.
+- **Q1/Q7:** already answered today.
+- String-filtered queries (`<> ''`, LIKE): no change. String bounds are not
+  exact.
 
-The partials are then combined.
+⛔ **Locally, the dataset must carry sums for any of this to move.**
+`scratch/hits_rugo_262k` has no manifest and predates `rugo.sum`, so it has to
+be regenerated with the new rugo writer. The skene mirror already carries them.
+Prove the knob moves before claiming any gain (see §9).
 
-**Additional soundness rule we must have.** A file counts as covered only if its
-null count **for the filter column is 0** and its bounds are exact rather than
-truncated (so no strings). NULLs fail the predicate, so a covered file with
-NULLs would over-count. Infino's implementation appears not to check this.
+## 8. Phasing
 
-## 10. Adjacent issues found while researching (not in scope — reported)
+| Phase | Content | Gate |
+|---|---|---|
+| **P0** | Engine UINT64 SUM/AVG fix | Repro test first; `make q` |
+| **P1** | `draken/ops/exact_sum.h` (skene switched onto it); rugo `rugo.sum` chunk KV write and read; skene/rugo row group → file aggregation; manifest cell plus the `sums` column (int128 leaf support); writer, ANALYZE, carry paths; invalidation rules; catalog pass-through | Round-trip tests; writer-throughput ABBA (baseline before the first edit) |
+| **P2** | §7.1-A unfiltered SUM/AVG | Equivalence and plan-shape tests |
+| **P3** | §6 classifier (one native implementation, called from the planner and the scan) plus §7.2 row-group statistics partials, ungrouped | ClickBench Q2/Q3/Q4 ABBA on regenerated rugo data and on skene |
+| **P4** | §7.2 grouped (constant keys) | Q8 ABBA |
+| **P5** | §7.1-B/C plan-time file-level rewrite, if P3/P4 leave file-level wins on the table (for example remote, where footers cost a round trip) | Measured before building |
 
-1. **Suspected: engine SUM over UINT64.** `agg2_read_raw` reads a UINT64 as its
-   int64 bit pattern, and `AggCell::isum` is an `__int128`. So `isum += raw`
-   sign-extends, and any value ≥ 2^63 contributes a negative amount. The
-   comment at `native_group_sinks.hpp` ~line 569 assumes int64 `+=`
-   wrap-equivalence, which does not hold for an int128 accumulator. The INT64
-   overflow check at finalize would then judge the wrong number. **Not
-   reproduced.**
-2. **`statistics_only_response.py:617`** uses `getattr(manifest, "has_deletes",
-   None)`. getattr is banned on the same grounds as hasattr.
+## 9. Tests and measurement
+
+- **Equivalence, per consumer:** the statistics answer equals the answer with
+  the path disabled. Cover every integer width and signedness, including
+  UINT64 values ≥ 2^63 (after P0). Include nulls, all-null units, empty tables,
+  and units with deletes (must be scanned, not covered).
+- **Classifier truth table:** every admissible form × {covered, disjoint,
+  boundary}. Include the null cases, unknown statistics, and an unclassifiable
+  predicate (no rewrite).
+- **Knob proof:** telemetry counters for row groups covered / boundary /
+  disjoint, and files covered / boundary / disjoint. A test asserts the counts,
+  not just the answer.
+- **Overflow (D5):** an INT64-overflowing total takes the scan path. The
+  statistics path never raises.
+- **Trust:** a foreign-written parquet file with a forged `rugo.sum` is
+  ignored.
+- **Round trip:** manifest int128 values above INT64 and negatives survive
+  encode/decode. An old manifest reads back with every sum unknown.
+- **Invalidation:** each §5.5 row.
+- `make q` for every phase.
+
+## 10. Adjacent issue (reported, not in scope)
+
+`opteryx/planner/optimizer/strategies/statistics_only_response.py:617` uses
+`getattr(manifest, "has_deletes", None)`. That is banned, like `hasattr`. P2
+touches this file, so fixing it there needs your approval.
+
+## 11. Rulings on the open items (2026-09-28)
+
+- **O1 DECIMAL:** INCLUDED for skene (the writer already emits DECIMAL sums;
+  the consumer carries the scale), NOT for parquet (no `rugo.sum` on DECIMAL,
+  and none from ANALYZE or the opteryx writer).
+- **O2:** DEFERRED, and P5 with it.
+- **O3:** the direct partial-merge entry into GroupBySink.
+- **O4 / P0:** included in this work.
+- **§10 getattr:** fixed while editing the file in P2.
+
+## 11a. Open items as originally raised
+
+- **O1: DECIMAL.** Out of scope as ruled? skene already writes DECIMAL sums, so
+  adding it later costs only the scale-carrying consumer logic.
+- **O2: the plan-time partial→final aggregate shape** (§7.1-C). No such plan
+  shape exists today. P5 needs one; P3/P4 do not, because they work inside the
+  sink. Proposal: defer to P5 and decide then.
+- **O3: the seam between the scan and the grouped sink.** A covered row group
+  hands `(key, partials)` straight into GroupBySink. This couples scan and sink.
+  The alternative is a tiny one-row synthetic morsel per covered unit, pre-
+  aggregated with a "partial" marker. Proposal: the direct partial-merge entry,
+  since it is the same merge the sink already does between workers.
+- **O4: the P0 engine fix.** It is outside this feature but blocks D4 UINT64.
+  Approve it as a separate change?

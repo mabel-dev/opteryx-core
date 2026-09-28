@@ -36,6 +36,10 @@ inline std::atomic<long long> val_expand_ns    {0};  // index->value expansion
 inline std::atomic<long long> mask_filter_ns   {0};  // post-loop row-mask filter
 inline std::atomic<long long> validity_bmp_ns  {0};  // validity bitmap construction
 inline std::atomic<long long> calls            {0};  // DecodeColumnFromChunk calls
+// Chunks whose dictionary page was parsed but none of whose data pages was
+// decoded (all skipped by a mask or a jump plan) — the work a lazy dictionary
+// would save (docs/PARQUET_SELECTIVE_DECODE_DESIGN.md §3.1).
+inline std::atomic<long long> dict_pages_parsed_unused {0};
 
 // ── byte_array dictionary-shape outcome counters ────────────────────────────
 // Why: `InternByteArrayToDictionary` is the top CPU consumer in a string scan
@@ -74,6 +78,7 @@ inline void reset() {
     mask_filter_ns.store(0, std::memory_order_relaxed);
     validity_bmp_ns.store(0, std::memory_order_relaxed);
     calls.store(0, std::memory_order_relaxed);
+    dict_pages_parsed_unused.store(0, std::memory_order_relaxed);
     ba_chunks.store(0, std::memory_order_relaxed);
     ba_intern_values.store(0, std::memory_order_relaxed);
     ba_drop_no_rederive.store(0, std::memory_order_relaxed);
@@ -109,6 +114,7 @@ inline double val_expand_s()    { return val_expand_ns.load(std::memory_order_re
 inline double mask_filter_s()   { return mask_filter_ns.load(std::memory_order_relaxed)   * 1e-9; }
 inline double validity_bmp_s()  { return validity_bmp_ns.load(std::memory_order_relaxed)  * 1e-9; }
 inline long long calls_count()  { return calls.load(std::memory_order_relaxed); }
+inline long long dict_pages_parsed_unused_count() { return dict_pages_parsed_unused.load(std::memory_order_relaxed); }
 
 // byte_array dictionary-shape counters (plain counts, not seconds).
 inline long long ba_chunks_count()            { return ba_chunks.load(std::memory_order_relaxed); }

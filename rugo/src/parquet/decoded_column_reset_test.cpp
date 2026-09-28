@@ -85,8 +85,8 @@ static_assert(kStringCount == kDecodedColumnStringMembers,
 // assertions below are meaningful) rather than sitting in any small-size buffer.
 static constexpr size_t kFill = 16;
 
-template <typename T>
-static void fill_vec(std::vector<T>& v) {
+template <typename T, typename A>
+static void fill_vec(std::vector<T, A>& v) {
     v.clear();
     for (size_t i = 0; i < kFill; ++i) v.push_back(static_cast<T>(i + 1));
 }

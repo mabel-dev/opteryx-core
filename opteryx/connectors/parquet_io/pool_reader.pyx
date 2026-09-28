@@ -2710,6 +2710,9 @@ cdef class NativeScanPlan:
             "page_index_fetches": self.pipeline_ptr.page_index_fetches(),
             "page_index_bytes_fetched": self.pipeline_ptr.page_index_bytes_fetched(),
             "page_index_gate_declines": self.pipeline_ptr.page_index_gate_declines(),
+            # Scan prefilter: rows reaching the worker-side predicate / surviving it.
+            "prefilter_rows_in": self.pipeline_ptr.prefilter_rows_in(),
+            "prefilter_rows_out": self.pipeline_ptr.prefilter_rows_out(),
             # The submission window this scan actually ran — the read-back that
             # proves `parquet_io_in_flight_limit` reached the NATIVE path, which
             # it did not before 2026-09-16. 0 is not a valid window, so a reading
@@ -2743,6 +2746,21 @@ cdef class NativeScanPlan:
             b = c if isinstance(c, bytes) else str(c).encode('utf-8')
             v.push_back(<string>b)
         self.pipeline_ptr.set_pass1_predicate(<void*>fn, <void*>ctx, v)
+
+    def set_scan_prefilter(self, size_t fn, size_t ctx, list columns):
+        """Make a pushed predicate THIS scan's filter, evaluated on the decode
+        workers (docs/PARQUET_SELECTIVE_DECODE_DESIGN.md §2.1): each row group
+        decodes its predicate columns, runs the predicate, and decodes the other
+        columns for the survivors only; a row group with no survivor is dropped
+        before they are decoded. Same `fn`/`ctx`/`columns` contract as
+        set_pass1_predicate, and the CALLER must have checked
+        pass1_worker_predicate_admissible. The Source gathers the predicate
+        columns by the worker's survivor mask, and runs the same program itself
+        for a row group the worker could not evaluate."""
+        if self.pipeline_ptr == NULL:
+            return
+        self.set_pass1_predicate(fn, ctx, columns)
+        self.pipeline_ptr.set_prefilter(True)
 
     cpdef void close(self):
         if self._closed:

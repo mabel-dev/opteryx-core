@@ -49,6 +49,18 @@ int32_t DecodeRLEBitPackedIndicesNoPrefix(const uint8_t *data, size_t data_size,
                                           int32_t num_values, int bit_width,
                                           std::vector<int32_t> &indices);
 
+// Selective variant of DecodeRLEBitPackedIndicesNoPrefix: walks the same stream
+// of `num_values` codes but APPENDS only the codes whose `sel` byte is non-zero
+// (sel has one 0/1 byte per value). An RLE run appends its code once per
+// selected value; a bit-packed group of 8 with no selected value is skipped
+// without being unpacked. `out` is cleared first. Returns the number of values
+// WALKED (== num_values on success), or -1 on error; out.size() is the number
+// selected.
+int32_t DecodeRLEBitPackedIndicesSelected(const uint8_t *data, size_t data_size,
+                                          int32_t num_values, int bit_width,
+                                          const uint8_t *sel,
+                                          std::vector<int32_t> &out);
+
 // Header-only probe: is this level stream a SINGLE RLE run of `expect_value`
 // that covers at least `num_values` entries?  Used to recognise the
 // all-present definition-level stream that every nullable-but-null-free

@@ -568,17 +568,43 @@ inline int64_t agg2_read_raw(const DrakenVector& v, uint32_t row, bool is_float)
         case DRAKEN_BOOL:
             return (static_cast<const uint8_t*>(v.data)[phys >> 3] >> (phys & 7)) & 1u;
         // E33 — zero-extend (source is unsigned; sign-extending would corrupt).
-        // UINT64 is NOT listed here — it falls to `default`, which reads the raw
-        // 8 bytes as int64_t (a bit-pattern reinterpret, not a value cast) —
-        // exactly the reinterpretation needed: c.isum accumulates via ordinary
-        // int64_t `+=`, which is bit-identical to uint64_t `+=` (two's
-        // complement), so the sum's bit pattern round-trips correctly as long as
-        // the FINAL reported value is reinterpreted back to uint64_t for output.
+        // UINT64 is NOT listed here — it falls to `default`, which stores the
+        // value's BIT PATTERN in the int64 container. That is right for the
+        // MIN/MAX lanes (the raw is copied back out at UINT64) and WRONG for any
+        // arithmetic: a value >= 2^63 reads negative. Arithmetic goes through
+        // agg2_raw_as_i128 / agg2_raw_as_double, never the raw directly.
         case DRAKEN_UINT8:  return static_cast<int64_t>(static_cast<const uint8_t* >(v.data)[phys]);
         case DRAKEN_UINT16: return static_cast<int64_t>(static_cast<const uint16_t*>(v.data)[phys]);
         case DRAKEN_UINT32: return static_cast<int64_t>(static_cast<const uint32_t*>(v.data)[phys]);
         default:            return static_cast<const int64_t*>(v.data)[phys];
     }
+}
+
+// The raw container's VALUE, for arithmetic. A UINT64 raw is the value's bit
+// pattern (see agg2_read_raw), so it widens unsigned; everything else is already
+// the value, sign-extended. Every sum / moment / median / percentile reads a raw
+// through one of these two — `isum += raw` or `static_cast<double>(raw)` on a
+// raw is the UINT64 bug (a value >= 2^63 added as value - 2^64).
+inline __int128 agg2_raw_as_i128(int64_t raw, bool is_u64) noexcept {
+    return is_u64 ? static_cast<__int128>(static_cast<uint64_t>(raw))
+                  : static_cast<__int128>(raw);
+}
+
+inline double agg2_raw_as_double(int64_t raw, bool is_float, bool is_u64) noexcept {
+    if (is_float) {
+        double d;
+        std::memcpy(&d, &raw, sizeof(d));
+        return d;
+    }
+    return is_u64 ? static_cast<double>(static_cast<uint64_t>(raw))
+                  : static_cast<double>(raw);
+}
+
+// SUM's INT64 lane: add one raw's value, false when the exact sum leaves INT64
+// (the caller raises "SUM overflow"). A UINT64 value >= 2^63 alone exceeds INT64.
+inline bool agg2_sum_i64_add(int64_t& lane, int64_t raw, bool is_u64) noexcept {
+    if (is_u64 && raw < 0) return false;
+    return !__builtin_add_overflow(lane, raw, &lane);
 }
 
 inline void agg2_update(AggCell& c, const DrakenVector& v, uint32_t row, bool is_float,
@@ -594,6 +620,7 @@ inline void agg2_update(AggCell& c, const DrakenVector& v, uint32_t row, bool is
         c.valid += 1;
         return;
     }
+    const bool is_u64 = v.type == DRAKEN_UINT64;
     if (!needs_minmax) {
         // SUM/AVG/COUNT-only spec: no normalized order key, no extreme lanes —
         // profiled as pure waste (sort_num_key per row) on Q33-class queries.
@@ -603,7 +630,7 @@ inline void agg2_update(AggCell& c, const DrakenVector& v, uint32_t row, bool is
             std::memcpy(&d, &raw, sizeof(d));
             c.fsum += d;
         } else {
-            c.isum += raw;
+            c.isum += agg2_raw_as_i128(raw, is_u64);
         }
         c.valid += 1;
         return;
@@ -615,7 +642,7 @@ inline void agg2_update(AggCell& c, const DrakenVector& v, uint32_t row, bool is
         std::memcpy(&d, &raw, sizeof(d));
         c.fsum += d;
     } else {
-        c.isum += raw;
+        c.isum += agg2_raw_as_i128(raw, is_u64);
     }
     if (c.valid == 0 || k < c.min_key) { c.min_key = k; c.min_raw = raw; }
     if (c.valid == 0 || k > c.max_key) { c.max_key = k; c.max_raw = raw; }
@@ -647,13 +674,8 @@ inline bool agg_fn_takes_distinct_operand(AggFn fn) noexcept {
 // No normalized order key / min-max lanes — STDDEV never needs them.
 inline void agg2_update_stddev(AggCell& c, const DrakenVector& v, uint32_t row,
                                bool is_float) noexcept {
-    int64_t raw = agg2_read_raw(v, row, is_float);
-    double d;
-    if (is_float) {
-        std::memcpy(&d, &raw, sizeof(d));
-    } else {
-        d = static_cast<double>(raw);
-    }
+    double d = agg2_raw_as_double(agg2_read_raw(v, row, is_float), is_float,
+                                  v.type == DRAKEN_UINT64);
     c.fsum += d;
     c.fsumsq += d * d;
     c.valid += 1;
@@ -1976,8 +1998,8 @@ struct UCDPartition {
 // the emitters read the cell exactly as they would for the non-DISTINCT aggregate.
 // Only MEDIAN can fail (its value cap).
 inline bool agg2_fold_distinct(AggCell& c, opteryx::ungrouped::MedianState& med,
-                               AggFn fn, bool is_float, const UCDPartition& d,
-                               ErrCtx& err) {
+                               AggFn fn, bool is_float, bool is_u64,
+                               const UCDPartition& d, ErrCtx& err) {
     if (!d.raw128.empty()) {   // DECIMAL128: SUM/AVG only (exact int128 lane)
         for (__int128 r : d.raw128) c.isum += r;
         c.valid += static_cast<int64_t>(d.raw128.size());
@@ -1985,9 +2007,7 @@ inline bool agg2_fold_distinct(AggCell& c, opteryx::ungrouped::MedianState& med,
     }
     const bool stddev = agg_fn_is_stddev_family(fn);
     for (int64_t r : d.raw) {
-        double x;
-        if (is_float) std::memcpy(&x, &r, sizeof(x));
-        else x = static_cast<double>(r);
+        double x = agg2_raw_as_double(r, is_float, is_u64);
         if (fn == AggFn::Median) {
             if (!med.append(x)) {
                 err.code = 1;
@@ -2002,7 +2022,7 @@ inline bool agg2_fold_distinct(AggCell& c, opteryx::ungrouped::MedianState& med,
         } else if (is_float) {
             c.fsum += x;
         } else {
-            c.isum += r;
+            c.isum += agg2_raw_as_i128(r, is_u64);
         }
     }
     if (fn != AggFn::Median) c.valid += static_cast<int64_t>(d.raw.size());
@@ -2263,12 +2283,10 @@ struct UngroupedAggSink : Sink {
             } else if (specs[s].fn == AggFn::Median) {
                 bool is_f = l.meta[s].is_float;
                 opteryx::ungrouped::MedianState& st = l.medians[s];
+                const bool is_u64 = v.type == DRAKEN_UINT64;
                 for (uint32_t i = 0; i < v.length; ++i) {
                     if (!sort_row_valid(v, i)) continue;
-                    int64_t raw = agg2_read_raw(v, i, is_f);
-                    double d;
-                    if (is_f) std::memcpy(&d, &raw, sizeof(d));
-                    else d = static_cast<double>(raw);
+                    double d = agg2_raw_as_double(agg2_read_raw(v, i, is_f), is_f, is_u64);
                     if (!st.append(d)) {
                         err.code = 1;
                         err.msg = kMedianCapExceededMsg;
@@ -2280,16 +2298,13 @@ struct UngroupedAggSink : Sink {
                 bool is_fy = l.meta[s].is_float2;
                 const DrakenVector& v2 =
                     in->columns[static_cast<size_t>(specs[s].col_idx2)].view;
+                const bool is_ux = v.type == DRAKEN_UINT64;
+                const bool is_uy = v2.type == DRAKEN_UINT64;
                 for (uint32_t i = 0; i < v.length; ++i) {
                     // Pairwise: skip the row unless BOTH operands are non-NULL.
                     if (!sort_row_valid(v, i) || !sort_row_valid(v2, i)) continue;
-                    int64_t rx = agg2_read_raw(v, i, is_fx);
-                    int64_t ry = agg2_read_raw(v2, i, is_fy);
-                    double x, y;
-                    if (is_fx) std::memcpy(&x, &rx, sizeof(x));
-                    else x = static_cast<double>(rx);
-                    if (is_fy) std::memcpy(&y, &ry, sizeof(y));
-                    else y = static_cast<double>(ry);
+                    double x = agg2_raw_as_double(agg2_read_raw(v, i, is_fx), is_fx, is_ux);
+                    double y = agg2_raw_as_double(agg2_read_raw(v2, i, is_fy), is_fy, is_uy);
                     agg2_update_corr(c, x, y);
                 }
             } else if (specs[s].fn == AggFn::ApproxCountDistinct) {
@@ -2303,12 +2318,10 @@ struct UngroupedAggSink : Sink {
             } else if (specs[s].fn == AggFn::ApproxPercentile) {
                 bool is_f = l.meta[s].is_float;
                 td_histogram_t* h = l.tds[s].h;
+                const bool is_u64 = v.type == DRAKEN_UINT64;
                 for (uint32_t i = 0; i < v.length; ++i) {
                     if (!sort_row_valid(v, i)) continue;
-                    int64_t raw = agg2_read_raw(v, i, is_f);
-                    double d;
-                    if (is_f) std::memcpy(&d, &raw, sizeof(d));
-                    else d = static_cast<double>(raw);
+                    double d = agg2_raw_as_double(agg2_read_raw(v, i, is_f), is_f, is_u64);
                     td_add(h, d, 1);
                 }
             } else {
@@ -2453,7 +2466,9 @@ struct UngroupedAggSink : Sink {
             size_t sp = items[it].first;
             if (!specs[sp].distinct_operand) continue;
             if (!agg2_fold_distinct(g.cells[sp], g.medians[sp], specs[sp].fn,
-                                    g.meta[sp].is_float, item_sets[it], err))
+                                    g.meta[sp].is_float,
+                                    g.meta[sp].type == DRAKEN_UINT64,
+                                    item_sets[it], err))
                 return;
             item_sets[it] = UCDPartition();
         }
@@ -2647,20 +2662,17 @@ inline void gb_lanes_resize(GBLanes& L, GBKind k, size_t n) {
 // GroupBySink::sink's pass C applies per row (including SUM's INT64 overflow trap),
 // run once over the DISTINCT values after every worker's set has been merged.
 // Kind dispatched once, tight loop per kind.
-inline bool gb_fold_distinct(GBLanes& L, GBKind kind, bool is_float,
+inline bool gb_fold_distinct(GBLanes& L, GBKind kind, bool is_float, bool is_u64,
                              const GBCountDistinct& D, ErrCtx& err) {
     const size_t n = D.size();
-    auto as_double = [is_float](int64_t r) -> double {
-        double x;
-        if (is_float) std::memcpy(&x, &r, sizeof(x));
-        else x = static_cast<double>(r);
-        return x;
+    auto as_double = [is_float, is_u64](int64_t r) -> double {
+        return agg2_raw_as_double(r, is_float, is_u64);
     };
     switch (kind) {
         case GBKind::SumI:
             for (size_t k = 0; k < n; ++k) {
                 uint32_t e = D.pair_gid[k];
-                if (__builtin_add_overflow(L.i64[e], D.pair_raw[k], &L.i64[e])) {
+                if (!agg2_sum_i64_add(L.i64[e], D.pair_raw[k], is_u64)) {
                     err.code = 1;
                     err.msg = "SUM overflow: exact integer sum exceeds INT64 "
                               "— fail loud, never a wrapped answer";
@@ -2672,7 +2684,7 @@ inline bool gb_fold_distinct(GBLanes& L, GBKind kind, bool is_float,
         case GBKind::AvgI:
             for (size_t k = 0; k < n; ++k) {
                 uint32_t e = D.pair_gid[k];
-                L.i128[e] += D.pair_raw[k];
+                L.i128[e] += agg2_raw_as_i128(D.pair_raw[k], is_u64);
                 L.valid[e] += 1;
             }
             return true;
@@ -3844,6 +3856,7 @@ struct GroupBySink : Sink {
             const uint32_t*    vsel   = v.selection;
             const uint8_t*     vvalid = v.validity;   // nullptr ⟹ all rows valid
             const bool         is_f   = l.meta[s].is_float;
+            const bool         is_u64 = vtype == DRAKEN_UINT64;
             // Row-valid test on hoisted locals — same predicate as sort_row_valid.
             auto row_ok = [vvalid](uint32_t i) -> bool {
                 return vvalid == nullptr || ((vvalid[i >> 3] >> (i & 7)) & 1u);
@@ -3886,7 +3899,7 @@ struct GroupBySink : Sink {
                         GBLanes& L = *lp[gb_part(l.mk_hash[i])];
                         uint32_t e = l.mk_ent[i];
                         int64_t r = agg2_read_raw_at(vtype, vdata, vsel, i, false);
-                        if (__builtin_add_overflow(L.i64[e], r, &L.i64[e])) {
+                        if (!agg2_sum_i64_add(L.i64[e], r, is_u64)) {
                             err.code = 1;
                             err.msg = "SUM overflow: exact integer sum exceeds INT64 "
                                       "— fail loud, never a wrapped answer";
@@ -3900,7 +3913,8 @@ struct GroupBySink : Sink {
                         if (!row_ok(i)) continue;
                         GBLanes& L = *lp[gb_part(l.mk_hash[i])];
                         uint32_t e = l.mk_ent[i];
-                        L.i128[e] += agg2_read_raw_at(vtype, vdata, vsel, i, false);
+                        L.i128[e] += agg2_raw_as_i128(
+                            agg2_read_raw_at(vtype, vdata, vsel, i, false), is_u64);
                         L.valid[e] += 1;
                     }
                     break;
@@ -3927,10 +3941,8 @@ struct GroupBySink : Sink {
                         if (!row_ok(i)) continue;
                         GBLanes& L = *lp[gb_part(l.mk_hash[i])];
                         uint32_t e = l.mk_ent[i];
-                        int64_t raw = agg2_read_raw_at(vtype, vdata, vsel, i, is_f);
-                        double d;
-                        if (is_f) std::memcpy(&d, &raw, sizeof(d));
-                        else d = static_cast<double>(raw);
+                        double d = agg2_raw_as_double(
+                            agg2_read_raw_at(vtype, vdata, vsel, i, is_f), is_f, is_u64);
                         L.f64[e] += d;
                         L.f64sq[e] += d * d;
                         L.valid[e] += 1;
@@ -3944,6 +3956,7 @@ struct GroupBySink : Sink {
                     const uint32_t*  vsel2  = v2.selection;
                     const uint8_t*   vvalid2 = v2.validity;
                     const bool       is_f2  = l.meta[s].is_float2;
+                    const bool       is_u2  = vtype2 == DRAKEN_UINT64;
                     for (uint32_t i = 0; i < rows; ++i) {
                         // Pairwise: skip unless BOTH operands are non-NULL.
                         if (!row_ok(i)) continue;
@@ -3951,13 +3964,10 @@ struct GroupBySink : Sink {
                                 && ((vvalid2[i >> 3] >> (i & 7)) & 1u) == 0) continue;
                         GBLanes& L = *lp[gb_part(l.mk_hash[i])];
                         uint32_t e = l.mk_ent[i];
-                        int64_t rx = agg2_read_raw_at(vtype, vdata, vsel, i, is_f);
-                        int64_t ry = agg2_read_raw_at(vtype2, vdata2, vsel2, i, is_f2);
-                        double x, y;
-                        if (is_f) std::memcpy(&x, &rx, sizeof(x));
-                        else x = static_cast<double>(rx);
-                        if (is_f2) std::memcpy(&y, &ry, sizeof(y));
-                        else y = static_cast<double>(ry);
+                        double x = agg2_raw_as_double(
+                            agg2_read_raw_at(vtype, vdata, vsel, i, is_f), is_f, is_u64);
+                        double y = agg2_raw_as_double(
+                            agg2_read_raw_at(vtype2, vdata2, vsel2, i, is_f2), is_f2, is_u2);
                         L.f64[e]   += x;
                         L.f64sq[e] += x * x;
                         L.f64y[e]  += y;
@@ -3972,10 +3982,8 @@ struct GroupBySink : Sink {
                         if (!row_ok(i)) continue;
                         GBLanes& L = *lp[gb_part(l.mk_hash[i])];
                         uint32_t e = l.mk_ent[i];
-                        int64_t raw = agg2_read_raw_at(vtype, vdata, vsel, i, is_f);
-                        double d;
-                        if (is_f) std::memcpy(&d, &raw, sizeof(d));
-                        else d = static_cast<double>(raw);
+                        double d = agg2_raw_as_double(
+                            agg2_read_raw_at(vtype, vdata, vsel, i, is_f), is_f, is_u64);
                         if (!L.median[e].append(d)) {
                             err.code = 1;
                             err.msg = kMedianCapExceededMsg;
@@ -4038,10 +4046,8 @@ struct GroupBySink : Sink {
                         if (!row_ok(i)) continue;
                         GBLanes& L = *lp[gb_part(l.mk_hash[i])];
                         uint32_t e = l.mk_ent[i];
-                        int64_t raw = agg2_read_raw_at(vtype, vdata, vsel, i, is_f);
-                        double d;
-                        if (is_f) std::memcpy(&d, &raw, sizeof(d));
-                        else d = static_cast<double>(raw);
+                        double d = agg2_raw_as_double(
+                            agg2_read_raw_at(vtype, vdata, vsel, i, is_f), is_f, is_u64);
                         td_add(L.td[e].h, d, 1);
                     }
                     break;
@@ -4814,6 +4820,7 @@ struct GroupBySink : Sink {
         for (size_t s = 0; s < nspecs; ++s) {
             if (!specs[s].distinct_operand) continue;
             if (!gb_fold_distinct(merged.lanes[s], g.kinds[s], g.meta[s].is_float,
+                                  g.meta[s].type == DRAKEN_UINT64,
                                   merged.cd[s], err))
                 return;
             merged.cd[s] = GBCountDistinct();
