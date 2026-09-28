@@ -31,6 +31,7 @@ from libc.stdint cimport int64_t
 from libc.stdint cimport uintptr_t
 from libc.stdint cimport uint32_t
 from libc.stdint cimport uint64_t
+from libc.stdint cimport uint8_t
 from libcpp cimport bool as cbool
 from libcpp.memory cimport make_shared
 from libcpp.memory cimport shared_ptr
@@ -103,6 +104,13 @@ cdef extern from "planner/stats_store.hpp" namespace "opteryx::planner":
 
     cdef cppclass StatsStore:
         const RelationStats* node(uint32_t nid)
+        void set_node(uint32_t nid, shared_ptr[RelationStats] stats) except +
+
+
+cdef extern from "planner/selectivity.hpp" namespace "opteryx::planner::selectivity_detail":
+    const uint8_t kAsciiClass[128]
+    const double kClassCardinality[8]
+    const int kExtendedClass
 
 
 cdef extern from "planner/selectivity.hpp" namespace "opteryx::planner":
@@ -175,6 +183,7 @@ cdef extern from "planner/statistics_refresh.hpp" namespace "opteryx::planner":
         RefreshTelemetry* telemetry
 
     void c_refresh_statistics "opteryx::planner::refresh_statistics"(const RefreshInputs& inputs) except +
+    void c_compute_node_statistics "opteryx::planner::compute_node_statistics"(const RefreshInputs& inputs, uint32_t nid) except +
 
 
 cdef extern from *:
@@ -248,8 +257,12 @@ RANGE_FALLBACK_SELECTIVITY = kRangeFallbackSelectivity
 LIKE_PREFIX_SELECTIVITY = kLikePrefixSelectivity
 LIKE_INFIX_SELECTIVITY = kLikeInfixSelectivity
 
-# The byte classes of ColumnStats.class_proportions, in order.
+# The byte classes of ColumnStats.class_proportions, in order; each byte's
+# class (every byte >= 0x80 is "extended"); each class's count of byte values.
+# The char-class estimator's tables, read from selectivity.hpp.
 CHAR_CLASSES = ("upper", "lower", "digit", "whitespace", "punct_text", "semantic", "extended", "control")
+BYTE_CLASS = tuple(kAsciiClass[b] if b < 128 else kExtendedClass for b in range(256))
+CLASS_CARDINALITY = {CHAR_CLASSES[k]: int(kClassCardinality[k]) for k in range(8)}
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +505,19 @@ def predicate_estimator_tag(predicate, StatisticsInput stats not None):
 # the store
 # ---------------------------------------------------------------------------
 
+cdef void _gather_rows(const SPlanGraph* graph, vector[const StepRow*]& rows) except *:
+    """Each node's native row, by node id."""
+    cdef size_t i
+    cdef uint32_t nid
+    cdef PlanStep step
+    for i in range(graph.size()):
+        nid = graph.node_at(i).id
+        if nid >= rows.size():
+            rows.resize(nid + 1, NULL)
+        step = <PlanStep?>(<object>graph.node_at(i).step)
+        rows[nid] = step._row
+
+
 cdef class StatisticsStore:
     """One query's estimated statistics: every node the last refresh of its plan
     reached, keyed by node id; shared CTEs by key; the scan base memo.
@@ -530,15 +556,7 @@ cdef class StatisticsStore:
         predicate note names its condition by expr_id, for the caller to render."""
         cdef const SPlanGraph* graph = <const SPlanGraph*><uintptr_t>plan.graph_address()
         cdef vector[const StepRow*] rows
-        cdef size_t i
-        cdef uint32_t nid
-        cdef PlanStep step
-        for i in range(graph.size()):
-            nid = graph.node_at(i).id
-            if nid >= rows.size():
-                rows.resize(nid + 1, NULL)
-            step = <PlanStep?>(<object>graph.node_at(i).step)
-            rows[nid] = step._row
+        _gather_rows(graph, rows)
         cdef RefreshInputs inputs
         cdef RefreshTelemetry notes
         inputs.graph = graph
@@ -568,6 +586,26 @@ cdef class StatisticsStore:
             for j in notes.joins
         ]
         return predicates, joins
+
+    def seed(self, uint32_t nid, StatisticsInput stats not None):
+        """Record `stats` as node `nid`'s statistics - an INPUT (architect ruling
+        2026-09-28): a test of one operator's propagation seeds that node's
+        inputs, then `compute`s the node."""
+        self._store.set_node(nid, stats._stats)
+
+    def compute(self, plan, uint32_t nid):
+        """Compute node `nid` of `plan` alone, from the statistics its inputs
+        already hold here (none is recomputed)."""
+        cdef const SPlanGraph* graph = <const SPlanGraph*><uintptr_t>plan.graph_address()
+        cdef vector[const StepRow*] rows
+        _gather_rows(graph, rows)
+        cdef RefreshInputs inputs
+        inputs.graph = graph
+        inputs.rows = &rows
+        self._inputs(inputs.selectivity)
+        inputs.steps = _step_kinds()
+        inputs.store = &self._store
+        c_compute_node_statistics(inputs, nid)
 
     def set_cte(self, str cte_key not None, uint32_t nid):
         """Record node `nid`'s statistics as shared CTE `cte_key`'s output (its
@@ -667,3 +705,26 @@ cdef class StatisticsStore:
     def has_histogram(self, uint32_t nid, bytes identity not None):
         cdef const ColumnStats* c = self._column(nid, identity)
         return c != NULL and <bint>c.histogram
+
+    def ordinal_bounds(self, uint32_t nid, bytes identity not None):
+        """The column's relation-wide ordinal-key (lo, hi), or None."""
+        cdef const ColumnStats* c = self._column(nid, identity)
+        return None if c == NULL or not c.has_ordinal_bounds else (c.ordinal_lo, c.ordinal_hi)
+
+    def length_bounds(self, uint32_t nid, bytes identity not None):
+        """The column's observed (min, max) value length in bytes, or None."""
+        cdef const ColumnStats* c = self._column(nid, identity)
+        return None if c == NULL or not c.has_length_bounds else (c.length_lo, c.length_hi)
+
+    def class_proportions(self, uint32_t nid, bytes identity not None):
+        """{class: share of the column's bytes} over CHAR_CLASSES, or None."""
+        cdef const ColumnStats* c = self._column(nid, identity)
+        cdef int k
+        if c == NULL or not c.has_char_class:
+            return None
+        return {CHAR_CLASSES[k]: c.class_proportions[k] for k in range(8)}
+
+    def avg_length(self, uint32_t nid, bytes identity not None):
+        """The column's mean non-null value length in bytes, or None."""
+        cdef const ColumnStats* c = self._column(nid, identity)
+        return None if c == NULL or not c.has_char_class else c.avg_length

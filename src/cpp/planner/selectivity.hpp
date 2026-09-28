@@ -93,6 +93,8 @@ inline constexpr uint8_t kAsciiClass[128] = {
     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 5, 5, 5, 5, 7,
 };
 
+inline constexpr int kExtendedClass = EXTENDED;
+
 inline int classify(uint32_t code_point) {
     return code_point < 128 ? kAsciiClass[code_point] : EXTENDED;
 }

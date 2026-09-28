@@ -572,6 +572,16 @@ public:
         for (NodeId nid : in_.graph->exit_points()) visit(nid);
     }
 
+    // Node `nid` alone, from the statistics its inputs already hold in the
+    // store (none are recomputed); an input with none has none.
+    void run_one(NodeId nid) {
+        std::vector<Child> children;
+        for (const Edge& edge : in_.graph->node(nid).in) {
+            children.push_back(Child{in_.store->node_ptr(edge.other), edge.role});
+        }
+        in_.store->set_node(nid, compute(nid, row(nid), children));
+    }
+
 private:
     using Cols = refresh_detail::Cols;
     struct Child {
@@ -1523,6 +1533,11 @@ private:
 
 inline void refresh_statistics(const RefreshInputs& in) {
     StatisticsRefresh(in).run();
+}
+
+// One node's statistics from its inputs' (see StatisticsRefresh::run_one).
+inline void compute_node_statistics(const RefreshInputs& in, NodeId nid) {
+    StatisticsRefresh(in).run_one(nid);
 }
 
 // A node's total dense bytes over the columns that know theirs; false when none
