@@ -22,7 +22,7 @@ answer aggregates from statistics **everywhere that is provably sound**:
 
 | # | Ruling |
 |---|---|
-| D1 | The manifest stores the sum as a native int128 leaf. Add draken/rugo support where it is missing (§5.3). |
+| D1 | ~~native int128 leaf~~ → **revised 2026-09-28: two optional positional `ARRAY(INT64)` columns, `sums_hi` / `sums_lo`** (the int128's halves), on the `null_counts` encoding. LIST<DECIMAL128> was unsupported in rugo's writer/reader and unconfirmed in draken. |
 | D2 | **Integer columns only.** No floats. DECIMAL is also not in scope (read "just int columns" as integers only; say if DECIMAL was meant to be included). |
 | D3 | Asked: is there a slot in the Parquet or skene spec? Answered in §4. |
 | D4 | **Every integer width and signedness:** INT8/16/32/64 and UINT8/16/32/64. |
@@ -140,6 +140,8 @@ A native accessor (`NativeManifest`) folds the per-file sums into a
 relation-wide total.
 
 ### 5.3 Persisted manifest format (D1)
+
+> **Superseded by the revised D1 (2026-09-28):** `sums_hi` + `sums_lo`, both `ARRAY(INT64)`, appended last, optional; a file row either tracks sums (one element per column, null = not tracked) or is EMPTY. The text below describes the rejected DECIMAL128 option.
 
 - Add a **new optional column appended last**, `sums`, following the
   `distinct_counts` precedent. Its type is `ARRAY(DECIMAL128)` at scale 0 (a

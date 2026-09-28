@@ -5,7 +5,7 @@ make clickbench-canon (10.88) (28-SEP) [1.02x]
 (125.6 seconds) <- Opteryx 0.26.8
 (10.65 seconds) <- DuckDB Baseline
 
-make tpch-sf1    (414.0ms) (28-SEP) [SF1] [1.19x]
+make tpch-sf1    (408.1ms) (28-SEP) [SF1] [1.17x]
 make tpch-sf10   (2698.8ms) (28-SEP) [SF10] [0.65x]
 make tpch-sf100  (30042.0ms) (26-SEP) [SF100] [0.98x]
 make tpcds-sf1   (24.1s) (25-SEP) [1 fails (Q51)] [SF1]

@@ -68,6 +68,9 @@ struct ManifestColumnsIn {
     ManifestArrayColumn element_min_values;
     ManifestArrayColumn element_max_values;
     ManifestArrayColumn element_min_k_hashes;             // array<array<uint64>>
+    // The exact sums' int64 halves - optional columns (manifest_encode.hpp)
+    ManifestArrayColumn sums_hi;
+    ManifestArrayColumn sums_lo;
 };
 
 struct ManifestSchemaIn {
@@ -195,6 +198,27 @@ inline void scatter_ints(NativeManifest& manifest, size_t file, const ManifestCo
     }
 }
 
+// Row `row` of the sums_hi / sums_lo pair into each cell's exact sum. A cell
+// gets a sum only when BOTH halves are present for it; rows whose two lists
+// disagree in length carry no sums at all (a torn pair is not a sum).
+inline void scatter_sums(NativeManifest& manifest, size_t file, const ManifestColumnsIn& in,
+                         const ManifestSchemaIn& schema, uint32_t row) {
+    int32_t hb = 0, he = 0, lb = 0, le = 0;
+    if (in.sums_hi.outer == nullptr || in.sums_lo.outer == nullptr) return;
+    if (!array_range(in.sums_hi, row, hb, he) || !array_range(in.sums_lo, row, lb, le)) return;
+    if (he - hb != le - lb) return;
+    std::vector<int64_t> positions = positions_of(in, schema, row, static_cast<size_t>(he - hb));
+    for (int32_t k = 0; k < he - hb; ++k) {
+        const int64_t position = positions[static_cast<size_t>(k)];
+        int64_t hi = 0, lo = 0;
+        if (position < 0 || !child_int(in.sums_hi, hb + k, hi) || !child_int(in.sums_lo, lb + k, lo)) continue;
+        ManifestCell& cell = manifest.cell(file, static_cast<size_t>(position));
+        cell.sum = static_cast<__int128>((static_cast<unsigned __int128>(static_cast<uint64_t>(hi)) << 64)
+                                         | static_cast<uint64_t>(lo));
+        cell.has_sum = true;
+    }
+}
+
 // Each element of row `row` of an array<array<uint64>> column - one hash list
 // per column - into cell field `field`. A null list stays unset.
 template <typename Store>
@@ -297,6 +321,7 @@ inline NativeManifest decode_manifest(const ManifestColumnsIn& in, const Manifes
         });
         scatter_hash_lists(manifest, f, in, schema, in.element_min_k_hashes, row,
                            [](ManifestCell& c, std::vector<uint64_t> v) { c.element_min_k = std::move(v); });
+        scatter_sums(manifest, f, in, schema, row);
         scatter_ints(manifest, f, in, schema, in.distinct_counts, row, [](ManifestCell& c, int64_t v) {
             c.distinct_count = v;
             c.distinct_exact = false;   // the manifest does not persist exactness

@@ -70,6 +70,9 @@ struct EncodedManifest {
     EncodedList column_sizes, null_counts, min_k, histogram_counts, min_values, max_values, field_ids;
     EncodedList min_lengths, max_lengths, char_class_counts, char_total_bytes, distinct_counts;
     EncodedList element_min_values, element_max_values, element_min_k_hashes;
+    // The cells' exact sums (ManifestCell::sum, int128) as their two int64
+    // halves: sums_hi = the high 64 bits, sums_lo = the low 64 bits' pattern.
+    EncodedList sums_hi, sums_lo;
 };
 
 namespace encode_detail {
@@ -156,6 +159,44 @@ inline EncodedList positional(const NativeManifest& m, int64_t absent,
                 const int64_t v = read(m, f, c);
                 leaf[at] = v == absent ? 0 : v;
                 if (v != absent) set_bit(out.leaf_validity, at);
+            }
+        }
+        out.offsets[f + 1] = static_cast<int32_t>(at);
+    }
+    out.leaf = leaf;
+    out.leaf_length = static_cast<uint32_t>(leaf_length);
+    out.leaf_type = DRAKEN_INT64;
+    return out;
+}
+
+// positional() for a statistic whose every int64 value is legal, so presence
+// cannot be a sentinel: a file is EMPTY unless some column `has` it, else one
+// element per column, null where the column does not.
+inline EncodedList positional_where(const NativeManifest& m, bool (*has)(const ManifestCell&),
+                                    int64_t (*read)(const ManifestCell&)) {
+    const size_t rows = m.file_count(), columns = m.column_count();
+    std::vector<uint8_t> tracked(rows, 0);
+    size_t leaf_length = 0;
+    for (size_t f = 0; f < rows; ++f) {
+        for (size_t c = 0; c < columns; ++c) {
+            if (has(m.cell(f, c))) { tracked[f] = 1; break; }
+        }
+        if (tracked[f]) leaf_length += columns;
+    }
+    EncodedList out;
+    out.depth = 1;
+    out.offsets = alloc<int32_t>(rows + 1);
+    auto* leaf = alloc<int64_t>(leaf_length);
+    out.leaf_validity = bits(leaf_length);
+    size_t at = 0;
+    out.offsets[0] = 0;
+    for (size_t f = 0; f < rows; ++f) {
+        if (tracked[f]) {
+            for (size_t c = 0; c < columns; ++c, ++at) {
+                const ManifestCell& cell = m.cell(f, c);
+                const bool present = has(cell);
+                leaf[at] = present ? read(cell) : 0;
+                if (present) set_bit(out.leaf_validity, at);
             }
         }
         out.offsets[f + 1] = static_cast<int32_t>(at);
@@ -352,6 +393,14 @@ inline EncodedManifest encode_manifest(const NativeManifest& m, const std::vecto
     out.element_min_k_hashes = cell_hash_lists(m, [](const ManifestCell& c) -> const std::vector<uint64_t>& {
         return c.element_min_k;
     });
+    out.sums_hi = positional_where(
+        m, [](const ManifestCell& c) { return c.has_sum; },
+        [](const ManifestCell& c) { return static_cast<int64_t>(c.sum >> 64); });
+    out.sums_lo = positional_where(
+        m, [](const ManifestCell& c) { return c.has_sum; },
+        [](const ManifestCell& c) {
+            return static_cast<int64_t>(static_cast<uint64_t>(static_cast<unsigned __int128>(c.sum)));
+        });
 
     // field_ids, on every row: the given ids, or the load-time positions
     const size_t columns = m.column_count();

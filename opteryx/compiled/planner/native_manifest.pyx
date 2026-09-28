@@ -288,6 +288,45 @@ cdef extern from *:
     uint64_t bval_int_lo(const BVal& v)
 
 
+cdef extern from *:
+    """
+    // A cell's exact sum (manifest's own, or its parquet footer's) as two words.
+    static inline int64_t cell_sum_hi(const opteryx::planner::ManifestCell& c) { return static_cast<int64_t>(c.sum >> 64); }
+    static inline uint64_t cell_sum_lo(const opteryx::planner::ManifestCell& c) { return static_cast<uint64_t>(c.sum); }
+    static inline bool cell_has_sum(const opteryx::planner::ManifestCell& c) { return c.has_sum; }
+    static inline int64_t footer_sum_hi(const opteryx::planner::ManifestCell& c) { return static_cast<int64_t>(c.footer.sum >> 64); }
+    static inline uint64_t footer_sum_lo(const opteryx::planner::ManifestCell& c) { return static_cast<uint64_t>(c.footer.sum); }
+    static inline bool footer_has_sum(const opteryx::planner::ManifestCell& c) { return c.footer.has_sum; }
+    """
+    int64_t cell_sum_hi(const ManifestCell& c)
+    uint64_t cell_sum_lo(const ManifestCell& c)
+    cbool cell_has_sum(const ManifestCell& c)
+    int64_t footer_sum_hi(const ManifestCell& c)
+    uint64_t footer_sum_lo(const ManifestCell& c)
+    cbool footer_has_sum(const ManifestCell& c)
+
+
+cdef extern from *:
+    """
+    // Writers of a cell's exact sum - the int128 Cython cannot spell.
+    static inline void cell_copy_sum(opteryx::planner::ManifestCell& to, const opteryx::planner::ManifestCell& from) {
+        to.has_sum = from.has_sum;
+        to.sum = from.sum;
+    }
+    static inline void cell_clear_sum(opteryx::planner::ManifestCell& c) {
+        c.has_sum = false;
+        c.sum = 0;
+    }
+    static inline void cell_set_sum(opteryx::planner::ManifestCell& c, int64_t hi, uint64_t lo) {
+        c.sum = static_cast<__int128>((static_cast<unsigned __int128>(static_cast<uint64_t>(hi)) << 64) | lo);
+        c.has_sum = true;
+    }
+    """
+    void cell_copy_sum(ManifestCell& to, const ManifestCell& frm)
+    void cell_clear_sum(ManifestCell& c)
+    void cell_set_sum(ManifestCell& c, int64_t hi, uint64_t lo)
+
+
 cdef extern from "planner/manifest_prune.hpp" namespace "opteryx::planner":
     cdef cppclass PruneColumns:
         const unordered_map[string, size_t]* position
@@ -369,6 +408,8 @@ cdef extern from "planner/manifest_encode.hpp" namespace "opteryx::planner":
         EncodedList element_min_values
         EncodedList element_max_values
         EncodedList element_min_k_hashes
+        EncodedList sums_hi
+        EncodedList sums_lo
 
     EncodedManifest encode_manifest(const CNativeManifest& m, const vector[int64_t]& field_ids) except +
 
@@ -478,6 +519,8 @@ cdef extern from "planner/manifest_decode.hpp" namespace "opteryx::planner":
         ManifestArrayColumn element_min_values
         ManifestArrayColumn element_max_values
         ManifestArrayColumn element_min_k_hashes
+        ManifestArrayColumn sums_hi
+        ManifestArrayColumn sums_lo
 
     cdef cppclass ManifestSchemaIn:
         vector[string] columns
@@ -670,6 +713,8 @@ cdef class NativeManifest:
         element_min_values = _list_vector(e.element_min_values, n)
         element_max_values = _list_vector(e.element_max_values, n)
         element_min_k_hashes = _list_vector(e.element_min_k_hashes, n)
+        sums_hi = _list_vector(e.sums_hi, n)
+        sums_lo = _list_vector(e.sums_lo, n)
         if bounds_as_text:
             min_values, max_values = self._text_bounds()
         morsel = Morsel()
@@ -700,6 +745,9 @@ cdef class NativeManifest:
             morsel.append_vector("element_min_k_hashes", element_min_k_hashes)
             morsel.append_vector("delete_file_path", delete_paths)
             morsel.append_vector("deleted_record_count", deleted)
+            # the exact integer sums' int64 halves (manifest_encode.hpp)
+            morsel.append_vector("sums_hi", sums_hi)
+            morsel.append_vector("sums_lo", sums_lo)
         return morsel
 
     cdef tuple _text_bounds(self):
@@ -933,11 +981,13 @@ cdef class NativeManifest:
             "distinct_sketch": tuple(c.distinct_sketch) if c.has_distinct_sketch else None,
             "element_bounds": None if c.element_min == kNoBound else (c.element_min, c.element_max),
             "element_min_k": tuple(c.element_min_k),
+            "sum": ((<object>cell_sum_hi(c[0])) << 64) + (<object>cell_sum_lo(c[0])) if cell_has_sum(c[0]) else None,
             "footer": None if not self._manifest.file(row).has_footer else {
                 "bounds": _bounds_view(&c.footer.bounds),
                 "null_count": _optional(c.footer.null_count),
                 "distinct_count": _optional(c.footer.distinct_count),
                 "uncompressed_size": _optional(c.footer.uncompressed_size),
+                "sum": ((<object>footer_sum_hi(c[0])) << 64) + (<object>footer_sum_lo(c[0])) if footer_has_sum(c[0]) else None,
             },
         }
 
@@ -1014,6 +1064,8 @@ def decode_manifest_parquet(
         _array(columns_in.element_min_values, vectors, "element_min_values", False)
         _array(columns_in.element_max_values, vectors, "element_max_values", False)
         _nested_array(columns_in.element_min_k_hashes, vectors, "element_min_k_hashes")
+        _array(columns_in.sums_hi, vectors, "sums_hi", False)
+        _array(columns_in.sums_lo, vectors, "sums_lo", False)
 
     out._manifest = new_decoded_manifest(columns_in, schema_in, rows)
     _bind_sketch_views(out)
@@ -1385,6 +1437,13 @@ cdef class NativeManifestBuilder:
         if distinct_floor != -1:
             cell.distinct_floor = distinct_floor
 
+    def set_sum(self, size_t row, size_t position, object value):
+        """The column's EXACT sum in file `row` (a Python int inside int128)."""
+        if type(value) is not int or not (-(1 << 127) <= value < (1 << 127)):
+            raise ValueError(f"a column sum must be an int inside int128, not {value!r}")
+        cdef ManifestCell* cell = &self._manifest.cell(row, position)
+        cell_set_sum(cell[0], <int64_t>(value >> 64), <uint64_t>(value & 0xFFFFFFFFFFFFFFFF))
+
     def set_distinct_count(self, size_t row, size_t position, int64_t count, bint exact):
         cdef ManifestCell* cell = &self._manifest.cell(row, position)
         cell.distinct_count = count
@@ -1474,6 +1533,8 @@ cdef class NativeManifestBuilder:
                 target.bounds = source.bounds
             if null_counts:
                 target.null_count = source.null_count
+            if cell_has_sum(source[0]):
+                cell_copy_sum(target[0], source[0])
         file.uncompressed_size = source_file.uncompressed_size
         file.histogram_bins = source_file.histogram_bins
         file.vector_row = source_file.vector_row
@@ -1552,6 +1613,7 @@ cdef class NativeManifestBuilder:
             target.min_length = prior.min_length
             target.max_length = prior.max_length
             target.char_total_bytes = prior.char_total_bytes
+            cell_copy_sum(target[0], prior[0])
         cdef uint32_t vector_row = source._manifest.file(source_row).vector_row
         self._min_k.carry(source._manifest.min_k, vector_row, row, columns)
         self._histogram.carry(source._manifest.histogram, vector_row, row, columns)
@@ -1567,6 +1629,7 @@ cdef class NativeManifestBuilder:
         cell.min_length = kUnknown
         cell.max_length = kUnknown
         cell.char_total_bytes = kUnknown
+        cell_clear_sum(cell[0])
         cdef bint k = self._min_k.clear(row, position)
         cdef bint h = self._histogram.clear(row, position)
         cdef bint c = self._char_class.clear(row, position)
@@ -1583,7 +1646,8 @@ cdef class NativeManifestBuilder:
                 cell = &self._manifest.cell(row, position)
                 if (cell.bounds.min_ordinal != kNoBound or cell.bounds.max_ordinal != kNoBound
                         or cell.null_count != kUnknown or cell.min_length != kUnknown
-                        or cell.max_length != kUnknown or cell.char_total_bytes != kUnknown):
+                        or cell.max_length != kUnknown or cell.char_total_bytes != kUnknown
+                        or cell_has_sum(cell[0])):
                     return True
         return False
 

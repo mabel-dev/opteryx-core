@@ -206,6 +206,11 @@ def _analyze_one_file(blob: str, targets: List[str], categories: Dict[str, Logic
 
     string_targets = {name for name in targets if categories[name] in _STRING_CATEGORIES}
     array_targets = {name for name in targets if categories[name] is LogicalCategory.ARRAY}
+    # Integer columns get their EXACT sum (draken/ops/exact_sum.h) — the
+    # statistic SUM/AVG are answered from. A morsel whose vector has no exact
+    # sum makes the file's sum unknown (None), never a partial one.
+    integer_targets = {name for name in targets if categories[name] is LogicalCategory.INTEGER}
+    sums: Dict[str, Optional[int]] = {name: 0 for name in integer_targets}
 
     sketches = {name: ColumnSketch() for name in targets}
     null_counts = {name: 0 for name in targets}
@@ -230,6 +235,9 @@ def _analyze_one_file(blob: str, targets: List[str], categories: Dict[str, Logic
                 if name not in array_targets:
                     sketches[name].update(col.hash())
                 null_counts[name] += col.null_count()
+                if name in integer_targets and sums[name] is not None:
+                    summed = col.exact_sum()
+                    sums[name] = None if summed is None else sums[name] + summed[0]
                 # ordinalize() doesn't support ARRAY/VECTOR_FP16/DECIMAL128
                 # (see draken/ops/ordinalize.h) -- no min/max/histogram for
                 # those columns rather than crashing the whole ANALYZE.
@@ -273,6 +281,7 @@ def _analyze_one_file(blob: str, targets: List[str], categories: Dict[str, Logic
             "char_class_counts": char_counts.get(name),
             "char_total_bytes": char_total_bytes.get(name),
             "length_range": length_range.get(name),
+            "sum": sums.get(name),
         }
     return {"record_count": record_count, "columns": columns}
 
@@ -374,6 +383,8 @@ def analyze_table(
 
             builder.set_sketch(row, fid, "min_k", list(col_stats["sketch"]))
             builder.set_counts(row, fid, null_count=col_stats["null_count"])
+            if col_stats["sum"] is not None:
+                builder.set_sum(row, fid, col_stats["sum"])
             if col_stats["min_max"] is not None:
                 low, high = col_stats["min_max"]
                 builder.set_ordinal_bound(row, fid, True, low)

@@ -191,7 +191,11 @@ inline SkeneApplied apply_skene_footer(NativeManifest& m, size_t row, const sken
             cell.distinct_exact = ndv_exact;
         }
         if (ndv_floor > 0) cell.distinct_floor = ndv_floor;
-        if (sum_known) {
+        // A sum is only a sum of THIS column's values when the column is an
+        // exact numeric one here - a DATE column over the file's stored day
+        // counts is not (draken/ops/exact_sum.h).
+        const DrakenType column_type = physical.at(position);
+        if (sum_known && (is_integer(column_type) || column_type == DRAKEN_DECIMAL)) {
             cell.has_sum = true;
             cell.sum = sum_total;
         }

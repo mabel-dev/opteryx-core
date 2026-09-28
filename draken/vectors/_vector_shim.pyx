@@ -436,6 +436,11 @@ cdef class Vector:
         # char_class_stats binding for the class table and contract.
         return self._nb.char_class_stats()
 
+    def exact_sum(self):
+        # (sum, valid) of the non-null values, or None for a type with no exact
+        # sum -- see draken_native.cpp's exact_sum binding / ops/exact_sum.h.
+        return self._nb.exact_sum()
+
     def is_null_at(self, idx):
         return self._nb.is_null_at(idx)
 

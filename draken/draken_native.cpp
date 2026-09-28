@@ -55,6 +55,7 @@ namespace { std::atomic<uint64_t> g_e37_carried_hits{0}; }
 #include "ops/bool_reductions.h"
 #include "ops/hash.h"               // includes decimal_arith.h transitively (E.32)
 #include "ops/column_profile.h"     // char_class_stats / ordinal_min_max / histogram_bucket
+#include "ops/exact_sum.h"          // exact_sum (ANALYZE column sums)
 #include "parvi.hpp"                 // opteryx::parvi::ParviSet — Vector.unique() fast path (<=16 distinct)
 #include "ops/int64_arithmetic.h"   // i64_neg (used by bridge round-trip test)
 #include "ops/int64_reductions.h"   // i64_sum (used by bridge round-trip test)
@@ -8361,6 +8362,31 @@ NB_MODULE(draken_native, m) {
                 ? nb::object(nb::make_tuple(nb::int_(stats.min_len), nb::int_(stats.max_len)))
                 : nb::none();
             return nb::make_tuple(counts_list, nb::int_(stats.total_bytes), length_range);
+        })
+        // ----------------------------------------------------------------
+        // exact_sum(): (sum, valid) — the EXACT sum of the non-null values and
+        // their count, per draken/ops/exact_sum.h (integer family and DECIMAL,
+        // unscaled; UINT64 zero-extended). None for a type with no exact sum.
+        // Backs ANALYZE's per-file column sums (opteryx _analyze.py).
+        .def("exact_sum", [](const VectorOwner& v) -> nb::object {
+            __int128 sum = 0;
+            uint64_t valid = 0;
+            bool ok;
+            {
+                nb::gil_scoped_release _gil;
+                ok = draken::ops::exact_sum(v.vec, &sum, &valid);
+            }
+            if (!ok) return nb::none();
+            // the int128 as a Python int: (high word << 64) + low word
+            nb::object high = nb::steal(PyLong_FromLongLong(static_cast<long long>(sum >> 64)));
+            nb::object shift = nb::steal(PyLong_FromLong(64));
+            nb::object low = nb::steal(PyLong_FromUnsignedLongLong(
+                static_cast<unsigned long long>(static_cast<uint64_t>(sum))));
+            nb::object shifted = nb::steal(PyNumber_Lshift(high.ptr(), shift.ptr()));
+            if (!shifted.is_valid()) throw nb::python_error();
+            nb::object total = nb::steal(PyNumber_Add(shifted.ptr(), low.ptr()));
+            if (!total.is_valid()) throw nb::python_error();
+            return nb::make_tuple(total, nb::int_(valid));
         })
         // ----------------------------------------------------------------
         // C.2 — arithmetic (vector × vector or vector × scalar)

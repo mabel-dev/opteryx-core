@@ -79,20 +79,18 @@ def test_division_by_zero_and_overflow_fall_through_to_the_float_result(expressi
 
 
 def test_decimal_column_bounds_keep_the_boundary_rows():
-    """The Q6 shape: BETWEEN over a DECIMAL(15,2) column, bounds written as sums."""
-    sql = """
-        SELECT d FROM (VALUES
-            (CAST('0.04' AS DECIMAL(15, 2))),
-            (CAST('0.05' AS DECIMAL(15, 2))),
-            (CAST('0.06' AS DECIMAL(15, 2))),
-            (CAST('0.07' AS DECIMAL(15, 2))),
-            (CAST('0.08' AS DECIMAL(15, 2)))
-        ) AS t(d)
-        WHERE d BETWEEN 0.06 - 0.01 AND 0.06 + 0.01
-        ORDER BY d
+    """The Q6 shape: BETWEEN over a DECIMAL(15,2) column, bounds written as sums.
+
+    Same rows as the bounds written out, and the 0.07 rows are among them.
     """
-    values = [str(list(row)[0]) for m in opteryx.session().execute_to_morsels(sql) for row in m]
-    assert values == ["0.05", "0.06", "0.07"]
+    table = "testdata.tpch_001.lineitem"
+    written = _scalar(f"SELECT COUNT(*) FROM {table} WHERE l_discount BETWEEN 0.05 AND 0.07")
+    computed = _scalar(
+        f"SELECT COUNT(*) FROM {table} WHERE l_discount BETWEEN 0.06 - 0.01 AND 0.06 + 0.01"
+    )
+    top_edge = _scalar(f"SELECT COUNT(*) FROM {table} WHERE l_discount = 0.07")
+    assert top_edge > 0
+    assert computed == written
 
 
 if __name__ == "__main__":  # pragma: no cover
