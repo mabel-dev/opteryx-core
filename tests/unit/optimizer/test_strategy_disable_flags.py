@@ -6,7 +6,7 @@
 """Per-strategy A/B kill-switches.
 
 `_STRATEGY_DISABLE_FLAGS` (opteryx/planner/optimizer/__init__.py) maps every
-strategy class name in the pipeline to an `opteryx.config.features` boolean,
+strategy class name in the pipeline to a reader of an `opteryx.config.features` boolean,
 checked centrally in `OptimizerVisitor.optimize()` before a strategy's own
 `should_i_run`. All flags default False (every strategy enabled) — this is
 for A/B testing a strategy against the rest of the pipeline, not a permanent
@@ -43,11 +43,10 @@ def test_every_pipeline_strategy_has_a_flag():
 
 
 def test_every_flag_exists_on_features_and_defaults_off():
-    from opteryx import config
-
-    for flag_name in _STRATEGY_DISABLE_FLAGS.values():
-        assert hasattr(config.features, flag_name), flag_name
-        assert getattr(config.features, flag_name) is False, flag_name
+    # Each reader names its flag as an attribute: one missing from Features raises
+    # AttributeError naming it.
+    for strategy_name, is_disabled in _STRATEGY_DISABLE_FLAGS.items():
+        assert is_disabled() is False, strategy_name
 
 
 def test_disabling_a_strategy_skips_it():

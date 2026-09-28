@@ -15,6 +15,15 @@ has no row. Every other catalog failure raises - a listing that silently loses
 rows reads as "no forks", which is a lie about state.
 """
 
+import os
+import sys
+
+_CATALOG_REPO = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "opteryx-catalog")
+)
+if os.path.isdir(_CATALOG_REPO) and _CATALOG_REPO not in sys.path:
+    sys.path.insert(1, _CATALOG_REPO)
+
 import pytest
 from opteryx_catalog.exceptions import DatasetNotFound
 

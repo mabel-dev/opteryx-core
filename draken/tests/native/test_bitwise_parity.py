@@ -14,31 +14,11 @@ Each test covers:
   - The exact function name exported by vector_bitwise NB_MODULE
 """
 
-import glob
-import importlib.util
-import os
 
 import draken.draken_native as dn
 
 
-def _load_vector_bitwise():
-    """Load vector_bitwise extension without triggering opteryx/__init__.py."""
-    pattern = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..",
-        "opteryx", "compiled", "nanobind", "vectors*.so"
-    )
-    matches = glob.glob(pattern)
-    if not matches:
-        raise RuntimeError("vector_bitwise extension not built — run make compile")
-    spec = importlib.util.spec_from_file_location(
-        "opteryx.compiled.nanobind.vectors", matches[0]
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-bw = _load_vector_bitwise()
+from opteryx.compiled.nanobind import vectors as bw
 
 
 def make(lst):

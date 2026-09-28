@@ -529,12 +529,7 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
                 )
             else:
                 node.swap_build_side = True
-                self.telemetry.optimization_semi_anti_build_side_swapped = (
-                    getattr(
-                        self.telemetry, "optimization_semi_anti_build_side_swapped", 0
-                    )
-                    + 1
-                )
+                self.telemetry.optimization_semi_anti_build_side_swapped += 1
                 self.record_decision(
                     f"{node.type} join exchange",
                     f"exchanged, ratio {_ratio_text(right_rows, left_rows)}x clears the"
@@ -616,14 +611,7 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
                     )
                 else:
                     node.swap_build_side = True
-                    self.telemetry.optimization_left_outer_join_build_side_swapped = (
-                        getattr(
-                            self.telemetry,
-                            "optimization_left_outer_join_build_side_swapped",
-                            0,
-                        )
-                        + 1
-                    )
+                    self.telemetry.optimization_left_outer_join_build_side_swapped += 1
                     self.record_decision(
                         "left outer join exchange",
                         f"exchanged, build leg {_ratio_text(right_rows, left_rows)}x"
@@ -691,14 +679,7 @@ class JoinAlgorithmStrategy(OptimizationStrategy):
                     node.left_relation_names, node.right_relation_names = node.right_relation_names, node.left_relation_names
                     # fmt:on
                     flip_join_leg_labels(context.optimized_plan, context.node_id)
-                    self.telemetry.optimization_full_outer_join_build_side_swapped = (
-                        getattr(
-                            self.telemetry,
-                            "optimization_full_outer_join_build_side_swapped",
-                            0,
-                        )
-                        + 1
-                    )
+                    self.telemetry.optimization_full_outer_join_build_side_swapped += 1
                     self.record_decision(
                         "full outer join build side",
                         f"exchanged, build leg {_ratio_text(right_rows, left_rows)}x"

@@ -29,9 +29,9 @@ def _read_node_predicate_ops(sql: str):
             name = type(op).__name__
             if "Read" not in name and "Scan" not in name:
                 continue
-            preds = getattr(op, "predicates", None) or []
+            preds = op.predicates or []
             if preds:
-                out.append((name, [getattr(p, "value", None) for p in preds]))
+                out.append((name, [p.value for p in preds]))
         return out
     finally:
         session.close()

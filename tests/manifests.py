@@ -22,7 +22,6 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
-import opteryx.types  # noqa: F401  (enter through opteryx.types: column_type <-> opteryx.types cycle)
 from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
 from opteryx.models.manifest import Manifest
 

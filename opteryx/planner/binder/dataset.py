@@ -902,7 +902,7 @@ def visit_function_dataset(
             True,
         )
         for f, info in zip(parquet_files, file_infos):
-            builder.add_file(f, "PARQUET", 0, getattr(info, "size", 0) or 0)
+            builder.add_file(f, "PARQUET", 0, info.size or 0)
         manifest = Manifest(builder.build({}), schema)
 
         # node.connector is a real FileSystemTable (not just a predicate-pushdown
@@ -1260,9 +1260,9 @@ def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
         engine_kwargs["at_date"] = node.at_date
         engine_kwargs["version"] = node.version
         engine_kwargs["version_tag"] = node.version_tag
-    if getattr(gateway, "requires_execution_context", False):
+    if gateway.requires_execution_context:
         engine_kwargs["execution_context"] = context.execution_context
-    if getattr(gateway, "requires_original_case", False):
+    if gateway.requires_original_case:
         engine_kwargs["original_relation"] = original_relation
 
     # Reuse the dataset resolved by the catalog resolution step, if present, so
@@ -1284,7 +1284,7 @@ def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
     # emits by the caller's READ access to the underlying table) opt out of
     # this relation-level gate rather than being blocked from the metadata
     # view entirely.
-    if not getattr(node.connector, "self_governs_permissions", False):
+    if not node.connector.self_governs_permissions:
         if not can_perform_action(context.execution_context, node.relation, action="READ"):
             # A view is expanded before it reaches here, so the relation being
             # refused can be one the caller never wrote. Name the view they did
@@ -1371,33 +1371,34 @@ def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
             from opteryx.models.snapshot_history import snapshots_output_schema
             from opteryx.models.source_list import sources_output_schema
 
-            loader_name, output_schema = {
-                "snapshots": ("get_snapshots", snapshots_output_schema),
+            load_history, output_schema = {
+                "snapshots": (lambda table: table.get_snapshots(), snapshots_output_schema),
                 # The live history plus the tombstones, in the wider shape that
                 # can say which is which - SHOW ALL SNAPSHOTS FOR, gated above.
                 "snapshots_all": (
-                    "get_all_snapshots",
+                    lambda table: table.get_all_snapshots(),
                     lambda relation: snapshots_output_schema(relation, include_expiry=True),
                 ),
-                "lineage": ("get_lineage", lineage_output_schema),
-                "sources": ("get_sources", sources_output_schema),
+                "lineage": (lambda table: table.get_lineage(), lineage_output_schema),
+                "sources": (lambda table: table.get_sources(), sources_output_schema),
             }[node.history_view or "snapshots"]
 
             node.manifest = None
-            loader = getattr(node.connector, loader_name, None)
             # None (no commit log on this connector) is NOT an empty history, and
             # the Show visitor tells the two apart. Storing the absence keeps
             # that distinction rather than flattening it to "no rows".
-            context.snapshots[node.alias] = None if loader is None else loader()
+            context.snapshots[node.alias] = load_history(node.connector)
             node.schema = context.plan_context.columns.bind_relation(
                 output_schema(node.alias), node.alias
             )
-        elif context.schema_only and getattr(node.connector, "get_dataset_schema", None) is not None:
+        elif context.schema_only:
             node.schema = context.plan_context.columns.bind_relation(
                 node.connector.get_dataset_schema(), node.alias
             )
             node.manifest = None
-        elif getattr(node.connector, "get_dataset_metadata", None) is not None:
+        else:
+            # A reader with no manifest returns (schema, None) - see
+            # BaseTable.get_dataset_metadata.
             described, node.manifest = node.connector.get_dataset_metadata()
             node.schema = context.plan_context.columns.bind_relation(described, node.alias)
             if node.manifest is not None:
@@ -1413,15 +1414,9 @@ def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
             # Propagate dataset commit timestamp from the connector to the
             # logical node so it becomes available to physical nodes
             # (and ultimately shown as `committed_at` in telemetry).
-            dc = getattr(node.connector, "dataset_committed_at", None)
+            dc = node.connector.dataset_committed_at
             if dc is not None:
                 node.dataset_committed_at = dc
-        else:
-            # Fallback for connectors that don't have manifest support yet
-            node.schema = context.plan_context.columns.bind_relation(
-                node.connector.get_dataset_schema(), node.alias
-            )
-            node.manifest = None
         # Physical row address, for a Scan the planner asked to emit one (MERGE).
         # These columns are not in the relation's schema and are not read from
         # the data file - the scan synthesizes them (see constants/row_identity).

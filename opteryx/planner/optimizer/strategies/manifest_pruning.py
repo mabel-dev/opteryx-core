@@ -132,7 +132,8 @@ class ManifestPruningStrategy(OptimizationStrategy):
         from opteryx.expression import get_all_nodes_of_type
 
         scan_identities = {
-            column.identity for column in getattr(scan_node.schema, "columns", None) or []
+            column.identity
+            for column in (scan_node.schema.columns if scan_node.schema is not None else None) or []
         }
         if not scan_identities:
             return []

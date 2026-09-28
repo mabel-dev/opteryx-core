@@ -178,9 +178,7 @@ class SemiJoinPushdownStrategy(OptimizationStrategy):
             levels += 1
 
         if levels:
-            self.telemetry.optimization_semi_join_pushdown = (
-                getattr(self.telemetry, "optimization_semi_join_pushdown", 0) + levels
-            )
+            self.telemetry.optimization_semi_join_pushdown += levels
             self.record_decision(
                 "semi join pushdown",
                 f"sunk below {levels} join{'s' if levels > 1 else ''}: probe est "

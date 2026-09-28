@@ -33,37 +33,11 @@ Coverage matrix:
     non-Vector haystack → TypeError (raised by draken_vector_unwrap).
 """
 
-import glob
-import importlib.util
-import os
 
 import draken.draken_native as dn
 import pytest
 
-# ---------------------------------------------------------------------------
-# Load extension
-# ---------------------------------------------------------------------------
-
-def _load_mod():
-    pattern = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..",
-        "opteryx", "compiled", "nanobind", "vectors*.so"
-    )
-    matches = glob.glob(pattern)
-    if not matches:
-        pytest.skip(
-            "vector_string_search extension not built — run make compile",
-            allow_module_level=True,
-        )
-    spec = importlib.util.spec_from_file_location(
-        "opteryx.compiled.nanobind.vectors", matches[0]
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-vss = _load_mod()
+from opteryx.compiled.nanobind import vectors as vss
 
 # ---------------------------------------------------------------------------
 # Factories

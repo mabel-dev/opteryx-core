@@ -1,9 +1,6 @@
 """
 Native + parity tests for E.3: ABS / SIGN / SQRT / ROUND via vector_math consumer.
 
-Loads the nanobind extension without triggering opteryx/__init__.py, following
-the same spec_from_file_location pattern as test_bitwise_parity.py (E.2).
-
 Coverage:
   types:    INT8 / INT16 / INT32 / INT64 / FLOAT32 / FLOAT64
   ops:      abs / sign / sqrt / round / round_digits
@@ -22,10 +19,7 @@ Hypothesis property tests:
   round: round(n) == n for integer-valued floats in safe range
 """
 
-import glob
-import importlib.util
 import math
-import os
 
 import draken.draken_native as dn
 import pytest
@@ -33,27 +27,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 
-# ---------------------------------------------------------------------------
-# Load vector_math extension
-# ---------------------------------------------------------------------------
-
-def _load_vector_math():
-    pattern = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..",
-        "opteryx", "compiled", "nanobind", "vectors*.so"
-    )
-    matches = glob.glob(pattern)
-    if not matches:
-        raise RuntimeError("vector_math extension not built — run make compile")
-    spec = importlib.util.spec_from_file_location(
-        "opteryx.compiled.nanobind.vectors", matches[0]
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-vm = _load_vector_math()
+from opteryx.compiled.nanobind import vectors as vm
 
 
 # ---------------------------------------------------------------------------

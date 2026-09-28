@@ -150,7 +150,7 @@ class CompactionPlanningStrategy(OptimizationStrategy):
             plan[scan_id] = scan
 
             sink.retired_files = sorted(chosen)
-            sink.baseline_snapshot_id = getattr(scan.connector, "snapshot_id", None)
+            sink.baseline_snapshot_id = scan.connector.snapshot_id
             # The ordering claim the sink writes into its output files. Only a
             # sort-aware plan has one: its rows arrive through the Order node,
             # so every row group is ordered on the primary key. A brute plan's

@@ -326,7 +326,7 @@ def _as_float(bound, target_type, keep_upper):
     row the join still matches. Nudge outward (toward the bound's own side of
     the range) until the float is on the safe side. FLOAT32 targets round again
     on materialisation, so the nudge is done in float32 space for those."""
-    single = getattr(target_type, "physical", None) is DrakenType.FLOAT32
+    single = target_type.physical is DrakenType.FLOAT32
     try:
         result = float(bound)
     except (OverflowError, ValueError):
@@ -432,10 +432,10 @@ def _coerce_temporal_bound(bound, target_type, category):
     physical, (low, high) = _TEMPORAL_NATIVE[category]
     if type(bound) is not int:
         return None
-    if getattr(target_type, "physical", None) is not physical:
+    if target_type.physical is not physical:
         return None
     if category is LogicalCategory.TIMESTAMP:
-        logical = getattr(target_type, "logical", None)
+        logical = target_type.logical
         if logical is None or logical.unit is not TimestampUnit.MICROSECONDS:
             return None
     if not low <= bound <= high:
@@ -642,8 +642,6 @@ def _constant_condition(target_col, literal, *, plan_context):
         return None
     category = target_type.category
     value = literal.value
-    if getattr(value, "item", None) is not None:
-        value = value.item()
 
     if category in (LogicalCategory.VARCHAR, LogicalCategory.NVARCHAR):
         # The engine spells a VARCHAR predicate literal as UTF-8 BYTES -- that is
@@ -947,7 +945,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
                 continue
 
             connector = scan.connector if scan.node_type in steps_with("connector") else None
-            if connector is not None and getattr(connector, "supports_predicate_pushdown", False):
+            if connector is not None and connector.supports_predicate_pushdown:
                 predicates = list(scan.predicates or ())
                 for condition in conditions:
                     if not _predicate_already_present(predicates, condition):

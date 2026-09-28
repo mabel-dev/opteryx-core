@@ -17,6 +17,15 @@ the WRITE side, recording exactly what `insert`/`replace_relation` were
 handed. What is under test is the receipt, not the rows.
 """
 
+import os
+import sys
+
+_CATALOG_REPO = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "opteryx-catalog")
+)
+if os.path.isdir(_CATALOG_REPO) and _CATALOG_REPO not in sys.path:
+    sys.path.insert(1, _CATALOG_REPO)
+
 import datetime
 from types import SimpleNamespace
 

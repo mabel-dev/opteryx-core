@@ -113,9 +113,7 @@ def _collect_equality_predicates(plan: LogicalPlan, start_nid) -> dict:
 def _make_passthrough(original: Expression) -> Expression:
     return LogicalColumn(
         node_type=NodeType.IDENTIFIER,
-        source_column=(
-            original.schema_column.name if original.schema_column else getattr(original, "value", None)
-        ),
+        source_column=original.schema_column.name,
         schema_column=original.schema_column,
         arena=original.arena,
     )
@@ -198,10 +196,7 @@ class FilterImpliedGroupKeyReductionStrategy(OptimizationStrategy):
         context.optimized_plan.insert_node_after(
             project_node, context.node_id
         )
-        self.telemetry.optimization_filter_implied_group_key_reduction = (
-            getattr(self.telemetry, "optimization_filter_implied_group_key_reduction", 0)
-            + len(implied)
-        )
+        self.telemetry.optimization_filter_implied_group_key_reduction += len(implied)
 
         return context
 

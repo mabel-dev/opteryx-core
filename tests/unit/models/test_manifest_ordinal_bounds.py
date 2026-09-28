@@ -45,8 +45,6 @@ from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.plan_context import PlanContext
-# after opteryx.types: entering through the compiled planner first trips the
-# column_type <-> opteryx.types import cycle
 from opteryx.compiled.planner.statistics import StatisticsStore
 from tests.manifests import NULL_FLAG
 from tests.manifests import FileSpec

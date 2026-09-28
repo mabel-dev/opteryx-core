@@ -92,7 +92,7 @@ def _scan_row_counts(plan, plan_context):
     out = {}
     for nid, node in plan.nodes(True):
         if node.node_type == LogicalPlanStepType.Scan:
-            rel = getattr(node, "relation", None) or getattr(node, "alias", None)
+            rel = node.relation or node.alias
             if rel and plan_context.statistics.has(nid):
                 out[rel] = plan_context.statistics.row_count(nid)
     return out

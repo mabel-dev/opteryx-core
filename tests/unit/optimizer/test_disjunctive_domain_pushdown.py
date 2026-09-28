@@ -67,8 +67,8 @@ def _scan_predicates(plan, alias):
     from opteryx.planner.logical_planner import LogicalPlanStepType
 
     for _, node in plan.nodes(True):
-        if node.node_type == LogicalPlanStepType.Scan and getattr(node, "alias", None) == alias:
-            return getattr(node, "predicates", None) or []
+        if node.node_type == LogicalPlanStepType.Scan and node.alias == alias:
+            return node.predicates or []
     return None
 
 

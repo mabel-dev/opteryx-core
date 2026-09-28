@@ -171,7 +171,7 @@ def _optimized_and_refreshed_scan_row_count(sql):
 
     for _nid, node in refreshed.nodes(True):
         if node.node_type == LogicalPlanStepType.Scan:
-            return plan_context.statistics.row_count(_nid), bool(getattr(node, "predicates", None))
+            return plan_context.statistics.row_count(_nid), bool(node.predicates)
     return None, False
 
 

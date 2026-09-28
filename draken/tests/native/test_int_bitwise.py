@@ -19,11 +19,6 @@ Hypothesis property tests:
     a & b == b & a (commutativity)
 """
 
-import ctypes
-import glob
-import importlib.util
-import os
-import sys
 
 import pytest
 import draken.draken_native as dn
@@ -32,26 +27,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 
-def _load_vector_bitwise():
-    """Load vector_bitwise extension without triggering opteryx/__init__.py."""
-    # draken_native must already be loaded (done at module level above) so
-    # draken_vector_unwrap / draken_vector_own_raw are in the global symbol table.
-    pattern = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..",
-        "opteryx", "compiled", "nanobind", "vectors*.so"
-    )
-    matches = glob.glob(pattern)
-    if not matches:
-        raise RuntimeError("vector_bitwise extension not built — run make compile")
-    spec = importlib.util.spec_from_file_location(
-        "opteryx.compiled.nanobind.vectors", matches[0]
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-bw = _load_vector_bitwise()
+from opteryx.compiled.nanobind import vectors as bw
 
 
 INT8_MIN   = -128

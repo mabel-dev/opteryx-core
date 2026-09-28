@@ -8,31 +8,13 @@ IPv4 column (vector_ipv4_in_cidr / draken_ipv4_in_cidr); the string-based `|`
 overload this file used to cover was removed with it.
 """
 
-import importlib.util
 import math
-import os
-import sys
 
 import pytest
 
 import draken.draken_native as dn
 
-# Load vector_misc directly by file path so opteryx/__init__.py is not executed.
-# The shared library uses RTLD_GLOBAL symbols from draken_native (already loaded above).
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.join(_HERE, "..", "..", "..")
-_SO = None
-for _fname in os.listdir(os.path.join(_ROOT, "opteryx/compiled/nanobind")):
-    if _fname.startswith("vectors") and _fname.endswith(".so"):
-        _SO = os.path.join(_ROOT, "opteryx/compiled/nanobind", _fname)
-        break
-if _SO is None:
-    pytest.skip("vector_misc.so not found; run DRAKEN_BUILD=1 make c first", allow_module_level=True)
-
-_spec = importlib.util.spec_from_file_location("opteryx.compiled.nanobind.vectors", _SO)
-_vm = importlib.util.module_from_spec(_spec)
-sys.modules["opteryx.compiled.nanobind.vectors"] = _vm
-_spec.loader.exec_module(_vm)
+from opteryx.compiled.nanobind import vectors as _vm
 
 vector_in_list = _vm.vector_in_list
 vector_log = _vm.vector_log

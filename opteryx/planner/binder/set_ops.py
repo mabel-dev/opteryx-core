@@ -66,7 +66,7 @@ def _setop_leg_columns(self, node: PlanStep, relation_names: List[str], context:
     any columns made `SELECT * FROM t WHERE ... INTERSECT SELECT * FROM t WHERE ...`
     compare the two legs on the FILTER's column alone and call the rest equal.
     """
-    graph = getattr(self, "graph", None)
+    graph = self.graph
     if graph is None:
         return None
 
@@ -365,7 +365,7 @@ def _branch_project_columns(self, node: PlanStep, relation_names: List[str], con
     Returns None if the branch (or a Project within it) cannot be located —
     the caller decides what that means for its own resolution strategy.
     """
-    graph = getattr(self, "graph", None)
+    graph = self.graph
     if graph is None:
         return None
 
@@ -433,7 +433,7 @@ def _branch_project_node(self, node: PlanStep, relation_names: List[str]):
     graph node — so its `.columns` can be mutated in place — instead of a copy
     of its bound SchemaColumns. Returns None if no such node can be located.
     """
-    graph = getattr(self, "graph", None)
+    graph = self.graph
     if graph is None:
         return None
 

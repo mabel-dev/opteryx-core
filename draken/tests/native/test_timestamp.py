@@ -123,6 +123,18 @@ class TestRoundTripEmpty:
         assert len(ts([])) == 0
 
 
+class TestWrongElementType:
+    # A non-datetime element raised ValueError; a wrong type is a TypeError.
+    def test_bytes_element_is_type_error(self):
+        with pytest.raises(TypeError, match="element must be datetime.datetime or None, got bytes"):
+            ts([b"2024-01-01"])
+
+    def test_date_element_is_type_error(self):
+        # datetime.date is not datetime.datetime — no silent midnight widen.
+        with pytest.raises(TypeError, match="got datetime.date"):
+            ts([DT_2024.date()])
+
+
 class TestRoundTripSingle:
     def test_single_utc(self):
         result = pylist(ts([DT_2024]))

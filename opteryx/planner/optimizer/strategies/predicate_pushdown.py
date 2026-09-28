@@ -1344,8 +1344,9 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 # Literal-on-one-side predicates: collectable as filters. Leaves
                 # with no left/right (NOT, IS NULL, Nested, CASE, functions) are
                 # collectable too.
-                left = getattr(predicate, "left", None)
-                right = getattr(predicate, "right", None)
+                predicate_type = type(predicate)
+                left = predicate.left if predicate_type in expressions_with("left") else None
+                right = predicate.right if predicate_type in expressions_with("right") else None
                 if len(get_all_nodes_of_type(left, (NodeType.IDENTIFIER,))) == 0:
                     return True
                 if len(get_all_nodes_of_type(right, (NodeType.IDENTIFIER,))) == 0:

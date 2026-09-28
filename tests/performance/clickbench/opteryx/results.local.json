@@ -1,14 +1,14 @@
 make clickbench (8.76s seconds) [256K rg] (28-SEP) [0.82x]
 make clickbench-skene (7.10s) (27-SEP) [0.67x]
-make clickbench-canon (10.91) (27-SEP) [1.02x]
+make clickbench-canon (10.88) (28-SEP) [1.02x]
 
 (125.6 seconds) <- Opteryx 0.26.8
 (10.65 seconds) <- DuckDB Baseline
 
-make tpch-sf1    (448.0ms) (27-SEP) [SF1] [1.29x]
-make tpch-sf10   (2772.5ms) (26-SEP) [SF10] [0.66x]
+make tpch-sf1    (414.7ms) (28-SEP) [SF1] [1.19x]
+make tpch-sf10   (2703.3ms) (28-SEP) [SF10] [0.65x]
 make tpch-sf100  (30042.0ms) (26-SEP) [SF100] [0.98x]
-make tpcds-sf1   (24.1s) (25-SEP) [1 fails] [SF1]
+make tpcds-sf1   (24.1s) (25-SEP) [1 fails (Q51)] [SF1]
 make tpcds-sf001 (18.3s) (25-AUG) [1 fails] [SF001]
 make medicare1   (393.2ms) (26-SEP) [2.26x]
 make job         (6473.2ms) (26-SEP) [0.96x] (33c)
@@ -24,9 +24,8 @@ make clickbench-aistor-canon-single
 make clickbench-aistor-rugo-split
 make h2o-aistor - 205794.3ms - [medium] (no DuckDB medium baseline)
 make job-aistor - 844999.9ms - 125.19x
-
-make tpch-sf01-aistor - 33813.9ms - 298.04x
-make tpcds-sf01-aistor - 455.5s - [1 fails (Q51)]
+make tpch-sf01-aistor - 22348.5ms (27-SEP) [196.98x]
+make tpcds-sf01-aistor - 455.5s (27-SEP) [1 fails (Q51)]
 make clickbench-aistor-canon-split-10 - 61992ms - 32.83x [10M rows]
 make clickbench-aistor-rugo-split-10 - 61605ms - 32.63x [10M rows]
 make h2o-small-aistor - 27898.4ms - 9.88x

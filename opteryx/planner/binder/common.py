@@ -126,6 +126,11 @@ class BinderVisitor:
 
     """
 
+    # The plan being traversed, set by traverse() so handlers (visit_insert, the set
+    # operations, the relation collectors) can reach already-bound nodes by id. None
+    # until a traversal starts - a handler called outside one sees that, explicitly.
+    graph = None
+
     def visit_node(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
         """
         Visits a given node and returns a new node and context after binding catalog information.

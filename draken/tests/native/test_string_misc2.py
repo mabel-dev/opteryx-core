@@ -39,7 +39,6 @@ Coverage:
     zero-norm → NaN
 """
 
-import importlib.util
 import math
 import os
 import sys
@@ -49,25 +48,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 import draken.draken_native as dn
 
-# ---------------------------------------------------------------------------
-# Module loading (spec_from_file_location pattern — no opteryx import)
-# ---------------------------------------------------------------------------
-
-def _load_module(name, rel_path):
-    base = os.path.join(os.path.dirname(__file__), "..", "..", "..", rel_path)
-    import glob
-    candidates = glob.glob(base + "*.so") + glob.glob(base + "*.pyd")
-    if not candidates:
-        raise FileNotFoundError(f"Compiled module not found: {base}*.so")
-    spec = importlib.util.spec_from_file_location(name, candidates[0])
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-_misc2 = _load_module(
-    "opteryx.compiled.nanobind.vectors",
-    "opteryx/compiled/nanobind/vectors",
-)
+from opteryx.compiled.nanobind import vectors as _misc2
 vector_replace             = _misc2.vector_replace
 vector_cosine_similarity   = _misc2.vector_cosine_similarity
 vector_cosine_distance     = _misc2.vector_cosine_distance

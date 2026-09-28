@@ -1,5 +1,7 @@
 import datetime
 
+from opteryx.connectors.base.base_connector import BaseConnector
+from opteryx.connectors.base.base_connector import BaseTable
 from opteryx.connectors.capabilities import Diachronic
 from opteryx.compiled.structures.plan_steps import ScanStep
 from opteryx.planner.binder.binding_context import BindingContext
@@ -9,8 +11,14 @@ from opteryx.types.logical_type import INT64
 from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 
 
-class FakeConnector(Diachronic):
+class FakeTable(BaseTable, Diachronic):
+    """The per-query reader the gateway hands the binder."""
+
     __mode__ = "FAKE"
+
+    def __init__(self, **kwargs):
+        BaseTable.__init__(self, **kwargs)
+        Diachronic.__init__(self, **kwargs)
 
     def get_dataset_schema(self):
         return RelationDescriptor(
@@ -24,6 +32,17 @@ class FakeConnector(Diachronic):
         )
 
 
+class FakeGateway(BaseConnector):
+    """What connector_factory returns: the binder reads capabilities off the
+    gateway and gets its reader from table_engine()."""
+
+    __mode__ = "FAKE"
+    supports_diachronic = True
+
+    def table_engine(self, name, **kwargs):
+        return FakeTable(dataset=name, **kwargs)
+
+
 def test_binder_sets_diachronic_dates():
     visitor = BinderVisitor()
     node = ScanStep()
@@ -31,7 +50,6 @@ def test_binder_sets_diachronic_dates():
     node.alias = "fake"
     node.start_date = datetime.datetime(2021, 1, 1)
     node.end_date = datetime.datetime(2021, 1, 2)
-    node.connector = FakeConnector()
 
     from types import SimpleNamespace
 
@@ -50,7 +68,7 @@ def test_binder_sets_diachronic_dates():
     original_factory = connectors_module.connector_factory
 
     def fake_factory(_dataset, telemetry, **config):
-        return FakeConnector(**config)
+        return FakeGateway()
 
     connectors_module.connector_factory = fake_factory
 
@@ -60,7 +78,7 @@ def test_binder_sets_diachronic_dates():
         node, _ = visitor.visit_scan(node, context)
     finally:
         connectors_module.connector_factory = original_factory
-    assert getattr(node, "connector", None) is not None
+    assert node.connector is not None
     # Ensure Diachronic support results in connector start/ end dates set from node
     assert node.connector.start_date == node.start_date
     assert node.connector.end_date == node.end_date

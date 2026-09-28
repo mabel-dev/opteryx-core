@@ -9,6 +9,11 @@ Its own module because it is a plain Python enum (a member is named NULL, which
 a Cython module cannot define) that both the native ColumnType
 (opteryx/compiled/planner/column_type.pyx) and opteryx.types.logical_type import;
 it imports nothing from opteryx.
+
+It lives beside column_type, not in opteryx.types, because column_type needs it at
+module init: reaching it through opteryx.types runs that package's __init__, which
+imports logical_type, which imports column_type - a cycle whenever column_type (or
+anything cimporting it) is the first thing imported.
 """
 
 from enum import Enum

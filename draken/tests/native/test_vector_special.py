@@ -2,35 +2,12 @@
 Tests for E.19: vector_map_access_string / vector_map_access_array via vector_special.
 """
 
-import glob
-import importlib.util
-import os
 
 import draken.draken_native as dn
 import pytest
 
 
-# ---------------------------------------------------------------------------
-# Load extensions
-# ---------------------------------------------------------------------------
-
-def _load(name):
-    pattern = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..",
-        "opteryx", "compiled", "nanobind", f"{name}*.so"
-    )
-    matches = glob.glob(pattern)
-    if not matches:
-        raise RuntimeError(f"{name} extension not built — run make compile")
-    spec = importlib.util.spec_from_file_location(
-        f"opteryx.compiled.nanobind.{name}", matches[0]
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-vs = _load("vectors")
+from opteryx.compiled.nanobind import vectors as vs
 
 
 # ---------------------------------------------------------------------------

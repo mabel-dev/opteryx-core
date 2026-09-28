@@ -431,7 +431,5 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
         plan.add_edge(reducer_nid, target_parent, parent_rel)
 
         join.reducer_applied = True
-        self.telemetry.optimization_semi_join_reducer = (
-            getattr(self.telemetry, "optimization_semi_join_reducer", 0) + 1
-        )
+        self.telemetry.optimization_semi_join_reducer += 1
         return plan

@@ -39,7 +39,7 @@ from draken.draken_native import TimestampUnit
 # (opteryx/compiled/planner/column_type.pyx, architect ruling 2026-09-27); this
 # module re-exports them and keeps the factories, canonical instances and parsing.
 from opteryx.compiled.planner.column_type import ColumnType
-from opteryx.types.logical_category import LogicalCategory
+from opteryx.compiled.planner.logical_category import LogicalCategory
 from opteryx.compiled.planner.column_type import _CATEGORY_OF
 from opteryx.compiled.planner.column_type import _UNIT_TO_SQL
 from opteryx.compiled.planner.column_type import physical_is_parameterized

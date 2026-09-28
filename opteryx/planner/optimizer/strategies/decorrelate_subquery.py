@@ -760,11 +760,7 @@ def _guard_scalar_cardinality(inner_plan: LogicalPlan, telemetry) -> None:
     guard = ScalarSubqueryGuardStep()
     guard_nid = inner_plan.add_node(guard)
     inner_plan.add_edge(exit_nid, guard_nid)
-    setattr(
-        telemetry,
-        "optimization_scalar_subquery_guard",
-        getattr(telemetry, "optimization_scalar_subquery_guard", 0) + 1,
-    )
+    telemetry.optimization_scalar_subquery_guard += 1
 
 
 def _is_restricted(plan: LogicalPlan) -> bool:
@@ -1688,9 +1684,7 @@ def _decorrelate_projection_existence(
     )
     replace_fn(flag)
 
-    telemetry.optimization_decorrelate_select_list_existence = (
-        getattr(telemetry, "optimization_decorrelate_select_list_existence", 0) + 1
-    )
+    telemetry.optimization_decorrelate_select_list_existence += 1
     return plan
 
 
@@ -1890,9 +1884,7 @@ def _project_uncorrelated_exists(plan, project_nid, inner_plan, remove, replace_
     join_nid = plan.insert_node_before(join, project_nid)
     _label_inserted_join_legs(plan, join_nid, agg_nid)
 
-    telemetry.optimization_decorrelate_select_list_existence = (
-        getattr(telemetry, "optimization_decorrelate_select_list_existence", 0) + 1
-    )
+    telemetry.optimization_decorrelate_select_list_existence += 1
     return plan
 
 
@@ -2619,7 +2611,7 @@ def _build_filter_join(
                 "rewrite can carry it (only filters and projections may sit between)"
             )
 
-    setattr(telemetry, counter, getattr(telemetry, counter, 0) + 1)
+    telemetry.increase(counter, 1)
     return plan
 
 
@@ -2886,11 +2878,7 @@ def _materialize_boolean_value(
         if column.node_type in FILTER_REFERENCED_NODE_TYPES
     ] + [_count_reference()]
 
-    setattr(
-        telemetry,
-        f"{counter}_materialized",
-        getattr(telemetry, f"{counter}_materialized", 0) + 1,
-    )
+    telemetry.increase(f"{counter}_materialized", 1)
     return plan
 
 
@@ -2946,11 +2934,7 @@ def _materialize_in_membership(
         if column.node_type in FILTER_REFERENCED_NODE_TYPES
     ] + [_reference_to(remove.schema_column, plan.plan_context.expressions)]
 
-    setattr(
-        telemetry,
-        f"{counter}_materialized",
-        getattr(telemetry, f"{counter}_materialized", 0) + 1,
-    )
+    telemetry.increase(f"{counter}_materialized", 1)
     return plan
 
 def _all_columns_of(node):
@@ -3209,11 +3193,7 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
     if local_pairs and _reduce_aggregate_input(
         plan, filter_nid, inner_plan, local_pairs, plan_context=plan_context
     ):
-        setattr(
-            telemetry,
-            "optimization_decorrelate_aggregate_reduced",
-            getattr(telemetry, "optimization_decorrelate_aggregate_reduced", 0) + 1,
-        )
+        telemetry.optimization_decorrelate_aggregate_reduced += 1
 
     inner_exit = inner_plan.exit_point()
     plan.absorb(inner_plan)
@@ -3332,9 +3312,7 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
                 "enclosing join provides that relation. This nesting is not supported."
             )
 
-    telemetry.optimization_decorrelate_scalar_subquery = (
-        getattr(telemetry, "optimization_decorrelate_scalar_subquery", 0) + 1
-    )
+    telemetry.optimization_decorrelate_scalar_subquery += 1
     return plan
 
 
@@ -3462,7 +3440,5 @@ def _decorrelate_projection(
     join_nid = plan.insert_node_before(join, project_nid)
     _label_inserted_join_legs(plan, join_nid, inner_exit)
 
-    telemetry.optimization_decorrelate_scalar_subquery = (
-        getattr(telemetry, "optimization_decorrelate_scalar_subquery", 0) + 1
-    )
+    telemetry.optimization_decorrelate_scalar_subquery += 1
     return plan

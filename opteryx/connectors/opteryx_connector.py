@@ -1241,6 +1241,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
     supports_limit_pushdown = True  # Via FileSystemTable base
     supports_statistics = True  # Opteryx manifests provide stats
     requires_execution_context = True  # information_schema row-level permission filtering
+    requires_original_case = False  # table_engine() takes the case-folded relation name
 
     PUSHABLE_OPS: Dict[str, bool] = {
         "Eq": True,

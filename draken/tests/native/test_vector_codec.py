@@ -1,9 +1,6 @@
 """
 Native + parity tests for E.4: base64/85 codec via vector_codec consumer.
 
-Loads the nanobind extension without triggering opteryx/__init__.py,
-following the spec_from_file_location pattern established in E.2/E.3.
-
 Coverage:
   base64 encode / decode:
     round-trip (decode(encode(x)) == x)
@@ -22,35 +19,12 @@ Coverage:
 """
 
 import base64 as stdlib_base64
-import glob
-import importlib.util
-import os
 
 import draken.draken_native as dn
 import pytest
 
 
-# ---------------------------------------------------------------------------
-# Load vector_codec extension
-# ---------------------------------------------------------------------------
-
-def _load_vector_codec():
-    pattern = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..",
-        "opteryx", "compiled", "nanobind", "vectors*.so"
-    )
-    matches = glob.glob(pattern)
-    if not matches:
-        pytest.skip("vector_codec extension not built — run make compile first", allow_module_level=True)
-    spec = importlib.util.spec_from_file_location(
-        "opteryx.compiled.nanobind.vectors", matches[0]
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-vc = _load_vector_codec()
+from opteryx.compiled.nanobind import vectors as vc
 
 
 # ---------------------------------------------------------------------------

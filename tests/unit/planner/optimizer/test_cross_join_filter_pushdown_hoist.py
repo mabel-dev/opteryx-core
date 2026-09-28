@@ -76,7 +76,7 @@ def test_arithmetic_join_key_is_converted_to_inner_join():
     cross_joins = [
         (nid, node)
         for nid, node in joins
-        if node.type == "cross join" and not getattr(node, "on", None)
+        if node.type == "cross join" and not node.on
     ]
     assert not cross_joins, f"arithmetic join key was not hoisted: {cross_joins}"
     inner = [node for _, node in joins if node.type == "inner"]

@@ -17,7 +17,12 @@ import sys
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-import opteryx.types  # noqa: F401  (enter through opteryx.types: column_type <-> opteryx.types cycle)
+_CATALOG_REPO = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "opteryx-catalog")
+)
+if os.path.isdir(_CATALOG_REPO) and _CATALOG_REPO not in sys.path:
+    sys.path.insert(1, _CATALOG_REPO)
+
 from opteryx_catalog.opteryx_catalog import OpteryxCatalog
 
 from opteryx.compiled.planner.native_manifest import decode_manifest_parquet

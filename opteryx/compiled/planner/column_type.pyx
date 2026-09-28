@@ -36,7 +36,7 @@ from draken.draken_native import DrakenType
 from draken.draken_native import LogicalKind
 from draken.draken_native import LogicalType
 from draken.draken_native import TimestampUnit
-from opteryx.types.logical_category import LogicalCategory
+from opteryx.compiled.planner.logical_category import LogicalCategory
 # Draken owns the physical+descriptor -> SQL name mapping; this is the one entry
 # point onto it. Never reimplement the table here (see ColumnType.__str__).
 from draken.vectors.vector import type_display_name as _draken_type_display_name

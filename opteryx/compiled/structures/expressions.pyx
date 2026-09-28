@@ -50,6 +50,7 @@ from libcpp.utility cimport pair
 from libcpp.vector cimport vector
 from cpython.unicode cimport PyUnicode_AsUTF8AndSize
 
+from opteryx.compiled.planner.logical_category import LogicalCategory
 
 
 cdef class ExprArena:
@@ -218,18 +219,13 @@ cdef inline bint _is_expression(object value):
     return type(value) in EXPRESSION_TYPES
 
 
-cdef object _LC = None
+cdef object _LC = LogicalCategory
 
 
 cdef void _check_literal(Literal literal):
     """A placed literal's value must be the native form of its declared type
     (architect rulings 2026-09-27, P3-c): an untyped literal, or a value of another
     kind, is refused - never coerced."""
-    global _LC
-    if _LC is None:
-        from opteryx.types.logical_category import LogicalCategory
-
-        _LC = LogicalCategory
     column_type = literal._type
     if column_type is None:
         raise TypeError(f"Literal #{literal.expr_id} has no type (value {literal._value!r})")
@@ -436,7 +432,6 @@ cdef const NodeKinds* node_kinds() except NULL:
     return &_NODE_KINDS
 
 
-cdef object _LC_NATIVE = None
 # Each class's NodeType value (one kind per class), cached: an enum's `.value` is a
 # Python attribute read, paid on every row write otherwise.
 cdef dict _KIND_OF = {}
@@ -450,11 +445,6 @@ cdef void _literal_to_native(object value, object column_type, LiteralValue& out
     native form is recorded as NONE: mid-construction a literal can hold a value
     and a type that do not agree yet, and a placed literal whose value is not its
     type's native form is refused where it is placed (_check_literal)."""
-    global _LC_NATIVE
-    if _LC_NATIVE is None:
-        from opteryx.types.logical_category import LogicalCategory
-
-        _LC_NATIVE = LogicalCategory
     cdef LiteralValue item
     out.items.clear()
     out.bytes.clear()
@@ -498,7 +488,7 @@ cdef void _literal_to_native(object value, object column_type, LiteralValue& out
         out.i = lo - (1 << 64) if lo > 9223372036854775807 else lo
         out.j = hi - (1 << 64) if hi > 9223372036854775807 else hi
         out.k = exponent
-    elif kind is tuple and category is _LC_NATIVE.INTERVAL and len(value) == 2:
+    elif kind is tuple and category is _LC.INTERVAL and len(value) == 2:
         out.tag = LITERAL_INTERVAL
         out.i = value[0]
         out.j = value[1]

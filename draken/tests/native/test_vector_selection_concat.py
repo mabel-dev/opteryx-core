@@ -3,9 +3,6 @@ Native correctness tests for Milestone E.11, Phase 10 C′:
   vector_concat
   via the vector_selection_concat nanobind consumer.
 
-Loads the extension without triggering opteryx/__init__.py, following the
-spec_from_file_location pattern established in E.2–E.10.
-
 The vector_coalesce / vector_iif tests that lived here are gone with those
 bindings: COALESCE/IIF/IFNULL/IFNOTNULL are now C-ABI kernels
 (draken/ops/kernels/function_null_conditional.cpp) and are covered through the
@@ -26,37 +23,12 @@ vector_concat:
   fewer than 2 args raises ValueError
 """
 
-import glob
-import importlib.util
-import os
 
 import draken.draken_native as dn
 import pytest
 
 
-# ---------------------------------------------------------------------------
-# Load vector_selection_concat extension
-# ---------------------------------------------------------------------------
-
-def _load_ext():
-    pattern = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..",
-        "opteryx", "compiled", "nanobind", "vectors*.so"
-    )
-    matches = glob.glob(pattern)
-    if not matches:
-        raise RuntimeError(
-            "vector_selection_concat extension not built — run make compile first"
-        )
-    spec = importlib.util.spec_from_file_location(
-        "opteryx.compiled.nanobind.vectors", matches[0]
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-ext = _load_ext()
+from opteryx.compiled.nanobind import vectors as ext
 vector_concat   = ext.vector_concat
 
 

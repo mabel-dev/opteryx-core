@@ -7,6 +7,15 @@
 session user. The catalog records that user as the dropper on its tombstone, so
 losing it here would leave every drop unattributed."""
 
+import os
+import sys
+
+_CATALOG_REPO = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "opteryx-catalog")
+)
+if os.path.isdir(_CATALOG_REPO) and _CATALOG_REPO not in sys.path:
+    sys.path.insert(1, _CATALOG_REPO)
+
 import pytest
 
 import opteryx

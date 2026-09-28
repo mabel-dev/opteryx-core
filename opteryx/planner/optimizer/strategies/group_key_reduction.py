@@ -118,9 +118,7 @@ class GroupKeyReductionStrategy(OptimizationStrategy):
         context.optimized_plan.insert_node_after(
             project_node, context.node_id
         )
-        self.telemetry.optimization_group_key_reduction = (
-            getattr(self.telemetry, "optimization_group_key_reduction", 0) + len(reducible)
-        )
+        self.telemetry.optimization_group_key_reduction += len(reducible)
 
         return context
 

@@ -4,9 +4,6 @@ via the vector_accessors nanobind consumer.
 Updated E.7: vector_string_length now propagates nulls (null input → None output).
 NVARCHAR codepoint-length and VARBINARY byte-length dispatch verified.
 
-Loads the extension without triggering opteryx/__init__.py, following the
-spec_from_file_location pattern established in E.2–E.5.
-
 Coverage:
   vector_string_length:
     known ASCII byte counts, multibyte UTF-8 byte counts (not codepoint counts)
@@ -25,37 +22,12 @@ Coverage:
     TypeError on non-ARRAY input
 """
 
-import glob
-import importlib.util
-import os
 
 import draken.draken_native as dn
 import pytest
 
 
-# ---------------------------------------------------------------------------
-# Load vector_accessors extension
-# ---------------------------------------------------------------------------
-
-def _load_vector_accessors():
-    pattern = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..",
-        "opteryx", "compiled", "nanobind", "vectors*.so"
-    )
-    matches = glob.glob(pattern)
-    if not matches:
-        raise RuntimeError(
-            "vector_accessors extension not built — run make compile first"
-        )
-    spec = importlib.util.spec_from_file_location(
-        "opteryx.compiled.nanobind.vectors", matches[0]
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-va = _load_vector_accessors()
+from opteryx.compiled.nanobind import vectors as va
 
 
 # ---------------------------------------------------------------------------

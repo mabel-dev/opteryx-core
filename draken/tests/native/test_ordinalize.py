@@ -420,6 +420,29 @@ class TestFloat32:
         assert f64_keys == sorted(f64_keys)
 
 
+@pytest.mark.parametrize("dtype, name", [(DT.FLOAT32, "FLOAT32"), (DT.FLOAT64, "FLOAT64")])
+class TestFloatScalarWrongType:
+    # PyFloat_AsDouble's error return (-1.0 with an exception set) was returned
+    # as a key, surfacing as SystemError. Found ordinalizing a STARTS_WITH
+    # prefix (bytes) against a numeric column.
+
+    @pytest.mark.parametrize("arg, arg_type", [(b"abc", "bytes"), ("abc", "str"), ([1.0], "list")])
+    def test_non_real_raises_type_error(self, dtype, name, arg, arg_type):
+        with pytest.raises(TypeError, match=f"ordinalize: {name} expects a real number .* got {arg_type}"):
+            dtype.ordinalize(arg)
+
+    def test_minus_one_is_a_value_not_an_error(self, dtype, name):
+        # -1.0 is PyFloat_AsDouble's error sentinel; a real -1.0 must still key.
+        assert dtype.ordinalize(-1.0) < dtype.ordinalize(0.0)
+
+    def test_int_accepted(self, dtype, name):
+        assert dtype.ordinalize(2) == dtype.ordinalize(2.0)
+
+    def test_oversized_int_keeps_overflow_error(self, dtype, name):
+        with pytest.raises(OverflowError):
+            dtype.ordinalize(10**400)
+
+
 # ---------------------------------------------------------------------------
 # BOOL -- bit-packed storage, not a byte array
 # ---------------------------------------------------------------------------
@@ -1175,6 +1198,31 @@ class TestDecimalScalarOverflow:
         one_past = decimal.Decimal(2**63).scaleb(-2)  # unscaled == INT64_MAX + 1
         with pytest.raises(Exception):
             DT.DECIMAL.ordinalize(one_past)
+
+
+class TestScalarWrongTypeIsTypeError:
+    # DATE32/INTERVAL raised ValueError for a wrong-typed argument; None was
+    # refused by nanobind's generic overload-mismatch message, never by name.
+
+    def test_date32_wrong_type(self):
+        with pytest.raises(TypeError, match="date32: element must be datetime.date or None, got bytes"):
+            DT.DATE32.ordinalize(b"abc")
+
+    def test_interval_wrong_type(self):
+        with pytest.raises(TypeError, match=r"interval: element must be a \(months, us\) tuple or None, got str"):
+            DT.INTERVAL.ordinalize("abc")
+        with pytest.raises(TypeError, match="got tuple"):
+            DT.INTERVAL.ordinalize((1, 2, 3))
+
+    @pytest.mark.parametrize(
+        "dtype",
+        [DT.INT8, DT.INT16, DT.INT32, DT.INT64, DT.UINT8, DT.UINT16, DT.UINT32, DT.UINT64,
+         DT.BOOL, DT.FLOAT32, DT.FLOAT64, DT.DECIMAL, DT.DATE32, DT.INTERVAL,
+         DT.VARCHAR, DT.NVARCHAR, DT.VARBINARY, DT.VARIANT, DT.TIMESTAMP64],
+    )
+    def test_none_refused_by_name(self, dtype):
+        with pytest.raises(TypeError, match="ordinalize: value must not be None"):
+            dtype.ordinalize(None)
 
 
 if __name__ == "__main__":  # pragma: no cover

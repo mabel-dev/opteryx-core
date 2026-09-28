@@ -23,6 +23,15 @@ catalog-shaped: its `table_engine` hands back a real `OpteryxTable` over a
 snapshot-less fake catalog dataset, and only the write half is in-memory.
 """
 
+import os
+import sys
+
+_CATALOG_REPO = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "opteryx-catalog")
+)
+if os.path.isdir(_CATALOG_REPO) and _CATALOG_REPO not in sys.path:
+    sys.path.insert(1, _CATALOG_REPO)
+
 from types import SimpleNamespace
 
 import pytest

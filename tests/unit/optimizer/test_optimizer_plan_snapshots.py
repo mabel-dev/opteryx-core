@@ -81,11 +81,11 @@ def _step_counts(plan):
 
 
 def _join_types(plan):
-    return [getattr(n, "type", None) for n in _nodes(plan, LogicalPlanStepType.Join)]
+    return [n.type for n in _nodes(plan, LogicalPlanStepType.Join)]
 
 
 def _scan_relations(plan):
-    return [getattr(n, "relation", None) for n in _nodes(plan, LogicalPlanStepType.Scan)]
+    return [n.relation for n in _nodes(plan, LogicalPlanStepType.Scan)]
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +117,7 @@ def test_predicate_pushed_into_scan():
     )
     assert _step_counts(plan).get(LogicalPlanStepType.Filter, 0) == 0
     scans = _nodes(plan, LogicalPlanStepType.Scan)
-    assert any(getattr(s, "predicates", None) for s in scans), "scan carries no predicates"
+    assert any(s.predicates for s in scans), "scan carries no predicates"
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +200,7 @@ def test_limit_over_outer_join_stays_above_join():
     child_types = [plan[cid].node_type for cid, _, _ in plan.ingoing_edges(limit_nid)]
     assert child_types == [LogicalPlanStepType.Join], child_types
 
-    scan_limits = [getattr(s, "limit", None) for s in _nodes(plan, LogicalPlanStepType.Scan)]
+    scan_limits = [s.limit for s in _nodes(plan, LogicalPlanStepType.Scan)]
     assert all(lim is None for lim in scan_limits), scan_limits
 
 
@@ -210,9 +210,7 @@ def test_limit_over_bare_scan_is_pushed_into_scan():
     plan = _optimized_plan("SELECT n_name FROM testdata.tpch_001.nation LIMIT 5")
     assert _step_counts(plan).get(LogicalPlanStepType.Limit, 0) == 0, _step_counts(plan)
     scans = _nodes(plan, LogicalPlanStepType.Scan)
-    assert any(getattr(s, "limit", None) == 5 for s in scans), [
-        getattr(s, "limit", None) for s in scans
-    ]
+    assert any(s.limit == 5 for s in scans), [s.limit for s in scans]
 
 
 if __name__ == "__main__":  # pragma: no cover

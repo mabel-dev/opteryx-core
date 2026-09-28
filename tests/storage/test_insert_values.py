@@ -5,8 +5,6 @@
 
 import json
 import pytest
-import tempfile
-from pathlib import Path
 
 import opteryx
 from opteryx.connectors import register_workspace

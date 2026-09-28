@@ -20,6 +20,15 @@ Two harnesses, mirroring test_materialized_views.py / test_catalog_ddl_delegatio
   end to end.
 """
 
+import os
+import sys
+
+_CATALOG_REPO = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "opteryx-catalog")
+)
+if os.path.isdir(_CATALOG_REPO) and _CATALOG_REPO not in sys.path:
+    sys.path.insert(1, _CATALOG_REPO)
+
 import datetime
 import json
 

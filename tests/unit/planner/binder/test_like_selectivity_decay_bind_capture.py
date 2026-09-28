@@ -71,19 +71,21 @@ def _find_instr_node(plan):
 
     for _nid, node in plan.nodes(True):
         if node.node_type == LogicalPlanStepType.Filter:
-            condition = getattr(node, "condition", None)
-            if condition is not None and getattr(condition, "value", None) in (
+            condition = node.condition
+            if condition is not None and condition.value in (
                 "InStr",
                 "IInStr",
                 "NotInStr",
                 "NotIInStr",
             ):
                 return condition
-        predicates = getattr(node, "predicates", None)
-        if predicates:
-            for p in predicates:
-                if getattr(p, "value", None) in ("InStr", "IInStr", "NotInStr", "NotIInStr"):
-                    return p
+        # Only Scan and FunctionDataset steps carry pushed predicates.
+        if node.node_type in (LogicalPlanStepType.Scan, LogicalPlanStepType.FunctionDataset):
+            predicates = node.predicates
+            if predicates:
+                for p in predicates:
+                    if p.value in ("InStr", "IInStr", "NotInStr", "NotIInStr"):
+                        return p
     return None
 
 

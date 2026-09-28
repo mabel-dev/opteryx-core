@@ -29,41 +29,15 @@ Coverage:
 """
 
 import datetime
-import glob
-import importlib.util
-import os
 
 import draken.draken_native as dn
 import pytest
 
+from opteryx.compiled.nanobind import vectors as vc
+
 INT64_MAX  =  9_223_372_036_854_775_807
 INT64_MIN  = -9_223_372_036_854_775_808
 UINT64_MAX = 18_446_744_073_709_551_615
-
-# ---------------------------------------------------------------------------
-# Load vector_casts extension
-# ---------------------------------------------------------------------------
-
-def _load_vector_casts():
-    pattern = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..",
-        "opteryx", "compiled", "nanobind", "vectors*.so"
-    )
-    matches = glob.glob(pattern)
-    if not matches:
-        pytest.skip(
-            "vector_casts extension not built — run make compile first",
-            allow_module_level=True,
-        )
-    spec = importlib.util.spec_from_file_location(
-        "opteryx.compiled.nanobind.vectors", matches[0]
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-vc = _load_vector_casts()
 
 # ---------------------------------------------------------------------------
 # Helpers

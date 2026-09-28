@@ -89,56 +89,58 @@ from .strategies.optimization_strategy import OptimizerContext
 __all__ = ["do_optimizer"]
 
 
-# Strategy class name -> opteryx.config.Features flag name. One entry per strategy
+# Strategy class name -> a reader of its opteryx.config.features flag. Each reader
+# names the flag as an attribute, read when called, so a flag set at runtime is seen
+# and a misspelt flag raises instead of being looked up by string. One entry per strategy
 # in OptimizerVisitor.strategies, checked centrally in optimize() so every strategy
 # gets an A/B kill-switch without each one hand-rolling its own flag check. A few
 # strategies (PredicateOrdering/PredicatePushdown/ManifestPruning) ALSO check their
 # own flag inline in should_i_run from before this table existed — listing them here
 # too is harmless (same flag, checked twice) and keeps this the complete registry.
 _STRATEGY_DISABLE_FLAGS = {
-    "AggregateScanPushdownStrategy": "disable_aggregate_scan_pushdown",
-    "BooleanSimplificationStrategy": "disable_boolean_simplification",
-    "CompactionPlanningStrategy": "disable_compaction_planning",
-    "ConstantFoldingStrategy": "disable_constant_folding",
-    "CorrelatedFiltersStrategy": "disable_correlated_filters",
-    "SemiJoinPushdownStrategy": "disable_semi_join_pushdown",
-    "SemiJoinReducerStrategy": "disable_semi_join_reducer",
-    "DecorrelateSubqueryStrategy": "disable_decorrelate_subquery",
-    "CrossJoinFilterPushdownStrategy": "disable_cross_join_filter_pushdown",
-    "DisjunctionSimplificationStrategy": "disable_disjunction_simplification",
-    "DisjunctiveDomainPushdownStrategy": "disable_disjunctive_domain_pushdown",
-    "DistinctPushdownStrategy": "disable_distinct_pushdown",
-    "DistinctScanPushdownStrategy": "disable_distinct_scan_pushdown",
-    "FilterImpliedGroupKeyReductionStrategy": "disable_filter_implied_group_key_reduction",
-    "FunctionRewriteStrategy": "disable_function_rewrite",
-    "GroupKeyReductionStrategy": "disable_group_key_reduction",
-    "JoinConditionHoistStrategy": "disable_join_condition_hoist",
-    "JoinEliminationStrategy": "disable_join_elimination",
-    "JoinKeyMaterializationStrategy": "disable_join_key_materialization",
-    "JoinAlgorithmStrategy": "disable_join_algorithm",
-    "JoinPlanningStrategy": "disable_join_planning",
-    "JoinRewriteStrategy": "disable_join_rewrite",
-    "LengthOnlyColumnStrategy": "disable_length_only_column",
-    "LimitEliminationStrategy": "disable_limit_elimination",
-    "LimitFilesPruningStrategy": "disable_limit_files_pruning",
-    "LimitPushdownStrategy": "disable_limit_pushdown",
-    "ManifestPruningStrategy": "disable_manifest_pruning",
-    "OperatorFusionStrategy": "disable_operator_fusion",
-    "PredicateCompactionStrategy": "disable_predicate_compaction",
-    "PredicateOrderingStrategy": "disable_predicate_ordering",
-    "PredicatePushdownStrategy": "disable_predicate_pushdown",
-    "PredicateRewriteStrategy": "disable_predicate_rewrite",
-    "ProjectFusionStrategy": "disable_project_fusion",
-    "ProjectionPushdownStrategy": "disable_projection_pushdown",
-    "RedundantCastEliminationStrategy": "disable_redundant_cast_elimination",
-    "RedundantOperationsStrategy": "disable_redundant_operations",
-    "RedundantSortEliminationStrategy": "disable_redundant_sort_elimination",
-    "SplitConjunctivePredicatesStrategy": "disable_split_conjunctive_predicates",
-    "StatisticsOnlyResponseStrategy": "disable_statistics_only_response",
-    "TimestampCastSinkStrategy": "disable_timestamp_cast_sink",
-    "TopNManifestPruningStrategy": "disable_topn_manifest_pruning",
-    "TopNScanPushdownStrategy": "disable_topn_scan_pushdown",
-    "WindowTopKFusionStrategy": "disable_window_topk_fusion",
+    "AggregateScanPushdownStrategy": lambda: config.features.disable_aggregate_scan_pushdown,
+    "BooleanSimplificationStrategy": lambda: config.features.disable_boolean_simplification,
+    "CompactionPlanningStrategy": lambda: config.features.disable_compaction_planning,
+    "ConstantFoldingStrategy": lambda: config.features.disable_constant_folding,
+    "CorrelatedFiltersStrategy": lambda: config.features.disable_correlated_filters,
+    "SemiJoinPushdownStrategy": lambda: config.features.disable_semi_join_pushdown,
+    "SemiJoinReducerStrategy": lambda: config.features.disable_semi_join_reducer,
+    "DecorrelateSubqueryStrategy": lambda: config.features.disable_decorrelate_subquery,
+    "CrossJoinFilterPushdownStrategy": lambda: config.features.disable_cross_join_filter_pushdown,
+    "DisjunctionSimplificationStrategy": lambda: config.features.disable_disjunction_simplification,
+    "DisjunctiveDomainPushdownStrategy": lambda: config.features.disable_disjunctive_domain_pushdown,
+    "DistinctPushdownStrategy": lambda: config.features.disable_distinct_pushdown,
+    "DistinctScanPushdownStrategy": lambda: config.features.disable_distinct_scan_pushdown,
+    "FilterImpliedGroupKeyReductionStrategy": lambda: config.features.disable_filter_implied_group_key_reduction,
+    "FunctionRewriteStrategy": lambda: config.features.disable_function_rewrite,
+    "GroupKeyReductionStrategy": lambda: config.features.disable_group_key_reduction,
+    "JoinConditionHoistStrategy": lambda: config.features.disable_join_condition_hoist,
+    "JoinEliminationStrategy": lambda: config.features.disable_join_elimination,
+    "JoinKeyMaterializationStrategy": lambda: config.features.disable_join_key_materialization,
+    "JoinAlgorithmStrategy": lambda: config.features.disable_join_algorithm,
+    "JoinPlanningStrategy": lambda: config.features.disable_join_planning,
+    "JoinRewriteStrategy": lambda: config.features.disable_join_rewrite,
+    "LengthOnlyColumnStrategy": lambda: config.features.disable_length_only_column,
+    "LimitEliminationStrategy": lambda: config.features.disable_limit_elimination,
+    "LimitFilesPruningStrategy": lambda: config.features.disable_limit_files_pruning,
+    "LimitPushdownStrategy": lambda: config.features.disable_limit_pushdown,
+    "ManifestPruningStrategy": lambda: config.features.disable_manifest_pruning,
+    "OperatorFusionStrategy": lambda: config.features.disable_operator_fusion,
+    "PredicateCompactionStrategy": lambda: config.features.disable_predicate_compaction,
+    "PredicateOrderingStrategy": lambda: config.features.disable_predicate_ordering,
+    "PredicatePushdownStrategy": lambda: config.features.disable_predicate_pushdown,
+    "PredicateRewriteStrategy": lambda: config.features.disable_predicate_rewrite,
+    "ProjectFusionStrategy": lambda: config.features.disable_project_fusion,
+    "ProjectionPushdownStrategy": lambda: config.features.disable_projection_pushdown,
+    "RedundantCastEliminationStrategy": lambda: config.features.disable_redundant_cast_elimination,
+    "RedundantOperationsStrategy": lambda: config.features.disable_redundant_operations,
+    "RedundantSortEliminationStrategy": lambda: config.features.disable_redundant_sort_elimination,
+    "SplitConjunctivePredicatesStrategy": lambda: config.features.disable_split_conjunctive_predicates,
+    "StatisticsOnlyResponseStrategy": lambda: config.features.disable_statistics_only_response,
+    "TimestampCastSinkStrategy": lambda: config.features.disable_timestamp_cast_sink,
+    "TopNManifestPruningStrategy": lambda: config.features.disable_topn_manifest_pruning,
+    "TopNScanPushdownStrategy": lambda: config.features.disable_topn_scan_pushdown,
+    "WindowTopKFusionStrategy": lambda: config.features.disable_window_topk_fusion,
 }
 
 
@@ -428,15 +430,15 @@ class OptimizerVisitor:
         is_compaction = plan_has_compaction(current_plan)
         for strategy in self.strategies:
             strategy_name = type(strategy).__name__
-            flag_name = _STRATEGY_DISABLE_FLAGS.get(strategy_name)
-            if flag_name is not None and getattr(config.features, flag_name):
+            is_disabled = _STRATEGY_DISABLE_FLAGS.get(strategy_name)
+            if is_disabled is not None and is_disabled():
                 continue
             if is_compaction and strategy_name in _STRATEGIES_SKIPPED_ON_COMPACTION:
                 continue
             if strategy.should_i_run(current_plan):
                 if (
                     strategy.optimization_technique == "cost"
-                    and getattr(current_plan, "statistics_are_stale", True)
+                    and current_plan.statistics_are_stale
                 ):
                     current_plan = refresh_statistics(current_plan, self.plan_context)
                     self.refreshed_statistics = True
@@ -463,13 +465,10 @@ class OptimizerVisitor:
                 else:
                     plan_changed = current_plan.mutation_epoch > 0 or step_written
                     # Graph.copy() does not carry instance attributes, so a
-                    # strategy that hands back a copy silently drops the
-                    # staleness flag and the getattr default (True) forces a
-                    # refresh even when nothing changed. Carry it over; the
-                    # plan_changed branch below re-marks it when warranted.
-                    current_plan.statistics_are_stale = getattr(
-                        previous_plan, "statistics_are_stale", True
-                    )
+                    # strategy that hands back a copy drops the staleness flag.
+                    # Carry it over; the plan_changed branch below re-marks it
+                    # when warranted.
+                    current_plan.statistics_are_stale = previous_plan.statistics_are_stale
                 self.telemetry.add_plan_rewrite(
                     "optimizer",
                     strategy.__class__.__name__,

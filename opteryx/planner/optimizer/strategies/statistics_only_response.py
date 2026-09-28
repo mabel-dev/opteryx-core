@@ -614,10 +614,8 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         # deleted rows, is a confident wrong answer. COUNT(*) alone stays
         # exact — get_count_from_manifest already returns live rows (physical
         # minus the exact delete-vector cardinality).
-        _has_deletes_fn = getattr(manifest, "has_deletes", None)
         if (
-            _has_deletes_fn is not None
-            and _has_deletes_fn()
+            manifest.has_deletes()
             and any(column_name for (_agg_func, column_name, _n) in agg_metadata)
         ):
             # Every per-column aggregate (MIN/MAX/COUNT(col)) carries a column
@@ -825,7 +823,7 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
                 schema_column=col,
                 arena=context.plan_context.expressions,
             )
-            for col in getattr(scan_node.schema, "columns", []) or []
+            for col in scan_node.schema.columns or []
         ]
 
         # Finally, clear the manifest to avoid file-based readers from
@@ -856,10 +854,5 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         for nid, n in list(plan.nodes(data=True)):
             if n is scan_node or n is aggregate_node or n is exit_node:
                 plan[nid] = n
-
-        # Record connector assignment status on the plan for diagnostic purposes
-        plan._stats_assigned_connector_type = scan_node.connector and getattr(
-            scan_node.connector, "__type__", None
-        )
 
         return plan

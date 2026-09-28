@@ -918,9 +918,7 @@ def rewrite_cnf_eq_to_inlist(condition, telemetry, *, plan_context):
                     plan_context=plan_context,
                 )
             )
-            telemetry.optimization_predicate_rewriter_eqs_to_list = (
-                getattr(telemetry, "optimization_predicate_rewriter_eqs_to_list", 0) + 1
-            )
+            telemetry.optimization_predicate_rewriter_eqs_to_list += 1
             rewrote = True
         else:
             new_params.append(data["node"])
@@ -1164,7 +1162,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry, *, plan_co
     # the whole rewrite. Convert an integer temporal literal by its own type
     # first, falling back to parse_iso for strings / datetimes.
     literal_value = literal_node.value
-    literal_cat = getattr(literal_node.type, "category", None)
+    literal_cat = None if literal_node.type is None else literal_node.type.category
     if (
         isinstance(literal_value, int)
         and not isinstance(literal_value, bool)
@@ -1755,8 +1753,9 @@ def _physical_name(expression) -> str:
     """Physical DrakenType name bound to an expression, or '' when untyped."""
     schema_column = expression.schema_column
     column_type = schema_column.column_type if schema_column is not None else None
-    physical = getattr(column_type, "physical", None)
-    return getattr(physical, "name", "") or ""
+    if column_type is None:
+        return ""
+    return column_type.physical.name
 
 
 def _is_null_preserving_cast(cast_node) -> bool:

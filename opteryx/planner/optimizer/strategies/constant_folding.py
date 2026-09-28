@@ -205,7 +205,7 @@ def _canonical_predicate_key(node):
         return _canonical_predicate_key(node.centre)
 
     if node_type == NodeType.LITERAL:
-        type_name = getattr(getattr(node.type, "physical", None), "name", "?")
+        type_name = "?" if node.type is None else node.type.physical.name
         return f"~lit[{type_name}]{_literal_key(node.value)}"
 
     if node_type == NodeType.IDENTIFIER:

@@ -90,34 +90,35 @@ def _snapshot(*roots):
     return snap
 
 
-# (module, function name, positions of the arguments that are the INPUT tree,
-#  query that makes it fire)
+# (namespace holding the function, function name, positions of the arguments that
+#  are the INPUT tree, query that makes it fire). A module is patched through its
+#  namespace dict (`vars(module)`), the same dict-item swap as `dispatcher`.
 _REWRITES = [
-    (rewriter, "rewrite_ored_like_to_any", (0,), f"SELECT row_id FROM {TABLE} WHERE s_low LIKE 'a%' OR s_low LIKE '%b'"),
-    (rewriter, "rewrite_ored_eq_to_inlist", (0,), f"SELECT (i_group = 1 OR i_group = 3) AS p FROM {TABLE}"),
-    (rewriter, "rewrite_ored_any_eq_to_contains", (0,), f"SELECT row_id FROM {TABLE} WHERE 'alpha' = ANY(arr_str) OR 'beta' = ANY(arr_str)"),
-    (rewriter, "rewrite_cnf_like_to_any", (0,), f"SELECT row_id FROM {TABLE} WHERE s_low LIKE 'a%' OR s_low LIKE '%b' OR s_low LIKE '%c%'"),
-    (rewriter, "rewrite_cnf_eq_to_inlist", (0,), f"SELECT row_id FROM {TABLE} WHERE i_group = 1 OR i_group = 3 OR i_group = 5"),
-    (rewriter, "rewrite_cnf_any_eq_to_contains", (0,), f"SELECT row_id FROM {TABLE} WHERE 'alpha' = ANY(arr_str) OR 'beta' = ANY(arr_str) OR 'gamma' = ANY(arr_str)"),
+    (vars(rewriter), "rewrite_ored_like_to_any", (0,), f"SELECT row_id FROM {TABLE} WHERE s_low LIKE 'a%' OR s_low LIKE '%b'"),
+    (vars(rewriter), "rewrite_ored_eq_to_inlist", (0,), f"SELECT (i_group = 1 OR i_group = 3) AS p FROM {TABLE}"),
+    (vars(rewriter), "rewrite_ored_any_eq_to_contains", (0,), f"SELECT row_id FROM {TABLE} WHERE 'alpha' = ANY(arr_str) OR 'beta' = ANY(arr_str)"),
+    (vars(rewriter), "rewrite_cnf_like_to_any", (0,), f"SELECT row_id FROM {TABLE} WHERE s_low LIKE 'a%' OR s_low LIKE '%b' OR s_low LIKE '%c%'"),
+    (vars(rewriter), "rewrite_cnf_eq_to_inlist", (0,), f"SELECT row_id FROM {TABLE} WHERE i_group = 1 OR i_group = 3 OR i_group = 5"),
+    (vars(rewriter), "rewrite_cnf_any_eq_to_contains", (0,), f"SELECT row_id FROM {TABLE} WHERE 'alpha' = ANY(arr_str) OR 'beta' = ANY(arr_str) OR 'gamma' = ANY(arr_str)"),
     # Patched where it is CALLED: splitting imports it under its own name, and the
     # two below are reached through the rewriter's `dispatcher` dict.
-    (splitting, "rewrite_anded_not_like_to_all", (0,), f"SELECT row_id FROM {TABLE} WHERE s_low NOT LIKE 'a%' AND s_low NOT LIKE '%z' AND row_id > 3"),
-    (rewriter, "_rewrite_rlike_to_dfa", (0,), f"SELECT row_id FROM {TABLE} WHERE s_low RLIKE '^a'"),
+    (vars(splitting), "rewrite_anded_not_like_to_all", (0,), f"SELECT row_id FROM {TABLE} WHERE s_low NOT LIKE 'a%' AND s_low NOT LIKE '%z' AND row_id > 3"),
+    (vars(rewriter), "_rewrite_rlike_to_dfa", (0,), f"SELECT row_id FROM {TABLE} WHERE s_low RLIKE '^a'"),
     (rewriter.dispatcher, "rewrite_in_to_eq", (0,), f"SELECT row_id FROM {TABLE} WHERE i_group IN (3)"),
     (rewriter.dispatcher, "reorder_interval_calc", (0,), f"SELECT row_id FROM {TABLE} WHERE ts_value - ts_null > INTERVAL '1' DAY"),
-    (rewriter, "rewrite_int_vs_fractional_const", (0,), f"SELECT row_id FROM {TABLE} WHERE i_null != 4.5"),
-    (rewriter, "rewrite_unsatisfiable_case_fold", (0,), f"SELECT row_id FROM {TABLE} WHERE UPPER(s_null) = 'Ab'"),
-    (ordering, "rewrite_anded_any_eq_to_contains_all", (0,), f"SELECT row_id FROM {TABLE} WHERE 'alpha' = ANY(arr_str) AND 'beta' = ANY(arr_str)"),
-    (fusion, "_substitute_column", (0,), f"SELECT UPPER(v) AS u FROM (SELECT s_low || s_high AS v FROM {TABLE}) AS s"),
-    (cross_join, "_hoist_arithmetic_join_key", (3,), f"SELECT a.row_id FROM {TABLE} AS a, {TABLE} AS b WHERE a.row_id = b.row_id - 53"),
+    (vars(rewriter), "rewrite_int_vs_fractional_const", (0,), f"SELECT row_id FROM {TABLE} WHERE i_null != 4.5"),
+    (vars(rewriter), "rewrite_unsatisfiable_case_fold", (0,), f"SELECT row_id FROM {TABLE} WHERE UPPER(s_null) = 'Ab'"),
+    (vars(ordering), "rewrite_anded_any_eq_to_contains_all", (0,), f"SELECT row_id FROM {TABLE} WHERE 'alpha' = ANY(arr_str) AND 'beta' = ANY(arr_str)"),
+    (vars(fusion), "_substitute_column", (0,), f"SELECT UPPER(v) AS u FROM (SELECT s_low || s_high AS v FROM {TABLE}) AS s"),
+    (vars(cross_join), "_hoist_arithmetic_join_key", (3,), f"SELECT a.row_id FROM {TABLE} AS a, {TABLE} AS b WHERE a.row_id = b.row_id - 53"),
 ]
 
 
 @pytest.mark.parametrize(
-    "module, name, input_positions, statement", _REWRITES, ids=[r[1] for r in _REWRITES]
+    "namespace, name, input_positions, statement", _REWRITES, ids=[r[1] for r in _REWRITES]
 )
-def test_rewrite_leaves_its_input_untouched(monkeypatch, module, name, input_positions, statement):
-    original = module[name] if isinstance(module, dict) else getattr(module, name)
+def test_rewrite_leaves_its_input_untouched(monkeypatch, namespace, name, input_positions, statement):
+    original = namespace[name]
     calls = []
 
     def wrapped(*args, **kwargs):
@@ -131,10 +132,7 @@ def test_rewrite_leaves_its_input_untouched(monkeypatch, module, name, input_pos
         calls.append((fired, before == _snapshot(*roots)))
         return result
 
-    if isinstance(module, dict):
-        monkeypatch.setitem(module, name, wrapped)
-    else:
-        monkeypatch.setattr(module, name, wrapped)
+    monkeypatch.setitem(namespace, name, wrapped)
     for _ in opteryx.session().execute_to_morsels(statement):
         pass
 

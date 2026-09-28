@@ -1,9 +1,6 @@
 """
 Native + parity tests for E.5: array element-reduction ops (ANY / ALL).
 
-Loads vector_array_reduce without triggering opteryx/__init__.py (same
-spec_from_file_location pattern as test_bitwise_parity.py).
-
 Coverage:
   child types:    DRAKEN_INT64, DRAKEN_VARCHAR
   ops:            anyop_eq, anyop_neq, anyop_gt, anyop_gte, anyop_lt, anyop_lte,
@@ -21,36 +18,13 @@ Hypothesis:
   any_eq(s, [t]) == any_neq(s, [t])  only when s != t (basic sanity)
 """
 
-import glob
-import importlib.util
-import os
 
 import draken.draken_native as dn
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-# ---------------------------------------------------------------------------
-# Load extension
-# ---------------------------------------------------------------------------
-
-def _load_vector_array_reduce():
-    pattern = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..",
-        "opteryx", "compiled", "nanobind", "vectors*.so"
-    )
-    matches = glob.glob(pattern)
-    if not matches:
-        raise RuntimeError("vector_array_reduce extension not built — run make compile")
-    spec = importlib.util.spec_from_file_location(
-        "opteryx.compiled.nanobind.vectors", matches[0]
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-ar = _load_vector_array_reduce()
+from opteryx.compiled.nanobind import vectors as ar
 
 
 # ---------------------------------------------------------------------------

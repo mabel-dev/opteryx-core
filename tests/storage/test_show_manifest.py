@@ -5,8 +5,6 @@
 
 """SHOW MANIFEST FOR - shipped with zero test coverage in 54af4f67, closing that gap."""
 
-import pytest
-
 import opteryx
 from opteryx.connectors import register_workspace
 from opteryx.connectors.local_store_connector import LocalStoreConnector

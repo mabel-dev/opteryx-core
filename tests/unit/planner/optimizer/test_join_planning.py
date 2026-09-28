@@ -34,8 +34,8 @@ def _count_cross_joins(plan) -> int:
         for nid in plan.nodes()
         if plan[nid].node_type == LogicalPlanStepType.Join
         and plan[nid].type == "cross join"
-        and not getattr(plan[nid], "on", None)
-        and not getattr(plan[nid], "using", None)
+        and not plan[nid].on
+        and not plan[nid].using
     )
 
 

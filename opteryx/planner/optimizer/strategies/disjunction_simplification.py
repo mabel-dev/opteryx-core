@@ -238,9 +238,7 @@ class DisjunctionSimplificationStrategy(OptimizationStrategy):
                     new_condition, select_nodes=(NodeType.IDENTIFIER,)
                 )
                 context.optimized_plan[context.node_id] = new_node
-                self.telemetry.optimization_disjunction_simplification = (
-                    getattr(self.telemetry, "optimization_disjunction_simplification", 0) + 1
-                )
+                self.telemetry.optimization_disjunction_simplification += 1
 
         return context
 

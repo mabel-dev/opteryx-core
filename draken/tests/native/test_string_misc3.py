@@ -17,7 +17,6 @@ Coverage:
     non-Vector input → TypeError
 """
 
-import importlib.util
 import os
 import sys
 
@@ -27,22 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 import draken.draken_native as dn
 
 
-def _load_module(name, rel_path):
-    base = os.path.join(os.path.dirname(__file__), "..", "..", "..", rel_path)
-    import glob
-    candidates = glob.glob(base + "*.so") + glob.glob(base + "*.pyd")
-    if not candidates:
-        raise FileNotFoundError(f"Compiled module not found: {base}*.so")
-    spec = importlib.util.spec_from_file_location(name, candidates[0])
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_misc3 = _load_module(
-    "opteryx.compiled.nanobind.vectors",
-    "opteryx/compiled/nanobind/vectors",
-)
+from opteryx.compiled.nanobind import vectors as _misc3
 vector_soundex = _misc3.vector_soundex
 
 

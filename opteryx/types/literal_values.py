@@ -13,7 +13,7 @@ A literal refuses any other value when it is placed (expressions._check_literal)
 import datetime
 from typing import Any
 
-from opteryx.types.logical_category import LogicalCategory
+from opteryx.compiled.planner.logical_category import LogicalCategory
 from opteryx.types.timestamps._datetime_conversion import date_to_int64_days
 from opteryx.types.timestamps._datetime_conversion import time_to_int64_us
 from opteryx.types.timestamps._datetime_conversion import timestamp_to_int64_us

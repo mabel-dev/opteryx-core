@@ -1874,12 +1874,10 @@ def _guard_relationships_through_dropped_column(node, context) -> None:
     """
     from opteryx.exceptions import UnsupportedSyntaxError
 
-    lookup = getattr(node.connector, "relationships_through_column", None)
-    if lookup is None:
-        return
-
+    # visit_drop_column refused any connector that is not Writable, and Writable
+    # declares relationships_through_column (default: none to break).
     try:
-        through = lookup(node.relation_name, node.column_name)
+        through = node.connector.relationships_through_column(node.relation_name, node.column_name)
     except Exception as err:  # noqa: BLE001
         # The check is advisory and the drop is the user's statement, so a
         # store that cannot answer must not block it. It must not pass
@@ -1990,7 +1988,7 @@ def _scanned_relations(visitor, context) -> list:
             for subquery in _expression_subqueries(plan_node):
                 _collect(subquery.value)
 
-    _collect(getattr(visitor, "graph", None))
+    _collect(visitor.graph)
     return relations
 
 
@@ -1999,13 +1997,13 @@ def _scanned_relations(visitor, context) -> list:
 # off the same attributes that branch read - so the receipt cannot say
 # `version` about a read the connector resolved as the head.
 def _resolved_by(table) -> str:
-    version_tag = getattr(table, "version_tag", None)
+    version_tag = table.version_tag
     if version_tag is not None:
         return "current" if str(version_tag).lower() == "current" else "tag"
-    version = getattr(table, "version", None)
+    version = table.version
     if version is not None:
         return "previous" if version == 0 else "version"
-    if getattr(table, "at_date", None) is not None:
+    if table.at_date is not None:
         return "date"
     return "current"
 
@@ -2059,7 +2057,7 @@ def _read_sources(visitor, context) -> list:
             for subquery in _expression_subqueries(plan_node):
                 _collect(subquery.value)
 
-    _collect(getattr(visitor, "graph", None))
+    _collect(visitor.graph)
     return entries
 
 
@@ -2323,7 +2321,7 @@ def visit_insert(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
         # being allowed to write the target.
         _enforce_egress(self, node, context)
 
-        if getattr(self, "graph", None) is None or node.source_tail_id is None:
+        if self.graph is None or node.source_tail_id is None:
             raise InvalidInternalStateError(
                 "visit_insert: CTAS requires graph and source_tail_id"
             )
@@ -2366,8 +2364,9 @@ def visit_insert(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
             )
             target_columns.append(flat)
 
-        if existing_column_names is not None and not getattr(
-            node.connector, "supports_schema_evolution_on_replace", False
+        if (
+            existing_column_names is not None
+            and not node.connector.supports_schema_evolution_on_replace
         ):
             # Schema-preserving REPLACE only for connectors that can't evolve
             # schema (e.g. the catalog connector has no public primitive to
@@ -2447,7 +2446,7 @@ def visit_insert(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
                     f"**INSERT** row has {len(row)} values, expected {source_column_count}"
                 )
     else:
-        if getattr(self, "graph", None) is None or node.source_tail_id is None:
+        if self.graph is None or node.source_tail_id is None:
             raise InvalidInternalStateError(
                 "visit_insert: SELECT path requires graph and source_tail_id"
             )
@@ -2591,10 +2590,7 @@ def visit_merge(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep
     # Read the target's schema through the connector-agnostic table engine, as
     # visit_insert does — the gateway connector has no schema of its own.
     table = node.connector.table_engine(node.relation_name, telemetry=context.telemetry)
-    if getattr(table, "get_dataset_metadata", None) is not None:
-        target_schema, _target_manifest = table.get_dataset_metadata()
-    else:
-        target_schema = table.get_dataset_schema()
+    target_schema, _target_manifest = table.get_dataset_metadata()
     node.target_schema = target_schema
     # The ordered data-file list the sink maps `$merge_file` through. It must be
     # the SAME list, in the SAME order, that the scan indexed against - both come

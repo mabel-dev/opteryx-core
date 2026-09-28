@@ -27,7 +27,6 @@ Coverage:
     negative args → ValueError
 """
 
-import importlib.util
 import os
 import sys
 
@@ -36,26 +35,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 import draken.draken_native as dn
 
-# ---------------------------------------------------------------------------
-# Module loading (spec_from_file_location pattern — no opteryx import)
-# ---------------------------------------------------------------------------
-
-def _load_module(name, rel_path):
-    base = os.path.join(os.path.dirname(__file__), "..", "..", "..", rel_path)
-    # Find the compiled .so file.
-    import glob
-    candidates = glob.glob(base + "*.so") + glob.glob(base + "*.pyd")
-    if not candidates:
-        raise FileNotFoundError(f"Compiled module not found: {base}*.so")
-    spec = importlib.util.spec_from_file_location(name, candidates[0])
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-_misc = _load_module(
-    "opteryx.compiled.nanobind.vectors",
-    "opteryx/compiled/nanobind/vectors",
-)
+from opteryx.compiled.nanobind import vectors as _misc
 vector_levenshtein  = _misc.vector_levenshtein
 vector_position     = _misc.vector_position
 vector_random_strings = _misc.vector_random_strings

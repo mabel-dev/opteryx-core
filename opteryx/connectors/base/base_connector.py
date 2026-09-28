@@ -188,6 +188,15 @@ class BaseTable:
     # has a native Source for it — see _compile_scan.
     scan_reader = None
 
+    # This reader filters its own rows by the caller's access (information_schema
+    # emits only rows about relations the caller may read), so the binder's
+    # relation-level READ gate does not apply to it.
+    self_governs_permissions = False
+
+    # When the data this reader serves was committed (ms since epoch), for readers
+    # backed by a commit log. None when there is no commit to name.
+    dataset_committed_at = None
+
     @property
     def __mode__(self):  # pragma: no cover
         raise NotImplementedError("__mode__ not defined")
@@ -245,6 +254,31 @@ class BaseTable:
             A RelationDescriptor describing the relation's declared schema.
         """
         return self.get_dataset_schema()
+
+    def get_dataset_metadata(self) -> Tuple[RelationDescriptor, Optional[Any]]:
+        """
+        Retrieve the dataset's schema and its Manifest (file list + statistics).
+
+        A reader with no manifest returns its schema and None - the binder then
+        binds the schema alone. Manifest-backed readers override this.
+        """
+        return self.get_dataset_schema(), None
+
+    # Commit-log history for SHOW SNAPSHOTS / SHOW ALL SNAPSHOTS / SHOW LINEAGE /
+    # SHOW SOURCES. None means this reader has NO commit log - distinct from an
+    # empty history, and the Show visitor tells the two apart. Readers backed by a
+    # commit log override these.
+    def get_snapshots(self) -> Optional[list]:
+        return None
+
+    def get_all_snapshots(self) -> Optional[list]:
+        return None
+
+    def get_lineage(self) -> Optional[list]:
+        return None
+
+    def get_sources(self) -> Optional[list]:
+        return None
 
     def read_dataset(self, **kwargs) -> Iterable:  # pragma: no cover
         """

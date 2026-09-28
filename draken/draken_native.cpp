@@ -1241,8 +1241,9 @@ static inline TimestampUnit str_to_unit(const std::string& s) {
 static int64_t py_datetime_to_instant(nb::object obj, TimestampUnit unit) {
     PyObject* dt = obj.ptr();
     if (!PyDateTime_Check(dt))
-        throw std::invalid_argument(
-            "timestamp sequence: element must be datetime.datetime or None");
+        throw nb::type_error((std::string(
+            "timestamp sequence: element must be datetime.datetime or None, got ")
+            + Py_TYPE(dt)->tp_name).c_str());
 
     int year   = PyDateTime_GET_YEAR(dt);
     int month  = PyDateTime_GET_MONTH(dt);
@@ -1472,8 +1473,9 @@ static VectorOwner make_timestamp_dict(
 // Accepts datetime.date and datetime.datetime (subclass); truncates time part.
 static inline int32_t py_date_to_days(PyObject* d) {
     if (!PyDate_Check(d))
-        throw std::invalid_argument(
-            "date32: element must be datetime.date or None");
+        throw nb::type_error((std::string(
+            "date32: element must be datetime.date or None, got ")
+            + Py_TYPE(d)->tp_name).c_str());
     const int y   = PyDateTime_GET_YEAR(d);
     const int mo  = PyDateTime_GET_MONTH(d);
     const int day = PyDateTime_GET_DAY(d);
@@ -4538,8 +4540,9 @@ static VectorOwner make_decimal_dict(
 
 static DrakenIntervalSlot py_to_interval_slot(nb::object obj) {
     if (!PyTuple_Check(obj.ptr()) || PyTuple_GET_SIZE(obj.ptr()) != 2)
-        throw std::invalid_argument(
-            "interval: element must be a (months, us) tuple or None");
+        throw nb::type_error((std::string(
+            "interval: element must be a (months, us) tuple or None, got ")
+            + Py_TYPE(obj.ptr())->tp_name).c_str());
     // PyTuple_GET_ITEM returns a BORROWED reference — use PyLong_AsLongLong
     // directly to avoid ref-count manipulation on the borrowed pointer.
     int64_t months = PyLong_AsLongLong(PyTuple_GET_ITEM(obj.ptr(), 0));
@@ -7473,7 +7476,16 @@ NB_MODULE(draken_native, m) {
         // value's unit lives on LogicalType, not DrakenType, so this
         // physical-type-only entry point can't disambiguate seconds/ms/us/ns
         // without guessing. Both throw rather than silently guessing.
+        //
+        // None is let INTO the body (.none(true) below) so it is refused here
+        // by name, not by nanobind's generic overload-mismatch message. It must
+        // be refused before the switch: py_date_to_days / py_to_interval_slot
+        // speak for vector ingestion, where None is a null row.
         .def("ordinalize", [](DrakenType self, nb::object value) -> int64_t {
+            if (value.is_none())
+                throw nb::type_error(
+                    "ordinalize: value must not be None — NULL has no ordinal key "
+                    "(Vector.ordinalize() gives NULL rows ORDINAL_NULL)");
             PyObject* obj = value.ptr();
             switch (self) {
                 case DRAKEN_INT64: {
@@ -7514,10 +7526,26 @@ NB_MODULE(draken_native, m) {
                         throw nb::python_error();
                     return draken::ops::ordinalize_scalar_u64(static_cast<uint64_t>(v));
                 }
-                case DRAKEN_FLOAT32:
-                    return draken::ops::ordinalize_scalar_f32(static_cast<float>(PyFloat_AsDouble(obj)));
-                case DRAKEN_FLOAT64:
-                    return draken::ops::ordinalize_scalar_f64(PyFloat_AsDouble(obj));
+                case DRAKEN_FLOAT32: case DRAKEN_FLOAT64: {
+                    // PyFloat_AsDouble returns -1.0 WITH an exception set on a
+                    // non-real argument (bytes, str, None, ...); returning that
+                    // -1.0 as a key left the error pending and surfaced as a
+                    // SystemError. Accepts what PyFloat_AsDouble accepts (float,
+                    // int, __float__); a TypeError is re-raised naming the draken
+                    // type, anything else (OverflowError for a huge int) as-is.
+                    const double d = PyFloat_AsDouble(obj);
+                    if (d == -1.0 && PyErr_Occurred()) {
+                        if (!PyErr_ExceptionMatches(PyExc_TypeError)) throw nb::python_error();
+                        PyErr_Clear();
+                        throw nb::type_error((std::string("ordinalize: ")
+                            + (self == DRAKEN_FLOAT32 ? "FLOAT32" : "FLOAT64")
+                            + " expects a real number (float or int), got "
+                            + Py_TYPE(obj)->tp_name).c_str());
+                    }
+                    if (self == DRAKEN_FLOAT32)
+                        return draken::ops::ordinalize_scalar_f32(static_cast<float>(d));
+                    return draken::ops::ordinalize_scalar_f64(d);
+                }
                 case DRAKEN_DECIMAL: {
                     __int128 unscaled; uint8_t scale;
                     py_scalar_to_unscaled_scale(obj, unscaled, scale);
@@ -7560,7 +7588,7 @@ NB_MODULE(draken_native, m) {
                 default:
                     throw std::invalid_argument("ordinalize: unsupported type for scalar ordinalize");
             }
-        })
+        }, nb::arg("value").none(true))
         .export_values();
 
     // ------------------------------------------------------------------

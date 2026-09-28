@@ -277,7 +277,5 @@ class TimestampCastSinkStrategy(OptimizationStrategy):
                             node.manifest = rebound
             node.map_expressions(_resettle)
 
-        self.telemetry.optimization_timestamp_cast_sink = (
-            getattr(self.telemetry, "optimization_timestamp_cast_sink", 0) + len(eligible)
-        )
+        self.telemetry.optimization_timestamp_cast_sink += len(eligible)
         return plan

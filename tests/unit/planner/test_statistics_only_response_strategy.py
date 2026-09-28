@@ -124,19 +124,19 @@ def test_strategy_rewrites_count_star_plan():
     agg_node = next(n for nid, n in plan.nodes(data=True) if n.node_type == LogicalPlanStepType.Project)
     assert hasattr(agg_node, "columns") and len(agg_node.columns) == 1
     literal = agg_node.columns[0]
-    assert getattr(literal, "value", None) == 9
-    assert getattr(literal, "alias", None) == "total_count"
+    assert literal.value == 9
+    assert literal.alias == "total_count"
 
     # The scan node should now point to $one_row and use the virtual connector
     scan_node = next(n for nid, n in plan.nodes(data=True) if n.node_type == LogicalPlanStepType.Scan)
     assert scan_node.relation == "$one_row"
     # If the strategy could replace the connector, it should be the virtual one.
-    conn_type = getattr(scan_node, 'connector', None) and getattr(scan_node.connector, '__type__', None)
+    conn_type = scan_node.connector and scan_node.connector.__type__
     if conn_type is not None:
         assert conn_type == "VIRTUAL"
     # Schema may or may not be present in synthetic unit tests; accept either
     # the virtual schema or None (integration tests will validate end-to-end)
-    schema_name = getattr(scan_node.schema, "name", None)
+    schema_name = None if scan_node.schema is None else scan_node.schema.name
     assert schema_name in (None, "$one_row")
 
     # The exit node should reference the same literal column
@@ -148,14 +148,14 @@ def test_strategy_rewrites_count_star_plan():
     literal_id = None
     for nid, n in plan.nodes(data=True):
         if n.node_type == LogicalPlanStepType.Project:
-            cols = getattr(n, 'columns', []) or []
+            cols = n.columns or []
             for c in cols:
-                if getattr(c, 'node_type', None) is not None:
-                    literal_id = getattr(c.schema_column, 'identity', None)
+                if c.node_type is not None:
+                    literal_id = c.schema_column.identity
     assert literal_id is not None
     # Exit must reference same identity
     exit_col = exit_node.columns[0]
-    assert getattr(exit_col, 'schema_column', None) and getattr(exit_col.schema_column, 'identity', None) == literal_id
+    assert exit_col.schema_column and exit_col.schema_column.identity == literal_id
 
 
 def test_strategy_prunes_manifest():
@@ -172,7 +172,7 @@ def test_strategy_prunes_manifest():
     # After the rewrite the scan is repointed at the `$one_row` virtual relation and
     # its manifest is dropped entirely — the strategy clears it so a file-based reader
     # can't supply a file list for a plan that must read nothing.
-    assert getattr(scan_node, "manifest", None) is None
+    assert scan_node.manifest is None
     assert scan_node.relation == "$one_row"
 
 

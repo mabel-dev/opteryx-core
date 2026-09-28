@@ -1,9 +1,6 @@
 """
 Native + parity tests for E.4: bool utility ops via vector_bool_ops consumer.
 
-Loads the nanobind extension without triggering opteryx/__init__.py,
-following the spec_from_file_location pattern established in E.2/E.3.
-
 Coverage:
   bool_vector_all_true:
     n=0, n=1, small n, n not multiple of 8
@@ -29,35 +26,12 @@ Coverage:
 """
 
 import array
-import glob
-import importlib.util
-import os
 
 import draken.draken_native as dn
 import pytest
 
 
-# ---------------------------------------------------------------------------
-# Load vector_bool_ops extension
-# ---------------------------------------------------------------------------
-
-def _load_vector_bool_ops():
-    pattern = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..",
-        "opteryx", "compiled", "nanobind", "vectors*.so"
-    )
-    matches = glob.glob(pattern)
-    if not matches:
-        pytest.skip("vector_bool_ops extension not built — run make compile first", allow_module_level=True)
-    spec = importlib.util.spec_from_file_location(
-        "opteryx.compiled.nanobind.vectors", matches[0]
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-bo = _load_vector_bool_ops()
+from opteryx.compiled.nanobind import vectors as bo
 
 
 # ---------------------------------------------------------------------------

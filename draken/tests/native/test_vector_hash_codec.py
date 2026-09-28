@@ -1,9 +1,6 @@
 """
 Native correctness tests for E.8: hex encode/decode + MD5/SHA digest consumers.
 
-Loads vector_hash_codec without triggering opteryx/__init__.py,
-following the spec_from_file_location pattern from E.4 (test_vector_codec.py).
-
 Coverage:
   vector_hex_encode:
     known fixtures (UPPERCASE output per mabel bintob16).
@@ -34,39 +31,13 @@ Coverage:
     null TVL, output type == VARCHAR, output length == 128.
 """
 
-import glob
 import hashlib
-import importlib.util
-import os
 
 import draken.draken_native as dn
 import pytest
 
 
-# ---------------------------------------------------------------------------
-# Load vector_hash_codec extension
-# ---------------------------------------------------------------------------
-
-def _load_vector_hash_codec():
-    pattern = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..",
-        "opteryx", "compiled", "nanobind", "vectors*.so"
-    )
-    matches = glob.glob(pattern)
-    if not matches:
-        pytest.skip(
-            "vector_hash_codec extension not built — run make compile first",
-            allow_module_level=True,
-        )
-    spec = importlib.util.spec_from_file_location(
-        "opteryx.compiled.nanobind.vectors", matches[0]
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-hc = _load_vector_hash_codec()
+from opteryx.compiled.nanobind import vectors as hc
 
 
 # ---------------------------------------------------------------------------

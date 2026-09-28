@@ -63,12 +63,9 @@ def _scan_predicate_ops(plan, relation):
     from opteryx.planner.logical_planner import LogicalPlanStepType
 
     for _, node in plan.nodes(True):
-        if node.node_type == LogicalPlanStepType.Scan and getattr(node, "relation", None) == relation:
-            preds = getattr(node, "predicates", None) or []
-            return [
-                (getattr(c, "value", None), getattr(getattr(c, "left", None), "value", None))
-                for c in preds
-            ]
+        if node.node_type == LogicalPlanStepType.Scan and node.relation == relation:
+            preds = node.predicates or []
+            return [(c.value, c.left.value) for c in preds]
     return None
 
 
@@ -197,7 +194,11 @@ def test_derived_bound_matches_the_target_type(
     from opteryx.planner.optimizer.strategies import correlated_filters as cf
     from opteryx.types import logical_type
 
-    column_type = getattr(logical_type, column_type_name)
+    column_type = {
+        "INT32": logical_type.INT32,
+        "INT64": logical_type.INT64,
+        "FLOAT64": logical_type.FLOAT64,
+    }[column_type_name]
     conditions = cf._range_conditions(
         _column(column_type, plan_context), type("R", (), {"upper_bound": upper, "lower_bound": lower})(), 
     plan_context=plan_context)
@@ -245,10 +246,8 @@ def _scan_predicates(plan, alias):
     from opteryx.planner.logical_planner import LogicalPlanStepType
 
     for _, node in plan.nodes(True):
-        if node.node_type == LogicalPlanStepType.Scan and getattr(node, "alias", None) == alias:
-            return [
-                (c.value, c.left.value, c.right.value) for c in (getattr(node, "predicates", None) or [])
-            ]
+        if node.node_type == LogicalPlanStepType.Scan and node.alias == alias:
+            return [(c.value, c.left.value, c.right.value) for c in (node.predicates or [])]
     return None
 
 

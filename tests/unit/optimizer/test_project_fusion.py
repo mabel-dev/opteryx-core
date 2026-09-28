@@ -119,7 +119,7 @@ def test_multiply_referenced_expression_is_hoisted_not_fused_away():
     counts = _step_counts(plan)
     assert counts.get(LogicalPlanStepType.Project, 0) == 1, counts
     projects = _nodes(plan, LogicalPlanStepType.Project)
-    assert getattr(projects[0], "hoisted_columns", None), "expected a hoisted column"
+    assert projects[0].hoisted_columns, "expected a hoisted column"
 
 
 def test_multiply_referenced_expression_fusion_preserves_results():
@@ -147,7 +147,7 @@ def test_trivial_rename_chain_fuses_without_hoisting():
     counts = _step_counts(plan)
     assert counts.get(LogicalPlanStepType.Project, 0) == 1, counts
     projects = _nodes(plan, LogicalPlanStepType.Project)
-    assert not getattr(projects[0], "hoisted_columns", None)
+    assert not projects[0].hoisted_columns
 
 
 def test_trivial_rename_chain_fusion_preserves_results():

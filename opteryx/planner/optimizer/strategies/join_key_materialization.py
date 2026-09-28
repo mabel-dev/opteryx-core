@@ -101,7 +101,7 @@ def materialize_operand_as_column(
     """
     child = plan[child_id]
     schema = child.schema if child.node_type in steps_with("schema") else None
-    columns = getattr(schema, "columns", None)
+    columns = schema.columns if schema is not None else None
     if not columns or not relation_names:
         return None
     project_columns: List[Expression] = [passthrough_column(col, arena=expr.arena) for col in columns]

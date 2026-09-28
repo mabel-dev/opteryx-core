@@ -15,6 +15,12 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.abspath(os.getcwd()))
 
+_CATALOG_REPO = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "opteryx-catalog")
+)
+if os.path.isdir(_CATALOG_REPO) and _CATALOG_REPO not in sys.path:
+    sys.path.insert(1, _CATALOG_REPO)
+
 import pytest
 
 from opteryx.connectors.opteryx_connector import OpteryxConnector
