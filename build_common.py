@@ -737,6 +737,7 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/draken_native.cpp",
                 "draken/core/vector_alloc.cpp",
                 "draken/core/bitmap_ops.cpp",  # E.21: bitmap operations for bytecode VM
+                "draken/core/lazy_region.cpp",  # lazy branch evaluation: row selection / narrow / scatter
                 # bool_vector_from_bits — the CPython-returning bridge that used
                 # to live in bitmap_ops.cpp. Split out so core/bitmap_ops.h stays
                 # free of <Python.h> (CLAUDE.md §2/§5). Same .so, same

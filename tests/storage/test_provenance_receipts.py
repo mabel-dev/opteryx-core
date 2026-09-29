@@ -346,6 +346,13 @@ def test_the_binder_names_the_task_an_execute_expanded():
     assert _produced_by(InsertStep(executing_task="ops.t", relation_name="ops.sink")) == "task:ops.t"
 
 
+def test_the_binder_names_the_task_an_execute_expanded_into_a_merge():
+    from opteryx.compiled.structures.plan_steps import MergeStep
+    from opteryx.planner.binder.relation import _produced_by
+
+    assert _produced_by(MergeStep(executing_task="ops.t", relation_name="ops.sink")) == "task:ops.t"
+
+
 def test_the_binder_names_the_view_a_refresh_populates():
     from opteryx.planner.binder.relation import _produced_by
 

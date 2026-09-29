@@ -646,6 +646,11 @@ inline std::vector<uint8_t> PatchParquetColumns(const uint8_t *src, size_t src_l
       }
       st.null_count = cs.null_count;
       st.distinct_count = cs.distinct_count;
+      // The pages are copied byte-for-byte, so the source's `rugo.sum` is still
+      // the chunk's sum (cs.has_sum is only ever set in a file rugo wrote) -
+      // kept when the column, as re-declared, is one that carries a sum.
+      st.has_sum = cs.has_sum && chunk_has_sum(cols[j].shape);
+      st.sum = st.has_sum ? cs.sum : 0;
       meta.stats[j] = st;
 
       // The bloom filter is a region of its own, outside the chunk's pages.

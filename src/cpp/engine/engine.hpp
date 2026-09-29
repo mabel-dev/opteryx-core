@@ -922,6 +922,7 @@ public:
                                       const std::vector<std::string>* zone_columns,
                                       const std::vector<int>* zone_ops,
                                       const std::vector<int64_t>* zone_ordinals,
+                                      const std::vector<std::vector<uint32_t>>* excluded_row_groups,
                                       int64_t* row_groups_total,
                                       int64_t* row_groups_pruned,
                                       int64_t* row_groups_pruned_runtime,
@@ -944,6 +945,7 @@ public:
                            files, column_names, out_identities, column_types,
                            retag_units, emit_indices, length_only,
                            program != nullptr ? fn : nullptr, program, zone,
+                           excluded_row_groups,
                            row_groups_total, row_groups_pruned,
                            row_groups_pruned_runtime, bytes_claimed, io));
     }
@@ -1381,9 +1383,10 @@ public:
         set_sink_(p, std::make_unique<QueueSink>(q));
         out_q = std::move(q);
     }
-    void set_agg_sink(size_t p, std::vector<AggSpec2> specs, size_t buf) {
+    // `seed`: empty, or one AggSeed per spec - the planner's statistics seed (P3).
+    void set_agg_sink(size_t p, std::vector<AggSpec2> specs, size_t buf, std::vector<AggSeed> seed = {}) {
         set_sink_(p,
-            std::make_unique<UngroupedAggSink>(std::move(specs), sink_buffer_(buf)));
+            std::make_unique<UngroupedAggSink>(std::move(specs), sink_buffer_(buf), std::move(seed)));
     }
     // `key_emit` has one entry per key_idx entry: false = the key is hashed to
     // separate the groups but its values are never stored or emitted.
@@ -1396,6 +1399,16 @@ public:
             std::move(specs), sink_buffer_(buf), ndv_estimate);
         groupby_sinks_[p] = sink.get();
         set_sink_(p, std::move(sink));
+    }
+    // The planner's GROUP BY statistics seed (P4): groups answered from covered row
+    // groups, queued into the GroupBySink that pipeline `p` sinks into. Plan-time only.
+    void set_groupby_seed(size_t p, GroupSeed seed) {
+        auto it = groupby_sinks_.find(p);
+        if (it == groupby_sinks_.end() || pipelines[p]->sink.get() != it->second) {
+            throw std::runtime_error(
+                "set_groupby_seed: pipeline does not sink into a GROUP BY");
+        }
+        it->second->set_seed(std::move(seed));
     }
     // GROUP BY -> ORDER BY <aggregate> LIMIT k fusion (docs/GROUPBY_TOPK_FUSION_DESIGN.md):
     // arm the GroupBySink that pipeline `p` sinks into. `keys` index the sink's

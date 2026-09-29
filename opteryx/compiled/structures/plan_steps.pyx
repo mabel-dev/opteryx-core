@@ -7324,6 +7324,7 @@ cdef class MergeStep(PlanStep):
     """The Merge logical plan step."""
 
     cdef object _connector
+    cdef str _executing_task
     cdef tuple _file_paths
     cdef str _operation
     cdef str _produced_by
@@ -7335,10 +7336,11 @@ cdef class MergeStep(PlanStep):
     cdef tuple _target_column_names
     cdef object _target_schema
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, file_paths=None, operation=None, produced_by=None, read_sources=None, relation_name=None, source_tail_id=None, statement_name=None, target_alias=None, target_column_names=None, target_schema=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, executing_task=None, file_paths=None, operation=None, produced_by=None, read_sources=None, relation_name=None, source_tail_id=None, statement_name=None, target_alias=None, target_column_names=None, target_schema=None):
         self.node_type = _step_types().Merge
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.connector = connector
+        self.executing_task = executing_task
         self.file_paths = file_paths
         self.operation = operation
         self.produced_by = produced_by
@@ -7358,6 +7360,15 @@ cdef class MergeStep(PlanStep):
     def connector(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._connector = value
+
+    @property
+    def executing_task(self):
+        return self._executing_task
+
+    @executing_task.setter
+    def executing_task(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._executing_task = value
 
     @property
     def file_paths(self):
@@ -7462,6 +7473,7 @@ cdef class MergeStep(PlanStep):
     cpdef dict field_values(self):
         cdef dict out = self._common_values()
         out["connector"] = self._connector
+        out["executing_task"] = self._executing_task
         out["file_paths"] = self._file_paths
         out["operation"] = self._operation
         out["produced_by"] = self._produced_by
@@ -7485,6 +7497,7 @@ cdef class MergeStep(PlanStep):
         memo[id(self)] = new
         self._copy_common_into(new, memo)
         new._connector = _copy_field(self._connector, memo)
+        new._executing_task = _copy_field(self._executing_task, memo)
         new._file_paths = _copy_field(self._file_paths, memo)
         new._operation = _copy_field(self._operation, memo)
         new._produced_by = _copy_field(self._produced_by, memo)
@@ -7503,6 +7516,7 @@ cdef class MergeStep(PlanStep):
         new.node_type = self.node_type
         self._share_common_into(new)
         new._connector = self._connector
+        new._executing_task = self._executing_task
         new._file_paths = self._file_paths
         new._operation = self._operation
         new._produced_by = self._produced_by
@@ -10685,7 +10699,7 @@ cpdef frozenset steps_with(str field):
             "estimated_row_count": frozenset({T.Project}),
             "event_kind": frozenset({T.CreateTrigger}),
             "except_columns": frozenset({T.Project}),
-            "executing_task": frozenset({T.Insert}),
+            "executing_task": frozenset({T.Insert, T.Merge}),
             "execution_context": frozenset({T.AlterWorkspace, T.GrantAccess, T.Listen, T.RevokeAccess, T.ShowEffectiveGrantsOn, T.ShowGrantsOn, T.Unlisten}),
             "existence_column": frozenset({T.Join}),
             "existence_three_valued": frozenset({T.Join}),

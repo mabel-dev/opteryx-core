@@ -1834,7 +1834,7 @@ class ParquetIOPipeline {
             struct stat st;
             if (fstat(fd, &st) == 0 && st.st_size > 0) {
                 void* b = mmap(nullptr, static_cast<size_t>(st.st_size),
-                               PROT_READ, MAP_PRIVATE, fd, 0);
+                               PROT_READ, MAP_SHARED, fd, 0);
                 if (b != MAP_FAILED) {
                     m.base = b;
                     m.len  = static_cast<size_t>(st.st_size);
@@ -2811,7 +2811,7 @@ class ParquetIOPipeline {
                 mmap_len        = static_cast<size_t>(span_max - mmap_offset);
                 int fd = open(item.path.c_str(), O_RDONLY | O_CLOEXEC);
                 if (fd >= 0) {
-                    mmap_base = mmap(nullptr, mmap_len, PROT_READ, MAP_PRIVATE, fd, mmap_offset);
+                    mmap_base = mmap(nullptr, mmap_len, PROT_READ, MAP_SHARED, fd, mmap_offset);
                     close(fd);
                 }
                 per_rg_mapped = (mmap_base != MAP_FAILED);

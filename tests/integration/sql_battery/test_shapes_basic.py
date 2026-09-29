@@ -76,7 +76,8 @@ STATEMENTS = [
         # 22 since `build` joined `version` as an UNRESTRICTED engine-identity row,
         # +1 for `write_coalesce_rows` (INSERT/CTAS coalescing threshold, USER/UNRESTRICTED).
         # +1 for `disable_topn_runtime_boundary` (Top-N runtime boundary switch, USER/UNRESTRICTED).
-        ("SHOW VARIABLES", 26, 5, None),
+        # +1 for `disable_statistics_coverage` (statistics coverage switch, USER/UNRESTRICTED).
+        ("SHOW VARIABLES", 27, 5, None),
         ("SELECT * FROM $variables", None, None, UnsupportedSyntaxError),
         ("SELECT name FROM $variables", None, None, UnsupportedSyntaxError),
         ("SELECT * FROM $VARIABLES", None, None, UnsupportedSyntaxError),

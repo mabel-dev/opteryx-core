@@ -304,6 +304,41 @@ def test_insert_select_consults_the_egress_hook(recording_workspaces):
     assert calls == [("dst_ws.dst", ["src_ws.src"], None)]
 
 
+def test_merge_consults_the_egress_hook(recording_workspaces, monkeypatch):
+    """MERGE's INSERT arm copies source rows into the target; it is checked like
+    any other write. Refused at bind time, so the local store's missing
+    merge_commit is never reached."""
+    from opteryx.connectors.local_store_connector import LocalStoreConnector
+
+    session, calls = recording_workspaces
+    list(session.execute_to_morsels("CREATE TABLE dst_ws.dst (a BIGINT)"))
+    calls.clear()
+
+    def refuse(self, target_relation, source_relations, secured=None):
+        calls.append((target_relation, list(source_relations), secured))
+        return [
+            EgressRefusal(
+                workspace="src_ws",
+                remediation="ALTER WORKSPACE src_ws SET egress_protection TO OFF.",
+                message="egress protection: refused for the test",
+            )
+        ]
+
+    monkeypatch.setattr(LocalStoreConnector, "egress_verdict", refuse)
+
+    with pytest.raises(EgressRestrictedError, match="refused for the test"):
+        list(
+            session.execute_to_morsels(
+                "MERGE INTO dst_ws.dst AS t USING (SELECT a FROM src_ws.src) AS s "
+                "ON t.a = s.a WHEN NOT MATCHED THEN INSERT (a) VALUES (s.a)"
+            )
+        )
+
+    assert len(calls) == 1
+    assert calls[0][0] == "dst_ws.dst"
+    assert "src_ws.src" in calls[0][1]
+
+
 def test_refresh_materialized_view_consults_the_egress_hook(recording_workspaces):
     """A refresh is a write like any other and is checked like one - the flag
     that lets REFRESH through the not-a-table guard does not exempt it here."""

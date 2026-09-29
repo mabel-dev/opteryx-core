@@ -194,7 +194,7 @@ int read_all_mmap(const char* path, uint8_t** dst, size_t* out_len) {
         return 0;
     }
     
-    void* mapped = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    void* mapped = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
     close(fd);
 
     if (mapped == MAP_FAILED) {
@@ -227,7 +227,7 @@ int read_all_mmap(const char* path, uint8_t** dst, size_t* out_len) {
         return 0;
     }
     
-    void* mapped = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    void* mapped = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
     close(fd);
 
     if (mapped == MAP_FAILED) {
@@ -445,7 +445,7 @@ int read_slice_mmap(const char* path, size_t offset, size_t length, uint8_t** ds
     }
     
     // Map from the beginning and return pointer to offset within mapping
-    void* mapped = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    void* mapped = mmap(NULL, file_size, PROT_READ, MAP_SHARED, fd, 0);
     close(fd);
 
     if (mapped == MAP_FAILED) {
@@ -493,7 +493,7 @@ int read_slice_mmap(const char* path, size_t offset, size_t length, uint8_t** ds
     }
     
     // Map from the beginning and return pointer to offset within mapping
-    void* mapped = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    void* mapped = mmap(NULL, file_size, PROT_READ, MAP_SHARED, fd, 0);
     close(fd);
 
     if (mapped == MAP_FAILED) {

@@ -84,7 +84,7 @@ class SpillFileMapping {
             return;
         }
         void* addr = ::mmap(nullptr, static_cast<size_t>(st.st_size), PROT_READ,
-                            MAP_PRIVATE, fd, 0);
+                            MAP_SHARED, fd, 0);
         ::close(fd);
         if (addr == MAP_FAILED) return;
         data_ = addr;

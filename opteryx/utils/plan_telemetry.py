@@ -489,6 +489,14 @@ def collect_plan_telemetry(plan: PhysicalPlan) -> dict:
                             node_stat["row_groups_pruned_topn"] = facts[
                                 "row_groups_pruned_topn"
                             ]
+                        # Statistics coverage (P3): row groups answered from their
+                        # footer statistics and never read, and row groups its exact
+                        # terms proved empty - present only when coverage was asked
+                        # of this scan, so "not asked" stays distinct from "0".
+                        for key in ("row_groups_answered_from_statistics",
+                                    "row_groups_disjoint_by_statistics"):
+                            if key in facts:
+                                node_stat[key] = facts[key]
                         node_stat["parquet_rows_before_filter"] = facts["parquet_rows_before_filter"]
                         node_stat["columns_read"] = facts["columns_read"]
                         # No pushed predicates on the native path → every column

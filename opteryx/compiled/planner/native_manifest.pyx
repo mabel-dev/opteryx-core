@@ -327,6 +327,25 @@ cdef extern from *:
     void cell_set_sum(ManifestCell& c, int64_t hi, uint64_t lo)
 
 
+cdef extern from "planner/native_manifest.hpp" namespace "opteryx::planner":
+    cbool is_integer(DrakenType t)
+
+
+cdef extern from *:
+    """
+    // total_sum's int128 as two words, for the Python int it becomes.
+    static inline bool manifest_total_sum(const opteryx::planner::NativeManifest& m, size_t position,
+                                          int64_t& hi, uint64_t& lo) {
+        __int128 total = 0;
+        if (!opteryx::planner::total_sum(m, position, total)) return false;
+        hi = static_cast<int64_t>(total >> 64);
+        lo = static_cast<uint64_t>(total);
+        return true;
+    }
+    """
+    cbool manifest_total_sum(const CNativeManifest& m, size_t position, int64_t& hi, uint64_t& lo) except +
+
+
 cdef extern from "planner/manifest_prune.hpp" namespace "opteryx::planner":
     cdef cppclass PruneColumns:
         const unordered_map[string, size_t]* position
@@ -647,6 +666,16 @@ cdef class NativeManifest:
 
     def total_null_count(self, size_t position):
         return _optional(total_null_count(self._manifest[0], self._position(position)))
+
+    def total_sum(self, size_t position):
+        """The column's EXACT sum over every file (manifest_estimates.hpp
+        total_sum) as a Python int, or None when any file's is unknown, any file
+        has deletes, or the fold overflows int128."""
+        cdef int64_t hi = 0
+        cdef uint64_t lo = 0
+        if not manifest_total_sum(self._manifest[0], self._position(position), hi, lo):
+            return None
+        return ((<object>hi) << 64) + (<object>lo)
 
     def sketch_row_widths(self, size_t row):
         """How many column slices file `row` has in each sketch (min-k,
@@ -1547,6 +1576,16 @@ cdef class NativeManifestBuilder:
         for position in positions:
             at.push_back(-1 if position is None else <int64_t?>position)
         cdef size_t added = self._manifest.add_file_cells_from(source._manifest[0], source_row, at)
+        # A carried sum is a sum of the SOURCE column's values. It stays this
+        # column's sum only when both are integer columns - a widening inside
+        # the integer family keeps every value; anything else (to DECIMAL, where
+        # the unscaled domain moves, or to FLOAT) would make it a wrong answer.
+        cdef size_t k
+        for k in range(at.size()):
+            if at[k] >= 0 and not (
+                is_integer(<DrakenType><int>source.physical[at[k]].value) and is_integer(self._physical[k])
+            ):
+                cell_clear_sum(self._manifest.cell(added, k))
         cdef uint32_t vector_row = source._manifest.file(source_row).vector_row
         self._min_k.carry_keyed(source._manifest.min_k, vector_row, added, at)
         self._histogram.carry_keyed(source._manifest.histogram, vector_row, added, at)

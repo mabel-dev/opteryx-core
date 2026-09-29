@@ -82,6 +82,35 @@ cdef extern from *:
     """static inline void _pr_decref(PyObject* op) { Py_DECREF(op); }"""
     void _pr_decref(PyObject* op)
 
+from opteryx.compiled.structures.stats_coverage cimport (
+    CoverageAccumulator, CoverageRequest, CoverageSpec, coverage_fill, coverage_seed,
+)
+
+
+cdef extern from "engine/parquet_stats_coverage.hpp" namespace "opteryx::engine":
+    int parquet_cover_row_group(const FileStats& footer, size_t rg_index, const CoverageSpec& spec,
+                                CoverageAccumulator& acc) except +
+
+
+cdef class _CoverageRequest:
+    """Owns one scan's native statistics-coverage request (P3/P4,
+    stats_coverage_request.hpp) for the length of open_native_scan_plan - freed
+    however that call ends. ``coverage`` = (terms, aggs, keys), see
+    stats_coverage.pxd ``coverage_fill``."""
+    cdef CoverageRequest* req
+    cdef size_t n_aggs
+    cdef size_t n_keys
+
+    def __cinit__(self, object coverage):
+        self.req = new CoverageRequest()
+        coverage_fill(self.req, coverage)
+        self.n_aggs = len(coverage[1])
+        self.n_keys = len(coverage[2])
+
+    def __dealloc__(self):
+        del self.req
+
+
 cdef extern from "core/draken_bridge.h":
     const DrakenVector* draken_vector_unwrap(PyObject* obj)
     int draken_vector_mark_dict_sorted(PyObject* obj)
@@ -2798,8 +2827,17 @@ cpdef NativeScanPlan open_native_scan_plan(
     http_tuning=None,
     coalesce_tuning=None,
     int64_t memory_budget=0,
+    coverage=None,
 ):
     """Plan-time setup for the fully-native scan-pull path (see `NativeScanPlan`).
+
+    ``coverage`` (P3/P4, docs/MANIFEST_SUM_STATISTIC_DESIGN.md §7):
+    ``(terms, aggs, keys)`` asking which kept row groups the aggregate above this
+    scan (ungrouped, or GROUP BY ``keys``) can be answered for from footer
+    statistics alone. Those are left out of the work
+    list and folded into ``plan.coverage_seed``; row groups the exact terms prove
+    empty are left out too. None: no coverage, the work list is exactly the
+    pruned one.
     Mirrors `open_ipc_source`'s footer-fetch + row-group pruning + pool sizing,
     reusing the same helpers, but returns raw C++ handles instead of a Cython
     `IpcRowGroupSource` — no prefetched-footer dicts, no pass-2 masks (see
@@ -2959,6 +2997,8 @@ cpdef NativeScanPlan open_native_scan_plan(
                 path, ReadParquetMetadataFromBuffer(footer_buf_ptr, footer_buf_size))
         plan.footer_fetch_ns += time.perf_counter_ns() - _footer_t0
 
+    cdef _CoverageRequest request = None if coverage is None else _CoverageRequest(coverage)
+    cdef int verdict
     cdef double bloom_waste_ratio
     cdef int64_t bloom_max_bytes
     bloom_waste_ratio, bloom_max_bytes = _bloom_coalesce_policy(coalesce_tuning)
@@ -2991,10 +3031,22 @@ cpdef NativeScanPlan open_native_scan_plan(
                                  bloom_waste_ratio, bloom_max_bytes)
         plan.pruned_items += <int>fsp.row_groups.size() - len(kept)
         for rg_i in kept:
+            if request is not None:
+                verdict = parquet_cover_row_group(deref(fsp), <size_t>rg_i, request.req.spec,
+                                                  request.req.acc)
+                if verdict == 1:
+                    plan.covered_items += 1
+                    continue
+                if verdict == 0:
+                    plan.coverage_disjoint_items += 1
+                    continue
             # Both work-item lists carry the FETCH url: the Python one is re-encoded
             # below to index footer_map, the C++ one is what the Source fetches.
             work_items.append((fetch_url, rg_i))
             plan.work_items.push_back(pair[string, int](path_bytes_cpp, <int>rg_i))
+
+    if request is not None:
+        plan.coverage_seed = coverage_seed(request.req, request.n_aggs, request.n_keys)
 
     plan.n_items = len(work_items)
     if plan.n_items == 0:

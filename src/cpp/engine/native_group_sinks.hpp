@@ -2059,12 +2059,66 @@ struct UngroupedAggGlobal : GlobalSinkState {
     bool init = false;
 };
 
+// ---- statistics seed (P3, docs/MANIFEST_SUM_STATISTIC_DESIGN.md §7) ---------------
+// The planner answered some row groups of the scan below this aggregate from their
+// footer statistics (engine/stats_coverage.hpp) and left them out of the scan. Their
+// folded partial per aggregate arrives here, to be merged as if those rows had been
+// sunk. `seeded` false: nothing was covered for that spec (it contributes nothing).
+struct AggSeed {
+    bool seeded = false;
+    int64_t rows = 0;
+    int64_t valid = 0;
+    __int128 sum = 0;
+    bool any_extreme = false;
+    int64_t min = 0, max = 0;       // the VALUES (ordinal == value for the seeded types)
+    DrakenType type = DRAKEN_INT64; // the operand's type as the scan decodes it
+};
+
+// sort_num_key's order key for an integer / DATE32 VALUE - the key the sink's
+// MIN/MAX lanes compare on, so a seeded extreme merges with sunk ones exactly as
+// if it had arrived in a morsel. Only the types coverage can seed an extreme for.
+inline uint64_t agg2_seed_order_key(DrakenType t, int64_t v) {
+    switch (t) {
+        case DRAKEN_UINT8: case DRAKEN_UINT16: case DRAKEN_UINT32:
+            return static_cast<uint64_t>(v);
+        default:
+            return static_cast<uint64_t>(v) ^ 0x8000000000000000ULL;
+    }
+}
+
+// GROUP BY (P4): the covered row groups that each held ONE group, folded per group.
+// Group-major: group i's key values are key_vals[i*K .. i*K+K) (key_ok 0 = a NULL
+// key) in the sink's key_idx order, and its partials are partials[i*S .. i*S+S) in
+// spec order. key_types are the key columns' types as the scan decodes them.
+struct GroupSeed {
+    size_t groups = 0;
+    std::vector<DrakenType> key_types;
+    std::vector<int64_t> key_vals;
+    std::vector<uint8_t> key_ok;
+    std::vector<AggSeed> partials;
+};
+
+inline AggCell agg2_seed_cell(const AggSeed& seed) {
+    AggCell c;
+    c.rows = seed.rows;
+    c.valid = seed.valid;
+    c.isum = seed.sum;
+    if (seed.any_extreme) {
+        c.min_raw = seed.min;
+        c.max_raw = seed.max;
+        c.min_key = agg2_seed_order_key(seed.type, seed.min);
+        c.max_key = agg2_seed_order_key(seed.type, seed.max);
+    }
+    return c;
+}
+
 struct UngroupedAggSink : Sink {
     std::vector<AggSpec2> specs;
     MorselBuffer* out;
+    std::vector<AggSeed> seed;      // empty, or one per spec
 
-    UngroupedAggSink(std::vector<AggSpec2> s, MorselBuffer* b)
-        : specs(std::move(s)), out(b) {}
+    UngroupedAggSink(std::vector<AggSpec2> s, MorselBuffer* b, std::vector<AggSeed> seeds = {})
+        : specs(std::move(s)), out(b), seed(std::move(seeds)) {}
 
     std::unique_ptr<GlobalSinkState> make_global() override {
         return std::make_unique<UngroupedAggGlobal>();
@@ -2406,6 +2460,36 @@ struct UngroupedAggSink : Sink {
             g.tds.resize(specs.size());
             g.dpending.resize(specs.size());
             g.meta.resize(specs.size());
+        }
+        // The planner's statistics seed: covered row groups' partials, merged as if
+        // their rows had been sunk. The seed's operand type IS the scan's decoded
+        // type - a captured type that disagrees means the plan and the scan
+        // describe different columns, which must fail, never merge.
+        if (!seed.empty()) {
+            if (seed.size() != specs.size()) {
+                err.code = 1;
+                err.msg = "aggregate statistics seed does not match the aggregates — "
+                          "fail loud, never a silent wrong answer";
+                return;
+            }
+            for (size_t s = 0; s < specs.size(); ++s) {
+                if (!seed[s].seeded) continue;
+                if (specs[s].col_idx >= 0) {
+                    if (g.meta[s].captured && g.meta[s].type != seed[s].type) {
+                        err.code = 1;
+                        err.msg = "aggregate statistics seed was planned for a different "
+                                  "operand type than the scan decodes — fail loud";
+                        return;
+                    }
+                    if (!g.meta[s].captured) {
+                        g.meta[s].type = seed[s].type;
+                        g.meta[s].is_float = false;
+                        g.meta[s].is_string = false;
+                        g.meta[s].captured = true;
+                    }
+                }
+                agg2_merge(g.cells[s], agg2_seed_cell(seed[s]));
+            }
         }
         // COUNT(DISTINCT): union each spec's queued worker sets. Partitions are
         // disjoint by hash, so (spec, partition) sets union AND count in parallel
@@ -3072,6 +3156,12 @@ struct GroupBySink : Sink {
     size_t topk_k = 0;
     bool topk_ties = false;
 
+    // The planner's statistics seed (P4, docs/MANIFEST_SUM_STATISTIC_DESIGN.md §7):
+    // groups answered from covered row groups the scan never reads. Queued at the
+    // top of finalize as one more partition set, so the merge, top-k cut and emit
+    // treat those groups exactly as sunk ones. groups == 0: none.
+    GroupSeed seed;
+
     // `kemit` has one entry per key (invariant enforced at the binding, which is the
     // only construction site and can raise) — false = hash the key, never store it.
     GroupBySink(std::vector<size_t> keys, std::vector<std::string> knames,
@@ -3098,6 +3188,28 @@ struct GroupBySink : Sink {
         topk_keys = std::move(keys);
         topk_k = k;
         topk_ties = ties;
+    }
+
+    // Plan-time (compiler, single-threaded). Shape errors are the caller's and
+    // throw; type agreement with the scan is checked in finalize, where it is known.
+    void set_seed(GroupSeed s) {
+        if (s.key_types.size() != key_idx.size()
+                || s.key_vals.size() != s.groups * key_idx.size()
+                || s.key_ok.size() != s.groups * key_idx.size()
+                || s.partials.size() != s.groups * specs.size()) {
+            throw std::runtime_error("GROUP BY statistics seed does not match the sink's "
+                                     "keys and aggregates");
+        }
+        for (const AggSpec2& sp : specs) {
+            const bool seedable = sp.fn == AggFn::CountStar || sp.fn == AggFn::Count
+                || sp.fn == AggFn::Sum || sp.fn == AggFn::Avg
+                || sp.fn == AggFn::Min || sp.fn == AggFn::Max;
+            if (!seedable || sp.distinct_operand) {
+                throw std::runtime_error("GROUP BY statistics seed over an aggregate "
+                                         "statistics cannot answer");
+            }
+        }
+        seed = std::move(s);
     }
 
     std::unique_ptr<GlobalSinkState> make_global() override {
@@ -4879,8 +4991,161 @@ struct GroupBySink : Sink {
         }
     }
 
+    // The statistics seed as queued partitions, one per hash partition it touches -
+    // as if one more worker had flushed. Keys are hashed by the SAME path as sunk
+    // rows (a typed key morsel through compute_row_hashes), so a seeded group and a
+    // sunk group with equal keys merge into one. With no morsel sunk, the seed
+    // types the sink (key, operand metadata); otherwise its types must equal the
+    // captured ones - a disagreement means plan and scan describe different
+    // columns, which fails, never merges.
+    bool queue_seed(GroupByGlobal& g, ErrCtx& err) {
+        const size_t K = key_idx.size();
+        const size_t S = specs.size();
+        const size_t G = seed.groups;
+        auto fail = [&err](const char* msg) {
+            err.code = 1;
+            err.msg = msg;
+            return false;
+        };
+        std::vector<AggColMeta> meta(S);
+        std::vector<GBKind> kinds(S);
+        bool has_rows = false;
+        for (size_t s = 0; s < S; ++s) {
+            if (specs[s].col_idx == kAggNoOperand) {
+                kinds[s] = GBKind::Rows;
+                has_rows = true;
+                continue;
+            }
+            meta[s].type = seed.partials[s].type;   // group 0: every group carries the same
+            meta[s].captured = true;
+            kinds[s] = gb_kind_of(specs[s], meta[s]);
+            if (kinds[s] != GBKind::Valid && kinds[s] != GBKind::SumI
+                    && kinds[s] != GBKind::AvgI && kinds[s] != GBKind::MinMaxNum)
+                return fail("GROUP BY statistics seed over an aggregate kind statistics "
+                            "cannot answer — fail loud");
+        }
+        if (!g.init) {
+            g.key_meta.assign(K, KeyColMeta{});
+            for (size_t k = 0; k < K; ++k) {
+                g.key_meta[k].type = seed.key_types[k];
+                g.key_meta[k].captured = true;
+            }
+            g.meta = meta;
+            g.kinds = kinds;
+            g.has_rows = has_rows;
+            g.init = true;
+        } else {
+            for (size_t k = 0; k < K; ++k) {
+                if (g.key_meta[k].type != seed.key_types[k] || g.key_meta[k].logical != nullptr)
+                    return fail("GROUP BY statistics seed was planned for a different key "
+                                "type than the scan decodes — fail loud");
+            }
+            for (size_t s = 0; s < S; ++s) {
+                if (kinds[s] == GBKind::Rows) continue;
+                if (g.meta[s].type != meta[s].type || g.kinds[s] != kinds[s])
+                    return fail("GROUP BY statistics seed was planned for a different "
+                                "operand type than the scan decodes — fail loud");
+            }
+        }
+
+        // The seed's keys as a typed morsel, in key_idx order (the multi-key mix
+        // is order-sensitive), hashed exactly as sink() hashes a morsel.
+        auto keys = std::make_shared<CxxMorsel>();
+        std::vector<int64_t> vals(G);
+        std::vector<uint8_t> ok(G);
+        std::vector<size_t> cols(K);
+        for (size_t k = 0; k < K; ++k) {
+            for (size_t i = 0; i < G; ++i) {
+                vals[i] = seed.key_vals[i * K + k];
+                ok[i] = seed.key_ok[i * K + k];
+            }
+            keys->columns.push_back(emit_fixed_column(vals.data(), ok.data(),
+                                                      static_cast<uint32_t>(G),
+                                                      seed.key_types[k], nullptr, err));
+            if (err.code != 0) return false;
+            keys->names.push_back(std::string());
+            cols[k] = k;
+        }
+        keys->zero_col_rows = static_cast<uint32_t>(G);
+        std::vector<uint64_t> hashes;
+        if (!compute_row_hashes(keys, cols, hashes, err)) return false;
+
+        std::array<GBPartition, kGBParts> parts;
+        std::array<bool, kGBParts> touched{};
+        for (size_t i = 0; i < G; ++i) {
+            const uint64_t h = hashes[i];
+            const size_t p = gb_part(h);
+            GBPartition& P = parts[p];
+            if (!touched[p]) {
+                // index-only: the merge probes a queued partition's CarcharIndex
+                // directly (see flush_locals' promote_* before it queues one).
+                P.use_mid = false;
+                P.use_parvi = false;
+                ready_partition(g, P);
+                touched[p] = true;
+            }
+            int64_t gid;
+            if (P.index.find_or_insert_id(h, static_cast<int64_t>(P.hashes.size()), gid)) {
+                P.hashes.push_back(h);
+                for (size_t j = 0; j < store_key_pos.size(); ++j) {
+                    P.keycols[j].append_row(keys->columns[store_key_pos[j]].view,
+                                            static_cast<uint32_t>(i), err,
+                                            "GROUP BY statistics seed key");
+                    if (err.code != 0) return false;
+                }
+                grow_lanes(g, P);
+            }
+            const AggSeed* part = &seed.partials[i * S];
+            if (g.has_rows) P.grows[gid] += part[0].rows;   // one shared COUNT(*) lane
+            for (size_t s = 0; s < S; ++s) {
+                const AggSeed& a = part[s];
+                GBLanes& L = P.lanes[s];
+                switch (kinds[s]) {
+                    case GBKind::Rows:
+                        break;
+                    case GBKind::Valid:
+                        L.valid[gid] += a.valid;
+                        break;
+                    case GBKind::SumI: {
+                        const __int128 lim = INT64_MAX;
+                        if (a.sum > lim || a.sum < -lim - 1
+                                || __builtin_add_overflow(L.i64[gid], static_cast<int64_t>(a.sum),
+                                                          &L.i64[gid]))
+                            return fail("SUM overflow: exact integer sum exceeds "
+                                        "INT64 — fail loud, never a wrapped answer");
+                        L.valid[gid] += a.valid;
+                        break;
+                    }
+                    case GBKind::AvgI:
+                        L.i128[gid] += a.sum;
+                        L.valid[gid] += a.valid;
+                        break;
+                    case GBKind::MinMaxNum: {
+                        if (!a.any_extreme) break;   // no non-null value: nothing to offer
+                        const bool want_max = specs[s].fn == AggFn::Max;
+                        const int64_t v = want_max ? a.max : a.min;
+                        const uint64_t kk = agg2_seed_order_key(a.type, v);
+                        if (L.valid[gid] == 0 || (want_max ? kk > L.mkey[gid] : kk < L.mkey[gid])) {
+                            L.mkey[gid] = kk;
+                            L.i64[gid] = v;
+                        }
+                        L.valid[gid] += a.valid;
+                        break;
+                    }
+                    default:
+                        return fail("GROUP BY statistics seed over an aggregate kind "
+                                    "statistics cannot answer — fail loud");
+                }
+            }
+        }
+        for (size_t p = 0; p < kGBParts; ++p)
+            if (touched[p]) g.pending[p].push_back(std::move(parts[p]));
+        return true;
+    }
+
     void finalize(GlobalSinkState& gs, ErrCtx& err) override {
         auto& g = static_cast<GroupByGlobal&>(gs);
+        if (seed.groups > 0 && !queue_seed(g, err)) return;
         // Adaptive parallelism: thread spawn/join costs ~ms — pure overhead for
         // small aggregations (profiled: sub-50ms queries doubled under 14 idle
         // spawns). Thread only when the queued group count justifies it.

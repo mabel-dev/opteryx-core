@@ -133,6 +133,16 @@ gate runs every eligible shape both ways and asserts the results are identical
 attribute a measurement, since the plan-time correlated filter pushes range
 predicates onto the same scans."""
 
+DISABLE_STATISTICS_COVERAGE: bool = get_bool("DISABLE_STATISTICS_COVERAGE", False)
+"""Turn OFF statistics coverage — answering the row groups of an ungrouped
+aggregate's scan whose footer statistics prove EVERY row satisfies the predicate
+from those statistics at plan time, instead of reading them
+(docs/MANIFEST_SUM_STATISTIC_DESIGN.md §7).
+
+Mirrored as the session variable `disable_statistics_coverage`. Off reads every
+row group the pruning keeps; the answer must be identical either way, which is
+what the on/off oracle asserts and what makes the off arm the honest baseline."""
+
 DISABLE_TOPN_RUNTIME_BOUNDARY: bool = get_bool("DISABLE_TOPN_RUNTIME_BOUNDARY", False)
 """Turn OFF the Top-N runtime boundary — the running n-th best leading-key value of
 a `... ORDER BY k LIMIT n` query, fed back into the parquet scan below it so row

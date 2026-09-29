@@ -10,11 +10,10 @@
 //   "True division" returning float64 is deferred until float64 is built.
 //   A separate slot or op-code covers true-div when that type lands.
 //
-// Overflow:
-//   add/sub/mul overflow: silent wrap (C signed arithmetic).
-//   neg(INT64_MIN): wraps to INT64_MIN (signed overflow, platform-deterministic
-//   on NEON/AVX2 x86; documents the behaviour rather than masking it).
-//   div/mod by zero: result = 0.
+// Overflow (ruling 2026-09-29): add/sub/mul/neg and INT64_MIN DIV -1 FAIL LOUD
+//   (std::overflow_error, per batch, no wrapped answer) — see ops/int64_checked.h,
+//   shared with fixed_int_ops.h. Same contract as SUM and DECIMAL.
+//   div/mod by zero on a live row: std::domain_error (ruling 2026-09-29; was 0).
 //
 // Null propagation: any null input → null output for that row.
 //   result_valid[i] = a_valid[i] AND b_valid[i].
@@ -32,6 +31,7 @@
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
 #include "ops/vec_result.h"
+#include "ops/int64_checked.h"
 
 namespace draken { namespace ops {
 
@@ -116,8 +116,8 @@ static inline VecResult make_dense_result(
 // Every producer in this file can — i64_neg and i64_div_scalar's `scalar == -1`
 // arm negate (ascending becomes descending), i64_mul_scalar by a negative scalar
 // reverses, i64_mod_scalar's sawtooth destroys order outright, and even
-// add/sub_scalar break monotonicity when they WRAP (this file's overflow rule is
-// silent wrap, see the header).
+// add/sub_scalar could break monotonicity if they wrapped (they now raise on
+// overflow instead, see the header — the mask stays for the negating arms).
 //
 // This is not a lost optimisation. A consumer is entitled to collapse a range or
 // equality predicate to a code interval on the strength of KEYS_SORTED
@@ -172,9 +172,14 @@ static inline VecResult make_shaped_result(int64_t* values, const DrakenVector& 
 // the result is constant. Returns true + fills `out` when applied. A null
 // constant (validity != nullptr) is NOT folded — it falls through to the general
 // path, which propagates the all-null result correctly.
+//
+// Overflow is a BAIL-OUT here, not an error (same rule as dec_const_fold): a dict
+// `data` array may hold dead entries no row references, and the physical block
+// cannot tell live from dead. On any overflow the fast path is abandoned and the
+// caller's uniform loop runs — it raises iff a LIVE row overflows.
 template <typename Op>
 static inline bool i64_const_fold(const DrakenVector& a, const DrakenVector& b,
-                                  Op op, VecResult& out) {
+                                  VecResult& out) {
     const bool a_const = draken_is_constant(&a) && a.validity == nullptr;
     const bool b_const = draken_is_constant(&b) && b.validity == nullptr;
     if (!a_const && !b_const) return false;
@@ -184,13 +189,17 @@ static inline bool i64_const_fold(const DrakenVector& a, const DrakenVector& b,
         const int64_t s = bd[0];
         const uint32_t k = a.data_length;
         int64_t* dst = alloc_i64(k);
-        for (uint32_t j = 0; j < k; ++j) dst[j] = op(ad[j], s);
+        bool ovf = false;
+        for (uint32_t j = 0; j < k; ++j) ovf |= Op::apply(ad[j], s, dst[j]);
+        if (ovf) { draken_free(dst); return false; }
         out = make_shaped_result(dst, a);
     } else {                             // a constant, b varies — shape from b
         const int64_t s = ad[0];
         const uint32_t k = b.data_length;
         int64_t* dst = alloc_i64(k);
-        for (uint32_t j = 0; j < k; ++j) dst[j] = op(s, bd[j]);
+        bool ovf = false;
+        for (uint32_t j = 0; j < k; ++j) ovf |= Op::apply(s, bd[j], dst[j]);
+        if (ovf) { draken_free(dst); return false; }
         out = make_shaped_result(dst, b);
     }
     return true;
@@ -203,13 +212,15 @@ static inline VecResult i64_add(const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
         throw std::invalid_argument("i64_add: length mismatch");
     VecResult out;
-    if (i64_const_fold(a, b, [](int64_t x, int64_t y){ return x + y; }, out)) return out;
+    if (i64_const_fold<I64OvfAdd>(a, b, out)) return out;
     const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const int64_t* bd = static_cast<const int64_t*>(b.data);
     int64_t* dst = alloc_i64(n);
-    for (uint32_t i = 0; i < n; ++i)
-        dst[i] = ad[a.selection[i]] + bd[b.selection[i]];
+    i64_checked_rows<I64OvfAdd>(n, dst,
+        [&](uint32_t i) { return ad[a.selection[i]]; },
+        [&](uint32_t i) { return bd[b.selection[i]]; },
+        a.validity, b.validity);
     return make_dense_result(dst, combine_validity(a.validity, b.validity, n), n);
 }
 
@@ -219,7 +230,7 @@ static inline VecResult i64_add_scalar(const DrakenVector& a, int64_t scalar) {
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const uint32_t k = a.data_length;
     int64_t* dst = alloc_i64(k);
-    for (uint32_t j = 0; j < k; ++j) dst[j] = ad[j] + scalar;
+    i64_checked_physical<I64OvfAdd>(a, ad, scalar, dst);
     return make_shaped_result(dst, a);
 }
 
@@ -230,13 +241,15 @@ static inline VecResult i64_sub(const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
         throw std::invalid_argument("i64_sub: length mismatch");
     VecResult out;
-    if (i64_const_fold(a, b, [](int64_t x, int64_t y){ return x - y; }, out)) return out;
+    if (i64_const_fold<I64OvfSub>(a, b, out)) return out;
     const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const int64_t* bd = static_cast<const int64_t*>(b.data);
     int64_t* dst = alloc_i64(n);
-    for (uint32_t i = 0; i < n; ++i)
-        dst[i] = ad[a.selection[i]] - bd[b.selection[i]];
+    i64_checked_rows<I64OvfSub>(n, dst,
+        [&](uint32_t i) { return ad[a.selection[i]]; },
+        [&](uint32_t i) { return bd[b.selection[i]]; },
+        a.validity, b.validity);
     return make_dense_result(dst, combine_validity(a.validity, b.validity, n), n);
 }
 
@@ -244,7 +257,7 @@ static inline VecResult i64_sub_scalar(const DrakenVector& a, int64_t scalar) {
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const uint32_t k = a.data_length;
     int64_t* dst = alloc_i64(k);
-    for (uint32_t j = 0; j < k; ++j) dst[j] = ad[j] - scalar;
+    i64_checked_physical<I64OvfSub>(a, ad, scalar, dst);
     return make_shaped_result(dst, a);
 }
 
@@ -255,13 +268,15 @@ static inline VecResult i64_mul(const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
         throw std::invalid_argument("i64_mul: length mismatch");
     VecResult out;
-    if (i64_const_fold(a, b, [](int64_t x, int64_t y){ return x * y; }, out)) return out;
+    if (i64_const_fold<I64OvfMul>(a, b, out)) return out;
     const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const int64_t* bd = static_cast<const int64_t*>(b.data);
     int64_t* dst = alloc_i64(n);
-    for (uint32_t i = 0; i < n; ++i)
-        dst[i] = ad[a.selection[i]] * bd[b.selection[i]];
+    i64_checked_rows<I64OvfMul>(n, dst,
+        [&](uint32_t i) { return ad[a.selection[i]]; },
+        [&](uint32_t i) { return bd[b.selection[i]]; },
+        a.validity, b.validity);
     return make_dense_result(dst, combine_validity(a.validity, b.validity, n), n);
 }
 
@@ -269,31 +284,29 @@ static inline VecResult i64_mul_scalar(const DrakenVector& a, int64_t scalar) {
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const uint32_t k = a.data_length;
     int64_t* dst = alloc_i64(k);
-    for (uint32_t j = 0; j < k; ++j) dst[j] = ad[j] * scalar;
+    i64_checked_physical<I64OvfMul>(a, ad, scalar, dst);
     return make_shaped_result(dst, a);
 }
 
 // ---------------------------------------------------------------------------
-// DIV — integer division, C truncation toward zero, div-by-zero → 0.
-// (cdivision=True semantics.)
+// DIV — integer division, C truncation toward zero, div-by-zero raises
+// (ruling 2026-09-29, was 0). (cdivision=True semantics.)
 // Note: true-division returning float64 is out of scope until float64 is built.
 // ---------------------------------------------------------------------------
 static inline VecResult i64_div(const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
         throw std::invalid_argument("i64_div: length mismatch");
     VecResult out;
-    // bv == -1 is answered by negation, not idiv: INT64_MIN / -1 raises SIGFPE
-    // (#DE) on x86 — the wrap contract above (matches i64_neg) requires the
-    // divide never be issued for that divisor.
-    if (i64_const_fold(a, b, [](int64_t x, int64_t y){ return y == 0 ? (int64_t)0 : y == -1 ? -x : x / y; }, out)) return out;
+    // y == -1 is answered by checked negation, not idiv (see I64OvfDiv).
+    if (i64_const_fold<I64OvfDiv>(a, b, out)) return out;
     const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const int64_t* bd = static_cast<const int64_t*>(b.data);
     int64_t* dst = alloc_i64(n);
-    for (uint32_t i = 0; i < n; ++i) {
-        const int64_t bv = bd[b.selection[i]];
-        dst[i] = (bv == 0) ? 0 : (bv == -1) ? -ad[a.selection[i]] : ad[a.selection[i]] / bv;
-    }
+    i64_checked_rows<I64OvfDiv>(n, dst,
+        [&](uint32_t i) { return ad[a.selection[i]]; },
+        [&](uint32_t i) { return bd[b.selection[i]]; },
+        a.validity, b.validity);
     return make_dense_result(dst, combine_validity(a.validity, b.validity, n), n);
 }
 
@@ -301,35 +314,29 @@ static inline VecResult i64_div_scalar(const DrakenVector& a, int64_t scalar) {
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const uint32_t k = a.data_length;
     int64_t* dst = alloc_i64(k);
-    if (scalar == 0) {
-        for (uint32_t j = 0; j < k; ++j) dst[j] = 0;
-    } else if (scalar == -1) {
-        // Negate, never idiv: INT64_MIN / -1 raises SIGFPE; wraps like i64_neg.
-        for (uint32_t j = 0; j < k; ++j) dst[j] = -ad[j];
-    } else {
-        for (uint32_t j = 0; j < k; ++j) dst[j] = ad[j] / scalar;
-    }
+    // scalar == -1 is checked negation, never idiv; scalar == 0 is a divide-by-zero
+    // error on a live row (see I64OvfDiv).
+    i64_checked_physical<I64OvfDiv>(a, ad, scalar, dst);
     return make_shaped_result(dst, a);
 }
 
 // ---------------------------------------------------------------------------
-// MOD — C truncation-based modulo, mod-by-zero → 0.
+// MOD — C truncation-based modulo, mod-by-zero raises (ruling 2026-09-29).
 // ---------------------------------------------------------------------------
 static inline VecResult i64_mod(const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
         throw std::invalid_argument("i64_mod: length mismatch");
     VecResult out;
-    // bv == -1 → 0 for every dividend, answered without idiv: INT64_MIN % -1
-    // raises SIGFPE (#DE) on x86 even though the mathematical result is 0.
-    if (i64_const_fold(a, b, [](int64_t x, int64_t y){ return (y == 0 || y == -1) ? (int64_t)0 : x % y; }, out)) return out;
+    // y == -1 → 0 for every dividend, answered without idiv (see I64OvfMod).
+    if (i64_const_fold<I64OvfMod>(a, b, out)) return out;
     const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const int64_t* bd = static_cast<const int64_t*>(b.data);
     int64_t* dst = alloc_i64(n);
-    for (uint32_t i = 0; i < n; ++i) {
-        const int64_t bv = bd[b.selection[i]];
-        dst[i] = (bv == 0 || bv == -1) ? 0 : ad[a.selection[i]] % bv;
-    }
+    i64_checked_rows<I64OvfMod>(n, dst,
+        [&](uint32_t i) { return ad[a.selection[i]]; },
+        [&](uint32_t i) { return bd[b.selection[i]]; },
+        a.validity, b.validity);
     return make_dense_result(dst, combine_validity(a.validity, b.validity, n), n);
 }
 
@@ -337,19 +344,15 @@ static inline VecResult i64_mod_scalar(const DrakenVector& a, int64_t scalar) {
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const uint32_t k = a.data_length;
     int64_t* dst = alloc_i64(k);
-    if (scalar == 0 || scalar == -1) {
-        // x % -1 == 0 for all x; never issue idiv (INT64_MIN % -1 SIGFPEs).
-        for (uint32_t j = 0; j < k; ++j) dst[j] = 0;
-    } else {
-        for (uint32_t j = 0; j < k; ++j) dst[j] = ad[j] % scalar;
-    }
+    // x % -1 == 0 for all x (never idiv: INT64_MIN % -1 SIGFPEs); scalar == 0 is a
+    // divide-by-zero error on a live row (see I64OvfMod).
+    i64_checked_physical<I64OvfMod>(a, ad, scalar, dst);
     return make_shaped_result(dst, a);
 }
 
 // ---------------------------------------------------------------------------
 // NEG — unary negation.
-// neg(INT64_MIN) wraps to INT64_MIN (signed overflow, platform-deterministic
-// on all our targets).
+// neg(INT64_MIN) overflows: fails loud (std::overflow_error), never wraps.
 // ---------------------------------------------------------------------------
 static inline VecResult i64_neg(const DrakenVector& a) {
     // Unary → always shape-preserving: negate the data_length physical values and
@@ -357,7 +360,7 @@ static inline VecResult i64_neg(const DrakenVector& a) {
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const uint32_t k = a.data_length;
     int64_t* dst = alloc_i64(k);
-    for (uint32_t j = 0; j < k; ++j) dst[j] = -ad[j];
+    i64_checked_physical<I64OvfNeg>(a, ad, 0, dst);
     return make_shaped_result(dst, a);
 }
 

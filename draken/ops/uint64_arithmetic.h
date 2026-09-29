@@ -5,8 +5,9 @@
 //   - genuinely unsigned semantics throughout (div/mod are unsigned, not the
 //     C truncation-toward-zero the signed family uses — matters for values
 //     that would be "negative" if misread as signed).
-//   - add/sub/mul overflow: wraps (well-defined for unsigned, unlike the
-//     signed family's implementation-defined wrap).
+//   - add/sub/mul overflow (incl. a subtraction below zero) FAILS LOUD, exactly
+//     like the signed family (ruling 2026-09-29; supersedes E33's wrap). See
+//     ops/int64_checked.h. div/mod by zero stays 0 (separate ruling).
 //   - no neg() — unsigned has no negation; the OpsTable slot stays
 //     unregistered, so dispatching it fails loudly rather than silently
 //     wrapping to a nonsensical "negative unsigned" value.
@@ -24,6 +25,7 @@
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
 #include "ops/vec_result.h"
+#include "ops/int64_checked.h"
 
 namespace draken { namespace ops {
 
@@ -138,20 +140,48 @@ static inline bool u64a_const_fold(const DrakenVector& a, const DrakenVector& b,
     return true;
 }
 
+// Overflow-checked twin of u64a_const_fold for add/sub/mul: overflow is a BAIL-OUT
+// (the uniform loop then raises iff a LIVE row overflows) — see i64_const_fold.
+template <typename Op>
+static inline bool u64a_const_fold_checked(const DrakenVector& a, const DrakenVector& b,
+                                           VecResult& out) {
+    const bool a_const = draken_is_constant(&a) && a.validity == nullptr;
+    const bool b_const = draken_is_constant(&b) && b.validity == nullptr;
+    if (!a_const && !b_const) return false;
+    const uint64_t* ad = static_cast<const uint64_t*>(a.data);
+    const uint64_t* bd = static_cast<const uint64_t*>(b.data);
+    const DrakenVector& src = b_const ? a : b;
+    const uint32_t k = src.data_length;
+    uint64_t* dst = u64a_alloc(k);
+    bool ovf = false;
+    if (b_const) {
+        const uint64_t s = bd[0];
+        for (uint32_t j = 0; j < k; ++j) ovf |= Op::apply(ad[j], s, dst[j]);
+    } else {
+        const uint64_t s = ad[0];
+        for (uint32_t j = 0; j < k; ++j) ovf |= Op::apply(s, bd[j], dst[j]);
+    }
+    if (ovf) { draken_free(dst); return false; }
+    out = u64a_make_shaped_result(dst, src);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
-// ADD / SUB / MUL — wrap on overflow (well-defined for uint64_t).
+// ADD / SUB / MUL — overflow-checked, fail loud (ops/int64_checked.h).
 // ---------------------------------------------------------------------------
 static inline VecResult u64_add(const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
         throw std::invalid_argument("u64_add: length mismatch");
     VecResult out;
-    if (u64a_const_fold(a, b, [](uint64_t x, uint64_t y){ return x + y; }, out)) return out;
+    if (u64a_const_fold_checked<U64OvfAdd>(a, b, out)) return out;
     const uint32_t n = a.length;
     const uint64_t* ad = static_cast<const uint64_t*>(a.data);
     const uint64_t* bd = static_cast<const uint64_t*>(b.data);
     uint64_t* dst = u64a_alloc(n);
-    for (uint32_t i = 0; i < n; ++i)
-        dst[i] = ad[a.selection[i]] + bd[b.selection[i]];
+    u_checked_rows<U64OvfAdd, uint64_t>(n, dst,
+        [&](uint32_t i) { return ad[a.selection[i]]; },
+        [&](uint32_t i) { return bd[b.selection[i]]; },
+        a.validity, b.validity);
     return u64a_make_dense_result(dst, u64a_combine_validity(a.validity, b.validity, n), n);
 }
 
@@ -160,7 +190,7 @@ static inline VecResult u64_add_scalar(const DrakenVector& a, int64_t scalar) {
     const uint64_t* ad = static_cast<const uint64_t*>(a.data);
     const uint32_t k = a.data_length;
     uint64_t* dst = u64a_alloc(k);
-    for (uint32_t j = 0; j < k; ++j) dst[j] = ad[j] + s;
+    u64_checked_physical<U64OvfAdd>(a, ad, s, dst);
     return u64a_make_shaped_result(dst, a);
 }
 
@@ -168,13 +198,15 @@ static inline VecResult u64_sub(const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
         throw std::invalid_argument("u64_sub: length mismatch");
     VecResult out;
-    if (u64a_const_fold(a, b, [](uint64_t x, uint64_t y){ return x - y; }, out)) return out;
+    if (u64a_const_fold_checked<U64OvfSub>(a, b, out)) return out;
     const uint32_t n = a.length;
     const uint64_t* ad = static_cast<const uint64_t*>(a.data);
     const uint64_t* bd = static_cast<const uint64_t*>(b.data);
     uint64_t* dst = u64a_alloc(n);
-    for (uint32_t i = 0; i < n; ++i)
-        dst[i] = ad[a.selection[i]] - bd[b.selection[i]];
+    u_checked_rows<U64OvfSub, uint64_t>(n, dst,
+        [&](uint32_t i) { return ad[a.selection[i]]; },
+        [&](uint32_t i) { return bd[b.selection[i]]; },
+        a.validity, b.validity);
     return u64a_make_dense_result(dst, u64a_combine_validity(a.validity, b.validity, n), n);
 }
 
@@ -183,7 +215,7 @@ static inline VecResult u64_sub_scalar(const DrakenVector& a, int64_t scalar) {
     const uint64_t* ad = static_cast<const uint64_t*>(a.data);
     const uint32_t k = a.data_length;
     uint64_t* dst = u64a_alloc(k);
-    for (uint32_t j = 0; j < k; ++j) dst[j] = ad[j] - s;
+    u64_checked_physical<U64OvfSub>(a, ad, s, dst);
     return u64a_make_shaped_result(dst, a);
 }
 
@@ -191,13 +223,15 @@ static inline VecResult u64_mul(const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
         throw std::invalid_argument("u64_mul: length mismatch");
     VecResult out;
-    if (u64a_const_fold(a, b, [](uint64_t x, uint64_t y){ return x * y; }, out)) return out;
+    if (u64a_const_fold_checked<U64OvfMul>(a, b, out)) return out;
     const uint32_t n = a.length;
     const uint64_t* ad = static_cast<const uint64_t*>(a.data);
     const uint64_t* bd = static_cast<const uint64_t*>(b.data);
     uint64_t* dst = u64a_alloc(n);
-    for (uint32_t i = 0; i < n; ++i)
-        dst[i] = ad[a.selection[i]] * bd[b.selection[i]];
+    u_checked_rows<U64OvfMul, uint64_t>(n, dst,
+        [&](uint32_t i) { return ad[a.selection[i]]; },
+        [&](uint32_t i) { return bd[b.selection[i]]; },
+        a.validity, b.validity);
     return u64a_make_dense_result(dst, u64a_combine_validity(a.validity, b.validity, n), n);
 }
 
@@ -206,28 +240,28 @@ static inline VecResult u64_mul_scalar(const DrakenVector& a, int64_t scalar) {
     const uint64_t* ad = static_cast<const uint64_t*>(a.data);
     const uint32_t k = a.data_length;
     uint64_t* dst = u64a_alloc(k);
-    for (uint32_t j = 0; j < k; ++j) dst[j] = ad[j] * s;
+    u64_checked_physical<U64OvfMul>(a, ad, s, dst);
     return u64a_make_shaped_result(dst, a);
 }
 
 // ---------------------------------------------------------------------------
-// DIV / MOD — genuinely unsigned division/modulo, div/mod-by-zero -> 0
-// (matches the signed family's zero-by-zero convention, not its truncation
+// DIV / MOD — genuinely unsigned division/modulo, div/mod-by-zero RAISES on a live
+// row (ruling 2026-09-29; matches the signed family, not its truncation
 // semantics — unsigned division has no "toward zero" ambiguity to begin with).
 // ---------------------------------------------------------------------------
 static inline VecResult u64_div(const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
         throw std::invalid_argument("u64_div: length mismatch");
     VecResult out;
-    if (u64a_const_fold(a, b, [](uint64_t x, uint64_t y){ return y == 0u ? (uint64_t)0 : x / y; }, out)) return out;
+    if (u64a_const_fold_checked<U64OvfDiv>(a, b, out)) return out;
     const uint32_t n = a.length;
     const uint64_t* ad = static_cast<const uint64_t*>(a.data);
     const uint64_t* bd = static_cast<const uint64_t*>(b.data);
     uint64_t* dst = u64a_alloc(n);
-    for (uint32_t i = 0; i < n; ++i) {
-        const uint64_t bv = bd[b.selection[i]];
-        dst[i] = (bv == 0u) ? 0u : ad[a.selection[i]] / bv;
-    }
+    u_checked_rows<U64OvfDiv, uint64_t>(n, dst,
+        [&](uint32_t i) { return ad[a.selection[i]]; },
+        [&](uint32_t i) { return bd[b.selection[i]]; },
+        a.validity, b.validity);
     return u64a_make_dense_result(dst, u64a_combine_validity(a.validity, b.validity, n), n);
 }
 
@@ -236,11 +270,7 @@ static inline VecResult u64_div_scalar(const DrakenVector& a, int64_t scalar) {
     const uint64_t* ad = static_cast<const uint64_t*>(a.data);
     const uint32_t k = a.data_length;
     uint64_t* dst = u64a_alloc(k);
-    if (s == 0u) {
-        for (uint32_t j = 0; j < k; ++j) dst[j] = 0u;
-    } else {
-        for (uint32_t j = 0; j < k; ++j) dst[j] = ad[j] / s;
-    }
+    u64_checked_physical<U64OvfDiv>(a, ad, s, dst);   // s == 0: divide-by-zero on a live row
     return u64a_make_shaped_result(dst, a);
 }
 
@@ -248,15 +278,15 @@ static inline VecResult u64_mod(const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
         throw std::invalid_argument("u64_mod: length mismatch");
     VecResult out;
-    if (u64a_const_fold(a, b, [](uint64_t x, uint64_t y){ return y == 0u ? (uint64_t)0 : x % y; }, out)) return out;
+    if (u64a_const_fold_checked<U64OvfMod>(a, b, out)) return out;
     const uint32_t n = a.length;
     const uint64_t* ad = static_cast<const uint64_t*>(a.data);
     const uint64_t* bd = static_cast<const uint64_t*>(b.data);
     uint64_t* dst = u64a_alloc(n);
-    for (uint32_t i = 0; i < n; ++i) {
-        const uint64_t bv = bd[b.selection[i]];
-        dst[i] = (bv == 0u) ? 0u : ad[a.selection[i]] % bv;
-    }
+    u_checked_rows<U64OvfMod, uint64_t>(n, dst,
+        [&](uint32_t i) { return ad[a.selection[i]]; },
+        [&](uint32_t i) { return bd[b.selection[i]]; },
+        a.validity, b.validity);
     return u64a_make_dense_result(dst, u64a_combine_validity(a.validity, b.validity, n), n);
 }
 
@@ -265,11 +295,7 @@ static inline VecResult u64_mod_scalar(const DrakenVector& a, int64_t scalar) {
     const uint64_t* ad = static_cast<const uint64_t*>(a.data);
     const uint32_t k = a.data_length;
     uint64_t* dst = u64a_alloc(k);
-    if (s == 0u) {
-        for (uint32_t j = 0; j < k; ++j) dst[j] = 0u;
-    } else {
-        for (uint32_t j = 0; j < k; ++j) dst[j] = ad[j] % s;
-    }
+    u64_checked_physical<U64OvfMod>(a, ad, s, dst);   // s == 0: divide-by-zero on a live row
     return u64a_make_shaped_result(dst, a);
 }
 

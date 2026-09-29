@@ -752,6 +752,139 @@ def _constant_replacements(condition):
     return preds
 
 
+# Statistics coverage (P3, docs/MANIFEST_SUM_STATISTIC_DESIGN.md §7): the
+# CoverageNeed codes of src/cpp/engine/stats_coverage.hpp.
+_NEED_ROWS, _NEED_VALID, _NEED_SUM, _NEED_MIN, _NEED_MAX = range(5)
+# native_parquet_scan_source.hpp LC_DATE: the one decode retag coverage admits.
+_LC_DATE = 3
+
+
+def _coverage_aggregates(aggregates):
+    """What each aggregate of an ungrouped aggregate needs from a row group its
+    scan's footer statistics cover: [(aggregate identity, need, operand physical
+    name | None, operand DrakenType value | None)], or None when ANY aggregate
+    cannot be answered from footer statistics - then no row group is covered and
+    the scan reads everything pruning keeps.
+
+    Answerable, and only these:
+      COUNT(*)            rows;
+      COUNT(col)          rows - nulls (any column type);
+      SUM/AVG(col)        the exact integer sum (integer columns, every width
+                          and sign - the engine's own int128 arithmetic);
+      MIN/MAX(col)        the bounds, where the stored bound IS the value: the
+                          signed integers, UINT8/16/32 and DATE32 - never UINT64
+                          (sign-biased ordinal), floats (NaN), strings (prefix
+                          ordinals) or temporal types with units.
+    A column carrying a logical descriptor (IPV4 over UINT32) is not a plain
+    integer and is refused, as is every DISTINCT but the distinct-invariant
+    MIN/MAX.
+    """
+    from opteryx.expression import NodeType
+    from opteryx.types.logical_type import DrakenType
+
+    summable = {
+        DrakenType.INT8, DrakenType.INT16, DrakenType.INT32, DrakenType.INT64,
+        DrakenType.UINT8, DrakenType.UINT16, DrakenType.UINT32, DrakenType.UINT64,
+    }
+    ordered = {
+        DrakenType.INT8, DrakenType.INT16, DrakenType.INT32, DrakenType.INT64,
+        DrakenType.UINT8, DrakenType.UINT16, DrakenType.UINT32, DrakenType.DATE32,
+    }
+    request = []
+    for agg in aggregates:
+        func = agg.value
+        sc = agg.schema_column
+        params = agg.parameters or []
+        if sc is None or sc.identity is None or len(params) != 1:
+            return None
+        distinct = agg.duplicate_treatment == "Distinct"
+        operand = params[0]
+        if func == "COUNT" and operand.node_type == NodeType.WILDCARD:
+            if distinct:
+                return None
+            request.append((sc.identity, _NEED_ROWS, None, None))
+            continue
+        if operand.node_type != NodeType.IDENTIFIER:
+            return None
+        column = operand.schema_column
+        if column is None or not column.name or column.column_type is None:
+            return None
+        column_type = column.column_type
+        if func == "COUNT":
+            if distinct:
+                return None
+            request.append((sc.identity, _NEED_VALID, column.name, column_type.physical.value))
+            continue
+        if column_type.logical is not None:
+            return None
+        if func in ("SUM", "AVG"):
+            if distinct or column_type.physical not in summable:
+                return None
+            request.append((sc.identity, _NEED_SUM, column.name, column_type.physical.value))
+            continue
+        if func in ("MIN", "MAX"):
+            if column_type.physical not in ordered:
+                return None
+            need = _NEED_MIN if func == "MIN" else _NEED_MAX
+            request.append((sc.identity, need, column.name, column_type.physical.value))
+            continue
+        return None
+    return request if request else None
+
+
+def _coverage_group_keys(step):
+    """The GROUP BY keys a statistics seed can name (P4): [(physical name,
+    DrakenType value)] in the sink's key order (_group_by_identities), or None.
+
+    A covered row group answers ONE group only when each key column holds a
+    single value throughout it, read from its bounds - so every key must be a
+    bare column whose stored bound IS the value: the signed integers, UINT8/16/32
+    and DATE32 (never UINT64's sign-biased ordinal, floats, strings, or a logical
+    descriptor). ROLLUP/CUBE/GROUPING SETS are refused: their extra grouping-set
+    key has no statistics.
+    """
+    from opteryx.expression import NodeType
+    from opteryx.types.logical_type import DrakenType
+
+    if step.grouping_set_identities is not None:
+        return None
+    single_valued = {
+        DrakenType.INT8, DrakenType.INT16, DrakenType.INT32, DrakenType.INT64,
+        DrakenType.UINT8, DrakenType.UINT16, DrakenType.UINT32, DrakenType.DATE32,
+    }
+    by_identity = {}
+    for group in step.groups:
+        column = group.schema_column
+        if group.node_type != NodeType.IDENTIFIER or column is None or not column.name:
+            return None
+        column_type = column.column_type
+        if column_type is None or column_type.logical is not None:
+            return None
+        if column_type.physical not in single_valued:
+            return None
+        by_identity[column.identity] = (column.name, column_type.physical.value)
+    return [by_identity[identity] for identity in _group_by_identities(step)]
+
+
+def _coverage_seed_partials(request, partials, specs):
+    """The covered row groups' partials, one per aggregate spec in spec order:
+    [(rows, valid, sum, any_extreme, min, max, operand DrakenType | None)].
+    `request` = [(aggregate identity, operand type)] parallel to `partials`.
+    Every spec MUST have one - its covered row groups were never read."""
+    by_identity = {
+        identity: (*partial, operand_type)
+        for (identity, operand_type), partial in zip(request, partials)
+    }
+    seeded = []
+    for spec in specs:
+        if spec[0] not in by_identity:
+            raise InvalidInternalStateError(
+                f"statistics seed has no partial for aggregate {spec[0]!r}, whose "
+                "covered row groups were not read")
+        seeded.append(by_identity[spec[0]])
+    return seeded
+
+
 def _group_by_identities(step):
     """A grouped aggregate's key identities: its GROUP BY expressions' identities,
     duplicates removed, in GROUP BY order. The native sink keys on them in this
@@ -871,6 +1004,13 @@ class _Compiler:
         # need_select). Built per execute() and discarded with the compiler — no
         # cross-query shared state.
         self._relocated_scan_filters: dict = {}
+        # Statistics coverage (P3, docs/MANIFEST_SUM_STATISTIC_DESIGN.md §7): an
+        # ungrouped aggregate directly over a scan registers what it needs by the
+        # scan's identity before compiling it; the scan's plan answers the row
+        # groups its footer statistics cover and leaves the seed here for the
+        # aggregate to be built with.
+        self._coverage_requests: dict = {}
+        self._coverage_seeds: dict = {}
         # Per-native-scan plan-time facts, keyed by scan node identity. On the
         # native path the Cython ParquetReadNode never executes, so its
         # ScanReadings (row_groups_read/files_read/…) stay zero — these carry the
@@ -940,6 +1080,12 @@ class _Compiler:
             "disable_runtime_minmax_join_filter",
             _variables,
             _config.DISABLE_RUNTIME_MINMAX_JOIN_FILTER,
+        )
+        # Statistics coverage (P3): resolved through the same variable chain.
+        self.statistics_coverage_enabled: bool = not _resolve_variable(
+            "disable_statistics_coverage",
+            _variables,
+            _config.DISABLE_STATISTICS_COVERAGE,
         )
         # How many (join, key column) runtime bounds this compile armed. A
         # plan-time fact, folded into telemetry so "the filter did not fire" is
@@ -2274,19 +2420,54 @@ class _Compiler:
             return p, out_ids
 
         if kind == "UngroupedAggregateNode":
-            (p, layout) = self._compile_only_child(in_edges, kind, node)
             aggregates = node.step.aggregates or []
+            scan_identity = None
+            if self.statistics_coverage_enabled and len(in_edges) == 1:
+                child = self.plan[in_edges[0][0]]
+                if child.is_scan:
+                    request = _coverage_aggregates(aggregates)
+                    if request is not None:
+                        scan_identity = child.identity
+                        self._coverage_requests[scan_identity] = (request, [])
+            (p, layout) = self._compile_only_child(in_edges, kind, node)
             layout = self._project_agg_operands(p, aggregates, layout)
             specs = self._parse_aggregates(aggregates, layout, grouped=False)
+            seed = None
+            if scan_identity is not None:
+                self._coverage_requests.pop(scan_identity, None)
+                covered = self._coverage_seeds.pop(scan_identity, None)
+                if covered is not None:
+                    request, partials = covered
+                    seed = _coverage_seed_partials(request, partials, specs)
             buf = self.nplan.new_buffer()
-            self.nplan.set_agg_sink(p, specs, buf)
+            self.nplan.set_agg_sink(p, specs, buf, seed)
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             out_layout = [spec[0] for spec in specs]
             return p2, out_layout
 
         if kind == "GroupedAggregateHashedNode":
+            # Statistics coverage (P4): registered before the scan below compiles -
+            # it classifies its row groups at plan time, folding each covered one
+            # that holds a single group into that group's seed.
+            scan_identity = None
+            coverage_keys = None
+            if self.statistics_coverage_enabled and len(in_edges) == 1:
+                child = self.plan[in_edges[0][0]]
+                if child.is_scan:
+                    coverage_keys = _coverage_group_keys(node.step)
+                    request = None
+                    if coverage_keys is not None:
+                        request = _coverage_aggregates(
+                            [agg for agg in node.step.aggregates or [] if agg.value != "GROUPING"])
+                    if request is not None:
+                        scan_identity = child.identity
+                        self._coverage_requests[scan_identity] = (request, coverage_keys)
             (p, layout) = self._compile_only_child(in_edges, kind, node)
+            covered = None
+            if scan_identity is not None:
+                self._coverage_requests.pop(scan_identity, None)
+                covered = self._coverage_seeds.pop(scan_identity, None)
             step = node.step
             group_cols = _group_by_identities(step)
             having = step.having_condition
@@ -2427,6 +2608,16 @@ class _Compiler:
             self.nplan.set_groupby_sink(
                 p, key_idx, group_cols, key_emit, specs, buf,
                 _estimate_to_int64(ndv_estimate, "group-count estimate for GROUP BY"))
+            if covered is not None:
+                request, groups = covered
+                seeded = []
+                operand_types = []
+                for key, partials in groups:
+                    entries = _coverage_seed_partials(request, partials, specs)
+                    operand_types = [entry[6] for entry in entries]
+                    seeded.append((key, [entry[:6] for entry in entries]))
+                self.nplan.set_groupby_seed(
+                    p, [key_type for _name, key_type in coverage_keys], seeded, operand_types)
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             out_layout = [identity for identity, emit in zip(group_cols, key_emit) if emit]
@@ -3312,6 +3503,18 @@ class _Compiler:
             resolve_skene_coalesce_tuning(scan.properties.variables),
         )
         splan.scan_identity = scan.identity
+        # Statistics coverage (P3), decided HERE at plan time: the row groups an
+        # ungrouped aggregate above can be answered for from footer statistics
+        # are classified now and skipped by the Source's claim builder. skene's
+        # one retag is TIMESTAMP-over-INT64 (retag_units), which moves no value
+        # coverage admits, but is refused for the same reason as parquet's.
+        coverage, coverage_request = self._coverage_for_scan(
+            scan, predicates,
+            {sc.name for sc in read_columns if sc.column_type.physical == DrakenType.TIMESTAMP64})
+        if coverage is not None:
+            splan.plan_coverage(coverage)
+            if splan.covered_row_groups:
+                self._coverage_seeds[scan.identity] = (coverage_request, splan.coverage_seed)
         return splan, filter_bc, read_layout, emit_ids
 
     def _skene_latmat_consumers(self, nid, has_pushed_predicate):
@@ -3842,6 +4045,15 @@ class _Compiler:
         # so row groups excluded / bytes read are unchanged. Only pruning; the
         # per-row residual is the relocated ExprFilter, not the scan.
         pruning = extract_predicate_stats(predicates) if predicates else None
+        # LC_DATE (3, native_parquet_scan_source.hpp) only re-TAGS the stored int32
+        # day count as DATE32 - the value is the footer's. Every other retag moves
+        # the value (timestamp units, DECIMAL scale) or carries a descriptor.
+        # (`widen_types` is every column's declared type, not a flag, and widening
+        # an integer keeps its value - so it never disqualifies a column.)
+        coverage, coverage_request = self._coverage_for_scan(
+            scan, predicates,
+            {sc.name for sc, retag in zip(read_scs, logical_coerce)
+             if retag and (retag & 0xF) != _LC_DATE})
         # This relation's validated `WITH(name = value)` settings (None when it
         # carries none) and the session's variables — the two layers the IO
         # resolvers below merge, hint first.
@@ -3918,8 +4130,13 @@ class _Compiler:
                 _scan_vars, _scan_overrides),
             http_tuning=resolve_http_tuning(_scan_vars, _scan_overrides),
             coalesce_tuning=resolve_coalesce_tuning(_scan_vars, _scan_overrides),
+            coverage=coverage,
         )
         self.footer_fetch_ns += splan.footer_fetch_ns
+        if coverage is not None and splan.covered_items:
+            # (request, seed): the aggregate above shapes the seed - ungrouped, one
+            # partial per aggregate; grouped, (key tuple, partials) per group.
+            self._coverage_seeds[scan.identity] = (coverage_request, splan.coverage_seed)
 
         if filter_bc is not None:
             # Wire the relocated residual for _compile_scan. The native Source emits
@@ -3934,6 +4151,37 @@ class _Compiler:
             self._relocated_scan_filters[scan.identity] = (
                 filter_bc, read_layout, emit_indices, emit_ids, need_select, read_scs)
         return splan
+
+    def _coverage_for_scan(self, scan, predicates, retagged):
+        """The statistics-coverage request for this scan, or (None, None).
+
+        Returns ``(coverage, request)``: ``coverage`` = (terms, needs, key
+        names) for open_native_scan_plan, ``request`` = [(aggregate identity,
+        operand DrakenType value)] parallel to the needs. Refused - no row group
+        is then answered from statistics, pruning is untouched - when no
+        aggregate directly above asked, the scan carries a LIMIT, any conjunct of its predicate
+        has no exact term (coverage_terms.py), or any column involved is in
+        `retagged` - the physical names whose decode moves the stored value
+        (each Source's own retags) - since its footer values are then not the
+        values the scan emits.
+        """
+        from opteryx.connectors.parquet_io.coverage_terms import extract_coverage_terms
+
+        registered = self._coverage_requests.get(scan.identity)
+        if registered is None or scan.limit is not None:
+            return None, None
+        wanted, keys = registered
+        terms = extract_coverage_terms(predicates)
+        if terms is None:
+            return None, None
+        involved = {name for name, _op, _ords in terms}
+        involved.update(name for _identity, _need, name, _type in wanted if name is not None)
+        involved.update(name for name, _type in keys)
+        if involved & retagged:
+            return None, None
+        needs = [(need, name) for _identity, need, name, _type in wanted]
+        request = [(identity, operand_type) for identity, _need, _name, operand_type in wanted]
+        return (terms, needs, [name for name, _type in keys]), request
 
     def _arm_scan_prefilter(self, p, splan, filter_bc, read_layout, read_scs) -> bool:
         """Scan prefilter (docs/PARQUET_SELECTIVE_DECODE_DESIGN.md §2.1): make the
@@ -4345,6 +4593,14 @@ class _Compiler:
                     # plus predicate-only columns, not just the projection.
                     "columns_read": len(scan.skene_read_schema_columns or []),
                 }
+                if splan.coverage_seed is not None:
+                    # P3: decided at plan time, so recorded here - the claim
+                    # builder never sees these row groups. Unlike parquet (where
+                    # coverage runs over the row groups pruning KEPT), skene's runs
+                    # before its zone/runtime pruning, so the disjoint count here
+                    # includes row groups a zone term would also have dropped.
+                    self.scan_facts[scan.identity]["row_groups_answered_from_statistics"] = splan.covered_row_groups
+                    self.scan_facts[scan.identity]["row_groups_disjoint_by_statistics"] = splan.coverage_disjoint_row_groups
                 p = self.nplan.new_pipeline()
                 self.nplan.set_native_skene_scan_source(p, splan, filter_bc, read_layout)
                 # RUNTIME MIN/MAX JOIN FILTER: record what this pipeline's SOURCE
@@ -4434,6 +4690,11 @@ class _Compiler:
                 # projection — that is what the native Source actually decodes.
                 "columns_read": len(reloc[1]) if reloc is not None else len(scan.columns),
             }
+            if splan.coverage_seed is not None:
+                # P3: row groups answered from footer statistics (never read) and
+                # row groups the exact coverage terms proved empty beyond pruning.
+                self.scan_facts[scan.identity]["row_groups_answered_from_statistics"] = splan.covered_items
+                self.scan_facts[scan.identity]["row_groups_disjoint_by_statistics"] = splan.coverage_disjoint_items
             p = self.nplan.new_pipeline()
             # R2: a scan-pushed LIMIT is enforced BY the scan — LimitPushdownStrategy
             # removes the Limit node from the plan when it pushes (limit_pushdown.py

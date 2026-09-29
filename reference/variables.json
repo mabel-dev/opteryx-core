@@ -168,6 +168,18 @@
         "default": false,
         "default_source": "literal"
     },
+    "disable_statistics_coverage": {
+        "name": "disable_statistics_coverage",
+        "type": "BOOL",
+        "owner": "USER",
+        "visibility": "UNRESTRICTED",
+        "settable": true,
+        "requires_entitlement": null,
+        "set_by": "any session",
+        "default": null,
+        "default_source": "environment",
+        "environment_key": "DISABLE_STATISTICS_COVERAGE"
+    },
     "disable_topn_runtime_boundary": {
         "name": "disable_topn_runtime_boundary",
         "type": "BOOL",

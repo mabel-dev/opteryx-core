@@ -246,7 +246,55 @@ Planning is Python by charter; this phase only decides the plan.
   residual's group partials by key.
   This needs a **partial→final aggregate plan shape** (§11, O2).
 
-### 7.2 Execution time, row-group granularity (native scan)
+### 7.2 Row-group granularity — REVISED 2026-09-29 (architect): classify at PLAN time, SEED the aggregate
+
+Implemented for parquet (P3):
+- `coverage_terms.py` translates the pushed predicate EXACTLY (all conjuncts or
+  nothing): signed ints, UINT8/16/32, DATE32; ops = < <= > >= <> IN IS [NOT] NULL
+  BETWEEN. The compiler registers an ungrouped aggregate's needs (COUNT(*),
+  COUNT(col), SUM/AVG over ints, MIN/MAX over the ordinal==value types) against
+  its scan before compiling it.
+- `open_native_scan_plan(coverage=...)` classifies every kept row group with the
+  native `stats_coverage.hpp` over its footer statistics
+  (`parquet_stats_coverage.hpp`; bounds trusted only in rugo-written files).
+  Covered row groups are folded into the plan's seed and left out of the work
+  list, together with row groups the exact terms prove empty.
+- The compiler builds `UngroupedAggSink` with the seed; `finalize` merges it
+  through `agg2_merge`, and takes operand types from it when no morsel arrived.
+- Kill switch / oracle: `disable_statistics_coverage`. Facts:
+  `row_groups_answered_from_statistics`, `row_groups_disjoint_by_statistics`.
+- skene (2026-09-29): `SkeneScanPlan.plan_coverage` runs at plan time
+  (`SkeneClaimSet::plan_coverage`), opening files through the cross-query reader
+  cache so the execution claim build is a cache hit; the Source's claim builder
+  skips the plan's excluded row groups before zone and runtime pruning (runtime
+  bounds only exist at execution, so claims — block fetch plans — are still laid
+  out there, over what the plan left).
+- GROUP BY (P4, 2026-09-29, both formats): a covered row group whose every key
+  column holds ONE value (min == max with no nulls, or only nulls = the NULL
+  group) is folded into that group's partials (`CoverageGroups`,
+  `fold_grouped_unit`; one decision entry, `cover_unit`, for both shapes). A
+  row group where any key varies is read. Compiler gate
+  (`_coverage_group_keys`): a GroupedAggregateHashedNode directly over a scan,
+  bare key columns of the ordinal==value types (signed ints, UINT8/16/32,
+  DATE32, with no logical descriptor), no ROLLUP/CUBE/GROUPING SETS, and the
+  same aggregate set as ungrouped. The seed reaches the sink through
+  `Engine::set_groupby_seed` → `GroupBySink::set_seed` (O3). At the top of
+  `finalize` it becomes one more queued partition per hash partition it touches,
+  with keys hashed through `compute_row_hashes` on a typed key morsel, exactly
+  as sunk rows are. The ordinary merge, top-k cut and emit then treat seeded
+  groups like sunk ones, and HAVING filters them downstream as usual. With no
+  morsel sunk, the seed types the sink; otherwise its types must equal the
+  captured ones, or it fails loud. Measured (on/off interleaved, best of 6):
+  - `GROUP BY EventDate` on skene: 32→17 ms (862 row groups).
+  - `CounterID` top-10: skene 12.7→8.4 ms, rugo 41→16 ms.
+  - `GROUP BY AdvEngineID`: skene 16.8→14.0 ms, rugo 43→31 ms.
+  - Q8 itself (`WHERE AdvEngineID <> 0`) gains nothing: its covered row
+    groups are the all-zero ones, which the predicate already drops as
+    disjoint.
+
+The text below is the superseded execution-time proposal.
+
+### 7.2-old Execution time, row-group granularity (native scan)
 
 This is native by charter, the Python/native boundary is crossed once, and it
 is where most of the win is. It works on footer statistics alone, so it needs
@@ -289,6 +337,31 @@ lands) and every existing skene file.
 `scratch/hits_rugo_262k` has no manifest and predates `rugo.sum`, so it has to
 be regenerated with the new rugo writer. The skene mirror already carries them.
 Prove the knob moves before claiming any gain (see §9).
+
+**Regenerated 2026-09-29.** The corpus was rewritten from itself with rugo
+0.9.143 (same files, 64k row groups in blocks of 4; the old tree is kept at
+`scratch/hits_rugo_262k.pre_sum`). Best of 6, coverage on/off interleaved:
+
+| Query | Old corpus | New corpus |
+|---|---|---|
+| Q3 | 78 ms | 1.4 ms (answered from footer sums, 0 row groups read) |
+| Q4 | 72 ms | 1.1 ms (answered from footer sums, 0 row groups read) |
+| `COUNT/SUM/AVG WHERE EventDate >= 15901` | 80 ms | off 68 ms, on 22.5 ms (692 of 1,061 covered) |
+| `GROUP BY EventDate` with `SUM` | 95 ms, nothing covered | off 75 ms, on 29 ms (932 covered) |
+
+Q2 and Q8 cover nothing: no row group holds only non-zero AdvEngineID. With
+coverage off, the new corpus is still about 30% faster on Q2 and Q8 (44 → 31 ms,
+interleaved, same row groups read, size +0.03%). That is a writer difference,
+not the sums, so ClickBench runs taken before and after the regeneration are
+not comparable.
+
+The skene mirror was rebuilt from the regenerated corpus the same day, with the
+Makefile's `dev/parquet_to_skene.py ... lz4`. It has the same shape (4 files,
+1,511 row groups) and is 0.3% larger. Its timings are unchanged (interleaved
+old vs new: Q2 21.8/21.7 ms, Q8 22.2/22.2 ms, Q3 1.1/1.0 ms), and P3/P4 cover
+the same row groups (rng 647, `GROUP BY EventDate` 862, CounterID 996,
+AdvEngineID 430). The old mirror already carried sums, so the rebuild changes
+nothing here.
 
 ## 8. Phasing
 

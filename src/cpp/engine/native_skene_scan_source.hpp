@@ -122,6 +122,7 @@
 #include "native_expression.hpp"   // ExprProgram / ExprFilterFn — the pushed predicate
 #include "operator.hpp"
 #include "runtime_bound.hpp"       // RuntimeKeyBound — runtime min/max join filter
+#include "stats_coverage.hpp"      // plan-time statistics coverage (P3)
 
 #include "logical_type.h"  // LogicalType / logical_type_intern (TIMESTAMP64 descriptor)
 #include "morsels/cxx_morsel.h"
@@ -144,7 +145,7 @@ class SkeneFileMapping {
             return;
         }
         void* addr = ::mmap(nullptr, static_cast<size_t>(st.st_size), PROT_READ,
-                            MAP_PRIVATE, fd, 0);
+                            MAP_SHARED, fd, 0);
         // The mapping keeps its own reference to the file; the descriptor is not
         // needed once mmap succeeds, and holding one per in-flight file would
         // burn descriptors on a wide scan.
@@ -728,7 +729,8 @@ class SkeneClaimSet {
                const std::vector<std::string>& read_columns, const SkeneZoneMap& zone,
                int64_t* out_total, int64_t* out_pruned, std::string& err_buf,
                size_t runtime_from, int64_t* out_pruned_runtime,
-               int64_t* out_bytes_claimed, SkeneIo* io, bool per_row_group) {
+               int64_t* out_bytes_claimed, SkeneIo* io, bool per_row_group,
+               const std::vector<std::vector<uint32_t>>* excluded = nullptr) {
         int64_t total = 0;
         int64_t pruned = 0;
         int64_t pruned_runtime = 0;
@@ -776,8 +778,19 @@ class SkeneClaimSet {
                 }
             }
 
+            // Row groups the PLAN already decided (plan_coverage below): answered
+            // from their statistics, or proven empty by the exact coverage terms.
+            // Ascending, so one cursor walks them alongside `g`. Not counted as
+            // total or pruned here — plan-time facts report them.
+            const std::vector<uint32_t>* skip =
+                (excluded != nullptr && i < excluded->size()) ? &(*excluded)[i] : nullptr;
+            size_t skip_at = 0;
             std::vector<uint32_t> surviving;
             for (uint32_t g = 0; g < metadata.row_groups.size(); ++g) {
+                if (skip != nullptr) {
+                    while (skip_at < skip->size() && (*skip)[skip_at] < g) ++skip_at;
+                    if (skip_at < skip->size() && (*skip)[skip_at] == g) continue;
+                }
                 // An empty row group is skipped at CLAIM time, and NOT counted as
                 // pruned — nothing was skipped that would have been read.
                 if (metadata.row_groups[g].row_count == 0) continue;
@@ -865,6 +878,86 @@ class SkeneClaimSet {
         if (out_pruned != nullptr) *out_pruned = pruned;
         if (out_pruned_runtime != nullptr) *out_pruned_runtime = pruned_runtime;
         if (out_bytes_claimed != nullptr) *out_bytes_claimed = bytes_measured ? bytes_claimed : -1;
+        return true;
+    }
+
+    // PLAN-TIME statistics coverage (P3, docs/MANIFEST_SUM_STATISTIC_DESIGN.md
+    // §7). Opens every file through the cross-query reader cache - the execution
+    // build that follows is then a cache hit, not a second footer read - and
+    // classifies each non-empty row group from its footer statistics
+    // (stats_coverage.hpp). Covered row groups are folded into `partials`; they
+    // and the ones the exact terms prove empty go into `excluded` (per file,
+    // ascending), which the execution build skips before any pruning. Called on
+    // a throwaway SkeneClaimSet: nothing here outlives the call but the cache.
+    //
+    // skene's statistics are the writer's own (min/max ordinals over non-null
+    // values, null counts, the int128 sum) - trusted as written. The terms only
+    // name columns whose ordinal IS the value (coverage_terms.py).
+    bool plan_coverage(const std::vector<std::string>& files, const CoverageSpec& spec,
+                       CoverageAccumulator& acc,
+                       std::vector<std::vector<uint32_t>>& excluded,
+                       int64_t* covered, int64_t* disjoint, std::string& err_buf) {
+        excluded.assign(files.size(), {});
+        int64_t n_covered = 0, n_disjoint = 0;
+        files_.clear();
+        files_.reserve(files.size());
+        for (size_t i = 0; i < files.size(); ++i) {
+            files_.push_back(std::make_unique<SkeneFile>());
+            SkeneFile& file = *files_.back();
+            file.path = files[i];
+            if (!open_file(file, err_buf)) return false;
+            const skene::FileMetadata& metadata = file.reader().metadata();
+            // each spec column's index in the flattened per-row-group statistics
+            std::vector<int32_t> stat_index(spec.names.size(), -1);
+            uint32_t offset = 0;
+            for (const skene::ColumnSchema& column : metadata.columns) {
+                for (size_t k = 0; k < spec.names.size(); ++k)
+                    if (spec.names[k] == column.name) stat_index[k] = static_cast<int32_t>(offset);
+                offset += skene_schema_subtree_size(column);
+            }
+            std::vector<CoverageColumn> columns(spec.names.size());
+            for (uint32_t g = 0; g < metadata.row_groups.size(); ++g) {
+                const skene::RowGroupSummary& summary = metadata.row_groups[g];
+                if (summary.row_count == 0) continue;
+                for (size_t k = 0; k < spec.names.size(); ++k) {
+                    CoverageColumn& c = columns[k];
+                    c = CoverageColumn{};
+                    const int32_t index = stat_index[k];
+                    if (index < 0 || static_cast<size_t>(index) >= summary.column_statistics.size())
+                        continue;
+                    const skene::RowGroupColumnStatistics& cs =
+                        summary.column_statistics[static_cast<size_t>(index)];
+                    if (!cs.present) continue;
+                    const skene::ColumnStatistics& st = cs.statistics;
+                    if ((st.flags & skene::kStatNullCount) != 0)
+                        c.null_count = static_cast<int64_t>(st.null_count);
+                    if ((st.flags & (skene::kStatMin | skene::kStatMax)) ==
+                            (skene::kStatMin | skene::kStatMax)) {
+                        c.has_bounds = true;
+                        c.min = st.min_ordinal;
+                        c.max = st.max_ordinal;
+                    }
+                    if ((st.flags & skene::kStatSum) != 0) {
+                        c.has_sum = true;
+                        c.sum = static_cast<__int128>(
+                            (static_cast<unsigned __int128>(static_cast<uint64_t>(st.sum_high)) << 64)
+                            | static_cast<uint64_t>(st.sum_low));
+                    }
+                }
+                const int verdict =
+                    cover_unit(spec, columns, static_cast<int64_t>(summary.row_count), acc);
+                if (verdict == 0) {
+                    excluded[i].push_back(g);
+                    ++n_disjoint;
+                } else if (verdict == 1) {
+                    excluded[i].push_back(g);
+                    ++n_covered;
+                }
+            }
+        }
+        files_.clear();
+        if (covered != nullptr) *covered = n_covered;
+        if (disjoint != nullptr) *disjoint = n_disjoint;
         return true;
     }
 
@@ -1157,6 +1250,7 @@ class NativeSkeneScanSource : public Source {
                           ExprFilterFn filter_fn,
                           ExprProgram* filter,
                           SkeneZoneMap zone,
+                          const std::vector<std::vector<uint32_t>>* excluded_row_groups,
                           int64_t* row_groups_total,
                           int64_t* row_groups_pruned,
                           int64_t* row_groups_pruned_runtime,
@@ -1175,6 +1269,7 @@ class NativeSkeneScanSource : public Source {
           filter_fn_(filter_fn),
           filter_(filter),
           zone_(zone),
+          excluded_(excluded_row_groups),
           row_groups_total_(row_groups_total),
           row_groups_pruned_(row_groups_pruned),
           row_groups_pruned_runtime_(row_groups_pruned_runtime),
@@ -1207,7 +1302,7 @@ class NativeSkeneScanSource : public Source {
                 g.init_ok = g.work.build(*files_, *column_names_, zone_,
                                          row_groups_total_, row_groups_pruned_,
                                          g.init_err, 0, nullptr, bytes_claimed_, io_,
-                                         /*per_row_group=*/false);
+                                         /*per_row_group=*/false, excluded_);
                 // Left UNWRITTEN (at its -1 sentinel) on purpose: the telemetry
                 // fold reports the runtime count only when a bound was actually
                 // wired, so "the filter did not fire here" stays distinguishable
@@ -1243,7 +1338,7 @@ class NativeSkeneScanSource : public Source {
             g.init_ok = g.work.build(*files_, *column_names_, effective,
                                      row_groups_total_, row_groups_pruned_, g.init_err,
                                      runtime_from, &pruned_runtime, bytes_claimed_, io_,
-                                     /*per_row_group=*/false);
+                                     /*per_row_group=*/false, excluded_);
             if (row_groups_pruned_runtime_ != nullptr)
                 *row_groups_pruned_runtime_ = pruned_runtime;
         });
@@ -1487,6 +1582,9 @@ class NativeSkeneScanSource : public Source {
     // they are written exactly once, inside the call_once above, and read by
     // Python only after the driver has finished.
     SkeneZoneMap zone_;
+    // Row groups the plan answered from statistics or proved empty, per file
+    // (SkeneClaimSet::plan_coverage). Borrowed from the SkeneScanPlan; null: none.
+    const std::vector<std::vector<uint32_t>>* excluded_ = nullptr;
     int64_t* row_groups_total_;
     int64_t* row_groups_pruned_;
     int64_t* row_groups_pruned_runtime_;

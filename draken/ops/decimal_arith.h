@@ -1060,9 +1060,9 @@ static inline VecResult dec128_mod(
 // never a real DECIMAL column, so no scale alignment is needed or attempted.
 // Deliberately NOT general DECIMAL128 INT_DIVIDE — dec128_div computes true,
 // scale-expanding decimal division (wrong semantics for a truncating integer
-// op). Follows the established C-truncation-toward-zero, divide-by-zero->0
-// integer convention (i64_div, fixed_int_ops.h) rather than dec128_div's
-// raise-on-zero decimal convention.
+// op). Follows the integer convention (i64_div, fixed_int_ops.h): C truncation
+// toward zero, and a zero divisor on a LIVE row RAISES (ruling 2026-09-29) — not
+// dec128_div's NULL-row convention, which is the true-decimal division's own.
 static inline VecResult dec128_int_divide(
     const DrakenVector& a, const DrakenVector& b)
 {
@@ -1072,16 +1072,20 @@ static inline VecResult dec128_int_divide(
     const __int128* ad = static_cast<const __int128*>(a.data);
     const __int128* bd = static_cast<const __int128*>(b.data);
     __int128* dst = alloc_i128(n);
+    bool any_zero = false;
     for (uint32_t i = 0; i < n; ++i) {
         const __int128 bv = bd[b.selection[i]];
+        any_zero |= (bv == 0);
         dst[i] = (bv == 0) ? 0 : (ad[a.selection[i]] / bv);   // truncates toward zero
     }
+    div_zero_rescan(any_zero, n, [&](uint32_t i) { return bd[b.selection[i]]; },
+                    a.validity, b.validity, dst, "division", "DECIMAL128");
     return make_decimal128_result(dst, combine_validity(a.validity, b.validity, n), n);
 }
 
 // E33 — scale-0 truncating integer modulo. Same scope/caller/convention notes
-// as dec128_int_divide above (mod-by-zero -> 0, sign of dividend — matches
-// i64_mod, NOT dec128_mod's raise-on-zero decimal convention).
+// as dec128_int_divide above (mod-by-zero raises, sign of dividend — matches
+// i64_mod, NOT dec128_mod's NULL-row decimal convention).
 static inline VecResult dec128_int_mod(
     const DrakenVector& a, const DrakenVector& b)
 {
@@ -1091,10 +1095,14 @@ static inline VecResult dec128_int_mod(
     const __int128* ad = static_cast<const __int128*>(a.data);
     const __int128* bd = static_cast<const __int128*>(b.data);
     __int128* dst = alloc_i128(n);
+    bool any_zero = false;
     for (uint32_t i = 0; i < n; ++i) {
         const __int128 bv = bd[b.selection[i]];
+        any_zero |= (bv == 0);
         dst[i] = (bv == 0) ? 0 : (ad[a.selection[i]] % bv);   // sign of dividend
     }
+    div_zero_rescan(any_zero, n, [&](uint32_t i) { return bd[b.selection[i]]; },
+                    a.validity, b.validity, dst, "modulo", "DECIMAL128");
     return make_decimal128_result(dst, combine_validity(a.validity, b.validity, n), n);
 }
 

@@ -246,6 +246,13 @@ class Manifest:
         position = self.position_of(column)
         return None if position is None else self.native.total_null_count(position)
 
+    def get_total_sum(self, column) -> Optional[int]:
+        """The column's EXACT sum of non-null values over every file (a Python
+        int), or None when any file's sum is unknown, any file has deletes, or
+        the total overflows int128 - never a partial sum."""
+        position = self.position_of(column)
+        return None if position is None else self.native.total_sum(position)
+
     def estimate_selectivity(self, predicate) -> float:
         """Estimated fraction of rows matching `predicate`, from this manifest's
         own statistics (the native estimator, src/cpp/planner/selectivity.hpp)."""

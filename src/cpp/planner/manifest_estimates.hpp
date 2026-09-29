@@ -472,6 +472,27 @@ inline int64_t total_null_count(const NativeManifest& m, size_t position) {
     return total;
 }
 
+// The column's EXACT sum over every file (draken/ops/exact_sum.h) - an ANSWER,
+// not an estimate: SUM/AVG are returned from it with the scan removed. Per file
+// its parquet footer's sum when the footer carries one, else the manifest's own
+// (both are exact). False - no answer - when any file has neither, when any file
+// carries merge-on-read deletes (the sums describe the physical superset), or
+// when the fold leaves __int128.
+inline bool total_sum(const NativeManifest& m, size_t position, __int128& out) {
+    if (has_deletes(m)) return false;
+    __int128 total = 0;
+    for (size_t f = 0; f < m.file_count(); ++f) {
+        const ManifestCell& c = m.cell(f, position);
+        __int128 part = 0;
+        if (m.file(f).has_footer && c.footer.has_sum) part = c.footer.sum;
+        else if (c.has_sum) part = c.sum;
+        else return false;
+        if (__builtin_add_overflow(total, part, &total)) return false;
+    }
+    out = total;
+    return true;
+}
+
 // Fraction of nulls over the live rows, the known counts summed; false when the
 // row count is unknown or zero.
 inline bool null_fraction(const NativeManifest& m, size_t position, double& fraction) {

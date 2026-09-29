@@ -33,7 +33,9 @@
 #include <stddef.h>
 #include <string.h>
 #include <stdexcept>
+#include "ops/int64_checked.h"
 #include <limits>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -168,7 +170,7 @@ static inline VecResult fi_make_dense(T* data, uint8_t* validity, uint32_t n) {
 // P9.1 (unify binops onto the registry kernel_fn ABI). Reads every operand as
 // int64 (sign-extended through its declared width, via selection so all three
 // vector shapes work uniformly), applies the op with the proven i64 semantics
-// (div/mod by zero → 0, C truncation toward zero — matches int64_arithmetic.h),
+// (div/mod by zero raises, C truncation toward zero — matches int64_arithmetic.h),
 // and writes the D.6 result width: int8→int16, int16→int32, int32→int64; for
 // cross-width the wider operand's rank wins. Add/sub/mul cannot overflow the
 // widened result, so the downcast to the result width is lossless. Output is
@@ -199,13 +201,18 @@ static inline int64_t fi_read_i64(const DrakenVector& v, uint32_t i) {
 }
 
 // op codes match BCBinaryOpCode: 1=PLUS 2=MINUS 3=MULTIPLY 5=MODULO 6=INT_DIVIDE.
+// Used ONLY for result widths narrower than INT64 (operands are <= INT32 there,
+// so int64 space cannot overflow and INT32_MIN / -1 is safe). An INT64 RESULT
+// goes through fi_int64_arith below — overflow-checked, fail loud.
 static inline int64_t fi_apply_i64(int op, int64_t x, int64_t y) {
     switch (op) {
         case 1: return x + y;
         case 2: return x - y;
         case 3: return x * y;
-        case 5: return (y == 0) ? 0 : x % y;   // mod-by-zero → 0 (matches i64_mod)
-        case 6: return (y == 0) ? 0 : x / y;   // div-by-zero → 0 (matches i64_div)
+        // A zero divisor yields a placeholder 0 here; fi_int_arith_store REPORTS it (a
+        // live row with a zero divisor is a divide-by-zero error, never a silent 0).
+        case 5: return (y == 0) ? 0 : x % y;
+        case 6: return (y == 0) ? 0 : x / y;
         default: throw std::invalid_argument("fi_apply_i64: unsupported op");
     }
 }
@@ -214,8 +221,15 @@ template<typename W, DrakenType WTAG>
 static inline VecResult fi_int_arith_store(int op, const DrakenVector& a, const DrakenVector& b) {
     const uint32_t n = a.length;
     W* dst = fi_alloc<W>(n);
-    for (uint32_t i = 0; i < n; ++i)
-        dst[i] = static_cast<W>(fi_apply_i64(op, fi_read_i64(a, i), fi_read_i64(b, i)));
+    bool any_zero = false;
+    for (uint32_t i = 0; i < n; ++i) {
+        const int64_t y = fi_read_i64(b, i);
+        any_zero |= ((op == 5 || op == 6) & (y == 0));
+        dst[i] = static_cast<W>(fi_apply_i64(op, fi_read_i64(a, i), y));
+    }
+    div_zero_rescan(any_zero, n, [&](uint32_t i) { return fi_read_i64(b, i); },
+                    a.validity, b.validity, dst, op == 6 ? "division" : "modulo",
+                    "INT" + std::to_string(sizeof(W) * 8));
     return fi_make_dense<W, WTAG>(dst, fi_combine_validity(a.validity, b.validity, n), n);
 }
 
@@ -248,6 +262,30 @@ static inline DrakenType fi_arith_result_tag(DrakenType ta, DrakenType tb) {
     }
 }
 
+// INT64-result arithmetic: overflow FAILS LOUD (ops/int64_checked.h), never
+// wraps; INT64_MIN / -1 never reaches idiv. Op is hoisted out of the row loop.
+template<typename Op>
+static inline VecResult fi_int64_arith_op(const DrakenVector& a, const DrakenVector& b) {
+    const uint32_t n = a.length;
+    int64_t* dst = fi_alloc<int64_t>(n);
+    i64_checked_rows<Op>(n, dst,
+        [&](uint32_t i) { return fi_read_i64(a, i); },
+        [&](uint32_t i) { return fi_read_i64(b, i); },
+        a.validity, b.validity);
+    return fi_make_dense<int64_t, DRAKEN_INT64>(dst, fi_combine_validity(a.validity, b.validity, n), n);
+}
+
+static inline VecResult fi_int64_arith(int op, const DrakenVector& a, const DrakenVector& b) {
+    switch (op) {
+        case 1: return fi_int64_arith_op<I64OvfAdd>(a, b);
+        case 2: return fi_int64_arith_op<I64OvfSub>(a, b);
+        case 3: return fi_int64_arith_op<I64OvfMul>(a, b);
+        case 5: return fi_int64_arith_op<I64OvfMod>(a, b);
+        case 6: return fi_int64_arith_op<I64OvfDiv>(a, b);
+        default: throw std::invalid_argument("fi_int64_arith: unsupported op");
+    }
+}
+
 // Integer arithmetic entry (PLUS/MINUS/MULTIPLY/MODULO/INT_DIVIDE), D.6 result width.
 static inline VecResult fi_int_arith(int op, const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
@@ -255,15 +293,15 @@ static inline VecResult fi_int_arith(int op, const DrakenVector& a, const Draken
     switch (fi_arith_result_tag(a.type, b.type)) {
         case DRAKEN_INT16: return fi_int_arith_store<int16_t, DRAKEN_INT16>(op, a, b);
         case DRAKEN_INT32: return fi_int_arith_store<int32_t, DRAKEN_INT32>(op, a, b);
-        case DRAKEN_INT64: return fi_int_arith_store<int64_t, DRAKEN_INT64>(op, a, b);
+        case DRAKEN_INT64: return fi_int64_arith(op, a, b);
         default: throw std::invalid_argument("fi_int_arith: bad result tag");
     }
 }
 
 // ===========================================================================
 // E33 — all-unsigned cross-width arithmetic, mirroring fi_int_arith/fi_read_i64
-// exactly but in uint64_t space (zero-extend, unsigned div/mod, wraps on
-// overflow — well-defined for unsigned, unlike signed overflow). Used only when
+// exactly but in uint64_t space (zero-extend, unsigned div/mod). add/sub/mul
+// overflow fails loud (ruling 2026-09-29, superseding E33's wrap). Used only when
 // BOTH operands are unsigned (UINT8/16/32/64 in any combination); a signed
 // operand paired with UINT64 cannot go through here (doesn't fit int64_t) and
 // is the DECIMAL128 escape in draken_binop instead.
@@ -280,24 +318,31 @@ static inline uint64_t fi_read_u64(const DrakenVector& v, uint32_t i) {
     }
 }
 
-static inline uint64_t fi_apply_u64(int op, uint64_t x, uint64_t y) {
-    switch (op) {
-        case 1: return x + y;
-        case 2: return x - y;
-        case 3: return x * y;
-        case 5: return (y == 0u) ? 0u : x % y;
-        case 6: return (y == 0u) ? 0u : x / y;
-        default: throw std::invalid_argument("fi_apply_u64: unsupported op");
-    }
-}
 
-template<typename W, DrakenType WTAG>
-static inline VecResult fi_uint_arith_store(int op, const DrakenVector& a, const DrakenVector& b) {
+template<typename Op, typename W, DrakenType WTAG>
+static inline VecResult fi_uint_arith_op(const DrakenVector& a, const DrakenVector& b) {
     const uint32_t n = a.length;
     W* dst = fi_alloc<W>(n);
-    for (uint32_t i = 0; i < n; ++i)
-        dst[i] = static_cast<W>(fi_apply_u64(op, fi_read_u64(a, i), fi_read_u64(b, i)));
+    u_checked_rows<Op, W>(n, dst,
+        [&](uint32_t i) { return fi_read_u64(a, i); },
+        [&](uint32_t i) { return fi_read_u64(b, i); },
+        a.validity, b.validity);
     return fi_make_dense<W, WTAG>(dst, fi_combine_validity(a.validity, b.validity, n), n);
+}
+
+// All-unsigned cross-width arithmetic. add / sub / mul are overflow-checked and FAIL
+// LOUD (ops/int64_checked.h) — including a subtraction below zero and a result above
+// the result width; div / mod by zero stays 0 (separate ruling).
+template<typename W, DrakenType WTAG>
+static inline VecResult fi_uint_arith_store(int op, const DrakenVector& a, const DrakenVector& b) {
+    switch (op) {
+        case 1: return fi_uint_arith_op<U64OvfAdd, W, WTAG>(a, b);
+        case 2: return fi_uint_arith_op<U64OvfSub, W, WTAG>(a, b);
+        case 3: return fi_uint_arith_op<U64OvfMul, W, WTAG>(a, b);
+        case 5: return fi_uint_arith_op<U64OvfMod, W, WTAG>(a, b);
+        case 6: return fi_uint_arith_op<U64OvfDiv, W, WTAG>(a, b);
+        default: throw std::invalid_argument("fi_uint_arith_store: unsupported op");
+    }
 }
 
 // Same-width widens by one step (mirroring fi_arith_result_tag's convention for
@@ -749,7 +794,7 @@ static inline uint32_t fixed_int_max(
 
 // ===========================================================================
 // ARITHMETIC — result type is NextWider<T>::type
-// div/mod by zero → 0. Null propagation: binary AND; unary copies.
+// div/mod by zero on a live row raises (ruling 2026-09-29). Null propagation: binary AND; unary copies.
 // ===========================================================================
 
 template<typename T>
@@ -766,16 +811,105 @@ static inline VecResult fixed_int_add(const DrakenVector& a, const DrakenVector&
     return fi_make_dense<W, WTAG>(dst, fi_combine_validity(a.validity, b.validity, n), n);
 }
 
-template<typename T>
-static inline VecResult fixed_int_add_scalar(const DrakenVector& a, int64_t scalar) {
+// Scalar arithmetic (vector x int64 scalar) for the narrow widths. The result
+// type is W = NextWider<T>. The operation is computed EXACTLY in int64 (checked,
+// ops/int64_checked.h) and the result must then fit W — otherwise it FAILS LOUD
+// (per batch), like every other INT overflow. The scalar is never cast to W
+// first: that silently truncated any scalar outside W's range (INT8 + 70000).
+// Logical rows only (selection followed), NULL rows skipped on the error rescan.
+// div/mod: zero divisor -> 0 (unchanged, separate ruling); a narrow dividend
+// cannot overflow, so those never trip the range check.
+// UNSIGNED source (UINT8/16/32): the result width W is unsigned too, and the int64
+// scalar may be negative (UINT8 + -1). The operation is computed EXACTLY in int128
+// (an unsigned value < 2^32 against an int64 scalar cannot overflow it) and the
+// result must lie in [0, max(W)] — otherwise it fails loud, like every other
+// overflow. A subtraction below zero is exactly that case.
+template<typename T, int OPC>
+static inline VecResult fixed_uint_scalar_checked(const DrakenVector& a, int64_t scalar) {
     using W = typename NextWider<T>::type;
     constexpr DrakenType WTAG = NextWider<T>::tag;
+    constexpr __int128 wmax = static_cast<__int128>(std::numeric_limits<W>::max());
     const uint32_t n = a.length;
     const T* ad = static_cast<const T*>(a.data);
-    const W  sv = static_cast<W>(scalar);
+    const __int128 sv = static_cast<__int128>(scalar);
+    auto calc = [&](uint32_t i, bool& bad) -> W {
+        const __int128 x = static_cast<__int128>(ad[a.selection[i]]);
+        __int128 r = 0;
+        if (OPC == 1) r = x + sv;
+        else if (OPC == 2) r = x - sv;
+        else if (OPC == 3) r = x * sv;
+        else if (OPC == 6) r = (sv == 0) ? 0 : x / sv;     // zero divisor reported below
+        else               r = (sv == 0) ? 0 : x % sv;
+        bad = (r < 0) | (r > wmax) | ((OPC >= 5) & (sv == 0));
+        return static_cast<W>(r);
+    };
     W* dst = fi_alloc<W>(n);
-    for (uint32_t i = 0; i < n; ++i) dst[i] = static_cast<W>(ad[a.selection[i]]) + sv;
+    bool any = false;
+    for (uint32_t i = 0; i < n; ++i) { bool bad; dst[i] = calc(i, bad); any |= bad; }
+    if (any) {
+        for (uint32_t i = 0; i < n; ++i) {
+            bool bad;
+            calc(i, bad);
+            if (bad && fi_row_valid(a.validity, i)) {
+                draken_free(dst);
+                const std::string w = "UINT" + std::to_string(sizeof(W) * 8);
+                const char* nm = OPC == 1 ? "addition" : OPC == 2 ? "subtraction"
+                               : OPC == 3 ? "multiplication" : OPC == 6 ? "division" : "modulo";
+                if (OPC >= 5 && sv == 0)
+                    throw std::domain_error(
+                        w + " " + nm + " by zero: the divisor is 0 — fail loud, never a silent 0");
+                throw std::overflow_error(
+                    w + " " + nm + " overflow: exact integer result is outside " + w +
+                    " — fail loud, never a wrapped answer");
+            }
+        }
+    }
     return fi_make_dense<W, WTAG>(dst, fi_copy_validity(a.validity, n), n);
+}
+
+template<typename T, typename Op>
+static inline VecResult fixed_int_scalar_checked(const DrakenVector& a, int64_t scalar) {
+    using W = typename NextWider<T>::type;
+    constexpr DrakenType WTAG = NextWider<T>::tag;
+    static_assert(std::is_signed<T>::value, "unsigned sources use fixed_uint_scalar_checked");
+    constexpr int64_t wmin = static_cast<int64_t>(std::numeric_limits<W>::min());
+    constexpr int64_t wmax = static_cast<int64_t>(std::numeric_limits<W>::max());
+    const uint32_t n = a.length;
+    const T* ad = static_cast<const T*>(a.data);
+    W* dst = fi_alloc<W>(n);
+    bool any = false;
+    for (uint32_t i = 0; i < n; ++i) {
+        int64_t r;
+        bool o = Op::apply(static_cast<int64_t>(ad[a.selection[i]]), scalar, r);
+        o |= (r < wmin) | (r > wmax);
+        dst[i] = static_cast<W>(r);
+        any |= o;
+    }
+    if (any) {
+        for (uint32_t i = 0; i < n; ++i) {
+            int64_t r;
+            bool o = Op::apply(static_cast<int64_t>(ad[a.selection[i]]), scalar, r);
+            o |= (r < wmin) | (r > wmax);
+            if (o && fi_row_valid(a.validity, i)) {
+                draken_free(dst);
+                if (Op::kDivMod && scalar == 0)
+                    throw std::domain_error(
+                        std::string("INT") + std::to_string(sizeof(W) * 8) + " " + Op::kName +
+                        " by zero: the divisor is 0 — fail loud, never a silent 0");
+                throw std::overflow_error(
+                    std::string("INT") + std::to_string(sizeof(W) * 8) + " " + Op::kName +
+                    " overflow: exact integer result exceeds INT" +
+                    std::to_string(sizeof(W) * 8) + " — fail loud, never a wrapped answer");
+            }
+        }
+    }
+    return fi_make_dense<W, WTAG>(dst, fi_copy_validity(a.validity, n), n);
+}
+
+template<typename T>
+static inline VecResult fixed_int_add_scalar(const DrakenVector& a, int64_t scalar) {
+    if constexpr (std::is_unsigned<T>::value) return fixed_uint_scalar_checked<T, 1>(a, scalar);
+    else return fixed_int_scalar_checked<T, I64OvfAdd>(a, scalar);
 }
 
 template<typename T>
@@ -787,21 +921,24 @@ static inline VecResult fixed_int_sub(const DrakenVector& a, const DrakenVector&
     const T* ad = static_cast<const T*>(a.data);
     const T* bd = static_cast<const T*>(b.data);
     W* dst = fi_alloc<W>(n);
-    for (uint32_t i = 0; i < n; ++i)
-        dst[i] = static_cast<W>(ad[a.selection[i]]) - static_cast<W>(bd[b.selection[i]]);
+    if constexpr (std::is_unsigned<T>::value) {
+        // add / mul of two narrow unsigned values always fit the next width; a
+        // subtraction below zero does not — fail loud, never wrap (ops/int64_checked.h).
+        u_checked_rows<U64OvfSub, W>(n, dst,
+            [&](uint32_t i) { return static_cast<uint64_t>(ad[a.selection[i]]); },
+            [&](uint32_t i) { return static_cast<uint64_t>(bd[b.selection[i]]); },
+            a.validity, b.validity);
+    } else {
+        for (uint32_t i = 0; i < n; ++i)
+            dst[i] = static_cast<W>(ad[a.selection[i]]) - static_cast<W>(bd[b.selection[i]]);
+    }
     return fi_make_dense<W, WTAG>(dst, fi_combine_validity(a.validity, b.validity, n), n);
 }
 
 template<typename T>
 static inline VecResult fixed_int_sub_scalar(const DrakenVector& a, int64_t scalar) {
-    using W = typename NextWider<T>::type;
-    constexpr DrakenType WTAG = NextWider<T>::tag;
-    const uint32_t n = a.length;
-    const T* ad = static_cast<const T*>(a.data);
-    const W  sv = static_cast<W>(scalar);
-    W* dst = fi_alloc<W>(n);
-    for (uint32_t i = 0; i < n; ++i) dst[i] = static_cast<W>(ad[a.selection[i]]) - sv;
-    return fi_make_dense<W, WTAG>(dst, fi_copy_validity(a.validity, n), n);
+    if constexpr (std::is_unsigned<T>::value) return fixed_uint_scalar_checked<T, 2>(a, scalar);
+    else return fixed_int_scalar_checked<T, I64OvfSub>(a, scalar);
 }
 
 template<typename T>
@@ -820,14 +957,8 @@ static inline VecResult fixed_int_mul(const DrakenVector& a, const DrakenVector&
 
 template<typename T>
 static inline VecResult fixed_int_mul_scalar(const DrakenVector& a, int64_t scalar) {
-    using W = typename NextWider<T>::type;
-    constexpr DrakenType WTAG = NextWider<T>::tag;
-    const uint32_t n = a.length;
-    const T* ad = static_cast<const T*>(a.data);
-    const W  sv = static_cast<W>(scalar);
-    W* dst = fi_alloc<W>(n);
-    for (uint32_t i = 0; i < n; ++i) dst[i] = static_cast<W>(ad[a.selection[i]]) * sv;
-    return fi_make_dense<W, WTAG>(dst, fi_copy_validity(a.validity, n), n);
+    if constexpr (std::is_unsigned<T>::value) return fixed_uint_scalar_checked<T, 3>(a, scalar);
+    else return fixed_int_scalar_checked<T, I64OvfMul>(a, scalar);
 }
 
 template<typename T>
@@ -839,26 +970,23 @@ static inline VecResult fixed_int_div(const DrakenVector& a, const DrakenVector&
     const T* ad = static_cast<const T*>(a.data);
     const T* bd = static_cast<const T*>(b.data);
     W* dst = fi_alloc<W>(n);
+    bool any_zero = false;
     for (uint32_t i = 0; i < n; ++i) {
         const W bv = static_cast<W>(bd[b.selection[i]]);
+        any_zero |= (bv == W(0));
         dst[i] = (bv == W(0)) ? W(0) : static_cast<W>(ad[a.selection[i]]) / bv;
     }
+    div_zero_rescan(any_zero, n, [&](uint32_t i) { return bd[b.selection[i]]; },
+                    a.validity, b.validity, dst, "division",
+                    std::string(std::is_unsigned<T>::value ? "UINT" : "INT") +
+                        std::to_string(sizeof(W) * 8));
     return fi_make_dense<W, WTAG>(dst, fi_combine_validity(a.validity, b.validity, n), n);
 }
 
 template<typename T>
 static inline VecResult fixed_int_div_scalar(const DrakenVector& a, int64_t scalar) {
-    using W = typename NextWider<T>::type;
-    constexpr DrakenType WTAG = NextWider<T>::tag;
-    const uint32_t n = a.length;
-    const T* ad = static_cast<const T*>(a.data);
-    const W  sv = static_cast<W>(scalar);
-    W* dst = fi_alloc<W>(n);
-    if (sv == W(0))
-        for (uint32_t i = 0; i < n; ++i) dst[i] = W(0);
-    else
-        for (uint32_t i = 0; i < n; ++i) dst[i] = static_cast<W>(ad[a.selection[i]]) / sv;
-    return fi_make_dense<W, WTAG>(dst, fi_copy_validity(a.validity, n), n);
+    if constexpr (std::is_unsigned<T>::value) return fixed_uint_scalar_checked<T, 6>(a, scalar);
+    else return fixed_int_scalar_checked<T, I64OvfDiv>(a, scalar);
 }
 
 template<typename T>
@@ -870,26 +998,23 @@ static inline VecResult fixed_int_mod(const DrakenVector& a, const DrakenVector&
     const T* ad = static_cast<const T*>(a.data);
     const T* bd = static_cast<const T*>(b.data);
     W* dst = fi_alloc<W>(n);
+    bool any_zero = false;
     for (uint32_t i = 0; i < n; ++i) {
         const W bv = static_cast<W>(bd[b.selection[i]]);
+        any_zero |= (bv == W(0));
         dst[i] = (bv == W(0)) ? W(0) : static_cast<W>(ad[a.selection[i]]) % bv;
     }
+    div_zero_rescan(any_zero, n, [&](uint32_t i) { return bd[b.selection[i]]; },
+                    a.validity, b.validity, dst, "modulo",
+                    std::string(std::is_unsigned<T>::value ? "UINT" : "INT") +
+                        std::to_string(sizeof(W) * 8));
     return fi_make_dense<W, WTAG>(dst, fi_combine_validity(a.validity, b.validity, n), n);
 }
 
 template<typename T>
 static inline VecResult fixed_int_mod_scalar(const DrakenVector& a, int64_t scalar) {
-    using W = typename NextWider<T>::type;
-    constexpr DrakenType WTAG = NextWider<T>::tag;
-    const uint32_t n = a.length;
-    const T* ad = static_cast<const T*>(a.data);
-    const W  sv = static_cast<W>(scalar);
-    W* dst = fi_alloc<W>(n);
-    if (sv == W(0))
-        for (uint32_t i = 0; i < n; ++i) dst[i] = W(0);
-    else
-        for (uint32_t i = 0; i < n; ++i) dst[i] = static_cast<W>(ad[a.selection[i]]) % sv;
-    return fi_make_dense<W, WTAG>(dst, fi_copy_validity(a.validity, n), n);
+    if constexpr (std::is_unsigned<T>::value) return fixed_uint_scalar_checked<T, 5>(a, scalar);
+    else return fixed_int_scalar_checked<T, I64OvfMod>(a, scalar);
 }
 
 // Unary negation: widened so -(INT8_MIN) = 128 fits in int16, etc.

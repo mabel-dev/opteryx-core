@@ -14,6 +14,9 @@ Currently supports:
   - SELECT COUNT(*) FROM table (no filters, no GROUP BY)
   - SELECT MIN(column) FROM table (for DATE, INTEGER and TIMESTAMP columns)
   - SELECT MAX(column) FROM table (for DATE, INTEGER and TIMESTAMP columns)
+  - SELECT SUM(column) / AVG(column) FROM table (integer columns, every width
+    and signedness) — from the manifest's EXACT per-file sums
+    (docs/MANIFEST_SUM_STATISTIC_DESIGN.md)
 
 Expected Speedup:
   - COUNT(*): ~400-800x (no file I/O)
@@ -181,6 +184,30 @@ def is_simple_aggregate(aggregate_node) -> bool:
             # sign-biased (draken/ops/ordinalize.h `ordinalize_scalar_u64`), so
             # an ordinal bound of a UINT64 column is not its value.
             if expr.schema_column.column_type.physical == DrakenType.UINT64:
+                return False
+            continue
+
+        # SUM/AVG - a bare integer column whose files all carry an EXACT sum
+        # (checked in `complete()`). Integer only: the sum statistic is exact
+        # integer arithmetic, bit-identical to the engine's int128 accumulator;
+        # a float sum would depend on summation order. A column with a logical
+        # descriptor (IPV4 rides UINT32) is not a plain integer and stays out.
+        if agg_func in ("SUM", "AVG"):
+            if aggregate.duplicate_treatment == "Distinct":
+                return False
+            if not aggregate.parameters or len(aggregate.parameters) != 1:
+                return False
+            expr = aggregate.parameters[0]
+            # A bare column only: an inline `SUM(x WHERE ...)` filter arrives
+            # here lowered to IIF(...), which this refuses.
+            if expr.node_type != NodeType.IDENTIFIER or expr.schema_column is None:
+                return False
+            if type(expr) not in expressions_with("source_column") or not expr.source_column:
+                return False
+            column_type = expr.schema_column.column_type
+            if column_type is None or column_type.logical is not None:
+                return False
+            if column_type.physical not in _SUMMABLE_TYPES:
                 return False
             continue
 
@@ -468,7 +495,7 @@ def get_all_aggregate_metadata(aggregate_node) -> list:
                 ) or ""
             else:
                 column_name = ""
-        elif agg_func in ("MIN", "MAX"):
+        elif agg_func in ("MIN", "MAX", "SUM", "AVG"):
             param = agg.parameters[0] if agg.parameters else None
             column_name = (
                 (param.source_column if type(param) in expressions_with("source_column") else "")
@@ -538,6 +565,60 @@ def get_min_max_from_manifest(manifest, column_name: str, operation: str):
     elif operation == "MAX":
         return max_val
     return None
+
+
+# Integer columns - every width and signedness - whose SUM/AVG the manifest's
+# exact sums answer.
+_SUMMABLE_TYPES = frozenset(
+    (
+        DrakenType.INT8, DrakenType.INT16, DrakenType.INT32, DrakenType.INT64,
+        DrakenType.UINT8, DrakenType.UINT16, DrakenType.UINT32, DrakenType.UINT64,
+    )
+)
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
+
+
+def get_sum_answer_from_manifest(manifest, column_name: str, agg_func: str, agg_node):
+    """(value, type) answering SUM(column) or AVG(column) from the manifest's
+    EXACT per-file sums, or None when the manifest cannot answer it - the caller
+    then leaves the scan to compute it.
+
+    The answer must be the engine's, bit for bit (native_group_sinks.hpp):
+      - SUM over integers is the exact int128 total, emitted as INT64. A total
+        outside INT64 is NOT answered here: the scan runs and the engine applies
+        its own overflow rule - the statistic never decides that (ruling D5);
+      - AVG is FLOAT64, the int128 total converted to double and divided by the
+        valid-row count converted to double - the engine's expression, in the
+        engine's order (both conversions round to nearest, in C and in Python);
+      - zero valid values is NULL for both.
+    The aggregate's bound output type must be the type the engine emits, or the
+    literal would carry a type the query never produces; anything else declines.
+    """
+    if manifest is None or not manifest.stats_are_authoritative:
+        return None
+    bound = agg_node.schema_column.column_type if agg_node.schema_column is not None else None
+    expected = DrakenType.INT64 if agg_func == "SUM" else DrakenType.FLOAT64
+    if bound is None or bound.physical != expected or bound.logical is not None:
+        return None
+
+    total = manifest.get_total_sum(column_name)
+    if total is None:
+        return None
+    rows = manifest.get_record_count()
+    nulls = manifest.get_total_null_count(column_name)
+    if rows is None or nulls is None:
+        return None
+    valid = rows - nulls
+    if valid < 0:
+        return None
+    if valid == 0:
+        return None, bound
+    if agg_func == "SUM":
+        if total < _INT64_MIN or total > _INT64_MAX:
+            return None
+        return total, bound
+    return float(total) / float(valid), bound
 
 
 class StatisticsOnlyResponseStrategy(OptimizationStrategy):
@@ -650,6 +731,13 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
                     return plan
                 # Preserve the column type (INTEGER or TIMESTAMP)
                 result_type = agg_node.parameters[0].schema_column.column_type or _CT_INT64
+            elif agg_func in ("SUM", "AVG"):
+                if not column_name:
+                    return plan
+                answer = get_sum_answer_from_manifest(manifest, column_name, agg_func, agg_node)
+                if answer is None:
+                    return plan
+                result_value, result_type = answer
             else:
                 # Unsupported aggregate type
                 return plan

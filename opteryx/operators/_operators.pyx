@@ -48,7 +48,7 @@ from cpython.ref cimport PyObject
 from opteryx.compiled.thread_pool cimport CppThreadPool, native_task_fn, spawn_detached_native_task
 from opteryx.compiled.expression.compiled_expression cimport (
     CompiledBytecode, BytecodeInstr, BC_LOAD_COL, BC_LOAD_LIT_CONST,
-    BC_LOAD_LIT_BOOL, BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF,
+    BC_LOAD_LIT_BOOL, BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF, BC_LAZY,
     BC_COMPARE, BC_BINARY_OP, BC_CAST,
     BC_CMP_INLIST_INLINE, BC_INSTR_C_NATIVE, BC_C_NATIVE_FIXED, BC_C_NATIVE_STRING,
     BC_C_NATIVE_DESC, BC_C_NATIVE_CHILD, BC_C_NATIVE_ARRAY,
@@ -127,6 +127,47 @@ ctypedef int (*ExprEvalFn)(void* instrs, int count, const CxxMorsel* m,
                            uint8_t** out_arena,
                            int* err_op, const char** err_msg,
                            VecResult** out_child) noexcept nogil
+
+cdef extern from *:
+    """
+    #include "engine/native_group_sinks.hpp"
+    // One aggregate's statistics seed (P3) from Python ints - the int128 sum
+    // arrives as its two words, which Cython cannot spell as one.
+    static inline opteryx::engine::AggSeed agg_seed_make(bool seeded, int64_t rows, int64_t valid,
+                                                         int64_t sum_hi, uint64_t sum_lo, bool any_extreme,
+                                                         int64_t min, int64_t max, int type) {
+        opteryx::engine::AggSeed s;
+        s.seeded = seeded;
+        s.rows = rows;
+        s.valid = valid;
+        s.sum = static_cast<__int128>((static_cast<unsigned __int128>(static_cast<uint64_t>(sum_hi)) << 64) | sum_lo);
+        s.any_extreme = any_extreme;
+        s.min = min;
+        s.max = max;
+        s.type = static_cast<DrakenType>(type);
+        return s;
+    }
+    // The GROUP BY statistics seed (P4), group-major - see GroupSeed.
+    static inline opteryx::engine::GroupSeed group_seed_make(
+            size_t groups, const std::vector<int>& key_types, std::vector<int64_t> key_vals,
+            std::vector<uint8_t> key_ok, std::vector<opteryx::engine::AggSeed> partials) {
+        opteryx::engine::GroupSeed g;
+        g.groups = groups;
+        for (int t : key_types) g.key_types.push_back(static_cast<DrakenType>(t));
+        g.key_vals = std::move(key_vals);
+        g.key_ok = std::move(key_ok);
+        g.partials = std::move(partials);
+        return g;
+    }
+    """
+    cdef cppclass AggSeed "opteryx::engine::AggSeed":
+        pass
+    cdef cppclass GroupSeed "opteryx::engine::GroupSeed":
+        pass
+    AggSeed agg_seed_make(bint seeded, int64_t rows, int64_t valid, int64_t sum_hi, uint64_t sum_lo,
+                          bint any_extreme, int64_t min, int64_t max, int type)
+    GroupSeed group_seed_make(size_t groups, const cppvector[int]& key_types, cppvector[int64_t] key_vals,
+                              cppvector[uint8_t] key_ok, cppvector[AggSeed] partials)
 
 cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nogil:
     cdef enum class AggFn "opteryx::engine::AggFn":
@@ -388,6 +429,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                           const cppvector[string]* zone_columns,
                                           const cppvector[int]* zone_ops,
                                           const cppvector[int64_t]* zone_ordinals,
+                                          const cppvector[cppvector[uint32_t]]* excluded_row_groups,
                                           int64_t* row_groups_total,
                                           int64_t* row_groups_pruned,
                                           int64_t* row_groups_pruned_runtime,
@@ -506,7 +548,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void set_pipeline_dop(size_t p, int dop)
         void add_select(size_t p, cppvector[size_t] indices, cppvector[string] names)
         void set_queue_sink(size_t p, shared_ptr[MorselQueue] q)
-        void set_agg_sink(size_t p, cppvector[AggSpec2] specs, size_t buf)
+        void set_agg_sink(size_t p, cppvector[AggSpec2] specs, size_t buf, cppvector[AggSeed] seed)
         void set_groupby_sink(size_t p, cppvector[size_t] key_idx,
                               cppvector[string] key_names,
                               cppvector[uint8_t] key_emit,
@@ -514,6 +556,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                               int64_t ndv_estimate)
         void set_groupby_topk(size_t p, cppvector[SortKeySpec] keys, size_t k,
                               bint ties) except +
+        void set_groupby_seed(size_t p, GroupSeed seed) except +
         void set_distinct_sink(size_t p, cppvector[size_t] on_idx, size_t buf,
                                int64_t ndv_estimate)
         void set_buffer_append_sink(size_t p, size_t buf)
@@ -2025,7 +2068,7 @@ _BC_OP_NAMES = {
     9: "a DNF predicate", 10: "a CNF predicate", 11: "a comparison",
     13: "an arithmetic/binary operator", 14: "a unary operator",
     15: "a function call", 16: "a subscript/extraction (-> ->> [i])",
-    17: "a CAST", 18: "a CASE", 19: "a constant literal",
+    17: "a CAST", 18: "a CASE", 19: "a constant literal", 20: "a lazy branch region",
 }
 
 
@@ -2055,7 +2098,7 @@ cdef Py_ssize_t _first_non_c_native(CompiledBytecode bc):
         op = bc.instrs[k].opcode
         fl = bc.instrs[k].flags
         if op in (BC_LOAD_COL, BC_LOAD_LIT_CONST, BC_LOAD_LIT_BOOL,
-                  BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF):
+                  BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF, BC_LAZY):
             continue
         if op == BC_COMPARE:
             opc = bc.instrs[k].op_code
@@ -2111,6 +2154,27 @@ cdef object _skene_io_counts(SkeneIo* io):
     if io.requests < 0:
         return None
     return (int(io.requests), int(io.metadata_requests), int(io.bytes_fetched))
+
+
+from opteryx.compiled.structures.stats_coverage cimport CoverageRequest, coverage_fill, coverage_seed
+
+
+cdef extern from *:
+    """
+    #include "engine/native_skene_scan_source.hpp"
+    #include "engine/stats_coverage_request.hpp"
+    // skene's plan-time coverage run (SkeneClaimSet::plan_coverage) over one
+    // request, the excluded row groups written straight into the plan's vector.
+    static inline bool skene_plan_coverage(opteryx::engine::CoverageRequest* r,
+                                           const std::vector<std::string>& files,
+                                           std::vector<std::vector<uint32_t>>& excluded) {
+        opteryx::engine::SkeneClaimSet planner;
+        return planner.plan_coverage(files, r->spec, r->acc, excluded, &r->covered, &r->disjoint,
+                                     r->err);
+    }
+    """
+    bint skene_plan_coverage(CoverageRequest* r, const cppvector[string]& files,
+                             cppvector[cppvector[uint32_t]]& excluded) except +
 
 
 cdef class SkeneScanPlan:
@@ -2178,6 +2242,33 @@ cdef class SkeneScanPlan:
     # The plan node this scan belongs to, so the post-run fold can find its
     # scan_facts entry. Set by the compiler; None means "do not report".
     cdef public object scan_identity
+    # Statistics coverage (P3, docs/MANIFEST_SUM_STATISTIC_DESIGN.md §7), decided
+    # at PLAN time by plan_coverage(): per file, the row groups answered from
+    # their footer statistics or proven empty - the Source's claim builder skips
+    # them before any pruning. Empty: nothing decided. `coverage_seed` is the
+    # covered row groups' partial per requested aggregate, None when coverage
+    # was not asked.
+    cdef cppvector[cppvector[uint32_t]] excluded_row_groups
+    cdef public object coverage_seed
+    cdef public int64_t covered_row_groups
+    cdef public int64_t coverage_disjoint_row_groups
+
+    def plan_coverage(self, object coverage):
+        """Classify every row group of this scan's files at plan time
+        (SkeneClaimSet::plan_coverage) for ``coverage`` = (terms, aggs, keys) - the
+        same request open_native_scan_plan takes - and keep the decision for the
+        Source. Sets ``coverage_seed`` (see stats_coverage.pxd coverage_seed) and
+        the two counters."""
+        cdef CoverageRequest* request = new CoverageRequest()
+        try:
+            coverage_fill(request, coverage)
+            if not skene_plan_coverage(request, self.files, self.excluded_row_groups):
+                raise RuntimeError(request.err.decode("utf-8", "replace"))
+            self.covered_row_groups = request.covered
+            self.coverage_disjoint_row_groups = request.disjoint
+            self.coverage_seed = coverage_seed(request, len(coverage[1]), len(coverage[2]))
+        finally:
+            del request
 
     def __init__(self, list files, list column_names, list out_identities,
                  list column_types, list retag_units, list emit_indices,
@@ -2795,6 +2886,7 @@ cdef class NativePlan:
                 &splan.column_types, &splan.retag_units, &splan.emit_indices,
                 &splan.length_only, NULL, 0, col_idx, lit_dv, _expr_filter_tramp,
                 &splan.zone_columns, &splan.zone_ops, &splan.zone_ordinals,
+                &splan.excluded_row_groups,
                 &splan.row_groups_total, &splan.row_groups_pruned,
                 &splan.row_groups_pruned_runtime, &splan.bytes_claimed, &splan.io)
             return
@@ -2814,6 +2906,7 @@ cdef class NativePlan:
             <void*>filter_bc.instrs, <int>filter_bc.count, col_idx, lit_dv,
             _expr_filter_tramp,
             &splan.zone_columns, &splan.zone_ops, &splan.zone_ordinals,
+            &splan.excluded_row_groups,
             &splan.row_groups_total, &splan.row_groups_pruned,
             &splan.row_groups_pruned_runtime, &splan.bytes_claimed, &splan.io)
 
@@ -3049,10 +3142,32 @@ cdef class NativePlan:
     def set_queue_sink(self, size_t p, PyMorselQueue q):
         self._e.set_queue_sink(p, q._q)
 
-    def set_agg_sink(self, size_t p, list specs, size_t buf):
+    def set_agg_sink(self, size_t p, list specs, size_t buf, list seed=None):
         """``specs`` = [(identity, fn:'CountStar'|'Count'|'Sum'|'Avg'|'Min'|'Max',
-        operand col_idx | -1), ...] in output-column order."""
-        self._e.set_agg_sink(p, _agg_spec_from_list(specs), buf)
+        operand col_idx | -1), ...] in output-column order.
+
+        ``seed`` (P3, docs/MANIFEST_SUM_STATISTIC_DESIGN.md §7): None, or one entry
+        per spec - None for a spec with nothing covered, else the covered row
+        groups' partial ``(rows, valid, sum, any_extreme, min, max, operand
+        DrakenType)``, merged by the sink as if those rows had been sunk."""
+        cdef cppvector[AggSeed] seeds
+        if seed is not None:
+            if len(seed) != len(specs):
+                from opteryx.exceptions import InvalidInternalStateError
+                raise InvalidInternalStateError(
+                    f"set_agg_sink: {len(seed)} seed entries for {len(specs)} aggregates")
+            for entry in seed:
+                if entry is None:
+                    seeds.push_back(agg_seed_make(False, 0, 0, 0, 0, False, 0, 0, 0))
+                    continue
+                rows, valid, total, any_extreme, low, high, operand_type = entry
+                seeds.push_back(agg_seed_make(
+                    True, <int64_t?>rows, <int64_t?>valid,
+                    <int64_t?>(total >> 64), <uint64_t?>(total & 0xFFFFFFFFFFFFFFFF),
+                    <bint>any_extreme, <int64_t?>low, <int64_t?>high,
+                    # COUNT(*) has no operand: its type is never read
+                    0 if operand_type is None else <int?>operand_type))
+        self._e.set_agg_sink(p, _agg_spec_from_list(specs), buf, seeds)
 
     def set_groupby_sink(self, size_t p, list key_idx, list key_names, list key_emit,
                          list specs, size_t buf, int64_t ndv_estimate):
@@ -3081,6 +3196,41 @@ cdef class NativePlan:
             kemit.push_back(<uint8_t>(1 if e else 0))
         self._e.set_groupby_sink(p, keys, knames, kemit, _agg_spec_from_list(specs), buf,
                                  ndv_estimate)
+
+    def set_groupby_seed(self, size_t p, list key_types, list groups, list operand_types):
+        """The planner's GROUP BY statistics seed (P4, docs/MANIFEST_SUM_STATISTIC_DESIGN.md
+        §7) for the GROUP BY sink on pipeline ``p``: ``groups`` = [(key tuple - None for
+        a NULL key - in key order, [(rows, valid, sum, any_extreme, min, max) per
+        aggregate]), ...] answered from covered row groups the scan does not read;
+        ``key_types`` / ``operand_types`` (None for COUNT(*)) are the DrakenTypes the
+        scan decodes. The sink merges them as if those rows had been sunk."""
+        cdef cppvector[int] ktypes
+        cdef cppvector[int64_t] kvals
+        cdef cppvector[uint8_t] kok
+        cdef cppvector[AggSeed] partials
+        cdef int64_t key_value
+        cdef uint8_t key_valid
+        for t in key_types:
+            ktypes.push_back(<int?>t)
+        for key, aggs in groups:
+            if len(key) != len(key_types) or len(aggs) != len(operand_types):
+                from opteryx.exceptions import InvalidInternalStateError
+                raise InvalidInternalStateError(
+                    "set_groupby_seed: a group's keys or partials do not match the sink")
+            for value in key:
+                # typed locals: a conditional expression pushed straight into a
+                # cppvector binds through a Cython FakeReference temporary
+                key_valid = 0 if value is None else 1
+                key_value = 0 if value is None else <int64_t?>value
+                kvals.push_back(key_value)
+                kok.push_back(key_valid)
+            for (rows, valid, total, any_extreme, low, high), operand_type in zip(aggs, operand_types):
+                partials.push_back(agg_seed_make(
+                    True, <int64_t?>rows, <int64_t?>valid,
+                    <int64_t?>(total >> 64), <uint64_t?>(total & 0xFFFFFFFFFFFFFFFF),
+                    <bint>any_extreme, <int64_t?>low, <int64_t?>high,
+                    0 if operand_type is None else <int?>operand_type))
+        self._e.set_groupby_seed(p, group_seed_make(len(groups), ktypes, kvals, kok, partials))
 
     def set_groupby_topk(self, size_t p, list keys, size_t k, bint ties):
         """Arm the GROUP BY sink on pipeline ``p`` to emit only each hash partition's

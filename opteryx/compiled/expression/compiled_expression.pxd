@@ -132,6 +132,14 @@ cdef enum BCOpcode:
     # (data_length==1) built ONCE at bind time. The executor re-stamps only the
     # logical length per morsel — no Python object, no isinstance, no re-encode.
     BC_LOAD_LIT_CONST    = 19
+    # LAZY branch region (see draken/core/lazy_region.h). Layout:
+    #   [BC_LAZY][typed-NULL LOAD_LIT_CONST][branch instrs ...]
+    # arity = number of instructions that FOLLOW (the NULL literal + the branch);
+    # op_code = row-selection kind (DRAKEN_LZ_*); bool_value = how far below the
+    # top of the stack the first guard sits; flags = number of guards. The branch is
+    # executed ONLY on the rows the guard admits; excluded rows come back NULL, so
+    # the ordinary blend / Kleene op that follows combines it unchanged.
+    BC_LAZY              = 20
 
 
 # Compare-time flag bits (instr.flags).

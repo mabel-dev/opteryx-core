@@ -1265,6 +1265,143 @@ cdef class CompiledBytecode:
 # Postfix lineariser
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# LAZY branch regions (BC_LAZY) — see draken/core/lazy_region.h.
+#
+# A guarded operand — the right side of AND/OR, a DNF/CNF term, a CASE/IIF branch, a
+# COALESCE argument — is emitted as [BC_LAZY][typed NULL literal][branch ...] so the
+# VM evaluates it ONLY on the rows its guard admits. A checked-arithmetic or cast
+# error on a row the guard excludes must never surface: `CASE WHEN a = MAX THEN 0
+# ELSE a + 1 END` is correct SQL. Kinds mirror DRAKEN_LZ_* in lazy_region.h.
+# ---------------------------------------------------------------------------
+DEF _LZ_NOT_FALSE = 1
+DEF _LZ_NOT_TRUE = 2
+DEF _LZ_TRUE = 3
+DEF _LZ_ALL_NULL = 4
+DEF _LZ_VALID = 5
+
+
+cdef bint _cannot_raise(CompiledExpression* node):
+    """True when evaluating `node` over ANY row can never raise on the row's DATA.
+
+    Only such a branch may run unguarded: guarding it costs a row-list pass and a
+    narrowing pass for nothing (MEASURED 2026-09-29: an always-guarded AND chain made
+    TPC-H SF1 Q06 2.4x slower and the suite geomean +9.6%). What can raise on data is
+    arithmetic (checked INT64 / DECIMAL overflow), casts, function kernels and
+    extractions, so those — and anything containing them — stay guarded. Column and
+    literal loads, comparisons, IS [NOT] NULL / TRUE / FALSE tests and the boolean
+    combinators are total over their operands' values. Conservative by construction:
+    an unlisted node type is "can raise"."""
+    cdef int nt = node.node_type
+    cdef Py_ssize_t i
+    if nt == _NT_NESTED:
+        return node.centre == NULL or _cannot_raise(node.centre)
+    if nt == _NT_IDENTIFIER or nt == _NT_EVALUATED or nt == _NT_AGGREGATOR or nt == _NT_LITERAL:
+        return True
+    if nt == _NT_AND or nt == _NT_OR or nt == _NT_XOR or nt == _NT_COMPARISON_OPERATOR:
+        return (node.left != NULL and node.right != NULL
+                and _cannot_raise(node.left) and _cannot_raise(node.right))
+    if nt == _NT_NOT or nt == _NT_UNARY_OPERATOR:
+        return node.centre != NULL and _cannot_raise(node.centre)
+    if nt == _NT_DNF or nt == _NT_CNF:
+        for i in range(<Py_ssize_t>node.parameters.size()):
+            if node.parameters[i] == NULL or not _cannot_raise(node.parameters[i]):
+                return False
+        return True
+    return False
+
+
+cdef object _typed_null_literal(CompiledExpression* node):
+    """The all-NULL constant a lazy region pushes when its guard admits NO row.
+
+    It carries the branch's own DECLARED type (with its DECIMAL descriptor) so the
+    blend kernel that consumes it still sees the same type family it would have got
+    from evaluating the branch — an untyped NULL would leave `IIF(c, <skipped>, NULL)`
+    with no branch to type the result from. Untyped only when the plan declares no
+    type for the branch."""
+    cdef object py_node = <object>node.source_node
+    cdef object ct = None
+    cdef object phys
+    cdef object lg
+    cdef int ptype = -1
+    if node.node_type == _NT_LITERAL:
+        ct = py_node.type
+    elif node.schema_column != NULL:
+        sc = py_node.schema_column
+        if sc is not None:
+            ct = sc.column_type
+    if ct is None:
+        return _materialise_constant_literal(None, node.physical_type)
+    phys = ct.physical
+    if phys is None:
+        return _materialise_constant_literal(None, node.physical_type)
+    ptype = <int>phys.value
+    lg = ct.logical
+    if (ptype == <int>DRAKEN_DECIMAL or ptype == <int>DRAKEN_DECIMAL128) \
+            and lg is not None and lg.precision:
+        return _materialise_constant_literal(
+            None, ptype, int(lg.precision), int(lg.scale), lg)
+    return _materialise_constant_literal(None, ptype, -1, -1, lg)
+
+
+cdef Py_ssize_t _linearize_lazy(
+    CompiledExpression* child,
+    CompiledBytecode bc,
+    Py_ssize_t depth,
+    int kind,
+    int back,
+    int nguards,
+) except -1:
+    """Emit `child` as a guarded branch region and return the stack height after it.
+
+    `back` is how far below the stack top (at the moment the region starts) the first
+    guard sits and `nguards` how many consecutive guards there are. An untyped NULL
+    literal heads the region: the VM pushes it, and nothing else, when the guard admits
+    no row at all."""
+    cdef Py_ssize_t lazy_idx, sub_depth
+    cdef BytecodeInstr* slot
+    cdef object null_lit
+    if _cannot_raise(child):
+        return _linearize(child, bc, depth)
+    lazy_idx = bc.count
+    slot = bc._push_instr()
+    slot.opcode = BC_LAZY
+    slot.op_code = kind
+    slot.bool_value = back
+    slot.flags = nguards
+    slot = bc._push_instr()
+    null_lit = _typed_null_literal(child)
+    slot.opcode = BC_LOAD_LIT_CONST
+    bc._hold(null_lit)
+    slot.literal_obj = <PyObject*>null_lit
+    sub_depth = _linearize(child, bc, depth)
+    bc.instrs[lazy_idx].arity = <int>(bc.count - lazy_idx - 1)
+    return sub_depth
+
+
+cdef Py_ssize_t _linearize_cond_param(
+    object func_name,
+    Py_ssize_t idx,
+    CompiledExpression* param,
+    CompiledBytecode bc,
+    Py_ssize_t depth,
+) except -1:
+    """One argument of a conditional function. The first argument (the condition /
+    the first COALESCE operand) is always evaluated; every later one only where the
+    earlier ones leave it to decide. Any other function: plain eager."""
+    if idx == 0:
+        return _linearize(param, bc, depth)
+    if func_name == "IIF":
+        if idx == 1:
+            return _linearize_lazy(param, bc, depth, _LZ_TRUE, 1, 1)
+        return _linearize_lazy(param, bc, depth, _LZ_NOT_TRUE, 2, 1)
+    if func_name == "COALESCE" or func_name == "IFNULL":
+        return _linearize_lazy(param, bc, depth, _LZ_ALL_NULL, <int>idx, <int>idx)
+    if func_name == "IFNOTNULL":
+        return _linearize_lazy(param, bc, depth, _LZ_VALID, 1, 1)
+    return _linearize(param, bc, depth)
+
+
 cdef Py_ssize_t _linearize(
     CompiledExpression* node,
     CompiledBytecode bc,
@@ -1452,7 +1589,12 @@ cdef Py_ssize_t _linearize(
         if node.left == NULL or node.right == NULL:
             raise ValueError("compiled_expression: binary boolean op missing operand")
         sub_depth = _linearize(node.left, bc, depth)
-        sub_depth = _linearize(node.right, bc, sub_depth)
+        if nt == _NT_AND:
+            sub_depth = _linearize_lazy(node.right, bc, sub_depth, _LZ_NOT_FALSE, 1, 1)
+        elif nt == _NT_OR:
+            sub_depth = _linearize_lazy(node.right, bc, sub_depth, _LZ_NOT_TRUE, 1, 1)
+        else:
+            sub_depth = _linearize(node.right, bc, sub_depth)
         slot = bc._push_instr()
         if nt == _NT_AND:
             slot.opcode = BC_AND
@@ -1484,7 +1626,15 @@ cdef Py_ssize_t _linearize(
         for i in range(n):
             if node.parameters[i] == NULL:
                 raise ValueError("compiled_expression: DNF/CNF parameter NULL")
-            sub_depth = _linearize(node.parameters[i], bc, sub_depth)
+            if i == 0:
+                sub_depth = _linearize(node.parameters[i], bc, sub_depth)
+            else:
+                # Term i runs only where no earlier term already decided the row
+                # (DNF: an earlier FALSE; CNF: an earlier TRUE). The earlier terms
+                # are the i values sitting below the stack top.
+                sub_depth = _linearize_lazy(
+                    node.parameters[i], bc, sub_depth,
+                    _LZ_NOT_FALSE if nt == _NT_DNF else _LZ_NOT_TRUE, <int>i, <int>i)
         slot = bc._push_instr()
         slot.opcode = BC_DNF if nt == _NT_DNF else BC_CNF
         slot.arity = <int>n
@@ -2304,7 +2454,10 @@ cdef Py_ssize_t _linearize(
             for i in range(3):
                 if node.parameters[i] == NULL:
                     raise ValueError("compiled_expression: IF_THEN_ELSE parameter NULL")
-                sub_depth = _linearize(node.parameters[i], bc, sub_depth)
+            sub_depth = _linearize(node.parameters[0], bc, sub_depth)
+            # THEN only where the condition is TRUE; ELSE where it is FALSE or NULL.
+            sub_depth = _linearize_lazy(node.parameters[1], bc, sub_depth, _LZ_TRUE, 1, 1)
+            sub_depth = _linearize_lazy(node.parameters[2], bc, sub_depth, _LZ_NOT_TRUE, 2, 1)
             slot = bc._push_instr()
             slot.opcode = BC_FUNCTION
             slot.arity = 3
@@ -2894,7 +3047,7 @@ cdef Py_ssize_t _linearize(
         for i in range(n):
             if node.parameters[i] == NULL:
                 raise ValueError("compiled_expression: FUNCTION parameter NULL")
-            sub_depth = _linearize(node.parameters[i], bc, sub_depth)
+            sub_depth = _linearize_cond_param(func_val.upper() if func_val else "", i, node.parameters[i], bc, sub_depth)
 
         # Pre-compute nb_func flag at bind time — eliminates runtime
         # `type(callable).__name__ == "nb_func"` string comparison per call.
@@ -3994,7 +4147,7 @@ def build_bytecode(CompiledExpressionHandle handle):
     for k in range(bc.count):
         op = bc.instrs[k].opcode
         fl = bc.instrs[k].flags
-        if op in _C_NATIVE_LOAD_OPCODES or op in _C_NATIVE_BOOL_OPCODES:
+        if op in _C_NATIVE_LOAD_OPCODES or op in _C_NATIVE_BOOL_OPCODES or op == BC_LAZY:
             continue
         if op == BC_COMPARE:
             opc = bc.instrs[k].op_code

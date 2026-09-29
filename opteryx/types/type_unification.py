@@ -7,11 +7,17 @@ module is the authority for those parameters:
 
 - DECIMAL (p, s)  — SQL Server rules (Decision E), capped at our int64 precision of 18,
   overflow → raise (never silently truncate; int128 backing is the deferred fix).
-- INTEGER width   — same-sign pairs: the wider of the integer operands, matching
-  Draken's kernel (`promote_narrow_int` computes at `wider_int_type` = the wider
-  operand). Cross-sign pairs: widen to the smallest signed type covering both ranges
-  (DuckDB's UBIGINT+INTEGER -> HUGEINT rule); UINT64 x signed bottoms out at
-  DECIMAL128(38, 0), the only type wide enough. See `_int_result_type`.
+- INTEGER width   — for `+ - * % DIV`: Draken's D.6 rule, the ARCHITECT'S decision that
+  the kernels implement (fixed_int_ops.h `fi_arith_result_tag` / `fi_uint_arith_result_tag`):
+  the result is the NEXT power up from the wider operand — INT8->INT16, INT16->INT32,
+  INT32->INT64, INT64 stays INT64; UINT8->UINT16, UINT16->UINT32, UINT32->UINT64, UINT64
+  stays; a signed x narrow-unsigned pair widens by the same rule from the smallest signed
+  rank covering the unsigned side. UINT64 x signed bottoms out at DECIMAL128(38, 0). The
+  DECLARED type must equal what the kernel EMITS: it used to declare "the wider operand"
+  (INT32 * INT32 -> INT32) while the kernel emitted INT64, so a constant-folded
+  `CAST(2147483647 AS INT32) * CAST(2147483647 AS INT32)` re-materialised its INT64 value
+  under an INT32 tag and died with "int32: value out of range". Other integer operators
+  (shifts) keep the older same-sign / cross-sign lattice. See `_int_result_type`.
 - FLOAT width     — FLOAT64 if any operand is FLOAT64, else FLOAT32 (integer/integer
   division yields FLOAT64).
 
@@ -240,8 +246,37 @@ def compute_selection_result_type(branches) -> "ColumnType | None":
     return _make_decimal(int_digits + scale, scale)
 
 
-def _int_result_type(left: ColumnType, right: ColumnType) -> ColumnType:
-    """INTEGER-category result width for a binary op, per the signed/unsigned lattice.
+# Operators whose integer result width is the kernels' D.6 next-power rule.
+_D6_INT_OPS = frozenset({"Plus", "Minus", "Multiply", "Modulo", "MyIntegerDivide"})
+
+# fi_arith_result_tag's effective rank: a narrow UNSIGNED type ranks as the smallest
+# SIGNED type that covers its range (UINT8 as INT16, UINT16 as INT32, UINT32 as INT64).
+_UINT_EFFECTIVE_SIGNED_RANK = {0: 1, 1: 2, 2: 3}
+
+
+def _int_result_type_d6(left: ColumnType, right: ColumnType) -> ColumnType:
+    """The width Draken's kernels emit for `+ - * % DIV` over two INTEGER operands (D.6)."""
+    left_u = left.physical in _UINT_RANK
+    right_u = right.physical in _UINT_RANK
+    if left_u and right_u:
+        rank = max(_UINT_RANK[left.physical], _UINT_RANK[right.physical])
+        return _UINT_BY_RANK[min(rank + 1, 3)]
+    if not left_u and not right_u:
+        rank = max(_INT_RANK[left.physical], _INT_RANK[right.physical])
+        return _INT_BY_RANK[min(rank + 1, 3)]
+    signed_ct, uint_ct = (right, left) if left_u else (left, right)
+    uint_rank = _UINT_RANK[uint_ct.physical]
+    if uint_rank == 3:
+        return _make_decimal(38, 0)  # UINT64 x signed: the DECIMAL128 escape
+    rank = max(_INT_RANK[signed_ct.physical], _UINT_EFFECTIVE_SIGNED_RANK[uint_rank])
+    return _INT_BY_RANK[min(rank + 1, 3)]
+
+
+def _int_result_type(left: ColumnType, right: ColumnType, op: str = "") -> ColumnType:
+    """INTEGER-category result width for a binary op.
+
+    `+ - * % DIV` over two INTEGER operands: the kernels' D.6 next-power rule
+    (`_int_result_type_d6`). Any other operator: the signed/unsigned lattice below.
 
     Same-sign pairs: wider width wins (unchanged convention). Cross-sign pairs: widen
     to the smallest signed type that can hold BOTH operands' full ranges — matches
@@ -256,6 +291,9 @@ def _int_result_type(left: ColumnType, right: ColumnType) -> ColumnType:
         )
     if len(operands) == 1:
         return operands[0]
+
+    if op in _D6_INT_OPS:
+        return _int_result_type_d6(left, right)
 
     left_u = left.physical in _UINT_RANK
     right_u = right.physical in _UINT_RANK
@@ -287,7 +325,7 @@ def compute_result_logical_type(
         return _decimal_result(left, right, op)
 
     if result_category == LogicalCategory.INTEGER:
-        return _int_result_type(left, right)
+        return _int_result_type(left, right, op)
 
     if result_category == LogicalCategory.FLOAT:
         if DrakenType.FLOAT64 in (left.physical, right.physical):

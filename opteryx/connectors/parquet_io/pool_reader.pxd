@@ -231,6 +231,17 @@ cdef class NativeScanPlan:
     # pruned nothing". Written once by the Source in make_global, on the driver
     # thread, and read by Python only after the driver has finished.
     cdef int64_t row_groups_pruned_runtime
+    # Statistics coverage (P3, docs/MANIFEST_SUM_STATISTIC_DESIGN.md §7): the
+    # row groups answered from their footer statistics at plan time - dropped
+    # from work_items, their partials folded into `coverage_seed` (see
+    # stats_coverage.pxd `coverage_seed`: per aggregate when ungrouped, per
+    # group when grouped; None when no coverage was requested) for the
+    # aggregate to be seeded with.
+    # `coverage_disjoint_items` counts the row groups the exact terms proved
+    # empty beyond plan-time pruning.
+    cdef public object coverage_seed
+    cdef public int covered_items
+    cdef public int coverage_disjoint_items
     # Which scan node this plan belongs to, so the post-run telemetry fold can
     # attribute the Source's counters. Set by the compiler; None on a plan the
     # compiler did not record (nothing to attribute).
@@ -268,6 +279,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     http_tuning=*,
     coalesce_tuning=*,
     int64_t memory_budget=*,
+    coverage=*,
 )
 
 # Plan-time eligibility gate for the native scan Source: proves from parsed

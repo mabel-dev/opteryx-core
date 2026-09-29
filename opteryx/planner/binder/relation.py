@@ -2574,6 +2574,12 @@ def visit_merge(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep
             f"User does not have permission to merge into {node.relation_name}"
         )
 
+    # A MERGE's INSERT arm (and an UPDATE's rewritten rows) copies source data
+    # into the target just as durably as INSERT ... SELECT does - see
+    # _enforce_egress on why covering only some write paths is not a boundary.
+    # UPDATE and DELETE desugar to this node, so this one call covers all three.
+    _enforce_egress(self, node, context)
+
     # `statement_name` is set by every builder that produces this node
     # (plan_merge, plan_update, plan_delete). None means a fourth builder
     # appeared without setting it, which would put the word "None" in a user's

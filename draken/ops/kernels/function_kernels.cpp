@@ -548,6 +548,28 @@ VecResult draken_abs(void* ctx, const DrakenVector* const* args, uint32_t nargs)
         return r;
     }
 
+    if (v->type == DRAKEN_INT64) {
+        // |INT64_MIN| = 2^63 does not fit: FAILS LOUD like every other INT64
+        // overflow (ops/int64_checked.h), never wraps. Only LIVE rows are read —
+        // NULL slots (arbitrary data) are skipped, and iterating logical rows
+        // through the selection never touches a dead dict entry. INT8/16/32
+        // widen to INT64 below and cannot overflow.
+        auto* out = static_cast<int64_t*>(draken_malloc((n > 0 ? n : 1) * sizeof(int64_t)));
+        if (out == nullptr) return draken_error_sentinel("allocation failed");
+        for (uint32_t i = 0; i < n; ++i) {
+            if (!fk_row_valid(v, i)) { out[i] = 0; continue; }
+            const int64_t x = fk_read_int64(v, i);
+            if (x == INT64_MIN) {
+                draken_free(out);
+                return draken_error_sentinel(
+                    "INT64 absolute value overflow: exact integer result exceeds INT64 "
+                    "— fail loud, never a wrapped answer");
+            }
+            out[i] = x < 0 ? -x : x;
+        }
+        return fk_numeric_result(v, out, n, DRAKEN_INT64);
+    }
+
     return fk_unary_numeric(args, nargs, "draken_abs",
                             [](int64_t x) { return x < 0 ? -x : x; },
                             [](double x) { return std::fabs(x); }, false);
