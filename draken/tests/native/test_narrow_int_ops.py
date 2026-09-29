@@ -421,14 +421,16 @@ class TestArithmeticHomogeneous:
     def test_i8_div(self):
         assert py(i8([10, 7]).div(i8([3, 2]))) == [3, 3]
 
-    def test_i8_div_by_zero(self):
-        assert py(i8([10]).div(i8([0]))) == [0]
+    def test_i8_div_by_zero_raises(self):
+        with pytest.raises(ValueError, match="division by zero"):
+            i8([10]).div(i8([0]))
 
     def test_i8_mod(self):
         assert py(i8([10, 7]).mod(i8([3, 2]))) == [1, 1]
 
-    def test_i8_mod_by_zero(self):
-        assert py(i8([10]).mod(i8([0]))) == [0]
+    def test_i8_mod_by_zero_raises(self):
+        with pytest.raises(ValueError, match="modulo by zero"):
+            i8([10]).mod(i8([0]))
 
     def test_null_propagation_binary(self):
         r = i8([None, 5]).add(i8([3, 5]))

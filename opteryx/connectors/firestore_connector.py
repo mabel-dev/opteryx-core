@@ -34,8 +34,10 @@ Deliberately minimal - this is expected to be rarely used:
 
     `doc` is VARCHAR rather than VARIANT only because Draken has no Python
     constructor for a VARIANT vector; the JSON operators accept either.
-  * No predicate pushdown. Every read is a scan of the collection with
-    `runQuery`, filtered by the engine. `runQuery` streams a whole range in
+  * Predicate pushdown is ONE shape: `doc ->> '<key>' = '<string>'`, sent to
+    Firestore as a `fieldFilter` EQUAL on the top-level field `<key>` (see
+    `_field_filter`, which is both the gate and the renderer). Every other
+    predicate is filtered by the engine. `runQuery` streams a whole range in
     one response, where `listDocuments` pages at a size Firestore caps for
     large documents - measured on a 7.5k-document collection, 33s of paging
     against 11s of ranged queries read one after another.
@@ -73,6 +75,7 @@ import datetime
 import json
 import math
 import queue
+import re
 import threading
 import time
 import urllib.error
@@ -89,8 +92,10 @@ from opteryx.connectors.base.base_connector import BaseConnector, BaseTable
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.expression import NodeType
 from opteryx.models import QueryTelemetry
 from opteryx.types import logical_type as _lt
+from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 
 FIRESTORE_ENDPOINT = "https://firestore.googleapis.com/v1"
@@ -111,6 +116,66 @@ _FULL_SCAN_PARTITIONS = 8
 _QUERY_CHUNK = 1000
 
 _ORDER_BY_NAME = [{"field": {"fieldPath": "__name__"}, "direction": "ASCENDING"}]
+
+# `doc ->> 'k'` renders a non-string value as its JSON text, so a string literal
+# that IS such a rendering could match a number/boolean/null/array/object in the
+# engine while Firestore's typed EQUAL on a stringValue never would. Those
+# literals are declined (left to the engine) rather than pushed.
+_JSON_NON_STRING_TEXT = re.compile(
+    r"^(?:-?[0-9][0-9eE+.\-]*|true|false|null|[\[{].*)$", re.DOTALL
+)
+_SIMPLE_FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _quote_field_path(key: str) -> str:
+    if _SIMPLE_FIELD_NAME.match(key):
+        return key
+    return "`" + key.replace("\\", "\\\\").replace("`", "\\`") + "`"
+
+
+def _field_filter(condition) -> Optional[Dict[str, Any]]:
+    """The Firestore `fieldFilter` for `doc ->> '<key>' = '<string>'`, else None.
+
+    This is BOTH the gate (`FirestoreTable.can_push`) and the renderer, so the
+    two cannot disagree: a predicate admitted by the gate is rendered by this
+    function or the read fails, and a predicate it cannot spell is left in the
+    plan as an engine Filter. It returns None, never raises, because the gate
+    needs an answer."""
+    if condition.node_type != NodeType.COMPARISON_OPERATOR or condition.value != "Eq":
+        return None
+    extraction, literal = condition.left, condition.right
+    if extraction is None or literal is None:
+        return None
+    if extraction.node_type != NodeType.EXTRACTION_OPERATOR or extraction.value != "LongArrow":
+        return None
+    column, key = extraction.left, extraction.right
+    if column is None or key is None:
+        return None
+    if column.node_type != NodeType.IDENTIFIER or column.schema_column.name != "doc":
+        return None
+    if key.node_type != NodeType.LITERAL or key.schema_column.category != LogicalCategory.VARCHAR:
+        return None
+    if literal.node_type != NodeType.LITERAL or literal.schema_column.category != LogicalCategory.VARCHAR:
+        return None
+    field = key.value.decode("utf-8")
+    text = literal.value.decode("utf-8")
+    if not field or _JSON_NON_STRING_TEXT.match(text):
+        return None
+    return {
+        "fieldFilter": {
+            "field": {"fieldPath": _quote_field_path(field)},
+            "op": "EQUAL",
+            "value": {"stringValue": text},
+        }
+    }
+
+
+def _where(filters: Optional[List[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+    if not filters:
+        return None
+    if len(filters) == 1:
+        return filters[0]
+    return {"compositeFilter": {"op": "AND", "filters": list(filters)}}
 
 # Transient statuses retried with backoff before the read is failed.
 _RETRY_STATUSES = (429, 500, 502, 503, 504)
@@ -362,13 +427,18 @@ class FirestoreConnector(BaseConnector):
         start_inclusive: bool = True,
         end: Optional[str] = None,
         limit: Optional[int] = None,
+        filters: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """Documents of a top-level collection in `__name__` order, from `start`
-        (a document resource name) up to but excluding `end`."""
+        (a document resource name) up to but excluding `end`, that satisfy every
+        one of `filters` (Firestore `fieldFilter`s)."""
         structured: Dict[str, Any] = {
             "from": [{"collectionId": collection}],
             "orderBy": _ORDER_BY_NAME,
         }
+        where = _where(filters)
+        if where is not None:
+            structured["where"] = where
         if start:
             structured["startAt"] = {
                 "values": [{"referenceValue": start}],
@@ -384,7 +454,9 @@ class FirestoreConnector(BaseConnector):
         )
         return [row["document"] for row in rows if "document" in row]
 
-    def partition_points(self, collection: str, count: int) -> List[str]:
+    def partition_points(
+        self, collection: str, count: int, filters: Optional[List[Dict[str, Any]]] = None
+    ) -> List[str]:
         """Up to `count` document names splitting the collection into ranges.
 
         `partitionQuery` only accepts a collection-GROUP query, which also
@@ -401,6 +473,9 @@ class FirestoreConnector(BaseConnector):
             },
             "partitionCount": count,
         }
+        where = _where(filters)
+        if where is not None:
+            body["structuredQuery"]["where"] = where
         prefix = f"{self.documents_root}{collection}/"
         points = set()
         while True:
@@ -497,10 +572,12 @@ class FirestoreTable(BaseTable):
     # physical_planner._build_scan_node), like information_schema.
     interal_only = True
     # The Reader passes the pushed LIMIT to read_dataset, which sizes the read
-    # from it (see _partitions_for), and stops pulling once it is met. Nothing
-    # is ever filtered here, so there is no pushed predicate for a LIMIT to be
-    # counted against.
+    # from it (see _partitions_for), and stops pulling once it is met.
     supports_limit_pushdown = True
+    # A pushed predicate is a Firestore `where`, and Firestore applies `limit`
+    # AFTER it, so the LIMIT counts rows that survived the predicate.
+    supports_predicate_pushdown = True
+    supports_filtered_limit_pushdown = True
 
     def __init__(
         self,
@@ -534,8 +611,16 @@ class FirestoreTable(BaseTable):
         )
         return self.schema
 
+    def can_push(self, operator, types: set = None) -> bool:
+        return _field_filter(operator.condition) is not None
+
     def _range_documents(
-        self, start: Optional[str], end: Optional[str], limit: Optional[int], stop: threading.Event
+        self,
+        start: Optional[str],
+        end: Optional[str],
+        limit: Optional[int],
+        stop: threading.Event,
+        filters: List[Dict[str, Any]],
     ) -> Iterator[List[Dict[str, Any]]]:
         """One range's documents, `_QUERY_CHUNK` at a time, resuming after the
         last name read. `limit` caps the range, `stop` abandons it."""
@@ -549,6 +634,7 @@ class FirestoreTable(BaseTable):
                 start_inclusive=after is None,
                 end=end,
                 limit=size,
+                filters=filters,
             )
             if documents:
                 yield documents
@@ -576,7 +662,7 @@ class FirestoreTable(BaseTable):
         ]
         return Morsel.from_vectors([name for name, _, _ in _COLUMNS], vectors)
 
-    def read_dataset(self, limit: Optional[int] = None, **kwargs) -> Iterable[Morsel]:
+    def read_dataset(self, limit: Optional[int] = None, predicates=None, **kwargs) -> Iterable[Morsel]:
         """Morsels of the collection, read in `_partitions_for(limit)` ranges.
 
         Ranges are read on worker threads and handed over through a bounded
@@ -584,9 +670,17 @@ class FirestoreTable(BaseTable):
         engine's Reader stops pulling at the LIMIT, and closing this generator
         stops the workers. Morsels arrive in no particular order."""
         stop = threading.Event()
+        filters = []
+        for predicate in predicates or ():
+            rendered = _field_filter(predicate)
+            if rendered is None:
+                raise DatasetReadError(
+                    "a predicate the Firestore connector cannot render reached the scan"
+                )
+            filters.append(rendered)
         partitions = _partitions_for(limit)
         points = (
-            self.gateway.partition_points(self.collection, partitions - 1)
+            self.gateway.partition_points(self.collection, partitions - 1, filters)
             if partitions > 1
             else []
         )
@@ -594,7 +688,7 @@ class FirestoreTable(BaseTable):
         ranges = list(zip(bounds, bounds[1:]))
 
         if len(ranges) == 1:
-            for documents in self._range_documents(None, None, limit, stop):
+            for documents in self._range_documents(None, None, limit, stop, filters):
                 yield self._morsel(documents)
             return
 
@@ -612,7 +706,7 @@ class FirestoreTable(BaseTable):
 
         def worker(start, end):
             try:
-                for documents in self._range_documents(start, end, limit, stop):
+                for documents in self._range_documents(start, end, limit, stop, filters):
                     if not put(documents):
                         return
             except BaseException as err:  # re-raised on the consuming thread

@@ -58,14 +58,24 @@ class FakeFirestore:
         self.collections = collections
         self.requests = []
         self.queries = []
+        self.filters = []
         self.partition_requests = []
+        self.partition_filters = []
         self.fail_after = None
 
-    def run_query(self, collection, start=None, start_inclusive=True, end=None, limit=None):
+    def run_query(
+        self, collection, start=None, start_inclusive=True, end=None, limit=None, filters=None
+    ):
         self.queries.append((collection, start, start_inclusive, end, limit))
+        self.filters.append(filters)
         if self.fail_after is not None and len(self.queries) > self.fail_after:
             raise RuntimeError("firestore went away")
         documents = sorted(self.collections.get(collection, []), key=lambda d: d["name"])
+        for flt in filters or ():
+            spec = flt["fieldFilter"]
+            assert spec["op"] == "EQUAL"
+            field, wanted = spec["field"]["fieldPath"], spec["value"]
+            documents = [d for d in documents if d["fields"].get(field) == wanted]
         if start is not None:
             documents = [
                 d for d in documents if (d["name"] >= start if start_inclusive else d["name"] > start)
@@ -74,8 +84,9 @@ class FakeFirestore:
             documents = [d for d in documents if d["name"] < end]
         return documents if limit is None else documents[:limit]
 
-    def partition_points(self, collection, count):
+    def partition_points(self, collection, count, filters=None):
         self.partition_requests.append((collection, count))
+        self.partition_filters.append(filters)
         documents = sorted(d["name"] for d in self.collections.get(collection, []))
         if count < 1 or not documents:
             return []
@@ -110,7 +121,9 @@ def firestore(monkeypatch):
     monkeypatch.setattr(
         FirestoreConnector,
         "partition_points",
-        lambda self, collection, count: fake.partition_points(collection, count),
+        lambda self, collection, count, filters=None: fake.partition_points(
+            collection, count, filters
+        ),
     )
     saved_prefixes = dict(connectors._storage_prefixes)
     saved_cache = dict(connectors._connector_cache)
@@ -345,6 +358,38 @@ def test_json_operators_filter_in_the_engine(firestore):
     register_workspace("fs", FirestoreConnector, project="p")
     rows = _rows("SELECT id FROM fs.orders WHERE doc->>'status' = 'open'")
     assert [row["id"] for row in rows] == ["o0001"]
+
+
+_STATUS_OPEN = [{"fieldFilter": {"field": {"fieldPath": "status"}, "op": "EQUAL", "value": {"stringValue": "open"}}}]
+
+
+def test_equality_on_a_json_key_is_pushed_to_firestore(firestore):
+    register_workspace("fs", FirestoreConnector, project="p", preserve_sql_case=True)
+    rows = _rows("SELECT id FROM fs.Orders WHERE doc->>'status' = 'open'")
+    assert len(rows) == 210
+    # Every range carried the filter, and the engine got only matching documents.
+    assert firestore.filters and all(f == _STATUS_OPEN for f in firestore.filters)
+    assert firestore.partition_filters == [_STATUS_OPEN]
+
+
+def test_a_pushed_filter_counts_the_limit_after_it(firestore):
+    register_workspace("fs", FirestoreConnector, project="p", preserve_sql_case=True)
+    rows = _rows("SELECT id FROM fs.Orders WHERE doc->>'status' = 'open' LIMIT 5")
+    assert len(rows) == 5
+    assert firestore.queries == [("Orders", None, True, None, 5)]
+    assert firestore.filters == [_STATUS_OPEN]
+
+
+def test_shapes_that_are_not_a_string_equality_stay_in_the_engine(firestore):
+    register_workspace("fs", FirestoreConnector, project="p", preserve_sql_case=True)
+    for where in (
+        "doc->>'status' != 'open'",
+        "doc->>'amount' = '5'",  # a string that reads as a number
+        "doc->>'status' LIKE 'op%'",
+    ):
+        firestore.filters.clear()
+        _rows(f"SELECT id FROM fs.Orders WHERE {where}")
+        assert not any(firestore.filters), where
 
 
 def test_sql_limit_reaches_the_reader(firestore):

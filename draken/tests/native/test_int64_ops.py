@@ -10,8 +10,8 @@ Coverage matrix (per 04_testing.md §1 and the ticket acceptance criteria):
   per-op:
     sum:         empty→0, all-null→0, non-null values
     min/max:     empty→raises, all-null→raises, correct value
-    arithmetic:  add/sub/mul/div/mod/neg; overflow wraps; div-by-zero→0;
-                 neg(INT64_MIN)→INT64_MIN; null propagation for binary ops
+    arithmetic:  add/sub/mul/div/mod/neg; overflow raises; div/mod-by-zero raises;
+                 neg(INT64_MIN) raises; null propagation for binary ops
     take:        repeats, out-of-order, empty indices, null source
     materialize: round-trip all three shapes
     dictionary_encode: round-trip materialize(dictionary_encode(v)) == v
@@ -188,9 +188,9 @@ class TestAdd:
     def test_empty(self):
         assert pylist(make([]).add(make([]))) == []
 
-    def test_overflow_wraps(self):
-        r = make([INT64_MAX]).add(1)
-        assert pylist(r) == [INT64_MIN]  # wrap
+    def test_overflow_raises(self):
+        with pytest.raises(OverflowError, match="addition overflow"):
+            make([INT64_MAX]).add(1)
 
     def test_null_propagation_both(self):
         a, b = make([1, None, 3]), make([None, 5, 6])
@@ -231,8 +231,9 @@ class TestSub:
     def test_scalar(self):
         assert pylist(make([10, 20]).sub(5)) == [5, 15]
 
-    def test_underflow_wraps(self):
-        assert pylist(make([INT64_MIN]).sub(1)) == [INT64_MAX]
+    def test_underflow_raises(self):
+        with pytest.raises(OverflowError, match="subtraction overflow"):
+            make([INT64_MIN]).sub(1)
 
     def test_null_propagation(self):
         r = pylist(make([1, None]).sub(make([2, 3])))
@@ -254,10 +255,9 @@ class TestMul:
     def test_mul_by_zero(self):
         assert pylist(make([5, -3]).mul(0)) == [0, 0]
 
-    def test_overflow_wraps(self):
-        r = make([INT64_MAX]).mul(2)
-        # INT64_MAX * 2 wraps; just check it returns a result without crashing
-        assert len(r) == 1
+    def test_overflow_raises(self):
+        with pytest.raises(OverflowError, match="multiplication overflow"):
+            make([INT64_MAX]).mul(2)
 
     def test_null_propagation(self):
         r = pylist(make([2, None, 4]).mul(make([3, 4, 5])))
@@ -276,11 +276,13 @@ class TestDiv:
     def test_scalar(self):
         assert pylist(make([9, 10]).div(3)) == [3, 3]
 
-    def test_div_by_zero_returns_zero(self):
-        assert pylist(make([5]).div(make([0]))) == [0]
+    def test_div_by_zero_raises(self):
+        with pytest.raises(ValueError, match="division by zero"):
+            make([5]).div(make([0]))
 
-    def test_scalar_div_by_zero(self):
-        assert pylist(make([7]).div(0)) == [0]
+    def test_scalar_div_by_zero_raises(self):
+        with pytest.raises(ValueError, match="division by zero"):
+            make([7]).div(0)
 
     def test_negative_truncation(self):
         # C truncation: -7 / 2 == -3 (not -4 Python floor)
@@ -306,11 +308,13 @@ class TestMod:
     def test_scalar(self):
         assert pylist(make([7, 8, 9]).mod(3)) == [1, 2, 0]
 
-    def test_mod_by_zero_returns_zero(self):
-        assert pylist(make([7]).mod(make([0]))) == [0]
+    def test_mod_by_zero_raises(self):
+        with pytest.raises(ValueError, match="modulo by zero"):
+            make([7]).mod(make([0]))
 
-    def test_scalar_mod_by_zero(self):
-        assert pylist(make([7]).mod(0)) == [0]
+    def test_scalar_mod_by_zero_raises(self):
+        with pytest.raises(ValueError, match="modulo by zero"):
+            make([7]).mod(0)
 
     def test_negative_mod(self):
         # C truncation: -7 % 3 == -1 (not 2 Python-style)
@@ -330,9 +334,9 @@ class TestNeg:
     def test_basic(self):
         assert pylist(make([1, -2, 0]).neg()) == [-1, 2, 0]
 
-    def test_int64_min_wraps(self):
-        r = pylist(make([INT64_MIN]).neg())
-        assert r[0] == INT64_MIN  # wraps back to INT64_MIN
+    def test_int64_min_raises(self):
+        with pytest.raises(OverflowError, match="negation overflow"):
+            make([INT64_MIN]).neg()
 
     def test_int64_max(self):
         assert pylist(make([INT64_MAX]).neg()) == [-(INT64_MAX)]
