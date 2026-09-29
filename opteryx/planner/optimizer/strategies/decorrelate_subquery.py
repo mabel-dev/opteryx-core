@@ -10,6 +10,23 @@ Decorrelate scalar subqueries (post-bind).
 ->  INNER JOIN (SELECT k, AGG(x) FROM T GROUP BY k) ON outer.k = T.k
     WHERE outer.c < AGG(x)
 
+The join is INNER only when the predicate above provably rejects the value an outer
+row with NO matching group must receive (`_unmatched_row_is_dropped`): the INNER join
+drops that row, and so would SQL. That value is the aggregate's empty-input value
+(`_empty_set_value`): 0 for COUNT, NULL for every other aggregate, taken through the
+subquery's own expression and HAVING. Anything the analysis cannot prove keeps every
+outer row instead:
+
+    WHERE (SELECT COUNT(*) FROM T WHERE T.k = outer.k) = 0
+->  LEFT OUTER JOIN (SELECT k, COUNT(*) FROM T GROUP BY k) ON outer.k = T.k
+    WHERE CASE WHEN T.k IS NULL THEN 0 ELSE COUNT(*) END = 0
+
+The CASE tests the inner KEY rather than COALESCE-ing the value, so a matched group
+whose value is legitimately NULL stays NULL. It is only needed where the empty-set
+value is not NULL; the LEFT join's own NULL is the answer otherwise. A correlation
+that reaches a scope further out cannot be preserved across the ancestor join, so
+that combination is refused.
+
 This runs on the BOUND plan, which is what makes it correct rather than
 heuristic. The binder resolves every name in the subquery against the
 subquery's own scope first and the enclosing query second, tagging the latter
@@ -141,7 +158,7 @@ Known gaps (raise, never silently wrong):
     case, since an uncorrelated subquery has no join key either way. A
     correlated one is NOT the same rewrite, though, and is refused, cleanly,
     rather than reusing the wrong join type: a WHERE-clause scalar subquery
-    joins INNER — a missing match makes the comparison unknown, so dropping
+    joins INNER when the predicate rejects the empty-group value, so dropping
     the row is correct — but a SELECT-list scalar subquery is a VALUE per
     outer row, so an outer row with no match must survive carrying NULL,
     which needs a LEFT OUTER join to the same grouped relation. The
