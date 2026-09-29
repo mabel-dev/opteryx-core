@@ -8468,13 +8468,15 @@ NB_MODULE(draken_native, m) {
         DRAKEN_BINOP_CROSS(add, draken_add, draken_add_scalar, draken_float_add_scalar, decimal_add_dispatch)
         DRAKEN_BINOP_CROSS(sub, draken_sub, draken_sub_scalar, draken_float_sub_scalar, decimal_sub_dispatch)
         DRAKEN_BINOP_CROSS(mul, draken_mul, draken_mul_scalar, draken_float_mul_scalar, decimal_mul_dispatch)
-        // div: integer truncation toward zero (div-by-zero → 0) for integers.
+        // div: integer truncation toward zero; a zero divisor on a live row RAISES
+        // (ruling 2026-09-29, ops/int64_checked.h) — and so does INT64_MIN / -1.
         // Float division is IEEE: 1.0/0.0 → +inf; 0.0/0.0 → NaN.
-        // Decimal division: half-even rounding, div-by-zero raises (E.32).
+        // Decimal division: half-even rounding; a zero divisor yields a NULL row, not
+        // an error (revised 2026-08-17, see the header of ops/decimal_arith.h).
         DRAKEN_BINOP_CROSS(div, draken_div, draken_div_scalar, draken_float_div_scalar, decimal_div_dispatch)
         DRAKEN_BINOP_CROSS(mod, draken_mod, draken_mod_scalar, draken_float_mod_scalar, decimal_mod_dispatch)
 #undef DRAKEN_BINOP_CROSS
-        // neg: unary negation; neg(INT64_MIN) wraps for integers.
+        // neg: unary negation; neg(INT64_MIN) raises for integers (ops/int64_checked.h).
         // E.32: DECIMAL neg raises on INT64_MIN (financial data; no silent wrap).
         .def("neg", [](const VectorOwner& v) -> VectorOwner {
             // Pure C++ on DrakenVector — release the GIL for the body.
