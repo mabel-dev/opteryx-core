@@ -155,12 +155,15 @@ Known gaps (raise, never silently wrong):
 The first two predate this strategy.
 """
 
+from opteryx.compiled.planner.column_table import ExpressionColumn
 from opteryx.compiled.planner.plan_graph import EdgeRole
 from opteryx.exceptions import InvalidInternalStateError, UnsupportedSyntaxError
 from opteryx.expression import NodeType, binary_operands, get_all_nodes_of_type
 from opteryx.expression.formatter import format_expression
 from opteryx.models import LogicalColumn
+from opteryx.models import QueryTelemetry
 from opteryx.models import is_expression
+from opteryx.planner import build_literal_node
 from opteryx.planner.binder.join_helpers import extract_join_fields
 from opteryx.planner.binder.join_helpers import hoistable_operand_leg
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
@@ -172,6 +175,7 @@ from opteryx.planner.optimizer.strategies.optimization_strategy import (
     OptimizationStrategy,
     OptimizerContext,
 )
+from opteryx.planner.optimizer.strategies.constant_folding import fold_constants
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import RelationSchema
 from opteryx.utils import random_string
@@ -179,6 +183,7 @@ from opteryx.compiled.structures.expressions import And
 from opteryx.compiled.structures.expressions import Or
 from opteryx.compiled.structures.expressions import UnaryOperator
 from opteryx.compiled.structures.expressions import Wildcard
+from opteryx.compiled.structures.expressions import Case
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import Aggregator
@@ -1338,6 +1343,223 @@ def _output_column(plan: LogicalPlan):
             f"A scalar subquery must return exactly one column, this one returns {len(columns)}."
         )
     return columns[0].schema_column
+
+
+# What an aggregate yields over an EMPTY input, which is what an outer row with no
+# matching correlation group must receive. Read off the engine's own ungrouped
+# aggregate over zero rows: COUNT-family is 0, everything else is NULL. An aggregate
+# in neither set has no registered empty value, so the rewrite refuses rather than guess.
+_EMPTY_IS_ZERO = frozenset({"COUNT", "COUNT_DISTINCT", "APPROX_COUNT_DISTINCT"})
+_EMPTY_IS_NULL = frozenset(
+    {
+        "AVG",
+        "MAX",
+        "MIN",
+        "SUM",
+        "MEDIAN",
+        "STDDEV",
+        "STDDEV_POP",
+        "STDDEV_SAMP",
+        "VAR_POP",
+        "VAR_SAMP",
+        "CORR",
+        "APPROX_PERCENTILE",
+    }
+)
+
+# Comparisons that yield NULL whenever either operand is NULL.
+_NULL_PROPAGATING_COMPARISONS = frozenset({"Eq", "NotEq", "Lt", "LtEq", "Gt", "GtEq"})
+
+# Nodes above the aggregate that pass its single row through unchanged.
+_ROW_PASSING_STEPS = (
+    LogicalPlanStepType.Project,
+    LogicalPlanStepType.Distinct,
+    LogicalPlanStepType.Order,
+    LogicalPlanStepType.HeapSort,
+    LogicalPlanStepType.Limit,
+)
+
+
+def _substitute(root, matches, make):
+    """`root` with every node satisfying `matches` replaced by `make(node)`."""
+    if matches(root):
+        return make(root)
+    return rewrite_children(root, lambda child: _substitute(child, matches, make), share=True)
+
+
+def _reads_column(node, column) -> bool:
+    return (
+        node.node_type == NodeType.IDENTIFIER
+        and node.schema_column is not None
+        and node.schema_column.identity == column.identity
+    )
+
+
+def _null_propagates(node, column) -> bool:
+    """Is `node` NULL whenever the column `column` is NULL — a bare reference to it, or
+    arithmetic over one."""
+    if _reads_column(node, column):
+        return True
+    if node.node_type == NodeType.BINARY_OPERATOR:
+        return _null_propagates(node.left, column) or _null_propagates(node.right, column)
+    return False
+
+
+def _aggregate_empty_value(expression, *, plan_context):
+    """`expression` evaluated with every aggregate at its empty-input value: a Literal
+    (value None for NULL), or None if it cannot be derived."""
+    aggregators = get_all_nodes_of_type(expression, (NodeType.AGGREGATOR,))
+    if any(a.value not in _EMPTY_IS_ZERO and a.value not in _EMPTY_IS_NULL for a in aggregators):
+        return None
+
+    def empty_literal(aggregator):
+        return build_literal_node(
+            0 if aggregator.value in _EMPTY_IS_ZERO else None, plan_context=plan_context
+        )
+
+    if not any(a.value in _EMPTY_IS_ZERO for a in aggregators) and _is_null_shaped(expression):
+        return build_literal_node(None, plan_context=plan_context)
+
+    folded = fold_constants(
+        _substitute(expression, lambda n: n.node_type == NodeType.AGGREGATOR, empty_literal),
+        QueryTelemetry.detached(),
+        plan_context=plan_context,
+    )
+    return folded if folded.node_type == NodeType.LITERAL else None
+
+
+def _is_null_shaped(expression) -> bool:
+    """Arithmetic over aggregates only: NULL in, NULL out."""
+    if expression.node_type == NodeType.AGGREGATOR:
+        return True
+    if expression.node_type == NodeType.BINARY_OPERATOR:
+        return _is_null_shaped(expression.left) or _is_null_shaped(expression.right)
+    return False
+
+
+def _empty_set_value(inner_plan: LogicalPlan, *, plan_context):
+    """
+    The value a correlated scalar subquery yields for an outer row whose correlation
+    key matches nothing, as a Literal (value None = NULL), or None when the plan's
+    shape does not let it be derived.
+
+    Must be read BEFORE `_expose_key` groups the aggregate: it is the ungrouped
+    aggregate that yields a row over an empty input.
+      - no aggregate (the ORDER BY ... LIMIT 1 form) or an aggregate that already had
+        a GROUP BY: no rows, so NULL;
+      - an ungrouped aggregate: one row of empty-input aggregate values — COUNT is 0,
+        not NULL — taken through the projection and any HAVING above it.
+    """
+    aggregate_nid, aggregate = _aggregate_node(inner_plan)
+    if aggregate is None or aggregate.node_type == LogicalPlanStepType.AggregateAndGroup:
+        return build_literal_node(None, plan_context=plan_context)
+
+    projecting = _projecting_node(inner_plan)
+    if projecting.node_type == LogicalPlanStepType.Project:
+        expression = projecting.columns[0]
+    else:
+        expression = aggregate.aggregates[0]
+    value = _aggregate_empty_value(expression, plan_context=plan_context)
+    if value is None:
+        return None
+
+    nid = inner_plan.exit_point()
+    while nid != aggregate_nid:
+        node = inner_plan[nid]
+        if node.node_type == LogicalPlanStepType.Filter:
+            # HAVING: over the empty aggregate row it either keeps the row or drops it,
+            # and a dropped row is a NULL value.
+            having = _aggregate_empty_value(node.condition, plan_context=plan_context)
+            if having is None:
+                return None
+            if not having.value:
+                return build_literal_node(None, plan_context=plan_context)
+        elif node.node_type not in _ROW_PASSING_STEPS:
+            return None
+        providers = inner_plan.ingoing_edges(nid)
+        if len(providers) != 1:
+            return None
+        nid = providers[0][0]
+    return value
+
+
+def _unmatched_row_is_dropped(condition, value_column, empty_value, *, plan_context) -> bool:
+    """
+    Would `condition` reject an outer row whose subquery value is `empty_value`?
+
+    True means the INNER join's silent drop of unmatched outer rows is exactly what
+    SQL does anyway, so the cheaper join stays correct. Only a PROOF returns True —
+    anything this cannot decide returns False and the caller keeps every outer row.
+    """
+    if condition.node_type == NodeType.AND:
+        return _unmatched_row_is_dropped(
+            condition.left, value_column, empty_value, plan_context=plan_context
+        ) or _unmatched_row_is_dropped(
+            condition.right, value_column, empty_value, plan_context=plan_context
+        )
+    if condition.node_type == NodeType.OR:
+        return _unmatched_row_is_dropped(
+            condition.left, value_column, empty_value, plan_context=plan_context
+        ) and _unmatched_row_is_dropped(
+            condition.right, value_column, empty_value, plan_context=plan_context
+        )
+    if empty_value is None:
+        return False
+
+    identifiers = get_all_nodes_of_type(condition, (NodeType.IDENTIFIER,))
+    if not any(_reads_column(i, value_column) for i in identifiers):
+        return False
+
+    # NULL against anything is UNKNOWN, which WHERE drops.
+    if (
+        empty_value.value is None
+        and condition.node_type == NodeType.COMPARISON_OPERATOR
+        and condition.value in _NULL_PROPAGATING_COMPARISONS
+    ):
+        return _null_propagates(condition.left, value_column) or _null_propagates(
+            condition.right, value_column
+        )
+
+    # Otherwise the predicate is decidable only if the value is all it reads.
+    if get_all_nodes_of_type(condition, (NodeType.SUBQUERY, NodeType.AGGREGATOR)) or not all(
+        _reads_column(i, value_column) for i in identifiers
+    ):
+        return False
+    decided = fold_constants(
+        _substitute(condition, lambda n: _reads_column(n, value_column), lambda _n: empty_value),
+        QueryTelemetry.detached(),
+        plan_context=plan_context,
+    )
+    return decided.node_type == NodeType.LITERAL and not decided.value
+
+
+def _empty_value_case(value_column, inner_key, empty_value, *, plan_context):
+    """
+    `CASE WHEN inner_key IS NULL THEN empty_value ELSE value END`.
+
+    The decorrelated relation has one row per matched key, so a NULL inner key means
+    the outer row found no group. Testing the key, rather than COALESCE-ing the value,
+    keeps a matched group whose value is legitimately NULL as NULL.
+    """
+    unmatched = UnaryOperator(arena=plan_context.expressions)
+    unmatched.value = "IsNull"
+    unmatched.centre = _local_copy(inner_key)
+    unmatched.schema_column = plan_context.columns.computed(
+        ExpressionColumn, "IsNull", column_type=_lt.BOOLEAN, nullable=False
+    )
+    return Case(
+        conditions=[unmatched],
+        results=[empty_value],
+        else_result=_reference_to(value_column, plan_context.expressions),
+        schema_column=plan_context.columns.computed(
+            ExpressionColumn,
+            value_column.name,
+            column_type=value_column.column_type,
+            nullable=True,
+        ),
+        arena=plan_context.expressions,
+    )
+
 
 
 def _collect_relations(plan: LogicalPlan, root_nid: str):
@@ -3096,6 +3318,11 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
     # Read the subquery's value column before the key widens the projection.
     value_column = _output_column(inner_plan)
 
+    # What an outer row that matches no group must receive. Derived here for the same
+    # reason: `_expose_key` is about to group the aggregate, and it is the ungrouped
+    # one whose empty-input value (COUNT = 0, the rest NULL) SQL defines.
+    empty_value = _empty_set_value(inner_plan, plan_context=plan_context) if key_pairs else None
+
     # Once decorrelated the subquery IS a relation, so its output column needs to
     # name one. An aggregate's output column has no origin (it is minted into the
     # `$derived` pseudo-schema), and a reference with no source belongs to neither
@@ -3186,6 +3413,46 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
         else:
             deferred_pairs.append((inner_key, outer_key))
 
+    # INNER drops an outer row with no matching group; SQL gives that row the
+    # aggregate's empty-set value instead. The two agree exactly when the predicate
+    # above rejects that value anyway (TPC-H Q2/Q17/Q20: MIN/AVG/SUM compared with
+    # `=`/`<`, NULL is UNKNOWN and WHERE drops the row), which is the only case the
+    # cheaper INNER join is kept for. Everything else, including anything this cannot
+    # prove, keeps every outer row with a LEFT OUTER join.
+    join_type = "inner"
+    if local_pairs and not _unmatched_row_is_dropped(
+        filter_node.condition, value_column, empty_value, plan_context=plan_context
+    ):
+        if deferred_pairs:
+            raise UnsupportedSyntaxError(
+                "A correlated scalar subquery that correlates to a scope further out than "
+                "the subquery enclosing it cannot be combined with a predicate that "
+                "accepts the empty-group value (COUNT = 0, IS NULL, COALESCE, ...): the "
+                "outer rows with no match cannot be preserved across the ancestor join. "
+                "This nesting is not supported."
+            )
+        if empty_value is None:
+            raise UnsupportedSyntaxError(
+                "A correlated scalar subquery's value for an outer row with no matching "
+                "rows cannot be determined for this subquery, and the predicate on it "
+                "accepts that value. Rewrite using **EXISTS** or a LEFT JOIN to a "
+                "grouped subquery."
+            )
+        join_type = "left outer"
+        if empty_value.value is not None:
+            # A node per position: an expression node shared between positions is the
+            # trap `_replace_every` documents.
+            filter_node.condition = _substitute(
+                filter_node.condition,
+                lambda n: _reads_column(n, value_column),
+                lambda _n: _empty_value_case(
+                    value_column, local_pairs[0][0], empty_value, plan_context=plan_context
+                ),
+            )
+            filter_node.columns = list(filter_node.columns or []) + [
+                _local_copy(local_pairs[0][0])
+            ]
+
     # Narrow the aggregate to the keys the join above can actually consume. Must run
     # while `inner_plan` is still separate — after the merge below there is no inner
     # plan left to graft into — and after `_expose_key`, which is what makes the
@@ -3220,7 +3487,7 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry, *, plan_context)
     join = JoinStep()
     # No correlation means no key to join on: the subquery is one value attached
     # to every outer row, which is exactly a cross join.
-    join.type = "inner" if local_pairs else "cross join"
+    join.type = join_type if local_pairs else "cross join"
     join.on = on_condition
     join.using = None
     # The join's referenced columns. This must be populated: projection pushdown

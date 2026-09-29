@@ -9,8 +9,11 @@ dropped instead of receiving the aggregate's empty-set value (0 for COUNT, NULL
 for every other aggregate).
 
 Expected rows are computed in Python from two plain, uncorrelated scans, so the
-oracle does not go through the code under test. These tests are EXPECTED TO FAIL
-until the defect is fixed.
+oracle does not go through the code under test. The fix (architect ruling 2026-09-29): the join is LEFT OUTER, with
+`CASE WHEN inner_key IS NULL THEN <empty-set value> ELSE value END` substituted where the
+empty-set value is not NULL, EXCEPT where the predicate provably rejects the empty-set value
+(TPC-H Q2/Q17/Q20 shapes), where the cheaper INNER join is kept. Skip-level correlation
+under a predicate that accepts the empty-set value is refused.
 """
 
 import os
@@ -22,6 +25,7 @@ import pytest
 
 import opteryx
 from opteryx.connectors import DiskConnector
+from opteryx.exceptions import UnsupportedSyntaxError
 
 opteryx.register_workspace("testdata", DiskConnector)
 
@@ -110,6 +114,60 @@ def test_having_scalar_count_zero():
         f"(SELECT COUNT(*) {CORR}) = 0"
     )
     assert _ids(sql) == _expected(lambda p: _count(p) == 0)
+
+
+@pytest.mark.parametrize(
+    "predicate, expected",
+    [
+        # The empty-set value is computed THROUGH the subquery's own expression.
+        (f"(SELECT COUNT(*) + 1 {CORR}) = 1", lambda p: _count(p) == 0),
+        (f"(SELECT 2 * COUNT(*) {CORR}) = 0", lambda p: _count(p) == 0),
+        (f"COALESCE((SELECT SUM(sq_i.radius) {CORR}), 0) = 0", lambda p: _sum_radius(p) is None),
+        # A HAVING over the empty aggregate row drops it: NULL, not 0.
+        (f"(SELECT COUNT(*) {CORR} HAVING COUNT(*) > 100) IS NULL", lambda p: True),
+        # The ORDER BY ... LIMIT 1 form has no aggregate: NULL when unmatched.
+        (
+            f"(SELECT sq_i.radius {CORR} ORDER BY sq_i.radius DESC LIMIT 1) IS NULL",
+            lambda p: _max_radius(p) is None,
+        ),
+        # Connectives: a NULL-rejecting conjunct is not enough under OR.
+        (f"(SELECT COUNT(*) {CORR}) = 0 OR sq_o.id = 5", lambda p: _count(p) == 0 or p == 5),
+        (f"(SELECT COUNT(*) {CORR}) = 0 AND sq_o.id > 1", lambda p: _count(p) == 0 and p > 1),
+        (f"(SELECT MAX(sq_i.radius) {CORR}) > 0 OR sq_o.id = 1", lambda p: (_max_radius(p) or 0) > 0 or p == 1),
+    ],
+)
+def test_where_scalar_expression_and_connective_shapes(predicate, expected):
+    assert _ids(OUTER + predicate) == _expected(expected)
+
+
+def _join_kinds(sql):
+    session = opteryx.session()
+    lines = []
+    for morsel in session.execute_to_morsels("EXPLAIN " + sql):
+        for i in range(len(morsel)):
+            name = morsel[i][0]
+            lines.append(name.decode() if isinstance(name, bytes) else name)
+    return " ".join(lines)
+
+
+def test_null_rejecting_predicate_keeps_the_inner_join():
+    plan = _join_kinds(OUTER + f"(SELECT MAX(sq_i.radius) {CORR}) > 0")
+    assert "Inner Join" in plan and "left_outer" not in plan
+
+
+def test_empty_value_accepting_predicate_uses_left_outer_join():
+    plan = _join_kinds(OUTER + f"(SELECT COUNT(*) {CORR}) = 0")
+    assert "left_outer" in plan
+
+
+def test_skip_level_correlation_with_empty_value_predicate_is_refused():
+    sql = (
+        "SELECT p.id FROM testdata.planets AS p WHERE (SELECT COUNT(*) FROM testdata.satellites AS s "
+        "WHERE s.planetId = p.id AND (SELECT COUNT(*) FROM testdata.satellites AS s2 "
+        "WHERE s2.planetId = p.id AND s2.id = s.id) = 0) = 0"
+    )
+    with pytest.raises(UnsupportedSyntaxError):
+        _rows(sql)
 
 
 if __name__ == "__main__":

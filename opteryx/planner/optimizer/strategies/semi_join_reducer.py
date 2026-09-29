@@ -67,6 +67,12 @@ from opteryx.compiled.structures.plan_steps import JoinStep
 # preserved/filtered side - it must be the PROBE; the RIGHT leg builds the table."
 _BUILD_SIDE_IS_RIGHT = ("left semi", "left anti")
 
+# The join types whose right leg is reduced only when it is a grouped aggregate keyed
+# by the join key (a decorrelated scalar subquery). LEFT OUTER is included because the
+# reducer keeps exactly the groups whose key the left leg holds, and a group whose key
+# the left leg lacks joins no left row, so the preserved-side rows are unaffected.
+_AGGREGATE_TARGET_JOINS = ("inner", "left outer")
+
 # Re-reading the source leg must cost materially less than the hash build it removes.
 # Half is deliberately conservative: the saving is a build the reducer replaces with a
 # smaller one, never the target scan itself, which still happens either way.
@@ -247,7 +253,7 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
                 continue
             if node.type in _BUILD_SIDE_IS_RIGHT:
                 return True
-            if node.type == "inner" and grouped_aggregate:
+            if node.type in _AGGREGATE_TARGET_JOINS and grouped_aggregate:
                 return True
         return False
 
@@ -260,7 +266,7 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
             nid
             for nid, node in plan.nodes(True)
             if node.node_type == LogicalPlanStepType.Join
-            and node.type in _BUILD_SIDE_IS_RIGHT + ("inner",)
+            and node.type in _BUILD_SIDE_IS_RIGHT + _AGGREGATE_TARGET_JOINS
             and not node.reducer_applied
         ]
         for join_nid in targets:
@@ -289,7 +295,7 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
             return plan
 
         # Where the reducer goes. For SEMI/ANTI it is the join's own build side. For an
-        # INNER join it is only worth doing when the right leg is a decorrelated scalar
+        # INNER or LEFT OUTER join it is only worth doing when the right leg is a decorrelated scalar
         # subquery — a grouped aggregate keyed by the join key — where the reducer stops
         # groups being BUILT rather than merely stopping them being probed. That is the
         # Q19 lesson: trimming an inner join's probe side alone measured 0.80x.
