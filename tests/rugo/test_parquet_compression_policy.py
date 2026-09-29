@@ -105,7 +105,7 @@ def test_incompressible_chunk_is_stored_raw():
     which is real redundancy even when the payload is noise."""
     morsel = _morsel(
         "SELECT CAST(RANDOM() * 9007199254740992 AS INTEGER)"
-        " ^ (CAST(RANDOM() * 9007199254740992 AS INTEGER) * 2048) AS r"
+        " ^ (CAST(RANDOM() * 9007199254740992 AS INTEGER) * 1024) AS r"
         " FROM GENERATE_SERIES(20000) AS g"
     )
     compressed = write_parquet(morsel, compression="zstd")
@@ -137,7 +137,7 @@ def test_compressible_chunk_still_compresses():
         STRINGY,
         "SELECT id, name, gravity, orbital_period FROM $planets",
         "SELECT CAST(RANDOM() * 9007199254740992 AS INTEGER)"
-        " ^ (CAST(RANDOM() * 9007199254740992 AS INTEGER) * 2048) AS r"
+        " ^ (CAST(RANDOM() * 9007199254740992 AS INTEGER) * 1024) AS r"
         " FROM GENERATE_SERIES(5000) AS g",
         "SELECT g % 10 AS low_ndv, g AS seq FROM GENERATE_SERIES(20000) AS g",
     ],
@@ -188,7 +188,7 @@ def test_mixed_codecs_in_one_file_are_readable():
     morsel = _morsel(
         "SELECT CAST(g AS VARCHAR) || 'aaaaaaaaaaaaaaaaaaaaaaaa' AS s,"
         " CAST(RANDOM() * 9007199254740992 AS INTEGER)"
-        " ^ (CAST(RANDOM() * 9007199254740992 AS INTEGER) * 2048) AS r"
+        " ^ (CAST(RANDOM() * 9007199254740992 AS INTEGER) * 1024) AS r"
         " FROM GENERATE_SERIES(20000) AS g"
     )
     buf = write_parquet(morsel, compression="zstd")
