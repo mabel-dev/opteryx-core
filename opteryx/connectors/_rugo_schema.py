@@ -45,6 +45,8 @@ PARQUET_LOGICAL_TYPE_MAP = {
     "json": LogicalCategory.NVARCHAR,
     "jsonb": LogicalCategory.NVARCHAR,
     "struct": LogicalCategory.NVARCHAR,
+    # A MAP is rendered as a JSON object, like a STRUCT (rugo/src/parquet/nested_json.hpp).
+    "map": LogicalCategory.NVARCHAR,
     "boolean": LogicalCategory.BOOLEAN,
     "binary": LogicalCategory.VARBINARY,
     "byte_array": LogicalCategory.VARBINARY,

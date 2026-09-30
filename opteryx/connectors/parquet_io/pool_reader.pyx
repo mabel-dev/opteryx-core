@@ -92,6 +92,39 @@ cdef extern from "engine/parquet_stats_coverage.hpp" namespace "opteryx::engine"
                                 CoverageAccumulator& acc) except +
 
 
+cdef extern from "nested_json.hpp" namespace "rugo":
+    # Can every leaf of STRUCT/MAP column `name` be rendered as JSON text? (footer only)
+    bint group_renderable(const FileStats& fs, const string& name, string& err) except +
+
+
+cdef bint _has_group_chunks(const RowGroupStats* rg, const string& name):
+    """True when the row group stores `name` as a nested group: chunks `<name>.<leaf>`."""
+    cdef string prefix = name + b"."
+    cdef size_t i
+    for i in range(rg.columns.size()):
+        if rg.columns[i].name.compare(0, prefix.size(), prefix) == 0:
+            return True
+    return False
+
+
+cdef _refuse_nested_group_column(const RowGroupStats* rg, const string& name, str path):
+    """A projected column with no chunk of its own name is schema evolution and is
+    NULL-filled downstream - EXCEPT when the file stores it as a nested group
+    (STRUCT / MAP), whose chunks are the dotted leaves `<name>.<leaf>`. Those have
+    no decoder, and filling them with NULL would be a silent wrong answer."""
+    cdef string prefix = name + b"."
+    cdef size_t i
+    for i in range(rg.columns.size()):
+        if rg.columns[i].name.compare(0, prefix.size(), prefix) == 0:
+            raise NotImplementedError(
+                f"column '{name.decode('utf-8')}' of {path} is a nested parquet column (a STRUCT or "
+                "MAP, or a LIST of them) that the native scan could not take: it is rendered "
+                "as JSON text only there, and this scan fell to the trampoline, which cannot "
+                "decode it; refusing to return NULLs for it"
+            )
+
+
+
 cdef class _CoverageRequest:
     """Owns one scan's native statistics-coverage request (P3/P4,
     stats_coverage_request.hpp) for the length of open_native_scan_plan - freed
@@ -612,11 +645,13 @@ cdef class CppIOPipeline:
             self.pipeline.set_coalesce_tuning(<double>_waste_ratio, <int64_t>_max_bytes)
         if http_tuning is not None:
             (_max_host_connections, _max_retries, _min_bw_bytes_per_s,
-             _timeout_floor_ms, _use_multiplexing, _use_pipewait, _force_http11) = http_tuning
+             _timeout_floor_ms, _use_multiplexing, _use_pipewait, _force_http11,
+             _max_bytes_in_flight) = http_tuning
             self.pipeline.set_http_tuning(
                 <long>_max_host_connections, <int>_max_retries,
                 <double>_min_bw_bytes_per_s, <long>_timeout_floor_ms,
                 <bint>_use_multiplexing, <bint>_use_pipewait, <bint>_force_http11,
+                <long long>_max_bytes_in_flight,
             )
         # Bearer credential for the C++ fetches — the alternative to pre-signing
         # each object (see _sign_paths). None when the connector still signs, in
@@ -776,6 +811,8 @@ cdef class CppIOPipeline:
                     col_names_vec.push_back(cpp_col_name)
                     col_stats_vec.push_back(rg.columns[i])
                     break
+            else:
+                _refuse_nested_group_column(rg, cpp_col_name, cpp_path)
 
         with nogil:
             self.pipeline.submit_row_group(path_str, rg_idx, col_names_vec, col_stats_vec)
@@ -801,6 +838,8 @@ cdef class CppIOPipeline:
                     col_names_vec.push_back(cpp_col_name)
                     col_stats_vec.push_back(rg.columns[i])
                     break
+            else:
+                _refuse_nested_group_column(rg, cpp_col_name, cpp_path)
 
         if num_rows > 0 and len(row_mask) < packed_len:
             raise ValueError(
@@ -3163,11 +3202,13 @@ cpdef NativeScanPlan open_native_scan_plan(
         plan.pipeline_ptr.set_coalesce_tuning(<double>_waste_ratio, <int64_t>_max_bytes)
     if http_tuning is not None:
         (_max_host_connections, _max_retries, _min_bw_bytes_per_s,
-         _timeout_floor_ms, _use_multiplexing, _use_pipewait, _force_http11) = http_tuning
+         _timeout_floor_ms, _use_multiplexing, _use_pipewait, _force_http11,
+             _max_bytes_in_flight) = http_tuning
         plan.pipeline_ptr.set_http_tuning(
             <long>_max_host_connections, <int>_max_retries,
             <double>_min_bw_bytes_per_s, <long>_timeout_floor_ms,
             <bint>_use_multiplexing, <bint>_use_pipewait, <bint>_force_http11,
+            <long long>_max_bytes_in_flight,
         )
     # E37: hand the per-column key flags to the decoder so non-key string columns
     # skip the seed XXH3 entirely (the "hash only when a query needs it" gate).
@@ -3268,6 +3309,7 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     # a bare physical int32 narrows to DK_INT32 rather than widening) — all
     # byte-identical to the trampoline (pool_reader _wrap_direct) and the
     # native Source (draken_type_for).
+    cdef string group_err
     cdef string s_int8 = b"int8"
     cdef string s_int16 = b"int16"
     cdef string s_uint8 = b"uint8"
@@ -3279,6 +3321,7 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     cdef string s_byte_array = b"byte_array"
     cdef string s_varchar = b"varchar"
     cdef string s_binary = b"binary"
+    cdef string s_json = b"json"
     cdef string s_boolean = b"boolean"
     # WP-11 footer tokens: rugo's metadata.cpp emits "date32[day]", "timestamp[unit]",
     # "time[unit]" (optionally ",UTC"), "decimal(p,s)". We prefix-match the temporal /
@@ -3411,7 +3454,11 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
                         # A plain string / raw-binary column: parquet byte_array whose
                         # rugo footer logical_type is "varchar" (UTF8 → VARCHAR/NVARCHAR)
                         # or "binary" (un-annotated byte_array → VARBINARY), or empty.
-                        # Reject fixed_len_byte_array, and MAP/DECIMAL/json/struct/ENUM
+                        # A top-level JSON-annotated byte_array is admitted: it is UTF-8
+                        # text in the same byte layout (DrakenType.VARIANT storage). A
+                        # STRUCT/MAP is NOT this case — its chunks are flattened leaves,
+                        # never a byte_array carrying "json".
+                        # Reject fixed_len_byte_array, and MAP/DECIMAL/struct/ENUM
                         # annotations — those decode nested/decimal, not a string
                         # vector, so they stay on the trampoline (fail-closed). LIST
                         # is rejected HERE too, and that is not the R6 relaxation: an
@@ -3421,7 +3468,8 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
                         if csp.physical_type != s_byte_array:
                             return False
                         if csp.logical_type.size() != 0 and \
-                                csp.logical_type != s_varchar and csp.logical_type != s_binary:
+                                csp.logical_type != s_varchar and csp.logical_type != s_binary and \
+                                csp.logical_type != s_json:
                             return False
                     elif kind == "array":
                         # R6: a parquet LIST column. rugo's footer logical_type is
@@ -3491,6 +3539,17 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
                     found = True
                     break
                 if not found:
+                    # A projected STRUCT/MAP has no chunk of its own name — its leaves are
+                    # `<name>.<leaf>`. The native scan expands and renders it as JSON text
+                    # (rugo/src/parquet/nested_json.hpp) when its leaves are renderable;
+                    # otherwise the gate refuses and the trampoline raises loudly.
+                    if kinds[k] == "varchar" and _has_group_chunks(rgp, wanted[<size_t>k]):
+                        if rg_i == 0 and not group_renderable(fsp[0], wanted[<size_t>k], group_err):
+                            # No other path can decode a STRUCT/MAP, so refuse HERE with the
+                            # precise reason rather than fall to a trampoline that cannot.
+                            raise NotImplementedError(
+                                f"cannot read {path}: {group_err.decode('utf-8')}")
+                        continue
                     return False
     return True
 

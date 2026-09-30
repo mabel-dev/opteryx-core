@@ -52,6 +52,7 @@
 #include "page_index.hpp"
 #include "ipc_serialize.hpp"
 #include "metadata.hpp"
+#include "nested_json.hpp"   // STRUCT/MAP leaves folded back into one JSON-text column
 #include "core/string_slot.h"   // Stage 4b: build Draken string slots in the worker
 #include "ops/string_hash.h"    // E37: draken_build_string_slot_seed — slot + carried hash seed
 #include "core/buffers.h"       // DrakenVector / DrakenStringArena — worker-side pass-1 predicate view
@@ -1647,6 +1648,11 @@ class ParquetIOPipeline {
         // budget, doubling time-to-failure and burying the first failure.
         std::shared_ptr<FetchBlock> block;
         size_t member = 0;
+        // Set when a projected column is a STRUCT/MAP: `column_names`/`column_stats`
+        // then carry that column's LEAF chunks (contiguous, in schema order) and the
+        // worker folds them back into ONE JSON-text column at the group's first slot
+        // (docs: nested_json.hpp). Null for every ordinary projection.
+        std::shared_ptr<const NestedSpec> nested;
     };
 
     // ── Fetch block ──────────────────────────────────────────────────────────
@@ -2171,9 +2177,17 @@ class ParquetIOPipeline {
         std::vector<OffsetIndexData> oi(ncols);
         std::vector<uint8_t> has_oi(ncols, 0);
         int64_t num_rows = -1;
+        // A leaf of a projected STRUCT/MAP is decoded whole (the fold reads every level),
+        // so it never gets a jump plan — same exclusion a LIST column has.
+        auto in_group = [&](size_t i) {
+            if (!item.nested) return false;
+            for (const NestedGroup& g : item.nested->groups)
+                if (i >= g.first && i < g.first + g.count) return true;
+            return false;
+        };
         for (size_t i = 0; i < ncols; ++i) {
             const ColumnStats& cs = item.column_stats[i];
-            if (!indexed(cs) || cs.max_repetition_level != 0) continue;
+            if (!indexed(cs) || cs.max_repetition_level != 0 || in_group(i)) continue;
             if (cs.num_values < 0) continue;
             oi[i] = ParseOffsetIndex(at(cs.offset_index_offset, cs.offset_index_length),
                                      static_cast<size_t>(cs.offset_index_length));
@@ -2979,180 +2993,18 @@ class ParquetIOPipeline {
             // position never depends on when it was decoded.
             const size_t ncols_total = item.column_stats.size();
             result.columns.assign(ncols_total, ColumnOut{});
-            // Decode column i under `col_mask` (uint8 per row group row, or null)
-            // into result.columns[i]. Returns false when the row group must stop
-            // decoding: an error (result.success = false) or a dictionary miss
-            // that proves it empty (result.empty_filtered).
-            auto decode_col = [&](size_t i, const uint8_t* col_mask) -> bool {
-                const auto& col_stats = item.column_stats[i];
-                // PageIndex jump plan for this column (nullptr = header-walk).
-                const PageJumpPlan* jump_ptr =
-                    (pp.active && i < pp.jump.size() && pp.jump[i].size() > 0) ? &pp.jump[i] : nullptr;
-
-                int64_t base_offset = base_offsets[i];
-                int64_t chunk_size = col_stats.total_compressed_size;
-
-                ColumnStats adjusted = col_stats;
-                adjusted.data_page_offset -= base_offset;
-                if (adjusted.dictionary_page_offset >= 0)
-                    adjusted.dictionary_page_offset -= base_offset;
-
-                // prefer_dict: keep the dictionary (compressed/Dict shape) for
-                // plain int32/int64 dict columns when not masking. Masked (pass-2)
-                // decode stays on the existing path — it only touches survivor rows
-                // and the masked-dict compaction is out of scope here. The logical
-                // gate (date/timestamp/decimal stay pool) is enforced via lt below.
-                const std::string& pt = col_stats.physical_type;
-                const std::string& cl = col_stats.logical_type;
-                // Roll-out: plain int + int-backed TIMESTAMP/DATE/DECIMAL + float.
-                // Int/temporal coercions are shape-preserving (retag / dict-only
-                // reinterpret), so a Dict-shaped int64 stays Dict; float needs no
-                // coercion. Phase 2 membership-skip stays int-only (decode gate) —
-                // float equality membership is out of scope.
-                //
-                // int-backed DECIMAL (physical int32/int64, precision <= 18 — an
-                // int128 decimal is FLBA/byte_array and so never matches `pt` here)
-                // joined this list on 2026-08-18. It is NOT a change to the Stage-4a
-                // gate below: such a column still leaves on the POOL path, because
-                // `safe_logical` requires int128_values for a decimal logical type.
-                // What changes is only WHICH pool encoding it leaves as —
-                // serialize_int64/serialize_int32 emit TAG_INT64_DICT (dictionary +
-                // per-row codes) instead of expanding the RLE runs to one int64 per
-                // row via serialize_rle_int_as_int64. Both consumers of that tag build
-                // a DECIMAL-tagged vector, never a bare INT64, so the historic
-                // "reinterpret trap" (tpch Q01 dec_mul type error, which came from a
-                // consumer taking a DIRECT DK_INT64 at face value) cannot recur:
-                // native scan -> build_pool_decimal_column's kTagInt64Dict branch
-                // (draken_vector_from_dict, DRAKEN_DECIMAL); trampoline scan ->
-                // INT64 dict vector + vector_reinterpret_as_decimal, which is
-                // shape-preserving and retags dict->dict.
-                // Armed under a row_mask too (pass-2, page pruning): the decoder
-                // compacts the codes to the survivors and the column stays
-                // Dict-shaped — see DecodeColumnFromChunk's contract in decode.hpp.
-                const bool prefer_dict =
-                    col_stats.dictionary_page_offset >= 0 &&
-                    (((pt == "int64" || pt == "int32") &&
-                      (cl.empty() || cl == "int64" || cl == "int32" ||
-                       cl.rfind("timestamp", 0) == 0 || cl.rfind("date", 0) == 0 ||
-                       cl.rfind("decimal", 0) == 0)) ||
-                     ((pt == "float64" || pt == "float32") &&
-                      (cl.empty() || cl == "float64" || cl == "float32")));
-
-                // Phase 2: pushed dictionary decode-skip predicate for this column
-                // (if any). Independent of prefer_dict — the probe only needs the
-                // dictionary (decoded before any data page), not the dict-shaped
-                // surviving representation.
-                //
-                // Armed only when the CALLER supplied no mask. A page-pruned row
-                // group qualifies (its mask is derived here, item.row_mask stays
-                // empty) and wants the probe. A pass-2 late-materialization item
-                // does not: its rows already matched the predicate, so the probe
-                // could only ever agree — and leaving it off keeps the pass-2
-                // consumer's "a masked submit never comes back empty" invariant
-                // exactly as strong as it was.
-                DictSkipPredicate skip;
-                const DictSkipPredicate* skip_ptr = nullptr;
-                if (item.row_mask.empty() && !dict_preds_.empty()) {
-                    auto nit = dict_preds_.find(col_stats.name);
-                    if (nit != dict_preds_.end()) {
-                        skip.kind = nit->second.kind;
-                        skip.int_vals = &nit->second.int_vals;
-                        skip.str_vals = &nit->second.str_vals;
-                        skip_ptr = &skip;
-                    }
-                }
-
-                DecodedColumn& decoded = scratch;   // reused; reset at decode entry
-                // H15 (2026-08-14, unratified): a SMALL column chunk is cheaper to
-                // pread than to fault in. MEASURED (x86 cold, `SUM(AdvEngineID)` over
-                // 100 files, column = 0.96 MB total): bytes requested via syscalls are
-                // IDENTICAL to a zero-column COUNT(*) (11.3 MB both), yet the device
-                // delivers 42 MB more — all of it arriving through mmap page faults,
-                // ~170 KB faulted per mapping to read a ~3 KB chunk. That is
-                // fault-around (filemap_map_pages / fault_around_bytes), which is why
-                // the rejected MADV_RANDOM attempt did nothing: MADV_RANDOM suppresses
-                // readahead, not fault-around. A pread asks for exactly the bytes we
-                // want, at the cost of one copy into a heap buffer — a good trade only
-                // while the chunk is small, so large chunks keep the zero-copy slice.
-                // Threshold in bytes; RUGO_PREAD_SMALL_CHUNKS=0 disables (A/B arm).
-                static const size_t pread_below = []() -> size_t {
-                    const char* v = getenv("RUGO_PREAD_SMALL_CHUNKS");
-                    if (v != nullptr && *v != '\0') return strtoull(v, nullptr, 10);
-                    return 256u * 1024u;
-                }();
-                const bool small_chunk_pread =
-                    is_local && pread_below > 0 &&
-                    static_cast<size_t>(chunk_size) < pread_below;
-                if (mmap_base != MAP_FAILED && !small_chunk_pread) {
-                    // Zero-copy: slice directly into the mmap — no heap allocation.
-                    const uint8_t* chunk_ptr =
-                        static_cast<const uint8_t*>(mmap_base) + (base_offset - mmap_offset);
-                    auto t_dec = std::chrono::steady_clock::now();
-                    DecodeColumnFromChunk(scratch,
-                        chunk_ptr, static_cast<size_t>(chunk_size), &adjusted, col_mask, prefer_dict, skip_ptr, jump_ptr);
-                    total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now() - t_dec).count();
-                    // A jumped-over page is never faulted in from the mapping.
-                    result.bytes_fetched += chunk_size -
-                        (jump_ptr != nullptr ? pruned_bytes_of(*jump_ptr) : 0);
-                } else if (remote) {
-                    // Fetched with the block: decode straight from the buffer.
-                    // No bloom filter rides here — the writer puts every bloom
-                    // in the file tail (docs/PARQUET_GROUPED_COLUMN_MAJOR_DESIGN.md
-                    // [D-6]: the remote bloom decode-skip was dropped with it;
-                    // bloom pruning is a plan-time, local-footer concern).
-                    if (i >= col_ptr.size() || col_ptr[i] == nullptr) {
-                        result.success = false;
-                        result.error = "coalesced range fetch did not cover column " +
-                                       std::to_string(i);
-                        return false;
-                    }
-                    const uint8_t* raw_data = col_ptr[i];
-                    const size_t   raw_size = col_len[i];
-                    result.bytes_fetched += col_fetched[i];   // what was actually transferred
-                    auto t_dec = std::chrono::steady_clock::now();
-                    DecodeColumnFromChunk(scratch,
-                        raw_data, raw_size, &adjusted, col_mask, prefer_dict, skip_ptr, jump_ptr);
-                    total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now() - t_dec).count();
-                } else {
-                    // Local file, reached either because the mmap failed OR because
-                    // H15 chose a pread for a small chunk (see small_chunk_pread).
-                    auto [raw_bytes, read_ns] = read_range(item.path, base_offset, chunk_size);
-                    result.bytes_fetched += chunk_size;
-                    total_read_ns += read_ns;
-                    auto t_dec = std::chrono::steady_clock::now();
-                    DecodeColumnFromChunk(scratch,
-                        raw_bytes.data(), raw_bytes.size(), &adjusted, col_mask, prefer_dict, skip_ptr, jump_ptr);
-                    total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now() - t_dec).count();
-                }
-
-                if (!decoded.success) {
-                    result.success = false;
-                    // Surface the specific reason (e.g. a decompression error)
-                    // verbatim when the decoder captured one; otherwise fall back
-                    // to the generic message for honest "unsupported shape"
-                    // rejections that carry no reason.
-                    if (!decoded.error_message.empty()) {
-                        result.error = "Decode failed for column '" + col_stats.name +
-                                       "': " + decoded.error_message;
-                    } else {
-                        result.error = "Decode failed for column: " + col_stats.name;
-                    }
-                    return false;
-                }
-
-                // Phase 2 fast-exit: a pushed-conjunct equality column whose
-                // dictionary lacks every needle means the WHOLE row group yields
-                // zero rows. Flag it and stop decoding the remaining columns — the
-                // consumer skips this row group entirely (no wrap/filter/morsel).
-                if (decoded.dict_all_filtered) {
-                    result.empty_filtered = true;
-                    result.empty_rows = decoded.num_rows;
-                    return false;
-                }
-
+            // Decoded leaves of each projected STRUCT/MAP, held until the group's last leaf.
+            std::vector<std::vector<DecodedColumn>> group_leaves;
+            if (item.nested) {
+                group_leaves.resize(item.nested->groups.size());
+                for (size_t g = 0; g < group_leaves.size(); ++g)
+                    group_leaves[g].resize(item.nested->groups[g].count);
+            }
+            // Turn a decoded column into the ColumnOut at result.columns[slot]. `col_stats` is
+            // the chunk's own stats, or — for a folded STRUCT/MAP — a synthetic descriptor of
+            // the JSON-text column. Returns false (result.success=false) on allocation failure.
+            auto emit_col = [&](size_t slot, const ColumnStats& col_stats, DecodedColumn& decoded) -> bool {
+                const size_t slot_orig = item.nested ? item.nested->orig[slot] : slot;
                 ColumnOut cout;
                 // Clustering hint: copied from this row group's own footer claim
                 // (already trust-gated by metadata.cpp's created_by check), applies
@@ -3222,7 +3074,7 @@ class ParquetIOPipeline {
                     bool ok;
                     // E37: this column carries a hash seed only if the plan flagged
                     // it a downstream key (parallel to the projected column order).
-                    const bool want_seed = (i < hash_key_columns_.size()) && (hash_key_columns_[i] != 0);
+                    const bool want_seed = (slot_orig < hash_key_columns_.size()) && (hash_key_columns_[slot_orig] != 0);
                     // Every read of this column is length-answerable (proved by
                     // LengthOnlyColumnStrategy) -> its long-value payloads need not
                     // be materialized. Movers that copy payloads without reading them
@@ -3232,7 +3084,7 @@ class ParquetIOPipeline {
                     // DrakenStringArena.payloads_elided (that struct byte is not
                     // self-zeroing across every arena constructor in the tree, so an
                     // uninitialised one could misread as elided — see buffers.h).
-                    const bool length_only = (i < length_only_columns_.size()) && (length_only_columns_[i] != 0);
+                    const bool length_only = (slot_orig < length_only_columns_.size()) && (length_only_columns_[slot_orig] != 0);
                     if (dk == DK_BOOL)
                         ok = build_direct_bool(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     else if (dk == DK_VARCHAR)
@@ -3302,8 +3154,219 @@ class ParquetIOPipeline {
                     cout.direct_kind = DK_POOL;
                     cout.ref_id = ref_id;
                 }
-                result.columns[i] = cout;
+                result.columns[slot] = cout;
                 return true;
+            };
+
+            // Decode column i under `col_mask` (uint8 per row group row, or null)
+            // into result.columns[i]. Returns false when the row group must stop
+            // decoding: an error (result.success = false) or a dictionary miss
+            // that proves it empty (result.empty_filtered).
+            auto decode_col = [&](size_t i, const uint8_t* col_mask) -> bool {
+                // A leaf of a projected STRUCT/MAP decodes UNMASKED (the fold applies the row
+                // mask once, over the assembled rows), with no dictionary retention, dictionary
+                // skip or page jump: the fold reads every level of every leaf.
+                const NestedGroup* ng = nullptr;
+                size_t ng_leaf = 0;
+                if (item.nested) {
+                    for (const NestedGroup& g : item.nested->groups) {
+                        if (i >= g.first && i < g.first + g.count) { ng = &g; ng_leaf = i - g.first; break; }
+                    }
+                }
+                const uint8_t* dec_mask = ng ? nullptr : col_mask;
+                const auto& col_stats = item.column_stats[i];
+                // PageIndex jump plan for this column (nullptr = header-walk).
+                const PageJumpPlan* jump_ptr =
+                    (ng == nullptr && pp.active && i < pp.jump.size() && pp.jump[i].size() > 0) ? &pp.jump[i] : nullptr;
+
+                int64_t base_offset = base_offsets[i];
+                int64_t chunk_size = col_stats.total_compressed_size;
+
+                ColumnStats adjusted = col_stats;
+                adjusted.data_page_offset -= base_offset;
+                if (adjusted.dictionary_page_offset >= 0)
+                    adjusted.dictionary_page_offset -= base_offset;
+
+                // prefer_dict: keep the dictionary (compressed/Dict shape) for
+                // plain int32/int64 dict columns when not masking. Masked (pass-2)
+                // decode stays on the existing path — it only touches survivor rows
+                // and the masked-dict compaction is out of scope here. The logical
+                // gate (date/timestamp/decimal stay pool) is enforced via lt below.
+                const std::string& pt = col_stats.physical_type;
+                const std::string& cl = col_stats.logical_type;
+                // Roll-out: plain int + int-backed TIMESTAMP/DATE/DECIMAL + float.
+                // Int/temporal coercions are shape-preserving (retag / dict-only
+                // reinterpret), so a Dict-shaped int64 stays Dict; float needs no
+                // coercion. Phase 2 membership-skip stays int-only (decode gate) —
+                // float equality membership is out of scope.
+                //
+                // int-backed DECIMAL (physical int32/int64, precision <= 18 — an
+                // int128 decimal is FLBA/byte_array and so never matches `pt` here)
+                // joined this list on 2026-08-18. It is NOT a change to the Stage-4a
+                // gate below: such a column still leaves on the POOL path, because
+                // `safe_logical` requires int128_values for a decimal logical type.
+                // What changes is only WHICH pool encoding it leaves as —
+                // serialize_int64/serialize_int32 emit TAG_INT64_DICT (dictionary +
+                // per-row codes) instead of expanding the RLE runs to one int64 per
+                // row via serialize_rle_int_as_int64. Both consumers of that tag build
+                // a DECIMAL-tagged vector, never a bare INT64, so the historic
+                // "reinterpret trap" (tpch Q01 dec_mul type error, which came from a
+                // consumer taking a DIRECT DK_INT64 at face value) cannot recur:
+                // native scan -> build_pool_decimal_column's kTagInt64Dict branch
+                // (draken_vector_from_dict, DRAKEN_DECIMAL); trampoline scan ->
+                // INT64 dict vector + vector_reinterpret_as_decimal, which is
+                // shape-preserving and retags dict->dict.
+                // Armed under a row_mask too (pass-2, page pruning): the decoder
+                // compacts the codes to the survivors and the column stays
+                // Dict-shaped — see DecodeColumnFromChunk's contract in decode.hpp.
+                const bool prefer_dict =
+                    ng == nullptr &&
+                    col_stats.dictionary_page_offset >= 0 &&
+                    (((pt == "int64" || pt == "int32") &&
+                      (cl.empty() || cl == "int64" || cl == "int32" ||
+                       cl.rfind("timestamp", 0) == 0 || cl.rfind("date", 0) == 0 ||
+                       cl.rfind("decimal", 0) == 0)) ||
+                     ((pt == "float64" || pt == "float32") &&
+                      (cl.empty() || cl == "float64" || cl == "float32")));
+
+                // Phase 2: pushed dictionary decode-skip predicate for this column
+                // (if any). Independent of prefer_dict — the probe only needs the
+                // dictionary (decoded before any data page), not the dict-shaped
+                // surviving representation.
+                //
+                // Armed only when the CALLER supplied no mask. A page-pruned row
+                // group qualifies (its mask is derived here, item.row_mask stays
+                // empty) and wants the probe. A pass-2 late-materialization item
+                // does not: its rows already matched the predicate, so the probe
+                // could only ever agree — and leaving it off keeps the pass-2
+                // consumer's "a masked submit never comes back empty" invariant
+                // exactly as strong as it was.
+                DictSkipPredicate skip;
+                const DictSkipPredicate* skip_ptr = nullptr;
+                if (ng == nullptr && item.row_mask.empty() && !dict_preds_.empty()) {
+                    auto nit = dict_preds_.find(col_stats.name);
+                    if (nit != dict_preds_.end()) {
+                        skip.kind = nit->second.kind;
+                        skip.int_vals = &nit->second.int_vals;
+                        skip.str_vals = &nit->second.str_vals;
+                        skip_ptr = &skip;
+                    }
+                }
+
+                DecodedColumn& decoded = scratch;   // reused; reset at decode entry
+                // H15 (2026-08-14, unratified): a SMALL column chunk is cheaper to
+                // pread than to fault in. MEASURED (x86 cold, `SUM(AdvEngineID)` over
+                // 100 files, column = 0.96 MB total): bytes requested via syscalls are
+                // IDENTICAL to a zero-column COUNT(*) (11.3 MB both), yet the device
+                // delivers 42 MB more — all of it arriving through mmap page faults,
+                // ~170 KB faulted per mapping to read a ~3 KB chunk. That is
+                // fault-around (filemap_map_pages / fault_around_bytes), which is why
+                // the rejected MADV_RANDOM attempt did nothing: MADV_RANDOM suppresses
+                // readahead, not fault-around. A pread asks for exactly the bytes we
+                // want, at the cost of one copy into a heap buffer — a good trade only
+                // while the chunk is small, so large chunks keep the zero-copy slice.
+                // Threshold in bytes; RUGO_PREAD_SMALL_CHUNKS=0 disables (A/B arm).
+                static const size_t pread_below = []() -> size_t {
+                    const char* v = getenv("RUGO_PREAD_SMALL_CHUNKS");
+                    if (v != nullptr && *v != '\0') return strtoull(v, nullptr, 10);
+                    return 256u * 1024u;
+                }();
+                const bool small_chunk_pread =
+                    is_local && pread_below > 0 &&
+                    static_cast<size_t>(chunk_size) < pread_below;
+                if (mmap_base != MAP_FAILED && !small_chunk_pread) {
+                    // Zero-copy: slice directly into the mmap — no heap allocation.
+                    const uint8_t* chunk_ptr =
+                        static_cast<const uint8_t*>(mmap_base) + (base_offset - mmap_offset);
+                    auto t_dec = std::chrono::steady_clock::now();
+                    DecodeColumnFromChunk(scratch,
+                        chunk_ptr, static_cast<size_t>(chunk_size), &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr);
+                    total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - t_dec).count();
+                    // A jumped-over page is never faulted in from the mapping.
+                    result.bytes_fetched += chunk_size -
+                        (jump_ptr != nullptr ? pruned_bytes_of(*jump_ptr) : 0);
+                } else if (remote) {
+                    // Fetched with the block: decode straight from the buffer.
+                    // No bloom filter rides here — the writer puts every bloom
+                    // in the file tail (docs/PARQUET_GROUPED_COLUMN_MAJOR_DESIGN.md
+                    // [D-6]: the remote bloom decode-skip was dropped with it;
+                    // bloom pruning is a plan-time, local-footer concern).
+                    if (i >= col_ptr.size() || col_ptr[i] == nullptr) {
+                        result.success = false;
+                        result.error = "coalesced range fetch did not cover column " +
+                                       std::to_string(i);
+                        return false;
+                    }
+                    const uint8_t* raw_data = col_ptr[i];
+                    const size_t   raw_size = col_len[i];
+                    result.bytes_fetched += col_fetched[i];   // what was actually transferred
+                    auto t_dec = std::chrono::steady_clock::now();
+                    DecodeColumnFromChunk(scratch,
+                        raw_data, raw_size, &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr);
+                    total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - t_dec).count();
+                } else {
+                    // Local file, reached either because the mmap failed OR because
+                    // H15 chose a pread for a small chunk (see small_chunk_pread).
+                    auto [raw_bytes, read_ns] = read_range(item.path, base_offset, chunk_size);
+                    result.bytes_fetched += chunk_size;
+                    total_read_ns += read_ns;
+                    auto t_dec = std::chrono::steady_clock::now();
+                    DecodeColumnFromChunk(scratch,
+                        raw_bytes.data(), raw_bytes.size(), &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr);
+                    total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - t_dec).count();
+                }
+
+                if (!decoded.success) {
+                    result.success = false;
+                    // Surface the specific reason (e.g. a decompression error)
+                    // verbatim when the decoder captured one; otherwise fall back
+                    // to the generic message for honest "unsupported shape"
+                    // rejections that carry no reason.
+                    if (!decoded.error_message.empty()) {
+                        result.error = "Decode failed for column '" + col_stats.name +
+                                       "': " + decoded.error_message;
+                    } else {
+                        result.error = "Decode failed for column: " + col_stats.name;
+                    }
+                    return false;
+                }
+
+                // Phase 2 fast-exit: a pushed-conjunct equality column whose
+                // dictionary lacks every needle means the WHOLE row group yields
+                // zero rows. Flag it and stop decoding the remaining columns — the
+                // consumer skips this row group entirely (no wrap/filter/morsel).
+                if (decoded.dict_all_filtered) {
+                    result.empty_filtered = true;
+                    result.empty_rows = decoded.num_rows;
+                    return false;
+                }
+
+                if (ng != nullptr) {
+                    // A leaf of a STRUCT/MAP: keep it (with its levels) until the group's last
+                    // leaf arrives, then fold them all into one JSON-text column.
+                    const size_t gi = static_cast<size_t>(ng - item.nested->groups.data());
+                    group_leaves[gi][ng_leaf] = std::move(scratch);
+                    if (ng_leaf + 1 < ng->count) return true;
+                    DecodedColumn folded;
+                    try {
+                        rugo::nested::assemble(*ng->plan, group_leaves[gi], col_mask, folded);
+                    } catch (const std::exception& e) {
+                        result.success = false;
+                        result.error = e.what();
+                        return false;
+                    }
+                    group_leaves[gi].clear();
+                    group_leaves[gi].shrink_to_fit();
+                    ColumnStats synth;
+                    synth.name = ng->name;
+                    synth.physical_type = "byte_array";
+                    synth.logical_type = "varchar";
+                    return emit_col(ng->first, synth, folded);
+                }
+                return emit_col(i, col_stats, decoded);
             };
 
             // ── Scan prefilter (docs/PARQUET_SELECTIVE_DECODE_DESIGN.md §2.1) ──
@@ -3373,6 +3436,32 @@ class ParquetIOPipeline {
         } catch (const std::exception& e) {
             result.success = false;
             result.error = e.what();
+        }
+
+        // Fold each STRUCT/MAP's leaf slots into the ONE column the consumer projected:
+        // the JSON-text ColumnOut was emitted at the group's first slot, the other leaf
+        // slots carry nothing. After this, names/columns are exactly the projection.
+        if (item.nested) {
+            std::vector<std::string> folded_names;
+            std::vector<ColumnOut> folded_cols;
+            folded_names.reserve(result.column_names.size());
+            folded_cols.reserve(result.columns.size());
+            for (size_t i = 0; i < result.columns.size();) {
+                const NestedGroup* grp = nullptr;
+                for (const NestedGroup& g : item.nested->groups)
+                    if (g.first == i) { grp = &g; break; }
+                if (grp != nullptr) {
+                    folded_names.push_back(grp->name);
+                    folded_cols.push_back(result.columns[i]);
+                    i += grp->count;
+                } else {
+                    folded_names.push_back(result.column_names[i]);
+                    folded_cols.push_back(result.columns[i]);
+                    ++i;
+                }
+            }
+            result.column_names = std::move(folded_names);
+            result.columns = std::move(folded_cols);
         }
 
         // H6: a cached mapping is pipeline-owned (local_mmap_cache_) — released
@@ -3584,7 +3673,8 @@ class ParquetIOPipeline {
     // this instead of constructing an HttpTuning on the Cython side.
     void set_http_tuning(long max_host_connections, int max_retries,
                           double min_bandwidth_bytes_per_s, long timeout_floor_ms,
-                          bool use_multiplexing, bool use_pipewait, bool force_http11) {
+                          bool use_multiplexing, bool use_pipewait, bool force_http11,
+                          long long max_bytes_in_flight) {
         HttpTuning t;
         t.max_host_connections = max_host_connections;
         t.max_retries = max_retries;
@@ -3593,6 +3683,7 @@ class ParquetIOPipeline {
         t.use_multiplexing = use_multiplexing;
         t.use_pipewait = use_pipewait;
         t.force_http11 = force_http11;
+        t.max_bytes_in_flight = max_bytes_in_flight;
         set_http_tuning(t);
     }
 #endif
@@ -3752,7 +3843,8 @@ class ParquetIOPipeline {
     void submit_block(const std::string& path, const std::vector<int>& rg_idx,
                       const std::vector<std::string>& column_names,
                       const std::vector<std::vector<ColumnStats>>& column_stats,
-                      const std::vector<std::vector<uint8_t>>& row_masks = {}) {
+                      const std::vector<std::vector<uint8_t>>& row_masks = {},
+                      std::shared_ptr<const NestedSpec> nested = nullptr) {
         if (shutdown_) return;
         if (rg_idx.empty())
             throw std::invalid_argument("submit_block: a block needs at least one row group");
@@ -3781,6 +3873,7 @@ class ParquetIOPipeline {
             item.column_names = column_names;
             item.column_stats = column_stats[m];
             if (!row_masks.empty()) item.row_mask = row_masks[m];
+            item.nested = nested;
             item.est_decoded_bytes = sum_column_bytes(column_stats[m], false);
             item.est_compressed_bytes = sum_column_bytes(column_stats[m], true);
             item.block = blk;

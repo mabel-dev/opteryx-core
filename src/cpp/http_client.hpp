@@ -52,8 +52,35 @@ struct HttpError : std::runtime_error {
 struct HttpTuning {
     long   max_host_connections      = 3;               // get_many()'s per-host connection cap
     int    max_retries                = 2;               // transient-failure retry budget
-    double min_bandwidth_bytes_per_s  = 20.0e6 / 8.0;     // assumed floor bandwidth per get()/get_many() call
+    double min_bandwidth_bytes_per_s  = 60.0e6 / 8.0;     // assumed floor bandwidth per get()/get_many() call (60 Mbps)
     long   timeout_floor_ms           = 10000;            // minimum per-request (get_many: per-batch) timeout
+
+    // ── Bytes in flight ────────────────────────────────────────────────────
+    // Process-wide cap on the bytes of range requests being transferred at once,
+    // across every thread, scan and query. A request (get_many: a batch attempt)
+    // is admitted only if its bytes fit under the cap, first come first served; a
+    // request larger than the cap is admitted alone, so nothing deadlocks. Waiting
+    // for admission happens BEFORE curl starts the request's timer, so it never
+    // spends the request's deadline.
+    //
+    // WHY: the deadline is sized from the request's own bytes at an assumed
+    // minimum bandwidth (min_bandwidth_bytes_per_s, timeout_floor_ms), but N
+    // concurrent requests share one link. Wide columns make each request large,
+    // so the same concurrency puts far more bytes on the wire (measured locally:
+    // 24 requests = 181 MB in flight for a wide string column against 17 MB for
+    // an int64 column) and the last byte can then land after the deadline of a
+    // link that was moving data the whole time. Locally, on a 100 Mbps shared
+    // link, that column fails with no cap (242 MB in flight) and completes at 94%
+    // of the link with a 23 MB cap.
+    //
+    //   <0 = no cap
+    //   0  = ADAPTIVE (default): cap = estimated link speed x timeout_floor x 0.5,
+    //        the estimate being a windowed max of measured aggregate throughput,
+    //        starting from min_bandwidth_bytes_per_s (see ByteGate in
+    //        http_client.cpp). A FIXED cap is wrong on a fast link: 25 MB measured
+    //        4x slower (129 -> 31 MB/s) for the wide column at 1200 Mbps shared.
+    //   >0 = that many bytes, fixed
+    long long max_bytes_in_flight     = 0;
 
     // ── HTTP/2 multiplexing ────────────────────────────────────────────────
     // get_many() adds every range's easy handle to one CURLM at once. WITHOUT

@@ -20,7 +20,9 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
+#include <deque>
 #include <cstring>
 #include <mutex>
 #include <random>
@@ -47,8 +49,15 @@ long http_timeout_floor_ms_env() {
 double http_min_bw_bytes_per_s_env() {
     static double v = []() {
         const char* e = std::getenv("OPTERYX_HTTP_MIN_BW_MBPS");
-        double mbps = e ? std::atof(e) : 20.0;   // assume ≥20 Mbps/stream
+        double mbps = e ? std::atof(e) : 60.0;   // assume ≥60 Mbps (also the adaptive byte cap's starting speed)
         return mbps * 1.0e6 / 8.0;
+    }();
+    return v;
+}
+long long http_max_bytes_in_flight_env() {
+    static long long v = []() {
+        const char* e = std::getenv("OPTERYX_HTTP_MAX_BYTES_IN_FLIGHT");
+        return e ? std::atoll(e) : 0LL;   // default: adaptive (see HttpTuning::max_bytes_in_flight)
     }();
     return v;
 }
@@ -125,6 +134,7 @@ bool curl_result_retryable(CURLcode c) {
         case CURLE_OPERATION_TIMEDOUT:
         case CURLE_COULDNT_CONNECT:
         case CURLE_COULDNT_RESOLVE_HOST:
+        case CURLE_SSL_CONNECT_ERROR:
         case CURLE_GOT_NOTHING:
         case CURLE_RECV_ERROR:
         case CURLE_SEND_ERROR:
@@ -192,6 +202,115 @@ unsigned backoff_ms(int attempt) {
     std::uniform_int_distribution<unsigned> d(0, base);
     return d(rng);
 }
+
+
+// ── Bytes-in-flight admission (HttpTuning::max_bytes_in_flight) ──────────────
+// One gate for the whole process: the link is shared by every thread and query.
+// Strict FIFO (tickets) so a large request cannot be starved by a stream of small
+// ones that each fit under the cap.
+//
+// ADAPTIVE CAP (max_bytes_in_flight == 0). The cap is the bytes that can still
+// land inside the deadline at the link's real speed, with headroom:
+//     cap = estimated_link_bytes_per_s x timeout_floor_s x kSafety
+// The link speed comes from DELIVERY-RATE SAMPLES, one per completed request: the
+// bytes the whole process finished moving while that request was in flight
+// (its own included) divided by its lifetime. Sampling per request rather than on
+// a fixed clock gives a sample at the first completion instead of after a window,
+// and each sample spans a whole request, so the lumpy completions of large ranges
+// cannot spike it. The estimate is the MAXIMUM over the last timeout_floor:
+//   - a max filter, not a mean, because a quiet moment (little demand) delivers
+//     little without the link being slow; a mean would shrink the cap and starve
+//     the very demand that would show the link is fast. Only a whole horizon of
+//     low samples lowers the estimate.
+//   - the assumption (min_bandwidth_bytes_per_s x timeout_floor, in full) stands for
+//     the first horizon and whenever a full horizon has produced no sample, so the
+//     gate opens at the assumed minimum and never learns "slow" from a warm-up.
+//   - headroom: kSafety < 1 means cap = 5 s of transfer at the estimate with the
+//     default 10 s floor, so in-flight bytes can exceed one second of throughput
+//     and the estimate can rise to a faster link.
+class ByteGate {
+public:
+    // What a request remembers from admission, to compute its delivery-rate sample.
+    struct Admission { long long bytes = 0; double t_start = 0.0; long long delivered_at_start = 0; };
+
+    Admission acquire(long long bytes, const HttpTuning& t) {
+        std::unique_lock<std::mutex> lk(m_);
+        const uint64_t ticket = next_ticket_++;
+        cv_.wait(lk, [&] {
+            return ticket == serving_ &&
+                   (in_flight_ == 0 || in_flight_ + bytes <= cap_locked(t, now_s()));
+        });
+        const double now = now_s();
+        if (first_use_ < 0) first_use_ = now;
+        in_flight_ += bytes;
+        ++serving_;
+        cv_.notify_all();   // the next ticket may fit alongside this one
+        return Admission{bytes, now, delivered_};
+    }
+    void release(const Admission& a) {
+        std::lock_guard<std::mutex> lk(m_);
+        in_flight_ -= a.bytes;
+        delivered_ += a.bytes;
+        const double now = now_s();
+        const double life = now - a.t_start;
+        if (life > 0.0)
+            samples_.emplace_back(now, static_cast<double>(delivered_ - a.delivered_at_start) / life);
+        cv_.notify_all();
+    }
+private:
+    static constexpr double kSafety = 0.5;   // cap = this x (bytes the estimate moves in the deadline)
+
+    static double now_s() {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    long long cap_locked(const HttpTuning& t, double now) {
+        if (t.max_bytes_in_flight > 0) return t.max_bytes_in_flight;
+        const double horizon = t.timeout_floor_ms / 1000.0;
+        while (!samples_.empty() && now - samples_.front().first > horizon) samples_.pop_front();
+        double measured = 0.0;
+        for (const auto& s : samples_) measured = std::max(measured, s.second);
+        // The assumed minimum is a FLOOR on the link, so it fills the deadline in full;
+        // a measured rate is an estimate that moves, so it keeps the safety margin. The
+        // assumption applies for the first horizon and whenever a horizon has produced
+        // no sample, so the gate never learns "slow" from a warm-up.
+        double cap = measured * horizon * kSafety;
+        const bool warming = first_use_ >= 0 && now - first_use_ < horizon;
+        if (warming || samples_.empty()) cap = std::max(cap, t.min_bandwidth_bytes_per_s * horizon);
+        return static_cast<long long>(cap);
+    }
+
+    std::mutex              m_;
+    std::condition_variable cv_;
+    long long               in_flight_   = 0;
+    long long               delivered_   = 0;     // bytes of every completed request, ever
+    uint64_t                next_ticket_ = 0;
+    uint64_t                serving_     = 0;
+    double                  first_use_   = -1.0;
+    std::deque<std::pair<double, double>> samples_;   // (time, bytes/s), oldest first
+};
+
+ByteGate& byte_gate() {
+    static ByteGate g;
+    return g;
+}
+
+// Holds `bytes` of the gate for the scope of one transfer attempt. No-op when the
+// cap is off (max_bytes_in_flight < 0) or the request has no known size.
+class ByteAdmission {
+public:
+    ByteAdmission(long long bytes, const HttpTuning& tuning) {
+        if (tuning.max_bytes_in_flight < 0 || bytes <= 0) return;
+        admission_ = byte_gate().acquire(bytes, tuning);
+        held_ = true;
+    }
+    ~ByteAdmission() { if (held_) byte_gate().release(admission_); }
+    ByteAdmission(const ByteAdmission&) = delete;
+    ByteAdmission& operator=(const ByteAdmission&) = delete;
+private:
+    ByteGate::Admission admission_;
+    bool                held_ = false;
+};
 
 // curl_easy_init()'s implicit auto-init (CURL_GLOBAL_ALL) is documented as not
 // thread-safe. tl_http_client() is thread_local, so multiple worker threads can
@@ -266,6 +385,7 @@ HttpTuning HttpClient::default_tuning() {
         HttpTuning c;
         c.max_host_connections     = http_max_host_connections_env();
         c.max_retries               = http_max_retries_env();
+        c.max_bytes_in_flight       = http_max_bytes_in_flight_env();
         c.min_bandwidth_bytes_per_s = http_min_bw_bytes_per_s_env();
         c.timeout_floor_ms          = http_timeout_floor_ms_env();
         c.use_multiplexing          = http_use_multiplexing_env();
@@ -462,7 +582,13 @@ std::vector<uint8_t> HttpClient::get(
         }
         if (hlist) curl_easy_setopt(easy, CURLOPT_HTTPHEADER, hlist);
 
-        CURLcode res = curl_easy_perform(easy);
+        CURLcode res;
+        {
+            // Same admission as get_many(), for this one range; see HttpTuning.
+            const long span = range_span_bytes(headers);
+            ByteAdmission admission(span > 0 ? span : 0, tuning);
+            res = curl_easy_perform(easy);
+        }
         curl_slist_free_all(hlist);
 
         bool curl_ok = (res == CURLE_OK);
@@ -619,6 +745,11 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
         const long batch_timeout_ms = timeout_for_bytes_ms(batch_bytes, tuning, timeout_ms_);
         last_batch_n     = idxs.size();
         last_batch_bytes = batch_bytes;
+
+        // Wait for room on the link BEFORE any handle is created or added: curl
+        // starts each request's timer when it is added, so waiting here costs the
+        // request none of its deadline. Held until this attempt's transfers end.
+        ByteAdmission admission(batch_bytes, tuning);
 
         auto cleanup = [&]() {
             for (size_t j = 0; j < idxs.size(); ++j) {

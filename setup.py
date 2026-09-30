@@ -1603,6 +1603,19 @@ extensions.append(
                 "rugo/src/parquet/decode_encodings.cpp",
                 "rugo/src/parquet/decode_page.cpp",
                 "rugo/src/parquet/page_index.cpp",
+                # STRUCT/MAP → JSON text (nested_json.hpp): the assembler, plus the
+                # renderers it shares with the JSON writers — ryu (float text) and
+                # mabel base64 (binary leaves). Out-of-line HERE so _operators /
+                # parquet_read resolve them from this module, exactly as they do
+                # DecodeColumnFromChunk.
+                "rugo/src/parquet/nested_json.cpp",
+                "third_party/ulfjack/ryu/d2s.c",
+                "third_party/ulfjack/ryu/f2s.c",
+                "third_party/mabel/base64/_base64.c",
+                "third_party/mabel/base64/_base64_dispatch.c",
+                "third_party/mabel/base64/_base64_neon.c",
+                "third_party/mabel/base64/_base64_avx2.c",
+                "third_party/mabel/base64/_base64_rvv.c",
                 "draken/simd/cpu_features.cpp",
                 "src/cpp/http_client.cpp",
             ]
@@ -1631,6 +1644,7 @@ extensions.append(
         extra_link_args=_curl_link_args + ([] if is_win() else ["-lm"]),
         depends=[
             "rugo/src/parquet/io_pipeline.hpp",
+            "rugo/src/parquet/nested_json.hpp",
             "rugo/src/parquet/ipc_serialize.hpp",
             "rugo/src/parquet/decode.hpp",
             "rugo/src/parquet/metadata.hpp",

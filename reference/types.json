@@ -591,6 +591,7 @@
             "parquet_logical": [
                 "json",
                 "jsonb",
+                "map",
                 "struct"
             ],
             "jsonl": [

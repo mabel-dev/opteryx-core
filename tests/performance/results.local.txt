@@ -1,6 +1,6 @@
 make clickbench (7.59s) [256K rg] (29-SEP) [0.71x]
 make clickbench-skene (6.90s) (29-SEP) [0.65x]
-make clickbench-canon (10.42) (29-SEP) [0.98x]
+make clickbench-canon (10.38) (30-SEP) [0.97x]
 **** clickbench (125.6 seconds) <- Opteryx 0.26.8
 
 make tpch-sf1    (408.1ms) (28-SEP) [SF1] [1.17x]

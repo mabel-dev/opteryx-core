@@ -221,29 +221,22 @@ struct LatmatScanSource : Source {
             err.msg = "LatmatScanSource: work item path missing from footer_map";
             return false;
         }
+        // A projected STRUCT/MAP is expanded to its leaf chunks here (folded back by the
+        // pipeline's worker). A column missing from a row group's stats means schema
+        // evolution, which neither native scan path supports, so it fails loud.
+        std::vector<std::string> names;
         std::vector<std::vector<ColumnStats>> stats;
-        stats.reserve(rg_idxs.size());
-        for (int rg_idx : rg_idxs) {
-            const RowGroupStats& rg = fit->second->row_groups[static_cast<size_t>(rg_idx)];
-            std::vector<ColumnStats> col_stats_vec;
-            col_stats_vec.reserve(want_names.size());
-            for (const std::string& want : want_names) {
-                for (const ColumnStats& cs : rg.columns) {
-                    if (cs.name == want) {
-                        col_stats_vec.push_back(cs);
-                        break;
-                    }
-                }
-            }
-            if (col_stats_vec.size() != want_names.size()) {
-                err.code = 1;
-                err.msg = "LatmatScanSource: row group is missing a projected column "
-                          "(schema evolution is not supported on this path)";
-                return false;
-            }
-            stats.push_back(std::move(col_stats_vec));
+        std::shared_ptr<const rugo::NestedSpec> nested;
+        std::string rerr;
+        if (!rugo::resolve_projection(*fit->second, rg_idxs, want_names, names, stats,
+                                      nested, rerr)) {
+            static thread_local std::string resolve_err_buf;
+            resolve_err_buf = "LatmatScanSource: " + rerr;
+            err.code = 1;
+            err.msg = resolve_err_buf.c_str();
+            return false;
         }
-        pipeline->submit_block(path, rg_idxs, want_names, stats, row_masks);
+        pipeline->submit_block(path, rg_idxs, names, stats, row_masks, nested);
         return true;
     }
 

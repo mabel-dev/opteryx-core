@@ -3344,12 +3344,17 @@ class _Compiler:
                 decimal_columns.append(0)
                 widen_types.append(_widen_target(sc, pt))
                 logical_coerce.append(0)
-            elif pt in (DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY):
+            elif pt in (DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY,
+                        DrakenType.VARIANT):
                 # WP-01: string columns decode natively (DK_VARCHAR / DK_VARCHAR_DICT
                 # / DK_POOL string). Carry the declared physical type so the native
                 # Source tags each vector byte-identically to the trampoline path.
+                # VARIANT is German-string storage holding JSON text (buffers.h), so
+                # it is a string column here; like the trampoline's `_string_type_for`
+                # it is tagged VARCHAR (the tag only selects the wrapper, the bytes
+                # are identical).
                 kinds.append("varchar")
-                string_types.append(pt.value)
+                string_types.append(DrakenType.VARCHAR.value if pt == DrakenType.VARIANT else pt.value)
                 widen_types.append(0)
                 decimal_columns.append(0)
                 logical_coerce.append(0)

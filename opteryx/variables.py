@@ -311,6 +311,8 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # on a `SHOW VARIABLES` a caller has never seen before.
     "http_max_connections_per_host": (
         INT64, FromConfig("HTTP_MAX_CONNECTIONS_PER_HOST"), VariableOwner.USER, Visibility.RESTRICTED),
+    "http_max_bytes_in_flight": (
+        INT64, FromConfig("HTTP_MAX_BYTES_IN_FLIGHT"), VariableOwner.USER, Visibility.RESTRICTED),
     "http_max_retries": (
         INT64, FromConfig("HTTP_MAX_RETRIES"), VariableOwner.USER, Visibility.RESTRICTED),
     "http_min_bandwidth_mbps": (

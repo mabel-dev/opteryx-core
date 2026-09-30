@@ -217,7 +217,32 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX, *, plan
         node.alias = alias
         plan[nid] = node
 
+    # One expression can be held by several steps at once: a derived table's Subquery
+    # boundary carries the very expression objects of the Project beneath it
+    # (`create_node_relation`), and `copy_sub_plan` preserves that sharing. The binder
+    # depends on it - it binds the Project's expression, and the boundary's is then
+    # already bound. Renaming each holder's copy separately split the one expression
+    # into two, leaving the boundary's unbound and referencing a relation no longer in
+    # scope at that step (`WITH v AS (SELECT s.h FROM (SELECT TRUNC(ts, 'HOUR') AS h
+    # FROM t) AS s) ...` failed with an ambiguous TRUNC over an untyped argument). A
+    # renamed expression is therefore memoised by the identity of the original, so
+    # holders of one expression keep sharing one. `_kept` pins the originals so an id
+    # cannot be recycled while the memo is live.
+    _renamed = {}
+    _kept = []
+
     def _prop(property):
+        if is_expression(property):
+            memoised = _renamed.get(id(property))
+            if memoised is not None:
+                return memoised
+            _kept.append(property)
+            result = _prop_uncached(property)
+            _renamed[id(property)] = result
+            return result
+        return _prop_uncached(property)
+
+    def _prop_uncached(property):
         # Expressions may be shared with the plan this one was copied from, so a
         # renamed expression is a new one (copy-on-write), returned to its holder.
         if type(property) is LogicalColumn and property.source is not None:

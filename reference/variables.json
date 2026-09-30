@@ -227,6 +227,18 @@
         "default_source": "environment",
         "environment_key": "GCP_PROJECT_ID"
     },
+    "http_max_bytes_in_flight": {
+        "name": "http_max_bytes_in_flight",
+        "type": "INT64",
+        "owner": "USER",
+        "visibility": "RESTRICTED",
+        "settable": true,
+        "requires_entitlement": "platform_admin",
+        "set_by": "platform_admin only",
+        "default": null,
+        "default_source": "environment",
+        "environment_key": "OPTERYX_HTTP_MAX_BYTES_IN_FLIGHT"
+    },
     "http_max_connections_per_host": {
         "name": "http_max_connections_per_host",
         "type": "INT64",

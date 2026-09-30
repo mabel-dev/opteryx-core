@@ -5,7 +5,6 @@
 
 
 import decimal
-from contextlib import suppress
 from typing import Any, Dict, Optional, Tuple
 
 from opteryx.compiled.structures.expressions import Expression
@@ -474,11 +473,10 @@ def locate_identifier_in_loaded_schemas(
             # Counting it as a relation made an alias that shadows the column it is
             # computed from self-ambiguous: `SELECT MAX(mass) AS mass, MIN(mass) AS mn`
             # raised AmbiguousIdentifierError on the operand of its own second aggregate.
-            # Worse, `inner_binder`'s already-seen-expression fast path binds sub-trees
-            # under `suppress(Exception)`, so where that path hit this the error was
-            # swallowed and the operand was left with no schema_column at all —
-            # surfacing much later as `AttributeError: 'NoneType' object has no attribute
-            # 'identity'` when the aggregate binder read the identities of its columns.
+            # Worse, `inner_binder`'s already-seen-expression fast path once bound
+            # sub-trees under a blanket suppress, so the error was swallowed and the
+            # operand was left with no schema_column at all — surfacing much later as
+            # `AttributeError: 'NoneType' object has no attribute 'identity'`.
             #
             # `$project` is `$derived` after a Project's own exit renames it (see
             # project.py) — the same scope-local aliases, just past the point where this
@@ -950,8 +948,7 @@ def inner_binder(
         # If the column exists in the schema, update node and context accordingly.
         if found_column:
             # found_identity = found_column.identity
-            with suppress(Exception):
-                node, _ = traversive_recursive_bind(node, context, format_cache)
+            node, _ = traversive_recursive_bind(node, context, format_cache)
 
             node.schema_column = found_column
             node.query_column = node.alias or column_name

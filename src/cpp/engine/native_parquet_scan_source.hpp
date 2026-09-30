@@ -1086,41 +1086,34 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
             return;
         }
         std::vector<int> rg_idxs;
-        std::vector<std::vector<ColumnStats>> stats;
         rg_idxs.reserve(static_cast<size_t>(last - first));
-        stats.reserve(static_cast<size_t>(last - first));
         for (int u = first; u < last; ++u) {
             // Excluded by the Top-N boundary when this unit was walked: never
             // submitted, so it produces no result (see NativeParquetScanGlobal::
             // topn_skip for why the counters already exclude it).
             if (!g.topn_skip.empty() && g.topn_skip[static_cast<size_t>(u)] != 0u) continue;
             const size_t idx = static_cast<size_t>(g.item_index(u));
-            const int rg_idx = (*work_items)[idx].second;
-            const RowGroupStats& rg = fit->second->row_groups[static_cast<size_t>(rg_idx)];
-            std::vector<ColumnStats> col_stats_vec;
-            col_stats_vec.reserve(column_names->size());
-            for (const std::string& want : *column_names) {
-                for (const ColumnStats& cs : rg.columns) {
-                    if (cs.name == want) {
-                        col_stats_vec.push_back(cs);
-                        break;
-                    }
-                }
-            }
-            if (col_stats_vec.size() != column_names->size()) {
-                // Schema evolution (a projected column absent from this row group)
-                // is out of scope for this first landing — fail loud, no NULL-fill
-                // guess.
-                err.code = 1;
-                err.msg = "NativeParquetScanSource: row group is missing a projected "
-                          "column (schema evolution is not supported on this path)";
-                return;
-            }
-            rg_idxs.push_back(rg_idx);
-            stats.push_back(std::move(col_stats_vec));
+            rg_idxs.push_back((*work_items)[idx].second);
         }
         if (rg_idxs.empty()) return;   // every member skipped by the Top-N boundary
-        pipeline->submit_block(path, rg_idxs, *column_names, stats);
+        // A projected STRUCT/MAP is expanded to its leaf chunks here (and folded back
+        // by the pipeline's worker). A projected column the row group lacks is schema
+        // evolution — out of scope on this path, so it fails loud, no NULL-fill guess.
+        std::vector<std::string> names;
+        std::vector<std::vector<ColumnStats>> stats;
+        std::shared_ptr<const rugo::NestedSpec> nested;
+        std::string rerr;
+        if (!rugo::resolve_projection(*fit->second, rg_idxs, *column_names, names, stats,
+                                      nested, rerr)) {
+            // ErrCtx::msg is a bare const char*: stash the text in a thread_local that
+            // outlives this call (see the decode-error path in get_morsel).
+            static thread_local std::string resolve_err_buf;
+            resolve_err_buf = "NativeParquetScanSource: " + rerr;
+            err.code = 1;
+            err.msg = resolve_err_buf.c_str();
+            return;
+        }
+        pipeline->submit_block(path, rg_idxs, names, stats, {}, nested);
     }
 
     SourceResult get_morsel(GlobalSourceState& gs, LocalSourceState&, MorselPtr& out,

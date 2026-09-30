@@ -454,10 +454,14 @@ class FirestoreConnector(BaseConnector):
         )
         return [row["document"] for row in rows if "document" in row]
 
-    def partition_points(
-        self, collection: str, count: int, filters: Optional[List[Dict[str, Any]]] = None
-    ) -> List[str]:
+    def partition_points(self, collection: str, count: int) -> List[str]:
         """Up to `count` document names splitting the collection into ranges.
+
+        The split is over the WHOLE collection, never the filtered one: a
+        collection-group query with a field filter needs a COLLECTION_GROUP_ASC
+        index on that field, which Firestore does not create by default. Each
+        range is read with the filter applied (`run_query`), so results are
+        exact; a selective filter only makes the ranges uneven.
 
         `partitionQuery` only accepts a collection-GROUP query, which also
         spans any nested collection with the same id, so points outside the
@@ -473,9 +477,6 @@ class FirestoreConnector(BaseConnector):
             },
             "partitionCount": count,
         }
-        where = _where(filters)
-        if where is not None:
-            body["structuredQuery"]["where"] = where
         prefix = f"{self.documents_root}{collection}/"
         points = set()
         while True:
@@ -680,7 +681,7 @@ class FirestoreTable(BaseTable):
             filters.append(rendered)
         partitions = _partitions_for(limit)
         points = (
-            self.gateway.partition_points(self.collection, partitions - 1, filters)
+            self.gateway.partition_points(self.collection, partitions - 1)
             if partitions > 1
             else []
         )

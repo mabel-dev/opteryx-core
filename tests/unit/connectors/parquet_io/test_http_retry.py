@@ -97,6 +97,24 @@ def test_4xx_not_retried_and_immediate():
         proc.kill(); proc.wait()
 
 
+def test_ssl_connect_error_is_retried():
+    """A TLS handshake failure is transient (seen live against GCS under load),
+    so it retries like a timeout. An https:// URL at the plain-HTTP throttle
+    server fails the handshake deterministically with CURLE_SSL_CONNECT_ERROR;
+    the error must be the retries-exhausted form, not an immediate hard failure."""
+    from opteryx.compiled.http_client import HttpClient
+
+    _ensure_data()
+    proc, port = _server(0.0)
+    try:
+        with pytest.raises(RuntimeError) as ei:
+            HttpClient().get_many([(f"https://127.0.0.1:{port}/{FNAME}", {"Range": "bytes=0-1023"})])
+        assert "exhaust" in str(ei.value).lower(), str(ei.value)
+        assert "SSL connect error" in str(ei.value), str(ei.value)
+    finally:
+        proc.kill(); proc.wait()
+
+
 def test_transient_faults_recover():
     """With a 30% transient fault rate and the default 2 retries (3 attempts),
     P(recover) per request is 1 - 0.3**3 ≈ 0.973, so essentially every read

@@ -60,7 +60,6 @@ class FakeFirestore:
         self.queries = []
         self.filters = []
         self.partition_requests = []
-        self.partition_filters = []
         self.fail_after = None
 
     def run_query(
@@ -84,9 +83,8 @@ class FakeFirestore:
             documents = [d for d in documents if d["name"] < end]
         return documents if limit is None else documents[:limit]
 
-    def partition_points(self, collection, count, filters=None):
+    def partition_points(self, collection, count):
         self.partition_requests.append((collection, count))
-        self.partition_filters.append(filters)
         documents = sorted(d["name"] for d in self.collections.get(collection, []))
         if count < 1 or not documents:
             return []
@@ -121,9 +119,7 @@ def firestore(monkeypatch):
     monkeypatch.setattr(
         FirestoreConnector,
         "partition_points",
-        lambda self, collection, count, filters=None: fake.partition_points(
-            collection, count, filters
-        ),
+        lambda self, collection, count: fake.partition_points(collection, count),
     )
     saved_prefixes = dict(connectors._storage_prefixes)
     saved_cache = dict(connectors._connector_cache)
@@ -369,7 +365,8 @@ def test_equality_on_a_json_key_is_pushed_to_firestore(firestore):
     assert len(rows) == 210
     # Every range carried the filter, and the engine got only matching documents.
     assert firestore.filters and all(f == _STATUS_OPEN for f in firestore.filters)
-    assert firestore.partition_filters == [_STATUS_OPEN]
+    # The split is over the whole collection (a filtered one needs a collection-group index).
+    assert firestore.partition_requests == [("Orders", 7)]
 
 
 def test_a_pushed_filter_counts_the_limit_after_it(firestore):

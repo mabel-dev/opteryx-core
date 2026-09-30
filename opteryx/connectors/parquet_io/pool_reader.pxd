@@ -87,7 +87,8 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         void set_memory_budget(int64_t bytes) except +
         void set_http_tuning(long max_host_connections, int max_retries,
                               double min_bandwidth_bytes_per_s, long timeout_floor_ms,
-                              bint use_multiplexing, bint use_pipewait, bint force_http11)
+                              bint use_multiplexing, bint use_pipewait, bint force_http11,
+                              long long max_bytes_in_flight)
         # Query-scoped Authorization header, the alternative to pre-signing every
         # object — one credential for the caller instead of one IAM signBlob RPC
         # per file. Same set-once-at-plan-time lifecycle as set_http_tuning above.

@@ -321,13 +321,22 @@ http_max_host_connections_env() for the empirical justification of the default."
 HTTP_MAX_RETRIES: int = int(get("OPTERYX_HTTP_MAX_RETRIES", 2))
 """Retry budget for transient HTTP/transport failures (5xx, 429, connect/timeout/recv errors)."""
 
-HTTP_MIN_BANDWIDTH_MBPS: float = float(get("OPTERYX_HTTP_MIN_BW_MBPS", 20.0))
-"""Assumed floor stream bandwidth (Mbps), used to derive a per-request timeout from the
-Range span so a stalled small request times out promptly rather than waiting the full
-client timeout."""
+HTTP_MIN_BANDWIDTH_MBPS: float = float(get("OPTERYX_HTTP_MIN_BW_MBPS", 60.0))
+"""Assumed floor bandwidth (Mbps), used to derive a per-request timeout from the Range span so
+a stalled small request times out promptly rather than waiting the full client timeout. Also
+the speed the adaptive bytes-in-flight cap starts from (HTTP_MAX_BYTES_IN_FLIGHT). Raised from
+20 to 60 on 2026-09-30; it changes a deadline only for a request larger than 75 MB, below which
+the timeout floor governs."""
 
 HTTP_REQUEST_TIMEOUT_FLOOR_MS: int = int(get("OPTERYX_HTTP_TIMEOUT_FLOOR_MS", 10000))
 """Minimum per-request timeout (ms), regardless of how small the Range span is."""
+
+HTTP_MAX_BYTES_IN_FLIGHT: int = int(get("OPTERYX_HTTP_MAX_BYTES_IN_FLIGHT", 0))
+"""Process-wide cap on the bytes of range requests in flight at once, across all threads and
+queries; a request larger than the cap is admitted alone. 0 = ADAPTIVE (the default): the cap
+follows the link's measured throughput, starting from the assumed minimum bandwidth above;
+> 0 = a fixed number of bytes; < 0 = no cap. See HttpTuning::max_bytes_in_flight in
+src/cpp/http_client.hpp."""
 
 DISABLE_HTTP_MULTIPLEXING: bool = get_bool("OPTERYX_HTTP_DISABLE_MULTIPLEXING", False)
 """Turn OFF HTTP/2 multiplexing (CURLOPT_PIPEWAIT) for get_many() batches.

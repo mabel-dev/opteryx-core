@@ -58,6 +58,7 @@ __all__ = [
 PER_SCAN_VARIABLES = frozenset({
     "disable_http2",
     "disable_http_multiplexing",
+    "http_max_bytes_in_flight",
     "http_max_connections_per_host",
     "http_max_retries",
     "http_min_bandwidth_mbps",
@@ -85,7 +86,7 @@ def _value(name, variables, default, overrides):
 
 
 def resolve_http_tuning(variables, overrides=None) -> tuple:
-    """The 7-tuple `set_http_tuning` / `CppIOPipeline.__cinit__` expect.
+    """The 8-tuple `set_http_tuning` / `CppIOPipeline.__cinit__` expect.
 
     Bandwidth is stored and SET in Mbps (the human-facing unit) and converted to
     bytes/s here, matching `HttpTuning`'s C++ field.
@@ -111,6 +112,7 @@ def resolve_http_tuning(variables, overrides=None) -> tuple:
         ),
         _value("http_pipewait", variables, config.HTTP_PIPEWAIT, overrides),
         _value("disable_http2", variables, config.DISABLE_HTTP2, overrides),
+        int(_value("http_max_bytes_in_flight", variables, config.HTTP_MAX_BYTES_IN_FLIGHT, overrides)),
     )
 
 
