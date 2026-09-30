@@ -54,6 +54,7 @@ from opteryx.planner.optimizer.strategies import (
     FilterImpliedGroupKeyReductionStrategy,
     FunctionRewriteStrategy,
     GroupKeyReductionStrategy,
+    GroupLimitKeyBoundStrategy,
     JoinConditionHoistStrategy,
     JoinEliminationStrategy,
     JoinKeyMaterializationStrategy,
@@ -114,6 +115,7 @@ _STRATEGY_DISABLE_FLAGS = {
     "FilterImpliedGroupKeyReductionStrategy": lambda: config.features.disable_filter_implied_group_key_reduction,
     "FunctionRewriteStrategy": lambda: config.features.disable_function_rewrite,
     "GroupKeyReductionStrategy": lambda: config.features.disable_group_key_reduction,
+    "GroupLimitKeyBoundStrategy": lambda: config.features.disable_group_limit_key_bound,
     "JoinConditionHoistStrategy": lambda: config.features.disable_join_condition_hoist,
     "JoinEliminationStrategy": lambda: config.features.disable_join_elimination,
     "JoinKeyMaterializationStrategy": lambda: config.features.disable_join_key_materialization,
@@ -271,6 +273,10 @@ class OptimizerVisitor:
             # away is never materialised as a column in the first place.
             JoinKeyMaterializationStrategy(telemetry),
             JoinPlanningStrategy(telemetry),  # Cost-based DPccp; no-op when flag off
+            # `GROUP BY k LIMIT n` with no ORDER BY: derive `k <= T` from manifest min/max so
+            # the pushdown below turns it into file/row-group pruning. Before pushdown, and
+            # quick to abandon - see its docstring.
+            GroupLimitKeyBoundStrategy(telemetry),
             PredicatePushdownStrategy(telemetry),
             CrossJoinFilterPushdownStrategy(
                 telemetry

@@ -19,6 +19,7 @@ from .join_algorithm import JoinAlgorithmStrategy
 from .join_planning import JoinPlanningStrategy
 from .join_rewriter import JoinRewriteStrategy
 from .limit_elimination import LimitEliminationStrategy
+from .group_limit_key_bound import GroupLimitKeyBoundStrategy
 from .limit_files_pruning import LimitFilesPruningStrategy
 from .limit_pushdown import LimitPushdownStrategy
 from .manifest_pruning import ManifestPruningStrategy
@@ -64,6 +65,7 @@ __all__ = [
     "JoinPlanningStrategy",
     "JoinRewriteStrategy",
     "LimitEliminationStrategy",
+    "GroupLimitKeyBoundStrategy",
     "LimitFilesPruningStrategy",
     "LimitPushdownStrategy",
     "ManifestPruningStrategy",

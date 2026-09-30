@@ -225,6 +225,30 @@ class Manifest:
             return []
         return self.native.key_ranges(position)
 
+    def file_value_bounds(self, column: str) -> Optional[List[Tuple[Any, Any]]]:
+        """Per-file ``(min, max)`` of one column as tagged VALUES (``("int", v)`` /
+        ``("bytes", b)``), in file order, from the file's own bounds else its footer's.
+
+        ``None`` - not a partial list - when the column is unknown or ANY file lacks a
+        bound that is a value (ordinal-only bounds are an encoding, not a value): a caller
+        reasoning about the whole file set must not reason about a subset of it."""
+        position = self.position_of(column)
+        if position is None:
+            return None
+        bounds = []
+        for row in range(self.get_file_count()):
+            cell = self.native.cell(row, position)
+            source = cell["bounds"]
+            if source["min"] is None or source["max"] is None:
+                footer = cell["footer"]
+                if footer is None:
+                    return None
+                source = footer["bounds"]
+            if source["min"] is None or source["max"] is None:
+                return None
+            bounds.append((source["min"], source["max"]))
+        return bounds
+
     def show_morsel(self):
         """SHOW MANIFEST's rows (bounds rendered as text)."""
         return self.native.show_morsel()

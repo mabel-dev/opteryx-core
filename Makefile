@@ -645,6 +645,19 @@ clickbench-profile: ## ClickBench + per-operator self-time profile (where the ti
 	@clear || true
 	@$(PYTHON) tests/performance/clickbench/opteryx/runner.py --profile
 
+# Interleaved Opteryx-vs-DuckDB A/B in ONE process on the SAME files: O D, GAP, D O,
+# GAP, next query; the whole sweep LOOPS times (even; starting order alternates per
+# loop). Exit status is the assertion (upper 95% bound of geomean opteryx/duckdb
+# <= MAX_RATIO, no errors). Override e.g.
+#   make clickbench-interleave LOOPS=6 MAX_RATIO=1.0 GAP=3 QUERIES=5,9,17 DATA=scratch/hits
+LOOPS ?= 4
+GAP ?= 5
+MAX_RATIO ?= 1.05
+QUERIES ?=
+DATA ?=
+clickbench-interleave: ## Interleaved Opteryx vs DuckDB ClickBench (O,D / D,O per query); fails if opteryx is slower than MAX_RATIO
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/interleave.py --loops $(LOOPS) --gap $(GAP) --max-ratio $(MAX_RATIO) $(if $(QUERIES),--queries $(QUERIES),) $(if $(DATA),--data $(DATA),)
+
 clickbench-duckdb: ## Re-run DuckDB ClickBench calibration (regenerates duckdb/results.local.json)
 	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py
 
