@@ -47,17 +47,26 @@ struct FieldSpan {
     uint32_t value_start;  // First char of value (after opening quote/brace/bracket)
     uint32_t value_width;  // Byte width of value
     uint8_t type;          // ValueType enum
+    // Which requested NESTED column (`key->>'sub'` / `key->'sub'`, nested_column.hpp)
+    // this span answers: 1..255, or 0 for an ordinary top-level field. A nested span's
+    // key bytes are its CONTAINER's key, which several nested columns share, so the slot
+    // is what tells them apart. Occupies what was padding — the struct does not grow.
+    uint8_t slot;
     uint16_t ordinal;      // Position (key order) within object
 
     FieldSpan() = default;
-    FieldSpan(uint32_t ks, uint32_t kw, uint32_t vs, uint32_t vw, ValueType t, uint16_t ord)
+    FieldSpan(uint32_t ks, uint32_t kw, uint32_t vs, uint32_t vw, ValueType t, uint16_t ord,
+              uint8_t sl)
         : key_start(ks), key_width(kw), value_start(vs), value_width(vw),
-          type(static_cast<uint8_t>(t)), ordinal(ord) {}
+          type(static_cast<uint8_t>(t)), slot(sl), ordinal(ord) {}
 
     // Byte length accessors
     inline uint32_t key_length() const { return key_width; }
     inline uint32_t value_length() const { return value_width; }
 };
+
+// Tens of millions of these per file: the nested slot must stay inside the padding.
+static_assert(sizeof(FieldSpan) == 20, "FieldSpan must stay 20 bytes");
 
 }  // namespace rugo::_jsonl
 

@@ -704,6 +704,7 @@ class Features:
     )
     disable_join_planning = get_bool("FEATURE_DISABLE_JOIN_PLANNING", False)
     disable_join_rewrite = get_bool("FEATURE_DISABLE_JOIN_REWRITE", False)
+    disable_jsonl_nested_extraction = get_bool("FEATURE_DISABLE_JSONL_NESTED_EXTRACTION", False)
     disable_length_only_column = get_bool("FEATURE_DISABLE_LENGTH_ONLY_COLUMN", False)
     disable_limit_elimination = get_bool("FEATURE_DISABLE_LIMIT_ELIMINATION", False)
     disable_group_limit_key_bound = get_bool("FEATURE_DISABLE_GROUP_LIMIT_KEY_BOUND", False)

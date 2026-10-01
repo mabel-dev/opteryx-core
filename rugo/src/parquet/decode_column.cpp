@@ -1306,7 +1306,17 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                             xint64, xfloat64, xint32, xfloat32,
                             ivec_i32, ivec_i64, ivec_f32, ivec_f64,
                             &any_error, &decoded_count,
-                            &batch_remaining, &batch_cv]() {
+                            &batch_remaining, &batch_mutex, &batch_cv]() {
+              // Signal this task complete. The decrement and the notify happen
+              // under batch_mutex: the waiter checks batch_remaining while holding
+              // it, so an unlocked notify could land between that check and the
+              // block (lost wakeup -> the scan hangs forever). Holding it also keeps
+              // the waiter from returning — and destroying these stack-local
+              // mutex/cv — until this task has finished touching them.
+              auto finish_task = [&batch_remaining, &batch_mutex, &batch_cv]() {
+                std::lock_guard<std::mutex> lk(batch_mutex);
+                if (batch_remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) batch_cv.notify_one();
+              };
               if (!any_error.load(std::memory_order_relaxed)) {
 
               // Decompression scratch buffer: thread_local so it is allocated
@@ -1335,7 +1345,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                   ds = decomp_buf.size();
                 } catch (...) {
                   any_error.store(true, std::memory_order_relaxed);
-                  if (batch_remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) batch_cv.notify_one();
+                  finish_task();
                   return;
                 }
               }
@@ -1349,7 +1359,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                 if (ptask.encoding == 5) {  // DELTA
                   if (DecodeDeltaBinaryPacked(dp, ds, nv, dst) != nv) {
                     any_error.store(true, std::memory_order_relaxed);
-                    if (batch_remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) batch_cv.notify_one();
+                    finish_task();
                     return;
                   }
                 } else {
@@ -1365,7 +1375,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                 if (ptask.encoding == 5) {  // DELTA
                   if (DecodeDeltaBinaryPacked(dp, ds, nv, dst) != nv) {
                     any_error.store(true, std::memory_order_relaxed);
-                    if (batch_remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) batch_cv.notify_one();
+                    finish_task();
                     return;
                   }
                 } else {
@@ -1397,10 +1407,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               decoded_count.fetch_add(1, std::memory_order_relaxed);
               } // end if !any_error
 
-              // Signal this task complete — notify if last in batch
-              if (batch_remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                batch_cv.notify_one();
-              }
+              finish_task();
             });
           }
 

@@ -55,6 +55,7 @@ from opteryx.planner.optimizer.strategies import (
     FunctionRewriteStrategy,
     GroupKeyReductionStrategy,
     GroupLimitKeyBoundStrategy,
+    JsonlNestedExtractionStrategy,
     JoinConditionHoistStrategy,
     JoinEliminationStrategy,
     JoinKeyMaterializationStrategy,
@@ -116,6 +117,7 @@ _STRATEGY_DISABLE_FLAGS = {
     "FunctionRewriteStrategy": lambda: config.features.disable_function_rewrite,
     "GroupKeyReductionStrategy": lambda: config.features.disable_group_key_reduction,
     "GroupLimitKeyBoundStrategy": lambda: config.features.disable_group_limit_key_bound,
+    "JsonlNestedExtractionStrategy": lambda: config.features.disable_jsonl_nested_extraction,
     "JoinConditionHoistStrategy": lambda: config.features.disable_join_condition_hoist,
     "JoinEliminationStrategy": lambda: config.features.disable_join_elimination,
     "JoinKeyMaterializationStrategy": lambda: config.features.disable_join_key_materialization,
@@ -277,6 +279,10 @@ class OptimizerVisitor:
             # the pushdown below turns it into file/row-group pruning. Before pushdown, and
             # quick to abandon - see its docstring.
             GroupLimitKeyBoundStrategy(telemetry),
+            # `col ->> 'k'` over a READ_JSONL object column becomes a column the scan
+            # reads directly (rugo's nested walk). Before pushdown, so the comparisons
+            # on it push into the reader and the object itself drops out of the read.
+            JsonlNestedExtractionStrategy(telemetry),
             PredicatePushdownStrategy(telemetry),
             CrossJoinFilterPushdownStrategy(
                 telemetry

@@ -14,7 +14,7 @@ whole query failed on a "type mismatch" that was never in the data.
 
 A glob over several small files is the cheapest way to reach a second decode
 with a different first-row shape; within one file the same logic runs per
-64MB chunk.
+DEFAULT_CHUNK_SIZE chunk.
 """
 
 import os

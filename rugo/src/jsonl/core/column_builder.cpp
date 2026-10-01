@@ -2,6 +2,8 @@
 
 #include "column_builder.hpp"
 #include "fast_parsers.hpp"
+#include "nested_column.hpp"
+#include "json_canonical.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -181,7 +183,7 @@ static ColumnType infer_numeric_type(
 
     for (size_t row = 0; row < limit; ++row) {
         for (const auto& f : records[row]) {
-            if (!key_matches(buffer, f.key_start, f.key_width, col_ptr, col_len))
+            if (f.slot != 0 || !key_matches(buffer, f.key_start, f.key_width, col_ptr, col_len))
                 continue;
             if (is_null(buffer, f.value_start, f.value_start + f.value_width - 1))
                 break;
@@ -207,6 +209,7 @@ StringColumnResult extract_column(
     const uint8_t*                            buffer,
     const RecordSet&                          records,
     const std::string&                         column_name,
+    uint8_t                                    slot,
     OrdinalPredictor&                         predictor,
     bool                                       copy_bytes,
     bool                                       may_have_escapes,
@@ -247,6 +250,11 @@ StringColumnResult extract_column(
     // content keys (common in wide/hetero-order records) still paid a full memcmp call.
     // Checking the first byte first turns most of those into a single byte compare.
     const uint8_t col_first = col_len ? static_cast<uint8_t>(column_name[0]) : 0;
+    // Top-level columns match by key bytes among slot-0 spans; a nested column
+    // (`key->>'sub'`) matches its slot — see nested_column.hpp.
+    ColumnKey ck;
+    ck.name = column_name.data(); ck.len = static_cast<uint32_t>(col_len);
+    ck.first = col_first; ck.slot = slot;
 
     // Row ranges for the resolve and emit walks. Aligned to 8 rows because both write the
     // bit-packed null bitmap, so no two workers ever touch the same byte. A caller that
@@ -278,18 +286,14 @@ StringColumnResult extract_column(
             // Fast path: try predicted ordinal first
             if (last_seen != 0xFFFF && last_seen < record.size()) {
                 const auto& f = record[last_seen];
-                if (f.key_width == col_len && buffer[f.key_start] == col_first &&
-                    std::memcmp(buffer + f.key_start, column_name.data(), col_len) == 0) {
-                    found = &f;
-                }
+                if (ck.matches(buffer, f)) found = &f;
             }
 
             // Slow path: linear scan (fallback if prediction missed)
             if (found == nullptr) {
                 for (size_t i = 0; i < record.size(); ++i) {
                     const auto& f = record[i];
-                    if (f.key_width == col_len && buffer[f.key_start] == col_first &&
-                        std::memcmp(buffer + f.key_start, column_name.data(), col_len) == 0) {
+                    if (ck.matches(buffer, f)) {
                         last_seen = static_cast<uint16_t>(i);
                         found = &f;
                         break;
@@ -1019,7 +1023,7 @@ static ParsedColumn parse_column_explicit(
         // value's bytes, and a container is JSON text that must stay byte-exact. The only
         // rows unescaping could ever touch are string rows, and those are refused below.
         OrdinalPredictor pred;
-        StringColumnResult scr = extract_column(buffer, records, name, pred,
+        StringColumnResult scr = extract_column(buffer, records, name, /*slot=*/0, pred,
                                                 /*copy_bytes=*/false, /*may_have_escapes=*/false,
                                                 SIZE_MAX, &rows, RecordValueTypes::Always);
         const uint8_t* base = buffer;   // never copied: offsets index the source buffer
@@ -1109,7 +1113,7 @@ static ParsedColumn parse_column_explicit(
     }
 
     OrdinalPredictor pred;
-    StringColumnResult scr = extract_column(buffer, records, name, pred,
+    StringColumnResult scr = extract_column(buffer, records, name, /*slot=*/0, pred,
                                             /*copy_bytes=*/false, may_have_escapes,
                                             SIZE_MAX, &rows);
     const uint8_t* base = scr.data_owned ? scr.data_ptr() : buffer;
@@ -1145,19 +1149,33 @@ static ParsedColumn parse_column_explicit(
             "explicit_schema: allocation failed for column '" + name + "'");
     std::memset(data, 0, alloc);
 
-    for (uint32_t i = 0; i < n; ++i) {
-        if (!row_valid(scr, i)) continue;          // NULL row keeps its zero
-        const uint32_t off = scr.offsets[i];
-        const uint32_t len = scr.lengths[i];
-        if (len == 0 || !declared_parse_into(dt, base + off, len, data, i)) {
-            std::string got(reinterpret_cast<const char*>(base + off),
-                            len < 64u ? len : 64u);
-            draken_free(data);
-            throw std::invalid_argument(
-                "explicit_schema: column '" + name + "' row " + std::to_string(i) +
-                " value '" + got + "' is not a valid " + declared +
-                " (declared type mismatch)");
+    // Row-parallel across the narrow-projection pool (a serial RowExec runs inline).
+    // BOOL writes a bit-packed bitmap, so its ranges are 8-row aligned and no two
+    // threads touch the same byte. Each range records its FIRST bad row; the lowest
+    // across ranges is reported, so the error is the same one the serial walk raised.
+    const std::vector<RowRange> ranges = rows.split(n, is_bool ? 8 : 1);
+    std::vector<uint32_t> first_bad(ranges.size(), UINT32_MAX);
+    rows.run(ranges, [&](size_t ri) {
+        for (uint32_t i = static_cast<uint32_t>(ranges[ri].begin);
+             i < static_cast<uint32_t>(ranges[ri].end); ++i) {
+            if (!row_valid(scr, i)) continue;      // NULL row keeps its zero
+            const uint32_t len = scr.lengths[i];
+            if (len == 0 || !declared_parse_into(dt, base + scr.offsets[i], len, data, i)) {
+                first_bad[ri] = i;
+                return;
+            }
         }
+    });
+    const uint32_t bad = *std::min_element(first_bad.begin(), first_bad.end());
+    if (bad != UINT32_MAX) {
+        const uint32_t off = scr.offsets[bad];
+        const uint32_t len = scr.lengths[bad];
+        std::string got(reinterpret_cast<const char*>(base + off), len < 64u ? len : 64u);
+        draken_free(data);
+        throw std::invalid_argument(
+            "explicit_schema: column '" + name + "' row " + std::to_string(bad) +
+            " value '" + got + "' is not a valid " + declared +
+            " (declared type mismatch)");
     }
 
     ParsedColumn pc;
@@ -1172,6 +1190,107 @@ static ParsedColumn parse_column_explicit(
     pc.offset_minutes = dt.offset_minutes;
     pc.precision = dt.precision;
     pc.scale = dt.scale;
+    return pc;
+}
+
+// A nested column (`key->>'sub'` / `key->'sub'`, nested_column.hpp): the sub-value spans
+// the record walk tagged with this column's slot, rendered EXACTLY as draken's `->` / `->>`
+// render the same path (json_extract.h), so pushing the extraction into the scan never
+// changes an answer:
+//   string    `->>`: its decoded UTF-8     `->`: re-escaped JSON string (json_canonical.hpp)
+//   object / array : canonical minified JSON text (both operators)
+//   number         : the source token      true / false: verbatim
+//   absent / JSON null: NULL (no span was emitted)
+// Every value read is validated as yyjson's read would validate it, and an invalid one
+// fails loud naming the column, row and value. Only the VALUE is checked: the rest of the
+// container is not parsed (architect ruling 2026-10-01).
+//
+// Spans are resolved here by slot rather than through extract_column, whose NULL test
+// reads the raw bytes and so cannot tell a JSON string "null" from JSON null.
+static ParsedColumn parse_nested_column(
+    const uint8_t* buffer, const RecordSet& records, const std::string& name,
+    const ColumnSpec& spec, uint8_t slot, const std::string* declared, const RowExec& rows) {
+
+    // The type is fixed by the operator; a declaration can only agree with it (the Cython
+    // edge checks first — this is the backstop for a non-Python caller).
+    const DrakenType expected = spec.as_json ? DRAKEN_VARIANT : DRAKEN_NVARCHAR;
+    const char* expected_name = spec.as_json ? "VARIANT" : "NVARCHAR";
+    if (declared != nullptr && *declared != expected_name)
+        throw std::invalid_argument(
+            "explicit_schema: column '" + name + "' is a nested " +
+            (spec.as_json ? "`->`" : "`->>`") + " extraction, which is " + expected_name +
+            "; it cannot be declared " + *declared);
+
+    const uint32_t n = static_cast<uint32_t>(records.size());
+    ColumnKey ck;
+    ck.slot = slot;
+
+    // Per-range output (8-row aligned: each range writes its own bytes of the bitmap),
+    // stitched together below. Ranges report their FIRST bad row; the lowest wins, so the
+    // error is the one a serial walk would raise.
+    const std::vector<RowRange> ranges = rows.split(n, 8);
+    std::vector<std::vector<uint8_t>> part_data(ranges.size());
+    std::vector<uint32_t> first_bad(ranges.size(), UINT32_MAX);
+    std::vector<uint8_t> any_value(ranges.size(), 0);
+
+    StringColumnResult out;
+    out.num_rows = n;
+    out.data_owned = true;
+    out.offsets.assign(n, 0);
+    out.lengths.assign(n, 0);
+    out.null_bitmap.assign((static_cast<size_t>(n) + 7) >> 3, 0xFF);
+
+    rows.run(ranges, [&](size_t ri) {
+        std::vector<uint8_t>& data = part_data[ri];
+        std::vector<uint8_t> stack, scratch;
+        for (uint32_t row = static_cast<uint32_t>(ranges[ri].begin);
+             row < static_cast<uint32_t>(ranges[ri].end); ++row) {
+            const FieldSpan* f = nullptr;
+            for (const FieldSpan& s : records[row])
+                if (ck.matches(buffer, s)) { f = &s; break; }
+            if (f == nullptr) {
+                out.null_bitmap[row >> 3] &= static_cast<uint8_t>(~(1u << (row & 7u)));
+                continue;
+            }
+            const size_t start = data.size();
+            if (!jsoncanon::render_nested(buffer, *f, spec.as_json, data, stack, scratch)) {
+                first_bad[ri] = row;
+                return;
+            }
+            out.offsets[row] = static_cast<uint32_t>(start);   // range-relative; rebased below
+            out.lengths[row] = static_cast<uint32_t>(data.size() - start);
+            any_value[ri] = 1;
+        }
+    });
+
+    const uint32_t bad = *std::min_element(first_bad.begin(), first_bad.end());
+    if (bad != UINT32_MAX) {
+        const FieldSpan* f = nullptr;
+        for (const FieldSpan& s : records[bad])
+            if (ck.matches(buffer, s)) { f = &s; break; }
+        const uint32_t len = f->value_width;
+        std::string got(reinterpret_cast<const char*>(buffer + f->value_start), len < 64u ? len : 64u);
+        throw std::runtime_error(
+            "read_jsonl: column '" + name + "' row " + std::to_string(bad) + ": value '" + got +
+            "' is not valid JSON");
+    }
+
+    // Stitch the per-range arenas into one, rebasing each range's offsets.
+    size_t total = 0;
+    for (const auto& d : part_data) total += d.size();
+    if (total > UINT32_MAX)
+        throw std::runtime_error("read_jsonl: column '" + name + "' exceeds 4 GiB in one chunk");
+    out.data.reserve(total);
+    for (size_t ri = 0; ri < ranges.size(); ++ri) {
+        const uint32_t base = static_cast<uint32_t>(out.data.size());
+        for (size_t row = ranges[ri].begin; row < ranges[ri].end; ++row) out.offsets[row] += base;
+        out.data.insert(out.data.end(), part_data[ri].begin(), part_data[ri].end());
+        if (any_value[ri]) { out.any_value_seen = true; out.any_key_seen = true; }
+    }
+
+    ParsedColumn pc = parse_varchar_column(out.data_ptr(), out, rows);
+    pc.type = expected;
+    pc.key_absent = !out.any_key_seen;
     return pc;
 }
 
@@ -1196,6 +1315,14 @@ std::vector<ParsedColumn> parse_all_columns(
 
     auto do_one = [&](size_t c, const RowExec& rows) {
         const auto it = context.explicit_schema.find(column_names[c]);
+        const ColumnSpec spec = parse_column_spec(column_names[c]);
+        if (spec.nested) {
+            out[c] = parse_nested_column(buffer, records, column_names[c], spec,
+                                         nested_slot(context, column_names[c]),
+                                         it != context.explicit_schema.end() ? &it->second : nullptr,
+                                         rows);
+            return;
+        }
         if (it != context.explicit_schema.end()) {
             out[c] = parse_column_explicit(buffer, records, column_names[c], it->second,
                                            may_have_escapes, rows);
@@ -1205,7 +1332,7 @@ std::vector<ParsedColumn> parse_all_columns(
         // Value shapes are only needed by parse_array_column (to tell a string row that
         // looks like an array from a real one); IfArrayHinted makes every other column
         // skip the per-row write entirely.
-        StringColumnResult scr = extract_column(buffer, records, column_names[c], pred,
+        StringColumnResult scr = extract_column(buffer, records, column_names[c], /*slot=*/0, pred,
                                                 /*copy_bytes=*/false, may_have_escapes,
                                                 context.infer_sample_size, &rows,
                                                 context.parse_arrays

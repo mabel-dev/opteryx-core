@@ -353,67 +353,49 @@ cdef inline bint _bv_all_native(
     return <uint32_t>simd_popcount(<uint8_t*>dv.data, <size_t>nbytes) == num_rows
 
 
+cdef inline void _fill_is_null_bits(
+    const DrakenVector* dv, bint is_null, uint8_t* out, Py_ssize_t nbytes, uint32_t num_rows,
+) noexcept nogil:
+    """Write IS NULL (is_null=1) / IS NOT NULL (is_null=0) for `dv` into `out`
+    (`nbytes` bytes, bit-packed, tail bits beyond `num_rows` cleared).
+
+    The validity mask is indexed by LOGICAL row, so no selection hop: IS NOT NULL
+    is the validity bitmap, IS NULL its complement — a byte-wide copy/invert.
+
+    DRAKEN_NULL is checked FIRST: that type tag is self-describing (every row is
+    null, with no data and no validity buffer allocated), so its absent validity
+    means all-null — the opposite of the all-valid reading an absent validity
+    buffer carries for every other type. An untyped `NULL` literal materialises
+    exactly this vector, and reading its (absent) validity as all-valid made
+    `NULL IS NULL` answer False."""
+    cdef const uint8_t* validity = dv.validity
+    cdef Py_ssize_t k
+    if dv.type == DRAKEN_NULL:
+        memset(out, 0xFF if is_null else 0x00, <size_t>nbytes)
+    elif validity == NULL:
+        memset(out, 0x00 if is_null else 0xFF, <size_t>nbytes)
+    elif is_null:
+        for k in range(nbytes):
+            out[k] = <uint8_t>~validity[k]
+    else:
+        memcpy(out, validity, <size_t>nbytes)
+    if num_rows & 7u:
+        out[nbytes - 1] &= <uint8_t>((1u << (num_rows & 7u)) - 1u)
+
+
 cdef BoolVector _is_null_from_dv(DrakenVector* dv, bint negate) noexcept:
-    """Produce a BoolVector of IS NULL / IS NOT NULL from a DrakenVector's validity bitmap.
-
-    negate=0: IS NULL — output bit = 1 where input is null (validity bit = 0)
-    negate=1: IS NOT NULL — output bit = 1 where input is valid (validity bit = 1)
-
-    Cases:
-      - dv.type == DRAKEN_NULL: EVERY row is null. The NULL type tag is
-        self-describing (draken carries no data and no validity buffer for it),
-        so absent validity here means all-null, not all-valid — the opposite of
-        the reading below. An untyped `NULL` literal materialises exactly this
-        vector, and reading its (absent) validity as all-valid made
-        `NULL IS NULL` answer False.
-      - dv.validity == NULL: all rows valid
-        - IS NULL: all zeros
-        - IS NOT NULL: all ones (with tail masked)
-      - dv.validity != NULL: copy validity, optionally invert
-    """
+    """Produce a BoolVector of IS NULL (negate=0) / IS NOT NULL (negate=1) from a
+    DrakenVector's validity bitmap — see _fill_is_null_bits."""
     cdef uint32_t num_rows = dv.length
     cdef Py_ssize_t nbytes = (<Py_ssize_t>num_rows + 7) >> 3
     cdef uint8_t* out_data = <uint8_t*>malloc(<size_t>nbytes)
-    cdef const uint8_t* validity = dv.validity
-    cdef bint all_null = dv.type == DRAKEN_NULL
     cdef object result_obj
-    cdef Py_ssize_t k
-    cdef uint8_t tail_mask
 
     if out_data == NULL:
         raise MemoryError("_is_null_from_dv: malloc failed")
 
     try:
-        if all_null:
-            # IS NULL: all output bits = 1; IS NOT NULL: all output bits = 0.
-            if negate:
-                memset(out_data, 0x00, <size_t>nbytes)
-            else:
-                memset(out_data, 0xFF, <size_t>nbytes)
-        elif validity == NULL:
-            # All rows are valid (no nulls in the input)
-            if negate:
-                # IS NOT NULL: all output bits = 1
-                memset(out_data, 0xFF, <size_t>nbytes)
-            else:
-                # IS NULL: all output bits = 0
-                memset(out_data, 0x00, <size_t>nbytes)
-        else:
-            # Copy the validity bitmap and optionally invert
-            memcpy(out_data, <void*>validity, <size_t>nbytes)
-            if negate:
-                # IS NOT NULL: output = validity (1=valid, 1 in output)
-                pass  # Already copied validity
-            else:
-                # IS NULL: output = ~validity (invert: 1=valid→0, 0=null→1)
-                for k in range(nbytes):
-                    out_data[k] = ~out_data[k]
-
-        # Mask tail bits beyond num_rows
-        if num_rows & 7u:
-            tail_mask = <uint8_t>((1u << (num_rows & 7u)) - 1u)
-            out_data[nbytes - 1] &= tail_mask
-
+        _fill_is_null_bits(dv, not negate, out_data, nbytes, num_rows)
         # Result has no nulls — IS NULL/NOT NULL always yields a definite answer
         result_obj = bool_vector_from_bits(out_data, NULL, num_rows)
     finally:
@@ -1375,20 +1357,12 @@ cdef inline int _dv_unary_null_c(
     Py_ssize_t nbytes,
     uint32_t num_rows,
 ) noexcept nogil:
-    """IS [NOT] NULL over ANY input type: a pure validity-bitmap read (the validity
-    mask is indexed by LOGICAL row — no selection hop), producing a never-null
-    bit-packed BOOL result. Mirrors _dv_not_c's arena/result idiom.
-
-    DRAKEN_NULL is checked FIRST: that type tag is self-describing (every row is
-    null, with no data and no validity buffer allocated), so its absent validity
-    means all-null — the opposite of the all-valid reading an absent validity
-    buffer carries for every other type. An untyped `NULL` literal materialises
-    exactly this vector."""
+    """IS [NOT] NULL over ANY input type: a pure validity-bitmap copy/invert
+    (see _fill_is_null_bits), producing a never-null bit-packed BOOL result.
+    Mirrors _dv_not_c's arena/result idiom."""
     cdef Py_ssize_t sp = sp_io[0]
     cdef DrakenVector* dv
     cdef uint8_t* result
-    cdef uint32_t i
-    cdef uint8_t bit
     sp -= 1
     dv = dv_stack[sp]
     if dv == NULL:
@@ -1396,20 +1370,7 @@ cdef inline int _dv_unary_null_c(
     result = <uint8_t*>draken_frame_arena_alloc(arena, <size_t>nbytes)
     if result == NULL:
         return 2
-    memset(result, 0, <size_t>nbytes)
-    if dv.type == DRAKEN_NULL:
-        # All rows null: IS NULL = all true; IS NOT NULL = all false (already zeroed).
-        if uop == UOP_IS_NULL:
-            memset(result, 0xFF, <size_t>nbytes)
-    elif dv.validity == NULL:
-        # All rows valid: IS NULL = all false (already zeroed); IS NOT NULL = all true.
-        if uop == UOP_IS_NOT_NULL:
-            memset(result, 0xFF, <size_t>nbytes)
-    else:
-        for i in range(num_rows):
-            bit = (dv.validity[i >> 3] >> (i & 7)) & 1
-            if (bit == 0) == (uop == UOP_IS_NULL):
-                result[i >> 3] |= <uint8_t>(1 << (i & 7))
+    _fill_is_null_bits(dv, uop == UOP_IS_NULL, result, nbytes, num_rows)
     dv_store[sp] = draken_vector_from_dense(result, num_rows, DRAKEN_BOOL, NULL)
     dv_stack[sp] = &dv_store[sp]
     sp += 1

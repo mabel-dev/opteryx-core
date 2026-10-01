@@ -2,7 +2,6 @@
 #define _JSONL_INTERPRETER_HPP_
 
 #include <vector>
-#include <map>
 #include <string>
 #include <cstdint>
 #include <optional>
@@ -22,18 +21,24 @@ struct WantedColumn {
     uint8_t     first;     // name[0], for fast reject
     int         pred_idx;  // predicate index, or -1
 
-    // Optional ONE-LEVEL nested sub-key: when `sub_len` is non-zero, the wanted value is
-    // not this key's value but the value of `sub` INSIDE it (`commit` + `collection` =>
-    // `commit.collection`). The container's bytes are then never materialised — the same
-    // marker walk that bounds the container also matches the sub-key inside it and emits a
-    // span for the sub-value alone. This is what lets a nested projection be read at scan
-    // time instead of materialising the whole object and re-parsing it per row downstream.
+    // Optional ONE-LEVEL nested sub-key (nested_column.hpp): when `sub_len` is non-zero,
+    // the wanted value is not this key's value but the value of `sub` INSIDE it
+    // (`commit->>'collection'`). The container's bytes are then never materialised — the
+    // same marker walk that bounds the container also matches the sub-key inside it and
+    // emits a span for the sub-value alone, tagged with `slot`.
     //
-    // Matched at nesting depth 1 ONLY: `commit.collection` must never match
-    // `commit.record.collection`. Depth is tracked explicitly by the walk.
+    // Matched at nesting depth 1 ONLY: `commit->>'collection'` must never match
+    // `commit.record.collection`. Depth is guarded structurally by find_nested_field.
     const char* sub     = nullptr;
     uint32_t    sub_len = 0;
     uint8_t     sub_first = 0;  // sub[0], for fast reject
+    uint8_t     slot = 0;       // FieldSpan::slot for this column's spans (0 = top-level)
+
+    // Several wanted columns can share one top-level key (`commit->>'a'`, `commit->>'b'`,
+    // and `commit` itself). The key is matched once; `next` chains to the next wanted
+    // column with the same key (index into MapProjection::columns, -1 = end), so one pass
+    // over the value serves all of them.
+    int next = -1;
 };
 
 // Projection + predicate pushdown for build_map. nullptr => emit every field (data-blind
@@ -118,11 +123,17 @@ struct RecordSet {
 // the wanted set, materialising only those fields and stopping each record once they are
 // found (minimal extent). Predicate filtering and final column ordering are the consumer's
 // job (finalize_records / extract_column).
+//
+// `markers` cover the byte range [range_start, buffer_length) of `buffer` (absolute
+// positions); range_start must be the start of a line (0, or one past a newline). Every
+// line in the range is judged on its own: one that is not exactly one object is rejected
+// whole (see MapBuilder's line discipline), so a range can be cut at any newline.
 RecordSet build_map(
     const uint8_t* buffer,
     size_t buffer_length,
     const std::vector<MarkerPosition>& markers,
-    const MapProjection* proj = nullptr
+    const MapProjection* proj = nullptr,
+    size_t range_start = 0
 );
 
 // Collect the union of keys across the RecordSet's first `sample_records` records, in
@@ -164,41 +175,6 @@ std::vector<std::string> discover_column_names(
 // when the predicate is evaluated on it (evaluate_predicate throws).
 void check_predicate_literals(
     const uint8_t* buffer, size_t buffer_length, const ParseContext& context);
-
-// Helper for interpreting a single JSON record (deprecated, use build_map)
-class RecordInterpreter {
-public:
-    // Parse a single record given marker positions and byte range
-    // Returns FieldSpans for all key-value pairs found in the record
-    std::vector<FieldSpan> parse_record(
-        const uint8_t* buffer,
-        uint32_t record_start,
-        uint32_t record_end,
-        const std::vector<MarkerPosition>& markers,
-        const std::map<std::string, uint32_t>& marker_index  // [position] -> index in markers
-    );
-
-private:
-    // Find the closing quote for an opening quote, accounting for escapes
-    uint32_t find_closing_quote(
-        uint32_t open_quote_pos,
-        const std::vector<MarkerPosition>& markers,
-        const std::map<std::string, uint32_t>& marker_index,
-        uint32_t record_end
-    );
-
-    // Classify value type by examining buffer at value_start
-    ValueType classify_value_type(
-        const uint8_t* buffer,
-        uint32_t value_start
-    );
-
-    // Skip whitespace forward in buffer
-    uint32_t skip_whitespace(const uint8_t* buffer, uint32_t pos, uint32_t limit);
-
-    // Extract key string (unquoted)
-    std::string extract_key(const uint8_t* buffer, uint32_t key_start, uint32_t key_end);
-};
 
 }  // namespace rugo::_jsonl
 

@@ -1,6 +1,8 @@
 #include "value_parser.hpp"
 #include "fast_parsers.hpp"
 #include "predicate_literal.hpp"
+#include "json_canonical.hpp"   // jsoncanon::render_nested (nested `->>` predicates)
+#include <vector>
 #include <cstring>
 #include <cmath>
 #include <stdexcept>
@@ -190,12 +192,51 @@ bool evaluate_scalar(
         }
     }
 }
+// A NESTED `->>` column (FieldSpan::slot != 0) is TEXT: its predicate compares the value
+// rendered exactly as the column holds it (jsoncanon::render_nested — decoded string,
+// source number token, canonical container) with a string literal, byte-wise like every
+// string comparison. Its JSON type never changes the comparison, which is what makes
+// `commit->>'n' = '5'` true for the JSON number 5, as the unpushed `->>` is.
+bool evaluate_nested_text(const uint8_t* buffer, const FieldSpan& span, const Predicate& pred) {
+    thread_local std::vector<uint8_t> text, stack, scratch;
+    text.clear();
+    if (!jsoncanon::render_nested(buffer, span, /*as_json=*/false, text, stack, scratch))
+        throw std::runtime_error(
+            "read_jsonl: column '" + pred.column + "': value '" +
+            std::string(reinterpret_cast<const char*>(buffer + span.value_start),
+                        span.value_width < 64u ? span.value_width : 64u) +
+            "' is not valid JSON");
+    auto compare_one = [&](const Predicate& p) -> bool {
+        if (p.kind != rugo::LITERAL_STRING)
+            throw std::invalid_argument(
+                rugo::literal_mismatch_message(p.column, "NVARCHAR", p.kind, p.value));
+        const size_t n = text.size() < p.value.size() ? text.size() : p.value.size();
+        int cmp = n ? std::memcmp(text.data(), p.value.data(), n) : 0;
+        if (cmp == 0) cmp = (text.size() < p.value.size()) ? -1 : (text.size() > p.value.size() ? 1 : 0);
+        return apply_op_i64(p.op, cmp, 0);
+    };
+    switch (pred.op) {
+        case 8: return false;  // IS NULL: a span exists, so the value is not NULL
+        case 9: return true;   // IS NOT NULL
+        case 6:
+            for (const auto& m : pred.members) if (compare_one(m)) return true;
+            return false;
+        case 7:
+            for (const auto& m : pred.members) if (!compare_one(m)) return false;
+            return true;
+        default:
+            return compare_one(pred);
+    }
+}
+
 }  // namespace
 
 bool evaluate_predicate(
     const uint8_t* buffer,
     const FieldSpan& value_span,
     const Predicate& pred) {
+
+    if (value_span.slot != 0) return evaluate_nested_text(buffer, value_span, pred);
 
     const bool value_is_null = is_null(
         buffer, value_span.value_start, value_span.value_start + value_span.value_width - 1);

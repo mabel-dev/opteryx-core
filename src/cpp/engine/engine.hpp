@@ -38,6 +38,7 @@
 #include "native_skene_scan_source.hpp"    // NativeSkeneScanSource (zero-Python skene)
 #include "native_skene_latmat_scan_source.hpp"  // NativeSkeneLatmatScanSource (two-pass skene)
 #include "native_postgres_scan_source.hpp"    // NativePostgresScanSource (zero-Python Postgres)
+#include "native_jsonl_scan_source.hpp"       // NativeJsonlScanSource (zero-Python READ_JSONL)
 #include "native_sort.hpp"          // SortSink, TopNSink, SortKeySpec, gather_rows
 #include "native_unnest.hpp"        // UnnestOperator — CROSS JOIN UNNEST
 #include "native_window_frame.hpp"  // FramedWindowSink — SUM/COUNT/AVG/MIN/MAX OVER (... ROWS/RANGE ...)
@@ -968,6 +969,14 @@ public:
     // object for the driver's lifetime.
     void set_native_postgres_scan_source(size_t p, const opteryx::pg::PgScanSpec* spec) {
         set_source_(p, std::make_unique<NativePostgresScanSource>(spec));
+    }
+
+    // Source = a native streaming JSONL scan (NativeJsonlScanSource): its own decode
+    // pool cuts local files into newline-aligned chunks and decodes them through rugo's
+    // C++ JSONL path. The spec is BORROWED: the Cython JsonlScanPlan owns it and
+    // NativePlan holds that object for the driver's lifetime.
+    void set_native_jsonl_scan_source(size_t p, const JsonlScanSpec* spec) {
+        set_source_(p, std::make_unique<NativeJsonlScanSource>(spec));
     }
 
     void set_skene_latmat_scan_source(size_t p,

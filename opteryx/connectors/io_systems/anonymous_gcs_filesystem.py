@@ -54,6 +54,24 @@ class AnonymousGcsFileSystem:
         object_path = urllib.parse.quote(stripped[len(bucket) + 1 :], safe="")
         return f"https://storage.googleapis.com/{bucket}/{object_path}"
 
+    # ── Native scan-path contract ───────────────────────────────────────────
+    #
+    # The same contract AnonymousS3FileSystem exposes: a native Source fetches the
+    # URL `rewrite_to_signed_url` returns with the header `native_auth_header`
+    # returns. Here the "signed" URL is the plain, credential-free public object URL
+    # and there is no header - the native fetch is anonymous end to end, exactly as
+    # open_input_file below is.
+
+    @property
+    def signs_urls(self) -> bool:
+        return True
+
+    def native_auth_header(self):
+        return None
+
+    def rewrite_to_signed_url(self, path: str, expiry_seconds: int = 3600) -> str:
+        return self._to_public_https_url(path)
+
     def open_input_file(self, path: str, columns=None, filters=None):
         return self._http.open_input_file(self._to_public_https_url(path), columns=columns, filters=filters)
 

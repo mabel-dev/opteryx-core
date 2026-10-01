@@ -101,19 +101,41 @@ def anonymous_http(monkeypatch):
     return _FakeAnonymousHttpClient
 
 
-def test_read_jsonl_public_gcs_object_is_read_anonymously(anonymous_http):
+class _PlanCaptured(Exception):
+    """Stops a query once its native JSONL scan plan is built, before execution."""
+
+
+def test_read_jsonl_public_gcs_object_is_read_anonymously(anonymous_http, monkeypatch):
     # _AnonymousGcsFileSystem quotes the object path the same way GcsFile does
     # (urllib.parse.quote(..., safe="")) -- '/' inside the object name becomes '%2F'.
     url = "https://storage.googleapis.com/opteryx/rugo_examples%2Fspace_missions.jsonl"
     anonymous_http.objects[url] = b'{"a": 1}\n{"a": 2}\n'
 
-    morsels = _run("SELECT * FROM READ_JSONL('gs://opteryx/rugo_examples/space_missions.jsonl')")
+    # Bind time reads the object through the (faked) anonymous Python client. The
+    # execution-time read is the native Source's own GET (NativeJsonlScanSource), so
+    # it is pinned at the plan instead: the URL the Source will fetch must be the
+    # public object URL, which the native contract fetches with no auth header
+    # (AnonymousGcsFileSystem.native_auth_header is None).
+    import opteryx.operators._operators as operators
 
-    assert sum(m.num_rows for m in morsels) == 2
-    # Fetched twice: once at bind time (schema resolution) and once at execution time
-    # (the real chunk decode) -- the same two-read shape READ_JSONL already has for
-    # local files; both reads must be anonymous, which is what this asserts.
-    assert anonymous_http.requested == [url, url]
+    captured = {}
+
+    def capture(parse_context, files, urls, *args):
+        captured["files"] = files
+        captured["urls"] = urls
+        raise _PlanCaptured()
+
+    monkeypatch.setattr(operators, "JsonlScanPlan", capture)
+    with pytest.raises(_PlanCaptured):
+        _run("SELECT * FROM READ_JSONL('gs://opteryx/rugo_examples/space_missions.jsonl')")
+
+    assert captured["files"] == ["gs://opteryx/rugo_examples/space_missions.jsonl"]
+    assert captured["urls"] == [url]
+    assert anonymous_http.requested == [url]
+
+    from opteryx.connectors.io_systems.anonymous_gcs_filesystem import anonymous_gcs_filesystem
+
+    assert anonymous_gcs_filesystem().native_auth_header() is None
 
 
 def test_read_jsonl_private_gcs_object_fails_loud_not_silent(anonymous_http):
@@ -181,7 +203,7 @@ class _FakeGcsListHttpClient:
 
 def test_other_gcs_read_paths_are_not_gated_by_the_read_jsonl_check():
     # The restriction lives entirely in READ_JSONL's own binder branch
-    # (visit_function_dataset) and JsonlReadNode._ensure_filesystem. OpteryxGcsFileSystem
+    # (visit_function_dataset) and JsonlReadNode.native_file_locations. OpteryxGcsFileSystem
     # itself -- used by catalog-backed / ad-hoc-registered-workspace GCS scans -- must
     # remain fully able to authenticate and list/open gs:// paths; nothing about this
     # fix touches that class.

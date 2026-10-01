@@ -1027,6 +1027,25 @@ extensions = [
         # describe/metadata calls the PostgresConnector makes through Cython.
         # Links OpenSSL directly (TLS + SCRAM primitives) — see resolve_openssl.
         "src/cpp/pg/pg_client.cpp",
+        # NativeJsonlScanSource (src/cpp/engine/native_jsonl_scan_source.hpp) decodes
+        # JSONL chunks on its own worker threads through rugo's C++ JSONL core, so this
+        # extension compiles that core in. Its own copy, like skene's reader above:
+        # the JSONL core is stateless functions over a caller-supplied buffer (its only
+        # static is thread_local parse scratch) — no registry, no cross-TU singleton.
+        # rugo_native keeps its own copy; neither extension links the other. The one
+        # value that crosses between them is the plan-time ParseContext (copied out of
+        # rugo's prepare_jsonl_context capsule), built from the same parse_context.hpp.
+        # column_builder.cpp's Python-boxing wrap_column is compiled but never called
+        # here; its draken_vector_own_* references resolve from draken_native (loaded
+        # RTLD_GLOBAL), like every other draken symbol this extension uses.
+        "rugo/src/jsonl/core/structural_scan.cpp",
+        "rugo/src/jsonl/core/interpreter.cpp",
+        "rugo/src/jsonl/core/value_parser.cpp",
+        "rugo/src/jsonl/core/field_span.cpp",
+        "rugo/src/jsonl/core/jsonl_reader.cpp",
+        "rugo/src/jsonl/core/column_builder.cpp",
+        "rugo/src/declared_type.cpp",
+        "src/cpp/disk_io.cpp",
         ]
         # skene's kZstd section codec, both halves. Same argument as lz4.c above,
         # and it is NOT optional: skene/src/encoding.cpp calls ZSTD_compress /
@@ -1051,6 +1070,8 @@ extensions = [
             "third_party/zstd/decompress",
             "third_party/zstd/compress",
             "third_party/lz4",           # lz4.h
+            "rugo/src",                  # declared_type.hpp / predicate_literal.hpp (JSONL core)
+            "rugo/src/jsonl/core",       # NativeJsonlScanSource's rugo JSONL core
         ]
         + _curl_include_dirs
         + _openssl_include_dirs,

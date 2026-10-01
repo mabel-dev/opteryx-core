@@ -62,7 +62,7 @@ define print_red
 	@echo -e "\033[0;31m$(1)\033[0m"
 endef
 
-.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q rugo-floor reference function-costs publish-reference page-index-test err-latch-test
+.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q rugo-floor reference function-costs publish-reference page-index-test err-latch-test bench-is-null
 
 # Default target
 .DEFAULT_GOAL := help
@@ -206,6 +206,9 @@ q:
 	@$(PYTEST) tests/unit/operators/test_native_scan_residual_gate.py -q
 	@$(PYTEST) tests/integration/sql_battery/test_is_json.py -q
 	@$(PYTEST) tests/integration/sql_battery/test_results_battery.py -q
+
+bench-is-null: check-python ## Benchmark c-native IS NULL / IS NOT NULL bytecode evaluation
+	@$(PYTHON) dev/bench_is_null.py $(BENCH_ARGS)
 
 rugo-floor: ## Run the rugo release floor (oracle + notebook actions + cli) — gates the rugo wheel
 	$(call print_blue,"Running rugo release floor: parquet oracle conformance...")

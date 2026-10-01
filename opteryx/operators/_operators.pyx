@@ -45,6 +45,7 @@ from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint64_t, uint8_t, u
 from libc.stdlib cimport malloc, realloc, free
 from libc.string cimport memcpy
 from cpython.ref cimport PyObject
+from cpython.pycapsule cimport PyCapsule_GetPointer
 from opteryx.compiled.thread_pool cimport CppThreadPool, native_task_fn, spawn_detached_native_task
 from opteryx.compiled.expression.compiled_expression cimport (
     CompiledBytecode, BytecodeInstr, BC_LOAD_COL, BC_LOAD_LIT_CONST,
@@ -311,6 +312,22 @@ cdef extern from "pg/pg_scan_spec.hpp" namespace "opteryx::pg" nogil:
         bint schema_from_catalog
         int64_t rows_read
 
+cdef extern from "engine/native_jsonl_scan_source.hpp" namespace "opteryx::engine" nogil:
+    cdef cppclass JsonlScanSpec:
+        cppvector[string] files
+        cppvector[string] urls
+        cppvector[string] decode_names
+        cppvector[uint8_t] drift_exempt
+        cppvector[string] out_identities
+        cppvector[uint32_t] emit_index
+        bint zero_columns
+        uint64_t chunk_size
+        int decode_workers
+        int64_t rows_read
+        int64_t bytes_read
+        int64_t chunks_read
+    void jsonl_scan_spec_set_context(JsonlScanSpec* spec, const void* context)
+
 cdef extern from "engine/native_skene_scan_source.hpp" namespace "opteryx::engine" nogil:
     # A skene scan's IO knobs (in) and counters (out); the plan owns one and the
     # Source borrows it for the driver's lifetime. Counters are -1 until the scan
@@ -452,6 +469,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void arm_latmat_topn_boundary(size_t p, size_t idx) except +
         int64_t topn_boundary_skipped(size_t idx) except +
         void set_native_postgres_scan_source(size_t p, const PgScanSpec* spec)
+        void set_native_jsonl_scan_source(size_t p, const JsonlScanSpec* spec)
         void set_skene_latmat_scan_source(size_t p,
                                           const cppvector[string]* files,
                                           const cppvector[string]* p1_column_names,
@@ -2629,6 +2647,92 @@ cdef class PostgresScanPlan:
         return self.spec.rows_read
 
 
+cdef class JsonlScanPlan:
+    """Owns the C++ JsonlScanSpec NativeJsonlScanSource borrows for one READ_JSONL scan.
+
+    A plain holder, not a planner: the compiler resolved the files (and, parallel
+    to them, the URL each remote one is fetched from with no credentials — "" for a
+    local path), the physical
+    columns to decode (each once) and which are nested columns exempt from the drift
+    check, the identities to emit under with the decoded column each one reads (a
+    physical column can feed several identities), and built rugo's ParseContext through
+    ``rugo.rugo_native.prepare_jsonl_context`` -- the same code read_jsonl uses, so
+    the pinned schema and pushed predicates mean exactly what they mean there. This
+    pins them in C++ storage that outlives the driver.
+    """
+
+    cdef JsonlScanSpec spec
+    cdef public object scan_identity
+
+    def __init__(self, object parse_context, list files, list urls, list decode_names,
+                 list drift_exempt, list out_identities, list emit_index,
+                 bint zero_columns, long long chunk_size, int decode_workers):
+        if len(decode_names) != len(drift_exempt):
+            raise ValueError("JsonlScanPlan: decode_names and drift_exempt must be parallel")
+        if len(out_identities) != len(emit_index):
+            raise ValueError("JsonlScanPlan: out_identities and emit_index must be parallel")
+        if len(set(decode_names)) != len(decode_names):
+            raise ValueError("JsonlScanPlan: decode_names must be unique")
+        for index in emit_index:
+            if not 0 <= index < len(decode_names):
+                raise ValueError("JsonlScanPlan: emit_index out of range")
+        if zero_columns and (decode_names or out_identities):
+            raise ValueError("JsonlScanPlan: a zero-column scan decodes no columns")
+        if not zero_columns and not out_identities:
+            raise ValueError("JsonlScanPlan: a projected scan needs at least one column")
+        if not files:
+            raise ValueError("JsonlScanPlan: no files to read")
+        if len(urls) != len(files):
+            raise ValueError("JsonlScanPlan: files and urls must be parallel")
+        if chunk_size <= 0:
+            raise ValueError("JsonlScanPlan: chunk_size must be positive")
+        if decode_workers <= 0:
+            raise ValueError("JsonlScanPlan: decode_workers must be positive")
+        jsonl_scan_spec_set_context(
+            &self.spec, PyCapsule_GetPointer(parse_context, b"rugo.jsonl.ParseContext"))
+        for path in files:
+            self.spec.files.push_back((<str>path).encode("utf-8"))
+        for url in urls:
+            self.spec.urls.push_back((<str>url).encode("utf-8"))
+        for name in decode_names:
+            self.spec.decode_names.push_back((<str>name).encode("utf-8"))
+        # Typed locals, not inline expressions: push_back takes `const T&`, and Cython
+        # types an inline `1 if x else 0` temporary as __Pyx_FakeReference<const T>,
+        # which then points at a dead temporary — every flag silently read back as 0.
+        cdef uint8_t exempt_flag
+        cdef uint32_t emit_slot
+        for exempt in drift_exempt:
+            exempt_flag = 1 if exempt else 0
+            self.spec.drift_exempt.push_back(exempt_flag)
+        for identity in out_identities:
+            self.spec.out_identities.push_back(<bytes>identity)
+        for index in emit_index:
+            emit_slot = index
+            self.spec.emit_index.push_back(emit_slot)
+        self.spec.zero_columns = zero_columns
+        self.spec.chunk_size = <uint64_t>chunk_size
+        self.spec.decode_workers = decode_workers
+        self.spec.rows_read = -1
+        self.spec.bytes_read = -1
+        self.spec.chunks_read = -1
+        self.scan_identity = None
+
+    @property
+    def rows_read(self):
+        """Rows emitted; -1 until the scan has run."""
+        return self.spec.rows_read
+
+    @property
+    def bytes_read(self):
+        """Chunk bytes decoded; -1 until the scan has run."""
+        return self.spec.bytes_read
+
+    @property
+    def chunks_read(self):
+        """Chunks decoded; -1 until the scan has run."""
+        return self.spec.chunks_read
+
+
 cdef class NativePlan:
     """The compiled-native execution plan: owns the C++ ``Engine`` pipeline graph plus
     the Python references (scan plan nodes, compiled expression programs) whose
@@ -2642,6 +2746,7 @@ cdef class NativePlan:
     # SkeneScanPlan / SkeneLatmatScanPlan objects the skene Sources borrow
     cdef public list skene_scan_plans
     cdef public list postgres_scan_plans  # PostgresScanPlan objects the Postgres Source borrows
+    cdef public list jsonl_scan_plans  # JsonlScanPlan objects the JSONL Source borrows
     # Top-N runtime boundaries armed on this plan: (scan identity, boundary slot).
     # Read after the run to report each scan's `row_groups_pruned_topn`; empty for
     # every plan that armed none.
@@ -2654,6 +2759,7 @@ cdef class NativePlan:
         self.scan_plans = []
         self.skene_scan_plans = []
         self.postgres_scan_plans = []
+        self.jsonl_scan_plans = []
         self.topn_boundary_scans = []
         # Spill root for this plan's MorselBuffers (docs/MORSEL_SPILL_DESIGN.md).
         # KVSTORE_LOCATION is the per-query spill store the config has always
@@ -2854,6 +2960,15 @@ cdef class NativePlan:
         ``plan``'s spec; this plan holds it alive for the driver's lifetime."""
         self.postgres_scan_plans.append(plan)
         self._e.set_native_postgres_scan_source(p, &plan.spec)
+
+    def set_native_jsonl_scan_source(self, size_t p, JsonlScanPlan plan):
+        """Source = the native streaming JSONL scan (NativeJsonlScanSource): its own
+        decode pool decodes newline-aligned chunks of local files while execution
+        consumes them -- no GIL trampoline, no compile-time materialization. The
+        Source borrows ``plan``'s spec; this plan holds it alive for the driver's
+        lifetime."""
+        self.jsonl_scan_plans.append(plan)
+        self._e.set_native_jsonl_scan_source(p, &plan.spec)
 
     def set_native_skene_scan_source(self, size_t p, SkeneScanPlan splan,
                                      CompiledBytecode filter_bc=None,

@@ -91,6 +91,8 @@ StringColumnResult extract_column(
     const uint8_t*                            buffer,
     const RecordSet& records,
     const std::string&                         column_name,
+    // 0 for a top-level column; a nested column's FieldSpan slot (nested_column.hpp).
+    uint8_t                                    slot,
     OrdinalPredictor&                         predictor,
     bool                                       copy_bytes = true,
     bool                                       may_have_escapes = false,

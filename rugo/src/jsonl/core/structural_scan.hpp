@@ -175,7 +175,15 @@ inline void scan_structural_masked(const uint8_t* data, size_t length, Emit&& em
         }
         const uint64_t escaped = _mask_find_escaped(bslash, &prev_escaped);
         const uint64_t real_q  = quote & ~escaped;
-        const uint64_t in_str  = _mask_prefix_xor(real_q) ^ prev_in_string;
+        uint64_t in_str = _mask_prefix_xor(real_q) ^ prev_in_string;
+        // A line is a record: string state never crosses a newline. A malformed line that
+        // ends inside a string (odd quote count) must not invert the quote parity of every
+        // following line, so each newline still inside a string closes it — flip the
+        // in-string run for every byte after it. ~1 word in 8 carries a newline.
+        for (uint64_t nlb = newline; nlb; nlb &= nlb - 1) {
+            const unsigned p = static_cast<unsigned>(__builtin_ctzll(nlb));
+            in_str ^= ((~0ull << p) << 1) & (0ull - ((in_str >> p) & 1ull));
+        }
         prev_in_string = static_cast<uint64_t>(0) - (in_str >> 63);   // all-ones if still in string
         uint64_t emit_bits = (structb & ~in_str) | real_q | newline;
         while (emit_bits) {
@@ -190,11 +198,13 @@ inline void scan_structural_masked(const uint8_t* data, size_t length, Emit&& em
     bool esc  = (prev_escaped & 1) != 0;
     for (; i < length; ++i) {
         const uint8_t c = data[i];
+        // A newline is always a marker and always ends the line's string/escape state (see
+        // the NEON block above) — checked first so an escape cannot swallow it.
+        if (c == '\n')          { in_s = false; esc = false; emit(static_cast<uint32_t>(i), c); continue; }
         if (in_s) {
             if (esc)            { esc = false; continue; }
             if (c == '\\')      { esc = true;  continue; }
             if (c == '"')       { in_s = false; emit(static_cast<uint32_t>(i), c); continue; }
-            if (c == '\n')      { emit(static_cast<uint32_t>(i), c); continue; }  // see NEON block's comment above
         } else {
             if (c == '"')       { in_s = true;  emit(static_cast<uint32_t>(i), c); continue; }
             if (lut[c])         { emit(static_cast<uint32_t>(i), c); }

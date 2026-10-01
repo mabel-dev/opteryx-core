@@ -62,9 +62,14 @@ def test_multi_record_last_line_unterminated():
 
 
 def test_truncated_record_is_still_rejected():
-    """The fix must not turn a genuinely unterminated record into a row."""
+    """The fix must not turn a genuinely unterminated record into a row. It is malformed:
+    counted when errors are ignored, raised otherwise — never dropped silently."""
     for truncated in (b'{"a":1}\n{"a":2', b'{"a":1}\n{"a":"x', b'{"a":1}\n{"a"'):
-        assert read_jsonl(truncated)["num_rows"] == 1, truncated
+        res = read_jsonl(truncated, fail_on_error=False)
+        assert res["num_rows"] == 1, truncated
+        assert res["malformed_count"] == 1, truncated
+        with pytest.raises(ValueError, match="Malformed JSONL at line 2"):
+            read_jsonl(truncated)
 
 
 # ---------------------------------------------------------------------------

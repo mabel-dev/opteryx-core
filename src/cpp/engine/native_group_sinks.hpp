@@ -214,58 +214,6 @@ struct GroupKeyColumn {
         note_null(out_row, is_null);
     }
 
-    // Batched append_row: appends rows[0..n) of `v`, in order. The result is
-    // IDENTICAL to n append_row calls. Fixed-width keys (the batched case) grow
-    // `raw` once and run ONE tight gather loop with the element size resolved at
-    // compile time, instead of a per-row vector::insert + null check + selection
-    // indirection across every key column's stream. BOOL and string keys keep the
-    // per-row path (arena growth per long string is inherently per value).
-    template <size_t E>
-    static void gather_fixed(uint8_t* dst, const uint8_t* src, const uint32_t* sel,
-                             const uint32_t* rows, size_t n) {
-        for (size_t k = 0; k < n; ++k)
-            std::memcpy(dst + k * E, src + static_cast<size_t>(sel[rows[k]]) * E, E);
-    }
-
-    void append_rows(const DrakenVector& v, const uint32_t* rows, size_t n,
-                     ErrCtx& err, const char* what) {
-        if (n == 0) return;
-        if (gb_key_is_bool(type) || gb_key_is_string(type)) {
-            for (size_t k = 0; k < n; ++k) append_row(v, rows[k], err, what);
-            return;
-        }
-        const size_t base_row = row_count();
-        raw.resize(raw.size() + n * elem_size);   // zero-filled: NULL rows stay zero
-        uint8_t* dst = raw.data() + base_row * elem_size;
-        const uint8_t* src = static_cast<const uint8_t*>(v.data);
-        const uint32_t* sel = v.selection;
-        if (v.validity == nullptr) {
-            switch (elem_size) {
-                case 1:  gather_fixed<1>(dst, src, sel, rows, n); break;
-                case 2:  gather_fixed<2>(dst, src, sel, rows, n); break;
-                case 4:  gather_fixed<4>(dst, src, sel, rows, n); break;
-                case 8:  gather_fixed<8>(dst, src, sel, rows, n); break;
-                case 16: gather_fixed<16>(dst, src, sel, rows, n); break;
-                default:
-                    for (size_t k = 0; k < n; ++k)
-                        std::memcpy(dst + k * elem_size,
-                                    src + static_cast<size_t>(sel[rows[k]]) * elem_size, elem_size);
-            }
-            // All rows valid; only an already-materialised validity map needs the bits set.
-            if (!validity.empty())
-                for (size_t k = 0; k < n; ++k) note_null(base_row + k, false);
-            return;
-        }
-        for (size_t k = 0; k < n; ++k) {
-            const uint32_t row = rows[k];
-            const bool is_null = !((v.validity[row >> 3] >> (row & 7)) & 1u);
-            if (!is_null)
-                std::memcpy(dst + k * elem_size,
-                            src + static_cast<size_t>(sel[row]) * elem_size, elem_size);
-            note_null(base_row + k, is_null);
-        }
-    }
-
     // Append row `r` of another GroupKeyColumn (same type) to this one, rebasing
     // a long-string slot into this column's arena. Used to merge per-group key
     // stores across worker partitions (GROUP BY).
@@ -3135,7 +3083,6 @@ struct GroupByLocal : LocalSinkState {
     // per-morsel ingest scratch
     std::vector<uint64_t> mk_hash;    // per row: draken key hash
     std::vector<uint32_t> mk_ent;     // per row: group id within its partition
-    std::vector<uint32_t> raw_perm;   // raw mode: morsel rows grouped by partition (stable)
     // H20 compressed-key path: one entry per DISTINCT hash, not per row.
     std::vector<uint32_t> dict_rep;   // per code: first row using it (representative)
     std::vector<uint8_t>  dict_part;  // per code: partition index
@@ -3542,20 +3489,11 @@ struct GroupBySink : Sink {
                 // high-cardinality; remember it before the partition is destroyed.
                 if (!l.parts[p].use_mid) l.mid_disabled = true;
                 if (l.parts[p].use_mid) l.parts[p].promote_mid();
-                const size_t window_groups = l.parts[p].size();   // this window's size: the next one's hint
                 g.pending[p].push_back(std::move(l.parts[p]));
                 l.parts[p] = GBPartition();
                 l.parts[p].use_parvi = low_card && !l.raw;        // fresh partition: re-arm the gate
                 l.parts[p].use_mid = !l.mid_disabled && !l.raw;   // ...but never re-arm a lost cause
                 l.parts[p].unindexed = l.raw;           // raw mode: appended, never probed
-                // POC: the fresh index started at 16 slots and doubled (full rehash each
-                // time) up to ~window_groups every window — ~7 rehashes per partition per
-                // flush. The index itself travels to the merge queue, so its capacity cannot
-                // be kept by clearing; presize the replacement to the last window's size
-                // (+12.5% slack: windows are uniform to ~1%). Only when the index will be
-                // probed directly — a live front map promotes into it and sizes itself.
-                if (!l.raw && !l.parts[p].use_parvi && !l.parts[p].use_mid)
-                    l.parts[p].index.reserve(window_groups + (window_groups >> 3));
                 type_keycols(l.parts[p], l.key_meta);   // fresh partition needs key types
             }
         }
@@ -3940,42 +3878,17 @@ struct GroupBySink : Sink {
         if (l.raw) {
             // ADAPTIVE RAW MODE: every row is a new group of its partition — no probe.
             // The finalize (radix) merge groups them; see kGBRawSwitchRatio.
-            //
-            // BATCHED (POC): counting-sort the morsel by partition (stable, so each
-            // partition's group ids are exactly what the per-row loop assigned), then
-            // append one partition at a time, one column at a time. The per-row loop
-            // wrote ~(1 + key columns) append streams x kGBParts partitions per row —
-            // hundreds of concurrent write streams; this writes one stream at a time.
-            uint32_t start[kGBParts + 1];
-            uint32_t base[kGBParts];
-            uint32_t cur[kGBParts];
-            std::memset(start, 0, sizeof(start));
-            for (uint32_t i = 0; i < rows; ++i) ++start[gb_part(l.mk_hash[i]) + 1];
-            for (size_t p = 0; p < kGBParts; ++p) {
-                start[p + 1] += start[p];
-                cur[p] = start[p];
-                base[p] = static_cast<uint32_t>(l.parts[p].hashes.size());
-            }
-            l.raw_perm.resize(rows);
             for (uint32_t i = 0; i < rows; ++i) {
-                const size_t p = gb_part(l.mk_hash[i]);
-                const uint32_t slot = cur[p]++;
-                l.raw_perm[slot] = i;
-                l.mk_ent[i] = base[p] + (slot - start[p]);
-            }
-            for (size_t p = 0; p < kGBParts; ++p) {
-                const size_t n = start[p + 1] - start[p];
-                if (n == 0) continue;
-                GBPartition& P = l.parts[p];
-                const uint32_t* perm = l.raw_perm.data() + start[p];
-                P.hashes.resize(base[p] + n);
-                uint64_t* hd = P.hashes.data() + base[p];
-                for (size_t k = 0; k < n; ++k) hd[k] = l.mk_hash[perm[k]];
+                uint64_t h = l.mk_hash[i];
+                GBPartition& P = l.parts[gb_part(h)];
+                const int64_t gid = static_cast<int64_t>(P.hashes.size());
+                P.hashes.push_back(h);
                 for (size_t j = 0; j < store_col_idx.size(); ++j) {
-                    P.keycols[j].append_rows(in->columns[store_col_idx[j]].view, perm, n, err,
-                                             "GROUP BY key value");
+                    P.keycols[j].append_row(in->columns[store_col_idx[j]].view, i, err,
+                                            "GROUP BY key value");
                     if (err.code != 0) return SinkResult::CONTINUE;
                 }
+                l.mk_ent[i] = static_cast<uint32_t>(gid);
             }
         } else {
         for (uint32_t i = 0; i < rows; ++i) {

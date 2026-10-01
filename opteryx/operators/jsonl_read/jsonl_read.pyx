@@ -16,47 +16,34 @@
 """
 JSONL Read Node
 
-SQL Query Execution Plan Node for `READ_JSONL(path)`.
+SQL Query Execution Plan Node for `READ_JSONL(path)` and manifest-backed scans of
+JSONL datasets.
 
-The file is fetched via the same filesystem resolution Parquet scans use
-(opteryx.connectors.io_systems.create_filesystem, keyed off the path's
-protocol), split into newline-aligned chunks so no JSONL record is ever split,
-and each chunk is decoded independently through rugo.jsonl.read_jsonl -- one
-Morsel per chunk, streamed out of read_morsels() rather than buffering the
-whole file into a single giant Morsel.
+This node is PLANNING ONLY. Execution is the native streaming Source
+(src/cpp/engine/native_jsonl_scan_source.hpp, compiled by
+opteryx.managers.execution.compiler._Compiler._compile_jsonl_scan): its own decode
+pool cuts every file into newline-aligned chunks and decodes them through rugo's C++
+JSONL path while execution consumes them. There is no Python read path —
+`read_morsels` raises.
 
-Stage 2: the optimizer's projection/predicate pushdown (see
-opteryx/planner/optimizer/strategies/projection_pushdown.py and
-predicate_pushdown.py) narrows `jsonl_physical_columns` to the columns
-actually referenced and populates `jsonl_predicates` with pushable
-(column-vs-literal) filters; both are passed to rugo on every chunk's decode.
-A predicate that filters out every row of a chunk is a legitimate zero-row
-result (decode_chunk returns None for it), not an error -- that chunk simply
-contributes nothing.
-
-The bind-time schema is PINNED onto every chunk (2026-09-17): each projected
-column's bound type, spelled as `str(ColumnType)`, is passed to rugo as its
-`explicit_schema`, so rugo parses the column strictly as that type instead of
-re-inferring it from the chunk's own sample rows. A value that does not fit
-fails loud from rugo naming the column, row and value; a column a chunk lacks
-comes back typed and all-null. Decoded vectors are correlated back to the
-plan by physical column NAME, since rugo's output order is not the request
-order. Before this, a column that was null for the first rows of a later
-chunk drifted to VARCHAR and failed the whole query, and every file paid an
-extra projection-free decode of its first chunk just to check names.
-
-Stage 4: `path` (a glob or an exact path) is resolved at bind time
-(opteryx.planner.binder.dataset) into `jsonl_files`, a sorted, non-empty list
-of matched file paths -- length 1 for a non-glob path, so there is no separate
-single-file code path here. read_morsels() iterates that list sequentially
-(no cross-file parallelism). A bound column whose key appears in NO record of
-a chunk is column drift (a file in the glob that lacks the column) and fails
-loud naming the file and the columns -- NDJSON semantics would otherwise read
-it as a column of NULLs. A key that is merely sparse is present on some
-record and is fine.
+What this node fixes at plan time:
+- `jsonl_files`: resolved at bind time (opteryx.planner.binder.dataset) from a glob
+  or an exact path — length 1 for a non-glob path.
+- `jsonl_physical_columns` / `jsonl_predicates`: the optimizer's projection and
+  predicate pushdown, as physical (pre-alias) names and rugo (column, op, value)
+  tuples. One physical column can feed several identities.
+- `pinned_schema()`: the bind-time schema pinned onto every chunk, so a later
+  chunk is parsed strictly as the bound types and a value that does not fit fails
+  loud. A bound column whose key appears in NO record of a chunk is column drift
+  and fails loud naming the file — except a nested `key->>'sub'` column, which a
+  chunk may legitimately lack.
+- `native_file_locations()`: where each file is read from. Local paths are
+  mapped; `http(s)://` URLs and unauthenticated `gs://` / `s3://` objects are
+  fetched whole over plain HTTP(S). Authenticated remote reads are not supported
+  (architect ruling 2026-10-01) and are refused at plan time.
 """
 
-from opteryx.exceptions import DatasetReadError
+from opteryx.exceptions import NotSupportedError
 from opteryx.models import QueryProperties
 
 # BasePlanNode/ReaderNode/Morsel in scope via _operators.pyx include.
@@ -77,7 +64,6 @@ cdef class JsonlReadNode(ReaderNode):
     cdef public bint jsonl_fail_on_error
     cdef public bint jsonl_infer_schema
     cdef public long long jsonl_infer_sample_size
-    cdef object _filesystem
 
     def __init__(
         self,
@@ -105,182 +91,80 @@ cdef class JsonlReadNode(ReaderNode):
                 self.jsonl_infer_schema = step.jsonl_infer_schema
             if step.jsonl_infer_sample_size is not None:
                 self.jsonl_infer_sample_size = step.jsonl_infer_sample_size
-        self._filesystem = None
 
     @property
     def name(self) -> str:  # pragma: no cover
         return "JSONL Reader"
 
-    cdef object _ensure_filesystem(self):
-        if self._filesystem is None:
-            # Dataset Scans attach a connector table that already holds the
-            # RIGHT filesystem (platform credentials for gs:// catalog data).
-            # The protocol-sniffing below is READ_JSONL's path, where a
-            # user-supplied gs:// URL must NEVER use platform credentials.
-            connector_filesystem = getattr(self.connector, "filesystem", None)
-            if connector_filesystem is not None:
-                self._filesystem = connector_filesystem
-                return self._filesystem
-            path = self.dataset
-            protocol = path.split("://")[0] if "://" in path else ""
-            if protocol in ("gs", "gcs"):
-                # SECURITY: must mirror the bind-time choice in opteryx.planner.binder.
-                # dataset's READ_JSONL branch exactly -- READ_JSONL never uses this
-                # process's platform GCS credentials for a user-supplied path, at bind
-                # time or execution time. See anonymous_gcs_filesystem's docstring.
-                from opteryx.connectors.io_systems.anonymous_gcs_filesystem import (
-                    anonymous_gcs_filesystem,
-                )
+    def native_file_locations(self) -> list:
+        """Where the native Source reads each of `jsonl_files` from: a list parallel
+        to it holding "" for a local path (memory-mapped) or the URL to GET with no
+        credentials. Raises NotSupportedError for anything else, before any byte is
+        read.
 
-                self._filesystem = anonymous_gcs_filesystem()
-            elif protocol == "s3":
-                # SECURITY: mirrors the bind-time s3:// branch in opteryx.planner.
-                # binder.dataset's READ_JSONL branch - never this process's AWS credentials
-                # for a user-supplied path. See anonymous_s3_filesystem's docstring.
-                from opteryx.connectors.io_systems.anonymous_s3_filesystem import (
-                    anonymous_s3_filesystem,
-                )
+        SECURITY: READ_JSONL is a bare dataset function — any SQL text can name any
+        path — so a user-supplied gs:// / s3:// path is NEVER read with this
+        process's platform credentials. It is rewritten to its public object URL by
+        the anonymous filesystems the binder already reads it through
+        (anonymous_gcs_filesystem / anonymous_s3_filesystem), whose native contract
+        guarantees no auth header; the store's own ACL decides the outcome. A
+        connector-backed (catalog) scan reads through the connector's filesystem,
+        which may hold platform credentials, so its remote files are refused rather
+        than fetched anonymously or with those credentials."""
+        if getattr(self.connector, "filesystem", None) is not None:
+            for path in self.jsonl_files:
+                if "://" in path:
+                    raise NotSupportedError(
+                        f"JSONL dataset file '{path}' is remote; JSONL datasets are "
+                        "read from local files only — authenticated remote JSONL reads "
+                        "are not supported."
+                    )
+            return ["" for _ in self.jsonl_files]
+        path = self.dataset
+        protocol = path.split("://")[0] if "://" in path else ""
+        if protocol == "":
+            return ["" for _ in self.jsonl_files]
+        if protocol in ("http", "https"):
+            return list(self.jsonl_files)
+        if protocol == "gs":
+            from opteryx.connectors.io_systems.anonymous_gcs_filesystem import (
+                anonymous_gcs_filesystem,
+            )
 
-                self._filesystem = anonymous_s3_filesystem()
-            else:
-                from opteryx.connectors.io_systems import create_filesystem
+            filesystem = anonymous_gcs_filesystem()
+        elif protocol == "s3":
+            from opteryx.connectors.io_systems.anonymous_s3_filesystem import (
+                anonymous_s3_filesystem,
+            )
 
-                self._filesystem = create_filesystem(protocol)
-        return self._filesystem
+            filesystem = anonymous_s3_filesystem()
+        else:
+            raise NotSupportedError(
+                f"READ_JSONL('{path}'): '{protocol}://' is not a supported scheme; "
+                "READ_JSONL reads local paths, http(s):// URLs and public gs:// / s3:// objects."
+            )
+        if filesystem.native_auth_header() is not None:
+            raise NotSupportedError(
+                f"READ_JSONL('{path}'): an authenticated read is not supported."
+            )
+        return [filesystem.rewrite_to_signed_url(file) for file in self.jsonl_files]
 
-    def read_morsels(self):
-        """Source-side morsel iterator driven by the push pipeline engine.
-
-        Streams one Morsel per newline-aligned chunk, across every file in
-        `jsonl_files` in order (sequential fan-out, Stage 4 -- a plain
-        non-glob path is simply a one-file list, so this is the only code
-        path for both cases).
-        """
-        from opteryx.connectors.jsonl_io import decode_chunk
-        from opteryx.connectors.jsonl_io import iter_newline_chunks
-
-        filesystem = self._ensure_filesystem()
-
-        expected_columns = self.columns or []
-        expected_physical_names = self.jsonl_physical_columns
-        predicates = self.jsonl_predicates
-
-        # physical (pre-alias) name -> expected LogicalColumn, for order-independent
-        # correlation of decoded chunk vectors against the bind-time/pushed-down
-        # schema -- rugo's projected-column output order is not guaranteed to match
-        # the `columns=` request order, so this must be name-keyed, not positional.
-        physical_to_expected = dict(zip(expected_physical_names, expected_columns))
-
-        # The bind-time schema, spelled the way rugo's declared-type vocabulary reads
-        # it (the platform's own `str(ColumnType)`), computed ONCE and pinned onto
-        # every chunk of every file. Predicate-only columns are not typed here:
-        # rugo evaluates a pushed predicate on the raw token during the map build.
-        explicit_schema = {
+    def pinned_schema(self) -> dict:
+        """The bind-time schema pinned onto every chunk, ``{physical_name:
+        str(ColumnType)}`` -- the platform's own type spelling, which rugo's
+        declared-type vocabulary reads verbatim. Computed from the (physical name,
+        expected column) pairs, so a physical column feeding several identities is
+        declared once. Predicate-only columns are not typed here: rugo evaluates a
+        pushed predicate on the raw token during the map build."""
+        return {
             physical_name: str(expected.schema_column.column_type)
-            for physical_name, expected in physical_to_expected.items()
+            for physical_name, expected in zip(self.jsonl_physical_columns, self.columns or [])
         }
 
-        for path in self.jsonl_files:
-            file_obj = filesystem.open_input_file(path)
-            try:
-                data = file_obj.memoryview
-                for chunk in iter_newline_chunks(data):
-                    if len(chunk) == 0:
-                        continue
+    def read_morsels(self):
+        from opteryx.exceptions import InvalidInternalStateError
 
-                    # An EMPTY projection means "this query reads no columns"
-                    # (COUNT(*), or a projection of only constants), NOT "a file with
-                    # zero columns". Emit the same shape the parquet scan's equivalent
-                    # path emits: a genuine ZERO-COLUMN morsel whose row count rides on
-                    # `zero_col_rows`, which is what `select([])` produces (draken's
-                    # cxx_morsel_ops.h) and exactly the contract UngroupedAggSink's
-                    # CountStar reads -- see parquet_read.pyx's `_next_cxx` ("No output
-                    # columns ... Emit a genuine ZERO-COLUMN morsel"). Building
-                    # `Morsel.from_vectors([], [])` here instead would report
-                    # num_rows == 0 and silently turn COUNT(*) into 0, which is worse
-                    # than the loud failure this replaces.
-                    #
-                    # With nothing projected there is nothing to pin and no column of
-                    # this file reaches the result, so no disagreement between files
-                    # can change the answer; None can only mean `predicates` filtered
-                    # every row out -- a legitimate zero-row chunk, skipped like any other.
-                    if not expected_physical_names:
-                        count_morsel, _ = decode_chunk(
-                            chunk,
-                            expected_physical_names,
-                            predicates,
-                            fail_on_error=self.jsonl_fail_on_error,
-                            infer_schema=self.jsonl_infer_schema,
-                            infer_sample_size=self.jsonl_infer_sample_size,
-                        )
-                        if count_morsel is None:
-                            continue
-
-                        result_morsel = count_morsel.select([])
-
-                        # `result_morsel.nbytes` is 0 (no columns); report the decoded
-                        # chunk's size, which is the work this read actually did.
-                        self.readings["rows_read"] += result_morsel.num_rows
-                        self.readings["bytes_processed"] += count_morsel.nbytes
-
-                        yield result_morsel
-                        continue
-
-                    try:
-                        chunk_morsel, absent_columns = decode_chunk(
-                            chunk,
-                            expected_physical_names,
-                            predicates,
-                            fail_on_error=self.jsonl_fail_on_error,
-                            infer_schema=self.jsonl_infer_schema,
-                            infer_sample_size=self.jsonl_infer_sample_size,
-                            explicit_schema=explicit_schema,
-                        )
-                    except ValueError as err:
-                        # rugo's declared-type mismatch: the message already names the
-                        # column, row and value; this adds the file. Not flow control --
-                        # the read is over, this is the error that ends it.
-                        raise DatasetReadError(
-                            f"READ_JSONL('{path}'): a value does not fit the schema resolved "
-                            f"at bind time (from the first file in this glob's matched-file "
-                            f"set). {err}"
-                        ) from err
-                    if chunk_morsel is None:
-                        # Every row in this chunk was filtered out by `predicates` --
-                        # a legitimate zero-row result, not a decode failure. This
-                        # chunk simply contributes nothing.
-                        continue
-
-                    if absent_columns:
-                        # A bound column whose key appears in NO record of this chunk is
-                        # column drift: a file in the glob that does not have the column
-                        # at all (a key that is merely sparse is present on SOME record
-                        # and does not trip this). Fail loud naming the file and columns
-                        # rather than emit a column of NULLs -- the same decision the
-                        # per-chunk name check took before pinning, kept deliberately.
-                        raise DatasetReadError(
-                            f"READ_JSONL('{path}'): the expected columns {sorted(absent_columns)} "
-                            "(from the bind-time schema, resolved from the first file in this "
-                            "glob's matched-file set) are absent from every record in a chunk "
-                            "of this file."
-                        )
-
-                    names = []
-                    vectors = []
-                    for physical_name in expected_physical_names:
-                        # Every expected column is present: declared columns are always
-                        # built by rugo (typed, all-null when the chunk lacks the key), and
-                        # each carries its declared type -- a mismatch raised above.
-                        vector = chunk_morsel.column(physical_name.encode("utf-8"))
-                        names.append(physical_to_expected[physical_name].schema_column.identity)
-                        vectors.append(vector)
-
-                    result_morsel = Morsel.from_vectors(names, vectors)
-
-                    self.readings["columns_read"] += len(result_morsel.column_names)
-                    self.readings["rows_read"] += result_morsel.num_rows
-                    self.readings["bytes_processed"] += result_morsel.nbytes
-
-                    yield result_morsel
-            finally:
-                file_obj.close()
+        raise InvalidInternalStateError(
+            "JsonlReadNode executes only as a native engine source "
+            "(NativeJsonlScanSource); it has no Python read path."
+        )

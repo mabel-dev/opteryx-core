@@ -4,39 +4,32 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-JSONL IO — thin glue between JsonlReadNode and rugo's JSONL reader.
+JSONL IO — the planning-side pieces of READ_JSONL and JSONL dataset scans.
 
-rugo.jsonl.read_jsonl always decodes whatever buffer it is given into exactly
-one Morsel (there is no lower-level streaming/chunked entry point exposed
-today -- the reader's own chunked mode was removed as dead code). To let
-JsonlReadNode stream morsels instead of buffering an entire file into one, the
-file's bytes are split here into newline-aligned chunks and each chunk is
-decoded through rugo independently, with the pushed-down projection/predicates
-(Stage 2) passed to every chunk's decode.
+Execution is native (src/cpp/engine/native_jsonl_scan_source.hpp): its own decode
+pool cuts each file into newline-aligned chunks of DEFAULT_CHUNK_SIZE and decodes
+them through rugo's C++ JSONL path. Nothing here runs during execution.
 
-The schema is resolved ONCE, at bind time, from the first record-bearing
-chunk, and PINNED onto every chunk's decode as rugo's `explicit_schema`
-(2026-09-17): each projected column is parsed strictly as its bound type, a
-column this chunk lacks comes back typed and all-null, and a value that does
-not fit the bound type fails loud naming the column, row and value. Before
-this, rugo re-inferred every chunk from its own 5-row sample, and a column
-that happened to be null for the first rows of a later chunk drifted to
-VARCHAR and failed the whole query.
+What lives here:
+- DEFAULT_CHUNK_SIZE, the chunk the native Source cuts at;
+- iter_newline_chunks, used at BIND time to read a file's first chunk for schema
+  inference — the same newline-aligned cut, so the bound schema comes from exactly
+  the bytes the native Source's first chunk of that file holds;
+- the predicate-pushdown capability (JsonlPredicatePushable, JSONL_OP_XLAT) and the
+  reader's supported-type declaration (JSONL_SUPPORTED_TYPES).
 """
 
-from typing import Iterator, Optional, Sequence
+from typing import Iterator
 
 from draken.draken_native import DrakenType
-from draken.morsels.morsel import Morsel
 
 from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.expression import NodeType
 from opteryx.types.logical_type import LogicalCategory
-from rugo.rugo_native import read_jsonl as _rugo_read_jsonl
 
-# Mirrors the chunk size used by the (now-removed) sequential chunked JSONL
-# reader that used to live in rugo/src/jsonl/_jsonl_reader.pxi.
-DEFAULT_CHUNK_SIZE = 64 * 1024 * 1024
+# 128MB: interleaved A/B on JSONBench 10m (2026-09-30) put 128MB ahead of 64MB
+# (total 0.973x/0.984x over two batches) and of 256MB (which regressed Q3/Q4).
+DEFAULT_CHUNK_SIZE = 128 * 1024 * 1024
 
 # Bound on how far past a chunk boundary we scan for the newline to extend to.
 # Real JSONL records are far shorter than this; a miss here means the file has
@@ -46,7 +39,6 @@ _NEWLINE_PROBE_WINDOW = 1024 * 1024
 
 __all__ = [
     "iter_newline_chunks",
-    "decode_chunk",
     "DEFAULT_CHUNK_SIZE",
     "JsonlPredicatePushable",
     "JSONL_OP_XLAT",
@@ -102,11 +94,15 @@ class JsonlPredicatePushable(PredicatePushable):
 
     PUSHABLE_OPS = {op: True for op in JSONL_OP_XLAT}
 
+    # NVARCHAR is only ever a NESTED `->>` column on a JSONL scan (top-level strings
+    # bind VARCHAR); rugo compares those as their rendered `->>` text, exactly as the
+    # unpushed comparison would (rugo value_parser evaluate_nested_text).
     PUSHABLE_TYPES = {
         LogicalCategory.INTEGER,
         LogicalCategory.FLOAT,
         LogicalCategory.BOOLEAN,
         LogicalCategory.VARCHAR,
+        LogicalCategory.NVARCHAR,
     }
 
     def can_push(self, operator, types=None) -> bool:
@@ -150,52 +146,3 @@ def iter_newline_chunks(data, chunk_size: int = DEFAULT_CHUNK_SIZE) -> Iterator[
                 end = end + newline_pos + 1
         yield view[start:end]
         start = end
-
-
-def decode_chunk(
-    chunk,
-    columns: Optional[Sequence[str]] = None,
-    predicates: Optional[Sequence[tuple]] = None,
-    fail_on_error: bool = True,
-    infer_schema: bool = True,
-    infer_sample_size: int = 5,
-    explicit_schema: Optional[dict] = None,
-):
-    """Decode one newline-aligned chunk via rugo.
-
-    Returns ``(morsel, absent_columns)``. ``morsel`` is ``None`` if every row
-    in this chunk was filtered out by ``predicates`` -- a benign zero-row
-    result, not a decode failure, so the caller treats it as "this chunk
-    contributed no rows". ``absent_columns`` lists the declared columns whose
-    key appeared in NO record of the chunk (each is still in the morsel, typed
-    and all-null); it is how the scan node tells a file that lacks the bound
-    columns entirely from one where they are merely sparse.
-
-    ``columns``/``predicates`` are the pushed-down projection (physical,
-    pre-alias names) and predicate tuples for this scan. ``explicit_schema``
-    is the bind-time schema pinned onto this chunk, ``{physical_name:
-    str(ColumnType)}`` -- the platform's own type spelling, which rugo's
-    declared-type vocabulary accepts verbatim. A value that does not fit its
-    declared type raises ``ValueError`` from rugo naming the column, row and
-    value. ``fail_on_error``/``infer_schema``/``infer_sample_size`` are
-    READ_JSONL's resolved options (Stage 3; see opteryx.planner.binder.dataset),
-    forwarded unchanged.
-
-    Calls rugo's native entry point rather than the ``rugo.jsonl`` facade
-    because the facade yields only the Morsel and drops ``absent_columns``.
-    """
-    result = _rugo_read_jsonl(
-        chunk,
-        columns=columns,
-        predicates=predicates,
-        explicit_schema=explicit_schema,
-        fail_on_error=fail_on_error,
-        infer_schema=infer_schema,
-        infer_sample_size=infer_sample_size,
-    )
-    if not result["success"]:
-        # Only ever means zero rows survived (see rugo/jsonl/__init__.py's
-        # _JsonlReader.__iter__); genuine failures raise from rugo directly.
-        return None, []
-    morsel = Morsel.from_vectors(result["column_names"], result["columns"])
-    return morsel, result["absent_columns"]

@@ -15,6 +15,7 @@ from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.map cimport map as cmap
 from libcpp.utility cimport move
+from cpython.pycapsule cimport PyCapsule_New, PyCapsule_GetPointer
 
 from draken.core.buffers cimport (
     DrakenType,
@@ -71,7 +72,8 @@ cdef extern from "core/parse_context.hpp" namespace "rugo::_jsonl":
         uint8_t kind
         vector[Predicate] members
 
-    struct ParseContext:
+    # cppclass (not struct): prepare_jsonl_context heap-allocates one with `new`.
+    cppclass ParseContext:
         vector[string] projected_columns
         vector[Predicate] predicates
         cmap[string, string] explicit_schema
@@ -110,14 +112,25 @@ cdef extern from "core/interpreter.hpp" namespace "rugo::_jsonl":
     vector[string] sample_record_keys(
         const RecordSet& rs, const uint8_t* buffer, size_t sample_records) nogil
 
+    # std::invalid_argument (-> ValueError) on a malformed nested column request
+    # (`key->>'sub'` with an empty key or sub-key; nested_column.hpp).
     vector[string] discover_column_names(
-        const uint8_t* buffer, size_t buffer_length, const ParseContext& context) nogil
+        const uint8_t* buffer, size_t buffer_length, const ParseContext& context
+    ) except + nogil
 
     # std::invalid_argument (-> ValueError) on a predicate literal that does not fit its
     # column: its declared type, or a non-null value in the head sample.
     void check_predicate_literals(
         const uint8_t* buffer, size_t buffer_length, const ParseContext& context
     ) except + nogil
+
+
+cdef extern from "core/nested_column.hpp" namespace "rugo::_jsonl":
+    # A nested column request: `key->>'sub'` (as_json false) / `key->'sub'` (as_json true).
+    struct ColumnSpec:
+        bint nested
+        bint as_json
+    ColumnSpec parse_column_spec(const string& s) except +
 
 
 cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
@@ -166,6 +179,15 @@ cdef extern from "core/jsonl_reader.hpp" namespace "rugo::_jsonl":
         const uint8_t* buffer, size_t length,
         const uint8_t* needle, size_t needle_len
     ) nogil
+    # The prefilter gate and the malformed-record message live in C++ so the native
+    # engine scan (src/cpp/engine/native_jsonl_scan_source.hpp) shares them verbatim.
+    bint maybe_prefilter(
+        const uint8_t* buffer, size_t length, const ParseContext& context,
+        vector[uint8_t]& out
+    ) nogil
+    string malformed_error_message(
+        const uint8_t* buffer, size_t length, uint32_t offset
+    ) nogil
 
 
 cdef extern from "core/column_builder.hpp" namespace "rugo::_jsonl":
@@ -199,76 +221,6 @@ cdef extern from "disk_io.h" nogil:
     int unmap_memory_c(unsigned char* addr, size_t size)
 
 
-cdef object _maybe_prefilter(const uint8_t* buf, size_t buf_len, predicates):
-    """Gated Volnitsky raw prefilter for a single selective string-equality predicate.
-    Returns a NEW bytes object of surviving candidate lines when prefiltering applies and
-    helps, else None (caller keeps using the original buf/buf_len as-is). Only ever
-    materialises small BOUNDED samples (first ~4KB, first ~1MB) as Python bytes regardless
-    of buf_len — never copies the whole buffer just to decide whether to prefilter, so this
-    stays cheap even when buf points at a multi-hundred-GB mmap'd file. SOUND: the needle is
-    the quoted value, which a matching record always contains regardless of whitespace; the
-    predicate is re-applied downstream so false positives are verified away. Self-disabling
-    on non-string, short, or non-selective cases."""
-    cdef PrefilterResult r
-    cdef PrefilterResult sr
-    cdef const uint8_t* ndl_ptr
-    cdef size_t first_len
-    cdef size_t sample_len
-    cdef bytes first_bytes
-    cdef bytes sample_bytes
-
-    if not predicates or len(predicates) != 1:
-        return None
-    col, op, val = predicates[0]
-    if op != "==":
-        return None
-    # A string literal only: its needle is the quoted value, which only a JSON string
-    # carries. A non-string literal is a type mismatch against a string column, and
-    # prefiltering on it would drop every record before evaluate_predicate could raise.
-    if not isinstance(val, (str, bytes)):
-        return None
-
-    # Probe the first record: only prefilter when `col` is stored as a quoted (string)
-    # value. A bare numeric/bool value isn't quoted, so a quoted needle would false-negative.
-    # Bounded to 4KB — real JSONL lines are far shorter than that.
-    first_len = buf_len if buf_len < 4096 else 4096
-    first_bytes = (<const char*>buf)[:first_len]
-    nl = first_bytes.find(b"\n")
-    first = first_bytes[:nl] if nl >= 0 else first_bytes
-    key = b'"' + col.encode("utf-8") + b'":'
-    ki = first.find(key)
-    if ki < 0:
-        return None                     # key absent / non-compact formatting -> skip (safe)
-    if first[ki + len(key):ki + len(key) + 1] != b'"':
-        return None                     # bare value -> skip (numeric hazard)
-
-    # val is bytes for every real Opteryx-pushed VARCHAR literal (its VARCHAR storage is
-    # byte-based, not str) -- str(b'commit') == "b'commit'", the Python repr, not the
-    # string's own bytes, so that needle would never be found and this prefilter would
-    # silently return an empty buffer (0 rows) instead of skipping/no-oping.
-    val_bytes = val if isinstance(val, bytes) else val.encode("utf-8")
-    needle = b'"' + val_bytes + b'"'
-    if len(needle) < 8:                 # short/low-entropy value -> skip won't pay off
-        return None
-
-    ndl_ptr = <const uint8_t*>needle
-
-    # Selectivity sample on the first ~1MB (bounded, not the whole buffer): if the needle
-    # already hits >30% of sampled rows, there's little to skip -> run the normal path
-    # instead of paying for a full prefilter.
-    sample_len = buf_len if buf_len < 1_000_000 else 1_000_000
-    sr = volnitsky_prefilter(buf, sample_len, ndl_ptr, len(needle))
-    sample_bytes = (<const char*>buf)[:sample_len]
-    sample_lines = sample_bytes.count(b"\n")
-    if sample_lines > 0 and sr.matched_records * 10 > sample_lines * 3:
-        return None
-
-    r = volnitsky_prefilter(buf, buf_len, ndl_ptr, len(needle))
-    if r.candidates.size() == 0:
-        return b""                      # no candidates -> empty buffer -> 0 rows
-    return (<char*>r.candidates.data())[:r.candidates.size()]
-
-
 cdef bint _names_contain(const vector[string]& names, const string& name):
     cdef size_t i
     for i in range(names.size()):
@@ -277,25 +229,144 @@ cdef bint _names_contain(const vector[string]& names, const string& name):
     return False
 
 
-cdef str _jsonl_malformed_error(const uint8_t* buf_data, size_t buf_len, uint32_t offset):
-    """Build a 1-based-line-number error message for the first malformed record detected
-    by the C++ parser. Only ever called on the fail_on_error=True error path (not hot),
-    so a full scan of the bytes before `offset` to count newlines is fine."""
-    cdef size_t i
-    cdef size_t line = 1
-    cdef size_t limit = offset if <size_t>offset < buf_len else buf_len
-    cdef size_t snippet_end = offset
-    cdef bytes snippet
-    for i in range(limit):
-        if buf_data[i] == c'\n':
-            line += 1
-    while snippet_end < buf_len and buf_data[snippet_end] != c'\n':
-        snippet_end += 1
-    snippet = (<const char*>buf_data)[offset:snippet_end][:200]
-    return (
-        f"Malformed JSONL at line {line} (byte offset {offset}): "
-        f"{snippet.decode('utf-8', 'replace')!r}"
-    )
+def jsonl_is_nested_column(str name):
+    """True iff `name` is a nested column request — `key->>'sub'` or `key->'sub'` —
+    by rugo's own parser (nested_column.hpp), so callers never re-implement the
+    notation. Raises ValueError on a malformed request (empty key or sub-key)."""
+    return bool(parse_column_spec(name.encode("utf-8")).nested)
+
+
+cdef dict _fill_parse_context(
+    ParseContext* context,
+    columns,
+    predicates,
+    explicit_schema,
+    infer_schema,
+    infer_sample_size,
+    parse_arrays,
+    parse_objects,
+    fail_on_error,
+):
+    """Build `context` from read_jsonl's arguments, validating every one EAGERLY — before
+    any bytes are read. The ONE place a JSONL ParseContext is built from Python values:
+    read_jsonl uses it per call, and prepare_jsonl_context uses it once at plan time for
+    the engine's native scan, so the two cannot disagree on what a request means.
+    Returns the declared schema ({} when none was given)."""
+    cdef Predicate pred
+    cdef Predicate member
+    cdef DeclaredType probe_type
+    cdef dict declared_schema = {}
+
+    if columns:
+        for col in columns:
+            context.projected_columns.push_back(col.encode('utf-8'))
+
+    if predicates:
+        for col, op, val in predicates:
+            pred.column = col.encode('utf-8')
+            pred.op = _jsonl_parse_op(op)
+            pred.value = b''
+            pred.members.clear()
+            if pred.op == _OP_IS_NULL or pred.op == _OP_IS_NOT_NULL:
+                if val is not None:
+                    raise ValueError(
+                        f"predicate {op!r} on {col!r} takes no value (pass None), got {val!r}"
+                    )
+            elif pred.op == _OP_IN or pred.op == _OP_NOT_IN:
+                if not isinstance(val, (list, tuple, set, frozenset)):
+                    raise ValueError(
+                        f"predicate {op!r} on {col!r} takes a list, tuple or set of "
+                        f"values, got {type(val).__name__}"
+                    )
+                # One scalar predicate per member on the same column: EQ for IN (any
+                # passes), NE for NOT IN (all pass). See Predicate::members.
+                member.column = pred.column
+                member.op = _OP_EQ if pred.op == _OP_IN else _OP_NE
+                for m in val:
+                    member.kind, member.value = _predicate_literal(col, op, m)
+                    pred.members.push_back(member)
+            else:
+                pred.kind, pred.value = _predicate_literal(col, op, val)
+            context.predicates.push_back(pred)
+
+    if explicit_schema:
+        for col, declared_type in explicit_schema.items():
+            if not isinstance(declared_type, str):
+                raise ValueError(
+                    f"read_jsonl: explicit_schema[{col!r}] = {declared_type!r} is not a "
+                    f"type name; expected a string such as 'IPV4' or 'DECIMAL(18, 2)'"
+                )
+            # Validated here, EAGERLY, through the same parser that will do the work —
+            # a bad type name must fail before any bytes are read, not part-way through
+            # a multi-gigabyte file.
+            declared_bytes = declared_type.encode('utf-8')
+            # A nested column's type is fixed by its operator — `->>` is NVARCHAR text,
+            # `->` is VARIANT JSON — so its declaration is a consistency check, not a
+            # choice (nested_column.hpp).
+            nested_spec = parse_column_spec(col.encode('utf-8'))
+            if nested_spec.nested:
+                nested_type = "VARIANT" if nested_spec.as_json else "NVARCHAR"
+                if declared_type != nested_type:
+                    raise ValueError(
+                        f"read_jsonl: explicit_schema[{col!r}] = {declared_type!r}, but a nested "
+                        f"{'`->`' if nested_spec.as_json else '`->>`'} column is {nested_type}"
+                    )
+                context.explicit_schema[col.encode('utf-8')] = declared_bytes
+                continue
+            if not parse_declared_type(declared_bytes, &probe_type):
+                raise ValueError(
+                    f"read_jsonl: explicit_schema[{col!r}] = {declared_type!r} is not a "
+                    f"supported type; supported types are "
+                    f"{declared_type_vocabulary().decode('utf-8')}"
+                )
+            context.explicit_schema[col.encode('utf-8')] = declared_bytes
+        declared_schema = dict(explicit_schema)
+
+    # Guard before the cast to uint32_t: infer_sample_size bounds BOTH the type-inference
+    # window and (since it also drives column discovery) how many records are consulted for
+    # the key set, so 0 would silently yield a zero-column relation and a negative would
+    # wrap to a huge window. Matches the CSV reader's identical guard on its own sample size.
+    if not isinstance(infer_sample_size, int) or isinstance(infer_sample_size, bool) or infer_sample_size <= 0:
+        raise ValueError("read_jsonl: infer_sample_size must be a positive integer")
+
+    context.infer_schema = infer_schema
+    context.infer_sample_size = infer_sample_size
+    context.parse_arrays = parse_arrays
+    context.parse_objects = parse_objects
+    context.fail_on_error = fail_on_error
+    return declared_schema
+
+
+cdef void _free_parse_context_capsule(object capsule) noexcept:
+    cdef ParseContext* context = <ParseContext*>PyCapsule_GetPointer(
+        capsule, b"rugo.jsonl.ParseContext")
+    del context
+
+
+def prepare_jsonl_context(
+    columns=None,
+    predicates=None,
+    explicit_schema=None,
+    infer_schema=True,
+    infer_sample_size=5,
+    parse_arrays=True,
+    parse_objects=True,
+    fail_on_error=True,
+):
+    """Plan-time half of a native JSONL scan: validate read_jsonl's arguments and build
+    the C++ ParseContext ONCE, through the same code read_jsonl uses, returned as a
+    PyCapsule named "rugo.jsonl.ParseContext" that owns it. The engine copies the context
+    out at plan build and decodes every chunk against it without Python."""
+    cdef ParseContext* context = new ParseContext()
+    try:
+        _fill_parse_context(
+            context, columns, predicates, explicit_schema, infer_schema, infer_sample_size,
+            parse_arrays, parse_objects, fail_on_error
+        )
+    except BaseException:
+        del context
+        raise
+    return PyCapsule_New(<void*>context, b"rugo.jsonl.ParseContext", _free_parse_context_capsule)
 
 
 def read_jsonl(
@@ -341,13 +412,10 @@ def read_jsonl(
         )
 
     cdef ParseContext context
-    cdef Predicate pred
-    cdef Predicate member
     cdef vector[string] column_names_cpp
     cdef RecordSet records
     cdef size_t total_rows = 0
-    cdef dict declared_schema = {}
-    cdef DeclaredType probe_type
+    cdef dict declared_schema
     cdef const uint8_t* buf_data = NULL
     cdef size_t buf_len = 0
     cdef InterpreterResult interp_result
@@ -368,7 +436,8 @@ def read_jsonl(
 
     # mmap state for the file-path case (freed in the finally below). `in_memory_data`
     # keeps whichever Python bytes object buf_data currently points into alive — the
-    # original in-memory input, or a fresh bytes object from the prefilter.
+    # original in-memory input. `pf_buf` holds the prefilter's surviving lines when it
+    # applies.
     cdef uint8_t* mapped_ptr = NULL
     cdef size_t mapped_len = 0
     cdef bint owns_mmap = False
@@ -377,73 +446,13 @@ def read_jsonl(
     cdef const char* c_path
     cdef bytes in_memory_data
     cdef const uint8_t[::1] buf_view
-    cdef object pf_result
+    cdef vector[uint8_t] pf_buf
+    cdef bint pf_applied = False
 
-    # Build ParseContext
-    if columns:
-        for col in columns:
-            context.projected_columns.push_back(col.encode('utf-8'))
-
-    if predicates:
-        for col, op, val in predicates:
-            pred.column = col.encode('utf-8')
-            pred.op = _jsonl_parse_op(op)
-            pred.value = b''
-            pred.members.clear()
-            if pred.op == _OP_IS_NULL or pred.op == _OP_IS_NOT_NULL:
-                if val is not None:
-                    raise ValueError(
-                        f"predicate {op!r} on {col!r} takes no value (pass None), got {val!r}"
-                    )
-            elif pred.op == _OP_IN or pred.op == _OP_NOT_IN:
-                if not isinstance(val, (list, tuple, set, frozenset)):
-                    raise ValueError(
-                        f"predicate {op!r} on {col!r} takes a list, tuple or set of "
-                        f"values, got {type(val).__name__}"
-                    )
-                # One scalar predicate per member on the same column: EQ for IN (any
-                # passes), NE for NOT IN (all pass). See Predicate::members.
-                member.column = pred.column
-                member.op = _OP_EQ if pred.op == _OP_IN else _OP_NE
-                for m in val:
-                    member.kind, member.value = _predicate_literal(col, op, m)
-                    pred.members.push_back(member)
-            else:
-                pred.kind, pred.value = _predicate_literal(col, op, val)
-            context.predicates.push_back(pred)
-
-    if explicit_schema:
-        for col, declared_type in explicit_schema.items():
-            if not isinstance(declared_type, str):
-                raise ValueError(
-                    f"read_jsonl: explicit_schema[{col!r}] = {declared_type!r} is not a "
-                    f"type name; expected a string such as 'IPV4' or 'DECIMAL(18, 2)'"
-                )
-            # Validated here, EAGERLY, through the same parser that will do the work —
-            # a bad type name must fail before any bytes are read, not part-way through
-            # a multi-gigabyte file.
-            declared_bytes = declared_type.encode('utf-8')
-            if not parse_declared_type(declared_bytes, &probe_type):
-                raise ValueError(
-                    f"read_jsonl: explicit_schema[{col!r}] = {declared_type!r} is not a "
-                    f"supported type; supported types are "
-                    f"{declared_type_vocabulary().decode('utf-8')}"
-                )
-            context.explicit_schema[col.encode('utf-8')] = declared_bytes
-        declared_schema = dict(explicit_schema)
-
-    # Guard before the cast to uint32_t: infer_sample_size bounds BOTH the type-inference
-    # window and (since it also drives column discovery) how many records are consulted for
-    # the key set, so 0 would silently yield a zero-column relation and a negative would
-    # wrap to a huge window. Matches the CSV reader's identical guard on its own sample size.
-    if not isinstance(infer_sample_size, int) or isinstance(infer_sample_size, bool) or infer_sample_size <= 0:
-        raise ValueError("read_jsonl: infer_sample_size must be a positive integer")
-
-    context.infer_schema = infer_schema
-    context.infer_sample_size = infer_sample_size
-    context.parse_arrays = parse_arrays
-    context.parse_objects = parse_objects
-    context.fail_on_error = fail_on_error
+    declared_schema = _fill_parse_context(
+        &context, columns, predicates, explicit_schema, infer_schema, infer_sample_size,
+        parse_arrays, parse_objects, fail_on_error
+    )
 
     try:
         if isinstance(data, str):
@@ -499,18 +508,19 @@ def read_jsonl(
         # filters; the predicate is still applied downstream, so false positives are
         # verified away. Only ever touches bounded samples of buf, not the whole thing.
         if use_prefilter and buf_len > 0:
-            pf_result = _maybe_prefilter(buf_data, buf_len, predicates)
-            if pf_result is not None:
-                # Prefilter produced a fresh, smaller bytes object — the mmap'd file (if
-                # any) is no longer needed for parsing, so release it now rather than
-                # holding the mapping open for the rest of the call.
+            with nogil:
+                pf_applied = maybe_prefilter(buf_data, buf_len, context, pf_buf)
+            if pf_applied:
+                # Prefilter produced a fresh, smaller buffer — the mmap'd file (if any) is
+                # no longer needed for parsing, so release it now rather than holding the
+                # mapping open for the rest of the call. An EMPTY survivor set means no
+                # record can match: buf_len 0 reads as zero rows.
                 if owns_mmap:
                     with nogil:
                         unmap_memory_c(mapped_ptr, mapped_len)
                     owns_mmap = False
-                in_memory_data = pf_result
-                buf_data = <const uint8_t*>in_memory_data
-                buf_len = len(in_memory_data)
+                buf_data = pf_buf.data()
+                buf_len = pf_buf.size()
 
         if buf_len > 0:
             # Parallel scan + document map: the buffer is split into newline-aligned
@@ -525,9 +535,9 @@ def read_jsonl(
             result['malformed_count'] = interp_result.all_records.malformed_count
 
             if context.fail_on_error and interp_result.all_records.malformed:
-                raise ValueError(_jsonl_malformed_error(
+                raise ValueError(malformed_error_message(
                     buf_data, buf_len, interp_result.all_records.malformed_pos
-                ))
+                ).decode('utf-8'))
 
             if interp_result.all_records.num_records() > 0:
                 # A DECLARED column is always built, even when no sampled record carries

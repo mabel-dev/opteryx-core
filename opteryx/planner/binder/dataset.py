@@ -518,6 +518,13 @@ def visit_function_dataset(
             raise InvalidFunctionParameterError(
                 f"READ_JSONL('{path}'): 'gcs://' is not a supported scheme; use 'gs://'."
             )
+        # "file://" is not an alias for a local path: the local filesystem does not
+        # strip it, so it used to fail opening the literal string. Refused outright,
+        # before any filesystem is touched — name the local path itself.
+        if protocol == "file":
+            raise InvalidFunctionParameterError(
+                f"READ_JSONL('{path}'): 'file://' is not a supported scheme; use the local path."
+            )
 
         # SECURITY: unlike visit_scan (catalog-backed table scans, gated by
         # can_perform_action before any connector is opened), READ_JSONL is a bare

@@ -1,5 +1,6 @@
 #include "field_span.hpp"
 #include "interpreter.hpp"
+#include "nested_column.hpp"
 #include "structural_scan.hpp"
 #include "value_parser.hpp"
 #include <algorithm>
@@ -110,24 +111,16 @@ static void finalize_records(
     // reach here); we re-resolve defensively and project to the requested column ORDER,
     // dropping predicate-only columns. Records hold only the wanted subset (few fields), so
     // the per-field scan is tiny. Output is built into a fresh flat arena.
-    struct Col { const char* name; uint32_t len; uint8_t first; };
-    auto make_cols = [](const auto& names) {
-        std::vector<Col> v; v.reserve(names.size());
-        for (const auto& n : names)
-            v.push_back({n.data(), static_cast<uint32_t>(n.size()), n.empty() ? uint8_t(0) : uint8_t(n[0])});
-        return v;
-    };
-    std::vector<Col> pcols; pcols.reserve(predicates.size());
-    for (const auto& p : predicates)
-        pcols.push_back({p.column.data(), static_cast<uint32_t>(p.column.size()),
-                         p.column.empty() ? uint8_t(0) : uint8_t(p.column[0])});
-    std::vector<Col> jcols = make_cols(context.projected_columns);
+    // Resolved through ColumnKey (nested_column.hpp): a top-level column matches by key
+    // bytes among slot-0 spans, a nested column by its slot.
+    std::vector<ColumnKey> pcols; pcols.reserve(predicates.size());
+    for (const auto& p : predicates) pcols.push_back(column_key(context, p.column));
+    std::vector<ColumnKey> jcols; jcols.reserve(context.projected_columns.size());
+    for (const auto& c : context.projected_columns) jcols.push_back(column_key(context, c));
 
-    auto find = [&](const RecordView& rec, const Col& c) -> const FieldSpan* {
+    auto find = [&](const RecordView& rec, const ColumnKey& c) -> const FieldSpan* {
         for (const auto& f : rec)
-            if (f.key_width == c.len && buffer_data[f.key_start] == c.first &&
-                std::memcmp(buffer_data + f.key_start, c.name, c.len) == 0)
-                return &f;
+            if (c.matches(buffer_data, f)) return &f;
         return nullptr;
     };
 
@@ -144,20 +137,13 @@ static void finalize_records(
     std::vector<uint32_t> col_ord(jcols.size(), NO_ORD);
 
     auto find_projected = [&](const RecordView& rec, size_t j) -> const FieldSpan* {
-        const Col& c = jcols[j];
+        const ColumnKey& c = jcols[j];
         const uint32_t hint = col_ord[j];
-        if (hint < rec.size()) {
-            const FieldSpan& f = rec[hint];
-            if (f.key_width == c.len && buffer_data[f.key_start] == c.first &&
-                std::memcmp(buffer_data + f.key_start, c.name, c.len) == 0)
-                return &f;
-        }
+        if (hint < rec.size() && c.matches(buffer_data, rec[hint])) return &rec[hint];
         for (uint32_t i = 0; i < rec.size(); ++i) {
-            const FieldSpan& f = rec[i];
-            if (f.key_width == c.len && buffer_data[f.key_start] == c.first &&
-                std::memcmp(buffer_data + f.key_start, c.name, c.len) == 0) {
+            if (c.matches(buffer_data, rec[i])) {
                 col_ord[j] = i;
-                return &f;
+                return &rec[i];
             }
         }
         return nullptr;
@@ -208,7 +194,8 @@ InterpreterResult interpret_jsonl(
     size_t buffer_length,
     const std::vector<MarkerPosition>& markers,
     const ParseContext& context,
-    OrdinalPredictor& /*predictor*/) {
+    OrdinalPredictor& /*predictor*/,
+    size_t range_start) {
 
     InterpreterResult result;
     if (buffer_length == 0) { result.bytes_consumed = 0; return result; }
@@ -225,28 +212,60 @@ InterpreterResult interpret_jsonl(
     // Predicates with no projection keep every field (MapProjection::keep_unwanted).
     // Predicate filtering and final column ordering happen afterwards in finalize_records.
     std::vector<WantedColumn> wanted_cols;
+    std::vector<ColumnSpec> specs;                 // owns the bytes wanted_cols points into
+    std::vector<const std::string*> wanted_names;  // full requested name per wanted column
     MapProjection projbundle;
     const MapProjection* proj_ptr = nullptr;
     if (!context.projected_columns.empty() || !prepared_predicates.empty()) {
-        auto find_col = [&](const char* n, size_t l) -> int {
-            for (size_t k = 0; k < wanted_cols.size(); ++k)
-                if (wanted_cols[k].len == l && std::memcmp(wanted_cols[k].name, n, l) == 0)
-                    return static_cast<int>(k);
+        // Wanted set: projected columns, then predicate-only columns, de-duplicated by
+        // their FULL name (`commit` and `commit->>'a'` are different columns that share a
+        // key). `specs` owns the parsed key/sub bytes the WantedColumns point into; it is
+        // sized up front so those pointers never move.
+        specs.reserve(context.projected_columns.size() + prepared_predicates.size());
+        auto find_col = [&](const std::string& name) -> int {
+            for (size_t k = 0; k < wanted_names.size(); ++k)
+                if (*wanted_names[k] == name) return static_cast<int>(k);
             return -1;
         };
+        auto add_col = [&](const std::string& name, int pred_idx) {
+            specs.push_back(parse_column_spec(name));
+            const ColumnSpec& sp = specs.back();
+            WantedColumn w{sp.key.data(), static_cast<uint32_t>(sp.key.size()),
+                           sp.key.empty() ? uint8_t(0) : uint8_t(sp.key[0]), pred_idx};
+            if (sp.nested) {
+                w.sub       = sp.sub.data();
+                w.sub_len   = static_cast<uint32_t>(sp.sub.size());
+                w.sub_first = static_cast<uint8_t>(sp.sub[0]);
+                w.slot      = nested_slot(context, name);
+            }
+            wanted_cols.push_back(w);
+            wanted_names.push_back(&name);
+        };
         for (const auto& c : context.projected_columns)
-            if (find_col(c.data(), c.size()) < 0)
-                wanted_cols.push_back({c.data(), static_cast<uint32_t>(c.size()),
-                                       c.empty() ? uint8_t(0) : uint8_t(c[0]), -1});
+            if (find_col(c) < 0) add_col(c, -1);
         // A predicate column joins the wanted set (reusing an existing projected entry)
         // and carries its predicate index for inline evaluation.
         for (size_t i = 0; i < prepared_predicates.size(); ++i) {
             const std::string& pc = prepared_predicates[i].column;
-            int k = find_col(pc.data(), pc.size());
+            // A `->` column is JSON, not text: comparing its rendering with a literal is
+            // not what SQL means by it. Refused rather than given a meaning here.
+            if (parse_column_spec(pc).as_json)
+                throw std::invalid_argument(
+                    "read_jsonl: predicate on `->` column '" + pc +
+                    "' is not supported; compare the `->>` text instead");
+            const int k = find_col(pc);
             if (k >= 0) { if (wanted_cols[k].pred_idx < 0) wanted_cols[k].pred_idx = static_cast<int>(i); }
-            else wanted_cols.push_back({pc.data(), static_cast<uint32_t>(pc.size()),
-                                        pc.empty() ? uint8_t(0) : uint8_t(pc[0]), static_cast<int>(i)});
+            else add_col(pc, static_cast<int>(i));
         }
+        // Chain wanted columns that share a top-level key, so the walk matches the key once
+        // (it takes the FIRST match) and serves the whole chain from one value.
+        for (size_t k = 0; k < wanted_cols.size(); ++k)
+            for (size_t j = k + 1; j < wanted_cols.size(); ++j)
+                if (wanted_cols[j].len == wanted_cols[k].len &&
+                    std::memcmp(wanted_cols[j].name, wanted_cols[k].name, wanted_cols[k].len) == 0) {
+                    wanted_cols[k].next = static_cast<int>(j);
+                    break;
+                }
 
         // Wide-projection guard. The minimal-extent projection runs an O(num_wanted)
         // memcmp-gate on every key of every record, so its cost scales as
@@ -258,8 +277,13 @@ InterpreterResult interpret_jsonl(
         // N×M blow-up never materialises and inline pushdown is the bigger win. Field count
         // is estimated from the first record's COLON markers (interior/nested/string colons
         // only inflate it, biasing conservatively toward keeping the projection).
+        //
+        // A NESTED column also keeps the projection: only the projected walk reads inside a
+        // container, so the data-blind map would hand every nested column back as NULL.
+        bool any_nested = false;
+        for (const auto& sp : specs) any_nested |= sp.nested;
         bool wide_projection = false;
-        if (prepared_predicates.empty()) {
+        if (prepared_predicates.empty() && !any_nested) {
             size_t first_record_fields = 0;
             for (const auto& m : markers) {
                 if (m.marker_type == static_cast<uint8_t>(MarkerType::NEWLINE)) break;
@@ -279,7 +303,7 @@ InterpreterResult interpret_jsonl(
         }
     }
 
-    auto all_records = build_map(buffer_data, buffer_length, markers, proj_ptr);
+    auto all_records = build_map(buffer_data, buffer_length, markers, proj_ptr, range_start);
 
     // bytes_consumed = byte after the last newline (backward scan — newline near the end).
     result.bytes_consumed = 0;
@@ -334,39 +358,10 @@ InterpreterResult interpret_jsonl_threaded(
     }
 
     // Newline-aligned ranges. Each range ends just after a newline, so every range
-    // holds complete records and the next range starts at a record boundary.
-    //
-    // "Next newline" is NOT sufficient on its own: the dump can contain a raw,
-    // unescaped newline inside a string (see interpreter.cpp / the JSONBench defect in
-    // tests/performance/jsonbench/README.md), and landing a range boundary on THAT
-    // newline splits one record in half. The first range then ends mid-record (harmless
-    // -- MapBuilder::finish discards the truncated fragment) but the second range starts
-    // mid-record on arbitrary garbage, and every nested `{...}` still sitting in that
-    // tail gets banked as a phantom record. Observed exactly: shard 6's boundary landed
-    // inside a malformed labeler-service record and its ~30 nested policy objects each
-    // became a spurious row.
-    //
-    // Every record in JSONL is an object, so a range may only begin at a line whose
-    // first non-whitespace byte is '{' (the same assumption the FSA's START_RECORD
-    // transition already encodes). Skip forward line-by-line until that holds; the
-    // malformed record is then wholly contained in -- and discarded by -- the preceding
-    // range, rather than being half-parsed by two.
-    auto next_record_boundary = [&](size_t after_newline) -> size_t {
-        size_t q = after_newline;
-        while (q < buffer_length) {
-            size_t r = q;
-            while (r < buffer_length &&
-                   (buffer_data[r] == ' ' || buffer_data[r] == '\t' || buffer_data[r] == '\r'))
-                ++r;
-            if (r >= buffer_length) return buffer_length;
-            if (buffer_data[r] == '{') return q;  // clean start-of-record
-            while (r < buffer_length && buffer_data[r] != '\n') ++r;  // garbage line: skip it
-            if (r >= buffer_length) return buffer_length;
-            q = r + 1;
-        }
-        return buffer_length;
-    };
-
+    // holds whole lines. Any newline is a sound split, including a raw newline inside a
+    // string (the JSONBench defect, tests/performance/jsonbench/README.md): build_map
+    // judges every line on its own, so the two halves of such a record are each rejected
+    // as malformed whichever range they land in.
     std::vector<std::pair<size_t, size_t>> ranges;
     ranges.reserve(nt);
     size_t start = 0;
@@ -376,9 +371,8 @@ InterpreterResult interpret_jsonl_threaded(
         size_t p = target;
         while (p < buffer_length && buffer_data[p] != '\n') ++p;
         if (p >= buffer_length) break;  // no more newlines; last range takes the rest
-        const size_t split = next_record_boundary(p + 1);
+        const size_t split = p + 1;
         if (split >= buffer_length) break;  // rest of the buffer is one final range
-        if (split <= start) continue;
         ranges.push_back({start, split});
         start = split;
     }
@@ -406,7 +400,9 @@ InterpreterResult interpret_jsonl_threaded(
                 if (use_masked) scan_structural_masked(buffer_data + s, e - s, emit);
                 else            scan_structural(buffer_data + s, e - s, emit);
                 OrdinalPredictor local_pred;  // interpret does not use it; keep thread-local
-                partial[c] = interpret_jsonl(buffer_data, buffer_length, markers, context, local_pred);
+                // [s, e) is this range: build_map judges its first and last lines against
+                // the range bounds, not the whole buffer's.
+                partial[c] = interpret_jsonl(buffer_data, e, markers, context, local_pred, s);
             }));
         }
         // Drain EVERY future before propagating: a range can throw (a predicate literal

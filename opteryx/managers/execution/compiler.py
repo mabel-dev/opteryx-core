@@ -4629,7 +4629,9 @@ class _Compiler:
             return self._compile_materialized_source(scan)
         if kind == "PostgresReadNode":
             return self._compile_postgres_scan(scan)
-        if kind in ("FunctionDatasetNode", "ReaderNode", "JsonlReadNode", "CsvReadNode"):
+        if kind == "JsonlReadNode":
+            return self._compile_jsonl_scan(scan)
+        if kind in ("FunctionDatasetNode", "ReaderNode", "CsvReadNode"):
             return self._compile_materialized_source(scan)
         if kind != "ParquetReadNode":
             _unsupported(f"the {kind} source")
@@ -6044,6 +6046,70 @@ class _Compiler:
             # local aggregate's outputs would be.
             self._remember_types(pushed_groups)
             self._remember_types(pushed_aggregates)
+        return p, identities
+
+    def _compile_jsonl_scan(self, scan):
+        """READ_JSONL / JSONL dataset scans: a JsonlScanPlan and a NativeJsonlScanSource.
+
+        The Source decodes newline-aligned chunks on its own decode pool while
+        execution consumes them (architect rulings 2026-10-01: own pool, chunk order
+        not guaranteed, errors fail fast mid-execution). Everything it needs is fixed
+        here, once: the files, the physical columns to decode (each once — one can
+        feed several identities), the bind-time schema pinned onto every chunk, the
+        pushed predicates and the READ_JSONL options, built into rugo's ParseContext
+        by the same code read_jsonl uses, and where each file is read from — local
+        paths are mapped, http(s) URLs and public gs:// / s3:// objects are fetched
+        with no credentials (JsonlReadNode.native_file_locations)."""
+        from opteryx.connectors.jsonl_io import DEFAULT_CHUNK_SIZE
+        from opteryx.operators._operators import JsonlScanPlan
+        from rugo.rugo_native import jsonl_is_nested_column
+        from rugo.rugo_native import prepare_jsonl_context
+
+        expected = scan.columns or []
+        physical = list(scan.jsonl_physical_columns)
+        zero_columns = not physical
+        # One decoded column per distinct physical name, in first-seen order; every
+        # expected column emits the decoded column its physical name reads.
+        decode_names = list(dict.fromkeys(physical))
+        decode_index = {name: i for i, name in enumerate(decode_names)}
+        identities = [col.schema_column.identity for col in expected]
+        context = prepare_jsonl_context(
+            columns=physical,
+            predicates=scan.jsonl_predicates,
+            # A zero-column scan pins nothing: no column of the file reaches the result.
+            explicit_schema=None if zero_columns else scan.pinned_schema(),
+            fail_on_error=scan.jsonl_fail_on_error,
+            infer_schema=scan.jsonl_infer_schema,
+            infer_sample_size=scan.jsonl_infer_sample_size,
+        )
+        plan = JsonlScanPlan(
+            context,
+            list(scan.jsonl_files),
+            scan.native_file_locations(),
+            decode_names,
+            [jsonl_is_nested_column(name) for name in decode_names],
+            identities,
+            [decode_index[name] for name in physical],
+            zero_columns,
+            DEFAULT_CHUNK_SIZE,
+            # The Source's own decode pool: every core but two (architect,
+            # 2026-10-01) — not the parquet IO derivation's 80%-of-host branch.
+            max(1, (os.cpu_count() or 1) - 2),
+        )
+        plan.scan_identity = scan.identity
+        self.scan_sources[scan.identity] = "NativeJsonlScanSource"
+        # The scan_facts shape is the parquet/skene one so the post-run fold reads
+        # it uniformly; a JSONL scan has files but no row groups.
+        self.scan_facts[scan.identity] = {
+            "files_read": len(scan.jsonl_files),
+            "row_groups_read": 0,
+            "row_groups_pruned": 0,
+            "parquet_rows_before_filter": 0,
+            "columns_read": len(decode_names),
+        }
+        p = self.nplan.new_pipeline()
+        self.nplan.set_native_jsonl_scan_source(p, plan)
+        self._remember_types(scan.columns)
         return p, identities
 
     def _compile_materialized_source(self, node):
