@@ -68,7 +68,7 @@
         "implementation": "opteryx.planner.logical_planner.logical_planner_builders.cast",
         "lowering": "a typed function call, `<TYPE>(expr)` / `TRY_<TYPE>(expr)`",
         "node_type": "FUNCTION",
-        "notes": "A literal operand is converted at plan time. Parameterised targets take their parameters through the cast's parameter channel: `CAST(x AS ARRAY<VARCHAR>)`, `CAST(x AS VECTOR(2))`, `CAST(x AS DECIMAL(p, s))`.",
+        "notes": "A literal operand is converted at plan time. Parameterised targets take their parameters through the cast's parameter channel: `CAST(x AS ARRAY<VARCHAR>)`, `CAST(x AS DECIMAL(p, s))`.",
         "status": "active",
         "summary": "Type conversion.",
         "syntax_forms": [

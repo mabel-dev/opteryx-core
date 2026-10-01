@@ -22,14 +22,7 @@ JOINs, this is sometimes as part of the join condition, but we also push SELECTI
 into joins.
 """
 
-from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan, PlanStep, LogicalPlanStepType
-from opteryx.types.logical_type import LogicalCategory
-from opteryx.types.vectors.vector_types import (
-    get_vector_source_identifier,
-    node_is_numeric_vector,
-    node_is_vector_query_expression,
-)
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext, get_nodes_of_type_from_logical_plan
 from opteryx.compiled.structures.plan_steps import HeapSortStep
@@ -37,30 +30,6 @@ from opteryx.compiled.structures.plan_steps import HeapSortStep
 
 class OperatorFusionStrategy(OptimizationStrategy):
     provides = ("heapsort-fused",)
-
-    @staticmethod
-    def _is_vector_topk_candidate(order_by) -> bool:
-        if len(order_by) != 1:
-            return False
-
-        expression, ascending, _nulls_first = order_by[0]
-        if expression.node_type != NodeType.FUNCTION:
-            return False
-        if expression.value not in ("COSINE_SIMILARITY", "COSINE_DISTANCE"):
-            return False
-        if len(expression.parameters) != 2:
-            return False
-        if get_vector_source_identifier(expression.parameters[0]) is None:
-            return False
-        if not node_is_numeric_vector(expression.parameters[0]):
-            return False
-        if not node_is_vector_query_expression(expression.parameters[1]):
-            return False
-
-        descending = not ascending
-        return (expression.value == "COSINE_DISTANCE" and not descending) or (
-            expression.value == "COSINE_SIMILARITY" and descending
-        )
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
         # visit() fuses an Order into the Limit above it; no Order, nothing to fuse.
@@ -88,7 +57,6 @@ class OperatorFusionStrategy(OptimizationStrategy):
                     # emits what the Order emitted, and a LIMIT adds no columns of its
                     # own so the two sets are the same set anyway.
                     new_node.pre_update_columns = node.pre_update_columns
-                    new_node.vector_topk_candidate = self._is_vector_topk_candidate(node.order_by)
                     if offset:
                         # The HeapSort replaces the Order and the Limit STAYS above
                         # it to skip the offset — HeapSortStep has no offset, and the
@@ -100,8 +68,6 @@ class OperatorFusionStrategy(OptimizationStrategy):
                         context.optimized_plan[next_node_id] = new_node
                         context.optimized_plan.remove_node(context.node_id, heal=True)
                     self.telemetry.optimization_fuse_operators_heap_sort += 1
-                    if new_node.vector_topk_candidate:
-                        self.telemetry.optimization_fuse_operators_vector_heap_sort += 1
 
         return context
 

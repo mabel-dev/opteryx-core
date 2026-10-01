@@ -2,8 +2,6 @@
 //
 // Kernels:
 //   draken_embed                      VARCHAR            -> VECTOR_FP16(ctx dimension)
-//   draken_cosine_similarity_vector   (VEC_FP16, VEC_FP16) -> FLOAT64
-//   draken_cosine_distance_vector     (VEC_FP16, VEC_FP16) -> FLOAT64
 //   draken_cosine_similarity_text     (VARCHAR, VARCHAR)   -> FLOAT64
 //   draken_cosine_distance_text       (VARCHAR, VARCHAR)   -> FLOAT64
 //   draken__match_against_2           (VARCHAR, VARCHAR)   -> BOOL
@@ -17,12 +15,14 @@
 // threshold in (0.3, 1.0] makes MATCH a case-insensitive exact match; under a semantic
 // capability the same number is a real similarity cut. One constant could not mean both.
 //
-// The `_vector`/`_text` suffixes are the catalog OVERLOAD IDs lowercased
-// (COSINE_SIMILARITY_VECTOR -> draken_cosine_similarity_vector). compiled_expression.pyx
-// probes `draken_{overload_id}` before the bare `draken_{name}`, so the two overloads of
-// one SQL name reach two different kernels. The bare `draken_cosine_similarity` /
-// `draken_cosine_distance` names are deliberately NOT registered: a name-level hit would
-// bind the generic arm (all operands, no ctx) and defeat the overload split.
+// The `_text` suffix is the catalog OVERLOAD ID lowercased
+// (COSINE_SIMILARITY_TEXT -> draken_cosine_similarity_text). The bare
+// `draken_cosine_similarity` / `draken_cosine_distance` names are deliberately NOT
+// registered: a name-level hit would bind the generic arm (all operands, no ctx).
+//
+// VECTOR is not a SQL type (architect ruling 2026-10-01): it exists only inside vector
+// indexes. draken_embed is therefore not a SQL function — it is the active embedding
+// capability, reached by the text kernels here and by the index builder.
 //
 // EMBED semantics (architect decision, 2026-07-16): EMBED is the static hashed
 // projection — a total, deterministic, dependency-free function of the input text.
@@ -71,7 +71,7 @@
 #include "ops/kernels/kernel_context.h"
 #include "ops/kernels/result_helpers.h"
 #include "ops/vec_result.h"
-#include "ops/vector_cosine.h"
+#include "ops/vector_cosine_row.h"
 #include "xxhash.h"  // XXH3_64bits — must match opteryx xxhash.pyx hash_bytes exactly.
 
 namespace {
@@ -82,11 +82,9 @@ typedef VecResult (*func_fn_t)(void* ctx, const DrakenVector* const* args, uint3
 
 
 // NOTE: this file holds NO embedding-width constant on purpose. The width is decided by
-// the active EMBED capability (opteryx/types/vectors/embedding_capability.py), declared
-// into the plan as EMBED's VECTOR(n) return type, and handed to every kernel here in a
-// vector_dim_ctx. A constant duplicated here could disagree with the plan's declared
-// type, and the projection boundary copies rows at the DECLARED stride — so a
-// disagreement would read the wrong bytes rather than raise. One number, one source.
+// the active embedding capability (opteryx/types/vectors/embedding_capability.py) and
+// handed to every kernel here in a ctx. A constant duplicated here could disagree with
+// the capability's declared width. One number, one source.
 
 // _StaticHashEmbeddingProvider._projection_scale == float(2 ** -0.5)
 const float PROJECTION_SCALE = static_cast<float>(0.7071067811865476);
@@ -358,7 +356,7 @@ uint8_t* merged_validity(const DrakenVector* a, const DrakenVector* b, uint32_t 
 
 // Row-wise cosine over two PHYSICAL fp16 blocks, read through each operand's own
 // selection — the uniform data[selection[i]] pattern, correct for any encoding.
-// Mirrors cosine_sim_fp16's math exactly, including zero-norm -> NaN.
+// The arithmetic is cosine_row_fp16, the same function cosine_sim_fp16 uses.
 VecResult cosine_over_embedded(const uint16_t* pa, const uint32_t* sel_a,
                                const uint16_t* pb, const uint32_t* sel_b,
                                uint32_t n, uint32_t dims, uint8_t* validity,
@@ -370,14 +368,7 @@ VecResult cosine_over_embedded(const uint16_t* pa, const uint32_t* sel_a,
         if (!vd_row_valid(validity, i)) { dst[i] = 0.0; continue; }
         const uint16_t* ra = pa + static_cast<size_t>(sel_a[i]) * dims;
         const uint16_t* rb = pb + static_cast<size_t>(sel_b[i]) * dims;
-        double dot = 0.0, sq_a = 0.0, sq_b = 0.0;
-        for (uint32_t k = 0; k < dims; ++k) {
-            const double fa = static_cast<double>(fp16_ieee_to_fp32_value(ra[k]));
-            const double fb = static_cast<double>(fp16_ieee_to_fp32_value(rb[k]));
-            dot += fa * fb; sq_a += fa * fa; sq_b += fb * fb;
-        }
-        const double denom = std::sqrt(sq_a) * std::sqrt(sq_b);
-        double sim = (denom == 0.0) ? std::numeric_limits<double>::quiet_NaN() : dot / denom;
+        double sim = draken::ops::cosine_row_fp16(ra, rb, dims);
         if (as_distance) {
             // 1 - clip(sim, -1, 1); NaN survives the clip (both compares are false).
             if (sim < -1.0) sim = -1.0; else if (sim > 1.0) sim = 1.0;
@@ -506,140 +497,6 @@ VecResult match_against_kernel(void* ctx, const DrakenVector* const* args, uint3
     return r;
 }
 
-// Shared body for the two vector overloads. `ctx` carries the bind-time dimension —
-// DrakenVector has no dimension field (it is a LogicalType detail), so the kernel
-// cannot recover it from its operands.
-VecResult cosine_vector_kernel(void* ctx, const DrakenVector* const* args, uint32_t nargs,
-                               bool as_distance, const char* who) {
-    if (nargs != 2u) return draken_error_sentinel_fmt("%s: expected 2 arguments", who);
-    if (ctx == nullptr)
-        return draken_error_sentinel_fmt("%s: missing vector dimension context", who);
-    const uint32_t dims = static_cast<const struct vector_dim_ctx*>(ctx)->dimension;
-    if (dims == 0u)
-        return draken_error_sentinel_fmt("%s: vector dimension must be >= 1", who);
-    try {
-        VecResult r = draken::ops::cosine_sim_fp16(*args[0], *args[1], dims);
-        if (!as_distance || r.data == nullptr) return r;
-        double* d = static_cast<double*>(r.data);
-        for (uint32_t i = 0; i < r.length; ++i) {
-            double s = d[i];
-            if (s < -1.0) s = -1.0; else if (s > 1.0) s = 1.0;
-            d[i] = 1.0 - s;
-        }
-        return r;
-    } catch (const std::exception& e) {
-        return draken_error_sentinel_fmt("%s: %s", who, e.what());
-    }
-}
-
-
-// ---------------------------------------------------------------------------
-// CAST(array AS VECTOR(n)) — draken_cast_array_to_vector
-// ---------------------------------------------------------------------------
-// An ARRAY's elements do NOT live in `parent->data` (which holds only the
-// int32 offsets[k+1]); they hang off the column owner's child vector, reachable only
-// via the BC_C_NATIVE_CHILD two-vector dispatch. Same wall, same mechanism, as
-// draken_cast_array_to_varchar.
-//
-// Width comes from the DECLARED type (vector_dim_ctx): an ARRAY column's row lengths
-// vary per row and are not knowable at bind time, so `CAST(x AS VECTOR)` with no
-// dimension is rejected at bind — the width has to be stated.
-//
-// Reads one double per element regardless of the child's numeric type, then packs fp16.
-inline double vd_child_elem_as_double(const DrakenVector* child, uint32_t e) {
-    const uint32_t phys = child->selection[e];
-    switch (child->type) {
-        case DRAKEN_INT8:    return static_cast<double>(static_cast<const int8_t*>(child->data)[phys]);
-        case DRAKEN_INT16:   return static_cast<double>(static_cast<const int16_t*>(child->data)[phys]);
-        case DRAKEN_INT32:   return static_cast<double>(static_cast<const int32_t*>(child->data)[phys]);
-        case DRAKEN_INT64:   return static_cast<double>(static_cast<const int64_t*>(child->data)[phys]);
-        case DRAKEN_UINT8:   return static_cast<double>(static_cast<const uint8_t*>(child->data)[phys]);
-        case DRAKEN_UINT16:  return static_cast<double>(static_cast<const uint16_t*>(child->data)[phys]);
-        case DRAKEN_UINT32:  return static_cast<double>(static_cast<const uint32_t*>(child->data)[phys]);
-        case DRAKEN_UINT64:  return static_cast<double>(static_cast<const uint64_t*>(child->data)[phys]);
-        case DRAKEN_FLOAT32: return static_cast<double>(static_cast<const float*>(child->data)[phys]);
-        case DRAKEN_FLOAT64: return static_cast<const double*>(child->data)[phys];
-        default:
-            throw std::runtime_error(
-                "CAST to VECTOR: array elements must be numeric — fail loud, never a "
-                "silent wrong vector");
-    }
-}
-
-inline bool vd_child_elem_valid(const DrakenVector* child, uint32_t e) {
-    return child->validity == nullptr || ((child->validity[e >> 3] >> (e & 7u)) & 1u);
-}
-
-VecResult cast_array_to_vector_core(void* ctx, const DrakenVector* parent,
-                                    const DrakenVector* child) {
-    if (!parent || !child)
-        return draken_error_sentinel("CAST to VECTOR: null input vector");
-    if (parent->type != DRAKEN_ARRAY)
-        return draken_error_sentinel_fmt(
-            "CAST to VECTOR: expected ARRAY operand, got %d", parent->type);
-    if (ctx == nullptr)
-        return draken_error_sentinel("CAST to VECTOR: missing vector dimension context");
-    const uint32_t dims = static_cast<const struct vector_dim_ctx*>(ctx)->dimension;
-    if (dims == 0u || dims > 65535u)
-        return draken_error_sentinel("CAST to VECTOR: dimension must be 1..65535");
-
-    const uint32_t k = parent->data_length;          // physical rows (offset pairs)
-    const int32_t* offsets = static_cast<const int32_t*>(parent->data);
-
-    const size_t cells = static_cast<size_t>(k > 0u ? k : 1u) * dims;
-    uint16_t* data = static_cast<uint16_t*>(draken_malloc(cells * sizeof(uint16_t)));
-    if (!data) return draken_error_sentinel("CAST to VECTOR: allocation failed");
-    std::memset(data, 0, cells * sizeof(uint16_t));
-
-    // Convert the k PHYSICAL rows (the shape-preserving idiom every array/string kernel
-    // here uses). A physical row can be referenced by BOTH null and non-null logical
-    // rows, and a NULL logical row's offsets are typically an empty range — so a
-    // malformed physical row must NOT raise on its own. Record it, and only fail if a
-    // VALID logical row actually reads it. Erroring eagerly would reject
-    // `CAST(arr AS VECTOR(2))` on a table whose null rows happen to hold no elements.
-    std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);
-    try {
-        for (uint32_t j = 0; j < k; ++j) {
-            const int32_t start = offsets[j];
-            const int32_t end   = offsets[j + 1];
-            if (end < start || static_cast<uint32_t>(end - start) != dims) { bad[j] = 1u; continue; }
-            uint16_t* dst = data + static_cast<size_t>(j) * dims;
-            for (uint32_t d = 0; d < dims; ++d) {
-                const uint32_t e = static_cast<uint32_t>(start) + d;
-                // A null element leaves the vector's direction undefined; there is no
-                // honest fp16 for it, and 0.0 would silently move the vector.
-                if (!vd_child_elem_valid(child, e)) { bad[j] = 1u; break; }
-                dst[d] = fp16_ieee_from_fp32_value(
-                    static_cast<float>(vd_child_elem_as_double(child, e)));
-            }
-        }
-    } catch (const std::exception& e) {
-        draken_free(data);
-        return draken_error_sentinel_fmt("CAST to VECTOR: %s", e.what());
-    }
-
-    for (uint32_t i = 0; i < parent->length; ++i) {
-        if (!vd_row_valid(parent->validity, i)) continue;
-        if (bad[parent->selection[i]]) {
-            draken_free(data);
-            return draken_error_sentinel_fmt(
-                "CAST to VECTOR: row %u is not a %u-element numeric array", i, dims);
-        }
-    }
-
-    VecResult r;
-    r.data = data;
-    r.type = DRAKEN_VECTOR_FP16;
-    try {
-        kernel_preserve_shape(r, parent);
-    } catch (const std::exception& e) {
-        draken_free(data);
-        return draken_error_sentinel_fmt("CAST to VECTOR: %s", e.what());
-    }
-    r.vec_dimension = static_cast<uint16_t>(dims);
-    return r;
-}
-
 }  // namespace
 
 extern "C" {
@@ -663,29 +520,14 @@ struct match_ctx* kernel_alloc_match_ctx(uint32_t dimension, void* embed_fn, dou
     return c;
 }
 
-struct vector_dim_ctx* kernel_alloc_vector_dim_ctx(uint32_t dimension) {
-    auto* c = static_cast<struct vector_dim_ctx*>(malloc(sizeof(struct vector_dim_ctx)));
-    if (!c) return nullptr;
-    c->dimension = dimension;
-    return c;
-}
-
-VecResult draken_cast_array_to_vector(void* ctx, const DrakenVector* parent,
-                                      const DrakenVector* child) {
-    return cast_array_to_vector_core(ctx, parent, child);
-}
-
 VecResult draken_embed(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
     if (nargs != 1u) return draken_error_sentinel("draken_embed: expected 1 argument");
     const DrakenVector* v = args[0];
     if (!vd_is_string(v->type))
         return draken_error_sentinel("draken_embed: string operand required");
 
-    // The binder hands down the width it DECLARED for this call (EMBED's return type
-    // is VECTOR(n)), and this kernel produces exactly that width. The width is not
-    // duplicated as a constant on both sides: the declaration is the single source of
-    // truth, so the plan's type and the kernel's output cannot disagree — a
-    // disagreement would make the projection boundary copy the wrong stride.
+    // The caller hands down the width the active capability declared, and this kernel
+    // produces exactly that width — the declaration is the single source of truth.
     // A hashed projection is width-agnostic by construction (slot = hash % dims), so
     // honouring the declared width costs nothing. A capability whose width is fixed by
     // a model must reject a width it cannot produce rather than silently retype.
@@ -727,18 +569,6 @@ VecResult draken_embed(void* ctx, const DrakenVector* const* args, uint32_t narg
     // VECTOR_FP16 without a dimension descriptor is a hard error in vecresult_to_owner.
     r.vec_dimension  = static_cast<uint16_t>(dims);
     return r;
-}
-
-VecResult draken_cosine_similarity_vector(void* ctx, const DrakenVector* const* args,
-                                          uint32_t nargs) {
-    return cosine_vector_kernel(ctx, args, nargs, /*as_distance=*/false,
-                                "draken_cosine_similarity");
-}
-
-VecResult draken_cosine_distance_vector(void* ctx, const DrakenVector* const* args,
-                                        uint32_t nargs) {
-    return cosine_vector_kernel(ctx, args, nargs, /*as_distance=*/true,
-                                "draken_cosine_distance");
 }
 
 VecResult draken_cosine_similarity_text(void* ctx, const DrakenVector* const* args,

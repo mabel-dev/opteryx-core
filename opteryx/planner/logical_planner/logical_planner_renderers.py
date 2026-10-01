@@ -219,8 +219,7 @@ def render_heapsort(node: PlanStep) -> str:
         format_expression(expr) + _sort_key_suffix(ascending, nulls_first)
         for expr, ascending, nulls_first in node.order_by
     )
-    qualifier = " VECTOR TOPK" if node.vector_topk_candidate else ""
-    return f"HEAP SORT{qualifier} (LIMIT {node.limit}, ORDER BY [{order}])"
+    return f"HEAP SORT (LIMIT {node.limit}, ORDER BY [{order}])"
 
 
 @register_render(LogicalPlanStepType.ScalarSubqueryGuard)

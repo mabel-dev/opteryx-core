@@ -7,7 +7,7 @@ CAST evaluation in the operators.
 Architectural contract (Phase 5.3.2):
 - Expression-layer functions are Draken-native: Draken vectors or Python
   scalars in, Draken vectors or Python scalars out.
-- PyArrow / NumPy are never accepted on the hot path — fail fast.
+- Only Draken vectors are accepted on the hot path — fail fast.
 - Reader-side conversion (PyArrow → Draken) happens at IO boundaries.
 """
 

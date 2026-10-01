@@ -120,7 +120,7 @@ setup(
     description=(
         "Skene: a lossless columnar file format for draken vectors — "
         "exact logical types, restored dictionary encodings, value-ordered "
-        "columns with exact distinct counts (no PyArrow, no NumPy)."
+        "columns with exact distinct counts. No dependencies."
     ),
     long_description=long_description,
     long_description_content_type="text/markdown",

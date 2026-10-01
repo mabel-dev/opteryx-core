@@ -1,7 +1,7 @@
 """Vendor USearch headers into third_party/usearch.
 
 Usage:
-    python tools/vendor_usearch.py --tag v2.21.4
+    python dev/vendor_usearch.py --tag v2.21.4
 
 This script downloads the specified GitHub release archive, verifies an
 optional SHA256, and vendors:

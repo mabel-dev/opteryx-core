@@ -687,19 +687,14 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_unixtime", (kernel_fn_t)&draken_unixtime},
     {"draken_time_bucket", (kernel_fn_t)&draken_time_bucket},
 
-    // EMBED / COSINE_SIMILARITY / COSINE_DISTANCE (function_vector_distance.cpp).
+    // Embedding capability + COSINE_SIMILARITY / COSINE_DISTANCE (function_vector_distance.cpp).
     // Keyed by catalog OVERLOAD id, not by function name — see kernel_registry.h.
     {"draken_embed", (kernel_fn_t)&draken_embed},
-    {"draken_cosine_similarity_vector", (kernel_fn_t)&draken_cosine_similarity_vector},
-    {"draken_cosine_distance_vector", (kernel_fn_t)&draken_cosine_distance_vector},
     {"draken_cosine_similarity_text", (kernel_fn_t)&draken_cosine_similarity_text},
     {"draken_cosine_distance_text", (kernel_fn_t)&draken_cosine_distance_text},
     // MATCH (col) AGAINST (str) — the overload id _MATCH_AGAINST_2 lowercased, hence the
     // doubled underscore. Runs the text cosine body and thresholds it (match_ctx).
     {"draken__match_against_2", (kernel_fn_t)&draken__match_against_2},
-    // Two-vector cast (parent+child); cast dispatch casts the fn ptr to its own
-    // signature, exactly as draken_cast_array_to_varchar is registered.
-    {"draken_cast_array_to_vector", (kernel_fn_t)&draken_cast_array_to_vector},
 };
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 """
-Standalone build for the ``rugo`` wheel — the PyArrow/NumPy-free file engine
+Standalone build for the ``rugo`` wheel — the dependency-free file engine
 (draken + rugo), packaged from this same source tree *without* the Opteryx SQL
 engine, for users who want fast Parquet/CSV/JSONL I/O with zero heavy deps.
 
@@ -112,8 +112,7 @@ setup(
     name="rugo",
     version=__version__,
     description=(
-        "Fast, dependency-free Parquet/CSV/JSONL reader and writer "
-        "(no PyArrow, no NumPy)."
+        "Fast, dependency-free Parquet/CSV/JSONL reader and writer."
     ),
     long_description=long_description,
     long_description_content_type="text/markdown",

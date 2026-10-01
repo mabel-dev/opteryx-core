@@ -88,7 +88,6 @@ def test_the_reported_syslog_schema_plans():
         ("TIME", "TIME[us]"),
         ("INTERVAL", "INTERVAL"),
         ("IPV4", "IPV4"),
-        ("VECTOR(384)", "VECTOR(384)"),
         ("INT8", "INT8"),
         ("INT16", "INT16"),
         ("INT32", "INT32"),
@@ -123,6 +122,14 @@ def test_timestamp_unit_is_part_of_the_declared_type(unit, expected):
     assert ct.logical.unit.name == expected, (unit, ct.logical.unit)
     # …and it SURVIVES serialization, which is the half that was losing it.
     assert str(ct) == f"TIMESTAMP[{unit}]", str(ct)
+
+
+def test_vector_is_refused_as_a_declared_type():
+    """VECTOR is not a SQL type (architect ruling 2026-10-01): vectors exist only
+    inside vector indexes. A column cannot be declared as one."""
+    with pytest.raises(UnsupportedSyntaxError) as err:
+        _declared("VECTOR(384)")
+    assert "vector indexes" in str(err.value), str(err.value)
 
 
 def test_timestamp_days_is_refused_as_a_declared_type():

@@ -173,8 +173,8 @@ CAST_TESTS = [
     (
         "TIMESTAMP",
         "2021-02-21T12:00:00+01:00",
-        datetime.datetime(2021, 2, 21, 12, 0, 0),
-    ),  # Timezone ignored
+        datetime.datetime(2021, 2, 21, 11, 0, 0),
+    ),  # Offset honoured: normalised to UTC, never discarded
     ("TIMESTAMP", "2021-02-21T12:00", datetime.datetime(2021, 2, 21, 12, 0, 0)),
     ("TIMESTAMP", "2021-02-21T12", None),
     ("TIMESTAMP", "2021-02-21T24:00:00", None),  # Invalid hour

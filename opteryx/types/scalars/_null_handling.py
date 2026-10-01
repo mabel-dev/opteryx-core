@@ -1,7 +1,6 @@
 """Null Handling Primitives (Step 3: Draken Integration).
 
-Fast null/NaN/infinity detection for scalars and Draken vectors,
-replacing numpy equivalents (numpy.isnan, numpy.isinf, etc.).
+Fast null/NaN/infinity detection for Python scalars and Draken vectors.
 
 This module provides:
 - is_null(value) - Check if value is NULL/None
@@ -10,14 +9,13 @@ This module provides:
 - is_not_null(value) - Efficient NOT NULL check
 
 Supports:
-- Python scalars (None, float NaN/inf, numpy types, pyarrow scalars)
+- Python scalars (None, float NaN/inf)
 - Draken vectors (delegated to Draken's null detection kernels)
 - Fast paths for native Python types
 - Error handling (fail-fast on invalid inputs)
 
 Design:
 - Native Python: Direct type checks (O(1))
-- NumPy/PyArrow: Module inspection + attribute access
 - Draken vectors: Call Draken's C++ null-detection kernels
 - No external dependencies in public API
 """
@@ -49,8 +47,7 @@ def is_null(value: Any) -> bool:
 
     A value is considered NULL if it is:
     - Python None
-    - numpy.nan or numpy float NaN
-    - PyArrow null scalar
+    - Python float NaN
 
     Args:
         value: Scalar value to check
@@ -90,8 +87,6 @@ def is_nan(value: Any) -> bool:
 
     A value is considered NaN if it is:
     - Python float('nan')
-    - numpy.nan or numpy float NaN
-    - PyArrow float NaN scalar
 
     Args:
         value: Scalar value to check
@@ -128,8 +123,6 @@ def is_inf(value: Any) -> bool:
 
     A value is considered infinite if it is:
     - Python float('inf') or float('-inf')
-    - numpy float infinity
-    - PyArrow float infinity scalar
 
     Args:
         value: Scalar value to check

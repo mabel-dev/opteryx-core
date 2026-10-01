@@ -102,22 +102,18 @@ def test_type_catalog_includes_runtime_metadata():
     assert "array<...>" in array_type["ingestion_mappings"]["jsonl_patterns"]
     assert "integer" in array_type["element_type_aliases"]
 
-    vector_type = catalog["vector"]
-    assert vector_type["family"] == "vector"
-    assert vector_type["metadata"]["description"].startswith(
-        "A fixed-length vector of FP16 (half-precision) floating-point values."
-    )
-    assert vector_type["metadata"]["example"] == "[1.0, 0.5, 0.25]::VECTOR(3)"
+    # VECTOR is not a SQL type (architect ruling 2026-10-01) — it exists only inside
+    # vector indexes, so it is not part of the documented type vocabulary.
+    assert "vector" not in catalog
 
 
 
 def test_every_type_carries_an_example():
     """A type with no example publishes a page that shows nobody how to write one.
 
-    Four of them (array, null, variant, vector) had drifted into that state
+    Several of them (array, null, variant) had drifted into that state
     unnoticed, because nothing asked. This only checks an example is PRESENT -
-    it does not run them, as `vector`'s cannot be projected in a SELECT list
-    (see its limitations).
+    it does not run them.
     """
     catalog = export_type_catalog()
 

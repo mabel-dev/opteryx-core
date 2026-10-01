@@ -3,7 +3,7 @@ Shared build machinery for the two wheels built from this single source tree:
 
   * ``opteryx_core`` — the full SQL engine (root ``setup.py``), which bundles
     draken + rugo intrinsically.
-  * ``rugo`` — the standalone PyArrow/NumPy-free file engine (``rugo/setup.py``),
+  * ``rugo`` — the standalone, dependency-free file engine (``rugo/setup.py``),
     which ships draken + rugo only.
 
 Both wheels compile the SAME draken/rugo sources; only the *packaging* differs.

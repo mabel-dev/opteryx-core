@@ -1,8 +1,7 @@
 """
 rugo — a fast, dependency-free file engine for Parquet, CSV, and JSONL.
 
-Reading **and** writing, with zero heavy dependencies: no PyArrow, no NumPy on
-any path. Compiled as C++/Cython extensions. Readers emit Draken vectors; the
+Reading **and** writing, with zero dependencies. Compiled as C++/Cython extensions. Readers emit Draken vectors; the
 writers consume Draken Morsels — the bundled ``draken`` columnar substrate.
 
     from rugo import parquet

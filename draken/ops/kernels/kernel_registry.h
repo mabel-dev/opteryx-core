@@ -84,15 +84,11 @@ format_ctx* kernel_alloc_format_ctx(unsigned char ts_unit, const char* fmt, size
                                     // CAST only: 1 = TRY_CAST (bad row -> NULL).
                                     unsigned char safe);
 
-// Vector/distance kernels (function_vector_distance.cpp). The _vector/_text suffixes are
-// catalog OVERLOAD ids: compiled_expression.pyx probes draken_{overload_id} before the
-// bare draken_{name}, so COSINE_SIMILARITY's two overloads reach two kernels. The bare
-// names are intentionally absent from the registry.
+// Text-embedding kernels (function_vector_distance.cpp). The _text suffix is the
+// catalog OVERLOAD id: compiled_expression.pyx probes draken_{overload_id} before the
+// bare draken_{name}. draken_embed is not a SQL function — it is the active embedding
+// capability, which the text kernels (and the vector index) delegate to.
 VecResult draken_embed(void* ctx, const DrakenVector* const* args, uint32_t nargs);
-VecResult draken_cosine_similarity_vector(void* ctx, const DrakenVector* const* args,
-                                          uint32_t nargs);
-VecResult draken_cosine_distance_vector(void* ctx, const DrakenVector* const* args,
-                                        uint32_t nargs);
 VecResult draken_cosine_similarity_text(void* ctx, const DrakenVector* const* args,
                                         uint32_t nargs);
 VecResult draken_cosine_distance_text(void* ctx, const DrakenVector* const* args,
@@ -101,12 +97,6 @@ VecResult draken_cosine_distance_text(void* ctx, const DrakenVector* const* args
 // running the text cosine body itself so the two cannot disagree. ctx is a match_ctx.
 VecResult draken__match_against_2(void* ctx, const DrakenVector* const* args,
                                   uint32_t nargs);
-// CAST(array AS VECTOR(n)). Two-vector (parent offsets + child elements) shape, like
-// draken_cast_array_to_varchar — dispatched via BC_C_NATIVE_CHILD. Width via ctx.
-VecResult draken_cast_array_to_vector(void* ctx, const DrakenVector* parent,
-                                      const DrakenVector* child);
-// Allocate context for the fp16 cosine kernels (the operands' VECTOR width).
-vector_dim_ctx* kernel_alloc_vector_dim_ctx(uint32_t dimension);
 // Allocate context for the TEXT cosine overloads (width + the resolved EMBED kernel
 // they delegate both operands to).
 cosine_text_ctx* kernel_alloc_cosine_text_ctx(uint32_t dimension, void* embed_fn);

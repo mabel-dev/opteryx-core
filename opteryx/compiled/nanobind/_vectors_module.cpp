@@ -21,6 +21,7 @@ namespace nb = nanobind;
 
 // Forward declarations — one per vector_*.cpp translation unit.
 void register_vector_accessors(nb::module_ &m);
+void register_vector_ann(nb::module_ &m);
 void register_vector_array_reduce(nb::module_ &m);
 void register_vector_bitwise(nb::module_ &m);
 void register_vector_bool_ops(nb::module_ &m);
@@ -45,6 +46,7 @@ void register_vector_temporal_convert(nb::module_ &m);
 
 NB_MODULE(vectors, m) {
     register_vector_accessors(m);
+    register_vector_ann(m);
     register_vector_array_reduce(m);
     register_vector_bitwise(m);
     register_vector_bool_ops(m);

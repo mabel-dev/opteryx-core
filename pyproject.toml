@@ -117,13 +117,6 @@ testing = [
 performance = [
     'orjson==3.11.*',  # Faster JSON serialization (not available on free-threaded Python)
 ]
-embeddings = [
-    # The MiniLM EMBED capability is optional and NOT vendored (CLAUDE.md §4). To build it,
-    # obtain an ONNX Runtime SDK and the all-MiniLM-L6-v2 weights out-of-band, then:
-    #   OPTERYX_ONNXRUNTIME_HOME=/path/to/onnxruntime-sdk   (build: include/ + lib/)
-    #   OPTERYX_MINILM_MODEL_DIR=/path/to/all-MiniLM-L6-v2  (runtime: model.onnx + vocab.txt)
-    #   OPTERYX_BUILD_EMBEDDINGS=1 make compile
-]
 
 
 

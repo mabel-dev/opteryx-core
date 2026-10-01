@@ -9,8 +9,16 @@ from typing import Any, Callable, Dict, Literal, Optional, Tuple
 from opteryx.compiled.structures.expressions import Expression
 from opteryx.compiled.structures.expressions import expressions_with
 from opteryx.exceptions import compose, did_you_mean, md_code, md_syntax
-from opteryx.types.logical_type import LogicalCategory, _NUMERIC_TYPES, _TEMPORAL_TYPES
-from opteryx.types.vectors.vector_types import is_numeric_vector_type, resolve_node_type
+from opteryx.types.logical_type import ColumnType, LogicalCategory, _NUMERIC_TYPES, _TEMPORAL_TYPES
+
+
+def resolve_node_type(node) -> Tuple[Optional[LogicalCategory], Optional[LogicalCategory]]:
+    """Return the logical category carried by a node (and no element category)."""
+    schema_column = node.schema_column
+    if schema_column is not None and schema_column.category is not None:
+        return schema_column.category, None
+    _raw_type = node.type if type(node) in expressions_with("type") else None
+    return (_raw_type.category if isinstance(_raw_type, ColumnType) else _raw_type), None
 
 
 #: Largest arity the transposed-argument check will permute. The search is
@@ -304,7 +312,7 @@ class FunctionCatalog:
             if type_family == "any":
                 return 2.0
 
-            node_type, element_type = resolve_node_type(node)
+            node_type, _ = resolve_node_type(node)
 
             # An UNRESOLVED type (None) is not a type judgement — it is an
             # identifier the binder has not typed yet. It must stay compatible
@@ -377,8 +385,6 @@ class FunctionCatalog:
                 return 0.0 if node_type == LogicalCategory.DATE else _INF
             if type_family == "timestamp":
                 return 0.0 if node_type == LogicalCategory.TIMESTAMP else _INF
-            if type_family == "numeric_vector":
-                return 0.0 if is_numeric_vector_type(node_type, element_type) else _INF
 
             return 1.0
 

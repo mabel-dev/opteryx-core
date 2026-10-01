@@ -67,7 +67,6 @@ _SCHEMA_ONLY_TYPES = [
     "IPV4",
     "NVARCHAR",
     "INTERVAL",
-    "VECTOR(4)",
 ]
 
 _ALL_TYPES = [t for t, _ in _DATA_TYPES] + _SCHEMA_ONLY_TYPES
@@ -235,8 +234,8 @@ def test_drop_column_by_position(tmp_path, position, target):
 def test_drop_column_of_each_type(tmp_path, sql_type):
     """Every type the dialect will declare can be dropped. Dropping is a
     metadata edit, so it must not care what the column held - including the
-    parameterized ones (DECIMAL(38,18) is decimal128-backed, VECTOR carries a
-    dimension, ARRAY carries an element type)."""
+    parameterized ones (DECIMAL(38,18) is decimal128-backed, ARRAY carries an
+    element type)."""
     session = _setup(tmp_path)
     session_exec(session, f"CREATE TABLE ws.events (keep INT64, victim {sql_type})")
 

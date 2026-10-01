@@ -5,7 +5,7 @@
 
 """Filter operations dispatcher - Draken-native only.
 
-All array inputs must be Draken vectors. No numpy/pyarrow conversion or
+All array inputs must be Draken vectors. No foreign-array conversion or
 fallbacks. Null handling is native to Draken vector operations. If you get
 AttributeError, your input isn't Draken — that's a bug upstream.
 
@@ -105,7 +105,7 @@ def _coerce_temporal_scalar(value, source_type, target_type):
 
 
 def to_temporal_array(values, source_type, target_type):
-    """Coerce values to a Draken temporal vector without Arrow/Numpy conversion."""
+    """Coerce values to a Draken temporal vector natively."""
     if values.__class__.__module__.startswith("draken.vectors."):
         values = values.to_pylist()
     elif not isinstance(values, (list, tuple)):

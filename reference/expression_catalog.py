@@ -140,7 +140,7 @@ EXPRESSION_DEFINITIONS: dict[str, dict[str, Any]] = {
         "notes": (
             "A literal operand is converted at plan time. Parameterised targets take "
             "their parameters through the cast's parameter channel: "
-            "`CAST(x AS ARRAY<VARCHAR>)`, `CAST(x AS VECTOR(2))`, "
+            "`CAST(x AS ARRAY<VARCHAR>)`, "
             "`CAST(x AS DECIMAL(p, s))`."
         ),
         "status": "active",

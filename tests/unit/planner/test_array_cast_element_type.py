@@ -7,8 +7,8 @@
 
 sqlparser hands `ARRAY<VARCHAR>` back as `{"Array": {"AngleBracket": {"Varchar": None}}}`.
 `_extract_data_type` flattens a dict-shaped data_type to its top-level key, so the element
-type survives only because it is copied into `cast_parameters` — the same channel VECTOR's
-width and DECIMAL's precision/scale use. It was then dropped again by the literal-fold
+type survives only because it is copied into `cast_parameters` — the same channel
+DECIMAL's precision/scale use. It was then dropped again by the literal-fold
 shortcut, which sees only the bare name "ARRAY": `ValueError: parse_column_type: unknown
 type 'ARRAY'`.
 
@@ -17,8 +17,7 @@ native kernel (`draken_cast_to_array`, tests/sql/test_cast_to_array.py):
 
   * array-literal / NULL source -> FOLDED. The kernel reads elements from the column
     owner's CHILD vector; such a literal has no child, so it cannot see its own input and
-    silently returns empty arrays. Folding is the only way these run — the same reason
-    VECTOR folds. The fold is a RETYPE, never an element-by-element conversion, so the
+    silently returns empty arrays. Folding is the only way these run. The fold is a RETYPE, never an element-by-element conversion, so the
     kernel's rule 3 (mismatch fails; no implicit stringification / parsing / truncation)
     and rule 4 (plain `::` raises, TRY_ nulls) hold identically on both routes.
   * every other literal source, and every column -> runtime CAST node carrying
@@ -252,16 +251,15 @@ def test_parenthesised_value_list_is_still_refused(sql):
     [
         "SELECT ['a','b'] AS v FROM $planets",
         "SELECT ['a','b']::ARRAY<VARCHAR> AS v FROM $planets",
-        "SELECT [1.0,2.0]::VECTOR(2) AS v FROM $planets",
     ],
 )
 def test_array_literal_cannot_be_projected_bare(sql):
-    """An ARRAY/VECTOR literal with values still cannot be a bare projection.
+    """An ARRAY literal with values still cannot be a bare projection.
 
-    Not a preference — its materialization is broken three separate ways (a TypeError on
-    the plain literal, an engine error on VECTOR, an empty array on a folded ARRAY), and
-    this refusal is the only thing keeping all three a single clean error. Pinned so the
-    guard is not narrowed before ARRAY-literal materialization is actually fixed.
+    Not a preference — its materialization is broken (a TypeError on the plain literal,
+    an empty array on a folded ARRAY), and this refusal is the only thing keeping both a
+    single clean error. Pinned so the guard is not narrowed before ARRAY-literal
+    materialization is actually fixed.
     """
     with pytest.raises(UnsupportedSyntaxError, match="cannot be projected"):
         _rows(f"{sql} LIMIT 1")

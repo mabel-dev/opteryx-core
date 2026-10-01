@@ -296,7 +296,6 @@ struct vector_dim_ctx {
     uint32_t dimension;
 };
 
-struct vector_dim_ctx* kernel_alloc_vector_dim_ctx(uint32_t dimension);
 
 /**
  * Context for the TEXT overloads (draken_cosine_{similarity,distance}_text).

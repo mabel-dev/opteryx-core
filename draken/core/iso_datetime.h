@@ -15,9 +15,11 @@
 //                          precisely because "no cross-TU header exists for it yet".
 //                          This is that header.
 //
-// Timestamps are NAIVE: an offset or 'Z' suffix is a parse ERROR, not something
-// to discard. Opteryx timestamps carry no zone, so silently dropping an offset
-// would shift every value by it.
+// Timestamps are NAIVE UTC: a 'Z' or '+HH:MM' / '-HH:MM' / '+HHMM' suffix is
+// HONOURED (the value is normalised to UTC), never discarded. Opteryx timestamps
+// carry no zone, so silently dropping an offset would shift every value by it.
+// Callers that cannot apply an offset pass no offset out-param and get the old
+// strict behaviour (any suffix is a parse error).
 //
 // Pure C++, header-only, no Python, no allocation.
 
@@ -74,15 +76,26 @@ inline int32_t parse_iso_date(const uint8_t* s, uint32_t len) noexcept {
     return static_cast<int32_t>(civil_to_days(year, month, day));
 }
 
-// Strict ISO-8601 timestamp parse: "YYYY-MM-DD", or "YYYY-MM-DD" plus a time
-// with either a 'T' or a space separator ("YYYY-MM-DDTHH:MM[:SS[.ffffff]]").
-// No timezone offset — see the naive-timestamp note at the top of this file.
+// ISO-8601 / RFC 3339 timestamp parse: "YYYY-MM-DD", or "YYYY-MM-DD" plus a
+// time with either a 'T' or a space separator
+// ("YYYY-MM-DDTHH:MM[:SS[.f...]][Z|+HH:MM|-HH:MM|+HHMM|-HHMM]").
+//
+// Fractional seconds take any number of digits (Cloud Logging emits up to 9 and
+// trims trailing zeros); digits past the sixth are TRUNCATED to microseconds,
+// matching Python's datetime.fromisoformat, not rounded and not rejected.
+//
+// A zone suffix is only accepted after a time component, and only when the
+// caller passes `offset_seconds`: it receives the signed offset (east of UTC
+// positive) for the caller to subtract. With `offset_seconds` null any suffix
+// is a parse error — see the naive-timestamp note at the top of this file.
 // Returns false on any parse error; on false the out-params are unspecified
-// except that the time fields have already been zeroed.
+// except that the time fields (and offset, if given) have already been zeroed.
 inline bool parse_iso_timestamp(const uint8_t* s, uint32_t len,
                                 int* year, int* month, int* day,
-                                int* hour, int* minute, int* second, int* usec) noexcept {
+                                int* hour, int* minute, int* second, int* usec,
+                                int* offset_seconds = nullptr) noexcept {
     *hour = 0; *minute = 0; *second = 0; *usec = 0;
+    if (offset_seconds) *offset_seconds = 0;
     uint32_t k = 0;
     int y = 0, m = 0, d = 0;
     while (k < len && s[k] != '-') {
@@ -114,32 +127,53 @@ inline bool parse_iso_timestamp(const uint8_t* s, uint32_t len,
     if (k == hstart || k >= len || s[k] != ':') return false;
     ++k;
     uint32_t mstart = k;
-    while (k < len && s[k] != ':') {
-        if (s[k] < '0' || s[k] > '9') return false;
+    while (k < len && s[k] >= '0' && s[k] <= '9') {
         mi = mi * 10 + (s[k] - '0'); ++k;
     }
     if (k == mstart) return false;
     if (k < len && s[k] == ':') {
         ++k;
         uint32_t sstart = k;
-        while (k < len && s[k] != '.') {
-            if (s[k] < '0' || s[k] > '9') return false;
+        while (k < len && s[k] >= '0' && s[k] <= '9') {
             ss = ss * 10 + (s[k] - '0'); ++k;
         }
         if (k == sstart) return false;
         if (k < len && s[k] == '.') {
             ++k;
             int ndigits = 0;
-            while (k < len) {
-                if (s[k] < '0' || s[k] > '9') return false;
-                if (ndigits >= 6) return false;
-                us = us * 10 + (s[k] - '0'); ++ndigits; ++k;
+            while (k < len && s[k] >= '0' && s[k] <= '9') {
+                // Past microseconds: keep consuming (validating) but drop the digit.
+                if (ndigits < 6) us = us * 10 + (s[k] - '0');
+                ++ndigits; ++k;
             }
             if (ndigits == 0) return false;
             for (int p = ndigits; p < 6; ++p) us *= 10;
         }
     }
-    if (k != len) return false;  // trailing offset/'Z' etc. -> not supported
+    // Minutes stopped on a non-digit that was not ':'; it may only be a zone.
+    if (k < len) {
+        if (!offset_seconds) return false;  // caller cannot honour an offset
+        if (s[k] == 'Z') {
+            ++k;
+        } else if (s[k] == '+' || s[k] == '-') {
+            const int sign = (s[k] == '+') ? 1 : -1;
+            ++k;
+            // Exactly HH:MM or HHMM — four digits, optional colon in the middle.
+            auto dig = [&](uint32_t at) { return at < len && s[at] >= '0' && s[at] <= '9'; };
+            if (!dig(k) || !dig(k + 1)) return false;
+            const int oh = (s[k] - '0') * 10 + (s[k + 1] - '0');
+            k += 2;
+            if (k < len && s[k] == ':') ++k;
+            if (!dig(k) || !dig(k + 1)) return false;
+            const int om = (s[k] - '0') * 10 + (s[k + 1] - '0');
+            k += 2;
+            if (oh > 23 || om > 59) return false;
+            *offset_seconds = sign * (oh * 3600 + om * 60);
+        } else {
+            return false;
+        }
+    }
+    if (k != len) return false;
     if (hh > 23 || mi > 59 || ss > 59) return false;
     *hour = hh; *minute = mi; *second = ss; *usec = us;
     return m >= 1 && m <= 12 && d >= 1 && d <= 31;

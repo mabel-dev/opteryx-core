@@ -2,7 +2,6 @@
 Opteryx types module.
 
 This module provides:
-- Internal scalar type system (replacing numpy/pyarrow type checks)
 - LogicalCategory type vocabulary (Draken-native engine)
 - Null handling primitives
 - Type conversion utilities
@@ -34,36 +33,8 @@ from opteryx.types.scalars._null_handling import (
     nulls_to_default,
     remove_nulls,
 )
-from opteryx.types.scalars._scalar_types import (
-    ScalarType,
-    classify_scalar,
-    extract_python_scalar,
-    is_null_scalar,
-    is_numeric_scalar,
-    is_scalar,
-    is_temporal_scalar,
-    unwrap_scalar,
-)
-from opteryx.types.vectors.vector_types import (
-    get_vector_source_identifier,
-    is_numeric_vector_type,
-    node_is_constant_embed_call,
-    node_is_literal_numeric_vector,
-    node_is_numeric_vector,
-    node_is_vector_query_expression,
-    resolve_node_type,
-)
 
 __all__ = [
-    # Scalar type system (Python scalar classification)
-    "ScalarType",
-    "classify_scalar",
-    "is_scalar",
-    "is_numeric_scalar",
-    "is_temporal_scalar",
-    "is_null_scalar",
-    "extract_python_scalar",
-    "unwrap_scalar",
     # type vocabulary
     "ColumnType",
     "LogicalCategory",
@@ -86,12 +57,4 @@ __all__ = [
     "has_nulls",
     "remove_nulls",
     "nulls_to_default",
-    # Vector type helpers
-    "get_vector_source_identifier",
-    "is_numeric_vector_type",
-    "node_is_constant_embed_call",
-    "node_is_literal_numeric_vector",
-    "node_is_numeric_vector",
-    "node_is_vector_query_expression",
-    "resolve_node_type",
 ]

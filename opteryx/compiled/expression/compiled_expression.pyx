@@ -36,7 +36,7 @@ import struct as _struct
 
 from draken.vectors.vector cimport Vector
 from draken.vectors.bool_vector cimport BoolVector
-from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_INTERVAL, DRAKEN_DATE32, DRAKEN_TIMESTAMP64, DRAKEN_VECTOR_FP16, DRAKEN_ARRAY
+from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_INTERVAL, DRAKEN_DATE32, DRAKEN_TIMESTAMP64, DRAKEN_ARRAY
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64
 from draken.core.buffers cimport DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64
 from draken.core.buffers cimport DRAKEN_DECIMAL128, DRAKEN_DECIMAL, DRAKEN_TIME32, DRAKEN_TIME64
@@ -288,15 +288,6 @@ cdef Vector _materialise_constant_literal(object value, int physical_type,
         # a folded ARRAY-literal argument (GREATEST([1,5,3])) reach a reducer as a
         # Vector rather than a bare Python list.
         return Vector(_draken_native.vector_array_from_sequence([list(value)]))
-    if physical_type == <int>DRAKEN_VECTOR_FP16:
-        # CAST(<array literal> AS VECTOR(n)) folds to a VECTOR-typed literal whose
-        # value is the element list — a genuine scalar (ONE vector), not an in-list
-        # collection, exactly like INTERVAL's tuple above. One row in, so the result is
-        # the constant-shape (data_length==1) vector the cosine kernels read via the
-        # uniform data[selection[i]]. The width is the row's own length: the fold in
-        # _cast_literal_value already checked it against the DECLARED VECTOR(n).
-        return Vector(
-            _draken_native.vector_fp16_from_sequence([list(value)], len(value)))
     if isinstance(value, _datetime.date) and not isinstance(value, _datetime.datetime):
         ordinal = (value - _EPOCH_DATE).days
         int_vec = _draken_native.vector_from_constant(ordinal, 1)
@@ -1472,15 +1463,6 @@ cdef Py_ssize_t _linearize(
                 slot.opcode = BC_LOAD_LIT_SET
                 bc._hold(value_obj)
                 slot.literal_obj = <PyObject*>value_obj
-            elif node.physical_type == <int>DRAKEN_VECTOR_FP16:
-                # A VECTOR literal's value is a list of floats, but it is ONE vector,
-                # not a membership set — it must precede the list/tuple in-list branch
-                # below for the same reason INTERVAL does, or it would be pushed as a
-                # raw Python object and fall out of the c-native set.
-                const_lit = _materialise_constant_literal(value_obj, node.physical_type)
-                slot.opcode = BC_LOAD_LIT_CONST
-                bc._hold(const_lit)
-                slot.literal_obj = <PyObject*>const_lit
             elif node.physical_type == <int>DRAKEN_INTERVAL:
                 # INTERVAL literal — its value is a (months, microseconds) tuple,
                 # but it is a genuine scalar, not an in-list collection. Materialise
@@ -1500,7 +1482,7 @@ cdef Py_ssize_t _linearize(
                 # callable receives a Vector, not a bare Python list (the bare list
                 # was the un-materialized operand the nb trampoline used to
                 # unchecked-cast to Vector → SIGSEGV). Must precede the generic
-                # list/tuple in-list branch below, exactly as INTERVAL/VECTOR do.
+                # list/tuple in-list branch below, exactly as INTERVAL does.
                 const_lit = _materialise_constant_literal(value_obj, node.physical_type)
                 slot.opcode = BC_LOAD_LIT_CONST
                 bc._hold(const_lit)
@@ -3069,19 +3051,7 @@ cdef Py_ssize_t _linearize(
             if _irt is not None and _irt.category is _LogicalCategory_BOOLEAN:
                 slot.flags |= BC_RESULT_WRAP_AS_BOOL
 
-        # A VECTOR result's byte width is dimension*2 — per-column metadata, not a
-        # function of DrakenType, so the span's fixed-width table cannot size it.
-        # Record the bind-time declared width here; _dv_eval_span_cxx reads it off the
-        # root instruction to materialize the result. Any VECTOR-returning kernel gets
-        # this for free — nothing here is EMBED-specific.
-        _fn_vec_dim = 0
         _fn_rt = func_ref_meta.inferred_return_type
-        if _fn_rt is not None and _fn_rt.logical is not None \
-                and getattr(_fn_rt.physical, "name", "") == "VECTOR_FP16":
-            _fn_rt_dim = getattr(_fn_rt.logical, "dimension", None)
-            if _fn_rt_dim is not None and int(_fn_rt_dim) > 0:
-                _fn_vec_dim = int(_fn_rt_dim)
-                slot.vec_dimension = <int32_t>_fn_vec_dim
 
         # Phase 9b: Resolve C kernel function pointer for function calls.
         # Function kernels (Phase 9a-fn) are under development; resolution is optional.
@@ -3195,50 +3165,16 @@ cdef Py_ssize_t _linearize(
                     from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx
                     _fn_ctx_alloc = alloc_binary_op_ctx
                     _fn_ctx_arg = (0, 0, 0, 0, 0, int(_sort_el.logical.unit.value), 0)
-            # COSINE_SIMILARITY/COSINE_DISTANCE over VECTOR operands: the kernel needs
-            # the operands' VECTOR width. A vector's dimension is a LogicalType detail
-            # and is NOT on the physical DrakenVector, so — exactly like the DECIMAL
-            # scales above — the binder has to hand it over in a ctx. Only the _VECTOR
-            # overload takes one; the _TEXT overload embeds its operands and knows its
-            # own width. Mismatched widths are rejected here, at PLAN time, rather than
-            # producing a garbage score per row.
             _fn_overload_id = getattr(func_ref_meta.selected_overload, "id", None)
             # Drives the bare-name fallback rule below: only an unambiguous
             # single-overload function may fall back to draken_{name}.
             _fn_overload_count = len(func_ref_meta.function_definition.overloads)
+            # COSINE_SIMILARITY/COSINE_DISTANCE embed both texts and compare them. They
+            # must use the SAME embedder as every other consumer, so hand them the
+            # resolved draken_embed rather than let them embed for themselves: an
+            # embedder of their own would silently diverge the moment a capability
+            # replaces the core one.
             if (func_name in ("COSINE_SIMILARITY", "COSINE_DISTANCE")
-                    and _fn_overload_id is not None and _fn_overload_id.endswith("_VECTOR")
-                    and n == 2):
-                _cos_dims = []
-                for _cos_i in range(2):
-                    if node.parameters[_cos_i] == NULL \
-                            or node.parameters[_cos_i].schema_column == NULL:
-                        _cos_dims = []
-                        break
-                    _cos_ct = (<object>node.parameters[_cos_i].schema_column).column_type
-                    _cos_lg = getattr(_cos_ct, "logical", None) if _cos_ct is not None else None
-                    _cos_d = getattr(_cos_lg, "dimension", None) if _cos_lg is not None else None
-                    if _cos_d is None or int(_cos_d) < 1:
-                        _cos_dims = []
-                        break
-                    _cos_dims.append(int(_cos_d))
-                if len(_cos_dims) == 2 and _cos_dims[0] == _cos_dims[1]:
-                    from draken.ops.kernels._kernel_registry import alloc_vector_dim_ctx
-                    _fn_ctx_alloc = alloc_vector_dim_ctx
-                    _fn_ctx_arg = _cos_dims[0]
-                else:
-                    # No usable width (untyped/mismatched operands) — the kernel cannot
-                    # run without one, and there is no Python fallback on the native
-                    # engine, so let it surface as an unsupported expression.
-                    _fn_skip_lookup = True
-            # The _TEXT overload is "embed both operands, then compare" — the same
-            # question as COSINE_SIMILARITY(EMBED(a), EMBED(b)). It must therefore use
-            # the SAME embedder, so hand it the resolved draken_embed rather than let it
-            # embed for itself: an embedder of its own would be duplicated logic that
-            # silently diverges the moment a capability replaces the core one (observed
-            # with MiniLM installed: the text overload answered 'dog'/'puppy' 0.0
-            # lexically while the EMBED composition answered 0.80).
-            elif (func_name in ("COSINE_SIMILARITY", "COSINE_DISTANCE")
                     and _fn_overload_id is not None and _fn_overload_id.endswith("_TEXT")):
                 from draken.ops.kernels._kernel_registry import (
                     alloc_cosine_text_ctx, lookup_kernel as _lk_embed)
@@ -3278,17 +3214,6 @@ cdef Py_ssize_t _linearize(
                         "not bound")
                 _fn_ctx_alloc = alloc_match_ctx
                 _fn_ctx_arg = (int(embedding_dimensions()), _emb_fn, float(_match_thresh))
-            # Any VECTOR-returning function (EMBED today) is TOLD the width the plan
-            # declared for it, and must produce exactly that. The declaration is the
-            # single source of truth: the projection boundary copies rows at the
-            # declared stride, so a kernel-side width constant that drifted from it
-            # would read the wrong bytes rather than fail. This is also the seam a
-            # registered capability plugs into — it declares a width, the binder
-            # records it, and the kernel is handed it.
-            elif _fn_vec_dim > 0:
-                from draken.ops.kernels._kernel_registry import alloc_vector_dim_ctx
-                _fn_ctx_alloc = alloc_vector_dim_ctx
-                _fn_ctx_arg = _fn_vec_dim
             if _fn_skip_lookup:
                 fn_ptr, ctx_wrapper = None, None
             else:
@@ -3298,7 +3223,7 @@ cdef Py_ssize_t _linearize(
                 # original scheme) forced every overload of a function onto one kernel —
                 # fine while each ported function had a single native overload, wrong as
                 # soon as two overloads take different operand types and need different
-                # kernels (COSINE_SIMILARITY over VECTOR vs over VARCHAR).
+                # kernels.
                 #
                 # The bare-name fallback is therefore allowed ONLY for a function with
                 # exactly one overload, where it cannot be ambiguous. With more than one
@@ -3692,44 +3617,6 @@ cdef Py_ssize_t _linearize(
                 slot.flags |= (BC_INSTR_C_NATIVE | BC_C_NATIVE_STRING
                                | BC_C_NATIVE_CHILD)
                 slot.column_identity = bc.instrs[bc.count - 2].column_identity
-        elif (not cast_is_try and cast_target_type == "VECTOR"
-                and (source_phys_name is None or source_phys_name == "ARRAY")
-                and bc.count >= 2
-                and bc.instrs[bc.count - 2].opcode == BC_LOAD_COL):
-            # CAST(array_column AS VECTOR(n)) — the mirror of the ARRAY->VARCHAR arm
-            # above: the elements hang off the column owner's child vector, reachable
-            # only from a DIRECT column load (hence the preceding-LOAD requirement), so
-            # an indirect/computed array is not eligible and falls out of the c-native
-            # set rather than dispatching a kernel that cannot see its own input.
-            # ARRAY columns are left UNTYPED by the binder, so source None is accepted
-            # and the kernel fails loud on a non-ARRAY parent.
-            #
-            # The width is a plan-time constant the physical vector cannot carry, so it
-            # goes down in a vector_dim_ctx AND onto slot.vec_dimension (which the span
-            # boundary reads off the root instruction to size the result copy). The
-            # binder guarantees it: a bare VECTOR never reaches here.
-            _cv_dim = 0
-            _cv_sc = cast_py_node.schema_column
-            _cv_ct = _cv_sc.column_type if _cv_sc is not None else None
-            _cv_lg = getattr(_cv_ct, "logical", None) if _cv_ct is not None else None
-            if _cv_lg is not None and getattr(_cv_lg, "dimension", None):
-                _cv_dim = int(_cv_lg.dimension)
-            if _cv_dim > 0:
-                from draken.ops.kernels._kernel_registry import alloc_vector_dim_ctx as _cv_alloc
-                fn_ptr, ctx_wrapper = _resolve_kernel_and_context(
-                    "draken_cast_array_to_vector", _cv_alloc, _cv_dim)
-                if fn_ptr is not None:
-                    slot.kernel_fn = <void*>(<unsigned long long>fn_ptr)
-                    if ctx_wrapper is not None:
-                        bc._hold(ctx_wrapper)
-                        slot.ctx_ptr = <void*>(<unsigned long long>ctx_wrapper.ctx_ptr)
-                    # DESC: VECTOR carries a descriptor (its width) that the arena DV*
-                    # cannot hold; the plan re-attaches it at the projection boundary,
-                    # exactly as DECIMAL/TIMESTAMP results do.
-                    slot.flags |= (BC_INSTR_C_NATIVE | BC_C_NATIVE_DESC
-                                   | BC_C_NATIVE_CHILD)
-                    slot.column_identity = bc.instrs[bc.count - 2].column_identity
-                    slot.vec_dimension = <int32_t>_cv_dim
 
         bc._hold(cast_kernel)
         slot.callable_ref = <PyObject*>cast_kernel

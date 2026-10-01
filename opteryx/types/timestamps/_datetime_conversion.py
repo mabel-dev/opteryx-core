@@ -4,7 +4,7 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Datetime conversion helpers for Phase 6b.2 (NumPy-free temporal representation).
+Datetime conversion helpers for Phase 6b.2 (native temporal representation).
 
 This module provides conversion functions between Python datetime types and
 native int64 representations:

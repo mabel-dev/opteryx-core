@@ -5872,19 +5872,17 @@ cdef class HeapSortStep(PlanStep):
 
     cdef object _limit
     cdef tuple _order_by
-    cdef object _vector_topk_candidate
 
     cdef void _sync_row(self) except *:
         PlanStep._sync_row(self)
         self._row.limit = _row_int(self._limit)
         self._check_row_arena()
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, limit=None, order_by=None, vector_topk_candidate=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, limit=None, order_by=None):
         self.node_type = _step_types().HeapSort
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.limit = limit
         self.order_by = order_by
-        self.vector_topk_candidate = vector_topk_candidate
 
     @property
     def limit(self):
@@ -5906,16 +5904,6 @@ cdef class HeapSortStep(PlanStep):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._order_by = _require_order_list("HeapSortStep.order_by", value)
 
-    @property
-    def vector_topk_candidate(self):
-        return self._vector_topk_candidate
-
-    @vector_topk_candidate.setter
-    def vector_topk_candidate(self, value):
-        self.write_count += 1  # a written field (auto-stale, ruling Q2)
-        _require_optional_bool("HeapSortStep.vector_topk_candidate", value)
-        self._vector_topk_candidate = value
-
     cpdef tuple expressions(self, bint include_columns=True):
         cdef list out = []
         if include_columns:
@@ -5931,7 +5919,6 @@ cdef class HeapSortStep(PlanStep):
         cdef dict out = self._common_values()
         out["limit"] = self._limit
         out["order_by"] = self._order_by
-        out["vector_topk_candidate"] = self._vector_topk_candidate
         return out
 
     cpdef PlanStep copy(self, dict memo=None):
@@ -5946,7 +5933,6 @@ cdef class HeapSortStep(PlanStep):
         self._copy_common_into(new, memo)
         new._limit = _copy_field(self._limit, memo)
         new._order_by = _copy_field(self._order_by, memo)
-        new._vector_topk_candidate = _copy_field(self._vector_topk_candidate, memo)
         new._sync_row()
         return new
 
@@ -5956,7 +5942,6 @@ cdef class HeapSortStep(PlanStep):
         self._share_common_into(new)
         new._limit = self._limit
         new._order_by = self._order_by
-        new._vector_topk_candidate = self._vector_topk_candidate
         new._row[0] = self._row[0]
         return new
 
@@ -10858,7 +10843,6 @@ cpdef frozenset steps_with(str field):
             "values_feeder": frozenset({T.Insert}),
             "variable": frozenset({T.Set}),
             "variables": frozenset({T.Set}),
-            "vector_topk_candidate": frozenset({T.HeapSort}),
             "version": frozenset({T.Scan}),
             "version_spec": frozenset({T.CreateTag, T.RollbackRelation}),
             "version_tag": frozenset({T.Scan}),

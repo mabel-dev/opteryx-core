@@ -173,13 +173,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
         vector_contains_any,
     )
     from opteryx.expression.functions.implementations.logical import null_if as _of_null_if
-    from opteryx.expression.functions.implementations.utility import (
-        cosine_distance as _of_cosine_distance,
-    )
-    from opteryx.expression.functions.implementations.utility import (
-        cosine_similarity as _of_cosine_similarity,
-    )
-    from opteryx.expression.functions.implementations.utility import embed as _of_embed
     from opteryx.expression.functions.implementations.utility import humanize as _of_humanize
     from opteryx.expression.functions.implementations.utility import (
         jsonb_object_keys as _of_jsonb_object_keys,
@@ -190,26 +183,12 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
 
     class other_functions:
         null_if = staticmethod(_of_null_if)
-        cosine_distance = staticmethod(_of_cosine_distance)
-        cosine_similarity = staticmethod(_of_cosine_similarity)
-        embed = staticmethod(_of_embed)
         humanize = staticmethod(_of_humanize)
         jsonb_object_keys = staticmethod(_of_jsonb_object_keys)
         generate_series = staticmethod(_of_generate_series)
 
     # Parameter short-hands
     _any = ParameterSpec(name="val", type_family="any")
-
-    def _embed_return_type(_arg_nodes):
-        # EMBED's real type IS known at bind time — the active capability declares the
-        # width, and the binder hands that same number to the kernel in a
-        # vector_dim_ctx, so the plan's type and the kernel's output cannot disagree.
-        # The old VARIANT placeholder was not merely imprecise: it made EMBED
-        # uncomposable, because COSINE_SIMILARITY's NUMERIC_VECTOR parameters reject
-        # VARIANT, so COSINE_SIMILARITY(EMBED(a), EMBED(b)) failed to bind at all.
-        from opteryx.types.vectors.embedding_capability import embedding_dimensions
-
-        return _CT_VECTOR(embedding_dimensions())
 
     # ARRAY_CONTAINS / _ANY / _ALL were removed: the operator spellings
     # (`item = ANY(arr)`, `arr @> (…)`, `arr @>> (…)`) are the supported
@@ -348,52 +327,15 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
             summary="Format number in human-readable form.",
         ),
         FunctionDefinition(
-            "EMBED",
-            aliases=(),
-            category="array",
-            volatility="immutable",
-            deterministic=True,
-            lifecycle=LifecycleSpec(status="active"),
-            summary="Convert text to an embedding vector.",
-            documentation="Embeds text using the configured engine embedding provider.",
-            overloads=(
-                FunctionOverload(
-                    id="EMBED_TEXT",
-                    parameters=(ParameterSpec(name="text", type_family="string"),),
-                    return_spec=ReturnSpec(mode="resolver", resolver=_embed_return_type),
-                    kernel=KernelSpec(
-                        engine="draken",
-                        id="default",
-                        callable_ref=other_functions.embed,
-                        cost_us_per_million=1_000_000.0,
-                    ),
-                ),
-            ),
-        ),
-        FunctionDefinition(
             "COSINE_SIMILARITY",
             aliases=(),
             category="array",
             volatility="immutable",
             deterministic=True,
             lifecycle=LifecycleSpec(status="active"),
-            summary="Cosine similarity between two vectors.",
-            documentation="Cosine similarity over numeric vectors or semantic text inputs.",
+            summary="Cosine similarity between the embeddings of two texts.",
+            documentation="Embeds both texts with the active embedding provider and returns their cosine similarity.",
             overloads=(
-                FunctionOverload(
-                    id="COSINE_SIMILARITY_VECTOR",
-                    parameters=(
-                        ParameterSpec(name="arr", type_family="numeric_vector"),
-                        ParameterSpec(name="vec", type_family="numeric_vector"),
-                    ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_FLOAT64),
-                    kernel=KernelSpec(
-                        engine="draken",
-                        id="default",
-                        callable_ref=other_functions.cosine_similarity,
-                        cost_us_per_million=1.33,
-                    ),
-                ),
                 FunctionOverload(
                     id="COSINE_SIMILARITY_TEXT",
                     parameters=(
@@ -404,7 +346,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=other_functions.cosine_similarity,
+                        callable_ref=None,   # c-native: draken_cosine_similarity_text
                         cost_us_per_million=893647.14,
                     ),
                 ),
@@ -417,23 +359,9 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
             volatility="immutable",
             deterministic=True,
             lifecycle=LifecycleSpec(status="active"),
-            summary="Cosine distance between two vectors.",
-            documentation="Cosine distance over numeric vectors or semantic text inputs.",
+            summary="Cosine distance between the embeddings of two texts.",
+            documentation="Embeds both texts with the active embedding provider and returns 1 - cosine similarity.",
             overloads=(
-                FunctionOverload(
-                    id="COSINE_DISTANCE_VECTOR",
-                    parameters=(
-                        ParameterSpec(name="arr", type_family="numeric_vector"),
-                        ParameterSpec(name="vec", type_family="numeric_vector"),
-                    ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_FLOAT64),
-                    kernel=KernelSpec(
-                        engine="draken",
-                        id="default",
-                        callable_ref=other_functions.cosine_distance,
-                        cost_us_per_million=1.17,
-                    ),
-                ),
                 FunctionOverload(
                     id="COSINE_DISTANCE_TEXT",
                     parameters=(
@@ -444,7 +372,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
-                        callable_ref=other_functions.cosine_distance,
+                        callable_ref=None,   # c-native: draken_cosine_distance_text
                         cost_us_per_million=884934.76,
                     ),
                 ),

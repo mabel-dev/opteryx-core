@@ -968,14 +968,14 @@ def cast(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     # through _build_decimal_closure (bare DECIMAL → DECIMAL(18,6), Decision F).
     # ARRAY splits on the SOURCE literal, because only some sources are readable by the
     # native kernel. `_extract_data_type` puts the `ARRAY<element>` element type in
-    # `cast_parameters` (the VECTOR(384) channel), so whichever way this goes the element
+    # `cast_parameters` (the type-parameter channel), so whichever way this goes the element
     # type is carried — `_cast_literal_value` folds it into the literal's ColumnType, and
     # the runtime CAST node hands it to the binder as `parameters=[element]`.
     #   - array literal / NULL source -> FOLD. draken_cast_to_array reads its elements
     #     from the column owner's CHILD vector, which only a real column has. Such a
     #     literal has no child, so the kernel cannot see its own input and silently
     #     yields empty arrays (it does not refuse). Folding is not an optimization here;
-    #     it is the only way these shapes can run — the same reason VECTOR folds.
+    #     it is the only way these shapes can run.
     #   - every other literal source (notably VARCHAR holding JSON array text) -> runtime
     #     CAST node. That input the kernel CAN read, and folding it would be a second,
     #     Python-side implementation of draken_cast_to_array (CLAUDE.md §3/§11).
@@ -1041,12 +1041,10 @@ def _extract_data_type(raw_data_type, branch, args, build_literal_node, *, plan_
 
     # Handle custom types
     if "Custom" in data_type:
-        # Custom is [ObjectName, args]: `VECTOR(384)` parses as
-        # [[{Identifier: VECTOR}], ["384"]]. Only the NAME was read, so every
-        # parenthesised argument on a custom type was silently dropped and
-        # `CAST(x AS VECTOR(384))` arrived at the binder as a bare "VECTOR" — which
-        # parse_column_type rejects, since a VECTOR has no meaning without a width.
-        # Carry the args through the same channel DECIMAL's precision/scale use.
+        # Custom is [ObjectName, args]: `NAME(384)` parses as
+        # [[{Identifier: NAME}], ["384"]]. Only the NAME was read, so every
+        # parenthesised argument on a custom type was silently dropped. Carry the
+        # args through the same channel DECIMAL's precision/scale use.
         _custom = branch["data_type"]["Custom"]
         data_type = _custom[0][0]["Identifier"]["value"].upper()
         for _param in (_custom[1] if len(_custom) > 1 else []):
@@ -1103,7 +1101,6 @@ _CAST_TARGET_NAMES = (
     "DECIMAL",
     "BOOL",
     "ARRAY",
-    "VECTOR",
     "INTERVAL",
     "VARBINARY",
     "INT8",
@@ -1152,6 +1149,16 @@ def _normalize_cast_type(data_type: str, *, refused_as: str) -> str:
         "_TIMESTAMP_DAYS",
     ):
         return upper_type
+
+    # VECTOR is not a SQL type (architect ruling 2026-10-01): vectors exist only inside
+    # vector indexes, which embed text themselves. Refused on every surface that spells a
+    # type — CAST, `::`, and column declarations — with the reason, not a typo hint.
+    if lower_type == "vector":
+        raise SqlError(
+            f"{md_code('VECTOR')} is not a type {refused_as} — vectors are not a SQL "
+            "value. They exist only inside vector indexes, which embed text columns "
+            "themselves."
+        )
 
     # NVARCHAR is its own name, matched exactly. It was `"nvarchar" in lower_type`,
     # which also claimed MYNVARCHAR and every other name ending in it — the same
@@ -1248,7 +1255,6 @@ def _normalize_cast_type(data_type: str, *, refused_as: str) -> str:
         "bool": "BOOLEAN",
         "boolean": "BOOLEAN",
         "array": "ARRAY",
-        "vector": "VECTOR",
         "interval": "INTERVAL",
     }
 
@@ -1454,10 +1460,6 @@ def column_type_from_ast(branch, *, plan_context) -> "ColumnType":
             # The DDL callers prefix the statement and the column name.
             raise _decimal_needs_precision_and_scale(params, lambda target: target)
         return parse_column_type(f"DECIMAL({int(params[0].value)}, {int(params[1].value)})")
-    if normalized == "VECTOR":
-        if not params:
-            raise UnsupportedSyntaxError("VECTOR requires a dimension, e.g. VECTOR(384)")
-        return parse_column_type(f"VECTOR({int(params[0].value)})")
     if normalized == "ARRAY":
         return parse_column_type(f"ARRAY<{_array_element_type(params)}>")
 
@@ -1469,7 +1471,7 @@ def _array_element_type(params):
 
     `_extract_data_type` flattens a dict-shaped AST data_type to its top-level key, so
     `ARRAY<VARCHAR>` would arrive as the bare name "ARRAY". The element type survives only
-    because it is copied into the cast's parameters — the same channel VECTOR's width and
+    because it is copied into the cast's parameters — the same channel
     DECIMAL's precision/scale use. This is the single place the fold path reads it back;
     the binder reads the same parameters for the runtime-CAST path.
     """
@@ -1485,7 +1487,7 @@ def _array_element_type(params):
 def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params=()):
     """Cast a literal value at compile time.
 
-    `params` carries the TYPE's parenthesized arguments (VECTOR's width today). Folding
+    `params` carries the TYPE's parenthesized arguments. Folding
     otherwise drops them, which for a parameterized target means folding to a constant
     that has lost its declared type — the reason NVARCHAR/DECIMAL are routed to the
     runtime CAST node instead.
@@ -1558,7 +1560,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
         # question that path answers separately, and this is not the place to
         # re-answer it. VARBINARY and temporal targets are likewise untouched: a
         # VARBINARY null reaching the string-concat closure would be stringified
-        # (VARBINARY is not in its string allow-list). Those two, plus VECTOR, are
+        # (VARBINARY is not in its string allow-list). Those two are
         # the same shape as the BOOLEAN gap above and are still open.
         from opteryx.types.logical_type import try_parse_column_type as _try_parse_ct
 
@@ -1576,7 +1578,7 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
     base_type = target_type.replace("TRY_", "")
 
     if base_type == "ARRAY":
-        # CAST(<array literal> AS ARRAY<E>): folded for the same reason VECTOR is — the
+        # CAST(<array literal> AS ARRAY<E>): folded because the
         # native kernel reads its elements from the column owner's CHILD vector, which
         # only a real column has. An array literal has no child, so the kernel cannot see
         # its own input; it does not refuse, it silently returns empty arrays. Folding is
@@ -1608,35 +1610,6 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
         return Literal(
             value=tuple(_vals), type=_CT_ARRAY_OF(_element_ct), alias=alias, 
         arena=literal_node.arena)
-
-    if base_type == "VECTOR":
-        # CAST(<array literal> AS VECTOR(n)): the values are known here, so fold to a
-        # VECTOR-typed literal rather than emit a runtime CAST. The runtime cast reads
-        # its elements from the column owner's CHILD vector, which only a real column
-        # has — a literal array has no child, so the kernel could not see its own input.
-        # Folding is not an optimization here; it is the only way this shape can run.
-        from opteryx.types.logical_type import VECTOR as _CT_VECTOR
-
-        if not params or params[0].node_type != NodeType.LITERAL:
-            raise UnsupportedSyntaxError(
-                "**CAST** to VECTOR requires a dimension, e.g. **CAST**([1.0, 0.0] AS VECTOR(2))."
-            )
-        _dims = int(params[0].value)
-        _vals = literal_node.value
-        if not isinstance(_vals, (list, tuple)):
-            raise UnsupportedSyntaxError("**CAST** to VECTOR expects an array literal.")
-        if len(_vals) != _dims:
-            raise UnsupportedSyntaxError(
-                f"**CAST** to VECTOR({_dims}) got a {len(_vals)}-element array literal."
-            )
-        _floats = []
-        for _v in _vals:
-            if _v is None or isinstance(_v, bool) or not isinstance(_v, (int, float)):
-                raise UnsupportedSyntaxError(
-                    "**CAST** to VECTOR expects an array literal of numbers with no nulls."
-                )
-            _floats.append(float(_v))
-        return Literal(value=tuple(_floats), type=_CT_VECTOR(_dims), alias=alias, arena=literal_node.arena)
 
     # Extract unit from internal temporal type forms
     unit = None

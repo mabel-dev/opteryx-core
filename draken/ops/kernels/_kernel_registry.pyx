@@ -98,7 +98,6 @@ cdef extern from "ops/kernels/kernel_registry.h":
         pass
     ctypedef vector_dim_ctx_ vector_dim_ctx
 
-    vector_dim_ctx* kernel_alloc_vector_dim_ctx(uint32_t dimension)
 
     ctypedef struct cosine_text_ctx_:
         pass
@@ -331,19 +330,6 @@ def alloc_format_ctx(int ts_unit, bytes fmt, int safe=0):
     cdef size_t fmt_len = <size_t>len(fmt)
     cdef format_ctx* ctx = kernel_alloc_format_ctx(
         <uint8_t>ts_unit, fmt_ptr, fmt_len, <uint8_t>safe)
-    if ctx == NULL:
-        return None
-    return <unsigned long long>ctx
-
-
-def alloc_vector_dim_ctx(int dimension):
-    """Allocate context for the fp16 cosine kernels.
-
-    Args:
-        dimension: VECTOR width of both operands, read off the bind-time LogicalType.
-            The physical DrakenVector carries no width, so the kernel cannot recover it.
-    """
-    cdef vector_dim_ctx* ctx = kernel_alloc_vector_dim_ctx(<uint32_t>dimension)
     if ctx == NULL:
         return None
     return <unsigned long long>ctx

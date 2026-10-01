@@ -19,7 +19,6 @@ _TYPE_LABELS = {
     "boolean": "boolean",
     "integer": "integer",
     "numeric": "number",
-    "numeric_vector": "vector",
     "string": "varchar",
     "temporal": "temporal",
     # The three string types as separate families (CONCAT/CONCAT_WS). `varchar`
@@ -165,11 +164,10 @@ _DOCUMENTATION_CATEGORIES = OrderedDict(
             ),
         ),
         (
-            "Vector / Embedding Functions",
+            "Text Similarity Functions",
             (
                 "COSINE_SIMILARITY",
                 "COSINE_DISTANCE",
-                "EMBED",
             ),
         ),
         (
@@ -343,12 +341,12 @@ _PARAMETER_DOCUMENTATION_OVERRIDES = {
         "more": "Additional string values to concatenate after `str1`.",
     },
     "COSINE_DISTANCE": {
-        "arr": "First vector or text input.",
-        "vec": "Second vector or text input.",
+        "arr": "First text input.",
+        "vec": "Second text input.",
     },
     "COSINE_SIMILARITY": {
-        "arr": "First vector or text input.",
-        "vec": "Second vector or text input.",
+        "arr": "First text input.",
+        "vec": "Second text input.",
     },
     "EXTRACT": {
         "part": "Date or time part to extract: `year`, `quarter`, `month`, `day`, `hour`, `minute`, `second` or `epoch`.",
@@ -358,9 +356,6 @@ _PARAMETER_DOCUMENTATION_OVERRIDES = {
     },
     "DATEDIFF": {
         "part": "Unit to measure the difference in, such as `day`, `month`, or `year`.",
-    },
-    "EMBED": {
-        "text": "Input text to convert into an embedding vector.",
     },
     "FLOOR": {
         "num": "Numeric value to round downward.",
@@ -415,10 +410,6 @@ _RETURN_OVERRIDES = {
         "integer",
         "Returns the requested part as an `integer`; `epoch` returns whole Unix epoch seconds.",
     ),
-    "EMBED": (
-        "vector",
-        "Returns an embedding vector.",
-    ),
     "GREATEST": (
         "element type of `arr`",
         "Returns a single element from `arr`, preserving the array's element type.",
@@ -451,7 +442,6 @@ _FUNCTION_NOTES = {
     "CURRENT_TIME": "Canonical SQL-92 form is `CURRENT_TIME`. Opteryx also accepts `CURRENT_TIME()`.",
     "CURRENT_TIMESTAMP": "Canonical SQL-92 form is `CURRENT_TIMESTAMP`. Opteryx also accepts `CURRENT_TIMESTAMP()`.",
     "EXTRACT": "Canonical SQL-92 form is `EXTRACT(part FROM date)`. The supported parts are `year`, `quarter`, `month`, `day`, `hour`, `minute`, `second` and `epoch`; each returns an `integer`. `epoch` is whole Unix epoch seconds - `EXTRACT(EPOCH FROM ts)` is the same value as `TO_UNIXTIME(ts)`, and is planned as that call. Sub-day parts require a TIMESTAMP operand.",
-    "EMBED": "This function depends on the configured embedding provider and returns a numeric `vector`.",
     "FLOOR": "When `scale` is provided, positive values affect digits to the right of the decimal point and negative values affect tens, hundreds, and larger positions.",
     "_MATCH_AGAINST": "Canonical form is `MATCH(str) AGAINST(pattern)`. Opteryx normalizes this syntax to an internal helper.",
     "NORMAL": "This function is volatile. The integer argument controls how many values are generated, not a seed.",
@@ -475,11 +465,10 @@ _RELATED_HINTS = {
     "COALESCE": ("IFNULL", "IFNOTNULL", "CASE"),
     "CONCAT": ("CONCAT_WS", "LEFT", "RIGHT"),
     "CONCAT_WS": ("CONCAT", "TRIM", "SUBSTRING"),
-    "COSINE_DISTANCE": ("COSINE_SIMILARITY", "EMBED"),
-    "COSINE_SIMILARITY": ("COSINE_DISTANCE", "EMBED"),
+    "COSINE_DISTANCE": ("COSINE_SIMILARITY",),
+    "COSINE_SIMILARITY": ("COSINE_DISTANCE",),
     "DATEDIFF": ("EXTRACT", "TRUNC", "TIME_BUCKET"),
     "EXTRACT": ("TRUNC", "DATEDIFF", "TIME_BUCKET"),
-    "EMBED": ("COSINE_SIMILARITY", "COSINE_DISTANCE"),
     "FLOOR": ("ROUND", "CEILING", "TRUNC"),
     "GREATEST": ("LEAST", "SORT", "UNNEST"),
     "IFNOTNULL": ("IFNULL", "COALESCE", "NULLIF"),
@@ -600,8 +589,6 @@ def _parameter_base_documentation(function_name: str, parameter: ParameterSpec) 
         return "Boolean input value."
     if type_label == "array":
         return "Array input value."
-    if type_label == "vector":
-        return "Numeric vector input value."
     if type_label == "temporal":
         return "Date, time, or timestamp input value."
     if type_label == "blob":

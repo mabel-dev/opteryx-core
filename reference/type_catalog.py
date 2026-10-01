@@ -353,32 +353,14 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
         "notes": (
             "Individual elements are accessed with subscript notation: `arr[0]` returns the first element "
             "(zero-indexed, negative indices count from the end). Array literals (`[1, 2, 3]`) are valid as an "
-            "operand of `IN`, `@>`, `@>>`, or `CAST(... AS VECTOR(n))` — just not as a bare item in the SELECT list."
+            "operand of `IN`, `@>` or `@>>` — just not as a bare item in the SELECT list."
         ),
         "limitations": [
             "There is no standalone array literal syntax in the SELECT list. `SELECT [1, 2, 3]` is not valid, though `[1, 2, 3]` is valid as an operand elsewhere (see notes).",
             "Array EQUALITY is not supported (no `=` operator registered for ARRAY = ARRAY). Membership/containment checks (`col IN (...)`, `@>`, `@>>`) DO work directly in a WHERE clause — the array itself just can't be compared for equality.",
             "Only VARIANT and VARCHAR values holding JSON array text can be CAST to ARRAY (e.g. `(v -> 'items')::ARRAY<VARCHAR>`). No other scalar can: `1::ARRAY<INTEGER>` is an error, not the one-element array `[1]`.",
             "CAST to ARRAY is strict. A row whose JSON is not an array (an object, or a bare scalar), or which holds an element that is not already of the declared element type, fails the whole row — elements are never individually nulled, and a number is never stringified to satisfy `ARRAY<VARCHAR>`. Use TRY_CAST to turn such rows into NULL instead of an error. A JSON `null` element is not a failure; it becomes a NULL element.",
-            "Element access (`arr[i]`) is unsupported for VECTOR_FP16 and DECIMAL128 element types — it fails loud rather than returning a stripped or misread value.",
-        ],
-    },
-    "vector": {
-        "description": (
-            "A fixed-length vector of FP16 (half-precision) floating-point values. "
-            "Used for similarity search and ML embedding workloads. "
-            "Declared as `VECTOR(n)` where n is the number of dimensions."
-        ),
-        "example": "[1.0, 0.5, 0.25]::VECTOR(3)",
-        "cast_to": [
-            {"type": "from ARRAY<FLOAT> literal", "example": "[1.0, 0.5, 0.25]::VECTOR(3)", "note": "Quantizes each element to FP16. Only a literal array of non-null numeric values is currently supported by CAST — casting an arbitrary ARRAY<FLOAT> column is not covered by this path."},
-        ],
-        "comparable_with": [],
-        "notes": "Similarity search uses dedicated functions such as `COSINE_DISTANCE(a, b)` and `COSINE_SIMILARITY(a, b)`. Standard comparison operators are not supported on VECTOR.",
-        "limitations": [
-            "Vector columns cannot be used with standard comparison operators (=, <, >, etc.).",
-            "The dimension count must match between vectors in any operation.",
-            "A VECTOR value cannot be projected in the SELECT list — `SELECT [1.0, 0.5, 0.25]::VECTOR(3)` is refused, because a literal list cannot be projected. A vector literal has to be consumed where it is built, by a function such as `COSINE_SIMILARITY(a, b)`.",
+            "Element access (`arr[i]`) is unsupported for DECIMAL128 element types — it fails loud rather than returning a stripped or misread value.",
         ],
     },
 }
@@ -397,7 +379,6 @@ _FAMILY: dict[LogicalCategory, str] = {
     LogicalCategory.BOOLEAN: "boolean",
     LogicalCategory.ARRAY: "nested",
     LogicalCategory.VARIANT: "nested",
-    LogicalCategory.VECTOR: "vector",
     LogicalCategory.NULL: "null",
 }
 
@@ -423,6 +404,10 @@ def export_type_catalog() -> OrderedDict[str, dict[str, Any]]:
 
     exported: dict[str, dict[str, Any]] = {}
     for cat in LogicalCategory:
+        # VECTOR is not a SQL type (architect ruling 2026-10-01): it exists only inside
+        # vector indexes, so it is not part of the documented type vocabulary.
+        if cat == LogicalCategory.VECTOR:
+            continue
         type_id = _type_id(cat)
         aliases = _SQL_ALIASES.get(type_id, [])
         metadata = _TYPE_METADATA.get(type_id, {})
@@ -435,7 +420,7 @@ def export_type_catalog() -> OrderedDict[str, dict[str, Any]]:
             "flags": {
                 "numeric": cat in _NUMERIC_TYPES,
                 "temporal": cat in _TEMPORAL_TYPES,
-                "collection": cat in {LogicalCategory.ARRAY, LogicalCategory.VARIANT, LogicalCategory.NVARCHAR, LogicalCategory.VECTOR},
+                "collection": cat in {LogicalCategory.ARRAY, LogicalCategory.VARIANT, LogicalCategory.NVARCHAR},
                 "parameterized": cat in {LogicalCategory.DECIMAL, LogicalCategory.ARRAY},
             },
             "metadata": metadata,

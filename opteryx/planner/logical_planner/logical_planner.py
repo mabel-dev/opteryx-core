@@ -49,10 +49,6 @@ from opteryx.planner.logical_planner.logical_planner_rewriter import decompose_a
 from opteryx.compiled.planner.plan_graph import PlanGraph
 from opteryx.types import logical_type as _plt
 from opteryx.types.logical_type import ColumnType, LogicalCategory
-from opteryx.types.vectors.vector_types import (
-    get_vector_source_identifier,
-    node_is_vector_query_expression,
-)
 from opteryx.utils import dnf, random_string, suggest_alternative
 from opteryx.compiled.structures.plan_steps import PlanStep
 from opteryx.compiled.structures.plan_steps import step_classes
@@ -622,37 +618,6 @@ def extract_simple_filter(filters, identifier: str = "Name", *, plan_context):
     if "Where" in filters:
         root = logical_planner_builders.build(filters["Where"], plan_context=plan_context)
         return root
-
-
-def _is_vector_order_expression(node: Expression) -> bool:
-    source_identifier = (
-        _get_vector_order_source_identifier(node.parameters[0])
-        if (node.node_type == NodeType.FUNCTION and len(node.parameters) == 2)
-        else None
-    )
-    return (
-        node.node_type == NodeType.FUNCTION
-        and node.value in ("COSINE_SIMILARITY", "COSINE_DISTANCE")
-        and len(node.parameters) == 2
-        and source_identifier is not None
-        and node_is_vector_query_expression(node.parameters[1])
-    )
-
-
-def _get_vector_order_source_identifier(node: Expression):
-    source_identifier = get_vector_source_identifier(node)
-    if source_identifier is not None:
-        return source_identifier
-    if node.node_type == NodeType.IDENTIFIER:
-        return node
-    if (
-        node.node_type == NodeType.CAST
-        and node.value in {"VECTOR", "TRY_VECTOR"}
-        and node.left is not None
-        and node.left.node_type == NodeType.IDENTIFIER
-    ):
-        return node.left
-    return None
 
 
 def _table_name(branch):
@@ -3339,31 +3304,6 @@ def inner_query_planner(ast_branch: dict, *, plan_context) -> LogicalPlan:
                         for ord_col in _order_by_columns_not_in_projection
                         if (getattr(ord_col, "source", None) or "").lower() != (proj_col.value[0] or "").lower()
                     ]
-
-            for ord_col in _order_by_columns:
-                if not _is_vector_order_expression(ord_col):
-                    continue
-                _order_by_columns_not_in_projection = [
-                    candidate
-                    for candidate in _order_by_columns_not_in_projection
-                    if candidate is not ord_col
-                ]
-                source_column = _get_vector_order_source_identifier(ord_col.parameters[0])
-                if source_column is None:
-                    continue
-                source_identity = (
-                    source_column.schema_column.identity
-                    if source_column.schema_column is not None
-                    else None
-                )
-                existing_projection_identities = {
-                    col.schema_column.identity
-                    for col in list(_projection) + list(_order_by_columns_not_in_projection)
-                    if col.schema_column is not None
-                }
-                if source_identity in existing_projection_identities:
-                    continue
-                _order_by_columns_not_in_projection.append(source_column)
 
         project_step = ProjectStep()
         project_step.columns = _projection

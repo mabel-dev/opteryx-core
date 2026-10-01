@@ -1,4 +1,4 @@
-# Standalone `rugo` wheel — the PyArrow/NumPy-free file engine (draken + rugo),
+# Standalone `rugo` wheel — the dependency-free file engine (draken + rugo),
 # built from the parent opteryx-core source tree. Metadata is carried in
 # rugo/setup.py (which re-roots to the repo top); this file only declares the
 # build backend. Build from the repo root: `python rugo/setup.py bdist_wheel`.

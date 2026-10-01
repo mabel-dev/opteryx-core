@@ -18,6 +18,7 @@ from opteryx.exceptions import (
     DatasetNotFoundError,
     EmptyDatasetError,
     UnsupportedSyntaxError,
+    UnsupportedTypeError,
     md_cause,
     md_code,
 )
@@ -87,6 +88,20 @@ def _read_parquet_footer_envelope(filesystem, path: str, size: int) -> bytes:
         if len(tail) != need:
             raise DataError(f"{md_code(path)}: short read of its {footer_len}-byte footer.")
     return b"PAR1" + tail[-need:]
+
+
+def _refuse_vector_columns(schema: RelationDescriptor, blob_name: str) -> RelationDescriptor:
+    """VECTOR is not a SQL value (architect ruling 2026-10-01): vectors exist only inside
+    vector indexes. A skene file can still carry one, so a relation that does is refused
+    here — at the one place a skene relation's schema enters a query — rather than
+    letting a vector reach a projection, a filter or a client."""
+    for column in schema.columns:
+        if column.column_type.category == LogicalCategory.VECTOR:
+            raise UnsupportedTypeError(
+                f"Column {md_code(column.name)} of {md_code(blob_name)} is a VECTOR. Vectors are "
+                "not a SQL value — they exist only inside vector indexes."
+            )
+    return schema
 
 
 class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable):
@@ -443,7 +458,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
             # Refresh LRU position.
             _FOOTER_METADATA_CACHE.pop(cache_key, None)
             _FOOTER_METADATA_CACHE[cache_key] = metadata
-            return skene_metadata_to_schema(metadata, self.dataset)
+            return _refuse_vector_columns(skene_metadata_to_schema(metadata, self.dataset), blob_name)
 
         file_obj = self.filesystem.open_input_file(blob_name)
         try:
@@ -455,7 +470,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         if len(_FOOTER_METADATA_CACHE) >= _FOOTER_METADATA_CACHE_MAX:
             _FOOTER_METADATA_CACHE.pop(next(iter(_FOOTER_METADATA_CACHE)), None)
         _FOOTER_METADATA_CACHE[cache_key] = metadata
-        return skene_metadata_to_schema(metadata, self.dataset)
+        return _refuse_vector_columns(skene_metadata_to_schema(metadata, self.dataset), blob_name)
 
     def _infer_jsonl_schema(self, blob_names: list) -> RelationDescriptor:
         """Schema for a JSONL dataset, inferred by decoding its first file that

@@ -368,10 +368,10 @@ VecResult draken_cast_timestamp_to_string(void* ctx, const DrakenVector* v) {
 using draken::iso_datetime::civil_to_days;
 
 // VARCHAR/NVARCHAR/VARBINARY → TIMESTAMP64. ctx (format_ctx*) null or fmt_len==0
-// -> strict ISO-8601 parse ("YYYY-MM-DDTHH:MM:SS[.ffffff]" or with a space
-// separator; no timezone offset — Opteryx timestamps are always naive, so an
-// offset suffix is a parse error, matching the plan-time literal parser's
-// intent rather than silently discarding it). ctx->fmt_len > 0 -> FORMAT-driven
+// -> ISO-8601 / RFC 3339 parse ("YYYY-MM-DDTHH:MM:SS[.f...][Z|±HH:MM]" or with a
+// space separator; fractional digits past microseconds are truncated, and a zone
+// suffix is honoured by normalising to UTC — the same rules as the plan-time
+// literal parser, value_parsing._parse_timestamp). ctx->fmt_len > 0 -> FORMAT-driven
 // parse via sql_parse_exec. Always produces microsecond-unit TIMESTAMP64.
 using draken::iso_datetime::parse_iso_timestamp;
 
@@ -430,12 +430,14 @@ VecResult draken_cast_string_to_timestamp(void* ctx, const DrakenVector* v) {
             int minute;
             int second;
             int usec;
+            int offset_seconds = 0;
             bool ok;
             if (use_fmt) {
                 ok = sql_parse_exec(prog, reinterpret_cast<const char*>(s), len,
                                      &year, &month, &day, &hour, &minute, &second, &usec);
             } else {
-                ok = parse_iso_timestamp(s, len, &year, &month, &day, &hour, &minute, &second, &usec);
+                ok = parse_iso_timestamp(s, len, &year, &month, &day, &hour, &minute, &second, &usec,
+                                         &offset_seconds);
             }
             if (!ok) {
                 if (!is_safe) {
@@ -451,7 +453,8 @@ VecResult draken_cast_string_to_timestamp(void* ctx, const DrakenVector* v) {
                    + static_cast<int64_t>(hour) * 3600000000LL
                    + static_cast<int64_t>(minute) * 60000000LL
                    + static_cast<int64_t>(second) * 1000000LL
-                   + usec;
+                   + usec
+                   - static_cast<int64_t>(offset_seconds) * 1000000LL;
         }
 
         VecResult r;

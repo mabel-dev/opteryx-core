@@ -917,7 +917,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
             documentation=(
                 "True when COSINE_SIMILARITY(column, query) >= the `match_threshold` "
                 "session variable (default 0.5). Matching is only as semantic as the "
-                "active EMBED capability: the built-in embedder is a lexical hashed "
+                "active embedding capability: the built-in embedder is a lexical hashed "
                 "projection, so by default MATCH behaves as a case-insensitive exact "
                 "match rather than a meaning-based one. Install a semantic embedding "
                 "capability, and/or tune `match_threshold`, to change that. Empty or "

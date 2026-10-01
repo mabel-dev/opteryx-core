@@ -125,12 +125,20 @@ def _parse_time(value):
     raise ValueError(f"Cannot parse {value} as time")
 
 
-# Seconds are OPTIONAL: the runtime kernel accepts 'YYYY-MM-DDTHH:MM' (it reads
-# back as 12:00:00), and requiring them here meant that literal parsed to NULL
-# while the same text on a column parsed fine.
+# Mirrors draken/core/iso_datetime.h parse_iso_timestamp, which the column
+# cast uses — the two must accept exactly the same text or a literal and a
+# column holding it disagree.
+#
+# Seconds are OPTIONAL: 'YYYY-MM-DDTHH:MM' reads back as HH:MM:00.
+# Fractional seconds take any number of digits (Cloud Logging emits up to 9 and
+# trims trailing zeros); past microseconds they are TRUNCATED, matching
+# datetime.fromisoformat, not rounded or rejected.
+# A zone suffix ('Z', '+HH:MM', '-HH:MM', '+HHMM') is only valid after a time.
 _TIMESTAMP_RE = re.compile(
-    r"^(?P<base>\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?)"
-    r"(?P<offset>Z|[+-]\d{2}:?\d{2})?$"
+    r"^(?P<date>\d{4}-\d{2}-\d{2})"
+    r"(?:[T ](?P<hour>\d{2}):(?P<minute>\d{2})(?::(?P<second>\d{2})(?:\.(?P<frac>\d+))?)?"
+    r"(?:(?P<zulu>Z)|(?P<sign>[+-])(?P<oh>\d{2}):?(?P<om>\d{2}))?)?$",
+    re.ASCII,  # the kernel tests bytes against '0'-'9'; '\d' alone admits '٢'
 )
 
 
@@ -140,23 +148,32 @@ def _parse_timestamp(value):
     if isinstance(value, datetime.date):
         return datetime.datetime.combine(value, datetime.time())
     if isinstance(value, str):
-        value_str = value.strip()
-        match = _TIMESTAMP_RE.match(value_str)
+        match = _TIMESTAMP_RE.match(value.strip())
         if match is None:
             raise ValueError(f"Cannot parse {value} as timestamp")
-        # A timezone offset, if present, is discarded — timestamps are stored
-        # naive (see LogicalCategory.TIMESTAMP docs); the wall-clock time as
-        # written is kept, only the offset is dropped.
-        base = match.group("base").replace("T", " ")
-        if "." in base:
-            return datetime.datetime.strptime(base, "%Y-%m-%d %H:%M:%S.%f")
-        if " " in base:
-            # Seconds are optional in the pattern above, so pick the format from
-            # what is actually present rather than assuming HH:MM:SS.
-            if base.count(":") == 1:
-                return datetime.datetime.strptime(base, "%Y-%m-%d %H:%M")
-            return datetime.datetime.strptime(base, "%Y-%m-%d %H:%M:%S")
-        return datetime.datetime.strptime(base, "%Y-%m-%d")
+        date = datetime.date.fromisoformat(match.group("date"))
+        if match.group("hour") is None:
+            return datetime.datetime.combine(date, datetime.time())
+        frac = match.group("frac") or ""
+        result = datetime.datetime.combine(
+            date,
+            datetime.time(
+                int(match.group("hour")),
+                int(match.group("minute")),
+                int(match.group("second") or 0),
+                int((frac + "000000")[:6]),
+            ),
+        )
+        # Timestamps are stored naive UTC (see LogicalCategory.TIMESTAMP docs): an
+        # offset is honoured by normalising to UTC, never discarded — dropping it
+        # would silently shift the value by the offset.
+        if match.group("sign"):
+            oh, om = int(match.group("oh")), int(match.group("om"))
+            if oh > 23 or om > 59:
+                raise ValueError(f"Cannot parse {value} as timestamp")
+            offset = datetime.timedelta(hours=oh, minutes=om)
+            result = result - offset if match.group("sign") == "+" else result + offset
+        return result
     raise ValueError(f"Cannot parse {value} as timestamp")
 
 

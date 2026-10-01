@@ -3,7 +3,8 @@
 //
 // cosine_sim_fp16(a, b, dimension):
 //   Row-wise cosine similarity for two DRAKEN_VECTOR_FP16 columns of matching dimension.
-//   fp16 values are widened to float64 on load; dot product and norms accumulate in float64.
+//   The per-row arithmetic is cosine_row_fp16 (ops/vector_cosine_row.h), the engine's one
+//   definition of cosine: fp64 accumulation, identical bits on NEON, AVX2 and scalar.
 //
 // NULL TVL: null in either input row → null output row.
 // Zero-norm: dot / (||a|| * ||b||) with any zero norm → NaN (IEEE; 0.0/0.0).
@@ -24,7 +25,7 @@
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
 #include "ops/vec_result.h"
-#include "fp16/fp16.h"
+#include "ops/vector_cosine_row.h"
 
 namespace draken { namespace ops {
 
@@ -80,20 +81,7 @@ static inline VecResult cosine_sim_fp16(
         const uint32_t idx_b = b.selection[i];
         const uint16_t* pa = da + static_cast<size_t>(idx_a) * dimension;
         const uint16_t* pb = db + static_cast<size_t>(idx_b) * dimension;
-
-        double dot = 0.0, sq_a = 0.0, sq_b = 0.0;
-        for (uint32_t k = 0u; k < dimension; ++k) {
-            const double fa = static_cast<double>(fp16_ieee_to_fp32_value(pa[k]));
-            const double fb = static_cast<double>(fp16_ieee_to_fp32_value(pb[k]));
-            dot  += fa * fb;
-            sq_a += fa * fa;
-            sq_b += fb * fb;
-        }
-
-        const double denom = std::sqrt(sq_a) * std::sqrt(sq_b);
-        dst[i] = (denom == 0.0)
-            ? std::numeric_limits<double>::quiet_NaN()
-            : dot / denom;
+        dst[i] = cosine_row_fp16(pa, pb, dimension);
     }
 
     // Clear validity tail bits beyond the last complete byte.

@@ -1027,7 +1027,7 @@
     "COSINE_DISTANCE": {
         "catalog_name": "COSINE_DISTANCE",
         "aliases": [],
-        "summary": "Cosine distance between two vectors.",
+        "summary": "Cosine distance between the embeddings of two texts.",
         "volatility": "immutable",
         "deterministic": true,
         "foldable": false,
@@ -1041,71 +1041,12 @@
         },
         "overloads": [
             {
-                "id": "COSINE_DISTANCE_VECTOR",
-                "label": "COSINE_DISTANCE(arr, vec)",
-                "category": "Vector / Embedding Functions",
-                "documentation": "Cosine distance over numeric vectors or semantic text inputs.",
-                "related_functions": [
-                    "COSINE_SIMILARITY",
-                    "EMBED"
-                ],
-                "return_type": "FLOAT",
-                "returns": {
-                    "type": "FLOAT",
-                    "documentation": "Returns the computed result as `FLOAT`."
-                },
-                "arity": {
-                    "minimum": 2,
-                    "maximum": 2,
-                    "variadic": false
-                },
-                "homogeneous": false,
-                "execution": {
-                    "kernel_id": "default",
-                    "engine": "draken",
-                    "cost_us_per_million": 1.17
-                },
-                "parameters": [
-                    {
-                        "label": "arr",
-                        "type": "vector",
-                        "documentation": "First vector or text input.",
-                        "optional": false,
-                        "variadic": false,
-                        "constant_only": false,
-                        "null_handling": "strict",
-                        "domain": [],
-                        "minimum": null,
-                        "maximum": null,
-                        "value_format": null,
-                        "element_of": null,
-                        "excludes": []
-                    },
-                    {
-                        "label": "vec",
-                        "type": "vector",
-                        "documentation": "Second vector or text input.",
-                        "optional": false,
-                        "variadic": false,
-                        "constant_only": false,
-                        "null_handling": "strict",
-                        "domain": [],
-                        "minimum": null,
-                        "maximum": null,
-                        "value_format": null,
-                        "element_of": null,
-                        "excludes": []
-                    }
-                ]
-            },
-            {
                 "id": "COSINE_DISTANCE_TEXT",
                 "label": "COSINE_DISTANCE(arr, vec)",
-                "category": "Vector / Embedding Functions",
-                "documentation": "Cosine distance over numeric vectors or semantic text inputs.",
+                "category": "Text Similarity Functions",
+                "documentation": "Embeds both texts with the active embedding provider and returns 1 - cosine similarity.",
                 "related_functions": [
-                    "COSINE_SIMILARITY",
-                    "EMBED"
+                    "COSINE_SIMILARITY"
                 ],
                 "return_type": "FLOAT",
                 "returns": {
@@ -1127,7 +1068,7 @@
                     {
                         "label": "arr",
                         "type": "varchar",
-                        "documentation": "First vector or text input.",
+                        "documentation": "First text input.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
@@ -1142,7 +1083,7 @@
                     {
                         "label": "vec",
                         "type": "varchar",
-                        "documentation": "Second vector or text input.",
+                        "documentation": "Second text input.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
@@ -1161,7 +1102,7 @@
     "COSINE_SIMILARITY": {
         "catalog_name": "COSINE_SIMILARITY",
         "aliases": [],
-        "summary": "Cosine similarity between two vectors.",
+        "summary": "Cosine similarity between the embeddings of two texts.",
         "volatility": "immutable",
         "deterministic": true,
         "foldable": false,
@@ -1175,71 +1116,12 @@
         },
         "overloads": [
             {
-                "id": "COSINE_SIMILARITY_VECTOR",
-                "label": "COSINE_SIMILARITY(arr, vec)",
-                "category": "Vector / Embedding Functions",
-                "documentation": "Cosine similarity over numeric vectors or semantic text inputs.",
-                "related_functions": [
-                    "COSINE_DISTANCE",
-                    "EMBED"
-                ],
-                "return_type": "FLOAT",
-                "returns": {
-                    "type": "FLOAT",
-                    "documentation": "Returns the computed result as `FLOAT`."
-                },
-                "arity": {
-                    "minimum": 2,
-                    "maximum": 2,
-                    "variadic": false
-                },
-                "homogeneous": false,
-                "execution": {
-                    "kernel_id": "default",
-                    "engine": "draken",
-                    "cost_us_per_million": 1.33
-                },
-                "parameters": [
-                    {
-                        "label": "arr",
-                        "type": "vector",
-                        "documentation": "First vector or text input.",
-                        "optional": false,
-                        "variadic": false,
-                        "constant_only": false,
-                        "null_handling": "strict",
-                        "domain": [],
-                        "minimum": null,
-                        "maximum": null,
-                        "value_format": null,
-                        "element_of": null,
-                        "excludes": []
-                    },
-                    {
-                        "label": "vec",
-                        "type": "vector",
-                        "documentation": "Second vector or text input.",
-                        "optional": false,
-                        "variadic": false,
-                        "constant_only": false,
-                        "null_handling": "strict",
-                        "domain": [],
-                        "minimum": null,
-                        "maximum": null,
-                        "value_format": null,
-                        "element_of": null,
-                        "excludes": []
-                    }
-                ]
-            },
-            {
                 "id": "COSINE_SIMILARITY_TEXT",
                 "label": "COSINE_SIMILARITY(arr, vec)",
-                "category": "Vector / Embedding Functions",
-                "documentation": "Cosine similarity over numeric vectors or semantic text inputs.",
+                "category": "Text Similarity Functions",
+                "documentation": "Embeds both texts with the active embedding provider and returns their cosine similarity.",
                 "related_functions": [
-                    "COSINE_DISTANCE",
-                    "EMBED"
+                    "COSINE_DISTANCE"
                 ],
                 "return_type": "FLOAT",
                 "returns": {
@@ -1261,7 +1143,7 @@
                     {
                         "label": "arr",
                         "type": "varchar",
-                        "documentation": "First vector or text input.",
+                        "documentation": "First text input.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
@@ -1276,7 +1158,7 @@
                     {
                         "label": "vec",
                         "type": "varchar",
-                        "documentation": "Second vector or text input.",
+                        "documentation": "Second text input.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
@@ -1651,68 +1533,6 @@
                     "cost_us_per_million": 1.0
                 },
                 "parameters": []
-            }
-        ]
-    },
-    "EMBED": {
-        "catalog_name": "EMBED",
-        "aliases": [],
-        "summary": "Convert text to an embedding vector.",
-        "volatility": "immutable",
-        "deterministic": true,
-        "foldable": false,
-        "pushdown_safe": false,
-        "lifecycle": {
-            "status": "active",
-            "introduced": null,
-            "deprecated_in": null,
-            "remove_after": null,
-            "replacement": null
-        },
-        "overloads": [
-            {
-                "id": "EMBED_TEXT",
-                "label": "EMBED(text)",
-                "category": "Vector / Embedding Functions",
-                "documentation": "Embeds text using the configured engine embedding provider.",
-                "related_functions": [
-                    "COSINE_SIMILARITY",
-                    "COSINE_DISTANCE"
-                ],
-                "return_type": "vector",
-                "returns": {
-                    "type": "vector",
-                    "documentation": "Returns an embedding vector."
-                },
-                "arity": {
-                    "minimum": 1,
-                    "maximum": 1,
-                    "variadic": false
-                },
-                "homogeneous": false,
-                "execution": {
-                    "kernel_id": "default",
-                    "engine": "draken",
-                    "cost_us_per_million": 1000000.0
-                },
-                "parameters": [
-                    {
-                        "label": "text",
-                        "type": "varchar",
-                        "documentation": "Input text to convert into an embedding vector.",
-                        "optional": false,
-                        "variadic": false,
-                        "constant_only": false,
-                        "null_handling": "strict",
-                        "domain": [],
-                        "minimum": null,
-                        "maximum": null,
-                        "value_format": null,
-                        "element_of": null,
-                        "excludes": []
-                    }
-                ],
-                "notes": "This function depends on the configured embedding provider and returns a numeric `vector`."
             }
         ]
     },
@@ -3711,7 +3531,7 @@
                 "id": "_MATCH_AGAINST_2",
                 "label": "MATCH(str) AGAINST(pattern)",
                 "category": "String Functions",
-                "documentation": "True when COSINE_SIMILARITY(column, query) >= the `match_threshold` session variable (default 0.5). Matching is only as semantic as the active EMBED capability: the built-in embedder is a lexical hashed projection, so by default MATCH behaves as a case-insensitive exact match rather than a meaning-based one. Install a semantic embedding capability, and/or tune `match_threshold`, to change that. Empty or stopword-only text embeds to a zero vector, giving an undefined (NaN) similarity, which never matches.",
+                "documentation": "True when COSINE_SIMILARITY(column, query) >= the `match_threshold` session variable (default 0.5). Matching is only as semantic as the active embedding capability: the built-in embedder is a lexical hashed projection, so by default MATCH behaves as a case-insensitive exact match rather than a meaning-based one. Install a semantic embedding capability, and/or tune `match_threshold`, to change that. Empty or stopword-only text embeds to a zero vector, giving an undefined (NaN) similarity, which never matches.",
                 "related_functions": [
                     "LENGTH",
                     "UPPER",

@@ -15,7 +15,7 @@ from setuptools_rust import RustExtension
 # used identically by this wheel (opteryx_core) and the standalone `rugo` wheel
 # (rugo/setup.py). See build_common.py — it is the one place those live, so the
 # two builds cannot drift. The opteryx-only, side-effectful pieces (libcurl,
-# consolidated-module generation, onnxruntime) stay in this file.
+# consolidated-module generation) stay in this file.
 from build_common import (
     COMMON_SIMD_SOURCES,
     CPP_FLAGS,
@@ -1319,10 +1319,11 @@ extensions.append(
 # calls them all, so the 21 kernels link into ONE shared object rather than 21.
 # This removes the per-extension duplication of vector_alloc.cpp / nb_combined.cpp
 # that bloated the wheel. New vector-op file → add it here AND register it in
-# _vectors_module.cpp. (vector_length / vector_search / carchar / usearch / minilm
+# _vectors_module.cpp. (vector_length / carchar / minilm
 # stay separate — independent native libraries, not C′ kernels.)
 _vectors_op_cpp = [
     "opteryx/compiled/nanobind/vector_accessors.cpp",
+    "opteryx/compiled/nanobind/vector_ann.cpp",
     "opteryx/compiled/nanobind/vector_array_reduce.cpp",
     "opteryx/compiled/nanobind/vector_bitwise.cpp",
     "opteryx/compiled/nanobind/vector_bool_ops.cpp",
@@ -1395,6 +1396,8 @@ extensions.append(
             # include_dirs (the C libraries moved to the repo root).
             "third_party/yyjson/src",
             "third_party/usearch/fp16/include",
+            # draken/ops/ann — usearch's header-only core graph (vector_ann.cpp).
+            "third_party/usearch/include",
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
@@ -1428,17 +1431,6 @@ extensions.append(
 
 extensions.append(
     Extension(
-        "opteryx.types.vectors.vector_math",
-        sources=["opteryx/types/vectors/vector_math.pyx"],
-        include_dirs=include_dirs + ["third_party/usearch/fp16/include"],
-        extra_compile_args=CPP_FLAGS,
-        extra_link_args=LD_EXTRA,
-        language="c++",
-    )
-)
-
-extensions.append(
-    Extension(
         "opteryx.compiled.io.process_ring",
         sources=[
             "opteryx/compiled/io/process_ring.pyx",
@@ -1463,142 +1455,36 @@ extensions.append(
 )
 
 
+# Embedding capability (MiniLM). ONNX Runtime is NOT linked: the extension loads the
+# shared library at runtime from the `onnxruntime` pip package (installed --no-deps)
+# through the stable C API, so only the vendored headers are needed to build it and the
+# wheel carries no ONNX Runtime code. Without the extra installed, installing the
+# capability raises (opteryx/types/vectors/embedding_capability.py).
 extensions.append(
     Extension(
-        "opteryx.compiled.nanobind.vector_search",
+        "opteryx.compiled.nanobind.minilm_native",
         sources=[
-            "src/cpp/vector_search_native.cpp",
+            "src/cpp/minilm_native.cpp",
             "third_party/nanobind/src/nb_combined.cpp",
         ],
         include_dirs=include_dirs
         + [
+            "third_party/onnxruntime/include",
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",
+            # draken/core/fp16.h -> <fp16/fp16.h>: the capability kernel packs its fp32
+            # rows to fp16 to build a VECTOR_FP16 result.
+            "third_party/usearch/fp16/include",
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA,
+        # draken_malloc / draken_identity_sel resolve against draken's extension at load
+        # time, as for every other extension that builds a DrakenVector result.
+        extra_link_args=LD_EXTRA
+        + (["-undefined", "dynamic_lookup"] if is_mac() else ["-ldl", "-Wl,--allow-shlib-undefined"]),
         language="c++",
     )
 )
-
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.usearch_native",
-        sources=[
-            "src/cpp/usearch_native.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/usearch/include",
-            "third_party/usearch/fp16/include",
-            "third_party/usearch/simsimd/include",
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS
-        + [
-            "-fno-strict-aliasing",
-            "-DNB_COMPACT_ASSERTIONS",
-            "-DUSEARCH_USE_SIMSIMD=1",
-        ],
-        extra_link_args=LD_EXTRA,
-        language="c++",
-    )
-)
-
-
-def _select_onnxruntime_sdk():
-    """Locate the ONNX Runtime SDK the optional MiniLM extension links against.
-
-    The SDK is NOT vendored (CLAUDE.md §4 — zero installed dependencies). Whoever wants
-    the MiniLM EMBED capability supplies an extracted ONNX Runtime SDK out-of-band and
-    points ``OPTERYX_ONNXRUNTIME_HOME`` at it — a directory holding ``include/`` and
-    ``lib/``. Returns ``(root, rpath)``; the rpath is the absolute ``lib/`` so the loaded
-    extension can ``dlopen`` the shared library at runtime from where it was built.
-    """
-    home = os.environ.get("OPTERYX_ONNXRUNTIME_HOME", "").strip()
-    if not home:
-        return None, None
-    root = os.path.abspath(os.path.expanduser(home))
-    rpath = os.path.join(root, "lib")
-    return root, rpath
-
-
-def _find_onnxruntime_library_path(lib_dir: str) -> str | None:
-    """Return a full path to the ONNX Runtime shared library if available."""
-
-    candidates = [
-        "libonnxruntime.dylib",
-        "libonnxruntime.1.22.0.dylib",
-        "libonnxruntime.so",
-        "libonnxruntime.so.1",
-        "libonnxruntime.so.1.22.0",
-    ]
-    for candidate in candidates:
-        path = os.path.join(lib_dir, candidate)
-        if os.path.exists(path):
-            return path
-    return None
-
-
-BUILD_EMBEDDINGS = os.environ.get("OPTERYX_BUILD_EMBEDDINGS", "0").lower() in ("1", "true", "yes")
-
-if BUILD_EMBEDDINGS:
-    _ort_root, _ort_rpath = _select_onnxruntime_sdk()
-    _ort_include = os.path.join(_ort_root, "include") if _ort_root else None
-    _ort_lib = os.path.join(_ort_root, "lib") if _ort_root else None
-    # Fail loud, not silent: OPTERYX_BUILD_EMBEDDINGS=1 is an explicit request to build the
-    # extension. If the out-of-band ONNX Runtime SDK is not where OPTERYX_ONNXRUNTIME_HOME
-    # says, do NOT quietly skip the extension (which would surface later as a baffling
-    # ImportError) — refuse the build with an actionable message.
-    if not (_ort_include and _ort_lib and os.path.exists(_ort_include) and os.path.exists(_ort_lib)):
-        raise SystemExit(
-            "OPTERYX_BUILD_EMBEDDINGS=1 but the ONNX Runtime SDK was not found. Set "
-            "OPTERYX_ONNXRUNTIME_HOME to a locally-obtained, extracted ONNX Runtime SDK "
-            "directory containing include/ and lib/ (the SDK is not vendored — see "
-            f"CLAUDE.md §4). Looked under: {_ort_root!r}."
-        )
-    ort_lib_path = _find_onnxruntime_library_path(_ort_lib)
-    extra_link = []
-    if ort_lib_path:
-        # Use direct library path so the linker finds the versioned shared lib.
-        extra_link.append(ort_lib_path)
-    else:
-        # Fallback to search by linker name.
-        extra_link.append("-lonnxruntime")
-
-    extensions.append(
-        Extension(
-            "opteryx.compiled.nanobind.minilm_native",
-            sources=[
-                "src/cpp/minilm_native.cpp",
-                "third_party/nanobind/src/nb_combined.cpp",
-            ],
-            include_dirs=include_dirs
-            + [
-                _ort_include,
-                "third_party/nanobind",
-                "third_party/nanobind/src",
-                "third_party/nanobind/ext/robin_map/include",
-                # draken/core/fp16.h -> <fp16/fp16.h>: the EMBED capability kernel
-                # packs its fp32 rows to fp16 to build a VECTOR_FP16 result.
-                "third_party/usearch/fp16/include",
-            ],
-            extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-            extra_link_args=LD_EXTRA
-            + [
-                f"-L{_ort_lib}",
-            ]
-            + extra_link
-            + [
-                f"-Wl,-rpath,{_ort_rpath}",
-            ],
-            language="c++",
-        )
-    )
 
 # C++ Parquet IO pipeline with lock-free queues
 extensions.append(
