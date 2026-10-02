@@ -968,6 +968,9 @@ PyObject* wrap_column(ParsedColumn& pc) {
             pc.array_parent_offsets, pc.array_child_data, pc.array_child_validity,
             pc.array_child_length, pc.array_child_type, pc.validity, pc.length);
     }
+    if (pc.is_string && pc.codes != nullptr)
+        return draken_vector_own_string_dict(pc.slots, pc.arena, pc.arena_len, pc.codes,
+                                             pc.data_length, pc.validity, pc.length, pc.type);
     if (pc.is_string)
         return draken_vector_own_string(pc.slots, pc.arena, pc.arena_len,
                                         pc.validity, pc.length, pc.type,
@@ -1205,11 +1208,201 @@ static ParsedColumn parse_column_explicit(
 // fails loud naming the column, row and value. Only the VALUE is checked: the rest of the
 // container is not parsed (architect ruling 2026-10-01).
 //
+// Intern table of rendered `->>` values for one row range: open-addressed, linear probe,
+// keyed by XXH3-64 with the bytes compared on every hash match (a collision must never
+// merge two values). Codes are dense first-seen order.
+struct TextInterner {
+    std::vector<uint32_t> table;    // code + 1; 0 = empty. Power-of-two size.
+    std::vector<uint64_t> hash;     // per code
+    std::vector<uint32_t> off;      // per code, into `bytes`
+    std::vector<uint32_t> len;      // per code
+    std::vector<uint8_t>  bytes;    // distinct values, back to back
+    uint32_t mask = 255;
+
+    TextInterner() : table(256, 0) {}
+    uint32_t size() const noexcept { return static_cast<uint32_t>(hash.size()); }
+
+    uint32_t intern(const uint8_t* d, uint32_t dn) {
+        const uint64_t h = XXH3_64bits(d, dn);
+        uint32_t i = static_cast<uint32_t>(h) & mask;
+        for (uint32_t e; (e = table[i]) != 0; i = (i + 1) & mask) {
+            const uint32_t c = e - 1;
+            if (hash[c] == h && len[c] == dn &&
+                (dn == 0 || std::memcmp(bytes.data() + off[c], d, dn) == 0))
+                return c;
+        }
+        const uint32_t c = size();
+        table[i] = c + 1;
+        hash.push_back(h);
+        off.push_back(static_cast<uint32_t>(bytes.size()));
+        len.push_back(dn);
+        bytes.insert(bytes.end(), d, d + dn);
+        if (static_cast<size_t>(c + 1) * 2 > table.size()) grow();
+        return c;
+    }
+
+private:
+    void grow() {
+        std::vector<uint32_t> t(table.size() * 2, 0);
+        const uint32_t m = static_cast<uint32_t>(t.size() - 1);
+        for (uint32_t c = 0; c < size(); ++c) {
+            uint32_t i = static_cast<uint32_t>(hash[c]) & m;
+            while (t[i] != 0) i = (i + 1) & m;
+            t[i] = c + 1;
+        }
+        table.swap(t);
+        mask = m;
+    }
+};
+
+// Dict gate for an interned `->>` column. Distinct values must stay at most half the rows
+// (the GROUP BY dict path's own ratio, native_group_sinks.hpp kGBDictMinRatio) and under
+// an absolute cap; checked every kDictGateEvery rows so a high-cardinality column bails
+// after a few thousand rows rather than a whole chunk. At K <= n/2 the dict is never larger
+// than the dense column (K*16 + 4n + distinct bytes <= 16n + all bytes), so the ratio
+// subsumes the DICTGATE bytes inequality here.
+static constexpr uint32_t kDictGateEvery   = 1024;
+static constexpr uint32_t kDictMaxDistinct = 1u << 16;
+static inline bool dict_gate_fails(uint32_t distinct, uint32_t rows_seen) noexcept {
+    return distinct > kDictMaxDistinct || static_cast<uint64_t>(distinct) * 2 > rows_seen;
+}
+
+// Build a nested `->>` column Dict-shaped: one interned copy of each distinct rendered value
+// and a uint32 code per row (ParsedColumn::codes). The values are byte-identical to the dense
+// path's — the same raw_text_view / render_nested per row decides them — and a NULL row is a
+// validity bit (code 0, never read). False when the gate rejects the column; the caller then
+// builds it dense, the always-correct path. Throws exactly as the dense path does on an
+// invalid value (lowest bad row wins).
+static bool parse_nested_text_dict(const uint8_t* buffer, const RecordSet& records,
+                                   const std::string& name, const ColumnKey& ck,
+                                   const RowExec& rows, ParsedColumn& pc) {
+    const uint32_t n = static_cast<uint32_t>(records.size());
+    if (n == 0) return false;
+
+    const std::vector<RowRange> ranges = rows.split(n, 8);
+    std::vector<TextInterner> part(ranges.size());
+    std::vector<uint32_t> first_bad(ranges.size(), UINT32_MAX);
+    std::vector<uint8_t> bailed(ranges.size(), 0);
+
+    uint32_t* codes = static_cast<uint32_t*>(draken_malloc(static_cast<size_t>(n) * sizeof(uint32_t)));
+    StringColumnResult bits;   // carrier for own_validity_from_scr only
+    bits.null_bitmap.assign((static_cast<size_t>(n) + 7) >> 3, 0xFF);
+
+    rows.run(ranges, [&](size_t ri) {
+        TextInterner& tab = part[ri];
+        std::vector<uint8_t> rendered, stack, scratch;
+        const uint32_t begin = static_cast<uint32_t>(ranges[ri].begin);
+        const uint32_t end = static_cast<uint32_t>(ranges[ri].end);
+        for (uint32_t row = begin; row < end; ++row) {
+            if (((row - begin) & (kDictGateEvery - 1)) == 0 && row != begin &&
+                dict_gate_fails(tab.size(), row - begin)) {
+                bailed[ri] = 1;
+                return;
+            }
+            const FieldSpan* f = nullptr;
+            for (const FieldSpan& s : records[row])
+                if (ck.matches(buffer, s)) { f = &s; break; }
+            if (f == nullptr) {
+                bits.null_bitmap[row >> 3] &= static_cast<uint8_t>(~(1u << (row & 7u)));
+                codes[row] = 0;
+                continue;
+            }
+            const uint8_t* d;
+            uint32_t dn;
+            if (!jsoncanon::raw_text_view(buffer, *f, d, dn)) {
+                rendered.clear();
+                if (!jsoncanon::render_nested(buffer, *f, /*as_json=*/false, rendered, stack, scratch)) {
+                    first_bad[ri] = row;
+                    return;
+                }
+                d = rendered.data();
+                dn = static_cast<uint32_t>(rendered.size());
+            }
+            codes[row] = tab.intern(d, dn);
+        }
+    });
+
+    const uint32_t bad = *std::min_element(first_bad.begin(), first_bad.end());
+    const bool any_bail = std::find(bailed.begin(), bailed.end(), 1) != bailed.end();
+    // A bad row is reported only when no range bailed — a bailed range stopped early and
+    // may hide a lower bad row; the dense path then finds and reports it.
+    if (bad != UINT32_MAX && !any_bail) {
+        draken_free(codes);
+        const FieldSpan* f = nullptr;
+        for (const FieldSpan& s : records[bad])
+            if (ck.matches(buffer, s)) { f = &s; break; }
+        const uint32_t len = f->value_width;
+        std::string got(reinterpret_cast<const char*>(buffer + f->value_start), len < 64u ? len : 64u);
+        throw std::runtime_error(
+            "read_jsonl: column '" + name + "' row " + std::to_string(bad) + ": value '" + got +
+            "' is not valid JSON");
+    }
+    if (any_bail || bad != UINT32_MAX) { draken_free(codes); return false; }
+
+    // One code space: range 0's table is the global one; later ranges are interned into it
+    // and their codes remapped.
+    TextInterner& global = part[0];
+    std::vector<std::vector<uint32_t>> remap(ranges.size());
+    bool need_remap = false;
+    for (size_t ri = 1; ri < ranges.size(); ++ri) {
+        const TextInterner& t = part[ri];
+        remap[ri].resize(t.size());
+        for (uint32_t c = 0; c < t.size(); ++c) {
+            remap[ri][c] = global.intern(t.bytes.data() + t.off[c], t.len[c]);
+            if (remap[ri][c] != c) need_remap = true;
+        }
+    }
+    const uint32_t K = global.size();
+    if (K == 0 || dict_gate_fails(K, n)) { draken_free(codes); return false; }
+    if (need_remap) {
+        rows.run(ranges, [&](size_t ri) {
+            if (ri == 0) return;
+            const std::vector<uint32_t>& m = remap[ri];
+            for (size_t row = ranges[ri].begin; row < ranges[ri].end; ++row)
+                if ((bits.null_bitmap[row >> 3] >> (row & 7)) & 1u) codes[row] = m[codes[row]];
+        });
+    }
+
+    size_t arena_len = 0;
+    for (uint32_t c = 0; c < K; ++c)
+        if (global.len[c] > STR_INLINE_MAX) arena_len += global.len[c];
+    DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(
+        draken_malloc(static_cast<size_t>(K) * sizeof(DrakenStringSlot)));
+    uint8_t* arena = arena_len ? static_cast<uint8_t*>(draken_malloc(arena_len)) : nullptr;
+    uint32_t at = 0;
+    for (uint32_t c = 0; c < K; ++c) {
+        const uint32_t len = global.len[c];
+        const uint8_t* src = len ? global.bytes.data() + global.off[c]
+                                 : reinterpret_cast<const uint8_t*>("");
+        if (len > STR_INLINE_MAX) {
+            std::memcpy(arena + at, src, len);
+            draken_build_string_slot(&slots[c], src, len, at);
+            at += len;
+        } else {
+            draken_build_string_slot(&slots[c], src, len, 0);
+        }
+    }
+
+    pc.is_string   = true;
+    pc.type        = DRAKEN_NVARCHAR;
+    pc.length      = n;
+    pc.slots       = slots;
+    pc.arena       = arena;
+    pc.arena_len   = arena_len;
+    pc.codes       = codes;
+    pc.data_length = K;
+    pc.validity    = own_validity_from_scr(bits, n);
+    pc.all_null    = false;
+    pc.key_absent  = false;
+    return true;
+}
+
 // Spans are resolved here by slot rather than through extract_column, whose NULL test
 // reads the raw bytes and so cannot tell a JSON string "null" from JSON null.
 static ParsedColumn parse_nested_column(
     const uint8_t* buffer, const RecordSet& records, const std::string& name,
-    const ColumnSpec& spec, uint8_t slot, const std::string* declared, const RowExec& rows) {
+    const ColumnSpec& spec, uint8_t slot, const std::string* declared, const RowExec& rows,
+    bool intern_text) {
 
     // The type is fixed by the operator; a declaration can only agree with it (the Cython
     // edge checks first — this is the backstop for a non-Python caller).
@@ -1224,6 +1417,11 @@ static ParsedColumn parse_nested_column(
     const uint32_t n = static_cast<uint32_t>(records.size());
     ColumnKey ck;
     ck.slot = slot;
+
+    if (intern_text && !spec.as_json) {
+        ParsedColumn pc;
+        if (parse_nested_text_dict(buffer, records, name, ck, rows, pc)) return pc;
+    }
 
     // Per-range output (8-row aligned: each range writes its own bytes of the bitmap),
     // stitched together below. Ranges report their FIRST bad row; the lowest wins, so the
@@ -1358,7 +1556,7 @@ std::vector<ParsedColumn> parse_all_columns(
             out[c] = parse_nested_column(buffer, records, column_names[c], spec,
                                          nested_slot(context, column_names[c]),
                                          it != context.explicit_schema.end() ? &it->second : nullptr,
-                                         rows);
+                                         rows, context.intern_nested_text);
             return;
         }
         if (it != context.explicit_schema.end()) {

@@ -60,6 +60,16 @@ from opteryx.expression.functions import (
 # LogicalCategory imported via __init__.pyx (textually included); canonical ColumnTypes also in scope.
 
 
+# The string transforms (case, REVERSE, SUBSTRING/LEFT/RIGHT, REPLACE, TRIM, PAD)
+# keep their input's string type — their kernels preserve the tag, so an NVARCHAR
+# in is an NVARCHAR out and a VARBINARY in is a VARBINARY out. Declaring a fixed
+# VARCHAR made the bound type disagree with the vector: `REVERSE(nv) || nv` was
+# refused as VARCHAR || NVARCHAR, and a constant-folded NVARCHAR result was
+# rebuilt as a VARCHAR literal. Argument 0 is always a typed string (an untyped
+# NULL is refused by the `string` family), so it is the result type.
+_SAME_STRING_TYPE = ReturnSpec(mode="same_as_arg", arg_index=0)
+
+
 def get_builtin_text_functions() -> List[FunctionDefinition]:
     """
     Core text functions (UPPER, LOWER, LENGTH, CONCAT, SUBSTRING, ...).
@@ -76,10 +86,11 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         _make(
             "UPPER",
             vector_uppercase,
-            _CT_VARCHAR,
+            None,
             (_str,),
             aliases=("UCASE",),
             category="text",
+            return_spec=_SAME_STRING_TYPE,
             engine="draken",
             summary="Convert string to uppercase.",
             cost=6551.57,
@@ -87,10 +98,11 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         _make(
             "LOWER",
             vector_lowercase,
-            _CT_VARCHAR,
+            None,
             (_str,),
             aliases=("LCASE",),
             category="text",
+            return_spec=_SAME_STRING_TYPE,
             engine="draken",
             summary="Convert string to lowercase.",
             cost=6415.14,
@@ -155,10 +167,11 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         _make(
             "INITCAP",
             vector_initcap,
-            _CT_VARCHAR,
+            None,
             (_string,),
             aliases=("TITLE",),
             category="text",
+            return_spec=_SAME_STRING_TYPE,
             engine="draken",
             summary="Capitalize first letter of each word.",
             cost=13268.63,
@@ -166,9 +179,10 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         _make(
             "REVERSE",
             vector_reverse,
-            _CT_VARCHAR,
+            None,
             (_string,),
             category="text",
+            return_spec=_SAME_STRING_TYPE,
             engine="draken",
             summary="Reverse a string.",
             cost=6277.98,
@@ -281,7 +295,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                         _string,
                         ParameterSpec(name="from_pos", type_family="integer"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_VARCHAR),
+                    return_spec=_SAME_STRING_TYPE,
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -298,7 +312,7 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="from_pos", type_family="integer"),
                         ParameterSpec(name="count", type_family="integer"),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_VARCHAR),
+                    return_spec=_SAME_STRING_TYPE,
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -311,11 +325,12 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         _make(
             "LEFT",
             vector_string_slice_left,
-            _CT_VARCHAR,
+            None,
             (
                 _string,
                 ParameterSpec(name="length", type_family="integer"),
             ),
+            return_spec=_SAME_STRING_TYPE,
             engine="draken",
             summary="Extract leftmost characters.",
             cost=8227.49,
@@ -323,11 +338,12 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
         _make(
             "RIGHT",
             vector_string_slice_right,
-            _CT_VARCHAR,
+            None,
             (
                 _string,
                 ParameterSpec(name="length", type_family="integer"),
             ),
+            return_spec=_SAME_STRING_TYPE,
             engine="draken",
             summary="Extract rightmost characters.",
             cost=8458.26,
@@ -448,10 +464,6 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
         name="compiled_program", type_family="binary", constant_only=True
     )
     _search = ParameterSpec(name="search", type_family="string")
-
-    def _trim_return_type(arg_nodes):
-        """TRIM/LTRIM/RTRIM always return VARCHAR."""
-        return _CT_VARCHAR
 
     # SQL-92's `TRIM([LEADING|TRAILING|BOTH] <chars> FROM <str>)` — the dialect
     # parses it and logical_planner_builders.trim_string maps the three directions
@@ -630,12 +642,13 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
         _make(
             "REPLACE",
             vector_replace,
-            _CT_VARCHAR,
+            None,
             (
                 _string,
                 _search,
                 ParameterSpec(name="replace_val", type_family="string"),
             ),
+            return_spec=_SAME_STRING_TYPE,
             engine="draken",
             summary="Replace all occurrences.",
             cost=9169.95,
@@ -706,7 +719,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                 FunctionOverload(
                     id="TRIM_1",
                     parameters=(_string, _trim_characters),
-                    return_spec=ReturnSpec(mode="resolver", resolver=_trim_return_type),
+                    return_spec=_SAME_STRING_TYPE,
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -729,7 +742,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                 FunctionOverload(
                     id="LTRIM_1",
                     parameters=(_string, _trim_characters),
-                    return_spec=ReturnSpec(mode="resolver", resolver=_trim_return_type),
+                    return_spec=_SAME_STRING_TYPE,
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -752,7 +765,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                 FunctionOverload(
                     id="RTRIM_1",
                     parameters=(_string, _trim_characters),
-                    return_spec=ReturnSpec(mode="resolver", resolver=_trim_return_type),
+                    return_spec=_SAME_STRING_TYPE,
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -799,7 +812,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="width", type_family="integer", constant_only=True),
                         ParameterSpec(name="fill", type_family="string", constant_only=True),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_VARCHAR),
+                    return_spec=_SAME_STRING_TYPE,
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -833,7 +846,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="width", type_family="integer", constant_only=True),
                         ParameterSpec(name="fill", type_family="string", constant_only=True),
                     ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_VARCHAR),
+                    return_spec=_SAME_STRING_TYPE,
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",

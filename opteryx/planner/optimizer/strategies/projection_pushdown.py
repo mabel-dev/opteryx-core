@@ -153,7 +153,15 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
                     arena=context.plan_context.expressions,
                 )
                 for col in node.schema.columns
-                if col.identity in context.collected_identities
+                # Inside an open Distinct region every column reaching the Distinct
+                # is a dedup key, so the leaf must supply its full width.
+                # `SELECT DISTINCT *` has no Project at all — the Distinct sits
+                # straight on the Scan — so `collected_identities` holds only the
+                # OUTER demand: nothing for `SELECT COUNT(*) FROM (SELECT DISTINCT *
+                # FROM t)`, which pruned the scan to zero columns and collapsed the
+                # dedup to one row (n = 1), and just `a` for `COUNT(a)`, which
+                # deduped on `a` alone and undercounted silently.
+                if context.seen_distincts or col.identity in context.collected_identities
             ]
 
             # A Scan/Subquery leg of a UNION whose own Project was pruned away
@@ -340,11 +348,16 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
                 # carried: "expression references column ... which the stream does not
                 # carry". The first leg escaped only by accident (union output identity
                 # == first leg's identity); the second leg failed.
-                if column.schema_column:
-                    identities.add(column.schema_column.identity)
+                #
+                # The same holds for every computed SUB-expression, not just the root:
+                # `SELECT LENGTH(UPPER(name)), COUNT(*) ... GROUP BY UPPER(name)` reads
+                # the key `UPPER(name)` from inside `LENGTH(...)`. Collecting only the
+                # root and the leaves saw `LENGTH(...)` and `name` — the key looked
+                # dead, the sink dropped it, and the Project fell back to recomputing
+                # it from a `name` the aggregate never emits. So walk every node.
                 identities.update(
                     col.schema_column.identity
-                    for col in get_all_nodes_of_type(column, (NodeType.IDENTIFIER,))
+                    for col in get_all_nodes_of_type(column, ("*",))
                     if col.schema_column
                 )
 

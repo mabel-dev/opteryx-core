@@ -115,17 +115,6 @@ def _build_morsel_from_columns(column_names, column_types, column_values):
     return Morsel.from_vectors(column_names, vectors)
 
 
-def _build_morsel_from_rows(columns, rows):
-    column_names, column_types = _column_metadata(columns)
-    column_values = [[] for _ in column_names]
-
-    for row in rows:
-        for index in range(len(column_names)):
-            column_values[index].append(row[index] if index < len(row) else None)
-
-    return _build_morsel_from_columns(column_names, column_types, column_values)
-
-
 def _restore_temporal_series_args(args):
     restored_args = []
 
@@ -165,9 +154,72 @@ def _unnest(step):
     return _build_morsel_from_columns(column_names, column_types, [_as_list(list_items)])
 
 
+# A temporal literal carries its PHYSICAL value — `CAST('2026-10-01' AS DATE)` folds
+# to the int 20727 tagged DATE32, a TIMESTAMP to epoch units, a TIME to units since
+# midnight — which is what _materialise_constant_literal builds a constant from. The
+# sequence constructors vector_from_sequence dispatches to want datetime objects
+# instead, so every temporal cell in VALUES failed ("element must be
+# datetime.datetime or None, got int"). Build these columns the way the constant path
+# does: an integer vector of the physical values, reinterpreted as the temporal type,
+# with the column's logical descriptor (unit, offset) attached. The integer width is
+# the one each reinterpret accepts.
+_TEMPORAL_FROM_PHYSICAL = {
+    _draken_native.DrakenType.TIMESTAMP64: (
+        _draken_native.vector_int64_from_sequence,
+        _draken_native.vector_reinterpret_as_timestamp64,
+    ),
+    _draken_native.DrakenType.DATE32: (
+        _draken_native.vector_int32_from_sequence,
+        _draken_native.vector_reinterpret_as_date32,
+    ),
+    _draken_native.DrakenType.TIME64: (
+        _draken_native.vector_int64_from_sequence,
+        _draken_native.vector_reinterpret_as_time64,
+    ),
+}
+
+
+def _temporal_vector(column, literals):
+    """The VALUES column `column` as a temporal vector built from its literals'
+    physical values. Every non-NULL literal must carry exactly the column's type —
+    the physical value only means anything in its own unit, so a literal in another
+    unit (or a value not in physical form) would be read at the wrong scale. That is
+    a planner fault, raised rather than guessed around."""
+    from opteryx.exceptions import InvalidInternalStateError
+
+    column_type = column.schema_column.column_type
+    make_ints, reinterpret = _TEMPORAL_FROM_PHYSICAL[column_type.physical]
+    values = []
+    for literal in literals:
+        if literal is None or literal.value is None:
+            values.append(None)
+            continue
+        if literal.type != column_type or not isinstance(literal.value, Integral):
+            raise InvalidInternalStateError(
+                f"VALUES column `{column.schema_column.name}` is {column_type}, but a "
+                f"row carries {literal.value!r} typed {literal.type} — a temporal "
+                "VALUES cell must arrive as a physical value of the column's own type."
+            )
+        values.append(int(literal.value))
+    vector = reinterpret(make_ints(values))
+    if column_type.logical is not None:
+        _draken_native.vector_attach_logical_type(vector, column_type.logical)
+    return vector
+
+
 def _values(step):
-    rows = [tuple(value.value for value in values) for values in step.values]
-    return _build_morsel_from_rows(step.columns, rows)
+    column_names, column_types = _column_metadata(step.columns)
+    vectors = []
+    for index, column in enumerate(step.columns):
+        # A row shorter than the column list reads NULL for the missing cells.
+        literals = [row[index] if index < len(row) else None for row in step.values]
+        if column_types[index] in _TEMPORAL_FROM_PHYSICAL:
+            vectors.append(_temporal_vector(column, literals))
+            continue
+        values = [None if literal is None else literal.value for literal in literals]
+        dtype = _resolve_column_dtype(column_types[index], values)
+        vectors.append(vector_from_sequence(values, dtype=dtype))
+    return Morsel.from_vectors(column_names, vectors)
 
 
 

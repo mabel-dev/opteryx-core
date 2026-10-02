@@ -164,6 +164,9 @@ _RETURN_TO_TY: Dict[str, Optional[Ty]] = {
     # Resolved from argument 0.
     "same as `num`": None,
     "same as `value`": None,
+    # The string transforms keep their input's string type (REVERSE, TRIM, PAD, ...).
+    "same as `string`": None,
+    "same as `str`": None,
     "compatible input type": None,
     # Genuinely not knowable from the signature.
     "IPV4": Ty.UNKNOWN,

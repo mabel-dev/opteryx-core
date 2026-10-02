@@ -203,3 +203,51 @@ def test_sub_keys_compare_decoded_like_yyjson():
         "c->>'x\"y'": [None, "q", None],
         "c->>'a/b'": [None, None, "slash"],
     }
+
+
+# --- intern_nested_text (EXPERIMENT 2026-10-02): a repetitive `->>` column is built
+# Dict-shaped in the scan. Values and NULLs must be identical to the dense build.
+
+
+def _low_card_lines(n):
+    # Every rendering kind, repeated: plain, escaped (and an escape-alias of a plain value,
+    # which must intern to the SAME entry), non-ASCII, the string "null", JSON null, absent,
+    # numbers, literals, containers.
+    shapes = [
+        r'"app.bsky.feed.like"', r'"app.bsky.feed.post"', r'"app.bsky.feed.post"',
+        r'"esc \"q\" \n"', r'"é中😀"', r'"null"', "null", None, "12", "1.10", "true",
+        r'{"a":[1, "s\/"]}', "[ ]", r'"a-much-longer-than-twelve-bytes-value"', r'""',
+    ]
+    out = []
+    for i in range(n):
+        s = shapes[(i * 7) % len(shapes)]
+        out.append(('{"id":%d,"c":{%s"y":1}}' % (i, "" if s is None else '"x":%s,' % s)).encode())
+    return b"\n".join(out) + b"\n"
+
+
+@pytest.mark.parametrize("n", [300, 3_000, 300_000])
+def test_interned_text_matches_dense(n):
+    data = _low_card_lines(n)
+    dense = read_jsonl(data, columns=["c->>'x'"], fail_on_error=True)["columns"][0]
+    interned = read_jsonl(data, columns=["c->>'x'"], fail_on_error=True, intern_nested_text=True)["columns"][0]
+    assert interned.to_pylist() == dense.to_pylist()
+    assert dense.is_dense
+    # 12 distinct rendered values (15 shapes, less JSON null and absent, less the escape
+    # alias, which shares "app.bsky.feed.post"'s entry).
+    assert interned.data_length == 12 and interned.is_dict
+
+
+def test_interned_text_high_cardinality_falls_back_dense():
+    data = b"".join(b'{"c":{"x":"v%d"}}\n' % i for i in range(50_000))
+    col = read_jsonl(data, columns=["c->>'x'"], intern_nested_text=True)["columns"][0]
+    assert col.is_dense
+    assert col.to_pylist() == ["v%d" % i for i in range(50_000)]
+
+
+def test_interned_text_reports_the_first_bad_row():
+    rows = [b'{"c":{"x":"v%d"}}' % (i % 5) for i in range(300_000)]
+    rows[200_000] = b'{"c":{"x":2x}}'
+    rows[70_001] = b'{"c":{"x":1x}}'
+    with pytest.raises(RuntimeError, match="row 70001"):
+        read_jsonl(b"\n".join(rows) + b"\n", columns=["c->>'x'"], fail_on_error=True,
+                   intern_nested_text=True)

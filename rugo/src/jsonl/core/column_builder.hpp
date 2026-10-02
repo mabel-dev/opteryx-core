@@ -147,6 +147,12 @@ struct ParsedColumn {
     DrakenStringSlot* slots    = nullptr;          // string slots (own_string)
     uint8_t*          arena    = nullptr;
     size_t            arena_len = 0;
+    // Dict-shaped string column (ParseContext::intern_nested_text): `slots` holds
+    // `data_length` UNIQUE values and `codes` (draken_malloc'd, `length` entries) is the
+    // per-row selection. A NULL row is a validity bit; its code is 0 and never read.
+    // nullptr = dense (slots has `length` entries).
+    uint32_t*         codes    = nullptr;
+    uint32_t          data_length = 0;
 
     // ARRAY-only fields (type == DRAKEN_ARRAY): child element buffers, one parent-offset
     // pair per row. Child is EITHER a string-family vector (child_slots/child_arena, when

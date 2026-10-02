@@ -6060,6 +6060,7 @@ class _Compiler:
         by the same code read_jsonl uses, and where each file is read from — local
         paths are mapped, http(s) URLs and public gs:// / s3:// objects are fetched
         with no credentials (JsonlReadNode.native_file_locations)."""
+        from opteryx import config
         from opteryx.connectors.jsonl_io import DEFAULT_CHUNK_SIZE
         from opteryx.operators._operators import JsonlScanPlan
         from rugo.rugo_native import jsonl_is_nested_column
@@ -6081,6 +6082,7 @@ class _Compiler:
             fail_on_error=scan.jsonl_fail_on_error,
             infer_schema=scan.jsonl_infer_schema,
             infer_sample_size=scan.jsonl_infer_sample_size,
+            intern_nested_text=not config.features.disable_jsonl_nested_dict,
         )
         plan = JsonlScanPlan(
             context,

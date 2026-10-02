@@ -110,6 +110,7 @@ def _make(
     cost: float = 1.0,
     summary: str = "",
     documentation: str | None = None,
+    return_spec: ReturnSpec | None = None,
 ) -> FunctionDefinition:
     """
     Central helper to construct a FunctionDefinition with a single overload.
@@ -120,6 +121,9 @@ def _make(
     Usage examples:
       _make("FOO", callable_ref, LogicalCategory.VARCHAR, (ParameterSpec(...),), cost=2.0)
       _make("NOW", LogicalCategory.TIMESTAMP, summary="Current timestamp.")
+
+    `return_spec` replaces the fixed return type for a function whose result type
+    is not a constant (pass `None` as the return type alongside it).
     """
     # Distinguish calling form: callable_or_ret is a callable -> full form,
     # otherwise it's the return-type shorthand.
@@ -131,6 +135,11 @@ def _make(
         callable_ref = lambda *a: None
         ret = callable_or_ret
         params = () if maybe_ret is None else maybe_ret
+
+    if return_spec is None:
+        return_spec = ReturnSpec(mode="fixed", fixed_type=ret)
+    elif ret is not None:
+        raise ValueError(f"_make({name}): pass a return type OR a return_spec, not both")
 
     if deterministic is None:
         deterministic = volatility == "immutable"
@@ -157,7 +166,7 @@ def _make(
             FunctionOverload(
                 id=overload_id,
                 parameters=params,
-                return_spec=ReturnSpec(mode="fixed", fixed_type=ret),
+                return_spec=return_spec,
                 kernel=KernelSpec(
                     engine=engine,
                     id=kernel_id or "default",

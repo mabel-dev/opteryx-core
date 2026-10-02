@@ -75,6 +75,9 @@ from opteryx.types.logical_type import (
     NULL as _CT_NULL,
 )
 from opteryx.types.logical_type import (
+    NVARCHAR as _CT_NVARCHAR,
+)
+from opteryx.types.logical_type import (
     TIME as _CT_TIME,
 )
 from opteryx.types.logical_type import (
@@ -993,6 +996,11 @@ def cast(branch, alias: Optional[List[str]] = None, key=None, *, plan_context):
     )
     if _base_target == "ARRAY":
         _fold_target = _source_category in (LogicalCategory.ARRAY, LogicalCategory.NULL)
+    elif _base_target == "NVARCHAR":
+        # A NULL source has no bytes to validate and no runtime kernel (the CAST
+        # node's NVARCHAR arm is string-sourced), so it folds to a typed null —
+        # `_materialise_constant_literal` builds the NVARCHAR null constant.
+        _fold_target = _source_category == LogicalCategory.NULL
     else:
         _fold_target = _base_target not in ("NVARCHAR", "DECIMAL")
 
@@ -1506,12 +1514,14 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
     # vector (data==NULL, validity==NULL ⇒ all-valid) and read as a garbage
     # string arena by concat/LIKE, emitting non-null junk. Stamp the resolved
     # string-family ColumnType so the constant materialises as a typed null
-    # string. NVARCHAR/DECIMAL never reach here (routed to the runtime CAST
-    # node). NUMERIC targets are stamped too — see the branch below for why the
+    # string. DECIMAL never reaches here (routed to the runtime CAST node), and
+    # NVARCHAR reaches here ONLY with a NULL source. NUMERIC targets are stamped too — see the branch below for why the
     # "kernels short-circuit on DRAKEN_NULL" reasoning did not hold for them.
     if _node_cat == LogicalCategory.NULL:
         if target_type.replace("TRY_", "") == "VARCHAR":
             return Literal(value=None, type=_CT_VARCHAR, alias=alias, arena=literal_node.arena)
+        if target_type.replace("TRY_", "") == "NVARCHAR":
+            return Literal(value=None, type=_CT_NVARCHAR, alias=alias, arena=literal_node.arena)
         if target_type.replace("TRY_", "") == "ARRAY":
             # CAST(NULL AS ARRAY<E>) is NULL — but a *typed* NULL. The untyped NULL would
             # drop the declared element type, leaving a UNION arm or a projection with

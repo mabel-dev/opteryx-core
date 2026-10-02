@@ -204,6 +204,11 @@ inline void build_column(rugo::_jsonl::ParsedColumn& pc, CxxColumn& out) {
         out.view = out.own->vec;
         return;
     }
+    if (pc.is_string && pc.codes != nullptr) {
+        emit_dict_string_column(pc.slots, pc.data_length, pc.arena, pc.arena_len, pc.codes,
+                                pc.length, pc.validity, pc.type, out);
+        return;
+    }
     if (pc.is_string) {
         emit_dense_string_column(pc.slots, pc.length, pc.arena, pc.arena_len, pc.validity,
                                  pc.type, out);

@@ -82,6 +82,7 @@ cdef extern from "core/parse_context.hpp" namespace "rugo::_jsonl":
         bint parse_arrays
         bint parse_objects
         bint fail_on_error
+        bint intern_nested_text
 
 
 cdef extern from "core/markers.hpp" namespace "rugo::_jsonl":
@@ -243,6 +244,7 @@ cdef dict _fill_parse_context(
     parse_arrays,
     parse_objects,
     fail_on_error,
+    intern_nested_text,
 ):
     """Build `context` from read_jsonl's arguments, validating every one EAGERLY — before
     any bytes are read. The ONE place a JSONL ParseContext is built from Python values:
@@ -331,6 +333,7 @@ cdef dict _fill_parse_context(
     context.parse_arrays = parse_arrays
     context.parse_objects = parse_objects
     context.fail_on_error = fail_on_error
+    context.intern_nested_text = intern_nested_text
     return declared_schema
 
 
@@ -349,6 +352,7 @@ def prepare_jsonl_context(
     parse_arrays=True,
     parse_objects=True,
     fail_on_error=True,
+    intern_nested_text=False,
 ):
     """Plan-time half of a native JSONL scan: validate read_jsonl's arguments and build
     the C++ ParseContext ONCE, through the same code read_jsonl uses, returned as a
@@ -358,7 +362,7 @@ def prepare_jsonl_context(
     try:
         _fill_parse_context(
             context, columns, predicates, explicit_schema, infer_schema, infer_sample_size,
-            parse_arrays, parse_objects, fail_on_error
+            parse_arrays, parse_objects, fail_on_error, intern_nested_text
         )
     except BaseException:
         del context
@@ -377,7 +381,8 @@ def read_jsonl(
     parse_objects=True,
     fail_on_error=True,
     use_threads=True,
-    use_prefilter=True
+    use_prefilter=True,
+    intern_nested_text=False,
 ):
     """
     Read JSONL data into Draken vectors with projection and predicate pushdown.
@@ -447,7 +452,7 @@ def read_jsonl(
 
     declared_schema = _fill_parse_context(
         &context, columns, predicates, explicit_schema, infer_schema, infer_sample_size,
-        parse_arrays, parse_objects, fail_on_error
+        parse_arrays, parse_objects, fail_on_error, intern_nested_text
     )
 
     try:

@@ -9,8 +9,8 @@ make tpcds-sf001         (17.8s)     (29-SEP) [1 fails (Q51)] [SF001]
 make medicare1           (202.6ms)   (26-SEP) [1.17x]
 make job                 (5946.2ms)  (29-SEP) [0.88x] (33c)
 make h2o                 (33.2s)     (26-SEP) [medium]
-make jsonbench-10-jsonl  (1929.9ms)  (02-OCT) [10m] [0.74x]
-make jsonbench-10-zstd   (2826.7ms)  (02-OCT) [10m] [1.09x]
+make jsonbench-10-jsonl  (1738.3ms)  (02-OCT) [10m] [0.67x]
+make jsonbench-10-zstd   (2618.8ms)  (02-OCT) [10m] [1.01x]
 make dash                (122.3ms)   (01-OCT) [1.35x]
 make signals             (0.6s)      (25-SEP)
 

@@ -70,6 +70,10 @@ struct ParseContext {
     // (identical raw-JSON-text storage either way — only the type tag differs).
     bool parse_objects = true;
     bool fail_on_error = true;  // Raise on malformed JSON or warn and continue
+    // intern_nested_text: a nested `->>` column is built Dict-shaped (unique values +
+    // per-row codes) when the chunk's values repeat enough, dense otherwise. EXPERIMENT
+    // (2026-10-02), A/B'd through FEATURE_DISABLE_JSONL_NESTED_DICT.
+    bool intern_nested_text = false;
 };
 
 }  // namespace rugo::_jsonl
