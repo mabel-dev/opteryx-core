@@ -1077,6 +1077,9 @@ extensions = [
             "rugo/src",                  # declared_type.hpp / predicate_literal.hpp (JSONL core)
             "rugo/src/jsonl/core",       # NativeJsonlScanSource's rugo JSONL core
             "third_party/miniz",         # miniz_tinfl.h (compressed JSONL: gzip)
+            # The vector index builder (src/cpp/engine/vector_index_build.hpp) runs
+            # draken/ops/ann, which converts fp16 via <fp16/fp16.h>.
+            "third_party/usearch/fp16/include",
         ]
         + _curl_include_dirs
         + _openssl_include_dirs,

@@ -128,12 +128,18 @@ struct RecordSet {
 // positions); range_start must be the start of a line (0, or one past a newline). Every
 // line in the range is judged on its own: one that is not exactly one object is rejected
 // whole (see MapBuilder's line discipline), so a range can be cut at any newline.
+//
+// `lines` (the raw prefilter's survivors, prefilter_lines): when given, `markers` cover
+// ONLY these lines — ascending, each a whole line of the range — and the bytes between
+// them are not part of the input. Each line is begun at its own start, so the skipped
+// bytes are never judged by the line discipline, and the range ends with the last line.
 RecordSet build_map(
     const uint8_t* buffer,
     size_t buffer_length,
     const std::vector<MarkerPosition>& markers,
     const MapProjection* proj = nullptr,
-    size_t range_start = 0
+    size_t range_start = 0,
+    const std::vector<LineSpan>* lines = nullptr
 );
 
 // Collect the union of keys across the RecordSet's first `sample_records` records, in

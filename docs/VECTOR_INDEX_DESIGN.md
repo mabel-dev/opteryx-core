@@ -900,7 +900,33 @@ all pass.
   - **C1 gaps fixed here:** `drop_dataset` left the `indexes` subcollection behind (a
     same-named new table would inherit the definitions), and `rename_dataset` moved neither
     the index files nor the definitions. Both now do, with tests.
-- **Next:** C2b, the native build operator.
+- **C2b build, steps 1-4 delivered 2026-10-02** (order from the independent review; sizing
+  premise corrected: the 4 GB file target is LOGICAL bytes, ~5.8M NVD-like rows per file):
+  - *Streaming skene writer:* `FileWriter::begin(options, OutputStream*, prefix)` streams the
+    lead column, stages the rest in memory, returns head + lead directory as a separate
+    prefix; file = prefix ‖ body, byte-identical to the buffered writer (no format change;
+    `skene/tests/test_streaming_writer.cpp`).
+  - *IVF split:* `ivf_plan` / `ivf_train` / `ivf_assign` / `ClusterStream`; `ivf_build`
+    bit-identical to its pre-split output (golden hashes in `test_vector_ann.py`).
+  - *Native per-file builder* (`src/cpp/engine/vector_index_build.hpp`, entry points in
+    `opteryx/operators/vector_index_build/`): footer via rugo, text column through rugo's
+    `ParquetIOPipeline` + the scan's `NativeScanColumnBuilder`, sample pass with a row mask,
+    full pass with deleted rows masked out, physical ordinals, `str_slice` batches into
+    `draken_embed`, `ClusterStream` into the streaming writer; centroids file in memory.
+    Deterministic for any thread count. Real MiniLM on NVD (335,085 rows): 410 s, 817 rows/s,
+    peak RSS 1.05 GiB, 966 row groups / 579 clusters.
+  - *Embedding batch = 1 (measured):* batching was both the memory blow-up (+10 GiB at
+    64 rows x 12 threads — working set ~ batch x seq^2, not the ORT arena) and the slowness:
+    batch 1 = 1207 rows/s on M5 (417 at 64), 356 on the x86 box (134 at 64).
+  - *GCS body:* `HttpClient::put` + `GcsResumableBody` (native chunked PUT to a session URI,
+    resume from the offset the session reports); `build_vector_index_to_session`. The
+    catalog's `GcsFileIO` gains `open_upload_session`, `cancel_upload_session` and `compose`.
+    Tested against a strict local stand-in of the resumable protocol with 503/429/500 and
+    partial commits: prefix + streamed body is byte-identical to the local build.
+- **Next:** step 5, `REFRESH INDEX n ON t` (aside grammar) on the OPTIMIZE precedent: plan
+  the unindexed files, take the lease, per file: open session → native build → upload
+  prefix + centroids → compose → `index-build` commit with sizes; renew the lease between
+  files. Then compaction carry (6) and the D2 reader (7).
 
 | Step | Work | Gate |
 |---|---|---|

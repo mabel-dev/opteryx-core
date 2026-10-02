@@ -61,19 +61,26 @@ InterpreterResult interpret_jsonl(
     const std::vector<MarkerPosition>& markers,
     const ParseContext& context,
     OrdinalPredictor& predictor,  // Updated in-place
-    size_t range_start = 0
+    size_t range_start = 0,
+    const std::vector<LineSpan>* lines = nullptr  // prefilter survivors — see build_map
 );
 
 
 // Multithreaded scan + interpret: splits the buffer into newline-aligned ranges,
 // processes each on a thread pool, and merges the records in order. max_threads == 0
 // uses hardware_concurrency. No intermediate copies — all ranges share one buffer.
+//
+// use_prefilter: run the raw Volnitsky prefilter (jsonl_reader.hpp) INSIDE each range
+// task. The gate decides once, on the buffer's head; then every task finds the surviving
+// lines of its own range (prefilter_lines) and scans only those, in place — the prefilter
+// runs on every thread, and nothing is copied.
 InterpreterResult interpret_jsonl_threaded(
     const uint8_t* buffer_data,
     size_t buffer_length,
     const ParseContext& context,
     OrdinalPredictor& predictor,
-    size_t max_threads = 0
+    size_t max_threads = 0,
+    bool use_prefilter = false
 );
 
 }  // namespace rugo::_jsonl

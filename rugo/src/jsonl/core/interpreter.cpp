@@ -708,20 +708,39 @@ struct MapBuilder {
 };
 }  // namespace
 
-RecordSet build_map(
+namespace {
+
+// The driver, specialised at compile time on whether the prefilter's line spans are
+// present: the per-marker line-entry check exists only in the kLines instantiation, so
+// the unfiltered scan's hot loop is exactly what it was.
+template <bool kLines>
+RecordSet build_map_impl(
     const uint8_t* buffer,
     size_t buffer_length,
     const std::vector<MarkerPosition>& markers,
     const MapProjection* proj,
-    size_t range_start) {
+    size_t range_start,
+    const std::vector<LineSpan>* lines) {
     MapBuilder b(buffer, static_cast<uint32_t>(buffer_length), proj);
-    b.begin_line(static_cast<uint32_t>(range_start));
+    // With `lines` the input is those lines only: the first is begun at its own start (no
+    // lines: at the range end, so the empty input judges nothing).
+    const size_t L = kLines ? lines->size() : 0;
+    size_t li = 0;
+    if constexpr (kLines) b.begin_line(L ? (*lines)[0].start : static_cast<uint32_t>(buffer_length));
+    else                  b.begin_line(static_cast<uint32_t>(range_start));
     b.rs.offsets.reserve(markers.size() / 20 + 2);
     b.rs.spans.reserve(markers.size() / 3 + 1);
     const size_t M = markers.size();
     const uint8_t NL = static_cast<uint8_t>(MarkerType::NEWLINE);
     for (size_t i = 0; i < M; ++i) {
         const uint32_t pos = markers[i].position;
+        // Entering a later surviving line: begin it at its own start. The line before it
+        // was already closed by its own newline marker (a line's markers always include
+        // its newline; only the range's last line can lack one, and nothing follows it),
+        // so this only moves the line start past the bytes the prefilter skipped.
+        if constexpr (kLines) {
+            while (li + 1 < L && pos >= (*lines)[li + 1].start) b.begin_line((*lines)[++li].start);
+        }
         const uint8_t ch = buffer[pos];
         // A value-position '[' or '{' opens a container. Bound it with a string- and
         // escape-aware byte scan (interior commas/brackets must not truncate it), emit
@@ -811,10 +830,29 @@ RecordSet build_map(
             }
         }
     }
+    // The last surviving line was closed by its newline; the bytes after it, to the range
+    // end, were skipped by the prefilter and are not input.
+    if constexpr (kLines) {
+        if (L == 0 || (*lines)[L - 1].end < buffer_length)
+            b.begin_line(static_cast<uint32_t>(buffer_length));
+    }
     b.finish();
     if (b.malformed_found) { b.rs.malformed = true; b.rs.malformed_pos = b.malformed_at; }
     b.rs.malformed_count = b.malformed_count;
     return std::move(b.rs);
+}
+
+}  // namespace
+
+RecordSet build_map(
+    const uint8_t* buffer,
+    size_t buffer_length,
+    const std::vector<MarkerPosition>& markers,
+    const MapProjection* proj,
+    size_t range_start,
+    const std::vector<LineSpan>* lines) {
+    return lines ? build_map_impl<true>(buffer, buffer_length, markers, proj, range_start, lines)
+                 : build_map_impl<false>(buffer, buffer_length, markers, proj, range_start, nullptr);
 }
 
 std::vector<std::string> sample_record_keys(

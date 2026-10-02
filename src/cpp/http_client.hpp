@@ -192,6 +192,29 @@ public:
     );
 
     /**
+     * Perform one HTTP PUT of `size` bytes from `data` (thread-safe; own easy handle).
+     *
+     * Unlike get()/head(), a non-2xx status is NOT an error here: a GCS resumable
+     * upload answers every in-progress chunk with 308, and only the caller can say
+     * which statuses mean what. Throws HttpError only when no response arrived
+     * (transport failure), marked retryable when curl says so.
+     *
+     * @return the status, the response headers (lower-case keys) and the body
+     */
+    struct PutResponse {
+        long                               status = 0;
+        std::map<std::string, std::string> headers;
+        std::vector<uint8_t>               body;
+    };
+    PutResponse put(
+        const std::string& url,
+        const uint8_t* data,
+        size_t size,
+        const std::map<std::string, std::string>& headers,
+        long timeout_ms
+    );
+
+    /**
      * Perform multiple HTTP GET requests concurrently (single-threaded CURLM).
      *
      * Drives the calling thread's persistent CURLM* event loop — never shared

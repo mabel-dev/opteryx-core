@@ -157,7 +157,8 @@ cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
         size_t buffer_length,
         const ParseContext& context,
         OrdinalPredictor& predictor,
-        size_t max_threads
+        size_t max_threads,
+        bint use_prefilter
     ) except + nogil
 
 
@@ -179,12 +180,8 @@ cdef extern from "core/jsonl_reader.hpp" namespace "rugo::_jsonl":
         const uint8_t* buffer, size_t length,
         const uint8_t* needle, size_t needle_len
     ) nogil
-    # The prefilter gate and the malformed-record message live in C++ so the native
-    # engine scan (src/cpp/engine/native_jsonl_scan_source.hpp) shares them verbatim.
-    bint maybe_prefilter(
-        const uint8_t* buffer, size_t length, const ParseContext& context,
-        vector[uint8_t]& out
-    ) nogil
+    # The malformed-record message lives in C++ so the native engine scan
+    # (src/cpp/engine/native_jsonl_scan_source.hpp) shares it verbatim.
     string malformed_error_message(
         const uint8_t* buffer, size_t length, uint32_t offset
     ) nogil
@@ -436,8 +433,7 @@ def read_jsonl(
 
     # mmap state for the file-path case (freed in the finally below). `in_memory_data`
     # keeps whichever Python bytes object buf_data currently points into alive — the
-    # original in-memory input. `pf_buf` holds the prefilter's surviving lines when it
-    # applies.
+    # original in-memory input.
     cdef uint8_t* mapped_ptr = NULL
     cdef size_t mapped_len = 0
     cdef bint owns_mmap = False
@@ -446,9 +442,8 @@ def read_jsonl(
     cdef const char* c_path
     cdef bytes in_memory_data
     cdef const uint8_t[::1] buf_view
-    cdef vector[uint8_t] pf_buf
-    cdef bint pf_applied = False
     cdef Codec codec
+    cdef bint run_prefilter = use_prefilter
 
     declared_schema = _fill_parse_context(
         &context, columns, predicates, explicit_schema, infer_schema, infer_sample_size,
@@ -513,34 +508,20 @@ def read_jsonl(
             with nogil:
                 column_names_cpp = discover_column_names(buf_data, buf_len, context)
 
-        # Sparser-style raw prefilter: for a selective string-equality predicate, drop
-        # records that cannot contain the value before any structural parsing. Sound by
-        # construction (value-anchored needle), self-disabling on short/non-selective
-        # filters; the predicate is still applied downstream, so false positives are
-        # verified away. Only ever touches bounded samples of buf, not the whole thing.
-        if use_prefilter and buf_len > 0:
-            with nogil:
-                pf_applied = maybe_prefilter(buf_data, buf_len, context, pf_buf)
-            if pf_applied:
-                # Prefilter produced a fresh, smaller buffer — the mmap'd file (if any) is
-                # no longer needed for parsing, so release it now rather than holding the
-                # mapping open for the rest of the call. An EMPTY survivor set means no
-                # record can match: buf_len 0 reads as zero rows.
-                if owns_mmap:
-                    with nogil:
-                        unmap_memory_c(mapped_ptr, mapped_len)
-                    owns_mmap = False
-                buf_data = pf_buf.data()
-                buf_len = pf_buf.size()
-
         if buf_len > 0:
             # Parallel scan + document map: the buffer is split into newline-aligned
             # ranges processed across a thread pool, then merged in order. (Per range
             # it still does SIMD-scan -> markers -> state machine; fusing those two
             # into one pass measured ~25% slower, so they stay decoupled.)
+            #
+            # Sparser-style raw prefilter (use_prefilter): for a selective
+            # string-equality predicate, each range task drops the lines that cannot
+            # match before scanning them — in place, on every thread (see
+            # interpret_jsonl_threaded). Sound by construction, self-disabling on
+            # short/non-selective filters; the predicates are still applied downstream.
             with nogil:
                 interp_result = interpret_jsonl_threaded(
-                    buf_data, buf_len, context, predictor, 0
+                    buf_data, buf_len, context, predictor, 0, run_prefilter
                 )
 
             result['malformed_count'] = interp_result.all_records.malformed_count

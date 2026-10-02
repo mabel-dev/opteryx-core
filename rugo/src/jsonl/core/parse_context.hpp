@@ -37,6 +37,13 @@ struct Predicate {
     bool    pred_parsed_bool = false;
 };
 
+// One line of the buffer, [start, end): `end` is the position of its newline, or the end
+// of the buffer/range for a final line without one. Absolute positions, like markers.
+struct LineSpan {
+    uint32_t start;
+    uint32_t end;
+};
+
 // Parse context: projection, predicates, schema (immutable per Reader session)
 struct ParseContext {
     // Projection: which columns to extract (empty = all columns)

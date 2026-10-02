@@ -1,5 +1,6 @@
 #include "field_span.hpp"
 #include "interpreter.hpp"
+#include "jsonl_reader.hpp"   // choose_prefilter_needle, prefilter_lines
 #include "nested_column.hpp"
 #include "structural_scan.hpp"
 #include "value_parser.hpp"
@@ -195,7 +196,8 @@ InterpreterResult interpret_jsonl(
     const std::vector<MarkerPosition>& markers,
     const ParseContext& context,
     OrdinalPredictor& /*predictor*/,
-    size_t range_start) {
+    size_t range_start,
+    const std::vector<LineSpan>* lines) {
 
     InterpreterResult result;
     if (buffer_length == 0) { result.bytes_consumed = 0; return result; }
@@ -303,7 +305,7 @@ InterpreterResult interpret_jsonl(
         }
     }
 
-    auto all_records = build_map(buffer_data, buffer_length, markers, proj_ptr, range_start);
+    auto all_records = build_map(buffer_data, buffer_length, markers, proj_ptr, range_start, lines);
 
     // bytes_consumed = byte after the last newline (backward scan — newline near the end).
     result.bytes_consumed = 0;
@@ -314,6 +316,8 @@ InterpreterResult interpret_jsonl(
         }
     }
     if (result.bytes_consumed == 0 && all_records.num_records() > 0) result.bytes_consumed = buffer_length;
+    // Prefiltered: the skipped lines were consumed too — the range is done.
+    if (lines) result.bytes_consumed = buffer_length;
 
     finalize_records(result, all_records, buffer_data, context, prepared_predicates);
     return result;
@@ -329,10 +333,17 @@ InterpreterResult interpret_jsonl_threaded(
     size_t buffer_length,
     const ParseContext& context,
     OrdinalPredictor& predictor,
-    size_t max_threads) {
+    size_t max_threads,
+    bool use_prefilter) {
 
     InterpreterResult result;
     if (buffer_length == 0) { result.bytes_consumed = 0; return result; }
+
+    // The prefilter gate decides ONCE, from bounded samples of the head; each range task
+    // then finds its own surviving lines (see run_range).
+    PrefilterNeedle needle;
+    const bool prefilter =
+        use_prefilter && choose_prefilter_needle(buffer_data, buffer_length, context, needle);
 
     // Adaptive masking: the masked scan drops in-string structurals (fewer FSM steps) but
     // costs ~1.4× scan, so it only nets out at high in-string density (stringified-JSON-ish
@@ -351,10 +362,47 @@ InterpreterResult interpret_jsonl_threaded(
     size_t max_chunks = std::max<size_t>(1, buffer_length / MIN_CHUNK);
     nt = std::min(nt, max_chunks);
 
+    // Scan + interpret one newline-aligned range [s, e), markers at ABSOLUTE positions into
+    // the shared buffer. Prefiltered: find the range's surviving lines and scan only those
+    // (each with its newline, so build_map closes every line itself); build_map begins each
+    // line at its own start, so the skipped bytes are never parsed or judged.
+    const uint8_t* lut = structural_lut();
+    auto run_range = [&](size_t s, size_t e) -> InterpreterResult {
+        std::vector<MarkerPosition> markers;
+        std::vector<LineSpan> lines;
+        // `base` is a by-value constant of each scan's emit: a mutable offset shared by
+        // reference would be reloaded after every marker store (it could alias the
+        // vector's writes), in the hottest loop of the read.
+        auto scan = [&](size_t from, size_t to) {
+            const uint32_t base = static_cast<uint32_t>(from);
+            auto emit = [&markers, lut, base](uint32_t pos, uint8_t ch) {
+                markers.push_back(MarkerPosition(pos + base, static_cast<MarkerType>(lut[ch] - 1)));
+            };
+            if (use_masked) scan_structural_masked(buffer_data + from, to - from, emit);
+            else            scan_structural(buffer_data + from, to - from, emit);
+        };
+        if (prefilter) {
+            lines = prefilter_lines(buffer_data, s, e,
+                                    reinterpret_cast<const uint8_t*>(needle.needle.data()),
+                                    needle.needle.size(), needle.keep_unicode_escapes);
+            size_t bytes = 0;
+            for (const LineSpan& l : lines) bytes += l.end - l.start + 1;
+            markers.reserve(bytes / 3);
+            for (const LineSpan& l : lines) scan(l.start, l.end < e ? l.end + 1 : e);
+        } else {
+            markers.reserve((e - s) / 3);
+            scan(s, e);
+        }
+        OrdinalPredictor local_pred;  // interpret does not use it; keep thread-local
+        // [s, e) is this range: build_map judges its first and last lines against the
+        // range bounds, not the whole buffer's.
+        return interpret_jsonl(buffer_data, e, markers, context, local_pred, s,
+                               prefilter ? &lines : nullptr);
+    };
+
     if (nt <= 1) {
         // Small input — single-threaded scan + interpret.
-        auto markers = scan_structural_markers(buffer_data, buffer_length, use_masked);
-        return interpret_jsonl(buffer_data, buffer_length, markers, context, predictor);
+        return run_range(0, buffer_length);
     }
 
     // Newline-aligned ranges. Each range ends just after a newline, so every range
@@ -387,22 +435,7 @@ InterpreterResult interpret_jsonl_threaded(
         futs.reserve(nc);
         for (size_t c = 0; c < nc; ++c) {
             futs.push_back(pool.submit_task([&, c]() {
-                const size_t s = ranges[c].first;
-                const size_t e = ranges[c].second;
-                // Scan this range with ABSOLUTE positions into the shared buffer.
-                std::vector<MarkerPosition> markers;
-                markers.reserve((e - s) / 3);
-                const uint8_t* lut = structural_lut();
-                auto emit = [&](uint32_t pos, uint8_t ch) {
-                    markers.push_back(MarkerPosition(static_cast<uint32_t>(pos + s),
-                                                     static_cast<MarkerType>(lut[ch] - 1)));
-                };
-                if (use_masked) scan_structural_masked(buffer_data + s, e - s, emit);
-                else            scan_structural(buffer_data + s, e - s, emit);
-                OrdinalPredictor local_pred;  // interpret does not use it; keep thread-local
-                // [s, e) is this range: build_map judges its first and last lines against
-                // the range bounds, not the whole buffer's.
-                partial[c] = interpret_jsonl(buffer_data, e, markers, context, local_pred, s);
+                partial[c] = run_range(ranges[c].first, ranges[c].second);
             }));
         }
         // Drain EVERY future before propagating: a range can throw (a predicate literal

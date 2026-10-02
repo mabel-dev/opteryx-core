@@ -4365,6 +4365,7 @@ include "read/read.pyx"
 
 include "data_file_stream/data_file_stream.pyx"
 include "compaction_commit/compaction_commit.pyx"
+include "vector_index_build/vector_index_build.pyx"
 include "csv_read/csv_read.pyx"
 include "explain/explain.pyx"
 include "function_dataset/function_dataset.pyx"

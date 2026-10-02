@@ -68,10 +68,11 @@ JSONL_SUPPORTED_TYPES = {
 }
 
 # Comparison ops rugo's (column, op, value) predicate tuples can express
-# (rugo/src/jsonl/_jsonl_reader.pxi: op in ['==', '!=', '<', '<=', '>', '>=']).
-# Maps Opteryx's COMPARISON_OPERATOR.value names to rugo's operator strings --
-# note these are NOT the same strings as PredicatePushable.OPS_XLAT uses for
-# other connectors (e.g. "=" there vs "==" here).
+# (rugo/src/jsonl/_jsonl_reader.pxi _JSONL_OPS). Maps Opteryx's
+# COMPARISON_OPERATOR.value names to rugo's operator strings -- note these are
+# NOT the same strings as PredicatePushable.OPS_XLAT uses for other connectors
+# (e.g. "=" there vs "==" here). InList/NotInList carry the literal's tuple of
+# members as the value; rugo evaluates them as any-EQ / all-NE, NULL cell => no row.
 JSONL_OP_XLAT = {
     "Eq": "==",
     "NotEq": "!=",
@@ -79,14 +80,21 @@ JSONL_OP_XLAT = {
     "GtEq": ">=",
     "Lt": "<",
     "LtEq": "<=",
+    "InList": "in",
+    "NotInList": "not in",
 }
+
+# IN-list ops: the list literal is always the RIGHT operand (`column IN (...)`),
+# so these have no `literal OP column` mirror form.
+_JSONL_LIST_OPS = {"InList", "NotInList"}
 
 
 class JsonlPredicatePushable(PredicatePushable):
     """Predicate-pushdown capability for READ_JSONL FunctionDataset nodes.
 
     Deliberately narrower than PredicatePushable's default ``can_push``: only
-    a plain ``column OP literal`` comparison with an op in JSONL_OP_XLAT is
+    a plain ``column OP literal`` comparison with an op in JSONL_OP_XLAT (for
+    IN / NOT IN, ``column IN (literal list)`` only) is
     representable as one of rugo's predicate tuples, so every other shape --
     BETWEEN, UNARY_OPERATOR (IsNull/IsEmpty/...), a boolean-valued FUNCTION --
     is rejected here rather than relying on PredicatePushable.can_push's
@@ -123,6 +131,8 @@ class JsonlPredicatePushable(PredicatePushable):
             return False
         if left.node_type == NodeType.IDENTIFIER and right.node_type == NodeType.LITERAL:
             ident = left
+        elif condition.value in _JSONL_LIST_OPS:
+            return False
         elif right.node_type == NodeType.IDENTIFIER and left.node_type == NodeType.LITERAL:
             ident = right
         else:

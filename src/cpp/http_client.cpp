@@ -677,6 +677,61 @@ std::map<std::string, std::string> HttpClient::head(
 }
 
 // ---------------------------------------------------------------------------
+// put() — one PUT; the status is the caller's to interpret (see the header)
+// ---------------------------------------------------------------------------
+
+HttpClient::PutResponse HttpClient::put(
+    const std::string& url,
+    const uint8_t* data,
+    size_t size,
+    const std::map<std::string, std::string>& headers,
+    long timeout_ms)
+{
+    CURL* easy = curl_easy_init();
+    if (!easy) throw std::runtime_error("curl_easy_init() failed");
+
+    ResponseBuffer buf;
+    curl_easy_setopt(easy, CURLOPT_URL,              url.c_str());
+    curl_easy_setopt(easy, CURLOPT_USERAGENT,        user_agent_.c_str());
+    curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,       timeout_ms);
+    curl_easy_setopt(easy, CURLOPT_CUSTOMREQUEST,    "PUT");
+    curl_easy_setopt(easy, CURLOPT_POSTFIELDS,       size ? reinterpret_cast<const char*>(data) : "");
+    curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(size));
+    curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION,    ResponseBuffer::write_body);
+    curl_easy_setopt(easy, CURLOPT_WRITEDATA,        &buf);
+    curl_easy_setopt(easy, CURLOPT_HEADERFUNCTION,   ResponseBuffer::write_headers);
+    curl_easy_setopt(easy, CURLOPT_HEADERDATA,       &buf);
+    configure_ssl(easy);
+    configure_share(easy);
+
+    struct curl_slist* hlist = nullptr;
+    for (const auto& kv : headers) {
+        std::string line = kv.first + ": " + kv.second;
+        hlist = curl_slist_append(hlist, line.c_str());
+    }
+    // No `Expect: 100-continue` round trip before a large body: the session URI has
+    // already accepted the upload, so waiting for permission only adds latency.
+    hlist = curl_slist_append(hlist, "Expect:");
+    curl_easy_setopt(easy, CURLOPT_HTTPHEADER, hlist);
+
+    CURLcode res = curl_easy_perform(easy);
+    long http_code = 0;
+    curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_slist_free_all(hlist);
+    curl_easy_cleanup(easy);
+
+    if (res != CURLE_OK) {
+        throw HttpError(std::string("CURL error: ") + curl_easy_strerror(res),
+                        curl_result_retryable(res), 0);
+    }
+    PutResponse out;
+    out.status = http_code;
+    out.headers = parse_headers(buf.headers_raw);
+    out.body = std::move(buf.body);
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // get_many() — concurrent batch GET via the calling thread's CURLM event loop
 //
 // Design:

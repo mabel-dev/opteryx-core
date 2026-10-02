@@ -31,6 +31,22 @@ PrefilterResult volnitsky_prefilter(
     const uint8_t* needle, size_t needle_len,
     bool keep_unicode_escapes = false);
 
+// The surviving lines of [from, to) under the same rule, as spans into `buffer` — no copy.
+// `from` must be a line start (0, or one past a newline). This is what the parser's range
+// tasks run (interpret_jsonl_threaded): each task finds its own range's lines and scans
+// only those, in place.
+std::vector<LineSpan> prefilter_lines(
+    const uint8_t* buffer, size_t from, size_t to,
+    const uint8_t* needle, size_t needle_len,
+    bool keep_unicode_escapes = false);
+
+// One prefilter needle: the bytes to search for, and whether `\u` lines must also be kept
+// (decoded-text comparison — see volnitsky_prefilter).
+struct PrefilterNeedle {
+    std::string needle;
+    bool keep_unicode_escapes = false;
+};
+
 // Gated Volnitsky raw prefilter over the pushed string-equality predicates. The pushed
 // predicates are AND-ed, so a record that fails any one of them is dropped regardless —
 // every eligible predicate is a sound filter on its own, and the MOST SELECTIVE one on the
@@ -39,9 +55,10 @@ PrefilterResult volnitsky_prefilter(
 //     needle is the quoted value (compared as raw bytes downstream, so its bytes are in
 //     every matching record);
 //   * nested `->>` column, string literal of >= 6 bytes drawn only from [A-Za-z0-9._:-]:
-//     the needle is the UNQUOTED value. `->>` compares decoded text, and a value of those
-//     bytes appears verbatim whether the field holds it as a string or as a number /
-//     boolean token — except when spelled with `\u` escapes, so those lines are kept too.
+//     `->>` compares decoded text, and a value of those bytes appears verbatim except when
+//     spelled with `\u` escapes, so those lines are kept too. The needle is the QUOTED
+//     value, unless the literal could be a JSON number / boolean token — then a matching
+//     field may hold it unquoted, and the needle is the bare value.
 // Returns true when prefiltering applies, with `out` holding the surviving candidate
 // lines (EMPTY when no record can match — the buffer then yields 0 rows); false when it
 // does not apply, and the caller keeps reading the original buffer. Only ever touches
@@ -49,6 +66,13 @@ PrefilterResult volnitsky_prefilter(
 // buffer, so it stays cheap over a multi-hundred-GB mapping. The predicates are
 // re-applied downstream so false positives are verified away. Self-disabling when no
 // predicate is eligible or the best one keeps more than 30% of the sampled records.
+//
+// choose_prefilter_needle is the gate alone: it decides from the bounded samples and
+// returns the needle, for callers that find the lines themselves (prefilter_lines).
+// maybe_prefilter is the gate plus a copy of the surviving lines into `out`, for callers
+// that parse a buffer of their own (the engine's per-chunk decode workers).
+bool choose_prefilter_needle(const uint8_t* buffer, size_t length, const ParseContext& context,
+                             PrefilterNeedle& out);
 bool maybe_prefilter(const uint8_t* buffer, size_t length, const ParseContext& context,
                      std::vector<uint8_t>& out);
 
