@@ -438,6 +438,15 @@ class RelationManagementNode(BasePlanNode):
         if action == "call_procedure":
             return object_message("called", "procedure", self.step.procedure_name)
 
+        if action == "vector_index_ddl":
+            verb = {"create": "created", "alter": "altered", "drop": "dropped"}[self.step.operation]
+            if self.step.operation == "alter":
+                return (
+                    f"set index {md_code(self.step.index_name)} on {md_code(self.step.relation_name)} "
+                    f"to build {self.step.index_options['build']}"
+                )
+            return f"{verb} index {md_code(self.step.index_name)} on {md_code(self.step.relation_name)}"
+
         raise InvalidInternalStateError(f"no receipt wording for relation action: {action}")
 
     def _apply(self, morsel=None, **kwargs) -> NonTabularResult:
@@ -846,6 +855,31 @@ class RelationManagementNode(BasePlanNode):
                 self.step.tag_name,
                 author=self._author,
             )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "vector_index_ddl":
+            step = self.step
+            if step.operation == "create":
+                step.connector.create_vector_index(
+                    step.relation_name,
+                    step.index_name,
+                    step.column_name,
+                    options=step.index_options,
+                    embedding_identity=step.embedding_identity,
+                    dimensions=step.embedding_dimensions,
+                    if_not_exists=bool(step.if_exists),
+                    author=self._author,
+                )
+            elif step.operation == "alter":
+                step.connector.alter_vector_index_build(
+                    step.relation_name, step.index_name, step.index_options["build"], author=self._author
+                )
+            elif step.operation == "drop":
+                step.connector.drop_vector_index(
+                    step.relation_name, step.index_name, bool(step.if_exists), author=self._author
+                )
+            else:
+                raise InvalidInternalStateError(f"unknown index operation {step.operation!r}")
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "rollback_relation":

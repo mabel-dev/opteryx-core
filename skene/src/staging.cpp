@@ -1,5 +1,7 @@
 #include "staging.h"
 
+#include "skene/format.h"   // kSectionAlign
+
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -58,6 +60,11 @@ Status Stage::open_file(const std::string& path) {
     return Status::ok();
 }
 
+void Stage::open_lead_stream(Sink* lead) {
+    file_mode_ = false;
+    lead_ = lead;
+}
+
 void Stage::close() {
     if (fd_ >= 0) {
         ::close(fd_);
@@ -71,6 +78,14 @@ void Stage::close() {
 Status Stage::append(uint32_t node, bool index, const void* data, size_t bytes,
                      uint64_t* out_offset) {
     staged_ += bytes;
+    if (lead_ != nullptr && node == 0 && !index) {
+        const uint64_t at = lead_->position();
+        const uint64_t misaligned = at % kSectionAlign;
+        if (misaligned != 0)
+            SKENE_RETURN_IF_ERROR(lead_->zeros(static_cast<size_t>(kSectionAlign - misaligned)));
+        *out_offset = lead_->position();
+        return lead_->write(data, bytes);
+    }
     if (file_mode_) {
         *out_offset = file_end_;
         SKENE_RETURN_IF_ERROR(write_all(fd_, data, bytes, path_));
@@ -88,6 +103,9 @@ Status Stage::append(uint32_t node, bool index, const void* data, size_t bytes,
 
 Status Stage::copy_to(uint32_t node, bool index, uint64_t offset, uint64_t bytes,
                       Sink* sink) {
+    if (lead_ != nullptr && node == 0 && !index)
+        return Status(Code::kMalformed,
+                      "internal: the streamed lead column has no staged bytes to copy");
     if (!file_mode_) {
         const std::vector<std::vector<uint8_t>>& streams = index ? index_ : data_;
         if (node >= streams.size() || offset > streams[node].size()
@@ -124,6 +142,12 @@ void Stage::release(uint32_t node, bool index) {
 
 Sink::~Sink() { abandon(); }
 
+void Sink::open_stream(OutputStream* stream) {
+    stream_ = stream;
+    buffer_.reserve(kSinkBufferBytes);
+    position_ = 0;
+}
+
 void Sink::open_memory(std::vector<uint8_t>* out) {
     memory_ = out;
     position_ = out->size();
@@ -148,7 +172,8 @@ Status Sink::write(const void* data, size_t bytes) {
         return Status::ok();
     }
     if (buffer_.size() + bytes > kSinkBufferBytes) SKENE_RETURN_IF_ERROR(flush());
-    if (bytes >= kSinkBufferBytes) return write_all(fd_, p, bytes, partial_);
+    if (bytes >= kSinkBufferBytes)
+        return stream_ != nullptr ? stream_->write(p, bytes) : write_all(fd_, p, bytes, partial_);
     buffer_.insert(buffer_.end(), p, p + bytes);
     return Status::ok();
 }
@@ -164,6 +189,12 @@ Status Sink::zeros(size_t bytes) {
 }
 
 Status Sink::flush() {
+    if (stream_ != nullptr) {
+        if (buffer_.empty()) return Status::ok();
+        Status st = stream_->write(buffer_.data(), buffer_.size());
+        buffer_.clear();
+        return st;
+    }
     if (fd_ < 0 || buffer_.empty()) return Status::ok();
     Status st = write_all(fd_, buffer_.data(), buffer_.size(), partial_);
     buffer_.clear();
@@ -172,6 +203,7 @@ Status Sink::flush() {
 
 Status Sink::commit() {
     if (memory_ != nullptr) return Status::ok();
+    if (stream_ != nullptr) return flush();   // the stream is the caller's to finish
     SKENE_RETURN_IF_ERROR(flush());
     if (::close(fd_) != 0) {
         fd_ = -1;

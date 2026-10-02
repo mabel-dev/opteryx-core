@@ -1,18 +1,12 @@
-"""Vendor USearch headers into third_party/usearch.
+"""Vendor the fp16 conversion headers that ship with USearch into third_party/usearch.
 
 Usage:
     python dev/vendor_usearch.py --tag v2.21.4
 
-This script downloads the specified GitHub release archive, verifies an
-optional SHA256, and vendors:
-  - headers under `third_party/usearch/include/usearch`
-  - required third-party headers under `third_party/usearch/fp16` and
-    `third_party/usearch/simsimd`
-  - `LICENSE`
-  - `README.md`
-
-The C++ integration in this repo is expected to consume the header-only API
-from `include/usearch`. We intentionally do not vendor the language bindings.
+Only `fp16/` (plus USearch's LICENSE and README) is vendored: draken's fp16 <-> fp32
+conversions (draken/core/fp16.h) use it. USearch's own index headers and SimSIMD are NOT
+vendored — the vector index is IVF-flat in draken/ops/ann (D-5, 2026-10-02), which needs
+neither.
 """
 
 from __future__ import annotations
@@ -69,18 +63,11 @@ def vendor_usearch(tag: str, dest: Path, verify_sha256: str | None = None) -> No
 
     checkout_root = Path("/tmp") / f"usearch_{tag}_checkout"
     extracted_root = _clone_repo(tag, checkout_root)
-    include_src = extracted_root / "include" / "usearch"
-    if not include_src.is_dir():
-        raise SystemExit(f"Unable to find USearch headers in {include_src}")
-
     if dest.exists():
         shutil.rmtree(dest)
-    (dest / "include").mkdir(parents=True, exist_ok=True)
+    dest.mkdir(parents=True, exist_ok=True)
 
-    shutil.copytree(include_src, dest / "include" / "usearch")
-    print(f"USearch headers copied to {dest / 'include' / 'usearch'}")
-
-    for dirname in ("fp16", "simsimd"):
+    for dirname in ("fp16",):
         src = extracted_root / dirname
         if not src.exists():
             raise SystemExit(f"Unable to find required USearch dependency directory {src}")

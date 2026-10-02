@@ -143,6 +143,7 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
     # the BaseTable defaults belong here.
     supports_diachronic = True  # Time-travel queries
     supports_version_travel = True  # VERSION AS OF <snapshot id / PREVIOUS>
+    supports_vector_indexes = True  # CREATE / ALTER / DROP INDEX (vector index)
     supports_statistics = True  # Manifest provides stats
     supports_predicate_pushdown = True  # Allow optimizer to push predicates to reader
     supports_limit_pushdown = True  # Allow optimizer to push LIMIT to OpteryxTable
@@ -1237,6 +1238,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
     # Capability declarations - what OpteryxTable readers support
     supports_diachronic = True  # Time-travel via OpteryxTable
     supports_version_travel = True  # VERSION AS OF <snapshot id / PREVIOUS>
+    supports_vector_indexes = True  # CREATE / ALTER / DROP INDEX (vector index)
     supports_predicate_pushdown = True  # Via FileSystemTable base
     supports_limit_pushdown = True  # Via FileSystemTable base
     supports_statistics = True  # Opteryx manifests provide stats
@@ -3426,6 +3428,77 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
         return catalog.list_tags(relative_id)
+
+    # --- vector indexes (docs/VECTOR_INDEX_DESIGN.md; definitions in the catalog's
+    # `indexes` subcollection, sidecars referenced per data file from the manifest) ---
+
+    def create_vector_index(
+        self,
+        relation_name: str,
+        index_name: str,
+        column_name: str,
+        *,
+        options: dict,
+        embedding_identity: str,
+        dimensions: int,
+        if_not_exists: bool,
+        author: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Define a vector index. Returns the stored definition, or None when IF NOT
+        EXISTS met an existing index (which is then left exactly as it was)."""
+        from opteryx_catalog.exceptions import VectorIndexAlreadyExists
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        try:
+            return catalog.create_vector_index(
+                relative_id,
+                index_name,
+                column_name,
+                embedding_identity=embedding_identity,
+                dimensions=dimensions,
+                author=author,
+                build=options.get("build"),
+                clusters=options.get("clusters", 0),
+                nprobe=options.get("nprobe", 32),
+            )
+        except VectorIndexAlreadyExists as exc:
+            if if_not_exists:
+                return None
+            # Translated at the boundary, like the tag errors: the catalog's message
+            # already names the index and what to do.
+            raise ValueError(str(exc)) from exc
+
+    def alter_vector_index_build(
+        self, relation_name: str, index_name: str, build: str, author: Optional[str] = None
+    ) -> dict:
+        from opteryx_catalog.exceptions import VectorIndexNotFound
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        try:
+            return catalog.alter_vector_index(relative_id, index_name, build=build, author=author)
+        except VectorIndexNotFound as exc:
+            raise ValueError(f"There is no index {index_name} on {relation_name}.") from exc
+
+    def drop_vector_index(
+        self, relation_name: str, index_name: str, if_exists: bool, author: Optional[str] = None
+    ) -> None:
+        from opteryx_catalog.exceptions import VectorIndexNotFound
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        try:
+            catalog.drop_vector_index(relative_id, index_name, author=author)
+        except VectorIndexNotFound as exc:
+            if if_exists:
+                return
+            raise ValueError(f"There is no index {index_name} on {relation_name}.") from exc
+
+    def list_vector_indexes(self, relation_name: str) -> list:
+        """The vector indexes defined on a relation, as the catalog's plain dicts."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        return self._get_catalog(workspace).list_vector_indexes(relative_id)
 
     def list_triggers(self, relation_name: str) -> list:
         """The triggers a holder carries - a dataset's, or a task's for a

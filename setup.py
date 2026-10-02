@@ -1396,8 +1396,6 @@ extensions.append(
             # include_dirs (the C libraries moved to the repo root).
             "third_party/yyjson/src",
             "third_party/usearch/fp16/include",
-            # draken/ops/ann — usearch's header-only core graph (vector_ann.cpp).
-            "third_party/usearch/include",
             "third_party/nanobind",
             "third_party/nanobind/src",
             "third_party/nanobind/ext/robin_map/include",

@@ -1266,6 +1266,9 @@ struct FileWriter::State {
 
     Stage stage;
     Sink  sink;
+    // Stream mode only (begin with an OutputStream): where finish() puts the
+    // head and the lead node's directory block.
+    std::vector<uint8_t>* prefix = nullptr;
 
     std::vector<RowGroupEntry> row_groups;
     uint64_t                   total_rows = 0;
@@ -1338,6 +1341,27 @@ Status FileWriter::begin(const WriteOptions& options, const std::string& path) {
     SKENE_RETURN_IF_ERROR(state_->stage.open_file(options.scratch_path));
     SKENE_RETURN_IF_ERROR(state_->sink.open_file(path));
     return write_head(&state_->sink);
+}
+
+Status FileWriter::begin(const WriteOptions& options, OutputStream* body,
+                         std::vector<uint8_t>* prefix) {
+    if (body == nullptr || prefix == nullptr)
+        return fail(Code::kMalformed, "FileWriter::begin: body and prefix are both required");
+    if (state_->began)
+        return fail(Code::kMalformed, "FileWriter::begin called twice");
+    SKENE_RETURN_IF_ERROR(validate_options(options));
+    if (!options.scratch_path.empty())
+        return fail(Code::kMalformed,
+                    "scratch_path is set but the output is a stream — a stream "
+                    "writes its lead column directly and stages the rest in memory");
+
+    state_->options = options;
+    state_->began   = true;
+    state_->prefix  = prefix;
+    prefix->clear();
+    state_->sink.open_stream(body);
+    state_->stage.open_lead_stream(&state_->sink);
+    return Status::ok();   // the head belongs to the prefix, written by finish()
 }
 
 Status FileWriter::add_row_group(const CxxMorsel& morsel) {
@@ -1458,6 +1482,14 @@ Status FileWriter::finish() {
     const uint32_t block_count = (row_groups + G - 1u) / G;
 
     // ── Layout: every final offset, before anything is written ──
+    //
+    // Stream mode: the lead node's sections are already in the body, at
+    // positions relative to the body's start. The prefix (head + the lead node's
+    // directory, padded to kSectionAlign) goes in front of the body, so those
+    // sections land at prefix_bytes + their staged position, and everything
+    // still to be written continues from prefix_bytes + the body's length.
+    const bool streaming = state_->stage.streams_lead();
+    uint64_t prefix_bytes = 0;
     std::vector<NodeLayout> layout(nodes.size());
     uint64_t at = sink.position();   // just past the head
     for (size_t n = 0; n < nodes.size(); ++n) {
@@ -1476,6 +1508,43 @@ Status FileWriter::finish() {
                         "column node %zu's directory block is %llu bytes, which "
                         "exceeds the 32-bit directory_bytes field", n,
                         static_cast<unsigned long long>(directory_bytes));
+        if (streaming && n == 0) {
+            prefix_bytes = align_up(kFileHeadBytes + directory_bytes);
+            L.directory_offset = kFileHeadBytes;
+            L.directory_bytes  = static_cast<uint32_t>(directory_bytes);
+            L.final_offset.assign(node.sections.size(), 0);
+            L.blocks.assign(block_count, BlockExtent{0, 0});
+            uint64_t begin = UINT64_MAX, end = 0;
+            for (uint32_t g = 0; g < row_groups; ++g) {
+                const ChunkRecord& chunk = node.chunks[g];
+                BlockExtent& block = L.blocks[g / G];
+                for (uint32_t s = 0; s < chunk.section_count; ++s) {
+                    const uint32_t i = chunk.section_index + s;
+                    const uint64_t placed = prefix_bytes + node.sections[i].offset;
+                    if (placed % kSectionAlign != 0 || placed < end)
+                        return fail(Code::kMalformed,
+                                    "internal: streamed section %u of the lead node "
+                                    "is misplaced", i);
+                    L.final_offset[i] = placed;
+                    const uint64_t stop = placed + node.sections[i].stored_bytes;
+                    if (node.sections[i].stored_bytes > 0 && block.bytes == 0)
+                        block.offset = placed;
+                    if (node.sections[i].stored_bytes > 0) block.bytes = stop - block.offset;
+                    if (begin == UINT64_MAX) begin = placed;
+                    end = stop;
+                }
+            }
+            if (begin == UINT64_MAX) {
+                L.data_offset = L.directory_offset + L.directory_bytes;
+                L.data_bytes  = 0;
+            } else {
+                L.data_offset = begin;
+                L.data_bytes  = end - begin;
+            }
+            sink.rebase(prefix_bytes);
+            at = sink.position();
+            continue;
+        }
         L.directory_offset = at;
         L.directory_bytes  = static_cast<uint32_t>(directory_bytes);
         at += directory_bytes;
@@ -1550,11 +1619,22 @@ Status FileWriter::finish() {
             entry.offset = L.final_offset[i];
             w.pod(entry);
         }
-        if (block.size() != L.directory_bytes || sink.position() != L.directory_offset)
+        if (block.size() != L.directory_bytes
+                || (!(streaming && n == 0) && sink.position() != L.directory_offset))
             return fail(Code::kMalformed,
                         "internal: column node %zu's directory block does not "
                         "land where the layout put it", n);
         L.directory_checksum = checksum_xxh3_64(block.data(), block.size());
+        if (streaming && n == 0) {
+            // The prefix: head, this directory, then zeros up to the first body
+            // byte. The lead node's chunks are already in the body.
+            Sink prefix;
+            prefix.open_memory(state_->prefix);
+            SKENE_RETURN_IF_ERROR(write_head(&prefix));
+            SKENE_RETURN_IF_ERROR(prefix.write(block.data(), block.size()));
+            SKENE_RETURN_IF_ERROR(prefix.zeros(static_cast<size_t>(prefix_bytes - prefix.position())));
+            continue;
+        }
         SKENE_RETURN_IF_ERROR(sink.write(block.data(), block.size()));
 
         for (const ChunkRecord& chunk : node.chunks) {

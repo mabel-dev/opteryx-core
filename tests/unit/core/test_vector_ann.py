@@ -1,17 +1,19 @@
-"""draken/ops/ann — fp16 cosine HNSW over a VECTOR_FP16 column (vector index, Stage B).
+"""draken/ops/ann — fp16 cosine IVF-flat over a VECTOR_FP16 column (vector index, Stage B).
 
 What each test protects:
-  * the graph's distances are the SQL kernel's COSINE_DISTANCE values (no re-rank needed);
-  * graph search agrees with the exact scan at high recall on clustered data;
+  * probing EVERY cluster is the exact scan, row for row and bit for bit — IVF only ever
+    narrows which rows are scored, never how they are scored;
+  * the returned distances are the SQL kernel's COSINE_DISTANCE values;
+  * partial probing still finds the true neighbours at high recall on clustered data;
   * rows outside the searchable domain (null, deleted, zero-magnitude, non-finite) are never
-    returned by either path;
-  * the admitted mask filters DURING traversal — every hit is admitted, and k hits are still
-    returned when k admitted rows exist;
-  * a graph is never used against the wrong data: checksum, row count, dimension, binding.
+    clustered and never returned, on either path;
+  * the build is deterministic: same input + seed => same model, for any thread count;
+  * the admitted mask is honoured.
 """
 
 import os
 import random
+import struct
 import sys
 
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "../../.."))
@@ -24,6 +26,8 @@ from opteryx.compiled.nanobind import vectors as V
 DIM = 32
 N = 3000
 CLUSTERS = 24
+UNSEARCHABLE = {5, 6, 7}
+DELETED = {9, 11}
 
 
 def _bitmap(rows, n):
@@ -33,101 +37,106 @@ def _bitmap(rows, n):
     return bytes(out)
 
 
-def _dataset(seed=7):
-    rng = random.Random(seed)
+def _u32(raw):
+    return list(struct.unpack(f"<{len(raw) // 4}I", raw))
+
+
+@pytest.fixture(scope="module")
+def data():
+    rng = random.Random(7)
     centres = [[rng.gauss(0, 1) for _ in range(DIM)] for _ in range(CLUSTERS)]
     rows = []
     for _ in range(N):
         c = centres[rng.randrange(CLUSTERS)]
         rows.append([x + 0.5 * rng.gauss(0, 1) for x in c])
-    rows[5] = [0.0] * DIM                      # zero magnitude: undefined cosine
-    rows[6] = [float("nan")] + [1.0] * (DIM - 1)  # non-finite
-    rows[7] = None                              # null
+    rows[5] = [0.0] * DIM                          # zero magnitude: undefined cosine
+    rows[6] = [float("nan")] + [1.0] * (DIM - 1)   # non-finite
+    rows[7] = None                                 # null
     vec = draken_native.vector_fp16_from_sequence(rows, DIM)
     queries = []
     for _ in range(40):
         c = centres[rng.randrange(CLUSTERS)]
         queries.append([x + 0.5 * rng.gauss(0, 1) for x in c])
-    return vec, queries
-
-
-UNSEARCHABLE = {5, 6, 7}
-DELETED = {9, 11}
-
-
-@pytest.fixture(scope="module")
-def built():
-    vec, queries = _dataset()
     excluded = _bitmap(DELETED, N)
-    graph = V.ann_hnsw_build(vec, excluded, 16, 128, 2, b"bind:test")
-    return vec, queries, excluded, graph
+    model = V.ann_ivf_build(vec, excluded, 0, 8, 64, 2, 1234)
+    return vec, queries, excluded, model
 
 
-def test_recall_against_exact(built):
-    vec, queries, excluded, graph = built
+def test_model_shape(data):
+    _, _, _, (centroids, order, offsets) = data
+    order, offsets = _u32(order), _u32(offsets)
+    clusters = len(offsets) - 1
+    assert clusters == round((N - len(UNSEARCHABLE) - len(DELETED)) ** 0.5)
+    assert len(centroids) == clusters * DIM * 2
+    assert offsets[0] == 0 and offsets[-1] == len(order) == N - len(UNSEARCHABLE) - len(DELETED)
+    assert not (UNSEARCHABLE | DELETED) & set(order)
+    for c in range(clusters):          # ascending within each cluster
+        block = order[offsets[c] : offsets[c + 1]]
+        assert block == sorted(block)
+
+
+def test_build_is_deterministic_across_thread_counts(data):
+    vec, _, excluded, model = data
+    assert V.ann_ivf_build(vec, excluded, 0, 8, 64, 1, 1234) == model
+    assert V.ann_ivf_build(vec, excluded, 0, 8, 64, 5, 1234) == model
+
+
+def test_probing_every_cluster_is_the_exact_scan(data):
+    vec, queries, excluded, (centroids, order, offsets) = data
+    clusters = len(offsets) // 4 - 1
+    for q in queries[:10]:
+        ivf = V.ann_ivf_search(vec, centroids, order, offsets, q, 25, clusters, excluded, None)
+        exact = V.ann_exact_topk(vec, q, 25, excluded, None)
+        assert ivf == exact                         # same rows, same bits, same order
+
+
+def test_partial_probe_recall(data):
+    vec, queries, excluded, (centroids, order, offsets) = data
     total = 0.0
     for q in queries:
-        ann_rows, _ = V.ann_hnsw_search(graph, vec, q, 10, 64, None)
-        exact_rows, _ = V.ann_exact_topk(vec, q, 10, excluded, None)
-        total += len(set(ann_rows) & set(exact_rows)) / 10.0
+        # Tie-aware: a hit counts when it is no farther than the exact 10th neighbour.
+        _, exact_d = V.ann_exact_topk(vec, q, 10, excluded, None)
+        _, d = V.ann_ivf_search(vec, centroids, order, offsets, q, 10, 4, excluded, None)
+        total += sum(1 for x in d if x <= exact_d[-1]) / 10.0
     assert total / len(queries) >= 0.95, total / len(queries)
 
 
-def test_distances_are_the_sql_kernel_values(built):
-    vec, queries, excluded, graph = built
-    for q in queries[:5]:
-        ann_rows, ann_d = V.ann_hnsw_search(graph, vec, q, 10, 64, None)
-        exact_rows, exact_d = V.ann_exact_topk(vec, q, 10, excluded, None)
-        exact = dict(zip(exact_rows, exact_d))
-        for row, d in zip(ann_rows, ann_d):
-            if row in exact:
-                assert d == exact[row], (row, d, exact[row])   # bit-identical, same function
-        assert ann_d == sorted(ann_d)
-
-
-def test_unsearchable_and_deleted_rows_never_returned(built):
-    vec, queries, excluded, graph = built
+def test_unsearchable_and_deleted_rows_never_returned(data):
+    vec, queries, excluded, (centroids, order, offsets) = data
     banned = UNSEARCHABLE | DELETED
+    clusters = len(offsets) // 4 - 1
     for q in queries:
-        ann_rows, _ = V.ann_hnsw_search(graph, vec, q, 50, 128, None)
+        rows, _ = V.ann_ivf_search(vec, centroids, order, offsets, q, 50, clusters, excluded, None)
         exact_rows, _ = V.ann_exact_topk(vec, q, 50, excluded, None)
-        assert not banned & set(ann_rows)
+        assert not banned & set(rows)
         assert not banned & set(exact_rows)
 
 
-def test_admitted_mask_filters_during_traversal(built):
-    vec, queries, _, graph = built
-    admitted_rows = set(range(0, N, 7))           # ~14% admitted
+def test_admitted_mask(data):
+    vec, queries, excluded, (centroids, order, offsets) = data
+    admitted_rows = set(range(0, N, 7))
     admitted = _bitmap(admitted_rows, N)
+    clusters = len(offsets) // 4 - 1
     for q in queries[:10]:
-        rows, _ = V.ann_hnsw_search(graph, vec, q, 10, 64, admitted)
-        assert len(rows) == 10                     # filtered in the walk, not after it
+        rows, _ = V.ann_ivf_search(vec, centroids, order, offsets, q, 10, clusters, excluded, admitted)
         assert set(rows) <= admitted_rows
+        assert (rows, _) == V.ann_exact_topk(vec, q, 10, excluded, admitted)
 
 
-def test_zero_query_returns_nothing(built):
-    vec, _, excluded, graph = built
-    assert V.ann_hnsw_search(graph, vec, [0.0] * DIM, 10, 64, None) == ([], [])
-    assert V.ann_exact_topk(vec, [0.0] * DIM, 10, excluded, None) == ([], [])
+def test_zero_query_returns_nothing(data):
+    vec, _, excluded, (centroids, order, offsets) = data
+    zero = [0.0] * DIM
+    assert V.ann_ivf_search(vec, centroids, order, offsets, zero, 10, 4, excluded, None) == ([], [])
+    assert V.ann_exact_topk(vec, zero, 10, excluded, None) == ([], [])
 
 
-def test_graph_refuses_the_wrong_data(built):
-    vec, queries, _, graph = built
-    tampered = bytearray(graph)
-    tampered[-1] ^= 1
-    with pytest.raises(RuntimeError, match="checksum"):
-        V.ann_hnsw_search(bytes(tampered), vec, queries[0], 10, 64, None)
-
-    shorter = draken_native.vector_fp16_from_sequence([[1.0] * DIM] * (N - 1), DIM)
-    with pytest.raises(RuntimeError, match="row count"):
-        V.ann_hnsw_search(graph, shorter, queries[0], 10, 64, None)
-
+def test_inconsistent_model_is_refused(data):
+    vec, queries, excluded, (centroids, order, offsets) = data
+    with pytest.raises(ValueError, match="inconsistent"):
+        V.ann_ivf_search(vec, centroids[:-2 * DIM], order, offsets, queries[0], 10, 4, None, None)
     narrower = draken_native.vector_fp16_from_sequence([[1.0] * (DIM - 1)] * N, DIM - 1)
-    with pytest.raises(ValueError, match="dimension"):
-        V.ann_hnsw_search(graph, narrower, queries[0], 10, 64, None)
-
-    with pytest.raises(RuntimeError, match="bad magic"):
-        V.ann_hnsw_search(b"x" * len(graph), vec, queries[0], 10, 64, None)
+    with pytest.raises(ValueError):
+        V.ann_ivf_search(narrower, centroids, order, offsets, [1.0] * (DIM - 1), 10, 4, None, None)
 
 
 if __name__ == "__main__":  # pragma: no cover

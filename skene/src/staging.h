@@ -13,6 +13,11 @@
 //   output to a path             -> stage in a SCRATCH FILE the caller names,
 //      and stream the output to disk. Memory stays at one row group of plans
 //      plus the directory, whatever the file size — the reason for two passes.
+//   output to a caller's stream  -> the LEAD column node (node 0) is not staged
+//      at all: its data sections go straight to the stream as they are encoded.
+//      Every other node stages in memory. For where neither a file nor memory
+//      can hold the output (a Cloud Run worker, whose disk IS memory) — see
+//      FileWriter::begin(options, OutputStream*, prefix).
 //
 // Neither mode is a fallback for the other: the caller's choice of output
 // decides, and a scratch path given with buffer output is rejected.
@@ -22,6 +27,7 @@
 #include <vector>
 
 #include "skene/status.h"
+#include "skene/writer.h"   // OutputStream
 
 namespace skene {
 
@@ -36,6 +42,11 @@ class Stage {
 
     void   open_memory();
     Status open_file(const std::string& path);   // created exclusively; removed on close
+    // Memory staging, except node 0's DATA sections, which are written straight
+    // to `lead` at the next kSectionAlign boundary of its position. Their staging
+    // offset is that position, relative to the start of the stream.
+    void   open_lead_stream(Sink* lead);
+    bool   streams_lead() const noexcept { return lead_ != nullptr; }
 
     // Appends `bytes` to node `node`'s data (index == false) or index stream and
     // returns where it was staged — an offset only this stage can interpret.
@@ -63,6 +74,7 @@ class Stage {
     std::vector<std::vector<uint8_t>> data_;
     std::vector<std::vector<uint8_t>> index_;
     uint64_t                          staged_ = 0;
+    Sink*                             lead_ = nullptr;
 };
 
 // The finished file's destination: a caller's vector, or a file written to
@@ -77,6 +89,13 @@ class Sink {
 
     void   open_memory(std::vector<uint8_t>* out);
     Status open_file(const std::string& path);
+    // Buffered writes to a caller's stream. position() starts at 0 and counts
+    // the stream's bytes until rebase() says where the stream sits in the file.
+    void   open_stream(OutputStream* stream);
+    // Stream mode: every byte written so far, and from now on, lies `base`
+    // bytes further into the file than the stream position — the length of the
+    // prefix the writer returns separately.
+    void   rebase(uint64_t base) noexcept { position_ += base; }
 
     uint64_t position() const noexcept { return position_; }
     Status   write(const void* data, size_t bytes);
@@ -88,6 +107,7 @@ class Sink {
     Status flush();
 
     std::vector<uint8_t>* memory_ = nullptr;
+    OutputStream*         stream_ = nullptr;
     int                   fd_ = -1;
     std::string           path_;
     std::string           partial_;

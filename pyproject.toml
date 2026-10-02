@@ -100,7 +100,7 @@ testpaths = ["tests"]
 # Don't recurse into these directories when collecting tests. Exclude the
 # `rugo` folder (example/debug scripts) because several files there run
 # at import time and are not intended as pytest tests.
-norecursedirs = ["scratch", ".*", "build", "dist", "tmp", "third_party", "rugo"]
+norecursedirs = ["scratch", ".*", "build", "dist", "tmp", "third_party", "rugo", "embeddings"]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
 ]

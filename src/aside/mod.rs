@@ -36,6 +36,7 @@
 mod admin;
 mod cursor;
 mod grant;
+mod index;
 mod listen;
 mod task;
 mod trigger;
@@ -97,6 +98,7 @@ pub enum OpteryxOnly {
     ShowCreate(admin::ShowCreate),
     ResyncRelation(admin::ResyncRelation),
     DetachRelation(admin::DetachRelation),
+    AlterIndexBuild(index::AlterIndexBuild),
 }
 
 /// Tokenize `sql`, then run each statement through the aside productions before
@@ -149,6 +151,9 @@ pub fn parse_statements(
         }
         if recognised.is_none() {
             recognised = admin::parse(&mut cursor)?;
+        }
+        if recognised.is_none() {
+            recognised = index::parse(&mut cursor)?;
         }
         match recognised {
             Some(statement) => out.push(OpteryxStatement::Opteryx(statement)),

@@ -1604,6 +1604,71 @@ def _bind_snapshot_ddl(self, node: PlanStep, context: BindingContext, statement:
     return node, context
 
 
+_INDEX_OPTIONS = {"build", "clusters", "nprobe"}
+
+
+def visit_vector_index_ddl(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
+    """Bind CREATE / ALTER / DROP INDEX (a vector index, docs/VECTOR_INDEX_DESIGN.md §7).
+
+    Gated at the ALTER tier, like every other change to a relation's definition. CREATE
+    validates the column (it must exist and be text) and the options, and stamps the
+    ACTIVE embedding capability's identity and width: the index is defined against that
+    embedder, and a later query under a different one is refused rather than scored."""
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.managers.permissions import can_perform_action
+
+    statement = {"create": "**CREATE INDEX**", "alter": "**ALTER INDEX**", "drop": "**DROP INDEX**"}[node.operation]
+    node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable) or not node.connector.supports_vector_indexes:
+        raise ReadOnlyConnectorError(
+            f"{statement} is not supported for {node.relation_name} - vector indexes are "
+            "available on Opteryx catalog tables."
+        )
+    if not can_perform_action(context.execution_context, node.relation_name, action="ALTER"):
+        raise PermissionError(f"User does not have permission to alter table {node.relation_name}")
+    _reject_materialized_view_target(node, statement)
+
+    if node.operation == "create":
+        from opteryx.types.logical_type import LogicalCategory
+        from opteryx.types.vectors.embedding_capability import active_embedding_capability
+        from opteryx.types.vectors.embedding_capability import embedding_dimensions
+
+        options = dict(node.index_options or {})
+        unknown = sorted(set(options) - _INDEX_OPTIONS)
+        if unknown:
+            raise UnsupportedSyntaxError(
+                f"Unknown index option(s) {unknown}; the options are {sorted(_INDEX_OPTIONS)}."
+            )
+        build = options.get("build", "async")
+        if type(build) is not str or build.lower() not in ("sync", "async"):
+            raise UnsupportedSyntaxError("Index option `build` is 'sync' or 'async'.")
+        options["build"] = build.lower()
+        for key, minimum in (("clusters", 0), ("nprobe", 1)):
+            if key in options and (type(options[key]) is not int or options[key] < minimum):
+                raise UnsupportedSyntaxError(f"Index option `{key}` is a whole number >= {minimum}.")
+        node.index_options = options
+
+        schema = node.connector.relation_schema(node.relation_name)
+        column = next((c for c in schema.columns if c.name.lower() == node.column_name.lower()), None)
+        if column is None:
+            raise UnsupportedSyntaxError(
+                f"{node.relation_name} has no column `{node.column_name}` to index."
+            )
+        if column.column_type.category not in (LogicalCategory.VARCHAR, LogicalCategory.NVARCHAR):
+            raise UnsupportedSyntaxError(
+                f"A vector index embeds text: `{column.name}` is {column.column_type}, not VARCHAR."
+            )
+        node.column_name = column.name
+        node.embedding_dimensions = embedding_dimensions()
+        node.embedding_identity = active_embedding_capability().identity
+
+    node.columns = []
+    return node, context
+
+
 def visit_create_tag(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind ALTER TABLE ... CREATE TAG."""
     return _bind_snapshot_ddl(self, node, context, "**ALTER TABLE ... CREATE TAG**")

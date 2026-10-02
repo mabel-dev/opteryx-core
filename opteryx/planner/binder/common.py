@@ -54,6 +54,7 @@ from opteryx.planner.binder.relation import (
     visit_drop_relation,
     visit_resync_relation,
     visit_create_tag,
+    visit_vector_index_ddl,
     visit_drop_tag,
     visit_rollback_relation,
     visit_drop_trigger,
@@ -358,6 +359,11 @@ class BinderVisitor:
         self, node: PlanStep, context: BindingContext
     ) -> Tuple[PlanStep, BindingContext]:
         return visit_create_tag(self, node, context)
+
+    def visit_vector_index_ddl(
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
+        return visit_vector_index_ddl(self, node, context)
 
     def visit_drop_tag(
         self, node: PlanStep, context: BindingContext

@@ -1,5 +1,6 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
 
 // ONNX Runtime is NOT linked. The shared library comes from the `onnxruntime` pip package
 // (`pip install opteryx-core[embeddings]`) and is loaded at runtime with dlopen; this file
@@ -412,7 +413,10 @@ class MiniLMEmbedder {
 // static-hash draken_embed, so the text cosine kernels and the vector index embed with
 // MiniLM. The embedder is a process-lifetime singleton: the kernel is a bare C function
 // pointer with nowhere to hold a session, and a session is thread-safe to share.
-std::unique_ptr<MiniLMEmbedder> g_capability_embedder;
+// Deliberately never destroyed: the kernel pointer is process-lifetime, and destroying
+// the session at exit would run after onnxruntime's own statics are torn down (it aborts
+// with "mutex lock failed").
+MiniLMEmbedder* g_capability_embedder = nullptr;
 std::size_t g_capability_dims = 0;
 std::string g_capability_model;
 
@@ -532,8 +536,7 @@ NB_MODULE(minilm_native, m) {
            const std::string& vocab_path, std::size_t max_length) {
             load_onnxruntime(library_path);
             if (g_capability_embedder == nullptr) {
-                g_capability_embedder =
-                    std::make_unique<MiniLMEmbedder>(model_path, vocab_path, max_length);
+                g_capability_embedder = new MiniLMEmbedder(model_path, vocab_path, max_length);
                 g_capability_dims = g_capability_embedder->dimensions();
                 g_capability_model = model_path;
             } else if (model_path != g_capability_model) {
@@ -546,4 +549,26 @@ NB_MODULE(minilm_native, m) {
         },
         nb::arg("library_path"), nb::arg("model_path"), nb::arg("vocab_path"),
         nb::arg("max_length") = 256);
+
+    // Dev / measurement surface (dev/ fixtures, tests/embeddings): embed `texts` with the
+    // INSTALLED capability and return the fp16 rows as raw bytes, row-major,
+    // len(texts) * dimensions * 2 bytes — the exact values the kernel produces. The GIL is
+    // released, so batches may run from several Python threads (Session::Run is
+    // thread-safe).
+    m.def(
+        "embed_to_fp16_bytes",
+        [](const std::vector<std::string>& texts) {
+            if (g_capability_embedder == nullptr)
+                throw std::runtime_error("the embedding capability is not installed");
+            std::vector<uint16_t> out(texts.size() * g_capability_dims);
+            {
+                nb::gil_scoped_release release;
+                const auto rows = g_capability_embedder->embed_texts(texts);
+                for (size_t r = 0; r < rows.size(); ++r)
+                    for (size_t d = 0; d < g_capability_dims; ++d)
+                        out[r * g_capability_dims + d] = fp16_ieee_from_fp32_value(rows[r][d]);
+            }
+            return nb::bytes(reinterpret_cast<const char*>(out.data()), out.size() * sizeof(uint16_t));
+        },
+        nb::arg("texts"));
 }

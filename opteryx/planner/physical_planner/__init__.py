@@ -750,6 +750,10 @@ def _create_create_tag_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, logical_node, action="create_tag")
 
 
+def _create_vector_index_ddl_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, logical_node, action="vector_index_ddl")
+
+
 def _create_drop_tag_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, logical_node, action="drop_tag")
 
@@ -926,6 +930,7 @@ _DISPATCH = {
     LogicalPlanStepType.RenameRelation:   _create_rename_relation_node,
     LogicalPlanStepType.CreateTag:        _create_create_tag_node,
     LogicalPlanStepType.DropTag:          _create_drop_tag_node,
+    LogicalPlanStepType.VectorIndexDdl:   _create_vector_index_ddl_node,
     LogicalPlanStepType.RollbackRelation: _create_rollback_relation_node,
     LogicalPlanStepType.AddColumn:        _create_add_column_node,
     LogicalPlanStepType.DropColumn:       _create_drop_column_node,

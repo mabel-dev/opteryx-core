@@ -887,7 +887,7 @@ def inner_binder(
     if format_cache is None:
         format_cache = {}
     column_name = node.query_column or format_expression(node, True, format_cache)
-    for schema in context.schemas.values():
+    for schema_name, schema in context.schemas.items():
         found_column = schema.find_column(column_name, case_insensitive=True)
         # A literal's column_name is its own textual form, so the case-insensitive
         # lookup above (correct for identifiers) would otherwise collapse two
@@ -947,8 +947,17 @@ def inner_binder(
             found_column = None
         # If the column exists in the schema, update node and context accordingly.
         if found_column:
-            # found_identity = found_column.identity
-            node, _ = traversive_recursive_bind(node, context, format_cache)
+            # A column found in `$project` was MATERIALISED by the Project below this
+            # step: the node is a reference to that output, and its children are not
+            # in scope — the logical planner deliberately drops `id` from the
+            # Project's passthrough when `id + 1` is projected, so `SELECT id + 1 ...
+            # ORDER BY id + 1` has no `id` above the Project. Binding the children
+            # there raised ColumnNotFoundError on `id`. (This bind used to sit under
+            # `suppress(Exception)`, which hid exactly that failure; it was removed.)
+            # Anywhere else — `$derived` (a repeat within the computing step) or a
+            # source relation — the children ARE in scope and are bound.
+            if schema_name != "$project":
+                node, _ = traversive_recursive_bind(node, context, format_cache)
 
             node.schema_column = found_column
             node.query_column = node.alias or column_name
@@ -1021,7 +1030,15 @@ def inner_binder(
             # mention of one nullary constant function in a projection, while
             # `SELECT PI() AS a` alone was fine: it takes the mint-a-new-column path
             # and never reaches here.
-            if node.node_type == NodeType.FUNCTION and node.function_ref is None:
+            #
+            # Not for a `$project` reference (above): it is never compiled as an
+            # expression, and its parameters are deliberately left unbound, so there
+            # is no overload to choose.
+            if (
+                schema_name != "$project"
+                and node.node_type == NodeType.FUNCTION
+                and node.function_ref is None
+            ):
                 _bind_function_reference(node, context)
 
             return node, context

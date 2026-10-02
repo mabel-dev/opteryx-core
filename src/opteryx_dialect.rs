@@ -837,6 +837,12 @@ impl Dialect for OpteryxDialect {
         true
     }
 
+    /// `CREATE INDEX ... USING IVF (col) WITH (build = 'sync', nprobe = 32)` — the
+    /// vector-index options (docs/VECTOR_INDEX_DESIGN.md §7).
+    fn supports_create_index_with_clause(&self) -> bool {
+        true
+    }
+
     /// Returns true if the dialect supports modifiers on SELECT statements, such as `DISTINCT` or `ALL`.
     /// This enables syntax like:
     /// - SELECT

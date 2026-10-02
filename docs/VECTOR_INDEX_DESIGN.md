@@ -1,7 +1,7 @@
 # Vector index — ANN access path over catalog tables
 
-**Status:** PROPOSED. Nothing has been built or measured. Decisions for the architect are in §14.
-**Date:** 2026-09-30, **rev 2** 2026-10-01 (architect direction: vectors live only in index files, not data files; index files are skene; ONNX cannot ship in the wheel, so embeddings come from an optional runtime-loaded provider whose weights are baked into the deployed image — §3, §9A). **rev 3** 2026-10-01: D-1 ruled (`VECTOR` is not a user-land concept; it exists only inside the index), D-12 approved (MIT licence verified), D-3 decided (§5.2).
+**Status:** IN BUILD. Stages A and B delivered, Stage C in progress (§13). Open decisions are in §14.
+**Date:** 2026-09-30, **rev 2** 2026-10-01 (architect direction: vectors live only in index files, not data files; index files are skene; ONNX cannot ship in the wheel, so embeddings come from an optional runtime-loaded provider whose weights are baked into the deployed image — §3, §9A). **rev 3** 2026-10-01: D-1 ruled (`VECTOR` is not a user-land concept; it exists only inside the index), D-12 approved (MIT licence verified), D-3 decided (§5.2). **rev 5** 2026-10-02: D-5 ruled (IVF-flat) and D-7 ruled (per-index sync/async, default async, compaction never re-embeds); storage accounting and billing (§5.5), compaction carry (§5.6), GC sizing (§5.4) and index discovery (§7A) designed; stale HNSW/usearch text corrected. **rev 6** 2026-10-02: D-13 ruled (index storage charged at logical bytes), D-14 ruled (compaction never embeds; compaction and index builds never run at the same time on a table, enforced by a maintenance lease, §5.7), D-15 ruled (follow sqlparser: `SHOW INDEXES FROM t`), D-16 ruled (`REFRESH INDEX`, fired by every commit that adds data files and by CREATE INDEX).
 **Replaces:** an externally drafted HLD, "Object-Store Vector Index for Opteryx and Hadro". That
 draft was written with only partial knowledge of the platform. §1 reviews it against the code;
 the rest of this document redesigns from what actually exists.
@@ -37,27 +37,32 @@ system:
 - **Filter first, then search, then fetch.** Execution is a new native `Source` shaped like the
   existing `LatmatScanSource`:
   1. Pass 1 decodes the predicate columns into a survivor mask.
-  2. The ANN search per file is *filtered by that mask and the delete bitmap during graph
-     traversal*, which avoids an overfetch loop.
-  3. A global candidate top-k is formed. The graph's metric is the SQL kernel itself, so its
+  2. The IVF search per file (probe the nearest clusters) scores only rows in that mask and
+     outside the delete bitmap, which avoids an overfetch loop. Below a survivor threshold
+     the file is scanned exactly instead.
+  3. A global candidate top-k is formed. The index's metric is the SQL kernel itself, so its
      distances are exact for every candidate it returns.
   4. Pass 2 does a masked decode of the projected columns through the existing
      `submit_row_group(..., row_mask)`.
 - **The index is not a "standalone library" in a new repo.** Its native parts go where
   standalone native code already lives:
   - distance kernels in **draken**
-  - ANN search in **draken** (usearch's core graph, vectors held in a skene file; D-3 decided)
+  - IVF-flat ANN search in **draken** (`draken/ops/ann/fp16_cosine_ivf.h`; vectors and
+    centroids held in skene files; D-3, D-5)
   - both ship in both wheels and are Python-free.
 
   Planning glue goes in `opteryx/planner`, the execution `Source` in `src/cpp/engine`, and
   lifecycle in `opteryx-catalog`.
+- **Indexes are accounted separately from data.** Each index file's size is recorded in the
+  manifest, totalled in the snapshot summary apart from data bytes, and reported to billing as
+  its own figure (§5.5). Compaction carries vectors instead of re-embedding (§5.6), and expiry
+  reclaims index files with their recorded sizes (§5.4).
 - **S3 Vectors compatibility and Hadro are re-scoped** (§11). Hadro is a stateless, read-only S3
   emulator with no concept of a dataset, so it cannot be the "dataset-aware" builder the draft
   describes.
 
-**Phase 0 prerequisite.** The embedding provider hook (§9A) and the table-write refusal of
-`VECTOR` (§3). Without a real provider, `EMBED` is a lexical hash and the index is only a
-lexical index.
+**Phase 0 prerequisite (delivered in Stage A).** The runtime-loaded embedding provider (§9A)
+and the removal of `VECTOR` from user land (§3).
 
 ---
 
@@ -95,7 +100,7 @@ What the draft gets right, and this design keeps:
 | `CAST(arr AS VECTOR(n))` | `function_vector_distance.cpp:537-626` | Native. Dimension 1..65535. |
 | `COSINE_SIMILARITY` / `COSINE_DISTANCE` / `MATCH…AGAINST` / `EMBED` | `function_vector_distance.cpp`, `draken/ops/vector_cosine.h:35-115` | Native C ABI kernels, but a **scalar** loop (fp16→fp32→double) with no SIMD. |
 | `EMBED` default provider | `opteryx/types/vectors/embedding_capability.py` | Static hashed lexical projection, 256-d, **not semantic**. MiniLM (ONNX, local) requires `OPTERYX_BUILD_EMBEDDINGS=1` plus a model dir. |
-| usearch 2.21.4 (HNSW) + SimSIMD + fp16 | `third_party/usearch/` | Vendored. `index_dense_gt` supports f16 scalars, `filtered_search`, `save`/`load`, and `view(memory_mapped_file_t)` (MAP_SHARED, **path-only** in this version), plus `exclude_vectors` serialization. |
+| usearch 2.21.4 (HNSW) + SimSIMD + fp16 | `third_party/usearch/` | *(As found 2026-09-30; since D-5 only `fp16/` remains vendored.)* Vendored. `index_dense_gt` supports f16 scalars, `filtered_search`, `save`/`load`, and `view(memory_mapped_file_t)` (MAP_SHARED, **path-only** in this version), plus `exclude_vectors` serialization. |
 | `UsearchIndex` binding | `src/cpp/usearch_native.cpp` | f32 buffers only. No save, load or view. Called **only** by `tests/unit/core/test_usearch_cpp.py`. |
 | Vector Top-K plan flag | `operator_fusion.py:42-63`, `plan_steps.pyx:5875-5917` | Sets `vector_topk_candidate`, but **nothing reads it** at runtime; it affects telemetry and EXPLAIN text only. |
 | Latmat two-pass scan | `src/cpp/engine/native_latmat_scan_source.hpp` | Pass 1 builds a survivor set, `reduce_to_topn` (the draken `SortKeyCmp`) reduces it, pass 2 does a masked decode. Locator is `LatmatRowGroup{path, rg_idx, positions}`. The mask is **one byte per row-group row**. |
@@ -141,7 +146,7 @@ Python.
 | Layer | Home | Contents |
 |---|---|---|
 | Distance kernels | **draken** (`draken/ops/`) | SIMD cosine (and, if D-2 adds it, L2/IP) over `VECTOR_FP16`, targeting NEON/AVX2 via `SIMD_STATIC_SELECT`. It is the graph's metric functor (§5.2), and it makes the brute-force baseline honest (§12). SimSIMD is already vendored; D-6 decides whether draken calls it or owns its kernels. |
-| Index files + build + search | **skene** (vectors file) + **draken** `ops/ann/` (graph and search), D-3 decided | Vectors are a skene file written and read with `skene::write_morsel` / `FileReader`; skene is its own extension (`build_common.py:1034`) and depends on draken alone. The graph is usearch's header-only core `index_gt`, with no Python and no opteryx dependency (§5.2). Any vendored source must follow `docs/VENDORED_LIBRARY_RULE.md` (`make check-symbols`). |
+| Index files + build + search | **skene** (vectors + centroids files) + **draken** `ops/ann/fp16_cosine_ivf.h` (IVF build, probe, top-k) | Both files are skene, written and read with `skene::write_morsel` / `FileReader`; skene is its own extension (`build_common.py:1034`) and depends on draken alone. IVF is draken's own code, with no Python, no opteryx dependency and no vendored ANN library (§5.2). |
 | Embedding provider hook | **draken** (kernel registration) + `opteryx/types/vectors` | A runtime-loaded provider; onnxruntime installed `--no-deps` (§9A). Registration already exists (`register_embedding_capability`). |
 | Execution | **`src/cpp/engine/`** | `NativeVectorIndexScanSource`, a sibling of `LatmatScanSource` that reuses `NativeScanColumnBuilder`, the rugo IO pipeline, `submit_row_group(..., row_mask)`, and draken `SortKeyCmp` / `TopNSink`. |
 | Index build at write | **native sink** (`DataFileStream` path) or a native maintenance operator (D-7) | Builds the sidecar from the vectors the sink already holds. |
@@ -186,69 +191,183 @@ Cost:
 
 ### 5.2 Contents
 
-```text
-<location>/index/<index_name>/<data-file-stem>.vidx
-```
-
-**DECIDED (D-3, rev 3).** Two immutable objects per (data file, index), both written before
-the commit that references them:
+**DECIDED (D-3 rev 3, D-5 ruled 2026-10-02: IVF-flat).** Two immutable skene objects per
+(data file, index), both written before the commit that references them:
 
 ```text
-<location>/index/<index_name>/<data-file-stem>.vectors.skene   -- (ordinal UINT32, embedding VECTOR_FP16)
-<location>/index/<index_name>/<data-file-stem>.graph           -- HNSW graph only, no vectors
+<location>/index/<index_id>/<data-file-stem>-<nonce>.vectors.skene     -- (ordinal UINT32, embedding VECTOR_FP16)
+<location>/index/<index_id>/<data-file-stem>-<nonce>.centroids.skene   -- (centroid VECTOR_FP16, row_group INT32, rows UINT32)
 ```
 
-- **Vectors: a skene file**, in ordinal order, so skene's dimension descriptor and checksums apply.
-  It is the only place the vector exists (§3). It is still derived state: rebuildable from the
-  source text column with the same provider and model (§9A).
-- **Graph: usearch's core `index_gt`** (`third_party/usearch/include/usearch/index.hpp:1986`),
-  not the `index_dense_gt` wrapper. Verified in the vendored 2.21.4:
-  - `index_gt` stores only the graph. Its `add` and `search` (`index.hpp:2783`, `:3020`) take the
-    **metric as a caller-supplied functor**, so distances are computed against vectors held
-    outside it, here the skene column's fp16 buffer.
-  - `search` also takes a **predicate** (the survivor and delete masks, §8).
-  - `save_to_stream` / `load_from_stream` (`:3281`, `:3327`) serialise through byte callbacks, so
-    the graph goes to any sink without a temporary file.
-  - The `index_dense_gt` route is rejected. With `exclude_vectors`, its `view()` sets the vector
-    count to 0 and then fails its own size check (`index_dense.hpp:1215-1236`, `:1288`), so it
-    cannot run without its own copy of the vectors.
-- The `.graph` object carries a small header ahead of the usearch stream: magic, format version,
-  index-definition id, provider identity (§9A), dimension, metric, HNSW parameters, the data
-  file's path, size and row count, the vectors file's path and size (binding checks), and the
-  body's length and CRC. Any mismatch fails the query.
-- **The code lives in draken** (`draken/ops/ann/`). It is a search over a `DrakenVector` of
-  `VECTOR_FP16`, which is draken's domain, and draken is Python-free and ships in both wheels.
-  usearch is header-only and already on draken's include path (`draken/core/fp16.h` uses its fp16
-  library), so nothing new is compiled. `make check-symbols` still applies.
-- **The metric functor is draken's own cosine kernel** (the SIMD one from Phase 1). The distances
-  the search returns are therefore the SQL kernel's values, and no separate exact re-rank pass is
-  needed (§8).
-- For IVF (if D-5 measures it ahead), the vectors file is instead sorted by cluster, with one row
-  group per cluster plus a centroid table, and no `.graph` object.
+- **Keyed by the index id, not its name**, so `DROP INDEX x; CREATE INDEX x` never reuses a
+  path. The nonce makes every build a new object (files are immutable).
+
+- **Vectors file, sorted by cluster:** one row group per non-empty cluster. Within a cluster,
+  rows are in ascending ordinal. Only searchable, non-deleted rows are stored, so the ordinal
+  column carries the data-file row. It is the only place the vector exists (§3), but it is
+  still derived state, rebuildable from the source text with the same provider and model (§9A).
+- **Centroids file:** row k is cluster k's unit-length centroid, plus its row group in the
+  vectors file (-1 when empty) and its row count. Small (K × dim × 2 bytes; 0.44 MB at
+  K=579, dim=384). It is read first; then only the `nprobe` probed row groups are fetched.
+- **Binding:** a skene file has no free-form section. So the binding (index-definition id,
+  embedding identity, data file path/size/row count) lives in the manifest entry that
+  references both objects, and is checked against them when the plan is built.
+- **The code lives in draken** (`draken/ops/ann/fp16_cosine_ivf.h`): `ivf_build` (deterministic
+  spherical k-means on a seeded sample, then a cluster-major order), `ivf_probe` (nearest
+  non-empty centroids), and `TopK::offer` (scores a contiguous block keyed by ordinal, which
+  is exactly a cluster row group as it arrives). `exact_topk` is the same accumulator over
+  every row.
+- **The metric is draken's own cosine** (the SIMD kernel from A1), as `1 - clip(cos)`. The
+  distances returned are therefore the SQL kernel's values, and no re-rank pass is needed (§8).
 
 ### 5.3 Referencing from the manifest
 
-- Add one manifest column: `vector_index_paths: list<struct{index_id, path, size}>`, one entry per
-  index that covers the file.
-- It is optional on read (like `distinct_counts`), so old manifests are simply "no sidecars".
-- It must be added at all **four** manifest sites (§2).
+**Built in C1 (paths) and C1b (sizes).** Six parallel array columns
+on each manifest entry, one element per index that covers that data file:
 
-Index **definitions** (name, column, dimension, metric, algorithm and parameters, row threshold,
-owner, created-at) live in a new dataset subcollection `indexes`, following `tags`. They must not
-live on the dataset document, because `save_dataset_metadata`'s `set()` would erase them.
+| column | type | meaning |
+|---|---|---|
+| `vector_index_ids` | `ARRAY<VARCHAR>` | index definition id |
+| `vector_index_vectors` | `ARRAY<VARCHAR>` | vectors file path |
+| `vector_index_centroids` | `ARRAY<VARCHAR>` | centroids file path |
+| `vector_index_vectors_bytes` | `ARRAY<INT64>` | vectors file on-disk size *(rev 5)* |
+| `vector_index_centroids_bytes` | `ARRAY<INT64>` | centroids file on-disk size *(rev 5)* |
+| `vector_index_logical_bytes` | `ARRAY<INT64>` | logical (decoded) size of both files together *(rev 6, billed; §5.5)* |
+
+- Empty arrays mean "this file has no index". Old manifests without the columns read as empty.
+- The arrays must have equal length. A mismatch is refused when the entry is read
+  (`index_refs`), never repaired.
+- Sizes are the sizes the builder wrote, handed to the commit with the paths. They are never
+  read back from storage. A commit that names an index file without its size is refused.
+- The engine's manifest decoder reads columns by name, so it ignores these until Stage D needs
+  them.
+
+Index **definitions** (name, id, column, method, metric, clusters, nprobe, build mode, embedding
+identity and width, owner, created-at) live in the dataset subcollection `indexes`, following
+`tags`. They must not live on the dataset document, because `save_dataset_metadata`'s `set()`
+would erase them.
 
 ### 5.4 Lifecycle, mapped onto existing commits
 
 | Event | What happens to sidecars |
 |---|---|
-| `CREATE INDEX` on an existing table | A maintenance operation builds sidecars for every live file above the threshold and commits a snapshot that changes only the manifest's `vector_index_paths`. It is modelled on `refresh_manifest` (operation type e.g. `index-build`), with the same CAS. Queries before that commit see no sidecars. |
-| `INSERT` / `append` / CTAS | Either the sink builds sidecars for its new files before commit (synchronous), or the files land unindexed and a later maintenance commit adds them (D-7). |
+| `CREATE INDEX` on an existing table | A maintenance operation builds sidecars for every live file above the threshold and commits a snapshot that changes only the manifest's index columns. With `build = 'sync'` CREATE INDEX runs this build before it returns; with `async` it fires `REFRESH INDEX` (§10). It is modelled on `refresh_manifest` (operation type e.g. `index-build`), with the same CAS. Queries before that commit see no sidecars. |
+| `INSERT` / `append` / CTAS | Either the sink builds sidecars for its new files before commit (synchronous), or the files land unindexed and the commit fires `REFRESH INDEX`, per the index's build mode (D-7, D-16; §10). |
 | `DELETE` / `UPDATE` / `MERGE` | Delete vectors mark ordinals. The search predicate excludes them (§8). New files from MERGE follow the append rule. |
-| `OPTIMIZE TABLE` | Output files are new, so they need new sidecars (same rule as append). Retired files' sidecars retire with them. |
+| `OPTIMIZE TABLE` / compaction | Compaction never embeds (D-14). It only merges files with the same index coverage: indexed inputs give an output whose index is built by **carrying** their vectors, referenced in the same compaction commit; unindexed inputs give an unindexed output that the commit's `REFRESH INDEX` builds (§5.6). It holds the maintenance lease (§5.7). Retired files' index files leave the head manifest with them. |
 | Rollback / `VERSION AS OF` / tags | Nothing extra. The older manifest references the older sidecars. |
-| Expiry / deep clean | Sidecars must be recognised as **referenced** artifacts, exactly like `deletes-*.parquet`. Otherwise deep clean will quarantine them. Ownership rules (`ownership.py`) apply unchanged because they sit under the dataset's location. |
+| Expiry / deep clean | Sidecars must be recognised as **referenced** artifacts, exactly like `deletes-*.parquet`. Otherwise deep clean will quarantine them. Ownership rules (`ownership.py`) apply unchanged because they sit under the dataset's location. An index file is deleted once no retained snapshot or tag references it, and expiry counts its **recorded** size (§5.3) in the reclaimed-bytes tally (rev 5; today it counts 0). |
 | `DROP INDEX` | Removes the definition and commits a manifest without that index's entries. Files are reclaimed by normal expiry, so older snapshots keep working. |
+| Commit lost (CAS) after index files were written | The files are unreferenced objects under the dataset's location. Deep clean reclaims them like any orphaned data file. Nothing reads them, because no manifest names them. |
 | Schema change to the indexed column | The sidecar header's definition id and dimension make a mismatch detectable. Plan-time use of a mismatched sidecar is **refused**, never skipped. |
+
+### 5.5 Storage accounting and billing (rev 5; D-13 ruled rev 6)
+
+Today the storage sweep (`xb500.opteryx` `app/operations/record_storage_billing.py`) bills each
+dataset's **head** snapshot `total-data-size`: the logical (uncompressed) size of its data
+files. Index files are not in that figure, and before rev 5 they could not be, because the
+manifest held their paths only.
+
+1. **Per file:** the manifest records each index file's on-disk size, and each index's logical
+   size (§5.3).
+   - **Logical size** of an index = the decoded bytes of its two skene files, which is what
+     `uncompressed_size_in_bytes` means for a data file:
+     - vectors: indexed rows × (4 + 2 × dim) bytes (`ordinal` UINT32 + fp16 embedding);
+     - centroids: clusters × (2 × dim + 4 + 4) bytes (centroid + `row_group` + `rows`).
+   - The builder computes it from what it wrote and hands it to the commit with the paths.
+2. **Per snapshot:** the summary gains three counters, maintained by every commit exactly as
+   `total-files-size` and `total-data-size` are:
+   - `total-index-files`: index files (vectors + centroids) referenced by the manifest.
+   - `total-index-size`: their on-disk bytes (for storage operations and expiry reporting).
+   - `total-index-data-size`: their logical bytes (**billed**).
+
+   `total-data-size` and `total-files-size` never include index bytes, so creating an index
+   does not move the data figure. `index-build` and `index-drop` commits change only the index
+   counters.
+3. **Per index:** not stored. `SHOW INDEXES` (§7A) derives each index's bytes and indexed-file
+   count from the head manifest, which the planner already reads and caches. A per-index copy
+   on the summary would be a second truth every commit has to keep right.
+4. **Billing (D-13 RULED 2026-10-02: logical bytes).** The sweep reads the head snapshot's
+   `total-index-data-size` and reports it as its **own figure**, alongside and never inside
+   `bytes_stored`: "data = 1 GB, indexes = 100 MB" per collection. Both figures are logical
+   bytes, metered the same way.
+   - Like data, only the head snapshot is metered. Index files kept alive by older snapshots
+     are not, matching how data files are treated today.
+   - The rate is a pricing setting, not an engine decision. How the embedding compute of a
+     build is metered is not covered by this ruling (it is the compute of whatever job runs
+     the build; §10).
+5. **Tags:** `create_tag` records `pinned-bytes` and `pinned-bytes-on-disk`. It also records
+   `pinned-index-bytes` (logical) and `pinned-index-bytes-on-disk` from the snapshot's summary,
+   so pinning an indexed snapshot does not understate what it holds.
+
+### 5.6 Compaction carries vectors and never embeds (D-7, D-14 ruled)
+
+Compaction (OPTIMIZE, and any whole-file rewrite through `compaction_commit`) moves rows into
+new data files. **Compaction never embeds** (D-14). Text that already has a vector keeps it
+(D-7); text that has none is embedded only by `REFRESH INDEX`, never by compaction.
+
+**Grouping rule.** Compaction only merges input files with the **same index coverage**: the
+same set of index ids. So, per index, an output file's inputs are either all indexed or all
+unindexed:
+- **All indexed:** the output's index is built by carrying vectors (below) and lands in the
+  same compaction commit.
+- **All unindexed** (an async index that has not caught up, or files below the D-8 threshold):
+  the output is unindexed. The compaction commit adds data files, so it fires
+  `REFRESH INDEX` (§10), which embeds rows that were **never** embedded. Nothing is embedded
+  twice.
+
+Carrying, per index, per output file:
+1. The writer records the mapping it already follows: output ordinal ← (input file, input
+   ordinal). Rows removed by delete vectors are not written and have no mapping (compaction
+   materialises deletes).
+2. For each input, read its vectors file in full (a sequential read of bytes already written;
+   no model involved) and look rows up by its `ordinal` column.
+3. Run `ivf_build` over the output's vectors (seconds, not minutes; §13 B3) and write the two
+   skene files.
+4. The output entries carry their index references and sizes in the **same**
+   `compaction_commit` snapshot. A compacted file is never unindexed in a window where its
+   inputs were indexed.
+
+Rules:
+- A file is either fully indexed for an index or not indexed at all. A partial index file is
+  never written.
+- **Invariant:** for each indexed output, carried vectors = searchable rows written. A
+  mismatch fails the compaction, like its row-count invariant.
+- Every input index file's embedding identity must equal the definition's. A mismatch refuses
+  the compaction for that table rather than mixing vectors from two models.
+- Each index on the table is carried independently.
+- Retired inputs' index files leave the head manifest in that commit and are reclaimed by
+  expiry (§5.4).
+
+### 5.7 Maintenance lease: compaction and index builds never overlap (D-14, rev 6)
+
+D-14 also rules that compaction and indexing do not run at the same time on a table. The
+commit CAS already stops either one from overwriting the other, but only at the end: an index
+build that loses the race has spent minutes of embedding for nothing, and a compaction that
+retires a file mid-build forces the build to start over. A lease prevents the overlap up front.
+
+- **The lease:** one document per dataset, `maintenance/lease` (a subcollection, like
+  `indexes`), holding `holder`, `operation` (`compaction` / `index-build`), `claimed-at-ms`
+  and `expires-at-ms`.
+- **Claimed** in one Firestore transaction (read, check free or expired, set), the same claim
+  pattern as `claim_trigger_fire`. The holder renews it while it works and releases it after
+  its commit. An expired lease (a crashed holder) can be claimed; the crashed holder's
+  uncommitted files are orphans that deep clean reclaims (§5.4).
+- **Who takes it:** every compaction (including on tables with no index, because a CREATE
+  INDEX can arrive while it runs), `REFRESH INDEX`, and the build that a `sync` CREATE INDEX
+  runs.
+- **Who does not:** INSERT, CTAS, MERGE, DELETE and UPDATE, including the index build a `sync`
+  index does inside them. They only index their **own new files**, which no compaction can
+  have selected yet, and their commits go through CAS as today. Making every write wait for a
+  compaction would be a regression for tables that never compact.
+- **A refused claim is loud, never queued silently:**
+  - `REFRESH INDEX` while a compaction holds the lease fails with a message naming the holder.
+    Nothing is lost: the compaction's own commit adds files and fires `REFRESH INDEX` again.
+  - A compaction while an index build holds the lease fails the same way, and its next
+    scheduled run picks the table up again.
+  - A `sync` CREATE INDEX that cannot get the lease fails; the definition is not created.
+- **The CAS stays.** The lease avoids wasted work; correctness still rests on the commit's
+  compare-and-set.
 
 ---
 
@@ -292,13 +411,33 @@ Common rules:
   message naming the index and the mismatch.
 - The approximate form over a table with **no** index is refused. It does not fall back to exact
   search, because the user asked for an index path.
-- Recall/cost knob: `expansion_search` (HNSW `ef`) or `nprobe` (IVF), as a session variable and/or
-  a statement option (D-9).
+- Recall/cost knob: `nprobe` (clusters probed per file), as a session variable and/or a statement
+  option (D-9). Default for ~0.95 recall (32 at K≈√N on NVD).
 - DDL:
-  `CREATE INDEX name ON table USING HNSW (text_col) WITH (metric='cosine', …)` /
+  `CREATE INDEX name ON table USING IVF (text_col) WITH (metric='cosine', clusters=…, …)` /
   `DROP INDEX name ON table`. This is sqlparser's `CreateIndex` shape, which DuckDB's vss extension
   also uses. It must be parse-checked. Governance matches other dataset DDL: owner/WRITE grant,
   and egress rules as for writes.
+
+## 7A. Discovering indexes (rev 5)
+
+- **`SHOW INDEXES FROM t`** (D-15 RULED: follow sqlparser) returns one row per index: `name`, `column`,
+  `method`, `metric`, `build`, `clusters`, `nprobe`, `embedding` (provider identity),
+  `files_indexed`, `files_total`, `index_bytes`, `created_by`, `created_at`.
+  - `files_indexed` / `files_total` and `index_bytes` come from the head manifest (§5.5). They
+    show how far an async index lags and what it costs to store.
+  - It reads the catalog only. It never opens an index file.
+  - Permission: the same as `SHOW CREATE TABLE`.
+  - sqlparser has no SHOW INDEX statement: `SHOW INDEXES FROM t`, `SHOW INDEX FROM t`,
+    `SHOW INDEXES ON t` and `SHOW KEYS FROM t` all fold into its generic `ShowVariable` node
+    (checked 2026-10-02). It is planned in `plan_show_variables`, exactly like
+    `SHOW MANIFEST FOR t`. The one spelling is MySQL's `SHOW INDEXES FROM t`; the other word
+    forms are refused with a message naming it (canonical spellings only).
+- **`SHOW CREATE TABLE t`** appends the `CREATE INDEX` statements that recreate the table's
+  indexes, reconstructed from the definitions like the table form.
+- **EXPLAIN and telemetry** for the approximate form report indexed vs exact files, probed
+  clusters and candidates (Stage D).
+- No `information_schema` view in v1.
 
 ---
 
@@ -311,7 +450,7 @@ per surviving data file (after manifest + row-group pruning):
   pass 1  decode predicate columns (existing NativeScanColumnBuilder / Pass1Pred)
           → survivor mask M_f (bit per file ordinal), AND NOT delete-bitmap D_f
   search  if file has a sidecar and popcount(M_f) ≥ τ:
-              filtered_search(q, k', pred = M_f[ordinal])     -- filter DURING traversal
+              ivf_search(q, k', nprobe, admitted = M_f)       -- filter while scoring
           else:
               exact SIMD distance over survivors of M_f       -- small / unindexed / very selective
           → candidates (ordinal, distance), k' per file  (distance = draken kernel value)
@@ -321,14 +460,14 @@ pass 2b   masked decode of remaining projected columns for the final k
 ```
 
 Why this shape:
-- **No overfetch loop.** Residual predicates are evaluated *before* the search. The mask becomes
-  usearch's traversal predicate, so the graph walk only yields admissible rows. This covers every
+- **No overfetch loop.** Residual predicates are evaluated *before* the search. The mask is the IVF
+  probe's admitted set (`TopK::offer(..., admitted)`), so only admissible rows are scored. This covers every
   predicate the engine can evaluate natively, not just an S3-style metadata-filter subset.
-- **Selective filters.** HNSW recall degrades when very few nodes are admissible, and brute force
-  over a few survivors is cheap. So below a survivor threshold τ, the exact path is used for that
-  file. The rule is deterministic, native and per-file, and both arms are correct under the
+- **Selective filters.** With a selective filter, the admitted rows may lie outside the probed
+  clusters, so IVF recall degrades — while brute force over a few survivors is cheap. So below
+  a survivor threshold τ, the exact path is used for that file. The rule is deterministic, native and per-file, and both arms are correct under the
   "approximate" contract. τ is a measured constant, not a guess (§12).
-- **The distance the user sees is always the SQL kernel's value.** The graph's metric functor *is*
+- **The distance the user sees is always the SQL kernel's value.** The index's metric *is*
   the draken kernel (§5.2), so search distances need no re-rank. Ordering goes through the same
   comparator `TopNSink` uses, so ties and NULLs are handled as in every other ORDER BY (the
   `reduce_to_topn` lesson).
@@ -367,6 +506,9 @@ and a cold query must download all of it first.
 | **HNSW, i8-quantized vectors file** + exact re-rank (needs an fp16 copy too) | ~½ of fp16 | ~½ | Same shape, half the bytes | Vendored (usearch i8) |
 | **IVF-flat** (centroids + per-list contiguous blocks, fp16) | Centroids (KB) + `nprobe` range GETs | Centroids only | **Yes**: matches the coalesced range-fetch pipeline | New code (small: k-means build + block layout) |
 | **Exact SIMD brute force** (no index) | Embedding column of surviving RGs | None | Yes (today's path) | Kernels only |
+
+**Resolved:** D-5 was ruled IVF-flat on the measurements in §13 (B3). The table and the
+recommendation below are kept as the reasoning.
 
 Recommendation: **measure before choosing (D-5).**
 1. Build the SIMD exact kernel first. It is needed anyway.
@@ -411,8 +553,8 @@ MiniLM path links the ONNX SDK at build time (`src/cpp/minilm_native.cpp` includ
   package, once, at provider registration. Execution stays native, so this is planning-phase
   Python, but it is a point for you to rule on.
 - **Identity.** An index definition records provider name, model checksum, dimension and
-  pooling/normalisation settings. `EMBED('literal')` in a query must resolve to the same
-  identity or the statement is **refused**. A new image with a different model therefore refuses
+  pooling/normalisation settings. The query text of the approximate form is embedded by the
+  running provider, whose identity must equal the definition's, or the statement is **refused**. A new image with a different model therefore refuses
   old indexes until they are rebuilt. It never scores them silently.
 - **Why this fixes the build question.** Because the vectors are derived from a text column
   through a pinned provider, `CREATE INDEX … (body)` can rebuild the index at any time, so
@@ -436,23 +578,37 @@ MiniLM path links the ONNX SDK at build time (`src/cpp/minilm_native.cpp` includ
 
 ## 10. Build path
 
-- **Where:** a native C++ builder in the index library (§4). Its input is the indexed expression
-  (the indexed text column embedded by the §9A provider) evaluated to a `VECTOR_FP16` `DrakenVector` stream in
-  file-ordinal order, plus the delete bitmap if one exists (deleted rows
-  are *not added*, so rebuilding after heavy deletes shrinks the index). Its output is the sidecar
-  bytes, uploaded through the existing FileIO before the commit that references them.
-- **Cost:** HNSW construction is CPU-heavy, roughly minutes for millions of rows even
-  multi-threaded. Doing it synchronously inside every INSERT/MERGE/OPTIMIZE sink ties write latency
-  to index build (D-7):
-  - (a) **Synchronous in the sink.** The index is always complete, and write latency and cost go up.
-  - (b) **Asynchronous maintenance commit** (a catalog task / `REFRESH INDEX`). Writes are
-    unaffected, and freshly written files are searched exactly until indexed, under the §5.1 rule.
-    EXPLAIN and telemetry report indexed vs exact file counts.
-  - (c) **Hybrid.** Synchronous for OPTIMIZE (already a heavy maintenance write), asynchronous for
-    INSERT/MERGE.
-
-  Recommendation: (c). It keeps small writes cheap and makes compacted files, where the bulk of
-  rows end up, immediately indexed.
+- **Where:** a native builder (C2b). Per data file: scan the indexed text column keeping file
+  ordinals, embed through the registered provider (§9A), drop null, deleted, zero-magnitude and
+  non-finite rows, run `ivf_build`, and write the vectors and centroids skene files through
+  FileIO, returning their paths and sizes. The `index-build` commit is control-plane work after
+  the native build.
+- **Cost:** embedding dominates (~44 rows/s per thread with MiniLM; §13 B3). Clustering takes
+  seconds.
+- **When (D-7, ruled 2026-10-02):** per index, `build = 'sync' | 'async'`, default `async`,
+  switched by `ALTER INDEX`.
+  - `sync`: CREATE INDEX builds every existing file before it returns. Every commit that adds
+    data files builds their index files first and references them in the same snapshot.
+  - `async`: new files land unindexed and are searched exactly until `REFRESH INDEX` indexes
+    them with an `index-build` commit.
+  - Compaction never embeds; it carries vectors or leaves the output unindexed (§5.6).
+- **Trigger (D-16 RULED 2026-10-02):** `REFRESH INDEX n ON t` is the one build primitive. It
+  takes the maintenance lease (§5.7), embeds every live data file that index does not cover
+  (above the D-8 threshold), and commits `index-build`.
+  - Users can run it directly.
+  - It is **fired automatically** for each async index on the table by every commit that adds
+    data files (INSERT, CTAS, MERGE, UPDATE's rewritten files, OPTIMIZE / compaction) and by
+    `CREATE INDEX`. The firing uses the existing commit-trigger path (`trigger_firing.py`),
+    which already submits `REFRESH MATERIALIZED VIEW` to jobs.opteryx after a commit: the job
+    runs as the commit's author, and a failure to fire is alerted and audited without failing
+    the commit.
+  - `REFRESH` is parsed by the aside parser, which today accepts only
+    `REFRESH MATERIALIZED VIEW` (`src/aside/view.rs`). `REFRESH INDEX n ON t` is a new
+    grammar there, like `ALTER INDEX`.
+  - No separate scheduled task: every way an index can fall behind is a commit that fires it.
+    A fire that fails (alerted) is caught up by the next one, or by running it by hand.
+- **Small files (D-8, open):** files below a row threshold get no index and are always
+  searched exactly.
 - **Bloom-style trap to avoid:** blooms were written for months with no remote reader
   (`bloom_probe_is_local_path_only`). The index must not ship its writer before its production
   (GCS) reader is proven.
@@ -480,7 +636,7 @@ the earliest and optional (D-10).
 
 Hadro can't host the full API: it has no write path, no catalog, and no engine. What it *could*
 plausibly do, consistent with its per-object S3 Select model, is **single-object vector search**:
-"top-k nearest rows in this one Parquet object using its `.vidx` sidecar". It would use the same
+"top-k nearest rows in this one Parquet object using its index files". It would use the same
 native index reader shipped in the `rugo` wheel. That is only possible if the index library lives
 in draken plus skene (D-3), and it is only worth doing if someone needs it. It is not on the critical
 path, and the draft's premise that Hadro builds indexes from dataset knowledge is withdrawn.
@@ -556,10 +712,11 @@ Each step is a separate change, approved before the next starts, and none is com
 
 **B1/B2 DELIVERED 2026-10-02.**
 - **B1 needs no code:** skene's existing writer/reader already round-trips `VECTOR_FP16` with its
-  dimension. Convention (supersedes the `ordinal` column in §5.2): the vectors file has ONE
+  dimension. *(Superseded by the IVF layout in §5.2: cluster-ordered `(ordinal, embedding)`,
+  searchable rows only.)* Original convention: the vectors file has ONE
   column `embedding VECTOR_FP16(dim)`, and row i is data-file ordinal i (null where the text is
   null). Deleted rows stay in the file; they are excluded at build and masked at search.
-- **B2:** `draken/ops/ann/fp16_cosine_hnsw.h`, built on usearch `index_gt<double, uint32_t, uint32_t>`.
+- **B2** *(superseded by IVF on D-5, 2026-10-02; deleted)*: `draken/ops/ann/fp16_cosine_hnsw.h`, built on usearch `index_gt<double, uint32_t, uint32_t>`.
   - The graph holds no vectors. It reads the column through `data[selection[r]]`, mapping
     slot to row via the add callback.
   - The metric is `1 - clip(cosine_row_fp16)`, so the distances are bit-identical to the
@@ -605,9 +762,75 @@ What this says:
    IVF clustered row groups (read the centroids, then `nprobe` row groups), optionally with
    i8 quantisation.
 
-**Next measurement before ruling D-5:** an IVF-flat prototype (k-means at build, cluster-sorted
-skene row groups), measuring bytes read and latency per query against exact and HNSW, on real
-embeddings (B3).
+**B3 + D-5 measurements on REAL embeddings (2026-10-02).**
+
+Fixture (`dev/vector_fixture.py`): every NVD vulnerability description (`testdata.nvd`, 335,085
+real English texts, ~320 characters each), embedded by the engine's own MiniLM capability.
+The queries are 20 natural-language queries plus 180 held-in rows. Recall is tie-aware: a hit
+counts if its distance is no greater than the exact 10th-nearest distance (NVD has many
+duplicate descriptions). Laptop, 6 threads where stated.
+
+**Embedding is the dominant build cost:** 710 rows/s on 16 threads (~44 rows/s per thread).
+335k rows took 8 minutes; 1M rows would take ~23 minutes on 16 cores. That is 20-30x the
+cost of building either index.
+
+| path | build | per-query CPU (1 thread) | recall@10 | vector bytes read per query |
+|---|---|---|---|---|
+| exact scan | none | 23 ms (69 ns/row) | 1.00 | 100% (257 MB) |
+| HNSW ef=64 | 16.5 s, 48.5 MB graph | 0.18 ms | 0.93 | 100% (must be resident) |
+| HNSW ef=128 | ″ | 0.33 ms | 0.95 | 100% |
+| IVF K=576, nprobe=16 | 23.5 s (8 k-means iterations), 0.44 MB centroids | 1.9 ms | 0.93 | 3.6% |
+| IVF K=576, nprobe=32 | ″ | 3.7 ms | 0.95 | 6.8% |
+| IVF K=576, nprobe=64 | ″ | 7.1 ms | 0.97 | 12.9% |
+
+Reading: at equal recall (0.95), HNSW costs ~10x less CPU, but **IVF reads ~15x fewer bytes**.
+In production (Cloud Run + GCS, 8 GiB workers, cold or partially cached), bytes read decide
+latency and memory. Every path's CPU here is single-digit milliseconds, and IVF's probe scan
+parallelises across row groups like any scan.
+
+**IVF re-measured with the draken implementation, engine-shaped (2026-10-02).** Vectors are
+copied into cluster order as the skene file stores them, each probed cluster is scored as a
+contiguous block keyed by ordinal, and the probe is split across 6 threads:
+
+| K | build (6 threads) | nprobe | 1 thread | 6 threads | recall@10 | bytes read |
+|---|---|---|---|---|---|---|
+| 579 (√N, default) | 4.4 s | 32 | 1.67 ms | 0.46 ms | 0.959 | 7.1% |
+| 579 | ″ | 64 | 3.15 ms | 0.74 ms | 0.979 | 13.4% |
+| 2048 | 35.7 s | 64 | 1.14 ms | 0.28 ms | 0.952 | 4.2% |
+
+At equal recall IVF now matches HNSW's 0.33 ms on parallel wall time, and reads 4-7% of the
+vectors instead of 100%. The prototype's "10x slower" was gather overhead plus a serial
+probe. Training on a sample cut the K=579 build from 23.5 s to 4.4 s.
+
+Consequences for open decisions:
+- **D-5 RULED 2026-10-02: IVF-flat over fp16.** Implemented in
+  `draken/ops/ann/fp16_cosine_ivf.h`: deterministic spherical k-means on a seeded sample, a
+  cluster-major order, a non-empty-cluster probe, and `TopK::offer` over contiguous blocks.
+  HNSW and the usearch graph and SimSIMD headers are deleted; only usearch's `fp16/` remains
+  vendored, for draken. Tests: `tests/unit/core/test_vector_ann.py`, including "probing
+  every cluster == the exact scan, bit for bit".
+  - The vectors file is sorted by cluster, with one skene row group per cluster and a
+    centroid table.
+  - The default nprobe is set for ~0.95 recall, overridable by the recall setting (D-9).
+  - HNSW would then be deleted. The exact path stays, for small files and selective filters.
+- **D-7 RULED 2026-10-02:**
+  1. **Compaction never re-embeds.** When OPTIMIZE (or any rewrite) moves rows into a new
+     data file, the builder carries each row's existing vector across by the old-to-new
+     row mapping and only re-clusters (seconds, not minutes). Rows with no vector to carry
+     (from an unindexed source file) are the only rows ever embedded during a rewrite.
+  2. **The build mode is per index, chosen at definition:**
+     `CREATE INDEX … USING IVF (col) WITH (build = 'sync' | 'async', …)`.
+     - `sync`: every commit that adds data files (INSERT, CTAS, MERGE, OPTIMIZE) embeds and
+       builds their sidecars before it commits. The index is always complete; write latency
+       pays ~1.4 ms per new row per embedding thread (MiniLM, 44 rows/s/thread).
+     - `async`: commits land unindexed. A maintenance build commits the sidecars later, and
+       until then those files are searched by the exact path (EXPLAIN and telemetry show
+       indexed vs exact files).
+     - **Default `async`** when `build` is omitted (ruled 2026-10-02).
+     - **`ALTER INDEX … SET (build = 'sync' | 'async')`** switches modes (ruled 2026-10-02).
+       The new mode applies from the next commit. Files written while the index was async
+       stay unindexed until a maintenance build.
+
 
 | Step | Work | Gate |
 |---|---|---|
@@ -618,12 +841,68 @@ embeddings (B3).
 
 ### Stage C: catalog lifecycle
 
+**C0, C1 and the C2 DDL delivered 2026-10-02.** The catalog suite (1401), `make q` and cargo
+all pass.
+- **C0:** the commit pointer check and the write are now ONE Firestore transaction
+  (`_set_if_pointer_unmoved`). The old code checked in its own transaction and then wrote
+  outside it. Test: `opteryx-catalog/tests/test_commit_pointer_atomic.py`.
+- **C1:** `opteryx_catalog/catalog/vector_indexes.py`, covering the definition record and its
+  validation, the sidecar paths, and the reference helpers.
+  - Definitions live in an `indexes` subcollection, with `create/get/list/alter/drop_vector_index`
+    and audit events.
+  - The manifest gains three parallel `ARRAY<VARCHAR>` columns: `vector_index_ids`,
+    `vector_index_vectors` and `vector_index_centroids`.
+  - New commits: `commit_vector_index_files` (`index-build`) and `remove_vector_index_files`
+    (`index-drop`).
+  - References are carried by every other commit and by the statistics refresh, copied on
+    fork, and protected by deep clean and expiry.
+  - Tests: `opteryx-catalog/tests/test_vector_indexes.py` (24).
+  - The engine needs no change to read these manifests: its decoder reads columns by name.
+- **C2 DDL:**
+  - `CREATE INDEX [IF NOT EXISTS] n ON t USING IVF (col) [WITH (build, clusters, nprobe)]`
+    uses sqlparser, with the dialect's WITH clause enabled.
+  - `ALTER INDEX n ON t SET (build = …)` goes through the aside parser (`src/aside/index.rs`).
+  - `DROP INDEX [IF EXISTS] n ON t` uses sqlparser. `ALTER INDEX … RENAME` is refused.
+  - One `VectorIndexDdl` plan step and the `vector_index_ddl` relation-management action carry
+    all three.
+  - The binder requires ALTER permission and a connector with `supports_vector_indexes` (the
+    Opteryx catalog only). It checks the column exists and is text, validates the options,
+    and stamps the active embedding identity and width.
+  - Tests: `tests/integration/test_vector_index_ddl_local.py` (15).
+- **Not yet built:** the index BUILD (C2b, the native operator: scan text, embed, `ivf_build`,
+  write the skene files, then the `index-build` commit) and the write-path policy (C3).
+  Until C2b lands, CREATE INDEX only DEFINES the index. Even with `build = 'sync'` no file
+  is indexed yet, and nothing reads indexes before Stage D, so nothing pretends otherwise.
+- **C1b delivered 2026-10-02** (catalog suite 1422, `make q`, DDL 15):
+  - `IndexFiles(vectors, centroids, vectors_bytes, centroids_bytes, logical_bytes)` is what
+    `index_refs` returns and what `commit_vector_index_files` takes. A plain path pair, or any
+    size that is not a positive integer, is refused; a manifest row whose six columns disagree
+    is refused.
+  - Every commit derives `total-index-files` / `total-index-size` / `total-index-data-size`
+    from the manifest it writes (`index_totals`, beside `_totals_from_entries`), at all five
+    summary sites. The data totals never include index bytes.
+  - Expiry's size map carries the recorded index sizes. Tags record `pinned-index-bytes` and
+    `pinned-index-bytes-on-disk`, and the `create_tag` audit carries them.
+  - The lease (§5.7): `claim_maintenance_lease` / `renew_maintenance_lease` /
+    `release_maintenance_lease` on `maintenance/lease`, the dataset's EXISTING `maintenance`
+    subcollection (beside the orphan quarantine), so drop and rename already clean it up.
+    Each claim gets a `claim-id`, so a late renew raises `MaintenanceLeaseLost` and a late
+    release returns False without touching a newer claim. TTL 1..3600 s; renew to hold
+    longer.
+  - **C1 gaps fixed here:** `drop_dataset` left the `indexes` subcollection behind (a
+    same-named new table would inherit the definitions), and `rename_dataset` moved neither
+    the index files nor the definitions. Both now do, with tests.
+- **Next:** C2b, the native build operator.
+
 | Step | Work | Gate |
 |---|---|---|
 | **C0** | *(needs your approval)* Fix the commit check-and-set race (§15 item 1) first, because every index commit relies on it. | Catalog race test |
-| **C1** | opteryx-catalog: `indexes` subcollection (D-11), `vector_index_paths` manifest column at all four sites, deep-clean and expiry treating sidecars as referenced, and an `index-build` commit (like `refresh_manifest`). | Time-travel, rollback, expiry and deep-clean tests |
-| **C2** | `CREATE INDEX … USING HNSW (text_col) WITH (…)` / `DROP INDEX`: parse-check, binder, governance (owner/WRITE grant, egress), plus a native build operator (scan text → embed → B1/B2 → upload → C1 commit). | DDL tests on a local catalog |
-| **C3** | Write-path build policy (**D-7**, needs ruling): OPTIMIZE builds sidecars synchronously; INSERT/MERGE leave files unindexed until a maintenance build. | OPTIMIZE/MERGE lifecycle tests |
+| **C1** | opteryx-catalog: `indexes` subcollection (D-11), the index manifest columns (§5.3), deep-clean and expiry treating index files as referenced, and the `index-build` / `index-drop` commits. | Time-travel, rollback, expiry and deep-clean tests |
+| **C1b** | Accounting (§5.5): the three size columns, `total-index-files` / `total-index-size` / `total-index-data-size` on every commit's summary, expiry's reclaimed bytes from recorded sizes, `pinned-index-bytes(-on-disk)` on tags; plus the maintenance lease (§5.7). | Sizes round-trip; counters across build, drop, compaction, fork; expiry tally; lease claim, renew, expiry, refusal |
+| **C2** | `CREATE INDEX … USING IVF (text_col) WITH (…)` / `ALTER INDEX` / `DROP INDEX`: parse-check, binder, governance, plus (C2b) the native build operator (scan text → embed → `ivf_build` → write skene files → `index-build` commit; §10). | DDL tests on a local catalog |
+| **C3** | Write-path policy (D-7, D-14, D-16, ruled): sync builds inside INSERT/CTAS/MERGE commits; `REFRESH INDEX` (aside grammar) fired by every file-adding commit and CREATE INDEX for async indexes; compaction grouping by coverage, vector carry, lease (§5.6, §5.7). | Lifecycle tests per mode; carry invariant; compaction never embeds; lease refusals |
+| **C4** | Discovery (§7A, D-15): `SHOW INDEXES FROM t` in `plan_show_variables`, and index lines in `SHOW CREATE TABLE`. | SHOW tests |
+| **C5** | Billing (§5.5, D-13), outside this repo: the xb500 storage sweep reports `total-index-data-size` (logical) as its own figure. | Sweep test |
 
 ### Stage D: query path
 
@@ -646,15 +925,19 @@ model at container build with its checksum verified (§9A).
 |---|---|---|---|
 | D-1 | `VECTOR` in user land | — | **RULED rev 3:** not a user-land concept. It exists only inside the index (§3). |
 | D-2 | Vector element type and metrics | fp16 only + cosine / add fp32 `VECTOR` base type / add L2 & inner product | fp16 + cosine for v1. L2/IP kernels are cheap to add with the SIMD work. fp32 only if S3 compatibility (D-10) is pursued. |
-| D-3 | Home of the ANN code and the graph format | — | **DECIDED rev 3:** draken `ops/ann/`, usearch core `index_gt` (graph-only), vectors in a skene file, graph in a separate `.graph` object (§5.2). |
+| D-3 | Home of the ANN code and the index format | — | **DECIDED rev 3, amended by D-5:** draken `ops/ann/` (IVF-flat), vectors and centroids in skene files (§5.2). |
 | D-4 | SQL spelling of "approximate" | `VECTOR_SEARCH` TVF / `APPROX_COSINE_DISTANCE` / `WITH INDEX` clause | `APPROX_COSINE_DISTANCE`: smallest binder change, explicit, and it matches existing fusion recognition. |
-| D-5 | ANN algorithm | HNSW fp16 / HNSW i8 + re-rank / IVF-flat / none (SIMD brute force) | Decide from §12 measurements. Nothing is chosen before the numbers exist. |
+| D-5 | ANN algorithm | — | **RULED 2026-10-02: IVF-flat over fp16** (§13 B3). HNSW and the usearch graph are deleted. |
 | D-6 | SIMD distance: SimSIMD (vendored) vs draken-owned kernels | — | Draken-owned NEON/AVX2 via `SIMD_STATIC_SELECT`, consistent with the rest of draken. SimSIMD stays usearch-internal. |
-| D-7 | When sidecars are built | sync in sink / async maintenance / hybrid | **Hybrid:** OPTIMIZE sync, INSERT/MERGE async. |
+| D-7 | When sidecars are built | — | **RULED 2026-10-02:** per index `build = 'sync' \| 'async'`, default async, `ALTER INDEX` switches; compaction never re-embeds (§5.6, §10). |
 | D-8 | Minimum rows per file for a sidecar | fixed constant / measured / per-index option | Measured constant from §12, overridable per index. |
 | D-9 | Recall knob exposure | session variable / statement option / index-definition default | Index-definition default, overridable by session variable. |
 | D-10 | S3 Vectors façade | none / SQL-translation façade in the service tier | Defer. Revisit only with a consumer. |
 | D-12 | Embedding provider | — | **APPROVED rev 3:** runtime-loaded ONNX Runtime C API (onnxruntime installed `--no-deps`), weights baked into the image at container build. MIT licence verified (§9A). |
+| D-13 | Index storage billing (§5.5) | — | **RULED 2026-10-02: charged at logical bytes** (`total-index-data-size`), reported as its own figure beside data. |
+| D-14 | Compaction and indexing (§5.6, §5.7) | — | **RULED 2026-10-02: they never happen at the same time.** Compaction never embeds and only merges files with equal index coverage (carrying vectors where indexed); a per-dataset maintenance lease keeps compaction and index builds apart. |
+| D-15 | Discovery spelling (§7A) | — | **RULED 2026-10-02: follow sqlparser.** It has no SHOW INDEX statement and folds every form into `ShowVariable`, so the spelling is MySQL's `SHOW INDEXES FROM t`; plus the `SHOW CREATE TABLE` lines. |
+| D-16 | Async build trigger (§10) | — | **RULED 2026-10-02:** `REFRESH INDEX n ON t`, fired by every commit that adds data files and by CREATE INDEX (via the existing commit-trigger path). No scheduled task. |
 | D-11 | Index definition as a catalog object | dataset subcollection `indexes` / new `ResourceType` | Subcollection. An index has no independent ownership or grants; it belongs to its table. |
 
 ---
@@ -663,16 +946,16 @@ model at container build with its checksum verified (§9A).
 
 1. **Catalog commit CAS window.** `_refuse_if_pointer_moved`
    (`opteryx_catalog.py:8563-8588`) checks the head pointer in a read-only transaction. The
-   `doc_ref.set()` at `:8662` runs outside it, while the docstring claims one transaction.
+   `doc_ref.set()` at `:8662` runs outside it, while the docstring claims one transaction. **Fixed in C0.**
 2. **Dead vector plan flag.** `vector_topk_candidate` (`operator_fusion.py`, `plan_steps.pyx`) is
    set but never read at runtime. The docstring of `tests/unit/planner/test_vector_topk_plan.py`
-   claims it keeps `TopNScanPushdownStrategy` off, but that strategy never reads it.
+   claims it keeps `TopNScanPushdownStrategy` off, but that strategy never reads it. **Deleted in A4.**
 3. **Likely dead code.** `src/cpp/vector_search_native.cpp` (`exact_search_cosine`) is reached
    only from a fallback at `registrar/utility.pyx:121`. `opteryx/types/vectors/vector_ranking.py`
-   has no engine caller.
+   has no engine caller. **Deleted in A4.**
 4. **Broken dev tooling.** `dev/run_usearch_smoke.sh` compiles `dev/usearch_smoke.cpp`, which
    does not exist. The docstring of `dev/vendor_usearch.py` gives its own path as
-   `tools/vendor_usearch.py`.
+   `tools/vendor_usearch.py`. **Script deleted in A4.**
 5. **Draken not declared as a dependency.** Hadro imports draken, but it is not declared in
    `pyproject.toml`; it presumably arrives transitively via the `rugo` wheel.
 6. **Stale type docs?** `reference/types.json:941-961` says only literal arrays cast to `VECTOR`,
@@ -683,4 +966,16 @@ model at container build with its checksum verified (§9A).
 8. **Leftover ONNX/MiniLM code.** The ONNX Runtime SDK discovery (`setup.py` ~1492), the
    `src/cpp/minilm_native.cpp` build, and the comment-only `embeddings` extra in `pyproject.toml`
    remain after ONNX was dropped from the wheel. §9A's C-API rewrite would replace them. Until
-   then they are dead weight, and I have not touched them.
+   then they are dead weight, and I have not touched them. **Replaced in A2.**
+9. **Delete-vector files are unbilled and sized 0.** The storage sweep bills `total-data-size`
+   only, so `deletes-*.parquet` files are not billed. Expiry records their size as 0, so its
+   reclaimed-bytes tally undercounts. §5.5 fixes this for index files only; delete files are
+   reported here and not changed.
+10. **`rename_dataset` delete vectors and shared files** (found in C1b, not fixed).
+    (a) It copies only `file_path`; `delete_file_path` is left pointing under the old
+    location. (b) Its copy loop `continue`s for a file already copied, *before* rewriting
+    the row, so every manifest after the first that names a shared file keeps the OLD
+    path, and that path is then deleted by `_reclaim_paths`. The index files added in C1b
+    are remapped on every row and do not have (b). **Fixed 2026-10-02:** one `_move` per path,
+    applied on every row to the data file, delete vector and index files (tests in
+    `test_rename_dataset.py`).

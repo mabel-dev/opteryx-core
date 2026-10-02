@@ -192,6 +192,9 @@ update: ## Update all dependencies
 
 # === TESTING ===
 
+test-embeddings: ## MiniLM capability tests (needs onnxruntime installed --no-deps + OPTERYX_MINILM_MODEL_DIR)
+	@$(PYTEST) tests/embeddings -q -p no:cacheprovider
+
 test: ## Run full test suite with compiled extensions
 	@$(PIP) install --upgrade pytest pytest-xdist
 	@clear || true

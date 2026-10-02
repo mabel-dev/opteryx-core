@@ -77,6 +77,7 @@ from opteryx.compiled.structures.plan_steps import CompactionCommitStep
 from opteryx.compiled.structures.plan_steps import CreateCollectionStep
 from opteryx.compiled.structures.plan_steps import CreateRelationStep
 from opteryx.compiled.structures.plan_steps import CreateTagStep
+from opteryx.compiled.structures.plan_steps import VectorIndexDdlStep
 from opteryx.compiled.structures.plan_steps import CreateTaskStep
 from opteryx.compiled.structures.plan_steps import CreateTriggerStep
 from opteryx.compiled.structures.plan_steps import CreateViewStep
@@ -221,6 +222,7 @@ class LogicalPlanStepType(int, Enum):
     CloneCollection = auto()  # CREATE COLLECTION <target> CLONE <source>
     ResyncRelation = auto()  # ALTER TABLE <fork> RESYNC [FORCE]
     DetachRelation = auto()  # ALTER TABLE <fork> DETACH
+    VectorIndexDdl = auto()  # CREATE / ALTER / DROP INDEX ... (vector index)
 
 
 class LogicalPlan(PlanGraph):
@@ -5495,6 +5497,24 @@ def plan_drop(statement, *, plan_context, **kwargs):
         plan.add_node(drop_view_node)
         return plan
 
+    elif object_type == "Index":
+        # DROP INDEX <name> ON <relation> — a vector index (docs/VECTOR_INDEX_DESIGN.md).
+        # An index is a property of its relation, so the relation is required.
+        if not drop_statement.get("table"):
+            raise UnsupportedSyntaxError(
+                "**DROP INDEX** needs the relation the index belongs to: "
+                "**DROP INDEX** <name> **ON** <relation>."
+            )
+        if len(drop_statement["names"]) != 1:
+            raise UnsupportedSyntaxError("**DROP INDEX** drops one index per statement.")
+        node = VectorIndexDdlStep()
+        node.operation = "drop"
+        node.index_name = _single_identifier(drop_statement["names"][0], "**DROP INDEX**")
+        node.relation_name = ".".join(_identifier_parts(drop_statement["table"]))
+        node.if_exists = bool(drop_statement.get("if_exists", False))
+        plan.add_node(node)
+        return plan
+
     elif object_type == "Table":
         # DROP TABLE path (new)
         drop_relation_node = DropRelationStep()
@@ -7428,6 +7448,113 @@ def plan_call(statement, *, plan_context, **kwargs) -> LogicalPlan:
     return plan
 
 
+# --- vector index DDL (docs/VECTOR_INDEX_DESIGN.md §7) ------------------------------
+
+_INDEX_GRAMMAR = (
+    "**CREATE INDEX** [**IF NOT EXISTS**] <name> **ON** <relation> **USING IVF** (<text column>) "
+    "[**WITH** (<option> = <value>, ...)]"
+)
+
+
+def _identifier_parts(name_parts) -> list:
+    return [part["Identifier"]["value"] for part in name_parts]
+
+
+def _single_identifier(name_parts, statement: str) -> str:
+    parts = _identifier_parts(name_parts)
+    if len(parts) != 1:
+        raise UnsupportedSyntaxError(
+            f"{statement}: an index name is a single identifier - the relation it belongs to "
+            "is named with **ON**."
+        )
+    return parts[0]
+
+
+def _index_option_value(value):
+    """An option's value as written: a string, an integer, or a bare word."""
+    if "Value" in value:
+        literal = value["Value"]["value"]
+        if "SingleQuotedString" in literal:
+            return literal["SingleQuotedString"]
+        if "Number" in literal:
+            text = literal["Number"][0]
+            if not text.isdigit():
+                raise UnsupportedSyntaxError(f"Index option values are whole numbers or strings, not `{text}`.")
+            return int(text)
+    if "Identifier" in value:
+        return value["Identifier"]["value"]
+    raise UnsupportedSyntaxError("Index option values are whole numbers or strings.")
+
+
+def plan_create_index(statement, *, plan_context, **kwargs) -> LogicalPlan:
+    """CREATE INDEX <name> ON <relation> USING IVF (<column>) [WITH (...)] - a vector index.
+
+    The only index this engine has is a vector index over a text column. Everything a
+    general CREATE INDEX can say that this one cannot honour is refused, never ignored."""
+    ast = statement["CreateIndex"]
+    for flag, words in (("unique", "UNIQUE"), ("concurrently", "CONCURRENTLY"), ("async", "ASYNC")):
+        if ast.get(flag):
+            raise UnsupportedSyntaxError(f"**CREATE INDEX** does not support `{words}`. Expected: {_INDEX_GRAMMAR}")
+    if ast.get("predicate") is not None:
+        raise UnsupportedSyntaxError(f"A vector index covers the whole relation; partial indexes (**WHERE**) are not supported. Expected: {_INDEX_GRAMMAR}")
+    if ast.get("include") or ast.get("index_options") or ast.get("alter_options") or ast.get("nulls_distinct") is not None:
+        raise UnsupportedSyntaxError(f"**CREATE INDEX** options other than **WITH** (...) are not supported. Expected: {_INDEX_GRAMMAR}")
+    if not ast.get("name"):
+        raise UnsupportedSyntaxError(f"**CREATE INDEX** needs a name. Expected: {_INDEX_GRAMMAR}")
+    using = ast.get("using")
+    method = None
+    if isinstance(using, dict) and "Custom" in using:
+        method = using["Custom"]["value"].lower()
+    if method != "ivf":
+        raise UnsupportedSyntaxError(
+            f"The only index method is **IVF** (a vector index over a text column). Expected: {_INDEX_GRAMMAR}"
+        )
+    columns = ast.get("columns") or []
+    if len(columns) != 1 or "Identifier" not in columns[0]["column"]["expr"]:
+        raise UnsupportedSyntaxError(f"A vector index covers exactly one text column, named directly. Expected: {_INDEX_GRAMMAR}")
+    options = {}
+    for option in ast.get("with") or []:
+        binary = option.get("BinaryOp") if isinstance(option, dict) else None
+        if not binary or binary.get("op") != "Eq" or "Identifier" not in binary["left"]:
+            raise UnsupportedSyntaxError(f"**WITH** takes <option> = <value> pairs. Expected: {_INDEX_GRAMMAR}")
+        key = binary["left"]["Identifier"]["value"].lower()
+        if key in options:
+            raise UnsupportedSyntaxError(f"Index option `{key}` is given twice.")
+        options[key] = _index_option_value(binary["right"])
+
+    node = VectorIndexDdlStep()
+    node.operation = "create"
+    node.index_name = _single_identifier(ast["name"], "**CREATE INDEX**")
+    node.relation_name = ".".join(_identifier_parts(ast["table_name"]))
+    node.column_name = columns[0]["column"]["expr"]["Identifier"]["value"]
+    node.index_options = options
+    node.if_exists = bool(ast.get("if_not_exists", False))
+    plan = LogicalPlan(plan_context)
+    plan.add_node(node)
+    return plan
+
+
+def plan_alter_index_build(statement, *, plan_context, **kwargs) -> LogicalPlan:
+    """ALTER INDEX <name> ON <relation> SET (BUILD = 'sync' | 'async') - aside parser."""
+    root = statement["AlterIndexBuild"]
+    node = VectorIndexDdlStep()
+    node.operation = "alter"
+    node.index_name = root["name"]["value"]
+    node.relation_name = _aside_object_name(root["relation"])
+    node.index_options = {"build": root["build"]}
+    plan = LogicalPlan(plan_context)
+    plan.add_node(node)
+    return plan
+
+
+def plan_alter_index(statement, *, plan_context, **kwargs) -> LogicalPlan:
+    """sqlparser's own ALTER INDEX is RENAME, which a vector index does not support."""
+    raise UnsupportedSyntaxError(
+        "An index cannot be renamed. The only **ALTER INDEX** is "
+        "**ALTER INDEX** <name> **ON** <relation> **SET** (**BUILD** = 'sync' | 'async')."
+    )
+
+
 QUERY_BUILDERS = {
     "Analyze": plan_analyze_query,
     # synthesized pre-parse, like DropTrigger and RefreshMaterializedView
@@ -7494,6 +7621,10 @@ QUERY_BUILDERS = {
     "RevokeAccess": plan_revoke_access,
     "ShowGrantsOn": plan_show_grants_on,
     "ShowEffectiveGrantsOn": plan_show_effective_grants_on,
+    # vector index DDL; ALTER INDEX ... SET is the aside parser's, RENAME is sqlparser's
+    "CreateIndex": plan_create_index,
+    "AlterIndexBuild": plan_alter_index_build,
+    "AlterIndex": plan_alter_index,
     # LOAD SAMPLE — synthesized pre-parse; the parser has no LOAD statement.
 }
 

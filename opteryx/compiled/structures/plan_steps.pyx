@@ -10599,7 +10599,181 @@ cdef class WindowStep(PlanStep):
         return new
 
 
-PLAN_STEP_TYPES = frozenset({AddColumnStep, AddRelationshipStep, AggregateStep, AggregateAndGroupStep, AlterColumnTypeStep, AlterMaterializedViewOwnerStep, AlterMaterializedViewSuspendedStep, AlterRelationStep, AlterTaskStep, AlterTriggerMinimumIntervalStep, AlterTriggerOwnerStep, AlterTriggerSuspendedStep, AlterViewStep, AlterWorkspaceStep, AlterWorkspaceSecureStep, AnalyzeStep, CallProcedureStep, CloneCollectionStep, CloneRelationStep, CommentStep, CompactionCommitStep, CreateCollectionStep, CreateRelationStep, CreateTagStep, CreateTaskStep, CreateTriggerStep, CreateViewStep, DetachRelationStep, DistinctStep, DropCollectionStep, DropColumnStep, DropRelationStep, DropRelationshipStep, DropTagStep, DropTaskStep, DropTriggerStep, DropViewStep, DropWorkspaceStep, ExceptStep, ExitStep, ExplainStep, FilterStep, FramedWindowStep, FunctionDatasetStep, GrantAccessStep, HeapSortStep, InsertStep, IntersectStep, JoinStep, LimitStep, ListenStep, MaterializedCteRefStep, MergeStep, OrderStep, ProjectStep, RenameColumnStep, RenameRelationStep, ResyncRelationStep, RevokeAccessStep, RollbackRelationStep, ScalarSubqueryGuardStep, ScanStep, SetStep, ShowStep, ShowColumnsStep, ShowEffectiveGrantsOnStep, ShowGrantsOnStep, ShowLineageStep, ShowManifestStep, ShowSnapshotsStep, ShowSourcesStep, SubqueryStep, TruncateRelationStep, UnionStep, UnlistenStep, UnnestStep, WindowStep})
+cdef class VectorIndexDdlStep(PlanStep):
+    """CREATE / ALTER / DROP INDEX on a relation (vector index; docs/VECTOR_INDEX_DESIGN.md).
+
+    `operation` is "create", "alter" or "drop". `index_options` carries the WITH (...) /
+    SET (...) key-values as written; the binder validates them and stamps the active
+    embedding identity and width a CREATE is defined against."""
+
+    cdef object _connector
+    cdef str _relation_name
+    cdef str _index_name
+    cdef str _operation
+    cdef str _column_name
+    cdef object _index_options
+    cdef object _if_exists
+    cdef str _embedding_identity
+    cdef object _embedding_dimensions
+
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, relation_name=None, index_name=None, operation=None, column_name=None, index_options=None, if_exists=None, embedding_identity=None, embedding_dimensions=None):
+        self.node_type = _step_types().VectorIndexDdl
+        self._init_common(columns, all_relations, pre_update_columns, uuid)
+        self.connector = connector
+        self.relation_name = relation_name
+        self.index_name = index_name
+        self.operation = operation
+        self.column_name = column_name
+        self.index_options = index_options
+        self.if_exists = if_exists
+        self.embedding_identity = embedding_identity
+        self.embedding_dimensions = embedding_dimensions
+
+    @property
+    def connector(self):
+        return self._connector
+
+    @connector.setter
+    def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._connector = value
+
+    @property
+    def relation_name(self):
+        return self._relation_name
+
+    @relation_name.setter
+    def relation_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._relation_name = value
+
+    @property
+    def index_name(self):
+        return self._index_name
+
+    @index_name.setter
+    def index_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._index_name = value
+
+    @property
+    def operation(self):
+        return self._operation
+
+    @operation.setter
+    def operation(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._operation = value
+
+    @property
+    def column_name(self):
+        return self._column_name
+
+    @column_name.setter
+    def column_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._column_name = value
+
+    @property
+    def index_options(self):
+        return self._index_options
+
+    @index_options.setter
+    def index_options(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._index_options = value
+
+    @property
+    def if_exists(self):
+        return self._if_exists
+
+    @if_exists.setter
+    def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        _require_optional_bool("VectorIndexDdlStep.if_exists", value)
+        self._if_exists = value
+
+    @property
+    def embedding_identity(self):
+        return self._embedding_identity
+
+    @embedding_identity.setter
+    def embedding_identity(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._embedding_identity = value
+
+    @property
+    def embedding_dimensions(self):
+        return self._embedding_dimensions
+
+    @embedding_dimensions.setter
+    def embedding_dimensions(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        _require_optional_int("VectorIndexDdlStep.embedding_dimensions", value)
+        self._embedding_dimensions = value
+
+    cpdef tuple expressions(self, bint include_columns=True):
+        cdef list out = []
+        if include_columns:
+            _extend_expressions(out, self._columns)
+        return tuple(out)
+
+    cpdef map_expressions(self, object fn):
+        self.columns = _map_expressions(fn, self._columns)
+
+    cpdef dict field_values(self):
+        cdef dict out = self._common_values()
+        out["connector"] = self._connector
+        out["relation_name"] = self._relation_name
+        out["index_name"] = self._index_name
+        out["operation"] = self._operation
+        out["column_name"] = self._column_name
+        out["index_options"] = self._index_options
+        out["if_exists"] = self._if_exists
+        out["embedding_identity"] = self._embedding_identity
+        out["embedding_dimensions"] = self._embedding_dimensions
+        return out
+
+    cpdef PlanStep copy(self, dict memo=None):
+        if memo is None:
+            memo = {}
+        cached = memo.get(id(self))
+        if cached is not None:
+            return cached
+        cdef VectorIndexDdlStep new = VectorIndexDdlStep.__new__(VectorIndexDdlStep)
+        new.node_type = self.node_type
+        memo[id(self)] = new
+        self._copy_common_into(new, memo)
+        new._connector = _copy_field(self._connector, memo)
+        new._relation_name = _copy_field(self._relation_name, memo)
+        new._index_name = _copy_field(self._index_name, memo)
+        new._operation = _copy_field(self._operation, memo)
+        new._column_name = _copy_field(self._column_name, memo)
+        new._index_options = _copy_field(self._index_options, memo)
+        new._if_exists = _copy_field(self._if_exists, memo)
+        new._embedding_identity = _copy_field(self._embedding_identity, memo)
+        new._embedding_dimensions = _copy_field(self._embedding_dimensions, memo)
+        new._sync_row()
+        return new
+
+    cdef PlanStep _shallow_copy(self):
+        cdef VectorIndexDdlStep new = VectorIndexDdlStep.__new__(VectorIndexDdlStep)
+        new.node_type = self.node_type
+        self._share_common_into(new)
+        new._connector = self._connector
+        new._relation_name = self._relation_name
+        new._index_name = self._index_name
+        new._operation = self._operation
+        new._column_name = self._column_name
+        new._index_options = self._index_options
+        new._if_exists = self._if_exists
+        new._embedding_identity = self._embedding_identity
+        new._embedding_dimensions = self._embedding_dimensions
+        new._row[0] = self._row[0]
+        return new
+
+
+PLAN_STEP_TYPES = frozenset({VectorIndexDdlStep, AddColumnStep, AddRelationshipStep, AggregateStep, AggregateAndGroupStep, AlterColumnTypeStep, AlterMaterializedViewOwnerStep, AlterMaterializedViewSuspendedStep, AlterRelationStep, AlterTaskStep, AlterTriggerMinimumIntervalStep, AlterTriggerOwnerStep, AlterTriggerSuspendedStep, AlterViewStep, AlterWorkspaceStep, AlterWorkspaceSecureStep, AnalyzeStep, CallProcedureStep, CloneCollectionStep, CloneRelationStep, CommentStep, CompactionCommitStep, CreateCollectionStep, CreateRelationStep, CreateTagStep, CreateTaskStep, CreateTriggerStep, CreateViewStep, DetachRelationStep, DistinctStep, DropCollectionStep, DropColumnStep, DropRelationStep, DropRelationshipStep, DropTagStep, DropTaskStep, DropTriggerStep, DropViewStep, DropWorkspaceStep, ExceptStep, ExitStep, ExplainStep, FilterStep, FramedWindowStep, FunctionDatasetStep, GrantAccessStep, HeapSortStep, InsertStep, IntersectStep, JoinStep, LimitStep, ListenStep, MaterializedCteRefStep, MergeStep, OrderStep, ProjectStep, RenameColumnStep, RenameRelationStep, ResyncRelationStep, RevokeAccessStep, RollbackRelationStep, ScalarSubqueryGuardStep, ScanStep, SetStep, ShowStep, ShowColumnsStep, ShowEffectiveGrantsOnStep, ShowGrantsOnStep, ShowLineageStep, ShowManifestStep, ShowSnapshotsStep, ShowSourcesStep, SubqueryStep, TruncateRelationStep, UnionStep, UnlistenStep, UnnestStep, WindowStep})
 
 # The class for each LogicalPlanStepType, for the few sites that build a step
 # whose type is only known at run time.
@@ -10610,7 +10784,7 @@ cpdef dict step_classes():
     global _STEP_CLASSES
     if _STEP_CLASSES is None:
         T = _step_types()
-        _STEP_CLASSES = {T.AddColumn: AddColumnStep, T.AddRelationship: AddRelationshipStep, T.Aggregate: AggregateStep, T.AggregateAndGroup: AggregateAndGroupStep, T.AlterColumnType: AlterColumnTypeStep, T.AlterMaterializedViewOwner: AlterMaterializedViewOwnerStep, T.AlterMaterializedViewSuspended: AlterMaterializedViewSuspendedStep, T.AlterRelation: AlterRelationStep, T.AlterTask: AlterTaskStep, T.AlterTriggerMinimumInterval: AlterTriggerMinimumIntervalStep, T.AlterTriggerOwner: AlterTriggerOwnerStep, T.AlterTriggerSuspended: AlterTriggerSuspendedStep, T.AlterView: AlterViewStep, T.AlterWorkspace: AlterWorkspaceStep, T.AlterWorkspaceSecure: AlterWorkspaceSecureStep, T.Analyze: AnalyzeStep, T.CallProcedure: CallProcedureStep, T.CloneCollection: CloneCollectionStep, T.CloneRelation: CloneRelationStep, T.Comment: CommentStep, T.CompactionCommit: CompactionCommitStep, T.CreateCollection: CreateCollectionStep, T.CreateRelation: CreateRelationStep, T.CreateTag: CreateTagStep, T.CreateTask: CreateTaskStep, T.CreateTrigger: CreateTriggerStep, T.CreateView: CreateViewStep, T.DetachRelation: DetachRelationStep, T.Distinct: DistinctStep, T.DropCollection: DropCollectionStep, T.DropColumn: DropColumnStep, T.DropRelation: DropRelationStep, T.DropRelationship: DropRelationshipStep, T.DropTag: DropTagStep, T.DropTask: DropTaskStep, T.DropTrigger: DropTriggerStep, T.DropView: DropViewStep, T.DropWorkspace: DropWorkspaceStep, T.Except: ExceptStep, T.Exit: ExitStep, T.Explain: ExplainStep, T.Filter: FilterStep, T.FramedWindow: FramedWindowStep, T.FunctionDataset: FunctionDatasetStep, T.GrantAccess: GrantAccessStep, T.HeapSort: HeapSortStep, T.Insert: InsertStep, T.Intersect: IntersectStep, T.Join: JoinStep, T.Limit: LimitStep, T.Listen: ListenStep, T.MaterializedCteRef: MaterializedCteRefStep, T.Merge: MergeStep, T.Order: OrderStep, T.Project: ProjectStep, T.RenameColumn: RenameColumnStep, T.RenameRelation: RenameRelationStep, T.ResyncRelation: ResyncRelationStep, T.RevokeAccess: RevokeAccessStep, T.RollbackRelation: RollbackRelationStep, T.ScalarSubqueryGuard: ScalarSubqueryGuardStep, T.Scan: ScanStep, T.Set: SetStep, T.Show: ShowStep, T.ShowColumns: ShowColumnsStep, T.ShowEffectiveGrantsOn: ShowEffectiveGrantsOnStep, T.ShowGrantsOn: ShowGrantsOnStep, T.ShowLineage: ShowLineageStep, T.ShowManifest: ShowManifestStep, T.ShowSnapshots: ShowSnapshotsStep, T.ShowSources: ShowSourcesStep, T.Subquery: SubqueryStep, T.TruncateRelation: TruncateRelationStep, T.Union: UnionStep, T.Unlisten: UnlistenStep, T.Unnest: UnnestStep, T.Window: WindowStep}
+        _STEP_CLASSES = {T.VectorIndexDdl: VectorIndexDdlStep, T.AddColumn: AddColumnStep, T.AddRelationship: AddRelationshipStep, T.Aggregate: AggregateStep, T.AggregateAndGroup: AggregateAndGroupStep, T.AlterColumnType: AlterColumnTypeStep, T.AlterMaterializedViewOwner: AlterMaterializedViewOwnerStep, T.AlterMaterializedViewSuspended: AlterMaterializedViewSuspendedStep, T.AlterRelation: AlterRelationStep, T.AlterTask: AlterTaskStep, T.AlterTriggerMinimumInterval: AlterTriggerMinimumIntervalStep, T.AlterTriggerOwner: AlterTriggerOwnerStep, T.AlterTriggerSuspended: AlterTriggerSuspendedStep, T.AlterView: AlterViewStep, T.AlterWorkspace: AlterWorkspaceStep, T.AlterWorkspaceSecure: AlterWorkspaceSecureStep, T.Analyze: AnalyzeStep, T.CallProcedure: CallProcedureStep, T.CloneCollection: CloneCollectionStep, T.CloneRelation: CloneRelationStep, T.Comment: CommentStep, T.CompactionCommit: CompactionCommitStep, T.CreateCollection: CreateCollectionStep, T.CreateRelation: CreateRelationStep, T.CreateTag: CreateTagStep, T.CreateTask: CreateTaskStep, T.CreateTrigger: CreateTriggerStep, T.CreateView: CreateViewStep, T.DetachRelation: DetachRelationStep, T.Distinct: DistinctStep, T.DropCollection: DropCollectionStep, T.DropColumn: DropColumnStep, T.DropRelation: DropRelationStep, T.DropRelationship: DropRelationshipStep, T.DropTag: DropTagStep, T.DropTask: DropTaskStep, T.DropTrigger: DropTriggerStep, T.DropView: DropViewStep, T.DropWorkspace: DropWorkspaceStep, T.Except: ExceptStep, T.Exit: ExitStep, T.Explain: ExplainStep, T.Filter: FilterStep, T.FramedWindow: FramedWindowStep, T.FunctionDataset: FunctionDatasetStep, T.GrantAccess: GrantAccessStep, T.HeapSort: HeapSortStep, T.Insert: InsertStep, T.Intersect: IntersectStep, T.Join: JoinStep, T.Limit: LimitStep, T.Listen: ListenStep, T.MaterializedCteRef: MaterializedCteRefStep, T.Merge: MergeStep, T.Order: OrderStep, T.Project: ProjectStep, T.RenameColumn: RenameColumnStep, T.RenameRelation: RenameRelationStep, T.ResyncRelation: ResyncRelationStep, T.RevokeAccess: RevokeAccessStep, T.RollbackRelation: RollbackRelationStep, T.ScalarSubqueryGuard: ScalarSubqueryGuardStep, T.Scan: ScanStep, T.Set: SetStep, T.Show: ShowStep, T.ShowColumns: ShowColumnsStep, T.ShowEffectiveGrantsOn: ShowEffectiveGrantsOnStep, T.ShowGrantsOn: ShowGrantsOnStep, T.ShowLineage: ShowLineageStep, T.ShowManifest: ShowManifestStep, T.ShowSnapshots: ShowSnapshotsStep, T.ShowSources: ShowSourcesStep, T.Subquery: SubqueryStep, T.TruncateRelation: TruncateRelationStep, T.Union: UnionStep, T.Unlisten: UnlistenStep, T.Unnest: UnnestStep, T.Window: WindowStep}
     return _STEP_CLASSES
 
 
@@ -10651,12 +10825,12 @@ cpdef frozenset steps_with(str field):
             "column_aliases": frozenset({T.FunctionDataset}),
             "column_if_exists": frozenset({T.DropColumn}),
             "column_mapping": frozenset({T.Insert}),
-            "column_name": frozenset({T.AddColumn, T.AddRelationship, T.AlterColumnType, T.DropColumn, T.RenameColumn}),
+            "column_name": frozenset({T.VectorIndexDdl, T.AddColumn, T.AddRelationship, T.AlterColumnType, T.DropColumn, T.RenameColumn}),
             "column_type": frozenset({T.AddColumn}),
             "columns": frozenset({T.AddColumn, T.AddRelationship, T.Aggregate, T.AggregateAndGroup, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CallProcedure, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.Distinct, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropWorkspace, T.Except, T.Exit, T.Explain, T.Filter, T.FramedWindow, T.FunctionDataset, T.GrantAccess, T.HeapSort, T.Insert, T.Intersect, T.Join, T.Limit, T.Listen, T.MaterializedCteRef, T.Merge, T.Order, T.Project, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RevokeAccess, T.RollbackRelation, T.ScalarSubqueryGuard, T.Scan, T.Set, T.Show, T.ShowColumns, T.ShowEffectiveGrantsOn, T.ShowGrantsOn, T.ShowLineage, T.ShowManifest, T.ShowSnapshots, T.ShowSources, T.Subquery, T.TruncateRelation, T.Union, T.Unlisten, T.Unnest, T.Window}),
             "comment": frozenset({T.Comment}),
             "condition": frozenset({T.Filter}),
-            "connector": frozenset({T.AddColumn, T.AddRelationship, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.DropColumn, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropWorkspace, T.FunctionDataset, T.Insert, T.Listen, T.Merge, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RollbackRelation, T.Scan, T.Show, T.TruncateRelation, T.Unlisten}),
+            "connector": frozenset({T.VectorIndexDdl, T.AddColumn, T.AddRelationship, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.DropColumn, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropWorkspace, T.FunctionDataset, T.Insert, T.Listen, T.Merge, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RollbackRelation, T.Scan, T.Show, T.TruncateRelation, T.Unlisten}),
             "connectors": frozenset({T.DropCollection, T.DropRelation, T.DropView}),
             "constraint_if_exists": frozenset({T.DropRelationship}),
             "constraint_name": frozenset({T.AddRelationship, T.DropRelationship}),
@@ -10708,7 +10882,7 @@ cpdef frozenset steps_with(str field):
             "hints": frozenset({T.FunctionDataset, T.MaterializedCteRef, T.Scan, T.Subquery}),
             "history_view": frozenset({T.Scan, T.ShowLineage, T.ShowSnapshots, T.ShowSources}),
             "hoisted_columns": frozenset({T.Project}),
-            "if_exists": frozenset({T.AddColumn, T.AddRelationship, T.AlterColumnType, T.AlterRelation, T.Comment, T.CreateTag, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropWorkspace, T.RenameColumn, T.RenameRelation, T.RollbackRelation, T.TruncateRelation}),
+            "if_exists": frozenset({T.VectorIndexDdl, T.AddColumn, T.AddRelationship, T.AlterColumnType, T.AlterRelation, T.Comment, T.CreateTag, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropWorkspace, T.RenameColumn, T.RenameRelation, T.RollbackRelation, T.TruncateRelation}),
             "if_not_exists": frozenset({T.AddColumn, T.CloneRelation, T.CreateCollection, T.CreateRelation, T.CreateTask, T.CreateTrigger, T.CreateView, T.Insert}),
             "implied_join": frozenset({T.Join}),
             "internal_relation": frozenset({T.Scan}),
@@ -10745,7 +10919,7 @@ cpdef frozenset steps_with(str field):
             "offset": frozenset({T.Limit}),
             "on": frozenset({T.Distinct, T.Join}),
             "on_table": frozenset({T.CreateTask}),
-            "operation": frozenset({T.Merge}),
+            "operation": frozenset({T.VectorIndexDdl, T.Merge}),
             "or_replace": frozenset({T.CreateTask, T.CreateTrigger, T.CreateView, T.Insert}),
             "order_by": frozenset({T.FramedWindow, T.HeapSort, T.Order, T.Window}),
             "outcome": frozenset({T.Listen}),
@@ -10777,7 +10951,7 @@ cpdef frozenset steps_with(str field):
             "references_relation_name": frozenset({T.AddRelationship}),
             "references_relation_parts": frozenset({T.AddRelationship}),
             "relation": frozenset({T.FunctionDataset, T.MaterializedCteRef, T.Scan, T.ShowColumns, T.ShowLineage, T.ShowManifest, T.ShowSnapshots, T.ShowSources, T.Subquery}),
-            "relation_name": frozenset({T.AddColumn, T.AddRelationship, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.CloneRelation, T.CompactionCommit, T.CreateRelation, T.CreateTag, T.DetachRelation, T.DropColumn, T.DropRelationship, T.DropTag, T.Exit, T.FunctionDataset, T.Insert, T.Merge, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RollbackRelation, T.TruncateRelation}),
+            "relation_name": frozenset({T.VectorIndexDdl, T.AddColumn, T.AddRelationship, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.CloneRelation, T.CompactionCommit, T.CreateRelation, T.CreateTag, T.DetachRelation, T.DropColumn, T.DropRelationship, T.DropTag, T.Exit, T.FunctionDataset, T.Insert, T.Merge, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RollbackRelation, T.TruncateRelation}),
             "relation_names": frozenset({T.DropRelation, T.Join}),
             "relation_parts": frozenset({T.AddRelationship, T.DropRelationship}),
             "relations": frozenset({T.Filter}),
@@ -10815,6 +10989,10 @@ cpdef frozenset steps_with(str field):
             "swap_build_side": frozenset({T.Join}),
             "table_name": frozenset({T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.Analyze, T.CreateTrigger, T.DropTrigger}),
             "tag_name": frozenset({T.CreateTag, T.DropTag}),
+            "index_name": frozenset({T.VectorIndexDdl}),
+            "index_options": frozenset({T.VectorIndexDdl}),
+            "embedding_identity": frozenset({T.VectorIndexDdl}),
+            "embedding_dimensions": frozenset({T.VectorIndexDdl}),
             "target_alias": frozenset({T.Merge}),
             "target_column_names": frozenset({T.Insert, T.Merge}),
             "target_schema": frozenset({T.Insert, T.Merge}),

@@ -232,6 +232,15 @@ struct WriteOptions {
 
 // ─── Writing a file ─────────────────────────────────────────────────────────
 
+// An append-only byte destination the caller owns — typically a sequential
+// upload (a GCS resumable session). The writer only ever appends, in order, and
+// never asks for a byte back. A failed write fails the file.
+class OutputStream {
+  public:
+    virtual ~OutputStream() = default;
+    virtual Status write(const void* data, size_t bytes) = 0;
+};
+
 // v3 writes in TWO PASSES. add_row_group encodes a row group and stages its
 // sections per column node; finish() lays the whole file out COLUMN-MAJOR —
 // every column's chunks for every row group adjacent (FORMAT.md §3) — and only
@@ -274,6 +283,29 @@ class FileWriter {
     // bodies in `options.scratch_path`, which is required. Memory stays at one
     // row group of plans plus the directory, whatever the file's size.
     Status begin(const WriteOptions& options, const std::string& path);
+
+    // STREAMS a file larger than memory or local disk can hold, in ONE
+    // sequential pass, with no scratch file and no format change.
+    //
+    // The layout puts each column node's directory block BEFORE its chunks, and
+    // the directory holds every chunk's absolute offset — so the first bytes of a
+    // file are only known at the end. This mode moves exactly those bytes out of
+    // the stream: the LEAD column node's (node 0's) data sections go to `body`
+    // as add_row_group encodes them; every other node stages in memory and is
+    // appended to `body` by finish(), with the index region, footer and tail.
+    // finish() then fills `prefix` with the head and node 0's directory block,
+    // zero-padded to kSectionAlign.
+    //
+    // THE FILE IS `*prefix` FOLLOWED BY EVERY BYTE WRITTEN TO `body`. Joining
+    // them is the caller's (a two-object GCS compose, or a local write of the
+    // prefix then the body). The padding makes that join position-independent:
+    // every body offset moves by a multiple of 64, so the alignment the body was
+    // written with is the alignment the file has.
+    //
+    // Memory: the other nodes' sections, the directories and the statistics —
+    // put the column that dominates the file FIRST in the schema. Neither
+    // pointer may be null; both must outlive finish().
+    Status begin(const WriteOptions& options, OutputStream* body, std::vector<uint8_t>* prefix);
 
     // Appends one row group. Fails loud rather than degrading, on: a type this
     // build cannot materialize, a parameterized physical type missing its
