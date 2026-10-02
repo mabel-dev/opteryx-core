@@ -1,21 +1,51 @@
 #include "jsonl_reader.hpp"
 #include "volnitsky.h"     // SPIKE: raw prefilter
 #include <cstring>
+#include <utility>
 
 namespace rugo::_jsonl {
 
+namespace {
+
+// [start, end) of the line holding byte `at`, excluding its newline.
+inline void line_bounds(const uint8_t* buffer, size_t length, size_t at, size_t& ls, size_t& le) {
+    ls = at; while (ls > 0 && buffer[ls - 1] != '\n') --ls;
+    le = at; while (le < length && buffer[le] != '\n') ++le;
+}
+
+// Every line containing a `\u` escape, in buffer order. memchr-driven: the only byte
+// examined per non-backslash run is the run's end, and a hit skips to the next line.
+std::vector<std::pair<size_t, size_t>> unicode_escape_lines(const uint8_t* buffer, size_t length) {
+    std::vector<std::pair<size_t, size_t>> lines;
+    size_t p = 0;
+    while (p + 1 < length) {
+        const void* hit = std::memchr(buffer + p, '\\', length - p - 1);
+        if (hit == nullptr) break;
+        const size_t b = static_cast<size_t>(static_cast<const uint8_t*>(hit) - buffer);
+        if (buffer[b + 1] != 'u') { p = b + 1; continue; }
+        size_t ls, le;
+        line_bounds(buffer, length, b, ls, le);
+        lines.emplace_back(ls, le);
+        p = le + 1;
+    }
+    return lines;
+}
+
+}  // namespace
+
 PrefilterResult volnitsky_prefilter(
     const uint8_t* buffer, size_t length,
-    const uint8_t* needle, size_t needle_len) {
+    const uint8_t* needle, size_t needle_len,
+    bool keep_unicode_escapes) {
     PrefilterResult r;
     if (length < needle_len || needle_len < 2) return r;
     VolnitskyTable* t = volnitsky_alloc();
     volnitsky_build(t, needle, needle_len);
-    r.candidates.reserve(length / 16);
 
     // Single whole-buffer Volnitsky pass: the bigram table skips ~needle_len-1 bytes across
-    // every non-matching window, so a rare needle leaps over whole records. On a hit, copy
+    // every non-matching window, so a rare needle leaps over whole records. On a hit, record
     // the enclosing line and jump past it (handles dedup of multiple hits in one record).
+    std::vector<std::pair<size_t, size_t>> hits;
     size_t last_end = 0; bool any = false;
     for (size_t p = needle_len - 1; p < length; ) {
         const uint16_t h = (static_cast<uint16_t>(buffer[p - 1]) << 8) | buffer[p];
@@ -24,11 +54,9 @@ PrefilterResult volnitsky_prefilter(
         const size_t hs = p - k;
         if (hs + needle_len <= length && std::memcmp(buffer + hs, needle, needle_len) == 0
             && (!any || hs >= last_end)) {
-            size_t ls = hs; while (ls > 0 && buffer[ls - 1] != '\n') --ls;
-            size_t le = hs; while (le < length && buffer[le] != '\n') ++le;
-            r.candidates.insert(r.candidates.end(), buffer + ls, buffer + le);
-            r.candidates.push_back('\n');
-            ++r.matched_records;
+            size_t ls, le;
+            line_bounds(buffer, length, hs, ls, le);
+            hits.emplace_back(ls, le);
             last_end = le; any = true;
             p = (le + 1 > needle_len - 1) ? le + 1 : needle_len - 1;  // skip past the matched line
             continue;
@@ -36,6 +64,29 @@ PrefilterResult volnitsky_prefilter(
         p += 1;
     }
     volnitsky_free(t);
+
+    // Both lists are in buffer order with one entry per line, so a merge keeps line order
+    // and drops a line both passes found.
+    std::vector<std::pair<size_t, size_t>> escapes;
+    if (keep_unicode_escapes) escapes = unicode_escape_lines(buffer, length);
+
+    r.candidates.reserve(length / 16);
+    auto emit = [&](const std::pair<size_t, size_t>& line) {
+        r.candidates.insert(r.candidates.end(), buffer + line.first, buffer + line.second);
+        r.candidates.push_back('\n');
+        ++r.matched_records;
+    };
+    size_t i = 0, j = 0;
+    while (i < hits.size() || j < escapes.size()) {
+        if (j == escapes.size() || (i < hits.size() && hits[i].first < escapes[j].first)) {
+            emit(hits[i++]);
+        } else if (i == hits.size() || escapes[j].first < hits[i].first) {
+            emit(escapes[j++]);
+        } else {
+            emit(hits[i++]);
+            ++j;
+        }
+    }
     return r;
 }
 
@@ -48,12 +99,36 @@ PrefilterResult volnitsky_prefilter(
 // ---------------------------------------------------------------------------------
 
 #include "predicate_literal.hpp"   // LITERAL_STRING
+#include "nested_column.hpp"       // parse_column_spec
 
 namespace rugo::_jsonl {
 
 namespace {
 
 constexpr uint8_t kOpEq = 0;   // parse_context.hpp Predicate::op
+
+// One prefilter candidate: the bytes to search for, and whether `\u` lines must also be
+// kept (decoded-text comparison — see volnitsky_prefilter).
+struct PrefilterNeedle {
+    std::string needle;
+    bool keep_unicode_escapes;
+};
+
+// A nested `->>` predicate compares the field's DECODED text (value_parser.cpp
+// evaluate_nested_text): a JSON string unescaped, a number/boolean as its source token.
+// A literal made only of these bytes — none of which JSON requires escaping, and whose
+// only alternative spelling is a `\uXXXX` escape — therefore appears verbatim in every
+// matching record that has no `\u` escape, whichever JSON type holds it. The minimum
+// length matches the quoted top-level needle (6 bytes + 2 quotes): shorter won't pay off.
+bool verbatim_safe(const std::string& v) {
+    if (v.size() < 6) return false;
+    for (const unsigned char c : v) {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '.' || c == '_' || c == ':' || c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
 
 // Find `needle` in [hay, hay + n); SIZE_MAX if absent.
 size_t find_bytes(const uint8_t* hay, size_t n, const uint8_t* needle, size_t m) {
@@ -190,50 +265,74 @@ std::string malformed_error_message(const uint8_t* buffer, size_t length, uint32
 
 bool maybe_prefilter(const uint8_t* buffer, size_t length, const ParseContext& context,
                      std::vector<uint8_t>& out) {
-    if (context.predicates.size() != 1) return false;
-    const Predicate& pred = context.predicates[0];
-    // `==` only: IN / NOT IN carry their members in `members`, not one value.
-    if (pred.op != kOpEq || !pred.members.empty()) return false;
-    // A string literal only: its needle is the quoted value, which only a JSON string
-    // carries. A non-string literal is a type mismatch against a string column, and
-    // prefiltering on it would drop every record before evaluate_predicate could raise.
-    if (pred.kind != LITERAL_STRING) return false;
-
-    // Probe the first record: only prefilter when the column is stored as a quoted
-    // (string) value. A bare numeric/bool value isn't quoted, so a quoted needle would
-    // false-negative. Bounded to 4KB — real JSONL lines are far shorter than that.
+    // The first record, for the top-level stored-as-string probe. Bounded to 4KB — real
+    // JSONL lines are far shorter than that.
     const size_t first_window = length < 4096 ? length : 4096;
     const void* nl = std::memchr(buffer, '\n', first_window);
     const size_t first_len = nl ? static_cast<size_t>(static_cast<const uint8_t*>(nl) - buffer)
                                 : first_window;
-    std::string key;
-    key.reserve(pred.column.size() + 3);
-    key.push_back('"');
-    key += pred.column;
-    key += "\":";
-    const size_t ki = find_bytes(buffer, first_len,
-                                 reinterpret_cast<const uint8_t*>(key.data()), key.size());
-    if (ki == SIZE_MAX) return false;            // key absent / non-compact formatting
-    const size_t vpos = ki + key.size();
-    if (vpos >= first_len || buffer[vpos] != '"') return false;   // bare value: numeric hazard
 
-    std::string needle;
-    needle.reserve(pred.value.size() + 2);
-    needle.push_back('"');
-    needle += pred.value;
-    needle.push_back('"');
-    if (needle.size() < 8) return false;         // short/low-entropy value: won't pay off
-    const uint8_t* ndl = reinterpret_cast<const uint8_t*>(needle.data());
+    std::vector<PrefilterNeedle> candidates;
+    for (const Predicate& pred : context.predicates) {
+        // `==` only: IN / NOT IN carry their members in `members`, not one value.
+        if (pred.op != kOpEq || !pred.members.empty()) continue;
+        // A string literal only. A non-string literal is a type mismatch against a string
+        // column, and prefiltering on it would drop every record before evaluate_predicate
+        // could raise.
+        if (pred.kind != LITERAL_STRING) continue;
 
-    // Selectivity sample on the first ~1MB: if the needle already hits >30% of sampled
-    // rows there is little to skip — run the normal path instead of a full prefilter.
+        const ColumnSpec spec = parse_column_spec(pred.column);
+        if (spec.nested) {
+            // `->` yields JSON, never compared with a string literal here; `->>` compares
+            // decoded text — see verbatim_safe for why the unquoted value is sound.
+            if (spec.as_json || !verbatim_safe(pred.value)) continue;
+            candidates.push_back({pred.value, /*keep_unicode_escapes=*/true});
+            continue;
+        }
+
+        // Top-level: only when the first record stores the column as a quoted (string)
+        // value. A bare numeric/bool value isn't quoted, so a quoted needle would
+        // false-negative.
+        std::string key;
+        key.reserve(pred.column.size() + 3);
+        key.push_back('"');
+        key += pred.column;
+        key += "\":";
+        const size_t ki = find_bytes(buffer, first_len,
+                                     reinterpret_cast<const uint8_t*>(key.data()), key.size());
+        if (ki == SIZE_MAX) continue;            // key absent / non-compact formatting
+        const size_t vpos = ki + key.size();
+        if (vpos >= first_len || buffer[vpos] != '"') continue;   // bare value: numeric hazard
+
+        std::string needle;
+        needle.reserve(pred.value.size() + 2);
+        needle.push_back('"');
+        needle += pred.value;
+        needle.push_back('"');
+        if (needle.size() < 8) continue;         // short/low-entropy value: won't pay off
+        candidates.push_back({std::move(needle), /*keep_unicode_escapes=*/false});
+    }
+    if (candidates.empty()) return false;
+
+    // Selectivity sample on the first ~1MB: keep the candidate that hits the fewest sampled
+    // records; if even that one hits >30% there is little to skip — run the normal path
+    // instead of a full prefilter.
     const size_t sample_len = length < 1000000 ? length : 1000000;
-    const PrefilterResult sr = volnitsky_prefilter(buffer, sample_len, ndl, needle.size());
     size_t sample_lines = 0;
     for (size_t i = 0; i < sample_len; ++i) sample_lines += (buffer[i] == '\n');
-    if (sample_lines > 0 && sr.matched_records * 10 > sample_lines * 3) return false;
+    const PrefilterNeedle* best = nullptr;
+    size_t best_matched = SIZE_MAX;
+    for (const PrefilterNeedle& c : candidates) {
+        const PrefilterResult sr = volnitsky_prefilter(
+            buffer, sample_len, reinterpret_cast<const uint8_t*>(c.needle.data()),
+            c.needle.size(), c.keep_unicode_escapes);
+        if (sr.matched_records < best_matched) { best = &c; best_matched = sr.matched_records; }
+    }
+    if (sample_lines > 0 && best_matched * 10 > sample_lines * 3) return false;
 
-    PrefilterResult r = volnitsky_prefilter(buffer, length, ndl, needle.size());
+    PrefilterResult r = volnitsky_prefilter(
+        buffer, length, reinterpret_cast<const uint8_t*>(best->needle.data()),
+        best->needle.size(), best->keep_unicode_escapes);
     out = std::move(r.candidates);
     return true;
 }

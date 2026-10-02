@@ -195,26 +195,34 @@ Cost:
 (data file, index), both written before the commit that references them:
 
 ```text
-<location>/index/<index_id>/<data-file-stem>-<nonce>.vectors.skene     -- (ordinal UINT32, embedding VECTOR_FP16)
-<location>/index/<index_id>/<data-file-stem>-<nonce>.centroids.skene   -- (centroid VECTOR_FP16, row_group INT32, rows UINT32)
+<location>/index/<index_id>/<data-file-stem>-<nonce>.vectors.skene     -- (embedding VECTOR_FP16, ordinal UINT32)
+<location>/index/<index_id>/<data-file-stem>-<nonce>.centroids.skene   -- (centroid VECTOR_FP16, rows UINT32, row_groups ARRAY<INT32>)
 ```
 
 - **Keyed by the index id, not its name**, so `DROP INDEX x; CREATE INDEX x` never reuses a
   path. The nonce makes every build a new object (files are immutable).
 
-- **Vectors file, sorted by cluster:** one row group per non-empty cluster. Within a cluster,
-  rows are in ascending ordinal. Only searchable, non-deleted rows are stored, so the ordinal
-  column carries the data-file row. It is the only place the vector exists (§3), but it is
+- **Vectors file, grouped by cluster (rev 7):** every row group holds rows of ONE cluster,
+  but a cluster may span several row groups, interleaved with other clusters'. The build
+  streams: rows are held per cluster and a cluster's block is written as a row group every
+  `flush_rows` rows (sized from the build's memory budget), the remainders at the end. A
+  file's vectors are therefore never resident at once. `embedding` is the FIRST column, so
+  the streaming skene writer streams it and stages only the ordinals. Written without
+  read acceleration (no per-row-group statistics, zone maps or sketches: nothing prunes a
+  vectors file on values). Only searchable, non-deleted rows are stored; `ordinal` is the
+  row's PHYSICAL position in the data file, numbered before deletes. It is the only place the vector exists (§3), but it is
   still derived state, rebuildable from the source text with the same provider and model (§9A).
-- **Centroids file:** row k is cluster k's unit-length centroid, plus its row group in the
-  vectors file (-1 when empty) and its row count. Small (K × dim × 2 bytes; 0.44 MB at
+- **Centroids file:** row k is cluster k's unit-length centroid, its row count, and the
+  list of its row groups in the vectors file (empty when the cluster is empty). Small (K × dim × 2 bytes; 0.44 MB at
   K=579, dim=384). It is read first; then only the `nprobe` probed row groups are fetched.
 - **Binding:** a skene file has no free-form section. So the binding (index-definition id,
   embedding identity, data file path/size/row count) lives in the manifest entry that
   references both objects, and is checked against them when the plan is built.
-- **The code lives in draken** (`draken/ops/ann/fp16_cosine_ivf.h`): `ivf_build` (deterministic
-  spherical k-means on a seeded sample, then a cluster-major order), `ivf_probe` (nearest
-  non-empty centroids), and `TopK::offer` (scores a contiguous block keyed by ordinal, which
+- **The code lives in draken** (`draken/ops/ann/fp16_cosine_ivf.h`): `ivf_plan` (K and a
+  seeded sample chosen from the candidate rows — valid, not deleted — before embedding),
+  `ivf_train` (spherical k-means on the embedded sample), `ivf_assign` and `ClusterStream`
+  (the streaming build); `ivf_build` composes them in memory and is bit-identical to its
+  pre-split output (tested); `ivf_probe` (nearest non-empty centroids), and `TopK::offer` (scores a contiguous block keyed by ordinal, which
   is exactly a cluster row group as it arrives). `exact_topk` is the same accumulator over
   every row.
 - **The metric is draken's own cosine** (the SIMD kernel from A1), as `1 - clip(cos)`. The

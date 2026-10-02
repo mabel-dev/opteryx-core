@@ -65,7 +65,7 @@ from opteryx.connectors.jsonl_io import JSONL_SUPPORTED_TYPES as _JSONL_SUPPORTE
 # Bind-time JSONL schema inference decodes exactly the first chunk the SCAN will
 # decode; taken from the scan's own splitter so the two cannot drift. See the call
 # site in the READ_JSONL branch for why it must be this chunk and not a smaller one.
-from opteryx.connectors.jsonl_io import iter_newline_chunks as _iter_newline_chunks
+from opteryx.connectors.jsonl_io import first_schema_chunk as _first_schema_chunk
 
 # CSV columns rugo's decoder can currently produce (rugo's sniff_csv_column_types
 # only widens INT64 -> FLOAT64 -> VARCHAR -- no BOOL, unlike JSONL, since CSV has
@@ -644,7 +644,11 @@ def visit_function_dataset(
                 # regardless of the option. A malformed record beyond chunk 0 is now
                 # caught by that chunk's decode at execution time instead, under the
                 # same fail_on_error policy and with the same error.
-                schema_chunk = next(_iter_newline_chunks(file_obj.memoryview), None)
+                #
+                # A compressed file binds off the first chunk of its decompressed
+                # stream — the same chunk the native Source's streaming decompressor
+                # cuts first (see first_schema_chunk).
+                schema_chunk = _first_schema_chunk(file_obj.memoryview, candidate_path)
                 if schema_chunk is None:
                     # Zero-byte file: no chunk at all, so no schema to infer. Handled
                     # as the record-less case below, the same as a file of blank lines.
@@ -1095,6 +1099,7 @@ def visit_function_dataset(
                     continue
                 candidate_morsel = read_csv_file(
                     candidate_data,
+                    candidate_path,
                     delimiter=separator,
                     has_header=has_header_row,
                     fail_on_error=fail_on_error,

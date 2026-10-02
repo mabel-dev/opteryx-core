@@ -4,10 +4,16 @@
 // (docs/VECTOR_INDEX_DESIGN.md §5.2, D-5 ruled 2026-10-02: IVF, because a query reads only
 // the probed clusters — on object storage the bytes read decide the cost).
 //
-// Build: spherical k-means. Centroids are trained on a deterministic sample, then every
-// searchable row is assigned to its nearest centroid. The result is a cluster-major row
-// ORDER (rows ascending within a cluster) with per-cluster OFFSETS — exactly the layout
-// the vectors file is written in, one row group per cluster.
+// Build: spherical k-means, in three steps that a build too large for memory runs apart:
+//   ivf_plan   — choose K and a deterministic sample from the CANDIDATE rows (valid, not
+//                deleted), before any row is embedded;
+//   ivf_train  — k-means over the embedded sample, in plan order;
+//   ivf_assign — the nearest centroid of each row, as it arrives.
+// ClusterStream holds assigned rows per cluster and hands back a block every `flush_rows`,
+// so a file's vectors never need to be resident at once; a cluster may therefore span
+// several row groups of the vectors file. ivf_build is the in-memory composition of the
+// same steps (cluster-major ORDER, rows ascending within a cluster, per-cluster OFFSETS) —
+// the reference the streaming build must agree with.
 //
 // Search: rank the centroids against the query, then score every row of the `nprobe`
 // nearest non-empty clusters exactly. Scoring is TopK::offer over a contiguous block,
@@ -168,6 +174,19 @@ struct IvfModel {
     uint32_t cluster_rows(uint32_t c) const noexcept { return offsets[c + 1] - offsets[c]; }
 };
 
+// K and the training sample, chosen from candidate row ids before any of them is embedded.
+struct IvfSamplePlan {
+    uint32_t              clusters = 0;   // 0 = no candidates
+    std::vector<uint32_t> sample;         // candidate ids, in TRAINING order
+};
+
+// Trained centroids.
+struct IvfCentroids {
+    uint32_t              dims = 0;
+    uint32_t              clusters = 0;
+    std::vector<uint16_t> centroids;      // clusters * dims fp16, unit length
+};
+
 namespace detail {
 
 // Run `fn(i)` for i in [0, n) on `threads` threads, interleaved. Each i is independent.
@@ -198,11 +217,145 @@ inline uint32_t nearest_centroid(const uint16_t* row, const std::vector<uint16_t
 
 }  // namespace detail
 
-static inline IvfModel ivf_build(const Fp16Column& column, const uint8_t* excluded,
-                                 const IvfParams& params) {
+static inline void ivf_check_params(const IvfParams& params) {
     if (params.threads == 0u) throw std::invalid_argument("ann: threads must be >= 1");
     if (params.iterations == 0u) throw std::invalid_argument("ann: iterations must be >= 1");
     if (params.sample_per_cluster == 0u) throw std::invalid_argument("ann: sample_per_cluster must be >= 1");
+}
+
+// K = params.clusters, or round(sqrt(n)) when 0, clamped to [1, n]; the sample is the
+// first min(n, sample_per_cluster * K) of a seeded Fisher-Yates shuffle of `candidates`.
+static inline IvfSamplePlan ivf_plan(const std::vector<uint32_t>& candidates, const IvfParams& params) {
+    ivf_check_params(params);
+    IvfSamplePlan plan;
+    const uint32_t n = static_cast<uint32_t>(candidates.size());
+    if (n == 0u) return plan;
+    uint32_t k = params.clusters != 0u
+        ? params.clusters
+        : static_cast<uint32_t>(std::lround(std::sqrt(static_cast<double>(n))));
+    plan.clusters = std::max(1u, std::min(k, n));
+
+    std::mt19937_64 rng(params.seed);
+    plan.sample = candidates;
+    const uint64_t want = static_cast<uint64_t>(params.sample_per_cluster) * plan.clusters;
+    const uint32_t m = static_cast<uint32_t>(std::min<uint64_t>(n, want));
+    for (uint32_t i = 0; i < m; ++i) {
+        std::uniform_int_distribution<uint32_t> pick(i, n - 1u);
+        std::swap(plan.sample[i], plan.sample[pick(rng)]);
+    }
+    plan.sample.resize(m);
+    return plan;
+}
+
+// k-means over `sample` (row i = the plan's sample[i], embedded). Rows that turn out not to
+// be searchable (null, zero-magnitude, non-finite — known only after embedding) are skipped;
+// K is clamped to the searchable rows that remain. Initial centroids are the first K of them.
+static inline IvfCentroids ivf_train(const Fp16Column& sample, uint32_t clusters, const IvfParams& params) {
+    ivf_check_params(params);
+    const uint32_t dims = sample.dims;
+    std::vector<uint32_t> use;
+    use.reserve(sample.rows);
+    for (uint32_t i = 0; i < sample.rows; ++i)
+        if (sample.valid(i) && ann_row_searchable(sample.row(i), dims)) use.push_back(i);
+
+    IvfCentroids out;
+    out.dims = dims;
+    const uint32_t m = static_cast<uint32_t>(use.size());
+    const uint32_t k = std::min(clusters, m);
+    if (k == 0u) return out;
+    out.clusters = k;
+
+    std::vector<double> sums(static_cast<size_t>(k) * dims);
+    out.centroids.assign(static_cast<size_t>(k) * dims, 0u);
+    for (uint32_t c = 0; c < k; ++c)
+        std::memcpy(out.centroids.data() + static_cast<size_t>(c) * dims, sample.row(use[c]),
+                    dims * sizeof(uint16_t));
+
+    std::vector<uint32_t> assign(m);
+    for (uint32_t it = 0; it < params.iterations; ++it) {
+        detail::parallel_for(m, params.threads, [&](uint32_t i) {
+            assign[i] = detail::nearest_centroid(sample.row(use[i]), out.centroids, k, dims);
+        });
+        // Mean in sample order — independent of the thread count.
+        std::fill(sums.begin(), sums.end(), 0.0);
+        std::vector<uint32_t> members(k, 0u);
+        for (uint32_t i = 0; i < m; ++i) {
+            const uint16_t* r = sample.row(use[i]);
+            double* s = sums.data() + static_cast<size_t>(assign[i]) * dims;
+            for (uint32_t d = 0; d < dims; ++d) s[d] += fp16_ieee_to_fp32_value(r[d]);
+            ++members[assign[i]];
+        }
+        for (uint32_t c = 0; c < k; ++c) {
+            uint16_t* dst = out.centroids.data() + static_cast<size_t>(c) * dims;
+            const double* s = sums.data() + static_cast<size_t>(c) * dims;
+            double norm = 0.0;
+            for (uint32_t d = 0; d < dims; ++d) norm += s[d] * s[d];
+            norm = std::sqrt(norm);
+            if (members[c] == 0u || norm == 0.0 || !std::isfinite(norm)) {
+                // Empty (or degenerate) cluster: reseed from a sample row, deterministically.
+                const uint32_t pick = use[(static_cast<uint64_t>(it) * k + c) % m];
+                std::memcpy(dst, sample.row(pick), dims * sizeof(uint16_t));
+                continue;
+            }
+            for (uint32_t d = 0; d < dims; ++d)
+                dst[d] = fp16_ieee_from_fp32_value(static_cast<float>(s[d] / norm));
+        }
+    }
+    return out;
+}
+
+// The cluster a searchable row belongs to: the nearest centroid, ties to the lowest id.
+static inline uint32_t ivf_assign(const IvfCentroids& model, const uint16_t* row) noexcept {
+    return detail::nearest_centroid(row, model.centroids, model.clusters, model.dims);
+}
+
+// Assigned rows held per cluster until `flush_rows` of one cluster are waiting; that block
+// (ordinals + vectors, in arrival order) is handed to `emit(cluster, ordinals, vectors, rows)`
+// and released. finish() emits every remainder, in cluster order. Peak memory is at most
+// clusters * flush_rows rows, whatever the file's size — the caller sizes flush_rows from
+// its memory budget. Emitted blocks become the vectors file's row groups, so one cluster may
+// be several row groups, interleaved with other clusters'.
+class ClusterStream {
+  public:
+    ClusterStream(uint32_t clusters, uint32_t dims, uint32_t flush_rows)
+        : dims_(dims), flush_rows_(flush_rows), ordinals_(clusters), vectors_(clusters) {
+        if (clusters == 0u) throw std::invalid_argument("ann: a cluster stream needs clusters");
+        if (dims == 0u) throw std::invalid_argument("ann: dimension must be >= 1");
+        if (flush_rows == 0u) throw std::invalid_argument("ann: flush_rows must be >= 1");
+    }
+
+    template <typename Emit>
+    void add(uint32_t cluster, uint32_t ordinal, const uint16_t* row, Emit&& emit) {
+        if (cluster >= ordinals_.size()) throw std::invalid_argument("ann: cluster out of range");
+        ordinals_[cluster].push_back(ordinal);
+        vectors_[cluster].insert(vectors_[cluster].end(), row, row + dims_);
+        if (ordinals_[cluster].size() >= flush_rows_) flush(cluster, emit);
+    }
+
+    template <typename Emit>
+    void finish(Emit&& emit) {
+        for (uint32_t c = 0; c < ordinals_.size(); ++c)
+            if (!ordinals_[c].empty()) flush(c, emit);
+    }
+
+  private:
+    template <typename Emit>
+    void flush(uint32_t c, Emit& emit) {
+        emit(c, ordinals_[c].data(), vectors_[c].data(), static_cast<uint32_t>(ordinals_[c].size()));
+        std::vector<uint32_t>().swap(ordinals_[c]);
+        std::vector<uint16_t>().swap(vectors_[c]);
+    }
+
+    uint32_t                           dims_;
+    uint32_t                           flush_rows_;
+    std::vector<std::vector<uint32_t>> ordinals_;
+    std::vector<std::vector<uint16_t>> vectors_;
+};
+
+// The in-memory build: plan + train + assign + a counting sort into cluster order.
+static inline IvfModel ivf_build(const Fp16Column& column, const uint8_t* excluded,
+                                 const IvfParams& params) {
+    ivf_check_params(params);
     const uint32_t dims = column.dims;
 
     std::vector<uint32_t> rows;
@@ -216,70 +369,26 @@ static inline IvfModel ivf_build(const Fp16Column& column, const uint8_t* exclud
 
     IvfModel model;
     model.dims = dims;
-    const uint32_t n = static_cast<uint32_t>(rows.size());
-    if (n == 0u) {
+    const IvfSamplePlan plan = ivf_plan(rows, params);
+    if (plan.clusters == 0u) {
         model.offsets.assign(1, 0u);
         return model;
     }
-    uint32_t k = params.clusters != 0u
-        ? params.clusters
-        : static_cast<uint32_t>(std::lround(std::sqrt(static_cast<double>(n))));
-    k = std::max(1u, std::min(k, n));
+    // The sample as a column of its own: row i is column row plan.sample[i]. Zero-copy.
+    std::vector<uint32_t> sample_selection(plan.sample.size());
+    for (size_t i = 0; i < plan.sample.size(); ++i)
+        sample_selection[i] = column.selection[plan.sample[i]];
+    const Fp16Column sample{column.data, sample_selection.data(), nullptr,
+                            static_cast<uint32_t>(plan.sample.size()), dims};
+    const IvfCentroids trained = ivf_train(sample, plan.clusters, params);
+    const uint32_t k = trained.clusters;
     model.clusters = k;
+    model.centroids = trained.centroids;
 
-    // Deterministic training sample (Fisher-Yates prefix with a seeded generator).
-    std::mt19937_64 rng(params.seed);
-    std::vector<uint32_t> sample(rows);
-    const uint64_t want = static_cast<uint64_t>(params.sample_per_cluster) * k;
-    const uint32_t m = static_cast<uint32_t>(std::min<uint64_t>(n, want));
-    for (uint32_t i = 0; i < m; ++i) {
-        std::uniform_int_distribution<uint32_t> pick(i, n - 1u);
-        std::swap(sample[i], sample[pick(rng)]);
-    }
-    sample.resize(m);
-
-    // Initial centroids: the first k sampled rows (distinct rows; m >= k).
-    std::vector<double> sums(static_cast<size_t>(k) * dims);
-    model.centroids.assign(static_cast<size_t>(k) * dims, 0u);
-    for (uint32_t c = 0; c < k; ++c)
-        std::memcpy(model.centroids.data() + static_cast<size_t>(c) * dims, column.row(sample[c]),
-                    dims * sizeof(uint16_t));
-
-    std::vector<uint32_t> assign(m);
-    for (uint32_t it = 0; it < params.iterations; ++it) {
-        detail::parallel_for(m, params.threads, [&](uint32_t i) {
-            assign[i] = detail::nearest_centroid(column.row(sample[i]), model.centroids, k, dims);
-        });
-        // Mean in sample order — independent of the thread count.
-        std::fill(sums.begin(), sums.end(), 0.0);
-        std::vector<uint32_t> members(k, 0u);
-        for (uint32_t i = 0; i < m; ++i) {
-            const uint16_t* r = column.row(sample[i]);
-            double* s = sums.data() + static_cast<size_t>(assign[i]) * dims;
-            for (uint32_t d = 0; d < dims; ++d) s[d] += fp16_ieee_to_fp32_value(r[d]);
-            ++members[assign[i]];
-        }
-        for (uint32_t c = 0; c < k; ++c) {
-            uint16_t* out = model.centroids.data() + static_cast<size_t>(c) * dims;
-            const double* s = sums.data() + static_cast<size_t>(c) * dims;
-            double norm = 0.0;
-            for (uint32_t d = 0; d < dims; ++d) norm += s[d] * s[d];
-            norm = std::sqrt(norm);
-            if (members[c] == 0u || norm == 0.0 || !std::isfinite(norm)) {
-                // Empty (or degenerate) cluster: reseed from a sample row, deterministically.
-                const uint32_t pick = sample[(static_cast<uint64_t>(it) * k + c) % m];
-                std::memcpy(out, column.row(pick), dims * sizeof(uint16_t));
-                continue;
-            }
-            for (uint32_t d = 0; d < dims; ++d)
-                out[d] = fp16_ieee_from_fp32_value(static_cast<float>(s[d] / norm));
-        }
-    }
-
-    // Final assignment of every searchable row, then a counting sort into cluster order.
+    const uint32_t n = static_cast<uint32_t>(rows.size());
     std::vector<uint32_t> cluster_of(n);
     detail::parallel_for(n, params.threads, [&](uint32_t i) {
-        cluster_of[i] = detail::nearest_centroid(column.row(rows[i]), model.centroids, k, dims);
+        cluster_of[i] = ivf_assign(trained, column.row(rows[i]));
     });
     model.offsets.assign(static_cast<size_t>(k) + 1u, 0u);
     for (uint32_t i = 0; i < n; ++i) ++model.offsets[cluster_of[i] + 1u];

@@ -1,19 +1,18 @@
-make clickbench [rugo-parquet] (7.35s) (01-OCT) [0.69x]
-make clickbench-skene (6.81s) (01-OCT) [0.64x]
-make clickbench-canon (9.62s) (01-OCT) [0.90x]
-**** clickbench (125.6 seconds) <- Opteryx 0.26.8
-
-make tpch-sf1    (408.1ms) (28-SEP) [SF1] [1.17x]
-make tpch-sf10   (2664.9ms) (01-OCT) [SF10] [0.64x]
-make tpch-sf100  (29065.8ms) (30-SEP) [SF100] [0.95x]
-make tpcds-sf1   (21.5s) (29-SEP) [1 fails (Q51)] [SF1]
-make tpcds-sf001 (17.8s) (29-SEP) [1 fails (Q51)] [SF001]
-make medicare1   (202.6ms) (26-SEP) [1.17x]
-make job         (5946.2ms) (29-SEP) [0.88x] (33c)
-make h2o         (33.2s) (26-SEP) [medium]
-make jsonbench   (2360.4ms) (01-OCT) [10m] [0.91x]
-make dash        (122.3ms) (01-OCT) [1.35x]
-make signals     (0.6s) [only two tests] (25-SEP)
+make clickbench          (7.35s)     (01-OCT) [rugo-parquet] [0.69x]
+make clickbench-skene    (6.81s)     (01-OCT) [0.64x]
+make clickbench-canon    (9.62s)     (01-OCT) [0.90x]
+make tpch-sf1            (408.1ms)   (28-SEP) [SF1] [1.17x]
+make tpch-sf10           (2664.9ms)  (01-OCT) [SF10] [0.64x]
+make tpch-sf100          (29065.8ms) (30-SEP) [SF100] [0.95x]
+make tpcds-sf1           (21.5s)     (29-SEP) [1 fails (Q51)] [SF1]
+make tpcds-sf001         (17.8s)     (29-SEP) [1 fails (Q51)] [SF001]
+make medicare1           (202.6ms)   (26-SEP) [1.17x]
+make job                 (5946.2ms)  (29-SEP) [0.88x] (33c)
+make h2o                 (33.2s)     (26-SEP) [medium]
+make jsonbench-10-jsonl  (2328.2ms)  (02-OCT) [10m] [0.90x]
+make jsonbench-10-zstd   (3244.0ms)  (02-OCT) [10m] [1.25x]
+make dash                (122.3ms)   (01-OCT) [1.35x]
+make signals             (0.6s)      (25-SEP)
 
 make tpch-sf10-aistor - 151426.7ms - 36.28x
 make tpcds-sf10-aistor - 1063.7s - [1 fails (Q51), 8 timeouts at 30s]
@@ -27,3 +26,5 @@ make tpcds-sf01-aistor - 455.5s (27-SEP) [1 fails (Q51)]
 make clickbench-aistor-canon-split-10 - 61992ms - 32.83x [10M rows]
 make clickbench-aistor-rugo-split-10 - 61605ms - 32.63x [10M rows]
 make h2o-small-aistor - 27898.4ms - 9.88x
+
+**** clickbench (125.6 seconds) <- Opteryx 0.26.8

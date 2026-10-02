@@ -448,6 +448,7 @@ def read_jsonl(
     cdef const uint8_t[::1] buf_view
     cdef vector[uint8_t] pf_buf
     cdef bint pf_applied = False
+    cdef Codec codec
 
     declared_schema = _fill_parse_context(
         &context, columns, predicates, explicit_schema, infer_schema, infer_sample_size,
@@ -484,6 +485,16 @@ def read_jsonl(
             buf_data = &buf_view[0] if buf_len > 0 else NULL
         else:
             in_memory_data = bytes(data)
+            buf_data = <const uint8_t*>in_memory_data
+            buf_len = len(in_memory_data)
+
+        # Compressed input (gzip / zstd / lz4, by magic bytes) is decompressed whole
+        # before parsing; an unsupported or mislabelled codec raises. Compressed bytes
+        # are never parsed as JSON text. (Streaming scans decompress chunk by chunk
+        # natively instead — this entry point takes one whole buffer.)
+        codec = _resolve_codec(data if isinstance(data, str) else "", buf_data, buf_len)
+        if codec != Codec.NONE:
+            in_memory_data = _decompress_all(codec, buf_data, buf_len)
             buf_data = <const uint8_t*>in_memory_data
             buf_len = len(in_memory_data)
 

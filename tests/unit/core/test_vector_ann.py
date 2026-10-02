@@ -8,7 +8,11 @@ What each test protects:
   * rows outside the searchable domain (null, deleted, zero-magnitude, non-finite) are never
     clustered and never returned, on either path;
   * the build is deterministic: same input + seed => same model, for any thread count;
-  * the admitted mask is honoured.
+  * the admitted mask is honoured;
+  * the plan/train/assign split (for builds too large for memory) changed NOTHING:
+    ivf_build is bit-identical to its pre-split output (hashes recorded before the split);
+  * the streaming build (ClusterStream) puts every searchable row in the same cluster as
+    ivf_build, in blocks of at most flush_rows, and never emits an unsearchable row.
 """
 
 import os
@@ -141,3 +145,63 @@ def test_inconsistent_model_is_refused(data):
 
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-q"])
+
+
+# sha256(centroids + order + offsets) of ivf_build BEFORE the plan/train/assign split
+# (2026-10-02). A changed hash is a changed index for the same input and seed.
+_PRE_SPLIT = {
+    (0, 8, 64, 2, 1234): "7a03bcace2e2b892b037cbd1f795528cb0ec386676020f8714c31afacc92173a",
+    (24, 8, 64, 1, 99): "32c0c47030e660a7a7653718ad65504bae08cc1c1e280862ec8b4be0826dcbd7",
+    (5, 3, 2, 3, 7): "4b8732cbd22bf0c7dfa3633dd2ed8e5843ef39a553840cef3ee2fc631a06c9d7",
+    (4000, 2, 64, 1, 1): "bddc1e234a53a7cd63a8cb0b1c4cc4be5d9682247f04fb38aee1fe3b6ae62ec2",
+}
+
+
+@pytest.mark.parametrize("args", sorted(_PRE_SPLIT))
+def test_build_is_bit_identical_to_before_the_split(data, args):
+    import hashlib
+
+    vec, _, excluded, _ = data
+    centroids, order, offsets = V.ann_ivf_build(vec, excluded, *args)
+    assert hashlib.sha256(centroids + order + offsets).hexdigest() == _PRE_SPLIT[args]
+
+
+def _clean_data():
+    """Every valid row searchable — what an embedder produces — so the streaming build's
+    candidates (valid, not deleted) are exactly ivf_build's searchable rows."""
+    rng = random.Random(11)
+    centres = [[rng.gauss(0, 1) for _ in range(DIM)] for _ in range(CLUSTERS)]
+    rows = [[x + 0.5 * rng.gauss(0, 1) for x in centres[rng.randrange(CLUSTERS)]] for _ in range(N)]
+    rows[7] = None
+    return draken_native.vector_fp16_from_sequence(rows, DIM), _bitmap(DELETED, N)
+
+
+@pytest.mark.parametrize("flush_rows", [1, 7, 64, 100000])
+def test_streaming_build_matches_the_in_memory_build(flush_rows):
+    vec, excluded = _clean_data()
+    centroids, order, offsets = V.ann_ivf_build(vec, excluded, 0, 8, 64, 2, 1234)
+    streamed_centroids, blocks = V.ann_ivf_stream(vec, excluded, 0, 8, 64, 2, 1234, flush_rows)
+    assert streamed_centroids == centroids
+
+    order, offsets = _u32(order), _u32(offsets)
+    expected = {c: order[offsets[c]:offsets[c + 1]] for c in range(len(offsets) - 1)}
+    got = {}
+    for cluster, ordinals in blocks:
+        ordinals = _u32(ordinals)
+        assert 0 < len(ordinals) <= flush_rows
+        got.setdefault(cluster, []).extend(ordinals)
+    assert got == {c: rows for c, rows in expected.items() if rows}
+
+
+def test_streaming_build_never_emits_unsearchable_rows(data):
+    vec, _, excluded, _ = data
+    _, blocks = V.ann_ivf_stream(vec, excluded, 0, 8, 64, 1, 1234, 50)
+    emitted = [r for _, ordinals in blocks for r in _u32(ordinals)]
+    assert len(emitted) == len(set(emitted)) == N - len(UNSEARCHABLE) - len(DELETED)
+    assert not (set(emitted) & (UNSEARCHABLE | DELETED))
+
+
+def test_streaming_flush_rows_must_be_positive(data):
+    vec, _, excluded, _ = data
+    with pytest.raises(ValueError, match="flush_rows"):
+        V.ann_ivf_stream(vec, excluded, 0, 8, 64, 1, 1234, 0)

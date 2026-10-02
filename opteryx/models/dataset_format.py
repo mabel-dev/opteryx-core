@@ -28,9 +28,20 @@ SKENE = "SKENE"
 
 # Recognised DATA file suffixes. Anything not listed here is not a data file
 # (manifests, sidecars, readmes) and takes no part in format discovery.
+#
+# Compressed JSONL is JSONL: the reader decompresses gzip / zstd / lz4 by magic
+# bytes. bzip2 / xz are listed too, NOT because they are readable but so a dataset
+# holding them fails loud at the read (naming the file and codec) instead of
+# having those files silently dropped from discovery as non-data.
 SUFFIX_TO_FORMAT = {
     ".parquet": PARQUET,
     ".jsonl": JSONL,
+    ".jsonl.gz": JSONL,
+    ".jsonl.zst": JSONL,
+    ".jsonl.zstd": JSONL,
+    ".jsonl.lz4": JSONL,
+    ".jsonl.bz2": JSONL,
+    ".jsonl.xz": JSONL,
     ".skene": SKENE,
 }
 

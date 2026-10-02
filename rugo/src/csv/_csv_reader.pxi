@@ -187,6 +187,7 @@ def read_csv(
         'columns'      : list of Draken Vector objects
     """
     cdef CsvParseContext    ctx
+    cdef Codec              codec
     cdef CsvPredicate       pred_cpp
     cdef vector[string]     column_names_cpp
     cdef uint32_t           num_cols = 0
@@ -263,6 +264,13 @@ def read_csv(
         buf = data
     else:
         buf = bytes(data)
+
+    # Compressed input (gzip / zstd / lz4, by magic bytes) is decompressed whole —
+    # this reader parses one whole buffer. An unsupported or mislabelled codec raises;
+    # compressed bytes are never parsed as CSV text.
+    codec = _resolve_codec(data if isinstance(data, str) else "", <const uint8_t*>buf, len(buf))
+    if codec != Codec.NONE:
+        buf = _decompress_all(codec, <const uint8_t*>buf, len(buf))
 
     # No bytes means no header, so no columns: there is no relation to return, and a
     # zero-column result would pass for one. A caller that treats an empty file as an

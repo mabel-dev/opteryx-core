@@ -3077,6 +3077,10 @@ struct GroupByLocal : LocalSinkState {
     // what made Medius a net +0.4% on the suite. duckdb learns the same way
     // (DecideAdaptation -> SkipLookups, decided once from early rows).
     bool mid_disabled = false;
+    // COUNT(DISTINCT) pair-set size each partition reached before its last flush,
+    // per spec. The partition that replaces it reserves that much up front instead
+    // of doubling up from carchar's minimum capacity again every flush window.
+    std::array<std::vector<uint32_t>, kGBParts> cd_hint;
     // ADAPTIVE RAW MODE (see kGBRawSwitchRatio): set at a flush, never cleared.
     bool raw = false;
     size_t rows_since_flush = 0;      // rows sunk since the last flush
@@ -3114,6 +3118,12 @@ struct GroupByGlobal : GlobalSinkState {
     std::vector<KeyColMeta> key_meta;
     bool has_rows = false;
     bool init = false;
+    // COUNT(DISTINCT) pair repartition (finalize only — see cd_repartition). A spec
+    // with cd_repart[s] set has had its pairs deduped up front: cd_count[s][id] is
+    // the distinct count of the group whose hash cd_dir maps to `id`.
+    std::vector<uint8_t> cd_repart;
+    std::vector<std::vector<int64_t>> cd_count;
+    opteryx::carchar::CarcharIndex cd_dir;
 };
 
 struct GroupBySink : Sink {
@@ -3468,6 +3478,20 @@ struct GroupBySink : Sink {
         return true;
     }
 
+    // Size a local partition's COUNT(DISTINCT) stores, reserving each pair set to
+    // what this partition's predecessor reached (cd_hint; empty before any flush).
+    static void init_cd(GroupByLocal& l, size_t p, size_t nspecs) {
+        GBPartition& P = l.parts[p];
+        P.cd.resize(nspecs);
+        const std::vector<uint32_t>& hint = l.cd_hint[p];
+        for (size_t s = 0; s < nspecs && s < hint.size(); ++s) {
+            if (hint[s] == 0) continue;
+            P.cd[s].seen.reserve(hint[s]);
+            P.cd[s].pair_gid.reserve(hint[s]);
+            P.cd[s].pair_vhash.reserve(hint[s]);
+        }
+    }
+
     // Queue every non-empty local partition for the parallel merge and reset
     // the local state (adaptive flush + the combine path share this).
     void flush_locals(GroupByGlobal& g, GroupByLocal& l) {
@@ -3489,6 +3513,10 @@ struct GroupBySink : Sink {
                 // high-cardinality; remember it before the partition is destroyed.
                 if (!l.parts[p].use_mid) l.mid_disabled = true;
                 if (l.parts[p].use_mid) l.parts[p].promote_mid();
+                std::vector<uint32_t>& hint = l.cd_hint[p];
+                hint.assign(l.parts[p].cd.size(), 0);
+                for (size_t s = 0; s < hint.size(); ++s)
+                    hint[s] = static_cast<uint32_t>(l.parts[p].cd[s].size());
                 g.pending[p].push_back(std::move(l.parts[p]));
                 l.parts[p] = GBPartition();
                 l.parts[p].use_parvi = low_card && !l.raw;        // fresh partition: re-arm the gate
@@ -3801,7 +3829,7 @@ struct GroupBySink : Sink {
                 size_t nn = P.size();
                 if (l.has_rows) P.grows.resize(nn);
                 if (P.lanes.size() != nspecs) P.lanes.resize(nspecs);
-                if (P.cd.size() != nspecs) P.cd.resize(nspecs);
+                if (P.cd.size() != nspecs) init_cd(l, p, nspecs);
                 for (size_t s = 0; s < nspecs; ++s)
                     gb_lanes_resize(P.lanes[s], l.kinds[s], nn);
             }
@@ -3917,7 +3945,7 @@ struct GroupBySink : Sink {
             size_t n = P.size();
             if (l.has_rows) P.grows.resize(n);
             if (P.lanes.size() != nspecs) P.lanes.resize(nspecs);
-            if (P.cd.size() != nspecs) P.cd.resize(nspecs);
+            if (P.cd.size() != nspecs) init_cd(l, p, nspecs);
             for (size_t s = 0; s < nspecs; ++s)
                 gb_lanes_resize(P.lanes[s], l.kinds[s], n);
         }
@@ -4927,6 +4955,18 @@ struct GroupBySink : Sink {
                          std::vector<MorselPtr>& out_morsels, ErrCtx& err) {
         const size_t nspecs = specs.size();
         const bool prof = gb_finalize_prof_on();
+        // Repartitioned COUNT(DISTINCT): the merge carried no pairs for these specs;
+        // the count was settled in cd_repartition, keyed by group hash.
+        for (size_t s = 0; s < nspecs && s < g.cd_repart.size(); ++s) {
+            if (!g.cd_repart[s]) continue;
+            GBLanes& L = merged.lanes[s];
+            const std::vector<int64_t>& cnt = g.cd_count[s];
+            for (size_t m = 0; m < merged.size(); ++m) {
+                int64_t id;
+                L.valid[m] = g.cd_dir.lookup_fast(merged.hashes[m], id)
+                                 ? cnt[static_cast<size_t>(id)] : 0;
+            }
+        }
         // SUM/AVG/STDDEV/MEDIAN(DISTINCT): every worker's pairs are merged now, so
         // each distinct (group, value) is present exactly once — fold them in.
         for (size_t s = 0; s < nspecs; ++s) {
@@ -5143,6 +5183,139 @@ struct GroupBySink : Sink {
         return true;
     }
 
+    // COUNT(DISTINCT) PAIR REPARTITION (2026-10-02). Sink-side, a (group, value)
+    // pair lives in its GROUP's partition, and the merge re-keys pairs one partition
+    // at a time — so few groups put every pair in a few partitions and the merge runs
+    // on a thread or two however many pairs there are (JSONBench Q2: 13 groups, 1.7M
+    // distinct pairs, threads=1, 64ms of an 89ms query; the thread gate also never
+    // saw the pairs, only the 13 groups). When groups are few and pairs many, dedup
+    // the pairs here instead: give each group hash a dense id, re-key each pair as
+    // gb_mix2(dense id, value hash) — the same 64-bit identity the merge uses, over a
+    // global id instead of a per-partition one — scatter by that key's partition bits
+    // and dedup the kGBParts buckets in parallel. The pair vectors are released, so
+    // the partition merge sees none for these specs; finish_and_emit writes the counts.
+    // distinct_operand specs keep the merge path (they carry values, not counts).
+    static constexpr size_t kCDRepartMinPairs = 65536;
+    static constexpr size_t kCDRepartMaxGroups = 65536;
+    void cd_repartition(GroupByGlobal& g, unsigned nt) {
+        const size_t nspecs = specs.size();
+        g.cd_repart.assign(nspecs, 0);
+        if (g.routed || g.kinds.size() != nspecs) return;
+        std::vector<size_t> rs;
+        for (size_t s = 0; s < nspecs; ++s)
+            if (g.kinds[s] == GBKind::CountDistinct && !specs[s].distinct_operand)
+                rs.push_back(s);
+        if (rs.empty()) return;
+        std::vector<GBPartition*> srcs;
+        size_t groups = 0, pairs = 0;
+        for (size_t p = 0; p < kGBParts; ++p) {
+            for (GBPartition& P : g.pending[p]) {
+                srcs.push_back(&P);
+                groups += P.size();
+                for (size_t s : rs) if (s < P.cd.size()) pairs += P.cd[s].size();
+            }
+        }
+        if (pairs < kCDRepartMinPairs || groups > kCDRepartMaxGroups) return;
+        const bool prof = gb_finalize_prof_on();
+        const uint64_t prof_t0 = prof ? gb_prof_now() : 0;
+        // Dense id per distinct group hash (an unindexed source may repeat one).
+        // Serial: bounded by kCDRepartMaxGroups.
+        std::vector<std::vector<uint32_t>> tr(srcs.size());
+        g.cd_dir = opteryx::carchar::CarcharIndex();
+        g.cd_dir.reserve(groups);
+        int64_t ng = 0;
+        for (size_t i = 0; i < srcs.size(); ++i) {
+            const GBPartition& P = *srcs[i];
+            tr[i].resize(P.size());
+            for (size_t e = 0; e < P.size(); ++e) {
+                int64_t id;
+                if (g.cd_dir.find_or_insert_id(P.hashes[e], ng, id)) ++ng;
+                tr[i][e] = static_cast<uint32_t>(id);
+            }
+        }
+        if (nt < 1) nt = 1;
+        if (nt > kGBParts) nt = static_cast<unsigned>(kGBParts);
+        auto par = [nt](size_t n, auto&& fn) {
+            std::atomic<size_t> next{0};
+            auto w = [&](unsigned t) {
+                for (size_t i; (i = next.fetch_add(1)) < n;) fn(t, i);
+            };
+            std::vector<std::thread> th;
+            th.reserve(nt - 1);
+            for (unsigned t = 1; t < nt; ++t) th.emplace_back(w, t);
+            w(0);
+            for (auto& t : th) t.join();
+        };
+        struct Scat {
+            std::vector<uint64_t> key;
+            std::vector<uint32_t> gid;
+            std::array<uint32_t, kGBParts + 1> off{};
+        };
+        std::vector<Scat> sc(srcs.size());
+        std::vector<std::vector<int64_t>> tc(nt);
+        g.cd_count.assign(nspecs, {});
+        for (size_t s : rs) {
+            // Pass 1, per source: counting-sort its pairs by gb_part(pair key), then
+            // release them. pair_vhash is overwritten with the key in place.
+            par(srcs.size(), [&](unsigned, size_t i) {
+                Scat& o = sc[i];
+                o.off.fill(0);
+                o.key.clear();
+                o.gid.clear();
+                if (s >= srcs[i]->cd.size()) return;
+                GBCountDistinct& SC = srcs[i]->cd[s];
+                const size_t np = SC.size();
+                const std::vector<uint32_t>& t = tr[i];
+                for (size_t k = 0; k < np; ++k) {
+                    const uint64_t key = gb_mix2(t[SC.pair_gid[k]], SC.pair_vhash[k]);
+                    SC.pair_vhash[k] = key;
+                    o.off[gb_part(key) + 1] += 1;
+                }
+                for (size_t b = 0; b < kGBParts; ++b) o.off[b + 1] += o.off[b];
+                o.key.resize(np);
+                o.gid.resize(np);
+                std::array<uint32_t, kGBParts> pos;
+                std::copy(o.off.begin(), o.off.end() - 1, pos.begin());
+                for (size_t k = 0; k < np; ++k) {
+                    const uint64_t key = SC.pair_vhash[k];
+                    const uint32_t at = pos[gb_part(key)]++;
+                    o.key[at] = key;
+                    o.gid[at] = t[SC.pair_gid[k]];
+                }
+                SC = GBCountDistinct();
+            });
+            // Pass 2, per bucket: dedup every source's slice of it; count per group.
+            for (auto& c : tc) c.assign(static_cast<size_t>(ng), 0);
+            par(kGBParts, [&](unsigned t, size_t b) {
+                size_t tot = 0;
+                for (const Scat& o : sc) tot += o.off[b + 1] - o.off[b];
+                if (tot == 0) return;
+                opteryx::carchar::CarcharSet seen;
+                seen.reserve(tot);
+                int64_t* c = tc[t].data();
+                for (const Scat& o : sc) {
+                    for (uint32_t k = o.off[b]; k < o.off[b + 1]; ++k)
+                        if (seen.insert_or_ignore(o.key[k])) c[o.gid[k]] += 1;
+                }
+            });
+            std::vector<int64_t>& out = g.cd_count[s];
+            out.assign(static_cast<size_t>(ng), 0);
+            for (const auto& c : tc)
+                for (size_t id = 0; id < c.size(); ++id) out[id] += c[id];
+            g.cd_repart[s] = 1;
+        }
+        if (prof) {
+            size_t distinct = 0;
+            for (size_t s : rs)
+                for (int64_t c : g.cd_count[s]) distinct += static_cast<size_t>(c);
+            fprintf(stderr,
+                    "[gb-finalize-prof] cd-repartition specs=%zu sources=%zu groups=%lld "
+                    "pairs=%zu distinct=%zu threads=%u %.1fms\n",
+                    rs.size(), srcs.size(), static_cast<long long>(ng), pairs, distinct, nt,
+                    (gb_prof_now() - prof_t0) / 1e6);
+        }
+    }
+
     void finalize(GlobalSinkState& gs, ErrCtx& err) override {
         auto& g = static_cast<GroupByGlobal&>(gs);
         if (seed.groups > 0 && !queue_seed(g, err)) return;
@@ -5192,6 +5365,7 @@ struct GroupBySink : Sink {
             int v = std::atoi(mw);
             if (v > 0) nt = static_cast<unsigned>(v);
         }
+        cd_repartition(g, nt);
         if (nt > nonempty_parts) nt = static_cast<unsigned>(nonempty_parts);
         if (total_entries < 65536) nt = 1;   // small agg: inline, no threads
         if (nt < 1) nt = 1;

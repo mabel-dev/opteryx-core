@@ -667,7 +667,7 @@ clickbench-interleave: ## Interleaved Opteryx vs DuckDB ClickBench (O,D / D,O pe
 clickbench-duckdb: ## Re-run DuckDB ClickBench calibration (regenerates duckdb/results.local.json)
 	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py
 
-jsonbench: ## Run JSONBench (Bluesky NDJSON) vs DuckDB via Opteryx SQL / READ_JSONL (JSONBENCH_SIZE=1|10|100, default 10)
+jsonbench: ## Run JSONBench (Bluesky NDJSON, zstd -1 shards) vs DuckDB via Opteryx SQL / READ_JSONL (JSONBENCH_SIZE=1|10|100, default 10)
 	@clear || true
 	@$(PYTHON) tests/performance/jsonbench/runner.py --size $(if $(JSONBENCH_SIZE),$(JSONBENCH_SIZE),10)
 
@@ -728,7 +728,15 @@ tpcds-001: tpcds-sf001 ## Alias for tpcds-sf001
 
 .PHONY: tpcds tpcds-001 tpcds-sf1 tpcds-sf001
 
-jsonbench-data: ## Fetch + decompress the JSONBench Bluesky dataset (JSONBENCH_SIZE=1|10|100, default 10)
+jsonbench-10-jsonl: ## Run JSONBench 10m vs DuckDB over the decompressed .jsonl shards
+	@clear || true
+	@$(PYTHON) tests/performance/jsonbench/runner.py --size 10 --format jsonl
+
+jsonbench-10-zstd: ## Run JSONBench 10m vs DuckDB over the zstd -1 .json.zst shards
+	@clear || true
+	@$(PYTHON) tests/performance/jsonbench/runner.py --size 10 --format zstd
+
+jsonbench-data: ## Fetch, decompress + zstd-recompress the JSONBench Bluesky dataset (JSONBENCH_SIZE=1|10|100, default 10)
 	@$(PYTHON) tests/performance/jsonbench/fetch_data.py --size $(if $(JSONBENCH_SIZE),$(JSONBENCH_SIZE),10)
 
 jsonbench-duckdb: ## Re-run DuckDB JSONBench calibration (regenerates duckdb/results.local.<N>m.json)

@@ -511,7 +511,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         matched-file set.
         """
         from opteryx.connectors.jsonl_io import JSONL_SUPPORTED_TYPES
-        from opteryx.connectors.jsonl_io import iter_newline_chunks
+        from opteryx.connectors.jsonl_io import first_schema_chunk
         from opteryx.types.logical_type import column_type_from_vector
         from rugo.jsonl import read_jsonl as _rugo_read_jsonl
 
@@ -519,7 +519,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         for blob_name in blob_names:
             file_obj = self.filesystem.open_input_file(blob_name)
             try:
-                schema_chunk = next(iter_newline_chunks(file_obj.memoryview), None)
+                schema_chunk = first_schema_chunk(file_obj.memoryview, blob_name)
                 if schema_chunk is None:
                     # Zero-byte blob: no chunk at all, so no schema to infer.
                     # Falls through to the record-less skip below, the same as a

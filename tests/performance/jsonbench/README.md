@@ -94,7 +94,7 @@ gone; the parser handles it, as it should.
 
 ```
 tests/performance/jsonbench/
-├── fetch_data.py       # downloads + decompresses shards (idempotent)
+├── fetch_data.py       # downloads, decompresses + zstd-recompresses shards (idempotent)
 ├── opteryx/runner.py   # the 5 queries as real Opteryx SQL against READ_JSONL (+ shard_glob)
 ├── rugo/runner.py      # the original hand-written scan-and-aggregate over rugo's JSONL reader (kept for its own tests, no longer used by runner.py)
 ├── duckdb/runner.py    # DuckDB baseline (upstream duckdb/queries.sql, verbatim)
@@ -102,10 +102,13 @@ tests/performance/jsonbench/
 └── results/            # per-run CSV: <git-sha>-<timestamp>.csv
 ```
 
-Data lands in `testdata/_downloads/jsonbench/` (raw `file_NNNN.json.gz`) and
-`testdata/_downloads/jsonbench/decompressed/` (cached `file_NNNN.jsonl`,
-decompressed once so repeat runs don't pay gzip cost every iteration).
-Neither is committed (see `.gitignore`).
+Data lands in `testdata/_downloads/jsonbench/` (raw `file_NNNN.json.gz`),
+`testdata/_downloads/jsonbench/decompressed/` (cached `file_NNNN.jsonl`, which
+the DuckDB calibration loads) and `testdata/_downloads/jsonbench/zstd/`
+(`file_NNNN.json.zst`, zstd level 1). `make jsonbench` reads the zstd shards:
+READ_JSONL decompresses them as it streams. No zstd shards are published —
+they are built locally the way JSONBench's own `_files_zstd` entry builds them
+(`zstd -1` per decompressed shard). None of this is committed (see `.gitignore`).
 
 ## Setup (one-time)
 

@@ -22,6 +22,7 @@ from opteryx.exceptions import InvalidInternalStateError
 from opteryx.expression import NodeType
 from opteryx.types.logical_type import LogicalCategory
 from rugo.csv import read_csv as _rugo_read_csv
+from rugo.rugo_native import decompress as _decompress
 
 __all__ = [
     "read_csv_file",
@@ -89,6 +90,7 @@ class CsvPredicatePushable(PredicatePushable):
 
 def read_csv_file(
     data,
+    path: str,
     columns: Optional[Sequence[str]] = None,
     predicates: Optional[Sequence[tuple]] = None,
     delimiter: str = ",",
@@ -113,12 +115,18 @@ def read_csv_file(
     predicate literal that does not fit its column. A caller that treats an
     empty file as an empty relation checks for it before calling.
 
+    ``path`` names the file: a compressed one (gzip / zstd / lz4, by magic bytes)
+    is decompressed whole first — rugo.csv has no chunked entry point to stream
+    into — and an unsupported codec, or an extension the bytes contradict, raises
+    RuntimeError naming it.
+
     rugo.csv yields exactly one morsel for any input it accepts, so the
     `None` branch below is unreachable today. It is a loud guard rather than a
     bare `next(iter(reader))` so that a future rugo that yields nothing
     surfaces as a named error instead of leaking StopIteration into whatever
     generator happens to be on the stack (PEP 479).
     """
+    data = _decompress(data, path)
     with _rugo_read_csv(
         data,
         columns=columns,

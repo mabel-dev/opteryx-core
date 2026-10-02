@@ -15,17 +15,23 @@ What lives here:
 - iter_newline_chunks, used at BIND time to read a file's first chunk for schema
   inference — the same newline-aligned cut, so the bound schema comes from exactly
   the bytes the native Source's first chunk of that file holds;
+- first_schema_chunk, that first chunk for a plain OR compressed (gzip / zstd /
+  lz4) file — for a compressed one, the first chunk of the decompressed stream,
+  cut by the same rule the native Source's streaming decompressor uses;
 - the predicate-pushdown capability (JsonlPredicatePushable, JSONL_OP_XLAT) and the
   reader's supported-type declaration (JSONL_SUPPORTED_TYPES).
 """
 
 from typing import Iterator
+from typing import Optional
 
 from draken.draken_native import DrakenType
 
 from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.expression import NodeType
 from opteryx.types.logical_type import LogicalCategory
+from rugo.rugo_native import decompressed_first_chunk
+from rugo.rugo_native import detect_compression
 
 # 128MB: interleaved A/B on JSONBench 10m (2026-09-30) put 128MB ahead of 64MB
 # (total 0.973x/0.984x over two batches) and of 256MB (which regressed Q3/Q4).
@@ -39,6 +45,7 @@ _NEWLINE_PROBE_WINDOW = 1024 * 1024
 
 __all__ = [
     "iter_newline_chunks",
+    "first_schema_chunk",
     "DEFAULT_CHUNK_SIZE",
     "JsonlPredicatePushable",
     "JSONL_OP_XLAT",
@@ -146,3 +153,20 @@ def iter_newline_chunks(data, chunk_size: int = DEFAULT_CHUNK_SIZE) -> Iterator[
                 end = end + newline_pos + 1
         yield view[start:end]
         start = end
+
+
+def first_schema_chunk(
+    data, path: str, chunk_size: int = DEFAULT_CHUNK_SIZE
+) -> Optional[memoryview]:
+    """The first chunk the native JSONL Source decodes from this file — the bytes
+    bind-time schema inference must read. None for a file with no bytes.
+
+    A compressed file (gzip / zstd / lz4, by magic bytes) yields the first
+    newline-aligned chunk of its DECOMPRESSED stream, decompressing only that far.
+    An unsupported codec, or an extension the bytes contradict, raises RuntimeError
+    naming the file — compressed bytes are never handed to the parser as text.
+    """
+    if detect_compression(data, path) is None:
+        return next(iter_newline_chunks(data, chunk_size), None)
+    chunk = decompressed_first_chunk(data, path, chunk_size)
+    return None if chunk is None else memoryview(chunk)

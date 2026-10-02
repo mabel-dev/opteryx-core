@@ -3,7 +3,8 @@
 JSONBench benchmark + DuckDB comparison runner.
 
 Runs the 5 upstream JSONBench queries (github.com/ClickHouse/JSONBench)
-as real Opteryx SQL against READ_JSONL(path) (warm, multi-iteration; see
+as real Opteryx SQL against READ_JSONL(path) over the zstd level-1 shards
+(`file_NNNN.json.zst`, JSONBench's `_files_zstd` form; warm, multi-iteration; see
 ./opteryx/runner.py) and compares each query's best time to the DuckDB
 baseline, writing per-iteration results to `results/<sha>-<ts>.csv`.
 
@@ -54,7 +55,7 @@ def _load_module(name: str, rel_path: str):
     return module
 
 
-fetch = _load_module("_jsonbench_fetch_data", "fetch_data.py").fetch
+_fetch_data = _load_module("_jsonbench_fetch_data", "fetch_data.py")
 _opteryx_runner = _load_module("_jsonbench_opteryx_runner", os.path.join("opteryx", "runner.py"))
 QUERIES = _opteryx_runner.QUERIES
 shard_glob = _opteryx_runner.shard_glob
@@ -70,7 +71,15 @@ from _common import (  # noqa: E402
 
 _DUCKDB_DIR = os.path.join(_HERE, "duckdb")
 _RESULTS_DIR = os.path.join(_HERE, "results")
-_JSONL_DIR = os.path.join(_REPO_ROOT, "testdata", "_downloads", "jsonbench", "decompressed")
+_DATA_DIR = os.path.join(_REPO_ROOT, "testdata", "_downloads", "jsonbench")
+
+# --format -> (fetcher, shard directory, shard glob, banner label). `zstd` is the
+# zstd level-1 shards (JSONBench's `_files_zstd` form, decompressed by READ_JSONL as
+# it streams); `jsonl` is the same shards decompressed.
+_FORMATS = {
+    "zstd": (_fetch_data.fetch_zstd, os.path.join(_DATA_DIR, "zstd"), "file_*.json.zst", "zstd -1"),
+    "jsonl": (_fetch_data.fetch, os.path.join(_DATA_DIR, "decompressed"), "file_*.jsonl", "decompressed"),
+}
 
 
 def _load_jsonbench_baseline(path: str) -> tuple[dict[str, float], str | None]:
@@ -102,7 +111,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="JSONBench benchmark vs DuckDB (Opteryx SQL via READ_JSONL)")
     parser.add_argument("--size", type=int, default=10, choices=(1, 10, 100), help="Dataset size in millions of rows (default: 10)")
     parser.add_argument("--iterations", type=int, default=2, help="Warm iterations per query (default: 2)")
-    parser.add_argument("--skip-fetch", action="store_true", help="Don't fetch/decompress data; fail if missing")
+    parser.add_argument(
+        "--format",
+        default="zstd",
+        choices=sorted(_FORMATS),
+        help="Shard format READ_JSONL scans: zstd level-1 (default) or decompressed jsonl",
+    )
+    parser.add_argument("--skip-fetch", action="store_true", help="Don't fetch/recompress data; fail if missing")
     parser.add_argument(
         "--duckdb-baseline",
         type=str,
@@ -111,13 +126,14 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    fetcher, shard_dir, shard_pattern, format_label = _FORMATS[args.format]
     if args.skip_fetch:
-        paths = sorted(glob.glob(os.path.join(_JSONL_DIR, "file_*.jsonl")))[: args.size]
+        paths = sorted(glob.glob(os.path.join(shard_dir, shard_pattern)))[: args.size]
         if len(paths) < args.size:
-            print(f"ERROR: expected {args.size} decompressed shard(s) in {_JSONL_DIR}, found {len(paths)}")
+            print(f"ERROR: expected {args.size} {args.format} shard(s) in {shard_dir}, found {len(paths)}")
             return 1
     else:
-        paths = fetch(args.size)
+        paths = fetcher(args.size)
 
     baseline_path = args.duckdb_baseline or os.path.join(_DUCKDB_DIR, f"results.local.{args.size}m.json")
     duckdb_min, duckdb_machine = _load_jsonbench_baseline(baseline_path)
@@ -129,7 +145,7 @@ def main() -> int:
         title="JSONBENCH BENCHMARK",
         opteryx_version=_opteryx.__version__,
         metadata=[
-            ("Dataset", f"Bluesky NDJSON, {args.size}m rows ({data_size / 1e9:.2f}GB decompressed)"),
+            ("Dataset", f"Bluesky NDJSON, {args.size}m rows ({data_size / 1e9:.2f}GB {format_label})"),
             ("Queries", str(len(QUERIES))),
             ("Iterations", f"{args.iterations} warm runs per query"),
         ],

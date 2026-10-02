@@ -143,6 +143,7 @@ cdef class CsvReadNode(ReaderNode):
                     continue
                 morsel = read_csv_file(
                     data,
+                    path,
                     columns=expected_physical_names,
                     predicates=predicates,
                     delimiter=self.csv_separator,

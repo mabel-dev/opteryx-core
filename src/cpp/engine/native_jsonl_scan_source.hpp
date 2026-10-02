@@ -28,6 +28,15 @@
 // stalls chunks of files already loaded. A file's bytes are released when its last
 // chunk is decoded (decoded columns own their bytes — nothing points back in).
 //
+// Compressed files (gzip / zstd / lz4, detected by magic bytes —
+// rugo/src/compression/stream_decompress.hpp) cannot be cut at arbitrary offsets,
+// so each one is a sequential stream: one worker at a time decompresses its next
+// newline-aligned chunk (same cut rule as a plain file) into an owned buffer,
+// outside the cursor lock, while other workers decode chunks already produced or
+// stream other files. Resident memory stays bounded by the in-flight window — the
+// decompressed file is never held whole. An unsupported codec, a mislabelled
+// extension, or a corrupt/truncated stream fails the query naming the file.
+//
 // Order: chunk/morsel order is NOT guaranteed (architect ruling 2026-10-01).
 //
 // Errors fail fast (architect ruling 2026-10-01): a declared-type mismatch, an
@@ -82,6 +91,7 @@
 #include "field_span.hpp"        // interpret_jsonl_threaded, OrdinalPredictor
 #include "column_builder.hpp"    // parse_all_columns, ParsedColumn
 #include "jsonl_reader.hpp"      // maybe_prefilter, malformed_error_message, py_str_repr
+#include "compression/stream_decompress.hpp"   // resolve_codec, LineChunker
 
 namespace opteryx::engine {
 
@@ -125,12 +135,15 @@ inline void jsonl_scan_spec_set_context(JsonlScanSpec* spec, const void* context
 namespace jsonl_detail {
 
 // One loaded file: a mapping (local) or a fetched body (remote). Shared by every
-// chunk cut from it; released when the last chunk holding it is decoded.
+// chunk cut from it; released when the last chunk holding it is decoded. For a
+// compressed file it is the COMPRESSED bytes, and each decompressed chunk is its
+// own Mapping owning `chunk`.
 struct Mapping {
     uint8_t* ptr = nullptr;
     size_t   len = 0;
-    bool     mapped = false;          // ptr is an mmap; otherwise it points into `body`
+    bool     mapped = false;          // ptr is an mmap; otherwise it points into `body`/`chunk`
     std::vector<uint8_t> body;
+    rugo::compression::ByteBuffer chunk;
     ~Mapping() { if (mapped && ptr != nullptr) unmap_memory_c(ptr, len); }
 };
 
@@ -140,6 +153,11 @@ struct FileState {
     FileStatus status = FileStatus::PENDING;
     std::shared_ptr<Mapping> data;
     size_t offset = 0;
+    // Compressed file: its decompressing stream (which reads from `data`), and whether
+    // a worker is producing its next chunk right now (one at a time — a stream is
+    // sequential).
+    std::unique_ptr<rugo::compression::LineChunker> stream;
+    bool busy = false;
 };
 
 struct Chunk {
@@ -330,10 +348,12 @@ private:
         g.cv_loaded.notify_all();
     }
 
-    // Load file `i` — map it, or GET it whole with no credentials. Called WITHOUT
-    // the cursor lock. Empty on success, else the query-ending message.
+    // Load file `i` — map it, or GET it whole with no credentials — and, when its
+    // bytes are compressed, open its decompressing stream. Called WITHOUT the cursor
+    // lock. Empty on success, else the query-ending message.
     std::string load(NativeJsonlScanGlobal& g, size_t i,
-                     std::shared_ptr<jsonl_detail::Mapping>& out) {
+                     std::shared_ptr<jsonl_detail::Mapping>& out,
+                     std::unique_ptr<rugo::compression::LineChunker>& stream) {
         const std::string& path = spec_->files[i];
         auto m = std::make_shared<jsonl_detail::Mapping>();
         if (spec_->urls[i].empty()) {
@@ -351,6 +371,32 @@ private:
             m->ptr = m->body.data();
             m->len = m->body.size();
         }
+        try {
+            const auto codec = rugo::compression::resolve_codec(path, m->ptr, m->len);
+            if (codec != rugo::compression::Codec::NONE)
+                stream = std::make_unique<rugo::compression::LineChunker>(
+                    rugo::compression::make_decoder(codec, m->ptr, m->len));
+        } catch (const std::exception& e) {
+            return "READ_JSONL('" + path + "'): " + e.what();
+        }
+        out = std::move(m);
+        return std::string();
+    }
+
+    // Decompress file `i`'s next chunk. Called WITHOUT the cursor lock, by the one
+    // worker that marked the stream busy. Empty on success (`out` null at end of
+    // stream), else the query-ending message.
+    std::string next_compressed_chunk(rugo::compression::LineChunker& stream, size_t i,
+                                      std::shared_ptr<jsonl_detail::Mapping>& out) {
+        auto m = std::make_shared<jsonl_detail::Mapping>();
+        try {
+            if (!stream.next(static_cast<size_t>(spec_->chunk_size), m->chunk)) return std::string();
+        } catch (const std::exception& e) {
+            return "READ_JSONL('" + spec_->files[i] + "'): the compressed file could not be "
+                   "decompressed: " + e.what();
+        }
+        m->ptr = m->chunk.data.get();
+        m->len = m->chunk.len;
         out = std::move(m);
         return std::string();
     }
@@ -368,6 +414,32 @@ private:
             for (size_t i = g.first_live; i < n; ++i) {
                 jsonl_detail::FileState& f = g.files[i];
                 if (f.status != FileStatus::READY) continue;
+                if (f.stream) {
+                    if (f.busy) continue;
+                    // Produce this stream's next chunk outside the lock; while busy it
+                    // counts as loading, so waiters neither give up nor spin on it.
+                    f.busy = true;
+                    g.loading += 1;
+                    lock.unlock();
+                    std::shared_ptr<jsonl_detail::Mapping> data;
+                    error = next_compressed_chunk(*f.stream, i, data);
+                    lock.lock();
+                    g.loading -= 1;
+                    f.busy = false;
+                    g.cv_loaded.notify_all();
+                    if (!error.empty()) return false;
+                    if (data == nullptr) {
+                        f.status = FileStatus::DONE;
+                        f.stream.reset();
+                        f.data.reset();
+                        continue;
+                    }
+                    chunk.map = std::move(data);
+                    chunk.start = 0;
+                    chunk.end = chunk.map->len;
+                    chunk.file = i;
+                    return true;
+                }
                 const size_t len = f.data->len;
                 if (f.offset >= len) {
                     f.status = FileStatus::DONE;
@@ -399,11 +471,13 @@ private:
                 g.loading += 1;
                 lock.unlock();
                 std::shared_ptr<jsonl_detail::Mapping> data;
-                error = load(g, i, data);
+                std::unique_ptr<rugo::compression::LineChunker> stream;
+                error = load(g, i, data, stream);
                 lock.lock();
                 g.loading -= 1;
                 if (!error.empty()) return false;
                 g.files[i].data = std::move(data);
+                g.files[i].stream = std::move(stream);
                 g.files[i].status = FileStatus::READY;
                 g.cv_loaded.notify_all();
                 continue;
@@ -416,7 +490,8 @@ private:
 
     static bool any_ready(const NativeJsonlScanGlobal& g) {
         for (size_t i = g.first_live; i < g.files.size(); ++i)
-            if (g.files[i].status == jsonl_detail::FileStatus::READY) return true;
+            if (g.files[i].status == jsonl_detail::FileStatus::READY && !g.files[i].busy)
+                return true;
         return false;
     }
 

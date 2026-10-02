@@ -993,6 +993,7 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/interop/value_format.hpp",
                 "draken/logical_type.h",   # LogicalKind, via value_format.hpp
                 "rugo/src/_text_render.hpp",
+                "rugo/src/compression/stream_decompress.hpp",
                 "rugo/src/jsonl/core/markers.hpp",
                 "rugo/src/jsonl/core/parse_context.hpp",
                 "rugo/src/jsonl/core/structural_scan.hpp",

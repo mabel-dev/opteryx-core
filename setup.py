@@ -1046,6 +1046,10 @@ extensions = [
         "rugo/src/jsonl/core/column_builder.cpp",
         "rugo/src/declared_type.cpp",
         "src/cpp/disk_io.cpp",
+        # miniz raw-DEFLATE inflate: gzip-compressed JSONL files, streamed by
+        # NativeJsonlScanSource through rugo/src/compression/stream_decompress.hpp
+        # (zstd and lz4 frame decoding use the vendored TUs already listed here).
+        "third_party/miniz/miniz_tinfl.cpp",
         ]
         # skene's kZstd section codec, both halves. Same argument as lz4.c above,
         # and it is NOT optional: skene/src/encoding.cpp calls ZSTD_compress /
@@ -1072,6 +1076,7 @@ extensions = [
             "third_party/lz4",           # lz4.h
             "rugo/src",                  # declared_type.hpp / predicate_literal.hpp (JSONL core)
             "rugo/src/jsonl/core",       # NativeJsonlScanSource's rugo JSONL core
+            "third_party/miniz",         # miniz_tinfl.h (compressed JSONL: gzip)
         ]
         + _curl_include_dirs
         + _openssl_include_dirs,
@@ -1109,6 +1114,7 @@ extensions = [
             "third_party/mabel/carchar/carchar_index.hpp",
             "third_party/mabel/carchar/carchar_common.hpp",
             "third_party/mabel/carchar/carchar_simd.hpp",
+            "rugo/src/compression/stream_decompress.hpp",
         ],
     ),
     Extension(

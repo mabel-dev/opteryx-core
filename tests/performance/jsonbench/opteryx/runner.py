@@ -22,11 +22,11 @@ at what was downloaded.
 Multiple shards, one relation
 ------------------------------
 DuckDB's baseline loads every shard into a single `bluesky` table. The equivalent
-here is one `READ_JSONL('<dir>/*.jsonl')` over a glob. Globbing measured ~2x faster
+here is one `READ_JSONL('<dir>/*.json.zst')` over a glob. Globbing measured ~2x faster
 than the `UNION ALL`-per-shard form this file used first -- one scan node over N
 files, rather than N scan nodes the planner then has to union together.
 
-A glob straight at the shared `decompressed/` directory would be wrong, though:
+A glob straight at the shared shard directory would be wrong, though:
 JSONBench sizes are prefix-nested (1m's shard IS 10m's first shard IS 100m's
 first shard), so that directory accumulates every shard any past run fetched, and
 `--size 1` after a prior `--size 10` run would silently read all 10 while
@@ -64,7 +64,7 @@ def shard_glob(paths: Iterable[str]) -> str:
 
     Builds `<shard-dir>/_by_size_for_sql/<n>shards/` as a directory of HARD LINKS to
     the original, unmodified shard files (see module docstring for why a glob at
-    the shared decompressed/ directory would silently over-match across --size
+    the shared shard directory would silently over-match across --size
     values). Hard links, not copies: the same inode, so the bytes read are literally
     the downloaded bytes, nothing duplicated (~5GB saved at the 10m size) and nothing
     altered. The directory is rebuilt from scratch on every call so it can never
@@ -94,7 +94,9 @@ def shard_glob(paths: Iterable[str]) -> str:
     for path in paths:
         os.link(os.path.abspath(path), os.path.join(group_dir, os.path.basename(path)))
 
-    return os.path.join(group_dir, "*.jsonl")
+    # The shards' own suffix ('.json.zst', '.jsonl', ...) — one format per run.
+    suffix = os.path.basename(paths[0]).split(".", 1)[1]
+    return os.path.join(group_dir, f"*.{suffix}")
 
 
 def _from(glob_path: str) -> str:
