@@ -172,10 +172,11 @@ struct case_ctx {
  * kind 0: count x int64 SORTED ASCENDING (int family raw values; DECIMAL raw
  *         quantized to the column's scale at bind time).
  * kind 1: count x (u32 len + bytes) — UTF-8/ASCII string entries.
- * kind 2: count x float64 (IEEE754 double), in GIVEN order (NOT sorted —
- *         draken_in_list does not binary-search this kind). Consumed today
- *         only by draken_array_contains (function_array_json.cpp), which
- *         always packs a single entry; draken_in_list has no kind-2 arm.
+ * kind 2: count x float64 (IEEE754 double), any order, NaN allowed — no
+ *         sortedness contract: draken_in_list (FLOAT64 operand only) splits
+ *         NaN out and sorts its own copy per call; draken_array_contains
+ *         (function_array_json.cpp) always packs a single entry. Equality is
+ *         total-order (NaN = NaN, -0.0 = 0.0), the engine's float `=`.
  * kind 3: count x uint64 SORTED ASCENDING (UNSIGNED int family raw values).
  *         A separate kind from 0 on purpose: a UINT64 value above INT64_MAX
  *         has no int64 spelling, so packing it as kind 0 would reinterpret it

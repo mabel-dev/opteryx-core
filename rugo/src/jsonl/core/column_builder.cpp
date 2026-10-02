@@ -1228,14 +1228,21 @@ static ParsedColumn parse_nested_column(
     // Per-range output (8-row aligned: each range writes its own bytes of the bitmap),
     // stitched together below. Ranges report their FIRST bad row; the lowest wins, so the
     // error is the one a serial walk would raise.
+    //
+    // A `->>` string with no escape is its raw body (jsoncanon::raw_text_view), so its row
+    // points straight into `buffer` (in_buffer[row]) and is never copied here; only
+    // escaped strings, non-strings and `->` render into the range's arena. The one copy
+    // the value pays is parse_varchar_column's, into the vector's own buffers — within
+    // this call, so the chunk buffer's lifetime is untouched.
     const std::vector<RowRange> ranges = rows.split(n, 8);
     std::vector<std::vector<uint8_t>> part_data(ranges.size());
     std::vector<uint32_t> first_bad(ranges.size(), UINT32_MAX);
     std::vector<uint8_t> any_value(ranges.size(), 0);
+    std::vector<uint8_t> any_rendered(ranges.size(), 0);
+    std::vector<uint8_t> in_buffer(spec.as_json ? 0 : n, 0);
 
     StringColumnResult out;
     out.num_rows = n;
-    out.data_owned = true;
     out.offsets.assign(n, 0);
     out.lengths.assign(n, 0);
     out.null_bitmap.assign((static_cast<size_t>(n) + 7) >> 3, 0xFF);
@@ -1252,6 +1259,16 @@ static ParsedColumn parse_nested_column(
                 out.null_bitmap[row >> 3] &= static_cast<uint8_t>(~(1u << (row & 7u)));
                 continue;
             }
+            any_value[ri] = 1;
+            const uint8_t* d;
+            uint32_t dn;
+            if (!spec.as_json && jsoncanon::raw_text_view(buffer, *f, d, dn)) {
+                out.offsets[row] = static_cast<uint32_t>(d - buffer);
+                out.lengths[row] = dn;
+                in_buffer[row] = 1;
+                continue;
+            }
+            any_rendered[ri] = 1;
             const size_t start = data.size();
             if (!jsoncanon::render_nested(buffer, *f, spec.as_json, data, stack, scratch)) {
                 first_bad[ri] = row;
@@ -1259,7 +1276,6 @@ static ParsedColumn parse_nested_column(
             }
             out.offsets[row] = static_cast<uint32_t>(start);   // range-relative; rebased below
             out.lengths[row] = static_cast<uint32_t>(data.size() - start);
-            any_value[ri] = 1;
         }
     });
 
@@ -1275,20 +1291,42 @@ static ParsedColumn parse_nested_column(
             "' is not valid JSON");
     }
 
-    // Stitch the per-range arenas into one, rebasing each range's offsets.
+    bool rendered = false;
     size_t total = 0;
-    for (const auto& d : part_data) total += d.size();
-    if (total > UINT32_MAX)
-        throw std::runtime_error("read_jsonl: column '" + name + "' exceeds 4 GiB in one chunk");
-    out.data.reserve(total);
     for (size_t ri = 0; ri < ranges.size(); ++ri) {
-        const uint32_t base = static_cast<uint32_t>(out.data.size());
-        for (size_t row = ranges[ri].begin; row < ranges[ri].end; ++row) out.offsets[row] += base;
-        out.data.insert(out.data.end(), part_data[ri].begin(), part_data[ri].end());
+        total += part_data[ri].size();
+        if (any_rendered[ri]) rendered = true;
         if (any_value[ri]) { out.any_value_seen = true; out.any_key_seen = true; }
     }
 
-    ParsedColumn pc = parse_varchar_column(out.data_ptr(), out, rows);
+    // No row rendered: every value's offset already indexes `buffer`. Otherwise one arena
+    // of the rendered ranges with the buffer rows copied in, every offset rebased to it.
+    const uint8_t* base = buffer;
+    if (rendered) {
+        for (uint32_t row = 0; row < n && !in_buffer.empty(); ++row)
+            if (in_buffer[row]) total += out.lengths[row];
+        if (total > UINT32_MAX)
+            throw std::runtime_error("read_jsonl: column '" + name + "' exceeds 4 GiB in one chunk");
+        out.data.reserve(total);
+        for (size_t ri = 0; ri < ranges.size(); ++ri) {
+            const uint32_t range_base = static_cast<uint32_t>(out.data.size());
+            out.data.insert(out.data.end(), part_data[ri].begin(), part_data[ri].end());
+            for (size_t row = ranges[ri].begin; row < ranges[ri].end; ++row) {
+                if (!in_buffer.empty() && in_buffer[row]) {
+                    const uint32_t at = static_cast<uint32_t>(out.data.size());
+                    out.data.insert(out.data.end(), buffer + out.offsets[row],
+                                    buffer + out.offsets[row] + out.lengths[row]);
+                    out.offsets[row] = at;
+                } else {
+                    out.offsets[row] += range_base;
+                }
+            }
+        }
+        out.data_owned = true;
+        base = out.data_ptr();
+    }
+
+    ParsedColumn pc = parse_varchar_column(base, out, rows);
     pc.type = expected;
     pc.key_absent = !out.any_key_seen;
     return pc;

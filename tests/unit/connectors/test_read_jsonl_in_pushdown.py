@@ -70,6 +70,8 @@ def _run(sql, push_in):
         ("s IN ('é', 'zz')", "s", "in", {7}),
         ("n IN (1, 3)", "n", "in", {1, 3, 6}),
         ("n NOT IN (1, 3)", "n", "not in", {2, 7}),
+        ("f IN (1.5, 3.5)", "f", "in", {1, 3, 6}),
+        ("f NOT IN (1.5, 0.0)", "f", "not in", {2, 3}),
         ("c ->> 'col' IN ('post', 'repost')", "c->>'col'", "in", {1, 3, 6}),
         ("c ->> 'col' NOT IN ('post', 'repost')", "c->>'col'", "not in", {2, 7}),
         ("c ->> 'col' IN ('nope', 'none')", "c->>'col'", "in", set()),

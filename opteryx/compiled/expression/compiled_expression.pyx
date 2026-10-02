@@ -603,9 +603,8 @@ def _pack_membership_blob(vals, int kind, int negate):
 
     kind 0 payload is int64 SORTED ASCENDING (draken_in_list binary-searches it, so
     the sortedness is load-bearing, not cosmetic); kind 1 is (u32 len + bytes)
-    entries; kind 2 is float64 in GIVEN order (draken_array_contains's only
-    consumer never has more than one entry, so there is no binary-search
-    invariant to preserve — draken_in_list has no kind-2 arm); kind 3 is uint64
+    entries; kind 2 is float64 with no order contract (draken_in_list sorts its
+    own copy and splits NaN out; draken_array_contains packs one entry); kind 3 is uint64
     SORTED ASCENDING (UNSIGNED int family — a separate kind from 0 so a value
     above INT64_MAX is never reinterpreted as negative). Shared by the
     IN-list lowering and the `@>`/`@>>`/single-item lowerings so they cannot
@@ -759,6 +758,15 @@ def _build_in_list_blob(values, left_type, int negate):
     if phys in ("VARCHAR", "NVARCHAR") and all(
             isinstance(v, (str, bytes)) for v in vals):
         return _pack_membership_blob(vals, 1, negate)
+    if phys == "FLOAT64" and all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in vals):
+        # The kernel's equality is the engine's float `=` (total order: NaN = NaN,
+        # -0.0 = 0.0). An int literal is admitted only inside +/-2**53, where a
+        # double holds every int exactly; outside it the list declines rather than
+        # matching the neighbouring double the int would round to.
+        if not all(isinstance(v, float) or -(2 ** 53) <= v <= 2 ** 53 for v in vals):
+            return None
+        return _pack_membership_blob(vals, 2, negate)
     if phys in ("DECIMAL", "DECIMAL128"):
         # A DECIMAL column stores the UNSCALED integer at its scale (int64 for
         # DECIMAL, int128 for DECIMAL128); each literal is rescaled to that grid
@@ -2018,7 +2026,7 @@ cdef Py_ssize_t _linearize(
                     return sub_depth   # doc pushed, fn pops 1 pushes 1 — net 0
 
         # IN-list — bind-time lowering to the C-ABI draken_in_list kernel for
-        # plain literal collections over integer-family or string columns.
+        # plain literal collections over integer-family, FLOAT64 or string columns.
         # Lists containing NULL keep the Python path (three-valued IN semantics
         # the blob cannot carry — engine admission then rejects loud).
         if op_str in ("InList", "NotInList") and node.right != NULL \

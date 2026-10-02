@@ -10,7 +10,7 @@
 namespace rugo::_jsonl {
 
 // LIVE: is_null(), evaluate_predicate() — predicate pushdown.
-// LIVE: parse_int64 / parse_float64 / parse_bool / extract_string — used by
+// LIVE: parse_int64 / parse_float64 / parse_bool — used by
 //   evaluate_predicate; parse_bool also by the typed column builder.
 // The numeric parsers delegate to the bounded fast_parse_* (fast_float-backed).
 // No stdlib strtod/strtoll here: strtod has no end bound and over-reads past the
@@ -46,12 +46,6 @@ bool parse_bool(const uint8_t* buffer, uint32_t start, uint32_t end, bool& out) 
     return false;
 }
 
-std::string extract_string(const uint8_t* buffer, uint32_t start, uint32_t end) {
-    // String value is between quotes; this returns raw bytes
-    size_t len = end - start + 1;
-    return std::string(reinterpret_cast<const char*>(buffer + start), len);
-}
-
 bool is_null(const uint8_t* buffer, uint32_t start, uint32_t end) {
     size_t len = end - start + 1;
     return (len == 4 && std::strncmp(reinterpret_cast<const char*>(buffer + start), "null", 4) == 0);
@@ -69,6 +63,16 @@ inline bool apply_op_i64(uint8_t op, int64_t a, int64_t b) {
         case 5: return a >= b;
     }
     return false;
+}
+// Byte-wise comparison of `a` against `b` under op 0-5. `=` / `<>` are decided by the
+// lengths alone when they differ (both are already known), so only an equal-length
+// pair reaches memcmp; an ordering op needs the bytes either way.
+inline bool apply_op_bytes(uint8_t op, const uint8_t* a, size_t an, const uint8_t* b, size_t bn) {
+    if (op <= 1 && an != bn) return op == 1;
+    const size_t n = an < bn ? an : bn;
+    int cmp = n ? std::memcmp(a, b, n) : 0;
+    if (cmp == 0) cmp = (an < bn) ? -1 : (an > bn ? 1 : 0);
+    return apply_op_i64(op, cmp, 0);
 }
 inline bool apply_op_f64(uint8_t op, double a, double b) {
     switch (op) {
@@ -185,11 +189,12 @@ bool evaluate_scalar(
             // six ops (EQ/NE/LT/LE/GT/GE) behave consistently with numeric predicates.
             return apply_op_i64(pred.op, field_bool ? 1 : 0, pred.pred_bool ? 1 : 0);
         }
-        default: {  // String (the only other kind literal_fits_json_value admits)
-            const std::string val_str = extract_string(buffer, value_span.value_start, fend);
-            const int cmp = val_str.compare(pred.value);
-            return apply_op_i64(pred.op, cmp, 0);
-        }
+        default:  // String (the only other kind literal_fits_json_value admits)
+            // The span's raw bytes, compared in place.
+            return apply_op_bytes(pred.op, buffer + value_span.value_start,
+                                  fend - value_span.value_start + 1,
+                                  reinterpret_cast<const uint8_t*>(pred.value.data()),
+                                  pred.value.size());
     }
 }
 // A NESTED `->>` column (FieldSpan::slot != 0) is TEXT: its predicate compares the value
@@ -198,22 +203,28 @@ bool evaluate_scalar(
 // string comparison. Its JSON type never changes the comparison, which is what makes
 // `commit->>'n' = '5'` true for the JSON number 5, as the unpushed `->>` is.
 bool evaluate_nested_text(const uint8_t* buffer, const FieldSpan& span, const Predicate& pred) {
+    // An unescaped string is compared in place (jsoncanon::raw_text_view); anything else
+    // is rendered first.
     thread_local std::vector<uint8_t> text, stack, scratch;
-    text.clear();
-    if (!jsoncanon::render_nested(buffer, span, /*as_json=*/false, text, stack, scratch))
-        throw std::runtime_error(
-            "read_jsonl: column '" + pred.column + "': value '" +
-            std::string(reinterpret_cast<const char*>(buffer + span.value_start),
-                        span.value_width < 64u ? span.value_width : 64u) +
-            "' is not valid JSON");
+    const uint8_t* t;
+    uint32_t tn;
+    if (!jsoncanon::raw_text_view(buffer, span, t, tn)) {
+        text.clear();
+        if (!jsoncanon::render_nested(buffer, span, /*as_json=*/false, text, stack, scratch))
+            throw std::runtime_error(
+                "read_jsonl: column '" + pred.column + "': value '" +
+                std::string(reinterpret_cast<const char*>(buffer + span.value_start),
+                            span.value_width < 64u ? span.value_width : 64u) +
+                "' is not valid JSON");
+        t = text.data();
+        tn = static_cast<uint32_t>(text.size());
+    }
     auto compare_one = [&](const Predicate& p) -> bool {
         if (p.kind != rugo::LITERAL_STRING)
             throw std::invalid_argument(
                 rugo::literal_mismatch_message(p.column, "NVARCHAR", p.kind, p.value));
-        const size_t n = text.size() < p.value.size() ? text.size() : p.value.size();
-        int cmp = n ? std::memcmp(text.data(), p.value.data(), n) : 0;
-        if (cmp == 0) cmp = (text.size() < p.value.size()) ? -1 : (text.size() > p.value.size() ? 1 : 0);
-        return apply_op_i64(p.op, cmp, 0);
+        return apply_op_bytes(p.op, t, tn,
+                              reinterpret_cast<const uint8_t*>(p.value.data()), p.value.size());
     };
     switch (pred.op) {
         case 8: return false;  // IS NULL: a span exists, so the value is not NULL

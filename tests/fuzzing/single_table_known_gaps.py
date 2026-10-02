@@ -365,33 +365,7 @@ REGISTER: List[RegisteredDefect] = [
     # `_unparenthesise` in single_table_grammar.py was emitting the UNPARENTHESISED
     # spelling of every aliased projection expression on the strength of this
     # entry. It is gone with the entry, so the generator writes what it built.
-    RegisteredDefect(
-        id="float-in-list-only-works-at-top-level",
-        repro=(
-            "SELECT COUNT(*) FROM testdata.planets "
-            "WHERE (mass <> -1.0) OR (orbital_eccentricity IN (-1.0, -2.0))"
-        ),
-        error_type="NotSupportedError",
-        signature="in a filter predicate",
-        detail=(
-            "An IN-list on a FLOAT column has a native kernel only when it is the entire "
-            "predicate. Every one of these fails while the bare form runs:\n"
-            "  NOT ((f_null IN (1.5, 2.5)))          -- one redundant paren pair\n"
-            "  NOT (f_null NOT IN (1.5, 2.5))        -- under a NOT\n"
-            "  (mass <> -1.0) OR (ecc IN (-1.0))     -- as a disjunct\n"
-            "  COUNT(* WHERE gm IN (1.5, 2.5))   -- as a FILTER predicate\n"
-            "The same shapes over an INTEGER or VARCHAR column all run.\n"
-            "The FILTER door is worth spelling out because it does not LOOK nested: the "
-            "predicate is written at the top level of the clause. It becomes nested because "
-            "`AGG(x WHERE p)` is lowered to `AGG(IIF(p, x, NULL))`, so `p` ends up as "
-            "IIF's condition and the message names IIF rather than the filter:\n"
-            "  NotSupportedError: a comparison in `IIF(gm IN [1.5, 2.5],1,null)`, outside the\n"
-            "  c-native kernel set\n"
-            "That is a DIFFERENT message from the one this entry matches, so the register does "
-            "not absorb it; the generator emits FILTER predicates at nesting depth 1 instead, "
-            "which applies the same rule that already keeps a FLOAT IN-list out of a disjunct."
-        ),
-    ),
+
     # ─────────────────────────────────────────────────────────────────────────
     # POSITION-DEPENDENT EVALUATION — an expression that works standalone but
     # fails once it is nested inside another expression.

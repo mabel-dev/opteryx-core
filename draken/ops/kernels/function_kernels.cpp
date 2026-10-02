@@ -2322,6 +2322,36 @@ VecResult draken_in_list(void* ctx, const DrakenVector* const* args, uint32_t na
             bool hit = std::binary_search(items.begin(), items.end(), data[v->selection[i]]);
             if (hit != negate) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
         }
+    } else if (c->kind == 2) {   // float64, FLOAT64 operand — total-order equality
+        if (v->type != DRAKEN_FLOAT64) {
+            draken_free(out);
+            if (validity != nullptr) draken_free(validity);
+            return draken_error_sentinel(
+                "draken_in_list: FLOAT64 operand required for kind-2 set");
+        }
+        // The engine's float equality is total-order: NaN = NaN, -0.0 = 0.0. NaN has
+        // no place in a `<` order, so it is split out into one flag; the rest are
+        // copied (the payload follows the 8-byte header, unaligned for a double load)
+        // and sorted here — kind 2 carries no sortedness contract. Under `<`, -0.0 and
+        // 0.0 are equivalent, so binary_search already matches them to each other.
+        bool set_has_nan = false;
+        std::vector<double> items;
+        items.reserve(c->count);
+        for (uint32_t e = 0; e < c->count; ++e) {
+            double d;
+            std::memcpy(&d, payload + static_cast<size_t>(e) * sizeof(double), sizeof(double));
+            if (std::isnan(d)) set_has_nan = true;
+            else items.push_back(d);
+        }
+        std::sort(items.begin(), items.end());
+        const auto* data = static_cast<const double*>(v->data);
+        for (uint32_t i = 0; i < n; ++i) {
+            if (!fk_row_valid(v, i)) continue;
+            const double d = data[v->selection[i]];
+            const bool hit = std::isnan(d) ? set_has_nan
+                                           : std::binary_search(items.begin(), items.end(), d);
+            if (hit != negate) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        }
     } else if (c->kind == 1) {   // string entries: (u32 len + bytes), linear scan
         if (!fk_is_string(v->type)) {
             draken_free(out);
@@ -2348,7 +2378,7 @@ VecResult draken_in_list(void* ctx, const DrakenVector* const* args, uint32_t na
         }
     } else {
         // Every kind is dispatched explicitly: this used to be a bare `else` that
-        // read ANY unrecognised kind (including kind 2, float64) as string entries.
+        // read ANY unrecognised kind as string entries.
         draken_free(out);
         if (validity != nullptr) draken_free(validity);
         return draken_error_sentinel("draken_in_list: unsupported membership-set kind");

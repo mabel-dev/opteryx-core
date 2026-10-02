@@ -175,6 +175,51 @@ inline bool write_value(const uint8_t* text, size_t len, std::vector<uint8_t>& o
     }
 }
 
+// True when every byte of the 8 in `w` is plain ASCII text a JSON string body may hold
+// raw: 0x20..0x7F, neither `"` nor `\`. Exact (no false positives): each test is the
+// classic "any byte < n" / "any byte == 0" word trick, exact once no byte has its top bit.
+inline bool ascii_clean_word(uint64_t w) noexcept {
+    constexpr uint64_t ones = 0x0101010101010101ull, highs = 0x8080808080808080ull;
+    const uint64_t q = w ^ (ones * '"'), b = w ^ (ones * '\\');
+    return ((w | ((w - ones * 0x20) & ~w) | ((q - ones) & ~q) | ((b - ones) & ~b)) & highs) == 0;
+}
+
+// `->>` of a string span is its raw body, byte for byte, when the body holds no escape —
+// render_nested would decode it to itself. True with (d, dn) viewing the body IN `buffer`
+// when that holds AND the body is valid exactly as render_nested's scan_string judges it
+// (UTF-8, no raw control byte, closing quote right after the span); false otherwise —
+// escaped, not a string, or invalid — and the caller goes through render_nested, which
+// either renders it or fails loud. Never a different answer: pure-ASCII bodies take the
+// word check (what scan_string would accept unescaped), everything else scan_string itself.
+inline bool raw_text_view(const uint8_t* buffer, const FieldSpan& f,
+                          const uint8_t*& d, uint32_t& dn) noexcept {
+    if (static_cast<ValueType>(f.type) != ValueType::String) return false;
+    const uint8_t* v = buffer + f.value_start;
+    const uint32_t len = f.value_width;
+    if (v[len] != '"') return false;
+    bool clean = true;
+    if (len >= 8) {
+        uint64_t w;
+        for (uint32_t i = 0; i + 8 <= len && clean; i += 8) {
+            std::memcpy(&w, v + i, 8);
+            clean = ascii_clean_word(w);
+        }
+        if (clean) { std::memcpy(&w, v + len - 8, 8); clean = ascii_clean_word(w); }
+    } else {
+        for (uint32_t i = 0; i < len && clean; ++i)
+            clean = v[i] >= 0x20 && v[i] < 0x80 && v[i] != '"' && v[i] != '\\';
+    }
+    if (!clean) {
+        const uint8_t* cur = v;
+        JsonArrayElement e;
+        if (!jsonarr::scan_string(cur, v + len + 1, e) || cur != v + len + 1 || e.str_escaped)
+            return false;
+    }
+    d = v;
+    dn = len;
+    return true;
+}
+
 // Render one nested sub-value span (find_nested_field in interpreter.cpp) exactly as
 // draken's `->` (as_json) / `->>` render the same path, appending to `out`:
 //   string  `->>`: its decoded UTF-8        `->`: re-escaped JSON string

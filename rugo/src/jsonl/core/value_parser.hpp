@@ -15,9 +15,6 @@ bool parse_int64(const uint8_t* buffer, uint32_t start, uint32_t end, int64_t& o
 bool parse_float64(const uint8_t* buffer, uint32_t start, uint32_t end, double& out);
 bool parse_bool(const uint8_t* buffer, uint32_t start, uint32_t end, bool& out);
 
-// Extract string value (unescaping not performed; raw bytes between quotes)
-std::string extract_string(const uint8_t* buffer, uint32_t start, uint32_t end);
-
 // Check if value is null
 bool is_null(const uint8_t* buffer, uint32_t start, uint32_t end);
 

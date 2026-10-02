@@ -1001,10 +1001,9 @@ _ASSOCIATIVE = frozenset({"AND", "OR", "XOR", "+", "*", "||", "&", "|", "^"})
 _LITERAL_RIGHT_OPERAND = frozenset({"/", "%", "<<", ">>"})
 
 # Spellings the generator suppresses beneath a NOT (`negated_forms_allowed=False`)
-# because they have no native kernel there — see
-# single_table_known_gaps/float-in-list-only-works-at-top-level and
-# negated-array-contains-has-no-kernel. A probe that moves one under a NOT would
-# report that registered defect instead of testing precedence.
+# — see single_table_known_gaps/negated-array-contains-has-no-kernel. A probe that
+# moves one under a NOT would report that registered defect instead of testing
+# precedence.
 _NOT_UNDER_NOT = frozenset(
     {
         "IS NOT NULL",
@@ -2026,9 +2025,7 @@ class Generator:
 
         `negated_forms_allowed=False` suppresses the NOT LIKE / NOT IN / NOT
         BETWEEN spellings. It is set when this predicate is about to be wrapped
-        in a `NOT (...)`, because `NOT (float_col NOT IN (...))` has no native
-        filter kernel — see
-        single_table_known_gaps/float-in-list-only-works-at-top-level.
+        in a `NOT (...)`.
         """
         rng = self.rng
         if depth < 2 and rng.random() < 0.3:
@@ -2055,9 +2052,7 @@ class Generator:
         if depth < 2 and rng.random() < 0.08:
             self.tags.add("not")
             # `(NOT {child})`, not `(NOT ({child}))`: every predicate this class
-            # returns is already parenthesised, and a SECOND pair around a
-            # FLOAT IN-list drops the query out of the native kernel set
-            # (single_table_known_gaps/float-in-list-only-works-at-top-level).
+            # returns is already parenthesised.
             return Prefix("NOT", self.predicate(depth + 1, negated_forms_allowed=False), Ty.BOOLEAN)
 
         builders = [
@@ -2158,12 +2153,7 @@ class Generator:
 
     def _in_list_predicate(self, depth: int, negated: bool) -> Optional[Node]:
         rng = self.rng
-        # A FLOAT IN-list only has a native kernel when it IS the whole
-        # predicate: as a disjunct, or under a NOT, or wrapped in one extra
-        # paren pair, it raises 'a comparison in a filter predicate `...`,
-        # outside the c-native kernel set'. INTEGER and VARCHAR are unaffected. See
-        # single_table_known_gaps/float-in-list-only-works-at-top-level.
-        types = (Ty.INTEGER, Ty.VARCHAR) if depth > 0 else (Ty.INTEGER, Ty.FLOAT, Ty.VARCHAR)
+        types = (Ty.INTEGER, Ty.FLOAT, Ty.VARCHAR)
         candidates = [c for c in self.relation.columns if c.ty in types]
         if not candidates:
             return None
@@ -2236,9 +2226,8 @@ class Generator:
         Conditions come from the three narrow builders rather than from
         `predicate()`: a CASE condition is not a top-level filter predicate, so
         routing the full grammar through here would nest shapes that are only
-        supported at top level (a FLOAT IN-list — see
-        single_table_known_gaps/float-in-list-only-works-at-top-level) and report
-        registered defects instead of testing CASE.
+        supported at top level and report registered defects instead of testing
+        CASE.
         """
         rng = self.rng
         if depth >= 2:
@@ -2665,13 +2654,7 @@ def _build_aggregate(generator: Generator, relation: Relation) -> SelectQuery:
         )
         if built is not None:
             call, out_ty, tag = built
-            # depth=1, not the default 0. An aggregate filter is lowered to the
-            # condition of an IIF, so it is NESTED by construction — and an IN-list
-            # on a FLOAT column only has a native kernel as the WHOLE predicate
-            # (single_table_known_gaps/float-in-list-only-works-at-top-level).
-            # Generating at depth 1 applies that rule, the same way a predicate
-            # under a connective gets it.
-            aggregate_filter = generator.predicate(depth=1).full()
+            aggregate_filter = generator.predicate().full()
             aggregate_filter_call = call
             alias = generator.names.next("a")
             projection.append(f"{with_aggregate_filter(call, aggregate_filter)} AS {alias}")
