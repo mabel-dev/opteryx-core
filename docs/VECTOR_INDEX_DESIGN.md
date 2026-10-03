@@ -867,7 +867,7 @@ all pass.
   - Tests: `opteryx-catalog/tests/test_vector_indexes.py` (24).
   - The engine needs no change to read these manifests: its decoder reads columns by name.
 - **C2 DDL:**
-  - `CREATE INDEX [IF NOT EXISTS] n ON t USING IVF (col) [WITH (build, clusters, nprobe)]`
+  - `CREATE INDEX [IF NOT EXISTS] n ON t USING IVF (col) [WITH (build, clusters)]`
     uses sqlparser, with the dialect's WITH clause enabled.
   - `ALTER INDEX n ON t SET (build = …)` goes through the aside parser (`src/aside/index.rs`).
   - `DROP INDEX [IF EXISTS] n ON t` uses sqlparser. `ALTER INDEX … RENAME` is refused.
@@ -1046,7 +1046,10 @@ all pass.
   - *Rows with no embedding are never returned* (ruled 2026-10-03): the search's
     TopNSink drops rows whose distance is NULL or NaN (`drop_unsearchable_leading`), from
     indexed and uncovered files alike — fewer than k rows when fewer have one.
-  - *nprobe* (D-9): `SET nprobe = n`; 0 (default) = the index's own. Read at compile.
+  - *nprobe* (D-9, re-ruled 2026-10-03): **the search is EXACT by default** — every
+    stored vector of every indexed file is scored (the centroids file is not read); only
+    `SET nprobe = n` (n >= 1) makes it approximate. The index definition no longer holds
+    an `nprobe` (the option and the catalog's default 32 are removed). Read at compile.
   - *Telemetry:* the scan's facts gain files indexed / exact, clusters probed, index row
     groups read, candidates, rows searched exactly, nprobe.
   - Remote index files are read through signed URLs (GCS V4 / S3 SigV4).
@@ -1060,23 +1063,36 @@ all pass.
   | 4 | 0.812 | 0.10 | 1.5 | 8 |
   | 8 | 0.883 | 0.20 | 1.9 | 16 |
   | 16 | 0.948 | 0.50 | 2.6 | 31 |
-  | **32 (default)** | **0.973** | 0.60 | 4.0 | 60 |
+  | 32 | 0.973 | 0.60 | 4.0 | 60 |
   | 64 | 0.983 | 0.70 | 6.7 | 118 |
   | 128 | 0.990 | 0.80 | 11.9 | 227 |
-  | exact (579) | 1.000 | — | 45.5 | all 966 |
+  | **exact (0, the default)** | **1.000** | — | 46.1 | all 966 |
 
-  The default meets the ~0.95 target at ~1/11 of the exact cost. The worst query still
-  loses 4 of 10 at 32: recall is a mean, not a floor.
+  The worst query still loses 4 of 10 at 32: recall is a mean, not a floor, and a
+  probe count holds no distance — it picks clusters by their CENTRES, and a row in an
+  unprobed cluster can be nearer than every row scored.
+- **A distance bound cannot make the exact search cheaper on this data (measured
+  2026-10-03**, same index and queries, scratch script): visiting clusters by a lower
+  bound on the distance any of their rows can have (centroid angle minus cluster radius;
+  tightened with each row's Voronoi cell — every row IS in its nearest centroid's cell)
+  and stopping once no cluster can beat the k-th best gives the exact top-10 for every
+  query, but reads a median 567 of 579 clusters (97.8% of rows, worst 99.5%). The 10th
+  neighbour sits at cosine distance 0.19-0.51 (~50°), clusters span ~67° from their
+  centre and centres are ~35° apart, so almost no cluster can be ruled out. A fixed
+  similarity floor does not help either: at similarity >= 0.7 the search still reads
+  97.5% of rows (62.5% even at 0.9, where nothing matches), and only 7 of 40 queries
+  have 10 rows that similar. Hence the ruling above: exact by default, `nprobe` as an
+  explicit, unbounded approximation.
 - **WHERE delivered 2026-10-03** (§8's pass-1 mask): a WHERE pushed into the scan is
   applied BEFORE the search. The compiler builds a pass-1 NativeScanPlan over the
   predicate columns and lowers the predicate to the latmat pass-1 C ABI
   (`Pass1PredResolver`); `VectorIndexAdmission` decodes and evaluates it per row group at
   execution start (row groups pruned by statistics hold no survivor), then:
-  - an indexed file's search scores ONLY its survivors (TopK's admitted mask);
-  - **instead of a measured τ, a rule:** when a file's probe finds fewer than k survivors
-    while the file has more, that file's survivors are admitted exactly — a selective
-    filter whose rows lie outside the probed clusters never costs answer rows that
-    exist (counted as `files_filtered_exact`);
+  - an indexed file's search scores EVERY survivor from its stored vector (TopK's
+    admitted mask over all row groups). `nprobe` is not applied under a WHERE (ruled
+    2026-10-03): the probe picks clusters by proximity and the filter picks rows by
+    predicate, and applying both keeps only rows that pass both — five survivors could
+    come back as two. τ (and the interim "probe fell short" rule) are deleted;
   - an uncovered file admits all its survivors (exact).
   A WHERE that could not be pushed into the scan (a Filter left above it), or one that
   does not lower to c-native bytecode, is refused. The main scan does not arm its worker
@@ -1121,7 +1137,7 @@ model at container build with its checksum verified (§9A).
 | D-6 | SIMD distance: SimSIMD (vendored) vs draken-owned kernels | — | Draken-owned NEON/AVX2 via `SIMD_STATIC_SELECT`, consistent with the rest of draken. SimSIMD stays usearch-internal. |
 | D-7 | When sidecars are built | — | **RULED 2026-10-02:** per index `build = 'sync' \| 'async'`, default async, `ALTER INDEX` switches; compaction never re-embeds (§5.6, §10). |
 | D-8 | Minimum rows per file for a sidecar | fixed constant / measured / per-index option | Measured constant from §12, overridable per index. |
-| D-9 | Recall knob exposure | session variable / statement option / index-definition default | **RULED 2026-10-03: `nprobe`** — the index definition's value, overridable per query. |
+| D-9 | Recall knob exposure | session variable / statement option / index-definition default | **RULED 2026-10-03: `nprobe`**, then **RE-RULED 2026-10-03: exact by default; `SET nprobe = n` only** — no index-definition value, ignored under a WHERE. |
 | D-10 | S3 Vectors façade | none / SQL-translation façade in the service tier | Defer. Revisit only with a consumer. |
 | D-12 | Embedding provider | — | **APPROVED rev 3:** runtime-loaded ONNX Runtime C API (onnxruntime installed `--no-deps`), weights baked into the image at container build. MIT licence verified (§9A). |
 | D-13 | Index storage billing (§5.5) | — | **RULED 2026-10-02: charged at logical bytes** (`total-index-data-size`), reported as its own figure beside data. |

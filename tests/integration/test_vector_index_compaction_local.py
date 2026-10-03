@@ -129,10 +129,10 @@ def env(tmp_path):
             return ("dataset", datasets[identifier]) if identifier in datasets else (None, None)
 
         def create_vector_index(self, identifier, name, column, *, embedding_identity, dimensions,
-                                author, build=None, clusters=0, nprobe=32):
+                                author, build=None, clusters=0):
             record = new_index_definition(
                 name=name, column=column, method="ivf", metric="cosine", build=build, clusters=clusters,
-                nprobe=nprobe, embedding_identity=embedding_identity, dimensions=dimensions,
+                embedding_identity=embedding_identity, dimensions=dimensions,
                 author=author, created_at_ms=1,
             )
             indexes[(identifier, record["name"])] = record
