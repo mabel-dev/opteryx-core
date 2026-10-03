@@ -11,8 +11,8 @@ make job                 (5946.2ms)  (29-SEP) [0.88x] (33c)
 make h2o                 (33.2s)     (26-SEP) [medium]
 make jsonbench-10-jsonl  (1210.0ms)  (03-OCT) [10m] [0.47x]
 make jsonbench-10-zstd   (2007.9ms)  (03-OCT) [10m] [0.77x]
-make dash                (122.3ms)   (01-OCT) [1.35x]
-make signals             (0.6s)      (25-SEP)
+make dash                (121.7ms)   (03-OCT) [1.35x]
+make signals             (0.5s)      (03-OCT)
 
 make tpch-sf10-aistor - 151426.7ms - 36.28x
 make tpcds-sf10-aistor - 1063.7s - [1 fails (Q51), 8 timeouts at 30s]

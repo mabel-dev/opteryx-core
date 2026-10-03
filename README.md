@@ -14,6 +14,28 @@ This project is opinionated toward the needs of `opteryx.app`. It is still usefu
 - A C/C++ toolchain for local source builds
 - Rust/Cargo for the Rust extension in `src/`
 
+## Hardware Support
+
+Wheels are built against a fixed instruction-set floor. A CPU below the floor will fail with an illegal-instruction error rather than run slowly.
+
+- **x86-64:** Haswell (2013) or later — AVX2, BMI1/2, FMA, PCLMUL.
+- **ARM (AArch64):** ARMv8-A **with the AES/PMULL crypto extension**. Plain ARMv8-A is not enough.
+
+| ARM hardware | Supported |
+|---|---|
+| Apple Silicon (M1 and later) | Yes |
+| AWS Graviton 2 / 3 / 4 | Yes |
+| Google Axion, GCP Tau T2A (Ampere Altra) | Yes |
+| Ampere Altra / AmpereOne (Azure, Oracle A1, Hetzner) | Yes |
+| Microsoft Cobalt 100 (incl. GitHub `ubuntu-24.04-arm` runners) | Yes |
+| NVIDIA Grace | Yes |
+| Raspberry Pi 5 (Cortex-A76) | Yes |
+| Raspberry Pi 4 / 400 / CM4 (Cortex-A72, no crypto extension) | **No** |
+| Raspberry Pi 3 / Zero 2 W (Cortex-A53, no crypto extension) | **No** |
+| 32-bit ARM (ARMv7) | **No** |
+
+On Linux you can check a machine with `grep -m1 -o -w aes /proc/cpuinfo` — no output means the CPU is below the floor.
+
 ## Install
 
 ```bash

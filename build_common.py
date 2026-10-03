@@ -431,6 +431,14 @@ if arch == "x86_64":
     # requirement, so no SIGILL risk) while scheduling for modern parts.
     CPP_FLAGS.extend(["-march=haswell", "-mtune=generic"])
     C_FLAGS.extend(["-march=haswell", "-mtune=generic"])
+elif arch == "aarch64" and not is_mac():
+    # armv8-a+aes sets the AArch64 ISA floor. Plain armv8-a (GCC's default)
+    # lacks the AES/PMULL extension, which the JSONL structural scan's
+    # carry-less multiply (vmull_p64) requires. Raspberry Pi 3/4 (Cortex-A53/
+    # A72 without the crypto extension) fall below this floor — see README
+    # "Hardware Support". Apple clang's default target already includes AES.
+    CPP_FLAGS.extend(["-march=armv8-a+aes", "-mtune=generic"])
+    C_FLAGS.extend(["-march=armv8-a+aes", "-mtune=generic"])
 elif arch == "arm" and not is_mac():
     # 32-bit ARM needs explicit NEON; AArch64 already guarantees it.
     CPP_FLAGS.append("-mfpu=neon")
