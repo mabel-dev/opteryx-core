@@ -6,49 +6,42 @@
 """
 Optimization Rule - Vector Search (docs/VECTOR_INDEX_DESIGN.md §7, D-4)
 
-Type: Physical planning (and the approximate form's only gate)
-Goal: run `ORDER BY APPROX_COSINE_DISTANCE(col, 'query') LIMIT k` through the index
+Type: Physical planning, plus one rule of COSINE_DISTANCE's ordering semantics
+Goal: run `ORDER BY COSINE_DISTANCE(col, 'query') LIMIT k` through the column's index
 
-An approximate result is only ever produced by syntax that says "approximate", and only
-in the one shape whose meaning is clear: APPROX_COSINE_DISTANCE as the SOLE ORDER BY key
-of a query over ONE scan, with a LIMIT, on a text column that has a vector index. Here
-the scan is stamped (`scan.vector_search`) and the compiler gives it a row admission
-(src/cpp/engine/vector_index_admission.hpp) that decodes only the index's candidates —
-plus every row of the files the index does not cover yet, searched exactly (ruled
-2026-10-03). The index search itself is exact unless the session sets `nprobe`. The
-rest of the plan is untouched: the projection computes each candidate's EXACT distance
-and the Top-N sink orders them, so the value a reader sees is always the COSINE_DISTANCE
-kernel's.
+Two jobs, for every sort whose LEADING key is COSINE_DISTANCE:
 
-Everything else is REFUSED, never quietly run exactly: the function anywhere but that
-ORDER BY key (or the same call repeated in the SELECT list), more than one key, no LIMIT,
-a WHERE that was not pushed into the scan (a pushed one is applied BEFORE the search, as
-its admitted set), a join, a column with no index, a query that is not a text literal, or
-an index defined against another embedder.
+1. The sort is marked `drops_unsearchable`: a row whose distance is NULL (null text) or
+   NaN has no embedding and is never returned (ruled 2026-10-03) - with or without a
+   vector index, so an index never changes an answer.
+
+2. When the shape allows, the scan is stamped (`scan.vector_search`) and the compiler
+   gives it a row admission (src/cpp/engine/vector_index_admission.hpp) that decodes only
+   the rows the index finds - exact by default (every stored vector scored), approximate
+   only under `SET nprobe` - plus every row of the files the index does not cover yet.
+   The shape: COSINE_DISTANCE(<indexed text column>, '<literal>') as the SOLE, ascending
+   ORDER BY key with a LIMIT, over ONE scan reached through projections only (a WHERE
+   pushed into that scan is applied before the search), and an index defined against
+   the active embedder. Any other query runs as written, without the index; the
+   projection computes each row's distance with the COSINE_DISTANCE kernel either way.
 
 Ordering: after OperatorFusion (the HeapSort it reads) and ProjectFusion. This strategy
-can not be disabled: it is the gate as well as the planner.
+can not be disabled: job 1 is semantics, not an optimization.
 """
 
-from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
-from opteryx.expression.formatter import format_expression
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
 
-FUNCTION = "APPROX_COSINE_DISTANCE"
-SHAPE = (
-    "**APPROX_COSINE_DISTANCE**(<text column>, '<query>') is only valid as the sole "
-    "**ORDER BY** key of a query over one table with a **LIMIT**, on a column with a "
-    "vector index"
-)
+FUNCTION = "COSINE_DISTANCE"
+_SORTS = (LogicalPlanStepType.HeapSort, LogicalPlanStepType.Order)
 
 
-def _approx_calls(expressions):
+def _distance_calls(expressions):
     return [
         node
         for node in get_all_nodes_of_type(list(expressions), (NodeType.FUNCTION,))
@@ -56,8 +49,29 @@ def _approx_calls(expressions):
     ]
 
 
+def _leading_call(plan: LogicalPlan, key):
+    """The COSINE_DISTANCE call a sort key IS, or that computes the column it names
+    (identities are unique in a plan), else None."""
+    if key.node_type == NodeType.FUNCTION:
+        return key if str(key.value).upper() == FUNCTION else None
+    if key.schema_column is None:
+        return None
+    identity = key.schema_column.identity
+    for _, node in plan.nodes(True):
+        if node.node_type != LogicalPlanStepType.Project:
+            continue
+        for expression in node.expressions():
+            if (
+                expression.schema_column is not None
+                and expression.schema_column.identity == identity
+                and expression.node_type == NodeType.FUNCTION
+            ):
+                return expression if str(expression.value).upper() == FUNCTION else None
+    return None
+
+
 class VectorSearchStrategy(OptimizationStrategy):
-    """Validate the approximate form and stamp its scan."""
+    """Mark COSINE_DISTANCE-led sorts; route the indexable shape through the index."""
 
     requires = ("heapsort-fused", "project-fused")
     provides = ("vector-search",)
@@ -66,102 +80,53 @@ class VectorSearchStrategy(OptimizationStrategy):
         return context
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
-        return any(_approx_calls(node.expressions()) for _, node in plan.nodes(True))
+        return any(_distance_calls(node.expressions()) for _, node in plan.nodes(True))
 
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:
-        holders = {nid for nid, node in plan.nodes(True) if _approx_calls(node.expressions())}
-        sorts = [
-            (nid, node) for nid, node in plan.nodes(True)
-            if node.node_type == LogicalPlanStepType.HeapSort
-        ]
-        if len(sorts) != 1:
-            raise UnsupportedSyntaxError(f"{SHAPE}.")
-        sort_nid, sort = sorts[0]
-        if not sort.limit or sort.limit <= 0 or len(sort.order_by) != 1:
-            raise UnsupportedSyntaxError(f"{SHAPE}: one key, and a **LIMIT**.")
-        key, ascending, _nulls_first = sort.order_by[0]
+        sorts = [(nid, node) for nid, node in plan.nodes(True) if node.node_type in _SORTS]
+        for sort_nid, sort in sorts:
+            call = _leading_call(plan, sort.order_by[0][0])
+            if call is None:
+                continue
+            sort.drops_unsearchable = True
+            plan[sort_nid] = sort
+            if sort.node_type == LogicalPlanStepType.HeapSort:
+                self._route_through_index(plan, sort_nid, sort, call)
+        return plan
 
-        # Down from the sort: only projections, to exactly one scan.
-        path = []
+    def _route_through_index(self, plan: LogicalPlan, sort_nid, sort, call) -> None:
+        """Stamp the scan when the query has the indexable shape; otherwise leave it."""
+        if not sort.limit or sort.limit <= 0 or len(sort.order_by) != 1 or not sort.order_by[0][1]:
+            return
         nid = sort_nid
         while True:
             ingoing = plan.ingoing_edges(nid)
             if len(ingoing) != 1:
-                raise UnsupportedSyntaxError(f"{SHAPE}: one table, no join.")
+                return
             nid = ingoing[0][0]
             node = plan[nid]
             if node.node_type == LogicalPlanStepType.Scan:
-                # A WHERE pushed into the scan is applied BEFORE the search: its
-                # survivors are the only rows the search may admit (vector_index_
-                # admission.hpp). One that could not be pushed is refused below.
                 scan_nid, scan = nid, node
                 break
-            if node.node_type == LogicalPlanStepType.Filter:
-                raise UnsupportedSyntaxError(
-                    f"{SHAPE}. This **WHERE** could not be pushed into the scan, so it could "
-                    "only filter the index's candidates afterwards - which could return fewer "
-                    "than LIMIT rows."
-                )
+            # A WHERE left above the scan would filter the index's candidates
+            # afterwards; one pushed into the scan is applied before the search.
             if node.node_type != LogicalPlanStepType.Project:
-                raise UnsupportedSyntaxError(f"{SHAPE}.")
-            path.append(nid)
-
-        # The sort key IS the call, or names the column a projection below computes with it.
-        if key.node_type == NodeType.FUNCTION:
-            call = key
-        else:
-            identity = key.schema_column.identity if key.schema_column is not None else None
-            computed = [
-                expression
-                for project_nid in path
-                for expression in plan[project_nid].expressions()
-                if expression.schema_column is not None and expression.schema_column.identity == identity
-            ]
-            call = computed[0] if computed else None
-        if call is None or call.node_type != NodeType.FUNCTION or str(call.value).upper() != FUNCTION:
-            raise UnsupportedSyntaxError(f"{SHAPE}.")
-        if not ascending:
-            raise UnsupportedSyntaxError(
-                f"{SHAPE}, ascending: the index finds the NEAREST rows, not the farthest."
-            )
-
-        # The same call may appear in the SELECT list; anywhere else it is refused.
-        signature = format_expression(call)
-        for nid in holders:
-            if nid != sort_nid and nid not in path:
-                raise UnsupportedSyntaxError(f"{SHAPE}.")
-            for other in _approx_calls(plan[nid].expressions()):
-                if format_expression(other) != signature:
-                    raise UnsupportedSyntaxError(
-                        f"{SHAPE}: one search per query - every **APPROX_COSINE_DISTANCE** in "
-                        "it must be the same call."
-                    )
-        key = call
-
-        column, query = key.parameters
+                return
+        column, query = call.parameters
         if column.node_type != NodeType.IDENTIFIER or column.schema_column is None:
-            raise UnsupportedSyntaxError(f"{SHAPE}: its first argument names the indexed column.")
+            return
         # A text literal is held as its UTF-8 bytes.
         if query.node_type != NodeType.LITERAL or type(query.value) is not bytes:
-            raise UnsupportedSyntaxError(
-                f"{SHAPE}: its second argument is the query, a text literal or parameter."
-            )
-
+            return
         connector = scan.connector
         if connector is None or not connector.supports_vector_indexes or scan.manifest is None:
-            raise UnsupportedSyntaxError(
-                f"{SHAPE}: {scan.relation} is not a catalog table, so it has no vector index."
-            )
+            return
         column_name = column.schema_column.name
         definitions = [
-            d for d in connector.vector_indexes()
-            if d["column"].lower() == column_name.lower()
+            d for d in connector.vector_indexes() if d["column"].lower() == column_name.lower()
         ]
         if not definitions:
-            raise UnsupportedSyntaxError(
-                f"{SHAPE}: `{column_name}` of {scan.relation} has no vector index. Create one "
-                "(**CREATE INDEX** ... **USING IVF**), or use **COSINE_DISTANCE** for an exact search."
-            )
+            return
         definition = definitions[0]
 
         from opteryx.types.vectors.embedding_capability import active_embedding_capability
@@ -170,11 +135,12 @@ class VectorSearchStrategy(OptimizationStrategy):
         if (capability.identity, capability.dimensions) != (
             definition["embedding-identity"], definition["dimensions"]
         ):
-            raise UnsupportedSyntaxError(
-                f"Index {definition['name']} on {scan.relation} was defined against the embedder "
-                f"{definition['embedding-identity']}; this engine embeds with {capability.identity}. "
-                "Searching it would compare vectors from two models."
+            self.record_decision(
+                "vector search",
+                f"index {definition['name']} on {scan.relation} not used: defined against "
+                f"{definition['embedding-identity']}, this engine embeds with {capability.identity}",
             )
+            return
 
         scan.vector_search = {
             "index_id": definition["index-id"],
@@ -193,4 +159,3 @@ class VectorSearchStrategy(OptimizationStrategy):
             f"index {definition['name']} on {scan.relation}: k={int(sort.limit)}, "
             f"{len(files) - exact} of {len(files)} file(s) indexed, {exact} searched exactly",
         )
-        return plan

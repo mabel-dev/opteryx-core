@@ -4311,6 +4311,105 @@ cdef class DropRelationshipStep(PlanStep):
         return new
 
 
+cdef class DropSecretStep(PlanStep):
+    """The DropSecret logical plan step: DROP SECRET [IF EXISTS] <name> IN <workspace>."""
+
+    cdef object _connector
+    cdef object _if_exists
+    cdef str _secret_name
+    cdef str _workspace_name
+
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, connector=None, if_exists=None, secret_name=None, workspace_name=None):
+        self.node_type = _step_types().DropSecret
+        self._init_common(columns, all_relations, pre_update_columns, uuid)
+        self.connector = connector
+        self.if_exists = if_exists
+        self.secret_name = secret_name
+        self.workspace_name = workspace_name
+
+    @property
+    def connector(self):
+        return self._connector
+
+    @connector.setter
+    def connector(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._connector = value
+
+    @property
+    def if_exists(self):
+        return self._if_exists
+
+    @if_exists.setter
+    def if_exists(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        _require_optional_bool("DropSecretStep.if_exists", value)
+        self._if_exists = value
+
+    @property
+    def secret_name(self):
+        return self._secret_name
+
+    @secret_name.setter
+    def secret_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._secret_name = value
+
+    @property
+    def workspace_name(self):
+        return self._workspace_name
+
+    @workspace_name.setter
+    def workspace_name(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._workspace_name = value
+
+    cpdef tuple expressions(self, bint include_columns=True):
+        cdef list out = []
+        if include_columns:
+            _extend_expressions(out, self._columns)
+        return tuple(out)
+
+    cpdef map_expressions(self, object fn):
+        self.columns = _map_expressions(fn, self._columns)
+
+    cpdef dict field_values(self):
+        cdef dict out = self._common_values()
+        out["connector"] = self._connector
+        out["if_exists"] = self._if_exists
+        out["secret_name"] = self._secret_name
+        out["workspace_name"] = self._workspace_name
+        return out
+
+    cpdef PlanStep copy(self, dict memo=None):
+        if memo is None:
+            memo = {}
+        cached = memo.get(id(self))
+        if cached is not None:
+            return cached
+        cdef DropSecretStep new = DropSecretStep.__new__(DropSecretStep)
+        new.node_type = self.node_type
+        memo[id(self)] = new
+        self._copy_common_into(new, memo)
+        new._connector = _copy_field(self._connector, memo)
+        new._if_exists = _copy_field(self._if_exists, memo)
+        new._secret_name = _copy_field(self._secret_name, memo)
+        new._workspace_name = _copy_field(self._workspace_name, memo)
+        new._sync_row()
+        return new
+
+    cdef PlanStep _shallow_copy(self):
+        cdef DropSecretStep new = DropSecretStep.__new__(DropSecretStep)
+        new.node_type = self.node_type
+        self._share_common_into(new)
+        new._connector = self._connector
+        new._if_exists = self._if_exists
+        new._secret_name = self._secret_name
+        new._workspace_name = self._workspace_name
+        new._row[0] = self._row[0]
+        return new
+
+
 cdef class DropTagStep(PlanStep):
     """The DropTag logical plan step."""
 
@@ -5887,8 +5986,13 @@ cdef class GrantAccessStep(PlanStep):
 
 
 cdef class HeapSortStep(PlanStep):
-    """The HeapSort logical plan step."""
+    """The HeapSort logical plan step.
 
+    `drops_unsearchable` (VectorSearchStrategy): the leading ORDER BY key is
+    COSINE_DISTANCE, so rows whose distance is NULL or NaN are never returned (ruled
+    2026-10-03) - set on the sort, with or without a vector index."""
+
+    cdef object _drops_unsearchable
     cdef object _limit
     cdef tuple _order_by
 
@@ -5897,11 +6001,21 @@ cdef class HeapSortStep(PlanStep):
         self._row.limit = _row_int(self._limit)
         self._check_row_arena()
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, limit=None, order_by=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, drops_unsearchable=None, limit=None, order_by=None):
         self.node_type = _step_types().HeapSort
         self._init_common(columns, all_relations, pre_update_columns, uuid)
+        self.drops_unsearchable = drops_unsearchable
         self.limit = limit
         self.order_by = order_by
+
+    @property
+    def drops_unsearchable(self):
+        return self._drops_unsearchable
+
+    @drops_unsearchable.setter
+    def drops_unsearchable(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._drops_unsearchable = value
 
     @property
     def limit(self):
@@ -5936,6 +6050,7 @@ cdef class HeapSortStep(PlanStep):
 
     cpdef dict field_values(self):
         cdef dict out = self._common_values()
+        out["drops_unsearchable"] = self._drops_unsearchable
         out["limit"] = self._limit
         out["order_by"] = self._order_by
         return out
@@ -5950,6 +6065,7 @@ cdef class HeapSortStep(PlanStep):
         new.node_type = self.node_type
         memo[id(self)] = new
         self._copy_common_into(new, memo)
+        new._drops_unsearchable = _copy_field(self._drops_unsearchable, memo)
         new._limit = _copy_field(self._limit, memo)
         new._order_by = _copy_field(self._order_by, memo)
         new._sync_row()
@@ -5959,6 +6075,7 @@ cdef class HeapSortStep(PlanStep):
         cdef HeapSortStep new = HeapSortStep.__new__(HeapSortStep)
         new.node_type = self.node_type
         self._share_common_into(new)
+        new._drops_unsearchable = self._drops_unsearchable
         new._limit = self._limit
         new._order_by = self._order_by
         new._row[0] = self._row[0]
@@ -7536,15 +7653,21 @@ cdef class MergeStep(PlanStep):
 
 
 cdef class OrderStep(PlanStep):
-    """The Order logical plan step."""
+    """The Order logical plan step.
+
+    `drops_unsearchable` (VectorSearchStrategy): the leading ORDER BY key is
+    COSINE_DISTANCE, so rows whose distance is NULL or NaN are never returned (ruled
+    2026-10-03) - set on the sort, with or without a vector index."""
 
     cdef str _alias
+    cdef object _drops_unsearchable
     cdef tuple _order_by
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, order_by=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, drops_unsearchable=None, order_by=None):
         self.node_type = _step_types().Order
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.alias = alias
+        self.drops_unsearchable = drops_unsearchable
         self.order_by = order_by
 
     @property
@@ -7555,6 +7678,15 @@ cdef class OrderStep(PlanStep):
     def alias(self, value):
         self.write_count += 1  # a written field (auto-stale, ruling Q2)
         self._alias = value
+
+    @property
+    def drops_unsearchable(self):
+        return self._drops_unsearchable
+
+    @drops_unsearchable.setter
+    def drops_unsearchable(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._drops_unsearchable = value
 
     @property
     def order_by(self):
@@ -7579,6 +7711,7 @@ cdef class OrderStep(PlanStep):
     cpdef dict field_values(self):
         cdef dict out = self._common_values()
         out["alias"] = self._alias
+        out["drops_unsearchable"] = self._drops_unsearchable
         out["order_by"] = self._order_by
         return out
 
@@ -7593,6 +7726,7 @@ cdef class OrderStep(PlanStep):
         memo[id(self)] = new
         self._copy_common_into(new, memo)
         new._alias = _copy_field(self._alias, memo)
+        new._drops_unsearchable = _copy_field(self._drops_unsearchable, memo)
         new._order_by = _copy_field(self._order_by, memo)
         new._sync_row()
         return new
@@ -7602,6 +7736,7 @@ cdef class OrderStep(PlanStep):
         new.node_type = self.node_type
         self._share_common_into(new)
         new._alias = self._alias
+        new._drops_unsearchable = self._drops_unsearchable
         new._order_by = self._order_by
         new._row[0] = self._row[0]
         return new
@@ -8335,8 +8470,8 @@ cdef class ScalarSubqueryGuardStep(PlanStep):
 cdef class ScanStep(PlanStep):
     """The Scan logical plan step.
 
-    `vector_search` marks the scan of an approximate search (D-4, VectorSearchStrategy):
-    a dict naming the index, the query text, k and nprobe. The compiler gives such a scan
+    `vector_search` marks the scan of a vector index search (D-4, VectorSearchStrategy):
+    a dict naming the index, the query text and k. The compiler gives such a scan
     a row admission that decodes only the index's candidates (and every row of files the
     index does not cover)."""
 
@@ -10812,7 +10947,7 @@ cdef class VectorIndexDdlStep(PlanStep):
         return new
 
 
-PLAN_STEP_TYPES = frozenset({VectorIndexDdlStep, AddColumnStep, AddRelationshipStep, AggregateStep, AggregateAndGroupStep, AlterColumnTypeStep, AlterMaterializedViewOwnerStep, AlterMaterializedViewSuspendedStep, AlterRelationStep, AlterTaskStep, AlterTriggerMinimumIntervalStep, AlterTriggerOwnerStep, AlterTriggerSuspendedStep, AlterViewStep, AlterWorkspaceStep, AlterWorkspaceSecureStep, AnalyzeStep, CallProcedureStep, CloneCollectionStep, CloneRelationStep, CommentStep, CompactionCommitStep, CreateCollectionStep, CreateRelationStep, CreateTagStep, CreateTaskStep, CreateTriggerStep, CreateViewStep, DetachRelationStep, DistinctStep, DropCollectionStep, DropColumnStep, DropRelationStep, DropRelationshipStep, DropTagStep, DropTaskStep, DropTriggerStep, DropViewStep, DropWorkspaceStep, ExceptStep, ExitStep, ExplainStep, FilterStep, FramedWindowStep, FunctionDatasetStep, GrantAccessStep, HeapSortStep, InsertStep, IntersectStep, JoinStep, LimitStep, ListenStep, MaterializedCteRefStep, MergeStep, OrderStep, ProjectStep, RenameColumnStep, RenameRelationStep, ResyncRelationStep, RevokeAccessStep, RollbackRelationStep, ScalarSubqueryGuardStep, ScanStep, SetStep, ShowStep, ShowColumnsStep, ShowEffectiveGrantsOnStep, ShowGrantsOnStep, ShowLineageStep, ShowManifestStep, ShowSnapshotsStep, ShowSourcesStep, SubqueryStep, TruncateRelationStep, UnionStep, UnlistenStep, UnnestStep, WindowStep})
+PLAN_STEP_TYPES = frozenset({VectorIndexDdlStep, AddColumnStep, AddRelationshipStep, AggregateStep, AggregateAndGroupStep, AlterColumnTypeStep, AlterMaterializedViewOwnerStep, AlterMaterializedViewSuspendedStep, AlterRelationStep, AlterTaskStep, AlterTriggerMinimumIntervalStep, AlterTriggerOwnerStep, AlterTriggerSuspendedStep, AlterViewStep, AlterWorkspaceStep, AlterWorkspaceSecureStep, AnalyzeStep, CallProcedureStep, CloneCollectionStep, CloneRelationStep, CommentStep, CompactionCommitStep, CreateCollectionStep, CreateRelationStep, CreateTagStep, CreateTaskStep, CreateTriggerStep, CreateViewStep, DetachRelationStep, DistinctStep, DropCollectionStep, DropColumnStep, DropRelationStep, DropRelationshipStep, DropTagStep, DropTaskStep, DropTriggerStep, DropViewStep, DropSecretStep, DropWorkspaceStep, ExceptStep, ExitStep, ExplainStep, FilterStep, FramedWindowStep, FunctionDatasetStep, GrantAccessStep, HeapSortStep, InsertStep, IntersectStep, JoinStep, LimitStep, ListenStep, MaterializedCteRefStep, MergeStep, OrderStep, ProjectStep, RenameColumnStep, RenameRelationStep, ResyncRelationStep, RevokeAccessStep, RollbackRelationStep, ScalarSubqueryGuardStep, ScanStep, SetStep, ShowStep, ShowColumnsStep, ShowEffectiveGrantsOnStep, ShowGrantsOnStep, ShowLineageStep, ShowManifestStep, ShowSnapshotsStep, ShowSourcesStep, SubqueryStep, TruncateRelationStep, UnionStep, UnlistenStep, UnnestStep, WindowStep})
 
 # The class for each LogicalPlanStepType, for the few sites that build a step
 # whose type is only known at run time.
@@ -10823,7 +10958,7 @@ cpdef dict step_classes():
     global _STEP_CLASSES
     if _STEP_CLASSES is None:
         T = _step_types()
-        _STEP_CLASSES = {T.VectorIndexDdl: VectorIndexDdlStep, T.AddColumn: AddColumnStep, T.AddRelationship: AddRelationshipStep, T.Aggregate: AggregateStep, T.AggregateAndGroup: AggregateAndGroupStep, T.AlterColumnType: AlterColumnTypeStep, T.AlterMaterializedViewOwner: AlterMaterializedViewOwnerStep, T.AlterMaterializedViewSuspended: AlterMaterializedViewSuspendedStep, T.AlterRelation: AlterRelationStep, T.AlterTask: AlterTaskStep, T.AlterTriggerMinimumInterval: AlterTriggerMinimumIntervalStep, T.AlterTriggerOwner: AlterTriggerOwnerStep, T.AlterTriggerSuspended: AlterTriggerSuspendedStep, T.AlterView: AlterViewStep, T.AlterWorkspace: AlterWorkspaceStep, T.AlterWorkspaceSecure: AlterWorkspaceSecureStep, T.Analyze: AnalyzeStep, T.CallProcedure: CallProcedureStep, T.CloneCollection: CloneCollectionStep, T.CloneRelation: CloneRelationStep, T.Comment: CommentStep, T.CompactionCommit: CompactionCommitStep, T.CreateCollection: CreateCollectionStep, T.CreateRelation: CreateRelationStep, T.CreateTag: CreateTagStep, T.CreateTask: CreateTaskStep, T.CreateTrigger: CreateTriggerStep, T.CreateView: CreateViewStep, T.DetachRelation: DetachRelationStep, T.Distinct: DistinctStep, T.DropCollection: DropCollectionStep, T.DropColumn: DropColumnStep, T.DropRelation: DropRelationStep, T.DropRelationship: DropRelationshipStep, T.DropTag: DropTagStep, T.DropTask: DropTaskStep, T.DropTrigger: DropTriggerStep, T.DropView: DropViewStep, T.DropWorkspace: DropWorkspaceStep, T.Except: ExceptStep, T.Exit: ExitStep, T.Explain: ExplainStep, T.Filter: FilterStep, T.FramedWindow: FramedWindowStep, T.FunctionDataset: FunctionDatasetStep, T.GrantAccess: GrantAccessStep, T.HeapSort: HeapSortStep, T.Insert: InsertStep, T.Intersect: IntersectStep, T.Join: JoinStep, T.Limit: LimitStep, T.Listen: ListenStep, T.MaterializedCteRef: MaterializedCteRefStep, T.Merge: MergeStep, T.Order: OrderStep, T.Project: ProjectStep, T.RenameColumn: RenameColumnStep, T.RenameRelation: RenameRelationStep, T.ResyncRelation: ResyncRelationStep, T.RevokeAccess: RevokeAccessStep, T.RollbackRelation: RollbackRelationStep, T.ScalarSubqueryGuard: ScalarSubqueryGuardStep, T.Scan: ScanStep, T.Set: SetStep, T.Show: ShowStep, T.ShowColumns: ShowColumnsStep, T.ShowEffectiveGrantsOn: ShowEffectiveGrantsOnStep, T.ShowGrantsOn: ShowGrantsOnStep, T.ShowLineage: ShowLineageStep, T.ShowManifest: ShowManifestStep, T.ShowSnapshots: ShowSnapshotsStep, T.ShowSources: ShowSourcesStep, T.Subquery: SubqueryStep, T.TruncateRelation: TruncateRelationStep, T.Union: UnionStep, T.Unlisten: UnlistenStep, T.Unnest: UnnestStep, T.Window: WindowStep}
+        _STEP_CLASSES = {T.VectorIndexDdl: VectorIndexDdlStep, T.AddColumn: AddColumnStep, T.AddRelationship: AddRelationshipStep, T.Aggregate: AggregateStep, T.AggregateAndGroup: AggregateAndGroupStep, T.AlterColumnType: AlterColumnTypeStep, T.AlterMaterializedViewOwner: AlterMaterializedViewOwnerStep, T.AlterMaterializedViewSuspended: AlterMaterializedViewSuspendedStep, T.AlterRelation: AlterRelationStep, T.AlterTask: AlterTaskStep, T.AlterTriggerMinimumInterval: AlterTriggerMinimumIntervalStep, T.AlterTriggerOwner: AlterTriggerOwnerStep, T.AlterTriggerSuspended: AlterTriggerSuspendedStep, T.AlterView: AlterViewStep, T.AlterWorkspace: AlterWorkspaceStep, T.AlterWorkspaceSecure: AlterWorkspaceSecureStep, T.Analyze: AnalyzeStep, T.CallProcedure: CallProcedureStep, T.CloneCollection: CloneCollectionStep, T.CloneRelation: CloneRelationStep, T.Comment: CommentStep, T.CompactionCommit: CompactionCommitStep, T.CreateCollection: CreateCollectionStep, T.CreateRelation: CreateRelationStep, T.CreateTag: CreateTagStep, T.CreateTask: CreateTaskStep, T.CreateTrigger: CreateTriggerStep, T.CreateView: CreateViewStep, T.DetachRelation: DetachRelationStep, T.Distinct: DistinctStep, T.DropCollection: DropCollectionStep, T.DropColumn: DropColumnStep, T.DropRelation: DropRelationStep, T.DropRelationship: DropRelationshipStep, T.DropTag: DropTagStep, T.DropTask: DropTaskStep, T.DropTrigger: DropTriggerStep, T.DropView: DropViewStep, T.DropSecret: DropSecretStep, T.DropWorkspace: DropWorkspaceStep, T.Except: ExceptStep, T.Exit: ExitStep, T.Explain: ExplainStep, T.Filter: FilterStep, T.FramedWindow: FramedWindowStep, T.FunctionDataset: FunctionDatasetStep, T.GrantAccess: GrantAccessStep, T.HeapSort: HeapSortStep, T.Insert: InsertStep, T.Intersect: IntersectStep, T.Join: JoinStep, T.Limit: LimitStep, T.Listen: ListenStep, T.MaterializedCteRef: MaterializedCteRefStep, T.Merge: MergeStep, T.Order: OrderStep, T.Project: ProjectStep, T.RenameColumn: RenameColumnStep, T.RenameRelation: RenameRelationStep, T.ResyncRelation: ResyncRelationStep, T.RevokeAccess: RevokeAccessStep, T.RollbackRelation: RollbackRelationStep, T.ScalarSubqueryGuard: ScalarSubqueryGuardStep, T.Scan: ScanStep, T.Set: SetStep, T.Show: ShowStep, T.ShowColumns: ShowColumnsStep, T.ShowEffectiveGrantsOn: ShowEffectiveGrantsOnStep, T.ShowGrantsOn: ShowGrantsOnStep, T.ShowLineage: ShowLineageStep, T.ShowManifest: ShowManifestStep, T.ShowSnapshots: ShowSnapshotsStep, T.ShowSources: ShowSourcesStep, T.Subquery: SubqueryStep, T.TruncateRelation: TruncateRelationStep, T.Union: UnionStep, T.Unlisten: UnlistenStep, T.Unnest: UnnestStep, T.Window: WindowStep}
     return _STEP_CLASSES
 
 
@@ -10840,7 +10975,7 @@ cpdef frozenset steps_with(str field):
             "action": frozenset({T.Analyze}),
             "aggregates": frozenset({T.Aggregate, T.AggregateAndGroup, T.Window}),
             "alias": frozenset({T.Distinct, T.Filter, T.FunctionDataset, T.Join, T.Limit, T.MaterializedCteRef, T.Order, T.Project, T.Scan, T.Subquery, T.Union, T.Unnest}),
-            "all_relations": frozenset({T.AddColumn, T.AddRelationship, T.Aggregate, T.AggregateAndGroup, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CallProcedure, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.Distinct, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropWorkspace, T.Except, T.Exit, T.Explain, T.Filter, T.FramedWindow, T.FunctionDataset, T.GrantAccess, T.HeapSort, T.Insert, T.Intersect, T.Join, T.Limit, T.Listen, T.MaterializedCteRef, T.Merge, T.Order, T.Project, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RevokeAccess, T.RollbackRelation, T.ScalarSubqueryGuard, T.Scan, T.Set, T.Show, T.ShowColumns, T.ShowEffectiveGrantsOn, T.ShowGrantsOn, T.ShowLineage, T.ShowManifest, T.ShowSnapshots, T.ShowSources, T.Subquery, T.TruncateRelation, T.Union, T.Unlisten, T.Unnest, T.Window}),
+            "all_relations": frozenset({T.AddColumn, T.AddRelationship, T.Aggregate, T.AggregateAndGroup, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CallProcedure, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.Distinct, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropSecret, T.DropWorkspace, T.Except, T.Exit, T.Explain, T.Filter, T.FramedWindow, T.FunctionDataset, T.GrantAccess, T.HeapSort, T.Insert, T.Intersect, T.Join, T.Limit, T.Listen, T.MaterializedCteRef, T.Merge, T.Order, T.Project, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RevokeAccess, T.RollbackRelation, T.ScalarSubqueryGuard, T.Scan, T.Set, T.Show, T.ShowColumns, T.ShowEffectiveGrantsOn, T.ShowGrantsOn, T.ShowLineage, T.ShowManifest, T.ShowSnapshots, T.ShowSources, T.Subquery, T.TruncateRelation, T.Union, T.Unlisten, T.Unnest, T.Window}),
             "analyze": frozenset({T.Explain}),
             "analyze_columns": frozenset({T.Analyze}),
             "args": frozenset({T.FunctionDataset}),
@@ -10866,10 +11001,10 @@ cpdef frozenset steps_with(str field):
             "column_mapping": frozenset({T.Insert}),
             "column_name": frozenset({T.VectorIndexDdl, T.AddColumn, T.AddRelationship, T.AlterColumnType, T.DropColumn, T.RenameColumn}),
             "column_type": frozenset({T.AddColumn}),
-            "columns": frozenset({T.AddColumn, T.AddRelationship, T.Aggregate, T.AggregateAndGroup, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CallProcedure, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.Distinct, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropWorkspace, T.Except, T.Exit, T.Explain, T.Filter, T.FramedWindow, T.FunctionDataset, T.GrantAccess, T.HeapSort, T.Insert, T.Intersect, T.Join, T.Limit, T.Listen, T.MaterializedCteRef, T.Merge, T.Order, T.Project, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RevokeAccess, T.RollbackRelation, T.ScalarSubqueryGuard, T.Scan, T.Set, T.Show, T.ShowColumns, T.ShowEffectiveGrantsOn, T.ShowGrantsOn, T.ShowLineage, T.ShowManifest, T.ShowSnapshots, T.ShowSources, T.Subquery, T.TruncateRelation, T.Union, T.Unlisten, T.Unnest, T.Window}),
+            "columns": frozenset({T.AddColumn, T.AddRelationship, T.Aggregate, T.AggregateAndGroup, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CallProcedure, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.Distinct, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropSecret, T.DropWorkspace, T.Except, T.Exit, T.Explain, T.Filter, T.FramedWindow, T.FunctionDataset, T.GrantAccess, T.HeapSort, T.Insert, T.Intersect, T.Join, T.Limit, T.Listen, T.MaterializedCteRef, T.Merge, T.Order, T.Project, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RevokeAccess, T.RollbackRelation, T.ScalarSubqueryGuard, T.Scan, T.Set, T.Show, T.ShowColumns, T.ShowEffectiveGrantsOn, T.ShowGrantsOn, T.ShowLineage, T.ShowManifest, T.ShowSnapshots, T.ShowSources, T.Subquery, T.TruncateRelation, T.Union, T.Unlisten, T.Unnest, T.Window}),
             "comment": frozenset({T.Comment}),
             "condition": frozenset({T.Filter}),
-            "connector": frozenset({T.VectorIndexDdl, T.AddColumn, T.AddRelationship, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.DropColumn, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropWorkspace, T.FunctionDataset, T.Insert, T.Listen, T.Merge, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RollbackRelation, T.Scan, T.Show, T.TruncateRelation, T.Unlisten}),
+            "connector": frozenset({T.VectorIndexDdl, T.AddColumn, T.AddRelationship, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.DropColumn, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropSecret, T.DropWorkspace, T.FunctionDataset, T.Insert, T.Listen, T.Merge, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RollbackRelation, T.Scan, T.Show, T.TruncateRelation, T.Unlisten}),
             "connectors": frozenset({T.DropCollection, T.DropRelation, T.DropView}),
             "constraint_if_exists": frozenset({T.DropRelationship}),
             "constraint_name": frozenset({T.AddRelationship, T.DropRelationship}),
@@ -10891,6 +11026,7 @@ cpdef frozenset steps_with(str field):
             "default": frozenset({T.AddColumn}),
             "defining_query": frozenset({T.Insert}),
             "distinct_target": frozenset({T.Unnest}),
+            "drops_unsearchable": frozenset({T.HeapSort, T.Order}),
             "effective": frozenset({T.ShowEffectiveGrantsOn, T.ShowGrantsOn}),
             "emit_row_identity": frozenset({T.Scan}),
             "end_date": frozenset({T.Scan}),
@@ -10921,7 +11057,7 @@ cpdef frozenset steps_with(str field):
             "hints": frozenset({T.FunctionDataset, T.MaterializedCteRef, T.Scan, T.Subquery}),
             "history_view": frozenset({T.Scan, T.ShowLineage, T.ShowSnapshots, T.ShowSources}),
             "hoisted_columns": frozenset({T.Project}),
-            "if_exists": frozenset({T.VectorIndexDdl, T.AddColumn, T.AddRelationship, T.AlterColumnType, T.AlterRelation, T.Comment, T.CreateTag, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropWorkspace, T.RenameColumn, T.RenameRelation, T.RollbackRelation, T.TruncateRelation}),
+            "if_exists": frozenset({T.VectorIndexDdl, T.AddColumn, T.AddRelationship, T.AlterColumnType, T.AlterRelation, T.Comment, T.CreateTag, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropSecret, T.DropWorkspace, T.RenameColumn, T.RenameRelation, T.RollbackRelation, T.TruncateRelation}),
             "if_not_exists": frozenset({T.AddColumn, T.CloneRelation, T.CreateCollection, T.CreateRelation, T.CreateTask, T.CreateTrigger, T.CreateView, T.Insert}),
             "implied_join": frozenset({T.Join}),
             "internal_relation": frozenset({T.Scan}),
@@ -10972,7 +11108,7 @@ cpdef frozenset steps_with(str field):
             "pre_inline_columns": frozenset({T.Filter}),
             "pre_inline_condition": frozenset({T.Filter}),
             "pre_inline_relations": frozenset({T.Filter}),
-            "pre_update_columns": frozenset({T.AddColumn, T.AddRelationship, T.Aggregate, T.AggregateAndGroup, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CallProcedure, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.Distinct, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropWorkspace, T.Except, T.Exit, T.Explain, T.Filter, T.FramedWindow, T.FunctionDataset, T.GrantAccess, T.HeapSort, T.Insert, T.Intersect, T.Join, T.Limit, T.Listen, T.MaterializedCteRef, T.Merge, T.Order, T.Project, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RevokeAccess, T.RollbackRelation, T.ScalarSubqueryGuard, T.Scan, T.Set, T.Show, T.ShowColumns, T.ShowEffectiveGrantsOn, T.ShowGrantsOn, T.ShowLineage, T.ShowManifest, T.ShowSnapshots, T.ShowSources, T.Subquery, T.TruncateRelation, T.Union, T.Unlisten, T.Unnest, T.Window}),
+            "pre_update_columns": frozenset({T.AddColumn, T.AddRelationship, T.Aggregate, T.AggregateAndGroup, T.AlterColumnType, T.AlterMaterializedViewOwner, T.AlterMaterializedViewSuspended, T.AlterRelation, T.AlterTask, T.AlterTriggerMinimumInterval, T.AlterTriggerOwner, T.AlterTriggerSuspended, T.AlterView, T.AlterWorkspace, T.AlterWorkspaceSecure, T.Analyze, T.CallProcedure, T.CloneCollection, T.CloneRelation, T.Comment, T.CompactionCommit, T.CreateCollection, T.CreateRelation, T.CreateTag, T.CreateTask, T.CreateTrigger, T.CreateView, T.DetachRelation, T.Distinct, T.DropCollection, T.DropColumn, T.DropRelation, T.DropRelationship, T.DropTag, T.DropTask, T.DropTrigger, T.DropView, T.DropSecret, T.DropWorkspace, T.Except, T.Exit, T.Explain, T.Filter, T.FramedWindow, T.FunctionDataset, T.GrantAccess, T.HeapSort, T.Insert, T.Intersect, T.Join, T.Limit, T.Listen, T.MaterializedCteRef, T.Merge, T.Order, T.Project, T.RenameColumn, T.RenameRelation, T.ResyncRelation, T.RevokeAccess, T.RollbackRelation, T.ScalarSubqueryGuard, T.Scan, T.Set, T.Show, T.ShowColumns, T.ShowEffectiveGrantsOn, T.ShowGrantsOn, T.ShowLineage, T.ShowManifest, T.ShowSnapshots, T.ShowSources, T.Subquery, T.TruncateRelation, T.Union, T.Unlisten, T.Unnest, T.Window}),
             "predicates": frozenset({T.FunctionDataset, T.Scan}),
             "principal": frozenset({T.GrantAccess, T.RevokeAccess}),
             "procedure_name": frozenset({T.CallProcedure}),
@@ -11009,6 +11145,7 @@ cpdef frozenset steps_with(str field):
             "schedule": frozenset({T.CreateTrigger}),
             "schema": frozenset({T.Aggregate, T.AggregateAndGroup, T.CreateRelation, T.FunctionDataset, T.MaterializedCteRef, T.Project, T.Scan, T.ShowColumns, T.ShowLineage, T.ShowManifest, T.ShowSnapshots, T.ShowSources, T.Subquery}),
             "schemas": frozenset({T.Join}),
+            "secret_name": frozenset({T.DropSecret}),
             "secure_destinations": frozenset({T.AlterWorkspaceSecure}),
             "secure_object": frozenset({T.AlterWorkspaceSecure}),
             "series_column": frozenset({T.FunctionDataset}),
@@ -11072,7 +11209,7 @@ cpdef frozenset steps_with(str field):
             "view_sql": frozenset({T.AlterView, T.CreateView}),
             "window_functions": frozenset({T.FramedWindow, T.Window}),
             "window_source": frozenset({T.CreateTrigger}),
-            "workspace_name": frozenset({T.AlterWorkspace, T.AlterWorkspaceSecure, T.DropWorkspace}),
+            "workspace_name": frozenset({T.AlterWorkspace, T.AlterWorkspaceSecure, T.DropSecret, T.DropWorkspace}),
             "write_coalesce_rows": frozenset({T.Insert}),
         }
     return _STEPS_WITH[field]

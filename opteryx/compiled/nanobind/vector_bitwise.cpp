@@ -4,7 +4,7 @@
 //
 // Each function:
 //   1. Receives nb::object operand(s).
-//   2. Calls draken_vector_unwrap (declared in draken_bridge.h,
+//   2. Calls draken_vector_unwrap (declared in vectors/_vector_bridge.h,
 //      implemented in draken_native.so — resolved at import time via
 //      RTLD_GLOBAL set in draken/__init__.py).
 //   3. Calls draken::ops::bitwise_* from draken/ops/int_bitwise.h.
@@ -20,7 +20,7 @@
 #include <nanobind/nanobind.h>
 
 #include "core/buffers.h"
-#include "core/draken_bridge.h"  // draken_vector_unwrap, draken_vector_own_raw
+#include "vectors/_vector_bridge.h"  // draken_vector_unwrap, draken_vector_own_raw
 #include "ops/int_bitwise.h"     // draken::ops::bitwise_*
 
 namespace nb = nanobind;

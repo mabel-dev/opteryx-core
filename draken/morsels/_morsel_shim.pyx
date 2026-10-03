@@ -38,7 +38,7 @@ cdef extern from *:
 # Native take over a raw int32 index buffer — no per-row PyObject boxing.
 # PyObject* in/out keeps `object` out of the .pyx (CLAUDE.md §3); the returned
 # handle is a NEW reference (balanced below in _take_native).
-cdef extern from "core/draken_bridge.h":
+cdef extern from "vectors/_vector_bridge.h":
     PyObject* draken_vector_take_buffer(PyObject* vec_obj,
                                         const int32_t* indices, uint32_t n)
     PyObject* draken_vector_take_with_null_buffer(PyObject* vec_obj,

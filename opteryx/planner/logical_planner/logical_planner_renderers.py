@@ -402,6 +402,12 @@ def render_alter_workspace_secure(node: PlanStep) -> str:
     return f"ALTER WORKSPACE ({node.workspace_name}) SET SECURE {node.secure_object} TO {destinations}"
 
 
+@register_render(LogicalPlanStepType.DropSecret)
+def render_drop_secret(node: PlanStep) -> str:
+    if_exists = "IF EXISTS " if node.if_exists else ""
+    return f"DROP SECRET {if_exists}({node.workspace_name}.{node.secret_name})"
+
+
 @register_render(LogicalPlanStepType.DropWorkspace)
 def render_drop_workspace(node: PlanStep) -> str:
     if_exists = "IF EXISTS " if node.if_exists else ""

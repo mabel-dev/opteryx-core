@@ -1,7 +1,7 @@
 #pragma once
 // draken/morsels/cxx_ordinal.h — C++ declaration of the draken ordinal-bounds seam.
 //
-// `cxx_ordinal_bounds_c` is defined in draken/draken_native.cpp as a pure C++,
+// `cxx_ordinal_bounds_c` is defined in draken/morsels/cxx_morsel_ops.cpp as a pure C++,
 // extern "C", nogil-safe function. Same seam pattern, and the same reason, as
 // morsels/cxx_hash.h: ops/hash.h's dispatch table is `static inline`, so a second
 // shared object that included it would get its own copy of the table. One symbol,

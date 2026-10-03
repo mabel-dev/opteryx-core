@@ -42,7 +42,7 @@
 #include "core/buffers.h"
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
-#include "core/draken_bridge.h"
+#include "vectors/_vector_bridge.h"
 #include "core/ipv4.h"          // draken::ipv4::parse_cidr, netmask (shared with casts/IP_TRUNC)
 #include "core/string_slot.h"   // draken_build_string_slot, str_hash_seed, str_data, str_length
 

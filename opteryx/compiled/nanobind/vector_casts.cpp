@@ -29,7 +29,7 @@
 #include "core/string_slot.h"
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
-#include "core/draken_bridge.h"
+#include "vectors/_vector_bridge.h"
 #include "utf8.h"
 
 // Builds a consolidated string VecResult from dense slots + arena + validity,

@@ -13,6 +13,7 @@ from libc.stdlib cimport malloc, free
 from libc.stddef cimport size_t
 from draken.core.buffers cimport DrakenVector
 from draken.vectors.vector cimport Vector
+from cpython.object cimport PyObject
 
 cdef class BoolVector(Vector):
     """BoolVector — Cython shim for a draken_native Vector with type DRAKEN_BOOL."""
@@ -59,13 +60,15 @@ cdef extern from "core/bitmap_ops.h" nogil:
     # Count set bits in a bitmap.
     size_t simd_popcount(const uint8_t* data, size_t nbytes) nogil
 
-# Create a BoolVector from raw bitmap buffers — returns Python object (BoolVector).
-# Declared outside nogil block because it returns a Python object.
+# Create a BoolVector from raw bitmap buffers — returns a NEW reference to a
+# nanobind Vector. PyObject* (not `object`) keeps `object` out of compiled .pyx
+# (CLAUDE.md §3): the caller balances the new reference by hand. `except NULL`
+# re-raises the exception the bridge set.
 # Lives in the shim/bridge layer, NOT core/bitmap_ops.h: it is the one Python-
 # returning member of that family, and core/ must stay <Python.h>-free so C++
 # consumers of the bitmap ops compile without CPython (CLAUDE.md §2/§5).
 cdef extern from "vectors/_bool_vector_bridge.h":
-    object bool_vector_from_bits(uint8_t* bitmap, uint8_t* null_bitmap, uint32_t num_rows)
+    PyObject* bool_vector_from_bits(uint8_t* bitmap, uint8_t* null_bitmap, uint32_t num_rows) except NULL
 
 
 # Cython-level factory function exported via __pyx_capi__.

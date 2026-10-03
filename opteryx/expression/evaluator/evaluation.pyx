@@ -59,6 +59,14 @@ from draken.vectors.bool_vector cimport (
     bool_vector_from_bits,
 )
 from draken.vectors.vector cimport simd_popcount
+from cpython.object cimport PyObject
+
+# bool_vector_from_bits returns a NEW reference (PyObject*, never `object`, in the
+# extern — CLAUDE.md §3); `<object>raw` takes its own reference, this drops the
+# bridge's. Cython 3's cpython.ref.Py_DECREF takes `object`, hence the C shim.
+cdef extern from *:
+    """static inline void _eval_decref(PyObject* op) { Py_DECREF(op); }"""
+    void _eval_decref(PyObject* op)
 
 # NodeType integer values — keep in sync with NodeType in opteryx/expression/__init__.py.
 DEF NT_UNKNOWN = 0
@@ -281,14 +289,17 @@ cdef BoolVector _bv_op2_native(
     else:
         had_null = c_xor_bitmap(out_data, out_null, l_data, lv.validity, r_data, rv.validity, <size_t>nbytes, num_rows)
 
+    cdef PyObject* raw
     try:
-        result_obj = bool_vector_from_bits(out_data, out_null if had_null else NULL, num_rows)
+        raw = bool_vector_from_bits(out_data, out_null if had_null else NULL, num_rows)
     finally:
         free(out_data)
         free(out_null)
         if l_scratch != NULL: free(l_scratch)
         if r_scratch != NULL: free(r_scratch)
 
+    result_obj = <object>raw
+    _eval_decref(raw)
     # bool_vector_from_bits returns a nanobind Vector (not a cdef BoolVector);
     # wrap in _BoolVector so callers get a proper typed BoolVector instance.
     return _BoolVector(result_obj)
@@ -321,13 +332,16 @@ cdef BoolVector _bv_not_native(
 
     had_null = c_not_bitmap(out_data, out_null, src_data, dv.validity, <size_t>nbytes, num_rows)
 
+    cdef PyObject* raw
     try:
-        result_obj = bool_vector_from_bits(out_data, out_null if had_null else NULL, num_rows)
+        raw = bool_vector_from_bits(out_data, out_null if had_null else NULL, num_rows)
     finally:
         free(out_data)
         free(out_null)
         if src_scratch != NULL: free(src_scratch)
 
+    result_obj = <object>raw
+    _eval_decref(raw)
     # bool_vector_from_bits returns a nanobind Vector (not a cdef BoolVector);
     # wrap in _BoolVector so callers get a proper typed BoolVector instance.
     return _BoolVector(result_obj)
@@ -394,13 +408,16 @@ cdef BoolVector _is_null_from_dv(DrakenVector* dv, bint negate) noexcept:
     if out_data == NULL:
         raise MemoryError("_is_null_from_dv: malloc failed")
 
+    cdef PyObject* raw
     try:
         _fill_is_null_bits(dv, not negate, out_data, nbytes, num_rows)
         # Result has no nulls — IS NULL/NOT NULL always yields a definite answer
-        result_obj = bool_vector_from_bits(out_data, NULL, num_rows)
+        raw = bool_vector_from_bits(out_data, NULL, num_rows)
     finally:
         free(out_data)
 
+    result_obj = <object>raw
+    _eval_decref(raw)
     return _BoolVector(result_obj)
 
 
@@ -422,6 +439,7 @@ cdef BoolVector _bv_truth_test_native(
     cdef const uint8_t* validity = dv.validity
     cdef uint8_t* out_data = <uint8_t*>malloc(<size_t>nbytes)
     cdef object result_obj
+    cdef PyObject* raw
     cdef Py_ssize_t k
     cdef uint8_t tail_mask
 
@@ -460,12 +478,14 @@ cdef BoolVector _bv_truth_test_native(
             out_data[nbytes - 1] &= tail_mask
 
         # Result has no nulls — IS TRUE/FALSE always yields a definite answer
-        result_obj = bool_vector_from_bits(out_data, NULL, num_rows)
+        raw = bool_vector_from_bits(out_data, NULL, num_rows)
     finally:
         free(out_data)
         if scratch != NULL:
             free(scratch)
 
+    result_obj = <object>raw
+    _eval_decref(raw)
     return _BoolVector(result_obj)
 
 
@@ -666,8 +686,10 @@ ctypedef VecResult (*case_fn_t)(void* ctx, void* morsel) nogil
 # VecResult → Python Vector (VectorOwner) trampoline. Declared returning `object`
 # so Cython manages the new reference; honors validity_embedded + ts_unit, which a
 # bare arena DV* cannot carry (string consolidated block / timestamp unit descriptor).
-cdef extern from "core/draken_bridge.h":
+cdef extern from "vectors/_vector_bridge.h":
     object draken_vecresult_own_c(VecResult res)
+
+cdef extern from "core/draken_capi.h":
     void draken_vecresult_discard_c(VecResult* res) noexcept nogil
 
 

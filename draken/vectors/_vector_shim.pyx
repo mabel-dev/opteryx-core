@@ -126,7 +126,7 @@ cdef extern from "ops/hash.h" nogil:
     void draken_hash(const DrakenVector& v, uint64_t* out, uint32_t n)
     void draken_hash_distinct(const DrakenVector& v, uint64_t* out)
 
-cdef extern from "core/draken_bridge.h":
+cdef extern from "vectors/_vector_bridge.h":
     const DrakenVector* draken_vector_unwrap(PyObject* obj)
     PyObject* draken_vector_own_raw(void* data, uint8_t* validity, uint32_t length, DrakenType dtype)
     PyObject* draken_vector_own_raw_with_arena(void* data, uint8_t* arena, uint8_t* validity,

@@ -115,7 +115,7 @@
 #include "native_array_pool_decode.hpp"    // build_pool_array_column (R6)
 #include "ops/kernels/cast_kernels.h"      // ladder-widening casts (declared-width coercion)
 #include "ops/kernels/error_handling.h"    // draken_error_sentinel
-#include "core/draken_bridge.h"            // draken_vecresult_child_owner_new_c
+#include "core/draken_capi.h"            // draken_vecresult_child_owner_new_c
 #include "logical_type.h"                  // LogicalType / logical_type_intern (WP-11 descriptors)
 #include "core/alloc.h"                    // draken_malloc / draken_free (WP-11 temporal narrow)
 #include "native_expression.hpp"           // ExprProgram / ExprFilterFn — scan prefilter

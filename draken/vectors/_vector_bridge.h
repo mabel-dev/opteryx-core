@@ -1,10 +1,14 @@
 #pragma once
-// draken/core/draken_bridge.h — Cython ↔ nanobind bridge surface.
+// draken/vectors/_vector_bridge.h — CPython bridge surface for draken Vectors.
 //
-// Functions bridging .pyx consumers to the nanobind VectorOwner handle.
-// This is the only bridge surface.  Per-op specifics live in ops/*.h.
-// Extension history: draken_vector_own_array added for E.16b (DRAKEN_ARRAY
-// construction from raw C buffers; no Python intermediate).
+// Python-facing BY DESIGN, which is why it lives in the `_`-prefixed bridge
+// layer and not in draken/core/: every function here takes or returns a
+// PyObject* (a draken.draken_native.Vector handle). The Python-free members of
+// the old core/draken_bridge.h moved to core/draken_capi.h — native C++ must
+// include that one, never this one (CLAUDE.md §1/§2).
+//
+// Implementations live in draken/draken_native.cpp (the nanobind binding) and
+// are resolved by other .so's through the RTLD_GLOBAL load in draken/__init__.py.
 //
 // Lifetime contract for draken_vector_unwrap:
 //   The returned pointer is BORROWED — it points inside the VectorOwner owned
@@ -30,17 +34,13 @@
 //   bridge (see draken/vectors/_bool_vector_bridge.cpp::bool_vector_from_bits
 //   for a safe example). Do NOT rely on implicit or accidental cross-allocator
 //   frees.
-
-// USAGE: called from C++ nanobind glue (draken_native.cpp) ONLY.
 //
-// DO NOT declare these from .pyx via `cdef extern`. The pattern:
-//   cdef extern from "core/draken_bridge.h":
-//       const DrakenVector* draken_vector_unwrap(object vec)   ← BANNED
-// puts `object` in .pyx — a CLAUDE.md §3 violation.
-// nb::object is C++; it lives in nanobind glue, not Cython.
-//
-// Implementations live in draken/draken_native.cpp and are compiled into
-// draken_native.so.
+// Declaring these from .pyx / .pxi:
+//   `cdef extern from "vectors/_vector_bridge.h"` with the PyObject* signatures
+//   exactly as written here is the sanctioned form; the caller manages the
+//   references by hand (functions returning PyObject* return a NEW reference,
+//   or NULL with a Python exception set). Declaring them with `object` in place
+//   of PyObject* is BANNED — it puts `object` in compiled .pyx (CLAUDE.md §3).
 
 #include <Python.h>
 #include <stdint.h>
@@ -64,10 +64,6 @@ const DrakenVector* draken_vector_unwrap(PyObject* obj);
 // lifetime contract as draken_vector_unwrap.
 const VectorOwner* draken_owner_unwrap(PyObject* obj);
 
-// draken_hash_rows — each logical row's Vector.hash_shaped() value into
-// out[0..v->vec.length), through the binding's own implementation. Pure C++,
-// GIL-free. 0, or -1 with the reason written to `error`.
-int draken_hash_rows(const VectorOwner* v, uint64_t* out, char* error, size_t error_len);
 
 // draken_vector_mark_dict_sorted — set DRAKEN_DICT_KEYS_SORTED on a dict-shaped
 // Vector (no-op for non-dict shapes). Lets the parquet scan carry a sorted
@@ -433,29 +429,6 @@ PyObject* draken_vector_own_decimal(
 PyObject* draken_vector_own_decimal128(
     void* data, uint8_t* validity, uint32_t length, uint8_t precision, uint8_t scale);
 
-// draken_arrow_varlen_to_string_block — Arrow varlen (data + offsets + nulls) →
-// German-string storage. PURE buffer work, no Python: builds and returns a
-// draken_malloc'd consolidated arena block [DrakenStringArena | slots | arena]
-// and, via *out_validity, a SEPARATE draken_malloc'd validity bitmap (or NULL
-// when all-valid). No UTF-8 decode — raw bytes preserved; `type` tag carried.
-//
-// Both returned buffers are draken_malloc'd and intended to be handed to
-// draken_vector_own_raw (via from_decoded) which assumes ownership. The block
-// does NOT embed validity, so own_raw's separate-validity contract holds.
-//
-// Parameters:
-//   data    — contiguous value bytes; row i spans [offsets[i], offsets[i+1]).
-//   offsets — int32_t[length + 1] start offsets (Arrow convention).
-//   nulls   — 1-bit-per-row validity bitmap (bit set = valid), or NULL = all valid.
-//   length  — logical row count.
-//   type    — DRAKEN_VARCHAR, DRAKEN_NVARCHAR, or DRAKEN_VARBINARY.
-//   out_validity — receives the separate validity bitmap (NULL if all-valid).
-//
-// Returns the arena block pointer, or NULL on allocation failure.
-void* draken_arrow_varlen_to_string_block(
-    const uint8_t* data, const uint32_t* offsets, const uint8_t* nulls,
-    uint32_t length, DrakenType type, uint8_t** out_validity);
-
 // draken_vecresult_own_c — C-linkage trampoline over draken_vector_own.
 //
 // Phase 9c: the expression executor (Cython, compiled as C++) needs to fold a
@@ -464,8 +437,8 @@ void* draken_arrow_varlen_to_string_block(
 // (declared below, outside extern "C"); this alias exposes the identical
 // behaviour with C linkage so cimport resolves a stable, unmangled symbol.
 //
-// VecResult is in scope here: vec_result.h is included above (line ~49) under
-// the same #ifdef __cplusplus that guards this block.
+// VecResult is in scope here: vec_result.h is included above under the same
+// #ifdef __cplusplus that guards this block.
 //
 // MOVES ownership from res, identical to draken_vector_own:
 //   res.data and res.validity are consumed (draken_free'd by new Vector on GC).
@@ -473,34 +446,6 @@ void* draken_arrow_varlen_to_string_block(
 // Returns a NEW reference to a Python Vector on success.
 // Returns NULL with a Python exception set on failure.
 PyObject* draken_vecresult_own_c(VecResult res);
-
-// draken_vecresult_child_owner_new_c — heap-allocate a VectorOwner from a VecResult,
-// with NO Python object created (unlike draken_vecresult_own_c). For embedding as
-// ANOTHER VectorOwner's child_owner (an ARRAY result's element vector), where a
-// Python handle would be wasted and wrong — child_owner wants sole C++ ownership,
-// not a refcounted Python wrapper.
-//
-// A raw pointer (not VectorOwner by value) crosses this C-linkage boundary
-// deliberately: VectorOwner is move-only (unique_ptr members), and a non-trivial
-// C++ type returned by value through `extern "C"` is compiler-ABI-dependent, not a
-// portable C contract — see draken_vecresult_own_c's comment on why VecResult
-// (also a C++ struct) gets a dedicated C-linkage alias instead of relying on the
-// mangled C++ symbol resolving cross-.so. A pointer has no such ambiguity.
-//
-// MOVES ownership from res, identical to draken_vecresult_own_c. Recurses through
-// res.child (freed after adoption — same contract as vecresult_to_owner).
-// Returns a NEW heap allocation; the caller adopts it into a
-// std::unique_ptr<VectorOwner> (default `delete` is correct — allocated with
-// plain `new`, both sides are C++ compiled by the same toolchain).
-VectorOwner* draken_vecresult_child_owner_new_c(VecResult res);
-
-// draken_vecresult_discard_c — free a heap-boxed child VecResult* (as produced by
-// a kernel's `new VecResult(...)`, e.g. VecResult::child) WITHOUT adopting it
-// anywhere. For error paths that received a valid ARRAY result but cannot use it
-// (see evaluation.pyx's evaluate_c_native) — frees data/validity/selection/nested
-// child correctly via the same vecresult_to_owner RAII teardown, then the box
-// itself. `res` may be NULL (no-op). Safe to call exactly once per pointer.
-void draken_vecresult_discard_c(VecResult* res);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -23,7 +23,7 @@
 // so these symbols resolve at import time from consumer extensions linked with
 // `-undefined dynamic_lookup` / `--allow-shlib-undefined` (the same mechanism
 // draken_native.so already uses for draken_vector_unwrap et al. — see
-// draken/core/draken_bridge.h and draken/__init__.py).
+// draken/vectors/_vector_bridge.h, draken/core/draken_capi.h and draken/__init__.py).
 //
 // `pool` is an opaque BSThreadPoolBridge* — callers on the far side of this bridge
 // must never dereference it themselves, only pass it through.

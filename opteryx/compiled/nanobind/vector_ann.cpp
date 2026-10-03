@@ -31,7 +31,7 @@
 #include <vector>
 
 #include "core/buffers.h"
-#include "core/draken_bridge.h"
+#include "vectors/_vector_bridge.h"
 #include "fp16/fp16.h"
 #include "ops/ann/fp16_cosine_ivf.h"
 

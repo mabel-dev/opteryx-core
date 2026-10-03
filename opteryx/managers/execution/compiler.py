@@ -1025,7 +1025,6 @@ class _Compiler:
         self.scan_facts: dict = {}
         # Set when an approximate vector search's scan is compiled: its HeapSort (the
         # plan's only one, VectorSearchStrategy) drops rows with no distance.
-        self._vector_search_armed = False
         # A0 acceptance gate: per-scan residual-reason code, keyed by scan node
         # identity, recorded when a parquet scan falls back to the per-morsel
         # Python trampoline (StreamingScanSource). The value is the stable string
@@ -2721,6 +2720,9 @@ class _Compiler:
             spec, emit, _ = self._narrow_sink_input(p, sink_layout, spec, emit)
             buf = self.nplan.new_buffer()
             self.nplan.set_sort_sink(p, spec, buf, emit)
+            if node.step.drops_unsearchable:
+                # Led by COSINE_DISTANCE: rows with no distance are never returned.
+                self.nplan.set_sort_drop_unsearchable(p)
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             # Order-sensitive from here to the queue: one worker preserves the
@@ -2739,10 +2741,10 @@ class _Compiler:
             self._arm_groupby_topk(in_edges[0][0], node.step.order_by, int(limit))
             buf = self.nplan.new_buffer()
             self.nplan.set_topn_sink(p, spec, int(limit), buf, emit)
-            if self._vector_search_armed:
-                # VectorSearchStrategy admits one search per query, and it is THIS sort:
-                # rows with no embedding are never returned (ruled 2026-10-03).
-                self.nplan.set_topn_drop_unsearchable(p)
+            if node.step.drops_unsearchable:
+                # Led by COSINE_DISTANCE: rows with no distance are never returned
+                # (ruled 2026-10-03), with or without a vector index.
+                self.nplan.set_sort_drop_unsearchable(p)
             self._arm_topn_boundary(p, in_edges[0][0], node, int(limit))
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
@@ -4698,7 +4700,7 @@ class _Compiler:
             from opteryx.exceptions import UnsupportedSyntaxError
 
             raise UnsupportedSyntaxError(
-                f"**APPROX_COSINE_DISTANCE** over {scan.relation} needs the native parquet "
+                f"The vector index search over {scan.relation} needs the native parquet "
                 "scan, and this scan's columns or files are outside what it reads."
             )
         if splan is not None:
@@ -4757,7 +4759,7 @@ class _Compiler:
             # projection (drops role-3 filter-only columns). The identity Select is
             # elided when read-set == emit-set (need_select False).
             filter_bc, read_layout, emit_indices, emit_ids, need_select, read_scs = reloc
-            # An approximate search decodes through row masks; the worker prefilter's
+            # A vector index search decodes through row masks; the worker prefilter's
             # survivor gather assumes full-length predicate columns, so it is not armed
             # there - the relocated filter runs as a native ExprFilter instead.
             if _vector_search or not self._arm_scan_prefilter(p, splan, filter_bc, read_layout, read_scs):
@@ -4791,7 +4793,7 @@ class _Compiler:
         return p, layout
 
     def _arm_vector_admission(self, p, scan, splan):
-        """Give an approximate search's native scan its row admission (D2,
+        """Give a vector index search's native scan its row admission (D2,
         vector_index_admission.hpp): built here from plan data - every scanned file with
         its rows, deleted ordinals and (when the index covers it) index files, the query,
         k and nprobe - and handed to the Source, which searches at execution start.
@@ -4834,15 +4836,14 @@ class _Compiler:
             self.nplan.scan_plans.append(p1_plan)
             self.nplan.held.append(resolver)
         self.nplan.set_native_scan_admission(p, handle.address(), handle, scan.identity)
-        self._vector_search_armed = True
         self.scan_facts[scan.identity]["vector_index"] = vs["index_name"]
         self.scan_facts[scan.identity]["nprobe"] = nprobe
 
     def _vector_filter_plan(self, scan):
-        """An approximate search's WHERE, as pass 1 (vector_index_admission.hpp): a
+        """A vector index search's WHERE, as pass 1 (vector_index_admission.hpp): a
         NativeScanPlan over the predicate columns and the predicate lowered to the
-        latmat pass-1 C ABI. Refused loudly when it cannot run natively - an approximate
-        search never falls back to filtering its candidates afterwards."""
+        latmat pass-1 C ABI. Refused loudly when it cannot run natively - the search
+        never falls back to filtering its candidates afterwards."""
         from opteryx.connectors.parquet_io.pool_reader import native_scan_supported
         from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
         from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
@@ -4855,7 +4856,7 @@ class _Compiler:
         from opteryx.operators._operators import scan_footer_bytes_cache
 
         refusal = (
-            "This **WHERE** cannot be applied natively before an approximate search, "
+            "This **WHERE** cannot be applied natively before the vector index search, "
             "and filtering the candidates afterwards could return fewer than LIMIT rows"
         )
         predicates = scan.predicates

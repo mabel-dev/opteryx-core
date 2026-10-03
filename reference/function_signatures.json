@@ -63,84 +63,6 @@
             }
         ]
     },
-    "APPROX_COSINE_DISTANCE": {
-        "catalog_name": "APPROX_COSINE_DISTANCE",
-        "aliases": [],
-        "summary": "Cosine distance, ranked through the column's vector index.",
-        "volatility": "immutable",
-        "deterministic": true,
-        "foldable": false,
-        "pushdown_safe": false,
-        "lifecycle": {
-            "status": "active",
-            "introduced": null,
-            "deprecated_in": null,
-            "remove_after": null,
-            "replacement": null
-        },
-        "overloads": [
-            {
-                "id": "APPROX_COSINE_DISTANCE_TEXT",
-                "label": "APPROX_COSINE_DISTANCE(arr, vec)",
-                "category": "Array Functions",
-                "documentation": "Valid only as the sole ORDER BY key of a query over one table with a LIMIT, on a text column with a vector index: the index decides which rows are candidates (approximate), and each candidate's distance is the EXACT cosine distance between the embeddings, as COSINE_DISTANCE returns it. Recall is set with the `nprobe` variable (default: the index's own).",
-                "related_functions": [
-                    "GREATEST",
-                    "LEAST",
-                    "SORT",
-                    "UNNEST"
-                ],
-                "return_type": "FLOAT",
-                "returns": {
-                    "type": "FLOAT",
-                    "documentation": "Returns the computed result as `FLOAT`."
-                },
-                "arity": {
-                    "minimum": 2,
-                    "maximum": 2,
-                    "variadic": false
-                },
-                "homogeneous": false,
-                "execution": {
-                    "kernel_id": "default",
-                    "engine": "draken",
-                    "cost_us_per_million": 884934.76
-                },
-                "parameters": [
-                    {
-                        "label": "arr",
-                        "type": "varchar",
-                        "documentation": "Input array or vector value.",
-                        "optional": false,
-                        "variadic": false,
-                        "constant_only": false,
-                        "null_handling": "strict",
-                        "domain": [],
-                        "minimum": null,
-                        "maximum": null,
-                        "value_format": null,
-                        "element_of": null,
-                        "excludes": []
-                    },
-                    {
-                        "label": "vec",
-                        "type": "varchar",
-                        "documentation": "Second vector or text value to compare against.",
-                        "optional": false,
-                        "variadic": false,
-                        "constant_only": false,
-                        "null_handling": "strict",
-                        "domain": [],
-                        "minimum": null,
-                        "maximum": null,
-                        "value_format": null,
-                        "element_of": null,
-                        "excludes": []
-                    }
-                ]
-            }
-        ]
-    },
     "BASE64_DECODE": {
         "catalog_name": "BASE64_DECODE",
         "aliases": [],
@@ -1122,7 +1044,7 @@
                 "id": "COSINE_DISTANCE_TEXT",
                 "label": "COSINE_DISTANCE(arr, vec)",
                 "category": "Text Similarity Functions",
-                "documentation": "Embeds both texts with the active embedding provider and returns 1 - cosine similarity.",
+                "documentation": "Embeds both texts with the active embedding provider and returns 1 - cosine similarity. As the leading ORDER BY key, rows whose distance is NULL (no text, so no embedding) are not returned. `ORDER BY COSINE_DISTANCE(col, 'query') LIMIT k` on a column with a vector index is answered through the index - exactly, unless the `nprobe` variable is set, when only that many clusters per file are searched (approximate).",
                 "related_functions": [
                     "COSINE_SIMILARITY"
                 ],

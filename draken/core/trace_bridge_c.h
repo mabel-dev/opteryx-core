@@ -15,7 +15,7 @@
 //
 // The real state lives in EXACTLY ONE place — draken/core/trace_bridge.cpp,
 // compiled into draken.draken_native (draken_native.so, the same .so
-// draken_bridge.h already uses for this purpose). Every OTHER .so —
+// vectors/_vector_bridge.h and core/draken_capi.h already use for this purpose). Every OTHER .so —
 // including src/cpp/engine/trace.hpp and rugo/src/parquet/io_pipeline.hpp —
 // only DECLARES these functions and calls through them; neither includes
 // draken/core/trace.hpp directly.

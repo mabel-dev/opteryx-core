@@ -68,6 +68,7 @@ from opteryx.planner.binder.relation import (
     visit_unlisten,
     visit_alter_trigger_owner,
     visit_drop_workspace,
+    visit_drop_secret,
     visit_compaction_commit,
     visit_rename_column,
     visit_rename_relation,
@@ -469,6 +470,11 @@ class BinderVisitor:
         self, node: PlanStep, context: BindingContext
     ) -> Tuple[PlanStep, BindingContext]:
         return visit_drop_workspace(self, node, context)
+
+    def visit_drop_secret(
+        self, node: PlanStep, context: BindingContext
+    ) -> Tuple[PlanStep, BindingContext]:
+        return visit_drop_secret(self, node, context)
 
     def visit_insert(
         self, node: PlanStep, context: BindingContext

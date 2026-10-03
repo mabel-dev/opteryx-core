@@ -144,7 +144,7 @@ cdef class _CoverageRequest:
         del self.req
 
 
-cdef extern from "core/draken_bridge.h":
+cdef extern from "vectors/_vector_bridge.h":
     const DrakenVector* draken_vector_unwrap(PyObject* obj)
     int draken_vector_mark_dict_sorted(PyObject* obj)
     int draken_vector_mark_row_sorted(PyObject* obj, int descending)
@@ -331,7 +331,7 @@ cdef inline Vector _wrap_num_dict_direct(MorselRef* result, size_t i, int dk):
     return vec
 
 
-# draken LogicalKind ordinal for IPV4 (draken/core/draken_bridge.h). The only
+# draken LogicalKind ordinal for IPV4 (draken/vectors/_vector_bridge.h). The only
 # kind rugo writes to the parquet key-value side channel: every other kind
 # draken models has a parquet logical type of its own.
 cdef int _DRAKEN_LK_IPV4 = 5

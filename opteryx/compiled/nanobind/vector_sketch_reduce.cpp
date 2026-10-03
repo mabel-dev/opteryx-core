@@ -29,7 +29,7 @@
 #include <vector>
 
 #include "core/buffers.h"
-#include "core/draken_bridge.h"
+#include "vectors/_vector_bridge.h"
 #include "core/kmv_sketch.h"
 #include "planner/manifest_sketch.hpp"
 

@@ -10,7 +10,7 @@ from libc.string cimport memset
 from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_BOOL
 from draken.vectors.vector cimport Vector
 
-cdef extern from "core/draken_bridge.h":
+cdef extern from "vectors/_vector_bridge.h":
     const DrakenVector* draken_vector_unwrap(PyObject* obj)
     PyObject* draken_vector_own_raw(void* data, uint8_t* validity, uint32_t length, DrakenType type)
 

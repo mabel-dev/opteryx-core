@@ -4,7 +4,7 @@
 #include "vectors/_bool_vector_bridge.h"
 #include "core/alloc.h"
 #include "core/buffers.h"
-#include "core/draken_bridge.h"
+#include "vectors/_vector_bridge.h"
 #include <cstring>
 #include <cstdint>
 

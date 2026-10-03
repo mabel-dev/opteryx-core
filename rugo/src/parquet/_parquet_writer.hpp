@@ -209,7 +209,7 @@ struct ColumnInput {
   // a bare unsigned integer and read back as one: a perfectly well-formed
   // column, wrong type, no error. Measured end to end 2026-08-19.
   //
-  // This is the draken LogicalKind ORDINAL (draken/core/draken_bridge.h:
+  // This is the draken LogicalKind ORDINAL (draken/vectors/_vector_bridge.h:
   // 0 NONE, 1 TIMESTAMP, 2 TIME, 3 DECIMAL, 4 VECTOR, 5 IPV4). 0 emits nothing.
   // Only kinds parquet cannot express belong here — annotating a kind the
   // schema already carries would create two sources of truth that can disagree.

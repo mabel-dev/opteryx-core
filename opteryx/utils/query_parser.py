@@ -107,6 +107,15 @@ _SYNTHESIZED_STATEMENTS = {
     "DetachRelation": (False, True, "owner"),
     # WRITE on the table the trigger hangs off, symmetric with creating one.
     "DropTrigger": (False, True, "writer"),
+    # Customer secrets (jobs.opteryx docs/design/secrets.md). Workspace-level
+    # owner-tier for all three - the binder (DROP), the information_schema
+    # table (SHOW) and jobs.opteryx at submission (CREATE) each hold the gate as
+    # workspace ALTER. No `_SYNTHESIZED_TARGETS` entry: the target is a
+    # workspace, not a relation, and reporting it as one would have a caller's
+    # READ checked against a name no grant covers.
+    "CreateSecret": (False, True, "owner"),
+    "DropSecret": (False, True, "owner"),
+    "ShowSecrets": (False, False, "owner"),
     # Ownership is a workspace-level change; the binder gates it at ALTER.
     "AlterMaterializedViewOwner": (False, True, "owner"),
     # SET|DROP SECURE relaxes the SOURCE workspace's egress protection for one

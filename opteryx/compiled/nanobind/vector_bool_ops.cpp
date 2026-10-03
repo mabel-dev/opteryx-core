@@ -39,7 +39,7 @@
 #include "core/buffers.h"
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
-#include "core/draken_bridge.h"
+#include "vectors/_vector_bridge.h"
 #include "ops/bool_logical.h"    // draken::ops::bool_and
 #include "ops/bool_reductions.h" // draken::ops::bool_any
 

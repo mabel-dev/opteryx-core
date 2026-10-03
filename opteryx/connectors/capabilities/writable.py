@@ -352,6 +352,22 @@ class Writable:
             f"{self.__class__.__name__} does not support DROP MATERIALIZED VIEW"
         )
 
+    def drop_secret(
+        self,
+        workspace_name: str,
+        secret_name: str,
+        author: Optional[str] = None,
+        if_exists: bool = False,
+    ) -> bool:
+        """Remove a customer secret from a workspace. Returns whether one was removed.
+
+        Raises ValueError when the secret does not exist and `if_exists` is
+        False. CREATE SECRET has no counterpart here: it is performed by the
+        platform at submission and never reaches an engine (jobs.opteryx
+        docs/design/secrets.md §2.2).
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not support DROP SECRET")
+
     def drop_trigger(
         self,
         relation_name: str,

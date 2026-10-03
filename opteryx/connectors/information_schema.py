@@ -2155,6 +2155,109 @@ class InformationSchemaMaintenanceTable(BaseTable):
         yield Morsel.from_vectors(list(self._COLUMNS), vectors)
 
 
+class InformationSchemaSecretsTable(BaseTable):
+    """Reads `information_schema.secrets`: the workspace's customer secrets,
+    without their values (jobs.opteryx docs/design/secrets.md §5, SEC-8).
+
+    `SHOW SECRETS IN <workspace>` is planned as a read of this table, so the
+    statement and the relation cannot disagree about what is shown or to whom.
+
+    Every column but the three that are key material - and those three never
+    leave the catalog: `list_secrets` strips them before this sees a record.
+    `scope` is a location, not a credential, and is shown.
+
+    Gated as a WHOLE on the workspace-level right to manage secrets (§9) -
+    `ALTER` on the workspace, the gate `ALTER WORKSPACE` holds - rather than
+    filtered row by row: the right is the workspace's, so either every row is
+    visible or none is, and a caller without it is told so rather than shown an
+    empty list that reads as "there are none".
+    """
+
+    __mode__ = "Internal"
+    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$one_row
+    self_governs_permissions = True  # read_dataset() enforces the workspace gate itself
+
+    _COLUMNS = (
+        "secret_catalog",
+        "secret_name",
+        "secret_type",
+        "scope",
+        "created_by",
+        "created_at",
+        "updated_by",
+        "updated_at",
+        # Last ATTEMPTED use, not last successful delivery or read - §5.
+        "last_used_at",
+        "use_count",
+    )
+
+    def __init__(self, *, dataset, catalog, workspace, telemetry, execution_context=None, **kwargs):
+        BaseTable.__init__(self, dataset=dataset, telemetry=telemetry, **kwargs)
+        self.catalog = catalog
+        self.workspace = workspace
+        self.execution_context = execution_context
+
+    def get_dataset_schema(self) -> RelationDescriptor:
+        column_types = {
+            "secret_catalog": _lt.VARCHAR,
+            "secret_name": _lt.VARCHAR,
+            "secret_type": _lt.VARCHAR,
+            "scope": _lt.VARCHAR,
+            "created_by": _lt.VARCHAR,
+            "created_at": _lt.TIMESTAMP(),
+            "updated_by": _lt.VARCHAR,
+            "updated_at": _lt.TIMESTAMP(),
+            "last_used_at": _lt.TIMESTAMP(),
+            "use_count": _lt.INT64,
+        }
+        self.schema = RelationDescriptor(
+            name="information_schema.secrets",
+            columns=[
+                ColumnDescriptor(name=column_name, column_type=column_types[column_name])
+                for column_name in self._COLUMNS
+            ],
+        )
+        return self.schema
+
+    def read_dataset(self, columns=None, predicates=None, **kwargs) -> Iterable[Morsel]:
+        from opteryx.managers.permissions import can_perform_workspace_action
+
+        if self.execution_context is None or not can_perform_workspace_action(
+            self.execution_context, self.workspace, action="ALTER"
+        ):
+            raise PermissionError(
+                f"User does not have permission to manage secrets in workspace {self.workspace}"
+            )
+
+        list_secrets = getattr(self.catalog, "list_secrets", None)
+        records = list_secrets() if list_secrets is not None else []
+
+        values = {column: [] for column in self._COLUMNS}
+        for record in records:
+            values["secret_catalog"].append(self.workspace)
+            values["secret_name"].append(record.get("name"))
+            values["secret_type"].append(record.get("type"))
+            values["scope"].append(record.get("scope"))
+            values["created_by"].append(record.get("created-by"))
+            values["created_at"].append(_ms_to_datetime(record.get("created-at-ms")))
+            values["updated_by"].append(record.get("updated-by"))
+            values["updated_at"].append(_ms_to_datetime(record.get("updated-at-ms")))
+            values["last_used_at"].append(_ms_to_datetime(record.get("last-used-at-ms")))
+            values["use_count"].append(int(record.get("use-count") or 0))
+
+        dtypes = {
+            "created_at": DrakenType.TIMESTAMP64,
+            "updated_at": DrakenType.TIMESTAMP64,
+            "last_used_at": DrakenType.TIMESTAMP64,
+            "use_count": DrakenType.INT64,
+        }
+        vectors = [
+            vector_from_sequence(values[column], dtype=dtypes.get(column, DrakenType.VARCHAR))
+            for column in self._COLUMNS
+        ]
+        yield Morsel.from_vectors(list(self._COLUMNS), vectors)
+
+
 _TABLE_CLASSES = {
     "tables": InformationSchemaTablesTable,
     "columns": InformationSchemaColumnsTable,
@@ -2167,4 +2270,5 @@ _TABLE_CLASSES = {
     "maintenance": InformationSchemaMaintenanceTable,
     "listeners": InformationSchemaListenersTable,
     "forks": InformationSchemaForksTable,
+    "secrets": InformationSchemaSecretsTable,
 }

@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 
-# draken LogicalKind ordinal for IPV4 (draken/core/draken_bridge.h). The only
+# draken LogicalKind ordinal for IPV4 (draken/vectors/_vector_bridge.h). The only
 # kind rugo records in the parquet key-value side channel — every other kind
 # draken models has a parquet logical type of its own and is already readable
 # from `logical_type`.

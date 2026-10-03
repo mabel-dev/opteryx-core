@@ -352,10 +352,9 @@ class OptimizerVisitor:
             # them and the Scan is only removed by RedundantOperations/ProjectFusion
             # above — before that point the HeapSort is adjacent to a Scan only for
             # `SELECT *`, and the top-N spec was never stamped on a real query.
-            # APPROX_COSINE_DISTANCE (D-4): the approximate form's gate and planner -
-            # refuses every shape but `ORDER BY APPROX_COSINE_DISTANCE(col, 'q') LIMIT k`
-            # over one indexed scan, and stamps that scan. Never disabled: a gate that
-            # can be switched off would let an approximate answer through unguarded.
+            # COSINE_DISTANCE (D-4): marks every sort led by it to drop rows with no
+            # distance (semantics, so never disabled), and stamps the scan of
+            # `ORDER BY COSINE_DISTANCE(col, 'q') LIMIT k` over one indexed scan.
             VectorSearchStrategy(telemetry),
             TopNScanPushdownStrategy(telemetry),  # WP-2: top-N spec onto scan feeding HeapSort
             TopNManifestPruningStrategy(telemetry),  # prune files using topn spec + manifest min/max

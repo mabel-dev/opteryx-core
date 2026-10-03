@@ -1,7 +1,7 @@
 #include "_jsonl_column_wrap.hpp"
 
 // Producer surface (definitions resolved at load via RTLD_GLOBAL from draken_native.so):
-#include "draken_bridge.h"  // draken_vector_own_string, draken_vector_own_array(_numeric)
+#include "vectors/_vector_bridge.h"  // draken_vector_own_string, draken_vector_own_array(_numeric)
 
 namespace rugo::_jsonl {
 

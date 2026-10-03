@@ -1804,6 +1804,44 @@ def visit_drop_workspace(self, node: PlanStep, context: BindingContext) -> Tuple
     return node, context
 
 
+def visit_drop_secret(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
+    """
+    Bind DROP SECRET [IF EXISTS] <name> IN <workspace> (jobs.opteryx
+    docs/design/secrets.md §2.4, §9).
+
+    Secrets live in the opteryx catalog whatever the workspace's data is bound
+    to, so this routes through the SETTINGS connector, as ALTER/DROP WORKSPACE
+    do. The gate is the workspace-level right to manage secrets, which for v1
+    is `ALTER` on the whole workspace - the right `ALTER WORKSPACE` holds, owner
+    of `ws.*`. Not a new action: opteryx-access's vocabulary is closed, and an
+    action every capability does not yet ship refuses everyone. Not AUTOMATE
+    either: `automation_admin` confers AUTOMATE, and a bot entitled to run a
+    workspace's pipelines is not thereby entitled to its credentials.
+    """
+    from opteryx.connectors import workspace_settings_connector
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_workspace_action
+
+    node.connector = workspace_settings_connector(
+        node.workspace_name, telemetry=context.telemetry
+    )
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.workspace_name} does not support DROP SECRET"
+        )
+
+    if not can_perform_workspace_action(
+        context.execution_context, node.workspace_name, action="ALTER"
+    ):
+        raise PermissionError(
+            f"User does not have permission to manage secrets in workspace {node.workspace_name}"
+        )
+
+    node.columns = []
+    return node, context
+
+
 def visit_truncate_relation(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """
     Bind the TRUNCATE TABLE node to determine which connector should handle

@@ -1,14 +1,14 @@
 #pragma once
 // draken/morsels/cxx_hash.h — C++ declaration of the draken morsel-hash seam.
 //
-// `cxx_hash_c` is defined in draken/draken_native.cpp as a pure C++, extern "C",
+// `cxx_hash_c` is defined in draken/morsels/cxx_morsel_ops.cpp as a pure C++, extern "C",
 // nogil-safe function (no PyObject / nanobind in its body). Until now it was
 // declared ONLY in the Cython .pxd, so C++ translation units in src/cpp/engine/
 // could not call it without a local forward declaration. This header is the one
 // shared C++ declaration: it is the `morsel.hash(columns)` surface the execution
 // operators (GROUP BY / DISTINCT / JOIN) key on.
 //
-// Contract (see draken_native.cpp:cxx_hash / hash_shaped_impl):
+// Contract (see cxx_morsel_ops.cpp:cxx_hash / core/vector_owner_ops.cpp:hash_shaped_impl):
 //   cxx_hash_c(m, col_idxs, n_cols) hashes the n_cols key columns of morsel `m`
 //   (identified by column index) into a NEW single-column CxxMorsel whose
 //   columns[0].view is a DRAKEN_INT64 hash vector — one hash per input row.

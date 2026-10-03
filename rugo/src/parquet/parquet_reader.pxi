@@ -380,7 +380,7 @@ cdef class SchemaColumn:
     cdef readonly str logical_type
     cdef readonly bint nullable
     # draken LogicalKind ordinal recovered from the file's key-value metadata
-    # (draken/core/draken_bridge.h: 5 = IPV4); 0 means the file carries no
+    # (draken/vectors/_vector_bridge.h: 5 = IPV4); 0 means the file carries no
     # annotation for this column — "don't know", never "no descriptor". Parquet
     # has no logical type for these kinds, so `logical_type` above cannot say it.
     cdef readonly int draken_logical_kind
@@ -909,7 +909,7 @@ cdef extern from *:
     #include <cstdint>
     #include <cstring>
     #include "core/alloc.h"
-    #include "core/draken_bridge.h"
+    #include "vectors/_vector_bridge.h"
 
     static inline uint32_t _rugo_read_code(const std::vector<uint8_t>& arr,
                                            size_t i, uint8_t width) {

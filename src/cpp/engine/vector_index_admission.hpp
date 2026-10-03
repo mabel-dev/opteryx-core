@@ -1,7 +1,7 @@
 // vector_index_admission.hpp — the vector search scan's row admission
-// (docs/VECTOR_INDEX_DESIGN.md §8, D2; D-4 `APPROX_COSINE_DISTANCE`, D-9 `nprobe`).
+// (docs/VECTOR_INDEX_DESIGN.md §8, D2; D-4 `COSINE_DISTANCE`, D-9 `nprobe`).
 //
-// `ORDER BY APPROX_COSINE_DISTANCE(col, 'query') LIMIT k` runs as an ordinary plan — the
+// `ORDER BY COSINE_DISTANCE(col, 'query') LIMIT k` runs as an ordinary plan — the
 // native parquet scan, the projection computing the EXACT distance, the Top-N sink — with
 // one difference: the scan decodes only the rows this admits. Decided once, at execution
 // start (RowAdmission::prepare runs in the scan's make_global), natively:

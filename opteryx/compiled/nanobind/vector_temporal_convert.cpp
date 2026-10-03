@@ -35,7 +35,7 @@
 
 #include "core/buffers.h"
 #include "core/alloc.h"
-#include "core/draken_bridge.h"
+#include "vectors/_vector_bridge.h"
 #include "logical_type.h"   // TimestampUnit (SECONDS/MILLISECONDS/MICROSECONDS/NANOSECONDS)
 
 namespace nb = nanobind;

@@ -190,7 +190,7 @@ cdef extern from "core/alloc.h":
 cdef extern from "core/string_slot.h":
     void draken_build_string_slot(DrakenStringSlot* slot, const uint8_t* data, uint32_t length, uint32_t arena_offset) noexcept nogil
 
-cdef extern from "core/draken_bridge.h":
+cdef extern from "vectors/_vector_bridge.h":
     object draken_vector_own_string(
         DrakenStringSlot* slots, uint8_t* arena, size_t arena_len,
         uint8_t* validity, uint32_t length, DrakenType type)

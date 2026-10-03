@@ -74,7 +74,8 @@ import draken.draken_native as dn
 ```
 
 `draken/__init__.py` loads the native extension with `RTLD_GLOBAL` so bridge symbols are visible to
-consumer extensions compiled against `core/draken_bridge.h`. Always import through the package, not
+consumer extensions compiled against `vectors/_vector_bridge.h` (PyObject bridge) and `core/draken_capi.h`
+(Python-free C ABI). Always import through the package, not
 the `.so` directly.
 
 ---
@@ -295,7 +296,7 @@ len(m)           # number of columns
 ## C Extension Interop
 
 Extensions compiled in Cython or C++ that need to pass vectors across the boundary without Python
-overhead use the bridge API in `core/draken_bridge.h`. `draken_bridge.h` is the authoritative source;
+overhead use the bridge API in `vectors/_vector_bridge.h`. `_vector_bridge.h` is the authoritative source;
 the headline functions are:
 
 ```c

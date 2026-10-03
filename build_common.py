@@ -735,6 +735,13 @@ def draken_rugo_extensions(parquet_created_by):
             "draken.draken_native",
             sources=[
                 "draken/draken_native.cpp",
+                # The Python-free halves of the old draken_native.cpp: VectorOwner
+                # ops and the native morsel ops + their extern "C" ABI
+                # (morsels/cxx_morsel_c.h, core/draken_capi.h). Draken must execute
+                # without Python (CLAUDE.md §1/§2), so these never include
+                # <Python.h>; same .so, same RTLD_GLOBAL resolution as before.
+                "draken/core/vector_owner_ops.cpp",
+                "draken/morsels/cxx_morsel_ops.cpp",
                 "draken/core/vector_alloc.cpp",
                 "draken/core/bitmap_ops.cpp",  # E.21: bitmap operations for bytecode VM
                 "draken/core/lazy_region.cpp",  # lazy branch evaluation: row selection / narrow / scatter
@@ -872,6 +879,14 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/ops/kernels/cast_kernels.h",
                 "draken/ops/kernels/binary_op_kernels.h",
                 "draken/ops/kernels/extraction_kernels.h",
+                "draken/core/vector_owner_ops.h",
+                "draken/core/draken_capi.h",
+                "draken/vectors/_vector_bridge.h",
+                "draken/morsels/cxx_morsel.h",
+                "draken/morsels/cxx_morsel_ops.h",
+                "draken/morsels/cxx_morsel_c.h",
+                "draken/morsels/cxx_hash.h",
+                "draken/morsels/cxx_ordinal.h",
             ],
         ),
         # Phase 9a: C kernel registry lookup wrapper (Cython interface for bytecode builder/executor)
@@ -1011,7 +1026,7 @@ def draken_rugo_extensions(parquet_created_by):
                 "rugo/src/csv/core/csv_scan.hpp",
                 "rugo/src/csv/core/csv_row_map.hpp",
                 "rugo/src/csv/core/csv_column_builder.hpp",
-                "draken/core/draken_bridge.h",
+                "draken/vectors/_vector_bridge.h",
                 "draken/core/string_slot.h",
                 "draken/core/alloc.h",
                 "draken/core/buffers.h",
@@ -1187,7 +1202,8 @@ DRAKEN_ABI_EXTRA_SOURCES = ("draken/ops/kernels/kernel_registry.cpp",)
 # whatever remains would be a confident-looking answer to the wrong question.
 DRAKEN_ABI_ANCHORS = (
     "draken/core/buffers.h",
-    "draken/core/draken_bridge.h",
+    "draken/core/draken_capi.h",
+    "draken/vectors/_vector_bridge.h",
     "draken/logical_type.h",
 )
 

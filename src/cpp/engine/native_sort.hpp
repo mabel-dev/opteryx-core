@@ -37,7 +37,7 @@
 #include "morsels/sort.hpp"      // THE sort (build: -Idraken)
 #include "topn_boundary.hpp"     // TopNBoundary / TopNBoundaryTracker (Top-N runtime boundary)
 
-// Row take for TopNSink::searchable_rows; resolved from draken_native at load time, as
+// Row take for rows_with_distance; resolved from draken_native at load time, as
 // native_cidr_unnest.hpp does.
 extern "C" CxxMorsel* cxx_take_c(const CxxMorsel* m, const int32_t* idx, uint32_t n);
 extern "C" void cxx_morsel_delete(CxxMorsel* m);
@@ -94,6 +94,36 @@ inline void sort_and_emit(const std::vector<MorselPtr>& ms,
     }
 }
 
+// ORDER BY COSINE_DISTANCE(...) (docs/VECTOR_INDEX_DESIGN.md §8, ruled 2026-10-03): a row
+// whose leading key, the distance, is NULL (null text) or NaN (no defined cosine) has no
+// embedding, is not a neighbour and is never returned - with or without a vector index,
+// so an index never changes an answer. The sorts drop it before buffering, and return
+// fewer rows than a LIMIT when fewer have one. Returns `in` itself when every row has a
+// distance.
+inline MorselPtr rows_with_distance(const MorselPtr& in, int32_t col, ErrCtx& err) {
+    const DrakenVector& v = in->columns[static_cast<size_t>(col)].view;
+    if (v.type != DRAKEN_FLOAT64) {
+        err.code = 1;
+        err.msg = "sort: a COSINE_DISTANCE key is not FLOAT64";
+        return nullptr;
+    }
+    const double* d = static_cast<const double*>(v.data);
+    std::vector<int32_t> keep;
+    keep.reserve(v.length);
+    for (uint32_t i = 0; i < v.length; ++i) {
+        const bool valid = v.validity == nullptr || ((v.validity[i >> 3] >> (i & 7u)) & 1u);
+        if (valid && !std::isnan(d[v.selection[i]])) keep.push_back(static_cast<int32_t>(i));
+    }
+    if (keep.size() == v.length) return in;
+    CxxMorsel* taken = cxx_take_c(in.get(), keep.data(), static_cast<uint32_t>(keep.size()));
+    if (taken == nullptr) {
+        err.code = 1;
+        err.msg = "sort: cannot drop the rows with no distance";
+        return nullptr;
+    }
+    return MorselPtr(taken, cxx_morsel_delete);
+}
+
 // ---- SortSink ---------------------------------------------------------------------
 
 struct SortLocal : LocalSinkState { std::vector<MorselPtr> morsels; };
@@ -120,6 +150,8 @@ struct SortSink : Sink, EmitSubset {
     std::vector<SortKeySpec> spec;
     MorselBuffer* out;
     size_t chunk_rows;
+    // A leading COSINE_DISTANCE key (rows_with_distance). false = NULL placement as ordered.
+    bool drop_unsearchable_leading = false;
 
     SortSink(std::vector<SortKeySpec> s, MorselBuffer* b, size_t chunk = 131072,
              bool prune = false, std::vector<uint32_t> emit = {})
@@ -135,8 +167,14 @@ struct SortSink : Sink, EmitSubset {
         return std::make_unique<SortLocal>();
     }
     SinkResult sink(const MorselPtr& in, GlobalSinkState&, LocalSinkState& ls,
-                    ErrCtx&) override {
-        if (in->num_rows() > 0) static_cast<SortLocal&>(ls).morsels.push_back(in);
+                    ErrCtx& err) override {
+        if (in->num_rows() == 0) return SinkResult::CONTINUE;
+        MorselPtr rows = in;
+        if (drop_unsearchable_leading) {
+            rows = rows_with_distance(in, spec[0].col_idx, err);
+            if (err.code != 0 || rows->num_rows() == 0) return SinkResult::CONTINUE;
+        }
+        static_cast<SortLocal&>(ls).morsels.push_back(rows);
         return SinkResult::CONTINUE;
     }
     void combine(GlobalSinkState& gs, LocalSinkState& ls, ErrCtx&) override {
@@ -179,37 +217,8 @@ struct TopNSink : Sink, EmitSubset {
     // `boundary_col` is spec[0].col_idx; Engine::arm_topn_sink_boundary sets both.
     TopNBoundary* boundary = nullptr;
     int32_t boundary_col = -1;
-    // Approximate vector search (docs/VECTOR_INDEX_DESIGN.md §8, ruled 2026-10-03): a row
-    // with no embedding - its leading key, the distance, is NULL (null text) or NaN (no
-    // defined cosine) - is not a neighbour and is never returned. Dropped here, before it
-    // is buffered, so the search returns fewer than n rows when fewer than n have one.
-    // false = every other Top-N (NULL placement as ordered).
+    // A leading COSINE_DISTANCE key (rows_with_distance). false = NULL placement as ordered.
     bool drop_unsearchable_leading = false;
-
-    // The rows of `in` whose leading key is a real distance, or `in` itself when all are.
-    MorselPtr searchable_rows(const MorselPtr& in, ErrCtx& err) const {
-        const DrakenVector& v = in->columns[spec[0].col_idx].view;
-        if (v.type != DRAKEN_FLOAT64) {
-            err.code = 1;
-            err.msg = "TopNSink: an approximate search's distance is not FLOAT64";
-            return nullptr;
-        }
-        const double* d = static_cast<const double*>(v.data);
-        std::vector<int32_t> keep;
-        keep.reserve(v.length);
-        for (uint32_t i = 0; i < v.length; ++i) {
-            const bool valid = v.validity == nullptr || ((v.validity[i >> 3] >> (i & 7u)) & 1u);
-            if (valid && !std::isnan(d[v.selection[i]])) keep.push_back(static_cast<int32_t>(i));
-        }
-        if (keep.size() == v.length) return in;
-        CxxMorsel* taken = cxx_take_c(in.get(), keep.data(), static_cast<uint32_t>(keep.size()));
-        if (taken == nullptr) {
-            err.code = 1;
-            err.msg = "TopNSink: cannot drop the rows with no distance";
-            return nullptr;
-        }
-        return MorselPtr(taken, cxx_morsel_delete);
-    }
 
     TopNSink(std::vector<SortKeySpec> s, size_t n, MorselBuffer* b,
              bool prune = false, std::vector<uint32_t> emit = {})
@@ -248,9 +257,8 @@ struct TopNSink : Sink, EmitSubset {
         if (in->num_rows() == 0) return SinkResult::CONTINUE;
         MorselPtr rows = in;
         if (drop_unsearchable_leading) {
-            rows = searchable_rows(in, err);
-            if (err.code != 0) return SinkResult::CONTINUE;
-            if (rows->num_rows() == 0) return SinkResult::CONTINUE;
+            rows = rows_with_distance(in, spec[0].col_idx, err);
+            if (err.code != 0 || rows->num_rows() == 0) return SinkResult::CONTINUE;
         }
         if (boundary != nullptr)
             l.tracker.observe(rows.get(), boundary_col, static_cast<uint32_t>(n_limit),

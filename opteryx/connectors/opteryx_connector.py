@@ -2241,6 +2241,30 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         catalog.drop_workspace(author=author)
         self._catalog_cache.pop(workspace_name, None)
 
+    def drop_secret(
+        self,
+        workspace_name: str,
+        secret_name: str,
+        author: Optional[str] = None,
+        if_exists: bool = False,
+    ) -> bool:
+        """DROP SECRET - see `Writable.drop_secret`. The catalog owns the record."""
+        catalog = self._get_catalog(workspace_name)
+        drop = getattr(catalog, "drop_secret", None)
+        if drop is None:
+            raise NotImplementedError("this catalog does not hold secrets")
+        try:
+            from opteryx_catalog.secrets import SecretNotFound
+        except ImportError:  # pragma: no cover - an older catalog has no secrets
+            SecretNotFound = KeyError
+        try:
+            return drop(secret_name, author=author, if_exists=if_exists)
+        except SecretNotFound as exc:
+            raise ValueError(
+                f"secret {workspace_name}.{secret_name} does not exist "
+                "(use DROP SECRET IF EXISTS to make this quiet)"
+            ) from exc
+
     def egress_verdict(
         self,
         target_relation: str,

@@ -37,7 +37,7 @@
 #include "core/alloc.h"
 #include "core/string_slot.h"
 #include "core/vector_alloc.h"
-#include "core/draken_bridge.h"
+#include "vectors/_vector_bridge.h"
 
 #include "simd_string_ops.h"
 #include "utf8.h"

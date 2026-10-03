@@ -473,7 +473,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void arm_latmat_topn_boundary(size_t p, size_t idx) except +
         int64_t topn_boundary_skipped(size_t idx) except +
         void set_native_scan_admission(size_t p, RowAdmission* admission) except +
-        void set_topn_drop_unsearchable(size_t p) except +
+        void set_sort_drop_unsearchable(size_t p) except +
         void set_native_postgres_scan_source(size_t p, const PgScanSpec* spec)
         void set_native_jsonl_scan_source(size_t p, const JsonlScanSpec* spec)
         void set_skene_latmat_scan_source(size_t p,
@@ -2757,7 +2757,7 @@ cdef class NativePlan:
     # Read after the run to report each scan's `row_groups_pruned_topn`; empty for
     # every plan that armed none.
     cdef public list topn_boundary_scans
-    # (scan identity, VectorIndexAdmissionHandle) for every approximate search armed,
+    # (scan identity, VectorIndexAdmissionHandle) for every vector index search armed,
     # read after the run for its counts (compiler._fold_skene_scan_facts).
     cdef public list vector_admission_scans
 
@@ -3927,10 +3927,10 @@ cdef class NativePlan:
         self._e.set_topn_sink(p, _sort_spec_from_list(spec), n, buf,
                               emit is not None, _emit_cols_from_list(emit))
 
-    def set_topn_drop_unsearchable(self, size_t p):
-        """Pipeline `p`'s Top-N is an approximate vector search's: rows whose distance
-        is NULL or NaN (no embedding) are never returned."""
-        self._e.set_topn_drop_unsearchable(p)
+    def set_sort_drop_unsearchable(self, size_t p):
+        """Pipeline `p`'s sort (Sort or Top-N) orders by COSINE_DISTANCE first: rows whose
+        distance is NULL or NaN (no embedding) are never returned."""
+        self._e.set_sort_drop_unsearchable(p)
 
     def set_window_sink(self, size_t p, list sort_spec, size_t n_part,
                         list fn_kinds, list fn_names, list fn_args, list fn_offsets,

@@ -227,10 +227,11 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     "trace": (BOOLEAN, FromConfig("OPTERYX_TRACE"), VariableOwner.USER, Visibility.UNRESTRICTED),
     "match_threshold": (FLOAT64, FromConfig("MATCH_THRESHOLD"), VariableOwner.USER, Visibility.UNRESTRICTED),
     # Vector search (D-9, docs/VECTOR_INDEX_DESIGN.md §7): the clusters probed per indexed
-    # file by `ORDER BY APPROX_COSINE_DISTANCE(...) LIMIT k`. 0 (the default) = EXACT, every
+    # file by `ORDER BY COSINE_DISTANCE(...) LIMIT k`. 0 (the default) = EXACT, every
     # stored vector scored; n >= 1 = approximate, only the n clusters whose centres are
     # nearest the query - a guess with no distance bound (ruled 2026-10-03). Ignored under a
-    # WHERE: the filter's survivors are always all scored. Read at COMPILE time. UNRESTRICTED and USER-owned like match_threshold: it trades recall for cost
+    # WHERE: the filter's survivors are always all scored. Read at COMPILE time.
+    # UNRESTRICTED and USER-owned like match_threshold: it trades recall for cost
     # on the caller's own query and grants no access.
     "nprobe": (INT64, 0, VariableOwner.USER, Visibility.UNRESTRICTED),
     # Runtime min/max join filters (docs/RUNTIME_MINMAX_FILTER_DESIGN.md), read

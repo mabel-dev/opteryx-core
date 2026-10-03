@@ -46,7 +46,7 @@
 
 #include "core/buffers.h"
 #include "core/alloc.h"
-#include "core/draken_bridge.h"
+#include "vectors/_vector_bridge.h"
 #include "core/string_slot.h"
 #include "logical_type.h"   // TimestampUnit
 #include "ops/temporal_arith.h"

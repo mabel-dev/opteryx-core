@@ -78,7 +78,7 @@ cdef extern from "core/vector_owner.h":
         pass
 
 
-cdef extern from "core/draken_bridge.h":
+cdef extern from "vectors/_vector_bridge.h":
     const DrakenVector* draken_vector_unwrap(PyObject* obj) except NULL
     const VectorOwner* draken_owner_unwrap(PyObject* obj) except NULL
     PyObject* draken_vector_own_raw(void* data, uint8_t* validity, uint32_t length, DrakenType type) except NULL

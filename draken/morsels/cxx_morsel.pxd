@@ -63,53 +63,46 @@ cdef extern from "morsels/cxx_morsel.h" nogil:
 cdef extern from * nogil:
     """
     extern "C" const CxxMorsel* cxx_morsel_raw_ptr(PyObject* handle);
-    extern "C" CxxMorsel* cxx_take_c(const CxxMorsel*, const int32_t*, uint32_t);
-    extern "C" CxxMorsel* cxx_slice_c(const CxxMorsel*, uint32_t, uint32_t);
-    extern "C" CxxMorsel* cxx_cast_column_c(const CxxMorsel*, uint32_t, int);
-    extern "C" CxxMorsel* cxx_mask_c(const CxxMorsel*, const DrakenVector*);
-    extern "C" CxxMorsel* cxx_mask_with_consts_c(const CxxMorsel*, const DrakenVector*,
-                                                  const int32_t*, const DrakenVector* const*, uint32_t);
-    extern "C" CxxMorsel* cxx_morsel_materialize_native_c(const CxxMorsel*);
-    extern "C" CxxMorsel* cxx_select_c(const CxxMorsel*, const char**, const uint32_t*, uint32_t);
-    extern "C" CxxMorsel* cxx_hash_c(const CxxMorsel*, const int32_t*, uint32_t);
-    extern "C" void cxx_morsel_delete(CxxMorsel*);
-    extern "C" CxxMorsel* cxx_morsel_shallow_copy(const CxxMorsel*);
-    extern "C" CxxMorsel* cxx_morsel_new_eos();
     extern "C" PyObject* cxx_morsel_to_handle(const CxxMorsel*);
     """
+    # PyObject edge (defined in the nanobind binding, draken_native.cpp).
     const CxxMorsel* cxx_morsel_raw_ptr(PyObject* handle)
+    # to_handle: NEW-ref nanobind handle wrapping a shallow copy (boundary out).
+    PyObject* cxx_morsel_to_handle(const CxxMorsel* m)
+
+
+# The Python-free C ABI (morsels/cxx_morsel_c.h; defined in cxx_morsel_ops.cpp).
+cdef extern from "morsels/cxx_morsel_c.h" nogil:
     # S-B.0(a) C-ABI transform surface — nogil, no PyObject. Caller owns the
-    # returned CxxMorsel (free via cxx_morsel_delete). Wired by S-B.1.
-    CxxMorsel* cxx_take_c(const CxxMorsel* m, const int32_t* idx, uint32_t n) nogil
-    CxxMorsel* cxx_slice_c(const CxxMorsel* m, uint32_t start, uint32_t length) nogil
+    # returned CxxMorsel (free via cxx_morsel_delete).
+    CxxMorsel* cxx_take_c(const CxxMorsel* m, const int32_t* idx, uint32_t n)
+    CxxMorsel* cxx_slice_c(const CxxMorsel* m, uint32_t start, uint32_t length)
     # WP-07 nogil join-key cast: cast columns[col_idx] to FLOAT64 (target=0) or
     # INT64 (target=1) via phase-9c dispatch kernels; new CxxMorsel shares the
     # other columns. NULL on cast error / bad idx. Free via cxx_morsel_delete.
-    CxxMorsel* cxx_cast_column_c(const CxxMorsel* m, uint32_t col_idx, int target) nogil
+    CxxMorsel* cxx_cast_column_c(const CxxMorsel* m, uint32_t col_idx, int target)
     # S1: whole-morsel mask (keep rows valid AND true) — derives indices once,
     # type-takes each column nogil. mask is the predicate BoolVector's view.
-    CxxMorsel* cxx_mask_c(const CxxMorsel* m, const DrakenVector* mask) nogil
+    CxxMorsel* cxx_mask_c(const CxxMorsel* m, const DrakenVector* mask)
     # S1 twin: same, but columns in const_col_idx are known-constant post-filter
     # (WHERE col = <literal>) and are broadcast O(1) from a pre-resolved scalar
     # DrakenVector* instead of being gathered. See cxx_mask_with_consts in
-    # draken_native.cpp for the caller-owns-the-scalar contract.
+    # cxx_morsel_ops.cpp for the caller-owns-the-scalar contract.
     CxxMorsel* cxx_mask_with_consts_c(const CxxMorsel* m, const DrakenVector* mask,
                                       const int32_t* const_col_idx,
                                       const DrakenVector* const* const_scalar_dv,
-                                      uint32_t n_consts) nogil
+                                      uint32_t n_consts)
     # Materialize every column of `m` into a fresh, plain-C++-owned VectorOwner —
     # strips any Python-object (py_deleter) ownership before a StreamingScanSource
-    # -pulled morsel crosses into the native engine (see draken_native.cpp).
-    CxxMorsel* cxx_morsel_materialize_native_c(const CxxMorsel* m) nogil
+    # -pulled morsel crosses into the native engine (see cxx_morsel_ops.cpp).
+    CxxMorsel* cxx_morsel_materialize_native_c(const CxxMorsel* m)
     # S-B.2 column select/reorder by identity name (bytes via ptr+len arrays).
     CxxMorsel* cxx_select_c(const CxxMorsel* m, const char** name_ptrs,
-                            const uint32_t* name_lens, uint32_t n) nogil
+                            const uint32_t* name_lens, uint32_t n)
     # S-B.3a keying hash — single col → shape-preserving, multi → dense mix.
     # Returns a 1-column CxxMorsel (read columns[0].view; free via cxx_morsel_delete).
-    CxxMorsel* cxx_hash_c(const CxxMorsel* m, const int32_t* col_idxs, uint32_t n_cols) nogil
-    void cxx_morsel_delete(CxxMorsel* m) nogil
-    # S-B.1a boundary bridges. shallow_copy: owned heap CxxMorsel sharing owners.
-    # to_handle: NEW-ref nanobind handle wrapping a shallow copy (boundary out).
-    CxxMorsel* cxx_morsel_shallow_copy(const CxxMorsel* m) nogil
-    CxxMorsel* cxx_morsel_new_eos() nogil
-    PyObject* cxx_morsel_to_handle(const CxxMorsel* m)
+    CxxMorsel* cxx_hash_c(const CxxMorsel* m, const int32_t* col_idxs, uint32_t n_cols)
+    void cxx_morsel_delete(CxxMorsel* m)
+    # S-B.1a: owned heap CxxMorsel sharing owners.
+    CxxMorsel* cxx_morsel_shallow_copy(const CxxMorsel* m)
+    CxxMorsel* cxx_morsel_new_eos()

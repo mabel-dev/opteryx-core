@@ -11,6 +11,7 @@ The plan does not try to be efficient or clever, at this point it is only trying
 
 import copy
 import fnmatch
+import re
 import time
 from enum import Enum, auto
 from typing import Dict, List, Optional, Tuple
@@ -87,6 +88,7 @@ from opteryx.compiled.structures.plan_steps import DropCollectionStep
 from opteryx.compiled.structures.plan_steps import DropColumnStep
 from opteryx.compiled.structures.plan_steps import DropRelationStep
 from opteryx.compiled.structures.plan_steps import DropRelationshipStep
+from opteryx.compiled.structures.plan_steps import DropSecretStep
 from opteryx.compiled.structures.plan_steps import DropTagStep
 from opteryx.compiled.structures.plan_steps import DropTaskStep
 from opteryx.compiled.structures.plan_steps import DropTriggerStep
@@ -223,6 +225,7 @@ class LogicalPlanStepType(int, Enum):
     ResyncRelation = auto()  # ALTER TABLE <fork> RESYNC [FORCE]
     DetachRelation = auto()  # ALTER TABLE <fork> DETACH
     VectorIndexDdl = auto()  # CREATE / ALTER / DROP INDEX ... (vector index)
+    DropSecret = auto()  # DROP SECRET [IF EXISTS] <name> IN <workspace>
 
 
 class LogicalPlan(PlanGraph):
@@ -7599,6 +7602,54 @@ def plan_refresh_index(statement, *, plan_context, **kwargs) -> LogicalPlan:
     return plan
 
 
+_SECRET_WORKSPACE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _secret_workspace(ident: dict) -> str:
+    """The workspace an `IN <workspace>` clause names, refused unless it is a
+    plain identifier - it is interpolated into SQL by `plan_show_secrets`."""
+    workspace = ident["value"]
+    if not _SECRET_WORKSPACE.match(workspace):
+        raise UnsupportedSyntaxError(f"'{workspace}' is not a workspace name.")
+    return workspace
+
+
+def plan_drop_secret(statement, *, plan_context, **kwargs) -> LogicalPlan:
+    """DROP SECRET [IF EXISTS] <name> IN <workspace> (docs: jobs.opteryx secrets.md §2.4).
+
+    Carries no value, so unlike CREATE SECRET it goes the ordinary route
+    through the engine and the workspace's settings connector.
+    """
+    root = "DropSecret"
+    node = DropSecretStep()
+    node.secret_name = statement[root]["name"]["value"].lower()
+    node.workspace_name = _secret_workspace(statement[root]["workspace"])
+    node.if_exists = bool(statement[root].get("if_exists", False))
+    plan = LogicalPlan(plan_context)
+    plan.add_node(node)
+    return plan
+
+
+def plan_show_secrets(statement, *, plan_context, **kwargs) -> LogicalPlan:
+    """SHOW SECRETS IN <workspace> - a read of `<workspace>.information_schema.secrets`.
+
+    Planned as that query rather than as an operator of its own, so the
+    statement and the relation cannot drift apart on what is shown or who may
+    see it: the table holds the gate (workspace ALTER) and never sees key
+    material, which the catalog strips before returning a record.
+    """
+    from opteryx.third_party import sqloxide
+
+    workspace = _secret_workspace(statement["ShowSecrets"]["workspace"])
+    parsed = sqloxide.parse_sql(
+        "SELECT secret_name, secret_type, scope, created_by, created_at, updated_by, "
+        "updated_at, last_used_at, use_count "
+        f"FROM {workspace}.information_schema.secrets ORDER BY secret_name",
+        _dialect="opteryx",
+    )
+    return plan_query(parsed[0], plan_context=plan_context)
+
+
 def plan_alter_index(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """sqlparser's own ALTER INDEX is RENAME, which a vector index does not support."""
     raise UnsupportedSyntaxError(
@@ -7614,6 +7665,9 @@ QUERY_BUILDERS = {
     "AlterMaterializedViewSuspended": plan_alter_materialized_view_suspended,
     "DropStatistics": plan_drop_statistics,
     "DropTrigger": plan_drop_trigger,
+    # CREATE SECRET is deliberately absent - see do_logical_planning_phase.
+    "DropSecret": plan_drop_secret,
+    "ShowSecrets": plan_show_secrets,
     # CREATE/DROP TASK — synthesized pre-parse; sqlparser has no TASK object
     # type, unlike EXECUTE which it parses natively.
     "CreateTrigger": plan_create_trigger,
@@ -7860,6 +7914,17 @@ def do_logical_planning_phase(parsed_statement: dict, *, plan_context) -> tuple:
                 "**SAVE RESULTS** is run by the platform, not by the query engine. "
                 "Reaching the engine means the service that dispatched it does not "
                 "recognize the statement - check that it is up to date."
+            )
+        # CREATE SECRET is the same shape and for a stronger reason: it carries a
+        # credential, and jobs.opteryx performs it at submission precisely so the
+        # value never travels through a job document to reach an engine
+        # (docs/design/secrets.md §2.2). The refusal names nothing from the
+        # statement.
+        if statement_type == "CreateSecret":
+            raise UnsupportedSyntaxError(
+                "**CREATE SECRET** is run by the platform at submission, not by the "
+                "query engine. Reaching the engine means the service that dispatched "
+                "it does not recognize the statement - check that it is up to date."
             )
         raise UnsupportedSyntaxError(
             f"Opteryx does not support '{convert_camel_to_sql_case(statement_type)}' type queries."

@@ -798,6 +798,10 @@ def _create_alter_workspace_secure_node(logical_node, query_properties, registry
     return registry.create("Relation Management", query_properties, logical_node, action="alter_workspace_secure")
 
 
+def _create_drop_secret_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, logical_node, action="drop_secret")
+
+
 def _create_drop_workspace_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, logical_node, action="drop_workspace")
 
@@ -941,6 +945,7 @@ _DISPATCH = {
     LogicalPlanStepType.AlterWorkspace:   _create_alter_workspace_node,
     LogicalPlanStepType.AlterWorkspaceSecure: _create_alter_workspace_secure_node,
     LogicalPlanStepType.DropWorkspace:    _create_drop_workspace_node,
+    LogicalPlanStepType.DropSecret:       _create_drop_secret_node,
     LogicalPlanStepType.Insert:           _create_insert_node,
     LogicalPlanStepType.Merge:            _create_merge_node,
     LogicalPlanStepType.CompactionCommit: _create_compaction_commit_node,

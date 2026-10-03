@@ -32,7 +32,7 @@
 #include "core/string_slot.h"
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
-#include "core/draken_bridge.h"
+#include "vectors/_vector_bridge.h"
 
 // Mabel C encoders (vendored C; include dirs wired in setup.py E.4 block).
 extern "C" {

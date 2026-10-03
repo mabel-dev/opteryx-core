@@ -1026,6 +1026,19 @@ all pass.
     byte-identical (or answer-identical) to the local read; a URL signed with the wrong
     secret is refused and the read fails loud. Real GCS (signed V4 URLs, resumable sessions,
     compose) is still unexercised.
+- **RENAMED 2026-10-03: the index answers plain `COSINE_DISTANCE`.** Once the search
+  became exact by default (D-9 re-ruling), "approximate" no longer described it:
+  `APPROX_COSINE_DISTANCE` is deleted, and `ORDER BY COSINE_DISTANCE(col, 'q') LIMIT k`
+  on an indexed column runs through the index. `VectorSearchStrategy` is no longer a
+  gate: any other shape (no LIMIT, DESC, more keys, a WHERE left above the scan, a join,
+  a non-literal query, no index, another embedder's index) runs as written without the
+  index — EXPLAIN shows a "vector search" decision only when the index is used (or, for an
+  embedder mismatch, why it was not). **Rows with no distance (NULL text, NaN) are
+  dropped whenever COSINE_DISTANCE leads an ORDER BY — with or without an index, with or
+  without a LIMIT** (ruled 2026-10-03: "drop NULLs everywhere"), so an index never changes
+  an answer: the strategy marks the sort `drops_unsearchable` and both the Sort and the
+  Top-N sinks drop them (`rows_with_distance`, native_sort.hpp). The block below
+  describes the first delivery, under the old name.
 - **D1 + D2 delivered 2026-10-03** — `ORDER BY APPROX_COSINE_DISTANCE(col, 'q') LIMIT k`
   runs through the index, end to end through SQL:
   - *Function:* `APPROX_COSINE_DISTANCE(text, text)`, the EXACT text-distance kernel under
@@ -1132,7 +1145,7 @@ model at container build with its checksum verified (§9A).
 | D-1 | `VECTOR` in user land | — | **RULED rev 3:** not a user-land concept. It exists only inside the index (§3). |
 | D-2 | Vector element type and metrics | fp16 only + cosine / add fp32 `VECTOR` base type / add L2 & inner product | fp16 + cosine for v1. L2/IP kernels are cheap to add with the SIMD work. fp32 only if S3 compatibility (D-10) is pursued. |
 | D-3 | Home of the ANN code and the index format | — | **DECIDED rev 3, amended by D-5:** draken `ops/ann/` (IVF-flat), vectors and centroids in skene files (§5.2). |
-| D-4 | SQL spelling of "approximate" | `VECTOR_SEARCH` TVF / `APPROX_COSINE_DISTANCE` / `WITH INDEX` clause | **RULED 2026-10-03: `APPROX_COSINE_DISTANCE(text_col, 'query')`.** |
+| D-4 | SQL spelling of "approximate" | `VECTOR_SEARCH` TVF / `APPROX_COSINE_DISTANCE` / `WITH INDEX` clause | **RULED 2026-10-03: `APPROX_COSINE_DISTANCE(text_col, 'query')`**, then **RE-RULED 2026-10-03: plain `COSINE_DISTANCE`** (the search is exact unless `SET nprobe`); a leading COSINE_DISTANCE key drops NULL-distance rows everywhere. |
 | D-5 | ANN algorithm | — | **RULED 2026-10-02: IVF-flat over fp16** (§13 B3). HNSW and the usearch graph are deleted. |
 | D-6 | SIMD distance: SimSIMD (vendored) vs draken-owned kernels | — | Draken-owned NEON/AVX2 via `SIMD_STATIC_SELECT`, consistent with the rest of draken. SimSIMD stays usearch-internal. |
 | D-7 | When sidecars are built | — | **RULED 2026-10-02:** per index `build = 'sync' \| 'async'`, default async, `ALTER INDEX` switches; compaction never re-embeds (§5.6, §10). |

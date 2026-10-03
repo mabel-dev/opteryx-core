@@ -62,7 +62,7 @@ cdef extern from *:
     """static inline void _cd_decref(PyObject* op) { Py_DECREF(op); }"""
     void _cd_decref(PyObject* op)
 
-cdef extern from "core/draken_bridge.h":
+cdef extern from "vectors/_vector_bridge.h":
     const DrakenVector* draken_vector_unwrap(PyObject* obj)
     int draken_vector_mark_dict_sorted(PyObject* obj)
     PyObject* draken_vector_own_string(

@@ -21,7 +21,7 @@
 
 #include "operator.hpp"
 #include "core/vector_owner.h"
-#include "core/draken_bridge.h"   // draken_vecresult_child_owner_new_c — ARRAY child adoption
+#include "core/draken_capi.h"   // draken_vecresult_child_owner_new_c — ARRAY child adoption
 #include "logical_type.h"   // LogicalType / logical_type_intern — descriptor re-attachment
 #include "ops/kernels/extraction_kernels.h"   // draken_json_extract_multi — fused `->`/`->>`
 
@@ -64,7 +64,7 @@ typedef int (*ExprFilterFn)(void* instrs, int count, const CxxMorsel* m,
 // ARRAY result's element vector — non-null only when out_vec->type ==
 // DRAKEN_ARRAY (see evaluation.pyx's _dv_eval_span_cxx). The span-side kernel
 // draken_malloc'd it standalone (not arena-owned), matching the ownership
-// contract draken_vecresult_child_owner_new_c (draken_bridge.h) expects.
+// contract draken_vecresult_child_owner_new_c (core/draken_capi.h) expects.
 typedef int (*ExprEvalFn)(void* instrs, int count, const CxxMorsel* m,
                           int* col_idx, void** lit_dv,
                           DrakenVector* out_vec, void** out_data,

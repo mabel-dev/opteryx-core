@@ -40,7 +40,7 @@
 #include "core/alloc.h"
 #include "core/string_slot.h"
 #include "core/vector_alloc.h"
-#include "core/draken_bridge.h"
+#include "vectors/_vector_bridge.h"
 
 namespace nb = nanobind;
 

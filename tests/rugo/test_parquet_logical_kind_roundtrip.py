@@ -41,7 +41,7 @@ import rugo.parquet as rp
 from draken.morsels.morsel import Morsel
 from draken.vectors.vector import Vector
 
-# draken LogicalKind ordinal for IPV4 (draken/core/draken_bridge.h).
+# draken LogicalKind ordinal for IPV4 (draken/vectors/_vector_bridge.h).
 IPV4_KIND = 5
 
 # Values chosen to span the signed midpoint: 255.255.255.255 is 0xFFFFFFFF, so it

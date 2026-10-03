@@ -1313,13 +1313,17 @@ public:
         set_sink_(p, std::make_unique<TopNSink>(std::move(spec), n, sink_buffer_(buf),
                                                 emit_prune, std::move(emit_cols)));
     }
-    // An approximate vector search's Top-N: rows with no distance are never returned
-    // (TopNSink::drop_unsearchable_leading).
-    void set_topn_drop_unsearchable(size_t p) {
-        auto* sink = dynamic_cast<TopNSink*>(pipelines[p]->sink.get());
-        if (sink == nullptr)
-            throw std::runtime_error("set_topn_drop_unsearchable: pipeline sink is not a TopNSink");
-        sink->drop_unsearchable_leading = true;
+    // ORDER BY COSINE_DISTANCE(...): rows with no distance are never returned
+    // (rows_with_distance), by the Sort or the Top-N sink of pipeline `p`.
+    void set_sort_drop_unsearchable(size_t p) {
+        if (auto* topn = dynamic_cast<TopNSink*>(pipelines[p]->sink.get())) {
+            topn->drop_unsearchable_leading = true;
+            return;
+        }
+        auto* sort = dynamic_cast<SortSink*>(pipelines[p]->sink.get());
+        if (sort == nullptr)
+            throw std::runtime_error("set_sort_drop_unsearchable: pipeline sink is not a sort");
+        sort->drop_unsearchable_leading = true;
     }
     // Window functions: sort_spec = [partition keys asc..., order keys...]; n_part =
     // count of leading partition keys; fn_kinds[i] / fn_names[i] / fn_args[i] /

@@ -38,6 +38,7 @@ mod cursor;
 mod grant;
 mod index;
 mod listen;
+mod secret;
 mod task;
 mod trigger;
 mod view;
@@ -50,6 +51,7 @@ use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer};
 
 pub use cursor::Cursor;
+pub use secret::redact as redact_secret_statement;
 
 /// One statement: either sqlparser's, or ours.
 ///
@@ -100,6 +102,9 @@ pub enum OpteryxOnly {
     DetachRelation(admin::DetachRelation),
     AlterIndexBuild(index::AlterIndexBuild),
     RefreshIndex(index::RefreshIndex),
+    CreateSecret(secret::CreateSecret),
+    DropSecret(secret::DropSecret),
+    ShowSecrets(secret::ShowSecrets),
 }
 
 /// Tokenize `sql`, then run each statement through the aside productions before
@@ -156,6 +161,9 @@ pub fn parse_statements(
         if recognised.is_none() {
             recognised = index::parse(&mut cursor)?;
         }
+        if recognised.is_none() {
+            recognised = secret::parse(&mut cursor)?;
+        }
         match recognised {
             Some(statement) => out.push(OpteryxStatement::Opteryx(statement)),
             None => {
@@ -201,7 +209,7 @@ pub(crate) fn source_slice(sql: &str, tokens: &[TokenWithSpan]) -> String {
 /// Characters, not bytes: sqlparser's tokenizer counts columns in chars, and a
 /// statement containing a multi-byte character would otherwise slice mid-glyph.
 /// Mirrors `opteryx.utils.sql.offset_of` on the Python side.
-fn offset_of(text: &str, line: u64, column: u64) -> usize {
+pub(crate) fn offset_of(text: &str, line: u64, column: u64) -> usize {
     let mut offset = 0usize;
     let mut current_line = 1u64;
     for ch in text.chars() {

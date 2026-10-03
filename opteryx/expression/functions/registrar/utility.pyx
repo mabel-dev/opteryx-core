@@ -353,38 +353,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
             ),
         ),
         FunctionDefinition(
-            "APPROX_COSINE_DISTANCE",
-            aliases=(),
-            category="array",
-            volatility="immutable",
-            deterministic=True,
-            lifecycle=LifecycleSpec(status="active"),
-            summary="Cosine distance, ranked through the column's vector index.",
-            documentation=(
-                "Valid only as the sole ORDER BY key of a query over one table with a LIMIT, "
-                "on a text column with a vector index: the index decides which rows are "
-                "candidates (approximate), and each candidate's distance is the EXACT cosine "
-                "distance between the embeddings, as COSINE_DISTANCE returns it. Recall is "
-                "set with the `nprobe` variable (default: the index's own)."
-            ),
-            overloads=(
-                FunctionOverload(
-                    id="APPROX_COSINE_DISTANCE_TEXT",
-                    parameters=(
-                        ParameterSpec(name="arr", type_family="string"),
-                        ParameterSpec(name="vec", type_family="string"),
-                    ),
-                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_FLOAT64),
-                    kernel=KernelSpec(
-                        engine="draken",
-                        id="default",
-                        callable_ref=None,   # c-native: draken_cosine_distance_text (aliased)
-                        cost_us_per_million=884934.76,
-                    ),
-                ),
-            ),
-        ),
-        FunctionDefinition(
             "COSINE_DISTANCE",
             aliases=(),
             category="array",
@@ -392,7 +360,14 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
             deterministic=True,
             lifecycle=LifecycleSpec(status="active"),
             summary="Cosine distance between the embeddings of two texts.",
-            documentation="Embeds both texts with the active embedding provider and returns 1 - cosine similarity.",
+            documentation=(
+                "Embeds both texts with the active embedding provider and returns 1 - cosine "
+                "similarity. As the leading ORDER BY key, rows whose distance is NULL (no "
+                "text, so no embedding) are not returned. `ORDER BY COSINE_DISTANCE(col, "
+                "'query') LIMIT k` on a column with a vector index is answered through the "
+                "index - exactly, unless the `nprobe` variable is set, when only that many "
+                "clusters per file are searched (approximate)."
+            ),
             overloads=(
                 FunctionOverload(
                     id="COSINE_DISTANCE_TEXT",

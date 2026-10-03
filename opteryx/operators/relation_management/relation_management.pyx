@@ -134,6 +134,8 @@ class RelationManagementNode(BasePlanNode):
             return f"alter workspace {self.step.workspace_name} set secure {self.step.secure_object} to {', '.join(self.step.secure_destinations)}"
         if self.action == "drop_workspace":
             return f"drop workspace {self.step.workspace_name}"
+        if self.action == "drop_secret":
+            return f"drop secret {self.step.secret_name} in {self.step.workspace_name}"
         if self.action == "create_tag":
             return f"create tag {self.step.tag_name} on {self.step.relation_name} as of {self.step.version_spec}"
         if self.action == "drop_tag":
@@ -423,6 +425,11 @@ class RelationManagementNode(BasePlanNode):
 
         if action == "drop_workspace":
             return object_message("dropped", "workspace", self.step.workspace_name)
+
+        if action == "drop_secret":
+            return object_message(
+                "dropped", "secret", f"{self.step.workspace_name}.{self.step.secret_name}"
+            )
 
         if action == "grant_access":
             return (
@@ -976,6 +983,17 @@ class RelationManagementNode(BasePlanNode):
         elif self.action == "drop_workspace":
             self.step.connector.drop_workspace(self.step.workspace_name, author=self._author)
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "drop_secret":
+            removed = self.step.connector.drop_secret(
+                self.step.workspace_name,
+                self.step.secret_name,
+                author=self._author,
+                if_exists=bool(self.step.if_exists),
+            )
+            return NonTabularResult(
+                record_count=1 if removed else 0, status=QueryStatus.SQL_SUCCESS
+            )
 
         elif self.action == "grant_access":
             # Adds exactly ONE policy. Every rule — owner authority covering the

@@ -35,7 +35,7 @@
 #include "core/string_slot.h"
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
-#include "core/draken_bridge.h"
+#include "vectors/_vector_bridge.h"
 
 // _base16.h uses C99 `restrict` keyword which is not valid in C++ even inside
 // extern "C".  Map it to the GCC/Clang extension `__restrict__` before including.
