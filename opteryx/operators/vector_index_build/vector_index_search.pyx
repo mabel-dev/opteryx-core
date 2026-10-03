@@ -7,9 +7,11 @@
 Vector index search — one data file (docs/VECTOR_INDEX_DESIGN.md §8, D2).
 
 The entry point into src/cpp/engine/vector_index_search.hpp: embed the query text with the
-index's own embedder, probe the `nprobe` nearest clusters, read only their row groups of the
-vectors file (local, or a signed URL by range GETs) and return the file's top-k. One native
-call, GIL released. The library the approximate scan is built from, and how it is tested.
+index's own embedder, score it against the file's stored vectors - every one when `nprobe`
+is 0 (exact, the default), only the `nprobe` nearest clusters' otherwise (approximate) -
+reading the vectors file locally or from a signed URL by range GETs, and return the file's
+top-k. One native call, GIL released. The library the vector search scan is built from,
+and how it is tested.
 """
 
 from libcpp cimport bool as cppbool
@@ -54,7 +56,8 @@ def search_vector_index_file(
     list deleted=None,
 ):
     """The data file's top-`k` rows nearest `query` through its index: a list of
-    (ordinal, cosine distance), nearest first, ties by ordinal; and the search's counts."""
+    (ordinal, cosine distance), nearest first, ties by ordinal; and the search's counts.
+    `nprobe` 0 = exact (every stored vector); >= 1 = the `nprobe` nearest clusters only."""
     from draken.interop.vector_sequence import vector_from_sequence
 
     if embed_fn == 0:
@@ -120,7 +123,6 @@ cdef extern from "engine/vector_index_admission.hpp" namespace "opteryx::engine"
         uint64_t row_groups_read
         uint64_t candidates
         uint64_t rows_exact
-        uint32_t files_filtered_exact
 
     cdef cppclass AdmissionPredicate:
         ParquetIOPipeline* pipeline
@@ -195,7 +197,6 @@ cdef class VectorIndexAdmissionHandle:
             "files_indexed": c.files_indexed, "files_exact": c.files_exact,
             "clusters_probed": c.clusters_probed, "index_row_groups_read": c.row_groups_read,
             "candidates": c.candidates, "rows_exact": c.rows_exact,
-            "files_filtered_exact": c.files_filtered_exact,
         }
 
     def set_predicate(self, NativeScanPlan plan, size_t fn, size_t ctx, list pred_col_to_p1,

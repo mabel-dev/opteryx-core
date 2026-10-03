@@ -4796,19 +4796,20 @@ class _Compiler:
         its rows, deleted ordinals and (when the index covers it) index files, the query,
         k and nprobe - and handed to the Source, which searches at execution start.
 
-        `nprobe`: the session's `nprobe`, or the index's own when it is 0 (D-9)."""
+        `nprobe`: the session's `SET nprobe`. 0 (the default) = exact, every stored vector
+        scored; >= 1 = approximate, that many clusters per file (ruled 2026-10-03)."""
         from draken.ops.kernels._kernel_registry import lookup_kernel
         from opteryx.operators._operators import VectorIndexAdmissionHandle
         from opteryx.variables import resolve as _resolve_var
 
         vs = scan.step.vector_search
-        nprobe = int(_resolve_var("nprobe", scan.properties.variables, 0) or 0) or vs["nprobe"]
-        if nprobe < 1:
+        nprobe = int(_resolve_var("nprobe", scan.properties.variables, 0))
+        if nprobe < 0:
             from opteryx.exceptions import InvalidConfigurationError
 
             raise InvalidConfigurationError(
                 config_item="nprobe", provided_value=str(nprobe),
-                valid_value_description="a whole number >= 1 (0 = the index's own)",
+                valid_value_description="a whole number >= 0 (0 = exact)",
             )
         manifest = scan.manifest
         indexed = scan.connector.vector_search_indexes(vs["index_id"])

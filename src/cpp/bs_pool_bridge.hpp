@@ -41,6 +41,27 @@ using PriorityPool = BS::thread_pool<BS::tp::priority>;
 
 
 /**
+ * Take the raised exception as an instance (new reference) and clear the
+ * indicator.  GIL held, an exception set.
+ */
+inline PyObject* take_raised_exception() {
+#if PY_VERSION_HEX >= 0x030C0000
+    // PyErr_GetRaisedException: Python >= 3.12.
+    return PyErr_GetRaisedException();
+#else
+    // Pre-3.12: no PyErr_GetRaisedException. Reconstruct the normalized
+    // exception instance from the legacy type/value/traceback triple.
+    PyObject *exc_type, *exc, *exc_traceback;
+    PyErr_Fetch(&exc_type, &exc, &exc_traceback);
+    PyErr_NormalizeException(&exc_type, &exc, &exc_traceback);
+    Py_XDECREF(exc_type);
+    Py_XDECREF(exc_traceback);
+    return exc;
+#endif
+}
+
+
+/**
  * Thread-safe result container: holds the result or exception until the Python
  * Future is notified.  All Python object references are managed with GIL held.
  */
@@ -112,20 +133,34 @@ public:
         // itself a tuple (e.g. the common `return idx, value` task shape) is then
         // used AS the call's argument tuple, so its elements are unpacked as
         // separate positional arguments — set_result(*result_) instead of
-        // set_result(result_) — raising a silently-swallowed TypeError below and
-        // leaving the Future PENDING forever. The parens force Py_BuildValue to
-        // always wrap in a genuine 1-tuple regardless of what result_/exception_
-        // is. (Found via a hung concurrent.futures.Future when the pooled task's
-        // return value was a tuple.)
-        // The call returns a NEW reference (set_*'s None) — released here.
-        PyObject* called = nullptr;
-        if (exception_) {
-            called = PyObject_CallMethod(py_future_, "set_exception", "(O)", exception_);
-        } else if (result_) {
-            called = PyObject_CallMethod(py_future_, "set_result", "(O)", result_);
+        // set_result(result_) — raising a TypeError and leaving the Future PENDING
+        // forever. The parens force Py_BuildValue to always wrap in a genuine
+        // 1-tuple regardless of what result_/exception_ is. (Found via a hung
+        // concurrent.futures.Future when the pooled task's return value was a
+        // tuple.)
+        PyObject* called = exception_
+            ? PyObject_CallMethod(py_future_, "set_exception", "(O)", exception_)
+            : PyObject_CallMethod(py_future_, "set_result", "(O)", result_);
+        if (called) {
+            Py_DECREF(called);  // set_*'s None, a new reference
+        } else {
+            // set_* itself raised. This runs on a pool worker — there is no
+            // Python frame to raise into — so the failure is raised through the
+            // Future: the waiter's result() raises it instead of hanging on a
+            // Future that never resolves.
+            PyObject* failure = take_raised_exception();
+            PyObject* delivered =
+                PyObject_CallMethod(py_future_, "set_exception", "(O)", failure);
+            if (delivered) {
+                Py_DECREF(delivered);
+            } else {
+                // The Future would not take it either, so it is already resolved
+                // and its waiter is not left hanging. Nothing can catch this;
+                // report it rather than drop it.
+                PyErr_WriteUnraisable(py_future_);
+            }
+            Py_XDECREF(failure);
         }
-        Py_XDECREF(called);
-        PyErr_Clear();  // Swallow any error from the set_* call itself.
 
         // Null out after use so ~ResultContainer is a no-op for these refs.
         Py_XDECREF(py_future_);   py_future_  = nullptr;
@@ -199,20 +234,7 @@ public:
             Py_DECREF(result);
             container_->notify_python_future();
         } else {
-            PyObject* exc;
-#if PY_VERSION_HEX >= 0x030C0000
-            // PyErr_GetRaisedException: Python >= 3.12.
-            // Returns exception *instance* (new ref) and clears indicator.
-            exc = PyErr_GetRaisedException();
-#else
-            // Pre-3.12: no PyErr_GetRaisedException. Reconstruct the normalized
-            // exception instance from the legacy type/value/traceback triple.
-            PyObject *exc_type, *exc_traceback;
-            PyErr_Fetch(&exc_type, &exc, &exc_traceback);
-            PyErr_NormalizeException(&exc_type, &exc, &exc_traceback);
-            Py_XDECREF(exc_type);
-            Py_XDECREF(exc_traceback);
-#endif
+            PyObject* exc = take_raised_exception();
             if (exc) {
                 container_->set_exception(exc);
                 Py_DECREF(exc);   // balance the new ref we own

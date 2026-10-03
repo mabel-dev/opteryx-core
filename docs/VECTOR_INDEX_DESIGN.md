@@ -1067,8 +1067,22 @@ all pass.
 
   The default meets the ~0.95 target at ~1/11 of the exact cost. The worst query still
   loses 4 of 10 at 32: recall is a mean, not a floor.
-- **Not yet:** WHERE as the search's admitted set (the design's pass-1 mask), the
-  per-file exact path below a survivor threshold τ, and real GCS.
+- **WHERE delivered 2026-10-03** (§8's pass-1 mask): a WHERE pushed into the scan is
+  applied BEFORE the search. The compiler builds a pass-1 NativeScanPlan over the
+  predicate columns and lowers the predicate to the latmat pass-1 C ABI
+  (`Pass1PredResolver`); `VectorIndexAdmission` decodes and evaluates it per row group at
+  execution start (row groups pruned by statistics hold no survivor), then:
+  - an indexed file's search scores ONLY its survivors (TopK's admitted mask);
+  - **instead of a measured τ, a rule:** when a file's probe finds fewer than k survivors
+    while the file has more, that file's survivors are admitted exactly — a selective
+    filter whose rows lie outside the probed clusters never costs answer rows that
+    exist (counted as `files_filtered_exact`);
+  - an uncovered file admits all its survivors (exact).
+  A WHERE that could not be pushed into the scan (a Filter left above it), or one that
+  does not lower to c-native bytecode, is refused. The main scan does not arm its worker
+  prefilter on this path (row masks and the prefilter's survivor gather do not compose);
+  the relocated filter still runs natively after it.
+- **Not yet:** real GCS.
 
 | Step | Work | Gate |
 |---|---|---|

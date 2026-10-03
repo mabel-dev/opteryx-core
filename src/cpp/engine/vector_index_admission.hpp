@@ -1,4 +1,4 @@
-// vector_index_admission.hpp — the approximate scan's row admission
+// vector_index_admission.hpp — the vector search scan's row admission
 // (docs/VECTOR_INDEX_DESIGN.md §8, D2; D-4 `APPROX_COSINE_DISTANCE`, D-9 `nprobe`).
 //
 // `ORDER BY APPROX_COSINE_DISTANCE(col, 'query') LIMIT k` runs as an ordinary plan — the
@@ -7,9 +7,11 @@
 // start (RowAdmission::prepare runs in the scan's make_global), natively:
 //
 //   indexed file    the file's index is searched (vector_index_search.hpp): the query is
-//                   embedded once, the `nprobe` nearest clusters are probed, and the
-//                   file's top-k rows (deleted rows excluded) are admitted — k rows of the
-//                   file, decoded through the pipeline's row masks.
+//                   embedded once and scored against the STORED vectors — every one by
+//                   default (exact, ruled 2026-10-03), or only the `nprobe` nearest
+//                   clusters' when the caller set `nprobe` (approximate, no distance
+//                   bound). The file's top-k rows (deleted rows excluded) are admitted —
+//                   k rows of the file, decoded through the pipeline's row masks.
 //   uncovered file  a file the index does not cover yet (an async index behind, a file
 //                   with no indexable row) is searched EXACTLY (ruled 2026-10-03): every
 //                   row that is not deleted is admitted, and the distance is computed for
@@ -18,15 +20,15 @@
 // A WHERE (pushed into the scan) is applied BEFORE the search, never after it (§8, "no
 // overfetch loop"): pass 1 decodes the predicate columns of every scanned row group and
 // evaluates the predicate natively (the latmat pass-1 C ABI), and only its survivors are
-// admitted — an indexed file's search scores only them (TopK's admitted mask), an
-// uncovered file admits them all. When an indexed file's probe finds fewer than k
-// survivors while the file has more, that file's survivors are admitted EXACTLY instead
-// — a selective filter whose rows lie outside the probed clusters cannot cost the
-// answer rows that exist (this replaces the design's measured threshold τ with a rule).
+// admitted — an indexed file's search scores EVERY survivor from its stored vector
+// (TopK's admitted mask over all row groups; `nprobe` is not applied: picking clusters
+// by proximity and rows by predicate would keep only rows that pass both, ruled
+// 2026-10-03), an uncovered file admits them all.
 //
-// The union of the per-file top-k sets holds the global approximate top-k at the same
-// per-file recall (§8); the Top-N sink orders it by the exact distance. Deleted rows are
-// excluded here for every file, so this scan needs no delete vector of its own.
+// The union of the per-file top-k sets holds the global top-k (exact by default; at the
+// probe's recall when `nprobe` is set); the Top-N sink orders it by the exact distance.
+// Deleted rows are excluded here for every file, so this scan needs no delete vector of
+// its own.
 
 #pragma once
 
@@ -67,7 +69,6 @@ struct AdmissionPredicate {
 struct AdmissionCounts {
     uint32_t files_indexed = 0;
     uint32_t files_exact = 0;        // uncovered files, searched exactly
-    uint32_t files_filtered_exact = 0;  // indexed files whose filtered probe fell short
     uint64_t clusters_probed = 0;
     uint64_t row_groups_read = 0;    // vectors-file row groups fetched
     uint64_t candidates = 0;         // rows admitted from indexed files
@@ -94,6 +95,8 @@ class VectorIndexAdmission final : public RowAdmission {
         }
         std::vector<uint16_t> q;
         bool searchable = false;
+        // A filter's survivors are all scored: the probe applies to an unfiltered search only.
+        const uint32_t nprobe = filtered_ ? 0u : nprobe_;
         if (!embed_query(embed_, dims_, query_->columns[0].view, &q, &searchable, err)) return false;
         // Pass 1: {fetch path: ordinal-indexed survivor bitmap}. A row group pruning
         // dropped (or the dictionary skip proved empty) contributes no survivor.
@@ -140,36 +143,25 @@ class VectorIndexAdmission final : public RowAdmission {
                 for (uint8_t b : bits) survivors_n += static_cast<uint64_t>(__builtin_popcount(b));
                 admitted = &bits;
             }
-            auto admit_all_survivors = [&]() {
-                fm.kind.assign(groups.size(), kNone);
-                for (uint64_t ordinal = 0; ordinal < f.rows; ++ordinal)
-                    if ((*admitted)[ordinal >> 3] >> (ordinal & 7u) & 1u) set_row(ordinal);
-            };
             if (f.indexed) {
                 ++counts_.files_indexed;
                 fm.kind.assign(groups.size(), kNone);
                 if (!searchable || survivors_n == 0) continue;
                 std::vector<draken::ann::AnnHit> hits;
                 IndexSearchStats stats;
-                if (!search_index_file(f.index, q.data(), dims_, k_, nprobe_, f.rows, f.deleted,
+                if (!search_index_file(f.index, q.data(), dims_, k_, nprobe, f.rows, f.deleted,
                                        admitted == nullptr ? nullptr : admitted->data(), &hits, &stats, err))
                     return false;
                 counts_.clusters_probed += stats.probed;
                 counts_.row_groups_read += stats.row_groups_read;
-                if (filtered_ && hits.size() < k_ && survivors_n > hits.size()) {
-                    // The probe fell short of k though the file holds more survivors:
-                    // search this file's survivors exactly.
-                    ++counts_.files_filtered_exact;
-                    counts_.rows_exact += survivors_n;
-                    admit_all_survivors();
-                    continue;
-                }
                 counts_.candidates += hits.size();
                 for (const auto& h : hits) set_row(h.ordinal);
             } else if (filtered_) {
                 ++counts_.files_exact;
                 counts_.rows_exact += survivors_n;
-                admit_all_survivors();
+                fm.kind.assign(groups.size(), kNone);
+                for (uint64_t ordinal = 0; ordinal < f.rows; ++ordinal)
+                    if ((*admitted)[ordinal >> 3] >> (ordinal & 7u) & 1u) set_row(ordinal);
             } else {
                 ++counts_.files_exact;
                 counts_.rows_exact += f.rows - f.deleted.size();

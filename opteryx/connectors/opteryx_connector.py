@@ -3848,7 +3848,6 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                     author=author,
                     build=options.get("build"),
                     clusters=options.get("clusters", 0),
-                    nprobe=options.get("nprobe", 32),
                 )
             except VectorIndexAlreadyExists as exc:
                 if if_not_exists:

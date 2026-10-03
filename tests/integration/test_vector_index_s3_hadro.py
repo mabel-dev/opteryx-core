@@ -93,7 +93,7 @@ def test_the_search_reads_its_index_through_presigned_urls(s3, built):
         return search_vector_index_file(vectors, _size(local, "v.skene"), centroids, _size(local, "c.skene"),
                                         QUERY, fn, dims, 10, nprobe, ROWS)
 
-    for nprobe in (2, info["clusters"]):
+    for nprobe in (0, 2, info["clusters"]):              # 0 = exact (the default)
         remote = search(_signed("v.skene"), _signed("c.skene"), nprobe)
         assert remote == search(str(local / "v.skene"), str(local / "c.skene"), nprobe)
         assert remote[0]                                           # it found something

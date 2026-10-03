@@ -78,9 +78,12 @@ def _create(build="sync"):
     _rows(f"CREATE INDEX body_idx ON {TABLE} USING IVF (body) WITH (build = '{build}')")
 
 
-def test_probing_every_cluster_is_the_exact_answer(env):
+def test_the_default_search_is_exact(env):
+    """No `SET nprobe`: every stored vector is scored, so the answer is the exact one."""
     _create()
-    assert _approx(10, nprobe=100000) == _exact(10)
+    assert _approx(10) == _exact(10)
+    assert _approx(10, nprobe=0) == _exact(10)
+    assert _approx(10, nprobe=100000) == _exact(10)       # probing every cluster, likewise
 
 
 def test_every_distance_is_exact_whatever_is_probed(env):
@@ -114,7 +117,7 @@ def test_deleted_rows_are_never_returned(env):
 
     seed = sorted(e["file_path"] for e in _entries(env.dataset))[best_id // ROWS]
     env.dataset.delete_rows({seed: [best_id % ROWS]}, author="tester")
-    found = _approx(10, nprobe=100000)
+    found = _approx(10)
     assert best_id not in {i for i, _ in found}
     assert found == _exact(10)
 
@@ -123,7 +126,7 @@ def test_deleted_rows_are_never_returned(env):
 def test_rows_with_no_embedding_are_never_returned(env, build):
     _create(build=build)
     total = len(_rows(f"SELECT id FROM {TABLE} WHERE body IS NOT NULL"))
-    found = _approx(899, nprobe=100000)                       # 900 rows, some NULL text
+    found = _approx(899)                                      # 900 rows, some NULL text
     assert total < 899 and len(found) == total                # fewer than LIMIT: no padding
     assert all(d is not None for _, d in found)
 
@@ -132,15 +135,16 @@ def test_rows_with_no_embedding_are_never_returned(env, build):
 def test_a_where_is_applied_before_the_search(env, build):
     _create(build=build)
     where = "id >= 150 AND id < 750"
-    assert _approx(10, nprobe=100000, extra=f"WHERE {where}") == _exact_where(10, where)
+    assert _approx(10, extra=f"WHERE {where}") == _exact_where(10, where)
 
 
-def test_a_selective_where_still_finds_every_qualifying_row(env):
-    """Five qualifying rows, scattered: the probe cannot be relied on to reach them, so
-    a file whose probe falls short of k is searched exactly over its survivors."""
+def test_a_where_scores_every_survivor_even_with_nprobe_set(env):
+    """Five qualifying rows, scattered across clusters: a probe picks clusters by
+    proximity and could miss them, so under a WHERE `nprobe` is not applied - every
+    survivor is scored from its stored vector."""
     _create()
     where = "id IN (3, 170, 333, 512, 871)"
-    found = _approx(10, extra=f"WHERE {where}")                # the DEFAULT nprobe
+    found = _approx(10, nprobe=1, extra=f"WHERE {where}")
     assert found == _exact_where(10, where)
     assert len(found) == len(_rows(f"SELECT id FROM {TABLE} WHERE {where} AND body IS NOT NULL"))
 

@@ -1604,7 +1604,7 @@ def _bind_snapshot_ddl(self, node: PlanStep, context: BindingContext, statement:
     return node, context
 
 
-_INDEX_OPTIONS = {"build", "clusters", "nprobe"}
+_INDEX_OPTIONS = {"build", "clusters"}
 
 
 def visit_vector_index_ddl(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
@@ -1651,9 +1651,8 @@ def visit_vector_index_ddl(self, node: PlanStep, context: BindingContext) -> Tup
         if type(build) is not str or build.lower() not in ("sync", "async"):
             raise UnsupportedSyntaxError("Index option `build` is 'sync' or 'async'.")
         options["build"] = build.lower()
-        for key, minimum in (("clusters", 0), ("nprobe", 1)):
-            if key in options and (type(options[key]) is not int or options[key] < minimum):
-                raise UnsupportedSyntaxError(f"Index option `{key}` is a whole number >= {minimum}.")
+        if "clusters" in options and (type(options["clusters"]) is not int or options["clusters"] < 0):
+            raise UnsupportedSyntaxError("Index option `clusters` is a whole number >= 0.")
         node.index_options = options
 
         schema = node.connector.relation_schema(node.relation_name)

@@ -15,9 +15,10 @@ of a query over ONE scan, with a LIMIT, on a text column that has a vector index
 the scan is stamped (`scan.vector_search`) and the compiler gives it a row admission
 (src/cpp/engine/vector_index_admission.hpp) that decodes only the index's candidates —
 plus every row of the files the index does not cover yet, searched exactly (ruled
-2026-10-03). The rest of the plan is untouched: the projection computes each candidate's
-EXACT distance and the Top-N sink orders them, so the value a reader sees is always the
-COSINE_DISTANCE kernel's.
+2026-10-03). The index search itself is exact unless the session sets `nprobe`. The
+rest of the plan is untouched: the projection computes each candidate's EXACT distance
+and the Top-N sink orders them, so the value a reader sees is always the COSINE_DISTANCE
+kernel's.
 
 Everything else is REFUSED, never quietly run exactly: the function anywhere but that
 ORDER BY key (or the same call repeated in the SELECT list), more than one key, no LIMIT,
@@ -181,7 +182,6 @@ class VectorSearchStrategy(OptimizationStrategy):
             "column": definition["column"],
             "query": query.value.decode("utf-8"),
             "k": int(sort.limit),
-            "nprobe": int(definition["nprobe"]),
             "dimensions": int(definition["dimensions"]),
         }
         plan[scan_nid] = scan

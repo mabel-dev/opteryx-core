@@ -103,6 +103,15 @@ def test_probing_every_cluster_is_exact_search(index):
         assert got == pytest.approx(want, abs=2e-3)       # fp16 storage
 
 
+def test_nprobe_zero_is_exact_and_never_reads_the_centroids(index):
+    hits, stats = _search(index, 25, 0, centroids="/nonexistent/centroids.skene")
+    assert stats["probed"] == 0
+    assert stats["row_groups_read"] == index["info"]["vectors_row_groups"]
+    assert stats["rows_scored"] == len(index["stored"])
+    assert hits == _search(index, 25, index["info"]["clusters"])[0]
+    assert [o for o, _ in hits] == [o for _, o in _exact(index, 25)]
+
+
 def test_a_narrow_probe_reads_only_its_clusters(index):
     hits, stats = _search(index, 10, 2)
     assert stats["probed"] == 2

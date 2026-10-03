@@ -4,10 +4,14 @@
 // The index is IVF-flat in two skene files (§5.2): the centroids file (K rows: the centroid,
 // its row count, the vectors-file row groups holding its rows) and the vectors file (row
 // groups of one cluster's rows each: the fp16 embedding and the row's PHYSICAL ordinal in
-// the data file). A search reads the whole centroids file — K x (2 dims + ...) bytes, small
-// — picks the `nprobe` nearest non-empty clusters, and reads ONLY their row groups of the
-// vectors file, through SkeneRangedFile: a local file by pread, a remote one by range GETs
-// on a signed URL. Nothing else of either file is fetched.
+// the data file). The DEFAULT search is EXACT (ruled 2026-10-03): every row group of the
+// vectors file is scored and the centroids file is never read. Only when the caller sets
+// `nprobe` >= 1 is it approximate: the whole centroids file — K x (2 dims + ...) bytes,
+// small — is read, the `nprobe` nearest non-empty clusters picked, and ONLY their row
+// groups of the vectors file read. Picking clusters by their centres is a guess with no
+// distance bound: a row in an unprobed cluster can be nearer than every row scored.
+// Files are read through SkeneRangedFile: a local file by pread, a remote one by range
+// GETs on a signed URL.
 //
 // Rows are scored with draken's TopK::offer — the same cosine distance the SQL kernel
 // returns, so the distance a caller sees needs no re-rank — with deleted ordinals excluded
@@ -35,8 +39,8 @@ struct IndexFileRef {
 };
 
 struct IndexSearchStats {
-    uint32_t clusters = 0;          // in the file's index
-    uint32_t probed = 0;            // clusters probed
+    uint32_t clusters = 0;          // in the file's index (0 when exact: centroids not read)
+    uint32_t probed = 0;            // clusters probed (0 when exact)
     uint32_t row_groups_read = 0;   // vectors-file row groups fetched
     uint64_t rows_scored = 0;       // rows those row groups held
 };
@@ -87,21 +91,12 @@ inline bool embed_query(EmbedFn embed, uint32_t dims, const DrakenVector& text,
     return true;
 }
 
-// The top-k rows of one indexed data file nearest `query` (fp16, `dims` wide).
-// `deleted`: ascending physical ordinals to exclude. `admitted` (nullable): a bitmap by
-// ordinal of the rows a filter kept, `data_rows` bits long. Returns false with `err` on any
-// failure — an index file that does not match its definition fails loud, never skips.
-inline bool search_index_file(const IndexFileRef& file, const uint16_t* query, uint32_t dims,
-                              uint32_t k, uint32_t nprobe, uint64_t data_rows,
-                              const std::vector<uint32_t>& deleted, const uint8_t* admitted,
-                              std::vector<draken::ann::AnnHit>* out, IndexSearchStats* stats,
-                              std::string* err) {
+// Approximate search only: read the whole centroids file and name the vectors-file row
+// groups of the `nprobe` clusters whose centres are nearest `query`, ascending.
+inline bool probe_row_groups(const IndexFileRef& file, const uint16_t* query, uint32_t dims,
+                             uint32_t nprobe, std::vector<uint32_t>* wanted, IndexSearchStats* stats,
+                             std::string* err) {
     using namespace search_detail;
-    out->clear();
-    if (dims == 0u || nprobe == 0u) { *err = "vector index search: dims and nprobe must be >= 1"; return false; }
-    if (k == 0u || !draken::ann::ann_row_searchable(query, dims)) return true;
-
-    // ── The centroids file, whole ──
     SkeneRangedFile centroids;
     if (!centroids.open(file.centroids, file.centroids_bytes, {"centroid", "rows", "row_groups"}, err)) return false;
     std::vector<uint16_t> cents;
@@ -139,13 +134,39 @@ inline bool search_index_file(const IndexFileRef& file, const uint16_t* query, u
     const uint32_t K = static_cast<uint32_t>(counts.size());
     stats->clusters = K;
 
-    // ── Probe, then only the probed clusters' row groups of the vectors file ──
+    // ── Probe: only the probed clusters' row groups of the vectors file ──
     const std::vector<uint32_t> probe =
         draken::ann::ivf_probe(cents.data(), K, dims, counts.data(), query, nprobe);
     stats->probed = static_cast<uint32_t>(probe.size());
+    for (uint32_t c : probe) wanted->insert(wanted->end(), groups[c].begin(), groups[c].end());
+    std::sort(wanted->begin(), wanted->end());
+    return true;
+}
+
+// The top-k rows of one indexed data file nearest `query` (fp16, `dims` wide). `nprobe`
+// 0 = exact (every row group); >= 1 = approximate, the `nprobe` nearest clusters only.
+// `deleted`: ascending physical ordinals to exclude. `admitted` (nullable): a bitmap by
+// ordinal of the rows a filter kept, `data_rows` bits long. Returns false with `err` on any
+// failure — an index file that does not match its definition fails loud, never skips.
+inline bool search_index_file(const IndexFileRef& file, const uint16_t* query, uint32_t dims,
+                              uint32_t k, uint32_t nprobe, uint64_t data_rows,
+                              const std::vector<uint32_t>& deleted, const uint8_t* admitted,
+                              std::vector<draken::ann::AnnHit>* out, IndexSearchStats* stats,
+                              std::string* err) {
+    using namespace search_detail;
+    out->clear();
+    if (dims == 0u) { *err = "vector index search: dims must be >= 1"; return false; }
+    if (k == 0u || !draken::ann::ann_row_searchable(query, dims)) return true;
+
+    SkeneRangedFile vectors;
+    if (!vectors.open(file.vectors, file.vectors_bytes, {"embedding", "ordinal"}, err)) return false;
     std::vector<uint32_t> wanted;
-    for (uint32_t c : probe) wanted.insert(wanted.end(), groups[c].begin(), groups[c].end());
-    std::sort(wanted.begin(), wanted.end());
+    if (nprobe == 0u) {
+        wanted.resize(vectors.row_groups());
+        for (uint32_t g = 0; g < vectors.row_groups(); ++g) wanted[g] = g;
+    } else if (!probe_row_groups(file, query, dims, nprobe, &wanted, stats, err)) {
+        return false;
+    }
     if (wanted.empty()) return true;
 
     std::vector<uint8_t> excluded;
@@ -157,8 +178,6 @@ inline bool search_index_file(const IndexFileRef& file, const uint16_t* query, u
         }
     }
 
-    SkeneRangedFile vectors;
-    if (!vectors.open(file.vectors, file.vectors_bytes, {"embedding", "ordinal"}, err)) return false;
     draken::ann::TopK top(k);
     for (uint32_t g : wanted) {
         if (g >= vectors.row_groups()) {

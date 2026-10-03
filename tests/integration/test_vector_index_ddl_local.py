@@ -146,10 +146,10 @@ def catalog_env(tmp_path):
             return None, None
 
         def create_vector_index(self, identifier, name, column, *, embedding_identity, dimensions,
-                                author, build=None, clusters=0, nprobe=32):
+                                author, build=None, clusters=0):
             record = new_index_definition(
                 name=name, column=column, method="ivf", metric="cosine", build=build,
-                clusters=clusters, nprobe=nprobe, embedding_identity=embedding_identity,
+                clusters=clusters, embedding_identity=embedding_identity,
                 dimensions=dimensions, author=author, created_at_ms=1,
             )
             if (identifier, record["name"]) in indexes:
@@ -255,9 +255,10 @@ def test_create_alter_drop(index_env):
 
 
 def test_create_with_options(index_env):
-    _run(f"CREATE INDEX b ON {TABLE} USING IVF (BODY) WITH (build = 'SYNC', clusters = 64, nprobe = 8)")
+    _run(f"CREATE INDEX b ON {TABLE} USING IVF (BODY) WITH (build = 'SYNC', clusters = 64)")
     (record,) = index_env.values()
-    assert (record["build"], record["clusters"], record["nprobe"], record["column"]) == ("sync", 64, 8, "body")
+    assert (record["build"], record["clusters"], record["column"]) == ("sync", 64, "body")
+    assert "nprobe" not in record                         # a session setting only (2026-10-03)
 
 
 @pytest.mark.parametrize(
@@ -267,7 +268,7 @@ def test_create_with_options(index_env):
         (f"CREATE INDEX i ON {TABLE} USING IVF (id)", "embeds text"),
         (f"CREATE INDEX i ON {TABLE} USING IVF (body) WITH (speed = 1)", "Unknown index option"),
         (f"CREATE INDEX i ON {TABLE} USING IVF (body) WITH (build = 'later')", "'sync' or 'async'"),
-        (f"CREATE INDEX i ON {TABLE} USING IVF (body) WITH (nprobe = 0)", "nprobe"),
+        (f"CREATE INDEX i ON {TABLE} USING IVF (body) WITH (nprobe = 8)", "Unknown index option"),
         (f"CREATE INDEX i ON {TABLE} USING BTREE (body)", "IVF"),
         (f"CREATE INDEX i ON {TABLE} (body)", "IVF"),
         (f"CREATE UNIQUE INDEX i ON {TABLE} USING IVF (body)", "UNIQUE"),
