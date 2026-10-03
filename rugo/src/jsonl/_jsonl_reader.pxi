@@ -94,12 +94,6 @@ cdef extern from "core/markers.hpp" namespace "rugo::_jsonl":
         uint8_t type
 
 
-cdef extern from "core/markers.hpp" namespace "rugo::_jsonl":
-    struct MarkerPosition:
-        uint32_t position
-        uint8_t marker_type
-
-
 cdef extern from "core/interpreter.hpp" namespace "rugo::_jsonl":
     # Flat-arena document map. Opaque to Cython: spans/offsets stay in C++; the only
     # introspection the edge needs (the sampled records' keys for column-name discovery)
@@ -145,14 +139,6 @@ cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
 
     # except + : evaluate_predicate throws std::invalid_argument (-> ValueError) on a
     # value whose JSON kind cannot be compared with the predicate literal's kind.
-    InterpreterResult interpret_jsonl(
-        const uint8_t* buffer_data,
-        size_t buffer_length,
-        const vector[MarkerPosition]& markers,
-        const ParseContext& context,
-        OrdinalPredictor& predictor
-    ) except + nogil
-
     InterpreterResult interpret_jsonl_threaded(
         const uint8_t* buffer_data,
         size_t buffer_length,
@@ -162,13 +148,6 @@ cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
         bint use_prefilter
     ) except + nogil
 
-
-
-cdef extern from "core/structural_scan.hpp" namespace "rugo::_jsonl":
-    vector[MarkerPosition] scan_structural_markers(
-        const uint8_t* buffer,
-        size_t length
-    ) nogil
 
 
 
@@ -207,6 +186,10 @@ cdef extern from "core/column_builder.hpp" namespace "rugo::_jsonl":
         bint may_have_escapes,
         const ParseContext& context
     ) except + nogil
+
+
+# The Python edge: kept out of core/ so the JSONL core compiles without Python.h.
+cdef extern from "jsonl/_jsonl_column_wrap.hpp" namespace "rugo::_jsonl":
     object wrap_column(ParsedColumn& pc)
 
 
@@ -571,61 +554,6 @@ def read_jsonl(
         if owns_mmap:
             with nogil:
                 unmap_memory_c(mapped_ptr, mapped_len)
-
-
-def benchmark_document_map(
-    data: bytes,
-):
-    """
-    Benchmark ONLY document map creation: structural scan + interpretation.
-    No predicates, no projection, no vector construction.
-
-    Returns:
-      dict with:
-        'num_records': int
-        'scan_ms': float (structural scan time)
-        'interpret_ms': float (document map building time)
-        'total_ms': float
-        'buffer_size_mb': float
-        'sample_map': first record as list of FieldSpans
-    """
-    import time
-
-    cdef:
-        const uint8_t* buf_data = <const uint8_t*><bytes>data
-        size_t buf_len = len(data)
-        size_t num_records = 0
-        ParseContext context
-        OrdinalPredictor predictor
-        vector[MarkerPosition] markers
-        InterpreterResult interp_result
-
-    # Step 1: Structural scan
-    scan_start = time.perf_counter()
-    with nogil:
-        markers = scan_structural_markers(buf_data, buf_len)
-    scan_ms = (time.perf_counter() - scan_start) * 1000
-
-    # Step 2: Document map interpretation
-    interp_start = time.perf_counter()
-    with nogil:
-        interp_result = interpret_jsonl(buf_data, buf_len, markers, context, predictor)
-    interp_ms = (time.perf_counter() - interp_start) * 1000
-
-    # The sampled records' keys (column names) for inspection.
-    sample_keys = [
-        k.decode('utf-8')
-        for k in sample_record_keys(interp_result.all_records, buf_data, context.infer_sample_size)
-    ]
-
-    return {
-        'num_records': interp_result.num_records_passed,
-        'scan_ms': scan_ms,
-        'interpret_ms': interp_ms,
-        'total_ms': scan_ms + interp_ms,
-        'buffer_size_mb': len(data) / 1024 / 1024,
-        'sample_keys': sample_keys,
-    }
 
 
 # Op codes shared with core/parse_context.hpp's Predicate::op.

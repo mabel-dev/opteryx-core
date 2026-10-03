@@ -141,7 +141,10 @@ EXPRESSION_DEFINITIONS: dict[str, dict[str, Any]] = {
             "A literal operand is converted at plan time. Parameterised targets take "
             "their parameters through the cast's parameter channel: "
             "`CAST(x AS ARRAY<VARCHAR>)`, "
-            "`CAST(x AS DECIMAL(p, s))`."
+            "`CAST(x AS DECIMAL(p, s))`. `FORMAT` takes a SQL-style pattern "
+            "(`YYYY-MM-DD`, `HH24:MI`) for parsing a string to DATE or TIMESTAMP and "
+            "for rendering DATE, TIMESTAMP or INTERVAL to VARCHAR; it is only "
+            "accepted inside `CAST()`, not with `::`."
         ),
         "status": "active",
         "summary": "Type conversion.",
@@ -149,6 +152,7 @@ EXPRESSION_DEFINITIONS: dict[str, dict[str, Any]] = {
             "CAST(expr AS type)",
             "TRY_CAST(expr AS type)",
             "SAFE_CAST(expr AS type)",
+            "CAST(expr AS type FORMAT 'pattern')",
             "expr::type",
         ],
     },

@@ -3600,13 +3600,18 @@ def create_node_relation(relation: dict, *, plan_context):
                     function="VALUES"
                 )
                 values_step.alias = subquery["alias"]["name"]["value"]
-                values_step.column_aliases = tuple(
-                    col["name"]["value"] for col in subquery["alias"]["columns"]
-                )
                 values_step.values = [
                     tuple(logical_planner_builders.build(value, plan_context=plan_context) for value in row["content"])
                     for row in subquery["subquery"]["body"]["Values"]["rows"]
                 ]
+                # Either every column is named or none is. With no column list the
+                # columns are `column_1` .. `column_n`, n from the first row; the
+                # binder holds every row, and a column list, to that width.
+                values_step.column_aliases = tuple(
+                    col["name"]["value"] for col in subquery["alias"]["columns"]
+                ) or tuple(
+                    f"column_{i}" for i in range(1, len(values_step.values[0]) + 1)
+                )
                 step_id = sub_plan.add_node(values_step)
                 root_node = step_id
         else:  # pragma: no cover
@@ -6428,7 +6433,35 @@ def plan_optimize_table(statement, *, plan_context, **kwargs):
         }
     }
 
-    query = _select_over([{"Wildcard": {}}], table_factor, None, None)
+    target = _writable_target(relation_name, "OPTIMIZE", kwargs.get("telemetry"))
+
+    # A relation with a vector index compacts with ROW ORIGINS: compaction never embeds
+    # (D-14), so an indexed output's index is carried from its inputs' vectors, and that
+    # needs every written row's input file and ordinal (§5.6). Asked for here, in SQL, so
+    # the binder binds the row identity the way it binds MERGE's - never an optimizer
+    # adding columns to a bound scan. Whether a given pass carries is the sink's to learn
+    # from the files it retires; a relation with no index pays nothing.
+    row_origins = target.supports_vector_indexes and bool(target.list_vector_indexes(relation_name))
+    projection = [{"Wildcard": {}}]
+    if row_origins:
+        from opteryx.constants.row_identity import COMPACTION_ORIGIN_FILE
+        from opteryx.constants.row_identity import COMPACTION_ORIGIN_ORDINAL
+        from opteryx.constants.row_identity import ROW_IDENTITY_FILE
+        from opteryx.constants.row_identity import ROW_IDENTITY_ORDINAL
+        from opteryx.planner.logical_planner.merge_desugar import _aliased
+        from opteryx.planner.logical_planner.merge_desugar import _identifier
+
+        # Every column by name (a wildcard cannot sit beside other columns), then the
+        # origins. Still every column: compaction rewrites whole rows.
+        projection = [
+            _aliased(_identifier(column), column)
+            for column in target.relation_column_names(relation_name)
+        ]
+        projection += [
+            _aliased(_identifier(ROW_IDENTITY_FILE), COMPACTION_ORIGIN_FILE),
+            _aliased(_identifier(ROW_IDENTITY_ORDINAL), COMPACTION_ORIGIN_ORDINAL),
+        ]
+    query = _select_over(projection, table_factor, None, None)
 
     # ORDER BY the relation's clustering columns, when it has any. Emitted here,
     # in SQL, so the binder resolves it exactly as it resolves any other ORDER BY
@@ -6440,9 +6473,7 @@ def plan_optimize_table(statement, *, plan_context, **kwargs):
     # that is not known until the optimizer has read the manifest. Removing a
     # node is safe and routine; adding a correctly-bound one is not.
     # CompactionPlanningStrategy drops it for a brute plan, which never sorts.
-    _sort_columns = _writable_target(
-        relation_name, "OPTIMIZE", kwargs.get("telemetry")
-    ).cluster_by_columns(relation_name)
+    _sort_columns = target.cluster_by_columns(relation_name)
     if _sort_columns:
         query["Query"]["order_by"] = {
             "kind": {
@@ -6459,9 +6490,17 @@ def plan_optimize_table(statement, *, plan_context, **kwargs):
         }
 
     plan = plan_query(query, plan_context=plan_context)
+    if row_origins:
+        from opteryx.planner.logical_planner.merge_desugar import _stamp_target_scan
+        from opteryx.planner.logical_planner.merge_desugar import _target_alias
+
+        _stamp_target_scan(
+            plan, relation_name, _target_alias(table_factor, relation_name), "OPTIMIZE TABLE"
+        )
 
     sink = CompactionCommitStep()
     sink.relation_name = relation_name
+    sink.row_origins = row_origins
     return _attach_sink(plan, sink)
 
 
@@ -7547,6 +7586,19 @@ def plan_alter_index_build(statement, *, plan_context, **kwargs) -> LogicalPlan:
     return plan
 
 
+def plan_refresh_index(statement, *, plan_context, **kwargs) -> LogicalPlan:
+    """REFRESH INDEX <name> ON <relation> - aside parser. Indexes every live data file the
+    index does not cover yet (D-16)."""
+    root = statement["RefreshIndex"]
+    node = VectorIndexDdlStep()
+    node.operation = "refresh"
+    node.index_name = root["name"]["value"]
+    node.relation_name = _aside_object_name(root["relation"])
+    plan = LogicalPlan(plan_context)
+    plan.add_node(node)
+    return plan
+
+
 def plan_alter_index(statement, *, plan_context, **kwargs) -> LogicalPlan:
     """sqlparser's own ALTER INDEX is RENAME, which a vector index does not support."""
     raise UnsupportedSyntaxError(
@@ -7621,10 +7673,12 @@ QUERY_BUILDERS = {
     "RevokeAccess": plan_revoke_access,
     "ShowGrantsOn": plan_show_grants_on,
     "ShowEffectiveGrantsOn": plan_show_effective_grants_on,
-    # vector index DDL; ALTER INDEX ... SET is the aside parser's, RENAME is sqlparser's
+    # vector index DDL; ALTER INDEX ... SET and REFRESH INDEX are the aside parser's,
+    # RENAME is sqlparser's
     "CreateIndex": plan_create_index,
     "AlterIndexBuild": plan_alter_index_build,
     "AlterIndex": plan_alter_index,
+    "RefreshIndex": plan_refresh_index,
     # LOAD SAMPLE — synthesized pre-parse; the parser has no LOAD statement.
 }
 

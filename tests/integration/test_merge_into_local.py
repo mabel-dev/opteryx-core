@@ -207,6 +207,10 @@ def merge_env(tmp_path):
                 raise KeyError(identifier)
             return datasets[identifier]
 
+        # No vector index here: writes build no sync index files.
+        def list_vector_indexes(self, identifier):
+            return []
+
         def get_relation(self, identifier):
             if identifier in datasets:
                 return "dataset", datasets[identifier]
@@ -662,6 +666,10 @@ def test_a_null_join_key_lands_in_the_right_population(tmp_path):
     datasets = {"col.tgt": target, "col.src": source}
 
     class _FakeCatalog:
+        # No vector index here: writes build no sync index files.
+        def list_vector_indexes(self, identifier):
+            return []
+
         def __init__(self, workspace=None, **kwargs):
             self.workspace = workspace
             self.io = disk_io
@@ -737,6 +745,10 @@ def test_merge_scales_past_the_removed_row_cap(tmp_path):
     datasets = {"col.tgt": target, "col.src": source}
 
     class _FakeCatalog:
+        # No vector index here: writes build no sync index files.
+        def list_vector_indexes(self, identifier):
+            return []
+
         def __init__(self, workspace=None, **kwargs):
             self.workspace = workspace
             self.io = disk_io
@@ -861,6 +873,10 @@ def test_composite_on_key(tmp_path):
     datasets = {"col.tgt": target, "col.src": source}
 
     class _FakeCatalog:
+        # No vector index here: writes build no sync index files.
+        def list_vector_indexes(self, identifier):
+            return []
+
         def __init__(self, workspace=None, **kwargs):
             self.workspace = workspace
             self.io = disk_io

@@ -175,6 +175,7 @@ def optimize_env(tmp_path):
     disk_io = _LocalDiskIO()
     target = _build_dataset(str(tmp_path / "tgt"), "col.tgt", disk_io)
     datasets = {"col.tgt": target}
+    leases: dict = {}
 
     class _FakeCatalog:
         def __init__(self, workspace=None, **kwargs):
@@ -193,6 +194,28 @@ def optimize_env(tmp_path):
             if identifier in datasets:
                 return "dataset", datasets[identifier]
             return None, None
+
+        # The table has no vector index, so OPTIMIZE plans without row origins.
+        def list_vector_indexes(self, identifier):
+            return []
+
+        # Every compaction holds the maintenance lease (§5.7); its rules are the
+        # catalog's own, tested there. One claim per dataset here.
+        def claim_maintenance_lease(self, identifier, *, holder, operation, ttl_seconds):
+            from opteryx_catalog.catalog.maintenance_lease import MaintenanceLease
+
+            assert identifier not in leases, f"{identifier} already leased"
+            leases[identifier] = MaintenanceLease(
+                dataset=identifier, claim_id="c", holder=holder, operation=operation,
+                claimed_at_ms=1, expires_at_ms=1 + ttl_seconds * 1000,
+            )
+            return leases[identifier]
+
+        def renew_maintenance_lease(self, lease, *, ttl_seconds):
+            return lease
+
+        def release_maintenance_lease(self, lease):
+            return leases.pop(lease.dataset, None) is lease
 
     saved_default = connectors._default_connector
     saved_prefixes = dict(connectors._storage_prefixes)

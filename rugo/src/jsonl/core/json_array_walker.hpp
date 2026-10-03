@@ -8,7 +8,7 @@
 // Strict JSON array walker for the JSONL ingest path.
 //
 // The bulk read path (interpreter.cpp / structural_scan.hpp) bounds a container value
-// but never looks inside it: scan_container_markers only balances brackets, so the text
+// but never looks inside it: bound_container only balances brackets, so the text
 // reaching here is `[` .. matching `]` and nothing more is known about it. This walker
 // is the value decoder for that span — it validates the array and reports one element at
 // a time, so an array column can be materialised without a general JSON library.

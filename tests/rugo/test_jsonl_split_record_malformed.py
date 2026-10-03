@@ -18,7 +18,7 @@ moved with chunk size — Q1 counted 10,000,024 rows from 10,000,000 lines at 8M
 The contract asserted here: a line that is not exactly one object is malformed — dropped
 and counted with fail_on_error=False, an error with fail_on_error=True — independent of
 its position in the buffer, of how the input is chunked, of the projection, of the threaded
-range split and of the masked/unmasked scan choice. Rows never exceed lines.
+range split and of how much structure its strings hold. Rows never exceed lines.
 """
 
 import os
@@ -30,9 +30,8 @@ sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 from rugo.rugo_native import read_jsonl
 
-# Plain records: low in-string density -> the unmasked scan. Dense records: string values
-# full of in-string commas/colons push sample_instring_density over its 0.40 threshold ->
-# the masked scan. Both must give the same answer.
+# Plain records, and dense records whose string values are full of in-string commas/colons
+# that the structural index must mask out. Both must give the same answer.
 PLAIN_TEXT = b"hello world"
 DENSE_TEXT = b",:" * 40
 
@@ -76,7 +75,7 @@ def check(data, columns, expected_ns, expected_malformed):
         assert read_jsonl(data, columns=columns, fail_on_error=True)["num_rows"] == len(expected_ns)
 
 
-@pytest.mark.parametrize("text", [PLAIN_TEXT, DENSE_TEXT], ids=["unmasked", "masked"])
+@pytest.mark.parametrize("text", [PLAIN_TEXT, DENSE_TEXT], ids=["plain", "dense"])
 @pytest.mark.parametrize("columns", PROJECTIONS, ids=str)
 def test_each_half_alone_is_one_malformed_line(text, columns):
     first, second = split_halves(65536 - 40, text)
@@ -88,7 +87,7 @@ def test_each_half_alone_is_one_malformed_line(text, columns):
             read_jsonl(half, columns=columns, fail_on_error=True)
 
 
-@pytest.mark.parametrize("text", [PLAIN_TEXT, DENSE_TEXT], ids=["unmasked", "masked"])
+@pytest.mark.parametrize("text", [PLAIN_TEXT, DENSE_TEXT], ids=["plain", "dense"])
 @pytest.mark.parametrize("columns", PROJECTIONS, ids=str)
 @pytest.mark.parametrize("where", ["start", "middle", "end", "end_no_newline"])
 def test_split_record_at_any_position(text, columns, where):
@@ -113,7 +112,7 @@ def newline_chunks(data, size):
     return out
 
 
-@pytest.mark.parametrize("text", [PLAIN_TEXT, DENSE_TEXT], ids=["unmasked", "masked"])
+@pytest.mark.parametrize("text", [PLAIN_TEXT, DENSE_TEXT], ids=["plain", "dense"])
 @pytest.mark.parametrize("columns", PROJECTIONS, ids=str)
 def test_outcome_does_not_depend_on_chunking(text, columns):
     good = [good_line(n, text) for n in range(200)]
@@ -142,7 +141,7 @@ def test_outcome_does_not_depend_on_chunking(text, columns):
             assert ns == list(range(200))
 
 
-@pytest.mark.parametrize("text", [PLAIN_TEXT, DENSE_TEXT], ids=["unmasked", "masked"])
+@pytest.mark.parametrize("text", [PLAIN_TEXT, DENSE_TEXT], ids=["plain", "dense"])
 @pytest.mark.parametrize("columns", [None, ["kind"], ["n"]], ids=str)
 def test_threaded_range_split_inside_split_record(text, columns):
     """interpret_jsonl_threaded cuts ~12.6MB into newline-aligned ranges at the first
@@ -232,3 +231,17 @@ def test_line_that_is_not_one_object_is_malformed(line, columns):
 
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("columns", [None, ["n"], ["obj->>'b'"]], ids=str)
+@pytest.mark.parametrize("newline_at", range(56, 72))
+def test_line_ending_inside_string_at_any_block_offset(columns, newline_at):
+    """A line that ends inside a string (odd quote count) must not carry its string state
+    into the next line, wherever its newline falls in the structural scan's 64-byte blocks.
+    A newline as a block's last byte (offset 63) used to hand the next block an in-string
+    carry, so the following line was read with its quote parity inverted."""
+    prefix = b'{"n":0,"text":"'
+    first = prefix + b"x" * (newline_at - len(prefix)) + b"\n"
+    assert first.index(b"\n") == newline_at
+    data = first + b'{"n":1,"obj":{"b":"y"}}\n{"n":2,"obj":{"b":"z"}}\n'
+    check(data, columns, [1, 2], 1)

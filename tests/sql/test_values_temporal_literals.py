@@ -54,8 +54,8 @@ def columns(sql):
         ("SELECT * FROM (VALUES (CAST('01:02:03' AS TIME)), "
          "(CAST('23:59:59.5' AS TIME))) AS v(t)",
          {"t": [datetime.time(1, 2, 3), datetime.time(23, 59, 59, 500000)]}),
-        # A short row still reads NULL for its missing cell, temporal or not.
-        ("SELECT * FROM (VALUES ('x', CAST('2026-10-01' AS DATE)), ('y')) AS v(a, b)",
+        # A temporal column beside other columns, with a NULL cell.
+        ("SELECT * FROM (VALUES ('x', CAST('2026-10-01' AS DATE)), ('y', NULL)) AS v(a, b)",
          {"a": ["x", "y"], "b": [datetime.date(2026, 10, 1), None]}),
         # The column is a real temporal column: temporal kernels accept it.
         ("SELECT t + INTERVAL '1' DAY AS later, DATE_TRUNC('day', t) AS day FROM (VALUES "

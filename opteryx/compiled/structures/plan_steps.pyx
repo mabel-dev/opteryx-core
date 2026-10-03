@@ -2803,16 +2803,21 @@ cdef class CommentStep(PlanStep):
 
 
 cdef class CompactionCommitStep(PlanStep):
-    """The CompactionCommit logical plan step."""
+    """The CompactionCommit logical plan step.
+
+    `row_origins` is set when OPTIMIZE asked its scan for row identity (the relation has a
+    vector index): every row reaching the sink carries its input file and ordinal, which
+    the sink records natively and strips, to carry the inputs' vectors (§5.6)."""
 
     cdef object _baseline_snapshot_id
+    cdef object _row_origins
     cdef object _connector
     cdef str _relation_name
     cdef tuple _retired_files
     cdef object _sorted_by
     cdef object _source_tail_id
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, baseline_snapshot_id=None, connector=None, relation_name=None, retired_files=None, sorted_by=None, source_tail_id=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, baseline_snapshot_id=None, connector=None, relation_name=None, retired_files=None, sorted_by=None, source_tail_id=None, row_origins=None):
         self.node_type = _step_types().CompactionCommit
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.baseline_snapshot_id = baseline_snapshot_id
@@ -2821,6 +2826,17 @@ cdef class CompactionCommitStep(PlanStep):
         self.retired_files = retired_files
         self.sorted_by = sorted_by
         self.source_tail_id = source_tail_id
+        self.row_origins = row_origins
+
+    @property
+    def row_origins(self):
+        return self._row_origins
+
+    @row_origins.setter
+    def row_origins(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        _require_optional_bool("CompactionCommitStep.row_origins", value)
+        self._row_origins = value
 
     @property
     def baseline_snapshot_id(self):
@@ -2895,6 +2911,7 @@ cdef class CompactionCommitStep(PlanStep):
         out["retired_files"] = self._retired_files
         out["sorted_by"] = self._sorted_by
         out["source_tail_id"] = self._source_tail_id
+        out["row_origins"] = self._row_origins
         return out
 
     cpdef PlanStep copy(self, dict memo=None):
@@ -2913,6 +2930,7 @@ cdef class CompactionCommitStep(PlanStep):
         new._retired_files = _copy_field(self._retired_files, memo)
         new._sorted_by = _copy_field(self._sorted_by, memo)
         new._source_tail_id = _copy_field(self._source_tail_id, memo)
+        new._row_origins = _copy_field(self._row_origins, memo)
         new._sync_row()
         return new
 
@@ -2926,6 +2944,7 @@ cdef class CompactionCommitStep(PlanStep):
         new._retired_files = self._retired_files
         new._sorted_by = self._sorted_by
         new._source_tail_id = self._source_tail_id
+        new._row_origins = self._row_origins
         new._row[0] = self._row[0]
         return new
 
@@ -10600,9 +10619,10 @@ cdef class WindowStep(PlanStep):
 
 
 cdef class VectorIndexDdlStep(PlanStep):
-    """CREATE / ALTER / DROP INDEX on a relation (vector index; docs/VECTOR_INDEX_DESIGN.md).
+    """CREATE / ALTER / DROP / REFRESH INDEX on a relation (vector index;
+    docs/VECTOR_INDEX_DESIGN.md).
 
-    `operation` is "create", "alter" or "drop". `index_options` carries the WITH (...) /
+    `operation` is "create", "alter", "drop" or "refresh". `index_options` carries the WITH (...) /
     SET (...) key-values as written; the binder validates them and stamps the active
     embedding identity and width a CREATE is defined against."""
 
@@ -10966,6 +10986,7 @@ cpdef frozenset steps_with(str field):
             "right_relation_names": frozenset({T.Except, T.Intersect, T.Join, T.Union}),
             "role": frozenset({T.GrantAccess, T.RevokeAccess}),
             "row_identity_statement": frozenset({T.Scan}),
+            "row_origins": frozenset({T.CompactionCommit}),
             "schedule": frozenset({T.CreateTrigger}),
             "schema": frozenset({T.Aggregate, T.AggregateAndGroup, T.CreateRelation, T.FunctionDataset, T.MaterializedCteRef, T.Project, T.Scan, T.ShowColumns, T.ShowLineage, T.ShowManifest, T.ShowSnapshots, T.ShowSources, T.Subquery}),
             "schemas": frozenset({T.Join}),

@@ -740,7 +740,7 @@ extensions = [
         "opteryx.compiled.expression.compiled_expression",
         sources=[
             "opteryx/compiled/expression/compiled_expression.pyx",
-            "src/cpp/expression/compiled_expression.cpp",
+            "src/cpp/expression/_compiled_expression.cpp",
         ],
         include_dirs=include_dirs + ["src/cpp"],
         language="c++",
@@ -841,7 +841,7 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
     ),
     # The plan graph behind every logical and physical plan: node ids, edges and
-    # edge roles native (src/cpp/planner/plan_graph.hpp); steps are its Python
+    # edge roles native (src/cpp/planner/_plan_graph.hpp); steps are its Python
     # payload.
     Extension(
         "opteryx.compiled.planner.plan_graph",
@@ -875,7 +875,7 @@ extensions = [
             "opteryx/third_party/maki_nage/_distogram.hpp",
             "src/cpp/planner/statistics_refresh.hpp",
             "src/cpp/planner/step_row.hpp",
-            "src/cpp/planner/plan_graph.hpp",
+            "src/cpp/planner/_plan_graph.hpp",
             "src/cpp/planner/native_manifest.hpp",
             "src/cpp/planner/manifest_estimates.hpp",
         ],
@@ -1035,9 +1035,8 @@ extensions = [
         # rugo_native keeps its own copy; neither extension links the other. The one
         # value that crosses between them is the plan-time ParseContext (copied out of
         # rugo's prepare_jsonl_context capsule), built from the same parse_context.hpp.
-        # column_builder.cpp's Python-boxing wrap_column is compiled but never called
-        # here; its draken_vector_own_* references resolve from draken_native (loaded
-        # RTLD_GLOBAL), like every other draken symbol this extension uses.
+        # The core is pure C++; its Python edge (wrap_column, rugo/src/jsonl/
+        # _jsonl_column_wrap.cpp) is compiled into rugo_native only, not here.
         "rugo/src/jsonl/core/structural_scan.cpp",
         "rugo/src/jsonl/core/interpreter.cpp",
         "rugo/src/jsonl/core/value_parser.cpp",

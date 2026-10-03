@@ -191,7 +191,7 @@ def _temporal_vector(column, literals):
     make_ints, reinterpret = _TEMPORAL_FROM_PHYSICAL[column_type.physical]
     values = []
     for literal in literals:
-        if literal is None or literal.value is None:
+        if literal.value is None:
             values.append(None)
             continue
         if literal.type != column_type or not isinstance(literal.value, Integral):
@@ -211,12 +211,12 @@ def _values(step):
     column_names, column_types = _column_metadata(step.columns)
     vectors = []
     for index, column in enumerate(step.columns):
-        # A row shorter than the column list reads NULL for the missing cells.
-        literals = [row[index] if index < len(row) else None for row in step.values]
+        # The binder has refused ragged rows, so every row has this cell.
+        literals = [row[index] for row in step.values]
         if column_types[index] in _TEMPORAL_FROM_PHYSICAL:
             vectors.append(_temporal_vector(column, literals))
             continue
-        values = [None if literal is None else literal.value for literal in literals]
+        values = [literal.value for literal in literals]
         dtype = _resolve_column_dtype(column_types[index], values)
         vectors.append(vector_from_sequence(values, dtype=dtype))
     return Morsel.from_vectors(column_names, vectors)

@@ -79,6 +79,7 @@ class RelationManagementNode(BasePlanNode):
         `action` names which statement this is (the physical planner's dispatch)."""
         BasePlanNode.__init__(self, properties, step, step.columns, step.pre_update_columns)
         self.action = action
+        self._index_files_built = None
 
     @property
     def name(self):
@@ -439,13 +440,21 @@ class RelationManagementNode(BasePlanNode):
             return object_message("called", "procedure", self.step.procedure_name)
 
         if action == "vector_index_ddl":
+            if self.step.operation == "refresh":
+                return (
+                    f"refreshed index {md_code(self.step.index_name)} on "
+                    f"{md_code(self.step.relation_name)}: {count} file(s) indexed"
+                )
             verb = {"create": "created", "alter": "altered", "drop": "dropped"}[self.step.operation]
             if self.step.operation == "alter":
                 return (
                     f"set index {md_code(self.step.index_name)} on {md_code(self.step.relation_name)} "
                     f"to build {self.step.index_options['build']}"
                 )
-            return f"{verb} index {md_code(self.step.index_name)} on {md_code(self.step.relation_name)}"
+            receipt = f"{verb} index {md_code(self.step.index_name)} on {md_code(self.step.relation_name)}"
+            if self.step.operation == "create" and self._index_files_built is not None:
+                receipt += f": {self._index_files_built} file(s) indexed"
+            return receipt
 
         raise InvalidInternalStateError(f"no receipt wording for relation action: {action}")
 
@@ -860,7 +869,7 @@ class RelationManagementNode(BasePlanNode):
         elif self.action == "vector_index_ddl":
             step = self.step
             if step.operation == "create":
-                step.connector.create_vector_index(
+                built = step.connector.create_vector_index(
                     step.relation_name,
                     step.index_name,
                     step.column_name,
@@ -870,6 +879,8 @@ class RelationManagementNode(BasePlanNode):
                     if_not_exists=bool(step.if_exists),
                     author=self._author,
                 )
+                # A sync index was built before CREATE returned: say how much of it.
+                self._index_files_built = built if step.index_options["build"] == "sync" else None
             elif step.operation == "alter":
                 step.connector.alter_vector_index_build(
                     step.relation_name, step.index_name, step.index_options["build"], author=self._author
@@ -878,6 +889,11 @@ class RelationManagementNode(BasePlanNode):
                 step.connector.drop_vector_index(
                     step.relation_name, step.index_name, bool(step.if_exists), author=self._author
                 )
+            elif step.operation == "refresh":
+                indexed = step.connector.refresh_vector_index(
+                    step.relation_name, step.index_name, author=self._author
+                )
+                return NonTabularResult(record_count=indexed, status=QueryStatus.SQL_SUCCESS)
             else:
                 raise InvalidInternalStateError(f"unknown index operation {step.operation!r}")
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)

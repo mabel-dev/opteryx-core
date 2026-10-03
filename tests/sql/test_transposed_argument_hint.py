@@ -41,7 +41,7 @@ def test_time_bucket_transposed_reports_the_reorder():
 
     assert "wrong order" in message, message
     assert "TIME_BUCKET(magnitude, units, date)" in message, message
-    assert "(NUMERIC, STRING, TEMPORAL)" in message, message
+    assert "(NUMERIC, STRING, DATE or TIMESTAMP)" in message, message
     assert "(TIMESTAMP, INTEGER, VARCHAR)" in message, message
     # The working call, in the order the signature wants.
     assert "Did you mean" in message, message
@@ -104,7 +104,7 @@ def test_single_bad_argument_in_a_later_position_still_gets_its_cast():
 
 def test_all_arguments_wrong_with_no_valid_permutation_keeps_the_casts():
     # Majority-mismatched, but no ordering of (VARCHAR, INTEGER, VARCHAR)
-    # satisfies (NUMERIC, STRING, TEMPORAL) - there is no temporal argument to
+    # satisfies (NUMERIC, STRING, DATE or TIMESTAMP) - there is no temporal argument to
     # move into place. A reorder hint here would be a fabricated remedy.
     message = _error("SELECT TIME_BUCKET(name, 1, 'hour') FROM $planets")
 

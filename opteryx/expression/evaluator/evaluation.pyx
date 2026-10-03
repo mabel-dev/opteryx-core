@@ -535,8 +535,7 @@ cpdef execute_and_append(list compiled_evals, morsel):
 # chain of C-level integer compares (Cython optimize.use_switch folds these
 # into a switch statement in the generated C).
 #
-# Native nodes: pop `arity` vectors, push one result.
-# Legacy nodes: call _eval_value(source_node, morsel), push one result.
+# Each node pops `arity` vectors and pushes one result.
 # ---------------------------------------------------------------------------
 
 from opteryx.compiled.expression.compiled_expression cimport (

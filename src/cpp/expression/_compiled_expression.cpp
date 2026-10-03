@@ -1,4 +1,4 @@
-// compiled_expression.cpp — lowers a Python Node tree into the arena.
+// _compiled_expression.cpp — lowers a Python Node tree into the arena.
 //
 // The lowering pass reads attributes from the source Node via the Python C API.
 // It never dispatches on schema_column type or kernel resolution at this stage —
@@ -8,7 +8,7 @@
 // PyObject* fields on each CompiledExpression are guaranteed non-NULL: missing
 // attributes are normalised to Py_None so consumers never have to NULL-check.
 
-#include "compiled_expression.h"
+#include "_compiled_expression.h"
 
 #include <cstddef>
 

@@ -74,7 +74,13 @@ def fixed_value_function(function, context):
     if function == "E":
         # eulers number
         return FLOAT64, 2.71828182845904523536028747135266249775724709369995
-    if function == "UNIXTIME":
-        # We should only ever get here if the function is called without parameters
-        return INT64, context.execution_context.connected_at.timestamp()
+    if function in ("UNIXTIME", "TO_UNIXTIME"):
+        # We should only ever get here if the function is called without parameters.
+        # Must be an int: an INT64 literal holding the float from .timestamp()
+        # failed to plan. Floor-divide like UNIXTIME(NOW()) does.
+        connected_at = context.execution_context.connected_at
+        epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+        if connected_at.tzinfo is None:
+            epoch = epoch.replace(tzinfo=None)
+        return INT64, (connected_at - epoch) // datetime.timedelta(seconds=1)
     return None, None

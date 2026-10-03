@@ -71,7 +71,9 @@ def get_builtin_temporal_extra_functions() -> List[FunctionDefinition]:
                                 "epoch SECONDS as an INTEGER, identical to TO_UNIXTIME."
                             ),
                         ),
-                        ParameterSpec(name="date", type_family="temporal"),
+                        ParameterSpec(
+                            name="date", type_family="datetime", excludes=("TIME", "INTERVAL")
+                        ),
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_INT64),
                     kernel=KernelSpec(

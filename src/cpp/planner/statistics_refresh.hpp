@@ -51,7 +51,7 @@
 #include "planner/join_estimator.hpp"
 #include "planner/manifest_estimates.hpp"
 #include "planner/native_manifest.hpp"
-#include "planner/plan_graph.hpp"
+#include "planner/_plan_graph.hpp"
 #include "planner/py_numeric.hpp"
 #include "planner/selectivity.hpp"
 #include "planner/stats_store.hpp"

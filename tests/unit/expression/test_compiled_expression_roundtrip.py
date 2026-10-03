@@ -33,7 +33,7 @@ def _python_walk(node):
     """Reference implementation: walk a Python Node tree in the same order as
     the C++ side, emitting (node_type_int, num_children) tuples.
 
-    Order matches src/cpp/expression/compiled_expression.cpp::walk_recursive:
+    Order matches src/cpp/expression/_compiled_expression.cpp::walk_recursive:
     self, left, right, centre, parameters in order.
     """
     out = []

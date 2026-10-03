@@ -13,7 +13,7 @@ from libc.stdint cimport int16_t, int32_t
 from libcpp.vector cimport vector
 
 
-cdef extern from "expression/compiled_expression.h" namespace "opteryx_expr":
+cdef extern from "expression/_compiled_expression.h" namespace "opteryx_expr":
     cdef cppclass CompiledExpression:
         int node_type
         int physical_type
@@ -201,7 +201,6 @@ ctypedef struct BytecodeInstr:
     int16_t right_type_code  # BCTypeCode: BC_TYPE_NONE / DATE / TIMESTAMP for BC_COMPARE / BC_BINARY_OP
     PyObject* column_identity # for BC_LOAD_COL — bytes
     PyObject* column_name     # for BC_LOAD_COL — bytes
-    PyObject* source_node     # unused (legacy field, kept for ABI compatibility)
     PyObject* callable_ref   # for BC_FUNCTION — kernel callable (legacy Python path) or NULL (C native)
     # Phase 9b: C function ABI fields (zero if legacy Python path)
     void* kernel_fn          # C function pointer: VecResult (*)(void* ctx, ...) for BC_FUNCTION/EXTRACTION/CAST/BINARY_OP

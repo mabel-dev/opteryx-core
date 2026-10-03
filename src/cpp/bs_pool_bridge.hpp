@@ -22,6 +22,7 @@
 #ifndef BS_POOL_BRIDGE_HPP
 #define BS_POOL_BRIDGE_HPP
 
+#include <Python.h>
 #include <thread>
 #include <queue>
 #include <memory>

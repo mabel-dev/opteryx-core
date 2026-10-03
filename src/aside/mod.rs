@@ -99,6 +99,7 @@ pub enum OpteryxOnly {
     ResyncRelation(admin::ResyncRelation),
     DetachRelation(admin::DetachRelation),
     AlterIndexBuild(index::AlterIndexBuild),
+    RefreshIndex(index::RefreshIndex),
 }
 
 /// Tokenize `sql`, then run each statement through the aside productions before

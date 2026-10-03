@@ -32,6 +32,7 @@ cdef extern from *:
 cdef extern from "engine/vector_index_build.hpp" namespace "opteryx::engine" nogil:
     cdef cppclass VectorIndexBuildSpec:
         string data_path
+        int64_t data_bytes
         string column
         cppvector[uint32_t] deleted
         VibEmbedFn embed
@@ -63,12 +64,13 @@ cdef VectorIndexBuildSpec _vib_spec(str data_path, str column, list deleted, uns
                                     uint32_t dims, uint32_t clusters, uint32_t iterations,
                                     uint32_t sample_per_cluster, unsigned long long seed, uint32_t flush_rows,
                                     uint32_t embed_batch, uint32_t embed_threads, uint32_t decode_workers,
-                                    uint32_t train_threads):
+                                    uint32_t train_threads, long long data_bytes):
     cdef VectorIndexBuildSpec spec
     cdef uint32_t ordinal
     if embed_fn == 0:
         raise ValueError("vector index build: no embedding kernel")
     spec.data_path = data_path.encode("utf-8")
+    spec.data_bytes = data_bytes
     spec.column = column.encode("utf-8")
     for ordinal in deleted:
         spec.deleted.push_back(ordinal)
@@ -103,8 +105,12 @@ def build_vector_index_local(
     uint32_t embed_threads=1,
     uint32_t decode_workers=2,
     uint32_t train_threads=1,
+    long long data_bytes=-1,
 ):
     """Build one parquet data file's vector index into two local skene files.
+
+    `data_path` is a local file or a self-authenticating (signed) https URL; a remote one
+    needs `data_bytes`, its size.
 
     Returns None when the file has no indexable row (nothing is written), otherwise a
     dict of the sizes and counts the catalog commit and the logs need. Raises on any
@@ -112,7 +118,7 @@ def build_vector_index_local(
     """
     cdef VectorIndexBuildSpec spec = _vib_spec(
         data_path, column, deleted, embed_fn, dims, clusters, iterations, sample_per_cluster, seed,
-        flush_rows, embed_batch, embed_threads, decode_workers, train_threads)
+        flush_rows, embed_batch, embed_threads, decode_workers, train_threads, data_bytes)
     cdef VectorIndexBuildResult result
     cdef string err
     cdef string c_vectors = vectors_path.encode("utf-8")
@@ -152,6 +158,7 @@ def build_vector_index_to_session(
     uint32_t embed_threads=1,
     uint32_t decode_workers=2,
     uint32_t train_threads=1,
+    long long data_bytes=-1,
 ):
     """Build one parquet data file's vector index, streaming the vectors BODY into the open
     resumable upload session `session_uri`.
@@ -163,7 +170,7 @@ def build_vector_index_to_session(
     """
     cdef VectorIndexBuildSpec spec = _vib_spec(
         data_path, column, deleted, embed_fn, dims, clusters, iterations, sample_per_cluster, seed,
-        flush_rows, embed_batch, embed_threads, decode_workers, train_threads)
+        flush_rows, embed_batch, embed_threads, decode_workers, train_threads, data_bytes)
     cdef VectorIndexBuildResult result
     cdef string err
     cdef string c_uri = session_uri.encode("utf-8")

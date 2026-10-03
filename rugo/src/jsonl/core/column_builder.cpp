@@ -1,5 +1,3 @@
-#include <Python.h>  // must precede any draken header that uses PyObject
-
 #include "column_builder.hpp"
 #include "fast_parsers.hpp"
 #include "nested_column.hpp"
@@ -11,8 +9,6 @@
 #include <thread>
 #include <future>
 
-// Producer surface (definitions resolved at load via RTLD_GLOBAL from draken_native.so):
-#include "draken_bridge.h"  // draken_vector_own_string, draken_vector_own_array(_numeric)
 #include "string_slot.h"    // DrakenStringSlot, draken_build_string_slot, str_init_null
 #include "alloc.h"          // draken_malloc
 #include "buffers.h"        // DrakenType, DRAKEN_VARCHAR
@@ -21,7 +17,8 @@
 #include "declared_parse.hpp"     // explicit_schema strict per-value parse (shared with CSV)
 
 // extract_column() pulls one column out as raw-byte slices (StringColumnResult);
-// build_typed_vector / build_varchar_vector materialise owned Draken vectors, and
+// parse_typed_column / parse_varchar_column fill owned ParsedColumn buffers (wrapped
+// into Draken Vectors by jsonl/_jsonl_column_wrap.cpp, the Python edge), and
 // merge_string_column stitches a column across chunks. See ARCHITECTURE.md.
 
 namespace rugo::_jsonl {
@@ -442,13 +439,6 @@ static uint8_t* own_validity_from_scr(StringColumnResult& scr, uint32_t n) {
 }
 }  // namespace
 
-// ---------------------------------------------------------------------------
-// build_varchar_vector — StringColumnResult → owned Draken VARCHAR Vector.
-//
-// Single C++ pass; no Python objects touch the data. Slots and arena are sized
-// from the extracted bytes, populated as German-string slots, and handed to
-// draken_vector_own_string which assumes ownership of all three buffers.
-// ---------------------------------------------------------------------------
 // Parse a column into VARCHAR string buffers (slots + arena + validity). No Python —
 // safe off the GIL. Wrapped into a Vector later by wrap_column().
 static ParsedColumn parse_varchar_column(const uint8_t* base, StringColumnResult& scr,
@@ -517,11 +507,6 @@ static ParsedColumn parse_varchar_column(const uint8_t* base, StringColumnResult
     pc.validity  = own_validity_from_scr(scr, n);  // SIMD-padded, NULL when all-valid
     pc.all_null  = !scr.any_value_seen;
     return pc;
-}
-
-PyObject* build_varchar_vector(const uint8_t* base, StringColumnResult& scr) {
-    ParsedColumn pc = parse_varchar_column(base, scr, RowExec{});
-    return wrap_column(pc);
 }
 
 namespace {
@@ -946,44 +931,6 @@ static ParsedColumn parse_typed_column(const uint8_t* base, StringColumnResult& 
         draken_free(data);
     }
     return parse_varchar_column(base, scr, rows);
-}
-
-PyObject* build_typed_vector(const uint8_t* base, StringColumnResult& scr) {
-    ParsedColumn pc = parse_typed_column(base, scr, ParseContext(), RowExec{});
-    return wrap_column(pc);
-}
-
-// Wrap parsed buffers into an owned Draken Vector (creates a Python object — GIL).
-PyObject* wrap_column(ParsedColumn& pc) {
-    if (pc.type == DRAKEN_ARRAY) {
-        // String-family child iff fill_string_array_column populated slots;
-        // fill_numeric_array_column never touches array_child_slots.
-        if (pc.array_child_slots != nullptr) {
-            return draken_vector_own_array(
-                pc.array_parent_offsets, pc.array_child_slots, pc.array_child_arena,
-                pc.array_child_arena_len, pc.array_child_length, pc.array_child_type,
-                pc.array_child_validity, pc.validity, pc.length);
-        }
-        return draken_vector_own_array_numeric(
-            pc.array_parent_offsets, pc.array_child_data, pc.array_child_validity,
-            pc.array_child_length, pc.array_child_type, pc.validity, pc.length);
-    }
-    if (pc.is_string && pc.codes != nullptr)
-        return draken_vector_own_string_dict(pc.slots, pc.arena, pc.arena_len, pc.codes,
-                                             pc.data_length, pc.validity, pc.length, pc.type);
-    if (pc.is_string)
-        return draken_vector_own_string(pc.slots, pc.arena, pc.arena_len,
-                                        pc.validity, pc.length, pc.type,
-                                        /*keyhash=*/nullptr);   // E37: jsonl producer = task #5
-    // A declared IPV4/TIMESTAMP/DECIMAL column carries a logical-type descriptor,
-    // which lives on the Vector's owner rather than in the frozen DrakenVector —
-    // so it has to be attached at construction. own_raw_logical is own_raw when
-    // the kind is NONE, which is every inferred column.
-    if (pc.logical_kind != 0)
-        return draken_vector_own_raw_logical(pc.data, pc.validity, pc.length, pc.type,
-                                             pc.logical_kind, pc.unit, pc.offset_minutes,
-                                             pc.precision, pc.scale, /*dimension=*/0u);
-    return draken_vector_own_raw(pc.data, pc.validity, pc.length, pc.type);
 }
 
 // Parse a column STRICTLY as its explicit_schema-declared type: every non-null value must

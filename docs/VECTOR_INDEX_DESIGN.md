@@ -923,10 +923,94 @@ all pass.
     catalog's `GcsFileIO` gains `open_upload_session`, `cancel_upload_session` and `compose`.
     Tested against a strict local stand-in of the resumable protocol with 503/429/500 and
     partial commits: prefix + streamed body is byte-identical to the local build.
-- **Next:** step 5, `REFRESH INDEX n ON t` (aside grammar) on the OPTIMIZE precedent: plan
-  the unindexed files, take the lease, per file: open session → native build → upload
-  prefix + centroids → compose → `index-build` commit with sizes; renew the lease between
-  files. Then compaction carry (6) and the D2 reader (7).
+- **C2b step 5 delivered 2026-10-03: `REFRESH INDEX n ON t`** (aside grammar in
+  `src/aside/index.rs`; view.rs steps aside for it). Bound at the ALTER tier like the other
+  index DDL; runs as `OpteryxConnector.refresh_vector_index`, control plane only:
+  - refuses an index defined against another embedder (identity or width) before the lease;
+  - claims the maintenance lease (`index-build`, 600 s), renewed every 120 s by a thread
+    while the native build holds no GIL; a lost lease stops the next commit, and an
+    overrun release is reported;
+  - plans with the catalog's `Dataset.vector_index_build_plan(index_id)`: the live files
+    the index does not cover, each with its size, its deleted ordinals at that snapshot and
+    newly minted paths (`IndexBuildTask`);
+  - per file, ONE native call, then ONE `index-build` commit (dataset reloaded, so a
+    concurrent append does not fail an hours-long refresh): a failure keeps every file
+    indexed before it. Local catalogs build to local files; GCS reads the data file through
+    a 7-day signed URL (the builder now takes remote input via range GETs and the
+    manifest's file size; a signed GET cannot answer a HEAD), streams the body into a
+    session, uploads prefix + centroids, composes, deletes the parts; a failed or empty
+    build cancels its session;
+  - a file with no indexable row gets no index files and is re-planned by every REFRESH
+    (cheap when the footer shows it: the footer null count; otherwise it is embedded again).
+- **C3, sync CREATE INDEX delivered 2026-10-03:** the lease is claimed BEFORE the
+  definition is created (refused ⇒ nothing created, §5.7); every existing file is built
+  and committed before CREATE returns (receipt: "created index … : N file(s) indexed");
+  a failed build drops the definition again with any files it committed, so a failed
+  CREATE leaves no index. `async` CREATE takes no lease and builds nothing.
+- **C3, commit-fired REFRESH INDEX delivered 2026-10-03** (three repos):
+  - *Ruled 2026-10-03, supersedes D-16's "runs as the commit's author":* a fired refresh
+    runs as the index's `created-by` and the creator pays; REFRESH INDEX stays owner-tier
+    (a writer's INSERT would otherwise fire a refresh the binder denies).
+  - opteryx-catalog `trigger_firing.fire_index_refreshes`: every commit that ADDED data
+    files (compaction included, before the user-created gate in `_after_commit`) submits
+    `REFRESH INDEX <name> ON <ws.coll.ds>` per async index to jobs, provenance under
+    `client_info.index_refresh`; never raises; alert + audit per failure; same kill
+    switch. Sync indexes are not fired (they build inside the write — not built yet).
+  - jobs.opteryx `_resolve_index_refresh_submission`: platform-only provenance (403
+    otherwise); identity, policies and billing from the definition's `created-by`
+    (refused if absent, never defaulted); `origin: index-refresh` (kept off
+    /jobs/recent); 60 s dedup window per (relation, index). A hand-run REFRESH INDEX
+    takes the ordinary owner-tier permission check.
+  - opteryx-core `analyze_query` now classifies every index statement against its
+    RELATION at the owner tier (it reported `denied` with no table, and DROP INDEX named
+    the index as the table — so index DDL through jobs could not have worked).
+  - A fired refresh that meets a held lease fails loudly (job FAILED); the next commit's
+    fire, or a hand run, catches up. worker.opteryx needs no change (no stamp).
+- **C3 step 6, compaction carry delivered 2026-10-03** (ruled: mapping captured by the
+  native writer path; no interim gate):
+  - *Desugar:* a relation with any vector index compacts with ROW ORIGINS — OPTIMIZE lists
+    its columns explicitly plus `$file AS $carry_file`, `$ordinal AS $carry_ordinal`, and
+    stamps the scan for row identity (MERGE's mechanism; the scan runs on the trampoline
+    Source, as MERGE's does). A relation with no index is planned exactly as before.
+  - *Selection:* files are grouped by index coverage (catalog `vector_index_coverage` at
+    the scan's snapshot); each group is selected alone and the pass takes the group whose
+    plan rewrites the most bytes. `retired_files` is now in SCAN order (a `$file` is a
+    position in it).
+  - *Writer:* `DataFileStream(row_origins=True)` gives each output file a native
+    `RowOriginRecorder`, which takes the two columns out of every row group before it is
+    written; the ordinals never become Python objects.
+  - *Carry:* `src/cpp/engine/vector_index_carry.hpp`, one native call per index: pass 0
+    reads every input's `ordinal` column (candidates + the INVARIANT: an indexed live input
+    row not written fails the compaction; a deleted one is let go; a row written twice
+    fails), pass 1 the sampled vectors and trains per output, pass 2 streams each output's
+    carried vectors through `IvfFilesWriter` — the write phase now shared with the build
+    (refactor bit-identical). Inputs are read through `SkeneRangedFile`
+    (`src/cpp/engine/skene_ranged_file.hpp`: skene's ranged reader over pread or signed-URL
+    range GETs — the D2 reader can use it). GCS outputs stream into sessions and compose,
+    as a build's do.
+  - *Commit:* catalog `compaction_commit(index_files=...)` attaches the carried files in
+    the SAME snapshot and refuses mixed input coverage, an output whose carried indexes
+    differ from its inputs', unknown outputs, and non-`IndexFiles` values.
+  - *Lease:* every compaction claims the maintenance lease (`compaction`, 3600 s) with its
+    first rows, renews it around the carry, releases it after the commit or any failure in
+    the sink; a statement that dies upstream of the sink leaves it to expire. Refused
+    loudly while an index build holds it.
+  - An output whose rows were all unindexed (no vector to carry) is refused loudly: it
+    cannot be recorded as indexed, and compaction may not change coverage. Not reachable
+    from a real indexed input (an index file is never written for a file with no vector).
+- **C3 finished 2026-10-03:**
+  - *Sync builds inside writes (D-7):* every engine write commits through the connector's
+    `insert` / `merge_commit` / `replace_relation` (INSERT, CTAS replace, MERGE, UPDATE,
+    DELETE's rewrites), which builds each new file's index files for every `sync` index
+    BEFORE the commit and passes them to the catalog (`add_files` / `merge_commit` /
+    `truncate_and_add_files` gain `index_files`), so the new files are indexed in their own
+    snapshot. No lease (§5.7: a write indexes only its own new files). A new file with no
+    indexable row gets none. The per-file build is shared with REFRESH.
+  - *Async CREATE INDEX fires its REFRESH* from the catalog's `create_vector_index`
+    (`fire_index_refreshes(..., only=name)`, never raises).
+- **Next:** Stage D — the D2 reader (step 7; `SkeneRangedFile` is ready for it), proven
+  on GCS before any production build is enabled. Needs D-4 (approximate SQL spelling) and
+  D-9 (recall setting) ruled.
 
 | Step | Work | Gate |
 |---|---|---|

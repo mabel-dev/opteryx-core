@@ -7,7 +7,11 @@
 //!
 //! ```text
 //! ALTER INDEX <name> ON <relation> SET (BUILD = 'sync' | 'async')
+//! REFRESH INDEX <name> ON <relation>
 //! ```
+//!
+//! `REFRESH INDEX` is the one build primitive (D-16): it indexes every live data file the
+//! index does not cover yet. view.rs owns every other REFRESH and steps aside for this one.
 //!
 //! `CREATE INDEX ... USING IVF (col) WITH (...)` and `DROP INDEX <name> ON <relation>`
 //! are sqlparser's own statements (the dialect enables CREATE INDEX's WITH clause).
@@ -30,6 +34,15 @@ const ALTER_GRAMMAR: &str = "Expected: **ALTER INDEX** <name> **ON** <relation> 
 **SET** (**BUILD** = 'sync' | 'async'). The build mode is the only property of an index \
 that can be altered; to change anything else, drop and re-create it.";
 
+const REFRESH_GRAMMAR: &str = "Expected: **REFRESH INDEX** <name> **ON** <relation>. \
+It takes no options.";
+
+#[derive(Debug, Serialize)]
+pub struct RefreshIndex {
+    pub name: Ident,
+    pub relation: ObjectName,
+}
+
 #[derive(Debug, Serialize)]
 pub struct AlterIndexBuild {
     pub name: Ident,
@@ -39,6 +52,15 @@ pub struct AlterIndexBuild {
 
 pub fn parse(cursor: &mut Cursor) -> Result<Option<OpteryxOnly>, ParserError> {
     let start = cursor.index();
+    if cursor.take_words(&["REFRESH", "INDEX"]) {
+        let name = cursor.identifier(REFRESH_GRAMMAR)?;
+        cursor.expect_word("ON", REFRESH_GRAMMAR)?;
+        let relation = cursor.object_name(REFRESH_GRAMMAR)?;
+        if !(cursor.at_end() || cursor.peek_is(&Token::SemiColon)) {
+            return Err(grammar_error(REFRESH_GRAMMAR));
+        }
+        return Ok(Some(OpteryxOnly::RefreshIndex(RefreshIndex { name, relation })));
+    }
     if !cursor.take_words(&["ALTER", "INDEX"]) {
         return Ok(None);
     }

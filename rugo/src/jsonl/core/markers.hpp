@@ -6,28 +6,6 @@
 
 namespace rugo::_jsonl {
 
-// The 9 marker characters we scan for
-enum class MarkerType : uint8_t {
-    BRACE_OPEN = 0,    // {
-    BRACE_CLOSE = 1,   // }
-    BRACKET_OPEN = 2,  // [
-    BRACKET_CLOSE = 3, // ]
-    COLON = 4,         // :
-    COMMA = 5,         // ,
-    QUOTE = 6,         // "
-    BACKSLASH = 7,     // Reverse solidus
-    NEWLINE = 8        // Newline
-};
-
-struct MarkerPosition {
-    uint32_t position;
-    uint8_t marker_type;  // MarkerType enum value
-
-    MarkerPosition() = default;
-    MarkerPosition(uint32_t pos, MarkerType type)
-        : position(pos), marker_type(static_cast<uint8_t>(type)) {}
-};
-
 // Value type classification (from marker and context)
 enum class ValueType : uint8_t {
     Null = 0,

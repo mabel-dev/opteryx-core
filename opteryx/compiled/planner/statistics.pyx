@@ -135,7 +135,7 @@ cdef extern from "planner/selectivity.hpp" namespace "opteryx::planner":
         const SelectivityInputs& inputs, int64_t predicate) except +
 
 
-cdef extern from "planner/plan_graph.hpp" namespace "opteryx::planner":
+cdef extern from "planner/_plan_graph.hpp" namespace "opteryx::planner":
     cdef cppclass SPlanNode "opteryx::planner::PlanNode":
         uint32_t id
         PyObject* step

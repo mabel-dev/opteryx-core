@@ -183,6 +183,10 @@ def catalog_connector(dataset):
                 raise KeyError(identifier)
             return dataset
 
+        # No vector index here: writes build no sync index files.
+        def list_vector_indexes(self, identifier):
+            return []
+
         def get_relation(self, identifier):
             if identifier == "col.ds":
                 return "dataset", dataset

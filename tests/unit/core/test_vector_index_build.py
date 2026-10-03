@@ -13,7 +13,10 @@ What each test protects:
   * the build is deterministic whatever the embed threads, decode workers and batching
     window: byte-identical files;
   * the reported sizes are the files' sizes, and the logical bytes follow §5.5;
-  * a file with nothing to index writes nothing; misuse fails loud and leaves no file.
+  * a file with nothing to index writes nothing; misuse fails loud and leaves no file;
+  * a remote data file (an https URL that carries its own credential, as a signed URL does)
+    builds the same files as the local one, through range GETs only - a signed GET URL
+    cannot answer a HEAD, so its size must be given, and is refused without it.
 """
 
 import os
@@ -194,6 +197,66 @@ def test_no_embedding_kernel_is_refused(data_file, tmp_path):
         build_vector_index_local(data_file, "body", [], 0, 256, str(tmp_path / "v"), str(tmp_path / "c"))
 
 
+# --- a remote data file: read through range GETs (a signed URL in production) -------------
+
+
+def _serve_ranges(payload, requests):
+    from http.server import BaseHTTPRequestHandler
+    from http.server import ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_HEAD(self):                   # a signed GET URL refuses every other method
+            requests.append(("HEAD", None))
+            self.send_response(403)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_GET(self):
+            first, last = self.headers["Range"].removeprefix("bytes=").split("-")
+            first, last = int(first), min(int(last), len(payload) - 1)
+            requests.append(("GET", (first, last)))
+            body = payload[first : last + 1]
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {first}-{last}/{len(payload)}")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_a_remote_file_builds_the_same_files_through_range_gets(data_file, tmp_path):
+    payload = open(data_file, "rb").read()
+    requests = []
+    server = _serve_ranges(payload, requests)
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/data.parquet?X-Goog-Signature=x"
+        (tmp_path / "local").mkdir()
+        (tmp_path / "remote").mkdir()
+        _, l_vec, l_cen = _build(data_file, tmp_path / "local")
+        _, r_vec, r_cen = _build(url, tmp_path / "remote", data_bytes=len(payload))
+    finally:
+        server.shutdown()
+    assert open(r_vec, "rb").read() == open(l_vec, "rb").read()
+    assert open(r_cen, "rb").read() == open(l_cen, "rb").read()
+    assert requests and all(method == "GET" for method, _ in requests)
+
+
+def test_a_remote_file_needs_its_size(tmp_path):
+    fn, dims = _embed()
+    with pytest.raises(RuntimeError, match="needs its size"):
+        build_vector_index_local(
+            "https://storage.example/data.parquet", "body", [], fn, dims,
+            str(tmp_path / "v"), str(tmp_path / "c"),
+        )
+    assert os.listdir(tmp_path) == []
+
+
 # --- the GCS path: the body streamed into a resumable upload session -----------------------
 #
 # A local stand-in for GCS's resumable protocol, strict where GCS is strict: non-final chunks
@@ -345,3 +408,120 @@ def test_session_with_nothing_to_index_is_never_finished(tmp_path):
 def test_session_chunk_must_be_a_multiple_of_256_kib(big_file):
     with pytest.raises(RuntimeError, match="256 KiB"):
         _to_session(big_file, _Session(), chunk_bytes=_QUANTUM + 1)
+
+
+# --- REFRESH INDEX's GCS orchestration (opteryx_connector._build_index_on_gcs) -------------
+#
+# Control plane around the native build: read the data file through a signed URL, stream the
+# body into a session, upload the prefix and centroids, compose prefix + body into the
+# vectors file and delete the two parts. A failed or empty build cancels its session.
+
+
+class _FakeGcsIO:
+    """The catalog GcsFileIO surface REFRESH INDEX uses, over objects in a dict; the
+    resumable session is the strict stand-in above."""
+
+    def __init__(self, faults=()):
+        self.objects = {}
+        self.session = _Session(faults)
+        self.server, self.uri = _serve(self.session)
+        self.body_path = None
+        self.cancelled = []
+
+    def open_upload_session(self, location):
+        assert self.body_path is None
+        self.body_path = location
+        return self.uri
+
+    def cancel_upload_session(self, uri):
+        self.cancelled.append(uri)
+
+    def new_output(self, path):
+        io = self
+
+        class _Out:
+            def create(self):
+                self.chunks = []
+                return self
+
+            def write(self, data):
+                self.chunks.append(bytes(data))
+
+            def close(self):
+                io.objects[path] = b"".join(self.chunks)
+
+        return _Out()
+
+    def compose(self, sources, destination):
+        if self.session.finished:
+            self.objects[self.body_path] = bytes(self.session.held)
+        self.objects[destination] = b"".join(self.objects[s] for s in sources)
+
+    def delete(self, path):
+        del self.objects[path]
+
+
+def _gcs_build(monkeypatch, data_file, io):
+    from types import SimpleNamespace
+
+    import opteryx.connectors.io_systems.gcs_filesystem as gcs_filesystem
+    from opteryx.connectors.opteryx_connector import _build_index_on_gcs
+    from opteryx.operators._operators import build_vector_index_to_session
+
+    payload = open(data_file, "rb").read()
+    reads = []
+    reader = _serve_ranges(payload, reads)
+    signed = []
+
+    class _Signer:
+        def rewrite_to_signed_url(self, path, expiry_seconds):
+            signed.append((path, expiry_seconds))
+            return f"http://127.0.0.1:{reader.server_address[1]}/signed"
+
+    monkeypatch.setattr(gcs_filesystem, "OpteryxGcsFileSystem", _Signer)
+    task = SimpleNamespace(
+        data_file="gs://bucket/t/data/f.parquet", data_bytes=len(payload), deleted=(),
+        vectors="gs://bucket/t/index/i/f-1.vectors.skene", centroids="gs://bucket/t/index/i/f-1.centroids.skene",
+    )
+    fn, dims = _embed()
+    options = dict(clusters=0, flush_rows=64, embed_threads=4, decode_workers=1, chunk_bytes=2 * _QUANTUM)
+    try:
+        return task, signed, _build_index_on_gcs(io, task, "body", fn, dims, options, build_vector_index_to_session)
+    finally:
+        reader.shutdown()
+        io.server.shutdown()
+
+
+def test_gcs_build_composes_the_vectors_file_and_cleans_up(monkeypatch, big_file, tmp_path):
+    fn, dims = _embed()
+    vectors_path, centroids_path = str(tmp_path / "v.skene"), str(tmp_path / "c.skene")
+    build_vector_index_local(big_file, "body", [], fn, dims, vectors_path, centroids_path,
+                             flush_rows=64, embed_threads=1, decode_workers=1)
+    io = _FakeGcsIO()
+    task, signed, built = _gcs_build(monkeypatch, big_file, io)
+
+    assert signed == [(task.data_file, 7 * 24 * 3600)]           # one URL, the longest life
+    assert io.body_path == f"{task.vectors}.body"
+    assert sorted(io.objects) == sorted([task.vectors, task.centroids])   # parts deleted
+    assert io.objects[task.vectors] == open(vectors_path, "rb").read()
+    assert io.objects[task.centroids] == open(centroids_path, "rb").read()
+    assert built["vectors_bytes"] == len(io.objects[task.vectors])
+    assert io.cancelled == []
+
+
+def test_gcs_build_failure_cancels_the_session_and_writes_nothing(monkeypatch, big_file):
+    io = _FakeGcsIO([("status", 403)])
+    with pytest.raises(RuntimeError, match="403"):
+        _gcs_build(monkeypatch, big_file, io)
+    assert io.cancelled == [io.uri] and io.objects == {}
+
+
+def test_gcs_build_with_nothing_to_index_cancels_and_writes_nothing(monkeypatch, tmp_path):
+    morsel = Morsel()
+    morsel.append_vector("body", vector_from_sequence([None, None], dtype="VARCHAR"))
+    path = tmp_path / "empty.parquet"
+    path.write_bytes(write_parquet(morsel))
+    io = _FakeGcsIO()
+    _, _, built = _gcs_build(monkeypatch, str(path), io)
+    assert built is None
+    assert io.cancelled == [io.uri] and io.objects == {} and io.session.puts == 0

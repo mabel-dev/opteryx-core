@@ -45,7 +45,8 @@
 #include <vector>
 
 #include "io_pipeline.hpp"                    // rugo::ParquetIOPipeline, MorselRef
-#include "metadata.hpp"                       // rugo FileStats / ReadParquetMetadata
+#include "filesystem.hpp"                     // rugo::FetchParquetFooter (local or remote)
+#include "metadata.hpp"                       // rugo FileStats / ReadParquetMetadataFromBuffer
 #include "memory_pool.hpp"                    // opteryx::MemoryPool
 #include "pool_sink_adapter.hpp"              // wire_pool_sink
 #include "engine/native_parquet_scan_source.hpp"  // NativeScanColumnBuilder
@@ -66,7 +67,10 @@ namespace opteryx::engine {
 using EmbedFn = VecResult (*)(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 
 struct VectorIndexBuildSpec {
-    std::string           data_path;           // local parquet file (remote: Stage C step 4)
+    // The parquet data file: a local path, or an https URL that carries its own credential
+    // (a signed URL — an hours-long build cannot refresh a bearer token natively).
+    std::string           data_path;
+    int64_t               data_bytes = -1;     // its size (the manifest's); -1 = stat it (local)
     std::string           column;              // the indexed text column
     std::vector<uint32_t> deleted;             // ascending physical ordinals
     EmbedFn               embed = nullptr;     // the registered draken_embed kernel
@@ -293,6 +297,99 @@ struct TextReader {
 
 }  // namespace vib_detail
 
+// The write phase every index build shares — the embedding build here and compaction's
+// carry (vector_index_carry.hpp): rows arrive one at a time with their physical ordinal,
+// each is assigned to its nearest trained centroid and handed to a ClusterStream, whose
+// blocks (one cluster's rows, at most flush_rows) become the vectors file's row groups,
+// streamed to the caller's OutputStream. `finish` writes the centroids file in memory and
+// the sizes the catalog commit records.
+class IvfFilesWriter {
+  public:
+    IvfFilesWriter(const draken::ann::IvfCentroids& trained, uint32_t dims, uint32_t flush_rows)
+        : trained_(trained), dims_(dims), groups_(trained.clusters), rows_(trained.clusters, 0u),
+          stream_(trained.clusters, dims, flush_rows) {}
+
+    bool begin(skene::OutputStream* body, VectorIndexBuildResult* out, std::string* err) {
+        counted_ = std::make_unique<vib_detail::CountingStream>(body);
+        skene::Status st = writer_.begin(skene::WriteOptions(), counted_.get(), &out->vectors_prefix);
+        if (!st.is_ok()) { *err = "vector index build: " + st.message(); return false; }
+        return true;
+    }
+
+    // One searchable row (the caller has checked ann_row_searchable).
+    bool add(const uint16_t* row, uint32_t ordinal, std::string* err) {
+        stream_.add(draken::ann::ivf_assign(trained_, row), ordinal, row, emitter());
+        ++indexed_;
+        if (!emit_err_.empty()) { *err = emit_err_; return false; }
+        return true;
+    }
+
+    uint64_t indexed() const noexcept { return indexed_; }
+
+    // Flush, finish the vectors file, write the centroids file and the sizes. With no row
+    // added, nothing is finished and `out->empty` is set: the caller abandons the stream.
+    bool finish(VectorIndexBuildResult* out, std::string* err) {
+        stream_.finish(emitter());
+        if (!emit_err_.empty()) { *err = emit_err_; return false; }
+        if (indexed_ == 0u) { out->empty = true; return true; }
+        skene::Status st = writer_.finish();
+        if (!st.is_ok()) { *err = "vector index build: " + st.message(); return false; }
+
+        const uint32_t K = trained_.clusters;
+        CxxMorsel centroids;
+        centroids.names = {"centroid", "rows", "row_groups"};
+        centroids.columns.push_back(vib_detail::fp16_column(trained_.centroids.data(), K, dims_));
+        centroids.columns.push_back(vib_detail::fixed_column<uint32_t>(rows_.data(), K, DRAKEN_UINT32));
+        centroids.columns.push_back(vib_detail::int32_list_column(groups_));
+        st = skene::write_morsel(centroids, skene::WriteOptions(), &out->centroids);
+        if (!st.is_ok()) { *err = "vector index build: centroids: " + st.message(); return false; }
+
+        // Logical (decoded) bytes: vectors rows x (2 dims + 4); centroids K x (2 dims + 4),
+        // plus the row-group lists — one int32 per entry and K + 1 int32 offsets.
+        const uint64_t d2 = 2u * static_cast<uint64_t>(dims_);
+        out->empty = false;
+        out->vectors_body_bytes = counted_->bytes;
+        out->rows_indexed = indexed_;
+        out->clusters = K;
+        out->vectors_row_groups = written_groups_;
+        out->logical_bytes = indexed_ * (d2 + 4u) + static_cast<uint64_t>(K) * (d2 + 4u)
+                             + 4u * static_cast<uint64_t>(written_groups_) + 4u * (static_cast<uint64_t>(K) + 1u);
+        return true;
+    }
+
+  private:
+    struct Emitter {
+        IvfFilesWriter* self;
+        void operator()(uint32_t c, const uint32_t* ordinals, const uint16_t* vectors, uint32_t n) const {
+            self->emit(c, ordinals, vectors, n);
+        }
+    };
+    Emitter emitter() { return Emitter{this}; }
+
+    void emit(uint32_t c, const uint32_t* ordinals, const uint16_t* vectors, uint32_t n) {
+        if (!emit_err_.empty()) return;
+        CxxMorsel block;
+        block.names = {"embedding", "ordinal"};
+        block.columns.push_back(vib_detail::fp16_column(vectors, n, dims_));
+        block.columns.push_back(vib_detail::fixed_column<uint32_t>(ordinals, n, DRAKEN_UINT32));
+        skene::Status s = writer_.add_row_group(block);
+        if (!s.is_ok()) { emit_err_ = "vector index build: " + s.message(); return; }
+        groups_[c].push_back(static_cast<int32_t>(written_groups_++));
+        rows_[c] += n;
+    }
+
+    const draken::ann::IvfCentroids&           trained_;
+    uint32_t                                   dims_;
+    std::vector<std::vector<int32_t>>          groups_;
+    std::vector<uint32_t>                      rows_;
+    draken::ann::ClusterStream                 stream_;
+    skene::FileWriter                          writer_;
+    std::unique_ptr<vib_detail::CountingStream> counted_;
+    uint32_t                                   written_groups_ = 0;
+    uint64_t                                   indexed_ = 0;
+    std::string                                emit_err_;
+};
+
 // Build the index of one data file. Returns false with `err` set on any failure; nothing
 // has then been promised — the caller abandons the stream.
 inline bool build_vector_index_file(const VectorIndexBuildSpec& spec, skene::OutputStream* body,
@@ -312,7 +409,13 @@ inline bool build_vector_index_file(const VectorIndexBuildSpec& spec, skene::Out
     // ── The footer: row groups, and the text column's chunk in each ──
     FileStats fs;
     try {
-        fs = ReadParquetMetadata(spec.data_path);
+        // A signed GET URL cannot answer a HEAD, so a remote file's size must be given.
+        if (spec.data_path.find("://") != std::string::npos && spec.data_bytes <= 0) {
+            *err = "vector index build: a remote data file needs its size (data_bytes)";
+            return false;
+        }
+        const rugo::ParquetFooterResult footer = rugo::FetchParquetFooter(spec.data_path, spec.data_bytes);
+        fs = ReadParquetMetadataFromBuffer(footer.envelope.data(), footer.envelope.size());
     } catch (const std::exception& e) {
         *err = std::string("vector index build: cannot read the footer of ") + spec.data_path + ": " + e.what();
         return false;
@@ -442,30 +545,10 @@ inline bool build_vector_index_file(const VectorIndexBuildSpec& spec, skene::Out
     }
     std::vector<uint16_t>().swap(sample_vectors);
     if (trained.clusters == 0u) { out->empty = true; return true; }
-    const uint32_t K = trained.clusters;
 
     // ── Pass 2: every row group, in file order ──
-    CountingStream counted(body);
-    skene::FileWriter writer;
-    skene::Status st = writer.begin(skene::WriteOptions(), &counted, &out->vectors_prefix);
-    if (!st.is_ok()) { *err = "vector index build: " + st.message(); return false; }
-
-    std::vector<std::vector<int32_t>> cluster_groups(K);
-    std::vector<uint32_t> cluster_rows(K, 0u);
-    uint32_t written_groups = 0;
-    std::string emit_err;
-    auto emit = [&](uint32_t c, const uint32_t* ordinals, const uint16_t* vectors, uint32_t n) {
-        if (!emit_err.empty()) return;
-        CxxMorsel block;
-        block.names = {"embedding", "ordinal"};
-        block.columns.push_back(fp16_column(vectors, n, spec.dims));
-        block.columns.push_back(fixed_column<uint32_t>(ordinals, n, DRAKEN_UINT32));
-        skene::Status s = writer.add_row_group(block);
-        if (!s.is_ok()) { emit_err = "vector index build: " + s.message(); return; }
-        cluster_groups[c].push_back(static_cast<int32_t>(written_groups++));
-        cluster_rows[c] += n;
-    };
-    draken::ann::ClusterStream stream(K, spec.dims, spec.flush_rows);
+    IvfFilesWriter files(trained, spec.dims, spec.flush_rows);
+    if (!files.begin(body, out, err)) return false;
 
     TextReader reader(spec.data_path, spec.column, chunk, spec.decode_workers);
     std::vector<std::vector<uint8_t>> masks(row_groups);
@@ -479,7 +562,6 @@ inline bool build_vector_index_file(const VectorIndexBuildSpec& spec, skene::Out
     };
     top_up(window);
     std::unordered_map<uint32_t, CxxColumn> arrived;   // decoded ahead of their turn
-    uint64_t indexed = 0;
     for (uint32_t g = 0; g < row_groups; ++g) {
         while (arrived.find(g) == arrived.end()) {
             uint32_t got = 0;
@@ -508,37 +590,10 @@ inline bool build_vector_index_file(const VectorIndexBuildSpec& spec, skene::Out
         for (uint32_t i = 0; i < n; ++i) {
             const uint16_t* row = vecs.data() + static_cast<size_t>(i) * spec.dims;
             if (!ok[i] || !draken::ann::ann_row_searchable(row, spec.dims)) continue;
-            stream.add(draken::ann::ivf_assign(trained, row), ordinals[i], row, emit);
-            ++indexed;
+            if (!files.add(row, ordinals[i], err)) return false;
         }
-        if (!emit_err.empty()) { *err = emit_err; return false; }
     }
-    stream.finish(emit);
-    if (!emit_err.empty()) { *err = emit_err; return false; }
-    if (indexed == 0u) { out->empty = true; return true; }   // the caller abandons the stream
-    st = writer.finish();
-    if (!st.is_ok()) { *err = "vector index build: " + st.message(); return false; }
-
-    // ── The centroids file ──
-    CxxMorsel centroids;
-    centroids.names = {"centroid", "rows", "row_groups"};
-    centroids.columns.push_back(fp16_column(trained.centroids.data(), K, spec.dims));
-    centroids.columns.push_back(fixed_column<uint32_t>(cluster_rows.data(), K, DRAKEN_UINT32));
-    centroids.columns.push_back(int32_list_column(cluster_groups));
-    st = skene::write_morsel(centroids, skene::WriteOptions(), &out->centroids);
-    if (!st.is_ok()) { *err = "vector index build: centroids: " + st.message(); return false; }
-
-    // Logical (decoded) bytes: vectors rows x (2 dims + 4); centroids K x (2 dims + 4), plus
-    // the row-group lists — one int32 per entry and K + 1 int32 offsets.
-    const uint64_t d2 = 2u * static_cast<uint64_t>(spec.dims);
-    out->empty = false;
-    out->vectors_body_bytes = counted.bytes;
-    out->rows_indexed = indexed;
-    out->clusters = K;
-    out->vectors_row_groups = written_groups;
-    out->logical_bytes = indexed * (d2 + 4u) + static_cast<uint64_t>(K) * (d2 + 4u)
-                         + 4u * static_cast<uint64_t>(written_groups) + 4u * (static_cast<uint64_t>(K) + 1u);
-    return true;
+    return files.finish(out, err);
 }
 
 // ── Local files (development and local catalogs; GCS is Stage C step 4) ──

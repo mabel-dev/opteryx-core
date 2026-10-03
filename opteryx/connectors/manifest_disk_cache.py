@@ -415,6 +415,17 @@ class CachingFileIO:
 
     ls = list_files
 
+    # GCS only (the catalog's GcsFileIO): the vector index build streams its vectors body
+    # into a resumable session and composes it with its prefix. None of it is a manifest.
+    def open_upload_session(self, location: str) -> str:
+        return self._inner.open_upload_session(location)
+
+    def cancel_upload_session(self, session_uri: str) -> None:
+        return self._inner.cancel_upload_session(session_uri)
+
+    def compose(self, sources: list, destination: str) -> None:
+        return self._inner.compose(sources, destination)
+
 
 # The disk-only name this module was introduced with, kept so existing callers and
 # tests keep working now that the wrapper takes a tier stack.

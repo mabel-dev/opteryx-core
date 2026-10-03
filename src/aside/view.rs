@@ -6,7 +6,7 @@
 //! The materialized-view surface, and `SAVE`.
 //!
 //! ```text
-//! REFRESH MATERIALIZED VIEW <name>
+//! REFRESH MATERIALIZED VIEW <name>        (REFRESH INDEX is index.rs's)
 //! ALTER MATERIALIZED VIEW <name> OWNER TO <principal> | CURRENT_USER
 //! ALTER MATERIALIZED VIEW <name> SUSPEND | RESUME
 //! SAVE RESULTS OF <job> AS <dataset>
@@ -32,8 +32,9 @@ use sqlparser::parser::ParserError;
 use super::cursor::{grammar_error, Cursor, ValueSlot};
 use super::OpteryxOnly;
 
-const REFRESH_GRAMMAR: &str = "Expected: **REFRESH MATERIALIZED VIEW** <name>. \
-It is the only **REFRESH** statement, and it takes no options.";
+const REFRESH_GRAMMAR: &str = "Expected: **REFRESH MATERIALIZED VIEW** <name>, or \
+**REFRESH INDEX** <name> **ON** <relation>. They are the only **REFRESH** statements, and \
+they take no options.";
 
 const SAVE_GRAMMAR: &str = "Expected: **SAVE RESULTS OF** <job> **AS** <dataset>. \
 It is the only **SAVE** statement.";
@@ -79,7 +80,12 @@ pub fn parse(cursor: &mut Cursor) -> Result<Option<OpteryxOnly>, ParserError> {
 
     if cursor.peek_word("REFRESH") {
         cursor.advance(1);
-        // Every REFRESH is ours: there is no other. A malformed one is refused
+        // `REFRESH INDEX` is the index family's (index.rs).
+        if cursor.peek_word("INDEX") {
+            cursor.seek(start);
+            return Ok(None);
+        }
+        // Every other REFRESH is ours: there is no other. A malformed one is refused
         // by name rather than handed to a parser with no REFRESH statement.
         cursor.expect_word("MATERIALIZED", REFRESH_GRAMMAR)?;
         cursor.expect_word("VIEW", REFRESH_GRAMMAR)?;

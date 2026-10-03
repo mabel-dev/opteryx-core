@@ -693,3 +693,23 @@ if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 
     run_tests()
+
+
+@pytest.mark.parametrize(
+    "sql, query_type, is_mutation, is_ddl",
+    [
+        ("CREATE INDEX i ON ws.c.t USING IVF (body)", "CreateIndex", False, True),
+        ("ALTER INDEX i ON ws.c.t SET (build = 'sync')", "AlterIndexBuild", False, True),
+        ("REFRESH INDEX i ON ws.c.t", "RefreshIndex", True, False),
+        ("DROP INDEX i ON ws.c.t", "Drop", False, True),
+    ],
+)
+def test_vector_index_statements_target_their_relation_at_owner_tier(sql, query_type, is_mutation, is_ddl):
+    """A vector index is a property of its relation: every index statement is
+    pre-flighted against the RELATION (never the index name, which no permission is
+    held on), at the owner tier the binder gates them at (ALTER)."""
+    info = opteryx.analyze_query(sql)
+    assert info["query_type"] == query_type
+    assert info["tables"] == ["ws.c.t"]
+    assert (info["is_mutation"], info["is_ddl"]) == (is_mutation, is_ddl)
+    assert info["permission_required"] == "owner"

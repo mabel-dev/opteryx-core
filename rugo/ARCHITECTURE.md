@@ -63,9 +63,10 @@ read_jsonl() [_jsonl_reader.pyx]
   │     ↓
   │  interpret_jsonl_threaded() [field_span.cpp]   ← splits buffer into newline-aligned
   │     │                                             ranges, runs each on a BS::thread_pool
-  │     └─ per range: scan_structural_markers() [structural_scan.cpp]  (NEON, ~3500 MB/s)
-  │                   interpret_jsonl()           [field_span.cpp]
-  │                     ├─ build_map()            [interpreter.cpp]  ← markers → FieldSpans
+  │     └─ per range: interpret_jsonl()           [field_span.cpp]
+  │                     ├─ build_map()            [interpreter.cpp]  ← per 256 KB line-aligned window:
+  │                     │    scan_structural_index() [structural_scan.cpp] → masked uint32 index
+  │                     │    (NEON / AVX2 64-byte blocks), walked by MapBuilder → FieldSpans
   │                     └─ finalize_records()                        ← projection + predicate
   │        … then merge per-range records in order →
   │
@@ -124,7 +125,7 @@ separator-less slice buffer). Single-chunk reads parse directly from the file bu
 
 | File | Purpose |
 |------|---------|
-| `structural_scan.{hpp,cpp}` | NEON marker scan; templated `scan_structural<Emit>` |
+| `structural_scan.{hpp,cpp}` | masked structural index (simdjson stage-1 style): NEON / AVX2+PCLMUL / scalar |
 | `interpreter.{hpp,cpp}` | `build_map` / `MapBuilder` state machine + pushdown |
 | `field_span.{hpp,cpp}` | `interpret_jsonl`, `finalize_records`, `interpret_jsonl_threaded` |
 | `value_parser.{hpp,cpp}` | predicate evaluation; `parse_*` delegate to `fast_parse_*` |

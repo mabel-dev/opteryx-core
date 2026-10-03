@@ -191,6 +191,7 @@ def test_hidden_classifications_are_actually_hidden():
     [
         ("CAST", "SELECT CAST(1 AS VARCHAR)"),
         ("TRY_CAST", "SELECT TRY_CAST(1 AS VARCHAR)"),
+        ("CAST", "SELECT CAST(CAST('2024-01-15' AS DATE) AS VARCHAR FORMAT 'DD/MM/YYYY')"),
     ],
 )
 def test_syntax_forms_run(name, statement):

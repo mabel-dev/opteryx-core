@@ -15,7 +15,8 @@ import decimal
 import logging
 import threading
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional, Tuple
+from contextlib import contextmanager
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from opteryx.connectors import TableType
 
@@ -1035,6 +1036,251 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
         return _catalog_manifest(
             self.schema, bounds_are_ordinal, entries, sketch_vectors, resolved_deletes
         )
+
+# REFRESH INDEX's maintenance lease (design §5.7): held for _LEASE_SECONDS and renewed
+# every _LEASE_RENEW_SECONDS while files build, so a crashed holder frees the table
+# within ten minutes.
+_LEASE_SECONDS = 600
+_LEASE_RENEW_SECONDS = 120
+# A compaction's sink renews only between its stages (no timer thread outlives a failed
+# statement), so it claims the longest lease; one that dies holds the table for an hour.
+_COMPACTION_LEASE_SECONDS = 3600
+# A signed URL's longest life (GCS V4): one file's build can run for hours.
+_SIGNED_URL_SECONDS = 7 * 24 * 3600
+
+
+def _readable(path: str) -> str:
+    """A location the native readers can open: local paths as they are, GCS objects as a
+    signed URL (an hours-long read cannot refresh a bearer token natively)."""
+    if not path.startswith("gs://"):
+        return path
+    from opteryx.connectors.io_systems import OpteryxGcsFileSystem
+
+    return OpteryxGcsFileSystem().rewrite_to_signed_url(path, _SIGNED_URL_SECONDS)
+
+
+def _carry_on_gcs(io, specs, recorders, dims, targets, options, carry_to_sessions):
+    """Carry into GCS: each output's vectors body streams into its own resumable session;
+    then its prefix and centroids are uploaded and prefix + body composed, as a build's."""
+    bodies = [f"{vectors}.body" for vectors, _ in targets]
+    sessions = [io.open_upload_session(body) for body in bodies]
+    try:
+        built = carry_to_sessions(specs, recorders, dims, sessions, **options)
+    except BaseException:
+        for session in sessions:
+            io.cancel_upload_session(session)
+        raise
+    for (vectors, centroids), body, session, result in zip(targets, bodies, sessions, built):
+        if result is None:
+            io.cancel_upload_session(session)
+            continue
+        prefix = f"{vectors}.prefix"
+        for path, data in ((prefix, result["prefix"]), (centroids, result["centroids"])):
+            stream = io.new_output(path).create()
+            stream.write(data)
+            stream.close()
+        io.compose([prefix, body], vectors)
+        io.delete(prefix)
+        io.delete(body)
+    return built
+
+
+class _MaintenanceLeaseHandle:
+    """A claimed maintenance lease (§5.7), for an operation the engine runs across many
+    calls (a compaction's sink). `renew` extends it; `release` frees it and says whether
+    this claim still held it."""
+
+    def __init__(self, connector, relation_name: str, holder: str, operation: str):
+        from opteryx_catalog.exceptions import MaintenanceLeaseHeld
+
+        from opteryx.exceptions import ExecutionError
+
+        workspace, relative_id = connector._parse_identifier(relation_name)
+        self._catalog = connector._get_catalog(workspace)
+        try:
+            self._lease = self._catalog.claim_maintenance_lease(
+                relative_id, holder=holder, operation=operation, ttl_seconds=_COMPACTION_LEASE_SECONDS
+            )
+        except MaintenanceLeaseHeld as exc:
+            raise ExecutionError(str(exc)) from exc
+
+    def renew(self) -> None:
+        from opteryx_catalog.exceptions import MaintenanceLeaseLost
+
+        from opteryx.exceptions import ExecutionError
+
+        try:
+            self._lease = self._catalog.renew_maintenance_lease(
+                self._lease, ttl_seconds=_COMPACTION_LEASE_SECONDS
+            )
+        except MaintenanceLeaseLost as exc:
+            raise ExecutionError(str(exc)) from exc
+
+    def release(self) -> bool:
+        return self._catalog.release_maintenance_lease(self._lease)
+
+
+def _build_index_files(catalog, definition, data_file, data_bytes, deleted, vectors, centroids):
+    """Build ONE data file's index files for `definition` - natively, GIL released - and
+    return their IndexFiles, or None when the file has no indexable row (nothing written).
+
+    A data file on GCS is read through a signed URL and its vectors body streamed into a
+    resumable upload session: both are self-contained credentials that outlive an
+    hours-long build, which a bearer token would not."""
+    import os
+
+    from opteryx_catalog.catalog.vector_indexes import IndexFiles
+
+    from draken.ops.kernels._kernel_registry import lookup_kernel
+    from opteryx import config
+    from opteryx.exceptions import NotSupportedError
+    from opteryx.operators._operators import build_vector_index_local
+    from opteryx.operators._operators import build_vector_index_to_session
+
+    embed_fn, _ = lookup_kernel("draken_embed")
+    threads = config.resolve_max_execution_workers()
+    options = dict(clusters=definition["clusters"], embed_threads=threads, train_threads=threads)
+    task = _IndexTarget(data_file, data_bytes, tuple(deleted), vectors, centroids)
+    if data_file.startswith("gs://"):
+        built = _build_index_on_gcs(
+            catalog.io, task, definition["column"], embed_fn, definition["dimensions"], options,
+            build_vector_index_to_session,
+        )
+    elif "://" not in data_file:
+        os.makedirs(os.path.dirname(vectors), exist_ok=True)
+        built = build_vector_index_local(
+            data_file, definition["column"], list(deleted), embed_fn, definition["dimensions"],
+            vectors, centroids, data_bytes=data_bytes, **options,
+        )
+    else:
+        raise NotSupportedError(
+            f"Vector indexes are built for files on local disk or GCS; {data_file} is neither."
+        )
+    if built is None:
+        return None
+    return IndexFiles(
+        vectors=vectors, centroids=centroids, vectors_bytes=built["vectors_bytes"],
+        centroids_bytes=built["centroids_bytes"], logical_bytes=built["logical_bytes"],
+    )
+
+
+class _IndexTarget(NamedTuple):
+    """One data file to index and where its index files go (what `_build_index_on_gcs`
+    reads; the catalog's IndexBuildTask has the same fields)."""
+
+    data_file: str
+    data_bytes: int
+    deleted: tuple
+    vectors: str
+    centroids: str
+
+
+def _require_index_embedder(definition: dict, relation_name: str) -> None:
+    """An index is built only by the embedder it was defined against (identity and width)."""
+    from opteryx.exceptions import ExecutionError
+    from opteryx.types.vectors.embedding_capability import active_embedding_capability
+
+    capability = active_embedding_capability()
+    if (capability.identity, capability.dimensions) != (
+        definition["embedding-identity"], definition["dimensions"]
+    ):
+        raise ExecutionError(
+            f"Index {definition['name']} on {relation_name} was defined against the embedder "
+            f"{definition['embedding-identity']} ({definition['dimensions']} dimensions); this "
+            f"engine embeds with {capability.identity} ({capability.dimensions}). Install that "
+            "embedder to build it, or drop and re-create the index."
+        )
+
+
+@contextmanager
+def _index_build_lease(catalog, relative_id: str, holder: str):
+    """Hold the dataset's maintenance lease (`index-build`, design §5.7) for the block.
+
+    Refused loudly when someone else holds it. Renewed on a timer while the block runs -
+    the native build releases the GIL - and yields `lost()`, which raises once the lease
+    has been lost: a lost lease cannot stop a build in flight, so it stops the commit
+    after it. Released on the way out; an overrun (the lease expired and was claimed
+    again) is reported unless another error is already leaving."""
+    import threading
+
+    from opteryx_catalog.exceptions import MaintenanceLeaseHeld
+    from opteryx_catalog.exceptions import MaintenanceLeaseLost
+
+    from opteryx.exceptions import ExecutionError
+
+    try:
+        lease = catalog.claim_maintenance_lease(
+            relative_id, holder=holder, operation="index-build", ttl_seconds=_LEASE_SECONDS
+        )
+    except MaintenanceLeaseHeld as exc:
+        raise ExecutionError(str(exc)) from exc
+
+    stop = threading.Event()
+    lost_with: list = []
+
+    def _renew():
+        held = lease
+        while not stop.wait(_LEASE_RENEW_SECONDS):
+            try:
+                held = catalog.renew_maintenance_lease(held, ttl_seconds=_LEASE_SECONDS)
+            except MaintenanceLeaseLost as exc:
+                lost_with.append(exc)
+                return
+
+    def lost() -> None:
+        if lost_with:
+            raise ExecutionError(str(lost_with[0])) from lost_with[0]
+
+    renewer = threading.Thread(target=_renew, name="index-build-lease", daemon=True)
+    renewer.start()
+    try:
+        yield lost
+    except BaseException:
+        stop.set()
+        renewer.join()
+        catalog.release_maintenance_lease(lease)
+        raise
+    stop.set()
+    renewer.join()
+    if not catalog.release_maintenance_lease(lease):
+        raise ExecutionError(
+            f"{holder} finished, but its maintenance lease on {relative_id} had expired and been "
+            "claimed again before it did."
+        )
+
+
+def _build_index_on_gcs(io, task, column, embed_fn, dims, build_options, build_to_session):
+    """Build one GCS data file's index files - see refresh_vector_index.
+
+    The vectors file is prefix + body: the body streams natively into a resumable upload
+    session while the build runs, then the prefix (known only at the end) is uploaded
+    and the two are composed into the vectors file. Returns the build's dict, or None
+    (nothing written) when the file has no indexable row."""
+    from opteryx.connectors.io_systems import OpteryxGcsFileSystem
+
+    url = OpteryxGcsFileSystem().rewrite_to_signed_url(task.data_file, _SIGNED_URL_SECONDS)
+    body, prefix = f"{task.vectors}.body", f"{task.vectors}.prefix"
+    session = io.open_upload_session(body)
+    try:
+        built = build_to_session(
+            url, column, list(task.deleted), embed_fn, dims, session,
+            data_bytes=task.data_bytes, **build_options,
+        )
+    except BaseException:
+        io.cancel_upload_session(session)
+        raise
+    if built is None:
+        io.cancel_upload_session(session)
+        return None
+    for path, data in ((prefix, built["prefix"]), (task.centroids, built["centroids"])):
+        stream = io.new_output(path).create()
+        stream.write(data)
+        stream.close()
+    io.compose([prefix, body], task.vectors)
+    io.delete(prefix)
+    io.delete(body)
+    return built
+
 
 # Decoded catalog manifests, shared across queries (the connector is recreated
 # per query). Keyed by manifest location + the layout decoded against; bounded
@@ -2144,6 +2390,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
         manifest = self._catalog_manifest_bytes("insert", rows)
+        index_files = self._sync_index_files(catalog, relation_name, relative_id, rows)
 
         def _commit_add_files():
             dataset = catalog.load_dataset(relative_id)
@@ -2151,6 +2398,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 manifest=manifest,
                 author=author,
                 commit_message=commit_message,
+                index_files=index_files,
                 **self._provenance_kwargs(dataset.add_files, read_sources, produced_by),
             )
 
@@ -2204,12 +2452,14 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
         manifest = self._catalog_manifest_bytes("merge_commit", rows)
+        index_files = self._sync_index_files(catalog, relation_name, relative_id, rows)
 
         def _commit_merge():
             dataset = catalog.load_dataset(relative_id)
             return dataset.merge_commit(
                 manifest=manifest,
                 positions=delete_positions,
+                index_files=index_files,
                 author=author,
                 commit_message=commit_message,
                 operation=operation,
@@ -2226,10 +2476,12 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         author: Optional[str] = None,
         baseline_snapshot_id: Optional[int] = None,
         commit_message: Optional[str] = None,
+        index_files: Optional[dict] = None,
     ) -> None:
         """Retire whole data files and add their replacements as ONE snapshot.
 
-        The commit half of OPTIMIZE. `rows` are the outputs the sink
+        The commit half of OPTIMIZE. `index_files` are the outputs' CARRIED vector index
+        files (`carry_compaction_vectors`), committed in the same snapshot (§5.6). `rows` are the outputs the sink
         already wrote; `retired_files` are the manifest paths they replace.
 
         Whole-file retirement rather than `merge_commit`'s row ordinals: a
@@ -2249,8 +2501,106 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 author=author,
                 baseline_snapshot_id=baseline_snapshot_id,
                 commit_message=commit_message,
+                index_files=index_files,
             ),
         )
+
+    def vector_index_coverage(self, relation_name: str, snapshot_id: Optional[int]) -> dict:
+        """{data file path: the vector index ids covering it} at a snapshot - compaction
+        selection groups by it (§5.6)."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        return self._get_catalog(workspace).load_dataset(relative_id).vector_index_coverage(snapshot_id)
+
+    def claim_compaction_lease(self, relation_name: str, holder: str):
+        """The dataset's maintenance lease for a compaction (§5.7): refused loudly while an
+        index build holds it. Returns a handle with `renew()` and `release()`."""
+        return _MaintenanceLeaseHandle(self, relation_name, holder, "compaction")
+
+    def carry_compaction_vectors(
+        self, relation_name: str, retired_files, baseline_snapshot_id: int, outputs, recorders
+    ) -> dict:
+        """Carry the retired files' vector indexes into a compaction's outputs (§5.6).
+
+        `retired_files` in SCAN order (a recorded `$file` is a position in it), `outputs`
+        the written data files and `recorders` their row-origin maps, aligned. Returns
+        `{output path: {index id: IndexFiles}}` - empty when the inputs are unindexed.
+        Control plane only: ONE native carry per index reads every input's vectors and
+        writes every output's index files; nothing here embeds. The inputs' coverage must
+        be uniform (selection grouped them so); the catalog refuses otherwise."""
+        import os
+
+        from opteryx_catalog.catalog.vector_indexes import IndexFiles
+        from opteryx_catalog.catalog.vector_indexes import vector_index_paths
+
+        from opteryx import config
+        from opteryx.exceptions import NotSupportedError
+        from opteryx.operators._operators import carry_vector_index_local
+        from opteryx.operators._operators import carry_vector_index_to_sessions
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        dataset = catalog.load_dataset(relative_id)
+        inputs = dataset.compaction_carry_inputs(retired_files, baseline_snapshot_id)
+        coverages = {frozenset(refs) for refs, _ in inputs.values()}
+        if coverages == {frozenset()}:
+            return {}
+        if len(coverages) != 1:
+            from opteryx.exceptions import InvalidInternalStateError
+
+            raise InvalidInternalStateError(
+                f"compaction of {relation_name} selected files with different vector index coverage"
+            )
+        if len(recorders) != len(outputs):
+            from opteryx.exceptions import InvalidInternalStateError
+
+            raise InvalidInternalStateError("compaction recorded row origins for a different number of files")
+        definitions = {d["index-id"]: d for d in catalog.list_vector_indexes(relative_id)}
+        threads = config.resolve_max_execution_workers()
+        carried: dict = {path: {} for path in outputs}
+        index_ids = sorted(coverages.pop())
+        for position, index_id in enumerate(index_ids):
+            definition = definitions.get(index_id)
+            if definition is None:
+                raise ValueError(
+                    f"{relation_name}: the files being compacted are indexed by {index_id}, which "
+                    "is no longer defined; drop its files (DROP INDEX) before compacting."
+                )
+            # A recorder is spent by a carry, so each index after the first carries from a copy.
+            spent = recorders if position == len(index_ids) - 1 else [r.copy() for r in recorders]
+            remote = [f for f in retired_files if "://" in f and not f.startswith("gs://")]
+            if remote:
+                raise NotSupportedError(f"Vector carry reads local or GCS files; {remote[0]} is neither.")
+            specs = []
+            for path in retired_files:
+                refs, deleted = inputs[path]
+                files = refs[index_id]
+                specs.append((_readable(files.vectors), files.vectors_bytes, list(deleted)))
+            targets = [vector_index_paths(dataset.metadata.location, index_id, out) for out in outputs]
+            options = dict(clusters=definition["clusters"], train_threads=threads)
+            if all(out.startswith("gs://") for out in outputs):
+                built = _carry_on_gcs(catalog.io, specs, spent, definition["dimensions"], targets,
+                                      options, carry_vector_index_to_sessions)
+            elif not any("://" in out for out in outputs):
+                for vectors, _ in targets:
+                    os.makedirs(os.path.dirname(vectors), exist_ok=True)
+                built = carry_vector_index_local(
+                    specs, spent, definition["dimensions"], [v for v, _ in targets], [c for _, c in targets],
+                    **options,
+                )
+            else:
+                raise NotSupportedError("Vector carry writes outputs on local disk or GCS.")
+            for out, (vectors, centroids), result in zip(outputs, targets, built):
+                if result is None:
+                    raise NotSupportedError(
+                        f"compaction output {out} carries no vector for index {definition['name']}: "
+                        "every row it holds was unindexed. A file with no indexable row cannot be "
+                        "recorded as indexed, and compaction may not change coverage (§5.6)."
+                    )
+                carried[out][index_id] = IndexFiles(
+                    vectors=vectors, centroids=centroids, vectors_bytes=result["vectors_bytes"],
+                    centroids_bytes=result["centroids_bytes"], logical_bytes=result["logical_bytes"],
+                )
+        return carried
 
     def replace_relation(
         self,
@@ -2272,11 +2622,13 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
         manifest = self._catalog_manifest_bytes("replace_relation", rows)
+        index_files = self._sync_index_files(catalog, relation_name, relative_id, rows)
 
         def _commit_replace():
             dataset = catalog.load_dataset(relative_id)
             return dataset.truncate_and_add_files(
                 manifest=manifest,
+                index_files=index_files,
                 author=author,
                 commit_message=commit_message,
                 **self._provenance_kwargs(
@@ -3443,31 +3795,56 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         dimensions: int,
         if_not_exists: bool,
         author: Optional[str] = None,
-    ) -> Optional[dict]:
-        """Define a vector index. Returns the stored definition, or None when IF NOT
-        EXISTS met an existing index (which is then left exactly as it was)."""
+    ) -> Optional[int]:
+        """Define a vector index. Returns the number of files built (0 for an `async`
+        index, whose files REFRESH INDEX builds), or None when IF NOT EXISTS met an
+        existing index (which is then left exactly as it was).
+
+        A `sync` index builds every existing file before this returns (D-7), under the
+        maintenance lease (§5.7), which is claimed BEFORE the definition is created: if
+        it cannot be had, the definition is not created. A build that fails drops the
+        definition again (with any files it had committed), so a failed CREATE leaves no
+        index behind."""
         from opteryx_catalog.exceptions import VectorIndexAlreadyExists
 
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
-        try:
-            return catalog.create_vector_index(
-                relative_id,
-                index_name,
-                column_name,
-                embedding_identity=embedding_identity,
-                dimensions=dimensions,
-                author=author,
-                build=options.get("build"),
-                clusters=options.get("clusters", 0),
-                nprobe=options.get("nprobe", 32),
-            )
-        except VectorIndexAlreadyExists as exc:
-            if if_not_exists:
+
+        def _define():
+            try:
+                return catalog.create_vector_index(
+                    relative_id,
+                    index_name,
+                    column_name,
+                    embedding_identity=embedding_identity,
+                    dimensions=dimensions,
+                    author=author,
+                    build=options.get("build"),
+                    clusters=options.get("clusters", 0),
+                    nprobe=options.get("nprobe", 32),
+                )
+            except VectorIndexAlreadyExists as exc:
+                if if_not_exists:
+                    return None
+                # Translated at the boundary, like the tag errors: the catalog's message
+                # already names the index and what to do.
+                raise ValueError(str(exc)) from exc
+
+        if options.get("build") != "sync":
+            return None if _define() is None else 0
+
+        with _index_build_lease(catalog, relative_id, f"CREATE INDEX {index_name} by {author}") as lost:
+            definition = _define()
+            if definition is None:
                 return None
-            # Translated at the boundary, like the tag errors: the catalog's message
-            # already names the index and what to do.
-            raise ValueError(str(exc)) from exc
+            try:
+                _require_index_embedder(definition, relation_name)
+                return self._build_uncovered_files(
+                    catalog, relation_name, relative_id, definition, author, lost
+                )
+            except BaseException:
+                catalog.drop_vector_index(relative_id, definition["name"], author=author)
+                raise
 
     def alter_vector_index_build(
         self, relation_name: str, index_name: str, build: str, author: Optional[str] = None
@@ -3499,6 +3876,71 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         """The vector indexes defined on a relation, as the catalog's plain dicts."""
         workspace, relative_id = self._parse_identifier(relation_name)
         return self._get_catalog(workspace).list_vector_indexes(relative_id)
+
+    def refresh_vector_index(self, relation_name: str, index_name: str, author: Optional[str] = None) -> int:
+        """REFRESH INDEX (D-16): index every live data file the index does not cover yet,
+        under the maintenance lease (§5.7). Returns the number of files indexed."""
+        from opteryx_catalog.exceptions import VectorIndexNotFound
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        try:
+            definition = catalog.get_vector_index(relative_id, index_name)
+        except VectorIndexNotFound as exc:
+            raise ValueError(f"There is no index {index_name} on {relation_name}.") from exc
+        _require_index_embedder(definition, relation_name)
+        with _index_build_lease(catalog, relative_id, f"REFRESH INDEX {index_name} by {author}") as lost:
+            return self._build_uncovered_files(catalog, relation_name, relative_id, definition, author, lost)
+
+    def _build_uncovered_files(self, catalog, relation_name, relative_id, definition, author, lost) -> int:
+        """Build and commit the index files of every live data file `definition` does not
+        cover. The caller holds the maintenance lease; `lost()` raises once it is gone.
+
+        Each file is committed as soon as it is built, so a failure keeps every file
+        indexed before it. A file with no indexable row (all null, deleted or without a
+        defined cosine) gets no index files and stays searched exactly."""
+        index_id = definition["index-id"]
+        indexed = 0
+        for task in catalog.load_dataset(relative_id).vector_index_build_plan(index_id):
+            files = _build_index_files(
+                catalog, definition, task.data_file, task.data_bytes, task.deleted,
+                task.vectors, task.centroids,
+            )
+            lost()
+            if files is None:
+                continue
+            self._commit(
+                relation_name,
+                lambda: catalog.load_dataset(relative_id).commit_vector_index_files(
+                    index_id, {task.data_file: files}, author=author, agent="refresh-index"
+                ),
+            )
+            indexed += 1
+        return indexed
+
+    def _sync_index_files(self, catalog, relation_name: str, relative_id: str, rows) -> Optional[dict]:
+        """A SYNC index's files for the data files a write is about to commit (D-7): built
+        here, before the commit, and referenced in the same snapshot, so the new files are
+        never unindexed. `{file path: {index id: IndexFiles}}`, or None with no sync index.
+
+        Takes no maintenance lease (§5.7): a write indexes only its OWN new files, which no
+        compaction can have selected yet. A file with no indexable row gets none."""
+        from opteryx_catalog.catalog.vector_indexes import vector_index_paths
+
+        sync = [d for d in catalog.list_vector_indexes(relative_id) if d.get("build") == "sync"]
+        if not sync:
+            return None
+        for definition in sync:
+            _require_index_embedder(definition, relation_name)
+        location = catalog.load_dataset(relative_id).metadata.location
+        built: dict = {}
+        for path, size in zip(rows.file_paths(), rows.file_sizes()):
+            for definition in sync:
+                vectors, centroids = vector_index_paths(location, definition["index-id"], path)
+                files = _build_index_files(catalog, definition, path, size, (), vectors, centroids)
+                if files is not None:
+                    built.setdefault(path, {})[definition["index-id"]] = files
+        return built
 
     def list_triggers(self, relation_name: str) -> list:
         """The triggers a holder carries - a dataset's, or a task's for a

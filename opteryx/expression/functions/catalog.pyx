@@ -381,6 +381,13 @@ class FunctionCatalog:
                 return 0.0 if node_type == LogicalCategory.VARBINARY else _INF
             if type_family == "temporal":
                 return 0.0 if isinstance(node_type, LogicalCategory) and node_type in _TEMPORAL_TYPES else _INF
+            # DATE or TIMESTAMP — the operand set of every calendar kernel
+            # (DATEDIFF, EXTRACT, FORMAT_TIMESTAMP, TIME_BUCKET, UNIXTIME...).
+            # `temporal` also admits TIME and INTERVAL, which those kernels do
+            # not take: declared as `temporal`, `UNIXTIME(time_col)` bound
+            # cleanly and then died in the kernel with a raw TypeError.
+            if type_family == "datetime":
+                return 0.0 if node_type == LogicalCategory.DATE or node_type == LogicalCategory.TIMESTAMP else _INF
             if type_family == "date":
                 return 0.0 if node_type == LogicalCategory.DATE else _INF
             if type_family == "timestamp":
@@ -426,10 +433,23 @@ class FunctionCatalog:
                 "integer": "INTEGER",
                 "boolean": "BOOLEAN",
                 "temporal": "TIMESTAMP",
+                "datetime": "TIMESTAMP",
                 "date": "DATE",
                 "timestamp": "TIMESTAMP",
                 "array": "ARRAY<VARCHAR>",
             }
+            # Families whose name is not a type a reader could write.
+            _FAMILY_DISPLAY = {"datetime": "DATE or TIMESTAMP"}
+            # Source types with NO cast into the family. Suggesting one sends the
+            # reader to a second error: TIME and INTERVAL have no conversion to a
+            # calendar instant, so `time_col::TIMESTAMP` is refused too.
+            _NO_CAST_INTO = {
+                "datetime": (LogicalCategory.TIME, LogicalCategory.INTERVAL),
+            }
+
+            def _family_name(family: str) -> str:
+                return _FAMILY_DISPLAY.get(family, family.upper())
+
             selected_for_error = scored[0]
 
             def _render_arg(node, index: int) -> str:
@@ -473,13 +493,18 @@ class FunctionCatalog:
                         )
                         mismatches.append(
                             f"arg{i + 1} (NULL): expected "
-                            f"{current_param.type_family.upper()}{cast_hint}"
+                            f"{_family_name(current_param.type_family)}{cast_hint}"
                         )
                     else:
                         col_name = _render_arg(node, i)
-                        cast_hint = f" - use `{col_name}::{cast_type}`." if cast_type else "."
+                        if node_type in _NO_CAST_INTO.get(current_param.type_family, ()):
+                            cast_hint = f" - {node_type.value} cannot be cast to {_family_name(current_param.type_family)}."
+                        elif cast_type:
+                            cast_hint = f" - use `{col_name}::{cast_type}`."
+                        else:
+                            cast_hint = "."
                         mismatches.append(
-                            f"arg{i + 1} ('{col_name}'): expected {current_param.type_family.upper()}, got {node_type.value}{cast_hint}"
+                            f"arg{i + 1} ('{col_name}'): expected {_family_name(current_param.type_family)}, got {node_type.value}{cast_hint}"
                         )
                 if not current_param.variadic:
                     current_param = next(param_iter, None)
@@ -504,7 +529,7 @@ class FunctionCatalog:
             if reordered is not None:
                 overload, permutation = reordered
                 signature = f"{canonical}({', '.join(p.name for p in overload.parameters)})"
-                expected = ", ".join(p.type_family.upper() for p in overload.parameters)
+                expected = ", ".join(_family_name(p.type_family) for p in overload.parameters)
                 supplied = ", ".join(_type_name(node) for node in arg_nodes)
                 call = (
                     f"{canonical}("

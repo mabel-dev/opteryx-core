@@ -13,15 +13,6 @@
 #include "string_slot.h"   // DrakenStringSlot
 #include "declared_type.hpp"   // DeclaredType — explicit_schema's type vocabulary
 
-// PyObject forward declaration — lets this header declare a Vector-producing
-// function without forcing Python.h include-order onto every consumer.
-// When Python.h is already included (the .cpp and the Cython TU both do),
-// Py_PYTHON_H is defined and the real declaration is used instead.
-#ifndef Py_PYTHON_H
-struct _object;
-typedef struct _object PyObject;
-#endif
-
 namespace rugo::_jsonl {
 
 // Row-range parallel executor (defined in column_builder.cpp). Only ever passed by pointer
@@ -113,24 +104,10 @@ StringColumnResult extract_column(
     RecordValueTypes                           record_value_types = RecordValueTypes::Never
 );
 
-// Build an owned Draken VARCHAR Vector from an extracted column. Slice bytes are read
-// from `base + offsets[i]`: pass scr.data_ptr() in copy mode, or the original buffer
-// in no-copy mode. Allocates draken_malloc slot + arena + validity, populates
-// German-string slots in one pass, transfers ownership via draken_vector_own_string.
-// Python edge lives here in C++; the .pyx stays typed-only. Returns a NEW reference.
-PyObject* build_varchar_vector(const uint8_t* base, StringColumnResult& scr);
-
-// Build an owned typed Draken Vector from an extracted column, using the column's
-// inferred type as a cheap speculative hint and validating by parse. Number columns
-// try int64, then widen to float64, then fall back to VARCHAR; bool tries true/false
-// then falls back to VARCHAR; string/null go straight to VARCHAR. The prediction is
-// never load-bearing — a parse miss falls back to an always-correct path. Slice bytes
-// are read from `base + offsets[i]` (see build_varchar_vector). Returns a NEW reference.
-PyObject* build_typed_vector(const uint8_t* base, StringColumnResult& scr);
-
 // A column parsed into owned draken_malloc buffers, ready to be wrapped into a Draken
 // Vector. Holds NO Python objects, so it can be produced off the GIL (in parallel) and
-// wrapped serially under the GIL via wrap_column(). Buffer ownership transfers to the
+// wrapped serially under the GIL via wrap_column() (jsonl/_jsonl_column_wrap.hpp —
+// the Python edge, kept out of this pure-C++ core). Buffer ownership transfers to the
 // Vector on wrap; this is a plain carrier with no destructor.
 struct ParsedColumn {
     DrakenType        type     = DRAKEN_VARCHAR;
@@ -210,9 +187,5 @@ std::vector<ParsedColumn> parse_all_columns(
     bool                                       may_have_escapes,
     const ParseContext&                        context
 );
-
-// Wrap a ParsedColumn into an owned Draken Vector. Creates a Python object — call under
-// the GIL. Returns a NEW reference, or NULL with an exception set on failure.
-PyObject* wrap_column(ParsedColumn& pc);
 
 }  // namespace rugo::_jsonl

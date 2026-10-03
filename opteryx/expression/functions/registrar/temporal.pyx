@@ -25,7 +25,11 @@ def get_builtin_temporal_functions() -> list:
             "millisecond", "milliseconds", "microsecond", "microseconds",
         ),
     )
-    _date = ParameterSpec(name="date", type_family="temporal")
+    # `datetime`, not `temporal`: every kernel below takes DATE or TIMESTAMP
+    # only, and `temporal` would bind TIME/INTERVAL straight into a raw
+    # kernel TypeError.
+    _not_calendar = ("TIME", "INTERVAL")
+    _date = ParameterSpec(name="date", type_family="datetime", excludes=_not_calendar)
 
     # Implementations are provided by the temporal implementation module.
     from opteryx.expression.functions.implementations import temporal as date_functions
@@ -71,7 +75,7 @@ def get_builtin_temporal_functions() -> list:
             "DATEDIFF",
             date_functions.date_diff,
             _CT_INT64,
-            (_part, _date, ParameterSpec(name="end", type_family="temporal")),
+            (_part, _date, ParameterSpec(name="end", type_family="datetime", excludes=_not_calendar)),
             aliases=("DATE_DIFF",),
             cost=2280.32,
             summary="Difference between two dates in the specified unit.",
@@ -81,8 +85,8 @@ def get_builtin_temporal_functions() -> list:
             date_functions.time_diff,
             _CT_INT64,
             (
-                ParameterSpec(name="time1", type_family="temporal"),
-                ParameterSpec(name="time2", type_family="temporal"),
+                ParameterSpec(name="time1", type_family="datetime", excludes=_not_calendar),
+                ParameterSpec(name="time2", type_family="datetime", excludes=_not_calendar),
             ),
             aliases=("TIME_DIFF",),
             cost=2331.70,
@@ -118,13 +122,46 @@ def get_builtin_temporal_functions() -> list:
             cost=685.61,
             summary="Convert Unix timestamp to TIMESTAMP.",
         ),
-        _make(
-            "UNIXTIME",
-            date_functions.unixtime,
-            _CT_INT64,
-            (_date,),
+        FunctionDefinition(
+            name="UNIXTIME",
             aliases=("TO_UNIXTIME",),
-            cost=517.15,
+            category="misc",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
             summary="Convert TIMESTAMP to Unix epoch seconds.",
+            documentation=(
+                "Converts a DATE or TIMESTAMP to whole Unix epoch seconds as an INTEGER; "
+                "sub-second detail is discarded. With no argument, gives the epoch "
+                "seconds at which the query's connection was opened - the same value as "
+                "UNIXTIME(NOW())."
+            ),
+            overloads=(
+                FunctionOverload(
+                    id="UNIXTIME_default",
+                    parameters=(_date,),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_INT64),
+                    kernel=KernelSpec(
+                        engine="draken",
+                        id="default",
+                        callable_ref=date_functions.unixtime,
+                        cost_us_per_million=517.15,
+                    ),
+                ),
+                # Never executed: the binder folds a zero-argument call to a
+                # constant (constant.pyx, fixed_value_function) before overload
+                # resolution. Declared so the catalog, and so the docs, know it.
+                FunctionOverload(
+                    id="UNIXTIME_0",
+                    parameters=(),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_INT64),
+                    kernel=KernelSpec(
+                        engine="draken",
+                        id="zero_arg",
+                        callable_ref=lambda *a: None,
+                        cost_us_per_million=1.0,
+                    ),
+                ),
+            ),
         ),
     ]

@@ -52,6 +52,7 @@ class DataFileStream:
         sorted_by=None,
         write_profile="fast",
         pending_schema=None,
+        row_origins=False,
     ):
         self.connector = connector
         self.relation_name = relation_name
@@ -76,6 +77,12 @@ class DataFileStream:
         self._batcher = MorselBatcher(self.coalesce_rows)
         self._writer = None
         self.rows = []   # one native file row per closed file
+        # Row origins (OPTIMIZE of a relation with a vector index, §5.6): every batch
+        # carries its rows' input file and ordinal, which a native recorder per output
+        # file takes out before the batch is written. `origins` aligns with `rows`.
+        self.row_origins = row_origins
+        self._recorder = None
+        self.origins = []
 
     def push(self, morsel):
         """Buffer a morsel by REFERENCE; write whole batches as they fill.
@@ -118,6 +125,13 @@ class DataFileStream:
         self.rows = []
 
     def _write_batch(self, batch):
+        if self.row_origins:
+            if self._recorder is None:
+                from opteryx.constants.row_identity import COMPACTION_ORIGIN_FILE
+                from opteryx.constants.row_identity import COMPACTION_ORIGIN_ORDINAL
+
+                self._recorder = RowOriginRecorder(COMPACTION_ORIGIN_FILE, COMPACTION_ORIGIN_ORDINAL)
+            batch = self._recorder.take(batch)
         if self._writer is None:
             self._writer = self.connector.open_data_file_writer(
                 self.relation_name,
@@ -135,3 +149,6 @@ class DataFileStream:
             return
         writer, self._writer = self._writer, None
         self.rows.append(writer.close())
+        if self.row_origins:
+            self.origins.append(self._recorder)
+            self._recorder = None

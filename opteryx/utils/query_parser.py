@@ -30,6 +30,8 @@ _TABLE_FUNCTIONS = frozenset({"UNNEST", "GENERATE_SERIES", "VALUES"})
 # `Drop` is handled separately because it names several targets at once.
 _STATEMENT_TARGETS = {
     "AlterTable": ("name",),
+    # A vector index is a property of its relation: the relation is the target.
+    "CreateIndex": ("table_name",),
     "CreateTable": ("name",),
     "CreateView": ("name",),
     "ShowColumns": ("show_options", "show_in", "parent_name"),
@@ -70,6 +72,9 @@ _SYNTHESIZED_TARGETS = {
     "RevokeAccess": "object_name",
     "ShowGrantsOn": "object_name",
     "ShowEffectiveGrantsOn": "object_name",
+    # Vector index statements act on the relation the index belongs to.
+    "AlterIndexBuild": "relation",
+    "RefreshIndex": "relation",
 }
 
 # What each synthesized statement is, and the role it needs. Kept beside the
@@ -135,6 +140,15 @@ _SYNTHESIZED_STATEMENTS = {
     # honest answer; the binder holds the real gate.
     "Listen": (False, False, "reader"),
     "Unlisten": (False, False, "reader"),
+    # Vector indexes: the binder gates all of them at ALTER, the owner tier. ALTER
+    # INDEX changes the definition (DDL); REFRESH INDEX changes no definition, it
+    # builds index files and commits them to the relation's manifest (a mutation).
+    # Owner-tier for REFRESH too (ruled 2026-10-03): a commit-fired refresh runs as
+    # the index's creator, who holds it, never as whoever's write fired it.
+    "AlterIndexBuild": (False, True, "owner"),
+    "RefreshIndex": (True, False, "owner"),
+    # sqlparser's own statement, but a CREATE INDEX is no CREATE TABLE: classed here.
+    "CreateIndex": (False, True, "owner"),
 }
 
 
@@ -210,6 +224,14 @@ def _collect_statement_target(ast: Dict[str, Any], tables: Set[str]) -> None:
     statement_type = next(iter(ast), None)
     body = ast.get(statement_type)
     if not isinstance(body, dict):
+        return
+
+    if statement_type == "Drop" and body.get("object_type") == "Index":
+        # DROP INDEX i ON t: `names` holds the INDEX, which no permission is held on;
+        # the relation it belongs to is the target.
+        name = _extract_table_name(body.get("table"))
+        if name:
+            tables.add(name)
         return
 
     if statement_type == "Drop":

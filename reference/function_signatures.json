@@ -1457,7 +1457,7 @@
                     {
                         "label": "date",
                         "type": "temporal",
-                        "documentation": "Date, time, or timestamp value to evaluate.",
+                        "documentation": "Date or timestamp value to evaluate.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
@@ -1467,12 +1467,15 @@
                         "maximum": null,
                         "value_format": null,
                         "element_of": null,
-                        "excludes": []
+                        "excludes": [
+                            "TIME",
+                            "INTERVAL"
+                        ]
                     },
                     {
                         "label": "end",
                         "type": "temporal",
-                        "documentation": "Ending date, time, or timestamp value.",
+                        "documentation": "Ending date or timestamp value.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
@@ -1482,7 +1485,10 @@
                         "maximum": null,
                         "value_format": null,
                         "element_of": null,
-                        "excludes": []
+                        "excludes": [
+                            "TIME",
+                            "INTERVAL"
+                        ]
                     }
                 ]
             }
@@ -1608,7 +1614,7 @@
                     {
                         "label": "date",
                         "type": "temporal",
-                        "documentation": "Date, time, or timestamp value to evaluate.",
+                        "documentation": "Date or timestamp value to evaluate.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
@@ -1618,7 +1624,10 @@
                         "maximum": null,
                         "value_format": null,
                         "element_of": null,
-                        "excludes": []
+                        "excludes": [
+                            "TIME",
+                            "INTERVAL"
+                        ]
                     }
                 ],
                 "notes": "Canonical SQL-92 form is `EXTRACT(part FROM date)`. The supported parts are `year`, `quarter`, `month`, `day`, `hour`, `minute`, `second` and `epoch`; each returns an `integer`. `epoch` is whole Unix epoch seconds - `EXTRACT(EPOCH FROM ts)` is the same value as `TO_UNIXTIME(ts)`, and is planned as that call. Sub-day parts require a TIMESTAMP operand."
@@ -1770,7 +1779,7 @@
                     {
                         "label": "date",
                         "type": "temporal",
-                        "documentation": "Date, time, or timestamp value to evaluate.",
+                        "documentation": "Date or timestamp value to evaluate.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
@@ -1780,7 +1789,10 @@
                         "maximum": null,
                         "value_format": null,
                         "element_of": null,
-                        "excludes": []
+                        "excludes": [
+                            "TIME",
+                            "INTERVAL"
+                        ]
                     }
                 ]
             }
@@ -5891,7 +5903,7 @@
                     {
                         "label": "time1",
                         "type": "temporal",
-                        "documentation": "First date, time, or timestamp value.",
+                        "documentation": "First date or timestamp value.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
@@ -5901,12 +5913,15 @@
                         "maximum": null,
                         "value_format": null,
                         "element_of": null,
-                        "excludes": []
+                        "excludes": [
+                            "TIME",
+                            "INTERVAL"
+                        ]
                     },
                     {
                         "label": "time2",
                         "type": "temporal",
-                        "documentation": "Second date, time, or timestamp value.",
+                        "documentation": "Second date or timestamp value.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
@@ -5916,7 +5931,10 @@
                         "maximum": null,
                         "value_format": null,
                         "element_of": null,
-                        "excludes": []
+                        "excludes": [
+                            "TIME",
+                            "INTERVAL"
+                        ]
                     }
                 ]
             }
@@ -6019,7 +6037,7 @@
                     {
                         "label": "date",
                         "type": "temporal",
-                        "documentation": "Date, time, or timestamp value to evaluate.",
+                        "documentation": "Date or timestamp value to evaluate.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
@@ -6029,7 +6047,10 @@
                         "maximum": null,
                         "value_format": null,
                         "element_of": null,
-                        "excludes": []
+                        "excludes": [
+                            "TIME",
+                            "INTERVAL"
+                        ]
                     }
                 ]
             }
@@ -6360,7 +6381,7 @@
                     {
                         "label": "value",
                         "type": "temporal",
-                        "documentation": "Date, time, or timestamp value to truncate.",
+                        "documentation": "Date or timestamp value to truncate.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
@@ -6439,7 +6460,7 @@
                     {
                         "label": "value",
                         "type": "temporal",
-                        "documentation": "Date, time, or timestamp value to truncate.",
+                        "documentation": "Date or timestamp value to truncate.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
@@ -6510,7 +6531,7 @@
                 "id": "UNIXTIME_default",
                 "label": "UNIXTIME(date)",
                 "category": "Date & Time Functions",
-                "documentation": "Convert TIMESTAMP to Unix epoch seconds.",
+                "documentation": "Converts a DATE or TIMESTAMP to whole Unix epoch seconds as an INTEGER; sub-second detail is discarded. With no argument, gives the epoch seconds at which the query's connection was opened - the same value as UNIXTIME(NOW()).",
                 "related_functions": [
                     "CURRENT_DATE",
                     "CURRENT_TIME",
@@ -6538,7 +6559,7 @@
                     {
                         "label": "date",
                         "type": "temporal",
-                        "documentation": "Date, time, or timestamp value to evaluate.",
+                        "documentation": "Date or timestamp value to evaluate.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
@@ -6548,9 +6569,42 @@
                         "maximum": null,
                         "value_format": null,
                         "element_of": null,
-                        "excludes": []
+                        "excludes": [
+                            "TIME",
+                            "INTERVAL"
+                        ]
                     }
                 ]
+            },
+            {
+                "id": "UNIXTIME_0",
+                "label": "UNIXTIME()",
+                "category": "Date & Time Functions",
+                "documentation": "Converts a DATE or TIMESTAMP to whole Unix epoch seconds as an INTEGER; sub-second detail is discarded. With no argument, gives the epoch seconds at which the query's connection was opened - the same value as UNIXTIME(NOW()).",
+                "related_functions": [
+                    "CURRENT_DATE",
+                    "CURRENT_TIME",
+                    "CURRENT_TIMESTAMP",
+                    "DATE",
+                    "EXTRACT"
+                ],
+                "return_type": "INTEGER",
+                "returns": {
+                    "type": "INTEGER",
+                    "documentation": "Returns the computed result as `INTEGER`."
+                },
+                "arity": {
+                    "minimum": 0,
+                    "maximum": 0,
+                    "variadic": false
+                },
+                "homogeneous": false,
+                "execution": {
+                    "kernel_id": "zero_arg",
+                    "engine": "draken",
+                    "cost_us_per_million": 1.0
+                },
+                "parameters": []
             }
         ]
     },

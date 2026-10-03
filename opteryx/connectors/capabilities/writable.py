@@ -713,11 +713,13 @@ class Writable:
         author: Optional[str] = None,
         baseline_snapshot_id: Optional[int] = None,
         commit_message: Optional[str] = None,
+        index_files: Optional[dict] = None,
     ) -> None:
         """Retire whole data files and add their replacements as ONE snapshot.
 
         The commit half of OPTIMIZE. `rows` are outputs the caller has
-        already written; `retired_files` are the manifest paths they replace.
+        already written; `retired_files` are the manifest paths they replace;
+        `index_files` the outputs' carried vector index files, if any.
 
         Overriding this is what DECLARES a connector able to compact — the
         binder refuses OPTIMIZE for any connector still carrying this base
@@ -735,6 +737,12 @@ class Writable:
         """
         # Reachable for the same reason as set_cluster_by: a connector with no
         # catalog has no file layout to compact.
+        raise NotImplementedError(f"{self.__class__.__name__} does not support OPTIMIZE")
+
+    def claim_compaction_lease(self, relation_name: str, holder: str):
+        """Claim the relation's maintenance lease for a compaction, refusing loudly while
+        another holds it. Returns a handle with `renew()` and `release() -> bool`. Every
+        connector that compacts (overrides `compaction_commit`) must provide one."""
         raise NotImplementedError(f"{self.__class__.__name__} does not support OPTIMIZE")
 
     def set_comment(self, object_name: str, comment: str, describer: Optional[str] = None) -> None:

@@ -1,4 +1,4 @@
-// compiled_expression.h — flat C++ representation of an expression tree.
+// _compiled_expression.h — flat C++ representation of an expression tree.
 //
 // Layering (CLAUDE.md):
 //   - Python : planner / binder produce the source Node tree.

@@ -948,6 +948,8 @@ def draken_rugo_extensions(parquet_created_by):
                     "rugo/src/jsonl/core/field_span.cpp",
                     "rugo/src/jsonl/core/jsonl_reader.cpp",
                     "rugo/src/jsonl/core/column_builder.cpp",
+                    # Python edge of the column builder (wrap_column); rugo_native only.
+                    "rugo/src/jsonl/_jsonl_column_wrap.cpp",
                     "draken/simd/simd_env.cpp",
                     "src/cpp/simd_search.cpp",
                     # csv reader C++ sources
@@ -1002,6 +1004,7 @@ def draken_rugo_extensions(parquet_created_by):
                 "rugo/src/jsonl/core/field_span.hpp",
                 "rugo/src/jsonl/core/jsonl_reader.hpp",
                 "rugo/src/jsonl/core/column_builder.hpp",
+                "rugo/src/jsonl/_jsonl_column_wrap.hpp",
                 "rugo/src/jsonl/core/fast_parsers.hpp",
                 "rugo/src/jsonl/core/json_array_walker.hpp",
                 "rugo/src/csv/core/csv_parse_context.hpp",

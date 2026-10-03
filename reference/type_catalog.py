@@ -163,7 +163,9 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
             {"type": "from VARCHAR (FORMAT)", "example": "CAST('15-01-2024' AS DATE FORMAT 'DD-MM-YYYY')", "note": "Parses against an explicit SQL-style pattern (tokens: YYYY, YY, MM, DD, HH24, HH12/HH, MI, SS, FF) instead of the YYYY-MM-DD default"},
             {"type": "from TIMESTAMP",  "example": "ts_col::DATE",               "note": "Truncates the time component; returns the date portion only"},
             {"type": "from INTEGER (literal only)", "example": "1::DATE",        "note": "An integer *literal* is interpreted as days since the Unix epoch. This does NOT work for an integer column — casting a column raises NotImplementedError; convert via `FROM_UNIXTIME(n)::DATE` instead"},
-            {"type": "to VARCHAR", "example": "date_col::VARCHAR", "note": "Renders as 'YYYY-MM-DD' (ISO 8601). `CAST(date_col AS VARCHAR FORMAT '...')` renders against an explicit pattern instead"},
+            {"type": "to VARCHAR", "example": "date_col::VARCHAR", "note": "Renders as 'YYYY-MM-DD' (ISO 8601)"},
+            {"type": "to VARCHAR (FORMAT)", "example": "CAST(date_col AS VARCHAR FORMAT 'DD/MM/YYYY')", "note": "Renders against an explicit SQL-style pattern, e.g. '15/01/2024'. Uses the same [format elements](../advanced/adv-working-with-timestamps#format-elements) as parsing (YYYY, YY, MM, DD, ...). `FORMAT` is only accepted inside `CAST()`, not with `::`"},
+            {"type": "to VARCHAR (strftime)", "example": "FORMAT_TIMESTAMP('%d/%m/%Y', date_col)", "note": "Function alternative taking strftime codes (`%Y`, `%m`, `%d`) rather than SQL format elements — see [FORMAT_TIMESTAMP](../functions/format_timestamp)"},
         ],
         "comparable_with": ["DATE", "TIMESTAMP"],
         "arithmetic": [
@@ -185,6 +187,7 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
         ],
         "cast_to": [
             {"type": "from VARCHAR", "example": "'09:30:45'::TIME", "note": "String must be in HH:MM:SS[.ffffff] format"},
+            {"type": "to VARCHAR", "example": "time_col::VARCHAR", "note": "Renders as 'HH:MM:SS.ffffff', e.g. '09:30:45.000000'. `CAST ... FORMAT` and `FORMAT_TIMESTAMP` do not accept TIME yet"},
         ],
         "comparable_with": ["TIME"],
         "limitations": [
@@ -215,7 +218,9 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
             {"type": "from INTEGER (milliseconds)", "example": "epoch_col::TIMESTAMP[ms]", "note": "Milliseconds since Unix epoch"},
             {"type": "from INTEGER (microseconds)", "example": "epoch_col::TIMESTAMP[us]", "note": "Microseconds since Unix epoch (default scale)"},
             {"type": "from INTEGER (nanoseconds)",  "example": "epoch_col::TIMESTAMP[ns]", "note": "Nanoseconds since Unix epoch"},
-            {"type": "to VARCHAR", "example": "ts_col::VARCHAR", "note": "Renders as 'YYYY-MM-DDTHH:MM:SS.ffffff' (ISO 8601, no offset — timestamps are naive). `CAST(ts_col AS VARCHAR FORMAT '...')` renders against an explicit pattern instead"},
+            {"type": "to VARCHAR", "example": "ts_col::VARCHAR", "note": "Renders as 'YYYY-MM-DDTHH:MM:SS.ffffff' (ISO 8601, no offset — timestamps are naive)"},
+            {"type": "to VARCHAR (FORMAT)", "example": "CAST(ts_col AS VARCHAR FORMAT 'DD/MM/YYYY HH24:MI')", "note": "Renders against an explicit SQL-style pattern, e.g. '15/01/2024 09:30'. Uses the same [format elements](../advanced/adv-working-with-timestamps#format-elements) as parsing (YYYY, MM, DD, HH24, MI, SS, FF, ...). `FORMAT` is only accepted inside `CAST()`, not with `::`"},
+            {"type": "to VARCHAR (strftime)", "example": "FORMAT_TIMESTAMP('%d/%m/%Y %H:%M', ts_col)", "note": "Function alternative taking strftime codes (`%Y`, `%m`, `%d`, `%H`, `%M`) rather than SQL format elements — see [FORMAT_TIMESTAMP](../functions/format_timestamp)"},
         ],
         "comparable_with": ["TIMESTAMP", "DATE"],
         "arithmetic": [

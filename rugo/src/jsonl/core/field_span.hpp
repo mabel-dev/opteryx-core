@@ -51,14 +51,13 @@ struct InterpreterResult {
     size_t num_records_passed = 0;
 };
 
-// Stateless interpreter: process buffer with projection, predicates, schema
-// Takes marker array from SIMD scan, produces FieldSpans for complete records.
-// `markers` cover [range_start, buffer_length) of `buffer_data` at absolute positions
-// (interpret_jsonl_threaded passes one newline-aligned range at a time).
+// Stateless interpreter: process buffer with projection, predicates, schema.
+// Maps [range_start, buffer_length) of `buffer_data` (build_map) and produces FieldSpans
+// for complete records (interpret_jsonl_threaded passes one newline-aligned range at a
+// time).
 InterpreterResult interpret_jsonl(
     const uint8_t* buffer_data,
     size_t buffer_length,
-    const std::vector<MarkerPosition>& markers,
     const ParseContext& context,
     OrdinalPredictor& predictor,  // Updated in-place
     size_t range_start = 0,

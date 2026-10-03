@@ -41,3 +41,9 @@ ROW_IDENTITY_FILE = "$file"
 ROW_IDENTITY_ORDINAL = "$ordinal"
 
 ROW_IDENTITY_COLUMNS = (ROW_IDENTITY_FILE, ROW_IDENTITY_ORDINAL)
+
+# What OPTIMIZE names the two when the relation has a vector index: the compaction sink
+# records each written row's origin under these (natively, never written to a file) to
+# carry the inputs' vectors into the outputs' index files (docs/VECTOR_INDEX_DESIGN.md §5.6).
+COMPACTION_ORIGIN_FILE = "$carry_file"
+COMPACTION_ORIGIN_ORDINAL = "$carry_ordinal"

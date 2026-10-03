@@ -340,6 +340,10 @@ def s3_catalog_table(s3, s3_root, tmp_path_factory):
                 raise KeyError(identifier)
             return dataset
 
+        # No vector index here: writes build no sync index files.
+        def list_vector_indexes(self, identifier):
+            return []
+
         def get_relation(self, identifier):
             if identifier == "col.ds":
                 return "dataset", dataset

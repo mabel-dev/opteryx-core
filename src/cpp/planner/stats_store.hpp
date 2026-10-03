@@ -41,7 +41,7 @@
 
 namespace opteryx::planner {
 
-// A plan node's id (plan_graph.hpp's NodeId; not included here - the store
+// A plan node's id (_plan_graph.hpp's NodeId; not included here - the store
 // holds no Python, and the graph holds each node's Python step).
 using StatsNodeId = uint32_t;
 

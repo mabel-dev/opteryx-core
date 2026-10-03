@@ -6,7 +6,7 @@
 # cython: boundscheck=False
 # distutils: language = c++
 
-"""The plan graph: the native structure (src/cpp/planner/plan_graph.hpp) behind
+"""The plan graph: the native structure (src/cpp/planner/_plan_graph.hpp) behind
 every logical and physical plan, and its Python interface.
 
 Native plan graph P2 (architect rulings 2026-09-27):
@@ -38,7 +38,7 @@ from cpython.ref cimport PyObject
 from opteryx.exceptions import InvalidInternalStateError
 
 
-cdef extern from "planner/plan_graph.hpp":
+cdef extern from "planner/_plan_graph.hpp":
     cdef enum CEdgeRole "opteryx::planner::EdgeRole":
         EDGE_NONE "opteryx::planner::EDGE_NONE"
         EDGE_LEFT "opteryx::planner::EDGE_LEFT"

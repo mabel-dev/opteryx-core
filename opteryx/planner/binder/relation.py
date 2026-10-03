@@ -1608,7 +1608,7 @@ _INDEX_OPTIONS = {"build", "clusters", "nprobe"}
 
 
 def visit_vector_index_ddl(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
-    """Bind CREATE / ALTER / DROP INDEX (a vector index, docs/VECTOR_INDEX_DESIGN.md §7).
+    """Bind CREATE / ALTER / DROP / REFRESH INDEX (a vector index, docs/VECTOR_INDEX_DESIGN.md §7).
 
     Gated at the ALTER tier, like every other change to a relation's definition. CREATE
     validates the column (it must exist and be text) and the options, and stamps the
@@ -1620,7 +1620,12 @@ def visit_vector_index_ddl(self, node: PlanStep, context: BindingContext) -> Tup
     from opteryx.exceptions import UnsupportedSyntaxError
     from opteryx.managers.permissions import can_perform_action
 
-    statement = {"create": "**CREATE INDEX**", "alter": "**ALTER INDEX**", "drop": "**DROP INDEX**"}[node.operation]
+    statement = {
+        "create": "**CREATE INDEX**",
+        "alter": "**ALTER INDEX**",
+        "drop": "**DROP INDEX**",
+        "refresh": "**REFRESH INDEX**",
+    }[node.operation]
     node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
     if not isinstance(node.connector, Writable) or not node.connector.supports_vector_indexes:
         raise ReadOnlyConnectorError(

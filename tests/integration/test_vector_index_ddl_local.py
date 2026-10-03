@@ -1,4 +1,4 @@
-"""CREATE / ALTER / DROP INDEX (vector index) end to end through SQL — local disk, no GCS.
+"""CREATE / ALTER / DROP / REFRESH INDEX (vector index) end to end through SQL — local disk, no GCS.
 
 The fake catalog stores definitions in a dict but validates them with the REAL catalog's
 `new_index_definition`, so the rules exercised are the catalog's own; the dataset is a real
@@ -8,12 +8,17 @@ What this protects:
     (ruled 2026-10-02), honouring WITH options and IF NOT EXISTS;
   * ALTER changes only the build mode; RENAME is refused;
   * DROP removes the definition (IF EXISTS tolerated);
+  * REFRESH builds the index files of every uncovered file natively, commits `index-build`
+    with the sizes the build wrote, is a no-op once up to date, holds the maintenance lease
+    only while it runs and is refused while someone else holds it, and refuses an index
+    defined against another embedder;
   * every misuse is refused at bind with the reason: unknown column, non-text column,
     unknown option, bad build mode, another index method, a partial index.
 """
 
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -106,7 +111,9 @@ def _build_dataset(location, identifier, disk_io):
 
 
 @pytest.fixture
-def index_env(tmp_path):
+def catalog_env(tmp_path):
+    """The fake catalog installed as the default connector: its index definitions, the
+    real dataset behind it, and the fake lease's state."""
     import opteryx.connectors as connectors
     from opteryx_catalog.catalog.manifest import clear_parsed_manifest_cache
     from opteryx_catalog.catalog.vector_indexes import new_index_definition
@@ -119,6 +126,8 @@ def index_env(tmp_path):
     dataset = _build_dataset(str(tmp_path / "docs"), "col.docs", disk_io)
     datasets = {"col.docs": dataset}
     indexes: dict = {}
+    leases: dict = {}
+    lease_log: list = []
 
     class _FakeCatalog:
         def __init__(self, workspace=None, **kwargs):
@@ -167,6 +176,34 @@ def index_env(tmp_path):
         def list_vector_indexes(self, identifier):
             return sorted((r for (i, _), r in indexes.items() if i == identifier), key=lambda r: r["name"])
 
+        # The lease's rules are the catalog's (Firestore transactions, tested there); this
+        # keeps one claim per dataset and records what happened to it.
+        def claim_maintenance_lease(self, identifier, *, holder, operation, ttl_seconds):
+            from opteryx_catalog.catalog.maintenance_lease import MaintenanceLease
+            from opteryx_catalog.catalog.maintenance_lease import describe_holder
+            from opteryx_catalog.exceptions import MaintenanceLeaseHeld
+
+            held = leases.get(identifier)
+            if held is not None:
+                raise MaintenanceLeaseHeld(f"{identifier} is held for {describe_holder(held.to_document())}")
+            lease = MaintenanceLease(
+                dataset=identifier, claim_id=f"claim-{len(lease_log)}", holder=holder,
+                operation=operation, claimed_at_ms=1, expires_at_ms=1 + ttl_seconds * 1000,
+            )
+            leases[identifier] = lease
+            lease_log.append(("claim", holder, operation))
+            return lease
+
+        def renew_maintenance_lease(self, lease, *, ttl_seconds):
+            return lease
+
+        def release_maintenance_lease(self, lease):
+            if leases.get(lease.dataset) != lease:
+                return False
+            del leases[lease.dataset]
+            lease_log.append(("release", lease.holder, lease.operation))
+            return True
+
     saved_default = connectors._default_connector
     saved_prefixes = dict(connectors._storage_prefixes)
     saved_cache = dict(connectors._connector_cache)
@@ -174,13 +211,18 @@ def index_env(tmp_path):
     connectors._connector_cache.clear()
     opteryx.set_default_connector(OpteryxConnector, catalog=_FakeCatalog)
     try:
-        yield indexes
+        yield SimpleNamespace(indexes=indexes, dataset=dataset, leases=leases, lease_log=lease_log)
     finally:
         connectors._default_connector = saved_default
         connectors._storage_prefixes.clear()
         connectors._storage_prefixes.update(saved_prefixes)
         connectors._connector_cache.clear()
         connectors._connector_cache.update(saved_cache)
+
+
+@pytest.fixture
+def index_env(catalog_env):
+    return catalog_env.indexes
 
 
 def _run(sql):
@@ -240,3 +282,218 @@ def test_refusals(index_env, sql, message):
     with pytest.raises(Exception, match=message):
         _run(sql)
     assert index_env == {}
+
+
+# --- REFRESH INDEX (D-16) ---------------------------------------------------
+
+
+def _messages(sql):
+    session = opteryx.session(user="tester")
+    list(session.execute_to_morsels(sql))
+    return session.messages
+
+
+def _index_refs(dataset):
+    from opteryx_catalog.catalog.manifest import get_parsed_manifest
+    from opteryx_catalog.catalog.vector_indexes import index_refs
+
+    entries = get_parsed_manifest(dataset.io, dataset.snapshot(None).manifest_list)
+    return {e["file_path"]: index_refs(e) for e in entries}
+
+
+def _indexed_ordinals(path):
+    import skene
+
+    data = open(path, "rb").read()
+    ordinals = []
+    for g in range(len(skene.read_metadata(data)["row_groups"])):
+        morsel = skene.read_morsel(data, g)
+        morsel.materialize()
+        ordinals.extend(morsel.column("ordinal").to_pylist())
+    return sorted(ordinals)
+
+
+def test_refresh_builds_commits_and_is_then_a_no_op(catalog_env):
+    _run(f"CREATE INDEX body_idx ON {TABLE} USING IVF (body)")
+    (record,) = catalog_env.indexes.values()
+    dataset = catalog_env.dataset
+
+    assert _messages(f"REFRESH INDEX body_idx ON {TABLE}") == [
+        f"refreshed index `body_idx` on `{TABLE}`: 1 file(s) indexed"
+    ]
+    assert dataset.snapshot(None).operation_type == "index-build"
+    (data_file, refs), = _index_refs(dataset).items()
+    files = refs[record["index-id"]]
+    # the sizes committed are the files the build wrote
+    assert os.path.getsize(files.vectors) == files.vectors_bytes
+    assert os.path.getsize(files.centroids) == files.centroids_bytes
+    assert files.vectors.startswith(f"{dataset.metadata.location}/index/{record['index-id']}/")
+    assert _indexed_ordinals(files.vectors) == [0, 1, 2]
+    summary = dataset.snapshot(None).summary
+    assert summary["total-index-files"] == 2
+    assert summary["total-index-size"] == files.vectors_bytes + files.centroids_bytes
+
+    head = dataset.metadata.current_snapshot_id
+    assert _messages(f"REFRESH INDEX body_idx ON {TABLE}") == [
+        f"refreshed index `body_idx` on `{TABLE}`: 0 file(s) indexed"
+    ]
+    assert dataset.metadata.current_snapshot_id == head          # nothing to commit
+    # the lease was held for each run and released after it
+    assert catalog_env.lease_log == [
+        ("claim", "REFRESH INDEX body_idx by tester", "index-build"),
+        ("release", "REFRESH INDEX body_idx by tester", "index-build"),
+    ] * 2
+    assert catalog_env.leases == {}
+
+
+def test_refresh_leaves_out_rows_deleted_at_plan_time(catalog_env):
+    _run(f"CREATE INDEX body_idx ON {TABLE} USING IVF (body)")
+    (record,) = catalog_env.indexes.values()
+    dataset = catalog_env.dataset
+    (data_file,) = _index_refs(dataset)
+    dataset.delete_rows({data_file: [1]}, author="tester")
+
+    _run(f"REFRESH INDEX body_idx ON {TABLE}")
+    files = _index_refs(dataset)[data_file][record["index-id"]]
+    assert _indexed_ordinals(files.vectors) == [0, 2]            # physical ordinals kept
+
+
+def test_refresh_is_refused_while_another_holds_the_lease(catalog_env):
+    from opteryx_catalog.catalog.maintenance_lease import MaintenanceLease
+
+    _run(f"CREATE INDEX body_idx ON {TABLE} USING IVF (body)")
+    head = catalog_env.dataset.metadata.current_snapshot_id
+    catalog_env.leases["col.docs"] = MaintenanceLease(
+        dataset="col.docs", claim_id="other", holder="OPTIMIZE by someone", operation="compaction",
+        claimed_at_ms=1, expires_at_ms=10**15,
+    )
+    with pytest.raises(Exception, match="compaction by OPTIMIZE by someone"):
+        _run(f"REFRESH INDEX body_idx ON {TABLE}")
+    assert catalog_env.dataset.metadata.current_snapshot_id == head
+    assert catalog_env.leases["col.docs"].claim_id == "other"     # left alone
+
+
+def test_refresh_refuses_an_index_defined_against_another_embedder(catalog_env):
+    _run(f"CREATE INDEX body_idx ON {TABLE} USING IVF (body)")
+    (record,) = catalog_env.indexes.values()
+    record["embedding-identity"] = "minilm-l6-v2:256:sha256:" + "0" * 64
+    with pytest.raises(Exception, match="defined against the embedder"):
+        _run(f"REFRESH INDEX body_idx ON {TABLE}")
+    assert catalog_env.lease_log == []                            # refused before the lease
+
+
+def test_refresh_of_an_unknown_index_is_refused(catalog_env):
+    with pytest.raises(Exception, match="no index"):
+        _run(f"REFRESH INDEX nope ON {TABLE}")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    ["REFRESH INDEX body_idx", f"REFRESH INDEX body_idx ON {TABLE} WITH (x = 1)", "REFRESH INDEX ON t"],
+)
+def test_malformed_refresh_is_refused_by_name(catalog_env, sql):
+    with pytest.raises(Exception, match=r"REFRESH INDEX\*\* <name> \*\*ON\*\* <relation>"):
+        _run(sql)
+
+
+# --- sync CREATE INDEX (D-7): builds before it returns, under the lease -------------------
+
+
+def test_sync_create_builds_every_file_before_returning(catalog_env):
+    assert _messages(f"CREATE INDEX body_idx ON {TABLE} USING IVF (body) WITH (build = 'sync')") == [
+        f"created index `body_idx` on `{TABLE}`: 1 file(s) indexed"
+    ]
+    (record,) = catalog_env.indexes.values()
+    (refs,) = _index_refs(catalog_env.dataset).values()
+    assert _indexed_ordinals(refs[record["index-id"]].vectors) == [0, 1, 2]
+    assert [event for event, *_ in catalog_env.lease_log] == ["claim", "release"]
+    assert catalog_env.lease_log[0][1:] == ("CREATE INDEX body_idx by tester", "index-build")
+
+
+def test_async_create_builds_nothing_and_takes_no_lease(catalog_env):
+    assert _messages(f"CREATE INDEX body_idx ON {TABLE} USING IVF (body)") == [
+        f"created index `body_idx` on `{TABLE}`"
+    ]
+    assert list(_index_refs(catalog_env.dataset).values()) == [{}]
+    assert catalog_env.lease_log == []
+
+
+def test_sync_create_without_the_lease_creates_nothing(catalog_env):
+    from opteryx_catalog.catalog.maintenance_lease import MaintenanceLease
+
+    catalog_env.leases["col.docs"] = MaintenanceLease(
+        dataset="col.docs", claim_id="other", holder="OPTIMIZE by someone", operation="compaction",
+        claimed_at_ms=1, expires_at_ms=10**15,
+    )
+    with pytest.raises(Exception, match="compaction by OPTIMIZE by someone"):
+        _run(f"CREATE INDEX body_idx ON {TABLE} USING IVF (body) WITH (build = 'sync')")
+    assert catalog_env.indexes == {}
+
+
+def test_a_failed_sync_build_leaves_no_index(catalog_env, monkeypatch):
+    import opteryx.operators._operators as operators
+
+    def _fail(*args, **kwargs):
+        raise RuntimeError("vector index build: injected failure")
+
+    monkeypatch.setattr(operators, "build_vector_index_local", _fail)
+    head = catalog_env.dataset.metadata.current_snapshot_id
+    with pytest.raises(RuntimeError, match="injected failure"):
+        _run(f"CREATE INDEX body_idx ON {TABLE} USING IVF (body) WITH (build = 'sync')")
+    assert catalog_env.indexes == {}
+    assert catalog_env.dataset.metadata.current_snapshot_id == head
+    assert catalog_env.leases == {}                                   # released on failure
+
+
+# --- sync indexes build inside the write (D-7): the new file is indexed in its own commit --
+
+
+def _texts_of(path):
+    from rugo.parquet import read_parquet
+
+    texts = []
+    for morsel in read_parquet(path, columns=["body"]):
+        texts.extend(morsel.column("body").to_pylist())
+    return texts
+
+
+def test_insert_into_a_sync_indexed_table_indexes_the_new_file_in_the_same_commit(catalog_env):
+    _run(f"CREATE INDEX body_idx ON {TABLE} USING IVF (body) WITH (build = 'sync')")
+    (record,) = catalog_env.indexes.values()
+    before = set(_index_refs(catalog_env.dataset))
+
+    _run(f"INSERT INTO {TABLE} (id, body) VALUES (4, 'dust storm'), (5, NULL), (6, 'ring of ice')")
+
+    snap = catalog_env.dataset.snapshot(None)
+    assert snap.operation_type == "add-files"                   # one commit, no index-build after it
+    refs = _index_refs(catalog_env.dataset)
+    (added,) = set(refs) - before
+    files = refs[added][record["index-id"]]
+    texts = _texts_of(added)
+    assert [texts[o] for o in _indexed_ordinals(files.vectors)] == ["dust storm", "ring of ice"]
+    assert os.path.getsize(files.vectors) == files.vectors_bytes
+    # A write takes no maintenance lease: it indexes only its own new files.
+    assert [e for e, *_ in catalog_env.lease_log] == ["claim", "release"]   # the CREATE's only
+
+
+def test_update_of_a_sync_indexed_table_indexes_the_rewritten_rows(catalog_env):
+    _run(f"CREATE INDEX body_idx ON {TABLE} USING IVF (body) WITH (build = 'sync')")
+    (record,) = catalog_env.indexes.values()
+    before = set(_index_refs(catalog_env.dataset))
+
+    _run(f"UPDATE {TABLE} SET body = 'frozen moon' WHERE id = 3")
+
+    refs = _index_refs(catalog_env.dataset)
+    (added,) = set(refs) - before
+    files = refs[added][record["index-id"]]
+    texts = _texts_of(added)
+    assert [texts[o] for o in _indexed_ordinals(files.vectors)] == ["frozen moon"]
+
+
+def test_insert_into_an_async_indexed_table_leaves_the_new_file_to_refresh(catalog_env):
+    _run(f"CREATE INDEX body_idx ON {TABLE} USING IVF (body)")
+    before = set(_index_refs(catalog_env.dataset))
+    _run(f"INSERT INTO {TABLE} (id, body) VALUES (4, 'dust storm')")
+    refs = _index_refs(catalog_env.dataset)
+    (added,) = set(refs) - before
+    assert refs[added] == {}

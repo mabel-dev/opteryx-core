@@ -93,6 +93,11 @@ _READ_CSV_OPTIONS = ("ignore_errors", "separator", "has_header_row", "infer_samp
 
 
 def _is_glob_pattern(path: str) -> bool:
+    # In an http(s) URL '?' opens the query string and '#' the fragment -- neither is
+    # part of the object path, so `...file.parquet?authuser=0` is one exact file, not
+    # a glob. Only the path portion is checked.
+    if path.startswith(("http://", "https://")):
+        path = path.split("#", 1)[0].split("?", 1)[0]
     return any(ch in path for ch in _GLOB_METACHARACTERS)
 
 
@@ -195,6 +200,17 @@ def _resolve_glob_files(path: str, filesystem) -> list:
     ``logs/*.jsonl``. This is a direct consequence of using ``fnmatch`` as
     directed rather than a hand-rolled path-aware matcher.
     """
+    # A filesystem with no listing (http(s): there is no directory to list) cannot
+    # expand a glob. Said plainly here, once for every reader, rather than escaping
+    # as an AttributeError on `list_files`.
+    if not hasattr(filesystem, "list_files"):
+        from opteryx.exceptions import NotSupportedError
+
+        scheme = path.split("://")[0] if "://" in path else "this"
+        raise NotSupportedError(
+            f"{md_code(path)}: glob patterns are not supported for {scheme}:// paths. "
+            "Name the file exactly."
+        )
     first_meta = min(path.index(ch) for ch in _GLOB_METACHARACTERS if ch in path)
     prefix = path[:first_meta]
     base_dir = prefix.rsplit("/", 1)[0] if "/" in prefix else ""
@@ -259,6 +275,37 @@ def _validate_unnest_argument(node: PlanStep) -> None:
     )
 
 
+def _reject_ragged_values(node: PlanStep) -> None:
+    """Every row of a VALUES list must be as wide as the first, and the column list
+    must name exactly that many columns — all of them, or (from the logical planner,
+    which then supplies `column_1` .. `column_n`) none.
+
+    None of this was checked. A short row was padded with NULL and a long one
+    truncated, silently — `VALUES (1, 'x'), (2)` answered (2, NULL) where the standard
+    and DuckDB refuse it. A column list narrower than the rows silently dropped the
+    unnamed columns, and a short FIRST row, or a column list wider than the rows, died
+    at execution as a bare IndexError."""
+    from opteryx.exceptions import SqlError
+
+    if not node.values:
+        return
+    width = len(node.values[0])
+    for number, row in enumerate(node.values[1:], start=2):
+        if len(row) != width:
+            raise SqlError(
+                f"Every row of a {md_syntax('VALUES')} list must have the same number of "
+                f"values - row 1 has {width} and row {number} has {len(row)}."
+            )
+    if len(node.column_aliases) != width:
+        raise SqlError(
+            f"The {md_syntax('VALUES')} list names {len(node.column_aliases)} column"
+            f"{'s' if len(node.column_aliases) != 1 else ''} "
+            f"({', '.join(md_code(alias) for alias in node.column_aliases)}) but each row "
+            f"has {width} value{'s' if width != 1 else ''}. Name every column, or none "
+            f"(they are then {md_code('column_1')}, {md_code('column_2')}, ...)."
+        )
+
+
 def visit_function_dataset(
     self, node: PlanStep, context: BindingContext
 ) -> Tuple[PlanStep, BindingContext]:
@@ -269,23 +316,23 @@ def visit_function_dataset(
     # reader to push into.
     node.connector = None
     if node.function == "VALUES":
+        _reject_ragged_values(node)
         relation_name = node.alias or f"$values-{random_string()}"
         types = {}
         element_types = {}
         if len(node.values) > 0:
             for i, column in enumerate(node.column_aliases):
-                if len(node.values[0]) >= i:
-                    value = node.values[0][i]
-                    types[column] = value.type  # ColumnType
-                    # Phase 2: element is embedded in ARRAY/VECTOR ColumnType.
-                    _val_cat = value.type.category if isinstance(value.type, ColumnType) else value.type
-                    if _val_cat in (LogicalCategory.ARRAY, LogicalCategory.VECTOR):
-                        _elem = value.type.element if isinstance(value.type, ColumnType) else None
-                        if _elem is None:
-                            schema_column = value.schema_column
-                            if schema_column is not None and isinstance(schema_column.column_type, ColumnType):
-                                _elem = schema_column.column_type.element
-                        element_types[column] = _elem
+                value = node.values[0][i]
+                types[column] = value.type  # ColumnType
+                # Phase 2: element is embedded in ARRAY/VECTOR ColumnType.
+                _val_cat = value.type.category if isinstance(value.type, ColumnType) else value.type
+                if _val_cat in (LogicalCategory.ARRAY, LogicalCategory.VECTOR):
+                    _elem = value.type.element if isinstance(value.type, ColumnType) else None
+                    if _elem is None:
+                        schema_column = value.schema_column
+                        if schema_column is not None and isinstance(schema_column.column_type, ColumnType):
+                            _elem = schema_column.column_type.element
+                    element_types[column] = _elem
         def _build_value_column(column):
             ct = types.get(column)  # ColumnType or None
             if isinstance(ct, ColumnType):

@@ -21,6 +21,9 @@ _TYPE_LABELS = {
     "numeric": "number",
     "string": "varchar",
     "temporal": "temporal",
+    # DATE or TIMESTAMP. Exported under the existing `temporal` label so
+    # consumers keyed on it keep working; `excludes` names TIME and INTERVAL.
+    "datetime": "temporal",
     # The three string types as separate families (CONCAT/CONCAT_WS). `varchar`
     # deliberately shares the label the permissive `string` family already
     # exports — a consumer reading "varchar" gets the same answer either way.
@@ -286,10 +289,10 @@ _COMMON_PARAMETER_DOCUMENTATION = {
     "chars": "Characters to remove from the input string.",
     "compare": "Value to compare against the primary input.",
     "condition": "Boolean expression used to choose which result to return.",
-    "date": "Date, time, or timestamp value to evaluate.",
+    "date": "Date or timestamp value to evaluate.",
     "default": "Fallback value returned when the primary value is null.",
     "delimiter": "Separator used to split the input string.",
-    "end": "Ending date, time, or timestamp value.",
+    "end": "Ending date or timestamp value.",
     "exp": "Exponent to raise the base value by.",
     "expr": "Value to place into the constructed result.",
     "false_value": "Value returned when `condition` evaluates to false.",
@@ -318,8 +321,8 @@ _COMMON_PARAMETER_DOCUMENTATION = {
     "str1": "First input string value.",
     "struct": "Structured value or object to read from.",
     "text": "Input text value.",
-    "time1": "First date, time, or timestamp value.",
-    "time2": "Second date, time, or timestamp value.",
+    "time1": "First date or timestamp value.",
+    "time2": "Second date or timestamp value.",
     "true_value": "Value returned when `condition` evaluates to true.",
     "ts": "Unix timestamp expressed in seconds.",
     "type_name": "Name of the target type to use for the result.",
@@ -392,7 +395,7 @@ _PARAMETER_DOCUMENTATION_OVERRIDES = {
     "TRUNC": {
         "num": "Numeric value to truncate.",
         "scale": "Decimal scale to keep before truncating toward zero.",
-        "value": "Date, time, or timestamp value to truncate.",
+        "value": "Date or timestamp value to truncate.",
         "unit": "Granularity to truncate to, such as `day`, `month`, or `year`.",
     },
 }
@@ -590,7 +593,7 @@ def _parameter_base_documentation(function_name: str, parameter: ParameterSpec) 
     if type_label == "array":
         return "Array input value."
     if type_label == "temporal":
-        return "Date, time, or timestamp input value."
+        return "Date or timestamp input value."
     if type_label == "blob":
         return "Binary input value."
     return f"Input value of type `{type_label}`."

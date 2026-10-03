@@ -114,29 +114,34 @@ struct RecordSet {
     }
 };
 
-// Build the document map from structural markers (linear single pass).
+// Build the document map of the byte range [range_start, buffer_length) of `buffer`.
+//
+// The range is processed in line-aligned windows of ~256 KB: each window is indexed by
+// scan_structural_index (structural_scan.hpp — positions only, in-string structure
+// masked out) into one reused buffer that stays cache-resident, and the window's index is
+// walked before the next is scanned. Nothing proportional to the input is materialised
+// except the output spans.
 //
 // Value shape is coarse (string / array / object / scalar) and read only from the
-// structural delimiter — no value parsing. Container values ([…], {…}) are bounded with a
-// string-and-escape-aware byte scan so interior commas/brackets do not truncate them.
-// Key identity is never hashed; with a projection it is matched by exact bytes only for
-// the wanted set, materialising only those fields and stopping each record once they are
-// found (minimal extent). Predicate filtering and final column ordering are the consumer's
-// job (finalize_records / extract_column).
+// structural delimiter — no value parsing. Container values ([…], {…}) are bounded by
+// bracket depth over the masked index, so interior commas/brackets — including those
+// inside strings, which the index never holds — do not truncate them. Key identity is
+// never hashed; with a projection it is matched by exact bytes only for the wanted set,
+// materialising only those fields and stopping each record once they are found (minimal
+// extent). Predicate filtering and final column ordering are the consumer's job
+// (finalize_records / extract_column).
 //
-// `markers` cover the byte range [range_start, buffer_length) of `buffer` (absolute
-// positions); range_start must be the start of a line (0, or one past a newline). Every
-// line in the range is judged on its own: one that is not exactly one object is rejected
-// whole (see MapBuilder's line discipline), so a range can be cut at any newline.
+// range_start must be the start of a line (0, or one past a newline). Every line in the
+// range is judged on its own: one that is not exactly one object is rejected whole (see
+// MapBuilder's line discipline), so a range can be cut at any newline.
 //
-// `lines` (the raw prefilter's survivors, prefilter_lines): when given, `markers` cover
-// ONLY these lines — ascending, each a whole line of the range — and the bytes between
-// them are not part of the input. Each line is begun at its own start, so the skipped
-// bytes are never judged by the line discipline, and the range ends with the last line.
+// `lines` (the raw prefilter's survivors, prefilter_lines): when given, ONLY these lines —
+// ascending, each a whole line of the range — are input, and the bytes between them are
+// never scanned. Each line is begun at its own start, so the skipped bytes are never
+// judged by the line discipline, and the range ends with the last line.
 RecordSet build_map(
     const uint8_t* buffer,
     size_t buffer_length,
-    const std::vector<MarkerPosition>& markers,
     const MapProjection* proj = nullptr,
     size_t range_start = 0,
     const std::vector<LineSpan>* lines = nullptr

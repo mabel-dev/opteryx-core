@@ -89,6 +89,7 @@ class _RecordingConnector:
         self.aborted = []
         self.deleted = []
         self.commits = []
+        self.leases = []
         self.fail_on_row_group = None
 
     def open_data_file_writer(
@@ -110,6 +111,21 @@ class _RecordingConnector:
 
     def compaction_commit(self, relation_name, rows, retired_files, **kwargs):
         self.commits.append((rows, list(retired_files)))
+
+    # Every compaction holds the maintenance lease (§5.7); this records its life.
+    def claim_compaction_lease(self, relation_name, holder):
+        connector = self
+        connector.leases.append("claimed")
+
+        class _Lease:
+            def renew(self):
+                connector.leases.append("renewed")
+
+            def release(self):
+                connector.leases.append("released")
+                return True
+
+        return _Lease()
 
 
 def _wide_morsel(seed):
@@ -287,6 +303,22 @@ def test_a_refused_commit_removes_the_outputs_and_raises():
     with pytest.raises(RuntimeError, match="row count changed"):
         _eos(node)
     assert node.connector.deleted == ["file_1.parquet", "file_2.parquet"]
+    assert node.connector.leases == ["claimed", "released"]      # released on the way out
+
+
+def test_the_lease_is_held_from_the_first_rows_to_the_commit():
+    node = _sink(MORSEL_MAX_ARENA_BYTES, target=_wide_morsel(0).nbytes, rows=ROWS_PER_MORSEL)
+    node._push_impl(_wide_morsel(0))
+    assert node.connector.leases == ["claimed"]
+    _eos(node)
+    assert node.connector.leases == ["claimed", "released"]
+    assert len(node.connector.commits) == 1
+
+
+def test_a_pass_with_nothing_to_compact_takes_no_lease():
+    node = _sink(MORSEL_MAX_ARENA_BYTES, retired=())
+    _eos(node)
+    assert node.connector.leases == []
 
 
 def test_stream_defaults_to_the_fixed_arena_ceiling_and_the_selection_target():

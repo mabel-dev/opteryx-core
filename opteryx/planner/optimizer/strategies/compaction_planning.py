@@ -116,7 +116,7 @@ class CompactionPlanningStrategy(OptimizationStrategy):
             # the engine has no reader for maintenance policy at all, so every
             # dataset gets the default. A dataset that set its own threshold is
             # planned against the wrong one.
-            result = select_compaction_plan(files, sort_column=sort_column, key_ranges=key_ranges)
+            result = self._select(sink, scan, files, sort_column, key_ranges)
 
             if result.outcome is not SelectionOutcome.PLANNED:
                 # Nothing to do. The sink retires no files and commits nothing,
@@ -140,7 +140,6 @@ class CompactionPlanningStrategy(OptimizationStrategy):
                 continue
 
             selected: CompactionPlan = result.plan
-            chosen = {entry.file_path for entry in selected.files}
             positions = sorted(entry.row for entry in selected.files)
 
             # THE PIN. `subset` keeps the sketch vectors positionally aligned
@@ -149,7 +148,10 @@ class CompactionPlanningStrategy(OptimizationStrategy):
             scan.manifest = manifest.subset(positions)
             plan[scan_id] = scan
 
-            sink.retired_files = sorted(chosen)
+            # In SCAN order - the narrowed manifest's order - because a row's `$file`
+            # is its position in that list, and the vector carry maps it back through
+            # this one (§5.6).
+            sink.retired_files = [files[row].file_path for row in positions]
             sink.baseline_snapshot_id = scan.connector.snapshot_id
             # The ordering claim the sink writes into its output files. Only a
             # sort-aware plan has one: its rows arrive through the Order node,
@@ -174,6 +176,37 @@ class CompactionPlanningStrategy(OptimizationStrategy):
             )
 
         return plan
+
+    def _select(self, sink, scan, files, sort_column, key_ranges):
+        """Selection, within ONE vector index coverage (design §5.6, D-14).
+
+        Compaction only merges files the same indexes cover: an output's index is carried
+        from its inputs', so its inputs must all be indexed - by the same indexes - or all
+        not. A relation with no index is one group. Each group is selected on its own and
+        the pass takes the group whose plan rewrites the most bytes; the others wait for a
+        later pass."""
+        if not sink.row_origins:
+            return select_compaction_plan(files, sort_column=sort_column, key_ranges=key_ranges)
+        coverage = sink.connector.vector_index_coverage(
+            sink.relation_name, scan.connector.snapshot_id
+        )
+        groups = {}
+        for entry in files:
+            groups.setdefault(coverage.get(entry.file_path, frozenset()), []).append(entry)
+        results = []
+        for key in sorted(groups, key=sorted):
+            members = groups[key]
+            in_group = {id(entry) for entry in members}
+            ranges = (
+                [r for r in key_ranges if id(r[0]) in in_group] if key_ranges is not None else None
+            )
+            results.append(
+                select_compaction_plan(members, sort_column=sort_column, key_ranges=ranges)
+            )
+        planned = [r for r in results if r.outcome is SelectionOutcome.PLANNED]
+        if not planned:
+            return results[0]
+        return max(planned, key=lambda r: r.plan.input_bytes)
 
     def _sort_column(self, sink, scan) -> Optional[str]:
         """The relation's primary sort key, or None when it has none.
