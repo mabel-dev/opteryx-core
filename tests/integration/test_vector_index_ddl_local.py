@@ -176,6 +176,10 @@ def catalog_env(tmp_path):
         def list_vector_indexes(self, identifier):
             return sorted((r for (i, _), r in indexes.items() if i == identifier), key=lambda r: r["name"])
 
+        # SHOW CREATE TABLE reads the table's declared relationships; it has none.
+        def list_relationships(self, identifier):
+            return []
+
         # The lease's rules are the catalog's (Firestore transactions, tested there); this
         # keeps one claim per dataset and records what happened to it.
         def claim_maintenance_lease(self, identifier, *, holder, operation, ttl_seconds):
@@ -498,3 +502,66 @@ def test_insert_into_an_async_indexed_table_leaves_the_new_file_to_refresh(catal
     refs = _index_refs(catalog_env.dataset)
     (added,) = set(refs) - before
     assert refs[added] == {}
+
+
+# --- discovery (C4, §7A, D-15) ------------------------------------------------
+
+
+def _table(sql):
+    out = []
+    for morsel in opteryx.session(user="tester").execute_to_morsels(sql):
+        morsel.materialize()
+        names = morsel.column_names
+        keys = [n.decode() if type(n) is bytes else n for n in names]
+        out.extend(dict(zip(keys, row)) for row in zip(*[morsel.column(c).to_pylist() for c in names]))
+    return out
+
+
+def test_show_indexes_lists_each_index_with_its_coverage(catalog_env):
+    assert _table(f"SHOW INDEXES FROM {TABLE}") == []
+    _run(f"CREATE INDEX lag_idx ON {TABLE} USING IVF (body)")
+    _run(f"CREATE INDEX body_idx ON {TABLE} USING IVF (body) WITH (build = 'sync', clusters = 2)")
+    sync, lagging = _table(f"SHOW INDEXES FROM {TABLE}")      # in name order
+    files = sum(f.logical_bytes for refs in _index_refs(catalog_env.dataset).values() for f in refs.values())
+    assert (sync["name"], sync["column"], sync["method"], sync["metric"], sync["build"], sync["clusters"]) == (
+        "body_idx", "body", "ivf", "cosine", "sync", 2,
+    )
+    assert (sync["files_indexed"], sync["files_total"], sync["index_bytes"]) == (1, 1, files)
+    assert sync["index_bytes"] > 0 and sync["created_by"] == "tester" and sync["embedding"]
+    assert sync["created_at"] is not None
+    # An async index nothing has refreshed yet: its lag is visible.
+    assert (lagging["name"], lagging["build"], lagging["files_indexed"], lagging["files_total"]) == (
+        "lag_idx", "async", 0, 1,
+    )
+    assert lagging["index_bytes"] == 0
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        f"SHOW INDEX FROM {TABLE}",
+        f"SHOW INDEXES ON {TABLE}",
+        f"SHOW KEYS FROM {TABLE}",
+        "SHOW INDEXES",
+    ],
+)
+def test_show_indexes_has_one_spelling(catalog_env, sql):
+    with pytest.raises(Exception, match="SHOW INDEXES FROM <table>"):
+        _run(sql)
+
+
+def test_show_indexes_outside_the_catalog_is_refused(catalog_env):
+    with pytest.raises(Exception, match="no indexes to show|cannot show"):
+        _run("SHOW INDEXES FROM $planets")
+
+
+def test_show_create_table_recreates_the_indexes(catalog_env):
+    _run(f"CREATE INDEX body_idx ON {TABLE} USING IVF (body)")
+    _run(f"CREATE INDEX b2 ON {TABLE} USING IVF (body) WITH (build = 'sync', clusters = 7)")
+    ((_, ddl),) = [tuple(row.values()) for row in _table(f"SHOW CREATE TABLE {TABLE}")]
+    statements = [s.strip() for s in ddl.rstrip(";").split(";\n\n")]
+    assert statements[0].startswith("CREATE TABLE")
+    assert statements[1:] == [
+        f"CREATE INDEX b2 ON {TABLE} USING IVF (body) WITH (build = 'sync', clusters = 7)",
+        f"CREATE INDEX body_idx ON {TABLE} USING IVF (body) WITH (build = 'async')",
+    ]

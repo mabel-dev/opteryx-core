@@ -430,8 +430,16 @@ Common rules:
 ## 7A. Discovering indexes (rev 5)
 
 - **`SHOW INDEXES FROM t`** (D-15 RULED: follow sqlparser) returns one row per index: `name`, `column`,
-  `method`, `metric`, `build`, `clusters`, `nprobe`, `embedding` (provider identity),
-  `files_indexed`, `files_total`, `index_bytes`, `created_by`, `created_at`.
+  `method`, `metric`, `build`, `clusters`, `embedding` (provider identity),
+  `files_indexed`, `files_total`, `index_bytes`, `created_by`, `created_at`. (`nprobe` left
+  the definition 2026-10-03; `index_bytes` is the LOGICAL size, the billed figure, §5.5.)
+  **DELIVERED 2026-10-03 (C4):** planned as a `ShowStep` (`object_type = "INDEXES"`) so it
+  binds exactly as SHOW CREATE TABLE (READ; refused on a connector without vector
+  indexes); `ShowIndexesNode` reads `OpteryxConnector.vector_index_status` (definitions +
+  head manifest). `SHOW INDEX FROM`, `SHOW INDEXES ON`, `SHOW KEYS FROM` and a bare
+  `SHOW INDEXES` are refused naming the one spelling. `SHOW CREATE TABLE` appends one
+  `CREATE INDEX ... USING IVF (col) WITH (build = '...'[, clusters = n])` per index, in
+  name order. Tests: `tests/integration/test_vector_index_ddl_local.py` (discovery).
   - `files_indexed` / `files_total` and `index_bytes` come from the head manifest (§5.5). They
     show how far an async index lags and what it costs to store.
   - It reads the catalog only. It never opens an index file.

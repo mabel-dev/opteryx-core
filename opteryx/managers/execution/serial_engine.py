@@ -45,6 +45,7 @@ def _special_op_types():
     from opteryx.operators.show_lineage import ShowLineageNode
     from opteryx.operators.show_sources import ShowSourcesNode
     from opteryx.operators.show_create import ShowCreateNode
+    from opteryx.operators.show_indexes import ShowIndexesNode
     from opteryx.operators.table_management import TableManagementNode
     from opteryx.operators.view_management import ViewManagementNode
     from opteryx.operators.relation_management import RelationManagementNode
@@ -62,6 +63,7 @@ def _special_op_types():
         ShowLineageNode,
         ShowSourcesNode,
         ShowCreateNode,
+        ShowIndexesNode,
         TableManagementNode,
         ViewManagementNode,
         RelationManagementNode,
@@ -91,6 +93,7 @@ def execute(
     from opteryx.operators.show_lineage import ShowLineageNode
     from opteryx.operators.show_sources import ShowSourcesNode
     from opteryx.operators.show_create import ShowCreateNode
+    from opteryx.operators.show_indexes import ShowIndexesNode
     from opteryx.operators.table_management import TableManagementNode
     from opteryx.operators.view_management import ViewManagementNode
     from opteryx.operators.relation_management import RelationManagementNode
@@ -184,6 +187,7 @@ def execute(
         head_node,
         (
             ShowCreateNode,
+            ShowIndexesNode,
             ShowColumnsNode,
             ShowGrantsNode,
             ShowManifestNode,

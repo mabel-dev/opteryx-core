@@ -735,12 +735,12 @@ def draken_rugo_extensions(parquet_created_by):
             "draken.draken_native",
             sources=[
                 "draken/draken_native.cpp",
-                # The Python-free halves of the old draken_native.cpp: VectorOwner
+                # The Python-free half of the old draken_native.cpp: VectorOwner
                 # ops and the native morsel ops + their extern "C" ABI
                 # (morsels/cxx_morsel_c.h, core/draken_capi.h). Draken must execute
-                # without Python (CLAUDE.md §1/§2), so these never include
+                # without Python (CLAUDE.md §1/§2), so it never includes
                 # <Python.h>; same .so, same RTLD_GLOBAL resolution as before.
-                "draken/core/vector_owner_ops.cpp",
+                # One TU on purpose — see the note at the top of the file.
                 "draken/morsels/cxx_morsel_ops.cpp",
                 "draken/core/vector_alloc.cpp",
                 "draken/core/bitmap_ops.cpp",  # E.21: bitmap operations for bytecode VM

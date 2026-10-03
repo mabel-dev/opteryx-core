@@ -60,7 +60,7 @@
 #include "ops/float_ops.h"          // fp_total_lt (used by compare_at row ordering)
 #include "ops/string_gather.h"  // sg_eq_slots, str_hash_seed (for dict ingestion)
 #include "vectors/_vector_bridge.h"  // CPython bridge surface declarations
-#include "core/draken_capi.h"        // Python-free C ABI (implemented in core/vector_owner_ops.cpp)
+#include "core/draken_capi.h"        // Python-free C ABI (implemented in morsels/cxx_morsel_ops.cpp)
 #include "core/frame_arena.h"       // per-frame allocator
 #include "ops/compare_dv.h"         // arena-backed compare entry point
 #include "ops/arithmetic_dv.h"      // arena-backed arithmetic entry point
@@ -77,8 +77,8 @@ namespace nb = nanobind;
 #include "morsels/cxx_morsel_ops.h"   // S0: nogil morsel-op surface (cxx_hash, ...)
 #include "core/vector_owner_ops.h"    // VectorOwner ops shared with the native morsel ops
 
-// The Python-free operations this binding wraps live in core/vector_owner_ops.cpp
-// and morsels/cxx_morsel_ops.cpp; this file is the Python edge only.
+// The Python-free operations this binding wraps live in morsels/cxx_morsel_ops.cpp;
+// this file is the Python edge only.
 using namespace draken::owner_ops;
 using namespace draken::morsel_ops;
 

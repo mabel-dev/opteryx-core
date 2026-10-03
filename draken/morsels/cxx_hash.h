@@ -8,7 +8,7 @@
 // shared C++ declaration: it is the `morsel.hash(columns)` surface the execution
 // operators (GROUP BY / DISTINCT / JOIN) key on.
 //
-// Contract (see cxx_morsel_ops.cpp:cxx_hash / core/vector_owner_ops.cpp:hash_shaped_impl):
+// Contract (see cxx_morsel_ops.cpp:cxx_hash / hash_shaped_impl):
 //   cxx_hash_c(m, col_idxs, n_cols) hashes the n_cols key columns of morsel `m`
 //   (identified by column index) into a NEW single-column CxxMorsel whose
 //   columns[0].view is a DRAKEN_INT64 hash vector — one hash per input row.

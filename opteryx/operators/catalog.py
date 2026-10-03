@@ -179,6 +179,7 @@ def _build_registry() -> OperatorRegistry:
     from opteryx.operators.show_lineage import ShowLineageNode
     from opteryx.operators.show_sources import ShowSourcesNode
     from opteryx.operators.show_create import ShowCreateNode
+    from opteryx.operators.show_indexes import ShowIndexesNode
     from opteryx.operators.table_management import TableManagementNode
     from opteryx.operators.view_management import ViewManagementNode
     from opteryx.operators.relation_management import RelationManagementNode
@@ -435,6 +436,12 @@ def _build_registry() -> OperatorRegistry:
     r.register(
         ShowCreateNode,
         name="Show Create",
+        category=OperatorCategory.DDL,
+        is_not_explained=True,
+    )
+    r.register(
+        ShowIndexesNode,
+        name="Show Indexes",
         category=OperatorCategory.DDL,
         is_not_explained=True,
     )

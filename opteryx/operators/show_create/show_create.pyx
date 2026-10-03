@@ -82,6 +82,11 @@ class ShowCreateNode(BasePlanNode):
             self.connector.relation_schema(self.object_name),
             relationships=self.connector.list_relationships(self.object_name),
             cluster_columns=self.connector.cluster_by_columns(self.object_name),
+            indexes=(
+                self.connector.list_vector_indexes(self.object_name)
+                if self.connector.supports_vector_indexes
+                else None
+            ),
         )
 
     def _materialized_view_statement(self):

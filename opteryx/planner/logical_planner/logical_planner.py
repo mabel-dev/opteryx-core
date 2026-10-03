@@ -4302,6 +4302,26 @@ def plan_show_variables(statement, *, plan_context, **kwargs):
         # Original case preserved, as for SHOW MANIFEST FOR above.
         table_name = ".".join(part["value"] for part in parts[2:])
         return _plan_show_history(table_name, words[0], plan_context=plan_context)
+    if words[0] == "INDEXES" and len(words) >= 3 and words[1] == "FROM":
+        # `SHOW INDEXES FROM <table>` (D-15, MySQL's spelling - sqlparser has no SHOW
+        # INDEX statement and folds every form into ShowVariable). A table's vector
+        # indexes, answered from the catalog and the head manifest (§7A); gated as
+        # SHOW CREATE TABLE is, so it rides the same Show step.
+        show_step = ShowStep()
+        show_step.object_type = "INDEXES"
+        # Original case preserved, as for SHOW MANIFEST FOR above.
+        show_step.object_name = ".".join(part["value"] for part in parts[2:])
+        plan = LogicalPlan(plan_context)
+        plan.add_node(show_step)
+        return plan
+    if words[0] in ("INDEX", "INDEXES", "KEYS"):
+        # One spelling only (canonical spellings, §7A): `SHOW INDEX FROM t`,
+        # `SHOW INDEXES ON t`, `SHOW KEYS FROM t` and a bare `SHOW INDEXES` all
+        # name it.
+        raise UnsupportedSyntaxError(
+            f"Opteryx does not support 'SHOW {' '.join(words[:2])}'; a table's indexes "
+            "are listed by `SHOW INDEXES FROM <table>`."
+        )
     if words[0] == "TRIGGERS":
         if len(words) < 3 or words[1] != "FOR":
             # Bare SHOW TRIGGERS cannot be answered: triggers live in a
@@ -4319,7 +4339,7 @@ def plan_show_variables(statement, *, plan_context, **kwargs):
     raise UnsupportedSyntaxError(
         f"Opteryx does not support 'SHOW {' '.join(words)}'; "
         "supported forms are `SHOW VARIABLES`, `SHOW USER`, `SHOW GRANTS`, "
-        "`SHOW TRIGGERS FOR <table>`, `SHOW MANIFEST FOR <table>`, "
+        "`SHOW TRIGGERS FOR <table>`, `SHOW INDEXES FROM <table>`, `SHOW MANIFEST FOR <table>`, "
         "`SHOW SNAPSHOTS FOR <table>`, `SHOW ALL SNAPSHOTS FOR <table>`, "
         "`SHOW LINEAGE FOR <table>`, and `SHOW SOURCES FOR <table>`."
     )

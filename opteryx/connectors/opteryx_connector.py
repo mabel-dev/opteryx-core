@@ -3927,6 +3927,29 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         workspace, relative_id = self._parse_identifier(relation_name)
         return self._get_catalog(workspace).list_vector_indexes(relative_id)
 
+    def vector_index_status(self, relation_name: str) -> list:
+        """SHOW INDEXES (§7A): each index's definition with how far it covers the head
+        snapshot - `files_indexed` of `files_total` live data files - and the logical
+        bytes of its files (what is billed, §5.5). Read from the catalog and the head
+        manifest only; no index file is opened."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        definitions = catalog.list_vector_indexes(relative_id)
+        if not definitions:
+            return []
+        dataset = catalog.load_dataset(relative_id)
+        files_total = len(dataset.vector_index_coverage())
+        out = []
+        for definition in sorted(definitions, key=lambda d: d["name"]):
+            files = dataset.vector_index_files(definition["index-id"])
+            out.append({
+                **definition,
+                "files_indexed": len(files),
+                "files_total": files_total,
+                "index_bytes": sum(f.logical_bytes for f in files.values()),
+            })
+        return out
+
     def refresh_vector_index(self, relation_name: str, index_name: str, author: Optional[str] = None) -> int:
         """REFRESH INDEX (D-16): index every live data file the index does not cover yet,
         under the maintenance lease (§5.7). Returns the number of files indexed."""

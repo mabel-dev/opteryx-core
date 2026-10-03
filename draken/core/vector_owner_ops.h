@@ -5,7 +5,7 @@
 //
 // Pure C++: no <Python.h>, no nanobind. Draken must execute without Python
 // (CLAUDE.md §1/§2), and these are on the native engine's per-morsel path. The
-// definitions live in core/vector_owner_ops.cpp, compiled into draken_native.so.
+// definitions live in morsels/cxx_morsel_ops.cpp, compiled into draken_native.so.
 //
 // Errors are C++ exceptions (std::out_of_range / std::invalid_argument /
 // std::bad_alloc). At the Python edge nanobind translates them (out_of_range →

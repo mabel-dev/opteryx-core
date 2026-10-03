@@ -641,6 +641,8 @@ def _create_show_node(logical_node, query_properties, registry):
 
     if object_type in ("TABLE", "VIEW", "MATERIALIZED VIEW", "TASK", "TRIGGER"):
         return registry.create("Show Create", query_properties, logical_node)
+    elif object_type == "INDEXES":
+        return registry.create("Show Indexes", query_properties, logical_node)
     else:
         raise UnsupportedSyntaxError(f"Unsupported SHOW type '{object_type}'")
 

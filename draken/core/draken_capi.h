@@ -4,7 +4,7 @@
 // No <Python.h>, no nanobind: native C++ (the opteryx engine, the planner's file
 // statistics) includes THIS header, never the Python bridge
 // (vectors/_vector_bridge.h). Draken must execute without Python (CLAUDE.md
-// §1/§2). Implementations live in core/vector_owner_ops.cpp, compiled into
+// §1/§2). Implementations live in morsels/cxx_morsel_ops.cpp, compiled into
 // draken_native.so and resolved by other .so's through the RTLD_GLOBAL load in
 // draken/__init__.py.
 //

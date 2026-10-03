@@ -27,7 +27,10 @@ Clustering is the reason this returns a SCRIPT rather than a statement:
 `CREATE TABLE` has no CLUSTER BY clause to put it in (sqlparser gates that
 grammar on the BigQuery and Generic dialects by concrete type, with no dialect
 hook to opt into), so a clustered table recreates as a CREATE followed by an
-ALTER. Constraints need no such split - CREATE TABLE takes them.
+ALTER. Constraints need no such split - CREATE TABLE takes them. A table's
+vector indexes follow, one CREATE INDEX each (docs/VECTOR_INDEX_DESIGN.md §7A),
+reconstructed from their definitions: the build mode always, the cluster count
+only when one was set (0 = the builder's own choice, sqrt of a file's rows).
 """
 
 from typing import Dict, List, Optional
@@ -101,11 +104,13 @@ def render_create_table(
     schema,
     relationships: Optional[List[Dict]] = None,
     cluster_columns: Optional[List[str]] = None,
+    indexes: Optional[List[Dict]] = None,
 ) -> str:
     """The DDL that recreates a table's shape.
 
-    One statement, or two when the table is clustered - see the module docstring
-    for why clustering cannot ride along in the CREATE.
+    One statement, then an ALTER when the table is clustered - see the module
+    docstring for why clustering cannot ride along in the CREATE - then one CREATE
+    INDEX per vector index (`indexes`: the catalog's definitions).
     """
     name = quote_qualified_name(relation_name)
 
@@ -117,6 +122,16 @@ def render_create_table(
     if cluster_columns:
         columns = ", ".join(quote_identifier(column) for column in cluster_columns)
         statements.append(f"ALTER TABLE {name} CLUSTER BY ({columns})")
+
+    for index in sorted(indexes or [], key=lambda d: d["name"]):
+        options = [f"build = '{index['build']}'"]
+        if index["clusters"]:
+            options.append(f"clusters = {index['clusters']}")
+        statements.append(
+            f"CREATE INDEX {quote_identifier(index['name'])} ON {name} "
+            f"USING {index['method'].upper()} ({quote_identifier(index['column'])}) "
+            f"WITH ({', '.join(options)})"
+        )
 
     return ";\n\n".join(statements) + ";"
 

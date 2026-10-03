@@ -248,6 +248,8 @@ def visit_show(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
         alter one, and only an owner may read what it runs.
       TRIGGER - AUTOMATE. A trigger's definition names the identity its
         unattended runs carry, same sensitivity as a task's.
+      INDEXES (`SHOW INDEXES FROM t`) - READ, as TABLE: an index's definition is
+        part of the table's DDL, and its counts disclose no path (§7A).
 
     Without this the statement reached its operator with no authorization at
     all, because a node type with no visitor was silently passed through (see
@@ -282,6 +284,11 @@ def visit_show(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
             raise UnsupportedSyntaxError(
                 f"connector for {node.object_name} cannot show a "
                 f"**{node.object_type}** definition."
+            )
+        if node.object_type == "INDEXES" and not node.connector.supports_vector_indexes:
+            raise UnsupportedSyntaxError(
+                f"{node.object_name} has no indexes to show - vector indexes are "
+                "available on Opteryx catalog tables."
             )
 
     node.columns = []
