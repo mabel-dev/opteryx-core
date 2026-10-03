@@ -4825,14 +4825,14 @@ class _Compiler:
             ))
         embed_fn, _ = lookup_kernel("draken_embed")
         handle = VectorIndexAdmissionHandle(files, vs["query"], embed_fn, vs["dimensions"], vs["k"], nprobe)
-        holder = handle
         if filter_parts is not None:
             p1_plan, fn, ctx, pred_col_to_p1, resolver = filter_parts
             handle.set_predicate(p1_plan, fn, ctx, pred_col_to_p1, resolver)
-            # The pass-1 plan's pipeline is torn down with the plan's others after the run.
+            # The pass-1 plan's pipeline is torn down with the plan's others after the
+            # run; the resolver owns the predicate's literals the C ABI reads.
             self.nplan.scan_plans.append(p1_plan)
-            holder = (handle, p1_plan, resolver)
-        self.nplan.set_native_scan_admission(p, handle.address(), holder, scan.identity)
+            self.nplan.held.append(resolver)
+        self.nplan.set_native_scan_admission(p, handle.address(), handle, scan.identity)
         self._vector_search_armed = True
         self.scan_facts[scan.identity]["vector_index"] = vs["index_name"]
         self.scan_facts[scan.identity]["nprobe"] = nprobe
