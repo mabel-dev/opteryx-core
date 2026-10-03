@@ -221,6 +221,13 @@ def _fold_skene_scan_facts(nplan, telemetry) -> None:
     facts = telemetry._reading.get("native_scan_facts")
     if not facts:
         return
+    # Approximate vector searches (vector_index_admission.hpp): what each search did -
+    # indexed vs exactly-searched (uncovered) files, clusters probed, candidates. The
+    # Source wrote them in make_global; the driver is finished, so they are final.
+    for identity, admission in nplan.vector_admission_scans:
+        entry = facts.get(identity)
+        if entry is not None:
+            entry.update(admission.counts())
     for plan in plans:
         identity = getattr(plan, "scan_identity", None)
         counts = getattr(plan, "row_group_counts", None)
@@ -1016,6 +1023,9 @@ class _Compiler:
         # ScanReadings (row_groups_read/files_read/…) stay zero — these carry the
         # real values, harvested into telemetry and overlaid by plan_telemetry.py.
         self.scan_facts: dict = {}
+        # Set when an approximate vector search's scan is compiled: its HeapSort (the
+        # plan's only one, VectorSearchStrategy) drops rows with no distance.
+        self._vector_search_armed = False
         # A0 acceptance gate: per-scan residual-reason code, keyed by scan node
         # identity, recorded when a parquet scan falls back to the per-morsel
         # Python trampoline (StreamingScanSource). The value is the stable string
@@ -2729,6 +2739,10 @@ class _Compiler:
             self._arm_groupby_topk(in_edges[0][0], node.step.order_by, int(limit))
             buf = self.nplan.new_buffer()
             self.nplan.set_topn_sink(p, spec, int(limit), buf, emit)
+            if self._vector_search_armed:
+                # VectorSearchStrategy admits one search per query, and it is THIS sort:
+                # rows with no embedding are never returned (ruled 2026-10-03).
+                self.nplan.set_topn_drop_unsearchable(p)
             self._arm_topn_boundary(p, in_edges[0][0], node, int(limit))
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
@@ -4649,7 +4663,11 @@ class _Compiler:
         # a dataset with no delete debt — the overwhelming case — is untouched.
         _scan_manifest = scan.manifest
         _scan_has_deletes = _scan_manifest is not None and _scan_manifest.has_deletes()
-        lat = None if _scan_has_deletes else self._latmat_scan_plan(scan)
+        # An approximate vector search (VectorSearchStrategy) runs on the single-pass
+        # native Source with a row admission, which also excludes deleted rows - so
+        # deletes do not decline it, and the two-pass latmat path is never its shape.
+        _vector_search = scan.step.vector_search
+        lat = None if (_scan_has_deletes or _vector_search) else self._latmat_scan_plan(scan)
         if lat is not None:
             (p1_plan, p2_plan, resolver, pred_col_to_p1, sort_p1_index, sort_ascending,
              sort_nulls_first, topn_limit, out_from_p1, out_from_p2, emit_ids) = lat
@@ -4675,7 +4693,14 @@ class _Compiler:
             # The predicate is fully applied in pass 1, and the Source emits the
             # projection directly — no relocated ExprFilter, no trailing Select.
             return p, emit_ids
-        splan = None if _scan_has_deletes else self._native_scan_plan(scan)
+        splan = None if (_scan_has_deletes and not _vector_search) else self._native_scan_plan(scan)
+        if _vector_search and splan is None:
+            from opteryx.exceptions import UnsupportedSyntaxError
+
+            raise UnsupportedSyntaxError(
+                f"**APPROX_COSINE_DISTANCE** over {scan.relation} needs the native parquet "
+                "scan, and this scan's columns or files are outside what it reads."
+            )
         if splan is not None:
             # Zero-Python Source: workers pull decoded row groups straight from
             # the rugo IO pipeline (no GIL trampoline, no per-morsel attach).
@@ -4708,6 +4733,8 @@ class _Compiler:
             # `_apply_to_scan`), so no downstream LimitOperator truncates. Pushdown
             # only fires with no pushed predicate and no OFFSET.
             self.nplan.set_native_scan_source(p, splan, scan.limit)
+            if _vector_search:
+                self._arm_vector_admission(p, scan, splan)
             # RUNTIME MIN/MAX JOIN FILTER (parquet): same record, same purpose and
             # same refusal semantics as skene_scan_pipelines above. The projection
             # is the right key set: a probe-side join key must be emitted by the
@@ -4730,7 +4757,10 @@ class _Compiler:
             # projection (drops role-3 filter-only columns). The identity Select is
             # elided when read-set == emit-set (need_select False).
             filter_bc, read_layout, emit_indices, emit_ids, need_select, read_scs = reloc
-            if not self._arm_scan_prefilter(p, splan, filter_bc, read_layout, read_scs):
+            # An approximate search decodes through row masks; the worker prefilter's
+            # survivor gather assumes full-length predicate columns, so it is not armed
+            # there - the relocated filter runs as a native ExprFilter instead.
+            if _vector_search or not self._arm_scan_prefilter(p, splan, filter_bc, read_layout, read_scs):
                 self.nplan.add_expr_filter(p, filter_bc, read_layout)
             if need_select:
                 self.nplan.add_select(p, emit_indices, emit_ids)
@@ -4759,6 +4789,114 @@ class _Compiler:
         layout = [col.schema_column.identity for col in (scan.columns or [])]
         self._remember_types(scan.columns)
         return p, layout
+
+    def _arm_vector_admission(self, p, scan, splan):
+        """Give an approximate search's native scan its row admission (D2,
+        vector_index_admission.hpp): built here from plan data - every scanned file with
+        its rows, deleted ordinals and (when the index covers it) index files, the query,
+        k and nprobe - and handed to the Source, which searches at execution start.
+
+        `nprobe`: the session's `nprobe`, or the index's own when it is 0 (D-9)."""
+        from draken.ops.kernels._kernel_registry import lookup_kernel
+        from opteryx.operators._operators import VectorIndexAdmissionHandle
+        from opteryx.variables import resolve as _resolve_var
+
+        vs = scan.step.vector_search
+        nprobe = int(_resolve_var("nprobe", scan.properties.variables, 0) or 0) or vs["nprobe"]
+        if nprobe < 1:
+            from opteryx.exceptions import InvalidConfigurationError
+
+            raise InvalidConfigurationError(
+                config_item="nprobe", provided_value=str(nprobe),
+                valid_value_description="a whole number >= 1 (0 = the index's own)",
+            )
+        manifest = scan.manifest
+        indexed = scan.connector.vector_search_indexes(vs["index_id"])
+        deletes = manifest.delete_positions() if manifest.has_deletes() else {}
+        # A WHERE pushed into the scan is applied BEFORE the search (pass 1).
+        filter_parts = self._vector_filter_plan(scan) if scan.predicates else None
+        filter_paths = filter_parts[0].fetch_paths if filter_parts is not None else {}
+        files = []
+        for path, rows in zip(manifest.get_file_paths(), manifest.record_counts()):
+            fetch = splan.fetch_paths.get(path, path)
+            files.append((
+                fetch, filter_paths.get(path, fetch) if filter_parts is not None else fetch,
+                int(rows), list(deletes.get(path, ())), indexed.get(path),
+            ))
+        embed_fn, _ = lookup_kernel("draken_embed")
+        handle = VectorIndexAdmissionHandle(files, vs["query"], embed_fn, vs["dimensions"], vs["k"], nprobe)
+        holder = handle
+        if filter_parts is not None:
+            p1_plan, fn, ctx, pred_col_to_p1, resolver = filter_parts
+            handle.set_predicate(p1_plan, fn, ctx, pred_col_to_p1, resolver)
+            # The pass-1 plan's pipeline is torn down with the plan's others after the run.
+            self.nplan.scan_plans.append(p1_plan)
+            holder = (handle, p1_plan, resolver)
+        self.nplan.set_native_scan_admission(p, handle.address(), holder, scan.identity)
+        self._vector_search_armed = True
+        self.scan_facts[scan.identity]["vector_index"] = vs["index_name"]
+        self.scan_facts[scan.identity]["nprobe"] = nprobe
+
+    def _vector_filter_plan(self, scan):
+        """An approximate search's WHERE, as pass 1 (vector_index_admission.hpp): a
+        NativeScanPlan over the predicate columns and the predicate lowered to the
+        latmat pass-1 C ABI. Refused loudly when it cannot run natively - an approximate
+        search never falls back to filtering its candidates afterwards."""
+        from opteryx.connectors.parquet_io.pool_reader import native_scan_supported
+        from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
+        from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
+        from opteryx.exceptions import UnsupportedSyntaxError
+        from opteryx.expression import get_all_nodes_of_type
+        from opteryx.expression.evaluator.evaluation import Pass1PredResolver
+        from opteryx.expression.evaluator.evaluation import get_pass1_eval_fn_ptr
+        from opteryx.operators._operators import bytecode_is_all_c_native
+        from opteryx.operators._operators import resolve_scan_filesystem
+        from opteryx.operators._operators import scan_footer_bytes_cache
+
+        refusal = (
+            "This **WHERE** cannot be applied natively before an approximate search, "
+            "and filtering the candidates afterwards could return fewer than LIMIT rows"
+        )
+        predicates = scan.predicates
+        filter_bc = self._lower_scan_predicate(predicates)
+        if not bytecode_is_all_c_native(filter_bc):
+            raise UnsupportedSyntaxError(f"{refusal}.")
+        p1_scs, seen = [], set()
+        for pred in predicates:
+            for ident in get_all_nodes_of_type(pred, select_nodes=(NodeType.IDENTIFIER,)):
+                sc = ident.schema_column
+                if sc is not None and sc.name not in seen:
+                    seen.add(sc.name)
+                    p1_scs.append(sc)
+        if not p1_scs:
+            raise UnsupportedSyntaxError(f"{refusal}: it reads no column.")
+        kinds, string_types, decimals, coerce, _widen, bad = self._classify_scan_columns(p1_scs)
+        if bad is not None:
+            raise UnsupportedSyntaxError(f"{refusal}: column kind {bad}.")
+        names = [sc.name for sc in p1_scs]
+        manifest = scan.manifest
+        paths = manifest.get_file_paths()
+        filesystem, _connector_type = resolve_scan_filesystem(scan.connector, paths)
+        if not native_scan_supported(paths, names, kinds, None, filesystem=filesystem,
+                                     footer_bytes_cache=scan_footer_bytes_cache()):
+            raise UnsupportedSyntaxError(f"{refusal}: its columns are not natively readable here.")
+        plan = open_native_scan_plan(
+            paths, names,
+            predicates=extract_predicate_stats(predicates) or None,
+            string_types=string_types, decimal_columns=decimals,
+            array_columns=[1 if _physical_type(sc) == DrakenType.ARRAY else 0 for sc in p1_scs],
+            logical_coerce=coerce, pool=None, filesystem=filesystem,
+            footer_bytes_cache=scan_footer_bytes_cache(),
+        )
+        self.footer_fetch_ns += plan.footer_fetch_ns
+        resolver = Pass1PredResolver(
+            filter_bc,
+            {sc.identity: sc.name for sc in p1_scs},
+            {sc.identity: sc.column_type.physical.value for sc in p1_scs},
+        )
+        index_by_name = {name: i for i, name in enumerate(names)}
+        pred_col_to_p1 = [index_by_name[n] for n in resolver.col_names]
+        return plan, get_pass1_eval_fn_ptr(), resolver.ctx_ptr(), pred_col_to_p1, resolver
 
     def _compile_join(self, nid, node):
         """Hash joins via the generalized native join (serialized multi-column keys

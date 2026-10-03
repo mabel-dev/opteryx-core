@@ -117,11 +117,14 @@ public:
         // always wrap in a genuine 1-tuple regardless of what result_/exception_
         // is. (Found via a hung concurrent.futures.Future when the pooled task's
         // return value was a tuple.)
+        // The call returns a NEW reference (set_*'s None) — released here.
+        PyObject* called = nullptr;
         if (exception_) {
-            PyObject_CallMethod(py_future_, "set_exception", "(O)", exception_);
+            called = PyObject_CallMethod(py_future_, "set_exception", "(O)", exception_);
         } else if (result_) {
-            PyObject_CallMethod(py_future_, "set_result", "(O)", result_);
+            called = PyObject_CallMethod(py_future_, "set_result", "(O)", result_);
         }
+        Py_XDECREF(called);
         PyErr_Clear();  // Swallow any error from the set_* call itself.
 
         // Null out after use so ~ResultContainer is a no-op for these refs.

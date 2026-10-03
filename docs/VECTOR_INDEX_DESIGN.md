@@ -1008,9 +1008,67 @@ all pass.
     indexable row gets none. The per-file build is shared with REFRESH.
   - *Async CREATE INDEX fires its REFRESH* from the catalog's `create_vector_index`
     (`fire_index_refreshes(..., only=name)`, never raises).
-- **Next:** Stage D — the D2 reader (step 7; `SkeneRangedFile` is ready for it), proven
-  on GCS before any production build is enabled. Needs D-4 (approximate SQL spelling) and
-  D-9 (recall setting) ruled.
+  - Verified end to end through SQL on local disk (INSERT/UPDATE sync builds, OPTIMIZE
+    carry incl. mixed coverage and deletes, leases): 118 integration tests.
+- **Stage D started 2026-10-03** (D-4 ruled `APPROX_COSINE_DISTANCE(text_col, 'query')`,
+  D-9 ruled `nprobe`, the definition's value overridable per query):
+  - *Per-file reader* (`src/cpp/engine/vector_index_search.hpp`, entry
+    `search_vector_index_file`): embeds the query with the registered kernel, reads the
+    whole centroids file, probes the `nprobe` nearest non-empty clusters, and fetches ONLY
+    their vectors-file row groups through `SkeneRangedFile` (pread, or range GETs on a
+    signed URL); scores with `TopK::offer` (the SQL kernel's distance; deleted ordinals
+    excluded; an `admitted` mask is taken but not yet fed). Probing every cluster equals
+    exact search; an index naming ordinals beyond its data file fails loud.
+  - *Proven against a signature-checking S3 server* (hadro, `tests/integration/
+    test_vector_index_s3_hadro.py`, 2026-10-03): every remote read the index makes goes
+    through a presigned URL by range GETs — the build reading its data file, the search
+    reading centroids + probed row groups, carry reading input vectors files — and each is
+    byte-identical (or answer-identical) to the local read; a URL signed with the wrong
+    secret is refused and the read fails loud. Real GCS (signed V4 URLs, resumable sessions,
+    compose) is still unexercised.
+- **D1 + D2 delivered 2026-10-03** — `ORDER BY APPROX_COSINE_DISTANCE(col, 'q') LIMIT k`
+  runs through the index, end to end through SQL:
+  - *Function:* `APPROX_COSINE_DISTANCE(text, text)`, the EXACT text-distance kernel under
+    a registry alias ("approximate" chooses the rows, never the value).
+  - *Gate + planner* (`VectorSearchStrategy`, after operator/project fusion, never
+    disabled): the sole ascending ORDER BY key (directly, or through the projected alias)
+    of a HeapSort over projections over ONE scan; the same call may repeat in the SELECT
+    list. Refused otherwise: no LIMIT, more keys, DESC, WHERE (pushed or not), joins,
+    any other use, a non-literal query, a non-catalog table, a column with no index, an
+    index of another embedder. Stamps `scan.vector_search`; EXPLAIN shows
+    "k=…, N of M file(s) indexed, X searched exactly".
+  - *Execution:* the existing native parquet scan gained a `RowAdmission` hook (decided
+    in `make_global`, masks into `submit_block`, empty units pruned through `kept`).
+    `VectorIndexAdmission` embeds the query once, searches every indexed file (top-k,
+    deletes excluded) and admits all non-deleted rows of uncovered files (ruled: exact,
+    and reported). Deletes no longer decline the native scan for this shape. The
+    projection computes each candidate's exact distance; the Top-N sink orders them.
+  - *Rows with no embedding are never returned* (ruled 2026-10-03): the search's
+    TopNSink drops rows whose distance is NULL or NaN (`drop_unsearchable_leading`), from
+    indexed and uncovered files alike — fewer than k rows when fewer have one.
+  - *nprobe* (D-9): `SET nprobe = n`; 0 (default) = the index's own. Read at compile.
+  - *Telemetry:* the scan's facts gain files indexed / exact, clusters probed, index row
+    groups read, candidates, rows searched exactly, nprobe.
+  - Remote index files are read through signed URLs (GCS V4 / S3 SigV4).
+- **Recall measured 2026-10-03** (NVD 335,085 rows, real MiniLM fp32, K=579, 40
+  security-phrase queries, k=10, M5 local warm; `dev/vector_index_recall.py`; truth =
+  every cluster probed = exact):
+
+  | nprobe | recall@10 mean | worst query | ms/query | vectors RGs read |
+  |---|---|---|---|---|
+  | 1 | 0.510 | 0.00 | 1.2 | 2 |
+  | 4 | 0.812 | 0.10 | 1.5 | 8 |
+  | 8 | 0.883 | 0.20 | 1.9 | 16 |
+  | 16 | 0.948 | 0.50 | 2.6 | 31 |
+  | **32 (default)** | **0.973** | 0.60 | 4.0 | 60 |
+  | 64 | 0.983 | 0.70 | 6.7 | 118 |
+  | 128 | 0.990 | 0.80 | 11.9 | 227 |
+  | exact (579) | 1.000 | — | 45.5 | all 966 |
+
+  The default meets the ~0.95 target at ~1/11 of the exact cost. The worst query still
+  loses 4 of 10 at 32: recall is a mean, not a floor.
+- **Not yet:** WHERE as the search's admitted set (the design's pass-1 mask), the
+  per-file exact path below a survivor threshold τ, and real GCS.
 
 | Step | Work | Gate |
 |---|---|---|
@@ -1044,12 +1102,12 @@ model at container build with its checksum verified (§9A).
 | D-1 | `VECTOR` in user land | — | **RULED rev 3:** not a user-land concept. It exists only inside the index (§3). |
 | D-2 | Vector element type and metrics | fp16 only + cosine / add fp32 `VECTOR` base type / add L2 & inner product | fp16 + cosine for v1. L2/IP kernels are cheap to add with the SIMD work. fp32 only if S3 compatibility (D-10) is pursued. |
 | D-3 | Home of the ANN code and the index format | — | **DECIDED rev 3, amended by D-5:** draken `ops/ann/` (IVF-flat), vectors and centroids in skene files (§5.2). |
-| D-4 | SQL spelling of "approximate" | `VECTOR_SEARCH` TVF / `APPROX_COSINE_DISTANCE` / `WITH INDEX` clause | `APPROX_COSINE_DISTANCE`: smallest binder change, explicit, and it matches existing fusion recognition. |
+| D-4 | SQL spelling of "approximate" | `VECTOR_SEARCH` TVF / `APPROX_COSINE_DISTANCE` / `WITH INDEX` clause | **RULED 2026-10-03: `APPROX_COSINE_DISTANCE(text_col, 'query')`.** |
 | D-5 | ANN algorithm | — | **RULED 2026-10-02: IVF-flat over fp16** (§13 B3). HNSW and the usearch graph are deleted. |
 | D-6 | SIMD distance: SimSIMD (vendored) vs draken-owned kernels | — | Draken-owned NEON/AVX2 via `SIMD_STATIC_SELECT`, consistent with the rest of draken. SimSIMD stays usearch-internal. |
 | D-7 | When sidecars are built | — | **RULED 2026-10-02:** per index `build = 'sync' \| 'async'`, default async, `ALTER INDEX` switches; compaction never re-embeds (§5.6, §10). |
 | D-8 | Minimum rows per file for a sidecar | fixed constant / measured / per-index option | Measured constant from §12, overridable per index. |
-| D-9 | Recall knob exposure | session variable / statement option / index-definition default | Index-definition default, overridable by session variable. |
+| D-9 | Recall knob exposure | session variable / statement option / index-definition default | **RULED 2026-10-03: `nprobe`** — the index definition's value, overridable per query. |
 | D-10 | S3 Vectors façade | none / SQL-translation façade in the service tier | Defer. Revisit only with a consumer. |
 | D-12 | Embedding provider | — | **APPROVED rev 3:** runtime-loaded ONNX Runtime C API (onnxruntime installed `--no-deps`), weights baked into the image at container build. MIT licence verified (§9A). |
 | D-13 | Index storage billing (§5.5) | — | **RULED 2026-10-02: charged at logical bytes** (`total-index-data-size`), reported as its own figure beside data. |

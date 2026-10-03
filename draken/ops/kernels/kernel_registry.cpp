@@ -692,6 +692,9 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_embed", (kernel_fn_t)&draken_embed},
     {"draken_cosine_similarity_text", (kernel_fn_t)&draken_cosine_similarity_text},
     {"draken_cosine_distance_text", (kernel_fn_t)&draken_cosine_distance_text},
+    // APPROX_COSINE_DISTANCE (D-4): "approximate" decides which rows an indexed scan
+    // admits, never the value reported — so it IS the exact text distance kernel.
+    {"draken_approx_cosine_distance_text", (kernel_fn_t)&draken_cosine_distance_text},
     // MATCH (col) AGAINST (str) — the overload id _MATCH_AGAINST_2 lowercased, hence the
     // doubled underscore. Runs the text cosine body and thresholds it (match_ctx).
     {"draken__match_against_2", (kernel_fn_t)&draken__match_against_2},

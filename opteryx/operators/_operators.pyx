@@ -375,6 +375,10 @@ def skene_reader_cache_stats():
     }
 
 
+cdef extern from "engine/native_parquet_scan_source.hpp" namespace "opteryx::engine" nogil:
+    cdef cppclass RowAdmission:
+        pass
+
 cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
     cdef cppclass OpReading "opteryx::engine::Engine::OpReading":
         string identity
@@ -468,6 +472,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                        ExprFilterFn fn, cppvector[uint8_t] is_pred) except +
         void arm_latmat_topn_boundary(size_t p, size_t idx) except +
         int64_t topn_boundary_skipped(size_t idx) except +
+        void set_native_scan_admission(size_t p, RowAdmission* admission) except +
+        void set_topn_drop_unsearchable(size_t p) except +
         void set_native_postgres_scan_source(size_t p, const PgScanSpec* spec)
         void set_native_jsonl_scan_source(size_t p, const JsonlScanSpec* spec)
         void set_skene_latmat_scan_source(size_t p,
@@ -2751,6 +2757,9 @@ cdef class NativePlan:
     # Read after the run to report each scan's `row_groups_pruned_topn`; empty for
     # every plan that armed none.
     cdef public list topn_boundary_scans
+    # (scan identity, VectorIndexAdmissionHandle) for every approximate search armed,
+    # read after the run for its counts (compiler._fold_skene_scan_facts).
+    cdef public list vector_admission_scans
 
     def __cinit__(self):
         self._e = new Engine()
@@ -2761,6 +2770,7 @@ cdef class NativePlan:
         self.postgres_scan_plans = []
         self.jsonl_scan_plans = []
         self.topn_boundary_scans = []
+        self.vector_admission_scans = []
         # Spill root for this plan's MorselBuffers (docs/MORSEL_SPILL_DESIGN.md).
         # KVSTORE_LOCATION is the per-query spill store the config has always
         # documented; the native SpillStore is its first-party caller. Only a
@@ -3661,6 +3671,14 @@ cdef class NativePlan:
         self._e.add_expr_filter(p, <void*>bc.instrs, <int>bc.count, col_idx, lit_dv,
                                 _expr_filter_tramp, c_const_col_idx, c_const_scalar_dv)
 
+    def set_native_scan_admission(self, size_t p, size_t admission, object holder, object scan_identity):
+        """Give pipeline `p`'s native parquet scan a row admission (a VectorIndexAdmission's
+        address): which rows it may decode, decided natively at execution start. `holder`
+        owns it and is held here for the run; its counts are read after it."""
+        self.held.append(holder)
+        self.vector_admission_scans.append((scan_identity, holder))
+        self._e.set_native_scan_admission(p, <RowAdmission*><void*>admission)
+
     def set_native_scan_prefilter(self, size_t p, CompiledBytecode bc, list layout,
                                   list is_pred):
         """Scan prefilter (docs/PARQUET_SELECTIVE_DECODE_DESIGN.md §2.1): pipeline
@@ -3908,6 +3926,11 @@ cdef class NativePlan:
         full width."""
         self._e.set_topn_sink(p, _sort_spec_from_list(spec), n, buf,
                               emit is not None, _emit_cols_from_list(emit))
+
+    def set_topn_drop_unsearchable(self, size_t p):
+        """Pipeline `p`'s Top-N is an approximate vector search's: rows whose distance
+        is NULL or NaN (no embedding) are never returned."""
+        self._e.set_topn_drop_unsearchable(p)
 
     def set_window_sink(self, size_t p, list sort_spec, size_t n_part,
                         list fn_kinds, list fn_names, list fn_args, list fn_offsets,
@@ -4367,6 +4390,7 @@ include "data_file_stream/data_file_stream.pyx"
 include "compaction_commit/compaction_commit.pyx"
 include "vector_index_build/vector_index_build.pyx"
 include "vector_index_build/vector_index_carry.pyx"
+include "vector_index_build/vector_index_search.pyx"
 include "csv_read/csv_read.pyx"
 include "explain/explain.pyx"
 include "function_dataset/function_dataset.pyx"

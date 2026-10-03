@@ -2687,6 +2687,7 @@ cdef class NativeScanPlan:
         self._closed = False
         self._pool = None
         self.footer_fetch_ns = 0
+        self.fetch_paths = {}
 
     def __dealloc__(self):
         self.close()
@@ -2986,6 +2987,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     # Python (work_items[i].first is consumed entirely inside C++ — footer lookup and
     # submit_row_group), so there is nothing to translate back for telemetry.
     orig_to_cpp, _ = _sign_paths(filesystem, paths)
+    plan.fetch_paths = orig_to_cpp
 
     # Batched, shared-tier remote footer acquisition. footer_map is NULL here because
     # this plan keys it by FETCH url while the helper keys by original path; the

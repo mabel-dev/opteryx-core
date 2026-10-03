@@ -254,6 +254,10 @@ cdef class NativeScanPlan:
     # plan compilation — kept separate so callers can report it as its own cost
     # instead of it silently inflating whatever timer wraps this function.
     cdef public uint64_t footer_fetch_ns
+    # {original path: fetch path} for every path the plan signed (empty when none
+    # were): work items name files by their FETCH path, and a row admission
+    # (vector_index_admission.hpp) must name them the same way.
+    cdef public dict fetch_paths
 
     cpdef void close(self)
 

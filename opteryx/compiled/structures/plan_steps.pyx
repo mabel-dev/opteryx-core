@@ -8333,7 +8333,12 @@ cdef class ScalarSubqueryGuardStep(PlanStep):
 
 
 cdef class ScanStep(PlanStep):
-    """The Scan logical plan step."""
+    """The Scan logical plan step.
+
+    `vector_search` marks the scan of an approximate search (D-4, VectorSearchStrategy):
+    a dict naming the index, the query text, k and nprobe. The compiler gives such a scan
+    a row admission that decodes only the index's candidates (and every row of files the
+    index does not cover)."""
 
     cdef str _alias
     cdef object _at_date
@@ -8358,6 +8363,7 @@ cdef class ScanStep(PlanStep):
     cdef str _relation
     cdef object _resolved_dataset
     cdef str _row_identity_statement
+    cdef object _vector_search
     cdef object _schema
     cdef str _source
     cdef object _start_date
@@ -8386,7 +8392,7 @@ cdef class ScanStep(PlanStep):
         self._row.pushed_distinct = self._pushed_distinct is True
         self._check_row_arena()
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, at_date=None, connector=None, dataset_committed_at=None, emit_row_identity=None, end_date=None, for_manifest_only=None, for_snapshots_only=None, hint_settings=None, hints=None, history_view=None, internal_relation=None, length_only_columns=None, limit=None, manifest=None, pending_cte_key=None, predicates=None, pushed_aggregates=None, pushed_distinct=None, pushed_groups=None, relation=None, resolved_dataset=None, row_identity_statement=None, schema=None, source=None, start_date=None, topn_boundary_key=None, topn_descending=None, topn_limit=None, topn_nulls_first=None, topn_order_by=None, topn_sort_identity=None, topn_sort_name=None, unpruned_columns=None, version=None, version_tag=None, via_view=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, at_date=None, connector=None, dataset_committed_at=None, emit_row_identity=None, end_date=None, for_manifest_only=None, for_snapshots_only=None, hint_settings=None, hints=None, history_view=None, internal_relation=None, length_only_columns=None, limit=None, manifest=None, pending_cte_key=None, predicates=None, pushed_aggregates=None, pushed_distinct=None, pushed_groups=None, relation=None, resolved_dataset=None, row_identity_statement=None, schema=None, source=None, start_date=None, topn_boundary_key=None, topn_descending=None, topn_limit=None, topn_nulls_first=None, topn_order_by=None, topn_sort_identity=None, topn_sort_name=None, unpruned_columns=None, version=None, version_tag=None, via_view=None, vector_search=None):
         self.node_type = _step_types().Scan
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.alias = alias
@@ -8412,6 +8418,7 @@ cdef class ScanStep(PlanStep):
         self.relation = relation
         self.resolved_dataset = resolved_dataset
         self.row_identity_statement = row_identity_statement
+        self.vector_search = vector_search
         self.schema = schema
         self.source = source
         self.start_date = start_date
@@ -8643,6 +8650,15 @@ cdef class ScanStep(PlanStep):
         self._resolved_dataset = value
 
     @property
+    def vector_search(self):
+        return self._vector_search
+
+    @vector_search.setter
+    def vector_search(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._vector_search = value
+
+    @property
     def row_identity_statement(self):
         return self._row_identity_statement
 
@@ -8833,6 +8849,7 @@ cdef class ScanStep(PlanStep):
         out["relation"] = self._relation
         out["resolved_dataset"] = self._resolved_dataset
         out["row_identity_statement"] = self._row_identity_statement
+        out["vector_search"] = self._vector_search
         out["schema"] = self._schema
         out["source"] = self._source
         out["start_date"] = self._start_date
@@ -8882,6 +8899,7 @@ cdef class ScanStep(PlanStep):
         new._relation = _copy_field(self._relation, memo)
         new._resolved_dataset = _copy_field(self._resolved_dataset, memo)
         new._row_identity_statement = _copy_field(self._row_identity_statement, memo)
+        new._vector_search = _copy_field(self._vector_search, memo)
         new._schema = _copy_field(self._schema, memo)
         new._source = _copy_field(self._source, memo)
         new._start_date = _copy_field(self._start_date, memo)
@@ -8926,6 +8944,7 @@ cdef class ScanStep(PlanStep):
         new._relation = self._relation
         new._resolved_dataset = self._resolved_dataset
         new._row_identity_statement = self._row_identity_statement
+        new._vector_search = self._vector_search
         new._schema = self._schema
         new._source = self._source
         new._start_date = self._start_date
@@ -11044,6 +11063,7 @@ cpdef frozenset steps_with(str field):
             "variables": frozenset({T.Set}),
             "version": frozenset({T.Scan}),
             "version_spec": frozenset({T.CreateTag, T.RollbackRelation}),
+            "vector_search": frozenset({T.Scan}),
             "version_tag": frozenset({T.Scan}),
             "via_view": frozenset({T.Scan}),
             "view_name": frozenset({T.AlterView, T.CreateView}),

@@ -6,7 +6,8 @@
 # cython: boundscheck=False
 # distutils: language = c++
 
-"""The plan graph: the native structure (src/cpp/planner/_plan_graph.hpp) behind
+"""The plan graph: the native structure (src/cpp/planner/plan_topology.hpp, its steps
+held by the _plan_graph.hpp bridge) behind
 every logical and physical plan, and its Python interface.
 
 Native plan graph P2 (architect rulings 2026-09-27):
@@ -50,7 +51,6 @@ cdef extern from "planner/_plan_graph.hpp":
 
     cdef cppclass CPlanNode "opteryx::planner::PlanNode":
         uint32_t id
-        PyObject* step
         vector[CEdge] out
         vector[CEdge] ingoing "in"
 
@@ -64,6 +64,7 @@ cdef extern from "planner/_plan_graph.hpp":
         const CPlanNode& node_at(size_t position)
         const CPlanNode& node(uint32_t id) except +
         PyObject* step(uint32_t id) except +
+        PyObject* step_at(size_t position)
         void add(uint32_t id, PyObject* step) except +
         void replace(uint32_t id, PyObject* step) except +
         void add_edge(uint32_t source, uint32_t target, CEdgeRole role) except +
@@ -258,7 +259,7 @@ cdef class PlanGraph:
         out = []
         if data:
             for i in range(n):
-                out.append((self._graph.node_at(i).id, <object>self._graph.node_at(i).step))
+                out.append((self._graph.node_at(i).id, <object>self._graph.step_at(i)))
         else:
             for i in range(n):
                 out.append(self._graph.node_at(i).id)
@@ -524,7 +525,7 @@ cdef class PlanGraph:
             new_id = self._node_ids.mint() if fresh_ids else old_id
             id_map[old_id] = new_id
             ids.push_back(new_id)
-            step_copy = (<object>self._graph.node_at(i).step).copy(memo)
+            step_copy = (<object>self._graph.step_at(i)).copy(memo)
             copied.append(step_copy)
             steps.push_back(<PyObject*>step_copy)
         cdef PlanGraph graph = self._empty_like()

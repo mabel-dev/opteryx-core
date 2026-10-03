@@ -3182,7 +3182,7 @@ cdef Py_ssize_t _linearize(
             # resolved draken_embed rather than let them embed for themselves: an
             # embedder of their own would silently diverge the moment a capability
             # replaces the core one.
-            if (func_name in ("COSINE_SIMILARITY", "COSINE_DISTANCE")
+            if (func_name in ("COSINE_SIMILARITY", "COSINE_DISTANCE", "APPROX_COSINE_DISTANCE")
                     and _fn_overload_id is not None and _fn_overload_id.endswith("_TEXT")):
                 from draken.ops.kernels._kernel_registry import (
                     alloc_cosine_text_ctx, lookup_kernel as _lk_embed)

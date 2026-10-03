@@ -635,6 +635,16 @@ public:
         prog.lit_dv = std::move(lit_dv);
         src->set_prefilter(std::move(prog), fn, std::move(is_pred));
     }
+    // Give pipeline `p`'s native parquet scan a row admission (the vector index search,
+    // vector_index_admission.hpp): which rows it may decode, decided at make_global.
+    // Borrowed; the plan's holder keeps it alive for the run.
+    void set_native_scan_admission(size_t p, RowAdmission* admission) {
+        auto* src = dynamic_cast<NativeParquetScanSource*>(pipelines[p]->source.get());
+        if (src == nullptr)
+            throw std::runtime_error(
+                "set_native_scan_admission: pipeline source is not a native parquet scan");
+        src->set_row_admission(admission);
+    }
     // Arm pipeline `p`'s native parquet scan as the CONSUMER, testing `column` (the
     // leading key's PHYSICAL name) under its NULL placement.
     void add_parquet_topn_boundary(size_t p, size_t idx, std::string column,
@@ -1302,6 +1312,14 @@ public:
                        bool emit_prune, std::vector<uint32_t> emit_cols) {
         set_sink_(p, std::make_unique<TopNSink>(std::move(spec), n, sink_buffer_(buf),
                                                 emit_prune, std::move(emit_cols)));
+    }
+    // An approximate vector search's Top-N: rows with no distance are never returned
+    // (TopNSink::drop_unsearchable_leading).
+    void set_topn_drop_unsearchable(size_t p) {
+        auto* sink = dynamic_cast<TopNSink*>(pipelines[p]->sink.get());
+        if (sink == nullptr)
+            throw std::runtime_error("set_topn_drop_unsearchable: pipeline sink is not a TopNSink");
+        sink->drop_unsearchable_leading = true;
     }
     // Window functions: sort_spec = [partition keys asc..., order keys...]; n_part =
     // count of leading partition keys; fn_kinds[i] / fn_names[i] / fn_args[i] /

@@ -1037,6 +1037,27 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
             self.schema, bounds_are_ordinal, entries, sketch_vectors, resolved_deletes
         )
 
+    # --- vector search (docs/VECTOR_INDEX_DESIGN.md §7-§8) ---
+
+    def vector_indexes(self) -> list:
+        """The vector indexes defined on this table, as the catalog's plain dicts."""
+        return self.catalog.list_vector_indexes(self.dataset)
+
+    def vector_index_covered(self, index_id: str) -> set:
+        """The data files one index covers at the snapshot this scan reads (no signing:
+        for the plan's EXPLAIN, which reports how many are searched exactly)."""
+        return set(self.table.vector_index_files(index_id, self.snapshot_id))
+
+    def vector_search_indexes(self, index_id: str) -> dict:
+        """{data file path: (vectors, vectors bytes, centroids, centroids bytes)} for one
+        index at the snapshot this scan reads, each location one the native reader can
+        open (a signed URL for a remote file). A live file absent here is not covered yet
+        and is searched exactly."""
+        return {
+            path: (_readable(f.vectors), f.vectors_bytes, _readable(f.centroids), f.centroids_bytes)
+            for path, f in self.table.vector_index_files(index_id, self.snapshot_id).items()
+        }
+
 # REFRESH INDEX's maintenance lease (design §5.7): held for _LEASE_SECONDS and renewed
 # every _LEASE_RENEW_SECONDS while files build, so a crashed holder frees the table
 # within ten minutes.
@@ -1045,18 +1066,24 @@ _LEASE_RENEW_SECONDS = 120
 # A compaction's sink renews only between its stages (no timer thread outlives a failed
 # statement), so it claims the longest lease; one that dies holds the table for an hour.
 _COMPACTION_LEASE_SECONDS = 3600
-# A signed URL's longest life (GCS V4): one file's build can run for hours.
+# A signed URL's longest life (GCS V4, and SigV4 presigning): one file's build can run
+# for hours.
 _SIGNED_URL_SECONDS = 7 * 24 * 3600
 
 
 def _readable(path: str) -> str:
-    """A location the native readers can open: local paths as they are, GCS objects as a
-    signed URL (an hours-long read cannot refresh a bearer token natively)."""
-    if not path.startswith("gs://"):
-        return path
-    from opteryx.connectors.io_systems import OpteryxGcsFileSystem
+    """A location the native skene readers can open: a local path as it is, a GCS or S3
+    object as a signed URL. Those readers send no auth header, and an hours-long read
+    cannot refresh a bearer token natively; a signed URL is its own credential."""
+    if path.startswith("gs://"):
+        from opteryx.connectors.io_systems import OpteryxGcsFileSystem
 
-    return OpteryxGcsFileSystem().rewrite_to_signed_url(path, _SIGNED_URL_SECONDS)
+        return OpteryxGcsFileSystem().rewrite_to_signed_url(path, _SIGNED_URL_SECONDS)
+    if path.startswith("s3://"):
+        from opteryx.connectors.io_systems.s3_filesystem import OpteryxS3FileSystem
+
+        return OpteryxS3FileSystem().rewrite_to_signed_url(path, _SIGNED_URL_SECONDS)
+    return path
 
 
 def _carry_on_gcs(io, specs, recorders, dims, targets, options, carry_to_sessions):

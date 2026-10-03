@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -35,6 +36,11 @@
 #include "pipeline_buffers.hpp"
 #include "morsels/sort.hpp"      // THE sort (build: -Idraken)
 #include "topn_boundary.hpp"     // TopNBoundary / TopNBoundaryTracker (Top-N runtime boundary)
+
+// Row take for TopNSink::searchable_rows; resolved from draken_native at load time, as
+// native_cidr_unnest.hpp does.
+extern "C" CxxMorsel* cxx_take_c(const CxxMorsel* m, const int32_t* idx, uint32_t n);
+extern "C" void cxx_morsel_delete(CxxMorsel* m);
 
 namespace opteryx::engine {
 
@@ -173,6 +179,37 @@ struct TopNSink : Sink, EmitSubset {
     // `boundary_col` is spec[0].col_idx; Engine::arm_topn_sink_boundary sets both.
     TopNBoundary* boundary = nullptr;
     int32_t boundary_col = -1;
+    // Approximate vector search (docs/VECTOR_INDEX_DESIGN.md §8, ruled 2026-10-03): a row
+    // with no embedding - its leading key, the distance, is NULL (null text) or NaN (no
+    // defined cosine) - is not a neighbour and is never returned. Dropped here, before it
+    // is buffered, so the search returns fewer than n rows when fewer than n have one.
+    // false = every other Top-N (NULL placement as ordered).
+    bool drop_unsearchable_leading = false;
+
+    // The rows of `in` whose leading key is a real distance, or `in` itself when all are.
+    MorselPtr searchable_rows(const MorselPtr& in, ErrCtx& err) const {
+        const DrakenVector& v = in->columns[spec[0].col_idx].view;
+        if (v.type != DRAKEN_FLOAT64) {
+            err.code = 1;
+            err.msg = "TopNSink: an approximate search's distance is not FLOAT64";
+            return nullptr;
+        }
+        const double* d = static_cast<const double*>(v.data);
+        std::vector<int32_t> keep;
+        keep.reserve(v.length);
+        for (uint32_t i = 0; i < v.length; ++i) {
+            const bool valid = v.validity == nullptr || ((v.validity[i >> 3] >> (i & 7u)) & 1u);
+            if (valid && !std::isnan(d[v.selection[i]])) keep.push_back(static_cast<int32_t>(i));
+        }
+        if (keep.size() == v.length) return in;
+        CxxMorsel* taken = cxx_take_c(in.get(), keep.data(), static_cast<uint32_t>(keep.size()));
+        if (taken == nullptr) {
+            err.code = 1;
+            err.msg = "TopNSink: cannot drop the rows with no distance";
+            return nullptr;
+        }
+        return MorselPtr(taken, cxx_morsel_delete);
+    }
 
     TopNSink(std::vector<SortKeySpec> s, size_t n, MorselBuffer* b,
              bool prune = false, std::vector<uint32_t> emit = {})
@@ -209,11 +246,17 @@ struct TopNSink : Sink, EmitSubset {
                     ErrCtx& err) override {
         auto& l = static_cast<TopNLocal&>(ls);
         if (in->num_rows() == 0) return SinkResult::CONTINUE;
+        MorselPtr rows = in;
+        if (drop_unsearchable_leading) {
+            rows = searchable_rows(in, err);
+            if (err.code != 0) return SinkResult::CONTINUE;
+            if (rows->num_rows() == 0) return SinkResult::CONTINUE;
+        }
         if (boundary != nullptr)
-            l.tracker.observe(in.get(), boundary_col, static_cast<uint32_t>(n_limit),
+            l.tracker.observe(rows.get(), boundary_col, static_cast<uint32_t>(n_limit),
                               *boundary);
-        l.morsels.push_back(in);
-        l.rows += in->num_rows();
+        l.morsels.push_back(rows);
+        l.rows += rows->num_rows();
         if (l.rows > compact_threshold) compact(l, err);
         return SinkResult::CONTINUE;
     }

@@ -63,6 +63,84 @@
             }
         ]
     },
+    "APPROX_COSINE_DISTANCE": {
+        "catalog_name": "APPROX_COSINE_DISTANCE",
+        "aliases": [],
+        "summary": "Cosine distance, ranked through the column's vector index.",
+        "volatility": "immutable",
+        "deterministic": true,
+        "foldable": false,
+        "pushdown_safe": false,
+        "lifecycle": {
+            "status": "active",
+            "introduced": null,
+            "deprecated_in": null,
+            "remove_after": null,
+            "replacement": null
+        },
+        "overloads": [
+            {
+                "id": "APPROX_COSINE_DISTANCE_TEXT",
+                "label": "APPROX_COSINE_DISTANCE(arr, vec)",
+                "category": "Array Functions",
+                "documentation": "Valid only as the sole ORDER BY key of a query over one table with a LIMIT, on a text column with a vector index: the index decides which rows are candidates (approximate), and each candidate's distance is the EXACT cosine distance between the embeddings, as COSINE_DISTANCE returns it. Recall is set with the `nprobe` variable (default: the index's own).",
+                "related_functions": [
+                    "GREATEST",
+                    "LEAST",
+                    "SORT",
+                    "UNNEST"
+                ],
+                "return_type": "FLOAT",
+                "returns": {
+                    "type": "FLOAT",
+                    "documentation": "Returns the computed result as `FLOAT`."
+                },
+                "arity": {
+                    "minimum": 2,
+                    "maximum": 2,
+                    "variadic": false
+                },
+                "homogeneous": false,
+                "execution": {
+                    "kernel_id": "default",
+                    "engine": "draken",
+                    "cost_us_per_million": 884934.76
+                },
+                "parameters": [
+                    {
+                        "label": "arr",
+                        "type": "varchar",
+                        "documentation": "Input array or vector value.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": false,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    },
+                    {
+                        "label": "vec",
+                        "type": "varchar",
+                        "documentation": "Second vector or text value to compare against.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": false,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    }
+                ]
+            }
+        ]
+    },
     "BASE64_DECODE": {
         "catalog_name": "BASE64_DECODE",
         "aliases": [],

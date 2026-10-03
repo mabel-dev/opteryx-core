@@ -353,6 +353,38 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
             ),
         ),
         FunctionDefinition(
+            "APPROX_COSINE_DISTANCE",
+            aliases=(),
+            category="array",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="Cosine distance, ranked through the column's vector index.",
+            documentation=(
+                "Valid only as the sole ORDER BY key of a query over one table with a LIMIT, "
+                "on a text column with a vector index: the index decides which rows are "
+                "candidates (approximate), and each candidate's distance is the EXACT cosine "
+                "distance between the embeddings, as COSINE_DISTANCE returns it. Recall is "
+                "set with the `nprobe` variable (default: the index's own)."
+            ),
+            overloads=(
+                FunctionOverload(
+                    id="APPROX_COSINE_DISTANCE_TEXT",
+                    parameters=(
+                        ParameterSpec(name="arr", type_family="string"),
+                        ParameterSpec(name="vec", type_family="string"),
+                    ),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_FLOAT64),
+                    kernel=KernelSpec(
+                        engine="draken",
+                        id="default",
+                        callable_ref=None,   # c-native: draken_cosine_distance_text (aliased)
+                        cost_us_per_million=884934.76,
+                    ),
+                ),
+            ),
+        ),
+        FunctionDefinition(
             "COSINE_DISTANCE",
             aliases=(),
             category="array",

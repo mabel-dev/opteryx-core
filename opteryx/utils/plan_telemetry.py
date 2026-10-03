@@ -497,6 +497,18 @@ def collect_plan_telemetry(plan: PhysicalPlan) -> dict:
                                     "row_groups_disjoint_by_statistics"):
                             if key in facts:
                                 node_stat[key] = facts[key]
+                        # Approximate vector search (D2): present only on the scan of
+                        # one. `vector_files_exact` is the files the index does not
+                        # cover yet, searched exactly (ruled 2026-10-03).
+                        for key, name in (("files_indexed", "vector_files_indexed"),
+                                          ("files_exact", "vector_files_exact"),
+                                          ("clusters_probed", "vector_clusters_probed"),
+                                          ("index_row_groups_read", "vector_index_row_groups_read"),
+                                          ("candidates", "vector_candidates"),
+                                          ("rows_exact", "vector_rows_exact"),
+                                          ("nprobe", "vector_nprobe")):
+                            if key in facts:
+                                node_stat[name] = facts[key]
                         node_stat["parquet_rows_before_filter"] = facts["parquet_rows_before_filter"]
                         node_stat["columns_read"] = facts["columns_read"]
                         # No pushed predicates on the native path → every column

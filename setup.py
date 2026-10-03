@@ -841,14 +841,18 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
     ),
     # The plan graph behind every logical and physical plan: node ids, edges and
-    # edge roles native (src/cpp/planner/_plan_graph.hpp); steps are its Python
-    # payload.
+    # edge roles native and Python-free (src/cpp/planner/plan_topology.hpp); steps
+    # are its Python payload, held by the bridge (src/cpp/planner/_plan_graph.hpp).
     Extension(
         "opteryx.compiled.planner.plan_graph",
         sources=["opteryx/compiled/planner/plan_graph.pyx"],
         include_dirs=include_dirs,
         language="c++",
         extra_compile_args=CPP_FLAGS,
+        depends=[
+            "src/cpp/planner/plan_topology.hpp",
+            "src/cpp/planner/_plan_graph.hpp",
+        ],
     ),
     # The query's estimated statistics: the store (src/cpp/planner/stats_store.hpp)
     # and predicate selectivity / cost (selectivity.hpp) over the expression arena.
@@ -875,6 +879,7 @@ extensions = [
             "opteryx/third_party/maki_nage/_distogram.hpp",
             "src/cpp/planner/statistics_refresh.hpp",
             "src/cpp/planner/step_row.hpp",
+            "src/cpp/planner/plan_topology.hpp",
             "src/cpp/planner/_plan_graph.hpp",
             "src/cpp/planner/native_manifest.hpp",
             "src/cpp/planner/manifest_estimates.hpp",

@@ -51,7 +51,7 @@
 #include "planner/join_estimator.hpp"
 #include "planner/manifest_estimates.hpp"
 #include "planner/native_manifest.hpp"
-#include "planner/_plan_graph.hpp"
+#include "planner/plan_topology.hpp"
 #include "planner/py_numeric.hpp"
 #include "planner/selectivity.hpp"
 #include "planner/stats_store.hpp"
@@ -99,7 +99,7 @@ struct RefreshTelemetry {
 };
 
 struct RefreshInputs {
-    const PlanGraph* graph = nullptr;
+    const PlanTopology* graph = nullptr;
     const std::vector<const StepRow*>* rows = nullptr;   // by NodeId; null where absent
     SelectivityInputs selectivity;
     const StepKinds* steps = nullptr;

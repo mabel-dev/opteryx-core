@@ -89,6 +89,7 @@
 // pool) stays exactly where the phase split puts it: Python, done once, before
 // any of this runs — see NativeScanPlan / open_native_scan_plan in pool_reader.pyx.
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -742,6 +743,20 @@ inline bool topn_excludes_row_group(const RowGroupStats& rg, const std::string& 
     return false;
 }
 
+// Row admission: WHICH ROWS of each row group the scan may decode at all, decided once at
+// execution start (make_global, on the driver thread, before any worker runs). The vector
+// index search (vector_index_admission.hpp, docs/VECTOR_INDEX_DESIGN.md §8) is the one
+// admission today: an indexed file admits its search candidates, an unindexed one every
+// row that is not deleted. Admitted rows are decoded through the pipeline's row masks
+// (selective decode), and a row group with no admitted row is never submitted.
+struct RowAdmission {
+    virtual ~RowAdmission() = default;
+    // Decide. `footers` are the scan's own (keyed by fetch path, as work items are).
+    virtual bool prepare(const ParquetFooterMap& footers, std::string* err) = 0;
+    // Row group `rg` of `path`: nullptr = every row; else one byte per row, 1 = admit.
+    virtual const std::vector<uint8_t>* mask(const std::string& path, int rg) const = 0;
+};
+
 struct NativeParquetScanGlobal : GlobalSourceState {
     std::mutex mtx;
     int next_to_submit = 0;
@@ -776,6 +791,8 @@ struct NativeParquetScanGlobal : GlobalSourceState {
     // consecutive submittable units with the same path and block id are one
     // pipeline submission, fetched together. Computed once in make_global.
     std::vector<int32_t> block_id;
+    // Row admission's failure, raised by the first get_morsel (make_global cannot).
+    std::string admission_error;
 
     // Work-item index for the i-th submittable unit.
     int item_index(int i) const {
@@ -840,6 +857,30 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
     }
 
     void set_runtime_pruned_counter(int64_t* slot) { row_groups_pruned_runtime_ = slot; }
+
+    // Row admission (see RowAdmission). Borrowed; outlives the run. nullptr = admit all.
+    RowAdmission* admission_ = nullptr;
+    // Plan-time only, on the compiler's thread, before run() is entered.
+    void set_row_admission(RowAdmission* admission) { admission_ = admission; }
+
+    // Decide admission and drop every unit it admits nothing of. Runs after the runtime
+    // bound, over what it kept, through the same `kept` list.
+    void apply_row_admission(NativeParquetScanGlobal& g) const {
+        if (admission_ == nullptr) return;
+        if (footer_map == nullptr) { g.admission_error = "row admission needs the scan's footers"; return; }
+        if (!admission_->prepare(*footer_map, &g.admission_error)) return;
+        const int n = g.item_count(work_items->size());
+        std::vector<int> kept;
+        kept.reserve(static_cast<size_t>(n));
+        for (int u = 0; u < n; ++u) {
+            const int w = g.item_index(u);
+            const auto& item = (*work_items)[static_cast<size_t>(w)];
+            const std::vector<uint8_t>* m = admission_->mask(item.first, item.second);
+            if (m == nullptr || std::find(m->begin(), m->end(), uint8_t{1}) != m->end()) kept.push_back(w);
+        }
+        g.kept = std::move(kept);
+        g.pruned_applied = true;
+    }
 
     // Top-N runtime boundary consumer (docs/TOPN_RUNTIME_BOUNDARY_DESIGN.md §4.1):
     // the engine-owned boundary the TopNSink fed by this scan publishes into, the
@@ -964,6 +1005,7 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
         // pipeline has completed and Engine::run() has published the bound, so
         // every bound this reads is either filled or honestly invalid.
         apply_runtime_bounds(*g);
+        apply_row_admission(*g);
         g->submit_cap = limit_submit_cap(*g);
         assign_fetch_blocks(*g);
         // The Top-N boundary is NOT applied here: it does not exist yet — the sink
@@ -1096,6 +1138,15 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
             rg_idxs.push_back((*work_items)[idx].second);
         }
         if (rg_idxs.empty()) return;   // every member skipped by the Top-N boundary
+        // Row admission: one mask per member, parallel to rg_idxs (empty = every row).
+        std::vector<std::vector<uint8_t>> masks;
+        if (admission_ != nullptr) {
+            masks.reserve(rg_idxs.size());
+            for (int rg : rg_idxs) {
+                const std::vector<uint8_t>* m = admission_->mask(path, rg);
+                masks.push_back(m == nullptr ? std::vector<uint8_t>{} : *m);
+            }
+        }
         // A projected STRUCT/MAP is expanded to its leaf chunks here (and folded back
         // by the pipeline's worker). A projected column the row group lacks is schema
         // evolution — out of scope on this path, so it fails loud, no NULL-fill guess.
@@ -1113,12 +1164,19 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
             err.msg = resolve_err_buf.c_str();
             return;
         }
-        pipeline->submit_block(path, rg_idxs, names, stats, {}, nested);
+        pipeline->submit_block(path, rg_idxs, names, stats, masks, nested);
     }
 
     SourceResult get_morsel(GlobalSourceState& gs, LocalSourceState&, MorselPtr& out,
                             ErrCtx& err) override {
         auto& g = static_cast<NativeParquetScanGlobal&>(gs);
+        if (!g.admission_error.empty()) {
+            static thread_local std::string admission_err_buf;
+            admission_err_buf = "NativeParquetScanSource: " + g.admission_error;
+            err.code = 1;
+            err.msg = admission_err_buf.c_str();
+            return SourceResult::FINISHED;
+        }
         while (true) {
             int submit_start, submit_end;
             {

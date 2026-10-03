@@ -135,14 +135,18 @@ cdef extern from "planner/selectivity.hpp" namespace "opteryx::planner":
         const SelectivityInputs& inputs, int64_t predicate) except +
 
 
-cdef extern from "planner/_plan_graph.hpp" namespace "opteryx::planner":
+cdef extern from "planner/plan_topology.hpp" namespace "opteryx::planner":
     cdef cppclass SPlanNode "opteryx::planner::PlanNode":
         uint32_t id
-        PyObject* step
 
-    cdef cppclass SPlanGraph "opteryx::planner::PlanGraph":
+    cdef cppclass SPlanTopology "opteryx::planner::PlanTopology":
         size_t size()
         const SPlanNode& node_at(size_t position)
+
+
+cdef extern from "planner/_plan_graph.hpp" namespace "opteryx::planner":
+    cdef cppclass SPlanGraph "opteryx::planner::PlanGraph"(SPlanTopology):
+        PyObject* step_at(size_t position)
 
 
 cdef extern from "planner/statistics_refresh.hpp" namespace "opteryx::planner":
@@ -175,7 +179,7 @@ cdef extern from "planner/statistics_refresh.hpp" namespace "opteryx::planner":
         vector[JoinNote] joins
 
     cdef cppclass RefreshInputs:
-        const SPlanGraph* graph
+        const SPlanTopology* graph
         const vector[const StepRow*]* rows
         SelectivityInputs selectivity
         const StepKinds* steps
@@ -515,7 +519,7 @@ cdef void _gather_rows(const SPlanGraph* graph, vector[const StepRow*]& rows) ex
         nid = graph.node_at(i).id
         if nid >= rows.size():
             rows.resize(nid + 1, NULL)
-        step = <PlanStep?>(<object>graph.node_at(i).step)
+        step = <PlanStep?>(<object>graph.step_at(i))
         rows[nid] = step._row
 
 
