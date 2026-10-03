@@ -310,3 +310,59 @@ def test_s3_file_errors_never_quote_a_query_string():
     with pytest.raises(DatasetReadError) as raised:
         S3File(f"https://acme.s3.amazonaws.com/k?X-Amz-Security-Token={CANARY}", _Client())
     assert CANARY not in str(raised.value)
+
+
+# -- SEC-16: the canary, for credentials => reads --------------------------------
+
+
+@pytest.fixture
+def s3_canary(monkeypatch):
+    """A REAL credentialed S3 filesystem whose session token is the canary,
+    pointed at a closed local port: every fetch fails, with a real presigned URL
+    (signature, key id, X-Amz-Security-Token) in hand when it does."""
+    from opteryx.connectors.io_systems import s3_filesystem
+
+    monkeypatch.setenv("AWS_S3_ENDPOINT", "http://127.0.0.1:9")
+    monkeypatch.setattr(
+        s3_filesystem._CHAIN, "frozen", lambda: (_ for _ in ()).throw(AssertionError("chain"))
+    )
+
+    def _resolve(execution_context, reference, path):
+        return ObjectStoreCredential(
+            kind="aws_access_key",
+            reference=reference,
+            secret={
+                "access_key_id": "AKIAABCDEFGHIJKLMNOP",
+                "secret_access_key": "abcdEFGHijklMNOPqrstUVWXyz0123456789+/AB",
+                "session_token": CANARY,
+                "region": "eu-west-2",
+            },
+            admits=lambda p: p.startswith("s3://acme-lake/exports/"),
+        )
+
+    register_secret_resolver(_resolve)
+    yield
+    register_secret_resolver(None)
+
+
+@pytest.mark.parametrize("function", ["READ_PARQUET", "READ_CSV", "READ_JSONL"])
+def test_the_canary_key_appears_in_no_sink(s3_canary, caplog, capfd, function):
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    sql = (
+        f"SELECT * FROM {function}('s3://acme-lake/exports/2026/a.dat', "
+        "credentials => 'analytics.lake')"
+    )
+    sinks = {}
+    for label, statement in (("query", sql), ("explain", f"EXPLAIN {sql}")):
+        try:
+            sinks[label] = repr(_rows(statement))
+        except Exception as err:  # the store is unreachable: this is the error path
+            sinks[f"{label} error"] = f"{type(err).__name__}: {err}"
+            sinks[f"{label} error cause"] = repr(err.__cause__) + repr(err.__context__)
+    out, err = capfd.readouterr()
+    sinks.update({"logs": caplog.text, "stdout": out, "stderr": err})
+    assert any("error" in name for name in sinks), "expected the read to fail against a closed port"
+    leaked = [name for name, text in sinks.items() if CANARY in text]
+    assert leaked == [], f"canary leaked into: {leaked}"
