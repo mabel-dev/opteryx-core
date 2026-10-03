@@ -11,15 +11,17 @@
 
 namespace rugo::_jsonl {
 
-// A column to emit from each record, matched by exact bytes (length + first-byte fast
-// reject, then memcmp — no hashing). The wanted set is projected ∪ predicate columns.
-// pred_idx is the index into MapProjection::predicates when this column carries an
-// inline-evaluated predicate, else -1.
+// A column to capture from each record, matched by exact bytes (length + first-byte fast
+// reject, then memcmp — no hashing). The wanted set is the output columns ∪ predicate
+// columns. pred_idx is the index into MapProjection::predicates when this column carries an
+// inline-evaluated predicate, else -1. `out` is its capture slot: < MapProjection::ncols for
+// an output column (its index in the output), beyond for a predicate-only column.
 struct WantedColumn {
     const char* name;
     uint32_t    len;
     uint8_t     first;     // name[0], for fast reject
     int         pred_idx;  // predicate index, or -1
+    uint32_t    out = 0;   // capture slot
 
     // Optional ONE-LEVEL nested sub-key (nested_column.hpp): when `sub_len` is non-zero,
     // the wanted value is not this key's value but the value of `sub` INSIDE it
@@ -41,24 +43,67 @@ struct WantedColumn {
     int next = -1;
 };
 
-// Projection + predicate pushdown for build_map. nullptr => emit every field (data-blind
-// full map, the right shape for a full read). When set, build is MINIMAL EXTENT: only
-// fields whose key matches a wanted column are materialized, and once all `num_wanted` are
-// found the rest of the record is skipped to the newline (no stepping, no materialization
-// of the tail). Predicate columns are evaluated INLINE the moment their value is emitted —
-// a failing row is dropped and skipped right there, so failing rows never materialize
-// their later columns. Ordinals count every field, so emitted spans carry true positions.
+// Projection + predicate pushdown for build_columns. MINIMAL EXTENT: only fields whose key
+// matches a wanted column are captured, and once every wanted column is resolved nothing
+// more is materialised for the record (its tail is still parsed — see parse_record).
+// Predicate columns are evaluated INLINE the moment their value is captured — a failing row
+// stops materialising right there. Ordinals count every field, so captured spans carry true
+// positions.
 //
-// keep_unwanted: predicates with NO projection (columns=None means every column). The wanted
-// set is then the predicate columns only, but every other field is still emitted — predicates
-// keep their inline evaluation and failing-row skip, while minimal extent (stop once all
-// wanted are found) is disabled, because the row's tail is part of the result.
+// A key that occurs more than once in a record: its FIRST occurrence resolves the column
+// (and, for a nested column, its first container decides — as yyjson's object lookup, and so
+// draken's `->>`, does); later occurrences are ignored.
 struct MapProjection {
     const std::vector<WantedColumn>* columns;
-    size_t                           num_wanted;
     const std::vector<Predicate>*    predicates;
-    bool                             keep_unwanted = false;
+    const std::vector<uint32_t>*     pred_slot;  // per predicate: the capture slot of its column
+    size_t                           ncols;      // output columns (capture slots [0, ncols))
+    // Per output column: 1 = copy each captured value's bytes into ColumnMap::arena while
+    // they are hot (see ColumnMap); 0 = reference the source buffer. head_copy_columns.
+    const std::vector<uint8_t>*      copy_bytes;
 };
+
+// The column-major document map: for each output column, one span per surviving row —
+// the column's value in that row, or an ABSENT span (span_absent) when the record does not
+// carry it. Rows are records that are well-formed lines and pass every predicate, in input
+// order. Column builders index it directly: no per-row key search.
+//
+// A COPIED column (copied[c] = 1) holds its values' bytes in arena[c], copied when each
+// record closed — while the parse window was still in cache — and its spans' value_start
+// index the arena (a string's body is followed by its closing quote, as in the source, so
+// every reader of a span sees the same bytes either way). The column builders then read
+// one dense array instead of striding the cold source buffer. An uncopied column's spans
+// index the source buffer. Which columns are copied changes no value, only where the
+// builders read it (head_copy_columns).
+struct ColumnMap {
+    size_t rows = 0;
+    std::vector<std::vector<FieldSpan>> cols;
+    std::vector<std::vector<uint8_t>> arena;   // per column: the copied values' bytes
+    std::vector<uint8_t> copied;               // per column: 1 = spans index arena[c]
+
+    // First malformed input, as RecordSet::malformed* (only consulted with fail_on_error).
+    bool     malformed = false;
+    uint32_t malformed_pos = 0;
+    uint32_t malformed_count = 0;
+
+    size_t num_records() const { return rows; }
+
+    // The bytes column `c`'s spans index: its arena when copied, else `source`.
+    const uint8_t* base(size_t c, const uint8_t* source) const {
+        if (!copied[c]) return source;
+        return arena[c].empty() ? reinterpret_cast<const uint8_t*>("") : arena[c].data();
+    }
+};
+
+// The span a ColumnMap holds for a row that does not carry the column.
+inline FieldSpan absent_span() {
+    FieldSpan f{};
+    f.type = static_cast<uint8_t>(ValueType::Unknown);
+    return f;
+}
+inline bool span_absent(const FieldSpan& f) {
+    return f.type == static_cast<uint8_t>(ValueType::Unknown);
+}
 
 // A view over one record's fields inside a RecordSet's flat span arena. Cheap to copy
 // (pointer + length); supports range-for and indexing so consumers read it like the old
@@ -114,7 +159,8 @@ struct RecordSet {
     }
 };
 
-// Build the document map of the byte range [range_start, buffer_length) of `buffer`.
+// Build the column-major document map of the byte range [range_start, buffer_length) of
+// `buffer`: the projection's output columns, for every surviving row.
 //
 // The range is processed in line-aligned windows of ~256 KB: each window is indexed by
 // scan_structural_index (structural_scan.hpp — positions only, in-string structure
@@ -126,10 +172,9 @@ struct RecordSet {
 // structural delimiter — no value parsing. Container values ([…], {…}) are bounded by
 // bracket depth over the masked index, so interior commas/brackets — including those
 // inside strings, which the index never holds — do not truncate them. Key identity is
-// never hashed; with a projection it is matched by exact bytes only for the wanted set,
-// materialising only those fields and stopping each record once they are found (minimal
-// extent). Predicate filtering and final column ordering are the consumer's job
-// (finalize_records / extract_column).
+// never hashed; it is matched by exact bytes only for the wanted set, capturing only those
+// fields and stopping each record's materialisation once they are found (minimal extent).
+// Every predicate is evaluated when the record closes; a record that fails one is not a row.
 //
 // range_start must be the start of a line (0, or one past a newline). Every line in the
 // range is judged on its own: one that is not exactly one object is rejected whole (see
@@ -139,13 +184,30 @@ struct RecordSet {
 // ascending, each a whole line of the range — are input, and the bytes between them are
 // never scanned. Each line is begun at its own start, so the skipped bytes are never
 // judged by the line discipline, and the range ends with the last line.
-RecordSet build_map(
+ColumnMap build_columns(
     const uint8_t* buffer,
     size_t buffer_length,
-    const MapProjection* proj = nullptr,
+    const MapProjection& proj,
     size_t range_start = 0,
     const std::vector<LineSpan>* lines = nullptr
 );
+
+// The row-major map of EVERY field of every record in [0, buffer_length), by the same
+// parser and line discipline as build_columns. Only for the head sample — column discovery
+// (discover_column_names) and the literal check (check_predicate_literals) — never the bulk
+// read.
+RecordSet build_map(const uint8_t* buffer, size_t buffer_length);
+
+// Which output columns build_columns copies into ColumnMap::arena: per column, 1 when its
+// first non-null value in the head sample (context.infer_sample_size records) is a string
+// or scalar — short values whose cold, strided re-reads dominated the column builders —
+// and 0 for a container, or a column DECLARED VARIANT / ARRAY<T>, or a `->` column: large
+// values the builders already read sequentially, and which copying would only move twice.
+// A nested `->>` column is copied (its sub-values are short). Decided from the head of the
+// whole buffer, so every range of a threaded read decides the same.
+std::vector<uint8_t> head_copy_columns(const uint8_t* buffer, size_t buffer_length,
+                                       const std::vector<std::string>& columns,
+                                       const ParseContext& context);
 
 // Collect the union of keys across the RecordSet's first `sample_records` records, in
 // first-seen order (for column-name discovery at the Cython edge, so RecordSet's internals

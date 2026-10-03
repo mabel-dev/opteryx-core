@@ -79,17 +79,6 @@ private:
 
 namespace {
 
-static inline bool key_matches(
-    const uint8_t* buf,
-    uint32_t       key_start,
-    uint32_t       key_width,
-    const char*    name,
-    size_t         name_len) noexcept
-{
-    return static_cast<size_t>(key_width) == name_len &&
-           std::memcmp(buf + key_start, name, name_len) == 0;
-}
-
 // Parse exactly 4 hex digits at p into *out. Returns false on any non-hex byte.
 static inline bool parse_hex4(const uint8_t* p, uint32_t* out) noexcept {
     uint32_t v = 0;
@@ -169,53 +158,18 @@ static void json_unescape(const uint8_t* src, uint32_t len, std::vector<uint8_t>
     }
 }
 
-static ColumnType infer_numeric_type(
-    const uint8_t*                            buffer,
-    const RecordSet&                          records,
-    const char*                               col_ptr,
-    size_t                                    col_len)
-{
-    bool saw_float = false;
-    size_t limit   = std::min(records.size(), static_cast<size_t>(64));
-
-    for (size_t row = 0; row < limit; ++row) {
-        for (const auto& f : records[row]) {
-            if (f.slot != 0 || !key_matches(buffer, f.key_start, f.key_width, col_ptr, col_len))
-                continue;
-            if (is_null(buffer, f.value_start, f.value_start + f.value_width - 1))
-                break;
-            if (f.type == static_cast<uint8_t>(ValueType::Integer) ||
-                f.type == static_cast<uint8_t>(ValueType::Double))
-            {
-                int64_t tmp_i = 0;
-                if (!fast_parse_int64(buffer, f.value_start, f.value_start + f.value_width - 1, tmp_i)) {
-                    double tmp_d = 0.0;
-                    if (fast_parse_float64(buffer, f.value_start, f.value_start + f.value_width - 1, tmp_d))
-                        saw_float = true;
-                }
-            }
-            break;
-        }
-    }
-    return saw_float ? ColumnType::Float64 : ColumnType::Int64;
-}
-
 }  // namespace
 
 StringColumnResult extract_column(
     const uint8_t*                            buffer,
-    const RecordSet&                          records,
-    const std::string&                         column_name,
-    uint8_t                                    slot,
-    OrdinalPredictor&                         predictor,
+    const std::vector<FieldSpan>&             col,
     bool                                       copy_bytes,
     bool                                       may_have_escapes,
     size_t                                     sample_size,
     const RowExec*                             rows,
     RecordValueTypes                           record_value_types)
 {
-    const size_t num_rows = records.size();
-    const size_t col_len  = column_name.size();
+    const size_t num_rows = col.size();
 
     StringColumnResult result;
     result.num_rows = num_rows;
@@ -228,11 +182,9 @@ StringColumnResult extract_column(
     const size_t bitmap_bytes = (num_rows + 7) >> 3;
     result.null_bitmap.assign(bitmap_bytes, 0xFF);
 
-    // Resolve each row to its FieldSpan (or nullptr if the key is absent); infer the
-    // column's type from the first non-null value and detect column-scoped escapes in the
-    // SAME pass (one combined key-matching walk, same total cost as the old resolve pass —
-    // the old code's separate infer-loop duplicated this key-matching work in its own pass).
-    // Value emission is a second, cheap pointer-chase pass below, once do_unescape is known.
+    // Resolve each row to its FieldSpan (or nullptr when the record does not carry the
+    // column — ColumnMap holds an absent span there); detect column-scoped escapes in the
+    // SAME pass. Value emission is a second, cheap pass below, once do_unescape is known.
     //
     // Column-scoped escape detection: a column only pays the copy+unescape cost if one of
     // ITS OWN values contains a backslash. `may_have_escapes` is a cheap whole-buffer
@@ -242,17 +194,6 @@ StringColumnResult extract_column(
     // nested text field with a backslash no longer taxes sibling scalar columns).
     std::vector<const FieldSpan*> resolved(num_rows, nullptr);
 
-    // First-byte fast reject (mirrors WantedColumn's `first` field in interpreter.hpp):
-    // key_width already gates out most non-matching fields, but same-length different-
-    // content keys (common in wide/hetero-order records) still paid a full memcmp call.
-    // Checking the first byte first turns most of those into a single byte compare.
-    const uint8_t col_first = col_len ? static_cast<uint8_t>(column_name[0]) : 0;
-    // Top-level columns match by key bytes among slot-0 spans; a nested column
-    // (`key->>'sub'`) matches its slot — see nested_column.hpp.
-    ColumnKey ck;
-    ck.name = column_name.data(); ck.len = static_cast<uint32_t>(col_len);
-    ck.first = col_first; ck.slot = slot;
-
     // Row ranges for the resolve and emit walks. Aligned to 8 rows because both write the
     // bit-packed null bitmap, so no two workers ever touch the same byte. A caller that
     // passes no executor gets exactly one range and runs everything inline.
@@ -260,44 +201,16 @@ StringColumnResult extract_column(
     const RowExec& rex = rows ? *rows : serial_rows;
     const std::vector<RowRange> ranges = rex.split(num_rows, 8);
 
-    // Every caller builds a fresh predictor per column, so this seed is 0xFFFF in practice
-    // and each chunk pays one linear scan on its first row before riding the hint — exactly
-    // what the serial walk did at row 0. The history is deliberately NOT written back: it is
-    // per-column scratch no caller ever reads, and its std::map is not thread-safe.
-    const std::vector<uint16_t> candidates = predictor.get_candidates(column_name);
-    const uint16_t seed = candidates.empty() ? 0xFFFF : candidates[0];
-
     std::vector<uint8_t> chunk_seen(ranges.size(), 0);
     std::vector<uint8_t> chunk_key(ranges.size(), 0);
     std::vector<uint8_t> chunk_esc(ranges.size(), 0);
 
     rex.run(ranges, [&](size_t ri) {
-        uint16_t last_seen = seed;
         bool seen = false;
         bool key  = false;
         bool esc  = false;
         for (size_t row = ranges[ri].begin; row < ranges[ri].end; ++row) {
-            const auto& record = records[row];
-            const FieldSpan* found = nullptr;
-
-            // Fast path: try predicted ordinal first
-            if (last_seen != 0xFFFF && last_seen < record.size()) {
-                const auto& f = record[last_seen];
-                if (ck.matches(buffer, f)) found = &f;
-            }
-
-            // Slow path: linear scan (fallback if prediction missed)
-            if (found == nullptr) {
-                for (size_t i = 0; i < record.size(); ++i) {
-                    const auto& f = record[i];
-                    if (ck.matches(buffer, f)) {
-                        last_seen = static_cast<uint16_t>(i);
-                        found = &f;
-                        break;
-                    }
-                }
-            }
-
+            const FieldSpan* found = span_absent(col[row]) ? nullptr : &col[row];
             if (found != nullptr) {
                 resolved[row] = found;
                 key = true;
@@ -955,7 +868,7 @@ static ParsedColumn parse_typed_column(const uint8_t* base, StringColumnResult& 
 // FIRST offending row (not whichever chunk raced there first) is part of the contract. The
 // row walk in extract_column and the VARCHAR builder still parallelise.
 static ParsedColumn parse_column_explicit(
-    const uint8_t* buffer, const RecordSet& records, const std::string& name,
+    const uint8_t* buffer, const std::vector<FieldSpan>& col, const std::string& name,
     const std::string& declared, bool may_have_escapes, const RowExec& rows) {
 
     DeclaredType dt;
@@ -972,8 +885,7 @@ static ParsedColumn parse_column_explicit(
         // may_have_escapes is deliberately FALSE here: unescaping rewrites a string
         // value's bytes, and a container is JSON text that must stay byte-exact. The only
         // rows unescaping could ever touch are string rows, and those are refused below.
-        OrdinalPredictor pred;
-        StringColumnResult scr = extract_column(buffer, records, name, /*slot=*/0, pred,
+        StringColumnResult scr = extract_column(buffer, col,
                                                 /*copy_bytes=*/false, /*may_have_escapes=*/false,
                                                 SIZE_MAX, &rows, RecordValueTypes::Always);
         const uint8_t* base = buffer;   // never copied: offsets index the source buffer
@@ -1062,8 +974,7 @@ static ParsedColumn parse_column_explicit(
         return pc;
     }
 
-    OrdinalPredictor pred;
-    StringColumnResult scr = extract_column(buffer, records, name, /*slot=*/0, pred,
+    StringColumnResult scr = extract_column(buffer, col,
                                             /*copy_bytes=*/false, may_have_escapes,
                                             SIZE_MAX, &rows);
     const uint8_t* base = scr.data_owned ? scr.data_ptr() : buffer;
@@ -1220,10 +1131,10 @@ static inline bool dict_gate_fails(uint32_t distinct, uint32_t rows_seen) noexce
 // validity bit (code 0, never read). False when the gate rejects the column; the caller then
 // builds it dense, the always-correct path. Throws exactly as the dense path does on an
 // invalid value (lowest bad row wins).
-static bool parse_nested_text_dict(const uint8_t* buffer, const RecordSet& records,
-                                   const std::string& name, const ColumnKey& ck,
+static bool parse_nested_text_dict(const uint8_t* buffer, const std::vector<FieldSpan>& col,
+                                   const std::string& name,
                                    const RowExec& rows, ParsedColumn& pc) {
-    const uint32_t n = static_cast<uint32_t>(records.size());
+    const uint32_t n = static_cast<uint32_t>(col.size());
     if (n == 0) return false;
 
     const std::vector<RowRange> ranges = rows.split(n, 8);
@@ -1246,9 +1157,7 @@ static bool parse_nested_text_dict(const uint8_t* buffer, const RecordSet& recor
                 bailed[ri] = 1;
                 return;
             }
-            const FieldSpan* f = nullptr;
-            for (const FieldSpan& s : records[row])
-                if (ck.matches(buffer, s)) { f = &s; break; }
+            const FieldSpan* f = span_absent(col[row]) ? nullptr : &col[row];
             if (f == nullptr) {
                 bits.null_bitmap[row >> 3] &= static_cast<uint8_t>(~(1u << (row & 7u)));
                 codes[row] = 0;
@@ -1275,9 +1184,7 @@ static bool parse_nested_text_dict(const uint8_t* buffer, const RecordSet& recor
     // may hide a lower bad row; the dense path then finds and reports it.
     if (bad != UINT32_MAX && !any_bail) {
         draken_free(codes);
-        const FieldSpan* f = nullptr;
-        for (const FieldSpan& s : records[bad])
-            if (ck.matches(buffer, s)) { f = &s; break; }
+        const FieldSpan* f = &col[bad];
         const uint32_t len = f->value_width;
         std::string got(reinterpret_cast<const char*>(buffer + f->value_start), len < 64u ? len : 64u);
         throw std::runtime_error(
@@ -1347,8 +1254,8 @@ static bool parse_nested_text_dict(const uint8_t* buffer, const RecordSet& recor
 // Spans are resolved here by slot rather than through extract_column, whose NULL test
 // reads the raw bytes and so cannot tell a JSON string "null" from JSON null.
 static ParsedColumn parse_nested_column(
-    const uint8_t* buffer, const RecordSet& records, const std::string& name,
-    const ColumnSpec& spec, uint8_t slot, const std::string* declared, const RowExec& rows,
+    const uint8_t* buffer, const std::vector<FieldSpan>& col, const std::string& name,
+    const ColumnSpec& spec, const std::string* declared, const RowExec& rows,
     bool intern_text) {
 
     // The type is fixed by the operator; a declaration can only agree with it (the Cython
@@ -1361,13 +1268,11 @@ static ParsedColumn parse_nested_column(
             (spec.as_json ? "`->`" : "`->>`") + " extraction, which is " + expected_name +
             "; it cannot be declared " + *declared);
 
-    const uint32_t n = static_cast<uint32_t>(records.size());
-    ColumnKey ck;
-    ck.slot = slot;
+    const uint32_t n = static_cast<uint32_t>(col.size());
 
     if (intern_text && !spec.as_json) {
         ParsedColumn pc;
-        if (parse_nested_text_dict(buffer, records, name, ck, rows, pc)) return pc;
+        if (parse_nested_text_dict(buffer, col, name, rows, pc)) return pc;
     }
 
     // Per-range output (8-row aligned: each range writes its own bytes of the bitmap),
@@ -1397,9 +1302,7 @@ static ParsedColumn parse_nested_column(
         std::vector<uint8_t> stack, scratch;
         for (uint32_t row = static_cast<uint32_t>(ranges[ri].begin);
              row < static_cast<uint32_t>(ranges[ri].end); ++row) {
-            const FieldSpan* f = nullptr;
-            for (const FieldSpan& s : records[row])
-                if (ck.matches(buffer, s)) { f = &s; break; }
+            const FieldSpan* f = span_absent(col[row]) ? nullptr : &col[row];
             if (f == nullptr) {
                 out.null_bitmap[row >> 3] &= static_cast<uint8_t>(~(1u << (row & 7u)));
                 continue;
@@ -1426,9 +1329,7 @@ static ParsedColumn parse_nested_column(
 
     const uint32_t bad = *std::min_element(first_bad.begin(), first_bad.end());
     if (bad != UINT32_MAX) {
-        const FieldSpan* f = nullptr;
-        for (const FieldSpan& s : records[bad])
-            if (ck.matches(buffer, s)) { f = &s; break; }
+        const FieldSpan* f = &col[bad];
         const uint32_t len = f->value_width;
         std::string got(reinterpret_cast<const char*>(buffer + f->value_start), len < 64u ? len : 64u);
         throw std::runtime_error(
@@ -1480,8 +1381,8 @@ static ParsedColumn parse_nested_column(
 // Parse all named columns in parallel — one task per column. Pure C++, no Python;
 // the caller wraps each ParsedColumn under the GIL.
 std::vector<ParsedColumn> parse_all_columns(
-    const uint8_t*                             buffer,
-    const RecordSet&                          records,
+    const uint8_t*                             source,
+    const ColumnMap&                           map,
     const std::vector<std::string>&            column_names,
     size_t                                     max_threads,
     bool                                       may_have_escapes,
@@ -1497,25 +1398,27 @@ std::vector<ParsedColumn> parse_all_columns(
     size_t nt = std::min(cap, ncols);
 
     auto do_one = [&](size_t c, const RowExec& rows) {
+        const std::vector<FieldSpan>& col = map.cols[c];
+        // The bytes this column's spans index: its arena when build_columns copied it,
+        // else the source buffer (ColumnMap).
+        const uint8_t* buffer = map.base(c, source);
         const auto it = context.explicit_schema.find(column_names[c]);
         const ColumnSpec spec = parse_column_spec(column_names[c]);
         if (spec.nested) {
-            out[c] = parse_nested_column(buffer, records, column_names[c], spec,
-                                         nested_slot(context, column_names[c]),
+            out[c] = parse_nested_column(buffer, col, column_names[c], spec,
                                          it != context.explicit_schema.end() ? &it->second : nullptr,
                                          rows, context.intern_nested_text);
             return;
         }
         if (it != context.explicit_schema.end()) {
-            out[c] = parse_column_explicit(buffer, records, column_names[c], it->second,
+            out[c] = parse_column_explicit(buffer, col, column_names[c], it->second,
                                            may_have_escapes, rows);
             return;
         }
-        OrdinalPredictor pred;  // thread-local; per-column, no sharing
         // Value shapes are only needed by parse_array_column (to tell a string row that
         // looks like an array from a real one); IfArrayHinted makes every other column
         // skip the per-row write entirely.
-        StringColumnResult scr = extract_column(buffer, records, column_names[c], /*slot=*/0, pred,
+        StringColumnResult scr = extract_column(buffer, col,
                                                 /*copy_bytes=*/false, may_have_escapes,
                                                 context.infer_sample_size, &rows,
                                                 context.parse_arrays

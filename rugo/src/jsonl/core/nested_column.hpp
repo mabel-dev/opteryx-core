@@ -96,32 +96,6 @@ inline uint8_t nested_slot(const ParseContext& ctx, const std::string& spec) {
     return found < 0 ? uint8_t(0) : static_cast<uint8_t>(found + 1);
 }
 
-// How a requested column finds its span in a record. Every site that resolves a column
-// against a record goes through this, so a top-level column can never pick up a nested
-// span that happens to carry the same container key, and vice versa.
-struct ColumnKey {
-    const char* name = nullptr;  // top-level key bytes (unused when slot != 0)
-    uint32_t    len = 0;
-    uint8_t     first = 0;
-    uint8_t     slot = 0;        // 0 = top-level, else the nested slot
-
-    inline bool matches(const uint8_t* buf, const FieldSpan& f) const noexcept {
-        if (slot) return f.slot == slot;
-        return f.slot == 0 && f.key_width == len && buf[f.key_start] == first &&
-               std::memcmp(buf + f.key_start, name, len) == 0;
-    }
-};
-
-// `spec` must outlive the returned key (it points into it).
-inline ColumnKey column_key(const ParseContext& ctx, const std::string& spec) {
-    ColumnKey k;
-    k.name  = spec.data();
-    k.len   = static_cast<uint32_t>(spec.size());
-    k.first = spec.empty() ? uint8_t(0) : static_cast<uint8_t>(spec[0]);
-    k.slot  = nested_slot(ctx, spec);
-    return k;
-}
-
 }  // namespace rugo::_jsonl
 
 #endif  // _JSONL_NESTED_COLUMN_HPP_

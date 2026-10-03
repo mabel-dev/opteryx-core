@@ -67,7 +67,7 @@ enum class RecordValueTypes : uint8_t {
                     // an array; every other column pays nothing
 };
 
-// Extract one column (ordinal prediction for fast key lookup).
+// Extract one column from its ColumnMap spans (one per row; span_absent = not carried).
 //   copy_bytes = true  : offsets index into result.data, which holds a copy of each
 //                        slice (needed when slices must outlive `buffer`, e.g. the
 //                        multi-chunk merge concatenates several buffers).
@@ -80,11 +80,7 @@ enum class RecordValueTypes : uint8_t {
 // pick the builder's base (result.data_ptr() vs the original buffer).
 StringColumnResult extract_column(
     const uint8_t*                            buffer,
-    const RecordSet& records,
-    const std::string&                         column_name,
-    // 0 for a top-level column; a nested column's FieldSpan slot (nested_column.hpp).
-    uint8_t                                    slot,
-    OrdinalPredictor&                         predictor,
+    const std::vector<FieldSpan>&             col,
     bool                                       copy_bytes = true,
     bool                                       may_have_escapes = false,
     // Only the first `sample_size` rows are consulted for the type hint
@@ -167,9 +163,9 @@ struct ParsedColumn {
     uint8_t           scale          = 0;
 };
 
-// Parse every named column from the document map in parallel (one task per column,
-// thread pool capped at max_threads / hardware_concurrency / column count). Pure C++,
-// no Python — safe to call with the GIL released. Returns one ParsedColumn per name.
+// Parse every named column from the column-major document map (map.cols[i] holds
+// column_names[i] — the same list interpret_jsonl_threaded was given), in parallel. Pure
+// C++, no Python — safe to call with the GIL released. Returns one ParsedColumn per name.
 //
 // context.explicit_schema: a column named here skips speculative type inference entirely
 // and is parsed STRICTLY as the declared type. The vocabulary is the platform's canonical
@@ -181,7 +177,7 @@ struct ParsedColumn {
 // columns (see extract_column).
 std::vector<ParsedColumn> parse_all_columns(
     const uint8_t*                             buffer,
-    const RecordSet& records,
+    const ColumnMap&                           map,
     const std::vector<std::string>&            column_names,
     size_t                                     max_threads,
     bool                                       may_have_escapes,

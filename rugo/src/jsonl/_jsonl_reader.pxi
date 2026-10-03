@@ -95,17 +95,13 @@ cdef extern from "core/markers.hpp" namespace "rugo::_jsonl":
 
 
 cdef extern from "core/interpreter.hpp" namespace "rugo::_jsonl":
-    # Flat-arena document map. Opaque to Cython: spans/offsets stay in C++; the only
-    # introspection the edge needs (the sampled records' keys for column-name discovery)
-    # goes through sample_record_keys().
-    cppclass RecordSet:
+    # Column-major document map. Opaque to Cython: the spans stay in C++ and go straight
+    # to parse_all_columns; the edge reads only the row count and the malformed report.
+    cppclass ColumnMap:
         size_t num_records()
         bint malformed
         uint32_t malformed_pos
         uint32_t malformed_count
-
-    vector[string] sample_record_keys(
-        const RecordSet& rs, const uint8_t* buffer, size_t sample_records) nogil
 
     # std::invalid_argument (-> ValueError) on a malformed nested column request
     # (`key->>'sub'` with an empty key or sub-key; nested_column.hpp).
@@ -130,12 +126,9 @@ cdef extern from "core/nested_column.hpp" namespace "rugo::_jsonl":
 
 cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
     struct InterpreterResult:
-        RecordSet all_records
+        ColumnMap all_records
         size_t num_records_passed
         uint32_t bytes_consumed
-
-    cppclass OrdinalPredictor:
-        pass
 
     # except + : evaluate_predicate throws std::invalid_argument (-> ValueError) on a
     # value whose JSON kind cannot be compared with the predicate literal's kind.
@@ -143,7 +136,7 @@ cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
         const uint8_t* buffer_data,
         size_t buffer_length,
         const ParseContext& context,
-        OrdinalPredictor& predictor,
+        const vector[string]& columns,
         size_t max_threads,
         bint use_prefilter
     ) except + nogil
@@ -180,7 +173,7 @@ cdef extern from "core/column_builder.hpp" namespace "rugo::_jsonl":
     # std::invalid_argument on a declared-type mismatch -> translated to Python ValueError.
     vector[ParsedColumn] parse_all_columns(
         const uint8_t* buffer,
-        const RecordSet& records,
+        const ColumnMap& columns,
         const vector[string]& column_names,
         size_t max_threads,
         bint may_have_escapes,
@@ -398,13 +391,12 @@ def read_jsonl(
 
     cdef ParseContext context
     cdef vector[string] column_names_cpp
-    cdef RecordSet records
+    cdef ColumnMap records
     cdef size_t total_rows = 0
     cdef dict declared_schema
     cdef const uint8_t* buf_data = NULL
     cdef size_t buf_len = 0
     cdef InterpreterResult interp_result
-    cdef OrdinalPredictor predictor
     cdef dict result = {
         'success': False,
         'column_names': [],
@@ -495,12 +487,21 @@ def read_jsonl(
         if buf_len > 0:
             with nogil:
                 column_names_cpp = discover_column_names(buf_data, buf_len, context)
+            # A DECLARED column is always built, even when no sampled record carries it:
+            # a schema pinned from another chunk (or file) names columns this buffer may
+            # lack entirely, and the caller relies on getting every declared column back —
+            # typed, all-null, and listed in result['absent_columns'] — rather than a
+            # morsel missing it. Column discovery for everything else is unchanged. The
+            # list is final before the scan: the scan captures exactly these columns.
+            for col in declared_schema:
+                col_bytes = col.encode('utf-8')
+                if not _names_contain(column_names_cpp, col_bytes):
+                    column_names_cpp.push_back(col_bytes)
 
         if buf_len > 0:
-            # Parallel scan + document map: the buffer is split into newline-aligned
-            # ranges processed across a thread pool, then merged in order. (Per range
-            # it still does SIMD-scan -> markers -> state machine; fusing those two
-            # into one pass measured ~25% slower, so they stay decoupled.)
+            # Parallel scan + column-major document map: the buffer is split into
+            # newline-aligned ranges processed across a thread pool, each capturing the
+            # columns above, then appended in order.
             #
             # Sparser-style raw prefilter (use_prefilter): for a selective
             # string-equality predicate, each range task drops the lines that cannot
@@ -509,7 +510,7 @@ def read_jsonl(
             # short/non-selective filters; the predicates are still applied downstream.
             with nogil:
                 interp_result = interpret_jsonl_threaded(
-                    buf_data, buf_len, context, predictor, 0, run_prefilter
+                    buf_data, buf_len, context, column_names_cpp, 0, run_prefilter
                 )
 
             result['malformed_count'] = interp_result.all_records.malformed_count
@@ -520,19 +521,8 @@ def read_jsonl(
                 ).decode('utf-8'))
 
             if interp_result.all_records.num_records() > 0:
-                # A DECLARED column is always built, even when no sampled record carries
-                # it: a schema pinned from another chunk (or file) names columns this
-                # buffer may lack entirely, and the caller relies on getting every
-                # declared column back — typed, all-null, and listed in
-                # result['absent_columns'] — rather than a morsel missing it. Column
-                # discovery for everything else is unchanged.
-                for col in declared_schema:
-                    col_bytes = col.encode('utf-8')
-                    if not _names_contain(column_names_cpp, col_bytes):
-                        column_names_cpp.push_back(col_bytes)
                 total_rows = interp_result.num_records_passed
-                # Move (not copy) the record structure — tens of millions of
-                # FieldSpans + their per-record vectors.
+                # Move (not copy) the column spans — millions of FieldSpans per column.
                 records = move(interp_result.all_records)
 
         # Build Draken vectors — buf_data/buf_len are still valid here (mmap released,
@@ -610,7 +600,7 @@ cdef str _jsonl_schema_type_name(DrakenType t):
 cdef list _build_vectors(
     const uint8_t* buf_ptr,
     size_t buf_len,
-    RecordSet& records,
+    ColumnMap& records,
     vector[string]& column_names,
     ParseContext& context,
     bint infer_schema,
@@ -620,7 +610,7 @@ cdef list _build_vectors(
 ):
     """
     Parse every column of the buffer produced by the threaded scan+interpret path
-    (interpret_jsonl_threaded always yields exactly one merged RecordSet over one buffer —
+    (interpret_jsonl_threaded always yields exactly one merged ColumnMap over one buffer —
     its internal newline-range parallelism is orthogonal to this). No Python per-row
     iteration. `buf_ptr` may point into an mmap'd file or an in-memory bytes buffer; the
     caller is responsible for keeping it mapped/alive for the duration of this call.

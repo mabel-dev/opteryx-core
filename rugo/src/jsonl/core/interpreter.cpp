@@ -262,15 +262,23 @@ inline bool find_nested_field(
 
 } // anonymous namespace
 
-// Document-map builder. Value shape is coarse and read only from the structural
-// delimiter; key identity is never hashed. With a projection it materialises only the
-// wanted fields and stops materialising each record once all are found (minimal
-// extent); without one it emits every field (data-blind full map). Records are parsed
-// strictly from the masked structural index by parse_record; walk_window drives the
-// line discipline around them.
+// Document-map builder, in one of two sinks chosen at compile time:
+//
+//   kColumns = true  — the bulk read (build_columns). Each wanted column's value is
+//                      captured as the record is parsed, and when the record closes one
+//                      span per output column (absent_span when not carried) is appended
+//                      to the ColumnMap. Minimal extent: once every wanted column is
+//                      resolved, nothing more is materialised for the record.
+//   kColumns = false — the head sample (build_map): every field of every record, row-major.
+//
+// Value shape is coarse and read only from the structural delimiter; key identity is never
+// hashed. Records are parsed strictly from the masked structural index by parse_record;
+// walk_window drives the line discipline around them.
 namespace {
+template <bool kColumns>
 struct MapBuilder {
-    RecordSet rs;
+    RecordSet rs;   // kColumns = false: the row-major map
+    ColumnMap cm;   // kColumns = true:  the column-major map
     const uint8_t* buffer;
     uint32_t buffer_length;
     uint32_t key_start = 0, key_width = 0;
@@ -278,17 +286,27 @@ struct MapBuilder {
     ValueType value_type = ValueType::Unknown;
     uint32_t ordinal = 0;
 
-    // Projection + predicate pushdown (nullptr => emit everything). `cur_wanted`/
-    // `cur_pred_idx`/`cur_col` are set per key by match_key; `found` counts matched wanted
-    // columns in the record; `record_dead` is raised when an inline predicate fails so the
-    // record is discarded at its close.
+    // Column capture (kColumns). Per capture slot (WantedColumn::out): `cur` holds the
+    // record's value when cur_gen == rec_gen; res_gen == rec_gen once the column is
+    // RESOLVED in this record (a value, or nothing to read) — its first occurrence decides,
+    // later occurrences are ignored. rec_gen advances per record, so nothing is cleared.
     const MapProjection* proj = nullptr;
+    std::vector<FieldSpan> cur;
+    std::vector<uint32_t>  cur_gen, res_gen;
+    uint32_t rec_gen = 0;
+    // Per ordinal: 1 + the wanted column whose key matched there last. NDJSON holds key
+    // order stable across records, so the steady state is one compare per key, however
+    // wide the projection.
+    std::vector<uint16_t> key_hint;
+    // One-lookup rejection of a key no wanted column can match: its first byte, and its
+    // width (bit w of `width_mask` for widths < 64; wider keys skip the width test).
+    bool first_wanted[256] = {};
+    uint64_t width_mask = 0;
+    bool any_wide = false;
     size_t num_wanted = 0;
     size_t found = 0;
-    int cur_pred_idx = -1;
-    bool cur_wanted = true;
-    // The matched wanted column for the key currently in hand, or nullptr. Carries its
-    // optional nested sub-key to commit_container.
+    // The matched wanted column (head of its same-key chain) for the key in hand, or
+    // nullptr when the key is not wanted.
     const WantedColumn* cur_col = nullptr;
     bool record_dead = false;
 
@@ -303,11 +321,11 @@ struct MapBuilder {
     //
     // `line_start`: first byte of the current line. `tail_start`: first byte from which
     // only whitespace may follow up to the newline (line_start before a record opens; one
-    // past its '}' after it closes). `line_records_base`: rs.offsets.size() when the line
-    // began — rollback point for reject_line.
+    // past its '}' after it closes). `line_rows_base`: rows banked when the line began —
+    // rollback point for reject_line.
     uint32_t line_start = 0;
     uint32_t tail_start = 0;
-    size_t   line_records_base = 1;
+    size_t   line_rows_base = 0;
     uint32_t cur_record_start_pos = 0;  // position of the current record's '{'
     // Whether this line already opened a record — a second '{' on the line is refused.
     bool saw_open_brace_since_newline = false;
@@ -319,11 +337,16 @@ struct MapBuilder {
         ++malformed_count;
     }
 
+    inline size_t rows_banked() const {
+        if constexpr (kColumns) return cm.rows;
+        else return rs.offsets.size() - 1;
+    }
+
     // Start a new line at `next` (one past a newline).
     inline void begin_line(uint32_t next) {
         line_start = next;
         tail_start = next;
-        line_records_base = rs.offsets.size();
+        line_rows_base = rows_banked();
         saw_open_brace_since_newline = false;
     }
 
@@ -331,8 +354,23 @@ struct MapBuilder {
     // produced — banked (a second object, trailing content) or in progress.
     inline void reject_line() {
         flag_malformed(saw_open_brace_since_newline ? cur_record_start_pos : line_start);
-        rs.offsets.resize(line_records_base);
-        rs.spans.resize(rs.offsets.back());
+        if constexpr (kColumns) {
+            if (cm.rows > line_rows_base) {
+                for (size_t c = 0; c < cm.cols.size(); ++c) {
+                    auto& col = cm.cols[c];
+                    // A copied column's arena rolls back to where the first dropped row's
+                    // bytes begin.
+                    if (cm.copied[c])
+                        for (size_t r = line_rows_base; r < col.size(); ++r)
+                            if (!span_absent(col[r])) { cm.arena[c].resize(col[r].value_start); break; }
+                    col.resize(line_rows_base);
+                }
+                cm.rows = line_rows_base;
+            }
+        } else {
+            rs.offsets.resize(line_rows_base + 1);
+            rs.spans.resize(rs.offsets.back());
+        }
         record_dead = false;
     }
 
@@ -344,72 +382,110 @@ struct MapBuilder {
     }
 
     MapBuilder(const uint8_t* buf, uint32_t buf_len, const MapProjection* p)
-        : buffer(buf), buffer_length(buf_len), proj(p),
-          // keep_unwanted: the whole row is wanted, so `found` must never reach the stop.
-          num_wanted(p ? (p->keep_unwanted ? SIZE_MAX : p->num_wanted) : 0) {
-        rs.offsets.push_back(0);
+        : buffer(buf), buffer_length(buf_len), proj(p) {
+        if constexpr (kColumns) {
+            size_t max_out = p->ncols;
+            for (const WantedColumn& w : *p->columns) max_out = std::max<size_t>(max_out, w.out + 1);
+            cur.resize(max_out);
+            cur_gen.assign(max_out, 0);
+            res_gen.assign(max_out, 0);
+            num_wanted = p->columns->size();
+            cm.cols.resize(p->ncols);
+            cm.arena.resize(p->ncols);
+            cm.copied = *p->copy_bytes;
+            for (const WantedColumn& w : *p->columns) {
+                first_wanted[w.first] = true;
+                if (w.len < 64) width_mask |= uint64_t(1) << w.len;
+                else any_wide = true;
+            }
+        } else {
+            rs.offsets.push_back(0);
+        }
     }
-
-    // First span index of the in-progress record. Invariant: at each record start,
-    // rs.spans.size() == record_start() (every record either banks or discards, restoring it).
-    inline uint32_t record_start() const { return rs.offsets.back(); }
 
     // The next wanted column sharing the current key (WantedColumn::next), or nullptr.
     inline const WantedColumn* next_in_group(const WantedColumn* w) const {
         return w->next < 0 ? nullptr : &(*proj->columns)[static_cast<size_t>(w->next)];
     }
 
-    // Exact match of the key in hand against the wanted set — length + first-byte reject,
-    // then memcmp. No hashing. Unprojected, every key is wanted.
+    // Exact match of the key in hand against the wanted set — a one-lookup reject on the
+    // key's first byte and width, the ordinal hint, then length + first-byte reject and
+    // memcmp over the set. No hashing. Forced inline: once per top-level key, a call was
+    // ~6% of a narrow projection's walk.
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((always_inline))
+#endif
     inline void match_key() {
-        if (!proj) return;
-        cur_wanted = proj->keep_unwanted; cur_pred_idx = -1; cur_col = nullptr;
-        const uint8_t first = buffer[key_start];
-        for (const WantedColumn& w : *proj->columns) {
-            if (key_width == w.len && first == w.first &&
-                std::memcmp(buffer + key_start, w.name, w.len) == 0) {
-                cur_wanted = true; cur_pred_idx = w.pred_idx; cur_col = &w; break;
+        if constexpr (kColumns) {
+            cur_col = nullptr;
+            const uint8_t* key = buffer + key_start;
+            if (key_width == 0 || !first_wanted[key[0]] ||
+                (key_width < 64 ? !((width_mask >> key_width) & 1u) : !any_wide))
+                return;
+            const std::vector<WantedColumn>& cols = *proj->columns;
+            auto eq = [&](const WantedColumn& w) {
+                return key_width == w.len && key[0] == w.first && std::memcmp(key, w.name, w.len) == 0;
+            };
+            if (ordinal < key_hint.size() && key_hint[ordinal] != 0) {
+                const WantedColumn& w = cols[key_hint[ordinal] - 1u];
+                if (eq(w)) { cur_col = &w; return; }
+            }
+            for (size_t i = 0; i < cols.size(); ++i) {
+                if (!eq(cols[i])) continue;
+                cur_col = &cols[i];
+                if (ordinal < 0xFFFFu && i < 0xFFFFu) {
+                    if (key_hint.size() <= ordinal) key_hint.resize(ordinal + 1, 0);
+                    key_hint[ordinal] = static_cast<uint16_t>(i + 1);
+                }
+                return;
             }
         }
     }
 
-    // Append one span for a wanted column (or, unprojected, for the field itself) and
-    // evaluate its inline predicate. Returns true when the record needs no more spans
-    // (predicate failed, or the last wanted column is now in hand).
-    inline bool stage(uint32_t vs, uint32_t vw, ValueType vt, uint8_t slot, int pred_idx) {
-        rs.spans.emplace_back(key_start, key_width, vs, vw, vt, static_cast<uint16_t>(ordinal), slot);
-        if (pred_idx >= 0 &&
-            !evaluate_predicate(buffer, rs.spans.back(), (*proj->predicates)[pred_idx])) {
+    // Resolve wanted column `w` to a value in this record and evaluate its inline predicate.
+    // A column already resolved in this record (a repeated key) is left as it is. Returns
+    // true when the record needs no more materialisation (predicate failed, or the last
+    // wanted column is now resolved).
+    inline bool stage(const WantedColumn* w, uint32_t vs, uint32_t vw, ValueType vt, uint8_t slot) {
+        const uint32_t k = w->out;
+        if (res_gen[k] == rec_gen) return false;
+        res_gen[k] = rec_gen;
+        cur[k] = FieldSpan(key_start, key_width, vs, vw, vt, static_cast<uint16_t>(ordinal), slot);
+        cur_gen[k] = rec_gen;
+        if (w->pred_idx >= 0 &&
+            !evaluate_predicate(buffer, cur[k], (*proj->predicates)[w->pred_idx])) {
             record_dead = true;
             return true;
         }
-        return proj && ++found >= num_wanted;
+        return ++found >= num_wanted;
     }
 
     // A wanted column that resolved to NOTHING (nested sub-key absent, its value JSON null,
-    // or the key's value is not an object). Emits NO span — exactly how an absent top-level
-    // column already represents a NULL cell — but still counts toward `found`, so
-    // minimal-extent stops materialising on schedule rather than waiting for a column that
-    // will never arrive.
+    // or the key's value is not an object): an absent cell, exactly how a missing top-level
+    // key reads. It still counts toward `found`, so minimal extent stops on schedule.
     //
     // Deliberately does NOT kill the record when the column carries a predicate: an absent
-    // top-level predicate column doesn't drop the row inline either; finalize_records then
-    // keeps it only if the predicate accepts NULL. Nested and flat predicates mean the same.
-    inline bool resolved_missing() { return proj && ++found >= num_wanted; }
+    // predicate column is judged when the record closes (predicate_accepts_absent), nested
+    // and top-level alike.
+    inline bool resolved_missing(const WantedColumn* w) {
+        const uint32_t k = w->out;
+        if (res_gen[k] == rec_gen) return false;
+        res_gen[k] = rec_gen;
+        return ++found >= num_wanted;
+    }
 
-    // Commit the staged scalar/string value (value_start/width/type) for every wanted
+    // Commit the scalar/string value in hand (value_start/width/type) for every wanted
     // column on this key: a top-level column takes the value; a nested column has nothing
-    // to read inside a non-object and is a NULL cell. Always advances the ordinal ONCE, so
-    // emitted spans keep their true object position.
+    // to read inside a non-object. Unprojected (the head sample), the field itself. Always
+    // advances the ordinal ONCE, so captured spans keep their true object position.
     inline bool commit_field() {
         bool stop = false;
-        if (cur_col == nullptr) {
-            // Unprojected (no projection, or keep_unwanted for a non-wanted key).
-            if (cur_wanted) stop = stage(value_start, value_width, value_type, 0, cur_pred_idx);
-        } else {
+        if constexpr (kColumns) {
             for (const WantedColumn* w = cur_col; w != nullptr && !record_dead; w = next_in_group(w))
-                stop |= w->sub_len ? resolved_missing()
-                                   : stage(value_start, value_width, value_type, 0, w->pred_idx);
+                stop |= w->sub_len ? resolved_missing(w) : stage(w, value_start, value_width, value_type, 0);
+        } else {
+            rs.spans.emplace_back(key_start, key_width, value_start, value_width, value_type,
+                                  static_cast<uint16_t>(ordinal), 0);
         }
         ++ordinal;
         return stop;
@@ -417,42 +493,76 @@ struct MapBuilder {
 
     // Commit a container value [start .. close] (open/close are its index entries) for
     // every wanted column on this key: a top-level column takes the whole container; a
-    // nested column takes its sub-key's value from inside it (find_nested_field), or is a
-    // NULL cell when the sub-key is absent / JSON null / the container is an array.
+    // nested column takes its sub-key's value from inside it (find_nested_field), or
+    // resolves to nothing when the sub-key is absent / JSON null / the container is an array.
     inline bool commit_container(const StructuralWindow& win,
                                  size_t open_idx, size_t close_idx,
                                  uint32_t start, uint32_t close, ValueType t) {
-        if (cur_col == nullptr) {
+        if constexpr (!kColumns) {
             value_start = start;
             value_width = close - start + 1;
             value_type = t;
             return commit_field();
-        }
-        bool stop = false;
-        for (const WantedColumn* w = cur_col; w != nullptr && !record_dead; w = next_in_group(w)) {
-            if (w->sub_len == 0) {
-                stop |= stage(start, close - start + 1, t, 0, w->pred_idx);
-                continue;
+        } else {
+            bool stop = false;
+            for (const WantedColumn* w = cur_col; w != nullptr && !record_dead; w = next_in_group(w)) {
+                if (w->sub_len == 0) {
+                    stop |= stage(w, start, close - start + 1, t, 0);
+                    continue;
+                }
+                if (res_gen[w->out] == rec_gen) continue;  // a repeated key: already resolved
+                uint32_t nstart = 0, nwidth = 0;
+                ValueType ntype = ValueType::Unknown;
+                stop |= find_nested_field(win, open_idx, close_idx,
+                                          w->sub, w->sub_len, w->sub_first, nstart, nwidth, ntype)
+                    ? stage(w, nstart, nwidth, ntype, w->slot)
+                    : resolved_missing(w);
             }
-            uint32_t nstart = 0, nwidth = 0;
-            ValueType ntype = ValueType::Unknown;
-            stop |= find_nested_field(win, open_idx, close_idx,
-                                      w->sub, w->sub_len, w->sub_first, nstart, nwidth, ntype)
-                ? stage(nstart, nwidth, ntype, w->slot, w->pred_idx)
-                : resolved_missing();
+            ++ordinal;
+            return stop;
         }
-        ++ordinal;
-        return stop;
     }
 
-    // Close the in-progress record. Bank: record its end offset — always, even with zero
-    // spans (an empty object `{}`, or a record with none of the wanted/projected columns,
-    // is still one NDJSON row and must not desync from the other columns' row counts).
-    // Discard: drop its partial spans (predicate failed).
+    // Close the in-progress record as a row. Row-major: its end offset — always, even with
+    // zero spans (an empty object `{}` is still one NDJSON row). Column-major: every
+    // predicate is judged on the record's captured values (an absent column passes only a
+    // predicate that accepts NULL — predicate_accepts_absent); a passing record appends
+    // one span per output column. A record with none of the output columns is still a row
+    // (all-absent), so every column keeps the same row count.
     inline void bank_record() {
-        rs.offsets.push_back(static_cast<uint32_t>(rs.spans.size()));
+        if constexpr (kColumns) {
+            const std::vector<Predicate>& preds = *proj->predicates;
+            for (size_t i = 0; i < preds.size(); ++i) {
+                const uint32_t k = (*proj->pred_slot)[i];
+                const bool present = cur_gen[k] == rec_gen;
+                if (present ? !evaluate_predicate(buffer, cur[k], preds[i])
+                            : !predicate_accepts_absent(preds[i]))
+                    return;
+            }
+            const FieldSpan none = absent_span();
+            for (size_t c = 0; c < cm.cols.size(); ++c) {
+                if (cur_gen[c] != rec_gen) { cm.cols[c].push_back(none); continue; }
+                if (!cm.copied[c]) { cm.cols[c].push_back(cur[c]); continue; }
+                // Copied column: the value's bytes go to the arena now, while the record is
+                // still in cache. A string keeps its closing quote after the body, exactly
+                // as in the source, for readers that check it (jsoncanon::raw_text_view).
+                FieldSpan f = cur[c];
+                std::vector<uint8_t>& ar = cm.arena[c];
+                const uint32_t at = static_cast<uint32_t>(ar.size());
+                const uint32_t quote = f.type == static_cast<uint8_t>(ValueType::String) ? 1u : 0u;
+                ar.insert(ar.end(), buffer + f.value_start, buffer + f.value_start + f.value_width + quote);
+                f.value_start = at;
+                cm.cols[c].push_back(f);
+            }
+            ++cm.rows;
+        } else {
+            rs.offsets.push_back(static_cast<uint32_t>(rs.spans.size()));
+        }
     }
-    inline void discard_record() { rs.spans.resize(record_start()); }
+    // Drop the in-progress record (an inline predicate failed).
+    inline void discard_record() {
+        if constexpr (!kColumns) rs.spans.resize(rs.offsets.back());
+    }
 
     static constexpr size_t NPOS = static_cast<size_t>(-1);
 
@@ -467,7 +577,7 @@ struct MapBuilder {
     // interior is not validated here. The masked index makes the string cases exact: the
     // entry after an opening quote is its closing quote, or the newline that truncates it.
     //
-    // Minimal extent: once every wanted column is in hand, or an inline predicate failed,
+    // Minimal extent: once every wanted column is resolved, or an inline predicate failed,
     // keys are no longer matched and nothing is materialised — but the rest of the record
     // is parsed by the same rules, so whether a line is accepted never depends on the
     // projection.
@@ -479,6 +589,7 @@ struct MapBuilder {
 #endif
     inline size_t parse_record(const StructuralWindow& w, size_t i, size_t& fail_at) {
         ordinal = 0; found = 0; record_dead = false;
+        if constexpr (kColumns) ++rec_gen;
         cur_record_start_pos = w.ix[i];
         saw_open_brace_since_newline = true;
         const size_t n = w.n;
@@ -573,17 +684,18 @@ struct MapBuilder {
 
 namespace {
 
-// Window size for build_map: input bytes indexed per scan. The index of one window
-// (4 bytes per entry, ~1 entry per 5-8 bytes of JSON) stays cache-resident while it is
-// walked; a window is extended to the end of its last line, so a line is never split.
+// Window size for build_columns / build_map: input bytes indexed per scan. The index of
+// one window (4 bytes per entry, ~1 entry per 5-8 bytes of JSON) stays cache-resident
+// while it is walked; a window is extended to the end of its last line, so a line is
+// never split.
 constexpr size_t kWindowBytes = static_cast<size_t>(256) << 10;
 
 // Walk one window's index: line discipline around parse_record. The builder's state
 // carries across windows; every window but the range's last ends with a newline entry,
 // so no record or resync ever needs an entry from the next window. `li` is the prefilter
 // line cursor (kLines only), also carried across windows.
-template <bool kLines>
-void walk_window(MapBuilder& b, const StructuralWindow& w, uint32_t buffer_length,
+template <bool kColumns, bool kLines>
+void walk_window(MapBuilder<kColumns>& b, const StructuralWindow& w, uint32_t buffer_length,
                  const std::vector<LineSpan>* lines, size_t& li) {
     const size_t L = kLines ? lines->size() : 0;
     // A line was rejected at entry `k`: recover at its end, the first newline entry at or
@@ -624,7 +736,7 @@ void walk_window(MapBuilder& b, const StructuralWindow& w, uint32_t buffer_lengt
         }
         size_t fail_at = 0;
         const size_t close = b.parse_record(w, i, fail_at);
-        if (close == MapBuilder::NPOS) {
+        if (close == MapBuilder<kColumns>::NPOS) {
             b.reject_line();
             i = resync(fail_at);
             continue;
@@ -636,17 +748,17 @@ void walk_window(MapBuilder& b, const StructuralWindow& w, uint32_t buffer_lengt
     }
 }
 
-// The driver, specialised at compile time on whether the prefilter's line spans are
-// present: the per-entry line-entry check exists only in the kLines instantiation, so
+// The driver, specialised at compile time on the sink and on whether the prefilter's line
+// spans are present: the per-entry line check exists only in the kLines instantiation, so
 // the unfiltered walk's hot loop carries no line cursor.
-template <bool kLines>
-RecordSet build_map_impl(
+template <bool kColumns, bool kLines>
+MapBuilder<kColumns> run_map(
     const uint8_t* buffer,
     size_t buffer_length,
     const MapProjection* proj,
     size_t range_start,
     const std::vector<LineSpan>* lines) {
-    MapBuilder b(buffer, static_cast<uint32_t>(buffer_length), proj);
+    MapBuilder<kColumns> b(buffer, static_cast<uint32_t>(buffer_length), proj);
     const uint32_t blen = static_cast<uint32_t>(buffer_length);
     // With `lines` the input is those lines only: the first is begun at its own start (no
     // lines: at the range end, so the empty input judges nothing).
@@ -655,14 +767,31 @@ RecordSet build_map_impl(
     if constexpr (kLines) b.begin_line(L ? (*lines)[0].start : blen);
     else                  b.begin_line(static_cast<uint32_t>(range_start));
     const size_t range_bytes = buffer_length > range_start ? buffer_length - range_start : 0;
-    b.rs.offsets.reserve(range_bytes / 100 + 2);
-    b.rs.spans.reserve(range_bytes / 16 + 1);
+    if constexpr (!kColumns) {
+        b.rs.offsets.reserve(range_bytes / 100 + 2);
+        b.rs.spans.reserve(range_bytes / 16 + 1);
+    }
 
     // The one index buffer, reused by every window (scan_structural_index's contract:
     // room for the window's bytes + 64).
     std::vector<uint32_t> index(std::min(range_bytes, kWindowBytes) + 64);
     auto room = [&index](size_t needed) {
         if (index.size() < needed) index.resize(needed);
+    };
+    // Column-major: size every column from the first window's row density, so the
+    // per-row appends never reallocate mid-range in the common (homogeneous) case.
+    size_t scanned = 0;
+    bool reserved = !kColumns;
+    auto reserve_from_density = [&]() {
+        if constexpr (kColumns) {
+            if (reserved || b.cm.rows == 0 || scanned == 0) return;
+            reserved = true;
+            const double scale = static_cast<double>(range_bytes) / static_cast<double>(scanned) * 1.05;
+            const size_t est = static_cast<size_t>(static_cast<double>(b.cm.rows) * scale) + 16;
+            for (auto& col : b.cm.cols) col.reserve(est);
+            for (auto& ar : b.cm.arena)
+                if (!ar.empty()) ar.reserve(static_cast<size_t>(static_cast<double>(ar.size()) * scale) + 64);
+        }
     };
 
     if constexpr (kLines) {
@@ -678,7 +807,7 @@ RecordSet build_map_impl(
                 n += scan_structural_index(buffer + l.start, to - l.start, l.start, index.data() + n);
                 bytes += to - l.start;
             }
-            walk_window<true>(b, StructuralWindow{buffer, index.data(), n}, blen, lines, li);
+            walk_window<kColumns, true>(b, StructuralWindow{buffer, index.data(), n}, blen, lines, li);
         }
     } else {
         size_t a = range_start;
@@ -690,7 +819,9 @@ RecordSet build_map_impl(
             }
             room((z - a) + 64);
             const size_t n = scan_structural_index(buffer + a, z - a, static_cast<uint32_t>(a), index.data());
-            walk_window<false>(b, StructuralWindow{buffer, index.data(), n}, blen, lines, li);
+            walk_window<kColumns, false>(b, StructuralWindow{buffer, index.data(), n}, blen, lines, li);
+            scanned += z - a;
+            reserve_from_density();
             a = z;
         }
     }
@@ -701,21 +832,32 @@ RecordSet build_map_impl(
             b.begin_line(blen);
     }
     b.finish();
-    if (b.malformed_found) { b.rs.malformed = true; b.rs.malformed_pos = b.malformed_at; }
-    b.rs.malformed_count = b.malformed_count;
-    return std::move(b.rs);
+    return b;
 }
 
 }  // namespace
 
-RecordSet build_map(
+ColumnMap build_columns(
     const uint8_t* buffer,
     size_t buffer_length,
-    const MapProjection* proj,
+    const MapProjection& proj,
     size_t range_start,
     const std::vector<LineSpan>* lines) {
-    return lines ? build_map_impl<true>(buffer, buffer_length, proj, range_start, lines)
-                 : build_map_impl<false>(buffer, buffer_length, proj, range_start, nullptr);
+    MapBuilder<true> b = lines
+        ? run_map<true, true>(buffer, buffer_length, &proj, range_start, lines)
+        : run_map<true, false>(buffer, buffer_length, &proj, range_start, nullptr);
+    b.cm.malformed = b.malformed_found;
+    b.cm.malformed_pos = b.malformed_found ? b.malformed_at : 0;
+    b.cm.malformed_count = b.malformed_count;
+    return std::move(b.cm);
+}
+
+RecordSet build_map(const uint8_t* buffer, size_t buffer_length) {
+    MapBuilder<false> b = run_map<false, false>(buffer, buffer_length, nullptr, 0, nullptr);
+    b.rs.malformed = b.malformed_found;
+    b.rs.malformed_pos = b.malformed_found ? b.malformed_at : 0;
+    b.rs.malformed_count = b.malformed_count;
+    return std::move(b.rs);
 }
 
 std::vector<std::string> sample_record_keys(
@@ -753,9 +895,37 @@ static RecordSet build_head(const uint8_t* buffer, size_t buffer_length, size_t 
             end = nl ? static_cast<size_t>(static_cast<const uint8_t*>(nl) - buffer) + 1
                      : buffer_length;
         }
-        RecordSet head = build_map(buffer, end, nullptr);
+        RecordSet head = build_map(buffer, end);
         if (head.num_records() >= want || end == buffer_length) return head;
     }
+}
+
+std::vector<uint8_t> head_copy_columns(const uint8_t* buffer, size_t buffer_length,
+                                       const std::vector<std::string>& columns,
+                                       const ParseContext& context) {
+    std::vector<uint8_t> copy(columns.size(), 1);
+    const RecordSet head = build_head(buffer, buffer_length, context.infer_sample_size);
+    const size_t limit = std::min(context.infer_sample_size, head.num_records());
+    for (size_t c = 0; c < columns.size(); ++c) {
+        const ColumnSpec sp = parse_column_spec(columns[c]);
+        const auto it = context.explicit_schema.find(columns[c]);
+        rugo::DeclaredType dt;
+        const bool declared_structured = it != context.explicit_schema.end() &&
+            rugo::parse_declared_type(it->second, &dt) && rugo::declared_is_structured(dt.type);
+        if (sp.as_json || declared_structured) { copy[c] = 0; continue; }
+        if (sp.nested) continue;
+        for (size_t r = 0; r < limit; ++r) {
+            const FieldSpan* f = nullptr;
+            for (const FieldSpan& s : head[r])
+                if (s.key_width == sp.key.size() &&
+                    std::memcmp(buffer + s.key_start, sp.key.data(), s.key_width) == 0) { f = &s; break; }
+            if (f == nullptr || is_null(buffer, f->value_start, f->value_start + f->value_width - 1)) continue;
+            copy[c] = (f->type == static_cast<uint8_t>(ValueType::Object) ||
+                       f->type == static_cast<uint8_t>(ValueType::Array)) ? 0 : 1;
+            break;
+        }
+    }
+    return copy;
 }
 
 std::vector<std::string> discover_column_names(

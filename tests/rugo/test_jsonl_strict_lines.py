@@ -84,3 +84,24 @@ def test_valid_top_level_is_accepted(line, columns):
     res = read_jsonl(data, columns=columns, fail_on_error=False)
     assert res["num_rows"] == 3
     assert res["malformed_count"] == 0
+
+
+# A key repeated in one record: its FIRST occurrence is the value — as yyjson's object
+# lookup (draken's `->` / `->>`) reads it — whatever the projection, and a repeat never
+# hides a later column. For a nested column, the first container with that key decides.
+@pytest.mark.parametrize("columns", [None, ["a", "b"], ["b", "a"], ["a"], ["b"]], ids=str)
+def test_repeated_key_first_occurrence_wins(columns):
+    res = read_jsonl(b'{"a":1,"a":2,"b":3}\n{"a":4,"b":5,"b":6}\n', columns=columns,
+                     fail_on_error=True)
+    names = res["column_names"]
+    values = {n: res["columns"][i].to_pylist() for i, n in enumerate(names)}
+    if "a" in names:
+        assert values["a"] == [1, 4]
+    if "b" in names:
+        assert values["b"] == [3, 5]
+
+
+def test_repeated_container_key_first_decides_nested():
+    data = b'{"o":{"b":"x"},"o":{"b":"y"}}\n{"o":{"z":1},"o":{"b":"w"}}\n'
+    res = read_jsonl(data, columns=["o->>'b'"], fail_on_error=True)
+    assert res["columns"][0].to_pylist() == ["x", None]

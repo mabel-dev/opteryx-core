@@ -39,8 +39,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         ParseContext ctx;
         ctx.fail_on_error = false;
         ctx.projected_columns = {"a", "a->>'b'"};
-        OrdinalPredictor predictor;
-        interpret_jsonl(data, size, ctx, predictor);
+        interpret_jsonl(data, size, ctx, ctx.projected_columns);
     } catch (const std::exception&) {
     } catch (...) {
     }

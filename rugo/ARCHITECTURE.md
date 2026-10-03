@@ -64,18 +64,20 @@ read_jsonl() [_jsonl_reader.pyx]
   │  interpret_jsonl_threaded() [field_span.cpp]   ← splits buffer into newline-aligned
   │     │                                             ranges, runs each on a BS::thread_pool
   │     └─ per range: interpret_jsonl()           [field_span.cpp]
-  │                     ├─ build_map()            [interpreter.cpp]  ← per 256 KB line-aligned window:
-  │                     │    scan_structural_index() [structural_scan.cpp] → masked uint32 index
-  │                     │    (NEON / AVX2 64-byte blocks), walked by MapBuilder → FieldSpans
-  │                     └─ finalize_records()                        ← projection + predicate
+  │                     └─ build_columns()        [interpreter.cpp]  ← per 256 KB line-aligned window:
+  │                          scan_structural_index() [structural_scan.cpp] → masked uint32 index
+  │                          (NEON / AVX2 64-byte blocks); MapBuilder parses each record strictly
+  │                          and captures the output columns → ColumnMap (one span per row per
+  │                          column; short values copied to a per-column arena while hot);
+  │                          predicates judged when each record closes
   │        … then merge per-range records in order →
   │
   └─ fallback (use_threads=False): JsonlReader::next_chunk() [jsonl_reader.cpp]
         reads 64MB chunks; process_buffer() truncates to the last newline so a record
         straddling a chunk boundary is carried, not double-counted.
   ↓
-_build_vectors_from_chunks() [_jsonl_reader.pyx]
-  └─ single chunk (common): parse_all_columns() [column_builder.cpp]
+_build_vectors() [_jsonl_reader.pxi]
+  └─ parse_all_columns() [column_builder.cpp] over the ColumnMap (column i = name i)
         one thread-pool task per column (nogil): extract_column() → parse_typed_column()
         → ParsedColumn (draken_malloc buffers, NO Python)
      then wrap_column() per column under the GIL → owns the buffers in a Draken Vector
@@ -86,18 +88,21 @@ Returns typed Draken Vectors (INT64 / FLOAT64 / BOOL / VARCHAR, real nulls)
 
 ### Pushdown
 
-When `columns` / `predicates` are given, `build_map` builds the document map for **only the
-projected ∪ predicate columns**:
+`build_columns` captures **only the output ∪ predicate columns** (the output list is the
+projection, or the columns discovered in the head sample):
 
 - **Column matching is exact-byte, not hashed.** `MapBuilder` compares each key against the
   (few) wanted columns by length + first byte + `memcmp`. Measured faster than XXH3 +
   set-lookup *and* exact — no collision risk.
-- **Projection skip.** Once a record's wanted columns are all found, the rest of the record
-  is skipped to the next newline.
-- **Inline filter.** A predicate column is evaluated the instant its value is emitted; on
-  failure the record is dropped and skipped *there* — failing rows never reach their later
-  columns. `finalize_records` remains the authoritative pass (handles rows missing the
-  predicate column, and multiple predicates per column, e.g. `id > 10 AND id < 40`).
+- **Projection skip.** Once a record's wanted columns are all resolved, nothing more of it
+  is materialised; the rest is still parsed by the same strict rules, so whether a line is
+  accepted never depends on the projection.
+- **Inline filter.** A predicate column is evaluated the instant its value is captured; on
+  failure the record stops materialising *there*. Every predicate is judged again when the
+  record closes (rows missing the predicate column, several predicates on one column, e.g.
+  `id > 10 AND id < 40`).
+- **Repeated keys.** A key's first occurrence in a record is its value (as yyjson's lookup,
+  and so draken's `->>`, reads it); later occurrences are ignored.
 - **Materialisation is survivor-only**: only rows that pass the filter are typed-parsed.
 
 ### Typed value reader
@@ -126,8 +131,8 @@ separator-less slice buffer). Single-chunk reads parse directly from the file bu
 | File | Purpose |
 |------|---------|
 | `structural_scan.{hpp,cpp}` | masked structural index (simdjson stage-1 style): NEON / AVX2+PCLMUL / scalar |
-| `interpreter.{hpp,cpp}` | `build_map` / `MapBuilder` state machine + pushdown |
-| `field_span.{hpp,cpp}` | `interpret_jsonl`, `finalize_records`, `interpret_jsonl_threaded` |
+| `interpreter.{hpp,cpp}` | `build_columns` (bulk, column-major) / `build_map` (head sample); strict `MapBuilder` + pushdown |
+| `field_span.{hpp,cpp}` | `interpret_jsonl`, `interpret_jsonl_threaded` (range split + parallel merge) |
 | `value_parser.{hpp,cpp}` | predicate evaluation; `parse_*` delegate to `fast_parse_*` |
 | `fast_parsers.hpp` | bounded int/float parsers (`fast_float`) |
 | `column_builder.{hpp,cpp}` | extract + parse columns; `parse_all_columns` (parallel), `wrap_column` |

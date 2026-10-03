@@ -87,8 +87,8 @@
 
 // rugo's JSONL core (rugo/src/jsonl/core) — pure C++.
 #include "parse_context.hpp"
-#include "interpreter.hpp"       // check_predicate_literals, RecordSet
-#include "field_span.hpp"        // interpret_jsonl_threaded, OrdinalPredictor
+#include "interpreter.hpp"       // check_predicate_literals, ColumnMap
+#include "field_span.hpp"        // interpret_jsonl_threaded
 #include "column_builder.hpp"    // parse_all_columns, ParsedColumn
 #include "jsonl_reader.hpp"      // maybe_prefilter, malformed_error_message, py_str_repr
 #include "compression/stream_decompress.hpp"   // resolve_codec, LineChunker
@@ -584,10 +584,9 @@ private:
         }
         if (len == 0) return;
 
-        rj::OrdinalPredictor predictor;
         rj::InterpreterResult ir;
         try {
-            ir = rj::interpret_jsonl_threaded(buf, len, ctx, predictor, 1);
+            ir = rj::interpret_jsonl_threaded(buf, len, ctx, spec_->decode_names, 1);
         } catch (const std::invalid_argument& e) {
             error = decode_error(e.what());
             return;
