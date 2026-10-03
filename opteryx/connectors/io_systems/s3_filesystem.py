@@ -588,7 +588,10 @@ class S3File:
         try:
             self._data = http_client.get(url, headers={"Accept-Encoding": "identity"})
         except RuntimeError as err:
-            raise DatasetReadError(f"Unable to read {md_code(url)}. {md_cause(err)}") from err
+            # The query string is NOT quoted: this is a presigned URL, and its
+            # signature, key id and any session token live there.
+            object_url = url.split("?", 1)[0]
+            raise DatasetReadError(f"Unable to read {md_code(object_url)}. {md_cause(err)}") from err
 
     @property
     def memoryview(self) -> memoryview:

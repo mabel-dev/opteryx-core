@@ -88,8 +88,17 @@ _GLOB_METACHARACTERS = frozenset("*?[")
 # parameters they translate to (rugo's `fail_on_error`, `has_header`, `delimiter`)
 # are deliberately not aliases, so writing one is an unrecognized option and the
 # "did you mean" hint below points at the SQL spelling.
-_READ_JSONL_OPTIONS = ("ignore_errors", "infer_schema", "infer_sample_size")
-_READ_CSV_OPTIONS = ("ignore_errors", "separator", "has_header_row", "infer_sample_size")
+_READ_JSONL_OPTIONS = ("ignore_errors", "infer_schema", "infer_sample_size", "credentials")
+_READ_CSV_OPTIONS = (
+    "ignore_errors",
+    "separator",
+    "has_header_row",
+    "infer_sample_size",
+    "credentials",
+)
+# READ_PARQUET reads its schema from the file and has nothing to configure; its one
+# option names the stored secret to read a private bucket with.
+_READ_PARQUET_OPTIONS = ("credentials",)
 
 
 def _is_glob_pattern(path: str) -> bool:
@@ -174,6 +183,73 @@ def _validate_reader_options(function: str, args: list, named_args: dict, option
     for name in named_args:
         if name not in options:
             raise InvalidFunctionParameterError(_unrecognized(name, operator_also_wrong=False))
+
+
+def _read_credential(function: str, path: str, protocol: str, named_args: dict, context):
+    """The stored secret a READ_* names with `credentials =>`, resolved - or None.
+
+    jobs.opteryx docs/design/secrets.md §8.2. Opt-in per call and never inferred:
+    a path that happens to fall under some secret's SCOPE does not pick that
+    secret up, because then the credential used would depend on which secrets
+    happen to exist. The value is a string literal NAMING a secret
+    (`'<workspace>.<name>'`), never the secret itself, so the statement carries
+    nothing to redact.
+
+    Resolution is the deployment's (opteryx.managers.secrets): with no resolver
+    registered this refuses rather than reading anonymously or with this
+    process's own credentials.
+    """
+    if "credentials" not in named_args:
+        return None
+    arg = named_args["credentials"]
+    if arg.node_type == NodeType.NESTED:
+        arg = arg.centre
+    if arg.node_type != NodeType.LITERAL or type(arg.value) is not bytes:
+        raise InvalidFunctionParameterError(
+            f"{function} option 'credentials' must be a string literal naming a secret, "
+            "e.g. credentials => 'analytics.billing_reader'. It has to be a literal "
+            "value, not a column, an expression or a parameter."
+        )
+    if protocol not in ("gs", "s3"):
+        raise InvalidFunctionParameterError(
+            f"{function} option 'credentials' applies to gs:// and s3:// paths only."
+        )
+
+    from opteryx.managers.secrets import resolve_secret
+
+    try:
+        credential = resolve_secret(context.execution_context, arg.text(), path)
+    except ValueError as err:
+        raise InvalidFunctionParameterError(f"{function}: {err}") from None
+    if credential.scheme != protocol:
+        raise PermissionError(
+            f"{function}: secret {credential.reference} is a {credential.kind} secret and "
+            f"cannot read {protocol}:// paths."
+        )
+    _check_credential_scope(function, credential, [path])
+    return credential
+
+
+def _check_credential_scope(function: str, credential, files) -> None:
+    """Every path a credentialed read resolves must be under the secret's SCOPE (§4.1).
+
+    Run on the literal path and again on every file a glob expanded to, before a
+    byte is fetched. The filesystem checks again on every access; this is the
+    check that fails the statement at bind time with a message naming the file.
+    """
+    if credential is None:
+        return
+    for file in files:
+        if not credential.admits(file):
+            raise PermissionError(
+                f"{function}: '{file}' is outside the SCOPE of secret {credential.reference}."
+            )
+
+
+def _credentialed_filesystem(credential, protocol: str):
+    from opteryx.connectors.io_systems.credentialed_filesystem import credentialed_filesystem
+
+    return credentialed_filesystem(credential, protocol)
 
 
 def _resolve_glob_files(path: str, filesystem) -> list:
@@ -591,7 +667,12 @@ def visit_function_dataset(
         # authenticated listing call. This does not touch create_filesystem itself,
         # so catalog-backed GCS read paths (visit_scan) are unaffected; READ_PARQUET
         # below applies the identical restriction for the identical reason.
-        if protocol == "gs":
+        credential = _read_credential("READ_JSONL", path, protocol, named_args, context)
+        if credential is not None:
+            # A customer's own credential: listing is the store's to allow, so
+            # globs work here - each expanded file is checked against SCOPE below.
+            filesystem = _credentialed_filesystem(credential, protocol)
+        elif protocol == "gs":
             if is_glob:
                 raise NotSupportedError(
                     f"READ_JSONL('{path}'): glob patterns are not supported for gs:// paths. Name the file exactly, or read the whole prefix without a wildcard."
@@ -626,6 +707,7 @@ def visit_function_dataset(
                 raise DatasetNotFoundError(connector="READ_JSONL", dataset=path)
         else:
             jsonl_files = [path]
+        _check_credential_scope("READ_JSONL", credential, jsonl_files)
 
         # Bind-time schema is resolved from the first matched file that actually
         # CONTAINS A RECORD (matches sorted lexicographically by path above);
@@ -814,6 +896,11 @@ def visit_function_dataset(
         from opteryx.connectors.jsonl_io import JsonlPredicatePushable
 
         node.connector = JsonlPredicatePushable()
+        if credential is not None:
+            # Carried for the reader, which otherwise re-derives an anonymous
+            # filesystem from the path's scheme. Not `.filesystem`: that names a
+            # catalog connector's, whose remote files the reader refuses.
+            node.connector.credentialed_filesystem = filesystem
     elif node.function == "READ_PARQUET":
         from opteryx.connectors._rugo_schema import rugo_to_relation_schema
         from opteryx.connectors.filesystem_connector import FileSystemTable
@@ -842,9 +929,12 @@ def visit_function_dataset(
         # Unlike READ_JSONL, Parquet's schema is unambiguous (read straight off the
         # file's own footer, not inferred from sample rows), so there is nothing
         # analogous to Stage 3's ignore_errors/infer_schema/infer_sample_size to
-        # configure -- any option is a mistake, not a typo to silently ignore. The
-        # empty option tuple makes every name unrecognized, in either spelling.
-        _validate_reader_options("READ_PARQUET", node.args, node.named_args or {}, ())
+        # configure -- any option but `credentials` (which names a secret to read a
+        # private bucket with, not a parse setting) is a mistake, not a typo to
+        # silently ignore, in either spelling.
+        _validate_reader_options(
+            "READ_PARQUET", node.args, node.named_args or {}, _READ_PARQUET_OPTIONS
+        )
 
         protocol = path.split("://")[0] if "://" in path else ""
         is_glob = _is_glob_pattern(path)
@@ -861,7 +951,16 @@ def visit_function_dataset(
         # above -- READ_PARQUET is equally a bare dataset function with no
         # can_perform_action authorization layer, so it must never use this
         # process's ambient/platform GCS credentials for a user-supplied path.
-        if protocol == "gs":
+        credential = _read_credential(
+            "READ_PARQUET", path, protocol, node.named_args or {}, context
+        )
+        if credential is not None:
+            # Held by the FileSystemTable below, which is what the scan router
+            # (parquet_read.resolve_scan_filesystem) reads - so the scan uses this
+            # filesystem and never builds one from the path's scheme.
+            filesystem = _credentialed_filesystem(credential, protocol)
+            storage_type = "GCS" if protocol == "gs" else "S3"
+        elif protocol == "gs":
             if is_glob:
                 raise NotSupportedError(
                     f"READ_PARQUET('{path}'): glob patterns are not supported for gs:// paths. Name the file exactly, or read the whole prefix without a wildcard."
@@ -903,6 +1002,7 @@ def visit_function_dataset(
                 raise DatasetNotFoundError(connector="READ_PARQUET", dataset=path)
         else:
             parquet_files = [path]
+        _check_credential_scope("READ_PARQUET", credential, parquet_files)
 
         # Bind-time schema comes from the first file's own footer (Parquet's schema
         # is embedded and unambiguous, unlike READ_JSONL's sample-row inference) --
@@ -1085,7 +1185,10 @@ def visit_function_dataset(
         # above -- READ_CSV is equally a bare dataset function with no
         # can_perform_action authorization layer, so it must never use this
         # process's ambient/platform GCS credentials for a user-supplied path.
-        if protocol == "gs":
+        credential = _read_credential("READ_CSV", path, protocol, named_args, context)
+        if credential is not None:
+            filesystem = _credentialed_filesystem(credential, protocol)
+        elif protocol == "gs":
             if is_glob:
                 raise NotSupportedError(
                     f"READ_CSV('{path}'): glob patterns are not supported for gs:// paths. Name the file exactly, or read the whole prefix without a wildcard."
@@ -1120,6 +1223,7 @@ def visit_function_dataset(
                 raise DatasetNotFoundError(connector="READ_CSV", dataset=path)
         else:
             csv_files = [path]
+        _check_credential_scope("READ_CSV", credential, csv_files)
 
         # Bind-time schema: a real, full rugo.csv.read_csv() pass over the first
         # matched file that actually CONTAINS A RECORD. Unlike READ_JSONL's cheap
@@ -1232,6 +1336,8 @@ def visit_function_dataset(
         # Enables predicate pushdown for a plain col-OP-literal comparison a
         # rugo predicate tuple can express; see CsvPredicatePushable.
         node.connector = CsvPredicatePushable()
+        if credential is not None:
+            node.connector.credentialed_filesystem = filesystem
     else:
         raise UnsupportedSyntaxError(f"{node.function} cannot be used in place of a table. It returns a value, not a set of rows, so it belongs in the **SELECT** list rather than the **FROM** clause.")
     return node, context

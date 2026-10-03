@@ -101,14 +101,15 @@ def test_surplus_positional_argument_rejected(jsonl_file, extra):
     assert "single positional argument" in str(err.value)
 
 
-def test_parquet_takes_no_options_in_either_spelling(parquet_file):
+def test_parquet_takes_only_credentials_in_either_spelling(parquet_file):
+    """Parquet has nothing to configure; its one option names a stored secret
+    (`credentials =>`, secrets.md §8.2), so every other name is refused."""
     for option in ("ignore_errors=>true", "ignore_errors=true"):
         with pytest.raises(InvalidFunctionParameterError) as err:
             _run(f"SELECT * FROM READ_PARQUET('{parquet_file}', {option})")
         message = str(err.value)
-        assert "does not take options" in message
-        # No "did you mean" or '=>' advice -- no spelling of this would work.
-        assert "Did you mean" not in message
+        assert "unrecognized option 'ignore_errors'" in message
+        assert "Valid options are: credentials" in message
 
 
 def test_explicit_schema_reports_the_gap_in_either_spelling(jsonl_file):

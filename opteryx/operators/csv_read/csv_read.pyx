@@ -86,7 +86,14 @@ cdef class CsvReadNode(ReaderNode):
         if self._filesystem is None:
             path = self.dataset
             protocol = path.split("://")[0] if "://" in path else ""
-            if protocol in ("gs", "gcs"):
+            credentialed = getattr(self.connector, "credentialed_filesystem", None)
+            if credentialed is not None:
+                # READ_CSV(..., credentials => ...): the filesystem the binder built
+                # from a stored customer secret and read the schema through. Reading
+                # with anything else here would be the anonymous path (and fail) or,
+                # worse, an ambient one.
+                self._filesystem = credentialed
+            elif protocol in ("gs", "gcs"):
                 # SECURITY: must mirror the bind-time choice in opteryx.planner.binder.
                 # dataset's READ_CSV branch exactly -- READ_CSV never uses this
                 # process's platform GCS credentials for a user-supplied path, at bind

@@ -111,6 +111,19 @@ cdef class JsonlReadNode(ReaderNode):
         connector-backed (catalog) scan reads through the connector's filesystem,
         which may hold platform credentials, so its remote files are refused rather
         than fetched anonymously or with those credentials."""
+        credentialed = getattr(self.connector, "credentialed_filesystem", None)
+        if credentialed is not None:
+            # READ_JSONL(..., credentials => '<workspace>.<name>'): the binder built
+            # this from a stored customer secret, checked every file against the
+            # secret's SCOPE, and the filesystem checks again here. The native Source
+            # sends no headers, so each file goes as a short-lived URL signed with
+            # that secret - never with this process's own credentials. The URL's
+            # query string carries the signature, which is why the HTTP client
+            # never quotes a query string in an error.
+            return [
+                credentialed.rewrite_to_signed_url(file, expiry_seconds=900)
+                for file in self.jsonl_files
+            ]
         if getattr(self.connector, "filesystem", None) is not None:
             for path in self.jsonl_files:
                 if "://" in path:

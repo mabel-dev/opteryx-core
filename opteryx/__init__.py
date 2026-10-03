@@ -88,6 +88,7 @@ if OPTERYX_DEBUG:  # pragma: no cover
 from opteryx.connectors import register_workspace
 from opteryx.connectors import set_default_connector
 from opteryx.managers.permissions import register_permissions_capability
+from opteryx.managers.secrets import register_secret_resolver
 # The host process's hook for exposing a Python callable to SQL as CALL <name>(...).
 # A plain module-level registry - no planner state, nothing to import lazily.
 from opteryx.procedures import register_procedure
@@ -222,6 +223,10 @@ __all__ = [
     # engine allows everything - access control belongs to a deployment, not
     # to the engine. See opteryx.managers.permissions.
     "register_permissions_capability",
+    # Installs how `credentials => '<workspace>.<name>'` on READ_* becomes a
+    # credential. Absent one, the option is refused - never answered with this
+    # process's own credentials. See opteryx.managers.secrets.
+    "register_secret_resolver",
     # Exposes a host Python callable as `CALL <name>(...)`. Statement-only and
     # side-effecting by design; see opteryx.procedures for why it is not a function.
     "register_procedure",

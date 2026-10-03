@@ -34,6 +34,18 @@
 
 namespace {
 
+// A URL as it may appear in an ERROR MESSAGE: everything up to the query string.
+// A presigned URL carries its credential there - X-Amz-Signature, X-Amz-Credential
+// and X-Amz-Security-Token for S3, X-Goog-Signature for GCS - and an error message
+// is copied into job documents, service logs and API responses by code that has
+// no reason to think it holds one (jobs.opteryx docs/design/secrets.md §3, §8.2).
+// The path is kept, so the message still says which object failed.
+std::string redact_url(const std::string& url) {
+    const auto query = url.find('?');
+    if (query == std::string::npos) return url;
+    return url.substr(0, query) + "?<redacted>";
+}
+
 // ── WP-5 retry / per-request-timeout configuration (env, read once) ──────────
 // These are the process-wide FALLBACK values only — HttpClient::default_tuning()
 // assembles them into an HttpTuning. A caller (Opteryx's query engine) that
@@ -607,10 +619,10 @@ std::vector<uint8_t> HttpClient::get(
             if (!curl_ok)
                 throw HttpError(
                     std::string("get: CURL error: ") + curl_easy_strerror(res) +
-                        " [os_errno=" + std::to_string(os_errno) + "] url=" + url,
+                        " [os_errno=" + std::to_string(os_errno) + "] url=" + redact_url(url),
                     retryable, 0);
             throw HttpError(
-                std::string("get: HTTP ") + std::to_string(http_code) + ": " + url,
+                std::string("get: HTTP ") + std::to_string(http_code) + ": " + redact_url(url),
                 retryable, http_code);
         }
 
@@ -669,7 +681,7 @@ std::map<std::string, std::string> HttpClient::head(
     }
     if (!http_status_ok(http_code)) {
         throw HttpError(
-            std::string("HTTP ") + std::to_string(http_code) + ": " + url,
+            std::string("HTTP ") + std::to_string(http_code) + ": " + redact_url(url),
             http_status_retryable(http_code), http_code);
     }
 
@@ -919,7 +931,7 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
                 // Hard failure (4xx or definitive transport error) — fail now.
                 if (!curl_ok)
                     throw HttpError(std::string("get_many: CURL error: ") +
-                        curl_easy_strerror(ctx[i].res) + " url=" + requests[i].first,
+                        curl_easy_strerror(ctx[i].res) + " url=" + redact_url(requests[i].first),
                         false, 0);
                 throw HttpError(std::string("get_many: HTTP ") +
                     std::to_string(ctx[i].http_code) + ": " + requests[i].first,
@@ -942,7 +954,7 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
             const long span = range_span_bytes(requests[i].second);
             throw HttpError(
                 "get_many: exhausted " + std::to_string(max_retries) + " retries (" +
-                cause + ") url=" + requests[i].first + " range=" +
+                cause + ") url=" + redact_url(requests[i].first) + " range=" +
                 [&]() { auto it = requests[i].second.find("Range");
                         return it == requests[i].second.end() ? std::string("full") : it->second; }() +
                 " received=" + std::to_string(ctx[i].buf.body.size()) + "/" +
@@ -1107,7 +1119,7 @@ std::vector<std::map<std::string, std::string>> HttpClient::head_many(
             if (!retryable) {
                 if (!curl_ok)
                     throw HttpError(std::string("head_many: CURL error: ") +
-                        curl_easy_strerror(ctx[i].res) + " url=" + requests[i].first,
+                        curl_easy_strerror(ctx[i].res) + " url=" + redact_url(requests[i].first),
                         false, 0);
                 throw HttpError(std::string("head_many: HTTP ") +
                     std::to_string(ctx[i].http_code) + ": " + requests[i].first,
@@ -1127,7 +1139,7 @@ std::vector<std::map<std::string, std::string>> HttpClient::head_many(
                 : std::string("HTTP ") + std::to_string(ctx[i].http_code);
             throw HttpError(
                 "head_many: exhausted " + std::to_string(max_retries) + " retries (" +
-                cause + ") url=" + requests[i].first,
+                cause + ") url=" + redact_url(requests[i].first),
                 true, ctx[i].http_code);
         }
 
