@@ -323,6 +323,34 @@ CLAUSE_DEFINITIONS = {
             "REPLACE, and name columns with AS in the SELECT."
         ),
     },
+    "create_secret": {
+        "canonical_name": "CREATE SECRET",
+        # Classified by the engine but never planned or executed by it: jobs.opteryx
+        # performs it at submission so the value never reaches a job document, the
+        # worker or a plan (jobs.opteryx docs/design/secrets.md §2.2).
+        "planner_entry": None,
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "CREATE [OR REPLACE] SECRET [IF NOT EXISTS] secret_name IN workspace (TYPE 'secret_type', option value, ...)",
+        ],
+        "summary": "Store a write-only credential in a workspace.",
+        "documentation": (
+            "Recognised by the aside parser. Types: gcs_service_account (KEY, SCOPE), "
+            "aws_access_key (ACCESS_KEY_ID, SECRET_ACCESS_KEY, optional SESSION_TOKEN and "
+            "REGION, SCOPE) and http_endpoint (URL, optional HEADER_AUTHORIZATION, "
+            "HEADER_X_API_KEY, HEADER_X_AUTH_TOKEN). Each value is a :name parameter or a "
+            "string literal; a literal is lifted out of the statement before it is stored "
+            "or logged. Use the secret with READ_PARQUET / READ_JSONL / READ_CSV "
+            "credentials => 'workspace.secret_name'."
+        ),
+        "notes": (
+            "Write-only: no statement returns a value. Requires ALTER on the whole "
+            "workspace. SCOPE is a prefix on a bucket boundary, not a glob. OR REPLACE and "
+            "IF NOT EXISTS are alternatives, never combined. Must be the only statement "
+            "in its request."
+        ),
+    },
     "create_table": {
         "canonical_name": "CREATE TABLE",
         "planner_entry": "plan_create_table",
@@ -489,6 +517,22 @@ CLAUSE_DEFINITIONS = {
         "notes": (
             "DROP TABLE against a materialized view is rejected, and this statement "
             "against a plain table is rejected, each pointing at the other."
+        ),
+    },
+    "drop_secret": {
+        "canonical_name": "DROP SECRET",
+        "planner_entry": "plan_drop_secret",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "DROP SECRET [IF EXISTS] secret_name IN workspace",
+            "DROP SECRET [IF EXISTS] secret_name FROM workspace",
+        ],
+        "summary": "Remove a stored secret from a workspace.",
+        "documentation": "Recognised by the aside parser; IN and FROM are both accepted.",
+        "notes": (
+            "Requires ALTER on the whole workspace. Dropping a secret does not revoke the "
+            "credential at its source."
         ),
     },
     "drop_statistics": {
@@ -1159,6 +1203,25 @@ CLAUSE_DEFINITIONS = {
             "subquery source. A connector that exposes no file-level metadata "
             "reports that rather than an empty manifest. It cannot be answered by "
             "the edit-time check, which does not read a manifest."
+        ),
+    },
+    "show_secrets": {
+        "canonical_name": "SHOW SECRETS",
+        "planner_entry": "plan_show_secrets",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["SHOW SECRETS IN workspace", "SHOW SECRETS FROM workspace"],
+        # See show_manifest's bare_form_rejected note above.
+        "bare_form_rejected": True,
+        "summary": "List a workspace's secrets, never their values.",
+        "documentation": (
+            "Planned as a read of the workspace's information_schema.secrets: name, type, "
+            "scope, who created and last replaced it and when, last attempted use and "
+            "use count."
+        ),
+        "notes": (
+            "Requires ALTER on the whole workspace; without it the statement is refused "
+            "rather than returning no rows."
         ),
     },
     "show_snapshots": {

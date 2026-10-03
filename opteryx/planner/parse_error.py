@@ -93,7 +93,8 @@ _KEYWORDS: List[str] = [
     # any near-miss - the ordering rule only decides ties.
     "ANTI", "CLONE", "DETACH", "EFFECTIVE", "GRANT", "LINEAGE", "LOAD",
     "MATERIALIZED", "MINIMUM", "NATURAL", "OPTIMIZE", "OWNER", "QUALIFY",
-    "REFRESH", "MERGE", "RESUME", "RESYNC", "REVOKE", "SAMPLE", "SEMI", "SIGNAL",
+    "REFRESH", "MERGE", "RESUME", "RESYNC", "REVOKE", "SAMPLE", "SECRET", "SECRETS",
+    "SEMI", "SIGNAL",
     "SNAPSHOTS", "SOURCES", "SUSPEND", "TASK", "TOP", "TRIGGERS", "VERSION",
     "WINDOW",
 ]
