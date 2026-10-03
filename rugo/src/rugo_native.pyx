@@ -17,6 +17,25 @@
 # share this one module namespace and both need it.
 cdef int _DRAKEN_LK_IPV4 = 5
 
+from cpython.ref cimport PyObject
+
+# The Python-edge column wrappers (csv/_csv_column_wrap.hpp, jsonl/_jsonl_column_wrap.hpp,
+# parquet/_parquet_column_wrap.hpp) are declared PyObject* ... except NULL, never
+# `object` (CLAUDE.md §3): each returns a NEW reference, or NULL with an exception set
+# (which `except NULL` re-raises). _rugo_steal takes ownership of that reference:
+# <object> increfs, the C-level Py_DECREF balances it. Cython 3's cpython.ref.Py_DECREF
+# takes `object`, hence the raw shim (same idiom as draken/vectors/bool_vector.pyx).
+cdef extern from *:
+    """static inline void _rugo_decref(PyObject* op) { Py_DECREF(op); }"""
+    void _rugo_decref(PyObject* op)
+
+
+cdef inline object _rugo_steal(PyObject* raw):
+    cdef object obj = <object>raw
+    _rugo_decref(raw)
+    return obj
+
+
 include "_text_render.pxi"          # shared descriptor for the CSV / JSONL writers
 include "_predicate_literal.pxi"     # predicate literal kinds for the CSV / JSONL readers
 include "compression/_decompress.pxi"   # gzip/zstd/lz4 input for the JSONL / CSV readers

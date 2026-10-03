@@ -11,7 +11,7 @@
 // groups of the vectors file read. Picking clusters by their centres is a guess with no
 // distance bound: a row in an unprobed cluster can be nearer than every row scored.
 // Files are read through SkeneRangedFile: a local file by pread, a remote one by range
-// GETs on a signed URL.
+// GETs (a gs:// object with the caller's bearer header, or a presigned URL).
 //
 // Rows are scored with draken's TopK::offer — the same cosine distance the SQL kernel
 // returns, so the distance a caller sees needs no re-rank — with deleted ordinals excluded
@@ -32,10 +32,11 @@
 namespace opteryx::engine {
 
 struct IndexFileRef {
-    std::string vectors;            // local path or signed URL
+    std::string vectors;            // local path, gs:// object, or presigned URL
     uint64_t    vectors_bytes = 0;
     std::string centroids;
     uint64_t    centroids_bytes = 0;
+    std::string auth_header;        // Authorization for both remote reads; empty = none
 };
 
 struct IndexSearchStats {
@@ -98,7 +99,7 @@ inline bool probe_row_groups(const IndexFileRef& file, const uint16_t* query, ui
                              std::string* err) {
     using namespace search_detail;
     SkeneRangedFile centroids;
-    if (!centroids.open(file.centroids, file.centroids_bytes, {"centroid", "rows", "row_groups"}, err)) return false;
+    if (!centroids.open(file.centroids, file.centroids_bytes, {"centroid", "rows", "row_groups"}, file.auth_header, err)) return false;
     std::vector<uint16_t> cents;
     std::vector<uint32_t> counts;
     std::vector<std::vector<uint32_t>> groups;
@@ -159,7 +160,7 @@ inline bool search_index_file(const IndexFileRef& file, const uint16_t* query, u
     if (k == 0u || !draken::ann::ann_row_searchable(query, dims)) return true;
 
     SkeneRangedFile vectors;
-    if (!vectors.open(file.vectors, file.vectors_bytes, {"embedding", "ordinal"}, err)) return false;
+    if (!vectors.open(file.vectors, file.vectors_bytes, {"embedding", "ordinal"}, file.auth_header, err)) return false;
     std::vector<uint32_t> wanted;
     if (nprobe == 0u) {
         wanted.resize(vectors.row_groups());

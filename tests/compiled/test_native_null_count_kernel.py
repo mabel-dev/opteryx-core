@@ -1,7 +1,7 @@
 """
 Correctness for the native ``Vector.null_count()`` kernel (draken_native.cpp),
 which replaces the ``int(sum(vec.is_null()))`` pattern (``is_null()`` boxes the
-whole column via ``to_pylist()`` — see ``_vector_shim.pyx``) with a single
+whole column via ``to_pylist()`` — see ``vector.pyx``) with a single
 validity-bitmap popcount pass.
 
 Explicit byte-boundary cases (n=0,1,7,8,9,15,16,17,63,64,65) are the point of

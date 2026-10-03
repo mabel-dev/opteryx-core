@@ -7,9 +7,10 @@
 // FORMAT v3), attaches the directories of the columns it reads, and fetches each row
 // group's chunks of those columns when that row group is read.
 //
-// A remote location is an https URL that carries its own credential (a signed URL): an
-// hours-long build cannot refresh a bearer token natively, and a signed GET cannot answer a
-// HEAD, so the size is given by the caller (the catalog records every index file's size).
+// A remote location is a gs:// object, read with the caller's Authorization header (a
+// bearer token, minted once by the caller and never refreshed here), or an http(s) URL
+// that carries its own credential (an S3 presigned URL) with an empty header. The size is
+// given by the caller (the catalog records every index file's size), so no HEAD is sent.
 
 #pragma once
 
@@ -24,6 +25,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include "filesystem.hpp"   // rugo::gcs_to_https
 #include "http_client.hpp"
 #include "morsels/cxx_morsel.h"
 #include "skene/format.h"
@@ -40,18 +42,27 @@ class SkeneRangedFile {
         if (fd_ >= 0) ::close(fd_);
     }
 
-    // Open `location` (a local path, or an http(s) URL carrying its own credential) of
-    // `file_bytes` bytes, for reading `columns`.
+    // Open `location` (a local path, a gs:// object, or an http(s) URL) of `file_bytes`
+    // bytes, for reading `columns`. `auth_header` is sent as Authorization on every remote
+    // GET when non-empty; a gs:// object without one is refused before any request.
     bool open(const std::string& location, uint64_t file_bytes,
-              const std::vector<std::string>& columns, std::string* err) {
+              const std::vector<std::string>& columns, const std::string& auth_header,
+              std::string* err) {
         location_ = location;
         file_bytes_ = file_bytes;
         columns_ = columns;
-        remote_ = location.rfind("http://", 0) == 0 || location.rfind("https://", 0) == 0;
+        auth_header_ = auth_header;
+        const bool gcs = location.rfind("gs://", 0) == 0;
+        remote_ = gcs || location.rfind("http://", 0) == 0 || location.rfind("https://", 0) == 0;
         if (!remote_ && location.find("://") != std::string::npos) {
-            *err = "skene: " + location + " is neither a local path nor an http(s) URL";
+            *err = "skene: " + location + " is neither a local path, a gs:// object nor an http(s) URL";
             return false;
         }
+        if (gcs && auth_header.empty()) {
+            *err = "skene: " + location + " is a gs:// object and no Authorization header was given";
+            return false;
+        }
+        url_ = gcs ? rugo::gcs_to_https(location) : location;
         if (remote_) {
             http_ = std::make_unique<HttpClient>(4, 120000);
         } else {
@@ -133,7 +144,8 @@ class SkeneRangedFile {
             try {
                 std::map<std::string, std::string> h{
                     {"Range", "bytes=" + std::to_string(offset) + "-" + std::to_string(offset + bytes - 1u)}};
-                *out = http_->get(location_, h);
+                if (!auth_header_.empty()) h.emplace("Authorization", auth_header_);
+                *out = http_->get(url_, h);
             } catch (const std::exception& e) {
                 *err = "skene: cannot read " + location_ + ": " + e.what();
                 return false;
@@ -159,6 +171,8 @@ class SkeneRangedFile {
     }
 
     std::string                 location_;
+    std::string                 url_;           // what the GETs fetch (gs:// mapped to https)
+    std::string                 auth_header_;
     uint64_t                    file_bytes_ = 0;
     std::vector<std::string>    columns_;
     bool                        remote_ = false;

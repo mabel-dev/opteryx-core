@@ -21,7 +21,7 @@
 // carry precision/scale (they live on the LogicalType descriptor, not the
 // DrakenVector, §11/§14): the caller's fallback reads the declared descriptor
 // off the Python-side Vector instead (build_arrow_type_for in
-// draken/vectors/_vector_shim.pyx). DECIMAL used to be "supported" here as a
+// draken/vectors/vector.pyx). DECIMAL used to be "supported" here as a
 // bare unscaled int64 — silently wrong for every caller except the one
 // (Morsel.hash-style raw access) that wanted the unscaled payload on purpose;
 // to_arrow() is not that caller.

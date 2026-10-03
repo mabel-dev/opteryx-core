@@ -694,7 +694,7 @@ cdef Vector from_decoded(void* data, uint8_t* validity, uint32_t length, DrakenT
     data and validity MUST have been allocated with draken_malloc; ownership
     is transferred to the new Vector on success (draken_free'd on GC).
     validity may be NULL (all-valid normalization invariant).
-    Analogous to from_decoded in _bool_vector_shim.pyx.
+    Analogous to from_decoded in bool_vector.pyx.
     """
     cdef PyObject* raw = draken_vector_own_raw(data, validity, length, dtype)
     if raw == NULL:

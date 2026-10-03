@@ -42,6 +42,7 @@ from opteryx.models import is_expression
 from opteryx.models import rewrite_children
 from opteryx.operators.window.helpers import FRAMED_AGGREGATE_FUNCTIONS
 from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
+from opteryx.planner.logical_planner import LogicalPlanStepType
 
 # Kind code -> function name, INVERTED from the single registry the plan node and the
 # native sink already agree on — so an operand-type refusal here names the function the
@@ -4668,7 +4669,11 @@ class _Compiler:
         # An approximate vector search (VectorSearchStrategy) runs on the single-pass
         # native Source with a row admission, which also excludes deleted rows - so
         # deletes do not decline it, and the two-pass latmat path is never its shape.
-        _vector_search = scan.step.vector_search
+        # Only a table Scan carries the stamp; READ_PARQUET(...) also reaches here as
+        # a FunctionDataset step, which has no index and no `vector_search` field.
+        _vector_search = (
+            scan.step.vector_search if scan.step.node_type == LogicalPlanStepType.Scan else None
+        )
         lat = None if (_scan_has_deletes or _vector_search) else self._latmat_scan_plan(scan)
         if lat is not None:
             (p1_plan, p2_plan, resolver, pred_col_to_p1, sort_p1_index, sort_ascending,

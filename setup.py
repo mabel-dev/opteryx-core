@@ -1308,32 +1308,15 @@ if not (
 _bitwise_bridge_link_args = (
     ["-undefined", "dynamic_lookup"] if is_mac() else ["-Wl,--allow-shlib-undefined"]
 )
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.vector_length",
-        sources=[
-            "src/cpp/vector_length_native.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA,
-        language="c++",
-    )
-)
 # ── Consolidated C′ vector-op module ──────────────────────────────────────
 # Each vector_*.cpp below exposes `void register_<name>(nb::module_&)` instead of
 # its own NB_MODULE; _vectors_module.cpp owns the single NB_MODULE(vectors, …) and
 # calls them all, so the 21 kernels link into ONE shared object rather than 21.
 # This removes the per-extension duplication of vector_alloc.cpp / nb_combined.cpp
 # that bloated the wheel. New vector-op file → add it here AND register it in
-# _vectors_module.cpp. (vector_length / carchar / minilm
-# stay separate — independent native libraries, not C′ kernels.)
+# _vectors_module.cpp. (minilm_native stays separate: it resolves draken_identity_sel
+# from draken_native, and folding it in would rebind it to this module's
+# vector_alloc.cpp copy.)
 _vectors_op_cpp = [
     "opteryx/compiled/nanobind/vector_accessors.cpp",
     "opteryx/compiled/nanobind/vector_ann.cpp",
@@ -1358,6 +1341,8 @@ _vectors_op_cpp = [
     "opteryx/compiled/nanobind/vector_string_slice.cpp",
     "opteryx/compiled/nanobind/vector_temporal_arith.cpp",
     "opteryx/compiled/nanobind/vector_temporal_convert.cpp",
+    # Local-disk file IO (was opteryx.compiled.io.disk_reader).
+    "src/cpp/disk_reader_native.cpp",
 ]
 # Vendored sources pulled in by individual kernels — compiled ONCE for the module.
 _vectors_extra_sources = [
@@ -1383,6 +1368,9 @@ _vectors_extra_sources = [
     # vector_string_case — SIMD string ops (+ cpu_features dep)
     "src/cpp/simd_string_ops.cpp",
     "draken/simd/cpu_features.cpp",
+    # disk_reader_native — mmap/pread file reads + directory listing
+    "src/cpp/disk_io.cpp",
+    "src/cpp/directories.cpp",
 ]
 extensions.append(
     Extension(
@@ -1415,27 +1403,6 @@ extensions.append(
         ],
         extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
         extra_link_args=LD_EXTRA + _bitwise_bridge_link_args,
-        language="c++",
-    )
-)
-
-extensions.append(
-    Extension(
-        "opteryx.compiled.io.disk_reader",
-        sources=[
-            "src/cpp/disk_reader_native.cpp",
-            "src/cpp/disk_io.cpp",
-            "src/cpp/directories.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA,
         language="c++",
     )
 )

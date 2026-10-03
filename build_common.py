@@ -501,56 +501,6 @@ COMMON_SIMD_SOURCES = [
 ]
 
 
-def make_draken_extension(module_path, source_file, language="c++", depends=None):
-    if depends is None:
-        depends = ["draken/core/buffers.h", "draken/core/vector_alloc.h"]
-
-    sources = [f"draken/{source_file}"]
-
-    # Unified DrakenVector constructors (one copy per extension; globals are
-    # extension-local — owned-vs-shared discrimination lives in the Cython
-    # typed wrapper, never in cross-extension pointer comparison).
-    if "draken/core/vector_alloc.cpp" not in sources:
-        sources.append("draken/core/vector_alloc.cpp")
-
-    # src/cpp/simd_bitops.cpp is GONE (deleted 2026-08-06). It used to be compiled
-    # in solely to supply `simd_popcount`, which collided with
-    # draken/core/bitmap_ops.cpp's. That collision is resolved: bitmap_ops.cpp's is
-    # canonical — it lives in draken (which must not depend on opteryx's src/cpp),
-    # every caller already declares it through draken's headers, and its ≤7-byte
-    # tail uses __builtin_popcount (a POPCNT/CNT instruction) rather than
-    # simd_bitops' 256-entry lookup table. The two main loops were identical
-    # (8-byte words + __builtin_popcountll). These shims now resolve simd_popcount
-    # from draken_native.so, loaded RTLD_GLOBAL by draken/__init__.py, the same way
-    # they resolve every other draken_native symbol. simd_bitops' other exports
-    # (simd_and/or/xor/not_mask, simd_select_bytes) had zero callers.
-
-    # The rest of the shared SIMD layer — simd_hash, simd_env, cpu_features,
-    # simd_search — is NOT compiled in. draken_native is its single compiled home
-    # (see its source list), and draken/__init__.py loads draken_native under
-    # RTLD_GLOBAL before any of these modules can be imported, so they resolve at
-    # runtime exactly as the bridge symbols do. Each of these four extensions used to
-    # carry its own copy of all five.
-    #
-    # These modules link with -undefined dynamic_lookup / --allow-shlib-undefined,
-    # so an unresolvable symbol is a crash at first call, NOT a link error. After
-    # changing this list, verify every project-prefixed undefined symbol
-    # (_simd_*, _draken_*, _opteryx_*, _kernel_*, _rugo_*, _avx_*, _neon_*) in each
-    # rebuilt .so is exported by draken_native. A green build proves nothing here.
-
-    # draken uses the system allocator (draken/core/alloc.h); mimalloc is not
-    # linked — see the note in build_extensions for why it was removed.
-    return Extension(
-        name=f"draken.{module_path}",
-        sources=sources,
-        include_dirs=include_dirs,
-        extra_compile_args=CPP_FLAGS if language == "c++" else C_FLAGS,
-        extra_link_args=LD_EXTRA if language == "c++" else [],
-        language=language,
-        depends=depends,
-    )
-
-
 def get_zstd_vendor_sources():
     """Return the vendored zstd sources so other extensions can link to the same files.
 
@@ -662,16 +612,6 @@ def get_parquet_vendor_sources():
 # actually call it.
 parquet_link_args = []
 
-# E.24 — Cython shim layer: real Cython extensions at each draken vector/morsel
-# import path, providing __pyx_vtable__ so cimport consumers can load them.
-# Each shim links draken_native.so via RTLD_GLOBAL (loaded in draken/__init__.py)
-# and uses -undefined dynamic_lookup / --allow-shlib-undefined to resolve
-# draken_vector_unwrap / draken_vector_own_raw at runtime.
-_shim_bridge_link_args = (
-    ["-undefined", "dynamic_lookup"] if is_mac() else ["-Wl,--allow-shlib-undefined"]
-)
-
-
 def draken_rugo_extensions(parquet_created_by):
     """The draken + rugo Extension objects, shared verbatim by both wheels.
 
@@ -681,67 +621,39 @@ def draken_rugo_extensions(parquet_created_by):
 
     Returns un-cythonized Extension objects; the caller runs ``cythonize``.
     """
-    shim_extensions = [
-        make_draken_extension(
-            "vectors.vector",
-            "vectors/_vector_shim.pyx",
-            # Vector._to_json() includes the shared native JSON renderer.
-            depends=[
-                "draken/core/buffers.h",
-                "draken/core/vector_alloc.h",
-                "draken/interop/value_format.hpp",
-                # value_format.hpp's render descriptor carries LogicalKind.
-                "draken/logical_type.h",
-            ],
-        ),
-        make_draken_extension("vectors.bool_vector", "vectors/_bool_vector_shim.pyx"),
-        make_draken_extension("morsels.morsel", "morsels/_morsel_shim.pyx"),
-        # The ONE sort implementation (vergesort prepass -> comparison-sort
-        # fallback over the AoS short-circuit comparator, or plain SortKeyCmp for
-        # 5+ key columns) lives in draken/morsels/sort.hpp — pure C++, no
-        # opteryx/Python dependency. This extension is a thin Cython marshaling
-        # shim over it (Morsel <-> shared_ptr<CxxMorsel>, nothing sort-related).
-        # Both wheels build it: opteryx's SortSink/TopNSink/WindowSink call the
-        # same header through src/cpp/engine/native_sort.hpp's re-export shim,
-        # and the standalone rugo wheel calls this module directly (no opteryx
-        # dependency). SQL ORDER BY semantics stay in opteryx's planner; only the
-        # sort primitive lives here.
-        make_draken_extension(
-            "morsels.sort",
-            "morsels/sort.pyx",
-            depends=[
-                "draken/core/buffers.h",
-                "draken/core/vector_alloc.h",
-                "draken/core/string_slot.h",
-                "draken/core/vergesort.h",
-                "draken/morsels/cxx_morsel.h",
-                "draken/morsels/sort.hpp",
-            ],
-        ),
-    ]
-    # Append shim bridge link args to each shim extension
-    for _ext in shim_extensions:
-        _ext.extra_link_args = list(_ext.extra_link_args) + _shim_bridge_link_args
-
     return [
-        # Draken ABI guard (Milestone A.1). Compiling this forces the frozen
-        # buffers.h static_asserts (sizeof==40, per-field offsets, DrakenType tag
-        # pins) to run on the dev platform — silent ABI drift becomes a build break.
-        Extension(
-            "draken.core._abi_guard",
-            sources=["draken/core/_abi_guard.cpp"],
-            include_dirs=include_dirs,
-            extra_compile_args=CPP_FLAGS,
-            extra_link_args=LD_EXTRA,
-            language="c++",
-            depends=["draken/core/buffers.h", "draken/core/string_slot.h"],
-        ),
         # Draken nanobind binding (Milestone B.1): Vector handle + Morsel + int64 ingestion.
-        # Single module; nanobind + vector_alloc globals (owned buffers use the system
-        # allocator via draken/core/alloc.h — mimalloc removed, see build_extensions).
+        # nanobind + vector_alloc globals (owned buffers use the system allocator via
+        # draken/core/alloc.h — mimalloc removed, see build_extensions).
+        #
+        # draken ships as ONE extension .so. Besides PyInit_draken_native it carries the
+        # Cython modules below, each with its own PyInit_<name>:
+        #   draken.vectors.vector, draken.vectors.bool_vector, draken.morsels.morsel,
+        #   draken.morsels.sort, draken.ops.kernels._kernel_registry
+        # draken/__init__.py registers them from this file (ExtensionFileLoader) right
+        # after the RTLD_GLOBAL load, so their dotted names and .pxd surfaces are
+        # unchanged for every cimport/import consumer. Because there is more than one
+        # .pyx here, cythonize infers each module name from its PATH (package
+        # __init__ files), not from this Extension's name — so each .pyx must be named
+        # after its module (vector.pyx pairs with vector.pxd) and every directory on
+        # the path must be a real package.
+        #
+        # Their draken symbols (draken_vector_*, cxx_*_c, simd_hash_i64, kernel_*)
+        # resolve at static link time — they used to be separate .so files linked
+        # -undefined dynamic_lookup, where a missing symbol was a crash at first call.
         Extension(
             "draken.draken_native",
             sources=[
+                "draken/vectors/vector.pyx",
+                "draken/vectors/bool_vector.pyx",
+                "draken/morsels/morsel.pyx",
+                "draken/morsels/sort.pyx",
+                "draken/ops/kernels/_kernel_registry.pyx",
+                # Draken ABI guard (Milestone A.1): forces the frozen buffers.h
+                # static_asserts (sizeof==40, per-field offsets, DrakenType tag pins)
+                # and the retired-tag #errors to run on every build — silent ABI drift
+                # becomes a build break.
+                "draken/core/_abi_guard.cpp",
                 "draken/draken_native.cpp",
                 # The Python-free half of the old draken_native.cpp: VectorOwner
                 # ops and the native morsel ops + their extern "C" ABI
@@ -828,17 +740,12 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/simd/cpu_features.cpp",
                 # draken_native is the single compiled home of the shared SIMD layer
                 # for the draken unit (simd_hash / simd_env / cpu_features above).
-                # The vector/morsel/sort modules built by make_draken_extension
-                # resolve those at runtime through the RTLD_GLOBAL load in
-                # draken/__init__.py instead of each compiling its own copy. Do not
-                # remove one without putting it back into every module that
-                # make_draken_extension builds: those link with -undefined
-                # dynamic_lookup / --allow-shlib-undefined, where a missing symbol is
-                # a crash at first call, not a link error.
+                # Other units (rugo, skene, opteryx) either compile their own copy or
+                # resolve these through the RTLD_GLOBAL load in draken/__init__.py.
                 #
                 # src/cpp/simd_search.cpp is deliberately NOT here. Nothing in draken
-                # references simd_search_substring — it was carried by all four
-                # make_draken_extension modules as dead weight, and adding it here
+                # references simd_search_substring — it was carried by all four of the
+                # old separate draken Cython modules as dead weight, and adding it here
                 # merely moved the waste (the linker dead-stripped it; draken_native
                 # exported no simd_search symbol). Other units (opteryx strings /
                 # vector_ops, rugo) use it and compile it themselves.
@@ -895,51 +802,27 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/morsels/cxx_morsel_c.h",
                 "draken/morsels/cxx_hash.h",
                 "draken/morsels/cxx_ordinal.h",
-            ],
-        ),
-        # Phase 9a: C kernel registry lookup wrapper (Cython interface for bytecode builder/executor)
-        #
-        # Sources are the .pyx ONLY. Every kernel this module talks to already lives in
-        # draken_native.so, which draken/__init__.py loads under RTLD_GLOBAL before any
-        # consumer can reach this module (importing it runs the draken package init
-        # first). So the small extern "C" surface it actually uses — kernel_registry_
-        # lookup / _register and the kernel_alloc_*_ctx family, all declared in
-        # kernel_registry.h — is resolved at runtime from draken_native, exactly as the
-        # vector/morsel shims above resolve draken_vector_unwrap.
-        #
-        # This used to recompile ~45 of draken_native's own sources: the entire kernel
-        # set plus its vendored digest/codec/ryu/yyjson backing. That put a SECOND copy
-        # of kernel_registry.cpp's `static std::map` registry in the process. It worked
-        # only by an unstated invariant — the single writer (register_kernel) and the
-        # single reader (lookup_kernel) both live in this .pyx, so a register/lookup
-        # pair always hit the same copy: bound locally on macOS, interposed onto
-        # draken_native's copy by RTLD_GLOBAL on Linux. Nothing enforced that. A C-side
-        # kernel_registry_lookup from draken_native would, on macOS, have read a map the
-        # Python registrations never reached. One copy, and the invariant is moot.
-        Extension(
-            "draken.ops.kernels._kernel_registry",
-            sources=["draken/ops/kernels/_kernel_registry.pyx"],
-            include_dirs=include_dirs,
-            extra_compile_args=CPP_FLAGS,
-            extra_link_args=LD_EXTRA + _shim_bridge_link_args,
-            language="c++",
-            depends=[
-                "draken/ops/kernels/c_kernel_abi.h",
-                "draken/ops/kernels/error_handling.h",
-                "draken/ops/kernels/result_helpers.h",
-                "draken/ops/kernels/kernel_registry.h",
-                "draken/ops/kernels/kernel_context.h",
-                "draken/ops/kernels/cast_kernels.h",
-                "draken/ops/kernels/binary_op_kernels.h",
-                "draken/ops/kernels/extraction_kernels.h",
+                "draken/core/string_slot.h",
+                "draken/core/vergesort.h",
+                "draken/morsels/sort.hpp",
+                "draken/interop/value_format.hpp",
+                "draken/logical_type.h",
                 "draken/ops/json_extract.h",
                 "draken/ops/json_path.h",
                 "draken/ops/string_result.h",
                 "draken/ops/string_subscript.h",
             ],
+            # Every PyInit in this .so (setuptools only exports PyInit_<ext name> on
+            # platforms that need an explicit export list).
+            export_symbols=[
+                "PyInit_draken_native",
+                "PyInit_vector",
+                "PyInit_bool_vector",
+                "PyInit_morsel",
+                "PyInit_sort",
+                "PyInit__kernel_registry",
+            ],
         ),
-        # E.24 Cython shims — real compiled extensions providing __pyx_vtable__
-        *shim_extensions,
         # Single consolidated rugo extension — all six readers/writers in one .so.
         # Eliminates cross-.so symbol lookup for draken bridge functions
         # (draken_vector_own_raw, draken_vector_own_string, etc.).
@@ -961,6 +844,10 @@ def draken_rugo_extensions(parquet_created_by):
                     # (no malloc, no other miniz object needed).
                     "third_party/miniz/miniz_tinfl.cpp",
                     "rugo/src/parquet/bloom_filter.cpp",
+                    # DecodedColumn -> owned Draken buffers (pure C++) and its
+                    # Python edge (wrap_parquet_column); the edge is rugo_native only.
+                    "rugo/src/parquet/column_materialize.cpp",
+                    "rugo/src/parquet/_parquet_column_wrap.cpp",
                     "draken/simd/cpu_features.cpp",
                     "src/cpp/disk_io.cpp",
                     "draken/core/vector_alloc.cpp",
@@ -979,6 +866,8 @@ def draken_rugo_extensions(parquet_created_by):
                     "rugo/src/csv/core/csv_scan.cpp",
                     "rugo/src/csv/core/csv_row_map.cpp",
                     "rugo/src/csv/core/csv_column_builder.cpp",
+                    # Python edge of the CSV column builder (wrap_csv_column); rugo_native only.
+                    "rugo/src/csv/_csv_column_wrap.cpp",
                     # explicit_schema's canonical type-name vocabulary, shared by
                     # the JSONL and CSV readers (rugo/src/declared_type.hpp).
                     "rugo/src/declared_type.cpp",
@@ -1034,6 +923,9 @@ def draken_rugo_extensions(parquet_created_by):
                 "rugo/src/csv/core/csv_scan.hpp",
                 "rugo/src/csv/core/csv_row_map.hpp",
                 "rugo/src/csv/core/csv_column_builder.hpp",
+                "rugo/src/csv/_csv_column_wrap.hpp",
+                "rugo/src/parquet/column_materialize.hpp",
+                "rugo/src/parquet/_parquet_column_wrap.hpp",
                 "draken/vectors/_vector_bridge.h",
                 "draken/core/string_slot.h",
                 "draken/core/alloc.h",
@@ -1094,9 +986,9 @@ def skene_extensions():
                     "skene/src/encoding.cpp",
                     "skene/src/bloom.cpp",
                     "skene/src/file_io.cpp",
-                    # One vector_alloc copy per extension — deliberate, matches
-                    # make_draken_extension (globals are extension-local; owners
-                    # carry their deleters so cross-extension frees are safe).
+                    # One vector_alloc copy per extension — deliberate (globals are
+                    # extension-local; owners carry their deleters so
+                    # cross-extension frees are safe).
                     "draken/core/vector_alloc.cpp",
                     # v3's per-file sketch is draken's Vector.hash()
                     # (skene/src/sketch.cpp -> draken/ops/hash.h ->

@@ -110,7 +110,7 @@ def test_carry_reads_its_inputs_through_presigned_urls(s3, built, tmp_path):
         m.append_vector("$o", vector_from_sequence(list(reversed(range(ROWS))), dtype="INT64"))
         recorder.take(m)
         out.mkdir()
-        return carry_vector_index_local([(location, _size(local, "v.skene"), [])], [recorder], dims,
+        return carry_vector_index_local([(location, _size(local, "v.skene"), [], "")], [recorder], dims,
                                         [str(out / "v")], [str(out / "c")], flush_rows=32)
 
     carry(_signed("v.skene"), tmp_path / "remote")

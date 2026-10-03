@@ -11,6 +11,38 @@ sys.setdlopenflags(ctypes.RTLD_GLOBAL | os.RTLD_NOW)
 from draken import draken_native  # noqa: F401, E402
 sys.setdlopenflags(_flags)
 
+# draken_native.so also carries draken's Cython modules (one PyInit_<name> each —
+# see build_common.draken_rugo_extensions). Register them under their dotted names
+# from that one file, in dependency order: a Cython module's init type-imports the
+# modules it cimports (bool_vector -> vector, morsel -> vector, sort -> morsel), so
+# each must already be in sys.modules. Their parent packages are imported after,
+# because draken.morsels/__init__ itself imports draken.morsels.morsel.
+import importlib  # noqa: E402
+import importlib.machinery  # noqa: E402
+import importlib.util  # noqa: E402
+
+_NATIVE_CYTHON_MODULES = (
+    "draken.vectors.vector",
+    "draken.vectors.bool_vector",
+    "draken.morsels.morsel",
+    "draken.morsels.sort",
+    "draken.ops.kernels._kernel_registry",
+)
+
+for _name in _NATIVE_CYTHON_MODULES:
+    _spec = importlib.util.spec_from_file_location(
+        _name,
+        draken_native.__file__,
+        loader=importlib.machinery.ExtensionFileLoader(_name, draken_native.__file__),
+    )
+    _module = importlib.util.module_from_spec(_spec)
+    sys.modules[_name] = _module
+    _spec.loader.exec_module(_module)
+
+for _name in _NATIVE_CYTHON_MODULES:
+    _parent, _, _leaf = _name.rpartition(".")
+    setattr(importlib.import_module(_parent), _leaf, sys.modules[_name])
+
 from draken.vectors import Vector  # noqa: E402
 from draken.morsels import Morsel  # noqa: E402
 

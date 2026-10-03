@@ -1073,7 +1073,10 @@ all pass.
     an `nprobe` (the option and the catalog's default 32 are removed). Read at compile.
   - *Telemetry:* the scan's facts gain files indexed / exact, clusters probed, index row
     groups read, candidates, rows searched exactly, nprobe.
-  - Remote index files are read through signed URLs (GCS V4 / S3 SigV4).
+  - Remote index files are read as gs:// with this process's bearer token (minted once,
+    not refreshed; GCS V4 signing was an IAM signBlob call per file on Cloud Run, refused
+    without `iam.serviceAccounts.signBlob` — changed 2026-10-03), or through S3 SigV4
+    presigned URLs. The build's data-file read and compaction's carry do the same.
 - **Recall measured 2026-10-03** (NVD 335,085 rows, real MiniLM fp32, K=579, 40
   security-phrase queries, k=10, M5 local warm; `dev/vector_index_recall.py`; truth =
   every cluster probed = exact):

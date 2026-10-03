@@ -77,12 +77,12 @@ def _cosine_distance(a, b):
     return 1.0 - dot / (math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b)))
 
 
-def _search(index, k, nprobe, deleted=None, vectors=None, centroids=None):
+def _search(index, k, nprobe, deleted=None, vectors=None, centroids=None, auth_header=""):
     fn, dims = _embed()
     return search_vector_index_file(
         vectors or index["vectors"], os.path.getsize(index["vectors"]),
         centroids or index["centroids"], os.path.getsize(index["centroids"]),
-        QUERY, fn, dims, k, nprobe, ROWS, deleted,
+        QUERY, fn, dims, k, nprobe, ROWS, deleted, auth_header=auth_header,
     )
 
 
@@ -135,13 +135,19 @@ def test_a_remote_index_answers_as_the_local_one(index):
     requests = []
     servers = [_serve_ranges(open(p, "rb").read(), requests) for p in (index["vectors"], index["centroids"])]
     try:
-        urls = [f"http://127.0.0.1:{s.server_address[1]}/f?X-Goog-Signature=x" for s in servers]
-        remote = _search(index, 10, 3, vectors=urls[0], centroids=urls[1])
+        urls = [f"http://127.0.0.1:{s.server_address[1]}/f" for s in servers]
+        remote = _search(index, 10, 3, vectors=urls[0], centroids=urls[1], auth_header="Bearer t0k3n")
     finally:
         for s in servers:
             s.shutdown()
     assert remote == _search(index, 10, 3)
-    assert requests and all(method == "GET" for method, _ in requests)
+    # Both files, every range.
+    assert requests and all(m == "GET" and auth == "Bearer t0k3n" for m, _, auth in requests)
+
+
+def test_a_gcs_index_without_an_authorization_header_is_refused(index):
+    with pytest.raises(RuntimeError, match="no Authorization header"):
+        _search(index, 10, 0, vectors="gs://bucket/v.skene")
 
 
 def test_an_index_that_overruns_its_data_file_fails_loud(index):

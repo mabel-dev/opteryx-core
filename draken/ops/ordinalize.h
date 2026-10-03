@@ -1,7 +1,7 @@
 #pragma once
 // draken/ops/ordinalize.h — per-type int64 ORDINAL KEY kernels.
 //
-// Replaces the Python `Vector.ordinalize()` shim (draken/vectors/_vector_shim.pyx,
+// Replaces the Python `Vector.ordinalize()` shim (draken/vectors/vector.pyx,
 // 2026-07-30) that boxed every value via to_pylist() and looped in Python —
 // interim debt, not the design (see .claude/CLAUDE.md §2). This is the native
 // replacement: used by the catalog manifest builder to compute per-column

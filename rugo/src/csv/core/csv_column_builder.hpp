@@ -11,16 +11,12 @@
 #include "string_slot.h"
 #include "../../declared_type.hpp"   // DeclaredType — explicit_schema's vocabulary
 
-#ifndef Py_PYTHON_H
-struct _object;
-typedef struct _object PyObject;
-#endif
-
 namespace rugo::_csv {
 
 // ---------------------------------------------------------------------------
 // ParsedCsvColumn — draken_malloc-owned column buffers ready for wrapping.
-// Buffer ownership transfers to DrakenVector via wrap_csv_column().
+// Buffer ownership transfers to DrakenVector via wrap_csv_column()
+// (csv/_csv_column_wrap.hpp — the Python edge; core/ never includes Python.h).
 // ---------------------------------------------------------------------------
 struct ParsedCsvColumn {
     DrakenType        type      = DRAKEN_VARCHAR;
@@ -96,10 +92,5 @@ StreamResult build_columns_streaming(
     const std::vector<size_t>&   proj_indices,
     const CsvParseContext&       ctx,
     size_t                       max_threads);
-
-// ---------------------------------------------------------------------------
-// wrap_csv_column — GIL required. Transfers buffer ownership into DrakenVector.
-// ---------------------------------------------------------------------------
-PyObject* wrap_csv_column(ParsedCsvColumn& pc);
 
 }  // namespace rugo::_csv

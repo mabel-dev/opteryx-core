@@ -6,7 +6,7 @@
 // re-clusters those vectors into the output's own vectors and centroids files. No model.
 //
 // Native end to end, called with the GIL released. Inputs are read row group by row group
-// through SkeneRangedFile (local, or a signed URL), never whole:
+// through SkeneRangedFile (local, gs:// with a bearer header, or a presigned URL), never whole:
 //
 //   pass 0  every input's `ordinal` column: which output rows have a vector (the carry
 //           candidates), and the INVARIANT — every indexed input row that is not deleted
@@ -34,8 +34,9 @@
 namespace opteryx::engine {
 
 struct CarryInput {
-    std::string           vectors;         // the input's vectors file: local path or signed URL
+    std::string           vectors;         // the input's vectors file: local path, gs:// or presigned URL
     uint64_t              vectors_bytes = 0;
+    std::string           auth_header;     // Authorization for its remote reads; empty = none
     std::vector<uint32_t> deleted;         // ascending: its deleted ordinals at plan time
 };
 
@@ -141,7 +142,7 @@ inline bool carry_vector_index(const CarrySpec& spec, const std::vector<CarryOut
     for (uint32_t k = 0; k < n_in; ++k) {
         const CarryInput& in = spec.inputs[k];
         SkeneRangedFile file;
-        if (!file.open(in.vectors, in.vectors_bytes, {"ordinal"}, err)) return false;
+        if (!file.open(in.vectors, in.vectors_bytes, {"ordinal"}, in.auth_header, err)) return false;
         for (uint32_t g = 0; g < file.row_groups(); ++g) {
             SkeneRangedFile::RowGroup rg;
             if (!file.read(g, &rg, err)) return false;
@@ -188,7 +189,7 @@ inline bool carry_vector_index(const CarrySpec& spec, const std::vector<CarryOut
         for (uint32_t j = 0; j < n_out; ++j) wanted |= feeds[j][k] && !plans[j].sample.empty();
         if (!wanted) continue;
         SkeneRangedFile file;
-        if (!file.open(spec.inputs[k].vectors, spec.inputs[k].vectors_bytes, {"embedding", "ordinal"}, err)) return false;
+        if (!file.open(spec.inputs[k].vectors, spec.inputs[k].vectors_bytes, {"embedding", "ordinal"}, spec.inputs[k].auth_header, err)) return false;
         for (uint32_t g = 0; g < file.row_groups(); ++g) {
             SkeneRangedFile::RowGroup rg;
             if (!file.read(g, &rg, err)) return false;
@@ -230,7 +231,7 @@ inline bool carry_vector_index(const CarrySpec& spec, const std::vector<CarryOut
         for (uint32_t k = 0; k < n_in; ++k) {
             if (!feeds[j][k]) continue;
             SkeneRangedFile file;
-            if (!file.open(spec.inputs[k].vectors, spec.inputs[k].vectors_bytes, {"embedding", "ordinal"}, err)) return false;
+            if (!file.open(spec.inputs[k].vectors, spec.inputs[k].vectors_bytes, {"embedding", "ordinal"}, spec.inputs[k].auth_header, err)) return false;
             for (uint32_t g = 0; g < file.row_groups(); ++g) {
                 SkeneRangedFile::RowGroup rg;
                 if (!file.read(g, &rg, err)) return false;

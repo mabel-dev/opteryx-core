@@ -197,7 +197,7 @@ def test_no_embedding_kernel_is_refused(data_file, tmp_path):
         build_vector_index_local(data_file, "body", [], 0, 256, str(tmp_path / "v"), str(tmp_path / "c"))
 
 
-# --- a remote data file: read through range GETs (a signed URL in production) -------------
+# --- a remote data file: read through range GETs (gs:// + bearer header in production) ----
 
 
 def _serve_ranges(payload, requests):
@@ -216,8 +216,11 @@ def _serve_ranges(payload, requests):
 
         def do_GET(self):
             first, last = self.headers["Range"].removeprefix("bytes=").split("-")
-            first, last = int(first), min(int(last), len(payload) - 1)
-            requests.append(("GET", (first, last)))
+            if first == "":                  # a suffix range: the last `last` bytes
+                first, last = max(0, len(payload) - int(last)), len(payload) - 1
+            else:
+                first, last = int(first), min(int(last), len(payload) - 1)
+            requests.append(("GET", (first, last), self.headers.get("Authorization")))
             body = payload[first : last + 1]
             self.send_response(206)
             self.send_header("Content-Range", f"bytes {first}-{last}/{len(payload)}")
@@ -244,7 +247,36 @@ def test_a_remote_file_builds_the_same_files_through_range_gets(data_file, tmp_p
         server.shutdown()
     assert open(r_vec, "rb").read() == open(l_vec, "rb").read()
     assert open(r_cen, "rb").read() == open(l_cen, "rb").read()
-    assert requests and all(method == "GET" for method, _ in requests)
+    assert requests and all(method == "GET" for method, *_ in requests)
+
+
+def test_a_remote_file_is_read_with_the_given_authorization_header(data_file, tmp_path):
+    payload = open(data_file, "rb").read()
+    requests = []
+    server = _serve_ranges(payload, requests)
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/data.parquet"
+        (tmp_path / "local").mkdir()
+        (tmp_path / "remote").mkdir()
+        _, l_vec, l_cen = _build(data_file, tmp_path / "local")
+        _, r_vec, r_cen = _build(url, tmp_path / "remote", data_bytes=len(payload),
+                                 auth_header="Bearer t0k3n")
+    finally:
+        server.shutdown()
+    assert open(r_vec, "rb").read() == open(l_vec, "rb").read()
+    assert open(r_cen, "rb").read() == open(l_cen, "rb").read()
+    # The footer and every row group alike.
+    assert requests and all(auth == "Bearer t0k3n" for _, _, auth in requests)
+
+
+def test_a_gcs_data_file_without_an_authorization_header_is_refused(tmp_path):
+    fn, dims = _embed()
+    with pytest.raises(RuntimeError, match="no Authorization header"):
+        build_vector_index_local(
+            "gs://bucket/data.parquet", "body", [], fn, dims,
+            str(tmp_path / "v"), str(tmp_path / "c"), data_bytes=1024,
+        )
+    assert os.listdir(tmp_path) == []
 
 
 def test_a_remote_file_needs_its_size(tmp_path):
@@ -464,21 +496,22 @@ class _FakeGcsIO:
 def _gcs_build(monkeypatch, data_file, io):
     from types import SimpleNamespace
 
-    import opteryx.connectors.io_systems.gcs_filesystem as gcs_filesystem
+    import opteryx.connectors.opteryx_connector as opteryx_connector
     from opteryx.connectors.opteryx_connector import _build_index_on_gcs
     from opteryx.operators._operators import build_vector_index_to_session
 
     payload = open(data_file, "rb").read()
     reads = []
     reader = _serve_ranges(payload, reads)
-    signed = []
+    mapped = []
 
-    class _Signer:
-        def rewrite_to_signed_url(self, path, expiry_seconds):
-            signed.append((path, expiry_seconds))
-            return f"http://127.0.0.1:{reader.server_address[1]}/signed"
+    def _index_reads():
+        def readable(path):
+            mapped.append(path)
+            return f"http://127.0.0.1:{reader.server_address[1]}/f.parquet", "Bearer t0k3n"
+        return readable
 
-    monkeypatch.setattr(gcs_filesystem, "OpteryxGcsFileSystem", _Signer)
+    monkeypatch.setattr(opteryx_connector, "_index_reads", _index_reads)
     task = SimpleNamespace(
         data_file="gs://bucket/t/data/f.parquet", data_bytes=len(payload), deleted=(),
         vectors="gs://bucket/t/index/i/f-1.vectors.skene", centroids="gs://bucket/t/index/i/f-1.centroids.skene",
@@ -486,7 +519,7 @@ def _gcs_build(monkeypatch, data_file, io):
     fn, dims = _embed()
     options = dict(clusters=0, flush_rows=64, embed_threads=4, decode_workers=1, chunk_bytes=2 * _QUANTUM)
     try:
-        return task, signed, _build_index_on_gcs(io, task, "body", fn, dims, options, build_vector_index_to_session)
+        return task, mapped, reads, _build_index_on_gcs(io, task, "body", fn, dims, options, build_vector_index_to_session)
     finally:
         reader.shutdown()
         io.server.shutdown()
@@ -498,9 +531,10 @@ def test_gcs_build_composes_the_vectors_file_and_cleans_up(monkeypatch, big_file
     build_vector_index_local(big_file, "body", [], fn, dims, vectors_path, centroids_path,
                              flush_rows=64, embed_threads=1, decode_workers=1)
     io = _FakeGcsIO()
-    task, signed, built = _gcs_build(monkeypatch, big_file, io)
+    task, mapped, reads, built = _gcs_build(monkeypatch, big_file, io)
 
-    assert signed == [(task.data_file, 7 * 24 * 3600)]           # one URL, the longest life
+    assert mapped == [task.data_file]                             # never signed: a bearer header
+    assert reads and all(auth == "Bearer t0k3n" for _, _, auth in reads)
     assert io.body_path == f"{task.vectors}.body"
     assert sorted(io.objects) == sorted([task.vectors, task.centroids])   # parts deleted
     assert io.objects[task.vectors] == open(vectors_path, "rb").read()
@@ -522,6 +556,6 @@ def test_gcs_build_with_nothing_to_index_cancels_and_writes_nothing(monkeypatch,
     path = tmp_path / "empty.parquet"
     path.write_bytes(write_parquet(morsel))
     io = _FakeGcsIO()
-    _, _, built = _gcs_build(monkeypatch, str(path), io)
+    _, _, _, built = _gcs_build(monkeypatch, str(path), io)
     assert built is None
     assert io.cancelled == [io.uri] and io.objects == {} and io.session.puts == 0

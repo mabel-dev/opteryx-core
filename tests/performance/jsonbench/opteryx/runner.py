@@ -71,7 +71,7 @@ def shard_glob(paths: Iterable[str]) -> str:
     carry a stale shard over from a differently-sized past run.
 
     Hard links rather than SYMlinks specifically: opteryx's native directory lister
-    (opteryx/compiled/io/disk_reader.list_files_info, behind
+    (opteryx.compiled.nanobind.vectors.list_files_info, behind
     LocalFileSystem.list_files -> _resolve_glob_files) reports only regular files
     and silently skips symlinks, so a symlinked shard would vanish from the glob
     with no error -- verified directly. A hard link to a regular file IS a regular

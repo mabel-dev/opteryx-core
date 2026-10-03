@@ -7,7 +7,7 @@
 // those ops must be able to compile without CPython headers present, which is
 // what CLAUDE.md §2/§5 ("Draken must be able to execute without Python")
 // requires. bool_vector_from_bits returns a PyObject* and therefore belongs in
-// the shim/bridge layer next to _bool_vector_shim.pyx, not in core.
+// the shim/bridge layer next to bool_vector.pyx, not in core.
 #include <Python.h>
 #include <stdint.h>
 

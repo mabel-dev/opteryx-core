@@ -66,6 +66,10 @@ STATEMENTS = [
         ("SELECT * FROM $planets", 9, 20, None),
         ("SELECT * FROM testdata.astronauts", 357, 19, None),
         ("SELECT * FROM $one_row", 1, 1, None),
+        # READ_PARQUET is a FunctionDataset step compiled down the Parquet scan path;
+        # the scan compiler must not assume a table ScanStep (no `vector_search`).
+        ("SELECT * FROM READ_PARQUET('testdata/flat/formats/parquet/tweets.parquet')", 100000, 13, None),
+        ("SELECT * FROM READ_PARQUET('testdata/flat/formats/parquet/tweets.parquet') LIMIT 1", 1, 13, None),
         # `$no_table` is the pre-Sep-2026 name for `$one_row`; still resolves.
         ("SELECT * FROM $no_table", 1, 1, None),
         # `SHOW VARIABLES` is the SINGLE surface for session variables. The

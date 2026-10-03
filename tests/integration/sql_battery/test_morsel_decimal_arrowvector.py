@@ -29,7 +29,7 @@ def test_decimal_column_empty_and_take_empty():
     assert out.schema.names == ["d"]
 
     # DECIMAL128 keeps its declared (precision, scale) through to_arrow() even
-    # at zero rows: Vector.to_arrow()'s fallback (_vector_shim.pyx) resolves
+    # at zero rows: Vector.to_arrow()'s fallback (vector.pyx) resolves
     # the pyarrow type from the vector's own descriptor (build_arrow_type_for)
     # instead of inferring it from an empty to_pylist(), which pyarrow can't
     # do and used to silently collapse to pa.null().

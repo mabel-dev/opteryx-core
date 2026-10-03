@@ -195,7 +195,7 @@ void parse_extensions(nb::handle extensions_obj, std::vector<std::string>& stora
 
 }  // namespace
 
-NB_MODULE(disk_reader, m) {
+void register_disk_reader(nb::module_ &m) {
     m.def(
         "read_file",
         [](nb::str path, bool sequential, bool willneed, bool drop_after) {

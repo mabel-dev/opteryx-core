@@ -57,7 +57,7 @@ cdef extern from "core/string_slot.h" nogil:
                                   uint32_t length, uint32_t arena_offset) nogil
     void str_init_null(DrakenStringSlot* slot) nogil
 
-# Inline Py_DECREF helper — mirrors _vec_shim_decref in _vector_shim.pyx.
+# Inline Py_DECREF helper — mirrors _vec_shim_decref in vector.pyx.
 cdef extern from *:
     """static inline void _cd_decref(PyObject* op) { Py_DECREF(op); }"""
     void _cd_decref(PyObject* op)

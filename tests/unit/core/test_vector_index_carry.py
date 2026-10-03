@@ -84,10 +84,10 @@ def _recorder(origins, name="x"):
     return recorder
 
 
-def _carry(tmp_path, inputs, outputs, deleted=((), ()), locations=None, **kwargs):
+def _carry(tmp_path, inputs, outputs, deleted=((), ()), locations=None, auth_header="", **kwargs):
     _, dims = _embed()
     specs = [
-        (locations[k] if locations else vectors, size, list(deleted[k]))
+        (locations[k] if locations else vectors, size, list(deleted[k]), auth_header)
         for k, (vectors, size, _, _) in enumerate(inputs)
     ]
     vectors = [str(tmp_path / f"out{j}.vectors.skene") for j in range(len(outputs))]
@@ -151,15 +151,16 @@ def test_remote_inputs_carry_to_the_same_files(tmp_path, inputs):
     for vectors, _, _, _ in inputs:
         server = _serve_ranges(open(vectors, "rb").read(), requests)
         servers.append(server)
-        locations.append(f"http://127.0.0.1:{server.server_address[1]}/v.skene?X-Goog-Signature=x")
+        locations.append(f"http://127.0.0.1:{server.server_address[1]}/v.skene")
     try:
-        _, remote_vectors, remote_centroids = _carry(tmp_path / "remote", inputs, [origins], locations=locations)
+        _, remote_vectors, remote_centroids = _carry(tmp_path / "remote", inputs, [origins], locations=locations,
+                                                     auth_header="Bearer t0k3n")
     finally:
         for server in servers:
             server.shutdown()
     assert open(remote_vectors[0], "rb").read() == open(local_vectors[0], "rb").read()
     assert open(remote_centroids[0], "rb").read() == open(local_centroids[0], "rb").read()
-    assert requests and all(method == "GET" for method, _ in requests)
+    assert requests and all(m == "GET" and auth == "Bearer t0k3n" for m, _, auth in requests)
 
 
 def test_an_output_that_carries_nothing_gets_no_files(tmp_path, inputs):

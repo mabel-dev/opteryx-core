@@ -1049,14 +1049,17 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
         return set(self.table.vector_index_files(index_id, self.snapshot_id))
 
     def vector_search_indexes(self, index_id: str) -> dict:
-        """{data file path: (vectors, vectors bytes, centroids, centroids bytes)} for one
-        index at the snapshot this scan reads, each location one the native reader can
-        open (a signed URL for a remote file). A live file absent here is not covered yet
-        and is searched exactly."""
-        return {
-            path: (_readable(f.vectors), f.vectors_bytes, _readable(f.centroids), f.centroids_bytes)
-            for path, f in self.table.vector_index_files(index_id, self.snapshot_id).items()
-        }
+        """{data file path: (vectors, vectors bytes, centroids, centroids bytes, auth header)}
+        for one index at the snapshot this scan reads, each location one the native reader
+        can open with that header (see _index_reads). A live file absent here is not
+        covered yet and is searched exactly."""
+        readable = _index_reads()
+        out = {}
+        for path, f in self.table.vector_index_files(index_id, self.snapshot_id).items():
+            vectors, auth_header = readable(f.vectors)
+            centroids, _ = readable(f.centroids)
+            out[path] = (vectors, f.vectors_bytes, centroids, f.centroids_bytes, auth_header)
+        return out
 
 # REFRESH INDEX's maintenance lease (design §5.7): held for _LEASE_SECONDS and renewed
 # every _LEASE_RENEW_SECONDS while files build, so a crashed holder frees the table
@@ -1066,24 +1069,36 @@ _LEASE_RENEW_SECONDS = 120
 # A compaction's sink renews only between its stages (no timer thread outlives a failed
 # statement), so it claims the longest lease; one that dies holds the table for an hour.
 _COMPACTION_LEASE_SECONDS = 3600
-# A signed URL's longest life (GCS V4, and SigV4 presigning): one file's build can run
-# for hours.
+# A SigV4 presigned URL's longest life: one file's build can run for hours.
 _SIGNED_URL_SECONDS = 7 * 24 * 3600
 
 
-def _readable(path: str) -> str:
-    """A location the native skene readers can open: a local path as it is, a GCS or S3
-    object as a signed URL. Those readers send no auth header, and an hours-long read
-    cannot refresh a bearer token natively; a signed URL is its own credential."""
-    if path.startswith("gs://"):
-        from opteryx.connectors.io_systems import OpteryxGcsFileSystem
+def _index_reads():
+    """A function mapping an index or data file location to (the location the native
+    readers open, the Authorization header they send - "" for none).
 
-        return OpteryxGcsFileSystem().rewrite_to_signed_url(path, _SIGNED_URL_SECONDS)
-    if path.startswith("s3://"):
-        from opteryx.connectors.io_systems.s3_filesystem import OpteryxS3FileSystem
+    A gs:// object stays gs:// and is read with this process's bearer token, minted once
+    here and shared by every file the caller maps: GCS signing has no local key on Cloud
+    Run, so it is an IAM signBlob call the service account may not be allowed to make. The
+    token is not refreshed - a native read that outlives it fails on GCS's 401. An s3://
+    object is presigned (SigV4 signs locally) and needs no header; a local path is as is."""
+    bearer = None
 
-        return OpteryxS3FileSystem().rewrite_to_signed_url(path, _SIGNED_URL_SECONDS)
-    return path
+    def readable(path: str) -> tuple:
+        nonlocal bearer
+        if path.startswith("gs://"):
+            if bearer is None:
+                from opteryx.connectors.io_systems import OpteryxGcsFileSystem
+
+                bearer = OpteryxGcsFileSystem()._bearer
+            return path, bearer
+        if path.startswith("s3://"):
+            from opteryx.connectors.io_systems.s3_filesystem import OpteryxS3FileSystem
+
+            return OpteryxS3FileSystem().rewrite_to_signed_url(path, _SIGNED_URL_SECONDS), ""
+        return path, ""
+
+    return readable
 
 
 def _carry_on_gcs(io, specs, recorders, dims, targets, options, carry_to_sessions):
@@ -1151,9 +1166,9 @@ def _build_index_files(catalog, definition, data_file, data_bytes, deleted, vect
     """Build ONE data file's index files for `definition` - natively, GIL released - and
     return their IndexFiles, or None when the file has no indexable row (nothing written).
 
-    A data file on GCS is read through a signed URL and its vectors body streamed into a
-    resumable upload session: both are self-contained credentials that outlive an
-    hours-long build, which a bearer token would not."""
+    A data file on GCS is read with this process's bearer token (not refreshed: a build
+    that outlives it fails on GCS's 401) and its vectors body streamed into a resumable
+    upload session, whose URI is its own credential."""
     import os
 
     from opteryx_catalog.catalog.vector_indexes import IndexFiles
@@ -1283,15 +1298,13 @@ def _build_index_on_gcs(io, task, column, embed_fn, dims, build_options, build_t
     session while the build runs, then the prefix (known only at the end) is uploaded
     and the two are composed into the vectors file. Returns the build's dict, or None
     (nothing written) when the file has no indexable row."""
-    from opteryx.connectors.io_systems import OpteryxGcsFileSystem
-
-    url = OpteryxGcsFileSystem().rewrite_to_signed_url(task.data_file, _SIGNED_URL_SECONDS)
+    data_file, auth_header = _index_reads()(task.data_file)
     body, prefix = f"{task.vectors}.body", f"{task.vectors}.prefix"
     session = io.open_upload_session(body)
     try:
         built = build_to_session(
-            url, column, list(task.deleted), embed_fn, dims, session,
-            data_bytes=task.data_bytes, **build_options,
+            data_file, column, list(task.deleted), embed_fn, dims, session,
+            data_bytes=task.data_bytes, auth_header=auth_header, **build_options,
         )
     except BaseException:
         io.cancel_upload_session(session)
@@ -2622,10 +2635,12 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
             if remote:
                 raise NotSupportedError(f"Vector carry reads local or GCS files; {remote[0]} is neither.")
             specs = []
+            readable = _index_reads()
             for path in retired_files:
                 refs, deleted = inputs[path]
                 files = refs[index_id]
-                specs.append((_readable(files.vectors), files.vectors_bytes, list(deleted)))
+                location, auth_header = readable(files.vectors)
+                specs.append((location, files.vectors_bytes, list(deleted), auth_header))
             targets = [vector_index_paths(dataset.metadata.location, index_id, out) for out in outputs]
             options = dict(clusters=definition["clusters"], train_threads=threads)
             if all(out.startswith("gs://") for out in outputs):

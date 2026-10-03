@@ -6872,7 +6872,7 @@ NB_MODULE(draken_native, m) {
         // ----------------------------------------------------------------
         // null_count(): native null-row count via validity-bitmap popcount.
         // Replaces the is_null()-then-Python-sum() pattern (is_null() itself
-        // boxes the whole column via to_pylist() -- see _vector_shim.pyx) with
+        // boxes the whole column via to_pylist() -- see vector.pyx) with
         // one native pass; no per-row Python at all. validity == nullptr means
         // "all valid" (unified-format convention) -> 0 nulls, no bitmap touched.
         // Manual tail-byte masking (not a bare simd_popcount over the whole

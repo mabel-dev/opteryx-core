@@ -114,7 +114,7 @@ cpdef Morsel align_tables(Morsel left_morsel, Morsel right_morsel,
                            int32_t[::1] left_view, int32_t[::1] right_view)
 
 
-# S-B boundary bridges (defined in _morsel_shim.pyx) — cimportable by the operator
+# S-B boundary bridges (defined in morsel.pyx) — cimportable by the operator
 # chain so it can convert at the scan/cursor edges and during the gil-wrapped
 # transition. Cheap shallow copies (share column owners, not bytes).
 cdef shared_ptr[CxxMorsel] morsel_to_cxx(Morsel m)

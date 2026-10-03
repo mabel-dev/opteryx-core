@@ -9,7 +9,8 @@ Vector index search — one data file (docs/VECTOR_INDEX_DESIGN.md §8, D2).
 The entry point into src/cpp/engine/vector_index_search.hpp: embed the query text with the
 index's own embedder, score it against the file's stored vectors - every one when `nprobe`
 is 0 (exact, the default), only the `nprobe` nearest clusters' otherwise (approximate) -
-reading the vectors file locally or from a signed URL by range GETs, and return the file's
+reading the vectors file locally or remotely by range GETs (gs:// with `auth_header`, or
+a presigned URL), and return the file's
 top-k. One native call, GIL released. The library the vector search scan is built from,
 and how it is tested.
 """
@@ -27,6 +28,7 @@ cdef extern from "engine/vector_index_search.hpp" namespace "opteryx::engine" no
         uint64_t vectors_bytes
         string centroids
         uint64_t centroids_bytes
+        string auth_header
 
     cdef cppclass IndexSearchStats:
         uint32_t clusters
@@ -54,6 +56,7 @@ def search_vector_index_file(
     uint32_t nprobe,
     unsigned long long data_rows,
     list deleted=None,
+    str auth_header="",
 ):
     """The data file's top-`k` rows nearest `query` through its index: a list of
     (ordinal, cosine distance), nearest first, ties by ordinal; and the search's counts.
@@ -70,6 +73,7 @@ def search_vector_index_file(
     ref.vectors_bytes = vectors_bytes
     ref.centroids = centroids.encode("utf-8")
     ref.centroids_bytes = centroids_bytes
+    ref.auth_header = auth_header.encode("utf-8")
     cdef cppvector[uint32_t] c_deleted
     cdef uint32_t ordinal
     for ordinal in (deleted or ()):
@@ -154,7 +158,7 @@ cdef class VectorIndexAdmissionHandle:
                   uint32_t k, uint32_t nprobe):
         """`files`: (fetch path, filter fetch path, physical rows, deleted ordinals, index
         or None), where index = (vectors location, vectors bytes, centroids location,
-        centroids bytes). The filter fetch path is how the WHERE's pass-1 plan names the
+        centroids bytes, Authorization header for both - "" for none). The filter fetch path is how the WHERE's pass-1 plan names the
         file (it may be signed separately); pass the fetch path when there is no WHERE."""
         from draken.interop.vector_sequence import vector_from_sequence
 
@@ -176,6 +180,7 @@ cdef class VectorIndexAdmissionHandle:
                 c_files[i].index.vectors_bytes = <uint64_t>index[1]
                 c_files[i].index.centroids = (<str>index[2]).encode("utf-8")
                 c_files[i].index.centroids_bytes = <uint64_t>index[3]
+                c_files[i].index.auth_header = (<str>index[4]).encode("utf-8")
             i += 1
         cdef Morsel one = Morsel()
         one.append_vector(b"q", vector_from_sequence([query], dtype="VARCHAR"))

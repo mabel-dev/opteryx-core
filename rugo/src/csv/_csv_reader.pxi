@@ -89,7 +89,11 @@ cdef extern from "core/csv_column_builder.hpp" namespace "rugo::_csv":
         size_t                  max_threads
     ) except + nogil
 
-    object wrap_csv_column(ParsedCsvColumn& pc)
+
+# The Python edge: kept out of core/ so the CSV core compiles without Python.h.
+# NEW reference or NULL+exception; the caller takes it with _rugo_steal (rugo_native.pyx).
+cdef extern from "csv/_csv_column_wrap.hpp" namespace "rugo::_csv":
+    PyObject* wrap_csv_column(ParsedCsvColumn& pc) except NULL
 
 
 # Op code mapping: 0=EQ 1=NE 2=LT 3=LE 4=GT 5=GE
@@ -362,7 +366,7 @@ def read_csv(
     # ---- Wrap columns under GIL ----
     draken_vectors = []
     for i in range(stream_result.columns.size()):
-        draken_vectors.append(wrap_csv_column(stream_result.columns[i]))
+        draken_vectors.append(_rugo_steal(wrap_csv_column(stream_result.columns[i])))
 
     result['success']      = True
     result['column_names'] = output_col_names

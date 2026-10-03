@@ -25,6 +25,7 @@ cdef extern from "engine/vector_index_carry.hpp" namespace "opteryx::engine" nog
     cdef cppclass CarryInput:
         string vectors
         uint64_t vectors_bytes
+        string auth_header
         cppvector[uint32_t] deleted
 
     cdef cppclass CarryOutput:
@@ -130,15 +131,16 @@ cdef class RowOriginRecorder:
 cdef CarrySpec _carry_spec(list inputs, uint32_t dims, uint32_t clusters, uint32_t iterations,
                            uint32_t sample_per_cluster, unsigned long long seed, uint32_t flush_rows,
                            uint32_t train_threads):
-    """`inputs`: one (vectors location, vectors bytes, deleted ordinals) per input file, in
-    the order the recorded file indexes refer to."""
+    """`inputs`: one (vectors location, vectors bytes, deleted ordinals, Authorization
+    header - "" for none) per input file, in the order the recorded file indexes refer to."""
     cdef CarrySpec spec
     cdef uint32_t ordinal
     cdef size_t k = 0
     spec.inputs.resize(len(inputs))
-    for location, size, deleted in inputs:
+    for location, size, deleted, auth_header in inputs:
         spec.inputs[k].vectors = (<str>location).encode("utf-8")
         spec.inputs[k].vectors_bytes = <uint64_t>size
+        spec.inputs[k].auth_header = (<str>auth_header).encode("utf-8")
         for ordinal in deleted:
             spec.inputs[k].deleted.push_back(ordinal)
         k += 1

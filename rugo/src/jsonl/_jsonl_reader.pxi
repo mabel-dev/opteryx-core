@@ -182,8 +182,9 @@ cdef extern from "core/column_builder.hpp" namespace "rugo::_jsonl":
 
 
 # The Python edge: kept out of core/ so the JSONL core compiles without Python.h.
+# NEW reference or NULL+exception; the caller takes it with _rugo_steal (rugo_native.pyx).
 cdef extern from "jsonl/_jsonl_column_wrap.hpp" namespace "rugo::_jsonl":
-    object wrap_column(ParsedColumn& pc)
+    PyObject* wrap_column(ParsedColumn& pc) except NULL
 
 
 # Native mmap disk IO (src/cpp/disk_io.cpp) — same reader used by the Parquet path
@@ -635,7 +636,7 @@ cdef list _build_vectors(
     with nogil:
         parsed = parse_all_columns(buf_ptr, records, column_names, 0, may_esc, context)
     for pi in range(parsed.size()):
-        vec = wrap_column(parsed[pi])
+        vec = _rugo_steal(wrap_column(parsed[pi]))
         if vec is not None:
             vectors.append(vec)
         name = column_names[pi].decode('utf-8')

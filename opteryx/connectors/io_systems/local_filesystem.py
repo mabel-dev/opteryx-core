@@ -8,10 +8,10 @@ import os
 from typing import List
 from typing import Tuple
 
-# Compiled disk_reader is required — fail fast if unavailable
-from opteryx.compiled.io.disk_reader import list_directory
-from opteryx.compiled.io.disk_reader import list_files_info
-from opteryx.compiled.io.disk_reader import unmap_memory
+# Compiled disk IO (in the vectors module) is required — fail fast if unavailable
+from opteryx.compiled.nanobind.vectors import list_directory
+from opteryx.compiled.nanobind.vectors import list_files_info
+from opteryx.compiled.nanobind.vectors import unmap_memory
 
 
 class MemoryMappedFile:
@@ -24,7 +24,7 @@ class MemoryMappedFile:
 
     def __init__(self, path: str):
         """Initialize memory-mapped file."""
-        from opteryx.compiled.io.disk_reader import read_file_mmap
+        from opteryx.compiled.nanobind.vectors import read_file_mmap
 
         self.path = path
         self.mmap_obj = read_file_mmap(path)
@@ -107,7 +107,7 @@ class OpteryxLocalFileSystem:
 
     def list_files(self, base_dir: str, recursive: bool = True) -> list:
         """
-        Return a list of file paths under base_dir using compiled disk_reader.
+        Return a list of file paths under base_dir using the compiled directory lister (nanobind vectors module).
         """
         return [info.path for info in self.list_file_infos(base_dir, recursive)]
 
@@ -188,7 +188,7 @@ class OpteryxLocalFileSystem:
         """
         if not ranges:
             return []
-        from opteryx.compiled.io.disk_reader import read_file_ranges
+        from opteryx.compiled.nanobind.vectors import read_file_ranges
         return read_file_ranges(path, ranges)
 
     def stream_to(self, path: str, sink, chunk_size: int = 1 << 20) -> int:

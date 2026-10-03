@@ -43,6 +43,7 @@ void register_vector_string_search(nb::module_ &m);
 void register_vector_string_slice(nb::module_ &m);
 void register_vector_temporal_arith(nb::module_ &m);
 void register_vector_temporal_convert(nb::module_ &m);
+void register_disk_reader(nb::module_ &m);  // src/cpp/disk_reader_native.cpp
 
 NB_MODULE(vectors, m) {
     register_vector_accessors(m);
@@ -68,4 +69,5 @@ NB_MODULE(vectors, m) {
     register_vector_string_slice(m);
     register_vector_temporal_arith(m);
     register_vector_temporal_convert(m);
+    register_disk_reader(m);
 }

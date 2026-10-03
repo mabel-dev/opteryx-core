@@ -67,9 +67,10 @@ namespace opteryx::engine {
 using EmbedFn = VecResult (*)(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 
 struct VectorIndexBuildSpec {
-    // The parquet data file: a local path, or an https URL that carries its own credential
-    // (a signed URL — an hours-long build cannot refresh a bearer token natively).
+    // The parquet data file: a local path, or a gs:// object read with `auth_header` (a
+    // bearer token minted once by the caller; it is not refreshed during the build).
     std::string           data_path;
+    std::string           auth_header;         // Authorization for remote reads; empty = none
     int64_t               data_bytes = -1;     // its size (the manifest's); -1 = stat it (local)
     std::string           column;              // the indexed text column
     std::vector<uint32_t> deleted;             // ascending physical ordinals
@@ -252,11 +253,12 @@ struct TextReader {
     std::vector<int>                    string_type{DRAKEN_VARCHAR};
     NativeScanColumnBuilder             builder{};
 
-    TextReader(const std::string& p, const std::string& column, std::vector<ColumnStats> c,
-               uint32_t workers)
+    TextReader(const std::string& p, const std::string& auth_header, const std::string& column,
+               std::vector<ColumnStats> c, uint32_t workers)
         : path(p), names{column}, chunk(std::move(c)) {
         pool = std::make_unique<MemoryPool>(int64_t{64} << 20, "vector index build", true);
         pipeline = std::make_unique<rugo::ParquetIOPipeline>(static_cast<int>(workers), 64u);
+        if (!auth_header.empty()) pipeline->set_auth_header(auth_header);
         wire_pool_sink(pipeline.get(), pool.get());
         builder.pool = pool.get();
         builder.varchar_columns = &varchar_flag;
@@ -409,12 +411,18 @@ inline bool build_vector_index_file(const VectorIndexBuildSpec& spec, skene::Out
     // ── The footer: row groups, and the text column's chunk in each ──
     FileStats fs;
     try {
-        // A signed GET URL cannot answer a HEAD, so a remote file's size must be given.
+        // The manifest records every file's size, so a remote file's is given, never HEADed.
         if (spec.data_path.find("://") != std::string::npos && spec.data_bytes <= 0) {
             *err = "vector index build: a remote data file needs its size (data_bytes)";
             return false;
         }
-        const rugo::ParquetFooterResult footer = rugo::FetchParquetFooter(spec.data_path, spec.data_bytes);
+        if (spec.data_path.rfind("gs://", 0) == 0 && spec.auth_header.empty()) {
+            *err = "vector index build: " + spec.data_path + " is a gs:// object and no Authorization header was given";
+            return false;
+        }
+        std::vector<rugo::ParquetFooterResult> footers =
+            rugo::FetchParquetFootersMany({spec.data_path}, {spec.data_bytes}, spec.auth_header);
+        const rugo::ParquetFooterResult& footer = footers[0];
         fs = ReadParquetMetadataFromBuffer(footer.envelope.data(), footer.envelope.size());
     } catch (const std::exception& e) {
         *err = std::string("vector index build: cannot read the footer of ") + spec.data_path + ": " + e.what();
@@ -501,7 +509,7 @@ inline bool build_vector_index_file(const VectorIndexBuildSpec& spec, skene::Out
                 std::upper_bound(first_row.begin(), first_row.end(), ordinal) - first_row.begin()) - 1u;
             by_group[g].push_back(ordinal);
         }
-        TextReader reader(spec.data_path, spec.column, chunk, spec.decode_workers);
+        TextReader reader(spec.data_path, spec.auth_header, spec.column, chunk, spec.decode_workers);
         uint32_t pending = 0;
         for (uint32_t g = 0; g < row_groups; ++g) {
             if (by_group[g].empty()) continue;
@@ -550,7 +558,7 @@ inline bool build_vector_index_file(const VectorIndexBuildSpec& spec, skene::Out
     IvfFilesWriter files(trained, spec.dims, spec.flush_rows);
     if (!files.begin(body, out, err)) return false;
 
-    TextReader reader(spec.data_path, spec.column, chunk, spec.decode_workers);
+    TextReader reader(spec.data_path, spec.auth_header, spec.column, chunk, spec.decode_workers);
     std::vector<std::vector<uint8_t>> masks(row_groups);
     const uint32_t window = std::max(2u, spec.decode_workers * 2u);
     uint32_t submitted = 0;

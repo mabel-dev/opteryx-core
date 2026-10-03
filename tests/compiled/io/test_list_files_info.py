@@ -1,9 +1,3 @@
-import pytest
-
-ci = pytest.importorskip("opteryx.compiled.io")
-
-if not hasattr(ci, 'list_files_info') or not hasattr(ci, 'list_directory'):
-    pytest.skip("compiled io functions not available")
 
 
 def test_list_directory_and_files_info(tmp_path):
@@ -17,7 +11,7 @@ def test_list_directory_and_files_info(tmp_path):
     sub.mkdir()
     (sub / "c.txt").write_text("baz")
 
-    from opteryx.compiled.io import list_files_info, list_directory
+    from opteryx.compiled.nanobind.vectors import list_files_info, list_directory
 
     # Non-recursive directory listing
     entries = list_directory(str(base))
