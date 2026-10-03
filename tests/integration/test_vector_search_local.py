@@ -9,6 +9,8 @@ distance reported is always the EXACT one. What each test protects:
   * files the index does not cover are searched exactly, and EXPLAIN says how many;
   * deleted rows are never returned, nor rows with no embedding (NULL text) - from indexed
     and uncovered files alike, even when that leaves fewer than LIMIT rows;
+  * a WHERE is applied BEFORE the search (only its survivors are candidates): broad or
+    selective, indexed or not, the answer holds LIMIT rows whenever that many qualify;
   * every other shape is refused, never silently run exactly.
 """
 
@@ -48,6 +50,13 @@ def _approx(k, nprobe=None, extra=""):
     return _rows(
         f"SELECT id, APPROX_COSINE_DISTANCE(body, '{QUERY}') AS d FROM {TABLE} {extra} ORDER BY d LIMIT {k}",
         session,
+    )
+
+
+def _exact_where(k, where):
+    return _rows(
+        f"SELECT id, COSINE_DISTANCE(body, '{QUERY}') AS d FROM {TABLE} "
+        f"WHERE body IS NOT NULL AND ({where}) ORDER BY d LIMIT {k}"
     )
 
 
@@ -119,10 +128,26 @@ def test_rows_with_no_embedding_are_never_returned(env, build):
     assert all(d is not None for _, d in found)
 
 
+@pytest.mark.parametrize("build", ["sync", "async"])
+def test_a_where_is_applied_before_the_search(env, build):
+    _create(build=build)
+    where = "id >= 150 AND id < 750"
+    assert _approx(10, nprobe=100000, extra=f"WHERE {where}") == _exact_where(10, where)
+
+
+def test_a_selective_where_still_finds_every_qualifying_row(env):
+    """Five qualifying rows, scattered: the probe cannot be relied on to reach them, so
+    a file whose probe falls short of k is searched exactly over its survivors."""
+    _create()
+    where = "id IN (3, 170, 333, 512, 871)"
+    found = _approx(10, extra=f"WHERE {where}")                # the DEFAULT nprobe
+    assert found == _exact_where(10, where)
+    assert len(found) == len(_rows(f"SELECT id FROM {TABLE} WHERE {where} AND body IS NOT NULL"))
+
+
 @pytest.mark.parametrize(
     "sql, message",
     [
-        (f"SELECT id FROM {TABLE} WHERE id > 3 ORDER BY APPROX_COSINE_DISTANCE(body, 'x') LIMIT 3", "WHERE"),
         (f"SELECT id FROM {TABLE} ORDER BY APPROX_COSINE_DISTANCE(body, 'x')", "LIMIT"),
         (f"SELECT id FROM {TABLE} ORDER BY APPROX_COSINE_DISTANCE(body, 'x') DESC LIMIT 3", "NEAREST"),
         (f"SELECT id FROM {TABLE} ORDER BY APPROX_COSINE_DISTANCE(body, 'x'), id LIMIT 3", "one key"),

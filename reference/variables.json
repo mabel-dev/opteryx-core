@@ -475,6 +475,17 @@
         "default": null,
         "default_source": "host"
     },
+    "nprobe": {
+        "name": "nprobe",
+        "type": "INT64",
+        "owner": "USER",
+        "visibility": "UNRESTRICTED",
+        "settable": true,
+        "requires_entitlement": null,
+        "set_by": "any session",
+        "default": 0,
+        "default_source": "literal"
+    },
     "operating_system": {
         "name": "operating_system",
         "type": "VARCHAR",
