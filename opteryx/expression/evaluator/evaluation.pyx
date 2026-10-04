@@ -674,14 +674,18 @@ cdef extern from "core/lazy_region.h" nogil:
                                 uint32_t k, uint32_t n)
 
 # Function-pointer typedefs per Decision 3 (Phase 9 design, §Post-design)
-ctypedef VecResult (*binop_fn_t)(void* ctx, const DrakenVector* left, const DrakenVector* right) nogil
-ctypedef VecResult (*cast_fn_t)(void* ctx, const DrakenVector* v) nogil
+# `noexcept` is load-bearing: these point at C kernels that cannot raise, and
+# without it Cython wraps every call in __Pyx_ErrOccurredWithGIL() — a GIL take
+# per kernel call inside the nogil VM, which deadlocks the in-worker scan
+# prefilter against a scan close that holds the GIL.
+ctypedef VecResult (*binop_fn_t)(void* ctx, const DrakenVector* left, const DrakenVector* right) noexcept nogil
+ctypedef VecResult (*cast_fn_t)(void* ctx, const DrakenVector* v) noexcept nogil
 # ARRAY->VARCHAR (BC_C_NATIVE_CHILD): parent + owner-held child element vector.
 ctypedef VecResult (*cast_child_fn_t)(void* ctx, const DrakenVector* parent,
-                                      const DrakenVector* child) nogil
-ctypedef VecResult (*extr_fn_t)(void* ctx, const DrakenVector* v, const DrakenVector* key) nogil
-ctypedef VecResult (*func_fn_t)(void* ctx, const DrakenVector* const* args, uint32_t nargs) nogil
-ctypedef VecResult (*case_fn_t)(void* ctx, void* morsel) nogil
+                                      const DrakenVector* child) noexcept nogil
+ctypedef VecResult (*extr_fn_t)(void* ctx, const DrakenVector* v, const DrakenVector* key) noexcept nogil
+ctypedef VecResult (*func_fn_t)(void* ctx, const DrakenVector* const* args, uint32_t nargs) noexcept nogil
+ctypedef VecResult (*case_fn_t)(void* ctx, void* morsel) noexcept nogil
 
 # VecResult → Python Vector (VectorOwner) trampoline. Declared returning `object`
 # so Cython manages the new reference; honors validity_embedded + ts_unit, which a
@@ -2529,70 +2533,13 @@ cdef int _dv_filter_span_with_consts_cxx(
     return rc
 
 
-cdef int _dv_filter_and_mask_span_cxx(
-    BytecodeInstr* instrs, int count, const CxxMorsel* m,
-    int* col_idx, DrakenVector** lit_dv,
-    CxxMorsel** out_filtered, uint8_t* out_mask,
-    Py_ssize_t nbytes, uint32_t num_rows, int* err_op, const char** err_msg,
-) noexcept nogil:
-    """Scan pass-1 twin of _dv_filter_span_cxx: besides the filtered CxxMorsel it
-    ALSO copies the per-logical-row survival bitmap into out_mask (caller owns; nbytes
-    long). A row survives iff the predicate bit is set AND the row is non-NULL — the
-    mask is data-bitmap AND validity, matching cxx_mask_c's own drop semantics. Lets
-    the parquet scan produce mask_bytes without the GIL Morsel VM. rc/err_msg as
-    _dv_filter_span_cxx."""
-    cdef DrakenVector* dv_cache_inline[256]
-    cdef DrakenVector** dv_cache
-    cdef DrakenVector* dv_stack[64]
-    cdef DrakenVector  dv_store[64]
-    cdef int rc
-    cdef DrakenVector* mask_dv
-    cdef uint8_t* dense
-    cdef Py_ssize_t bi
-    cdef DrakenFrameArena* arena = draken_frame_arena_create()
-    cdef VecResult* child_vr = NULL
-    if arena == NULL:
-        err_op[0] = -99
-        err_msg[0] = NULL
-        return 99
-    dv_cache = _dv_cache_for(count, dv_cache_inline, arena)
-    if dv_cache == NULL:
-        draken_frame_arena_destroy(arena)
-        err_op[0] = -99
-        err_msg[0] = NULL
-        return 99
-    _dv_fill_cache_cxx(instrs, count, m, col_idx, lit_dv, dv_cache)
-    rc = c_execute_dv_inner(instrs, count, dv_cache, dv_stack, dv_store,
-                            arena, nbytes, num_rows, err_op, err_msg, &child_vr)
-    if rc == 0 and child_vr != NULL:
-        # See _dv_filter_span_cxx — structurally unreachable, fail loud not leak.
-        draken_vecresult_discard_c(child_vr)
-        err_op[0] = -97
-        err_msg[0] = NULL
-        rc = 97
-    elif rc == 0:
-        mask_dv = dv_stack[0]
-        dense = _ensure_dense_bitmap_c(mask_dv, nbytes, num_rows, arena)
-        if dense == NULL:
-            draken_frame_arena_destroy(arena)
-            err_op[0] = -99
-            err_msg[0] = NULL
-            return 99
-        memcpy(out_mask, dense, <size_t>nbytes)
-        if mask_dv.validity != NULL:
-            c_bitmap_and_inplace(out_mask, mask_dv.validity, <size_t>nbytes)
-        out_filtered[0] = cxx_mask_c(m, mask_dv)
-    draken_frame_arena_destroy(arena)
-    return rc
-
-
 # ── Pass-1 worker predicate (Q24 latmat) ────────────────────────────────────────
 # Run the c-native predicate over decoded pass-1 columns supplied as a DrakenVector*
 # ARRAY (not a CxxMorsel) and emit the survivor bitmap. Called from the rugo
 # io_pipeline decode workers through an opaque C fn-ptr handed over at registration
 # (get_pass1_eval_fn_ptr) — rugo stays opteryx-free (only draken's DrakenVector and
-# this pointer cross). Pure nogil, no PyObject. Mirrors _dv_filter_and_mask_span_cxx
-# but sources column DVs from `cols` and produces only the mask (the main thread
+# this pointer cross). Pure nogil, no PyObject. Sources column DVs from `cols`
+# and produces only the mask (the main thread
 # applies it to the shipped survivor columns for top-N).
 
 ctypedef struct Pass1PredCtx:
@@ -3323,78 +3270,6 @@ cdef int _dv_eval_span_cxx(
         draken_vecresult_discard_c(child_local)
     draken_frame_arena_destroy(arena)
     return rc
-
-
-cpdef object filter_morsel_c_native(CompiledBytecode bc, Morsel morsel):
-    """S3.2: evaluate an all-c-native predicate AND apply its mask in ONE nogil
-    span over the CxxMorsel — the predicate result DV* feeds straight into
-    cxx_mask_c, no Python BoolVector materialized, no nanobind mask crossing, one
-    GIL release for the whole filter. Returns the filtered (Cxx-backed) Morsel,
-    or None when not applicable (caller falls back to execute_bytecode +
-    filter_mask). Raises on a genuine C kernel error (rc 4)."""
-    cdef const CxxMorsel* m = morsel._cxx_ptr
-    if m == NULL or bc.count > 256:
-        return None
-    cdef Py_ssize_t num_rows = morsel.ptr.num_rows
-    if num_rows == 0:
-        return None
-    cdef int col_idx[256]
-    cdef DrakenVector* lit_dv[256]
-    cdef int err_op = 0
-    cdef const char* err_msg_ptr = NULL
-    cdef int rc
-    cdef CxxMorsel* filtered = NULL
-    if _dv_cxx_resolve_caches(bc, m, col_idx, lit_dv) != 0:
-        return None
-    with nogil:
-        rc = _dv_filter_span_cxx(bc.instrs, bc.count, m, col_idx, lit_dv, &filtered,
-                                 &err_op, &err_msg_ptr)
-    if rc == 0:
-        return cxx_to_morsel(shared_ptr[CxxMorsel](filtered))
-    if rc == 4 or rc == 96:
-        raise _kernel_error_exc(rc, err_msg_ptr)
-    # rc 1/2/3/5/99: signal the caller to use the Morsel VM + filter_mask path.
-    return None
-
-
-cpdef object predicate_filter_and_mask_c_native(CompiledBytecode bc, Morsel morsel):
-    """Parquet scan pass-1: for an all-c-native predicate, filter AND produce the
-    survival mask bytes in ONE nogil span — no GIL Morsel VM. Returns
-    (filtered_morsel, mask_bytes) where mask_bytes is the LSB-first per-row bitmap
-    (bit set = row survived), or None when not applicable (caller falls back to
-    execute_bytecode + filter_mask). Raises on a genuine C kernel error (rc 4)."""
-    cdef const CxxMorsel* m = morsel._cxx_ptr
-    if m == NULL or bc.count > 256:
-        return None
-    cdef Py_ssize_t num_rows = morsel.ptr.num_rows
-    if num_rows == 0:
-        return None
-    cdef Py_ssize_t nbytes = (num_rows + 7) >> 3
-    cdef int col_idx[256]
-    cdef DrakenVector* lit_dv[256]
-    cdef int err_op = 0
-    cdef const char* err_msg_ptr = NULL
-    cdef int rc
-    cdef CxxMorsel* filtered = NULL
-    cdef uint8_t* mask_buf
-    cdef object mask_bytes
-    if _dv_cxx_resolve_caches(bc, m, col_idx, lit_dv) != 0:
-        return None
-    mask_buf = <uint8_t*>draken_malloc(<size_t>(nbytes if nbytes > 0 else 1))
-    if mask_buf == NULL:
-        return None
-    with nogil:
-        rc = _dv_filter_and_mask_span_cxx(bc.instrs, bc.count, m, col_idx, lit_dv,
-                                          &filtered, mask_buf, nbytes,
-                                          <uint32_t>num_rows, &err_op, &err_msg_ptr)
-    if rc == 0:
-        mask_bytes = (<char*>mask_buf)[:nbytes]   # owned Python bytes copy
-        draken_free(mask_buf)
-        return (cxx_to_morsel(shared_ptr[CxxMorsel](filtered)), mask_bytes)
-    draken_free(mask_buf)
-    if rc == 4 or rc == 96:
-        raise _kernel_error_exc(rc, err_msg_ptr)
-    return None
 
 
 cdef Py_ssize_t _gil_run(

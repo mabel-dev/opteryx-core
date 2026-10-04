@@ -8,9 +8,7 @@
 // creation order at degree `dop` (run_pipeline, executor.hpp): breaker results hand
 // off natively (MorselBuffer for materialized morsels, Join2Ref for a hash-join
 // build table); the terminal pipeline streams into the production MorselQueue the
-// (Python) cursor drains. No Python runs inside run() — the one tracked exception
-// is StreamingScanSource's pull trampoline (see the engine_cutover_decisions memory:
-// interim debt until native_parquet_scan_source covers every scan shape).
+// (Python) cursor drains. No Python runs inside run().
 //
 // The builder API is deliberately index-based and flat (size_t handles, plain
 // vectors) so the Cython edge stays a dumb marshaller: all decisions — pipeline
@@ -48,7 +46,6 @@
 #include "runtime_bound.hpp"        // RuntimeKeyBound — runtime min/max join filter
 #include "native_scalar_guard.hpp"  // ScalarGuardSource — scalar-subquery cardinality
 #include "native_queue_sink.hpp"    // QueueSink/Global — the terminal output edge
-#include "streaming_scan_source.hpp"
 #include "trace.hpp"                 // TraceSpan/trace_begin/trace_drain — execution tracing
 
 namespace opteryx::engine {
@@ -882,10 +879,6 @@ public:
         op->band_lower_closed = lower_closed;
         op->band_upper_closed = upper_closed;
         add_op_(p, std::move(op));
-    }
-    void set_scan_source(size_t p, void* scan_ptr, ScanPullFn fn, bool serialize_pull) {
-        set_source_(p,
-            std::make_unique<StreamingScanSource>(scan_ptr, fn, serialize_pull));
     }
     // Zero-Python scan Source: workers pull decoded row groups straight from the
     // rugo IO pipeline — no GIL trampoline, no per-morsel thread attach. All the

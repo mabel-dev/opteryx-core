@@ -75,27 +75,6 @@ def compile_pipeline(plan: PhysicalPlan):
         if candidate.kind == "ExitNode":
             exit_node = candidate
 
-    # Lower and bind each ParquetReadNode's pushed-down predicate, exactly as
-    # compiler.py._compile_scan does for the native engine's StreamingScanSource
-    # path (same rewrite chain: CASE->IF_THEN_ELSE, BETWEEN->compares, decimal
-    # rescale). ParquetReadNode fails loud at execute() time if predicates are
-    # present with no compiled_predicate bound — that used to only happen on
-    # the native path, so this push pipeline (EXPLAIN ANALYZE / INSERT ... SELECT)
-    # crashed on any pushed-down scan predicate. One lowering, one rewrite chain,
-    # reused here rather than re-implemented.
-    for _nid, node in flat:
-        if node.kind != "ParquetReadNode":
-            continue
-        predicates = node.predicates
-        if not predicates or node.compiled_predicate is not None:
-            continue
-        from opteryx.managers.execution.compiler import _Compiler
-
-        _compiler = _Compiler(plan, None)
-        node.compiled_predicate = _compiler._lower_bytecode(
-            _compiler._compose_predicate_nodes(predicates)
-        )
-
     # Attach the shared context to every operator. Wire _downstream pointers.
     # Stamp each operator with the number of upstream input chains feeding it
     # (incoming-edge count) so multi-input operators (e.g. Union) gate their

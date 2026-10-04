@@ -95,6 +95,14 @@ class LimitFilesPruningStrategy(OptimizationStrategy):
             record_counts = node.manifest.record_counts()
             if any(count is None for count in record_counts):
                 return context
+            # record_count is PHYSICAL rows; a file's merge-on-read deleted rows
+            # supply nothing to the limit, so count only its live rows.
+            if node.manifest.has_deletes():
+                deletes = node.manifest.delete_positions()
+                record_counts = [
+                    count - len(deletes.get(path, ()))
+                    for count, path in zip(record_counts, node.manifest.get_file_paths())
+                ]
 
             # Sort file POSITIONS by row count descending, so the surviving set
             # can be handed to Manifest.subset.

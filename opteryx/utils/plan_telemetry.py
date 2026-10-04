@@ -419,11 +419,10 @@ def collect_plan_telemetry(plan: PhysicalPlan) -> dict:
 
             # Add telemetry-specific readings for reader nodes
             if node.is_scan:
-                # These may already be present from sensors() (self.readings — the
-                # trampoline scan's ScanReadings, flushed by close_source in the
-                # driver teardown). Only fall back to the connector-level telemetry
-                # object when sensors() gave nothing, so a real flushed reading is
-                # never clobbered back to 0. Bytes are deliberately absent from this
+                # These may already be present from sensors() (self.readings).
+                # Only fall back to the connector-level telemetry object when
+                # sensors() gave nothing, so a real reading is never clobbered
+                # back to 0. Bytes are deliberately absent from this
                 # fallback: the shared telemetry's only byte totals are query-wide
                 # (`billing_bytes`, plan-time logical; `io_bytes_fetched`, compressed
                 # IO), so neither can stand in for one node's bytes. Every scan node
@@ -431,7 +430,7 @@ def collect_plan_telemetry(plan: PhysicalPlan) -> dict:
                 for _k in ("rows_read", "blobs_read", "columns_read"):
                     if not node_stat.get(_k):
                         node_stat[_k] = getattr(node.telemetry, _k, 0)
-                # columns_read has no ScanReadings field — default to the READ
+                # columns_read has no reading of its own — default to the READ
                 # SET: the projection PLUS any column only a pushed predicate
                 # names (native scans override it from scan_facts below, and
                 # that is the same set they report). The projection alone is
@@ -456,19 +455,16 @@ def collect_plan_telemetry(plan: PhysicalPlan) -> dict:
                     if read_set:
                         node_stat["columns_read"] = len(read_set)
 
-                # Native scan path: the Cython ScanReadings above are all zero — the
-                # C++ engine scanned, not the Cython node. Overlay the real values:
-                # plan-time facts (files/row-groups/columns) harvested by identity,
-                # and rows/bytes from the native op-stat counters already overlaid
-                # onto this row above. native_scan_facts only carries native-path
-                # scans, so trampoline scans keep their own telemetry readings.
+                # Native scan path: the C++ engine scanned, not the plan node.
+                # Overlay the real values: plan-time facts (files/row-groups/columns)
+                # harvested by identity, and rows/bytes from the native op-stat
+                # counters already overlaid onto this row above.
                 native_scan_facts = node.telemetry._reading.get("native_scan_facts")
                 if native_scan_facts:
                     facts = native_scan_facts.get(node.identity)
                     if facts:
                         node_stat["files_read"] = facts["files_read"]
-                        # A blob == a file for the parquet scan; mirror files_read
-                        # (the Cython blobs_read counter is zero on the native path).
+                        # A blob == a file for the parquet scan; mirror files_read.
                         node_stat["blobs_read"] = facts["files_read"]
                         node_stat["row_groups_read"] = facts["row_groups_read"]
                         node_stat["row_groups_pruned"] = facts["row_groups_pruned"]

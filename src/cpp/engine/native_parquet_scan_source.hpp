@@ -986,7 +986,16 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
             if (fit == footer_map->end()) return n_items;
             const size_t rg_idx = static_cast<size_t>((*work_items)[w].second);
             if (rg_idx >= fit->second->row_groups.size()) return n_items;
-            cumulative += fit->second->row_groups[rg_idx].num_rows;
+            // A row admission (merge-on-read deletes) shrinks what a row group can
+            // contribute to its admitted rows; counting the footer's full row count
+            // would cap the frontier too early and return fewer rows than the LIMIT.
+            const std::vector<uint8_t>* am =
+                admission_ != nullptr ? admission_->mask((*work_items)[w].first,
+                                                         (*work_items)[w].second)
+                                      : nullptr;
+            cumulative += am != nullptr
+                              ? static_cast<int64_t>(std::count(am->begin(), am->end(), uint8_t{1}))
+                              : fit->second->row_groups[rg_idx].num_rows;
             if (cumulative >= row_limit) return i + 1;
         }
         return n_items;
@@ -1167,6 +1176,66 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
         pipeline->submit_block(path, rg_idxs, names, stats, masks, nested);
     }
 
+    // Zero-projection scan — no column is read and no predicate is pushed (a
+    // COUNT(*)-shaped read whose count the optimizer could not answer from
+    // statistics). Each row group's answer is its row count, which the footer
+    // already carries exactly: one zero-column morsel per row group, the count
+    // riding on `zero_col_rows`. No IO beyond the footers, no decode. Honours the
+    // runtime bound and a row admission (merge-on-read deletes: a masked row group
+    // counts its admitted rows) via item_index/kept, and a scan-pushed LIMIT,
+    // exactly like the decoding path.
+    SourceResult count_only_morsel(NativeParquetScanGlobal& g, MorselPtr& out, ErrCtx& err) {
+        if (prefilter_ || topn_boundary_ != nullptr) {
+            err.code = 1;
+            err.msg = "NativeParquetScanSource: a zero-column scan cannot carry a "
+                      "prefilter or top-N boundary";
+            return SourceResult::FINISHED;
+        }
+        if (footer_map == nullptr) {
+            err.code = 1;
+            err.msg = "NativeParquetScanSource: a zero-column scan needs the scan's footers";
+            return SourceResult::FINISHED;
+        }
+        std::lock_guard<std::mutex> lock(g.mtx);
+        while (g.next_to_submit < g.submit_cap) {
+            if (row_limit >= 0 && g.rows_emitted >= row_limit) break;
+            const auto& item = (*work_items)[static_cast<size_t>(g.item_index(g.next_to_submit))];
+            g.next_to_submit += 1;
+            auto fit = footer_map->find(item.first);
+            if (fit == footer_map->end()) {
+                err.code = 1;
+                err.msg = "NativeParquetScanSource: work item path missing from footer_map";
+                return SourceResult::FINISHED;
+            }
+            const size_t rg_idx = static_cast<size_t>(item.second);
+            if (rg_idx >= fit->second->row_groups.size()) {
+                err.code = 1;
+                err.msg = "NativeParquetScanSource: work item row group missing from its footer";
+                return SourceResult::FINISHED;
+            }
+            int64_t nrows = fit->second->row_groups[rg_idx].num_rows;
+            if (admission_ != nullptr) {
+                const std::vector<uint8_t>* am = admission_->mask(item.first, item.second);
+                if (am != nullptr)
+                    nrows = static_cast<int64_t>(std::count(am->begin(), am->end(), uint8_t{1}));
+            }
+            if (row_limit >= 0 && nrows > row_limit - g.rows_emitted)
+                nrows = row_limit - g.rows_emitted;
+            if (nrows <= 0) continue;
+            if (nrows > static_cast<int64_t>(UINT32_MAX)) {
+                err.code = 1;
+                err.msg = "NativeParquetScanSource: row group exceeds the 2^32-1 row morsel limit";
+                return SourceResult::FINISHED;
+            }
+            g.rows_emitted += nrows;
+            auto m = std::make_shared<CxxMorsel>();
+            m->zero_col_rows = static_cast<uint32_t>(nrows);
+            out = std::move(m);
+            return SourceResult::HAVE_MORE;
+        }
+        return SourceResult::FINISHED;
+    }
+
     SourceResult get_morsel(GlobalSourceState& gs, LocalSourceState&, MorselPtr& out,
                             ErrCtx& err) override {
         auto& g = static_cast<NativeParquetScanGlobal&>(gs);
@@ -1177,6 +1246,7 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
             err.msg = admission_err_buf.c_str();
             return SourceResult::FINISHED;
         }
+        if (column_names->empty()) return count_only_morsel(g, out, err);
         while (true) {
             int submit_start, submit_end;
             {

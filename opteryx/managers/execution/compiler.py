@@ -1001,9 +1001,7 @@ class _Compiler:
         # HeapSort branch to arm the GROUP BY -> ORDER BY/LIMIT top-k fusion.
         self._groupby_sinks: dict = {}
         # WP-INSTR (instrument 2): per-scan Source-type selection, keyed by scan
-        # node identity. "NativeParquetScanSource" == zero-Python native pull;
-        # "StreamingScanSource" == the GIL trampoline. Later work packages assert
-        # string/predicate scans migrate from the latter to the former.
+        # node identity: "NativeParquetScanSource" or "LatmatScanSource".
         self.scan_sources: dict = {}
         # WP-02: per-native-scan relocated residual filter, keyed by scan node
         # identity. When a pushed predicate is lowered to a c-native span and its
@@ -1019,20 +1017,15 @@ class _Compiler:
         # aggregate to be built with.
         self._coverage_requests: dict = {}
         self._coverage_seeds: dict = {}
-        # Per-native-scan plan-time facts, keyed by scan node identity. On the
-        # native path the Cython ParquetReadNode never executes, so its
-        # ScanReadings (row_groups_read/files_read/…) stay zero — these carry the
-        # real values, harvested into telemetry and overlaid by plan_telemetry.py.
+        # Per-native-scan plan-time facts, keyed by scan node identity
+        # (row_groups_read/files_read/…), harvested into telemetry and overlaid by
+        # plan_telemetry.py — the ParquetReadNode plan node never executes.
         self.scan_facts: dict = {}
         # Set when an approximate vector search's scan is compiled: its HeapSort (the
         # plan's only one, VectorSearchStrategy) drops rows with no distance.
-        # A0 acceptance gate: per-scan residual-reason code, keyed by scan node
-        # identity, recorded when a parquet scan falls back to the per-morsel
-        # Python trampoline (StreamingScanSource). The value is the stable string
-        # for WHICH `_native_scan_plan` guard fired (one of the R1..R7 codes — see
-        # that method). Parallel to `scan_sources`: every "StreamingScanSource"
-        # entry has exactly one reason here. Plan-time only; never touched per
-        # morsel. Folded into telemetry `_reading["scan_residual_reasons"]`.
+        # Per-scan residual-reason code, keyed by scan node identity: the stable
+        # string for WHICH `_native_scan_plan` guard declined the scan. Named in
+        # the refusal `_compile_scan` raises when neither native Source admits it.
         self.scan_residual_reasons: dict = {}
         # Wall time (ns) spent inside open_native_scan_plan's cold-cache footer
         # fetch/parse, summed across every scan this compile touches. This is
@@ -3882,19 +3875,10 @@ class _Compiler:
         from opteryx.operators._operators import bytecode_is_all_c_native
         from opteryx.variables import resolve as _resolve_var
 
-        if not scan.columns and not scan.predicates:
-            # R1: zero-projection, no predicate — a bare COUNT(*) shape with
-            # nothing to read and no filter to relocate. Note: this is NOT the
-            # common bare-`SELECT COUNT(*) FROM t` form — that short-circuits to
-            # a literal manifest-count response in the optimizer
-            # (StatisticsOnlyResponseStrategy) and never reaches a scan at all.
-            # This guard only fires when that rewrite couldn't apply (e.g. no
-            # manifest stats) and there is truly no column to admit a read-set
-            # from. A2 closes the WITH-predicate zero-projection shape below —
-            # read-set = role-3 predicate columns, emit-set = empty, row count
-            # rides on the ColumnSelectOperator's zero_col_rows degenerate path.
-            self.scan_residual_reasons[scan.identity] = "zero_projection"
-            return None
+        # R1 (CLOSED 2026-10-04): a zero-projection, no-predicate scan (a COUNT(*)
+        # shape the statistics-only rewrite could not answer) plans with an empty
+        # read set; NativeParquetScanSource answers it from the footer row counts
+        # with zero-column morsels — no column IO, no decode.
         # R2 (CLOSED): a scan-pushed LIMIT is now enforced natively —
         # NativeParquetScanSource carries `row_limit`, claims each morsel's share
         # under its global mutex, truncates the morsel that crosses the boundary,
@@ -4181,7 +4165,8 @@ class _Compiler:
         names) for open_native_scan_plan, ``request`` = [(aggregate identity,
         operand DrakenType value)] parallel to the needs. Refused - no row group
         is then answered from statistics, pruning is untouched - when no
-        aggregate directly above asked, the scan carries a LIMIT, any conjunct of its predicate
+        aggregate directly above asked, the scan carries a LIMIT or merge-on-read deletes
+        (footer statistics count the deleted rows), any conjunct of its predicate
         has no exact term (coverage_terms.py), or any column involved is in
         `retagged` - the physical names whose decode moves the stored value
         (each Source's own retags) - since its footer values are then not the
@@ -4191,6 +4176,8 @@ class _Compiler:
 
         registered = self._coverage_requests.get(scan.identity)
         if registered is None or scan.limit is not None:
+            return None, None
+        if scan.manifest is not None and scan.manifest.has_deletes():
             return None, None
         wanted, keys = registered
         terms = extract_coverage_terms(predicates)
@@ -4657,13 +4644,9 @@ class _Compiler:
         # than the single-pass path below, and when it declines the scan falls through
         # to that path, which is exactly the work the trampoline would have done for
         # the shapes it declines on. See `_latmat_scan_plan`.
-        # Merge-on-read deletes: the two zero-Python Sources below decode row
-        # groups entirely in C++ and know nothing about delete vectors, so a
-        # delete-bearing scan through either would serve deleted rows back.
-        # Decline both and fall through to StreamingScanSource, whose
-        # ParquetReadNode subtracts each file's delete vector per row group
-        # (see _apply_delete_filter). The fast paths can learn deletes later;
-        # a dataset with no delete debt — the overwhelming case — is untouched.
+        # Merge-on-read deletes: the single-pass native Source applies them as a
+        # row admission (DeleteAdmission — deleted rows are never decoded). The
+        # two-pass latmat Source has no admission, so it declines them.
         _scan_manifest = scan.manifest
         _scan_has_deletes = _scan_manifest is not None and _scan_manifest.has_deletes()
         # An approximate vector search (VectorSearchStrategy) runs on the single-pass
@@ -4700,7 +4683,7 @@ class _Compiler:
             # The predicate is fully applied in pass 1, and the Source emits the
             # projection directly — no relocated ExprFilter, no trailing Select.
             return p, emit_ids
-        splan = None if (_scan_has_deletes and not _vector_search) else self._native_scan_plan(scan)
+        splan = self._native_scan_plan(scan)
         if _vector_search and splan is None:
             from opteryx.exceptions import UnsupportedSyntaxError
 
@@ -4710,8 +4693,7 @@ class _Compiler:
             )
         if splan is not None:
             # Zero-Python Source: workers pull decoded row groups straight from
-            # the rugo IO pipeline (no GIL trampoline, no per-morsel attach).
-            # Same emit order and layout contract as the trampoline path below.
+            # the rugo IO pipeline (no per-morsel attach).
             self.scan_sources[scan.identity] = "NativeParquetScanSource"
             manifest = scan.manifest
             reloc = self._relocated_scan_filters.get(scan.identity)
@@ -4741,7 +4723,10 @@ class _Compiler:
             # only fires with no pushed predicate and no OFFSET.
             self.nplan.set_native_scan_source(p, splan, scan.limit)
             if _vector_search:
+                # The vector admission excludes deleted rows itself.
                 self._arm_vector_admission(p, scan, splan)
+            elif _scan_has_deletes:
+                self._arm_delete_admission(p, splan, manifest)
             # RUNTIME MIN/MAX JOIN FILTER (parquet): same record, same purpose and
             # same refusal semantics as skene_scan_pipelines above. The projection
             # is the right key set: a probe-side join key must be emitted by the
@@ -4767,35 +4752,35 @@ class _Compiler:
             # A vector index search decodes through row masks; the worker prefilter's
             # survivor gather assumes full-length predicate columns, so it is not armed
             # there - the relocated filter runs as a native ExprFilter instead.
-            if _vector_search or not self._arm_scan_prefilter(p, splan, filter_bc, read_layout, read_scs):
+            # Deletes decode through row masks the same way, so they keep the
+            # ExprFilter too.
+            if (_vector_search or _scan_has_deletes
+                    or not self._arm_scan_prefilter(p, splan, filter_bc, read_layout, read_scs)):
                 self.nplan.add_expr_filter(p, filter_bc, read_layout)
             if need_select:
                 self.nplan.add_select(p, emit_indices, emit_ids)
             return p, emit_ids
-        self.scan_sources[scan.identity] = "StreamingScanSource"
-        # Lower the pushed predicate HERE, at plan time, and hand the bytecode to the
-        # scan. The scan used to lower it itself at execute() time, bypassing this
-        # rewrite chain: CASE stayed on the GIL BC_CASE VM, and a decimal-column
-        # compare reached the c-native kernel with an off-scale literal, violating
-        # its same-type/same-scale contract and silently dropping rows
-        # (`d > 1.49` lost `1.50`). One lowering, one rewrite chain.
-        if scan.predicates:
-            scan.compiled_predicate = self._lower_scan_predicate(scan.predicates)
-        p = self.nplan.new_pipeline()
-        # A scan that is not concurrent-pull safe (two-pass latmat, fallback
-        # generator) gets its pull mutex-serialised inside the Source; the rest of
-        # the pipeline still runs at full dop. (Pinning these pipelines to dop 1
-        # was tried 2026-07-02 and REVERTED: parked pull-waiters cost nothing —
-        # sample counts blocked threads — while dop 1 serialised the downstream
-        # filter/sink work and regressed Q40-class queries ~2x.)
-        self.nplan.set_scan_source(p, scan, not scan.is_concurrent_pull_safe())
-        # The scan emits its projected columns in scan.columns order (the scan's own
-        # _sp_output_identity_order) and applies its pushed-down predicates itself.
-        # A zero-projection scan (bare COUNT(*)) is legal: it emits zero-column
-        # morsels whose row count rides on zero_col_rows.
-        layout = [col.schema_column.identity for col in (scan.columns or [])]
-        self._remember_types(scan.columns)
-        return p, layout
+        # No Python trampoline fallback (ruled 2026-10-03): a parquet scan neither
+        # native Source admits is REFUSED, naming the residual reason, until that
+        # reason is closed natively.
+        reason = self.scan_residual_reasons.get(scan.identity, "unrecorded")
+        _unsupported(
+            f"Reading {scan.relation} ({reason})",
+            "The native parquet reader cannot read this dataset yet",
+        )
+
+    def _arm_delete_admission(self, p, splan, manifest):
+        """Give a delete-bearing native scan its merge-on-read deletes as a row
+        admission (delete_admission.hpp): every delete-bearing file's deleted
+        ordinals, keyed by the fetch path its work items use."""
+        from opteryx.operators._operators import DeleteAdmissionHandle
+
+        files = [
+            (splan.fetch_paths.get(path, path), tuple(deleted))
+            for path, deleted in manifest.delete_positions().items()
+        ]
+        handle = DeleteAdmissionHandle(files)
+        self.nplan.set_native_scan_deletes(p, handle.address(), handle)
 
     def _arm_vector_admission(self, p, scan, splan):
         """Give a vector index search's native scan its row admission (D2,
@@ -6636,7 +6621,7 @@ class _Compiler:
 def compile_to_native(plan, pool=None):
     """Compile ``plan`` into a runnable ``(NativePlan, PyMorselQueue, scan_sources)``.
     ``scan_sources`` maps each parquet scan node identity to the Source it was wired
-    to ("NativeParquetScanSource" or "StreamingScanSource") — WP-INSTR instrument 2.
+    to ("NativeParquetScanSource" or "LatmatScanSource") — WP-INSTR instrument 2.
     Raises ``NotSupportedError`` at once — before anything runs — for any shape the
     native engine has no operator for.
 
@@ -6736,7 +6721,6 @@ def compile_to_native(plan, pool=None):
         # fold the body's plan-time facts into the facts this compile returns
         compiler.scan_sources.update(body_compiler.scan_sources)
         compiler.scan_facts.update(body_compiler.scan_facts)
-        compiler.scan_residual_reasons.update(body_compiler.scan_residual_reasons)
         compiler.footer_fetch_ns += body_compiler.footer_fetch_ns
         compiler.runtime_bounds_wired += body_compiler.runtime_bounds_wired
 
@@ -6770,8 +6754,7 @@ def compile_to_native(plan, pool=None):
         final_logical.append(_logical_tuple(ct))
     nplan.set_final_schema(final_names, final_types, final_logical)
     return (nplan, out_q, compiler.scan_sources, compiler.scan_facts,
-            compiler.scan_residual_reasons, compiler.footer_fetch_ns,
-            compiler.runtime_bounds_wired)
+            compiler.footer_fetch_ns, compiler.runtime_bounds_wired)
 
 
 def execute_native(plan, telemetry=None, trace_sink=None):
@@ -6838,7 +6821,7 @@ def execute_native(plan, telemetry=None, trace_sink=None):
     # reports actual compile cost, and time_engine_footer_fetch reports the IO
     # separately instead of one hiding inside the other's name.
     _compile0 = _t.perf_counter_ns()
-    (nplan, out_q, scan_sources, scan_facts, scan_residual_reasons,
+    (nplan, out_q, scan_sources, scan_facts,
      _footer_fetch_ns, _runtime_bounds_wired) = compile_to_native(plan, pool=pool)
     _compile_ns = _t.perf_counter_ns() - _compile0 - _footer_fetch_ns
     # WP-INSTR instrument 2: which Source each parquet scan selected (a plan-time
@@ -6855,12 +6838,6 @@ def execute_native(plan, telemetry=None, trace_sink=None):
         # filter was WIRED, that says what it was WORTH.
         if _runtime_bounds_wired:
             telemetry._reading["runtime_minmax_bounds_wired"] = _runtime_bounds_wired
-        # A0 acceptance gate: WHY each trampoline (StreamingScanSource) scan fell
-        # back — the stable R1..R7 reason code from _native_scan_plan, keyed by
-        # scan identity, parallel to scan_sources. Plan-time fact, always recorded
-        # (tiny dict), so a close-out chip can assert "reason Rx now shows zero".
-        if scan_residual_reasons:
-            telemetry._reading["scan_residual_reasons"] = dict(scan_residual_reasons)
         # Native-scan plan-time facts (files/row-groups/columns read), keyed by
         # scan identity — overlaid onto the scan's sensor row by plan_telemetry.py to
         # replace the always-zero ScanReadings fields on the native path.
@@ -6965,31 +6942,7 @@ def execute_native(plan, telemetry=None, trace_sink=None):
             if not _saw_finished:
                 out_q.wait_finished()
             _done_wait_ns = _t.perf_counter_ns() - _tw0
-            # Trampoline scans (StreamingScanSource) accumulate ScanReadings during
-            # next_morsel but only flush them into node.readings in close_source() —
-            # which the native engine's pull loop never calls (it just detects EOS).
-            # The driver is done (queue FINISHED, or wait_finished returned → every
-            # worker finished), so it is safe to close each scan on this thread:
-            # flush_into populates the readings sensors()/plan_telemetry read, and the source
-            # is released. Idempotent
-            # (close_source guards on _scan_finished), so scans that self-closed are
-            # untouched. Native-parquet scans have no ScanReadings to flush — their
-            # facts come from native_scan_facts — and their close_source is a no-op.
-            # IO diagnostics for trampoline scans must be read BEFORE close_source
-            # drops the source (and its IO pipeline) — collect them here, merged
-            # later with the native-scan diagnostics into one io_scan_diagnostics.
             _io_diags: list = []
-            _scans = getattr(nplan, "scans", None)
-            if _scans:
-                if telemetry is not None:
-                    for _scan in _scans:
-                        _io_fn = getattr(_scan, "io_diagnostics", None)
-                        if _io_fn is not None:
-                            _diag = _io_fn()
-                            if _diag:
-                                _io_diags.append(_diag)
-                for _scan in _scans:
-                    _scan.close_source()
             # Skene row-group SKIPPING is a run-time decision (the Source's claim
             # builder reads each file's footer statistics), so unlike parquet's
             # plan-time pruning its count does not exist when scan_facts is built.
@@ -7126,8 +7079,7 @@ def execute_native(plan, telemetry=None, trace_sink=None):
             # Per-scan IO-pipeline diagnostics (GCS/HTTP request count, retries,
             # latency histogram, worker_blocked_ns) — the scan network visibility.
             # Native scan plans are read here BEFORE close_scan_plans tears their
-            # pipelines down, and merged with the trampoline diagnostics collected
-            # above (before close_source) into one io_scan_diagnostics list.
+            # pipelines down, into one io_scan_diagnostics list.
             if telemetry is not None:
                 # Per-join build-side consolidation decisions. Same harvest point and
                 # the same reason as the scan diagnostics below: a native decision made

@@ -24,7 +24,6 @@ from draken.morsels.morsel cimport cxx_morsel_from_vectors_sp, cxx_select_sp
 from draken.morsels.cxx_morsel cimport CxxMorsel, MorselState, ErrCtx, cxx_morsel_new_eos, cxx_morsel_delete
 from draken.morsels.cxx_morsel cimport cxx_morsel_nbytes
 from draken.morsels.cxx_morsel cimport cxx_slice_c, cxx_hash_c, cxx_take_c, cxx_cast_column_c
-from draken.morsels.cxx_morsel cimport cxx_morsel_materialize_native_c
 from draken.vectors.bool_vector cimport BoolVector
 from draken.vectors.vector cimport Vector, mix_hash
 from draken.core.buffers cimport (
@@ -73,16 +72,6 @@ from opteryx.connectors.parquet_io.pool_reader cimport NativeScanPlan, ParquetIO
 from opteryx.compiled.structures.footer_cache cimport ParquetFooterMap
 from opteryx.compiled.structures.memory_pool cimport MemoryPool, CppMemoryPool
 
-# ScanPullFn: the streaming scan pull-on-demand callback. LIVE — ``_scan_pull_trampoline``
-# implements it and ``NativePlan.set_scan_source`` hands it to the engine. (The former
-# narrow ``native_engine_real_*`` wrappers and the ``run_real_*``/demo fused pipelines
-# that also used it were removed as dead code once the general ``NativePlan``/
-# ``native_plan_execute`` engine subsumed them.)
-ctypedef void (*ScanPullFn)(void* scan_ptr, shared_ptr[CxxMorsel]* out,
-                            int* finished, int* err_code) noexcept nogil
-
-cdef extern from "engine/streaming_scan_source.hpp" namespace "opteryx::engine" nogil:
-    pass  # makes StreamingScanSource's header available; the engine drives it via ScanPullFn
 # ---- THE ENGINE: the pipeline-graph runner (engine.hpp). The plan compiler
 # (opteryx/managers/execution/compiler.py — planning, Python) builds the graph through
 # the NativePlan builder edge (see below); execution is ONE detached native driver
@@ -115,7 +104,7 @@ cdef extern from "engine/native_sort.hpp" namespace "opteryx::engine" nogil:
 
 # The engine's general expression operators (native_expression.hpp): programs are
 # lowered + resolved at PLAN time; execution calls back into the pure-nogil spans
-# in evaluation.pyx through these C fn-pointer shapes (the ScanPullFn idiom).
+# in evaluation.pyx through these C fn-pointer shapes.
 ctypedef int (*ExprFilterFn)(void* instrs, int count, const CxxMorsel* m,
                              int* col_idx, void** lit_dv,
                              int* const_col_idx, void** const_scalar_dv, int n_consts,
@@ -434,7 +423,6 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                            size_t result, bint distinct, uint32_t max_iterations,
                            string name) except +
         void set_spill_root(string root)
-        void set_scan_source(size_t p, void* scan_ptr, ScanPullFn fn, bint serialize_pull)
         void set_native_skene_scan_source(size_t p,
                                           const cppvector[string]* files,
                                           const cppvector[string]* column_names,
@@ -758,8 +746,6 @@ cdef extern from "pythread.h":
 # Instruments 1 & 4 of the measurement harness. Times the wall-clock nanoseconds
 # spent inside the KNOWN execution-time ``with gil`` bodies and records which OS
 # thread entered which named site. The instrumented sites are:
-#   * ``_scan_pull_run``  — the scan-pull trampoline, entered once per morsel per
-#     worker for a StreamingScanSource.
 #   * ``_dispatch_push``  — BasePlanNode's DEFAULT push path, the "transitional
 #     gil-adapter" that re-acquires the GIL to decode the carrier to a Python
 #     Morsel and run ``_push_impl``. Entered once per morsel per operator on any
@@ -772,8 +758,8 @@ cdef extern from "pythread.h":
 #     on that path it nests INSIDE ``_dispatch_push``'s span, so its ns is counted
 #     twice in ``gil_held_ns``. Error path only, never the steady state.
 # Two derived readings:
-#   1. gil_held_ns  — summed over all sites; a native-gated numeric scan touches
-#      no execution Python and reports ~0, a trampoline scan reports clearly > 0.
+#   1. gil_held_ns  — summed over all sites; a native scan touches no execution
+#      Python and reports ~0.
 #   4. worker_gil_sites — the enumerated (thread, site) breakdown a purity guard
 #      checks: only whitelisted sites may appear; an empty list == zero
 #      execution-time Python ran on any worker.
@@ -802,7 +788,6 @@ cdef int _gil_instr_site_count = 0
 
 # Stable C string literals (static storage) — safe to stash the pointer and to
 # compare by pointer identity; each call-site passes the same constant.
-cdef const char* _SITE_SCAN_PULL = "_scan_pull_run"
 cdef const char* _SITE_STASH_EXC = "_stash_exc"
 cdef const char* _SITE_DISPATCH_PUSH = "_dispatch_push"
 
@@ -1515,21 +1500,6 @@ cdef class BasePlanNode:
         if close is not None:
             close()
 
-    cpdef bint is_concurrent_pull_safe(self) except *:
-        """May N worker threads call ``pull_one(self)`` (i.e. ``next_morsel``)
-        CONCURRENTLY and each receive a distinct morsel, with no external lock?
-
-        This is a CORRECTNESS capability, not a performance hint. The default is
-        ``False``: the base source iterates a non-reentrant Python generator
-        (``_next_morsel_py`` → ``read_morsels()``), so concurrent callers would
-        re-enter the same generator and crash (``generator already executing``)
-        or corrupt its state. Only a source whose ``next_morsel`` override is
-        genuinely reentrant (its own internal mutex hands each caller a disjoint,
-        already-decoded unit) may return ``True``. The parallel strategies use
-        this to decide between lockless self-pull and a serialised (locked) pull;
-        a ``False`` here forces the safe serialised path, never silent breakage."""
-        return False
-
     # ---- Pipeline wiring (called by pipeline_compiler) --------------------------
     cpdef void set_downstream(self, BasePlanNode node) except *:
         self._downstream = node
@@ -1783,81 +1753,6 @@ cdef class NativeFanoutHandle:
             self._args = NULL
 
 
-cdef void _scan_pull_run(void* scan_ptr, shared_ptr[CxxMorsel]* out,
-                         int* finished, int* err_code) noexcept with gil:
-    """WP-INSTR timing shim over the trampoline body. When the engine
-    instrumentation is disarmed this is a single branch straight into
-    ``_scan_pull_run_inner`` (the real GIL-held pull); when armed it brackets the
-    body with a monotonic clock so ``gil_held_ns`` / ``worker_gil_sites`` capture
-    every per-morsel, per-worker Python re-entry of the StreamingScanSource."""
-    cdef long long _t0
-    if not _gil_instr_enabled:
-        _scan_pull_run_inner(scan_ptr, out, finished, err_code)
-        return
-    _t0 = _instr_mono_ns()
-    _scan_pull_run_inner(scan_ptr, out, finished, err_code)
-    _instr_record(_SITE_SCAN_PULL, _instr_mono_ns() - _t0)
-
-
-cdef void _scan_pull_run_inner(void* scan_ptr, shared_ptr[CxxMorsel]* out,
-                               int* finished, int* err_code) noexcept:
-    """GIL-held body of the streaming Source trampoline — holds the Python locals a
-    nogil function cannot. Calls the existing native scan's ``next_morsel()`` ON
-    DEMAND. Skips EOS-state morsels internally (mirrors the demo bridges' pull loops)
-    so the C++ side only ever sees real data or genuine exhaustion. A raised exception
-    is recorded via ``err_code`` (1); the caller surfaces the real Python exception,
-    stashed on the scan node by the existing ``_take_exc``/``_cxx_push_exc``
-    contract, at the GIL boundary after the run."""
-    cdef shared_ptr[CxxMorsel] cxm
-    cdef object scan_obj
-    cdef object exc
-    try:
-        scan_obj = <object><PyObject*>scan_ptr
-        while True:
-            cxm = (<BasePlanNode>scan_obj).next_morsel()
-            if cxm.get() == NULL:
-                finished[0] = 1
-                err_code[0] = 0
-                return
-            if cxm.get().state == MorselState.END_OF_STREAM:
-                continue
-            # Strip any Python-object-backed column ownership before this morsel
-            # crosses into the C++ Source (StreamingScanSource::get_morsel's `out`):
-            # a fresh, plain-C++-owned copy has no py_deleter, so a concurrent
-            # worker tearing down a DIFFERENT pulled morsel can never race a
-            # Py_DECREF against this one under free-threaded builds. See
-            # cxx_morsel_materialize_native in draken/draken_native.cpp.
-            cxm = shared_ptr[CxxMorsel](cxx_morsel_materialize_native_c(cxm.get()))
-            out[0] = cxm
-            finished[0] = 0
-            err_code[0] = 0
-            return
-    except BaseException as exc:
-        finished[0] = 1
-        err_code[0] = 1
-        # Stash the real Python exception on the scan node so the consumer-side
-        # `build_terminal_exc` can re-raise it (rich traceback) instead of the
-        # synthetic "scan pull raised" RuntimeError. First exception wins; the
-        # `_ctx._exc` slot is preferred (matches `_take_exc`), else the node-local
-        # `_cxx_push_exc` fallback (a scan driven without a shared PipelineContext).
-        if scan_obj is not None:
-            if (<BasePlanNode>scan_obj)._ctx is not None:
-                if (<BasePlanNode>scan_obj)._ctx._exc is None:
-                    (<BasePlanNode>scan_obj)._ctx._exc = exc
-            elif (<BasePlanNode>scan_obj)._cxx_push_exc is None:
-                (<BasePlanNode>scan_obj)._cxx_push_exc = exc
-
-
-cdef void _scan_pull_trampoline(void* scan_ptr, shared_ptr[CxxMorsel]* out,
-                                int* finished, int* err_code) noexcept nogil:
-    """Native entry (matches ``ScanPullFn``) for ``StreamingScanSource`` — the REAL
-    (non-demo) cutover's streaming pull-on-demand callback, called from any worker
-    thread once per requested morsel. ``scan_ptr`` is a BORROWED ``PyObject*`` (the
-    caller's Python stack frame holds the real reference for the run's duration,
-    exactly like the slice 5a-d demo bridges' borrowed pointers)."""
-    _scan_pull_run(scan_ptr, out, finished, err_code)
-
-
 cpdef void push_one(BasePlanNode head, object morsel) except *:
     """Python-callable driver: push one Morsel (or EOS sentinel) into a chain
     head over the C++ carrier. The sanctioned Morsel→chain entry for Python
@@ -1876,23 +1771,6 @@ cpdef void push_one(BasePlanNode head, object morsel) except *:
     if err.code != 0:
         _exc = head._take_exc()
         raise _exc if _exc is not None else RuntimeError("pipeline push failed")
-
-
-cpdef object pull_one(BasePlanNode scan):
-    """Python-callable concurrent-pull entry: pull one morsel from `scan` and
-    return it as a Python Morsel, or None on exhaustion.
-
-    The sanctioned pull entry for the M4 morsel-driven scheduler's worker
-    threads. It calls the scan's typed `next_morsel()` override (the
-    thread-safe concurrent-pull path for single-pass parquet — N workers may
-    call this on the SAME scan and receive disjoint morsels), NOT the
-    `_next_morsel_py` generator wrapper (which is not reentrant). The pull
-    itself is GIL-held today (S-B.2 makes it nogil); the decode below is
-    parallel and the nogil ingest the puller feeds overlaps across workers."""
-    cdef shared_ptr[CxxMorsel] cxm = scan.next_morsel()
-    if cxm.get() == NULL:
-        return None
-    return cxx_to_morsel(cxm)
 
 
 # =====================================================================================
@@ -2746,7 +2624,6 @@ cdef class NativePlan:
     planning, not the hot path; every value crossing here is a plain int/float/bytes
     decided at plan time."""
     cdef Engine* _e
-    cdef public list scans   # BasePlanNode scan objects StreamingScanSource borrows
     cdef public list held    # CompiledBytecode programs (own instrs + literal vectors)
     cdef public list scan_plans  # NativeScanPlan objects NativeParquetScanSource borrows
     # SkeneScanPlan / SkeneLatmatScanPlan objects the skene Sources borrow
@@ -2763,7 +2640,6 @@ cdef class NativePlan:
 
     def __cinit__(self):
         self._e = new Engine()
-        self.scans = []
         self.held = []
         self.scan_plans = []
         self.skene_scan_plans = []
@@ -2953,15 +2829,6 @@ cdef class NativePlan:
                 "max_iterations": int(r.max_iterations),
             })
         return out
-
-    def set_scan_source(self, size_t p, scan, bint serialize_pull=False):
-        """Source = the existing native scan, pulled via the GIL trampoline — the ONE
-        tracked execution-path Python touch (see engine_cutover_decisions memory).
-        ``serialize_pull`` mutex-serialises the pull for scans that are not
-        concurrent-pull safe (two-pass latmat); operators/sink stay parallel."""
-        self.scans.append(scan)
-        self._e.set_scan_source(p, <void*><PyObject*>scan, _scan_pull_trampoline,
-                                serialize_pull)
 
     def set_native_postgres_scan_source(self, size_t p, PostgresScanPlan plan):
         """Source = the native PostgreSQL scan (NativePostgresScanSource): one
@@ -3679,6 +3546,13 @@ cdef class NativePlan:
         self.vector_admission_scans.append((scan_identity, holder))
         self._e.set_native_scan_admission(p, <RowAdmission*><void*>admission)
 
+    def set_native_scan_deletes(self, size_t p, size_t admission, object holder):
+        """Give pipeline `p`'s native parquet scan its merge-on-read deletes (a
+        DeleteAdmission's address): the rows it may decode, decided natively at
+        execution start. `holder` owns it and is held here for the run."""
+        self.held.append(holder)
+        self._e.set_native_scan_admission(p, <RowAdmission*><void*>admission)
+
     def set_native_scan_prefilter(self, size_t p, CompiledBytecode bc, list layout,
                                   list is_pred):
         """Scan prefilter (docs/PARQUET_SELECTIVE_DECODE_DESIGN.md §2.1): pipeline
@@ -4187,14 +4061,8 @@ def build_terminal_exc(NativePlan nplan, NativeErrorSlot errslot):
     the reader is looking at an engine error already (the class and the bracketed
     code say so), and leading with the internals pushed the part they can act on,
     the message, to the far right of the line."""
-    cdef object exc
-    cdef object scan_obj
     if errslot.code == 0:
         return None
-    for scan_obj in nplan.scans:
-        exc = (<BasePlanNode>scan_obj)._take_exc()
-        if exc is not None:
-            return exc
     # Code 2 (kErrCodeDataError, operator.hpp) marks a USER-FACING data error: the
     # native message is the complete, user-presentable text (e.g. the SQL-standard
     # "more than one row returned by a subquery used as an expression", or a CAST
@@ -4399,6 +4267,7 @@ include "skene_read/skene_read.pyx"
 include "postgres_read/postgres_read.pyx"
 include "null_reader/null_reader.pyx"
 include "parquet_read/parquet_read.pyx"
+include "parquet_read/delete_admission.pyx"
 include "set_variable/set_variable.pyx"
 include "show_columns/show_columns.pyx"
 include "show_grants/show_grants.pyx"

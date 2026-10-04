@@ -27,8 +27,8 @@
 
 namespace opteryx::engine {
 
-// Signatures of the Cython-side pure-nogil spans (passed in as C fn pointers, the
-// same idiom as ScanPullFn — the engine never links against the Cython module).
+// Signatures of the Cython-side pure-nogil spans (passed in as C fn pointers —
+// the engine never links against the Cython module).
 // `err_msg` (rc 4 only) is the failing kernel's VecResult::error_msg (see
 // draken/ops/vec_result.h) — a pointer into that thread's error_handling.cpp
 // buffer, valid only until the next kernel call on THIS thread. It is threaded

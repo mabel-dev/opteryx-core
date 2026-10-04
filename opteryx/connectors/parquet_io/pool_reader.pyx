@@ -1282,7 +1282,11 @@ cdef tuple _bloom_coalesce_policy(object coalesce_tuning):
 
 cdef list _prune_row_groups(const FileStats& fs, list predicates, str bloom_path,
                             double waste_ratio, int64_t max_bytes):
-    """Indices of `fs`'s row groups that survive the pushed `predicates`.
+    """Indices of `fs`'s row groups that hold rows and survive the pushed `predicates`.
+
+    A row group with num_rows == 0 is never kept: its column chunks may carry no
+    data page at all (BigQuery exports write a lone empty dictionary page), so
+    handing one to the decoder walks off the end of the chunk.
 
     Min/max first (`_rg_passes_predicates_native`), then bloom membership for the
     Eq/InList predicates — but only on the row groups min/max kept, and with the
@@ -1300,6 +1304,8 @@ cdef list _prune_row_groups(const FileStats& fs, list predicates, str bloom_path
     cdef size_t rg_i, ci, n_rg = fs.row_groups.size()
     cdef list keep = []
     for rg_i in range(n_rg):
+        if fs.row_groups[rg_i].num_rows == 0:
+            continue
         if not predicates or _rg_passes_predicates_native(fs.row_groups[rg_i], predicates):
             keep.append(rg_i)
     if bloom_path is None or not keep or not predicates:
@@ -2433,6 +2439,10 @@ cpdef IpcRowGroupSource open_ipc_source(
         if prefetched_footers and path in prefetched_footers:
             meta = prefetched_footers[path]
             for rg_idx, rg_meta in enumerate(meta.get("row_groups", [])):
+                # Empty row group: nothing to decode (see _prune_row_groups).
+                if rg_meta["num_rows"] == 0:
+                    src.pruned_row_group_count += 1
+                    continue
                 if predicates and not row_group_may_satisfy(rg_meta, predicates):
                     src.pruned_row_group_count += 1
                     continue
@@ -3341,7 +3351,10 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     cdef dict orig_to_cpp
     cdef str fetch_url
 
-    if ncols == 0 or len(expected_kinds) != ncols:
+    # An EMPTY read set is admitted: a zero-projection scan reads no column, so the
+    # per-column checks below are vacuous and only the path/footer checks apply —
+    # NativeParquetScanSource answers it from the footer row counts.
+    if len(expected_kinds) != ncols:
         return False
     for k in range(ncols):
         name = column_names[k]
