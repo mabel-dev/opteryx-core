@@ -30,6 +30,8 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), "../../..", "dev"))
 
 import pytest
 
+from opteryx.exceptions import NotSupportedError
+
 import native_residual_census as census  # dev/native_residual_census.py
 
 
@@ -53,8 +55,10 @@ def assert_scan_native(sql):
 # ---------------------------------------------------------------------------
 
 def test_residual_reasons_reachable():
-    """Each canonical query forces exactly its guard and tags the matching reason.
-    A reason may carry a `:<detail>` suffix, so match on the prefix.
+    """Each canonical query forces exactly its guard, is REFUSED (no trampoline
+    fallback, ruled 2026-10-03) and tags the matching reason.
+    The refusal message carries the reason (the census returns no reasons when the
+    query raises).
 
     HAND_SET holds one entry today — `footer_gate` via schema evolution, the last
     residual with a live SQL trigger. Written as a loop rather than a parametrize so
@@ -62,13 +66,10 @@ def test_residual_reasons_reachable():
     assertion instead of an empty parameter set, which pytest turns into a skip."""
     for expected_reason, sql in census.HAND_SET.items():
         sources, reasons, err = census.scan_residuals(sql)
-        assert err is None, f"{expected_reason}: query raised: {err}"
-        assert set(sources.values()) == {"StreamingScanSource"}, (
-            f"{expected_reason}: expected trampoline fallback, got sources={sources}")
-        observed = set(reasons.values())
-        assert any(
-            r == expected_reason or r.startswith(expected_reason + ":") for r in observed
-        ), f"expected residual reason {expected_reason!r}, got {sorted(observed)}"
+        assert isinstance(err, NotSupportedError), (
+            f"{expected_reason}: expected a refusal, got err={err!r} sources={sources}")
+        assert f"({expected_reason}" in str(err), (
+            f"{expected_reason}: refusal does not name the reason: {err}")
 
 
 def test_native_scan_records_no_residual():
@@ -670,33 +671,31 @@ def test_regex_predicate_now_native(predicate):
     assert reasons == {}, reasons
 
 
-def test_regex_predicate_survivor_count_matches_trampoline():
-    """Admitted natively is not enough — the regex must SELECT THE SAME ROWS. Runs
-    the native path against a forced-trampoline baseline in one process, so this
-    compares the two implementations rather than a hard-coded number."""
+def test_regex_predicate_survivor_count_matches_oracle():
+    """Admitted natively is not enough - the regex must SELECT THE SAME ROWS. The
+    trampoline baseline is gone (ruled 2026-10-03), so the oracle is a plain-Python
+    `re` count over the same column read through rugo."""
+    import re
+
     import opteryx
-    from opteryx.connectors.parquet_io import pool_reader
+    import rugo.parquet
 
     sql = "SELECT user_id FROM '%s' WHERE text RLIKE 'a'" % _REGEX_FLAT
 
-    def _count():
-        session = opteryx.session()
-        rows = sum(m.num_rows for m in session.execute_to_morsels(sql))
-        return rows, set(session.telemetry["scan_sources"].values())
+    session = opteryx.session()
+    native_rows = sum(m.num_rows for m in session.execute_to_morsels(sql))
+    native_src = set(session.telemetry["scan_sources"].values())
 
-    native_rows, native_src = _count()
-
-    original = pool_reader.native_scan_supported
-    pool_reader.native_scan_supported = lambda *a, **k: False
-    try:
-        tramp_rows, tramp_src = _count()
-    finally:
-        pool_reader.native_scan_supported = original
+    pattern = re.compile("a")
+    oracle_rows = 0
+    with rugo.parquet.read_parquet(_REGEX_FLAT + "/tweets.parquet", columns=["text"]) as reader:
+        for morsel in reader:
+            oracle_rows += sum(
+                1 for v in morsel.column("text") if v is not None and pattern.search(v))
 
     assert native_src == {"NativeParquetScanSource"}, native_src
-    assert tramp_src == {"StreamingScanSource"}, tramp_src
-    assert native_rows == tramp_rows, (native_rows, tramp_rows)
-    assert native_rows > 0, "predicate matched nothing — not a meaningful parity check"
+    assert native_rows == oracle_rows, (native_rows, oracle_rows)
+    assert native_rows > 0, "predicate matched nothing - not a meaningful parity check"
 
 
 # ---------------------------------------------------------------------------
