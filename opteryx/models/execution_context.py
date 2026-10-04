@@ -51,6 +51,11 @@ class ExecutionContext:
             Set only by the platform's own single-target work (a materialized
             view refresh, an OPTIMIZE), where the submitting service knows the
             one workspace involved and bills against it.
+        origin: str, optional
+            What caused this execution when the platform ran it on something's
+            behalf - `trigger`, `task`, `index-refresh` - as the submitting
+            service recorded it. None for caller-submitted SQL. Reported on the
+            billing events only; it grants and changes nothing.
     """
 
     query_id: str = None
@@ -65,6 +70,7 @@ class ExecutionContext:
     access_policies: List[dict] = field(default_factory=list)
     billing_account: str = None
     workspace: str = None
+    origin: str = None
 
     def __post_init__(self):
         """

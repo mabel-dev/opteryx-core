@@ -200,6 +200,31 @@ def test_billing_event_is_emitted_without_draining_the_result(monkeypatch):
     assert processed[0]["event_details"]["billing_bytes"] > 0
 
 
+@pytest.mark.parametrize("origin", [None, "trigger", "task"])
+def test_billing_events_carry_the_origin(monkeypatch, origin):
+    """Both events name what caused the run, so usage can be split into work
+    people ran and work the platform ran for them. Caller SQL carries None
+    rather than a default - absent IS the interactive case."""
+    events = []
+
+    import opteryx.query_session as query_session
+
+    monkeypatch.setattr(
+        query_session,
+        "write_billing_event",
+        lambda **kwargs: events.append(kwargs),
+    )
+
+    session = opteryx.session(origin=origin)
+    for _ in session.execute_to_morsels("SELECT * FROM testdata.astronauts"):
+        pass
+
+    kinds = {e["billing_event"] for e in events}
+    assert BillingEventType.QUERY_EXECUTION in kinds
+    assert BillingEventType.DATA_PROCESSED_BYTES in kinds
+    assert all(e["event_details"]["origin"] == origin for e in events)
+
+
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 

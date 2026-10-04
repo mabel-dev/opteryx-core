@@ -4043,8 +4043,9 @@ class _Compiler:
                                      footer_bytes_cache=scan_footer_bytes_cache()):
             # R7b: the footer gate (native_scan_supported) rejected the scan — schema
             # evolution, a row group whose types are not all eligible, or a remote path
-            # the filesystem could not sign (an unsigned remote fetch has no auth header
-            # and would 401 at execution time). Signable remote paths ARE admitted.
+            # the filesystem can neither sign nor authenticate by bearer header (its
+            # fetch would 401 at execution time). Signed or bearer remote paths ARE
+            # admitted.
             self.scan_residual_reasons[scan.identity] = "footer_gate"
             return None
         # Pruning triples — identical to the trampoline path's `_sp_predicate_stats`
@@ -4689,7 +4690,8 @@ class _Compiler:
 
             raise UnsupportedSyntaxError(
                 f"The vector index search over {scan.relation} needs the native parquet "
-                "scan, and this scan's columns or files are outside what it reads."
+                "scan, and this scan's columns or files are outside what it reads "
+                f"({self.scan_residual_reasons.get(scan.identity, 'no reason recorded')})."
             )
         if splan is not None:
             # Zero-Python Source: workers pull decoded row groups straight from

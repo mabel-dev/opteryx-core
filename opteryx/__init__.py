@@ -109,6 +109,7 @@ def session(
     billing_account: Optional[str] = None,
     workspace: Optional[str] = None,
     query_id: Optional[str] = None,
+    origin: Optional[str] = None,
 ) -> "Session":
     """
     Create and return a new `Session` object (the canonical execution object).
@@ -123,6 +124,13 @@ def session(
     refresh, an OPTIMIZE. Leave it unset for caller-submitted SQL: a query may
     read several workspaces and write another, so there is no one value to
     record and a guess would be recorded as fact.
+
+    `origin` is what caused this execution when the platform ran it on
+    something's behalf - `trigger` (a materialized view refresh), `task` (a
+    trigger-fired task run), `index-refresh` - as the submitting service
+    recorded it on the job. Leave it unset for caller-submitted SQL. It is
+    stamped on the billing events so usage can be split into work people ran
+    and work the platform ran for them; it changes nothing about execution.
 
     Example:
         session = opteryx.session(user="alice", memberships=["finance"])
@@ -140,6 +148,7 @@ def session(
         billing_account=billing_account,
         workspace=workspace,
         query_id=query_id,
+        origin=origin,
     )
 
 

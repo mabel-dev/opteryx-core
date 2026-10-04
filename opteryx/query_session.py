@@ -91,6 +91,7 @@ class Session(DataFrame):
         billing_account: Optional[str] = None,
         workspace: Optional[str] = None,
         query_id: Optional[str] = None,
+        origin: Optional[str] = None,
         **kwargs,
     ):
         # reject removed parameters explicitly
@@ -112,6 +113,8 @@ class Session(DataFrame):
             raise ProgrammingError("A Session billing_account must be a string.")
         if workspace and not isinstance(workspace, str):
             raise ProgrammingError("A Session workspace must be a string.")
+        if origin and not isinstance(origin, str):
+            raise ProgrammingError("A Session origin must be a string.")
         if memberships is None:
             # `public` — the group every caller is in by virtue of being a caller.
             # NOT a product/tenant name: a caller who supplied no memberships holds
@@ -138,6 +141,8 @@ class Session(DataFrame):
             # on behalf of one workspace", which is the normal case for caller
             # SQL. Defaulting it would assert a single target where there is none.
             workspace=workspace,
+            # NOT defaulted, for the same reason: absent means caller SQL.
+            origin=origin or None,
         )
 
         # Initialize cursor-like state (merged from previous Cursor implementation)
@@ -238,6 +243,11 @@ class Session(DataFrame):
                 "user": self.context.user,
                 "query_id": self.query_id,
                 "query": operation,
+                # What caused this run, when the platform ran it for something
+                # (a trigger, a task, an index refresh); None for caller SQL.
+                # In the event body rather than beside `actor`, so the billing
+                # ingest carries it with no schema change.
+                "origin": self.context.origin,
                 # THIS statement's relations, not the batch's. `operation` here
                 # is one statement's text (`_execute_statements` splits before
                 # calling), and this event is emitted once per statement, so the
@@ -273,6 +283,7 @@ class Session(DataFrame):
                 "user": self.context.user,
                 "query_id": self.query_id,
                 "query": operation,
+                "origin": self.context.origin,
                 "billing_bytes": self._telemetry.billing_bytes,
                 # The relations that figure was measured over. Emitted here as
                 # well as on QUERY_EXECUTION deliberately: this is the event

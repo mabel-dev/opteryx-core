@@ -3195,6 +3195,11 @@ cpdef NativeScanPlan open_native_scan_plan(
             # n_items > 0 is guaranteed: the zero-item plan returned above.
             _pool_workers = plan.n_items
         plan.pipeline_ptr = new ParquetIOPipeline(_pool_workers, 1024)
+    # The bearer credential for remote paths that were not pre-signed (the gate
+    # admitted them on it) - as every other pipeline constructor here sets it.
+    _auth = _native_auth_header(filesystem)
+    if _auth:
+        plan.pipeline_ptr.set_auth_header(_auth.encode("utf-8"))
     # Armed only when something is remote (see _any_remote_path); the window
     # above was validated either way.
     if fetch_ahead > 0 and _remote_scan:
@@ -3292,10 +3297,13 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     fallback data page anyway (measured: every numeric chunk in the test corpus
     lists dict+plain).
 
-    REMOTE paths are admitted when ``filesystem`` can sign them. A path is eligible
-    if it is local (the C++ IO opens it via ifstream) OR it rewrites to a signed
-    fetch URL; an unsignable remote path is rejected, because the pipeline's libcurl
-    fetches carry no auth header and would 401 at execution time. This gate is the
+    REMOTE paths are admitted when ``filesystem`` authenticates them natively. A path
+    is eligible if it is local (the C++ IO opens it via ifstream), OR it rewrites to a
+    signed fetch URL, OR the filesystem supplies a bearer header the C++ fetches attach
+    (`_native_auth_header`; GCS's default since bearer-token support landed in the
+    pipeline - its rewrite of gs:// to storage.googleapis.com is native). A remote path
+    with neither is rejected: its fetch would carry no credential and 401 at execution
+    time. This gate is the
     FIRST thing to touch footers — it warms `_PARSED_FOOTER_CACHE` (keyed by original
     path), which is why `open_native_scan_plan` afterwards does no network — so it
     acquires remote footers through the batched, shared-tier `_acquire_remote_footers`
@@ -3377,8 +3385,9 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     # a remote scan returns ZERO ROWS. If remote scans ever silently return nothing
     # again, check that macro before anything in this file.
     orig_to_cpp, _ = _sign_paths(filesystem, paths)
+    auth_header = _native_auth_header(filesystem)
     for path in paths:
-        if not _is_local_path(path) and path not in orig_to_cpp:
+        if not _is_local_path(path) and path not in orig_to_cpp and not auth_header:
             return False
 
     # Batched, shared-tier acquisition for every remote footer, so the per-path loop
@@ -3386,7 +3395,7 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     # gate — the first toucher of remote footers — pay one serial, GIL-held
     # round-trip per file.
     _acquire_remote_footers(paths, orig_to_cpp, file_sizes, footer_bytes_cache,
-                            NULL, None, _native_auth_header(filesystem))
+                            NULL, None, auth_header)
 
     # PROTOTYPE (2026-08-14, unratified) — H5: batch the LOCAL cold footers.
     # This gate is the FIRST toucher of local footers on the native path (it
