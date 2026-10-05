@@ -5,7 +5,11 @@
 #include <string>
 #include <cstdint>
 #include <optional>
+#include <cstring>
+#include <new>
+#include <utility>
 
+#include "alloc.h"
 #include "markers.hpp"
 #include "parse_context.hpp"
 
@@ -68,6 +72,100 @@ struct MapProjection {
     bool                             early_exit;
 };
 
+// A copied column's bytes (ColumnMap::arena): a growable buffer whose resize() leaves new
+// bytes uninitialised — every byte it grows by is written by the memcpy that follows, so
+// value-initialising them first (std::vector) was a second pass over the same bytes.
+// Copies are deep, as std::vector's were (the Cython edge copy-assigns InterpreterResult).
+class ByteArena {
+public:
+    ByteArena() = default;
+    ByteArena(const ByteArena& o) { assign_from(o); }
+    ByteArena& operator=(const ByteArena& o) {
+        if (this != &o) { n_ = 0; assign_from(o); }
+        return *this;
+    }
+    ByteArena(ByteArena&& o) noexcept : p_(o.p_), n_(o.n_), cap_(o.cap_) { o.p_ = nullptr; o.n_ = o.cap_ = 0; }
+    ByteArena& operator=(ByteArena&& o) noexcept {
+        if (this != &o) { draken_free(p_); p_ = o.p_; n_ = o.n_; cap_ = o.cap_; o.p_ = nullptr; o.n_ = o.cap_ = 0; }
+        return *this;
+    }
+    ~ByteArena() { draken_free(p_); }
+
+    size_t size() const { return n_; }
+    bool empty() const { return n_ == 0; }
+    uint8_t* data() { return p_; }
+    const uint8_t* data() const { return p_; }
+    void reserve(size_t c) { if (c > cap_) grow_to(c); }
+    void resize(size_t n) {
+        if (n > cap_) grow_to(n > 2 * cap_ ? n : 2 * cap_);
+        n_ = n;
+    }
+    void swap(ByteArena& o) noexcept { std::swap(p_, o.p_); std::swap(n_, o.n_); std::swap(cap_, o.cap_); }
+
+private:
+    void assign_from(const ByteArena& o) {
+        resize(o.n_);
+        if (o.n_) std::memcpy(p_, o.p_, o.n_);
+    }
+    void grow_to(size_t c) {
+        uint8_t* q = static_cast<uint8_t*>(draken_malloc(c));
+        if (q == nullptr) throw std::bad_alloc();
+        if (n_) std::memcpy(q, p_, n_);
+        draken_free(p_);
+        p_ = q;
+        cap_ = c;
+    }
+    uint8_t* p_ = nullptr;
+    size_t n_ = 0, cap_ = 0;
+};
+
+// Every position the parser stores — FieldSpan, the structural index, LineSpan — is a
+// uint32_t offset from the start of the buffer it was handed. So no buffer the parser walks
+// may be longer than this: a larger input is read as CHUNKS of at most this many bytes, each
+// cut after a newline, each walked from its own start (interpret_jsonl_threaded), and a
+// single line longer than this cannot be read at all (it throws std::length_error).
+inline constexpr size_t kMaxChunkBytes = UINT32_MAX;
+
+// Throws std::length_error unless `length` fits kMaxChunkBytes. `what` names the caller.
+void require_chunk_length(size_t length, const char* what);
+
+// The end of the chunk of [from, length) that starts at `from` (a line start): `length`
+// when the rest fits kMaxChunkBytes, else one past the last newline inside the first
+// kMaxChunkBytes. Throws std::length_error when that span holds no newline (one line
+// longer than kMaxChunkBytes).
+size_t chunk_end(const uint8_t* buffer, size_t from, size_t length);
+
+// What a column's spans index, row by row: chunk k's rows [row[k], row[k + 1]) index
+// base[k]. One entry for an input read as one chunk. A row walk goes through
+// for_each_chunk_run; anything else (an error report) uses at().
+struct SpanBases {
+    std::vector<size_t>         row;    // first row of each chunk; row[0] == 0
+    std::vector<const uint8_t*> base;
+
+    static SpanBases one(const uint8_t* b) { return SpanBases{{0}, {b}}; }
+    const uint8_t* at(size_t r) const {
+        size_t k = row.size() - 1;
+        while (row[k] > r) --k;
+        return base[k];
+    }
+};
+
+// Walk rows [begin, end) as runs that each lie in one chunk: fn(from, to, base) for every
+// non-empty run in order, `base` being what the run's spans index. fn returns false to stop
+// the walk. A one-chunk input is one run — the caller's inner loop is its plain loop over a
+// fixed base, with nothing added per row.
+template <class F>
+inline void for_each_chunk_run(const SpanBases& b, size_t begin, size_t end, F&& fn) {
+    size_t k = b.row.size() - 1;
+    while (b.row[k] > begin) --k;
+    for (size_t r = begin; r < end; ++k) {
+        const size_t stop = k + 1 < b.row.size() && b.row[k + 1] < end ? b.row[k + 1] : end;
+        if (stop == r) continue;   // an empty chunk
+        if (!fn(r, stop, b.base[k])) return;
+        r = stop;
+    }
+}
+
 // The column-major document map: for each output column, one span per surviving row —
 // the column's value in that row, or an ABSENT span (span_absent) when the record does not
 // carry it. Rows are records that are well-formed lines and pass every predicate, in input
@@ -80,23 +178,39 @@ struct MapProjection {
 // one dense array instead of striding the cold source buffer. An uncopied column's spans
 // index the source buffer. Which columns are copied changes no value, only where the
 // builders read it (head_copy_columns).
+//
+// An input read as several chunks (over kMaxChunkBytes): chunk k's rows start at
+// chunk_row[k], and their spans are offsets from chunk k's own start — chunk_src[k] in the
+// source, chunk_arena[c][k] in a copied column's arena — so every offset fits uint32_t.
+// All three are empty for an input read as one chunk, whose spans index the source (or
+// arena) from 0.
 struct ColumnMap {
     size_t rows = 0;
     std::vector<std::vector<FieldSpan>> cols;
-    std::vector<std::vector<uint8_t>> arena;   // per column: the copied values' bytes
+    std::vector<ByteArena> arena;              // per column: the copied values' bytes
     std::vector<uint8_t> copied;               // per column: 1 = spans index arena[c]
+    std::vector<size_t> chunk_row;
+    std::vector<size_t> chunk_src;
+    std::vector<std::vector<size_t>> chunk_arena;  // per column, per chunk
 
     // First malformed input, as RecordSet::malformed* (only consulted with fail_on_error).
+    // malformed_pos is an offset into the whole source.
     bool     malformed = false;
-    uint32_t malformed_pos = 0;
+    size_t   malformed_pos = 0;
     uint32_t malformed_count = 0;
 
     size_t num_records() const { return rows; }
 
-    // The bytes column `c`'s spans index: its arena when copied, else `source`.
-    const uint8_t* base(size_t c, const uint8_t* source) const {
-        if (!copied[c]) return source;
-        return arena[c].empty() ? reinterpret_cast<const uint8_t*>("") : arena[c].data();
+    // The bytes column `c`'s spans index, per chunk: its arena when copied, else `source`.
+    SpanBases bases(size_t c, const uint8_t* source) const {
+        const uint8_t* b = !copied[c] ? source
+            : arena[c].empty() ? reinterpret_cast<const uint8_t*>("") : arena[c].data();
+        if (chunk_row.empty()) return SpanBases::one(b);
+        SpanBases out{chunk_row, {}};
+        out.base.reserve(chunk_row.size());
+        for (size_t k = 0; k < chunk_row.size(); ++k)
+            out.base.push_back(b + (copied[c] ? chunk_arena[c][k] : chunk_src[k]));
+        return out;
     }
 };
 
@@ -200,7 +314,7 @@ struct RecordSet {
 // cut inside a string, unbalanced brackets and a second value on the line are still
 // rejected, whatever the projection.
 //
-// `lines` (the raw prefilter's survivors, prefilter_lines): when given, ONLY these lines —
+// `lines` (the raw prefilter's survivors, a filtered prefilter_plan_segments segment): when given, ONLY these lines —
 // ascending, each a whole line of the range — are input, and the bytes between them are
 // never scanned. Each line is begun at its own start, so the skipped bytes are never
 // judged by the line discipline, and the range ends with the last line.

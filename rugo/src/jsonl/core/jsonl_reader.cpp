@@ -1,6 +1,9 @@
 #include "jsonl_reader.hpp"
-#include "volnitsky.h"     // SPIKE: raw prefilter
+#include "volnitsky.h"     // simd_contains_cs (confirm step)
+#include "interpreter.hpp"  // require_chunk_length
 #include <cstring>
+#include <algorithm>
+#include <memory>
 #include <utility>
 
 namespace rugo::_jsonl {
@@ -33,40 +36,177 @@ std::vector<LineSpan> unicode_escape_lines(const uint8_t* buffer, size_t from, s
 
 }  // namespace
 
-std::vector<LineSpan> prefilter_lines(
-    const uint8_t* buffer, size_t from, size_t to,
-    const uint8_t* needle, size_t needle_len,
-    bool keep_unicode_escapes) {
-    std::vector<LineSpan> hits;
-    if (to < from + needle_len || needle_len < 2) return hits;
-    VolnitskyTable* t = volnitsky_alloc();
-    volnitsky_build(t, needle, needle_len);
+namespace {
 
-    // Single Volnitsky pass over the range: the bigram table skips ~needle_len-1 bytes
-    // across every non-matching window, so a rare needle leaps over whole records. On a
-    // hit, record the enclosing line and jump past it (one entry per line however many
-    // hits it holds).
-    for (size_t p = from + needle_len - 1; p < to; ) {
-        const uint16_t h = (static_cast<uint16_t>(buffer[p - 1]) << 8) | buffer[p];
-        const uint16_t k = t->entries[h];
-        if (!k) { p += needle_len - 1; continue; }
-        const size_t hs = p - k;
-        if (hs >= from && hs + needle_len <= to &&
-            std::memcmp(buffer + hs, needle, needle_len) == 0 &&
-            (hits.empty() || hs > hits.back().end)) {
-            hits.push_back(line_at(buffer, from, to, hs));
-            const size_t next = static_cast<size_t>(hits.back().end) + 1;  // past the matched line
-            p = next + needle_len - 1 > p ? next + needle_len - 1 : p + 1;
+// Multi-pattern Volnitsky over a clause's needles. W = the shortest needle's length (capped
+// at 256). EVERY bigram in the first W bytes of every needle is registered with its offset
+// (chained, not just the rightmost), so after a window's candidates are all verified the
+// scan may stride W-1 whatever the outcome: an occurrence at s covers bigram end positions
+// s+1 .. s+W-1, W-1 consecutive positions, and the stride lands on one of them.
+struct MultiTable {
+    struct Entry { uint32_t next; uint32_t needle; uint32_t offset; };
+    std::vector<uint32_t> head;   // bigram -> 1-based index into entries (0 = absent)
+    std::vector<Entry> entries;
+    size_t window = 0;
+    explicit MultiTable(const std::vector<std::string>& needles) : head(65536, 0) {
+        window = SIZE_MAX;
+        for (const std::string& n : needles) window = n.size() < window ? n.size() : window;
+        if (window > 256) window = 256;
+        for (uint32_t j = 0; j < needles.size(); ++j) {
+            const uint8_t* n = reinterpret_cast<const uint8_t*>(needles[j].data());
+            for (uint32_t i = 0; i + 1 < window; ++i) {
+                const uint16_t h = (static_cast<uint16_t>(n[i]) << 8) | n[i + 1];
+                entries.push_back({head[h], j, i});
+                head[h] = static_cast<uint32_t>(entries.size());
+            }
+        }
+    }
+};
+
+inline bool line_has_unicode_escape(const uint8_t* b, size_t ls, size_t le) {
+    for (size_t p = ls; p + 1 < le; ) {
+        const void* hit = std::memchr(b + p, '\\', le - p - 1);
+        if (hit == nullptr) return false;
+        const size_t q = static_cast<size_t>(static_cast<const uint8_t*>(hit) - b);
+        if (b[q + 1] == 'u') return true;
+        p = q + 1;   // as unicode_escape_lines: any `\u` byte pair counts (conservative)
+    }
+    return false;
+}
+
+inline bool line_has(const uint8_t* b, size_t ls, size_t le, const std::string& n) {
+    return simd_contains_cs(b + ls, le - ls, reinterpret_cast<const uint8_t*>(n.data()), n.size());
+}
+
+// Does line [ls, le) satisfy every clause after the driver?
+inline bool confirm_line(const uint8_t* b, size_t ls, size_t le, const PrefilterPlan& plan) {
+    for (size_t c = 1; c < plan.clauses.size(); ++c) {
+        const PrefilterClause& cl = plan.clauses[c];
+        bool ok = false;
+        for (const std::string& n : cl.needles) if (line_has(b, ls, le, n)) { ok = true; break; }
+        if (!ok && cl.keep_unicode_escapes) ok = line_has_unicode_escape(b, ls, le);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+// SIMD sieve driver: per needle, compare the two sieve bytes (the rarest on the sample) at
+// their offsets for 64 candidate starts at a time; verify candidates with memcmp. Touches
+// every byte (like the newline floor) at vector width, independent of needle length — the
+// better driver when needles are short and Volnitsky's stride (shortest needle - 1) is small.
+static void simd_driver(const uint8_t* buffer, size_t from, size_t to, const PrefilterPlan& plan,
+                        std::vector<LineSpan>& hits) {
+    const PrefilterClause& driver = plan.clauses[0];
+    const size_t k = driver.needles.size();
+    size_t maxlen = 0;
+    for (const auto& n : driver.needles) maxlen = n.size() > maxlen ? n.size() : maxlen;
+    // Verify a candidate start; on a hit decide its line and return the resume position.
+    auto verify = [&](size_t start, size_t& resume) -> bool {
+        for (const std::string& n : driver.needles)
+            if (start + n.size() <= to && std::memcmp(buffer + start, n.data(), n.size()) == 0) {
+                const LineSpan line = line_at(buffer, from, to, start);
+                if (confirm_line(buffer, line.start, line.end, plan)) hits.push_back(line);
+                resume = static_cast<size_t>(line.end) + 1;
+                return true;
+            }
+        return false;
+    };
+    size_t s = from;
+#if defined(__ARM_NEON)
+    while (s + 64 + maxlen <= to) {
+        uint8x16_t acc[4] = {vdupq_n_u8(0), vdupq_n_u8(0), vdupq_n_u8(0), vdupq_n_u8(0)};
+        for (size_t j = 0; j < k; ++j) {
+            const uint8_t* n = reinterpret_cast<const uint8_t*>(driver.needles[j].data());
+            const uint32_t a = plan.sieve[j].first, b = plan.sieve[j].second;
+            const uint8x16_t va = vdupq_n_u8(n[a]), vb = vdupq_n_u8(n[b]);
+            for (int q = 0; q < 4; ++q)
+                acc[q] = vorrq_u8(acc[q], vandq_u8(vceqq_u8(vld1q_u8(buffer + s + 16 * q + a), va),
+                                                   vceqq_u8(vld1q_u8(buffer + s + 16 * q + b), vb)));
+        }
+        if (vmaxvq_u8(vorrq_u8(vorrq_u8(acc[0], acc[1]), vorrq_u8(acc[2], acc[3]))) == 0) {
+            s += 64;
             continue;
         }
-        p += 1;
+        size_t resume = s + 64;
+        bool jumped = false;
+        for (int q = 0; q < 4 && !jumped; ++q) {
+            uint64_t m = vget_lane_u64(
+                vreinterpret_u64_u8(vshrn_n_u16(vreinterpretq_u16_u8(acc[q]), 4)), 0);
+            while (m) {
+                const unsigned L = static_cast<unsigned>(__builtin_ctzll(m) >> 2);
+                m &= ~(0xFull << (L << 2));
+                if (verify(s + 16 * q + L, resume)) { jumped = true; break; }
+            }
+        }
+        s = resume;
     }
-    volnitsky_free(t);
-    if (!keep_unicode_escapes) return hits;
+#endif
+    // Tail (and non-NEON builds): scalar sieve, one start at a time.
+    while (s < to) {
+        bool cand = false;
+        for (size_t j = 0; j < k && !cand; ++j) {
+            const std::string& n = driver.needles[j];
+            cand = s + n.size() <= to &&
+                   buffer[s + plan.sieve[j].first] == static_cast<uint8_t>(n[plan.sieve[j].first]) &&
+                   buffer[s + plan.sieve[j].second] == static_cast<uint8_t>(n[plan.sieve[j].second]);
+        }
+        size_t resume = s + 1;
+        if (cand) verify(s, resume);
+        s = resume;
+    }
+}
 
-    // Both lists are in buffer order with one entry per line, so a merge keeps line order
-    // and drops a line both passes found.
-    const std::vector<LineSpan> escapes = unicode_escape_lines(buffer, from, to);
+// The plan's surviving lines of [from, to) — one driver pass (SIMD sieve when `table` is
+// null, else Volnitsky over `table`), every other clause confirmed per line, then the
+// driver's `\u` lines merged in. `from` must be a line start.
+static std::vector<LineSpan> prefilter_span(
+    const uint8_t* buffer, size_t from, size_t to, const PrefilterPlan& plan,
+    const MultiTable* table) {
+    std::vector<LineSpan> hits;
+    const PrefilterClause& driver = plan.clauses[0];
+    if (table == nullptr) {
+        simd_driver(buffer, from, to, plan, hits);
+        goto escapes_merge;
+    }
+    {
+    const MultiTable& t = *table;
+    const size_t W = t.window;
+    const size_t stride = W - 1;   // W >= 2: the gate never admits a needle under kMinNeedle
+
+    for (size_t p = from + stride; p < to; ) {
+        const uint16_t h = (static_cast<uint16_t>(buffer[p - 1]) << 8) | buffer[p];
+        uint32_t e = t.head[h];
+        bool found = false;
+        size_t hs = 0;
+        while (e) {
+            const MultiTable::Entry& en = t.entries[e - 1];
+            e = en.next;
+            const size_t start = p - 1 - en.offset;
+            const std::string& n = driver.needles[en.needle];
+            if (start >= from && start + n.size() <= to &&
+                std::memcmp(buffer + start, n.data(), n.size()) == 0) {
+                found = true; hs = start; break;
+            }
+        }
+        if (!found) { p += stride; continue; }
+        const LineSpan line = line_at(buffer, from, to, hs);
+        if (confirm_line(buffer, line.start, line.end, plan)) hits.push_back(line);
+        p = static_cast<size_t>(line.end) + 1 + stride;   // past the decided line
+    }
+    }
+escapes_merge:
+    if (!driver.keep_unicode_escapes) return hits;
+
+    // Lines the driver keeps for their `\u` escapes, still subject to every other clause;
+    // merged in buffer order, one entry per line.
+    std::vector<LineSpan> escapes = unicode_escape_lines(buffer, from, to);
+    size_t kept = 0;
+    for (const LineSpan& l : escapes)
+        if (confirm_line(buffer, l.start, l.end, plan)) escapes[kept++] = l;
+    escapes.resize(kept);
+    if (escapes.empty()) return hits;
     std::vector<LineSpan> merged;
     merged.reserve(hits.size() + escapes.size());
     size_t i = 0, j = 0;
@@ -83,20 +223,65 @@ std::vector<LineSpan> prefilter_lines(
     return merged;
 }
 
-PrefilterResult volnitsky_prefilter(
-    const uint8_t* buffer, size_t length,
-    const uint8_t* needle, size_t needle_len,
-    bool keep_unicode_escapes) {
-    PrefilterResult r;
-    const std::vector<LineSpan> lines =
-        prefilter_lines(buffer, 0, length, needle, needle_len, keep_unicode_escapes);
-    r.candidates.reserve(length / 16);
-    for (const LineSpan& line : lines) {
-        r.candidates.insert(r.candidates.end(), buffer + line.start, buffer + line.end);
-        r.candidates.push_back('\n');
+namespace {
+
+// Line-aligned end at or after `target` within [.., to]: one past the newline, or `to`.
+inline size_t line_end_after(const uint8_t* buffer, size_t target, size_t to) {
+    if (target >= to) return to;
+    const void* nl = std::memchr(buffer + target, '\n', to - target);
+    return nl ? static_cast<size_t>(static_cast<const uint8_t*>(nl) - buffer) + 1 : to;
+}
+
+constexpr size_t kWindow = static_cast<size_t>(4) << 20;   // re-decided every 4MB
+constexpr size_t kProbe  = static_cast<size_t>(256) << 10; // the decision's sample per window
+
+}  // namespace
+
+std::vector<PrefilterSegment> prefilter_plan_segments(
+    const uint8_t* buffer, size_t from, size_t to, const PrefilterPlan& plan) {
+    require_chunk_length(to, "prefilter_plan_segments");   // LineSpan positions are uint32_t
+    const PrefilterClause& driver = plan.clauses[0];
+    // Driver: the SIMD sieve when the shortest needle is <= 16 bytes (Volnitsky's stride,
+    // shortest - 1, is then small), Volnitsky otherwise. NEON builds only: the crossover is
+    // measured on Apple Silicon (2026-10-05); no other target has data, so they keep
+    // Volnitsky.
+    size_t shortest = SIZE_MAX;
+    for (const auto& n : driver.needles) shortest = n.size() < shortest ? n.size() : shortest;
+#if defined(__ARM_NEON)
+    const bool auto_simd = shortest <= 16;
+#else
+    const bool auto_simd = false;
+#endif
+    const bool use_simd = !plan.sieve.empty() && auto_simd;
+    std::unique_ptr<MultiTable> table;
+    if (!use_simd) table = std::make_unique<MultiTable>(driver.needles);
+
+    // The gate judged the buffer's HEAD; data may be skewed (sorted, clustered). So each
+    // line-aligned 4MB window is re-judged on its own first 256KB: if the probe's survivors
+    // exceed 30% of its bytes the window is left UNFILTERED (parsed by the normal path)
+    // — a non-selective region costs one probe, not a driver pass plus the per-line parse.
+    // Adjacent windows of the same kind are coalesced into one segment.
+    std::vector<PrefilterSegment> out;
+    for (size_t wf = from; wf < to; ) {
+        const size_t we = line_end_after(buffer, wf + kWindow, to);
+        const size_t pe = line_end_after(buffer, wf + kProbe, we);
+        std::vector<LineSpan> probe = prefilter_span(buffer, wf, pe, plan, table.get());
+        size_t kept = 0;
+        for (const LineSpan& l : probe) kept += l.end - l.start + 1;
+        const bool filtered = kept * 10 <= (pe - wf) * 3;
+        if (out.empty() || out.back().filtered != filtered) out.push_back({wf, we, filtered, {}});
+        PrefilterSegment& seg = out.back();
+        seg.to = we;
+        if (filtered) {
+            seg.lines.insert(seg.lines.end(), probe.begin(), probe.end());
+            if (pe < we) {
+                const std::vector<LineSpan> rest = prefilter_span(buffer, pe, we, plan, table.get());
+                seg.lines.insert(seg.lines.end(), rest.begin(), rest.end());
+            }
+        }
+        wf = we;
     }
-    r.matched_records = lines.size();
-    return r;
+    return out;
 }
 
 }  // namespace rugo::_jsonl
@@ -115,15 +300,19 @@ namespace rugo::_jsonl {
 namespace {
 
 constexpr uint8_t kOpEq = 0;   // parse_context.hpp Predicate::op
+constexpr uint8_t kOpIn = 6;
+// Shortest needle armed: a quoted 2-byte value. Volnitsky needs a bigram, and a needle this
+// short strides 3 bytes — whether that beats parsing is the selectivity sample's call.
+constexpr size_t kMinNeedle = 4;
 
 // A nested `->>` predicate compares the field's DECODED text (value_parser.cpp
 // evaluate_nested_text): a JSON string unescaped, a number/boolean as its source token.
 // A literal made only of these bytes — none of which JSON requires escaping, and whose
 // only alternative spelling is a `\uXXXX` escape — therefore appears verbatim in every
-// matching record that has no `\u` escape, whichever JSON type holds it. The minimum
-// length matches the quoted top-level needle (6 bytes + 2 quotes): shorter won't pay off.
+// matching record that has no `\u` escape, whichever JSON type holds it. Length is not
+// judged here: kMinNeedle bounds the needle, and the selectivity sample decides the payoff.
 bool verbatim_safe(const std::string& v) {
-    if (v.size() < 6) return false;
+    if (v.empty()) return false;
     for (const unsigned char c : v) {
         const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
                         (c >= '0' && c <= '9') || c == '.' || c == '_' || c == ':' || c == '-';
@@ -275,22 +464,54 @@ std::string py_str_repr(const uint8_t* bytes, size_t length) {
     return out;
 }
 
-std::string malformed_error_message(const uint8_t* buffer, size_t length, uint32_t offset) {
-    const size_t limit = static_cast<size_t>(offset) < length ? static_cast<size_t>(offset) : length;
+std::string malformed_error_message(const uint8_t* buffer, size_t length, size_t offset) {
+    const size_t limit = offset < length ? offset : length;
     size_t line = 1;
     for (size_t i = 0; i < limit; ++i)
         if (buffer[i] == '\n') ++line;
     size_t snippet_end = offset;
     while (snippet_end < length && buffer[snippet_end] != '\n') ++snippet_end;
-    const size_t start = static_cast<size_t>(offset) < length ? static_cast<size_t>(offset) : length;
+    const size_t start = offset < length ? offset : length;
     size_t snippet_len = snippet_end > start ? snippet_end - start : 0;
     if (snippet_len > 200) snippet_len = 200;
     return "Malformed JSONL at line " + std::to_string(line) + " (byte offset " +
            std::to_string(offset) + "): " + py_str_repr(buffer + start, snippet_len);
 }
 
-bool choose_prefilter_needle(const uint8_t* buffer, size_t length, const ParseContext& context,
-                             PrefilterNeedle& out) {
+// The needle for string literal `v` on column `pred_column`, or false when it is not a
+// sound needle (see choose_prefilter_plan).
+static bool literal_needle(const uint8_t* buffer, size_t first_len, const std::string& column,
+                           const ColumnSpec& spec, const std::string& v, std::string& needle) {
+    if (spec.nested) {
+        // `->` yields JSON, never compared with a string literal here; `->>` compares
+        // decoded text — see verbatim_safe for why the unquoted value is sound.
+        if (spec.as_json || !verbatim_safe(v)) return false;
+        // Quoted unless a number/boolean token could hold it — see json_scalar_token.
+        needle = json_scalar_token(v) ? v : "\"" + v + "\"";
+        return needle.size() >= kMinNeedle;
+    }
+    // Top-level: only when the first record stores the column as a quoted (string) value.
+    // A bare numeric/bool value isn't quoted, so a quoted needle would false-negative.
+    std::string key;
+    key.reserve(column.size() + 3);
+    key.push_back('"');
+    key += column;
+    key += "\":";
+    const size_t ki = find_bytes(buffer, first_len,
+                                 reinterpret_cast<const uint8_t*>(key.data()), key.size());
+    if (ki == SIZE_MAX) return false;            // key absent / non-compact formatting
+    const size_t vpos = ki + key.size();
+    if (vpos >= first_len || buffer[vpos] != '"') return false;   // bare value: numeric hazard
+    needle.clear();
+    needle.reserve(v.size() + 2);
+    needle.push_back('"');
+    needle += v;
+    needle.push_back('"');
+    return needle.size() >= kMinNeedle;
+}
+
+bool choose_prefilter_plan(const uint8_t* buffer, size_t length, const ParseContext& context,
+                           PrefilterPlan& out) {
     // The first record, for the top-level stored-as-string probe. Bounded to 4KB — real
     // JSONL lines are far shorter than that.
     const size_t first_window = length < 4096 ? length : 4096;
@@ -298,78 +519,90 @@ bool choose_prefilter_needle(const uint8_t* buffer, size_t length, const ParseCo
     const size_t first_len = nl ? static_cast<size_t>(static_cast<const uint8_t*>(nl) - buffer)
                                 : first_window;
 
-    std::vector<PrefilterNeedle> candidates;
+    std::vector<PrefilterClause> clauses;
     for (const Predicate& pred : context.predicates) {
-        // `==` only: IN / NOT IN carry their members in `members`, not one value.
-        if (pred.op != kOpEq || !pred.members.empty()) continue;
-        // A string literal only. A non-string literal is a type mismatch against a string
-        // column, and prefiltering on it would drop every record before evaluate_predicate
-        // could raise.
-        if (pred.kind != LITERAL_STRING) continue;
+        // `=` (one literal) or IN (any of its members). Every literal must be a string: a
+        // non-string literal is a type mismatch against a string column, and prefiltering
+        // on it would drop every record before evaluate_predicate could raise.
+        std::vector<const Predicate*> literals;
+        if (pred.op == kOpEq && pred.members.empty()) literals.push_back(&pred);
+        else if (pred.op == kOpIn && !pred.members.empty())
+            for (const Predicate& m : pred.members) literals.push_back(&m);
+        else continue;
 
         const ColumnSpec spec = parse_column_spec(pred.column);
-        if (spec.nested) {
-            // `->` yields JSON, never compared with a string literal here; `->>` compares
-            // decoded text — see verbatim_safe for why the unquoted value is sound.
-            if (spec.as_json || !verbatim_safe(pred.value)) continue;
-            // Quoted unless a number/boolean token could hold it — see json_scalar_token.
-            candidates.push_back({json_scalar_token(pred.value) ? pred.value
-                                                                : "\"" + pred.value + "\"",
-                                  /*keep_unicode_escapes=*/true});
-            continue;
+        PrefilterClause clause;
+        clause.keep_unicode_escapes = spec.nested;
+        bool ok = true;
+        for (const Predicate* lit : literals) {
+            std::string needle;
+            if (lit->kind != LITERAL_STRING ||
+                !literal_needle(buffer, first_len, pred.column, spec, lit->value, needle)) {
+                ok = false; break;
+            }
+            clause.needles.push_back(std::move(needle));
         }
-
-        // Top-level: only when the first record stores the column as a quoted (string)
-        // value. A bare numeric/bool value isn't quoted, so a quoted needle would
-        // false-negative.
-        std::string key;
-        key.reserve(pred.column.size() + 3);
-        key.push_back('"');
-        key += pred.column;
-        key += "\":";
-        const size_t ki = find_bytes(buffer, first_len,
-                                     reinterpret_cast<const uint8_t*>(key.data()), key.size());
-        if (ki == SIZE_MAX) continue;            // key absent / non-compact formatting
-        const size_t vpos = ki + key.size();
-        if (vpos >= first_len || buffer[vpos] != '"') continue;   // bare value: numeric hazard
-
-        std::string needle;
-        needle.reserve(pred.value.size() + 2);
-        needle.push_back('"');
-        needle += pred.value;
-        needle.push_back('"');
-        if (needle.size() < 8) continue;         // short/low-entropy value: won't pay off
-        candidates.push_back({std::move(needle), /*keep_unicode_escapes=*/false});
+        if (ok) clauses.push_back(std::move(clause));
     }
-    if (candidates.empty()) return false;
+    if (clauses.empty()) return false;
 
-    // Selectivity sample on the first ~1MB: keep the candidate that hits the fewest sampled
-    // records; if even that one hits >30% there is little to skip — run the normal path
-    // instead of prefiltering.
+    // Selectivity sample on the first ~1MB: the clause hitting the fewest sampled records
+    // drives, the rest confirm; if the whole plan still keeps >30% there is little to skip —
+    // run the normal path instead of prefiltering.
     const size_t sample_len = length < 1000000 ? length : 1000000;
     size_t sample_lines = 0;
     for (size_t i = 0; i < sample_len; ++i) sample_lines += (buffer[i] == '\n');
-    const PrefilterNeedle* best = nullptr;
-    size_t best_matched = SIZE_MAX;
-    for (const PrefilterNeedle& c : candidates) {
-        const size_t matched = prefilter_lines(
-            buffer, 0, sample_len, reinterpret_cast<const uint8_t*>(c.needle.data()),
-            c.needle.size(), c.keep_unicode_escapes).size();
-        if (matched < best_matched) { best = &c; best_matched = matched; }
+    std::vector<std::pair<size_t, size_t>> rank;   // (sampled hits, clause index)
+    for (size_t c = 0; c < clauses.size(); ++c) {
+        PrefilterPlan one;
+        one.clauses.push_back(clauses[c]);
+        const MultiTable t(one.clauses[0].needles);
+        rank.push_back({prefilter_span(buffer, 0, sample_len, one, &t).size(), c});
     }
-    if (sample_lines > 0 && best_matched * 10 > sample_lines * 3) return false;
-    out = *best;
+    std::sort(rank.begin(), rank.end());
+    PrefilterPlan plan;
+    for (const auto& r : rank) plan.clauses.push_back(std::move(clauses[r.second]));
+    {
+        size_t hist[256] = {0};
+        for (size_t i = 0; i < sample_len; ++i) ++hist[buffer[i]];
+        for (const std::string& n : plan.clauses[0].needles) {
+            uint32_t a = 0, b = 1;
+            // two distinct positions with the lowest sample frequency
+            std::vector<uint32_t> idx(n.size());
+            for (uint32_t i = 0; i < n.size(); ++i) idx[i] = i;
+            std::sort(idx.begin(), idx.end(), [&](uint32_t x, uint32_t y) {
+                return hist[static_cast<uint8_t>(n[x])] < hist[static_cast<uint8_t>(n[y])]; });
+            a = idx[0];
+            for (size_t i = 1; i < idx.size(); ++i) if (n[idx[i]] != n[a] || i + 1 == idx.size()) { b = idx[i]; break; }
+            plan.sieve.push_back({a, b});
+        }
+    }
+    const size_t matched = plan.clauses.size() == 1
+        ? rank[0].first
+        : [&] { const MultiTable t(plan.clauses[0].needles);
+                return prefilter_span(buffer, 0, sample_len, plan, &t).size(); }();
+    if (sample_lines > 0 && matched * 10 > sample_lines * 3) return false;
+    out = std::move(plan);
     return true;
 }
 
 bool maybe_prefilter(const uint8_t* buffer, size_t length, const ParseContext& context,
                      std::vector<uint8_t>& out) {
-    PrefilterNeedle needle;
-    if (!choose_prefilter_needle(buffer, length, context, needle)) return false;
-    PrefilterResult r = volnitsky_prefilter(
-        buffer, length, reinterpret_cast<const uint8_t*>(needle.needle.data()),
-        needle.needle.size(), needle.keep_unicode_escapes);
-    out = std::move(r.candidates);
+    PrefilterPlan plan;
+    if (!choose_prefilter_plan(buffer, length, context, plan)) return false;
+    out.clear();
+    out.reserve(length / 16);
+    for (const PrefilterSegment& seg : prefilter_plan_segments(buffer, 0, length, plan)) {
+        if (!seg.filtered) {   // non-selective window(s): every byte, whole lines
+            out.insert(out.end(), buffer + seg.from, buffer + seg.to);
+            if (buffer[seg.to - 1] != '\n') out.push_back('\n');
+            continue;
+        }
+        for (const LineSpan& line : seg.lines) {
+            out.insert(out.end(), buffer + line.start, buffer + line.end);
+            out.push_back('\n');
+        }
+    }
     return true;
 }
 

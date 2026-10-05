@@ -44,6 +44,16 @@ size_t scan_structural_index(const uint8_t* data, size_t length, uint32_t base, 
 size_t scan_structural_index_cont(const uint8_t* data, size_t length, uint32_t base, uint32_t* out,
                                   uint64_t state[2]);
 
+// scan_structural_index restricted to what a reader that never looks INSIDE a top-level
+// container needs: every entry of the full index whose bracket depth (folded `{`/`[` vs
+// `}`/`]`, outside strings, counted from the line start and reset by each newline) is at
+// most 1 — before an opening bracket, after a closing one, or for any other marker. So a
+// top-level container keeps its opening and its matching closing bracket and loses
+// everything between, and newlines are always written. A depth walk from the opening
+// bracket (interpreter.cpp depth_walk) therefore stops at the same entry, with the same
+// position, as over the full index. `data` must begin at a line start.
+size_t scan_structural_index_top(const uint8_t* data, size_t length, uint32_t base, uint32_t* out);
+
 // The early-exit tail check (build_columns, interpreter.hpp). [data, data + length) is the
 // UNREAD rest of a record's line — from just after the value that finished the record to
 // the buffer end — entered OUTSIDE a string with `depth` brackets open. One pass finds the

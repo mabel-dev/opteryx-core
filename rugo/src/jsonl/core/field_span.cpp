@@ -1,6 +1,6 @@
 #include "field_span.hpp"
 #include "interpreter.hpp"
-#include "jsonl_reader.hpp"   // choose_prefilter_needle, prefilter_lines
+#include "jsonl_reader.hpp"   // choose_prefilter_plan, prefilter_plan_segments
 #include "nested_column.hpp"
 #include "value_parser.hpp"
 #include <algorithm>
@@ -14,14 +14,18 @@
 
 namespace rugo::_jsonl {
 
-// Single-range entry: build_columns over [range_start, buffer_length).
-InterpreterResult interpret_jsonl(
+namespace {
+
+// build_columns over [range_start, buffer_length), with the copied columns decided by the
+// caller (head_copy_columns) — over the whole input, so every chunk decides the same.
+InterpreterResult interpret_range(
     const uint8_t* buffer_data,
     size_t buffer_length,
     const ParseContext& context,
     const std::vector<std::string>& columns,
     size_t range_start,
-    const std::vector<LineSpan>* lines) {
+    const std::vector<LineSpan>* lines,
+    const std::vector<uint8_t>& copy) {
 
     InterpreterResult result;
     if (buffer_length == 0) { result.bytes_consumed = 0; return result; }
@@ -93,7 +97,6 @@ InterpreterResult interpret_jsonl(
                 break;
             }
 
-    const std::vector<uint8_t> copy = head_copy_columns(buffer_data, buffer_length, columns, context);
     const MapProjection proj{&wanted_cols, &prepared_predicates, &pred_slot, columns.size(), &copy,
                              /*early_exit=*/!context.projected_columns.empty()};
     ColumnMap map = build_columns(buffer_data, buffer_length, proj, range_start, lines);
@@ -113,10 +116,27 @@ InterpreterResult interpret_jsonl(
     return result;
 }
 
+}  // namespace
+
+// Single-range entry: build_columns over [range_start, buffer_length).
+InterpreterResult interpret_jsonl(
+    const uint8_t* buffer_data,
+    size_t buffer_length,
+    const ParseContext& context,
+    const std::vector<std::string>& columns,
+    size_t range_start,
+    const std::vector<LineSpan>* lines) {
+    require_chunk_length(buffer_length, "interpret_jsonl");
+    if (buffer_length == 0) return InterpreterResult{};
+    return interpret_range(buffer_data, buffer_length, context, columns, range_start, lines,
+                           head_copy_columns(buffer_data, buffer_length, columns, context));
+}
+
 // Multithreaded entry: split the buffer into newline-aligned ranges and map each in
 // parallel, then append the per-range columns in order. All threads share the one
-// read-only buffer; FieldSpan positions are absolute, so the merged columns reference that
-// single buffer (no per-chunk copies). max_threads == 0 means "use hardware_concurrency".
+// read-only buffer; FieldSpan positions are offsets from the start of the range's chunk
+// (ColumnMap), so the merged columns reference that single buffer (no per-chunk copies).
+// max_threads == 0 means "use hardware_concurrency".
 InterpreterResult interpret_jsonl_threaded(
     const uint8_t* buffer_data,
     size_t buffer_length,
@@ -130,9 +150,9 @@ InterpreterResult interpret_jsonl_threaded(
 
     // The prefilter gate decides ONCE, from bounded samples of the head; each range task
     // then finds its own surviving lines (see run_range).
-    PrefilterNeedle needle;
+    PrefilterPlan plan;
     const bool prefilter =
-        use_prefilter && choose_prefilter_needle(buffer_data, buffer_length, context, needle);
+        use_prefilter && choose_prefilter_plan(buffer_data, buffer_length, context, plan);
 
     size_t hw = std::thread::hardware_concurrency();
     if (hw == 0) hw = 1;
@@ -144,79 +164,127 @@ InterpreterResult interpret_jsonl_threaded(
     size_t max_chunks = std::max<size_t>(1, buffer_length / MIN_CHUNK);
     nt = std::min(nt, max_chunks);
 
-    // Interpret one newline-aligned range [s, e) of the shared buffer (build_columns scans
-    // it window by window). Prefiltered: find the range's surviving lines first;
-    // build_columns scans only those and begins each at its own start, so the skipped
-    // bytes are never parsed or judged.
-    auto run_range = [&](size_t s, size_t e) -> InterpreterResult {
-        std::vector<LineSpan> lines;
-        if (prefilter) {
-            lines = prefilter_lines(buffer_data, s, e,
-                                    reinterpret_cast<const uint8_t*>(needle.needle.data()),
-                                    needle.needle.size(), needle.keep_unicode_escapes);
-        }
-        // [s, e) is this range: build_columns judges its first and last lines against the
-        // range bounds, not the whole buffer's.
-        return interpret_jsonl(buffer_data, e, context, columns, s,
-                               prefilter ? &lines : nullptr);
+    // Chunks: the buffer is read in pieces of at most kMaxChunkBytes, each cut after a
+    // newline (chunk_end), because every position the parser stores is a uint32_t offset
+    // from the start of what it walks. Each range below lies inside one chunk and is walked
+    // from that chunk's start, so its spans are chunk-relative; the merge records where each
+    // chunk's rows begin (ColumnMap::chunk_row). An input of at most kMaxChunkBytes is one
+    // chunk at 0 — exactly the unchunked read.
+    std::vector<size_t> chunk_starts{0};
+    for (size_t at = chunk_end(buffer_data, 0, buffer_length); at < buffer_length;
+         at = chunk_end(buffer_data, at, buffer_length))
+        chunk_starts.push_back(at);
+    auto chunk_of = [&](size_t pos) {
+        return static_cast<size_t>(
+            std::upper_bound(chunk_starts.begin(), chunk_starts.end(), pos) - chunk_starts.begin() - 1);
     };
 
-    if (nt <= 1) {
-        // Small input — single-threaded scan + interpret.
-        return run_range(0, buffer_length);
-    }
+    // Which columns build_columns copies, decided once from the head of the whole input so
+    // every range — in every chunk — decides the same (head_copy_columns).
+    const std::vector<uint8_t> copy = head_copy_columns(buffer_data, buffer_length, columns, context);
 
-    // Newline-aligned ranges. Each range ends just after a newline, so every range
-    // holds whole lines. Any newline is a sound split, including a raw newline inside a
-    // string (the JSONBench defect, tests/performance/jsonbench/README.md): build_columns
-    // judges every line on its own, so the two halves of such a record are each rejected
-    // as malformed whichever range they land in.
+    // Interpret one newline-aligned range [s, e) of the shared buffer, inside chunk k
+    // (build_columns scans it window by window). Prefiltered: the range is cut into
+    // segments — a filtered one is scanned over its surviving lines only (each begun at its
+    // own start, so the skipped bytes are never parsed or judged), an unfiltered
+    // (non-selective) one by the normal path. One partial result per segment, merged in
+    // order below.
+    auto run_range = [&](size_t k, size_t s, size_t e) -> std::vector<InterpreterResult> {
+        const size_t c0 = chunk_starts[k];
+        const uint8_t* chunk = buffer_data + c0;
+        std::vector<InterpreterResult> parts;
+        if (!prefilter) {
+            // [s, e) is this range: build_columns judges its first and last lines against
+            // the range bounds, not the whole buffer's.
+            parts.push_back(interpret_range(chunk, e - c0, context, columns, s - c0, nullptr, copy));
+            return parts;
+        }
+        for (const PrefilterSegment& seg : prefilter_plan_segments(chunk, s - c0, e - c0, plan))
+            parts.push_back(interpret_range(chunk, seg.to, context, columns, seg.from,
+                                            seg.filtered ? &seg.lines : nullptr, copy));
+        return parts;
+    };
+
+    // Newline-aligned ranges. Each range ends just after a newline, so every range holds
+    // whole lines. Any newline is a sound split, including a raw newline inside a string
+    // (the JSONBench defect, tests/performance/jsonbench/README.md): build_columns judges
+    // every line on its own, so the two halves of such a record are each rejected as
+    // malformed whichever range they land in. A range that crosses a chunk start is cut
+    // there.
     std::vector<std::pair<size_t, size_t>> ranges;
-    ranges.reserve(nt);
-    size_t start = 0;
-    for (size_t i = 1; i < nt && start < buffer_length; ++i) {
-        size_t target = buffer_length * i / nt;
-        if (target <= start) continue;
-        size_t p = target;
-        while (p < buffer_length && buffer_data[p] != '\n') ++p;
-        if (p >= buffer_length) break;  // no more newlines; last range takes the rest
-        const size_t split = p + 1;
-        if (split >= buffer_length) break;  // rest of the buffer is one final range
-        ranges.push_back({start, split});
-        start = split;
-    }
-    if (start < buffer_length) ranges.push_back({start, buffer_length});
-
-    const size_t nc = ranges.size();
-    std::vector<InterpreterResult> partial(nc);
-
     {
-        BS::thread_pool<> pool(nt);
-        std::vector<std::future<void>> futs;
-        futs.reserve(nc);
-        for (size_t c = 0; c < nc; ++c) {
-            futs.push_back(pool.submit_task([&, c]() {
-                partial[c] = run_range(ranges[c].first, ranges[c].second);
-            }));
+        std::vector<std::pair<size_t, size_t>> even;
+        size_t start = 0;
+        for (size_t i = 1; i < nt && start < buffer_length; ++i) {
+            size_t target = buffer_length * i / nt;
+            if (target <= start) continue;
+            size_t p = target;
+            while (p < buffer_length && buffer_data[p] != '\n') ++p;
+            if (p >= buffer_length) break;  // no more newlines; last range takes the rest
+            const size_t split = p + 1;
+            if (split >= buffer_length) break;  // rest of the buffer is one final range
+            even.push_back({start, split});
+            start = split;
         }
-        // Drain EVERY future before propagating: a range can throw (a predicate literal
-        // that does not fit a value — evaluate_predicate), and rethrowing on the first
-        // while other ranges still run would leave them reading this frame's locals
-        // (ranges, partial, context) after it unwinds.
-        std::exception_ptr first_exc;
-        for (auto& f : futs) {
-            try {
-                f.get();
-            } catch (...) {
-                if (!first_exc) first_exc = std::current_exception();
+        if (start < buffer_length) even.push_back({start, buffer_length});
+        for (const auto& [s, e] : even) {
+            size_t a = s;
+            for (size_t k = chunk_of(s) + 1; k < chunk_starts.size() && chunk_starts[k] < e; ++k) {
+                ranges.push_back({a, chunk_starts[k]});
+                a = chunk_starts[k];
             }
+            ranges.push_back({a, e});
         }
-        if (first_exc) std::rethrow_exception(first_exc);
     }
+
+    std::vector<InterpreterResult> partial;
+    std::vector<size_t> partial_chunk;   // the chunk each partial result lies in
+    if (ranges.size() == 1) {
+        // Small input — single-threaded scan + interpret; one segment needs no merge.
+        partial = run_range(0, 0, buffer_length);
+        if (partial.size() == 1) return std::move(partial[0]);
+        partial_chunk.assign(partial.size(), 0);
+    } else {
+        std::vector<std::vector<InterpreterResult>> per_range(ranges.size());
+
+        {
+            BS::thread_pool<> pool(nt);
+            std::vector<std::future<void>> futs;
+            futs.reserve(ranges.size());
+            for (size_t c = 0; c < ranges.size(); ++c) {
+                futs.push_back(pool.submit_task([&, c]() {
+                    per_range[c] = run_range(chunk_of(ranges[c].first), ranges[c].first, ranges[c].second);
+                }));
+            }
+            // Drain EVERY future before propagating: a range can throw (a predicate literal
+            // that does not fit a value — evaluate_predicate), and rethrowing on the first
+            // while other ranges still run would leave them reading this frame's locals
+            // (ranges, partial, context) after it unwinds.
+            std::exception_ptr first_exc;
+            for (auto& f : futs) {
+                try {
+                    f.get();
+                } catch (...) {
+                    if (!first_exc) first_exc = std::current_exception();
+                }
+            }
+            if (first_exc) std::rethrow_exception(first_exc);
+        }
+        for (size_t c = 0; c < ranges.size(); ++c)
+            for (auto& p : per_range[c]) {
+                partial.push_back(std::move(p));
+                partial_chunk.push_back(chunk_of(ranges[c].first));
+            }
+    }
+    const size_t nc = partial.size();
+    const size_t nchunks = chunk_starts.size();
 
     // Merge in range order, in parallel: every range's spans and arena bytes go straight
     // to their final offsets (prefix sums over the ranges), value_start rebased by the
     // range's arena base. A serial append copied every column's bytes on one thread.
+    // Rebased relative to the range's CHUNK: a copied span indexes the arena from where its
+    // chunk's bytes begin (chunk_arena), as an uncopied one indexes the source from where
+    // its chunk begins (chunk_src).
     const size_t ncol = columns.size();
     std::vector<size_t> row_base(nc + 1, 0);
     std::vector<std::vector<size_t>> arena_base(ncol, std::vector<size_t>(nc + 1, 0));
@@ -226,6 +294,19 @@ InterpreterResult interpret_jsonl_threaded(
             arena_base[c][k + 1] = arena_base[c][k] + partial[k].all_records.arena[c].size();
     }
     ColumnMap& out = result.all_records;
+    // A chunk's first partial: where its rows and arena bytes begin.
+    std::vector<size_t> first_part(nchunks, nc);
+    for (size_t k = nc; k-- > 0; ) first_part[partial_chunk[k]] = k;
+    if (nchunks > 1) {
+        out.chunk_src = chunk_starts;
+        out.chunk_row.resize(nchunks);
+        out.chunk_arena.assign(ncol, std::vector<size_t>(nchunks, 0));
+        for (size_t h = 0; h < nchunks; ++h) {
+            const size_t k = first_part[h];  // nc: a chunk with no segment holds no rows
+            out.chunk_row[h] = row_base[k];
+            for (size_t c = 0; c < ncol; ++c) out.chunk_arena[c][h] = arena_base[c][k];
+        }
+    }
     out.rows = row_base[nc];
     out.cols.resize(ncol);
     out.arena.resize(ncol);
@@ -239,30 +320,38 @@ InterpreterResult interpret_jsonl_threaded(
         std::vector<std::future<void>> futs;
         for (size_t k = 0; k < nc; ++k) {
             futs.push_back(pool.submit_task([&, k]() {
-                const ColumnMap& p = partial[k].all_records;
+                ColumnMap& p = partial[k].all_records;
+                const size_t h = partial_chunk[k];
                 for (size_t c = 0; c < ncol; ++c) {
-                    const uint32_t ab = static_cast<uint32_t>(arena_base[c][k]);
                     if (!p.arena[c].empty())
-                        std::memcpy(out.arena[c].data() + ab, p.arena[c].data(), p.arena[c].size());
+                        std::memcpy(out.arena[c].data() + arena_base[c][k], p.arena[c].data(), p.arena[c].size());
+                    // Within one chunk, so it fits uint32_t (a chunk's copied bytes are
+                    // bytes of the chunk).
+                    const uint32_t ab = static_cast<uint32_t>(arena_base[c][k] - arena_base[c][first_part[h]]);
                     FieldSpan* dst = out.cols[c].data() + row_base[k];
                     for (size_t r = 0; r < p.rows; ++r) {
                         FieldSpan f = p.cols[c][r];
                         if (p.copied[c] && !span_absent(f)) f.value_start += ab;
                         dst[r] = f;
                     }
+                    // Done with this range's column: free it here, on the worker, rather
+                    // than one range after another when `partial` is destroyed.
+                    std::vector<FieldSpan>().swap(p.cols[c]);
+                    ByteArena().swap(p.arena[c]);
                 }
             }));
         }
         for (auto& f : futs) f.get();
     }
-    for (auto& p : partial) {
-        const ColumnMap& m = p.all_records;
+    for (size_t k = 0; k < nc; ++k) {
+        const ColumnMap& m = partial[k].all_records;
         out.malformed_count += m.malformed_count;
-        if (m.malformed && (!out.malformed || m.malformed_pos < out.malformed_pos)) {
+        const size_t pos = chunk_starts[partial_chunk[k]] + m.malformed_pos;
+        if (m.malformed && (!out.malformed || pos < out.malformed_pos)) {
             out.malformed = true;
-            out.malformed_pos = m.malformed_pos;
+            out.malformed_pos = pos;
         }
-        result.num_records_passed += p.num_records_passed;
+        result.num_records_passed += partial[k].num_records_passed;
     }
     result.bytes_consumed = buffer_length;
     return result;

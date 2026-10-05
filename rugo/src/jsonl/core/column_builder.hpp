@@ -8,6 +8,7 @@
 #include "markers.hpp"
 #include "value_parser.hpp"
 #include "field_span.hpp"
+#include "interpreter.hpp"   // SpanBases
 #include "parse_context.hpp"
 #include "buffers.h"       // DrakenType
 #include "string_slot.h"   // DrakenStringSlot
@@ -34,7 +35,7 @@ struct StringColumnResult {
     ColumnType inferred_type = ColumnType::String;  // type hint from first non-null value
     size_t num_rows = 0;
     std::vector<uint8_t>  data;       // concatenated string values
-    std::vector<uint32_t> offsets;    // start position of each row in data
+    std::vector<uint32_t> offsets;    // start position of each row in `bases`
     std::vector<uint32_t> lengths;    // length of each row's value
     std::vector<uint8_t>  null_bitmap; // null marker: bit=1 (valid), bit=0 (null)
     bool data_owned = false;          // offsets index into `data` (copy/unescape), not the buffer
@@ -51,6 +52,10 @@ struct StringColumnResult {
     // Empty when recording was not requested (or, under IfArrayHinted, the hint was not
     // Array) — a consumer that needs it must check the size, never assume.
     std::vector<uint8_t>  value_types;
+
+    // What `offsets` index, row by row: `data` when data_owned, else the column's source
+    // bytes (ColumnMap::bases — one base per chunk of an input read in chunks).
+    SpanBases bases;
 
     uint8_t*  data_ptr()   { return data.empty() ? nullptr : data.data(); }
     uint32_t* offset_ptr() { return offsets.empty() ? nullptr : offsets.data(); }
@@ -71,15 +76,15 @@ enum class RecordValueTypes : uint8_t {
 //   copy_bytes = true  : offsets index into result.data, which holds a copy of each
 //                        slice (needed when slices must outlive `buffer`, e.g. the
 //                        multi-chunk merge concatenates several buffers).
-//   copy_bytes = false : no copy — offsets index into the original `buffer`, and the
-//                        builder must be given that same buffer as its `base`. Saves a
-//                        full copy of the column's bytes (the single-chunk fast path).
+//   copy_bytes = false : no copy — offsets index the column's source bytes (`source`,
+//                        per chunk). Saves a full copy of the column's bytes.
 // may_have_escapes: when true AND the column is a string, values are JSON-unescaped into
 // result.data (forcing copy mode; result.data_owned is set). Gate it on a cheap buffer-wide
-// '\' check so escape-free data keeps the zero-copy fast path. Check result.data_owned to
-// pick the builder's base (result.data_ptr() vs the original buffer).
+// '\' check so escape-free data keeps the zero-copy fast path. result.bases says what the
+// offsets index either way. Throws std::length_error when a copied column's bytes exceed
+// 4 GiB (its offsets are uint32_t).
 StringColumnResult extract_column(
-    const uint8_t*                            buffer,
+    const SpanBases&                          source,
     const std::vector<FieldSpan>&             col,
     bool                                       copy_bytes = true,
     bool                                       may_have_escapes = false,

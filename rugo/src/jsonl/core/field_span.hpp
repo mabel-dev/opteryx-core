@@ -46,9 +46,10 @@ InterpreterResult interpret_jsonl(
 // hardware_concurrency. No intermediate copies of the input — all ranges share one buffer.
 //
 // use_prefilter: run the raw Volnitsky prefilter (jsonl_reader.hpp) INSIDE each range
-// task. The gate decides once, on the buffer's head; then every task finds the surviving
-// lines of its own range (prefilter_lines) and scans only those, in place — the prefilter
-// runs on every thread, and nothing is copied.
+// task. The gate decides once, on the buffer's head; then every task cuts its own range
+// into segments (prefilter_plan_segments, re-judged per 4MB window) and scans the
+// surviving lines of the filtered ones in place, the unfiltered ones by the normal path —
+// the prefilter runs on every thread, and nothing is copied.
 InterpreterResult interpret_jsonl_threaded(
     const uint8_t* buffer_data,
     size_t buffer_length,

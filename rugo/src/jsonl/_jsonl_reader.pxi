@@ -100,7 +100,7 @@ cdef extern from "core/interpreter.hpp" namespace "rugo::_jsonl":
     cppclass ColumnMap:
         size_t num_records()
         bint malformed
-        uint32_t malformed_pos
+        size_t malformed_pos
         uint32_t malformed_count
 
     # std::invalid_argument (-> ValueError) on a malformed nested column request
@@ -128,7 +128,7 @@ cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
     struct InterpreterResult:
         ColumnMap all_records
         size_t num_records_passed
-        uint32_t bytes_consumed
+        size_t bytes_consumed
 
     # except + : evaluate_predicate throws std::invalid_argument (-> ValueError) on a
     # value whose JSON kind cannot be compared with the predicate literal's kind.
@@ -145,18 +145,10 @@ cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
 
 
 cdef extern from "core/jsonl_reader.hpp" namespace "rugo::_jsonl":
-    struct PrefilterResult:
-        vector[uint8_t] candidates
-        size_t total_records
-        size_t matched_records
-    PrefilterResult volnitsky_prefilter(
-        const uint8_t* buffer, size_t length,
-        const uint8_t* needle, size_t needle_len
-    ) nogil
     # The malformed-record message lives in C++ so the native engine scan
     # (src/cpp/engine/native_jsonl_scan_source.hpp) shares it verbatim.
     string malformed_error_message(
-        const uint8_t* buffer, size_t length, uint32_t offset
+        const uint8_t* buffer, size_t length, size_t offset
     ) nogil
 
 
@@ -509,10 +501,12 @@ def read_jsonl(
             # match before scanning them — in place, on every thread (see
             # interpret_jsonl_threaded). Sound by construction, self-disabling on
             # short/non-selective filters; the predicates are still applied downstream.
+            # move(): Cython assigns a call's result through a temporary, which would
+            # otherwise COPY the whole ColumnMap (every span and arena) into interp_result.
             with nogil:
-                interp_result = interpret_jsonl_threaded(
+                interp_result = move(interpret_jsonl_threaded(
                     buf_data, buf_len, context, column_names_cpp, 0, run_prefilter
-                )
+                ))
 
             result['malformed_count'] = interp_result.all_records.malformed_count
 

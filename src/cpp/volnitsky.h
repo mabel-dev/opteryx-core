@@ -316,6 +316,11 @@ static inline bool simd_contains_cs(
         if (_find_first_byte(hay + base, clen, f) == SIZE_MAX) continue;
         const size_t wlen = ((clen + pat_len - 1) < (hay_len - base))
                                  ? (clen + pat_len - 1) : (hay_len - base);
+        // A final chunk shorter than the pattern holds no match start: every earlier
+        // window already reached pat_len-1 bytes past its chunk. Verifying it would break
+        // _simd_first_last_verify's hay_len >= pat_len contract (span underflows and the
+        // scan reads past the haystack — a false positive from the next string's bytes).
+        if (wlen < pat_len) break;
         if (_simd_first_last_verify(hay + base, wlen, pat, pat_len)) return true;
     }
     return false;

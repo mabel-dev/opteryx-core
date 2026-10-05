@@ -161,7 +161,7 @@ static void json_unescape(const uint8_t* src, uint32_t len, std::vector<uint8_t>
 }  // namespace
 
 StringColumnResult extract_column(
-    const uint8_t*                            buffer,
+    const SpanBases&                          source,
     const std::vector<FieldSpan>&             col,
     bool                                       copy_bytes,
     bool                                       may_have_escapes,
@@ -175,6 +175,7 @@ StringColumnResult extract_column(
     result.num_rows = num_rows;
 
     if (num_rows == 0) {
+        result.bases = source;
         return result;
     }
 
@@ -209,25 +210,29 @@ StringColumnResult extract_column(
         bool seen = false;
         bool key  = false;
         bool esc  = false;
-        for (size_t row = ranges[ri].begin; row < ranges[ri].end; ++row) {
-            const FieldSpan* found = span_absent(col[row]) ? nullptr : &col[row];
-            if (found != nullptr) {
-                resolved[row] = found;
-                key = true;
-                const bool val_null =
-                    is_null(buffer, found->value_start, found->value_start + found->value_width - 1);
-                if (!val_null) {
-                    seen = true;
-                    if (may_have_escapes && !esc &&
-                        found->type == static_cast<uint8_t>(ValueType::String) &&
-                        std::memchr(buffer + found->value_start, '\\', found->value_width) != nullptr) {
-                        esc = true;
+        for_each_chunk_run(source, ranges[ri].begin, ranges[ri].end,
+                           [&](size_t from, size_t to, const uint8_t* buffer) {
+            for (size_t row = from; row < to; ++row) {
+                const FieldSpan* found = span_absent(col[row]) ? nullptr : &col[row];
+                if (found != nullptr) {
+                    resolved[row] = found;
+                    key = true;
+                    const bool val_null =
+                        is_null(buffer, found->value_start, found->value_start + found->value_width - 1);
+                    if (!val_null) {
+                        seen = true;
+                        if (may_have_escapes && !esc &&
+                            found->type == static_cast<uint8_t>(ValueType::String) &&
+                            std::memchr(buffer + found->value_start, '\\', found->value_width) != nullptr) {
+                            esc = true;
+                        }
                     }
+                } else {
+                    result.null_bitmap[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
                 }
-            } else {
-                result.null_bitmap[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
             }
-        }
+            return true;
+        });
         chunk_seen[ri] = seen ? 1 : 0;
         chunk_key[ri]  = key  ? 1 : 0;
         chunk_esc[ri]  = esc  ? 1 : 0;
@@ -247,7 +252,7 @@ StringColumnResult extract_column(
     for (size_t row = 0; row < sample_rows; ++row) {
         const FieldSpan* f = resolved[row];
         if (f == nullptr) continue;
-        if (is_null(buffer, f->value_start, f->value_start + f->value_width - 1)) continue;
+        if (is_null(source.at(row), f->value_start, f->value_start + f->value_width - 1)) continue;
         const uint8_t vt = f->type;
         if (vt == static_cast<uint8_t>(ValueType::String))
             result.inferred_type = ColumnType::String;
@@ -284,7 +289,7 @@ StringColumnResult extract_column(
 
     // Emit one value: NULL marks the bitmap; otherwise copy+unescape (do_unescape), copy
     // (copy_bytes), or reference the original buffer (zero-copy).
-    auto emit_value = [&](const FieldSpan& f, size_t row) {
+    auto emit_value = [&](const FieldSpan& f, size_t row, const uint8_t* buffer) {
         if (record_types) result.value_types[row] = f.type;
         const uint32_t vend = f.value_start + f.value_width - 1;
         if (is_null(buffer, f.value_start, vend)) {
@@ -308,19 +313,31 @@ StringColumnResult extract_column(
     if (result.data_owned) {
         // copy / unescape mode: every row appends to ONE growing arena, so each row's offset
         // depends on all preceding rows. Order-dependent — this pass stays serial.
-        for (size_t row = 0; row < num_rows; ++row) {
-            const FieldSpan* f = resolved[row];
-            if (f != nullptr) emit_value(*f, row);
-        }
+        for_each_chunk_run(source, 0, num_rows, [&](size_t from, size_t to, const uint8_t* buffer) {
+            for (size_t row = from; row < to; ++row) {
+                const FieldSpan* f = resolved[row];
+                if (f != nullptr) emit_value(*f, row, buffer);
+            }
+            return true;
+        });
+        if (result.data.size() > UINT32_MAX)
+            throw std::length_error("read_jsonl: a column's copied values exceed 4 GiB (" +
+                                    std::to_string(result.data.size()) + " bytes)");
+        result.bases = SpanBases::one(result.data.data());
     } else {
         // Zero-copy mode: a row writes only its own offsets/lengths slot (offsets index into
         // `buffer`), and bitmap writes are 8-row aligned, so the ranges are independent.
         rex.run(ranges, [&](size_t ri) {
-            for (size_t row = ranges[ri].begin; row < ranges[ri].end; ++row) {
-                const FieldSpan* f = resolved[row];
-                if (f != nullptr) emit_value(*f, row);
-            }
+            for_each_chunk_run(source, ranges[ri].begin, ranges[ri].end,
+                               [&](size_t from, size_t to, const uint8_t* buffer) {
+                for (size_t row = from; row < to; ++row) {
+                    const FieldSpan* f = resolved[row];
+                    if (f != nullptr) emit_value(*f, row, buffer);
+                }
+                return true;
+            });
         });
+        result.bases = source;
     }
 
     return result;
@@ -354,11 +371,9 @@ static uint8_t* own_validity_from_scr(StringColumnResult& scr, uint32_t n) {
 
 // Parse a column into VARCHAR string buffers (slots + arena + validity). No Python —
 // safe off the GIL. Wrapped into a Vector later by wrap_column().
-static ParsedColumn parse_varchar_column(const uint8_t* base, StringColumnResult& scr,
-                                         const RowExec& rows) {
+static ParsedColumn parse_varchar_column(StringColumnResult& scr, const RowExec& rows) {
     const uint32_t n = static_cast<uint32_t>(scr.num_rows);
     const bool has_nulls = !scr.null_bitmap.empty();
-    const uint8_t* src = base;  // slices live at base + offsets[i]
 
     // Slots and the arena are both indexed per row, so the two passes parallelise once each
     // chunk knows where its own arena bytes start. Alignment 1: nothing here is bit-packed
@@ -392,22 +407,27 @@ static ParsedColumn parse_varchar_column(const uint8_t* base, StringColumnResult
     // pass — the slot's stored offset stays the GLOBAL offset into the arena.
     rows.run(ranges, [&](size_t ri) {
         uint32_t arena_offset = static_cast<uint32_t>(chunk_base[ri]);
-        for (size_t i = ranges[ri].begin; i < ranges[ri].end; ++i) {
-            if (has_nulls && !((scr.null_bitmap[i >> 3] >> (i & 7)) & 1)) {
-                str_init_null(&slots[i]);
-                continue;
+        // slices live at bases + offsets[i]
+        for_each_chunk_run(scr.bases, ranges[ri].begin, ranges[ri].end,
+                           [&](size_t from, size_t to, const uint8_t* src) {
+            for (size_t i = from; i < to; ++i) {
+                if (has_nulls && !((scr.null_bitmap[i >> 3] >> (i & 7)) & 1)) {
+                    str_init_null(&slots[i]);
+                    continue;
+                }
+                const uint32_t off = scr.offsets[i];
+                const uint32_t len = scr.lengths[i];
+                const uint8_t* bytes = len ? src + off : reinterpret_cast<const uint8_t*>("");
+                if (len > STR_INLINE_MAX) {
+                    std::memcpy(arena + arena_offset, bytes, len);
+                    draken_build_string_slot(&slots[i], bytes, len, arena_offset);
+                    arena_offset += len;
+                } else {
+                    draken_build_string_slot(&slots[i], bytes, len, 0);
+                }
             }
-            const uint32_t off = scr.offsets[i];
-            const uint32_t len = scr.lengths[i];
-            const uint8_t* bytes = len ? src + off : reinterpret_cast<const uint8_t*>("");
-            if (len > STR_INLINE_MAX) {
-                std::memcpy(arena + arena_offset, bytes, len);
-                draken_build_string_slot(&slots[i], bytes, len, arena_offset);
-                arena_offset += len;
-            } else {
-                draken_build_string_slot(&slots[i], bytes, len, 0);
-            }
-        }
+            return true;
+        });
     });
 
     ParsedColumn pc;
@@ -428,42 +448,50 @@ static inline bool row_valid(const StringColumnResult& scr, uint32_t i) {
     return (scr.null_bitmap[i >> 3] >> (i & 7)) & 1u;
 }
 
-// Parse every valid slice (at base + offsets[i]) as int64 into data[i] (0 for nulls).
+// Parse every valid slice (at bases + offsets[i]) as int64 into data[i] (0 for nulls).
 // False if ANY row misses. data[] is one fixed-width element per row, so chunks write
 // disjoint memory and need no alignment quantum. A chunk abandons its range on the first
 // miss; the caller frees `data` wholesale and falls back, so the rows a losing chunk left
 // unwritten are never read.
-static bool try_fill_int64(const uint8_t* base, StringColumnResult& scr, uint32_t n,
+static bool try_fill_int64(StringColumnResult& scr, uint32_t n,
                            int64_t* data, const RowExec& rows) {
     const std::vector<RowRange> ranges = rows.split(n, 1);
     std::vector<uint8_t> ok(ranges.size(), 1);
     rows.run(ranges, [&](size_t ri) {
-        for (size_t i = ranges[ri].begin; i < ranges[ri].end; ++i) {
-            if (!row_valid(scr, static_cast<uint32_t>(i))) { data[i] = 0; continue; }
-            const uint32_t off = scr.offsets[i], len = scr.lengths[i];
-            if (len == 0 || !fast_parse_int64(base, off, off + len - 1, data[i])) {
-                ok[ri] = 0;
-                return;
+        for_each_chunk_run(scr.bases, ranges[ri].begin, ranges[ri].end,
+                           [&](size_t from, size_t to, const uint8_t* base) {
+            for (size_t i = from; i < to; ++i) {
+                if (!row_valid(scr, static_cast<uint32_t>(i))) { data[i] = 0; continue; }
+                const uint32_t off = scr.offsets[i], len = scr.lengths[i];
+                if (len == 0 || !fast_parse_int64(base, off, off + len - 1, data[i])) {
+                    ok[ri] = 0;
+                    return false;
+                }
             }
-        }
+            return true;
+        });
     });
     for (uint8_t v : ok) if (!v) return false;
     return true;
 }
 
-static bool try_fill_float64(const uint8_t* base, StringColumnResult& scr, uint32_t n,
+static bool try_fill_float64(StringColumnResult& scr, uint32_t n,
                              double* data, const RowExec& rows) {
     const std::vector<RowRange> ranges = rows.split(n, 1);
     std::vector<uint8_t> ok(ranges.size(), 1);
     rows.run(ranges, [&](size_t ri) {
-        for (size_t i = ranges[ri].begin; i < ranges[ri].end; ++i) {
-            if (!row_valid(scr, static_cast<uint32_t>(i))) { data[i] = 0.0; continue; }
-            const uint32_t off = scr.offsets[i], len = scr.lengths[i];
-            if (len == 0 || !fast_parse_float64(base, off, off + len - 1, data[i])) {
-                ok[ri] = 0;
-                return;
+        for_each_chunk_run(scr.bases, ranges[ri].begin, ranges[ri].end,
+                           [&](size_t from, size_t to, const uint8_t* base) {
+            for (size_t i = from; i < to; ++i) {
+                if (!row_valid(scr, static_cast<uint32_t>(i))) { data[i] = 0.0; continue; }
+                const uint32_t off = scr.offsets[i], len = scr.lengths[i];
+                if (len == 0 || !fast_parse_float64(base, off, off + len - 1, data[i])) {
+                    ok[ri] = 0;
+                    return false;
+                }
             }
-        }
+            return true;
+        });
     });
     for (uint8_t v : ok) if (!v) return false;
     return true;
@@ -529,7 +557,7 @@ static inline double array_elem_as_double(const JsonArrayElement& e) noexcept {
 // every row once) or its content no longer matches child_type (can't happen barring a
 // concurrent-mutation bug, but this must never silently mis-type a value).
 static bool fill_numeric_array_column(
-    const uint8_t* base, StringColumnResult& scr, uint32_t n, DrakenType child_type,
+    StringColumnResult& scr, uint32_t n, DrakenType child_type,
     size_t total_elements, ParsedColumn& pc)
 {
     int32_t* offsets = static_cast<int32_t*>(draken_malloc(static_cast<size_t>(n + 1) * sizeof(int32_t)));
@@ -553,31 +581,34 @@ static bool fill_numeric_array_column(
     offsets[0] = 0;
     size_t cursor = 0;
     bool ok = true;
-    for (uint32_t i = 0; i < n && ok; ++i) {
-        offsets[i + 1] = offsets[i];
-        if (!row_valid(scr, i)) continue;  // absent/null row: zero-length slice
-        int32_t* const row_end = &offsets[i + 1];
-        ok = walk_json_array(base + scr.offsets[i], scr.lengths[i],
-                             [&](const JsonArrayElement& elem) {
-            const size_t e = cursor++;
-            if (elem.kind == JsonElemKind::Null) {
-                any_child_null = true;
-                child_validity[e >> 3] &= static_cast<uint8_t>(~(1u << (e & 7)));
-            } else if (is_bool) {
-                if (elem.bool_value) child_data[e >> 3] |= static_cast<uint8_t>(1u << (e & 7));
-            } else if (child_type == DRAKEN_FLOAT64) {
-                reinterpret_cast<double*>(child_data)[e] = array_elem_as_double(elem);
-            } else if (child_type == DRAKEN_UINT64) {
-                reinterpret_cast<uint64_t*>(child_data)[e] =
-                    (elem.kind == JsonElemKind::Uint) ? elem.uint_value
-                                                      : static_cast<uint64_t>(elem.int_value);
-            } else {  // DRAKEN_INT64
-                reinterpret_cast<int64_t*>(child_data)[e] = elem.int_value;
-            }
-            *row_end += 1;
-            return true;
-        });
-    }
+    for_each_chunk_run(scr.bases, 0, n, [&](size_t from, size_t to, const uint8_t* base) {
+        for (uint32_t i = static_cast<uint32_t>(from); i < to && ok; ++i) {
+            offsets[i + 1] = offsets[i];
+            if (!row_valid(scr, i)) continue;  // absent/null row: zero-length slice
+            int32_t* const row_end = &offsets[i + 1];
+            ok = walk_json_array(base + scr.offsets[i], scr.lengths[i],
+                                 [&](const JsonArrayElement& elem) {
+                const size_t e = cursor++;
+                if (elem.kind == JsonElemKind::Null) {
+                    any_child_null = true;
+                    child_validity[e >> 3] &= static_cast<uint8_t>(~(1u << (e & 7)));
+                } else if (is_bool) {
+                    if (elem.bool_value) child_data[e >> 3] |= static_cast<uint8_t>(1u << (e & 7));
+                } else if (child_type == DRAKEN_FLOAT64) {
+                    reinterpret_cast<double*>(child_data)[e] = array_elem_as_double(elem);
+                } else if (child_type == DRAKEN_UINT64) {
+                    reinterpret_cast<uint64_t*>(child_data)[e] =
+                        (elem.kind == JsonElemKind::Uint) ? elem.uint_value
+                                                          : static_cast<uint64_t>(elem.int_value);
+                } else {  // DRAKEN_INT64
+                    reinterpret_cast<int64_t*>(child_data)[e] = elem.int_value;
+                }
+                *row_end += 1;
+                return true;
+            });
+        }
+        return ok;
+    });
     if (!ok) {
         draken_free(offsets); draken_free(child_data); draken_free(child_validity);
         return false;
@@ -599,7 +630,7 @@ static bool fill_numeric_array_column(
 // String-family child (array of strings). Two passes: size the arena for long-form
 // slots (mirrors parse_varchar_column), then populate slots + arena.
 static bool fill_string_array_column(
-    const uint8_t* base, StringColumnResult& scr, uint32_t n, size_t total_elements, ParsedColumn& pc)
+    StringColumnResult& scr, uint32_t n, size_t total_elements, ParsedColumn& pc)
 {
     int32_t* offsets = static_cast<int32_t*>(draken_malloc(static_cast<size_t>(n + 1) * sizeof(int32_t)));
     const size_t child_bm_bytes = (total_elements + 7) >> 3;
@@ -615,18 +646,21 @@ static bool fill_string_array_column(
     size_t arena_size = 0;
     offsets[0] = 0;
     bool ok = true;
-    for (uint32_t i = 0; i < n && ok; ++i) {
-        offsets[i + 1] = offsets[i];
-        if (!row_valid(scr, i)) continue;
-        int32_t* const row_end = &offsets[i + 1];
-        ok = walk_json_array(base + scr.offsets[i], scr.lengths[i],
-                             [&](const JsonArrayElement& elem) {
-            *row_end += 1;
-            if (elem.kind == JsonElemKind::String && elem.str_decoded_len > STR_INLINE_MAX)
-                arena_size += elem.str_decoded_len;
-            return true;
-        });
-    }
+    for_each_chunk_run(scr.bases, 0, n, [&](size_t from, size_t to, const uint8_t* base) {
+        for (uint32_t i = static_cast<uint32_t>(from); i < to && ok; ++i) {
+            offsets[i + 1] = offsets[i];
+            if (!row_valid(scr, i)) continue;
+            int32_t* const row_end = &offsets[i + 1];
+            ok = walk_json_array(base + scr.offsets[i], scr.lengths[i],
+                                 [&](const JsonArrayElement& elem) {
+                *row_end += 1;
+                if (elem.kind == JsonElemKind::String && elem.str_decoded_len > STR_INLINE_MAX)
+                    arena_size += elem.str_decoded_len;
+                return true;
+            });
+        }
+        return ok;
+    });
     if (!ok) { draken_free(offsets); draken_free(child_validity); return false; }
 
     DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(
@@ -639,35 +673,38 @@ static bool fill_string_array_column(
     size_t cursor = 0;
     uint32_t arena_offset = 0;
     uint8_t inline_buf[STR_INLINE_MAX];
-    for (uint32_t i = 0; i < n && ok; ++i) {
-        if (!row_valid(scr, i)) continue;
-        ok = walk_json_array(base + scr.offsets[i], scr.lengths[i],
-                             [&](const JsonArrayElement& elem) {
-            const size_t e = cursor++;
-            if (elem.kind != JsonElemKind::String) {  // null element
-                any_child_null = true;
-                child_validity[e >> 3] &= static_cast<uint8_t>(~(1u << (e & 7)));
-                str_init_null(&slots[e]);
+    for_each_chunk_run(scr.bases, 0, n, [&](size_t from, size_t to, const uint8_t* base) {
+        for (uint32_t i = static_cast<uint32_t>(from); i < to && ok; ++i) {
+            if (!row_valid(scr, i)) continue;
+            ok = walk_json_array(base + scr.offsets[i], scr.lengths[i],
+                                 [&](const JsonArrayElement& elem) {
+                const size_t e = cursor++;
+                if (elem.kind != JsonElemKind::String) {  // null element
+                    any_child_null = true;
+                    child_validity[e >> 3] &= static_cast<uint8_t>(~(1u << (e & 7)));
+                    str_init_null(&slots[e]);
+                    return true;
+                }
+                const uint32_t slen = elem.str_decoded_len;
+                const bool extern_slot = slen > STR_INLINE_MAX;
+                uint8_t* const dst = extern_slot ? arena + arena_offset : inline_buf;
+                const uint8_t* bytes;
+                if (elem.str_escaped) {
+                    jsonarr::decode_string(elem.str_raw, elem.str_raw_len, dst);
+                    bytes = dst;
+                } else if (extern_slot) {
+                    std::memcpy(dst, elem.str_raw, slen);
+                    bytes = dst;
+                } else {
+                    bytes = slen ? elem.str_raw : reinterpret_cast<const uint8_t*>("");
+                }
+                draken_build_string_slot(&slots[e], bytes, slen, extern_slot ? arena_offset : 0);
+                if (extern_slot) arena_offset += slen;
                 return true;
-            }
-            const uint32_t slen = elem.str_decoded_len;
-            const bool extern_slot = slen > STR_INLINE_MAX;
-            uint8_t* const dst = extern_slot ? arena + arena_offset : inline_buf;
-            const uint8_t* bytes;
-            if (elem.str_escaped) {
-                jsonarr::decode_string(elem.str_raw, elem.str_raw_len, dst);
-                bytes = dst;
-            } else if (extern_slot) {
-                std::memcpy(dst, elem.str_raw, slen);
-                bytes = dst;
-            } else {
-                bytes = slen ? elem.str_raw : reinterpret_cast<const uint8_t*>("");
-            }
-            draken_build_string_slot(&slots[e], bytes, slen, extern_slot ? arena_offset : 0);
-            if (extern_slot) arena_offset += slen;
-            return true;
-        });
-    }
+            });
+        }
+        return ok;
+    });
     if (!ok) {
         draken_free(offsets); draken_free(child_validity);
         draken_free(slots); draken_free(arena);
@@ -700,8 +737,7 @@ static bool fill_string_array_column(
 // ParsedColumn.array_fallback set so the Cython edge can warn (this function runs off
 // the GIL and must not touch Python itself). The speculative path is speculative by
 // design: it never throws on data — only the declared path (parse_column_explicit) is strict.
-static ParsedColumn parse_array_column(const uint8_t* base, StringColumnResult& scr,
-                                      const RowExec& rows) {
+static ParsedColumn parse_array_column(StringColumnResult& scr, const RowExec& rows) {
     const uint32_t n = static_cast<uint32_t>(scr.num_rows);
 
     // The caller must have asked extract_column to record value shapes (IfArrayHinted
@@ -715,14 +751,17 @@ static ParsedColumn parse_array_column(const uint8_t* base, StringColumnResult& 
     ArrayElementSurvey survey;
     size_t total_elements = 0;
     bool parse_ok = true;
-    for (uint32_t i = 0; i < n && parse_ok && !survey.saw_nested; ++i) {
-        if (!row_valid(scr, i)) continue;
-        if (scr.value_types[i] != static_cast<uint8_t>(ValueType::Array)) {
-            parse_ok = false;  // a scalar or object row: out of scope, not an array
-            break;
+    for_each_chunk_run(scr.bases, 0, n, [&](size_t from, size_t to, const uint8_t* base) {
+        for (uint32_t i = static_cast<uint32_t>(from); i < to && parse_ok && !survey.saw_nested; ++i) {
+            if (!row_valid(scr, i)) continue;
+            if (scr.value_types[i] != static_cast<uint8_t>(ValueType::Array)) {
+                parse_ok = false;  // a scalar or object row: out of scope, not an array
+                break;
+            }
+            parse_ok = survey_array_row(base + scr.offsets[i], scr.lengths[i], survey, total_elements);
         }
-        parse_ok = survey_array_row(base + scr.offsets[i], scr.lengths[i], survey, total_elements);
-    }
+        return parse_ok && !survey.saw_nested;
+    });
 
     const bool saw_number = survey.saw_int || survey.saw_uint || survey.saw_real;
     const int kinds = (survey.saw_bool ? 1 : 0) + (saw_number ? 1 : 0) +
@@ -730,7 +769,7 @@ static ParsedColumn parse_array_column(const uint8_t* base, StringColumnResult& 
     const bool out_of_scope = !parse_ok || survey.saw_nested || kinds > 1;
 
     if (out_of_scope) {
-        ParsedColumn pc = parse_varchar_column(base, scr, rows);
+        ParsedColumn pc = parse_varchar_column(scr, rows);
         pc.array_fallback = true;
         return pc;
     }
@@ -757,8 +796,8 @@ static ParsedColumn parse_array_column(const uint8_t* base, StringColumnResult& 
     pc.all_null = !scr.any_value_seen;
 
     const bool ok = as_string
-        ? fill_string_array_column(base, scr, n, total_elements, pc)
-        : fill_numeric_array_column(base, scr, n, child_type, total_elements, pc);
+        ? fill_string_array_column(scr, n, total_elements, pc)
+        : fill_numeric_array_column(scr, n, child_type, total_elements, pc);
     if (!ok) {
         // Defensive-only path (see fill_*'s docs) — the survey already validated every
         // row once, so a re-parse failure here would indicate a real bug, not bad data.
@@ -774,22 +813,22 @@ static ParsedColumn parse_array_column(const uint8_t* base, StringColumnResult& 
 // parse_typed_column — extracted column → owned typed buffers, with fallback.
 // No Python — safe off the GIL. Wrapped into a Vector by wrap_column().
 // ---------------------------------------------------------------------------
-static ParsedColumn parse_typed_column(const uint8_t* base, StringColumnResult& scr,
-                                       const ParseContext& context, const RowExec& rows) {
+static ParsedColumn parse_typed_column(StringColumnResult& scr, const ParseContext& context,
+                                       const RowExec& rows) {
     const uint32_t n = static_cast<uint32_t>(scr.num_rows);
 
     // String / all-null columns: nothing to parse.
     if (scr.inferred_type == ColumnType::String ||
         scr.inferred_type == ColumnType::Null || n == 0) {
-        return parse_varchar_column(base, scr, rows);
+        return parse_varchar_column(scr, rows);
     }
 
     // Object columns (parse_objects): VARIANT is physically identical to VARCHAR
     // (German-string storage holding raw JSON text) — only the type tag differs, so
     // this reuses parse_varchar_column verbatim rather than duplicating it.
     if (scr.inferred_type == ColumnType::Variant) {
-        if (!context.parse_objects) return parse_varchar_column(base, scr, rows);
-        ParsedColumn pc = parse_varchar_column(base, scr, rows);
+        if (!context.parse_objects) return parse_varchar_column(scr, rows);
+        ParsedColumn pc = parse_varchar_column(scr, rows);
         pc.type = DRAKEN_VARIANT;
         return pc;
     }
@@ -797,8 +836,8 @@ static ParsedColumn parse_typed_column(const uint8_t* base, StringColumnResult& 
     // Array columns (parse_arrays): real structural materialization, scoped to
     // uniform-scalar-element arrays (see parse_array_column).
     if (scr.inferred_type == ColumnType::Array) {
-        if (!context.parse_arrays) return parse_varchar_column(base, scr, rows);
-        return parse_array_column(base, scr, rows);
+        if (!context.parse_arrays) return parse_varchar_column(scr, rows);
+        return parse_array_column(scr, rows);
     }
 
     if (scr.inferred_type == ColumnType::Bool) {
@@ -808,26 +847,29 @@ static ParsedColumn parse_typed_column(const uint8_t* base, StringColumnResult& 
         uint8_t* data = static_cast<uint8_t*>(draken_malloc(alloc));  // bit-packed
         std::memset(data, 0, alloc);
         bool ok = true;
-        for (uint32_t i = 0; i < n; ++i) {
-            if (!row_valid(scr, i)) continue;  // bit stays 0
-            const uint32_t off = scr.offsets[i], len = scr.lengths[i];
-            bool b;
-            if (len == 0 || !parse_bool(base, off, off + len - 1, b)) { ok = false; break; }
-            if (b) data[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-        }
+        for_each_chunk_run(scr.bases, 0, n, [&](size_t from, size_t to, const uint8_t* base) {
+            for (uint32_t i = static_cast<uint32_t>(from); i < to; ++i) {
+                if (!row_valid(scr, i)) continue;  // bit stays 0
+                const uint32_t off = scr.offsets[i], len = scr.lengths[i];
+                bool b;
+                if (len == 0 || !parse_bool(base, off, off + len - 1, b)) { ok = false; return false; }
+                if (b) data[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+            }
+            return true;
+        });
         if (ok) {
             ParsedColumn pc; pc.type = DRAKEN_BOOL; pc.length = n;
             pc.data = data; pc.validity = own_validity_from_scr(scr, n);
             return pc;
         }
         draken_free(data);
-        return parse_varchar_column(base, scr, rows);
+        return parse_varchar_column(scr, rows);
     }
 
     // Numeric: speculate int64, widen to float64, else fall back to VARCHAR.
     {
         int64_t* data = static_cast<int64_t*>(draken_malloc(static_cast<size_t>(n) * sizeof(int64_t)));
-        if (try_fill_int64(base, scr, n, data, rows)) {
+        if (try_fill_int64(scr, n, data, rows)) {
             ParsedColumn pc; pc.type = DRAKEN_INT64; pc.length = n;
             pc.data = data; pc.validity = own_validity_from_scr(scr, n);
             return pc;
@@ -836,14 +878,14 @@ static ParsedColumn parse_typed_column(const uint8_t* base, StringColumnResult& 
     }
     {
         double* data = static_cast<double*>(draken_malloc(static_cast<size_t>(n) * sizeof(double)));
-        if (try_fill_float64(base, scr, n, data, rows)) {
+        if (try_fill_float64(scr, n, data, rows)) {
             ParsedColumn pc; pc.type = DRAKEN_FLOAT64; pc.length = n;
             pc.data = data; pc.validity = own_validity_from_scr(scr, n);
             return pc;
         }
         draken_free(data);
     }
-    return parse_varchar_column(base, scr, rows);
+    return parse_varchar_column(scr, rows);
 }
 
 // Parse a column STRICTLY as its explicit_schema-declared type: every non-null value must
@@ -868,7 +910,7 @@ static ParsedColumn parse_typed_column(const uint8_t* base, StringColumnResult& 
 // FIRST offending row (not whichever chunk raced there first) is part of the contract. The
 // row walk in extract_column and the VARCHAR builder still parallelise.
 static ParsedColumn parse_column_explicit(
-    const uint8_t* buffer, const std::vector<FieldSpan>& col, const std::string& name,
+    const SpanBases& source, const std::vector<FieldSpan>& col, const std::string& name,
     const std::string& declared, bool may_have_escapes, const RowExec& rows) {
 
     DeclaredType dt;
@@ -885,15 +927,15 @@ static ParsedColumn parse_column_explicit(
         // may_have_escapes is deliberately FALSE here: unescaping rewrites a string
         // value's bytes, and a container is JSON text that must stay byte-exact. The only
         // rows unescaping could ever touch are string rows, and those are refused below.
-        StringColumnResult scr = extract_column(buffer, col,
+        StringColumnResult scr = extract_column(source, col,
                                                 /*copy_bytes=*/false, /*may_have_escapes=*/false,
                                                 SIZE_MAX, &rows, RecordValueTypes::Always);
-        const uint8_t* base = buffer;   // never copied: offsets index the source buffer
+        // never copied: offsets index the source buffer (scr.bases)
         const uint32_t n = static_cast<uint32_t>(scr.num_rows);
 
         auto refuse = [&](uint32_t i, const char* why) {
             const uint32_t len = scr.lengths[i];
-            std::string got(reinterpret_cast<const char*>(base + scr.offsets[i]),
+            std::string got(reinterpret_cast<const char*>(scr.bases.at(i) + scr.offsets[i]),
                             len < 64u ? len : 64u);
             throw std::invalid_argument(
                 "explicit_schema: column '" + name + "' row " + std::to_string(i) +
@@ -909,7 +951,7 @@ static ParsedColumn parse_column_explicit(
                     vt != static_cast<uint8_t>(ValueType::Array))
                     refuse(i, "not a JSON object or array");
             }
-            ParsedColumn pc = parse_varchar_column(base, scr, rows);
+            ParsedColumn pc = parse_varchar_column(scr, rows);
             pc.type = DRAKEN_VARIANT;
             pc.key_absent = !scr.any_key_seen;
             return pc;
@@ -917,44 +959,47 @@ static ParsedColumn parse_column_explicit(
 
         // DRAKEN_ARRAY: survey every row against the DECLARED element type.
         size_t total_elements = 0;
-        for (uint32_t i = 0; i < n; ++i) {
-            if (!row_valid(scr, i)) continue;
-            if (scr.value_types[i] != static_cast<uint8_t>(ValueType::Array))
-                refuse(i, "not a JSON array");
-            ArrayElementSurvey sv;
-            size_t count = 0;
-            if (!survey_array_row(base + scr.offsets[i], scr.lengths[i], sv, count))
-                refuse(i, "not a well-formed JSON array");
-            if (sv.saw_nested) refuse(i, "an element is itself an array or object");
-            const bool saw_number = sv.saw_int || sv.saw_uint || sv.saw_real;
-            switch (dt.element) {
-                case DRAKEN_BOOL:
-                    if (saw_number || sv.saw_string) refuse(i, "an element is not a boolean");
-                    break;
-                case DRAKEN_VARCHAR:
-                    if (saw_number || sv.saw_bool) refuse(i, "an element is not a string");
-                    break;
-                case DRAKEN_INT64:
-                    if (sv.saw_bool || sv.saw_string) refuse(i, "an element is not a number");
-                    if (sv.saw_real) refuse(i, "an element is not an integer");
-                    if (sv.saw_uint) refuse(i, "an element is past INT64_MAX");
-                    break;
-                case DRAKEN_UINT64:
-                    if (sv.saw_bool || sv.saw_string) refuse(i, "an element is not a number");
-                    if (sv.saw_real) refuse(i, "an element is not an integer");
-                    if (sv.saw_neg_int) refuse(i, "an element is negative");
-                    break;
-                case DRAKEN_FLOAT64:
-                    if (sv.saw_bool || sv.saw_string) refuse(i, "an element is not a number");
-                    break;
-                default:
-                    // parse_declared_type only ever admits the five above.
-                    throw std::invalid_argument(
-                        "explicit_schema: column '" + name + "' declared " + declared +
-                        " has an element type the array builder cannot materialise");
+        for_each_chunk_run(scr.bases, 0, n, [&](size_t from, size_t to, const uint8_t* base) {
+            for (uint32_t i = static_cast<uint32_t>(from); i < to; ++i) {
+                if (!row_valid(scr, i)) continue;
+                if (scr.value_types[i] != static_cast<uint8_t>(ValueType::Array))
+                    refuse(i, "not a JSON array");
+                ArrayElementSurvey sv;
+                size_t count = 0;
+                if (!survey_array_row(base + scr.offsets[i], scr.lengths[i], sv, count))
+                    refuse(i, "not a well-formed JSON array");
+                if (sv.saw_nested) refuse(i, "an element is itself an array or object");
+                const bool saw_number = sv.saw_int || sv.saw_uint || sv.saw_real;
+                switch (dt.element) {
+                    case DRAKEN_BOOL:
+                        if (saw_number || sv.saw_string) refuse(i, "an element is not a boolean");
+                        break;
+                    case DRAKEN_VARCHAR:
+                        if (saw_number || sv.saw_bool) refuse(i, "an element is not a string");
+                        break;
+                    case DRAKEN_INT64:
+                        if (sv.saw_bool || sv.saw_string) refuse(i, "an element is not a number");
+                        if (sv.saw_real) refuse(i, "an element is not an integer");
+                        if (sv.saw_uint) refuse(i, "an element is past INT64_MAX");
+                        break;
+                    case DRAKEN_UINT64:
+                        if (sv.saw_bool || sv.saw_string) refuse(i, "an element is not a number");
+                        if (sv.saw_real) refuse(i, "an element is not an integer");
+                        if (sv.saw_neg_int) refuse(i, "an element is negative");
+                        break;
+                    case DRAKEN_FLOAT64:
+                        if (sv.saw_bool || sv.saw_string) refuse(i, "an element is not a number");
+                        break;
+                    default:
+                        // parse_declared_type only ever admits the five above.
+                        throw std::invalid_argument(
+                            "explicit_schema: column '" + name + "' declared " + declared +
+                            " has an element type the array builder cannot materialise");
+                }
+                total_elements += count;
             }
-            total_elements += count;
-        }
+            return true;
+        });
 
         ParsedColumn pc;
         pc.type = DRAKEN_ARRAY;
@@ -963,8 +1008,8 @@ static ParsedColumn parse_column_explicit(
         pc.all_null = !scr.any_value_seen;
         pc.key_absent = !scr.any_key_seen;
         const bool ok = (dt.element == DRAKEN_VARCHAR)
-            ? fill_string_array_column(base, scr, n, total_elements, pc)
-            : fill_numeric_array_column(base, scr, n, dt.element, total_elements, pc);
+            ? fill_string_array_column(scr, n, total_elements, pc)
+            : fill_numeric_array_column(scr, n, dt.element, total_elements, pc);
         if (!ok) {
             // The survey above validated every row once; a re-walk failure is a bug,
             // not bad data (same contract as parse_array_column).
@@ -974,14 +1019,13 @@ static ParsedColumn parse_column_explicit(
         return pc;
     }
 
-    StringColumnResult scr = extract_column(buffer, col,
+    StringColumnResult scr = extract_column(source, col,
                                             /*copy_bytes=*/false, may_have_escapes,
                                             SIZE_MAX, &rows);
-    const uint8_t* base = scr.data_owned ? scr.data_ptr() : buffer;
     const uint32_t n = static_cast<uint32_t>(scr.num_rows);
 
     if (declared_is_string(dt.type)) {
-        ParsedColumn pc = parse_varchar_column(base, scr, rows);
+        ParsedColumn pc = parse_varchar_column(scr, rows);
         pc.type = dt.type;
         pc.key_absent = !scr.any_key_seen;
         return pc;
@@ -1017,21 +1061,24 @@ static ParsedColumn parse_column_explicit(
     const std::vector<RowRange> ranges = rows.split(n, is_bool ? 8 : 1);
     std::vector<uint32_t> first_bad(ranges.size(), UINT32_MAX);
     rows.run(ranges, [&](size_t ri) {
-        for (uint32_t i = static_cast<uint32_t>(ranges[ri].begin);
-             i < static_cast<uint32_t>(ranges[ri].end); ++i) {
-            if (!row_valid(scr, i)) continue;      // NULL row keeps its zero
-            const uint32_t len = scr.lengths[i];
-            if (len == 0 || !declared_parse_into(dt, base + scr.offsets[i], len, data, i)) {
-                first_bad[ri] = i;
-                return;
+        for_each_chunk_run(scr.bases, ranges[ri].begin, ranges[ri].end,
+                           [&](size_t from, size_t to, const uint8_t* base) {
+            for (uint32_t i = static_cast<uint32_t>(from); i < static_cast<uint32_t>(to); ++i) {
+                if (!row_valid(scr, i)) continue;      // NULL row keeps its zero
+                const uint32_t len = scr.lengths[i];
+                if (len == 0 || !declared_parse_into(dt, base + scr.offsets[i], len, data, i)) {
+                    first_bad[ri] = i;
+                    return false;
+                }
             }
-        }
+            return true;
+        });
     });
     const uint32_t bad = *std::min_element(first_bad.begin(), first_bad.end());
     if (bad != UINT32_MAX) {
         const uint32_t off = scr.offsets[bad];
         const uint32_t len = scr.lengths[bad];
-        std::string got(reinterpret_cast<const char*>(base + off), len < 64u ? len : 64u);
+        std::string got(reinterpret_cast<const char*>(scr.bases.at(bad) + off), len < 64u ? len : 64u);
         draken_free(data);
         throw std::invalid_argument(
             "explicit_schema: column '" + name + "' row " + std::to_string(bad) +
@@ -1131,7 +1178,7 @@ static inline bool dict_gate_fails(uint32_t distinct, uint32_t rows_seen) noexce
 // validity bit (code 0, never read). False when the gate rejects the column; the caller then
 // builds it dense, the always-correct path. Throws exactly as the dense path does on an
 // invalid value (lowest bad row wins).
-static bool parse_nested_text_dict(const uint8_t* buffer, const std::vector<FieldSpan>& col,
+static bool parse_nested_text_dict(const SpanBases& source, const std::vector<FieldSpan>& col,
                                    const std::string& name,
                                    const RowExec& rows, ParsedColumn& pc) {
     const uint32_t n = static_cast<uint32_t>(col.size());
@@ -1151,31 +1198,34 @@ static bool parse_nested_text_dict(const uint8_t* buffer, const std::vector<Fiel
         std::vector<uint8_t> rendered, stack, scratch;
         const uint32_t begin = static_cast<uint32_t>(ranges[ri].begin);
         const uint32_t end = static_cast<uint32_t>(ranges[ri].end);
-        for (uint32_t row = begin; row < end; ++row) {
-            if (((row - begin) & (kDictGateEvery - 1)) == 0 && row != begin &&
-                dict_gate_fails(tab.size(), row - begin)) {
-                bailed[ri] = 1;
-                return;
-            }
-            const FieldSpan* f = span_absent(col[row]) ? nullptr : &col[row];
-            if (f == nullptr) {
-                bits.null_bitmap[row >> 3] &= static_cast<uint8_t>(~(1u << (row & 7u)));
-                codes[row] = 0;
-                continue;
-            }
-            const uint8_t* d;
-            uint32_t dn;
-            if (!jsoncanon::raw_text_view(buffer, *f, d, dn)) {
-                rendered.clear();
-                if (!jsoncanon::render_nested(buffer, *f, /*as_json=*/false, rendered, stack, scratch)) {
-                    first_bad[ri] = row;
-                    return;
+        for_each_chunk_run(source, begin, end, [&](size_t from, size_t to, const uint8_t* buffer) {
+            for (uint32_t row = static_cast<uint32_t>(from); row < to; ++row) {
+                if (((row - begin) & (kDictGateEvery - 1)) == 0 && row != begin &&
+                    dict_gate_fails(tab.size(), row - begin)) {
+                    bailed[ri] = 1;
+                    return false;
                 }
-                d = rendered.data();
-                dn = static_cast<uint32_t>(rendered.size());
+                const FieldSpan* f = span_absent(col[row]) ? nullptr : &col[row];
+                if (f == nullptr) {
+                    bits.null_bitmap[row >> 3] &= static_cast<uint8_t>(~(1u << (row & 7u)));
+                    codes[row] = 0;
+                    continue;
+                }
+                const uint8_t* d;
+                uint32_t dn;
+                if (!jsoncanon::raw_text_view(buffer, *f, d, dn)) {
+                    rendered.clear();
+                    if (!jsoncanon::render_nested(buffer, *f, /*as_json=*/false, rendered, stack, scratch)) {
+                        first_bad[ri] = row;
+                        return false;
+                    }
+                    d = rendered.data();
+                    dn = static_cast<uint32_t>(rendered.size());
+                }
+                codes[row] = tab.intern(d, dn);
             }
-            codes[row] = tab.intern(d, dn);
-        }
+            return true;
+        });
     });
 
     const uint32_t bad = *std::min_element(first_bad.begin(), first_bad.end());
@@ -1186,7 +1236,7 @@ static bool parse_nested_text_dict(const uint8_t* buffer, const std::vector<Fiel
         draken_free(codes);
         const FieldSpan* f = &col[bad];
         const uint32_t len = f->value_width;
-        std::string got(reinterpret_cast<const char*>(buffer + f->value_start), len < 64u ? len : 64u);
+        std::string got(reinterpret_cast<const char*>(source.at(bad) + f->value_start), len < 64u ? len : 64u);
         throw std::runtime_error(
             "read_jsonl: column '" + name + "' row " + std::to_string(bad) + ": value '" + got +
             "' is not valid JSON");
@@ -1254,7 +1304,7 @@ static bool parse_nested_text_dict(const uint8_t* buffer, const std::vector<Fiel
 // Spans are resolved here by slot rather than through extract_column, whose NULL test
 // reads the raw bytes and so cannot tell a JSON string "null" from JSON null.
 static ParsedColumn parse_nested_column(
-    const uint8_t* buffer, const std::vector<FieldSpan>& col, const std::string& name,
+    const SpanBases& source, const std::vector<FieldSpan>& col, const std::string& name,
     const ColumnSpec& spec, const std::string* declared, const RowExec& rows,
     bool intern_text) {
 
@@ -1272,7 +1322,7 @@ static ParsedColumn parse_nested_column(
 
     if (intern_text && !spec.as_json) {
         ParsedColumn pc;
-        if (parse_nested_text_dict(buffer, col, name, rows, pc)) return pc;
+        if (parse_nested_text_dict(source, col, name, rows, pc)) return pc;
     }
 
     // Per-range output (8-row aligned: each range writes its own bytes of the bitmap),
@@ -1300,38 +1350,41 @@ static ParsedColumn parse_nested_column(
     rows.run(ranges, [&](size_t ri) {
         std::vector<uint8_t>& data = part_data[ri];
         std::vector<uint8_t> stack, scratch;
-        for (uint32_t row = static_cast<uint32_t>(ranges[ri].begin);
-             row < static_cast<uint32_t>(ranges[ri].end); ++row) {
-            const FieldSpan* f = span_absent(col[row]) ? nullptr : &col[row];
-            if (f == nullptr) {
-                out.null_bitmap[row >> 3] &= static_cast<uint8_t>(~(1u << (row & 7u)));
-                continue;
+        for_each_chunk_run(source, ranges[ri].begin, ranges[ri].end,
+                           [&](size_t from, size_t to, const uint8_t* buffer) {
+            for (uint32_t row = static_cast<uint32_t>(from); row < static_cast<uint32_t>(to); ++row) {
+                const FieldSpan* f = span_absent(col[row]) ? nullptr : &col[row];
+                if (f == nullptr) {
+                    out.null_bitmap[row >> 3] &= static_cast<uint8_t>(~(1u << (row & 7u)));
+                    continue;
+                }
+                any_value[ri] = 1;
+                const uint8_t* d;
+                uint32_t dn;
+                if (!spec.as_json && jsoncanon::raw_text_view(buffer, *f, d, dn)) {
+                    out.offsets[row] = static_cast<uint32_t>(d - buffer);
+                    out.lengths[row] = dn;
+                    in_buffer[row] = 1;
+                    continue;
+                }
+                any_rendered[ri] = 1;
+                const size_t start = data.size();
+                if (!jsoncanon::render_nested(buffer, *f, spec.as_json, data, stack, scratch)) {
+                    first_bad[ri] = row;
+                    return false;
+                }
+                out.offsets[row] = static_cast<uint32_t>(start);   // range-relative; rebased below
+                out.lengths[row] = static_cast<uint32_t>(data.size() - start);
             }
-            any_value[ri] = 1;
-            const uint8_t* d;
-            uint32_t dn;
-            if (!spec.as_json && jsoncanon::raw_text_view(buffer, *f, d, dn)) {
-                out.offsets[row] = static_cast<uint32_t>(d - buffer);
-                out.lengths[row] = dn;
-                in_buffer[row] = 1;
-                continue;
-            }
-            any_rendered[ri] = 1;
-            const size_t start = data.size();
-            if (!jsoncanon::render_nested(buffer, *f, spec.as_json, data, stack, scratch)) {
-                first_bad[ri] = row;
-                return;
-            }
-            out.offsets[row] = static_cast<uint32_t>(start);   // range-relative; rebased below
-            out.lengths[row] = static_cast<uint32_t>(data.size() - start);
-        }
+            return true;
+        });
     });
 
     const uint32_t bad = *std::min_element(first_bad.begin(), first_bad.end());
     if (bad != UINT32_MAX) {
         const FieldSpan* f = &col[bad];
         const uint32_t len = f->value_width;
-        std::string got(reinterpret_cast<const char*>(buffer + f->value_start), len < 64u ? len : 64u);
+        std::string got(reinterpret_cast<const char*>(source.at(bad) + f->value_start), len < 64u ? len : 64u);
         throw std::runtime_error(
             "read_jsonl: column '" + name + "' row " + std::to_string(bad) + ": value '" + got +
             "' is not valid JSON");
@@ -1345,9 +1398,10 @@ static ParsedColumn parse_nested_column(
         if (any_value[ri]) { out.any_value_seen = true; out.any_key_seen = true; }
     }
 
-    // No row rendered: every value's offset already indexes `buffer`. Otherwise one arena
-    // of the rendered ranges with the buffer rows copied in, every offset rebased to it.
-    const uint8_t* base = buffer;
+    // No row rendered: every value's offset already indexes the source (per chunk).
+    // Otherwise one arena of the rendered ranges with the buffer rows copied in, every
+    // offset rebased to it.
+    out.bases = source;
     if (rendered) {
         for (uint32_t row = 0; row < n && !in_buffer.empty(); ++row)
             if (in_buffer[row]) total += out.lengths[row];
@@ -1357,22 +1411,26 @@ static ParsedColumn parse_nested_column(
         for (size_t ri = 0; ri < ranges.size(); ++ri) {
             const uint32_t range_base = static_cast<uint32_t>(out.data.size());
             out.data.insert(out.data.end(), part_data[ri].begin(), part_data[ri].end());
-            for (size_t row = ranges[ri].begin; row < ranges[ri].end; ++row) {
-                if (!in_buffer.empty() && in_buffer[row]) {
-                    const uint32_t at = static_cast<uint32_t>(out.data.size());
-                    out.data.insert(out.data.end(), buffer + out.offsets[row],
-                                    buffer + out.offsets[row] + out.lengths[row]);
-                    out.offsets[row] = at;
-                } else {
-                    out.offsets[row] += range_base;
+            for_each_chunk_run(source, ranges[ri].begin, ranges[ri].end,
+                               [&](size_t from, size_t to, const uint8_t* buffer) {
+                for (size_t row = from; row < to; ++row) {
+                    if (!in_buffer.empty() && in_buffer[row]) {
+                        const uint32_t at = static_cast<uint32_t>(out.data.size());
+                        out.data.insert(out.data.end(), buffer + out.offsets[row],
+                                        buffer + out.offsets[row] + out.lengths[row]);
+                        out.offsets[row] = at;
+                    } else {
+                        out.offsets[row] += range_base;
+                    }
                 }
-            }
+                return true;
+            });
         }
         out.data_owned = true;
-        base = out.data_ptr();
+        out.bases = SpanBases::one(out.data_ptr());
     }
 
-    ParsedColumn pc = parse_varchar_column(base, out, rows);
+    ParsedColumn pc = parse_varchar_column(out, rows);
     pc.type = expected;
     pc.key_absent = !out.any_key_seen;
     return pc;
@@ -1391,6 +1449,11 @@ std::vector<ParsedColumn> parse_all_columns(
     const size_t ncols = column_names.size();
     std::vector<ParsedColumn> out(ncols);
     if (ncols == 0) return out;
+    // A column is one draken vector, whose length is uint32_t.
+    if (map.rows > UINT32_MAX)
+        throw std::length_error("read_jsonl: " + std::to_string(map.rows) +
+                                " rows in one read; a column holds at most " +
+                                std::to_string(UINT32_MAX));
 
     size_t hw = std::thread::hardware_concurrency();
     if (hw == 0) hw = 1;
@@ -1400,8 +1463,8 @@ std::vector<ParsedColumn> parse_all_columns(
     auto do_one = [&](size_t c, const RowExec& rows) {
         const std::vector<FieldSpan>& col = map.cols[c];
         // The bytes this column's spans index: its arena when build_columns copied it,
-        // else the source buffer (ColumnMap).
-        const uint8_t* buffer = map.base(c, source);
+        // else the source buffer — per chunk (ColumnMap).
+        const SpanBases buffer = map.bases(c, source);
         const auto it = context.explicit_schema.find(column_names[c]);
         const ColumnSpec spec = parse_column_spec(column_names[c]);
         if (spec.nested) {
@@ -1425,9 +1488,8 @@ std::vector<ParsedColumn> parse_all_columns(
                                                     ? RecordValueTypes::IfArrayHinted
                                                     : RecordValueTypes::Never);
         // Unescaped (or copied) columns own their bytes in scr.data; zero-copy columns
-        // reference the original buffer.
-        const uint8_t* base = scr.data_owned ? scr.data_ptr() : buffer;
-        out[c] = parse_typed_column(base, scr, context, rows);
+        // reference the original buffer (scr.bases says which).
+        out[c] = parse_typed_column(scr, context, rows);
     };
 
     // Two parallel shapes, chosen by width and NEVER combined (see RowExec: nesting one

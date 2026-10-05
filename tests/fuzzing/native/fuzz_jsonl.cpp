@@ -44,13 +44,25 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     } catch (...) {
     }
 
-    // The Sparser-style prefilter, which walks records and runs a Volnitsky
-    // substring search over them. Needle taken from the input so the fuzzer can
-    // steer it; an empty needle is itself a case worth reaching.
+    // The Sparser-style prefilter's segment scan, driven by both drivers: Volnitsky (no
+    // sieve) and the SIMD sieve (positions from the input). Needles, the confirm clause and
+    // the \u keep are taken from the input so the fuzzer can steer them. A needle under 2
+    // bytes is never built (the gate's floor is 4).
     try {
-        const size_t needle_len = size >= 4 ? (data[0] % 8) : 0;
-        if (needle_len <= size) {
-            volnitsky_prefilter(data, size, data, needle_len);
+        if (size >= 8) {
+            const size_t n1 = 2 + data[0] % 14, n2 = 2 + data[1] % 20;
+            if (n1 + n2 + 4 <= size) {
+                PrefilterPlan plan;
+                plan.clauses.push_back({{std::string(reinterpret_cast<const char*>(data + 4), n1),
+                                         std::string(reinterpret_cast<const char*>(data + 4 + n1), n2)},
+                                        (data[2] & 1) != 0});
+                if (data[2] & 2)
+                    plan.clauses.push_back({{std::string(reinterpret_cast<const char*>(data + 4), n2)},
+                                            (data[2] & 4) != 0});
+                prefilter_plan_segments(data, 0, size, plan);
+                plan.sieve = {{data[3] % n1, (data[3] >> 4) % n1}, {0, static_cast<uint32_t>(n2 - 1)}};
+                prefilter_plan_segments(data, 0, size, plan);
+            }
         }
     } catch (const std::exception&) {
     } catch (...) {

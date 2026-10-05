@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <unordered_set>
 #include <utility>
@@ -558,10 +559,11 @@ struct MapBuilder {
                 // still in cache. A string keeps its closing quote after the body, exactly
                 // as in the source, for readers that check it (jsoncanon::raw_text_view).
                 FieldSpan f = cur[c];
-                std::vector<uint8_t>& ar = cm.arena[c];
+                ByteArena& ar = cm.arena[c];
                 const uint32_t at = static_cast<uint32_t>(ar.size());
                 const uint32_t quote = f.type == static_cast<uint8_t>(ValueType::String) ? 1u : 0u;
-                ar.insert(ar.end(), buffer + f.value_start, buffer + f.value_start + f.value_width + quote);
+                ar.resize(at + f.value_width + quote);
+                std::memcpy(ar.data() + at, buffer + f.value_start, f.value_width + quote);
                 f.value_start = at;
                 cm.cols[c].push_back(f);
             }
@@ -1062,6 +1064,13 @@ MapBuilder<kColumns> run_map(
             a = line_end;
         }
     } else {
+        // No wanted column reads inside a top-level container (no `key->>'sub'`), so the
+        // walk only ever bounds one: the depth <= 1 index is enough
+        // (scan_structural_index_top), and bound_container steps from a container's
+        // opening bracket straight to its closing one.
+        bool top_only = true;
+        if constexpr (kColumns)
+            for (const WantedColumn& w : *proj->columns) top_only &= w.sub_len == 0;
         size_t a = range_start;
         while (a < buffer_length) {
             size_t z = std::min(buffer_length, a + kWindowBytes);
@@ -1070,7 +1079,9 @@ MapBuilder<kColumns> run_map(
                 z = nl ? static_cast<size_t>(static_cast<const uint8_t*>(nl) - buffer) + 1 : buffer_length;
             }
             room((z - a) + 64);
-            const size_t n = scan_structural_index(buffer + a, z - a, static_cast<uint32_t>(a), index.data());
+            const size_t n = top_only
+                ? scan_structural_index_top(buffer + a, z - a, static_cast<uint32_t>(a), index.data())
+                : scan_structural_index(buffer + a, z - a, static_cast<uint32_t>(a), index.data());
             walk_window<kColumns, false>(b, StructuralWindow{buffer, index.data(), n}, blen, lines, li);
             scanned += z - a;
             reserve_from_density();
@@ -1089,12 +1100,29 @@ MapBuilder<kColumns> run_map(
 
 }  // namespace
 
+void require_chunk_length(size_t length, const char* what) {
+    if (length > kMaxChunkBytes)
+        throw std::length_error(std::string(what) + ": " + std::to_string(length) +
+                                " bytes in one buffer; at most " + std::to_string(kMaxChunkBytes) +
+                                " (4 GiB) can be parsed at once");
+}
+
+size_t chunk_end(const uint8_t* buffer, size_t from, size_t length) {
+    if (length - from <= kMaxChunkBytes) return length;
+    for (size_t p = from + kMaxChunkBytes; p > from; --p)
+        if (buffer[p - 1] == '\n') return p;
+    throw std::length_error("read_jsonl: the line at byte " + std::to_string(from) +
+                            " is longer than " + std::to_string(kMaxChunkBytes) +
+                            " bytes (4 GiB), the most that can be parsed at once");
+}
+
 ColumnMap build_columns(
     const uint8_t* buffer,
     size_t buffer_length,
     const MapProjection& proj,
     size_t range_start,
     const std::vector<LineSpan>* lines) {
+    require_chunk_length(buffer_length, "build_columns");
     MapBuilder<true> b = lines
         ? run_map<true, true>(buffer, buffer_length, &proj, range_start, lines)
         : run_map<true, false>(buffer, buffer_length, &proj, range_start, nullptr);
@@ -1105,6 +1133,7 @@ ColumnMap build_columns(
 }
 
 RecordSet build_map(const uint8_t* buffer, size_t buffer_length) {
+    require_chunk_length(buffer_length, "build_map");
     MapBuilder<false> b = run_map<false, false>(buffer, buffer_length, nullptr, 0, nullptr);
     b.rs.malformed = b.malformed_found;
     b.rs.malformed_pos = b.malformed_found ? b.malformed_at : 0;
@@ -1136,19 +1165,21 @@ std::vector<std::string> sample_record_keys(
 
 // The unprojected, unfiltered map of the input's head: grown by physical lines until
 // it banks `want` records (blank and malformed lines bank none) or covers the whole
-// buffer. The head always ends just after a newline (or at the buffer end), so no
-// record in it is cut short. May hold more than `want` records; callers take the first
-// `want`.
+// buffer — or its first chunk (kMaxChunkBytes, cut after a newline), the most the parser
+// takes at once: past that the sample holds fewer than `want` records. The head always ends
+// just after a newline (or at the buffer end), so no record in it is cut short. May hold
+// more than `want` records; callers take the first `want`.
 static RecordSet build_head(const uint8_t* buffer, size_t buffer_length, size_t want) {
+    const size_t limit = chunk_end(buffer, 0, buffer_length);
     for (size_t lines = want; ; lines *= 2) {
         size_t end = 0;
-        for (size_t seen = 0; seen < lines && end < buffer_length; ++seen) {
-            const void* nl = std::memchr(buffer + end, '\n', buffer_length - end);
+        for (size_t seen = 0; seen < lines && end < limit; ++seen) {
+            const void* nl = std::memchr(buffer + end, '\n', limit - end);
             end = nl ? static_cast<size_t>(static_cast<const uint8_t*>(nl) - buffer) + 1
-                     : buffer_length;
+                     : limit;
         }
         RecordSet head = build_map(buffer, end);
-        if (head.num_records() >= want || end == buffer_length) return head;
+        if (head.num_records() >= want || end == limit) return head;
     }
 }
 

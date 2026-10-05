@@ -64,6 +64,13 @@ inline uint64_t to_mask64(uint8x16_t a, uint8x16_t b, uint8x16_t c, uint8x16_t d
     return vgetq_lane_u64(vreinterpretq_u64_u8(s0), 0);
 }
 
+// to_mask64 for a class that is usually absent from a block (backslash, newline): one OR
+// tree and a horizontal max decide, and only a block that holds one pays the fold.
+RUGO_JSONL_SCAN_INLINE uint64_t mask64_if_any(uint8x16_t a, uint8x16_t b, uint8x16_t c, uint8x16_t d) {
+    if (vmaxvq_u8(vorrq_u8(vorrq_u8(a, b), vorrq_u8(c, d))) == 0) return 0;
+    return to_mask64(a, b, c, d);
+}
+
 inline uint8x16_t structural16(uint8x16_t v) {
     // '[' / ']' are '{' / '}' with bit 0x20 clear: one OR folds the bracket pairs.
     const uint8x16_t lower = vorrq_u8(v, vdupq_n_u8(0x20));
@@ -76,10 +83,36 @@ RUGO_JSONL_SCAN_INLINE BlockMasks classify(const uint8_t* p) {
     const uint8x16_t q = vdupq_n_u8('"'), bs = vdupq_n_u8('\\'), nl = vdupq_n_u8('\n');
     BlockMasks m;
     m.quote      = to_mask64(vceqq_u8(v0, q), vceqq_u8(v1, q), vceqq_u8(v2, q), vceqq_u8(v3, q));
-    m.backslash  = to_mask64(vceqq_u8(v0, bs), vceqq_u8(v1, bs), vceqq_u8(v2, bs), vceqq_u8(v3, bs));
-    m.newline    = to_mask64(vceqq_u8(v0, nl), vceqq_u8(v1, nl), vceqq_u8(v2, nl), vceqq_u8(v3, nl));
+    m.backslash  = mask64_if_any(vceqq_u8(v0, bs), vceqq_u8(v1, bs), vceqq_u8(v2, bs), vceqq_u8(v3, bs));
+    m.newline    = mask64_if_any(vceqq_u8(v0, nl), vceqq_u8(v1, nl), vceqq_u8(v2, nl), vceqq_u8(v3, nl));
     m.structural = to_mask64(structural16(v0), structural16(v1), structural16(v2), structural16(v3));
     return m;
+}
+// classify + the folded opening / closing bracket masks (scan_structural_index_top).
+struct TopMasks {
+    BlockMasks b;
+    uint64_t open, close;
+};
+RUGO_JSONL_SCAN_INLINE TopMasks classify_top(const uint8_t* p) {
+    const uint8x16_t v0 = vld1q_u8(p), v1 = vld1q_u8(p + 16), v2 = vld1q_u8(p + 32), v3 = vld1q_u8(p + 48);
+    const uint8x16_t q = vdupq_n_u8('"'), bs = vdupq_n_u8('\\'), nl = vdupq_n_u8('\n');
+    const uint8x16_t x = vdupq_n_u8(0x20), ob = vdupq_n_u8('{'), cb = vdupq_n_u8('}');
+    const uint8x16_t l0 = vorrq_u8(v0, x), l1 = vorrq_u8(v1, x), l2 = vorrq_u8(v2, x), l3 = vorrq_u8(v3, x);
+    TopMasks m;
+    m.b.quote     = to_mask64(vceqq_u8(v0, q), vceqq_u8(v1, q), vceqq_u8(v2, q), vceqq_u8(v3, q));
+    m.b.backslash = mask64_if_any(vceqq_u8(v0, bs), vceqq_u8(v1, bs), vceqq_u8(v2, bs), vceqq_u8(v3, bs));
+    m.b.newline   = mask64_if_any(vceqq_u8(v0, nl), vceqq_u8(v1, nl), vceqq_u8(v2, nl), vceqq_u8(v3, nl));
+    m.open        = to_mask64(vceqq_u8(l0, ob), vceqq_u8(l1, ob), vceqq_u8(l2, ob), vceqq_u8(l3, ob));
+    m.close       = to_mask64(vceqq_u8(l0, cb), vceqq_u8(l1, cb), vceqq_u8(l2, cb), vceqq_u8(l3, cb));
+    m.b.structural = m.open | m.close;  // ':' / ',' only where kept: sep_mask
+    return m;
+}
+// The ':' / ',' mask of the block at p — only for a block with entries to keep.
+RUGO_JSONL_SCAN_INLINE uint64_t sep_mask(const uint8_t* p) {
+    const uint8x16_t v0 = vld1q_u8(p), v1 = vld1q_u8(p + 16), v2 = vld1q_u8(p + 32), v3 = vld1q_u8(p + 48);
+    const uint8x16_t co = vdupq_n_u8(':'), cm = vdupq_n_u8(',');
+    return to_mask64(vorrq_u8(vceqq_u8(v0, co), vceqq_u8(v0, cm)), vorrq_u8(vceqq_u8(v1, co), vceqq_u8(v1, cm)),
+                     vorrq_u8(vceqq_u8(v2, co), vceqq_u8(v2, cm)), vorrq_u8(vceqq_u8(v3, co), vceqq_u8(v3, cm)));
 }
 #else
 inline uint64_t to_mask64(__m256i lo, __m256i hi) {
@@ -108,6 +141,35 @@ RUGO_JSONL_SCAN_INLINE BlockMasks classify(const uint8_t* p) {
     m.structural = to_mask64(structural32(lo), structural32(hi));
     return m;
 }
+
+// classify + the folded opening / closing bracket masks (scan_structural_index_top).
+struct TopMasks {
+    BlockMasks b;
+    uint64_t open, close;
+};
+RUGO_JSONL_SCAN_INLINE TopMasks classify_top(const uint8_t* p) {
+    const __m256i lo = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p));
+    const __m256i hi = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + 32));
+    const __m256i q = _mm256_set1_epi8('"'), bs = _mm256_set1_epi8('\\'), nl = _mm256_set1_epi8('\n');
+    const __m256i x = _mm256_set1_epi8(0x20), ob = _mm256_set1_epi8('{'), cb = _mm256_set1_epi8('}');
+    const __m256i llo = _mm256_or_si256(lo, x), lhi = _mm256_or_si256(hi, x);
+    TopMasks m;
+    m.b.quote     = to_mask64(_mm256_cmpeq_epi8(lo, q), _mm256_cmpeq_epi8(hi, q));
+    m.b.backslash = to_mask64(_mm256_cmpeq_epi8(lo, bs), _mm256_cmpeq_epi8(hi, bs));
+    m.b.newline   = to_mask64(_mm256_cmpeq_epi8(lo, nl), _mm256_cmpeq_epi8(hi, nl));
+    m.open        = to_mask64(_mm256_cmpeq_epi8(llo, ob), _mm256_cmpeq_epi8(lhi, ob));
+    m.close       = to_mask64(_mm256_cmpeq_epi8(llo, cb), _mm256_cmpeq_epi8(lhi, cb));
+    m.b.structural = m.open | m.close;  // ':' / ',' only where kept: sep_mask
+    return m;
+}
+// The ':' / ',' mask of the block at p — only for a block with entries to keep.
+RUGO_JSONL_SCAN_INLINE uint64_t sep_mask(const uint8_t* p) {
+    const __m256i lo = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p));
+    const __m256i hi = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + 32));
+    const __m256i co = _mm256_set1_epi8(':'), cm = _mm256_set1_epi8(',');
+    return to_mask64(_mm256_or_si256(_mm256_cmpeq_epi8(lo, co), _mm256_cmpeq_epi8(lo, cm)),
+                     _mm256_or_si256(_mm256_cmpeq_epi8(hi, co), _mm256_cmpeq_epi8(hi, cm)));
+}
 #endif
 
 // Mask the block, then flatten its set bits to positions. The flatten writes 8 entries
@@ -115,8 +177,10 @@ RUGO_JSONL_SCAN_INLINE BlockMasks classify(const uint8_t* p) {
 // (simdjson flatten_bits): the entry count per block is data-dependent, a branch per
 // entry is not. Forced inline: out of line, the per-block call and the BlockMasks
 // round-trip through memory cost ~25% of the scan.
-RUGO_JSONL_SCAN_INLINE size_t index_block(const BlockMasks& m, uint64_t& prev_escaped, uint64_t& prev_in_string,
-                          uint32_t idx, uint32_t* o) {
+// The block's index bits (before any depth filter) and the in-string mask they were
+// masked with; carries the escape and string state.
+RUGO_JSONL_SCAN_INLINE uint64_t block_bits(const BlockMasks& m, uint64_t& prev_escaped, uint64_t& prev_in_string,
+                                           uint64_t& in_str_out) {
     const uint64_t escaped = (m.backslash | prev_escaped) ? find_escaped(m.backslash, &prev_escaped) : 0;
     const uint64_t real_q = m.quote & ~escaped;
     uint64_t in_str = prefix_xor(real_q) ^ prev_in_string;
@@ -131,8 +195,14 @@ RUGO_JSONL_SCAN_INLINE size_t index_block(const BlockMasks& m, uint64_t& prev_es
     // newline in the same block, so without the mask a line ending inside a string with its
     // newline at bit 63 would start the next block, and the next line, inverted.
     prev_in_string = 0ull - ((in_str & ~m.newline) >> 63);
-    uint64_t bits = (m.structural & ~in_str) | real_q | m.newline;
+    in_str_out = in_str;
+    return (m.structural & ~in_str) | real_q | m.newline;
+}
 
+// Flatten the set bits to positions. Writes 8 entries unconditionally, 8 more when the
+// block holds more than 8, and loops only past 16 (simdjson flatten_bits): the entry count
+// per block is data-dependent, a branch per entry is not.
+RUGO_JSONL_SCAN_INLINE size_t flatten(uint64_t bits, uint32_t idx, uint32_t* o) {
     const int count = __builtin_popcountll(bits);
     for (int k = 0; k < 8; ++k) {
         o[k] = idx + static_cast<uint32_t>(__builtin_ctzll(bits | (1ull << 63)));
@@ -149,6 +219,58 @@ RUGO_JSONL_SCAN_INLINE size_t index_block(const BlockMasks& m, uint64_t& prev_es
         }
     }
     return static_cast<size_t>(count);
+}
+
+// Mask the block, then flatten its set bits to positions. Forced inline: out of line, the
+// per-block call and the BlockMasks round-trip through memory cost ~25% of the scan.
+RUGO_JSONL_SCAN_INLINE size_t index_block(const BlockMasks& m, uint64_t& prev_escaped, uint64_t& prev_in_string,
+                          uint32_t idx, uint32_t* o) {
+    uint64_t in_str;
+    return flatten(block_bits(m, prev_escaped, prev_in_string, in_str), idx, o);
+}
+
+// index_block keeping only depth <= 1 entries (scan_structural_index_top). `depth` is the
+// bracket depth before the block's first byte. The depth changes only at a bracket or a
+// newline outside a string, so the block is cut into runs of constant depth at those
+// events; a block with none is kept or dropped whole.
+RUGO_JSONL_SCAN_INLINE size_t index_block_top(const uint8_t* p, uint64_t& prev_escaped, uint64_t& prev_in_string,
+                                              int64_t& depth, uint32_t idx, uint32_t* o) {
+    const TopMasks m = classify_top(p);
+    uint64_t in_str;
+    uint64_t bits = block_bits(m.b, prev_escaped, prev_in_string, in_str);
+    const uint64_t op = m.open & ~in_str, cl = m.close & ~in_str;
+    uint64_t ev = op | cl | m.b.newline;
+    // No newline: the depth only moves by brackets, so popcounts bound it over the whole
+    // block (check_line_tail's "count, don't walk"). Never dipping below 2 drops every
+    // entry; never rising above 1 keeps every entry. Only a block that crosses between
+    // the two walks its events.
+    const int64_t nop = __builtin_popcountll(op), ncl = __builtin_popcountll(cl);
+    if (m.b.newline == 0 && depth - ncl >= 2) {
+        depth += nop - ncl;
+        return 0;  // wholly inside a top-level container: nothing kept, nothing written
+    }
+    bits |= sep_mask(p) & ~in_str;
+    if (m.b.newline == 0 && depth + nop <= 1) {
+        depth += nop - ncl;
+    } else {
+        uint64_t keep = 0;
+        unsigned from = 0;  // first byte of the current constant-depth run
+        int64_t d = depth;
+        for (; ev; ev &= ev - 1) {
+            const unsigned e = static_cast<unsigned>(__builtin_ctzll(ev));
+            const uint64_t b = 1ull << e;
+            // The run [from, e) at depth d.
+            if (d <= 1 && e > from) keep |= (~0ull >> (64 - (e - from))) << from;
+            if (m.b.newline & b) { keep |= b; d = 0; }
+            else if (op & b)     { if (d <= 1) keep |= b; ++d; }
+            else                 { --d; if (d <= 1) keep |= b; }
+            from = e + 1;
+        }
+        if (d <= 1 && from < 64) keep |= ~0ull << from;
+        depth = d;
+        bits &= keep;
+    }
+    return flatten(bits, idx, o);
 }
 
 // check_line_tail's four classes plus the newline: quote, backslash, an opening bracket
@@ -356,6 +478,54 @@ size_t scan_structural_index_cont(const uint8_t* data, size_t length, uint32_t b
     }
     state[0] = esc ? 1u : 0u;
     state[1] = in_s ? 1u : 0u;
+#endif
+    return count;
+}
+
+size_t scan_structural_index_top(const uint8_t* data, size_t length, uint32_t base, uint32_t* out) {
+    size_t count = 0;
+#if defined(RUGO_JSONL_SCAN_NEON) || defined(RUGO_JSONL_SCAN_AVX2)
+    uint64_t prev_escaped = 0, prev_in_string = 0;
+    int64_t depth = 0;
+    size_t i = 0;
+    for (; i + 64 <= length; i += 64)
+        count += index_block_top(data + i, prev_escaped, prev_in_string, depth,
+                                 base + static_cast<uint32_t>(i), out + count);
+    if (i < length) {
+        uint8_t tail[64];
+        std::memset(tail, ' ', sizeof tail);
+        std::memcpy(tail, data + i, length - i);
+        count += index_block_top(tail, prev_escaped, prev_in_string, depth,
+                                 base + static_cast<uint32_t>(i), out + count);
+    }
+#else
+    // Byte-for-byte the SIMD answer: scan_structural_index's scalar loop with the depth
+    // filter.
+    bool in_s = false, esc = false;
+    int64_t depth = 0;
+    for (size_t i = 0; i < length; ++i) {
+        const uint8_t c = data[i];
+        const uint32_t pos = base + static_cast<uint32_t>(i);
+        if (c == '\n')     { in_s = false; esc = false; depth = 0; out[count++] = pos; continue; }
+        if (esc) {
+            esc = false;
+            if (c == '"' || c == '\\') continue;
+        } else if (c == '\\') {
+            esc = true;
+            continue;
+        }
+        if (in_s) {
+            if (c == '"')  { in_s = false; if (depth <= 1) out[count++] = pos; }
+            continue;
+        }
+        switch (c) {
+            case '"': in_s = true; if (depth <= 1) out[count++] = pos; break;
+            case '{': case '[': if (depth <= 1) out[count++] = pos; ++depth; break;
+            case '}': case ']': --depth; if (depth <= 1) out[count++] = pos; break;
+            case ':': case ',': if (depth <= 1) out[count++] = pos; break;
+            default: break;
+        }
+    }
 #endif
     return count;
 }

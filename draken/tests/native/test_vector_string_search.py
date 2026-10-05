@@ -316,6 +316,27 @@ class TestContains:
         v = sv([body])
         assert pylist(vss.vector_contains(v, needle("brown cat"))) == [False]
 
+    # Haystacks over 1024 bytes are searched in 1024-byte chunks. A final chunk shorter than
+    # the needle used to be verified anyway: the scan read past the haystack into the next
+    # string's bytes, so a needle split across two adjacent rows was "found".
+    @pytest.mark.parametrize("tail", range(1, 16))
+    def test_long_haystack_needle_split_across_rows_is_not_found(self, tail):
+        pat = "abcdefghijklmnop"   # 16 bytes; its first `tail` bytes end row 0
+        v = sv(["x" * 1024 + pat[:tail], pat[tail:] + "y" * 20])
+        assert pylist(vss.vector_contains(v, needle(pat))) == [False, False]
+
+    @pytest.mark.parametrize("length", [1025, 1030, 1039, 1040, 2047, 2048, 2049, 3100])
+    def test_long_haystack_match_at_the_end_is_found(self, length):
+        pat = "abcdefghijklmnop"
+        v = sv(["x" * (length - len(pat)) + pat, "z" * length])
+        assert pylist(vss.vector_contains(v, needle(pat))) == [True, False]
+
+    @pytest.mark.parametrize("start", [1009, 1015, 1020, 1023, 1024, 2040])
+    def test_long_haystack_match_across_a_chunk_boundary_is_found(self, start):
+        pat = "abcdefghijklmnop"
+        v = sv(["x" * start + pat + "x" * 50])
+        assert pylist(vss.vector_contains(v, needle(pat))) == [True]
+
     def test_short_string_both_sides(self):
         v = sv(["ab", "a", "b", ""])
         assert pylist(vss.vector_contains(v, needle("a"))) == [True, True, False, False]
