@@ -294,8 +294,8 @@ separate; magnitude claimed only when the ranges separate.
   (`dev/bench_results/ab-clickbench-Justins-MacBook-Pro-20261004-191352.*`,
   3 rounds, ~9.7 s/suite).
 - Temporary sweep switches `OPTERYX_SWEEP_GB_FLUSH_ENTRIES` /
-  `OPTERYX_SWEEP_GB_MERGE_LEAF` in `native_group_sinks.hpp` (default build
-  unchanged; delete once banked).
+  `OPTERYX_SWEEP_GB_MERGE_LEAF` in `native_group_sinks.hpp` — deleted
+  2026-10-05 once banked, along with every other `OPTERYX_SWEEP_*` switch.
 - C1 note: §9.4 of `docs/PARQUET_GROUPED_COLUMN_MAJOR_DESIGN.md` measured 64k
   parquet row groups 4-9% SLOWER on ClickBench (Mac, fixed per-row-group cost),
   so a 64k-vs-262k mirror is not a clean ceiling for sub-row-group decode
@@ -398,6 +398,33 @@ JoinCsr probe, min of 7, arms alternating, match counts checked):
   inconsistent between distances and inside the layout-noise band. Not faster
   on either architecture — **deleted**. The ban stands at the GROUP BY probe on
   both, under the full-suite harness.
+
+### C1 ceiling — i5 (2026-10-05)
+
+`dev/c1_skew_probe.py`: per query, median of 3 passes after a warm pass,
+barrier idle summed over pipelines; ceiling = idle / DOP / wall, the wall share
+a perfect distribution of the same work could remove (DOP 4 = cpu − 2 by
+design on the 6-core box; mimalloc preload as the harness uses).
+
+| dataset | suite wall | ceiling | worst queries |
+|---|---|---|---|
+| ClickBench, parquet 262k rgs | 61.7 s | **0.2%** | Q37-Q43 (34-206 ms, CounterID=62) 2-6% |
+| TPC-H SF1, parquet | 3.1 s | **2.3%** | Q16 4.7%, Q02 4.1%, Q22 3.7% |
+| TPC-H SF10, parquet | 33.8 s | **0.8%** | Q22 3.5%, Q02 2.5%, Q11 2.4% |
+| TPC-H SF1, skene v3 (64k rgs) | 2.4 s | **2.9%** | Q10 11.1%, Q22 9.3%, Q02 7.0% |
+
+- **Verdict on x86 at DOP 4: C1 has no ceiling worth building for.** Finer
+  decode claims can only reclaim barrier idle, and that is ≤ 3% of every suite
+  and 0.2% of ClickBench. ~378 row groups across 4 workers already balance.
+- The 2026-09-23 SF1 imbalance finding (64k claims −18-22% exec) was at 14-18
+  workers on the Mac with ~23 lineitem claims. The ceiling scales with workers
+  per claim, so it is a high-DOP effect. The Mac re-measure (when idle) and
+  the production vCPU count decide whether C1 matters anywhere. On a 4-8 vCPU
+  Cloud Run instance the i5 picture applies.
+- Not covered: idle INSIDE a pipeline, i.e. workers waiting on the decode pool
+  mid-run. Process cores are 4.3-5.8 of 6 on parquet, so ≤ ~25% headroom on
+  the small SF1 queries (Q02/Q11/Q16/Q22), which are latency-bound, not
+  distribution-bound.
 
 ## 10. Still needed to start
 
