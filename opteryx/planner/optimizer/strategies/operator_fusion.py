@@ -49,6 +49,8 @@ class OperatorFusionStrategy(OptimizationStrategy):
                     # sort ever has to keep.
                     new_node.limit = int(next_node.limit) + offset
                     new_node.order_by = node.order_by
+                    # The query's meaning (planner/unsearchable_sorts.py) moves with it.
+                    new_node.drops_unsearchable = node.drops_unsearchable
                     # This strategy runs AFTER projection pushdown, so the fused node
                     # is the only place the Order's active-column set can come from —
                     # a fresh PlanStep has none, and without it the HeapSort

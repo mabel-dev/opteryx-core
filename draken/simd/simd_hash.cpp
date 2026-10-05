@@ -2,23 +2,13 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <atomic>
 #include <cstring>
 #include <algorithm>  // std::min (RVV path; pulled in transitively elsewhere on x86/ARM)
 
 #include "simd_dispatch.h"
-#include "cpu_features.h"
 
-#if defined(__AVX2__)
-#include <immintrin.h>
-#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
-#include <arm_neon.h>
-#elif defined(__riscv) && defined(__riscv_vector)
+#if defined(__riscv) && defined(__riscv_vector)
 #include <riscv_vector.h>
-#endif
-
-#if defined(_MSC_VER)
-#include <intrin.h>
 #endif
 
 namespace {
@@ -45,42 +35,6 @@ inline void scalar_mix(uint64_t* dest, const uint64_t* values, std::size_t count
         dest[i] = mixed;
     }
 }
-
-// Provide architecture-specific mullo_u64 overloads.
-
-#if defined(__AVX2__)
-inline __m256i mullo_u64(__m256i a, __m256i b) {
-    // AVX2 lacks a direct 64-bit integer multiply, so combine 32-bit partials per lane.
-    const __m256i mask = _mm256_set1_epi64x(0xFFFFFFFFULL);
-    __m256i a_lo = _mm256_and_si256(a, mask);
-    __m256i b_lo = _mm256_and_si256(b, mask);
-    __m256i a_hi = _mm256_srli_epi64(a, 32);
-    __m256i b_hi = _mm256_srli_epi64(b, 32);
-
-    __m256i prod_ll = _mm256_mul_epu32(a_lo, b_lo);
-    __m256i prod_lh = _mm256_mul_epu32(a_lo, b_hi);
-    __m256i prod_hl = _mm256_mul_epu32(a_hi, b_lo);
-
-    __m256i cross = _mm256_add_epi64(prod_lh, prod_hl);
-    cross = _mm256_slli_epi64(cross, 32);
-
-    return _mm256_add_epi64(prod_ll, cross);
-}
-#endif
-
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-inline uint64x2_t mullo_u64(uint64x2_t a, uint64x2_t b) {
-    uint32x2_t a_lo = vmovn_u64(a);
-    uint32x2_t b_lo = vmovn_u64(b);
-    uint32x2_t a_hi = vshrn_n_u64(a, 32);
-    uint32x2_t b_hi = vshrn_n_u64(b, 32);
-    uint64x2_t lo_lo = vmull_u32(a_lo, b_lo);
-    uint64x2_t lo_hi = vmull_u32(a_lo, b_hi);
-    uint64x2_t hi_lo = vmull_u32(a_hi, b_lo);
-    uint64x2_t cross = vaddq_u64(lo_hi, hi_lo);
-    return vaddq_u64(lo_lo, vshlq_n_u64(cross, 32));
-}
-#endif
 
 }  // namespace
 
@@ -129,51 +83,25 @@ static void simd_mix_hash_scalar(uint64_t* dest, const uint64_t* values, std::si
     scalar_mix(dest, values, count);
 }
 
-#if defined(__AVX2__)
-static void simd_mix_hash_avx2(uint64_t* dest, const uint64_t* values, std::size_t count) {
-    if (dest == nullptr || values == nullptr || count == 0) {
-        return;
-    }
 
-    const std::size_t stride = 4;
-    const __m256i const_vec = _mm256_set1_epi64x(static_cast<long long>(MIX_HASH_CONSTANT));
-    std::size_t i = 0;
-    for (; i + stride <= count; i += stride) {
-        __m256i dst_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(dest + i));
-        __m256i val_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(values + i));
-        __m256i mixed = _mm256_xor_si256(dst_vec, val_vec);
-        __m256i product = mullo_u64(mixed, const_vec);
-        product = _mm256_add_epi64(product, _mm256_set1_epi64x(1));
-        __m256i shifted = _mm256_srli_epi64(product, 32);
-        __m256i combined = _mm256_xor_si256(product, shifted);
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dest + i), combined);
-    }
-    if (i < count) {
-        scalar_mix(dest + i, values + i, count - i);
-    }
-}
-#endif
-
-// NOTE: there is deliberately no NEON mixer.
-// AArch64 NEON has no 64x64->64 integer multiply, so a vector mixer must emulate
-// it with three vmull_u32 partial products plus shifts and adds. Scalar AArch64
-// does the same work in one `madd`. Measured on M-series (byte-identical output,
-// interleaved A/B, min of 15, both L2-resident and 64 MiB working sets):
-//     NEON (3x vmull emulation)      0.315 ns/value
-//     unrolled scalar (scalar_mix)   0.203 ns/value   <- 1.55x faster
-// The ARM dispatch slot below therefore selects scalar_mix on purpose. This does
-// NOT generalise to x86: AVX2's emulation amortises over 4 lanes, so the AVX2
-// mixer is kept. Re-measure before adding a NEON mixer back.
+// NOTE: there is deliberately no hand-written vector mixer on x86 or ARM.
+// AVX2 and NEON both lack a 64x64->64 integer multiply, so a hand vector mixer
+// must emulate it from 32-bit partial products.
+//   ARM (M-series, byte-identical, interleaved, min of 15, L2 and 64 MiB):
+//     NEON (3x vmull emulation) 0.315 ns/value vs scalar_mix 0.203 — 1.55x slower.
+//   x86 (i5-8500, gcc 12 -O3 -march=haswell, min of 31, 2026-10-04,
+//   dev/bench_hash_mix_arch.cpp): hand AVX2 0.66-0.68 ns/value vs scalar_mix
+//     0.63 at 1 MiB — the compiler auto-vectorizes scalar_mix itself (vpmuludq)
+//     and beats the hand kernel; at 64 MiB they tie. ClickBench suite with the
+//     hand kernel removed: 0.9995 (7 rounds). The hand AVX2 mixer was deleted.
+// So every ISA except RVV (which has a native vmul) runs scalar_mix, and on x86
+// "scalar" means "what the compiler vectorizes". Re-measure before adding a hand
+// vector mixer back on either.
 
 void simd_mix_hash(uint64_t* dest, const uint64_t* values, std::size_t count) {
     using fn_t = void(*)(uint64_t*, const uint64_t*, std::size_t);
-    static std::atomic<fn_t> cache{nullptr};
-
-#if defined(__AVX2__)
-    // noop - AVX2 candidate included below
-#endif
-    // ARM slot is scalar_mix by measurement, not by omission - see the note above.
-    fn_t fn = SIMD_STATIC_SELECT(simd_mix_hash_avx2, simd_mix_hash_scalar, simd_mix_hash_rvv, simd_mix_hash_scalar);
+    // x86 and ARM slots are scalar_mix by measurement, not by omission - see the note above.
+    fn_t fn = SIMD_STATIC_SELECT(simd_mix_hash_scalar, simd_mix_hash_scalar, simd_mix_hash_rvv, simd_mix_hash_scalar);
 
     return fn(dest, values, count);
 }
@@ -204,32 +132,18 @@ static void simd_hash_i64_scalar(const uint64_t* src, uint64_t* dst, std::size_t
     }
 }
 
-#if defined(__AVX2__)
-static void simd_hash_i64_avx2(const uint64_t* src, uint64_t* dst, std::size_t count) {
-    const __m256i kc  = _mm256_set1_epi64x(static_cast<long long>(MIX_HASH_CONSTANT));
-    const __m256i one = _mm256_set1_epi64x(1);
-    std::size_t i = 0;
-    for (; i + 4 <= count; i += 4) {
-        __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
-        v = _mm256_add_epi64(mullo_u64(v, kc), one);
-        v = _mm256_xor_si256(v, _mm256_srli_epi64(v, 32));
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), v);
-    }
-    if (i < count) simd_hash_i64_scalar(src + i, dst + i, count - i);
-}
-#endif
 
-// No NEON variant: this is the mixer minus the xor-with-dest, so the same
-// measurement applies - NEON must emulate the 64-bit multiply with three
-// vmull_u32, scalar does it in one madd. Measured (byte-identical, interleaved,
-// min of 15, at 512 KiB and 32 MiB): NEON 0.297 ns/value vs unrolled scalar
-// 0.155 ns/value = 1.91x. The ARM slot selects the scalar kernel on purpose.
+// No hand-written x86/ARM variant: this is the mixer minus the xor-with-dest, so
+// the same measurements apply. ARM: NEON 0.297 ns/value vs unrolled scalar
+// 0.155 (1.91x slower; byte-identical, interleaved, min of 15, 512 KiB and
+// 32 MiB). x86 (i5-8500, gcc 12, 2026-10-04): hand AVX2 0.58-0.60 vs the
+// compiler-vectorized scalar loop 0.51 at 1 MiB, tied at 64 MiB — the hand
+// AVX2 kernel was deleted. Both slots select the scalar kernel on purpose.
 
 void simd_hash_i64(const uint64_t* src, uint64_t* dst, std::size_t count) {
     if (!src || !dst || !count) return;
     using fn_t = void(*)(const uint64_t*, uint64_t*, std::size_t);
-    static std::atomic<fn_t> cache{nullptr};
-    // ARM slot is the scalar kernel by measurement - see the note above.
-    fn_t fn = SIMD_STATIC_SELECT(simd_hash_i64_avx2, simd_hash_i64_scalar, simd_hash_i64_rvv, simd_hash_i64_scalar);
+    // x86 and ARM slots are the scalar kernel by measurement - see the note above.
+    fn_t fn = SIMD_STATIC_SELECT(simd_hash_i64_scalar, simd_hash_i64_scalar, simd_hash_i64_rvv, simd_hash_i64_scalar);
     fn(src, dst, count);
 }

@@ -581,6 +581,33 @@ def resolve_max_execution_workers(requested: Optional[int] = None) -> int:
         return max(2, cpu - 2, (cpu * 4) // 5)
     return requested
 
+# ── Vector index cost model (docs/VECTOR_INDEX_DESIGN.md §8, ruled 2026-10-04) ──────────
+# Whether a file is searched through its vector index or exactly is decided per file by
+# comparing the two paths' estimated seconds: requests x latency + bytes / throughput +
+# CPU. Every constant below is MEASURED, never guessed. These are the 2026-10-04 dev
+# machine figures (Apple M5 Pro; GCS reached over the office link) - "measure locally for
+# now" (architect); production should override them from a Cloud Run measurement.
+VECTOR_COST_REMOTE_REQUEST_SECONDS: float = float(get("VECTOR_COST_REMOTE_REQUEST_SECONDS", 0.159))
+"""One remote (GCS/S3) range GET's latency. Median of 9 64-byte GETs, dev -> GCS."""
+VECTOR_COST_REMOTE_BYTES_PER_SECOND: float = float(get("VECTOR_COST_REMOTE_BYTES_PER_SECOND", 3.8e6))
+"""Remote read throughput past the latency. Median of 5 whole-file GETs of a 2.4 MB index."""
+VECTOR_COST_LOCAL_REQUEST_SECONDS: float = float(get("VECTOR_COST_LOCAL_REQUEST_SECONDS", 3.5e-7))
+"""One local pread's latency (64 bytes, page cache warm)."""
+VECTOR_COST_LOCAL_BYTES_PER_SECOND: float = float(get("VECTOR_COST_LOCAL_BYTES_PER_SECOND", 2.1e10))
+"""Local read throughput (a 52 MB index pread whole, page cache warm)."""
+VECTOR_COST_SCORE_SECONDS_PER_ROW_DIM: float = float(get("VECTOR_COST_SCORE_SECONDS_PER_ROW_DIM", 2.87e-10))
+"""Scoring one stored fp16 vector, per dimension: an exact search of a local 100k-row,
+256-wide index, median of 7."""
+VECTOR_COST_EMBED_SECONDS_PER_ROW: dict = {
+    # One thread, through the engine (COSINE_DISTANCE over a one-row-group file of NVD
+    # descriptions, minus the same scan's LENGTH): an exact search embeds every row, one
+    # worker per row group.
+    "static-hash": float(get("VECTOR_COST_EMBED_SECONDS_PER_ROW_STATIC_HASH", 4.43e-6)),
+    "minilm-l6-v2": float(get("VECTOR_COST_EMBED_SECONDS_PER_ROW_MINILM", 1.85e-2)),
+}
+"""Embedding one row on one thread, by embedder name. An embedder with no entry has no
+measured cost, and a search over its index is refused rather than guessed."""
+
 if environ.get("FEATURE_DRAKEN_DICT_EXPR_STRICT") is not None:
     import warnings
     warnings.warn(
@@ -683,6 +710,7 @@ class Features:
     disable_aggregate_scan_pushdown = get_bool("FEATURE_DISABLE_AGGREGATE_SCAN_PUSHDOWN", False)
     disable_boolean_simplification = get_bool("FEATURE_DISABLE_BOOLEAN_SIMPLIFICATION", False)
     disable_compaction_planning = get_bool("FEATURE_DISABLE_COMPACTION_PLANNING", False)
+    disable_vector_index_routing = get_bool("FEATURE_DISABLE_VECTOR_INDEX_ROUTING", False)
     disable_constant_folding = get_bool("FEATURE_DISABLE_CONSTANT_FOLDING", False)
     disable_correlated_filters = get_bool("FEATURE_DISABLE_CORRELATED_FILTERS", False)
     disable_decorrelate_subquery = get_bool("FEATURE_DISABLE_DECORRELATE_SUBQUERY", False)

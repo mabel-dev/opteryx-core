@@ -1066,6 +1066,7 @@ static FileStats ParseFileMeta(TInput &in, const MetadataParseOptions &opts) {
       break;
     case 4: { // row_groups (list<RowGroup>)
       auto lh = ReadListHeader(in);
+      fs.num_row_groups = static_cast<int64_t>(lh.size);
       if (opts.schema_only) {
         for (uint32_t i = 0; i < lh.size; i++) {
           SkipStruct(in);

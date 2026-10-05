@@ -605,6 +605,7 @@ def check_statement(
     }
 
     plan_context = PlanContext()
+    plan_context.variables = execution_context.variables
     try:
         logical_plan, _ast = build_logical_plan(
             parsed_statements=parsed_statements,

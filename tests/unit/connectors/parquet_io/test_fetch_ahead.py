@@ -94,7 +94,8 @@ def _scan(url, fetch_ahead, workers=2, take=None, **kwargs):
     seen = []
     try:
         gen = iter_row_groups_ipc(None, [url], COLUMNS, decode_workers=workers,
-                                  fetch_ahead=fetch_ahead, **kwargs)
+                                  fetch_ahead=fetch_ahead, remote_decode_workers=workers,
+                                  **kwargs)
         try:
             for _scan_rg, rg in gen:
                 seen.extend(rg[b"x"].to_pylist())
@@ -154,14 +155,16 @@ def test_native_plan_reports_depth_and_rejects_an_inert_one():
         proc, port = _server(tmp)
         try:
             url = f"http://127.0.0.1:{port}/{name}"
-            plan = open_native_scan_plan([url], ["x"], decode_workers=2, fetch_ahead=6)
+            plan = open_native_scan_plan([url], ["x"], decode_workers=2, fetch_ahead=6,
+                                         remote_decode_workers=2)
             try:
                 assert plan.diagnostics()["fetch_ahead_depth"] == 6
                 assert plan.row_group_count == N_ROW_GROUPS
             finally:
                 plan.close()
-            with pytest.raises(ValueError, match="must exceed the decode worker count"):
-                open_native_scan_plan([url], ["x"], decode_workers=2, fetch_ahead=2)
+            with pytest.raises(ValueError, match="must exceed the remote decode worker count"):
+                open_native_scan_plan([url], ["x"], decode_workers=2, fetch_ahead=2,
+                                      remote_decode_workers=2)
         finally:
             proc.kill(); proc.wait()
 
@@ -171,7 +174,8 @@ def test_native_plan_local_only_is_validated_but_not_armed():
 
     with tempfile.TemporaryDirectory() as tmp:
         path, _ = _write(tmp)
-        plan = open_native_scan_plan([path], ["x"], decode_workers=2, fetch_ahead=6)
+        plan = open_native_scan_plan([path], ["x"], decode_workers=2, fetch_ahead=6,
+                                     remote_decode_workers=2)
         try:
             assert plan.row_group_count == N_ROW_GROUPS
             assert plan.diagnostics()["fetch_ahead_depth"] == 0
@@ -187,10 +191,71 @@ def test_depth_not_exceeding_the_decode_workers_is_rejected():
     with tempfile.TemporaryDirectory() as tmp:
         path, _ = _write(tmp)
         for depth in (4, 2):
-            with pytest.raises(ValueError, match="must exceed the decode worker count"):
-                open_ipc_source(None, [path], ["x"], decode_workers=4, fetch_ahead=depth)
+            with pytest.raises(ValueError, match="must exceed the remote decode worker count"):
+                open_ipc_source(None, [path], ["x"], decode_workers=4, fetch_ahead=depth,
+                                remote_decode_workers=4)
         with pytest.raises(ValueError, match="must be >= 0"):
             open_ipc_source(None, [path], ["x"], decode_workers=4, fetch_ahead=-1)
+
+
+def test_depth_is_validated_against_the_remote_width_not_the_local_one():
+    """The 192-vCPU regression (ClickBench fleet, 2026-10-04). A local scan's decode
+    width scales with the host — 190 on a 192-vCPU box — and never pairs with the
+    fetch pool, so the default depth (64) must not be checked against it: every
+    local scan on a 66+ vCPU host was refused at plan time."""
+    from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path, _ = _write(tmp)
+        plan = open_native_scan_plan([path], ["x"], decode_workers=190, fetch_ahead=64,
+                                     remote_decode_workers=16)
+        try:
+            assert plan.row_group_count == N_ROW_GROUPS
+            assert plan.diagnostics()["fetch_ahead_depth"] == 0
+        finally:
+            plan.close()
+
+
+def test_a_depth_the_remote_pool_cannot_use_still_raises_on_a_local_scan():
+    """The validation still runs on EVERY scan: a depth no wider than the remote
+    decode pool is rejected on a local scan too, not only on the next remote one."""
+    from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path, _ = _write(tmp)
+        with pytest.raises(ValueError, match="must exceed the remote decode worker count"):
+            open_native_scan_plan([path], ["x"], decode_workers=2, fetch_ahead=8,
+                                  remote_decode_workers=16)
+
+
+def test_a_depth_without_the_remote_width_is_rejected():
+    """No silent default for the reference width: a configured depth with nothing
+    to validate it against is a caller bug."""
+    from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path, _ = _write(tmp)
+        with pytest.raises(ValueError, match="needs the remote decode worker count"):
+            open_native_scan_plan([path], ["x"], decode_workers=2, fetch_ahead=6)
+
+
+def test_a_wide_host_scans_local_parquet_through_sql():
+    """End to end through the compiler, the way the fleet hit it: the local decode
+    width resolved to 190 (as on a 192-vCPU host) with the default depth of 64.
+    The width is server-owned config read at import, so this runs in a subprocess."""
+    repo = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../.."))
+    script = (
+        "import sys; sys.path.insert(0, '.'); import opteryx\n"
+        "s = opteryx.session()\n"
+        "rows = sum(m.num_rows for m in s.execute_to_morsels("
+        "'SELECT user_id FROM testdata.flat.formats.parquet WHERE user_id > 0'))\n"
+        "print('ROWS', rows)\n"
+    )
+    env = {**os.environ, "PARQUET_LOCAL_IO_WORKERS": "190", "PARQUET_IO_FETCH_AHEAD": "64"}
+    result = subprocess.run([sys.executable, "-c", script], cwd=repo, env=env,
+                            capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stderr
+    assert int(result.stdout.split("ROWS")[1]) > 0
 
 
 def test_explicit_window_smaller_than_depth_is_rejected():
@@ -200,10 +265,10 @@ def test_explicit_window_smaller_than_depth_is_rejected():
         path, _ = _write(tmp)
         with pytest.raises(ValueError, match="caps fetch depth"):
             open_ipc_source(None, [path], ["x"], decode_workers=2, fetch_ahead=8,
-                            in_flight_limit_override=4)
+                            remote_decode_workers=2, in_flight_limit_override=4)
         # Equal is fine: the window covers the depth exactly.
         src = open_ipc_source(None, [path], ["x"], decode_workers=2, fetch_ahead=8,
-                              in_flight_limit_override=8)
+                              remote_decode_workers=2, in_flight_limit_override=8)
         src.close()
 
 

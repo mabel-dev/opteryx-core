@@ -1,0 +1,1 @@
+Opteryx: pin opteryx-core 0.9.155, run as a long-lived server

@@ -145,6 +145,8 @@ _STRATEGY_DISABLE_FLAGS = {
     "TimestampCastSinkStrategy": lambda: config.features.disable_timestamp_cast_sink,
     "TopNManifestPruningStrategy": lambda: config.features.disable_topn_manifest_pruning,
     "TopNScanPushdownStrategy": lambda: config.features.disable_topn_scan_pushdown,
+    # Routing through a vector index only: the sort semantics are not this strategy's.
+    "VectorSearchStrategy": lambda: config.features.disable_vector_index_routing,
     "WindowTopKFusionStrategy": lambda: config.features.disable_window_topk_fusion,
 }
 

@@ -307,15 +307,10 @@ def _index_refs(dataset):
 
 
 def _indexed_ordinals(path):
-    import skene
+    sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", "unit", "core"))
+    from test_vector_index_build import stored_vectors
 
-    data = open(path, "rb").read()
-    ordinals = []
-    for g in range(len(skene.read_metadata(data)["row_groups"])):
-        morsel = skene.read_morsel(data, g)
-        morsel.materialize()
-        ordinals.extend(morsel.column("ordinal").to_pylist())
-    return sorted(ordinals)
+    return sorted(stored_vectors(path))
 
 
 def test_refresh_builds_commits_and_is_then_a_no_op(catalog_env):
@@ -329,14 +324,14 @@ def test_refresh_builds_commits_and_is_then_a_no_op(catalog_env):
     assert dataset.snapshot(None).operation_type == "index-build"
     (data_file, refs), = _index_refs(dataset).items()
     files = refs[record["index-id"]]
-    # the sizes committed are the files the build wrote
-    assert os.path.getsize(files.vectors) == files.vectors_bytes
-    assert os.path.getsize(files.centroids) == files.centroids_bytes
-    assert files.vectors.startswith(f"{dataset.metadata.location}/index/{record['index-id']}/")
-    assert _indexed_ordinals(files.vectors) == [0, 1, 2]
+    # the sizes committed are the file the build wrote
+    assert os.path.getsize(files.path) == files.file_bytes
+    assert 0 < files.footer_bytes < files.file_bytes
+    assert files.path.startswith(f"{dataset.metadata.location}/index/{record['index-id']}/")
+    assert _indexed_ordinals(files.path) == [0, 1, 2]
     summary = dataset.snapshot(None).summary
-    assert summary["total-index-files"] == 2
-    assert summary["total-index-size"] == files.vectors_bytes + files.centroids_bytes
+    assert summary["total-index-files"] == 1
+    assert summary["total-index-size"] == files.file_bytes
 
     head = dataset.metadata.current_snapshot_id
     assert _messages(f"REFRESH INDEX body_idx ON {TABLE}") == [
@@ -360,7 +355,7 @@ def test_refresh_leaves_out_rows_deleted_at_plan_time(catalog_env):
 
     _run(f"REFRESH INDEX body_idx ON {TABLE}")
     files = _index_refs(dataset)[data_file][record["index-id"]]
-    assert _indexed_ordinals(files.vectors) == [0, 2]            # physical ordinals kept
+    assert _indexed_ordinals(files.path) == [0, 2]            # physical ordinals kept
 
 
 def test_refresh_is_refused_while_another_holds_the_lease(catalog_env):
@@ -410,7 +405,7 @@ def test_sync_create_builds_every_file_before_returning(catalog_env):
     ]
     (record,) = catalog_env.indexes.values()
     (refs,) = _index_refs(catalog_env.dataset).values()
-    assert _indexed_ordinals(refs[record["index-id"]].vectors) == [0, 1, 2]
+    assert _indexed_ordinals(refs[record["index-id"]].path) == [0, 1, 2]
     assert [event for event, *_ in catalog_env.lease_log] == ["claim", "release"]
     assert catalog_env.lease_log[0][1:] == ("CREATE INDEX body_idx by tester", "index-build")
 
@@ -475,8 +470,8 @@ def test_insert_into_a_sync_indexed_table_indexes_the_new_file_in_the_same_commi
     (added,) = set(refs) - before
     files = refs[added][record["index-id"]]
     texts = _texts_of(added)
-    assert [texts[o] for o in _indexed_ordinals(files.vectors)] == ["dust storm", "ring of ice"]
-    assert os.path.getsize(files.vectors) == files.vectors_bytes
+    assert [texts[o] for o in _indexed_ordinals(files.path)] == ["dust storm", "ring of ice"]
+    assert os.path.getsize(files.path) == files.file_bytes
     # A write takes no maintenance lease: it indexes only its own new files.
     assert [e for e, *_ in catalog_env.lease_log] == ["claim", "release"]   # the CREATE's only
 
@@ -492,7 +487,7 @@ def test_update_of_a_sync_indexed_table_indexes_the_rewritten_rows(catalog_env):
     (added,) = set(refs) - before
     files = refs[added][record["index-id"]]
     texts = _texts_of(added)
-    assert [texts[o] for o in _indexed_ordinals(files.vectors)] == ["frozen moon"]
+    assert [texts[o] for o in _indexed_ordinals(files.path)] == ["frozen moon"]
 
 
 def test_insert_into_an_async_indexed_table_leaves_the_new_file_to_refresh(catalog_env):

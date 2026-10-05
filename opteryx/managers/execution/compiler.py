@@ -673,10 +673,10 @@ def _wp11_logical_coerce(sc, pt):
 
     Parquet TIME is NOT handled here: the binder decodes it as plain INT64 (no TIME
     logical type is modelled from a scan), so a time column reaches the ordinary int
-    path — see native_scan_supported's "int" footer branch, which admits a
+    path — see native_scan_rejection's "int" footer branch, which admits a
     time-annotated int column.
 
-    `kind_str` feeds native_scan_supported's footer gate; `packed` feeds the native
+    `kind_str` feeds native_scan_rejection's footer gate; `packed` feeds the native
     Source's build_column retag (LC_* packing)."""
     if pt == DrakenType.DATE32:
         return ("date", False, _LC_DATE)
@@ -1010,6 +1010,10 @@ class _Compiler:
         # need_select). Built per execute() and discarded with the compiler — no
         # cross-query shared state.
         self._relocated_scan_filters: dict = {}
+        # Row identity ($file / $ordinal, constants/row_identity.py) for a scan admitted
+        # natively: its identity columns' (schema column, kind), appended by the Source
+        # after the read set. _native_scan_plan -> _compile_scan, like the above.
+        self._native_scan_row_identity: dict = {}
         # Statistics coverage (P3, docs/MANIFEST_SUM_STATISTIC_DESIGN.md §7): an
         # ungrouped aggregate directly over a scan registers what it needs by the
         # scan's identity before compiling it; the scan's plan answers the row
@@ -3829,7 +3833,7 @@ class _Compiler:
         parquet int32 widens to INT64 on decode) or string (VARCHAR/NVARCHAR/
         VARBINARY, decoded natively via the DK_VARCHAR / DK_VARCHAR_DICT /
         DK_POOL-string paths — WP-01); no scan-pushed LIMIT (R2, still open); and
-        the footer gate (native_scan_supported) proves every column of every row
+        the footer gate (native_scan_rejection) proves every column of every row
         group eligible — no schema evolution, no DECIMAL/temporal/BOOL logical
         types. A scan-fused TopN hint (R3) is admitted (see below) — it is
         ignored, not honoured, because the real sort/limit already happens in a
@@ -3860,7 +3864,7 @@ class _Compiler:
         read-set to build from and stays on the trampoline (see the guard
         above)."""
         from opteryx import config
-        from opteryx.connectors.parquet_io.pool_reader import native_scan_supported
+        from opteryx.connectors.parquet_io.pool_reader import native_scan_rejection
         from opteryx.connectors.parquet_io.io_tuning import resolve_coalesce_tuning
         from opteryx.connectors.parquet_io.io_tuning import resolve_fetch_ahead
         from opteryx.connectors.parquet_io.io_tuning import resolve_fetch_ahead_gate
@@ -3929,7 +3933,7 @@ class _Compiler:
         # file is a SUCCESS — the scan's whole answer is "no rows" — and bouncing
         # it to the per-morsel Python trampoline made the best-pruned queries in
         # the battery the only ones that left the native path. The native scan
-        # plans over an empty path list: `native_scan_supported`'s "every column of
+        # plans over an empty path list: `native_scan_rejection`'s "every column of
         # every file" loops are vacuously true, `open_native_scan_plan` builds zero
         # work items, and the Source reports exhaustion on its first pull. The
         # downstream native operators see an input that produced no morsels, which
@@ -4000,6 +4004,28 @@ class _Compiler:
                         seen.add(sc.identity)
                         read_scs.append(sc)
 
+        # Row identity is not read from the file: the Source appends it after the read
+        # set (set_native_scan_row_identity), so it leaves the columns rugo decodes.
+        identity_scs = []
+        if scan.step.node_type == LogicalPlanStepType.Scan and scan.step.emit_row_identity:
+            from opteryx.constants.row_identity import ROW_IDENTITY_COLUMNS
+            from opteryx.constants.row_identity import ROW_IDENTITY_FILE
+
+            identity_scs = [sc for sc in read_scs if sc.name in ROW_IDENTITY_COLUMNS]
+            if identity_scs:
+                read_scs = [sc for sc in read_scs if sc.name not in ROW_IDENTITY_COLUMNS]
+                identity_ids = {sc.identity for sc in identity_scs}
+                if predicates and any(
+                    ident.schema_column is not None and ident.schema_column.identity in identity_ids
+                    for pred in predicates
+                    for ident in get_all_nodes_of_type(pred, select_nodes=(NodeType.IDENTIFIER,))
+                ):
+                    # A pushed predicate on the row address: nothing pushes one today.
+                    self.scan_residual_reasons[scan.identity] = "row_identity_predicate"
+                    return None
+                self._native_scan_row_identity[scan.identity] = [
+                    (sc, 0 if sc.name == ROW_IDENTITY_FILE else 1) for sc in identity_scs
+                ]
         kinds, string_types, decimal_columns, logical_coerce, widen_types, bad_type = (
             self._classify_scan_columns(read_scs))
         if bad_type is not None:
@@ -4038,15 +4064,16 @@ class _Compiler:
         # trampoline's `_ensure_scan_started` uses, so the two paths cannot disagree
         # about which filesystem a scan has.
         filesystem, connector_type = resolve_scan_filesystem(scan.connector, paths)
-        if not native_scan_supported(paths, names, kinds, file_sizes or None,
-                                     filesystem=filesystem,
-                                     footer_bytes_cache=scan_footer_bytes_cache()):
-            # R7b: the footer gate (native_scan_supported) rejected the scan — schema
+        rejection = native_scan_rejection(paths, names, kinds, file_sizes or None,
+                                          filesystem=filesystem,
+                                          footer_bytes_cache=scan_footer_bytes_cache())
+        if rejection is not None:
+            # R7b: the footer gate (native_scan_rejection) rejected the scan — schema
             # evolution, a row group whose types are not all eligible, or a remote path
             # the filesystem can neither sign nor authenticate by bearer header (its
             # fetch would 401 at execution time). Signed or bearer remote paths ARE
-            # admitted.
-            self.scan_residual_reasons[scan.identity] = "footer_gate"
+            # admitted. The gate's own reason (column, kind, file) rides on the code.
+            self.scan_residual_reasons[scan.identity] = "footer_gate: " + rejection
             return None
         # Pruning triples — identical to the trampoline path's `_sp_predicate_stats`
         # so row groups excluded / bytes read are unchanged. Only pruning; the
@@ -4057,7 +4084,8 @@ class _Compiler:
         # the value (timestamp units, DECIMAL scale) or carries a descriptor.
         # (`widen_types` is every column's declared type, not a flag, and widening
         # an integer keeps its value - so it never disqualifies a column.)
-        coverage, coverage_request = self._coverage_for_scan(
+        # A scan addressing rows emits every row it reads: none is answered from statistics.
+        coverage, coverage_request = (None, None) if identity_scs else self._coverage_for_scan(
             scan, predicates,
             {sc.name for sc, retag in zip(read_scs, logical_coerce)
              if retag and (retag & 0xF) != _LC_DATE})
@@ -4123,6 +4151,15 @@ class _Compiler:
             # swept without moving the other.
             fetch_ahead_min_blocks=resolve_fetch_ahead_gate(
                 _scan_vars, _scan_overrides),
+            # The remote decode width the depth is validated against — on EVERY
+            # scan, local ones included, so a mis-set depth raises everywhere. Not
+            # `decode_workers`: a local scan's width scales with the host and never
+            # pairs with the fetch pool.
+            remote_decode_workers=_resolve_var(
+                "parquet_gcs_io_workers",
+                scan.properties.variables,
+                config.PARQUET_GCS_IO_WORKERS,
+            ),
             # Memory admission budget (bytes; 0 = off): what this scan's pipeline
             # may hold in decoded + prefetched bytes. Read back as
             # `memory_budget_bytes` in io_scan_diagnostics.
@@ -4148,13 +4185,15 @@ class _Compiler:
         if filter_bc is not None:
             # Wire the relocated residual for _compile_scan. The native Source emits
             # the read-set in `names` order; read_layout is the parallel identities.
-            read_layout = [sc.identity for sc in read_scs]
+            # Row identity follows the read set (the Source appends it).
+            read_layout = [sc.identity for sc in read_scs] + [sc.identity for sc in identity_scs]
             emit_ids = [col.schema_column.identity for col in scan.columns]
             emit_indices = [read_layout.index(identity) for identity in emit_ids]
             # Projected columns lead read_layout, so read-set ⊋ emit-set iff there
             # are appended role-3 columns — then a Select narrows back; else the
-            # Select would be the identity permutation and is elided (§3).
-            need_select = len(read_layout) > len(emit_ids)
+            # Select would be the identity permutation and is elided (§3). Row
+            # identity moved behind the read set needs the Select to put it back.
+            need_select = read_layout != emit_ids
             self._relocated_scan_filters[scan.identity] = (
                 filter_bc, read_layout, emit_indices, emit_ids, need_select, read_scs)
         return splan
@@ -4252,7 +4291,7 @@ class _Compiler:
         from opteryx.connectors.parquet_io.pass1_predicate_gate import (
             pass1_worker_predicate_admissible,
         )
-        from opteryx.connectors.parquet_io.pool_reader import native_scan_supported
+        from opteryx.connectors.parquet_io.pool_reader import native_scan_rejection
         from opteryx.connectors.parquet_io.io_tuning import resolve_coalesce_tuning
         from opteryx.connectors.parquet_io.io_tuning import resolve_fetch_ahead
         from opteryx.connectors.parquet_io.io_tuning import resolve_fetch_ahead_gate
@@ -4367,10 +4406,11 @@ class _Compiler:
         filesystem, connector_type = resolve_scan_filesystem(scan.connector, paths)
         # One gate over BOTH read-sets: every column either pass touches has to be
         # provably decodable, and schema evolution disqualifies the scan outright.
-        if not native_scan_supported(paths, p1_names + p2_names, p1_kinds + p2_kinds,
-                                     file_sizes or None, filesystem=filesystem,
-                                     footer_bytes_cache=scan_footer_bytes_cache()):
-            self.scan_residual_reasons[scan.identity] = "footer_gate"
+        rejection = native_scan_rejection(paths, p1_names + p2_names, p1_kinds + p2_kinds,
+                                          file_sizes or None, filesystem=filesystem,
+                                          footer_bytes_cache=scan_footer_bytes_cache())
+        if rejection is not None:
+            self.scan_residual_reasons[scan.identity] = "footer_gate: " + rejection
             return None
 
         decode_workers = _resolve_var(
@@ -4392,6 +4432,13 @@ class _Compiler:
         _scan_overrides = scan.scan_overrides
         fetch_ahead = resolve_fetch_ahead(_scan_vars, _scan_overrides)
         fetch_ahead_gate = resolve_fetch_ahead_gate(_scan_vars, _scan_overrides)
+        # What the depth is validated against on every scan (see the single-pass
+        # site): the remote decode width, never this scan's own local width.
+        remote_decode_workers = _resolve_var(
+            "parquet_gcs_io_workers",
+            scan.properties.variables,
+            config.PARQUET_GCS_IO_WORKERS,
+        )
         in_flight_override = resolve_in_flight_limit(_scan_vars, _scan_overrides)
         memory_budget = resolve_memory_budget(_scan_vars, _scan_overrides)
         http_tuning = resolve_http_tuning(_scan_vars, _scan_overrides)
@@ -4422,6 +4469,7 @@ class _Compiler:
                 pool=None,
                 fetch_ahead=fetch_ahead,
                 fetch_ahead_min_blocks=fetch_ahead_gate,
+                remote_decode_workers=remote_decode_workers,
                 in_flight_limit_override=in_flight_override,
                 http_tuning=http_tuning,
                 coalesce_tuning=coalesce_tuning,
@@ -4658,7 +4706,13 @@ class _Compiler:
         _vector_search = (
             scan.step.vector_search if scan.step.node_type == LogicalPlanStepType.Scan else None
         )
-        lat = None if (_scan_has_deletes or _vector_search) else self._latmat_scan_plan(scan)
+        # Row identity runs single-pass (constants/row_identity.py): the two-pass latmat
+        # Source renumbers rows between its passes.
+        _row_identity = (
+            scan.step.emit_row_identity if scan.step.node_type == LogicalPlanStepType.Scan else None
+        )
+        lat = (None if (_scan_has_deletes or _vector_search or _row_identity)
+               else self._latmat_scan_plan(scan))
         if lat is not None:
             (p1_plan, p2_plan, resolver, pred_col_to_p1, sort_p1_index, sort_ascending,
              sort_nulls_first, topn_limit, out_from_p1, out_from_p2, emit_ids) = lat
@@ -4724,6 +4778,14 @@ class _Compiler:
             # `_apply_to_scan`), so no downstream LimitOperator truncates. Pushdown
             # only fires with no pushed predicate and no OFFSET.
             self.nplan.set_native_scan_source(p, splan, scan.limit)
+            row_identity = self._native_scan_row_identity.get(scan.identity)
+            if row_identity:
+                self.nplan.set_native_scan_row_identity(
+                    p,
+                    [splan.fetch_paths.get(path, path) for path in manifest.get_file_paths()],
+                    [kind for _sc, kind in row_identity],
+                    [sc.name for sc, _kind in row_identity],
+                )
             if _vector_search:
                 # The vector admission excludes deleted rows itself.
                 self._arm_vector_admission(p, scan, splan)
@@ -4745,7 +4807,16 @@ class _Compiler:
             )
             self._remember_types(scan.columns)
             if reloc is None:
-                return p, [col.schema_column.identity for col in scan.columns]
+                emit_ids = [col.schema_column.identity for col in scan.columns]
+                if row_identity:
+                    # The Source emits row identity after the read set: Select it back
+                    # into the projection's order.
+                    identity_ids = {sc.identity for sc, _kind in row_identity}
+                    emitted = [i for i in emit_ids if i not in identity_ids] + [
+                        sc.identity for sc, _kind in row_identity]
+                    if emitted != emit_ids:
+                        self.nplan.add_select(p, [emitted.index(i) for i in emit_ids], emit_ids)
+                return p, emit_ids
             # WP-02: the native Source emits the read-set; apply the relocated
             # residual filter natively over that layout, then Select back to the
             # projection (drops role-3 filter-only columns). The identity Select is
@@ -4811,12 +4882,15 @@ class _Compiler:
         # A WHERE pushed into the scan is applied BEFORE the search (pass 1).
         filter_parts = self._vector_filter_plan(scan) if scan.predicates else None
         filter_paths = filter_parts[0].fetch_paths if filter_parts is not None else {}
+        # Covered files the planner's cost model chose to search exactly carry no index.
+        exact_by_cost = set(vs["exact_files"])
         files = []
         for path, rows in zip(manifest.get_file_paths(), manifest.record_counts()):
             fetch = splan.fetch_paths.get(path, path)
             files.append((
                 fetch, filter_paths.get(path, fetch) if filter_parts is not None else fetch,
-                int(rows), list(deletes.get(path, ())), indexed.get(path),
+                int(rows), list(deletes.get(path, ())),
+                None if path in exact_by_cost else indexed.get(path),
             ))
         embed_fn, _ = lookup_kernel("draken_embed")
         handle = VectorIndexAdmissionHandle(files, vs["query"], embed_fn, vs["dimensions"], vs["k"], nprobe)
@@ -4836,7 +4910,7 @@ class _Compiler:
         NativeScanPlan over the predicate columns and the predicate lowered to the
         latmat pass-1 C ABI. Refused loudly when it cannot run natively - the search
         never falls back to filtering its candidates afterwards."""
-        from opteryx.connectors.parquet_io.pool_reader import native_scan_supported
+        from opteryx.connectors.parquet_io.pool_reader import native_scan_rejection
         from opteryx.connectors.parquet_io.pool_reader import open_native_scan_plan
         from opteryx.connectors.parquet_io.predicates import extract_predicate_stats
         from opteryx.exceptions import UnsupportedSyntaxError
@@ -4871,9 +4945,10 @@ class _Compiler:
         manifest = scan.manifest
         paths = manifest.get_file_paths()
         filesystem, _connector_type = resolve_scan_filesystem(scan.connector, paths)
-        if not native_scan_supported(paths, names, kinds, None, filesystem=filesystem,
-                                     footer_bytes_cache=scan_footer_bytes_cache()):
-            raise UnsupportedSyntaxError(f"{refusal}: its columns are not natively readable here.")
+        rejection = native_scan_rejection(paths, names, kinds, None, filesystem=filesystem,
+                                          footer_bytes_cache=scan_footer_bytes_cache())
+        if rejection is not None:
+            raise UnsupportedSyntaxError(f"{refusal}: {rejection}.")
         plan = open_native_scan_plan(
             paths, names,
             predicates=extract_predicate_stats(predicates) or None,

@@ -1,0 +1,89 @@
+{
+ "suite": "clickbench",
+ "scale": "1",
+ "dataset": null,
+ "queries": "1,2,16",
+ "iterations": 2,
+ "controls": [
+  "Q01",
+  "Q02"
+ ],
+ "order": [
+  [
+   "base",
+   "same"
+  ],
+  [
+   "same",
+   "base"
+  ]
+ ],
+ "arms": [
+  {
+   "label": "base",
+   "tree": "/Users/justin/Nextcloud/opteryx-core",
+   "env": {},
+   "so": {}
+  },
+  {
+   "label": "same",
+   "tree": "/Users/justin/Nextcloud/opteryx-core",
+   "env": {
+    "OPTERYX_GB_MERGE_THREADS": "4"
+   },
+   "so": {}
+  }
+ ],
+ "machine": {
+  "host": "Justins-MacBook-Pro.local",
+  "system": "Darwin",
+  "machine": "arm64",
+  "python": "3.14.5",
+  "gil_enabled": true,
+  "cpu_count": 18,
+  "cc": "",
+  "cxx": "",
+  "cxxflags": "",
+  "cppflags": "",
+  "machdep.cpu.brand_string": "Apple M5 Pro",
+  "hw.perflevel0.logicalcpu": "6",
+  "hw.perflevel1.logicalcpu": "12",
+  "hw.perflevel0.l1dcachesize": "131072",
+  "hw.perflevel0.l2cachesize": "16777216",
+  "hw.l2cachesize": "8388608",
+  "hw.l3cachesize": "",
+  "hw.memsize": "68719476736",
+  "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)"
+ },
+ "row_count_mismatches": [],
+ "times_ms": {
+  "base": {
+   "Q01": [
+    177.664375,
+    165.770292
+   ],
+   "Q02": [
+    34.791542,
+    33.666208
+   ],
+   "Q16": [
+    194.439042,
+    188.778583
+   ]
+  },
+  "same": {
+   "Q01": [
+    155.644042,
+    154.968542
+   ],
+   "Q02": [
+    31.685584,
+    31.560875
+   ],
+   "Q16": [
+    238.541375,
+    255.590958
+   ]
+  }
+ }
+}

@@ -103,6 +103,7 @@ testpaths = ["tests"]
 norecursedirs = ["scratch", ".*", "build", "dist", "tmp", "third_party", "rugo", "embeddings"]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "measured_costs: a vector search test that keeps the measured cost-model constants",
 ]
 
 [project.optional-dependencies]

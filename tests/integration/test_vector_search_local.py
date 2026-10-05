@@ -13,7 +13,13 @@ each test protects:
   * deleted rows are never returned, nor rows with no embedding (NULL text) - with or
     without an index, with or without a LIMIT, even when that leaves fewer than LIMIT;
   * a WHERE is applied BEFORE the search and every survivor is scored, `nprobe` or not;
-  * every other shape runs as written, without the index.
+  * every other shape runs as written, without the index;
+  * the index is used per file only where it is estimated cheaper than an exact search
+    (ruled 2026-10-04), and EXPLAIN states both estimates.
+
+So that the index path is what they exercise whatever the measured constants become,
+every test but the cost-model ones prices embedding at a second a row
+(`_index_is_cheaper`), which makes the index the cheaper path.
 """
 
 import math
@@ -33,6 +39,16 @@ from test_vector_index_compaction_local import _entries  # noqa: E402
 from test_vector_index_compaction_local import env  # noqa: E402,F401
 
 QUERY = "storm moon ring"
+
+
+@pytest.fixture(autouse=True)
+def _index_is_cheaper(request, monkeypatch):
+    """Embedding at 1 s/row: the cost model then sends every covered file through the
+    index. Tests marked `measured_costs` keep the measured constants."""
+    if request.node.get_closest_marker("measured_costs") is None:
+        from opteryx import config
+
+        monkeypatch.setitem(config.VECTOR_COST_EMBED_SECONDS_PER_ROW, "static-hash", 1.0)
 
 
 def _rows(sql, session=None):
@@ -92,7 +108,7 @@ def test_the_default_search_is_exact(env):
     """No `SET nprobe`: every stored vector is scored, so the answer is the exact one."""
     _create()
     (decision,) = _decision(f"SELECT id FROM {TABLE} ORDER BY COSINE_DISTANCE(body, '{QUERY}') LIMIT 5")
-    assert "index body_idx" in decision
+    assert "index body_idx" in decision and "3 of 3 file(s) via the index" in decision
     _same(_search(10), _reference(10))
     _same(_search(10, nprobe=0), _reference(10))
     _same(_search(10, nprobe=100000), _reference(10))     # probing every cluster, likewise
@@ -112,7 +128,44 @@ def test_uncovered_files_are_searched_exactly_and_explain_says_so(env):
     _create(build="async")                                   # nothing built yet
     _same(_search(10), _reference(10))
     (decision,) = _decision(f"SELECT id FROM {TABLE} ORDER BY COSINE_DISTANCE(body, '{QUERY}') LIMIT 5")
-    assert "0 of 3 file(s) indexed, 3 searched exactly" in decision
+    assert "not used" in decision and "3 not covered by the index" in decision
+
+
+@pytest.mark.measured_costs
+def test_with_the_measured_costs_local_files_go_through_the_index(env):
+    """Locally a read costs next to nothing, so embedding every row is what an exact search
+    pays and the index is cheaper. EXPLAIN states both estimates."""
+    _create()
+    (decision,) = _decision(f"SELECT id FROM {TABLE} ORDER BY COSINE_DISTANCE(body, '{QUERY}') LIMIT 5")
+    assert "3 of 3 file(s) via the index (0 uncosted)" in decision
+    assert "est index" in decision and "over 3 costed file(s)" in decision
+    # The catalog records each file's row-group count, so none is estimated.
+    assert "row groups estimated for 0" in decision
+    _same(_search(10), _reference(10))
+
+
+@pytest.mark.measured_costs
+def test_when_embedding_is_free_every_file_is_searched_exactly(env, monkeypatch):
+    """With nothing to save on embedding, the index's extra reads lose: no file uses it,
+    the scan is not routed through it, and the answer is the exact one."""
+    from opteryx import config
+
+    _create()
+    monkeypatch.setitem(config.VECTOR_COST_EMBED_SECONDS_PER_ROW, "static-hash", 0.0)
+    (decision,) = _decision(f"SELECT id FROM {TABLE} ORDER BY COSINE_DISTANCE(body, '{QUERY}') LIMIT 5")
+    assert "not used: every file is cheaper searched exactly" in decision
+    _same(_search(10), _reference(10))
+
+
+@pytest.mark.measured_costs
+def test_an_embedder_with_no_measured_cost_is_refused(env, monkeypatch):
+    from opteryx import config
+    from opteryx.exceptions import InvalidConfigurationError
+
+    _create()
+    monkeypatch.delitem(config.VECTOR_COST_EMBED_SECONDS_PER_ROW, "static-hash")
+    with pytest.raises(InvalidConfigurationError, match="static-hash"):
+        _search(10)
 
 
 def test_deleted_rows_are_never_returned(env):

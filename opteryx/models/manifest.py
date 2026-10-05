@@ -108,6 +108,18 @@ class Manifest:
     def uncompressed_sizes(self) -> List[Optional[int]]:
         return self.native.uncompressed_sizes()
 
+    def row_group_counts(self) -> List[Optional[int]]:
+        """Each file's row-group count, in file order; None where unknown."""
+        return self.native.row_group_counts()
+
+    def column_uncompressed_sizes(self, column) -> List[Optional[int]]:
+        """Each file's in-memory bytes for `column` (by name), in file order; None where
+        unknown. Raises KeyError when the manifest has no such column."""
+        position = self.position_of(column)
+        if position is None:
+            raise KeyError(column)
+        return self.native.column_uncompressed_sizes(position)
+
     def deleted_record_counts(self) -> List[int]:
         return self.native.deleted_record_counts()
 

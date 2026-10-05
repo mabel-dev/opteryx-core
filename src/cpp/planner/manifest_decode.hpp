@@ -54,6 +54,7 @@ struct ManifestColumnsIn {
     const DrakenVector* uncompressed_size = nullptr;
     const DrakenVector* histogram_bins = nullptr;
     const DrakenVector* deleted_record_count = nullptr;   // optional column
+    const DrakenVector* row_group_count = nullptr;        // optional column; NULL = unknown
     const DrakenVector* delete_file_path = nullptr;       // optional column
     ManifestArrayColumn column_uncompressed_sizes;
     ManifestArrayColumn null_counts;
@@ -296,6 +297,7 @@ inline NativeManifest decode_manifest(const ManifestColumnsIn& in, const Manifes
             file.histogram_bins = bins;   // 0 is the writer's "no histogram"
         }
         read_int(in.deleted_record_count, row, file.deleted_record_count);
+        read_int(in.row_group_count, row, file.row_group_count);
         read_string(in.delete_file_path, row, file.delete_file_path);
         file.vector_row = row;
         size_t f = manifest.add_file(std::move(file));

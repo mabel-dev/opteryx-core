@@ -81,6 +81,10 @@ This is the same shape as the pandas/polars entries.
 no runtime dependencies, so `install` is a single binary-wheel download with no
 on-box compilation and no toolchain.
 
+`install` pins the release (`opteryx-core==0.9.155`, the latest release when
+this entry was drafted) and fails if the imported
+version differs, so a published result names the build that produced it.
+
 ### Query dialect
 
 `queries.sql` adapts queries to Opteryx's dialect. The adaptations are syntactic
@@ -97,12 +101,9 @@ on-box compilation and no toolchain.
 
 ### Hardware coverage
 
-Results are published for instance types with **32 or fewer vCPUs**. The account
-used for these runs is limited to 32 concurrent on-demand vCPUs, so the 192-vCPU
-machines in the ClickBench fleet (`c6a.metal`, `c7a.metal-48xl`,
-`c8g.metal-48xl`) could not be launched. The published set spans 2 to 16 vCPUs
-on both x86_64 (`c6a.*`, `t3a.small`) and AArch64 (`c8g.*`), which covers the
-small/medium range of the standard fleet on both architectures.
+The results submitted with this entry are from `c6a.4xlarge`, the canonical
+machine. Results for the other instance types in the ClickBench fleet come from
+the ClickBench benchmark runs, not from submitted measurements.
 
 ### Known Issues
 

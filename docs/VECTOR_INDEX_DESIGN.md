@@ -1,7 +1,7 @@
 # Vector index — ANN access path over catalog tables
 
 **Status:** IN BUILD. Stages A and B delivered, Stage C in progress (§13). Open decisions are in §14.
-**Date:** 2026-09-30, **rev 2** 2026-10-01 (architect direction: vectors live only in index files, not data files; index files are skene; ONNX cannot ship in the wheel, so embeddings come from an optional runtime-loaded provider whose weights are baked into the deployed image — §3, §9A). **rev 3** 2026-10-01: D-1 ruled (`VECTOR` is not a user-land concept; it exists only inside the index), D-12 approved (MIT licence verified), D-3 decided (§5.2). **rev 5** 2026-10-02: D-5 ruled (IVF-flat) and D-7 ruled (per-index sync/async, default async, compaction never re-embeds); storage accounting and billing (§5.5), compaction carry (§5.6), GC sizing (§5.4) and index discovery (§7A) designed; stale HNSW/usearch text corrected. **rev 6** 2026-10-02: D-13 ruled (index storage charged at logical bytes), D-14 ruled (compaction never embeds; compaction and index builds never run at the same time on a table, enforced by a maintenance lease, §5.7), D-15 ruled (follow sqlparser: `SHOW INDEXES FROM t`), D-16 ruled (`REFRESH INDEX`, fired by every commit that adds data files and by CREATE INDEX).
+**Date:** 2026-09-30, **rev 2** 2026-10-01 (architect direction: vectors live only in index files, not data files; index files are skene; ONNX cannot ship in the wheel, so embeddings come from an optional runtime-loaded provider whose weights are baked into the deployed image — §3, §9A). **rev 3** 2026-10-01: D-1 ruled (`VECTOR` is not a user-land concept; it exists only inside the index), D-12 approved (MIT licence verified), D-3 decided (§5.2). **rev 5** 2026-10-02: D-5 ruled (IVF-flat) and D-7 ruled (per-index sync/async, default async, compaction never re-embeds); storage accounting and billing (§5.5), compaction carry (§5.6), GC sizing (§5.4) and index discovery (§7A) designed; stale HNSW/usearch text corrected. **rev 6** 2026-10-02: D-13 ruled (index storage charged at logical bytes), D-14 ruled (compaction never embeds; compaction and index builds never run at the same time on a table, enforced by a maintenance lease, §5.7), D-15 ruled (follow sqlparser: `SHOW INDEXES FROM t`), D-16 ruled (`REFRESH INDEX`, fired by every commit that adds data files and by CREATE INDEX). **rev 8** 2026-10-04: the index file is one flat byte-addressable file per data file, not skene (§5.2); D-9 and D-4 re-ruled (exact by default, plain `COSINE_DISTANCE`).
 **Replaces:** an externally drafted HLD, "Object-Store Vector Index for Opteryx and Hadro". That
 draft was written with only partial knowledge of the platform. §1 reviews it against the code;
 the rest of this document redesigns from what actually exists.
@@ -191,40 +191,52 @@ Cost:
 
 ### 5.2 Contents
 
-**DECIDED (D-3 rev 3, D-5 ruled 2026-10-02: IVF-flat).** Two immutable skene objects per
-(data file, index), both written before the commit that references them:
+**RULED 2026-10-04 (rev 8; supersedes D-3's "skene files" and rev 7's row-group layout):
+ONE immutable flat file per (data file, index)**, written before the commit that
+references it (`src/cpp/engine/vector_index_file.hpp`):
 
 ```text
-<location>/index/<index_id>/<data-file-stem>-<nonce>.vectors.skene     -- (embedding VECTOR_FP16, ordinal UINT32)
-<location>/index/<index_id>/<data-file-stem>-<nonce>.centroids.skene   -- (centroid VECTOR_FP16, rows UINT32, row_groups ARRAY<INT32>)
+<location>/index/<index_id>/<data-file-stem>-<nonce>.vidx
+    BODY    blocks, back to back: one cluster's rows each -
+              uint32 ordinal[n]            the rows' PHYSICAL ordinals in the data file
+              uint16 vector[n][dims]       their fp16 embeddings
+    FOOTER  dims, clusters, blocks, rows; uint16 centroid[clusters][dims]; (cluster, rows) per block
+    TAIL    24 bytes: footer length, footer checksum (XXH3-64), version, magic
 ```
 
+- **Why not skene.** The first delivery stored the vectors in skene with one row group per
+  cluster plus a separate centroids file. On GCS that made a 4,630-row index 68 row groups
+  and two objects, read one range at a time: 37 s per query against 1.5 s for the exact
+  search without the index. An index on object storage is read by BYTE RANGE - the cost is
+  the round trip, not the bytes - and skene's unit is a decoded chunk, not an addressable
+  list. fp16 vectors do not compress either (the NVD vectors file was 258.9 MB for 258.7 MB
+  of raw vectors). So the index is its own flat format: no decoder, every block a byte range
+  computed from the footer alone, and the centroids inside the one file.
 - **Keyed by the index id, not its name**, so `DROP INDEX x; CREATE INDEX x` never reuses a
   path. The nonce makes every build a new object (files are immutable).
-
-- **Vectors file, grouped by cluster (rev 7):** every row group holds rows of ONE cluster,
-  but a cluster may span several row groups, interleaved with other clusters'. The build
-  streams: rows are held per cluster and a cluster's block is written as a row group every
-  `flush_rows` rows (sized from the build's memory budget), the remainders at the end. A
-  file's vectors are therefore never resident at once. `embedding` is the FIRST column, so
-  the streaming skene writer streams it and stages only the ordinals. Written without
-  read acceleration (no per-row-group statistics, zone maps or sketches: nothing prunes a
-  vectors file on values). Only searchable, non-deleted rows are stored; `ordinal` is the
-  row's PHYSICAL position in the data file, numbered before deletes. It is the only place the vector exists (§3), but it is
-  still derived state, rebuildable from the source text with the same provider and model (§9A).
-- **Centroids file:** row k is cluster k's unit-length centroid, its row count, and the
-  list of its row groups in the vectors file (empty when the cluster is empty). Small (K × dim × 2 bytes; 0.44 MB at
-  K=579, dim=384). It is read first; then only the `nprobe` probed row groups are fetched.
-- **Binding:** a skene file has no free-form section. So the binding (index-definition id,
-  embedding identity, data file path/size/row count) lives in the manifest entry that
-  references both objects, and is checked against them when the plan is built.
+- **Blocks.** The build streams: rows are held per cluster and a cluster's block is written
+  every `flush_rows` rows (sized from the build's memory budget), the remainders at the end,
+  so a cluster is one or a few blocks and a file's vectors are never resident at once. Only
+  searchable, non-deleted rows are stored. The vector exists nowhere else (§3), but it is
+  still derived state, rebuildable from the source text with the same provider and model
+  (§9A).
+- **Reads.** The catalog records the file's size AND its footer's, so opening a file is ONE
+  range read (footer + tail together). An exact search then reads every block in requests
+  of up to 16 MB, in parallel waves of up to 128 MB (one `get_many` per wave); a probe reads
+  only the probed clusters' blocks, adjacent ranges merged. Files of one scan are searched
+  in parallel. Locally the same plan runs on `pread`. The body carries no checksum: its
+  length is verified against the footer and the recorded size, and a mismatch is refused.
+- **Writes.** One stream: blocks, footer, tail. A GCS build streams the file into ONE
+  resumable session and finishes it natively - no prefix object, no compose, no delete.
+- **Binding:** the binding (index-definition id, embedding identity, data file path/size/
+  row count) lives in the manifest entry that references the file, and is checked against
+  it when the plan is built.
 - **The code lives in draken** (`draken/ops/ann/fp16_cosine_ivf.h`): `ivf_plan` (K and a
-  seeded sample chosen from the candidate rows — valid, not deleted — before embedding),
+  seeded sample chosen from the candidate rows - valid, not deleted - before embedding),
   `ivf_train` (spherical k-means on the embedded sample), `ivf_assign` and `ClusterStream`
-  (the streaming build); `ivf_build` composes them in memory and is bit-identical to its
-  pre-split output (tested); `ivf_probe` (nearest non-empty centroids), and `TopK::offer` (scores a contiguous block keyed by ordinal, which
-  is exactly a cluster row group as it arrives). `exact_topk` is the same accumulator over
-  every row.
+  (the streaming build); `ivf_probe` (nearest non-empty centroids), and `TopK::offer` (scores
+  a contiguous block keyed by ordinal, which is exactly a block as it arrives). `exact_topk`
+  is the same accumulator over every row.
 - **The metric is draken's own cosine** (the SIMD kernel from A1), as `1 - clip(cos)`. The
   distances returned are therefore the SQL kernel's values, and no re-rank pass is needed (§8).
 
@@ -278,14 +290,14 @@ manifest held their paths only.
 
 1. **Per file:** the manifest records each index file's on-disk size, and each index's logical
    size (§5.3).
-   - **Logical size** of an index = the decoded bytes of its two skene files, which is what
+   - **Logical size** of an index = the decoded bytes of its index file (rev 8: equal to the file, the format being its own decoded form), which is what
      `uncompressed_size_in_bytes` means for a data file:
-     - vectors: indexed rows × (4 + 2 × dim) bytes (`ordinal` UINT32 + fp16 embedding);
-     - centroids: clusters × (2 × dim + 4 + 4) bytes (centroid + `row_group` + `rows`).
+     - blocks: indexed rows × (4 + 2 × dim) bytes (`ordinal` UINT32 + fp16 embedding);
+     - footer: 24 + clusters × 2 × dim + blocks × 8 bytes; tail 24 bytes.
    - The builder computes it from what it wrote and hands it to the commit with the paths.
 2. **Per snapshot:** the summary gains three counters, maintained by every commit exactly as
    `total-files-size` and `total-data-size` are:
-   - `total-index-files`: index files (vectors + centroids) referenced by the manifest.
+   - `total-index-files`: index files (one per indexed data file per index) referenced by the manifest.
    - `total-index-size`: their on-disk bytes (for storage operations and expiry reporting).
    - `total-index-data-size`: their logical bytes (**billed**).
 
@@ -1034,6 +1046,17 @@ all pass.
     byte-identical (or answer-identical) to the local read; a URL signed with the wrong
     secret is refused and the read fails loud. Real GCS (signed V4 URLs, resumable sessions,
     compose) is still unexercised.
+- **FORMAT REPLACED 2026-10-04 (rev 8, §5.2):** the skene pair is gone. One `.vidx` file per
+  data file; the manifest's five `vidx_*` columns replace the six `vector_index_*` ones (a
+  manifest carrying the old columns reads as "not indexed"; the old files are orphans the
+  sweeps reclaim). `IndexFiles(path, file_bytes, footer_bytes, logical_bytes)`; logical =
+  file (the format is its own decoded form). The reader (`VectorIndexFile`) opens in one
+  request, reads in coalesced parallel waves; admission searches files on 8 threads.
+  Build/carry stream into one local file or one GCS session. `GcsFileIO.compose` and the
+  skene ranged reader are deleted. Every existing index must be rebuilt (DROP, CREATE).
+  Telemetry: `vector_index_bytes_read`, `vector_index_requests` replace the row-group count.
+  Measured (local, 1,500-row file): exact search = 2 requests (footer, body). The GCS
+  re-measure on `opteryx.test.space_missions` is pending its rebuild.
 - **RENAMED 2026-10-03: the index answers plain `COSINE_DISTANCE`.** Once the search
   became exact by default (D-9 re-ruling), "approximate" no longer described it:
   `APPROX_COSINE_DISTANCE` is deleted, and `ORDER BY COSINE_DISTANCE(col, 'q') LIMIT k`

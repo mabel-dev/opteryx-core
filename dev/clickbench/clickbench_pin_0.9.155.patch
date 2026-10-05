@@ -1,0 +1,486 @@
+diff -ruN a/opteryx/README.md b/opteryx/README.md
+--- a/opteryx/README.md	2026-10-04 14:14:31
++++ b/opteryx/README.md	2026-10-04 17:57:41
+@@ -13,6 +13,27 @@
+ This page benchmarks Opteryx (PyPI package `opteryx-core`) using the split
+ Parquet files provided by ClickBench.
+ 
++### Process model
++
++Opteryx is an in-process engine, and this entry runs it the way it is deployed:
++as a long-lived service. `start` launches `server.py`, a standard-library HTTP
++wrapper that imports `opteryx` and waits; `query` posts each statement to it.
++This is the same shape as the pandas/polars entries.
++
++- `BENCH_RESTARTABLE=yes`: the driver stops the server, drops the OS page cache
++  and starts a fresh process before every query, so try 1 is cold. Tries 2-3
++  run in the same process.
++- `BENCH_DURABLE=yes`: the data is Parquet on disk and nothing is loaded into
++  process memory.
++- `start` launches the service and nothing else: no warm-up query, and the
++  dataset is not touched. `check` reads `/health` and runs no query.
++- There is no query-result cache. What carries from try 1 to tries 2-3 is
++  process state: imported modules and the engine's Parquet footer and schema
++  caches.
++- The reported time is the server-side drain of `execute_to_morsels`, the same
++  span the previous process-per-query entry measured. Rendering the result as
++  TSV happens after the clock stops.
++
+ ---
+ 
+ ## Generating Benchmark Results
+@@ -60,6 +81,10 @@
+ no runtime dependencies, so `install` is a single binary-wheel download with no
+ on-box compilation and no toolchain.
+ 
++`install` pins the release (`opteryx-core==0.9.155`, the latest release when
++this entry was drafted) and fails if the imported
++version differs, so a published result names the build that produced it.
++
+ ### Query dialect
+ 
+ `queries.sql` adapts queries to Opteryx's dialect. The adaptations are syntactic
+@@ -76,12 +101,9 @@
+ 
+ ### Hardware coverage
+ 
+-Results are published for instance types with **32 or fewer vCPUs**. The account
+-used for these runs is limited to 32 concurrent on-demand vCPUs, so the 192-vCPU
+-machines in the ClickBench fleet (`c6a.metal`, `c7a.metal-48xl`,
+-`c8g.metal-48xl`) could not be launched. The published set spans 2 to 16 vCPUs
+-on both x86_64 (`c6a.*`, `t3a.small`) and AArch64 (`c8g.*`), which covers the
+-small/medium range of the standard fleet on both architectures.
++The results submitted with this entry are from `c6a.4xlarge`, the canonical
++machine. Results for the other instance types in the ClickBench fleet come from
++the ClickBench benchmark runs, not from submitted measurements.
+ 
+ ### Known Issues
+ 
+diff -ruN a/opteryx/benchmark.sh b/opteryx/benchmark.sh
+--- a/opteryx/benchmark.sh	2026-10-04 14:14:31
++++ b/opteryx/benchmark.sh	2026-10-04 17:57:41
+@@ -1,9 +1,12 @@
+ #!/bin/bash
+ export BENCH_DOWNLOAD_SCRIPT="download-hits-parquet-partitioned"
+-export BENCH_RESTARTABLE=no
+-# Single-process engine: each query forks a fresh full-machine process with no
+-# shared scheduler across connections, so the concurrent-QPS test only
+-# oversubscribes RAM rather than measuring throughput. Skip it by default;
+-# override BENCH_CONCURRENT_DURATION to re-enable. See issue #946.
++# Long-lived query server (server.py). Restartable: the driver stops it, drops
++# caches and starts it again before every query, so try 1 is a cold process;
++# tries 2-3 hit the same process. Durable: the data is Parquet on disk, nothing
++# lives in process memory, so ./load is not re-run.
++export BENCH_RESTARTABLE=yes
++export BENCH_DURABLE=yes
++# Concurrent-QPS test stays off for now: server.py serves one request at a
++# time, so N connections would measure a queue, not throughput.
+ export BENCH_CONCURRENT_DURATION="${BENCH_CONCURRENT_DURATION:-0}"
+ exec ../lib/benchmark-common.sh
+diff -ruN a/opteryx/check b/opteryx/check
+--- a/opteryx/check	2026-10-04 14:14:31
++++ b/opteryx/check	2026-10-04 17:57:41
+@@ -1,34 +1,12 @@
+ #!/bin/bash
++# Succeeds only while the server is up and serving a real opteryx-core install.
++# Must FAIL when the server is down: with BENCH_RESTARTABLE=yes the driver waits
++# for that before dropping caches for each cold try.
++#
++# Runs no query — the driver calls this before every cold try, and executing
++# anything here would warm the engine ahead of the measurement. The version
++# shape is asserted instead of a literal so this needs no edit per release.
+ set -e
+ 
+-# Smoke test that actually executes through the engine and propagates a
+-# non-zero exit on failure. The old `python -m opteryx "SELECT version()"`
+-# CLI path is unusable here for two reasons:
+-#
+-#   1. opteryx-core's single-run CLI calls the removed opteryx.query(),
+-#      catches the AttributeError, and STILL exits 0 -- a false green that
+-#      would let a broken install pass this check.
+-#   2. `version()` is not a function in the current engine; the version is
+-#      exposed as the system variable `@@version`.
+-#
+-# This matters more than it looks: bench_load() in lib/benchmark-common.sh
+-# calls ./check unconditionally, AFTER the ~14 GB download and load. A check
+-# that cannot pass burns the whole setup cost before failing.
+-#
+-# Assert the shape of the value rather than a literal, so the check does not
+-# need editing on every release.
+-"$HOME/opteryx_venv/bin/python" - <<'PY'
+-import re
+-
+-import opteryx
+-
+-session = opteryx.session()
+-morsels = list(session.execute_to_morsels("SELECT @@version"))
+-session.close()
+-
+-assert morsels, "SELECT @@version returned no morsels"
+-value = list(morsels[0][0])[0]
+-if isinstance(value, (bytes, bytearray)):
+-    value = value.decode()
+-assert re.fullmatch(r"\d+\.\d+\.\d+.*", str(value)), f"unexpected version {value!r}"
+-PY
++version=$(curl -sf http://127.0.0.1:8421/health)
++[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]
+diff -ruN a/opteryx/install b/opteryx/install
+--- a/opteryx/install	2026-10-04 14:14:31
++++ b/opteryx/install	2026-10-04 17:57:41
+@@ -29,16 +29,18 @@
+ fi
+ 
+ "$HOME/opteryx_venv/bin/python" -m pip install --upgrade pip
+-# Pulls the cp314 wheel for the latest release.
+-"$HOME/opteryx_venv/bin/python" -m pip install --upgrade opteryx-core
++# Pinned so a published result is reproducible against a named release.
++OPTERYX_VERSION=0.9.155
++"$HOME/opteryx_venv/bin/python" -m pip install "opteryx-core==${OPTERYX_VERSION}"
+ 
+ # Fail loudly here rather than 43 queries later if pip silently fell back to a
+ # source build or resolved an interpreter we did not expect.
+-"$HOME/opteryx_venv/bin/python" - <<'PY'
++"$HOME/opteryx_venv/bin/python" - "$OPTERYX_VERSION" <<'PY'
+ import sys
+ 
+ import opteryx
+ 
+ print(f"python  {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})")
+ print(f"opteryx-core {opteryx.__version__}")
++assert opteryx.__version__ == sys.argv[1], f"expected opteryx-core {sys.argv[1]}, got {opteryx.__version__}"
+ PY
+diff -ruN a/opteryx/query b/opteryx/query
+--- a/opteryx/query	2026-10-04 14:14:31
++++ b/opteryx/query	2026-10-04 17:57:41
+@@ -1,42 +1,28 @@
+ #!/bin/bash
+-# Reads a SQL query from stdin, runs it via opteryx-core (Python in-process)
+-# against the partitioned parquet under ./hits/.
++# Reads a SQL query from stdin and runs it on the long-lived server.
+ # Stdout: query result as TSV (header + rows).
+-# Stderr: query runtime in fractional seconds on the last line.
++# Stderr: query runtime in fractional seconds on the last line (server-measured
++#         drain of execute_to_morsels; see server.py).
++# Exit non-zero on error; the traceback is in server.log.
+ set -e
+ 
+-query=$(cat)
++body=$(mktemp)
++trap 'rm -f "$body"' EXIT
+ 
+-"$HOME/opteryx_venv/bin/python" - "$query" <<'PY'
+-import sys
+-import timeit
++meta=$(curl -sS -o "$body" -w '%{http_code} %header{x-elapsed}' \
++    -X POST --data-binary @- http://127.0.0.1:8421/query) || {
++    echo "query failed: no response from server (see server.log)" >&2
++    exit 1
++}
+ 
+-import opteryx
++code=${meta%% *}
++elapsed=${meta#* }
+ 
+-query = sys.argv[1]
++if [ "$code" != "200" ] || [ -z "$elapsed" ]; then
++    echo "query failed: HTTP $code" >&2
++    cat "$body" >&2
++    exit 1
++fi
+ 
+-# opteryx-core execution surface: a Session that yields native
+-# morsels. `execute_to_morsels` runs entirely in the native engine; draining
+-# the generator is the execution. We time the drain (matching the engine's own
+-# ClickBench runner), holding the morsels so results can be emitted afterwards.
+-# NB: opteryx.query() / Cursor.arrow() from the 0.x line no longer exist here.
+-session = opteryx.session()
+-start = timeit.default_timer()
+-morsels = list(session.execute_to_morsels(query))
+-end = timeit.default_timer()
+-
+-cols = None
+-for morsel in morsels:
+-    if cols is None:
+-        cols = morsel.column_names
+-        print("\t".join(
+-            c.decode() if isinstance(c, (bytes, bytearray)) else str(c)
+-            for c in cols
+-        ))
+-    for i in range(morsel.num_rows):
+-        print("\t".join("" if v is None else str(v) for v in morsel[i]))
+-
+-session.close()
+-
+-print(f"{end - start:.3f}", file=sys.stderr)
+-PY
++cat "$body"
++echo "$elapsed" >&2
+diff -ruN a/opteryx/results/20261004/c6a.4xlarge.json b/opteryx/results/20261004/c6a.4xlarge.json
+--- a/opteryx/results/20261004/c6a.4xlarge.json	1970-01-01 01:00:00
++++ b/opteryx/results/20261004/c6a.4xlarge.json	2026-10-04 17:57:41
+@@ -0,0 +1,59 @@
++{
++    "system": "Opteryx (Parquet, partitioned)",
++    "date": "2026-10-04",
++    "machine": "c6a.4xlarge",
++    "cluster_size": 1,
++    "proprietary": "no",
++    "hardware": "cpu",
++    "tuned": "no",
++    "tags": ["C++","stateless","column-oriented","embedded"],
++    "load_time": 0,
++    "data_size": 14737666736,
++    "concurrent_qps": null,
++    "concurrent_error_ratio": null,
++    "result": [
++        [0.604, 0.004, 0.003],
++        [0.762, 0.109, 0.114],
++        [1.005, 0.177, 0.176],
++        [1.041, 0.153, 0.153],
++        [1.465, 0.602, 0.594],
++        [1.483, 0.508, 0.5],
++        [0.834, 0.004, 0.003],
++        [0.981, 0.112, 0.111],
++        [1.765, 0.852, 0.842],
++        [1.975, 1.049, 1.039],
++        [1.135, 0.164, 0.165],
++        [1.161, 0.175, 0.18],
++        [1.605, 0.664, 0.66],
++        [2.833, 0.879, 0.881],
++        [1.515, 0.724, 0.717],
++        [1.565, 0.672, 0.664],
++        [2.964, 1.461, 1.455],
++        [0.787, 0.03, 0.03],
++        [5.268, 2.802, 2.806],
++        [0.73, 0.064, 0.071],
++        [10.304, 2.334, 2.33],
++        [11.67, 2.572, 2.616],
++        [21.755, 3.935, 4.005],
++        [2.109, 0.53, 0.456],
++        [0.911, 0.151, 0.161],
++        [1.477, 0.431, 0.427],
++        [1.041, 0.162, 0.167],
++        [10.222, 2.434, 2.412],
++        [9.006, 3.819, 3.79],
++        [0.771, 0.128, 0.128],
++        [2.494, 0.758, 0.747],
++        [6.287, 0.922, 0.906],
++        [6.377, 3.574, 3.537],
++        [10.389, 3.623, 3.542],
++        [10.388, 3.592, 3.651],
++        [1.348, 0.654, 0.634],
++        [1.164, 0.198, 0.2],
++        [0.951, 0.099, 0.079],
++        [0.956, 0.06, 0.06],
++        [1.388, 0.39, 0.392],
++        [0.965, 0.067, 0.052],
++        [0.912, 0.048, 0.055],
++        [0.909, 0.049, 0.043]
++]
++}
+diff -ruN a/opteryx/server.py b/opteryx/server.py
+--- a/opteryx/server.py	1970-01-01 01:00:00
++++ b/opteryx/server.py	2026-10-04 17:57:41
+@@ -0,0 +1,82 @@
++"""
++Long-lived Opteryx query server for the ClickBench entry.
++
++Standard library only — the venv holds opteryx-core and nothing else.
++
++Routes (127.0.0.1:8421):
++    GET  /health  -> 200, body = opteryx version. No query is run: ./check
++                     calls this before every cold try, and a query here would
++                     warm the engine ahead of the measurement.
++    POST /query   -> body = one SQL statement. Response body = the result as
++                     TSV (header + rows); header X-Elapsed = seconds spent
++                     draining execute_to_morsels.
++
++The clock covers exactly what the embedded entry's clock covered: draining
++`execute_to_morsels`. Session construction (warm: ~0.04ms) and TSV rendering
++are outside it.
++
++One session per request; the engine's footer and schema caches are process
++scoped, so tries 2..3 of a query see a warm process. There is no result cache.
++
++A query that raises is not caught: the handler dies, the connection closes with
++no response, `./query` exits non-zero and the driver records null. The traceback
++is in server.log.
++"""
++
++import timeit
++from http.server import BaseHTTPRequestHandler
++from http.server import HTTPServer
++
++import opteryx
++
++HOST = "127.0.0.1"
++PORT = 8421
++
++
++def render_tsv(morsels) -> bytes:
++    lines = []
++    for morsel in morsels:
++        if not lines:
++            lines.append("\t".join(c.decode() for c in morsel.column_names))
++        for i in range(morsel.num_rows):
++            lines.append("\t".join("" if v is None else str(v) for v in morsel[i]))
++    return ("\n".join(lines) + "\n").encode() if lines else b""
++
++
++class Handler(BaseHTTPRequestHandler):
++    def do_GET(self):
++        if self.path != "/health":
++            self.send_error(404)
++            return
++        body = opteryx.__version__.encode()
++        self.send_response(200)
++        self.send_header("Content-Length", str(len(body)))
++        self.end_headers()
++        self.wfile.write(body)
++
++    def do_POST(self):
++        if self.path != "/query":
++            self.send_error(404)
++            return
++        query = self.rfile.read(int(self.headers["Content-Length"])).decode()
++
++        session = opteryx.session()
++        start = timeit.default_timer()
++        morsels = list(session.execute_to_morsels(query))
++        elapsed = timeit.default_timer() - start
++
++        body = render_tsv(morsels)
++        session.close()
++
++        self.send_response(200)
++        self.send_header("X-Elapsed", f"{elapsed:.6f}")
++        self.send_header("Content-Length", str(len(body)))
++        self.end_headers()
++        self.wfile.write(body)
++
++    def log_message(self, format, *args):
++        pass
++
++
++if __name__ == "__main__":
++    HTTPServer((HOST, PORT), Handler).serve_forever()
+diff -ruN a/opteryx/start b/opteryx/start
+--- a/opteryx/start	2026-10-04 14:14:31
++++ b/opteryx/start	2026-10-04 17:57:41
+@@ -1,2 +1,11 @@
+ #!/bin/bash
+-exit 0
++# Launch the long-lived query server and nothing else: no warm-up query, no
++# touching the dataset. ./check is the readiness signal.
++set -e
++
++if [ -f server.pid ] && kill -0 "$(cat server.pid)" 2>/dev/null; then
++    exit 0
++fi
++
++nohup "$HOME/opteryx_venv/bin/python" server.py >>server.log 2>&1 &
++echo $! > server.pid
+diff -ruN a/opteryx/stop b/opteryx/stop
+--- a/opteryx/stop	2026-10-04 14:14:31
++++ b/opteryx/stop	2026-10-04 17:57:41
+@@ -1,2 +1,12 @@
+ #!/bin/bash
++# The driver waits for ./check to fail after this, so the process must be gone,
++# not just signalled.
++if [ -f server.pid ]; then
++    pid=$(cat server.pid)
++    kill "$pid" 2>/dev/null || true
++    while kill -0 "$pid" 2>/dev/null; do
++        sleep 0.1
++    done
++    rm -f server.pid
++fi
+ exit 0
+diff -ruN a/opteryx-skene/install b/opteryx-skene/install
+--- a/opteryx-skene/install	2026-10-04 14:14:31
++++ b/opteryx-skene/install	2026-10-04 17:55:54
+@@ -29,16 +29,18 @@
+ fi
+ 
+ "$HOME/opteryx_venv/bin/python" -m pip install --upgrade pip
+-# Pulls the cp314 wheel for the latest release.
+-"$HOME/opteryx_venv/bin/python" -m pip install --upgrade opteryx-core
++# Pinned so a published result is reproducible against a named release.
++OPTERYX_VERSION=0.9.155
++"$HOME/opteryx_venv/bin/python" -m pip install "opteryx-core==${OPTERYX_VERSION}"
+ 
+ # Fail loudly here rather than 43 queries later if pip silently fell back to a
+ # source build or resolved an interpreter we did not expect.
+-"$HOME/opteryx_venv/bin/python" - <<'PY'
++"$HOME/opteryx_venv/bin/python" - "$OPTERYX_VERSION" <<'PY'
+ import sys
+ 
+ import opteryx
+ 
+ print(f"python  {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})")
+ print(f"opteryx-core {opteryx.__version__}")
++assert opteryx.__version__ == sys.argv[1], f"expected opteryx-core {sys.argv[1]}, got {opteryx.__version__}"
+ PY
+diff -ruN a/opteryx-skene/results/20261004/c6a.4xlarge.json b/opteryx-skene/results/20261004/c6a.4xlarge.json
+--- a/opteryx-skene/results/20261004/c6a.4xlarge.json	1970-01-01 01:00:00
++++ b/opteryx-skene/results/20261004/c6a.4xlarge.json	2026-10-04 17:55:54
+@@ -0,0 +1,59 @@
++{
++    "system": "Opteryx",
++    "date": "2026-10-04",
++    "machine": "c6a.4xlarge",
++    "cluster_size": 1,
++    "proprietary": "no",
++    "hardware": "cpu",
++    "tuned": "no",
++    "tags": ["C++","stateless","column-oriented","embedded"],
++    "load_time": 176,
++    "data_size": 11698473632,
++    "concurrent_qps": null,
++    "concurrent_error_ratio": null,
++    "result": [
++        [0.816, 0.086, 0.085],
++        [1.003, 0.177, 0.177],
++        [0.76, 0.086, 0.086],
++        [0.814, 0.084, 0.085],
++        [1.691, 0.715, 0.71],
++        [1.538, 0.504, 0.5],
++        [0.815, 0.085, 0.085],
++        [1.014, 0.19, 0.18],
++        [1.979, 0.926, 0.956],
++        [2.289, 1.108, 1.13],
++        [1.304, 0.266, 0.265],
++        [1.329, 0.31, 0.309],
++        [1.759, 0.695, 0.691],
++        [2.251, 0.973, 0.978],
++        [1.899, 0.776, 0.773],
++        [1.779, 0.809, 0.798],
++        [2.762, 1.501, 1.501],
++        [0.909, 0.12, 0.121],
++        [4.451, 2.838, 2.834],
++        [1.11, 0.164, 0.165],
++        [7.149, 1.56, 1.547],
++        [8.159, 1.8, 1.726],
++        [13.589, 2.678, 2.654],
++        [10.421, 1.63, 1.652],
++        [2.38, 0.53, 0.529],
++        [1.172, 0.401, 0.404],
++        [2.582, 0.546, 0.548],
++        [7.015, 1.014, 1.012],
++        [6.875, 3.474, 3.425],
++        [0.615, 0.123, 0.123],
++        [1.854, 0.738, 0.737],
++        [5.203, 1.026, 1.017],
++        [5.489, 3.712, 3.71],
++        [7.239, 2.96, 2.982],
++        [7.285, 2.941, 2.956],
++        [1.371, 0.756, 0.748],
++        [0.958, 0.204, 0.214],
++        [0.898, 0.116, 0.115],
++        [0.962, 0.165, 0.163],
++        [1.185, 0.348, 0.352],
++        [0.898, 0.112, 0.114],
++        [0.903, 0.111, 0.112],
++        [0.904, 0.117, 0.116]
++]
++}

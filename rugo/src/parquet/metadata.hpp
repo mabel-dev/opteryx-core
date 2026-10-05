@@ -165,6 +165,10 @@ struct FileStats {
   // and ApplyDrakenLogicalKV in metadata.cpp. Foreign keys are kept, not
   // interpreted.
   std::unordered_map<std::string, std::string> key_value_metadata;
+  // How many row groups the footer lists - set even under schema_only, which parses
+  // none of them (row_groups stays empty there). Appended last: every field above keeps
+  // its offset.
+  int64_t num_row_groups = 0;
 };
 
 FileStats ReadParquetMetadata(const std::string &path,

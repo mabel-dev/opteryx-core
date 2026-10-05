@@ -473,7 +473,7 @@ cdef inline int64_t _absent_as_sentinel(object value) except? -1:
     return <int64_t>value
 
 
-cdef int _validate_fetch_ahead(int decode_workers, int fetch_ahead,
+cdef int _validate_fetch_ahead(int remote_decode_workers, int fetch_ahead,
                                int in_flight_limit_override) except -1:
     """Reject a CONFIGURED fetch-ahead depth that could only be inert. Returns 0.
 
@@ -482,20 +482,36 @@ cdef int _validate_fetch_ahead(int decode_workers, int fetch_ahead,
     mis-set depth would raise only on scans big enough to arm it, and a small
     remote scan would quietly accept a setting the next query rejects.
 
+    ``remote_decode_workers`` is the decode width a REMOTE scan runs
+    (``parquet_gcs_io_workers``) — the pool the fetch pool actually pairs with.
+    It is passed on EVERY scan, local ones included, and is deliberately not the
+    scan's own ``decode_workers``: a local scan never arms the fetch pool, and its
+    decode width scales with the host (``resolve_parquet_local_io_workers``), so
+    checking the depth against it rejected every local scan once that width
+    reached the depth (64 on a 66+ vCPU host — all of ClickBench on the 192-vCPU
+    fleet machines, 2026-10-04).
+
     Two combinations are REJECTED rather than silently inert (the design rule:
     never ship a knob whose wrong setting is quietly slower):
-      * ``0 < fetch_ahead <= decode_workers`` — a fetch pool no wider than the
-        decode pool adds a hand-off and no concurrency. Measured on the rig:
+      * ``0 < fetch_ahead <= remote_decode_workers`` — a fetch pool no wider than
+        the decode pool adds a hand-off and no concurrency. Measured on the rig:
         fetch_ahead=4 with workers=4 ran 5.42s where coupled ran 4.46s.
       * an explicit window smaller than ``fetch_ahead`` — the depth would be
         capped by the window and the knob would appear to do nothing."""
     if fetch_ahead < 0:
         raise ValueError(f"parquet_io_fetch_ahead must be >= 0 (0 = off), got {fetch_ahead}")
-    if 0 < fetch_ahead <= decode_workers:
+    if fetch_ahead > 0 and remote_decode_workers <= 0:
         raise ValueError(
-            f"parquet_io_fetch_ahead={fetch_ahead} must exceed the decode worker "
-            f"count ({decode_workers}) or be 0 (off): a fetch pool no wider than the "
-            "decode pool adds a hand-off and no concurrency (measured slower)"
+            f"parquet_io_fetch_ahead={fetch_ahead} needs the remote decode worker count "
+            f"to validate against, got remote_decode_workers={remote_decode_workers}; "
+            "pass the resolved parquet_gcs_io_workers"
+        )
+    if 0 < fetch_ahead <= remote_decode_workers:
+        raise ValueError(
+            f"parquet_io_fetch_ahead={fetch_ahead} must exceed the remote decode worker "
+            f"count (parquet_gcs_io_workers={remote_decode_workers}) or be 0 (off): a "
+            "fetch pool no wider than the decode pool adds a hand-off and no "
+            "concurrency (measured slower)"
         )
     if in_flight_limit_override > 0 and fetch_ahead > in_flight_limit_override:
         raise ValueError(
@@ -581,8 +597,8 @@ cdef int _gated_fetch_ahead(int fetch_ahead, int gate, int remote_blocks) except
     return fetch_ahead
 
 
-cdef int _submission_window(int decode_workers, int fetch_ahead,
-                            int in_flight_limit_override) except -1:
+cdef int _submission_window(int decode_workers, int remote_decode_workers,
+                            int fetch_ahead, int in_flight_limit_override) except -1:
     """Row groups submitted but not yet consumed, given the decode width, the
     EFFECTIVE fetch-ahead depth (post-gate) and an explicit override (0 = auto).
 
@@ -595,7 +611,7 @@ cdef int _submission_window(int decode_workers, int fetch_ahead,
     ``workers + 2`` window and the smaller arena that goes with it. The same
     validation runs here (against a depth the gate may already have zeroed, where
     it is a no-op) so no caller can reach this with an inert depth."""
-    _validate_fetch_ahead(decode_workers, fetch_ahead, in_flight_limit_override)
+    _validate_fetch_ahead(remote_decode_workers, fetch_ahead, in_flight_limit_override)
     if in_flight_limit_override > 0:
         return in_flight_limit_override
     return max(decode_workers, fetch_ahead) + 2
@@ -2126,7 +2142,7 @@ cdef tuple _acquire_remote_footers(
     the caller keys its own map differently — `open_native_scan_plan` keys by FETCH
     url, because the C++ Source uses `work_items[i].first` for BOTH the footer_map
     lookup and the `submit_row_group` fetch — or needs no map at all
-    (`native_scan_supported` only reads types).
+    (`native_scan_rejection` only reads types).
 
     Returns (remote_files_seen, process_hits, tier_hits, tier_misses) for telemetry.
     `remote_files_seen == 0` means the scan was all-local and the other counters carry
@@ -2353,6 +2369,7 @@ cpdef IpcRowGroupSource open_ipc_source(
     coalesce_tuning=None,
     int fetch_ahead=0,
     int fetch_ahead_min_blocks=0,
+    int remote_decode_workers=0,
     int64_t memory_budget=0,
 ):
     """Plan a single-pass scan: fetch footers, prune row groups, size the pool,
@@ -2521,12 +2538,13 @@ cpdef IpcRowGroupSource open_ipc_source(
     # Validate what the SESSION set, then let the gate decide whether this scan is
     # big enough to arm it — in that order, so a mis-set depth raises on every scan
     # rather than only on the ones large enough to reach the fetch pool.
-    _validate_fetch_ahead(decode_workers, fetch_ahead, in_flight_limit_override)
+    _validate_fetch_ahead(remote_decode_workers, fetch_ahead, in_flight_limit_override)
     fetch_ahead = _gated_fetch_ahead(
         fetch_ahead, fetch_ahead_min_blocks,
         _count_remote_fetch_blocks(work_items, src.block_ids),
     )
-    in_flight_limit = _submission_window(decode_workers, fetch_ahead, in_flight_limit_override)
+    in_flight_limit = _submission_window(
+        decode_workers, remote_decode_workers, fetch_ahead, in_flight_limit_override)
     if in_flight_limit < 1:
         in_flight_limit = 1
     est_rg = max_rg_bytes * 2
@@ -2576,6 +2594,7 @@ cpdef IpcRowGroupSource open_pass2_source(
     coalesce_tuning=None,
     int fetch_ahead=0,
     int fetch_ahead_min_blocks=0,
+    int remote_decode_workers=0,
     int64_t memory_budget=0,
 ):
     """Pass-2 late-materialization driver: decode only the surviving rows of the
@@ -2641,12 +2660,13 @@ cpdef IpcRowGroupSource open_pass2_source(
         return src
     src._assign_blocks()
     # Same order as the single-pass path: validate the configured depth, then gate.
-    _validate_fetch_ahead(decode_workers, fetch_ahead, in_flight_limit_override)
+    _validate_fetch_ahead(remote_decode_workers, fetch_ahead, in_flight_limit_override)
     fetch_ahead = _gated_fetch_ahead(
         fetch_ahead, fetch_ahead_min_blocks,
         _count_remote_fetch_blocks(wi, src.block_ids),
     )
-    src.in_flight_limit = max(1, _submission_window(decode_workers, fetch_ahead, in_flight_limit_override))
+    src.in_flight_limit = max(1, _submission_window(
+        decode_workers, remote_decode_workers, fetch_ahead, in_flight_limit_override))
     src.pipeline = CppIOPipeline(
         decode_workers=decode_workers,
         queue_capacity=1024,
@@ -2873,6 +2893,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     footer_bytes_cache=None,
     int fetch_ahead=0,
     int fetch_ahead_min_blocks=0,
+    int remote_decode_workers=0,
     int in_flight_limit_override=0,
     http_tuning=None,
     coalesce_tuning=None,
@@ -3140,13 +3161,13 @@ cpdef NativeScanPlan open_native_scan_plan(
     # window is auto = workers + 2, widened to cover the fetch pool when
     # fetch-ahead is on — _submission_window also rejects an inert depth.
     # Same order as the trampoline paths: validate the configured depth, then gate.
-    _validate_fetch_ahead(decode_workers, fetch_ahead, 0)
+    _validate_fetch_ahead(remote_decode_workers, fetch_ahead, 0)
     fetch_ahead = _gated_fetch_ahead(
         fetch_ahead, fetch_ahead_min_blocks,
         _count_remote_fetch_blocks_native(work_items, plan.footer_map, list(column_names)),
     )
     plan.in_flight_limit = _submission_window(
-        decode_workers, fetch_ahead, in_flight_limit_override)
+        decode_workers, remote_decode_workers, fetch_ahead, in_flight_limit_override)
     est_rg = max_rg_bytes * 2
     dyn_pool_size = est_rg * (plan.in_flight_limit + 1)
     if dyn_pool_size < 256*1024*1024:
@@ -3270,9 +3291,23 @@ cpdef NativeScanPlan open_native_scan_plan(
     return plan
 
 
-cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes=None,
-                                 filesystem=None, footer_bytes_cache=None):
+cdef str _footer_type_rejection(path, size_t rg_i, const string& name, str kind,
+                                const string& physical, const string& logical):
+    """The footer gate's refusal for one column chunk whose types do not decode as the
+    requested kind."""
+    return (f"column '{name.decode('utf-8', 'replace')}' (kind '{kind}') in {path} row group "
+            f"{rg_i} has physical type '{physical.decode('utf-8', 'replace')}' and logical "
+            f"type '{logical.decode('utf-8', 'replace')}', which do not decode as '{kind}'")
+
+
+cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=None,
+                                filesystem=None, footer_bytes_cache=None):
     """Plan-time gate for the zero-Python native scan Source (increment-1 scope).
+
+    Returns None when the scan is admitted, otherwise a one-line reason naming what
+    was refused — the column, its requested kind, the file, the row group and the
+    footer's physical/logical types — which the compiler carries into the refusal,
+    so a rejected scan says WHY instead of a bare "footer_gate".
 
     Proves, from parsed footers (cache-warmed — not wasted work when the answer
     is False, the trampoline path needs the same footers), that EVERY projected
@@ -3363,14 +3398,14 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     # per-column checks below are vacuous and only the path/footer checks apply —
     # NativeParquetScanSource answers it from the footer row counts.
     if len(expected_kinds) != ncols:
-        return False
+        return f"{len(expected_kinds)} kinds for {ncols} columns"
     for k in range(ncols):
         name = column_names[k]
         wanted.push_back(<string>(name if isinstance(name, bytes) else (<str>name).encode("utf-8")))
         kind = expected_kinds[k]
         if kind not in ("int", "float32", "float64", "varchar", "bool",
                         "decimal64", "decimal128", "date", "timestamp", "array"):
-            return False
+            return f"column '{name}' has kind '{kind}', which the native scan has no decoder for"
         kinds.append(kind)
 
     # Transport eligibility, before any footer work: local, or remote-and-signable.
@@ -3388,7 +3423,8 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     auth_header = _native_auth_header(filesystem)
     for path in paths:
         if not _is_local_path(path) and path not in orig_to_cpp and not auth_header:
-            return False
+            return (f"remote file {path} can be neither signed nor bearer-authenticated by "
+                    f"filesystem {type(filesystem).__name__}")
 
     # Batched, shared-tier acquisition for every remote footer, so the per-path loop
     # below only ever hits the parsed cache for them. Skipping this would make this
@@ -3451,7 +3487,7 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
                     kind = kinds[k]
                     if kind == "int":
                         if csp.physical_type != s_int32 and csp.physical_type != s_int64:
-                            return False
+                            return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
                         # WP-11: parquet TIME is decoded as plain INT64 (the binder
                         # models no TIME logical type from a scan), so a "time[...]"
                         # annotation on an int column is admitted — it flows through
@@ -3468,12 +3504,12 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
                                 csp.logical_type != s_uint8 and csp.logical_type != s_uint16 and \
                                 csp.logical_type != s_uint32 and csp.logical_type != s_uint64 and \
                                 csp.logical_type.find(s_time) != 0:
-                            return False
+                            return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
                     elif kind == "float32":
                         if csp.physical_type != s_float32:
-                            return False
+                            return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
                         if csp.logical_type.size() != 0 and csp.logical_type != s_float32:
-                            return False
+                            return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
                     elif kind == "varchar":
                         # A plain string / raw-binary column: parquet byte_array whose
                         # rugo footer logical_type is "varchar" (UTF8 → VARCHAR/NVARCHAR)
@@ -3490,11 +3526,11 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
                         # the compiler, never "varchar", so reaching this branch with
                         # one means the schema and the footer disagree.
                         if csp.physical_type != s_byte_array:
-                            return False
+                            return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
                         if csp.logical_type.size() != 0 and \
                                 csp.logical_type != s_varchar and csp.logical_type != s_binary and \
                                 csp.logical_type != s_json:
-                            return False
+                            return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
                     elif kind == "array":
                         # R6: a parquet LIST column. rugo's footer logical_type is
                         # "array<child>" and the column chunk is the flattened LEAF,
@@ -3509,29 +3545,29 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
                         # (int128-backed DECIMAL, UUID) fail closed here rather than
                         # being admitted into a decode that cannot happen.
                         if csp.logical_type.find(s_array) != 0:
-                            return False
+                            return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
                         if csp.max_repetition_level < 1:
-                            return False
+                            return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
                         if csp.physical_type != s_int32 and csp.physical_type != s_int64 and \
                                 csp.physical_type != s_float32 and csp.physical_type != s_float64 and \
                                 csp.physical_type != s_boolean and \
                                 csp.physical_type != s_byte_array:
-                            return False
+                            return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
                     elif kind == "bool":
                         # WP-11: parquet BOOLEAN → DK_BOOL dense (1 byte/row). No
                         # logical annotation.
                         if csp.physical_type != s_boolean:
-                            return False
+                            return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
                     elif kind == "date":
                         # WP-11: parquet DATE (int32 days) — footer "date32[day]".
                         if csp.physical_type != s_int32:
-                            return False
+                            return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
                         if csp.logical_type != s_date32:
-                            return False
+                            return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
                     elif kind == "timestamp":
                         # WP-11: TIMESTAMP → int64 with logical "timestamp[unit]".
                         if csp.physical_type != s_int64:
-                            return False
+                            return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
                         # R7b close-out: a CAST-driven retag (`EventTime::TIMESTAMP[ms]`)
                         # asks for a TIMESTAMP column whose FOOTER carries no temporal
                         # annotation at all — a bare int64 (empty or "int64" logical).
@@ -3547,19 +3583,19 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
                         if csp.logical_type.size() != 0 and \
                                 csp.logical_type != s_int64 and \
                                 csp.logical_type.find(s_timestamp) != 0:
-                            return False
+                            return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
                     elif kind == "decimal64" or kind == "decimal128":
                         # WP-11: DECIMAL — rugo footer logical "decimal(p,s)". p≤18 is
                         # int64-backed (DK_POOL, decimal64); p>18 is int128 (DK_DECIMAL128,
                         # decimal128). The classifier already split them by the schema's
                         # physical type; the gate only confirms the column IS a decimal.
                         if csp.logical_type.find(s_decimal) != 0:
-                            return False
+                            return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
                     else:  # float64
                         if csp.physical_type != s_float64:
-                            return False
+                            return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
                         if csp.logical_type.size() != 0 and csp.logical_type != s_float64:
-                            return False
+                            return _footer_type_rejection(path, rg_i, wanted[<size_t>k], kinds[k], csp.physical_type, csp.logical_type)
                     found = True
                     break
                 if not found:
@@ -3574,8 +3610,9 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
                             raise NotImplementedError(
                                 f"cannot read {path}: {group_err.decode('utf-8')}")
                         continue
-                    return False
-    return True
+                    return (f"column '{wanted[<size_t>k].decode('utf-8', 'replace')}' is not in "
+                            f"{path} (row group {rg_i})")
+    return None
 
 
 def iter_row_groups_ipc(
@@ -3593,6 +3630,7 @@ def iter_row_groups_ipc(
     coalesce_tuning=None,
     int fetch_ahead=0,
     int fetch_ahead_min_blocks=0,
+    int remote_decode_workers=0,
     int64_t memory_budget=0,
 ):
     """
@@ -3618,6 +3656,7 @@ def iter_row_groups_ipc(
         coalesce_tuning=coalesce_tuning,
         fetch_ahead=fetch_ahead,
         fetch_ahead_min_blocks=fetch_ahead_min_blocks,
+        remote_decode_workers=remote_decode_workers,
         memory_budget=memory_budget,
     )
     cdef list names = src.column_names_bytes

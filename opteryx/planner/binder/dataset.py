@@ -633,7 +633,7 @@ def visit_function_dataset(
         # "gcs://" is not a recognized scheme here -- reject it outright rather than
         # treating it as an alias for "gs://". (create_filesystem's own protocol_map
         # treats "gs"/"gcs" as equivalent for other, authorization-checked callers,
-        # but the native Parquet scan gate (pool_reader.native_scan_supported) only
+        # but the native Parquet scan gate (pool_reader.native_scan_rejection) only
         # recognizes the literal "gs://" prefix as remote and mis-detects "gcs://"
         # as local, so admitting it here for a bare dataset function is a trap, not
         # a convenience.)

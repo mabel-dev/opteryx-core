@@ -642,6 +642,18 @@ public:
                 "set_native_scan_admission: pipeline source is not a native parquet scan");
         src->set_row_admission(admission);
     }
+    // Make pipeline `p`'s native parquet scan append row identity ($file / $ordinal,
+    // opteryx/constants/row_identity.py) after its read set: `files` is the scan's file
+    // list in order as fetch paths, `kinds` 0 = file index, 1 = ordinal, one per name.
+    void set_native_scan_row_identity(size_t p, std::vector<std::string> files,
+                                      std::vector<uint8_t> kinds,
+                                      std::vector<std::string> names) {
+        auto* src = dynamic_cast<NativeParquetScanSource*>(pipelines[p]->source.get());
+        if (src == nullptr)
+            throw std::runtime_error(
+                "set_native_scan_row_identity: pipeline source is not a native parquet scan");
+        src->set_row_identity(files, std::move(kinds), std::move(names));
+    }
     // Arm pipeline `p`'s native parquet scan as the CONSUMER, testing `column` (the
     // leading key's PHYSICAL name) under its NULL placement.
     void add_parquet_topn_boundary(size_t p, size_t idx, std::string column,

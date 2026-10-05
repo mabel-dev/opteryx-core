@@ -114,6 +114,13 @@ def env(tmp_path):
     leases: dict = {}
     lease_log: list = []
 
+    def _publish(identifier):
+        """The real catalog keeps definitions on the dataset document, so a loaded dataset
+        carries them; this fake's datasets are shared objects, updated in place."""
+        datasets[identifier].metadata.vector_indexes = [
+            r for (i, _), r in sorted(indexes.items()) if i == identifier
+        ]
+
     class _FakeCatalog:
         def __init__(self, workspace=None, **kwargs):
             self.workspace = workspace
@@ -136,6 +143,7 @@ def env(tmp_path):
                 author=author, created_at_ms=1,
             )
             indexes[(identifier, record["name"])] = record
+            _publish(identifier)
             return record
 
         def get_vector_index(self, identifier, name):
@@ -146,6 +154,7 @@ def env(tmp_path):
 
         def drop_vector_index(self, identifier, name, *, author):
             del indexes[(identifier, normalize_index_name(name))]
+            _publish(identifier)
 
         def list_vector_indexes(self, identifier):
             return [r for (i, _), r in sorted(indexes.items()) if i == identifier]
@@ -197,15 +206,10 @@ def _entries(dataset):
 
 
 def _vectors_by_ordinal(path):
-    import skene
+    sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", "unit", "core"))
+    from test_vector_index_build import stored_vectors
 
-    data = open(path, "rb").read()
-    out = {}
-    for g in range(len(skene.read_metadata(data)["row_groups"])):
-        m = skene.read_morsel(data, g)
-        m.materialize()
-        out.update(zip(m.column("ordinal").to_pylist(), m.column("embedding").to_pylist()))
-    return out
+    return stored_vectors(path)
 
 
 def _texts(path):
@@ -227,7 +231,7 @@ def _vector_of_text(dataset, index_id):
         if index_id not in refs:
             continue
         texts = _texts(entry["file_path"])
-        for ordinal, vector in _vectors_by_ordinal(refs[index_id].vectors).items():
+        for ordinal, vector in _vectors_by_ordinal(refs[index_id].path).items():
             found[texts[ordinal]] = vector
     return found
 
@@ -252,11 +256,11 @@ def test_optimize_carries_every_vector_into_the_compaction_commit(env):
         refs = index_refs(entry)
         assert set(refs) == {index_id}                                 # carried, same commit
         texts = _texts(entry["file_path"])
-        carried = _vectors_by_ordinal(refs[index_id].vectors)
+        carried = _vectors_by_ordinal(refs[index_id].path)
         assert {texts[o]: v for o, v in carried.items()} == {
             t: before[t] for t in texts if t is not None
         }
-        assert os.path.getsize(refs[index_id].vectors) == refs[index_id].vectors_bytes
+        assert os.path.getsize(refs[index_id].path) == refs[index_id].file_bytes
     assert env.lease_log == [("claim", "compaction"), ("release", "compaction")]
 
 
@@ -294,7 +298,7 @@ def test_optimize_merges_only_files_with_the_same_coverage(env):
     from draken.ops.kernels._kernel_registry import lookup_kernel
     from opteryx_catalog.catalog.vector_indexes import IndexFiles
     from opteryx_catalog.catalog.vector_indexes import index_refs
-    from opteryx_catalog.catalog.vector_indexes import vector_index_paths
+    from opteryx_catalog.catalog.vector_indexes import vector_index_path
 
     _run(f"CREATE INDEX body_idx ON {TABLE} USING IVF (body)")              # async: builds nothing
     (record,) = env.indexes.values()
@@ -303,10 +307,10 @@ def test_optimize_merges_only_files_with_the_same_coverage(env):
     fn, _ = lookup_kernel("draken_embed")
     files = {}
     for path in paths[:2]:
-        vectors, centroids = vector_index_paths(env.dataset.metadata.location, index_id, path)
-        os.makedirs(os.path.dirname(vectors), exist_ok=True)
-        built = operators.build_vector_index_local(path, "body", [], fn, record["dimensions"], vectors, centroids)
-        files[path] = IndexFiles(vectors, centroids, built["vectors_bytes"], built["centroids_bytes"], built["logical_bytes"])
+        target = vector_index_path(env.dataset.metadata.location, index_id, path)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        built = operators.build_vector_index_local(path, "body", [], fn, record["dimensions"], target)
+        files[path] = IndexFiles(target, built["file_bytes"], built["footer_bytes"], built["logical_bytes"])
     env.dataset.commit_vector_index_files(index_id, files, author="tester", agent="test")
     before = _vector_of_text(env.dataset, index_id)
 

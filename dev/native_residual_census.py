@@ -106,8 +106,8 @@ def scan_residuals(sql: str) -> Tuple[Dict, Dict, Optional[BaseException]]:
 # `footer_gate` is the integer/narrow/unsigned admission gate (A1 closed the
 # integer widths). It stays reachable here via a SCHEMA-EVOLUTION dataset (a
 # projected column absent from one of the files) — the native scan does not
-# support schema evolution, so native_scan_supported returns False and the scan
-# stays on the trampoline, byte-for-byte the same R7b guard the integer case hit.
+# support schema evolution, so native_scan_rejection names the missing column and the
+# scan is refused, through the same R7b guard the integer case hit.
 # ---------------------------------------------------------------------------
 _FLAT = "testdata/flat/formats/parquet"
 _TEN = "testdata/flat/ten_files"

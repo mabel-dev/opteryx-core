@@ -245,7 +245,7 @@ def test_fetch_ahead_gate_counts_blocks_not_row_groups(served):
     def depth(subdir, gate):
         url = _served_url(served, subdir)
         plan = open_native_scan_plan([url], ["a"], decode_workers=2, fetch_ahead=6,
-                                     fetch_ahead_min_blocks=gate)
+                                     fetch_ahead_min_blocks=gate, remote_decode_workers=2)
         try:
             assert plan.row_group_count == N_RG
             return plan.diagnostics()["fetch_ahead_depth"]

@@ -1040,25 +1040,30 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
     # --- vector search (docs/VECTOR_INDEX_DESIGN.md §7-§8) ---
 
     def vector_indexes(self) -> list:
-        """The vector indexes defined on this table, as the catalog's plain dicts."""
-        return self.catalog.list_vector_indexes(self.dataset)
+        """The vector indexes defined on this table, as the catalog's plain dicts - from the
+        dataset this scan loaded (the definitions ride on its document), so planning an
+        index search reads nothing more."""
+        return list(self.table.metadata.vector_indexes)
 
-    def vector_index_covered(self, index_id: str) -> set:
-        """The data files one index covers at the snapshot this scan reads (no signing:
-        for the plan's EXPLAIN, which reports how many are searched exactly)."""
-        return set(self.table.vector_index_files(index_id, self.snapshot_id))
+    def vector_index_sizes(self, index_id: str) -> dict:
+        """{data file path: (index file bytes, its footer bytes)} for the files one index
+        covers at the snapshot this scan reads (no credentials: for the plan's per-file
+        choice between the index and an exact search)."""
+        return {
+            path: (f.file_bytes, f.footer_bytes)
+            for path, f in self.table.vector_index_files(index_id, self.snapshot_id).items()
+        }
 
     def vector_search_indexes(self, index_id: str) -> dict:
-        """{data file path: (vectors, vectors bytes, centroids, centroids bytes, auth header)}
-        for one index at the snapshot this scan reads, each location one the native reader
-        can open with that header (see _index_reads). A live file absent here is not
-        covered yet and is searched exactly."""
+        """{data file path: (index file, its bytes, its footer bytes, auth header)} for one
+        index at the snapshot this scan reads, each location one the native reader can open
+        with that header (see _index_reads). A live file absent here is not covered yet
+        and is searched exactly."""
         readable = _index_reads()
         out = {}
         for path, f in self.table.vector_index_files(index_id, self.snapshot_id).items():
-            vectors, auth_header = readable(f.vectors)
-            centroids, _ = readable(f.centroids)
-            out[path] = (vectors, f.vectors_bytes, centroids, f.centroids_bytes, auth_header)
+            location, auth_header = readable(f.path)
+            out[path] = (location, f.file_bytes, f.footer_bytes, auth_header)
         return out
 
 # REFRESH INDEX's maintenance lease (design §5.7): held for _LEASE_SECONDS and renewed
@@ -1102,28 +1107,19 @@ def _index_reads():
 
 
 def _carry_on_gcs(io, specs, recorders, dims, targets, options, carry_to_sessions):
-    """Carry into GCS: each output's vectors body streams into its own resumable session;
-    then its prefix and centroids are uploaded and prefix + body composed, as a build's."""
-    bodies = [f"{vectors}.body" for vectors, _ in targets]
-    sessions = [io.open_upload_session(body) for body in bodies]
+    """Carry into GCS: each output's index file streams into its own resumable session,
+    which the carry finishes - one object per output, as a build's. A session whose output
+    carried nothing, or every session when the carry fails, is cancelled."""
+    sessions = [io.open_upload_session(path) for path in targets]
     try:
         built = carry_to_sessions(specs, recorders, dims, sessions, **options)
     except BaseException:
         for session in sessions:
             io.cancel_upload_session(session)
         raise
-    for (vectors, centroids), body, session, result in zip(targets, bodies, sessions, built):
+    for session, result in zip(sessions, built):
         if result is None:
             io.cancel_upload_session(session)
-            continue
-        prefix = f"{vectors}.prefix"
-        for path, data in ((prefix, result["prefix"]), (centroids, result["centroids"])):
-            stream = io.new_output(path).create()
-            stream.write(data)
-            stream.close()
-        io.compose([prefix, body], vectors)
-        io.delete(prefix)
-        io.delete(body)
     return built
 
 
@@ -1162,12 +1158,12 @@ class _MaintenanceLeaseHandle:
         return self._catalog.release_maintenance_lease(self._lease)
 
 
-def _build_index_files(catalog, definition, data_file, data_bytes, deleted, vectors, centroids):
-    """Build ONE data file's index files for `definition` - natively, GIL released - and
-    return their IndexFiles, or None when the file has no indexable row (nothing written).
+def _build_index_files(catalog, definition, data_file, data_bytes, deleted, index_path):
+    """Build ONE data file's index file for `definition` - natively, GIL released - and
+    return its IndexFiles, or None when the file has no indexable row (nothing written).
 
     A data file on GCS is read with this process's bearer token (not refreshed: a build
-    that outlives it fails on GCS's 401) and its vectors body streamed into a resumable
+    that outlives it fails on GCS's 401) and its index file streamed into a resumable
     upload session, whose URI is its own credential."""
     import os
 
@@ -1182,17 +1178,17 @@ def _build_index_files(catalog, definition, data_file, data_bytes, deleted, vect
     embed_fn, _ = lookup_kernel("draken_embed")
     threads = config.resolve_max_execution_workers()
     options = dict(clusters=definition["clusters"], embed_threads=threads, train_threads=threads)
-    task = _IndexTarget(data_file, data_bytes, tuple(deleted), vectors, centroids)
+    task = _IndexTarget(data_file, data_bytes, tuple(deleted), index_path)
     if data_file.startswith("gs://"):
         built = _build_index_on_gcs(
             catalog.io, task, definition["column"], embed_fn, definition["dimensions"], options,
             build_vector_index_to_session,
         )
     elif "://" not in data_file:
-        os.makedirs(os.path.dirname(vectors), exist_ok=True)
+        os.makedirs(os.path.dirname(index_path), exist_ok=True)
         built = build_vector_index_local(
             data_file, definition["column"], list(deleted), embed_fn, definition["dimensions"],
-            vectors, centroids, data_bytes=data_bytes, **options,
+            index_path, data_bytes=data_bytes, **options,
         )
     else:
         raise NotSupportedError(
@@ -1201,20 +1197,19 @@ def _build_index_files(catalog, definition, data_file, data_bytes, deleted, vect
     if built is None:
         return None
     return IndexFiles(
-        vectors=vectors, centroids=centroids, vectors_bytes=built["vectors_bytes"],
-        centroids_bytes=built["centroids_bytes"], logical_bytes=built["logical_bytes"],
+        path=index_path, file_bytes=built["file_bytes"], footer_bytes=built["footer_bytes"],
+        logical_bytes=built["logical_bytes"],
     )
 
 
 class _IndexTarget(NamedTuple):
-    """One data file to index and where its index files go (what `_build_index_on_gcs`
+    """One data file to index and where its index file goes (what `_build_index_on_gcs`
     reads; the catalog's IndexBuildTask has the same fields)."""
 
     data_file: str
     data_bytes: int
     deleted: tuple
-    vectors: str
-    centroids: str
+    path: str
 
 
 def _require_index_embedder(definition: dict, relation_name: str) -> None:
@@ -1292,15 +1287,13 @@ def _index_build_lease(catalog, relative_id: str, holder: str):
 
 
 def _build_index_on_gcs(io, task, column, embed_fn, dims, build_options, build_to_session):
-    """Build one GCS data file's index files - see refresh_vector_index.
+    """Build one GCS data file's index file - see refresh_vector_index.
 
-    The vectors file is prefix + body: the body streams natively into a resumable upload
-    session while the build runs, then the prefix (known only at the end) is uploaded
-    and the two are composed into the vectors file. Returns the build's dict, or None
-    (nothing written) when the file has no indexable row."""
+    The file streams natively into a resumable upload session while the build runs, and
+    the build finishes the session: one object, written once. Returns the build's dict, or
+    None (nothing written, the session cancelled) when the file has no indexable row."""
     data_file, auth_header = _index_reads()(task.data_file)
-    body, prefix = f"{task.vectors}.body", f"{task.vectors}.prefix"
-    session = io.open_upload_session(body)
+    session = io.open_upload_session(task.path)
     try:
         built = build_to_session(
             data_file, column, list(task.deleted), embed_fn, dims, session,
@@ -1311,14 +1304,6 @@ def _build_index_on_gcs(io, task, column, embed_fn, dims, build_options, build_t
         raise
     if built is None:
         io.cancel_upload_session(session)
-        return None
-    for path, data in ((prefix, built["prefix"]), (task.centroids, built["centroids"])):
-        stream = io.new_output(path).create()
-        stream.write(data)
-        stream.close()
-    io.compose([prefix, body], task.vectors)
-    io.delete(prefix)
-    io.delete(body)
     return built
 
 
@@ -2594,7 +2579,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         import os
 
         from opteryx_catalog.catalog.vector_indexes import IndexFiles
-        from opteryx_catalog.catalog.vector_indexes import vector_index_paths
+        from opteryx_catalog.catalog.vector_indexes import vector_index_path
 
         from opteryx import config
         from opteryx.exceptions import NotSupportedError
@@ -2639,23 +2624,20 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
             for path in retired_files:
                 refs, deleted = inputs[path]
                 files = refs[index_id]
-                location, auth_header = readable(files.vectors)
-                specs.append((location, files.vectors_bytes, list(deleted), auth_header))
-            targets = [vector_index_paths(dataset.metadata.location, index_id, out) for out in outputs]
+                location, auth_header = readable(files.path)
+                specs.append((location, files.file_bytes, files.footer_bytes, list(deleted), auth_header))
+            targets = [vector_index_path(dataset.metadata.location, index_id, out) for out in outputs]
             options = dict(clusters=definition["clusters"], train_threads=threads)
             if all(out.startswith("gs://") for out in outputs):
                 built = _carry_on_gcs(catalog.io, specs, spent, definition["dimensions"], targets,
                                       options, carry_vector_index_to_sessions)
             elif not any("://" in out for out in outputs):
-                for vectors, _ in targets:
-                    os.makedirs(os.path.dirname(vectors), exist_ok=True)
-                built = carry_vector_index_local(
-                    specs, spent, definition["dimensions"], [v for v, _ in targets], [c for _, c in targets],
-                    **options,
-                )
+                for target in targets:
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                built = carry_vector_index_local(specs, spent, definition["dimensions"], targets, **options)
             else:
                 raise NotSupportedError("Vector carry writes outputs on local disk or GCS.")
-            for out, (vectors, centroids), result in zip(outputs, targets, built):
+            for out, target, result in zip(outputs, targets, built):
                 if result is None:
                     raise NotSupportedError(
                         f"compaction output {out} carries no vector for index {definition['name']}: "
@@ -2663,8 +2645,8 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                         "recorded as indexed, and compaction may not change coverage (§5.6)."
                     )
                 carried[out][index_id] = IndexFiles(
-                    vectors=vectors, centroids=centroids, vectors_bytes=result["vectors_bytes"],
-                    centroids_bytes=result["centroids_bytes"], logical_bytes=result["logical_bytes"],
+                    path=target, file_bytes=result["file_bytes"], footer_bytes=result["footer_bytes"],
+                    logical_bytes=result["logical_bytes"],
                 )
         return carried
 
@@ -3986,13 +3968,12 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
 
         Each file is committed as soon as it is built, so a failure keeps every file
         indexed before it. A file with no indexable row (all null, deleted or without a
-        defined cosine) gets no index files and stays searched exactly."""
+        defined cosine) gets no index file and stays searched exactly."""
         index_id = definition["index-id"]
         indexed = 0
         for task in catalog.load_dataset(relative_id).vector_index_build_plan(index_id):
             files = _build_index_files(
-                catalog, definition, task.data_file, task.data_bytes, task.deleted,
-                task.vectors, task.centroids,
+                catalog, definition, task.data_file, task.data_bytes, task.deleted, task.path,
             )
             lost()
             if files is None:
@@ -4013,7 +3994,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
 
         Takes no maintenance lease (§5.7): a write indexes only its OWN new files, which no
         compaction can have selected yet. A file with no indexable row gets none."""
-        from opteryx_catalog.catalog.vector_indexes import vector_index_paths
+        from opteryx_catalog.catalog.vector_indexes import vector_index_path
 
         sync = [d for d in catalog.list_vector_indexes(relative_id) if d.get("build") == "sync"]
         if not sync:
@@ -4024,8 +4005,8 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         built: dict = {}
         for path, size in zip(rows.file_paths(), rows.file_sizes()):
             for definition in sync:
-                vectors, centroids = vector_index_paths(location, definition["index-id"], path)
-                files = _build_index_files(catalog, definition, path, size, (), vectors, centroids)
+                target = vector_index_path(location, definition["index-id"], path)
+                files = _build_index_files(catalog, definition, path, size, (), target)
                 if files is not None:
                     built.setdefault(path, {})[definition["index-id"]] = files
         return built

@@ -23,16 +23,21 @@ path itself: the scan already holds that list, so the index is exact and free,
 where a per-row path string would be a string payload dragged through a join
 for no information gain. The consumer maps index -> path through the same list.
 
-Only MERGE asks for these today. They are deliberately NOT a general SQL
-surface - the names are unspellable in user SQL by convention (a leading `$`
-marks engine-internal columns), and `visit_scan` only materialises them when
-the planner set `emit_row_identity` on the Scan.
+MERGE, UPDATE, DELETE and OPTIMIZE (carrying a vector index) ask for these. They
+are deliberately NOT a general SQL surface - the names are unspellable in user SQL
+by convention (a leading `$` marks engine-internal columns), and the binder only
+adds them when the planner set `emit_row_identity` on the Scan.
+
+The native parquet scan (NativeParquetScanSource) appends them after its read set,
+numbered from the footer's row-group row counts and the rows each decode kept
+(rugo's MorselRef::kept_rows), so deletes, page pruning and the worker prefilter
+all keep the address exact.
 
 ⚠️ A scan projecting `$ordinal` must run SINGLE-PASS. The two-pass late
 materialization path renumbers rows between its passes, so a row's position no
 longer equals its file ordinal - the ordinal it produced would address a
-different row. `parquet_read.pyx` gates on this; do not relax it without making
-pass 2 carry the ordinal itself.
+different row. The compiler never routes a row-identity scan to the latmat Source;
+do not relax that without making pass 2 carry the ordinal itself.
 """
 
 # The column names, as they appear in the Scan's schema and in the synthesized

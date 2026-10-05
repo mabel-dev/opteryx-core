@@ -17,14 +17,15 @@ Two halves:
 
   carry_vector_index_local / carry_vector_index_to_sessions
                      the entry points into src/cpp/engine/vector_index_carry.hpp: ONE native
-                     call per compaction, GIL released, reading every input's vectors file
-                     row group by row group and writing every output's index files.
+                     call per compaction, GIL released, reading every input's index file
+                     in large parallel range reads and writing every output's index file.
 """
 
 cdef extern from "engine/vector_index_carry.hpp" namespace "opteryx::engine" nogil:
     cdef cppclass CarryInput:
-        string vectors
-        uint64_t vectors_bytes
+        string path
+        uint64_t file_bytes
+        uint64_t footer_bytes
         string auth_header
         cppvector[uint32_t] deleted
 
@@ -39,7 +40,7 @@ cdef extern from "engine/vector_index_carry.hpp" namespace "opteryx::engine" nog
         uint32_t flush_rows
 
     bint c_carry_local "opteryx::engine::carry_vector_index_local"(const CarrySpec& spec, const cppvector[CarryOutput]& outputs,
-                                  const cppvector[string]& vectors, const cppvector[string]& centroids,
+                                  const cppvector[string]& paths,
                                   cppvector[VectorIndexBuildResult]* results, string* err)
     bint c_carry_to_sessions "opteryx::engine::carry_vector_index_to_sessions"(const CarrySpec& spec, const cppvector[CarryOutput]& outputs,
                                         const cppvector[string]& sessions, size_t chunk_bytes,
@@ -131,15 +132,17 @@ cdef class RowOriginRecorder:
 cdef CarrySpec _carry_spec(list inputs, uint32_t dims, uint32_t clusters, uint32_t iterations,
                            uint32_t sample_per_cluster, unsigned long long seed, uint32_t flush_rows,
                            uint32_t train_threads):
-    """`inputs`: one (vectors location, vectors bytes, deleted ordinals, Authorization
-    header - "" for none) per input file, in the order the recorded file indexes refer to."""
+    """`inputs`: one (index file location, file bytes, footer bytes, deleted ordinals,
+    Authorization header - "" for none) per input file, in the order the recorded file
+    indexes refer to."""
     cdef CarrySpec spec
     cdef uint32_t ordinal
     cdef size_t k = 0
     spec.inputs.resize(len(inputs))
-    for location, size, deleted, auth_header in inputs:
-        spec.inputs[k].vectors = (<str>location).encode("utf-8")
-        spec.inputs[k].vectors_bytes = <uint64_t>size
+    for location, size, footer_bytes, deleted, auth_header in inputs:
+        spec.inputs[k].path = (<str>location).encode("utf-8")
+        spec.inputs[k].file_bytes = <uint64_t>size
+        spec.inputs[k].footer_bytes = <uint64_t>footer_bytes
         spec.inputs[k].auth_header = (<str>auth_header).encode("utf-8")
         for ordinal in deleted:
             spec.inputs[k].deleted.push_back(ordinal)
@@ -167,30 +170,24 @@ cdef cppvector[CarryOutput] _carry_outputs(list recorders):
     return outputs
 
 
-cdef dict _carry_result(VectorIndexBuildResult* r, bint with_bytes):
+cdef dict _carry_result(VectorIndexBuildResult* r):
     if r.empty:
         return None
-    out = {
-        "body_bytes": r.vectors_body_bytes,
-        "vectors_bytes": r.vectors_prefix.size() + r.vectors_body_bytes,
-        "centroids_bytes": r.centroids.size(),
+    return {
+        "file_bytes": r.file_bytes,
+        "footer_bytes": r.footer_bytes,
         "logical_bytes": r.logical_bytes,
         "rows_indexed": r.rows_indexed,
         "clusters": r.clusters,
-        "vectors_row_groups": r.vectors_row_groups,
+        "blocks": r.blocks,
     }
-    if with_bytes:
-        out["prefix"] = (<char*>r.vectors_prefix.data())[:r.vectors_prefix.size()]
-        out["centroids"] = (<char*>r.centroids.data())[:r.centroids.size()]
-    return out
 
 
 def carry_vector_index_local(
     list inputs,
     list recorders,
     uint32_t dims,
-    list vectors_paths,
-    list centroids_paths,
+    list paths,
     uint32_t clusters=0,
     uint32_t iterations=8,
     uint32_t sample_per_cluster=64,
@@ -198,25 +195,24 @@ def carry_vector_index_local(
     uint32_t flush_rows=512,
     uint32_t train_threads=1,
 ):
-    """Carry one index for every output of a compaction into local files. Returns one
-    entry per output: None when it carried no vector (no files written), else the sizes
-    the commit records. Raises on any failure, including a broken carry invariant."""
+    """Carry one index for every output of a compaction into local files (`paths[j]` for
+    output j). Returns one entry per output: None when it carried no vector (no file
+    written), else the sizes the commit records. Raises on any failure, including a broken
+    carry invariant."""
     cdef CarrySpec spec = _carry_spec(inputs, dims, clusters, iterations, sample_per_cluster, seed,
                                       flush_rows, train_threads)
     cdef cppvector[CarryOutput] outputs = _carry_outputs(recorders)
-    cdef cppvector[string] c_vectors, c_centroids
-    for path in vectors_paths:
-        c_vectors.push_back((<str>path).encode("utf-8"))
-    for path in centroids_paths:
-        c_centroids.push_back((<str>path).encode("utf-8"))
+    cdef cppvector[string] c_paths
+    for path in paths:
+        c_paths.push_back((<str>path).encode("utf-8"))
     cdef cppvector[VectorIndexBuildResult] results
     cdef string err
     cdef bint ok
     with nogil:
-        ok = c_carry_local(spec, outputs, c_vectors, c_centroids, &results, &err)
+        ok = c_carry_local(spec, outputs, c_paths, &results, &err)
     if not ok:
         raise RuntimeError(err.decode("utf-8", "replace"))
-    return [_carry_result(&results[j], False) for j in range(results.size())]
+    return [_carry_result(&results[j]) for j in range(results.size())]
 
 
 def carry_vector_index_to_sessions(
@@ -232,10 +228,10 @@ def carry_vector_index_to_sessions(
     uint32_t flush_rows=512,
     uint32_t train_threads=1,
 ):
-    """Carry one index for every output of a compaction, streaming output j's vectors
-    BODY into the open resumable session `sessions[j]`. Returns one entry per output: None
-    when it carried no vector (its session is left unfinished), else a dict holding
-    `prefix` and `centroids` (bytes) for the caller to upload and compose."""
+    """Carry one index for every output of a compaction, streaming output j's index file
+    into the open resumable session `sessions[j]`, finished here. Returns one entry per
+    output: None when it carried no vector (its session is left unfinished), else the
+    sizes the commit records."""
     cdef CarrySpec spec = _carry_spec(inputs, dims, clusters, iterations, sample_per_cluster, seed,
                                       flush_rows, train_threads)
     cdef cppvector[CarryOutput] outputs = _carry_outputs(recorders)
@@ -249,4 +245,4 @@ def carry_vector_index_to_sessions(
         ok = c_carry_to_sessions(spec, outputs, c_sessions, chunk_bytes, &results, &err)
     if not ok:
         raise RuntimeError(err.decode("utf-8", "replace"))
-    return [_carry_result(&results[j], True) for j in range(results.size())]
+    return [_carry_result(&results[j]) for j in range(results.size())]

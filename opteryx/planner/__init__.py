@@ -485,6 +485,13 @@ def bind_logical_plan(
     finally:
         telemetry.time_planning_binder += time.monotonic_ns() - start
 
+    # Semantics, not optimization: decided on the bound plan (and every shared CTE body)
+    # so that no optimizer flag can change an answer. See unsearchable_sorts.
+    from opteryx.planner.unsearchable_sorts import mark_unsearchable_sorts
+
+    mark_unsearchable_sorts(bound_plan)
+    for body in plan_context.shared_ctes.values():
+        mark_unsearchable_sorts(body)
     return bound_plan
 
 
@@ -566,6 +573,7 @@ def query_planner(
         # by the optimizer, the result-size guard and the billing meter, never across
         # queries, and never stored on plan nodes.
         plan_context = PlanContext()
+        plan_context.variables = execution_context.variables
         # Parse, resolve, rewrite and bind - the same path `Session.check` stops at the
         # end of.
         bound_plan, _clean_sql, _ast = bind_statement(

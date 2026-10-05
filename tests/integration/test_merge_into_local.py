@@ -78,8 +78,9 @@ class _LocalDiskIO:
         return self._Out(path)
 
 
-def _build_dataset(location, identifier, columns, rows, disk_io):
-    """A real SimpleDataset on local disk holding one data file."""
+def _build_dataset(location, identifier, columns, rows, disk_io, **write_options):
+    """A real SimpleDataset on local disk holding one data file (`write_options` go to
+    write_parquet)."""
     from draken.interop.vector_sequence import vector_from_sequence
     from draken.morsels.morsel import Morsel
     from rugo.parquet import write_parquet
@@ -96,7 +97,7 @@ def _build_dataset(location, identifier, columns, rows, disk_io):
     morsel = Morsel()
     for index, name in enumerate(columns):
         morsel.append_vector(name, vector_from_sequence([r[index] for r in rows], dtype="INTEGER"))
-    data = write_parquet(morsel, compression="zstd")
+    data = write_parquet(morsel, compression="zstd", **write_options)
     path = f"{location}/data/seed.parquet"
     with open(path, "wb") as f:
         f.write(data)

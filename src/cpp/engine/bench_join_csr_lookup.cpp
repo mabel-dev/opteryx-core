@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <string>
@@ -88,8 +89,129 @@ static JoinCsrModel build_csr(const std::vector<uint64_t>& keys) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-architecture probe-shape arms (2026-10-04, docs/ARCH_AWARE_PERFORMANCE_TEST_PLAN.md
+// Phase 1: prefetch and bloom re-tests on ARM and x86). Every arm returns the
+// same match count as the plain loop — checked, not assumed.
+// ---------------------------------------------------------------------------
 
-int main() {
+// The build-side filter layout the 2026-08-07 bloom experiment shipped and
+// measured best: one 64-bit word per key, k=2 bits in that word, ~8 bits/key
+// rounded up to a power of two words. Bits are taken from hash ranges the CSR
+// bucket index (low bits) does not use.
+struct WordBloom {
+    std::vector<uint64_t> words;
+    size_t mask = 0;
+    explicit WordBloom(const std::vector<uint64_t>& keys) {
+        size_t n = 1;
+        while (n * 8 < keys.size()) n <<= 1;   // >= 8 bits per key
+        words.assign(n, 0);
+        mask = n - 1;
+        for (uint64_t h : keys) words[(h >> 32) & mask] |= bits(h);
+    }
+    static uint64_t bits(uint64_t h) { return (1ull << ((h >> 20) & 63)) | (1ull << ((h >> 26) & 63)); }
+    bool maybe(uint64_t h) const {
+        const uint64_t b = bits(h);
+        return (words[(h >> 32) & mask] & b) == b;
+    }
+};
+
+static size_t probe_plain(const JoinCsrModel& c, const std::vector<uint64_t>& keys) {
+    size_t acc = 0;
+    for (uint64_t k : keys) acc += c.row_count_for(k);
+    return acc;
+}
+
+static size_t probe_bloom(const JoinCsrModel& c, const WordBloom& f, const std::vector<uint64_t>& keys) {
+    size_t acc = 0;
+    for (uint64_t k : keys)
+        if (f.maybe(k)) acc += c.row_count_for(k);
+    return acc;
+}
+
+// Pivot-style pipelined probe: hash ahead, prefetch the bucket's off[] entry
+// 2*D keys ahead, then (off[] now cached) prefetch the bucket's hashes[] range
+// D keys ahead, then do the lookup. D is the knob.
+template <size_t D>
+static size_t probe_prefetch(const JoinCsrModel& c, const std::vector<uint64_t>& keys) {
+    const size_t n = keys.size();
+    size_t acc = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (i + 2 * D < n) __builtin_prefetch(&c.off[static_cast<size_t>(keys[i + 2 * D]) & c.mask]);
+        if (i + D < n) {
+            const size_t b = static_cast<size_t>(keys[i + D]) & c.mask;
+            __builtin_prefetch(&c.hashes[c.off[b]]);
+        }
+        acc += c.row_count_for(keys[i]);
+    }
+    return acc;
+}
+
+static double ns_per(const std::chrono::steady_clock::time_point& t0,
+                     const std::chrono::steady_clock::time_point& t1, size_t n) {
+    return std::chrono::duration<double, std::nano>(t1 - t0).count() / n;
+}
+
+static void run_arms(const char* mix_name, const JoinCsrModel& csr, const WordBloom& bloom,
+                     const std::vector<uint64_t>& keys, int reps) {
+    struct Arm { const char* name; size_t (*fn)(const JoinCsrModel&, const WordBloom&, const std::vector<uint64_t>&); };
+    static const Arm arms[] = {
+        {"plain", [](const JoinCsrModel& c, const WordBloom&, const std::vector<uint64_t>& k) { return probe_plain(c, k); }},
+        {"bloom", [](const JoinCsrModel& c, const WordBloom& f, const std::vector<uint64_t>& k) { return probe_bloom(c, f, k); }},
+        {"pf8", [](const JoinCsrModel& c, const WordBloom&, const std::vector<uint64_t>& k) { return probe_prefetch<8>(c, k); }},
+        {"pf16", [](const JoinCsrModel& c, const WordBloom&, const std::vector<uint64_t>& k) { return probe_prefetch<16>(c, k); }},
+        {"pf32", [](const JoinCsrModel& c, const WordBloom&, const std::vector<uint64_t>& k) { return probe_prefetch<32>(c, k); }},
+    };
+    constexpr size_t kArms = sizeof(arms) / sizeof(arms[0]);
+    const size_t expect = probe_plain(csr, keys);
+    double best[kArms];
+    for (size_t a = 0; a < kArms; ++a) best[a] = 1e300;
+    volatile size_t sink = 0;
+    for (int r = 0; r < reps; ++r) {
+        for (size_t k = 0; k < kArms; ++k) {
+            const size_t a = (r % 2 == 0) ? k : kArms - 1 - k;   // alternate arm order
+            const auto t0 = std::chrono::steady_clock::now();
+            const size_t got = arms[a].fn(csr, bloom, keys);
+            const auto t1 = std::chrono::steady_clock::now();
+            if (got != expect) {
+                std::fprintf(stderr, "MISMATCH: arm %s returned %zu, plain %zu\n", arms[a].name, got, expect);
+                std::exit(1);
+            }
+            sink += got;
+            const double t = ns_per(t0, t1, keys.size());
+            if (t < best[a]) best[a] = t;
+        }
+    }
+    std::printf("   %-5s", mix_name);
+    for (size_t a = 0; a < kArms; ++a) std::printf("  %s %6.2f (x%.2f)", arms[a].name, best[a], best[a] / best[0]);
+    std::printf("\n");
+}
+
+static int arms_main(int reps) {
+    std::printf("Probe-shape arms, ns/probe, min of %d, arm order alternating; x = vs plain\n", reps);
+    const size_t kProbes = 4'000'000;
+    std::mt19937_64 rng(0xA5C4A5C4A5C4ULL);
+    for (size_t build_rows : {1'000ul, 100'000ul, 1'000'000ul, 4'000'000ul, 16'000'000ul, 64'000'000ul}) {
+        std::vector<uint64_t> build(build_rows);
+        for (auto& v : build) v = rng();
+        JoinCsrModel csr = build_csr(build);
+        WordBloom bloom(build);
+        std::vector<uint64_t> miss(kProbes), hit(kProbes), half(kProbes);
+        for (size_t i = 0; i < kProbes; ++i) {
+            miss[i] = rng() | 1ull;
+            hit[i] = build[rng() % build_rows];
+            half[i] = (i & 1) ? miss[i] : hit[i];
+        }
+        std::printf("build %zu rows (CSR %.1f MiB, filter %.1f MiB)\n", build_rows, build_rows * 16.0 / 1048576.0,
+                    bloom.words.size() * 8.0 / 1048576.0);
+        run_arms("miss", csr, bloom, miss, reps);
+        run_arms("half", csr, bloom, half, reps);
+        run_arms("hit", csr, bloom, hit, reps);
+    }
+    return 0;
+}
+
+int main(int argc, char** argv) {
+    if (argc > 1 && std::strcmp(argv[1], "--arms") == 0) return arms_main(argc > 2 ? std::atoi(argv[2]) : 5);
     std::printf("%s\n", std::string(96, '=').c_str());
     std::printf("JoinCsr lookup cost (L) — %s\n",
 #if defined(__aarch64__)

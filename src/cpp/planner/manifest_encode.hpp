@@ -66,6 +66,7 @@ struct EncodedManifest {
     EncodedStrings delete_file_path;          // "" on a row without deletes (null there)
     uint8_t* delete_file_path_validity = nullptr;
     EncodedScalar deleted_record_count;
+    EncodedScalar row_group_count;   // NULL = unknown
     EncodedScalar record_count, file_size, uncompressed_size, histogram_bins;
     EncodedList column_sizes, null_counts, min_k, histogram_counts, min_values, max_values, field_ids;
     EncodedList min_lengths, max_lengths, char_class_counts, char_total_bytes, distinct_counts;
@@ -352,6 +353,9 @@ inline EncodedManifest encode_manifest(const NativeManifest& m, const std::vecto
     }
     out.delete_file_path = strings(delete_paths);
     out.deleted_record_count = int64s(deleted, false);
+    std::vector<int64_t> row_groups;
+    for (size_t f = 0; f < rows; ++f) row_groups.push_back(m.file(f).row_group_count);
+    out.row_group_count = int64s(row_groups, true);
     out.file_path = strings(paths);
     out.file_format = strings(formats);
     out.record_count = int64s(records, true);

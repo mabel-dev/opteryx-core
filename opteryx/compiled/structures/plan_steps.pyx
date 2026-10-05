@@ -8471,9 +8471,9 @@ cdef class ScanStep(PlanStep):
     """The Scan logical plan step.
 
     `vector_search` marks the scan of a vector index search (D-4, VectorSearchStrategy):
-    a dict naming the index, the query text and k. The compiler gives such a scan
-    a row admission that decodes only the index's candidates (and every row of files the
-    index does not cover)."""
+    a dict naming the index, the query text, k and `exact_files` (covered files the cost
+    model chose to search exactly). The compiler gives such a scan a row admission that
+    decodes only the index's candidates (and every row of the files searched exactly)."""
 
     cdef str _alias
     cdef object _at_date

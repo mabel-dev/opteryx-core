@@ -1,0 +1,1692 @@
+System name: Opteryx
+Proprietary: no
+Tuned: no
+Tags: ["C++","stateless","column-oriented","embedded"]
+ClickBench PR: 
+Disk usage before: 19821604864
+Hit:1 http://us-east-1.ec2.archive.ubuntu.com/ubuntu noble InRelease
+Hit:2 http://us-east-1.ec2.archive.ubuntu.com/ubuntu noble-updates InRelease
+Hit:3 http://us-east-1.ec2.archive.ubuntu.com/ubuntu noble-backports InRelease
+Hit:4 http://security.ubuntu.com/ubuntu noble-security InRelease
+Reading package lists...
+Reading package lists...
+Building dependency tree...
+Reading state information...
+software-properties-common is already the newest version (0.99.49.4).
+software-properties-common set to manually installed.
+0 upgraded, 0 newly installed, 0 to remove and 19 not upgraded.
+Hit:1 http://us-east-1.ec2.archive.ubuntu.com/ubuntu noble InRelease
+Hit:2 http://us-east-1.ec2.archive.ubuntu.com/ubuntu noble-updates InRelease
+Hit:3 http://us-east-1.ec2.archive.ubuntu.com/ubuntu noble-backports InRelease
+Hit:4 http://security.ubuntu.com/ubuntu noble-security InRelease
+Get:5 https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu noble InRelease [17.8 kB]
+Get:6 https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu noble/main amd64 Packages [44.1 kB]
+Get:7 https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu noble/main Translation-en [6096 B]
+Fetched 68.0 kB in 1s (79.4 kB/s)
+Reading package lists...
+Repository: 'Types: deb
+URIs: https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu/
+Suites: noble
+Components: main
+'
+Description:
+This PPA contains more recent Python versions packaged for Ubuntu.
+
+Disclaimer: there's no guarantee of timely updates in case of security problems or other issues. If you want to use them in a security-or-otherwise-critical environment (say, on a production server), you do so at your own risk.
+
+Update Note
+===========
+Please use this repository instead of ppa:fkrull/deadsnakes.
+
+Reporting Issues
+================
+
+Issues can be reported in the master issue tracker at:
+https://github.com/deadsnakes/issues/issues
+
+Supported Ubuntu and Python Versions
+====================================
+
+- Ubuntu 22.04 (jammy) Python3.7+ (NOT Python3.10)
+- Ubuntu 24.04 (noble) Python3.7+ (NOT Python3.12)
+- Ubuntu 26.04 (resolute) Python3.7+ (NOT Python3.14)
+- Note: Python 3.10 (jammy), Python3.12 (noble), Python3.14 (resolute) are not provided by deadsnakes as upstream ubuntu provides those packages.
+
+Why some packages aren't built:
+- Note: for 22.04+, older python versions requre libssl<3 so they are not currently built
+- If you need these, reach out to asottile to set up a private ppa
+
+The packages may also work on other versions of Ubuntu or Debian, but that is not tested or supported.
+
+Packages
+========
+
+The packages provided here are loosely based on the debian upstream packages with some modifications to make them more usable as non-default pythons and on ubuntu.  As such, the packages follow debian's patterns and often do not include a full python distribution with just `apt install python#.#`.  Here is a list of packages that may be useful along with the default install:
+
+- `python#.#-dev`: includes development headers for building C extensions
+- `python#.#-venv`: provides the standard library `venv` module
+- `python#.#-distutils`: provides the standard library `distutils` module
+- `python#.#-lib2to3`: provides the `2to3-#.#` utility as well as the standard library `lib2to3` module
+- `python#.#-gdbm`: provides the standard library `dbm.gnu` module
+- `python#.#-tk`: provides the standard library `tkinter` module
+
+Third-Party Python Modules
+==========================
+
+Python modules in the official Ubuntu repositories are packaged to work with the Python interpreters from the official repositories. Accordingly, they generally won't work with the Python interpreters from this PPA. As an exception, pure-Python modules for Python 3 will work, but any compiled extension modules won't.
+
+To install 3rd-party Python modules, you should use the common Python packaging tools.  For an introduction into the Python packaging ecosystem and its tools, refer to the Python Packaging User Guide:
+https://packaging.python.org/installing/
+
+Sources
+=======
+The package sources are available at:
+https://github.com/deadsnakes/
+
+Nightly Builds
+==============
+
+For nightly builds, see ppa:deadsnakes/nightly https://launchpad.net/~deadsnakes/+archive/ubuntu/nightly
+More info: https://launchpad.net/~deadsnakes/+archive/ubuntu/ppa
+Adding repository.
+Hit:1 http://us-east-1.ec2.archive.ubuntu.com/ubuntu noble InRelease
+Hit:2 http://us-east-1.ec2.archive.ubuntu.com/ubuntu noble-updates InRelease
+Hit:3 http://us-east-1.ec2.archive.ubuntu.com/ubuntu noble-backports InRelease
+Hit:4 http://security.ubuntu.com/ubuntu noble-security InRelease
+Hit:5 https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu noble InRelease
+Reading package lists...
+Reading package lists...
+Building dependency tree...
+Reading state information...
+git is already the newest version (1:2.43.0-1ubuntu7.3).
+wget is already the newest version (1.21.4-1ubuntu4.5).
+The following additional packages will be installed:
+  libpython3.14-stdlib
+Suggested packages:
+  binutils
+The following NEW packages will be installed:
+  libpython3.14-stdlib python3.14 python3.14-venv
+0 upgraded, 3 newly installed, 0 to remove and 19 not upgraded.
+Need to get 7426 kB of archives.
+After this operation, 25.1 MB of additional disk space will be used.
+Get:1 https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu noble/main amd64 libpython3.14-stdlib amd64 3.14.8-1+noble1 [3233 kB]
+Get:2 https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu noble/main amd64 python3.14 amd64 3.14.8-1+noble1 [2460 kB]
+Get:3 https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu noble/main amd64 python3.14-venv amd64 3.14.8-1+noble1 [1732 kB]
+dpkg-preconfigure: unable to re-open stdin: No such file or directory
+Fetched 7426 kB in 1s (5412 kB/s)
+Selecting previously unselected package libpython3.14-stdlib:amd64.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 79235 files and directories currently installed.)
+Preparing to unpack .../libpython3.14-stdlib_3.14.8-1+noble1_amd64.deb ...
+Unpacking libpython3.14-stdlib:amd64 (3.14.8-1+noble1) ...
+Selecting previously unselected package python3.14.
+Preparing to unpack .../python3.14_3.14.8-1+noble1_amd64.deb ...
+Unpacking python3.14 (3.14.8-1+noble1) ...
+Selecting previously unselected package python3.14-venv.
+Preparing to unpack .../python3.14-venv_3.14.8-1+noble1_amd64.deb ...
+Unpacking python3.14-venv (3.14.8-1+noble1) ...
+Setting up libpython3.14-stdlib:amd64 (3.14.8-1+noble1) ...
+Setting up python3.14 (3.14.8-1+noble1) ...
+Setting up python3.14-venv (3.14.8-1+noble1) ...
+Processing triggers for man-db (2.12.0-4build2) ...
+
+Running kernel seems to be up-to-date.
+
+No services need to be restarted.
+
+No containers need to be restarted.
+
+No user sessions are running outdated binaries.
+
+No VM guests are running outdated hypervisor (qemu) binaries on this host.
+Requirement already satisfied: pip in /root/opteryx_venv/lib/python3.14/site-packages (26.2.1)
+Collecting opteryx-core==0.9.155
+  Downloading opteryx_core-0.9.155-cp314-cp314-manylinux_2_34_x86_64.whl.metadata (11 kB)
+Downloading opteryx_core-0.9.155-cp314-cp314-manylinux_2_34_x86_64.whl (46.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 46.4/46.4 MB 70.0 MB/s  0:00:00
+Installing collected packages: opteryx-core
+Successfully installed opteryx-core-0.9.155
+python  3.14.8  (GIL enabled: True)
+opteryx-core 0.9.155
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_6.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_1.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_3.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_7.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_2.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_4.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_0.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_5.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_8.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_9.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_10.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_11.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_12.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_13.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_14.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_16.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_15.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_19.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_18.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_20.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_25.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_26.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_23.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_28.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_24.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_29.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_21.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_17.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_27.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_30.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_31.parquet
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_33.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_32.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_36.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_34.parquet
+172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... connected.
+172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_35.parquet
+connected.
+connected.
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.43.7, Resolving datasets.clickhouse.com (datasets.clickhouse.com)... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_37.parquet
+172.66.40.249, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... connected.
+172.66.40.249172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... , 172.66.43.7, 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... 2606:4700:3108::ac42:28f9, ...--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_39.parquet
+
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... 172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... connected.
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... connected.
+connected.
+connected.
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_22.parquet
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_38.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_40.parquet
+connected.
+172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... connected.
+172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... connected.
+connected.
+HTTP request sent, awaiting response... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_41.parquet
+HTTP request sent, awaiting response... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_43.parquet
+HTTP request sent, awaiting response... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_44.parquet
+HTTP request sent, awaiting response... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_42.parquet
+HTTP request sent, awaiting response... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... HTTP request sent, awaiting response... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... HTTP request sent, awaiting response... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_46.parquet
+connected.
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_45.parquet
+HTTP request sent, awaiting response... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_49.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_50.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_47.parquet
+HTTP request sent, awaiting response... HTTP request sent, awaiting response... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_48.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_51.parquet
+172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... HTTP request sent, awaiting response... 172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... connected.
+connected.
+HTTP request sent, awaiting response... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... HTTP request sent, awaiting response... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... connected.
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_56.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_52.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_54.parquet
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... 172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_55.parquet
+
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_53.parquet
+HTTP request sent, awaiting response... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... connected.
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... connected.
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... HTTP request sent, awaiting response... 172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... connected.
+connected.
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_57.parquet
+connected.
+172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... connected.
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_58.parquet
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... HTTP request sent, awaiting response... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... connected.
+172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... HTTP request sent, awaiting response... HTTP request sent, awaiting response... 200 OK
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_60.parquet
+connected.
+172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... HTTP request sent, awaiting response... Length: 122286439 (117M) [binary/octet-stream]
+Saving to: ‘hits_5.parquet’
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... connected.
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_59.parquet
+172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... HTTP request sent, awaiting response... connected.
+connected.
+HTTP request sent, awaiting response... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_62.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_63.parquet
+HTTP request sent, awaiting response... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_61.parquet
+HTTP request sent, awaiting response... HTTP request sent, awaiting response... 200 OK
+Length: 122927935 (117M) [binary/octet-stream]
+Saving to: ‘hits_6.parquet’
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... connected.
+200 OK
+Length: 122446530 (117M) [binary/octet-stream]
+Saving to: ‘hits_0.parquet’
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_64.parquet
+connected.
+
+     0K .172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... 200 OK
+Length: 149514164 (143M) [binary/octet-stream]
+Saving to: ‘hits_12.parquet’
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 200 OK
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_65.parquet
+Length: 174965044 (167M) [binary/octet-stream]
+Saving to: ‘hits_1.parquet’
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... HTTP request sent, awaiting response... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 200 OK
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_68.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_69.parquet
+Length: 192507052 (184M) [binary/octet-stream]
+Saving to: ‘hits_3.parquet’
+200 OK
+Length: 123902333 (118M) [binary/octet-stream]
+Saving to: ‘hits_7.parquet’
+172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... 200 OK
+connected.
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_67.parquet
+HTTP request sent, awaiting response... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_66.parquet
+172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... connected.
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... connected.
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_70.parquet
+172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... connected.
+200 OK
+Length: 140929275 (134M) [binary/octet-stream]
+Saving to: ‘hits_4.parquet’
+HTTP request sent, awaiting response... Length: 122735269 (117M) [binary/octet-stream]
+Saving to: ‘hits_8.parquet’
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... 
+     0K .200 OK
+Length: 156510916 (149M) [binary/octet-stream]
+Saving to: ‘hits_26.parquet’
+connected.
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 200 OK
+200 OK
+Length: 151121699 (144M) [binary/octet-stream]
+Length: 133629314 (127M) [binary/octet-stream]
+Saving to: ‘hits_14.parquet’
+Saving to: ‘hits_9.parquet’
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... HTTP request sent, awaiting response... HTTP request sent, awaiting response... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... connected.
+connected.
+172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_73.parquet
+.172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... 
+     0K .--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_72.parquet
+HTTP request sent, awaiting response... HTTP request sent, awaiting response... .
+     0K .Resolving datasets.clickhouse.com (datasets.clickhouse.com)... HTTP request sent, awaiting response... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_75.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_74.parquet
+172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... connected.
+connected.
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_71.parquet
+172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 200 OK
+Length: 146132022 (139M) [binary/octet-stream]
+Saving to: ‘hits_13.parquet’
+172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... connected.
+200 OK
+Length: 162772407 (155M) [binary/octet-stream]
+Saving to: ‘hits_28.parquet’
+
+     0K ..HTTP request sent, awaiting response... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_76.parquet
+.HTTP request sent, awaiting response... connected.
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_81.parquet
+200 OK
+Length: 78243765 (75M) [binary/octet-stream]
+Saving to: ‘hits_33.parquet’
+
+     0K .--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_78.parquet
+.--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_77.parquet
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 200 OK
+172.66.40.249Length: , 118419888172.66.43.7, 2606:4700:3108::ac42:2b07 (113M), ...
+ [binary/octet-stream]
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... Saving to: ‘hits_11.parquet’
+
+     0K .connected.
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_80.parquet
+
+     0K ..connected.
+HTTP request sent, awaiting response... .
+     0K .Resolving datasets.clickhouse.com (datasets.clickhouse.com)... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... .HTTP request sent, awaiting response... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... 172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... connected.
+..172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... HTTP request sent, awaiting response... connected.
+connected.
+HTTP request sent, awaiting response... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_82.parquet
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_79.parquet
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 
+     0K .200 OK
+Length: 166286210 (159M) [binary/octet-stream]
+Saving to: ‘hits_27.parquet’
+.200 OK
+Length: 78257049 (75M) [binary/octet-stream]
+Saving to: ‘hits_24.parquet’
+
+     0K .172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... ...--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_83.parquet
+connected.
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_84.parquet
+
+     0K .200 OK
+Length: 119426616 (114M) [binary/octet-stream]
+Saving to: ‘hits_34.parquet’
+.connected.
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 
+     0K ..172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... 200 OK
+Length: 103692598 (99M) [binary/octet-stream]
+Saving to: ‘hits_19.parquet’
+
+     0K ..Resolving datasets.clickhouse.com (datasets.clickhouse.com)... .connected.
+
+     0K ..HTTP request sent, awaiting response... 200 OK
+172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... Length: 101513258 (97M) [binary/octet-stream]
+Saving to: ‘hits_10.parquet’
+.HTTP request sent, awaiting response... 200 OK
+HTTP request sent, awaiting response... Length: 116867853 (111M) [binary/octet-stream]
+Saving to: ‘hits_17.parquet’
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_87.parquet
+..200 OK
+Length: 79631107 (76M) [binary/octet-stream]
+Saving to: ‘hits_23.parquet’
+200 OK
+Length: 99795554 (95M) [binary/octet-stream]
+Saving to: ‘hits_49.parquet’
+.connected.
+200 OK
+Length: 79213288 (76M) [binary/octet-stream]
+Saving to: ‘hits_29.parquet’
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_85.parquet
+HTTP request sent, awaiting response... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_88.parquet
+.200 OK
+Length: 85766533 (82M) [binary/octet-stream]
+Saving to: ‘hits_20.parquet’
+.HTTP request sent, awaiting response... 
+     0K .--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_89.parquet
+HTTP request sent, awaiting response... HTTP request sent, awaiting response... ..--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_93.parquet
+...
+     0K .HTTP request sent, awaiting response... .--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_94.parquet
+HTTP request sent, awaiting response... 
+     0K ..--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_91.parquet
+
+     0K ..--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_86.parquet
+.--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_92.parquet
+200 OK
+.Length: 124187913 (118M) [binary/octet-stream]
+Saving to: ‘hits_30.parquet’
+ .200 OK
+Length: 144169728 (137M) [binary/octet-stream]
+Saving to: ‘hits_25.parquet’
+.200 OK
+Length: 94506004 (90M) [binary/octet-stream]
+Saving to: ‘hits_32.parquet’
+200 OK
+.Length: 245339079 (234M) [binary/octet-stream]
+Saving to: ‘hits_50.parquet’
+.--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_90.parquet
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... .--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_95.parquet
+...Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... --2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_96.parquet
+...Resolving datasets.clickhouse.com (datasets.clickhouse.com)... .....172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... .Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 200 OK
+Length: 79775901 (76M) [binary/octet-stream]
+Saving to: ‘hits_22.parquet’
+200 OK
+.Length: 230595491 (220M) [binary/octet-stream]
+Saving to: ‘hits_2.parquet’
+.200 OK
+200 OK
+Length: 103098894 (98M) [binary/octet-stream]
+Length: 92407680Saving to: ‘hits_15.parquet’
+ (88M) [binary/octet-stream]
+.Saving to: ‘hits_46.parquet’
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_97.parquet
+
+     0K .Resolving datasets.clickhouse.com (datasets.clickhouse.com)... connected.
+172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...HTTP request sent, awaiting response... 
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... .172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... .connected.
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_99.parquet
+.Resolving datasets.clickhouse.com (datasets.clickhouse.com)... connected.
+--2026-10-04 16:45:08--  https://datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_98.parquet
+.172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... .200 OK
+Length: 288524057 (275M) [binary/octet-stream]
+Saving to: ‘hits_42.parquet’
+.connected.
+ ......
+     0K ...200 OK
+Length: 101067219 (96M) [binary/octet-stream]
+Saving to: ‘hits_16.parquet’
+.Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 
+     0K .172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... 
+     0K ..connected.
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 200 OK
+Length: 133119589 (127M) [binary/octet-stream]
+Saving to: ‘hits_18.parquet’
+..
+     0K ..172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... 200 OK
+.Length: 108247781 (103M) [binary/octet-stream]
+Saving to: ‘hits_37.parquet’
+.200 OK
+.Length: 123065410 (117M) [binary/octet-stream]
+Saving to: ‘hits_31.parquet’
+.200 OK
+connected.
+Length: 169373476 (162M) [binary/octet-stream]
+Saving to: ‘hits_56.parquet’
+HTTP request sent, awaiting response... ..
+     0K
+     0K . .200 OK
+connected.
+Length: 143594342 (137M) [binary/octet-stream]
+Saving to: ‘hits_60.parquet’
+..Resolving datasets.clickhouse.com (datasets.clickhouse.com)... . ..200 OK
+Length: 139325887 (133M) [binary/octet-stream]
+.Saving to: ‘hits_59.parquet’
+.172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... ..200 OK
+Length: 153632381 (147M) [binary/octet-stream]
+Saving to: ‘hits_35.parquet’
+.connected.
+..172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... .. ....200 OK
+Length: 103522954 (99M) [binary/octet-stream]
+Saving to: ‘hits_39.parquet’
+.200 OK
+Length: 113455196 (108M) [binary/octet-stream]
+Saving to: ‘hits_21.parquet’
+HTTP request sent, awaiting response... .Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 
+     0K .....HTTP request sent, awaiting response... ..200 OK
+.Length: 92487304 (88M) [binary/octet-stream]
+Saving to: ‘hits_36.parquet’
+connected.
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... 172.66.40.249, 172.66.40.249172.66.43.7, , 172.66.43.7, 2606:4700:3108::ac42:2b07, ...2606:4700:3108::ac42:28f9
+, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... .172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... 200 OK
+Length: 132005180 (126M) [binary/octet-stream]
+Saving to: ‘hits_38.parquet’
+.
+     0K ..
+     0K ...connected.
+HTTP request sent, awaiting response... ..connected.
+..connected.
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... ..
+     0K ..172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... HTTP request sent, awaiting response... HTTP request sent, awaiting response... .. ...172.66.40.249
+     0K .Resolving datasets.clickhouse.com (datasets.clickhouse.com)... ., 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... ....
+     0K .Resolving datasets.clickhouse.com (datasets.clickhouse.com)... .200 OK
+Length: 142508647 (136M) [binary/octet-stream]
+Saving to: ‘hits_40.parquet’
+HTTP request sent, awaiting response... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... ....172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443...  .connected.
+.HTTP request sent, awaiting response... connected.
+.
+     0K ...connected.
+200 OK
+Length: 290614269 (277M) [binary/octet-stream]
+Saving to: ‘hits_41.parquet’
+.
+     0K .172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... HTTP request sent, awaiting response... ..Resolving datasets.clickhouse.com (datasets.clickhouse.com)... HTTP request sent, awaiting response... ..connected.
+172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443...  .172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... 
+     0K .172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... .Resolving datasets.clickhouse.com (datasets.clickhouse.com)... .connected.
+connected.
+.Resolving datasets.clickhouse.com (datasets.clickhouse.com)... ..172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... .
+     0K .HTTP request sent, awaiting response... ....HTTP request sent, awaiting response... 
+     0K ...connected.
+...Resolving datasets.clickhouse.com (datasets.clickhouse.com)... .172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... .HTTP request sent, awaiting response... 
+     0K . . .connected.
+HTTP request sent, awaiting response... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... .Resolving datasets.clickhouse.com (datasets.clickhouse.com)... .
+     0K . .connected.
+connected.
+..Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... .HTTP request sent, awaiting response... .Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... 172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... 
+     0K .Resolving datasets.clickhouse.com (datasets.clickhouse.com)... connected.
+.
+     0K ...HTTP request sent, awaiting response... 172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... .. .200 OK
+Length: 299692947 (286M) [binary/octet-stream]
+Saving to: ‘hits_43.parquet’
+.connected.
+
+     0K .Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... connected.
+..HTTP request sent, awaiting response... .Resolving datasets.clickhouse.com (datasets.clickhouse.com)... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... .172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... connected.
+connected.
+HTTP request sent, awaiting response... HTTP request sent, awaiting response... .Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 200 OK
+.Length: 148061387 (141M) [binary/octet-stream]
+.Saving to: ‘hits_45.parquet’
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... .Resolving datasets.clickhouse.com (datasets.clickhouse.com)... .
+     0K .connected.
+...connected.
+connected.
+...172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... ...connected.
+.Resolving datasets.clickhouse.com (datasets.clickhouse.com)... connected.
+200 OK
+Length: 34336875 (33M) [binary/octet-stream]
+Saving to: ‘hits_47.parquet’
+
+     0K .....172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... HTTP request sent, awaiting response... ..connected.
+ . .200 OK
+HTTP request sent, awaiting response... .Length: 144222581 (138M) [binary/octet-stream]
+Saving to: ‘hits_82.parquet’
+.172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... .. .HTTP request sent, awaiting response... 200 OK
+Length: 362954325 (346M) [binary/octet-stream]
+Saving to: ‘hits_51.parquet’
+.Resolving datasets.clickhouse.com (datasets.clickhouse.com)...  .172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... HTTP request sent, awaiting response... .connected.
+..
+     0K ..Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 200 OK
+HTTP request sent, awaiting response... Length: 231113014 (220M) [binary/octet-stream]
+Saving to: ‘hits_65.parquet’
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... ..172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... HTTP request sent, awaiting response... ...HTTP request sent, awaiting response... HTTP request sent, awaiting response... connected.
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... HTTP request sent, awaiting response... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443...  ...200 OK
+.Length: 130504343 (124M) [binary/octet-stream]
+Saving to: ‘hits_81.parquet’
+172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... .connected.
+. .Resolving datasets.clickhouse.com (datasets.clickhouse.com)... .172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... connected.
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... HTTP request sent, awaiting response... connected.
+.172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... .172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 
+     0K .connected.
+connected.
+..200 OK
+.Length: 242404750 (231M) [binary/octet-stream]
+Saving to: ‘hits_44.parquet’
+200 OK
+connected.
+Length: 135911190 (130M) [binary/octet-stream]
+Saving to: ‘hits_52.parquet’
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 
+     0K ...HTTP request sent, awaiting response... 
+     0K .  .200 OK
+Length: 160289383 (153M) [binary/octet-stream]
+Saving to: ‘hits_99.parquet’
+.Resolving datasets.clickhouse.com (datasets.clickhouse.com)... ..HTTP request sent, awaiting response... .....connected.
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... HTTP request sent, awaiting response... .. ..HTTP request sent, awaiting response... Resolving datasets.clickhouse.com (datasets.clickhouse.com)... 200 OK
+Length: 117270944 (112M) [binary/octet-stream]
+HTTP request sent, awaiting response... Saving to: ‘hits_61.parquet’
+200 OK
+Length: 126081196 (120M) [binary/octet-stream]
+Saving to: ‘hits_95.parquet’
+..HTTP request sent, awaiting response... ..HTTP request sent, awaiting response... ..HTTP request sent, awaiting response...  ...200 OK
+Length: 277305733 (264M) [binary/octet-stream]
+Saving to: ‘hits_54.parquet’
+Resolving datasets.clickhouse.com (datasets.clickhouse.com)... ..200 OK
+Length: 121861949 (116M) [binary/octet-stream]
+Saving to: ‘hits_58.parquet’
+172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... 172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:28f9, ...
+HTTP request sent, awaiting response... .Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... 172.66.40.249, 172.66.43.7, 2606:4700:3108::ac42:2b07, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.40.249|:443... 172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... ..172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:28f9, ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... .connected.
+.connected.
+.connected.
+
+     0K ..HTTP request sent, awaiting response... 
+     0K ....200 OK
+Length: 114848859 (110M) [binary/octet-stream]
+Saving to: ‘hits_53.parquet’
+.............200 OK
+Length: 94791732 (90M) [binary/octet-stream]
+Saving to: ‘hits_86.parquet’
+200 OK
+Length: 214853191 (205M) [binary/octet-stream]
+Saving to: ‘hits_77.parquet’
+..172.66.43.7, 172.66.40.249, 2606:4700:3108::ac42:28f9., ...
+Connecting to datasets.clickhouse.com (datasets.clickhouse.com)|172.66.43.7|:443... . ..200 OK
+Length: 191403426 (183M) [binary/octet-stream]
+Saving to: ‘hits_92.parquet’
+..... ...200 OK
+.Length: 154993686 (148M) [binary/octet-stream]
+Saving to: ‘hits_69.parquet’
+200 OK
+.Length: 151992636 (145M) [binary/octet-stream]
+Saving to: ‘hits_98.parquet’
+.
+     0K .200 OK
+Length: 106703134 (102M) [binary/octet-stream]
+Saving to: ‘hits_64.parquet’
+.... ..
+     0K ..... .200 OK
+Length: 152098737 (145M) [binary/octet-stream]
+
+     0K Saving to: ‘hits_71.parquet’
+......200 OK
+Length: 182927052 (174M) [binary/octet-stream]
+.Saving to: ‘hits_94.parquet’
+.200 OK
+Length: 200 OK
+139626186 (133M) [binary/octet-stream]
+Saving to: ‘hits_88.parquet’
+Length: 111856320 (107M) [binary/octet-stream]
+Saving to: ‘hits_83.parquet’
+
+     0K ...200 OK
+Length: 101151375 (96M) [binary/octet-stream]
+Saving to: ‘hits_63.parquet’
+...200 OK
+Length: 163014901 (155M) [binary/octet-stream]
+Saving to: ‘hits_62.parquet’
+.200 OK
+Length: 140789919 (134M) [binary/octet-stream]
+Saving to: ‘hits_76.parquet’
+200 OK
+Length: 128851017 (123M) [binary/octet-stream]
+Saving to: ‘hits_70.parquet’
+ ..200 OK
+Length: 183779939 (175M) [binary/octet-stream]
+Saving to: ‘hits_79.parquet’
+.....
+     0K .....
+     0K .
+     0K . .
+     0K .
+     0K .....
+     0K ..
+     0K .
+     0K ....
+     0K ....
+     0K ............
+     0K ....... ....
+     0K .........
+     0K . .................
+     0K .
+     0K ..
+     0K .........
+     0K .......
+     0K ........................HTTP request sent, awaiting response... ... ..
+     0K ...
+     0K .200 OK
+.Length: 127987774 (122M) [binary/octet-stream]
+Saving to: ‘hits_93.parquet’
+.. . ... .....HTTP request sent, awaiting response... . .....
+     0K ...
+     0K ......................... ... ..HTTP request sent, awaiting response... ..............200 OK
+Length: 208743580 (199M) [binary/octet-stream]
+Saving to: ‘hits_78.parquet’
+.... ..200 OK
+Length: 213264089 (203M) [binary/octet-stream]
+Saving to: ‘hits_87.parquet’
+..200 OK
+
+     0K .Length: 110153808 (105M) [binary/octet-stream]
+Saving to: ‘hits_72.parquet’
+200 OK
+Length: 135714790 (129M) [binary/octet-stream]
+Saving to: ‘hits_80.parquet’
+HTTP request sent, awaiting response... ...........HTTP request sent, awaiting response... .200 OK
+Length: 91556675 (87M) [binary/octet-stream]
+Saving to: ‘hits_75.parquet’
+.200 OK
+Length: 141586514 (135M) [binary/octet-stream]
+Saving to: ‘hits_97.parquet’
+200 OK
+Length: 166222917 (159M) [binary/octet-stream]
+Saving to: ‘hits_57.parquet’
+HTTP request sent, awaiting response... .....200 OK
+..Length: 120282128 (115M) [binary/octet-stream]
+Saving to: ‘hits_85.parquet’
+........
+     0K ..200 OK
+Length: 160976888 (154M) [binary/octet-stream]
+Saving to: ‘hits_74.parquet’
+
+     0K .....
+     0K .200 OK
+Length: 184175027 (176M) [binary/octet-stream]
+Saving to: ‘hits_96.parquet’
+.... ......
+     0K  ........ .... .
+     0K . .....
+     0K ..... .
+     0K ...200 OK
+Length: 179154543 (171M) [binary/octet-stream]
+Saving to: ‘hits_90.parquet’
+... ........
+     0K .. ....
+     0K ..... ................ ....
+     0K ...
+     0K ................... 20% 57.5M 2s................. ........ . ........
+ 32768K ..HTTP request sent, awaiting response... ....
+     0K ....... .......... ...................... ........... .. .................. .. ....200 OK
+Length: 244748637 (233M) [binary/octet-stream]
+Saving to: ‘hits_67.parquet’
+...200 OK
+Length: 109156135 (104M) [binary/octet-stream]
+Saving to: ‘hits_66.parquet’
+ ...........
+     0K ... ......
+     0K ...... .. ...... 27% 43.8M 2s........ ........
+     0K ......... ......200 OK
+Length: 148865810 (142M) [binary/octet-stream]
+Saving to: ‘hits_84.parquet’
+..
+     0K .............. .................. .............. ..... ...
+ 32768K ................ . .................. .. ........
+     0K ..... .. . ........ .......... ......... ............. ......... ... .... ...... ............... ...... . .......... ....................... ........... ............ ..... 27% 35.3M 2s ... . ... .... . . .. ..
+ 32768K .... . ...... .... ......... . ... ...... . ... 27% 33.8M 3s....... ................... ...... ..... 20% 33.8M 4s.......... ... . .... .......... ..... .........
+ 32768K ......
+ 32768K ......................................................... ..... ........ ........................... ........... 28% 30.5M 3s....... 22% 29.4M 4s.. ......
+ 32768K ..connected.
+.. .. 20% 55.3M 2s. ......... ...HTTP request sent, awaiting response... .............. 42% 29.4M 1s .
+ 32768K ...................................
+ 32768K ... .. .. ..... .. . ............... ... .........connected.
+....200 OK
+Length: 33680419 (32M). [binary/octet-stream]
+Saving to: ‘hits_48.parquet’
+..
+ 32768K .......HTTP request sent, awaiting response... .. ..... ...... ...... ............. .............. .................. .. .............connected.
+........200 OK
+.Length: 217339961 (207M) [binary/octet-stream]
+Saving to: ‘hits_55.parquet’
+............................. 27% 25.0M 3s............connected.
+.... ...... . ...
+     0K ..... .... ....
+     0K ... .HTTP request sent, awaiting response... .
+ 32768K ....connected.
+.. .. ..connected.
+....... ... . .... . ......... .... 22% 24.5M 4s.. .HTTP request sent, awaiting response... . ........................ .......... .. .200 OK
+ .Length: 131821351 (126M) [binary/octet-stream]
+Saving to: ‘hits_91.parquet’
+. 21% 26.0M 4s ...... 13% 47.0M 4s......... ... . ......
+ 32768K ................. ....
+ 32768K ........... ..... ..200 OK
+Length: 166069967 (158M) [binary/octet-stream]
+Saving to: ‘hits_68.parquet’
+. ......
+ 32768K .. ...... .......................... ... ... ..
+     0K .... ....................HTTP request sent, awaiting response...  ...
+     0K . ........ ........... ...... 26% 27.9M 3s.... .... 33% 22.4M 3s......... ...... ... ......... 32% 22.2M 3s............
+ 32768K .... 17% 21.2M 7s....... ........ 25% 21.2M 5s.. ........HTTP request sent, awaiting response... ..... 27% 20.8M 4s....200 OK
+Length: 141591751 (135M) [binary/octet-stream]
+Saving to: ‘hits_73.parquet’
+
+ 32768K .. ...........
+ 32768K ....... .. .............
+ 32768K ...........
+ 32768K .... 29% 22.4M 3s. ...
+     0K ......
+ 32768K . .. ...... 26% 27.9M 3s...200 OK
+.Length: 240762745 (230M) [binary/octet-stream]
+Saving to: ‘hits_89.parquet’
+..... .... ......
+ 32768K . ...... 11% 23.1M 11s......... 21% 20.0M 6s .. 18% 30.3M 5s
+     0K ........... 19% 21.4M 6s .. ....
+ 32768K . .. ..................
+ 32768K ..................
+ 32768K ...... ..
+ 32768K .. 35% 20.2M 3s... ..............
+ 32768K .... ........ 27% 20.5M 4s... ... ........ 27% 19.8M 4s...................... ..
+ 32768K ...... . ....... . ......
+ 32768K ... 11% 20.8M 12s ....
+ 32768K ..... .... .. ... .............. 33% 19.0M 3s...... ..... 15% 25.4M 7s.
+ 32768K ................ . .............................. ............ . ..
+ 32768K ..... .. . ......................... ...........
+ 32768K ...................... ...... .... ........... 30% 27.3M 3s....... 25% 18.7M 5s..... ............ 42% 17.5M 2s. ... 16% 23.0M 7s .........
+ 32768K .................. .......... 11% 17.7M 14s.......  9% 19.1M 16s........ ... ....... ...
+ 32768K ....... 29% 19.4M 4s
+ 32768K . ..... 25% 17.6M 5s.
+ 32768K ............. .....
+ 32768K ... 23% 16.4M 6s .................... ............ ......
+ 32768K ................... ..... ...... . ......
+ 32768K ......... ..........
+ 32768K .............. ............... ..... .. ....... ...................
+ 32768K ....... ............. .. 20% 20.5M 6s.. ... ..... 20% 18.3M 7s.................... 28% 17.6M 5s .... ........ ................
+ 32768K ...
+ 32768K ............ ............ .. 14% 17.0M 11s . ....... . ...........................
+ 32768K ............ 27% 19.4M 4s.................. ..... .... 97% 16.4M 0s .... 23% 15.5M 7s....... ....
+ 32768K                                    100% 64.5M=2.0s
+
+2026-10-04 16:45:10 (16.7 MB/s) - ‘hits_47.parquet’ saved [34336875/34336875]
+
+.... ....... ..... . .... 18% 19.0M 8s....................... .. .............. ....... 28% 14.6M 5s... 24% 15.1M 7s. .. ..
+ 32768K .. .. ..
+ 32768K .... . ........
+ 32768K . .......... ... ............... . . ......
+ 32768K ... .......
+ 32768K . . .... .............
+ 32768K ...... 29% 16.0M 5s.. 13% 43.4M 5s .... .. 21% 15.9M 7s ...... ............ ...................... 28% 13.9M 6s......
+ 32768K ........ 30% 14.3M 5s .... ...
+ 32768K . ..
+ 32768K .......... .......... ............ .............. .
+ 32768K .... 35% 15.1M 4s............ .....
+ 32768K ......................... ....... .. ............................ .......... 41% 23.4M 3s. ... . ..
+ 32768K . .. . .......... ................ .
+ 65536K ..... ............. 17% 14.5M 10s.... .. .... .. .. ........ 44% 22.3M 3s........ ............... .... ...........
+ 32768K .. ........ .. ...... . . .. ..... 23% 15.6M 7s.......
+ 65536K ........... ... ....
+ 32768K ... ............................. ....... . ...................... ..... ........ 24% 13.5M 7s.. ....... .. . ... 20% 13.5M 9s.................... 54% 23.2M 2s.. . . .............. .. ............
+ 32768K .... ....................
+ 32768K .. 13% 12.2M 17s.. ......... ...........
+ 65536K ................. ............ .. 23% 26.7M 4s.... ... 23% 12.8M 8s ......................... 22% 15.8M 7s ............... 37% 27.6M 4s. .... ..........
+ 32768K ... ... . ..........
+ 65536K .... 12% 12.7M 18s. ..... . .. 52% 26.3M 2s........
+ 32768K ..... 26% 12.6M 7s ................ .............
+ 32768K .... ... ...... .......... 27% 12.4M 7s.. ...
+ 32768K ..
+ 32768K ...
+ 65536K ........ 52% 23.2M 2s...... 34% 23.6M 5s...... ....... 31% 28.6M 5s............................. ..... 22% 24.7M 9s................ 43% 20.7M 4s .
+ 65536K ... 45% 20.2M 3s.......
+ 32768K ... .................
+ 65536K ..... .... .. ......
+ 65536K .
+ 65536K ....... .
+ 32768K ........
+ 65536K ........ 23% 12.2M 8s.......... ..
+ 65536K ... ... ...... 42% 11.0M 4s. ... 15% 11.9M 14s............. ....... 42% 11.0M 4s.................. ........ 22% 11.8M 10s... 20% 19.9M 6s. ...
+ 32768K .................... ........ ......
+ 32768K ...... ...... 27% 19.0M 6s...... ..............
+ 32768K .. ................... ...... . ............. .. 32% 26.3M 6s.. ........ ..... .
+ 32768K .. ....... .....
+ 32768K .........
+ 32768K .... . .
+ 65536K ... .... 39% 21.2M 5s ... ....... 24% 11.4M 9s ........
+ 65536K ..... ... ........ ....................
+ 65536K ....... ......... .......... ....... 56% 15.2M 2s.............. ..................... ...... 41% 28.0M 4s... ...... ................. 23% 10.1M 10s... 25% 10.7M 9s. 23% 21.0M 10s. 19% 9.86M 14s
+ 65536K ....... ..
+ 32768K ....... 61% 23.0M 2s.. ........... ....... ..... 85% 22.9M 1s... .........
+ 32768K .... .......
+ 65536K ........
+ 65536K ........... ....
+ 32768K ......
+ 32768K .......... ............ ....
+ 65536K ........... ........ 27% 31.5M 5s....... 64% 17.3M 2s..... 15% 15.3M 11s..... 42% 9.74M 5s...... .... 50% 21.4M 3s. ................................. ......
+ 65536K ...... 18% 21.7M 14s ...... .......
+ 65536K .. 23% 21.5M 11s.. . .
+ 65536K ..... 24% 11.0M 9s .... ..
+ 32768K ..... ...
+ 32768K . ... ....
+ 65536K ... ...... 71% 18.1M 1s........... .....
+ 65536K .. .......
+ 65536K ............. .... ....... .... . ...... .
+ 32768K ...... .........
+ 65536K ..... ..... 40% 22.7M 4s.. ..................... ......... .. 54% 12.5M 3s .. .............. ....... ..
+ 65536K ... ...... ... ...... ....
+ 65536K ..................... ... .................. .. ................. .. 22% 9.51M 11s ... ........................... 67% 17.1M 2s.. ...................... ....................... ........... ..... ..........
+ 65536K ....... ....... ... .. ..........
+ 32768K ............ . .......... 99% 12.7M 0s.......
+ 32768K                                    100% 23.4M=2.5s
+
+.2026-10-04 16:45:12 (12.7 MB/s) - ‘hits_48.parquet’ saved [33680419/33680419]
+
+............. ........... ..... 54% 15.6M 3s.. ... ....... 61% 23.3M 2s................... 33% 8.78M 7s... .... 67% . 25.8M 2s......... ....... .
+ 65536K ......... ..... ..... .. 47% 17.5M 4s......
+ 65536K .. 85% 12.0M 1s.. .... ....
+ 32768K .......                        100% 19.9M=3.8s
+
+2026-10-04 16:45:12 (19.8 MB/s) - ‘hits_24.parquet’ saved [78257049/78257049]
+
+... .......
+ 98304K ..... . .............
+ 65536K ...... ... ................... 39% 8.47M 6s. ... .. ........ ... ... 48% 19.9M 4s.. ... 54% 14.7M 3s......... .... .............. 36% 19.2M 6s....... . .............. ..
+ 32768K ........ .... .. ..................
+ 65536K .... ... ..... ... ..........
+ 65536K ........... .. ..... ........... ...... ......
+ 65536K ...... ... ................
+ 65536K . ........ ................ ....... .. .... ................. 59% 13.1M 3s......... ............... 81% 23.2M 1s ... ............. ..... ..... ....... ........... .. 55% 16.8M 3s. .. 40% 9.22M 6s........... ... 43% 18.2M 5s.... 48% 32.5M 4s.... ...
+ 98304K . ........ 50% 14.9M 4s....... 35% 20.1M 7s .......
+ 65536K ...............
+ 65536K .
+ 65536K ..... 18% 8.47M 17s.. ...
+ 65536K ........
+ 98304K ... .. ........ ....... ... 57% 15.6M 3s... ....... .. .... 65% 25.8M 2s...................
+ 65536K ........
+ 98304K .......
+ 32768K .... ......
+ 65536K . .. 41% 28.1M 5s........ 47% 24.2M 4s.. ..................
+ 98304K ............. 59% 29.4M 3s. 56% 22.1M 3s.
+ 98304K ............. 27% 20.9M 11s.... .. 57% 16.1M 3s
+ 98304K .... ....... ..... .............. .
+ 65536K ..
+ 98304K .... 41% 19.7M 6s............................... ...
+ 65536K ...........
+ 65536K ... 53% 21.6M 4s............
+ 65536K .......... ..... 68% 22.8M 2s...... .... 47% 23.5M 4s.
+ 65536K ................. ...................
+ 65536K .. ...... .................. ............. .....
+ 98304K ..... 78% 21.0M 1s........ .... ....... ................ ......... ................... .. ..... 47% 18.9M 3s ...............
+ 98304K .... .. 58% 12.8M 3s.......... ...... .... 46% 14.1M 5s.. ....... ... .. ................... . ...... .... 29% 13.6M 10s.............
+ 65536K .... .
+ 65536K .... . .............. ... ......... .. ..........
+ 65536K . ........ ......
+ 65536K ..                        100% 14.3M=4.5s
+
+2026-10-04 16:45:12 (16.6 MB/s) - ‘hits_33.parquet’ saved [78243765/78243765]
+
+........................ ......... ........ .. . ...... ... 54% 8.29M 4s..................... ..... ......... . ............ .... ......... .. 47% 15.5M 5s ... 78% 17.6M 1s.. .. . ............... 61% 22.6M 3s....... .............. ............ . . ............. 70% 14.2M 2s ... .... ..... 14% 6.99M 27s.
+ 98304K ..... 32% 6.99M 9s..... .. 33% 7.35M 9s.. 25% 9.64M 10s....... 42% 10.4M 6s.....
+ 98304K ............. .. .........
+ 65536K .
+ 65536K ....
+ 65536K .................
+ 65536K ........ ... .... 92% 21.6M 0s.. ....... 32% 6.95M 10s.................
+ 98304K .. . .. 34% 21.1M 9s. . ....
+ 32768K .. 71% 32.6M 2s .
+ 32768K .. 34% 23.4M 9s... 33% 17.0M 9s.............
+ 32768K ...... ..... 52% 16.6M 4s.....
+ 98304K ..........
+ 98304K ....
+ 98304K .. ..... .
+ 32768K .... ...... ... .................. .... ...... ...
+ 98304K .......... 23% 6.34M 16s.................... ........ .
+ 32768K ..
+ 98304K ...................................... .........
+ 32768K .. . ........................ .... .................... .. ............... 59% 9.02M 4s ....... . . . .. ............ 41% 4.54M 11s.... 41% 6.84M 9s.... 62% 5.76M 4s. 46% 6.05M 9s.... ........ ..... 54% 4.50M 7s....... .
+ 65536K ..
+ 65536K .. ..
+ 98304K .............. ... 45% 6.06M 9s..
+ 98304K ...
+ 65536K ........... ....... .......
+ 65536K ... .......
+ 65536K .... ........ .. ...... ........ ... ... 49% 5.87M 8s............... ........ 92% 7.36M 1s....... 97% 6.74M 0s......... ....... .. ......
+ 65536K ........ ............ ....... ..........
+ 98304K ....... .. .................... ...................... ....... ......................... .............. ...... ...
+ 98304K ........... ................ 100% 6.80M=8.1s
+
+2026-10-04 16:45:16 (11.7 MB/s) - ‘hits_49.parquet’ saved [99795554/99795554]
+
+...                                 100% 22.7M=8.2s
+
+2026-10-04 16:45:16 (12.1 MB/s) - ‘hits_19.parquet’ saved [103692598/103692598]
+
+........... ... ............ 54% 4.76M 7s. . ..... 22% 3.88M 29s ................ ... 84% 6.07M 2s ..... 31% 4.02M 17s .. ............... .. ..... ..... 76% 6.39M 3s. ......... 36% 3.89M 14s... 56% 5.32M 6s... 31% 6.05M 18s. ............ 50% 4.63M 8s.. .. ......            100% 4.77M=8.5s
+
+2026-10-04 16:45:16 (13.8 MB/s) - ‘hits_6.parquet’ saved [122927935/122927935]
+
+.
+ 65536K ..... 13% 3.88M 51s. .. . . ......
+ 32768K ..                           100% 2.10M=7.9s
+
+2026-10-04 16:45:16 (13.2 MB/s) - ‘hits_66.parquet’ saved [109156135/109156135]
+
+...
+ 65536K ..      100% 5.05M.=8.5s
+
+2026-10-04 16:45:16 (10.6 MB/s) - ‘hits_32.parquet’ saved [94506004/94506004]
+
+.... 27% 6.04M 22s.....
+ 65536K ... .
+ 98304K ...
+ 32768K ......... .... ..............
+ 32768K .
+ 65536K .............
+ 65536K .. ........ .............. .. ..
+ 32768K ...........
+ 98304K ........ 24% 5.02M 28s.......... ................................. .......... 46% 5.15M 11s....... 84% 4.89M 2s...... 66% 3.98M 5s ... ....... 89% 5.48M 1s ..
+ 65536K ..... ....... ........ 72% 5.46M 4s...... ............ 40% 4.73M 12s....... 48% 4.77M 10s.. .... ...... ....
+ 65536K .... .......
+ 65536K ...
+ 65536K .........
+131072K ...... .......... . ... ...... 36% 2.78M 20s..........
+ 65536K ..... ............ ................ ... 49% 3.65M 12s..
+ 65536K ...... 81% 3.69M 3s. 30% 2.73M 27s.. 64% 3.94M 7s...... 44% 3.50M 15s..
+ 98304K .... 18% 2.69M 53s.............. 60% 3.66M 8s..... ...... .
+ 32768K ........ . ..... .................
+ 65536K . ...
+ 65536K ...... .. .... 54% 3.98M 9s .
+ 98304K .....
+131072K .....                            100% 1.72M=12s
+
+2026-10-04 16:45:20 (8.48 MB/s) - ‘hits_37.parquet’ saved [108247781/108247781]
+
+...
+ 32768K ... .. .. .......... 87%
+ 32768K 3.92M . 2s............
+131072K ..... ....
+ 98304K ..... ............. ...... 54% 3.77M 10s....... 79% 3.92M 3s........ .......
+131072K ............. ...... 51% 3.48M 12s................................ ............................
+ 98304K ....... 85% 3.41M 2s .......
+131072K .... . ..... 81% 3.67M 3s........... 74% 3.81M 4s.........
+ 65536K .............. .... 66% 3.59M 6s.... 41% 3.79M 18s... 22% 2.59M. 44s...
+ 98304K ......... 81% 3.57M 3s
+ 98304K . ... .. .......... . ..... . .... .... .. ....... ....
+ 98304K ......
+ 98304K .............
+131072K ... ..................... .
+ 65536K ... ....
+ 32768K ........ .. ....... .... ... .. ... ... ........ ...... ........ ............................................... .. ....... ... 36% 2.36M 24s...... 64% 3.34M 7s...... ..... ... 30% 3.07M 28s. ... .. .................. ....... .............. .... .. ........................
+ 32768K ... ...
+ 98304K .. .......... ... 55% 2.77M 12s....
+ 65536K ... .... ... 83% 3.08M 3s............. 75% 3.04M 5s.......                      100% 1.88M=15s
+
+2026-10-04 16:45:22 (5.22 MB/s) - ‘hits_22.parquet’ saved [79775901/79775901]
+
+.. .. 62% 3.05M 8s........................ 52% 2.96M 13s. 71% 3.02M 6s... ............... 88% 2.91M 2s..... 85% 2.92M 2s... ..
+ 65536K .......... 91% 2.92M 1s. .
+ 98304K . .. ... 86% 2.89M 2s....
+ 98304K ... .. ..... .
+131072K ....      100% 2.41M=15s
+
+2026-10-04 16:45:23 (8.08 MB/s) - ‘hits_70.parquet’ saved [128851017/128851017]
+
+......... .... . .......
+ 98304K .
+ 98304K ...... ... .........
+ 98304K .............
+ 98304K .. . ..
+131072K ........
+ 98304K ......                       100% 1.72M=16s
+
+2026-10-04 16:45:24 (4.67 MB/s) - ‘hits_29.parquet’ saved [79213288/79213288]
+
+............. ......................... 62%. 2.64M 10s.. ......... ............................ . ................... .. ... 84% 2.40M 3s............. 36% 2.54M 28s................ ..
+ 98304K ...................... 79% 2.54M 4s.... ..... ...                    100% 1.98M=17s
+
+.2026-10-04 16:45:25 (8.40 MB/s) - ‘hits_12.parquet’ saved [149514164/149514164]
+
+.. ....... 45% 2.38M 20s... ... ... ....... ... ..... .
+ 65536K ........
+ 65536K . ...... ...... ..      100% 2.10M=17s
+
+2026-10-04 16:45:25 (5.34 MB/s) - ‘hits_86.parquet’ saved [94791732/94791732]
+
+.. ....... ... .. ...
+ 98304K ...........      100% 2.04M=17s
+
+2026-10-04 16:45:25 (7.19 MB/s) - ‘hits_93.parquet’ saved [127987774/127987774]
+
+.........
+ 65536K .. ... .... .. .. ........ ....... ............ .... 82% 2.45M 4s ... ... .. ................ ................................ .............. 60% 2.28M 12s.............
+131072K .....  .. ............ 70% 2.31M 8s...... ..... ...... .. ..................... ........
+ 98304K .......... . ........... ........ ......... .. ...
+ 98304K ...... ........ 38% 2.04M 30s........ 71% 2.19M 7s... ................ 43% 2.19M 24s........... 46% 2.22M 22s................. ...... ..... ....... .... .. . ........ . .... . .. 78% 2.04M. 5s...
+ 65536K ......
+ 98304K ..........
+131072K . 
+ 98304K. .. .. .... ........... 44% 2.13M 24s... .. ................ ... .. ...
+ 65536K ..................................... 87% 2.03M 3s. ........
+131072K .................................... ..... 95% 2.03M 1s.... 50% 2.02M 18s... 71% 2.01M 8s .. ..... 64% 2.01M 11s.......... 82% 2.00M 4s.........
+ 98304K .. .............. 69% 2.00M 9s.... ..............                  100% 2.04M=21s
+
+2026-10-04 16:45:29 (5.42 MB/s) - ‘hits_11.parquet’ saved [118419888/118419888]
+
+................               100% 2.14M=21s
+
+2026-10-04 16:45:29 (7.03 MB/s) - ‘hits_35.parquet’ saved [153632381/153632381]
+
+..
+131072K ....
+ 65536K ...
+ 98304K ........
+ 98304K . ... .
+ 98304K. . ...                       100% 1.95M=21s
+
+2026-10-04 16:45:29 (6.61 MB/s) - ‘hits_13.parquet’ saved [146132022/146132022]
+
+.... 29% 1.94M  51s...... 47% 2.00M 24s. .. 55% 2.43M 16s.. 64% 1.94M 11s.. ...
+131072K ... 66% 1.93M 11s.. ..... 65% 1.93M 11s. ... .. ......                      100% 1.93M=21s
+
+2026-10-04 16:45:29 (5.10 MB/s) - ‘hits_21.parquet’ saved [113455196/113455196]
+
+...... ....... .... .... ............ . .... .....
+ 65536K .....
+ 65536K .
+131072K ..... .
+ 65536K ......
+ 65536K ...... 67% 2.33M 10s.
+ 65536K ............. 83% 2.32M 4s. 69% 2.32M 9s.. 82% 2.31M 5s.... 61% 2.30M 14s................... .... 46% 1.86M 25s.....        .   .100% 2.25M=22s
+
+2026-10-04 16:45:30 (5.36 MB/s) - ‘hits_7.parquet’ saved [123902333/123902333]
+
+...................... .....
+ 98304K . ... ............
+131072K .
+ 98304K ..
+ 98304K .. 74% 2.24M 8s.
+ 98304K ..................                       100% 2.06M.=22s
+
+2026-10-04 16:45:30 (3.39 MB/s) - ‘hits_23.parquet’ saved [79631107/79631107]
+
+..
+131072K .... .......... ....... ........ ....... 89% 1.90M 2s..... .. .. ......
+ 98304K ..... ....................                   100% 2.04M=23s
+
+2026-10-04 16:45:31 (4.88 MB/s) - ‘hits_17.parquet’ saved [116867853/116867853]
+
+ ................                   100% 2.01M=23s
+
+2026-10-04 16:45:31 (4.92 MB/s) - ‘hits_61.parquet’ saved [117270944/117270944]
+
+.................
+ 98304K .... ............ ... ........ . ... ... ... .... . ..... .... ... .... ....            100% 1.99M=23s
+
+2026-10-04 16:45:31 (5.03 MB/s) - ‘hits_31.parquet’ saved [123065410/123065410]
+
+. ..... .......           100% 2.05M=23s
+
+2026-10-04 16:45:31 (5.05 MB/s) - ‘hits_30.parquet’ saved [124187913/124187913]
+
+                             100% 2.11M=24s
+
+2026-10-04 16:45:31 (5.71 MB/s) - ‘hits_4.parquet’ saved [140929275/140929275]
+
+.......... ........... .... ...... 44% 2.07M 30s..............   100% 1.94M=24s
+
+.2026-10-04 16:45:32 (5.32 MB/s) - ‘hits_38.parquet’ saved [132005180/132005180]
+
+........................               100% 1.97M=23s
+
+2026-10-04 16:45:32 (4.89 MB/s) - ‘hits_85.parquet’ saved [120282128/120282128]
+
+.. ............................
+ 65536K ........ ............ 75% 2.02M 8s.. .... . ............ 27% 2.02M 63s.. 82%. 1.98M 5s...... ................................ 46% 1.96M 28s. .... . ... 62% 1.95M 14s .
+ 98304K .. .... 84% 1.96M 5s... .. 72% 1.95M 9s......
+ 65536K ...
+ 98304K ..... .........  ..... ........... ......
+ 98304K ... ......
+ 65536K .... 36% 1.95M 42s.
+ 98304K ...... ....
+ 65536K ..... ... .... .. ...... 60% 2.07M 16s.. .. 36% 1.99M 44s................................
+131072K ................... 69% 1.99M 11s............ ...
+ 98304K ... ...... 99% 1.98M 0s... ... 72% 2.01M 10s .
+ 98304K .. ... ................. ... 96% 1.98M 1s........ .... ... .......
+ 98304K                                    100% 2.60M=26s
+
+2026-10-04 16:45:34 (3.73 MB/s) - ‘hits_10.parquet’ saved [101513258/101513258]
+
+..
+ 98304K ... ......... ......... ..                     100% 2.28M=26s
+
+2026-10-04 16:45:34 (4.24 MB/s) - ‘hits_53.parquet’ saved [114848859/114848859]
+
+..
+ 98304K .. 80% 2.29M 6s.... 74% 2.28M 9s.. 73% 2.25M 9s........ 66% 2.27M 13s...
+131072K ..... 36% 2.27M 45s....... 60% 2.26M 17s................... ..... ... 80% 2.24M 6s...... ... 68% 2.24M 12s..... .
+ 65536K .... . ..
+ 98304K ..... .
+163840K ...
+ 98304K ..
+ 65536K ..... ...
+ 65536K .... .... ..................
+131072K .......... 99% 2.20M 0s
+163840K ... ........................... 72% 2.18M 10s.....                        100% 2.41M=27s
+
+.2026-10-04 16:45:35 (3.98 MB/s) - ‘hits_83.parquet’ saved [111856320/111856320]
+
+.............. ........ 77% 2.16M 8s.                100% 2.30M=27s
+
+2026-10-04 16:45:35 (3.01 MB/s) - ‘hits_20.parquet’ saved [85766533/85766533]
+
+......
+163840K .......... ..................
+131072K ...... ......... 54% 2.15M 23s                                  100% 2.58M=27s
+
+2026-10-04 16:45:35 (5.89 MB/s) - ‘hits_56.parquet’ saved [169373476/169373476]
+
+......... 93% 2.14M 2s....
+ 98304K ......... 44% 2.13M 35s........ .....         100% 2.24M=27s
+
+2026-10-04 16:45:36 (4.38 MB/s) - ‘hits_95.parquet’ saved [126081196/126081196]
+
+.....                               100% 2.58M=28s
+
+2026-10-04 16:45:36 (4.81 MB/s) - ‘hits_59.parquet’ saved [139325887/139325887]
+
+.. .. .. 99% 2.13M 0s .. .... ......
+ 98304K                                    100% 2.54M=28s
+
+2026-10-04 16:45:36 (3.47 MB/s) - ‘hits_16.parquet’ saved [101067219/101067219]
+
+.....
+131072K .... .... .. .........
+163840K ..
+ 65536K ............. ..... ...... ..... ...... . ....... ... .. .... .... ............................... ............ 86% 2.14M 4s........ 72% 2.13M 11s...... .. 46% 2.14M 32s... . .. .......... . .. .. ..  100% 2.17M=29s
+
+2026-10-04 16:45:37 (4.42 MB/s) - ‘hits_18.parquet’ saved [133119589/133119589]
+
+............ ..........
+131072K ... . ..
+ 65536K ................... 82% 2.17M 6s. .. 78% 2.22M 8s
+ 98304K ...             100% 2.41M=29s
+
+2026-10-04 16:45:37 (4.00 MB/s) - ‘hits_5.parquet’ saved [122286439/122286439]
+
+... ... .............. 70% 2.23M 12s.................... 95% 2.21M 1s..............
+ 98304K .........
+163840K ....     100% 2.31M=29s
+
+2026-10-04 16:45:37 (5.32 MB/s) - ‘hits_62.parquet’ saved [163014901/163014901]
+
+. . ....
+131072K . .... .. ... . ..... ... .... ...
+131072K .............. ............ ............................ 83% 2.34M 6s.............. .............            100% 2.52M=30s
+
+2026-10-04 16:45:38 (3.87 MB/s) - ‘hits_8.parquet’ saved [122735269/122735269]
+
+.......... .......... 54% 2.34M 25s... .........
+131072K .................. ................. ........ 67% 2.34M 14s...
+ 98304K . ... ... ........... ...... ... .. ....... . ..............
+ 98304K .... ..... ..... ....... . ...... . .. ... .... .......................                100% 2.69M=31s
+
+2026-10-04 16:45:39 (3.64 MB/s) - ‘hits_34.parquet’ saved [119426616/119426616]
+
+................. ....... 80% 2.40M 7s.......                        100% 2.75M=31s
+
+2026-10-04 16:45:39 (5.51 MB/s) - ‘hits_90.parquet’ saved [179154543/179154543]
+
+... . .. ....                             100% 2.85M=31s
+
+2026-10-04 16:45:39 (4.29 MB/s) - ‘hits_76.parquet’ saved [140789919/140789919]
+
+. 93% 2.41M 2s..... .. ... ........... ............ .. .
+131072K .       100% 2.56M=31s
+
+2026-10-04 16:45:40 (4.90 MB/s) - ‘hits_74.parquet’ saved [160976888/160976888]
+
+... ..............
+131072K ... ........ .... 57% 2.45M 24s ..... 94% 2.45M 2s......             100% 2.70M=32s
+
+2026-10-04 16:45:40 (3.64 MB/s) - ‘hits_0.parquet’ saved [122446530/122446530]
+
+.... 58% 2.45M 23s........ 57% 2.46M 23s.............. ........ .....
+ 98304K . ..... .
+131072K . .... .. .. ..
+131072K ........
+163840K ...... ....... 55% 2.50M 25s.... ...... .........................................
+163840K .................... 94% 2.56M 2s ............ 76% 2.55M 10s.... 85% 2.55M 5s .... ................ 87% 2.56M 5s. ...............
+131072K .......... .
+ 98304K ... ..
+131072K ... 43% 2.60M 43s....... .... 99% 2.61M 0s. 70% 2.59M 14s... 69% 2.59M 14s. 97% 2.59M 1s         100% 2.75M=33s
+
+2026-10-04 16:45:41 (2.64 MB/s) - ‘hits_36.parquet’ saved [92487304/92487304]
+
+
+163840K ...... 97% 2.60M 1s.. ....... ........ ..
+ 98304K                                    100%. 2.43M=33s
+
+2026-10-04 16:45:42 (2.89 MB/s) - ‘hits_63.parquet’ saved [101151375/101151375]
+
+ ... .....
+ 98304K .............
+ 98304K ..
+163840K ..
+ 98304K ..... 90% 2.63M 4s
+ 98304K ........... 93% 2.64M 3s...... 58% 2.67M 24s. 82%. 2.64M 7s.......... ..................... .
+131072K .. .........
+131072K ... 98% 2.68M 0s....
+131072K ....                                 100% 3.05M=34s
+
+2026-10-04 16:45:42 (2.87 MB/s) - ‘hits_15.parquet’ saved [103098894/103098894]
+
+......                            100% 3.03M=33s
+
+2026-10-04 16:45:42 (4.11 MB/s) - ‘hits_73.parquet’ saved [141591751/141591751]
+
+.
+163840K .....          100% 2.84M=34s
+
+2026-10-04 16:45:42 (2.57 MB/s) - ‘hits_75.parquet’ saved [91556675/91556675]
+
+..                                 100% 3.30M=34s
+
+2026-10-04 16:45:42 (2.88 MB/s) - ‘hits_39.parquet’ saved [103522954/103522954]
+
+.. .... ... ... .......                           100% 3.01M=34s
+
+2026-10-04 16:45:42 (3.98 MB/s) - ‘hits_60.parquet’ saved [143594342/143594342]
+
+. ........ ....
+131072K ...............................                                  100% 2.90M=35s
+
+2026-10-04 16:45:43 (3.75 MB/s) - ‘hits_52.parquet’ saved [135911190/135911190]
+
+.. . ......... .. ... . .... .. ... ........ ..... ......... ..... ......                            100% 3.11M=35s
+
+2026-10-04 16:45:43 (3.88 MB/s) - ‘hits_97.parquet’ saved [141586514/141586514]
+
+. 66% 2.77M 18s...              100% 2.96M=35s
+
+2026-10-04 16:45:43 (4.22 MB/s) - ‘hits_69.parquet’ saved [154993686/154993686]
+
+........................  .100% 2.80M=35s
+
+2026-10-04 16:45:43 (3.59 MB/s) - ‘hits_9.parquet’ saved [133629314/133629314]
+
+..............
+ 98304K ............ ... ................. ........ 41% 2.79M 50s..             100% 2.99M=36s
+
+2026-10-04 16:45:44 (3.26 MB/s) - ‘hits_58.parquet’ saved [121861949/121861949]
+
+........ 62% 2.83M 21s. .. 94% 2.84M 2s. ......... .. ..... ....... ....
+ 98304K .... ......
+131072K ...
+ 98304K ..... 46% 2.87M 42s..... ..... . .... 80% 2.88M 8s.... 48% 2.88M 38s......................
+163840K .......... 93% 2.90M 3s....         100% 3.03M=37s
+
+2026-10-04 16:45:44 (2.41 MB/s) - ‘hits_46.parquet’ saved [92407680/92407680]
+
+..
+131072K . ..
+131072K . ..........  ..... 96% 2.91M 1s    100% 2.99M=37s
+
+2026-10-04 16:45:45 (3.41 MB/s) - ‘hits_81.parquet’ saved [130504343/130504343]
+
+..........  100% 2.96M=36s
+
+2026-10-04 16:45:45 (4.37 MB/s) - ‘hits_57.parquet’ saved [166222917/166222917]
+
+ .                         100% 3.33M=37s
+
+2026-10-04 16:45:45 (3.76 MB/s) - ‘hits_82.parquet’ saved [144222581/144222581]
+
+....
+131072K ...... .......
+131072K .......... 98% 2.95M 0s........ 88% 2.95M 5s. 96% 2.94M 1s..... 55% 2.96M 30s... 91% 2.96M 3s.......... .. 82% 2.98M 8s.. ......
+196608K ..
+131072K .. ..... .
+131072K ... ..
+ 98304K ...
+ 98304K ....                                  100% 3.80M=37s
+
+2026-10-04 16:45:45 (3.50 MB/s) - ‘hits_80.parquet’ saved [135714790/135714790]
+
+.........
+196608K ....                              100% 3.58M=37s
+
+2026-10-04 16:45:45 (2.73 MB/s) - ‘hits_64.parquet’ saved [106703134/106703134]
+
+.......... 91% 3.04M 4s................ ............. ....         100% 3.20M=38s
+
+2026-10-04 16:45:46 (4.07 MB/s) - ‘hits_99.parquet’ saved [160289383/160289383]
+
+...
+163840K .... 68% 3.09M 17s........                     100% 3.46M=37s
+
+2026-10-04 16:45:46 (3.81 MB/s) - ‘hits_84.parquet’ saved [148865810/148865810]
+
+.... 66% 3.10M 19s........... .. .......                              100% 3.69M=38s
+
+2026-10-04 16:45:46 (3.52 MB/s) - ‘hits_88.parquet’ saved [139626186/139626186]
+
+....
+163840K ... ....
+ 98304K . ..... ... ... ...... ........ .. ...................... ............. ...... 61% 3.21M 23s. ....... . ............                            100% 4.22M=38s
+
+2026-10-04 16:45:47 (5.20 MB/s) - ‘hits_78.parquet’ saved [208743580/208743580]
+
+ ....... .
+131072K ...... 94% 3.27M 2s.......                         100% 4.01M=39s
+
+.2026-10-04 16:45:47 (3.54 MB/s) - ‘hits_25.parquet’ saved [144169728/144169728]
+
+....... 87% 3.29M 5s........            100% 3.58M=39s
+
+2026-10-04 16:45:47 (3.82 MB/s) - ‘hits_26.parquet’ saved [156510916/156510916]
+
+......... ...
+196608K ..... ....
+163840K . . ... .. ....                         100% 4.29M=39s
+
+2026-10-04 16:45:47 (2.71 MB/s) - ‘hits_72.parquet’ saved [110153808/110153808]
+
+.... ............................ ..... ...          100% 3.76M=40s
+
+2026-10-04 16:45:47 (4.65 MB/s) - ‘hits_3.parquet’ saved [192507052/192507052]
+
+.... ....... 73% 3.47M 14s............... 90% 3.55M 4s.... ........... .
+131072K ..... .. ..
+131072K ...  100% 3.64M=40s
+
+2026-10-04 16:45:48 (3.99 MB/s) - ‘hits_27.parquet’ saved [166286210/166286210]
+
+...... ... ..... .. .................... .......... . .......... . ............... .......... 76% 3.87M 12s. 72% 3.91M 15s.............. 69% 3.90M 18s........   100% 4.04M=39s
+
+2026-10-04 16:45:48 (3.22 MB/s) - ‘hits_91.parquet’ saved [131821351/131821351]
+
+
+131072K ... ...
+163840K ...                  100% 4.99M=40s
+
+2026-10-04 16:45:48 (3.61 MB/s) - ‘hits_98.parquet’ saved [151992636/151992636]
+
+ ..     100% 4.21M=40s
+
+2026-10-04 16:45:48 (3.84 MB/s) - ‘hits_28.parquet’ saved [162772407/162772407]
+
+.. ....
+196608K .... 67% 4.02M 20s. ....                   100% 5.33M=40s
+
+2026-10-04 16:45:48 (4.39 MB/s) - ‘hits_96.parquet’ saved [184175027/184175027]
+
+...............
+196608K ....... ........                       100% 6.18M=40s
+
+2026-10-04 16:45:49 (5.05 MB/s) - ‘hits_87.parquet’ saved [213264089/213264089]
+
+...................... 94% 4.36M 3s.. 83% 4.36M 8s. 58% 4.29M 29s.. .. .... ... ... .. ..
+131072K ..
+196608K .
+131072K ................. 69% 4.53M 18s...... ..... . ..........
+196608K .......... ............................. ..... . ... ..                     100% 7.72M=41s
+
+2026-10-04 16:45:49 (3.43 MB/s) - ‘hits_45.parquet’ saved [148061387/148061387]
+
+. ........ ..... 88% 5.20M 5s............... .......
+131072K ................. 55% 5.56M 33s..  100% 5.79M=40s
+
+2026-10-04 16:45:49 (3.94 MB/s) - ‘hits_68.parquet’ saved [166069967/166069967]
+
+... 78% 5.58M 12s                            100% 10.1M=41s
+
+.2026-10-04 16:45:49 (3.28 MB/s) - ‘hits_40.parquet’ saved [142508647/142508647]
+
+.... .. .... .
+163840K ..
+131072K ..... 55% 5.82M 33s..... ... ..... 60% 5.91M 27s.........
+196608K .....
+163840K ....           100% 7.82M=42s
+
+2026-10-04 16:45:50 (4.39 MB/s) - ‘hits_92.parquet’ saved [191403426/191403426]
+
+......... .......... ........ 73% 6.53M 15s........ ..... 95% 6.64M 2s...
+131072K . .... .............
+229376K ........ ...... ........... 82% 7.28M 9s...... 88% 7.39M 6s.........
+196608K .. ....
+131072K . . .......... ... .............. .... ...... 77% 8.26M 12s.... ..................
+163840K .............. ....... . ....... ....                  100% 12.1M=43s
+
+2026-10-04 16:45:51 (3.37 MB/s) - ‘hits_14.parquet’ saved [151121699/151121699]
+
+ .........                         100% 12.7M=42s
+
+2026-10-04 16:45:51 (5.54 MB/s) - ‘hits_67.parquet’ saved [244748637/244748637]
+
+.... ............. 91% 9.66M 4s...........
+163840K ...... .... .. .. .. ...... ........ ...... .......... ............. 95% 11.1M 2s.. ......... 80% 11.1M 10s.. 87% 10.8M 6s.....
+163840K . .....
+229376K ....
+196608K .. 78% 11.5M 12s...............
+229376K ........................ ... 97% 12.1M 1s... 72% 12.1M 16s . ....                100% 13.6M=43s
+
+2026-10-04 16:45:51 (3.35 MB/s) - ‘hits_71.parquet’ saved [152098737/152098737]
+
+. . ....
+229376K ...
+163840K ........ 81% 12.5M 10s.... ..... .                             100% 14.6M=44s
+
+2026-10-04 16:45:51 (3.82 MB/s) - ‘hits_1.parquet’ saved [174965044/174965044]
+
+..
+229376K ............... ............... ....... .. ......                              100% 14.7M=42s
+
+2026-10-04 16:45:52 (5.43 MB/s) - ‘hits_89.parquet’ saved [240762745/240762745]
+
+.......                   100% 14.7M=44s
+
+2026-10-04 16:45:52 (4.02 MB/s) - ‘hits_79.parquet’ saved [183779939/183779939]
+
+. .............. 69% 13.3M 19s..... .. 93% 13.3M 3s.....
+163840K ..... 64% 13.6M 24s ..
+196608K ... 72% 13.8M 17s......
+229376K .....
+196608K ... .............. .. 91% 14.1M 4s............
+163840K . .... ............... .... 95% 14.7M 2s.............
+229376K ....... ..... .. .......... ...... 92% 15.2M 3s .... ........
+196608K ............... .....                      100% 16.9M=45s
+
+2026-10-04 16:45:53 (4.60 MB/s) - ‘hits_77.parquet’ saved [214853191/214853191]
+
+ .. ............. ................ .....    100%. 16.5M=45s
+
+2026-10-04 16:45:53 (4.93 MB/s) - ‘hits_65.parquet’ saved [231113014/231113014]
+
+. .... .                         100% 17.5M=45s
+
+2026-10-04 16:45:53 (5.21 MB/s) - ‘hits_50.parquet’ saved [245339079/245339079]
+
+.... ..... ..                    100% 18.2M=45s
+
+2026-10-04 16:45:53 (3.90 MB/s) - ‘hits_94.parquet’ saved [182927052/182927052]
+
+ ............ .... 92% 16.5M 4s.....
+262144K ... 89% 16.8M 5s.........
+262144K ............. 87% 17.4M 7s...... .... .
+196608K .. 93% 17.7M 3s..                   100% 19.5M=44s
+
+2026-10-04 16:45:53 (4.69 MB/s) - ‘hits_55.parquet’ saved [217339961/217339961]
+
+.. ...
+262144K .................. ....... ............... 83% 18.9M 9s.. 73% 19.8M 16s.... 84% 19.8M 8s.
+262144K . ..
+229376K .... .
+196608K ................ ............ ................. . ...            100% 25.9M=46s
+
+2026-10-04 16:45:54 (6.05 MB/s) - ‘hits_41.parquet’ saved [290614269/290614269]
+
+. . ..... ...........              100% 28.7M=46s
+
+2026-10-04 16:45:54 (5.98 MB/s) - ‘hits_42.parquet’ saved [288524057/288524057]
+
+........ ................ . . . ......   100% 27.9M=46s
+
+2026-10-04 16:45:54 (6.20 MB/s) - ‘hits_43.parquet’ saved [299692947/299692947]
+
+.....     100% 28.9M=46s
+
+2026-10-04 16:45:54 (4.76 MB/s) - ‘hits_2.parquet’ saved [230595491/230595491]
+
+............. .. . ................... 96% 34.7M 1s.. 83% 34.2M 9s
+229376K .. 96% 34.2M 2s
+294912K .
+262144K ..................                            100% 40.6M=47s
+
+2026-10-04 16:45:55 (4.97 MB/s) - ‘hits_44.parquet’ saved [242404750/242404750]
+
+...                           100% 47.5M=47s
+
+2026-10-04 16:45:55 (5.68 MB/s) - ‘hits_54.parquet’ saved [277305733/277305733]
+
+ ........ ........ ........ 92% 55.5M 4s
+327680K ........ ........ ........ ..      100% 89.0M=47s
+
+2026-10-04 16:45:55 (7.32 MB/s) - ‘hits_51.parquet’ saved [362954325/362954325]
+
+bench: waited 70s for ext4lazyinit to finish before the load
+codec=lz4 workers=12 files=28 rows=99997497 bytes=11698473632
+Load time: 176.575
+[0.816,0.086,0.085],
+[1.003,0.177,0.177],
+[0.760,0.086,0.086],
+[0.814,0.084,0.085],
+[1.691,0.715,0.710],
+[1.538,0.504,0.500],
+[0.815,0.085,0.085],
+[1.014,0.190,0.180],
+[1.979,0.926,0.956],
+[2.289,1.108,1.130],
+[1.304,0.266,0.265],
+[1.329,0.310,0.309],
+[1.759,0.695,0.691],
+[2.251,0.973,0.978],
+[1.899,0.776,0.773],
+[1.779,0.809,0.798],
+[2.762,1.501,1.501],
+[0.909,0.120,0.121],
+[4.451,2.838,2.834],
+[1.110,0.164,0.165],
+[7.149,1.560,1.547],
+[8.159,1.800,1.726],
+[13.589,2.678,2.654],
+[10.421,1.630,1.652],
+[2.380,0.530,0.529],
+[1.172,0.401,0.404],
+[2.582,0.546,0.548],
+[7.015,1.014,1.012],
+[6.875,3.474,3.425],
+[0.615,0.123,0.123],
+[1.854,0.738,0.737],
+[5.203,1.026,1.017],
+[5.489,3.712,3.710],
+[7.239,2.960,2.982],
+[7.285,2.941,2.956],
+[1.371,0.756,0.748],
+[0.958,0.204,0.214],
+[0.898,0.116,0.115],
+[0.962,0.165,0.163],
+[1.185,0.348,0.352],
+[0.898,0.112,0.114],
+[0.903,0.111,0.112],
+[0.904,0.117,0.116],
+Data size: 11698473632
+Concurrent QPS: null
+Concurrent error ratio: null
+Disk usage after: 31834693632
+System: opteryx-skene
+Machine: c6a.4xlarge
+Total time: 607

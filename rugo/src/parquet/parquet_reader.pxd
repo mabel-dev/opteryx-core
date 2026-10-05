@@ -113,6 +113,7 @@ cdef extern from "metadata.hpp":
         vector[SchemaElement] schema
         vector[SchemaField] schema_columns
         unordered_map[string, string] key_value_metadata
+        long long num_row_groups
 
     FileStats ReadParquetMetadataC(const char* path) except +
     FileStats ReadParquetMetadataFromBuffer(const uint8_t* buf, size_t size) except +

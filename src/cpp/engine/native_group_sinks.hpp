@@ -1837,7 +1837,14 @@ constexpr int64_t kDistinctParviGateNDV = 16;
 // aggregations never reach the cap: zero behavior change. Measured curve
 // (Q33, 90M groups): 262144 → 2.21s, 131072 → 1.66s, 65536 → 1.62s,
 // 32768 → 1.61s; 65536 picked (flat below it, fewer merge chunks).
+// ARCH SWEEP SWITCH (temporary, 2026-10-04, docs/ARCH_AWARE_PERFORMANCE_TEST_PLAN.md
+// Phase 1): lets dev/build_so_variant.sh build -DOPTERYX_SWEEP_GB_FLUSH_ENTRIES=N
+// variants for per-architecture A/B. Default build unchanged. DELETE once banked.
+#ifdef OPTERYX_SWEEP_GB_FLUSH_ENTRIES
+constexpr size_t kGBFlushEntries = OPTERYX_SWEEP_GB_FLUSH_ENTRIES;
+#else
 constexpr size_t kGBFlushEntries = 65536;
+#endif
 // ADAPTIVE RAW MODE (2026-09-25). A worker whose local tables are not deduplicating
 // stops probing them: at a flush, if the partitions hold more than this fraction of
 // the rows sunk since the previous flush (groups / rows > 0.9 — nearly every row a
@@ -1859,7 +1866,12 @@ constexpr double kGBRawSwitchRatio = 0.9;
 // group select (53..54), the carchar tag (57..63) and slot bits (low bits): bucket
 // bits inside the tag range would make every tag in a bucket identical and the
 // SIMD tag filter useless.
+// ARCH SWEEP SWITCH (temporary, 2026-10-04) — see kGBFlushEntries. DELETE once banked.
+#ifdef OPTERYX_SWEEP_GB_MERGE_LEAF
+constexpr size_t kGBMergeLeaf = OPTERYX_SWEEP_GB_MERGE_LEAF;
+#else
 constexpr size_t kGBMergeLeaf = 65536;
+#endif
 constexpr int kGBMergeBucketShift = 40;
 constexpr size_t kGBMergeMaxBuckets = 4096;
 // Hash-bit budget (see PARTITION BITS above). Slot bits: carchar indexes slots by
@@ -3920,6 +3932,16 @@ struct GroupBySink : Sink {
             }
         } else {
         for (uint32_t i = 0; i < rows; ++i) {
+#ifdef OPTERYX_SWEEP_GB_PREFETCH
+            // ARCH SWEEP SWITCH (temporary, 2026-10-04, ARCH_AWARE plan D2: re-test of
+            // the ban above under the new harness, both architectures, full suite).
+            // Prefetch the carchar control line of the row D ahead. DELETE once banked.
+            if (i + OPTERYX_SWEEP_GB_PREFETCH < rows) {
+                const uint64_t ha = l.mk_hash[i + OPTERYX_SWEEP_GB_PREFETCH];
+                const GBPartition& PA = l.parts[gb_part(ha)];
+                if (!PA.use_parvi && !PA.use_mid) PA.index.prefetch(ha);
+            }
+#endif
             uint64_t h = l.mk_hash[i];
             GBPartition& P = l.parts[gb_part(h)];
             int64_t gid;

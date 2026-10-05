@@ -408,6 +408,7 @@ cdef extern from "planner/manifest_encode.hpp" namespace "opteryx::planner":
         EncodedStrings delete_file_path
         uint8_t* delete_file_path_validity
         EncodedScalar deleted_record_count
+        EncodedScalar row_group_count
         EncodedScalar record_count
         EncodedScalar file_size
         EncodedScalar uncompressed_size
@@ -525,6 +526,7 @@ cdef extern from "planner/manifest_decode.hpp" namespace "opteryx::planner":
         const DrakenVector* uncompressed_size
         const DrakenVector* histogram_bins
         const DrakenVector* deleted_record_count
+        const DrakenVector* row_group_count
         const DrakenVector* delete_file_path
         ManifestArrayColumn column_uncompressed_sizes
         ManifestArrayColumn null_counts
@@ -739,6 +741,7 @@ cdef class NativeManifest:
                                                        e.delete_file_path.arena_len, e.delete_file_path_validity, n,
                                                        DRAKEN_VARCHAR))
         deleted = _scalar_vector(e.deleted_record_count, n)
+        row_groups = _scalar_vector(e.row_group_count, n)
         element_min_values = _list_vector(e.element_min_values, n)
         element_max_values = _list_vector(e.element_max_values, n)
         element_min_k_hashes = _list_vector(e.element_min_k_hashes, n)
@@ -774,6 +777,7 @@ cdef class NativeManifest:
             morsel.append_vector("element_min_k_hashes", element_min_k_hashes)
             morsel.append_vector("delete_file_path", delete_paths)
             morsel.append_vector("deleted_record_count", deleted)
+            morsel.append_vector("row_group_count", row_groups)
             # the exact integer sums' int64 halves (manifest_encode.hpp)
             morsel.append_vector("sums_hi", sums_hi)
             morsel.append_vector("sums_lo", sums_lo)
@@ -837,6 +841,18 @@ cdef class NativeManifest:
     def deleted_record_counts(self):
         cdef size_t row
         return [self._manifest.file(row).deleted_record_count for row in range(self._manifest.file_count())]
+
+    def row_group_counts(self):
+        """Each file's row-group count; None where unknown."""
+        cdef size_t row
+        return [_optional(self._manifest.file(row).row_group_count) for row in range(self._manifest.file_count())]
+
+    def column_uncompressed_sizes(self, size_t position):
+        """Each file's in-memory bytes for the column at load-time `position`; None where
+        unknown."""
+        cdef size_t row, column = self._position(position)
+        return [_optional(self._manifest.cell(row, column).uncompressed_size)
+                for row in range(self._manifest.file_count())]
 
     def delete_positions(self):
         """{path: file-local deleted row ordinals} for every file carrying
@@ -1080,6 +1096,7 @@ def decode_manifest_parquet(
         columns_in.uncompressed_size = _scalar(vectors, "uncompressed_size_in_bytes", True)
         columns_in.histogram_bins = _scalar(vectors, "histogram_bins", True)
         columns_in.deleted_record_count = _scalar(vectors, "deleted_record_count", False)
+        columns_in.row_group_count = _scalar(vectors, "row_group_count", False)
         columns_in.delete_file_path = _scalar(vectors, "delete_file_path", False)
         _array(columns_in.column_uncompressed_sizes, vectors, "column_uncompressed_sizes_in_bytes", True)
         _array(columns_in.null_counts, vectors, "null_counts", True)

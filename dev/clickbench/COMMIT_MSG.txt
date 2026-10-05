@@ -1,0 +1,10 @@
+Opteryx: pin opteryx-core 0.9.155, run as a long-lived server
+
+- opteryx/, opteryx-skene/: install pins opteryx-core==0.9.155 and fails if
+  the imported version differs.
+- opteryx/: long-lived server.py (BENCH_RESTARTABLE=yes, BENCH_DURABLE=yes);
+  start/check/stop/query talk to it over 127.0.0.1:8421. Timing is the
+  server-side drain of execute_to_morsels, as before.
+- Results: one compliant c6a.4xlarge run of each entry (2026-10-04).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

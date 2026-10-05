@@ -3,9 +3,9 @@
 //
 // Input: a parquet data file, its indexed text column, the file's deleted ordinals
 // (decoded at plan time, as for every scan), the registered `draken_embed` kernel and the
-// IVF parameters. Output: the vectors file streamed to the caller's OutputStream (its
-// prefix returned separately — see skene::FileWriter::begin(options, OutputStream*,
-// prefix)), the centroids file in memory, and the sizes the catalog commit records.
+// IVF parameters. Output: ONE index file (vector_index_file.hpp) streamed to the caller's
+// OutputStream - blocks, footer, tail, in that order - and the sizes the catalog commit
+// records.
 //
 // Two passes over the text column, through rugo's ParquetIOPipeline and the native scan's
 // own string decoder (NativeScanColumnBuilder) — one decoder, shared with the scan:
@@ -15,7 +15,7 @@
 //           row group) and embedded; ivf_train runs k-means on them.
 //   pass 2  every row group in order, deleted rows masked out: embed, ivf_assign, and hand
 //           the row to a ClusterStream. Each block it emits — one cluster's rows, at most
-//           `flush_rows` of them — becomes one row group of the vectors file.
+//           `flush_rows` of them — is one block of the index file.
 //
 // Memory is bounded by K x flush_rows embedded rows plus the row groups in flight, not by
 // the file. Sampled rows are embedded twice (in pass 1 and again in pass 2, ~64 x K rows,
@@ -50,16 +50,13 @@
 #include "memory_pool.hpp"                    // opteryx::MemoryPool
 #include "pool_sink_adapter.hpp"              // wire_pool_sink
 #include "engine/native_parquet_scan_source.hpp"  // NativeScanColumnBuilder
-#include "core/alloc.h"                       // draken_malloc / draken_free
-#include "core/vector_alloc.h"                // draken_vector_from_dense
-#include "core/vector_owner.h"                // VectorOwner, OwnedBuffer
-#include "logical_type.h"                     // LogicalType, logical_type_intern
+#include "core/alloc.h"                       // draken_free
 #include "morsels/cxx_morsel.h"               // CxxMorsel, CxxColumn
 #include "ops/ann/fp16_cosine_ivf.h"          // ivf_plan / ivf_train / ivf_assign / ClusterStream
 #include "ops/kernels/kernel_context.h"       // vector_dim_ctx
 #include "ops/string_gather.h"                // str_slice
 #include "ops/vec_result.h"                   // VecResult
-#include "skene/writer.h"                     // skene::FileWriter, OutputStream
+#include "engine/vector_index_file.hpp"      // VectorIndexFileWriter (and skene::OutputStream)
 #include "engine/gcs_resumable_body.hpp"      // GcsResumableBody
 
 namespace opteryx::engine {
@@ -77,7 +74,7 @@ struct VectorIndexBuildSpec {
     EmbedFn               embed = nullptr;     // the registered draken_embed kernel
     uint32_t              dims = 0;            // its declared width
     draken::ann::IvfParams ivf;                // clusters 0 = sqrt(rows to index)
-    uint32_t              flush_rows = 512;    // rows per vectors-file row group, at most
+    uint32_t              flush_rows = 512;    // rows per index-file block, at most
     // Rows per embedding call. ONE, measured (2026-10-02, MiniLM, NVD text): batching pads
     // every row to the batch's longest, and the working set of a call grows with
     // batch x sequence^2 — at 64 rows x 12 threads it reached +10 GiB. Batch 1 was the
@@ -88,28 +85,17 @@ struct VectorIndexBuildSpec {
 };
 
 struct VectorIndexBuildResult {
-    bool                  empty = true;        // no indexable row: no files were written
-    std::vector<uint8_t>  vectors_prefix;      // the vectors file is prefix + body
-    uint64_t              vectors_body_bytes = 0;
-    std::vector<uint8_t>  centroids;           // the whole centroids file
+    bool                  empty = true;        // no indexable row: no file was written
+    uint64_t              file_bytes = 0;      // the index file, whole
+    uint64_t              footer_bytes = 0;    // its footer (recorded, so a search opens it in one read)
     uint64_t              rows_indexed = 0;
     uint32_t              clusters = 0;
-    uint32_t              vectors_row_groups = 0;
-    uint64_t              logical_bytes = 0;   // decoded size of both files (billed, §5.5)
+    uint32_t              blocks = 0;
+    // The billed size (§5.5): the format is its own decoded form, so this is the file.
+    uint64_t              logical_bytes = 0;
 };
 
 namespace vib_detail {
-
-// Counts what the caller's stream received, so the body size is the writer's own count.
-struct CountingStream final : skene::OutputStream {
-    skene::OutputStream* inner;
-    uint64_t             bytes = 0;
-    explicit CountingStream(skene::OutputStream* s) : inner(s) {}
-    skene::Status write(const void* data, size_t n) override {
-        bytes += n;
-        return inner->write(data, n);
-    }
-};
 
 // A kernel's VecResult, freed per vec_result.h's ownership contract.
 struct OwnedVecResult {
@@ -196,52 +182,6 @@ inline bool embed_rows(const VectorIndexBuildSpec& spec, const DrakenVector& tex
     return true;
 }
 
-// A dense fixed-width column owning a copy of `values`.
-template <typename T>
-inline CxxColumn fixed_column(const T* values, uint32_t n, DrakenType type) {
-    void* data = draken_malloc(std::max<size_t>(1u, static_cast<size_t>(n) * sizeof(T)));
-    if (n) std::memcpy(data, values, static_cast<size_t>(n) * sizeof(T));
-    DrakenVector v = draken_vector_from_dense(data, n, type, nullptr);
-    CxxColumn c;
-    c.view = v;
-    c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data), OwnedBuffer<uint8_t>(nullptr));
-    return c;
-}
-
-inline CxxColumn fp16_column(const uint16_t* halves, uint32_t rows, uint32_t dims) {
-    CxxColumn c;
-    void* data = draken_malloc(std::max<size_t>(2u, static_cast<size_t>(rows) * dims * 2u));
-    if (rows) std::memcpy(data, halves, static_cast<size_t>(rows) * dims * 2u);
-    DrakenVector v = draken_vector_from_dense(data, rows, DRAKEN_VECTOR_FP16, nullptr);
-    c.view = v;
-    c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data), OwnedBuffer<uint8_t>(nullptr));
-    LogicalType lt;
-    lt.kind = LogicalKind::VECTOR;
-    lt.dimension = dims;
-    c.own->logical_type = logical_type_intern(lt);
-    return c;
-}
-
-// ARRAY<INT32>: row i holds lists[i].
-inline CxxColumn int32_list_column(const std::vector<std::vector<int32_t>>& lists) {
-    const uint32_t n = static_cast<uint32_t>(lists.size());
-    std::vector<int32_t> flat;
-    std::vector<int32_t> offsets(static_cast<size_t>(n) + 1u, 0);
-    for (uint32_t i = 0; i < n; ++i) {
-        flat.insert(flat.end(), lists[i].begin(), lists[i].end());
-        offsets[i + 1u] = static_cast<int32_t>(flat.size());
-    }
-    void* offset_buf = draken_malloc(offsets.size() * sizeof(int32_t));
-    std::memcpy(offset_buf, offsets.data(), offsets.size() * sizeof(int32_t));
-    DrakenVector v = draken_vector_from_dense(offset_buf, n, DRAKEN_ARRAY, nullptr);
-    CxxColumn c;
-    c.view = v;
-    c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(offset_buf), OwnedBuffer<uint8_t>(nullptr));
-    CxxColumn child = fixed_column<int32_t>(flat.data(), static_cast<uint32_t>(flat.size()), DRAKEN_INT32);
-    c.own->child_owner = std::make_unique<VectorOwner>(std::move(*child.own));
-    return c;
-}
-
 // Decodes one text column of one data file, row group by row group, through the pipeline.
 struct TextReader {
     std::string                         path;
@@ -302,20 +242,15 @@ struct TextReader {
 // The write phase every index build shares — the embedding build here and compaction's
 // carry (vector_index_carry.hpp): rows arrive one at a time with their physical ordinal,
 // each is assigned to its nearest trained centroid and handed to a ClusterStream, whose
-// blocks (one cluster's rows, at most flush_rows) become the vectors file's row groups,
-// streamed to the caller's OutputStream. `finish` writes the centroids file in memory and
-// the sizes the catalog commit records.
-class IvfFilesWriter {
+// blocks (one cluster's rows, at most flush_rows) become the index file's blocks, streamed
+// to the caller's OutputStream. `finish` writes the footer and the sizes the commit records.
+class IvfIndexWriter {
   public:
-    IvfFilesWriter(const draken::ann::IvfCentroids& trained, uint32_t dims, uint32_t flush_rows)
-        : trained_(trained), dims_(dims), groups_(trained.clusters), rows_(trained.clusters, 0u),
-          stream_(trained.clusters, dims, flush_rows) {}
+    IvfIndexWriter(const draken::ann::IvfCentroids& trained, uint32_t dims, uint32_t flush_rows)
+        : trained_(trained), dims_(dims), stream_(trained.clusters, dims, flush_rows) {}
 
-    bool begin(skene::OutputStream* body, VectorIndexBuildResult* out, std::string* err) {
-        counted_ = std::make_unique<vib_detail::CountingStream>(body);
-        skene::Status st = writer_.begin(skene::WriteOptions(), counted_.get(), &out->vectors_prefix);
-        if (!st.is_ok()) { *err = "vector index build: " + st.message(); return false; }
-        return true;
+    void begin(skene::OutputStream* out) {
+        file_ = std::make_unique<VectorIndexFileWriter>(out, trained_.centroids.data(), trained_.clusters, dims_);
     }
 
     // One searchable row (the caller has checked ann_row_searchable).
@@ -328,68 +263,39 @@ class IvfFilesWriter {
 
     uint64_t indexed() const noexcept { return indexed_; }
 
-    // Flush, finish the vectors file, write the centroids file and the sizes. With no row
-    // added, nothing is finished and `out->empty` is set: the caller abandons the stream.
+    // Flush, write the footer, report the sizes. With no row added, nothing is written and
+    // `out->empty` is set: the caller abandons the stream.
     bool finish(VectorIndexBuildResult* out, std::string* err) {
+        if (indexed_ == 0u) { out->empty = true; return true; }
         stream_.finish(emitter());
         if (!emit_err_.empty()) { *err = emit_err_; return false; }
-        if (indexed_ == 0u) { out->empty = true; return true; }
-        skene::Status st = writer_.finish();
-        if (!st.is_ok()) { *err = "vector index build: " + st.message(); return false; }
-
-        const uint32_t K = trained_.clusters;
-        CxxMorsel centroids;
-        centroids.names = {"centroid", "rows", "row_groups"};
-        centroids.columns.push_back(vib_detail::fp16_column(trained_.centroids.data(), K, dims_));
-        centroids.columns.push_back(vib_detail::fixed_column<uint32_t>(rows_.data(), K, DRAKEN_UINT32));
-        centroids.columns.push_back(vib_detail::int32_list_column(groups_));
-        st = skene::write_morsel(centroids, skene::WriteOptions(), &out->centroids);
-        if (!st.is_ok()) { *err = "vector index build: centroids: " + st.message(); return false; }
-
-        // Logical (decoded) bytes: vectors rows x (2 dims + 4); centroids K x (2 dims + 4),
-        // plus the row-group lists — one int32 per entry and K + 1 int32 offsets.
-        const uint64_t d2 = 2u * static_cast<uint64_t>(dims_);
+        VectorIndexFileSizes sizes;
+        if (!file_->finish(&sizes, err)) return false;
         out->empty = false;
-        out->vectors_body_bytes = counted_->bytes;
-        out->rows_indexed = indexed_;
-        out->clusters = K;
-        out->vectors_row_groups = written_groups_;
-        out->logical_bytes = indexed_ * (d2 + 4u) + static_cast<uint64_t>(K) * (d2 + 4u)
-                             + 4u * static_cast<uint64_t>(written_groups_) + 4u * (static_cast<uint64_t>(K) + 1u);
+        out->file_bytes = sizes.file_bytes;
+        out->footer_bytes = sizes.footer_bytes;
+        out->rows_indexed = sizes.rows;
+        out->clusters = sizes.clusters;
+        out->blocks = sizes.blocks;
+        out->logical_bytes = sizes.file_bytes;
         return true;
     }
 
   private:
     struct Emitter {
-        IvfFilesWriter* self;
+        IvfIndexWriter* self;
         void operator()(uint32_t c, const uint32_t* ordinals, const uint16_t* vectors, uint32_t n) const {
-            self->emit(c, ordinals, vectors, n);
+            if (self->emit_err_.empty()) self->file_->add_block(c, ordinals, vectors, n, &self->emit_err_);
         }
     };
     Emitter emitter() { return Emitter{this}; }
 
-    void emit(uint32_t c, const uint32_t* ordinals, const uint16_t* vectors, uint32_t n) {
-        if (!emit_err_.empty()) return;
-        CxxMorsel block;
-        block.names = {"embedding", "ordinal"};
-        block.columns.push_back(vib_detail::fp16_column(vectors, n, dims_));
-        block.columns.push_back(vib_detail::fixed_column<uint32_t>(ordinals, n, DRAKEN_UINT32));
-        skene::Status s = writer_.add_row_group(block);
-        if (!s.is_ok()) { emit_err_ = "vector index build: " + s.message(); return; }
-        groups_[c].push_back(static_cast<int32_t>(written_groups_++));
-        rows_[c] += n;
-    }
-
-    const draken::ann::IvfCentroids&           trained_;
-    uint32_t                                   dims_;
-    std::vector<std::vector<int32_t>>          groups_;
-    std::vector<uint32_t>                      rows_;
-    draken::ann::ClusterStream                 stream_;
-    skene::FileWriter                          writer_;
-    std::unique_ptr<vib_detail::CountingStream> counted_;
-    uint32_t                                   written_groups_ = 0;
-    uint64_t                                   indexed_ = 0;
-    std::string                                emit_err_;
+    const draken::ann::IvfCentroids&         trained_;
+    uint32_t                                 dims_;
+    draken::ann::ClusterStream               stream_;
+    std::unique_ptr<VectorIndexFileWriter>   file_;
+    uint64_t                                 indexed_ = 0;
+    std::string                              emit_err_;
 };
 
 // Build the index of one data file. Returns false with `err` set on any failure; nothing
@@ -555,8 +461,8 @@ inline bool build_vector_index_file(const VectorIndexBuildSpec& spec, skene::Out
     if (trained.clusters == 0u) { out->empty = true; return true; }
 
     // ── Pass 2: every row group, in file order ──
-    IvfFilesWriter files(trained, spec.dims, spec.flush_rows);
-    if (!files.begin(body, out, err)) return false;
+    IvfIndexWriter files(trained, spec.dims, spec.flush_rows);
+    files.begin(body);
 
     TextReader reader(spec.data_path, spec.auth_header, spec.column, chunk, spec.decode_workers);
     std::vector<std::vector<uint8_t>> masks(row_groups);
@@ -604,21 +510,34 @@ inline bool build_vector_index_file(const VectorIndexBuildSpec& spec, skene::Out
     return files.finish(out, err);
 }
 
-// ── Local files (development and local catalogs; GCS is Stage C step 4) ──
+// ── Local files (development and local catalogs) ──
 
-// Streams the vectors body to `<path>.body-partial`.
-struct LocalBodyStream final : skene::OutputStream {
+// Streams an index file to `<path>.partial`; `commit` renames it into place. A stream that
+// is not committed leaves nothing behind.
+struct LocalIndexStream final : skene::OutputStream {
     std::FILE*  f = nullptr;
+    std::string path;
     std::string partial;
-    explicit LocalBodyStream(const std::string& path) : partial(path + ".body-partial") {
+    explicit LocalIndexStream(const std::string& p) : path(p), partial(p + ".partial") {
         f = std::fopen(partial.c_str(), "wb");
     }
-    ~LocalBodyStream() { discard(); }
+    ~LocalIndexStream() { discard(); }
     bool ok() const { return f != nullptr; }
     skene::Status write(const void* data, size_t n) override {
         if (std::fwrite(data, 1, n, f) != n)
             return skene::Status(skene::Code::kMalformed, "cannot write " + partial + ": " + std::strerror(errno));
         return skene::Status::ok();
+    }
+    bool commit(std::string* err) {
+        const bool closed = std::fclose(f) == 0;
+        f = nullptr;
+        if (!closed || std::rename(partial.c_str(), path.c_str()) != 0) {
+            *err = "cannot write " + path + ": " + std::strerror(errno);
+            discard();
+            return false;
+        }
+        partial.clear();
+        return true;
     }
     void discard() {
         if (f != nullptr) { std::fclose(f); f = nullptr; }
@@ -626,58 +545,23 @@ struct LocalBodyStream final : skene::OutputStream {
     }
 };
 
-// Writes `path` = prefix + the streamed body, then removes the body. The local stand-in
-// for the two-object compose a GCS build does.
-inline bool assemble_local(LocalBodyStream& body, const std::vector<uint8_t>& prefix,
-                           const std::string& path, std::string* err) {
-    if (std::fclose(body.f) != 0) { body.f = nullptr; *err = "cannot close " + body.partial; return false; }
-    body.f = nullptr;
-    std::FILE* in = std::fopen(body.partial.c_str(), "rb");
-    std::FILE* outf = std::fopen(path.c_str(), "wb");
-    bool good = in != nullptr && outf != nullptr &&
-                std::fwrite(prefix.data(), 1, prefix.size(), outf) == prefix.size();
-    std::vector<uint8_t> buf(size_t{4} << 20);
-    while (good) {
-        const size_t n = std::fread(buf.data(), 1, buf.size(), in);
-        if (n == 0) { good = !std::ferror(in); break; }
-        good = std::fwrite(buf.data(), 1, n, outf) == n;
-    }
-    if (in) std::fclose(in);
-    if (outf && std::fclose(outf) != 0) good = false;
-    if (!good) { std::remove(path.c_str()); *err = "cannot assemble " + path; }
-    body.discard();
-    return good;
-}
-
-inline bool write_local_file(const std::string& path, const std::vector<uint8_t>& bytes, std::string* err) {
-    std::FILE* f = std::fopen(path.c_str(), "wb");
-    bool good = f != nullptr && std::fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size();
-    if (f && std::fclose(f) != 0) good = false;
-    if (!good) { std::remove(path.c_str()); *err = "cannot write " + path; }
-    return good;
-}
-
-// Build one data file's index into local `vectors_path` / `centroids_path`. On failure, or
-// when the file has nothing to index (`out->empty`), neither file exists afterwards.
-inline bool build_vector_index_file_local(const VectorIndexBuildSpec& spec, const std::string& vectors_path,
-                                          const std::string& centroids_path, VectorIndexBuildResult* out,
-                                          std::string* err) {
-    LocalBodyStream body(vectors_path);
-    if (!body.ok()) { *err = "vector index build: cannot create " + body.partial; return false; }
-    if (!build_vector_index_file(spec, &body, out, err)) return false;
+// Build one data file's index into the local file `path`. On failure, or when the file has
+// nothing to index (`out->empty`), no file exists afterwards.
+inline bool build_vector_index_file_local(const VectorIndexBuildSpec& spec, const std::string& path,
+                                          VectorIndexBuildResult* out, std::string* err) {
+    LocalIndexStream file(path);
+    if (!file.ok()) { *err = "vector index build: cannot create " + file.partial; return false; }
+    if (!build_vector_index_file(spec, &file, out, err)) return false;
     if (out->empty) return true;
-    if (!assemble_local(body, out->vectors_prefix, vectors_path, err)) return false;
-    if (!write_local_file(centroids_path, out->centroids, err)) { std::remove(vectors_path.c_str()); return false; }
-    return true;
+    return file.commit(err);
 }
 
-// ── GCS: the body into an open resumable session (Stage C step 4) ──
+// ── GCS: the file into an open resumable session ──
 
-// Build one data file's index, streaming the vectors BODY into the resumable upload session
+// Build one data file's index, streaming the whole file into the resumable upload session
 // `session_uri` (opened by the control plane, which holds the credentials). On success the
-// session is finished, so the body object exists; the caller then uploads the prefix and the
-// centroids and composes prefix + body into the vectors file. On failure, or when there is
-// nothing to index, the session is left unfinished and never becomes an object.
+// session is finished and the object exists. On failure, or when there is nothing to index,
+// the session is left unfinished and never becomes an object.
 inline bool build_vector_index_file_to_session(const VectorIndexBuildSpec& spec,
                                                const std::string& session_uri, size_t chunk_bytes,
                                                VectorIndexBuildResult* out, std::string* err) {
@@ -687,7 +571,7 @@ inline bool build_vector_index_file_to_session(const VectorIndexBuildSpec& spec,
     if (out->empty) return true;
     skene::Status st = body.finish();
     if (!st.is_ok()) { *err = "vector index build: " + st.message(); return false; }
-    if (body.committed() != out->vectors_body_bytes) {
+    if (body.committed() != out->file_bytes) {
         *err = "vector index build: the session holds a different number of bytes than were written";
         return false;
     }

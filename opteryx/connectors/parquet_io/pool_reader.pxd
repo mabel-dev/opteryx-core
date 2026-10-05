@@ -280,6 +280,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     footer_bytes_cache=*,
     int fetch_ahead=*,
     int fetch_ahead_min_blocks=*,
+    int remote_decode_workers=*,
     int in_flight_limit_override=*,
     http_tuning=*,
     coalesce_tuning=*,
@@ -291,5 +292,5 @@ cpdef NativeScanPlan open_native_scan_plan(
 # footers that every projected column, in every row group, decodes to a
 # DirectKind the Source supports (increment-1 scope: plain numerics only).
 # `filesystem` supplies the signed-URL rewrite that makes a remote path eligible.
-cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes=*,
-                                 filesystem=*, footer_bytes_cache=*)
+cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=*,
+                                filesystem=*, footer_bytes_cache=*)

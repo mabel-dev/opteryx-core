@@ -499,7 +499,8 @@ def collect_plan_telemetry(plan: PhysicalPlan) -> dict:
                         for key, name in (("files_indexed", "vector_files_indexed"),
                                           ("files_exact", "vector_files_exact"),
                                           ("clusters_probed", "vector_clusters_probed"),
-                                          ("index_row_groups_read", "vector_index_row_groups_read"),
+                                          ("index_bytes_read", "vector_index_bytes_read"),
+                                          ("index_requests", "vector_index_requests"),
                                           ("candidates", "vector_candidates"),
                                           ("rows_exact", "vector_rows_exact"),
                                           ("nprobe", "vector_nprobe")):

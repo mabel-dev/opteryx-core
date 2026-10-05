@@ -91,6 +91,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -863,6 +864,98 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
     // Plan-time only, on the compiler's thread, before run() is entered.
     void set_row_admission(RowAdmission* admission) { admission_ = admission; }
 
+    // Row identity (opteryx/constants/row_identity.py): columns appended after the read
+    // set, one per entry of identity_kinds_ - kIdentityFile is the row's file as its
+    // position in the scan's file list, kIdentityOrdinal its zero-based physical row
+    // number in that file (counted before deletes, page pruning and filtering). Numbered
+    // from the footer's row-group row counts and the rows each result kept
+    // (MorselRef::kept_rows), so every path that drops rows keeps the address exact.
+    static constexpr uint8_t kIdentityFile = 0;
+    static constexpr uint8_t kIdentityOrdinal = 1;
+    std::vector<uint8_t> identity_kinds_;
+    std::vector<std::string> identity_names_;
+    // Fetch path -> (its file index, the first row of each of its row groups).
+    std::unordered_map<std::string, std::pair<int64_t, std::vector<int64_t>>> identity_files_;
+
+    // Plan-time only, on the compiler's thread, before run() is entered. `files` is the
+    // scan's file list in order, as fetch paths (the work items' keys).
+    void set_row_identity(const std::vector<std::string>& files, std::vector<uint8_t> kinds,
+                          std::vector<std::string> names) {
+        if (kinds.empty() || kinds.size() != names.size())
+            throw std::runtime_error("set_row_identity: one name per identity column");
+        if (footer_map == nullptr)
+            throw std::runtime_error("set_row_identity: row identity needs the scan's footers");
+        for (size_t f = 0; f < files.size(); ++f) {
+            auto fit = footer_map->find(files[f]);
+            if (fit == footer_map->end())
+                throw std::runtime_error("set_row_identity: a scanned file has no footer: " + files[f]);
+            std::vector<int64_t> first_rows;
+            first_rows.reserve(fit->second->row_groups.size());
+            int64_t at = 0;
+            for (const auto& rg : fit->second->row_groups) {
+                first_rows.push_back(at);
+                at += rg.num_rows;
+            }
+            if (!identity_files_.emplace(files[f], std::make_pair(static_cast<int64_t>(f),
+                                                                  std::move(first_rows))).second)
+                throw std::runtime_error("set_row_identity: a file is listed twice: " + files[f]);
+        }
+        identity_kinds_ = std::move(kinds);
+        identity_names_ = std::move(names);
+        // No pipeline when pruning left nothing to read (and none decodes a zero-column scan).
+        if (pipeline != nullptr) pipeline->set_report_kept_rows(true);
+    }
+
+    // Append the identity columns for row group `rg` of `path` to `m`: its rows are the
+    // row group's rows where `kept` is 1 (nullptr = every row), at most `limit` of them
+    // (-1 = all). Fails loud when the count disagrees with the morsel's.
+    bool append_row_identity(CxxMorsel& m, const std::string& path, int rg, const uint8_t* kept,
+                             size_t kept_len, int64_t limit, ErrCtx& err) const {
+        auto fit = identity_files_.find(path);
+        auto fail = [&](const char* msg) { err.code = 1; err.msg = msg; return false; };
+        if (fit == identity_files_.end())
+            return fail("NativeParquetScanSource: row identity has no file index for a work item");
+        const std::vector<int64_t>& first_rows = fit->second.second;
+        if (rg < 0 || static_cast<size_t>(rg) >= first_rows.size())
+            return fail("NativeParquetScanSource: row identity row group is outside its footer");
+        const int64_t first = first_rows[static_cast<size_t>(rg)];
+        const int64_t rg_rows = (*footer_map->find(path)->second).row_groups[static_cast<size_t>(rg)].num_rows;
+        if (kept != nullptr && kept_len != static_cast<size_t>(rg_rows))
+            return fail("NativeParquetScanSource: kept-row mask does not cover its row group");
+        const size_t n = m.columns.empty() ? static_cast<size_t>(m.zero_col_rows) : m.num_rows();
+        const size_t k = identity_kinds_.size();
+        std::vector<OwnedBuffer<void>> bufs;
+        bufs.reserve(k);
+        for (size_t i = 0; i < k; ++i) {
+            bufs.emplace_back(draken_malloc(sizeof(int64_t) * (n ? n : 1)));
+            if (!bufs.back()) return fail("NativeParquetScanSource: out of memory building row identity");
+        }
+        size_t w = 0;
+        for (int64_t r = 0; r < rg_rows && (limit < 0 || static_cast<int64_t>(w) < limit); ++r) {
+            if (kept != nullptr && kept[r] == 0) continue;
+            if (w == n)
+                return fail("NativeParquetScanSource: row identity counts more rows than the morsel holds");
+            for (size_t i = 0; i < k; ++i)
+                static_cast<int64_t*>(bufs[i].get())[w] =
+                    identity_kinds_[i] == kIdentityFile ? fit->second.first : first + r;
+            ++w;
+        }
+        if (w != n)
+            return fail("NativeParquetScanSource: row identity counts fewer rows than the morsel holds");
+        m.zero_col_rows = 0;
+        for (size_t i = 0; i < k; ++i) {
+            DrakenVector v = draken_vector_from_dense(bufs[i].get(), static_cast<uint32_t>(n),
+                                                      DRAKEN_INT64, nullptr);
+            auto owner = std::make_shared<VectorOwner>(v, std::move(bufs[i]), OwnedBuffer<uint8_t>(nullptr));
+            CxxColumn col;
+            col.view = owner->vec;
+            col.own = std::move(owner);
+            m.columns.push_back(std::move(col));
+            m.names.push_back(identity_names_[i]);
+        }
+        return true;
+    }
+
     // Decide admission and drop every unit it admits nothing of. Runs after the runtime
     // bound, over what it kept, through the same `kept` list.
     void apply_row_admission(NativeParquetScanGlobal& g) const {
@@ -1230,6 +1323,15 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
             g.rows_emitted += nrows;
             auto m = std::make_shared<CxxMorsel>();
             m->zero_col_rows = static_cast<uint32_t>(nrows);
+            if (!identity_kinds_.empty()) {
+                // Only row identity is read: numbered from the footer and the admission.
+                const std::vector<uint8_t>* am =
+                    admission_ != nullptr ? admission_->mask(item.first, item.second) : nullptr;
+                if (!append_row_identity(*m, item.first, item.second,
+                                         am != nullptr ? am->data() : nullptr,
+                                         am != nullptr ? am->size() : 0, nrows, err))
+                    return SourceResult::FINISHED;
+            }
             out = std::move(m);
             return SourceResult::HAVE_MORE;
         }
@@ -1425,12 +1527,23 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                     if (!build_column(result, i, col, err)) { build_err(); return SourceResult::FINISHED; }
                     m->columns.push_back(std::move(col));
                 }
+                if (!identity_kinds_.empty() &&
+                    !append_row_identity(*m, result.path, result.rg_idx,
+                                         result.kept_rows.empty() ? nullptr : result.kept_rows.data(),
+                                         result.kept_rows.size(), -1, err))
+                    return SourceResult::FINISHED;
             } else {
                 for (size_t i = 0; i < ncols; ++i) {
                     CxxColumn col;
                     if (!build_column(result, i, col, err)) { build_err(); return SourceResult::FINISHED; }
                     m->columns.push_back(std::move(col));
                 }
+                // Before the Source's own prefilter, which filters them with the rest.
+                if (!identity_kinds_.empty() &&
+                    !append_row_identity(*m, result.path, result.rg_idx,
+                                         result.kept_rows.empty() ? nullptr : result.kept_rows.data(),
+                                         result.kept_rows.size(), -1, err))
+                    return SourceResult::FINISHED;
                 if (prefilter_) {
                     // The worker declined: run the program over the whole row group.
                     CxxMorsel* filtered = nullptr;

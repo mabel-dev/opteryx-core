@@ -34,6 +34,7 @@ class PlanContext:
         "shared_ctes",
         "physical_shared_ctes",
         "recursive_ctes",
+        "variables",
         "statistics_estimated_by_optimizer",
     )
 
@@ -71,3 +72,8 @@ class PlanContext:
         # Whether the optimizer refreshed statistics - see
         # OptimizerVisitor.refreshed_statistics.
         self.statistics_estimated_by_optimizer: bool = False
+        # The session's variables, for a planning read of a tunable through
+        # opteryx.variables.resolve (the vector index cost model reads nprobe and the
+        # worker count). Set by whoever plans a session's query; None = no session, and
+        # resolve() then answers each variable's default.
+        self.variables = None

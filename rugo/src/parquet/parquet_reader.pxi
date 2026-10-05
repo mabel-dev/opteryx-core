@@ -400,11 +400,13 @@ cdef class ParquetMetadata:
     schema_columns is a tuple of SchemaColumn. For column statistics use
     fetch_column_stats(); for data use iter_row_groups_ipc()."""
     cdef readonly long long num_rows
+    cdef readonly long long num_row_groups
     cdef readonly tuple schema_columns
 
     def __repr__(self):
         return (
             f"ParquetMetadata(num_rows={self.num_rows}, "
+            f"num_row_groups={self.num_row_groups}, "
             f"schema_columns={self.schema_columns!r})"
         )
 
@@ -482,6 +484,7 @@ cdef ParquetMetadata _make_metadata(parquet_reader.FileStats& fs):
     """Build typed ParquetMetadata from C++ FileStats. Schema only — no row groups."""
     cdef ParquetMetadata meta = ParquetMetadata.__new__(ParquetMetadata)
     meta.num_rows = fs.num_rows
+    meta.num_row_groups = fs.num_row_groups
     cdef list cols = []
     cdef size_t i
     for i in range(fs.schema_columns.size()):

@@ -9,10 +9,9 @@ Vector index search — one data file (docs/VECTOR_INDEX_DESIGN.md §8, D2).
 The entry point into src/cpp/engine/vector_index_search.hpp: embed the query text with the
 index's own embedder, score it against the file's stored vectors - every one when `nprobe`
 is 0 (exact, the default), only the `nprobe` nearest clusters' otherwise (approximate) -
-reading the vectors file locally or remotely by range GETs (gs:// with `auth_header`, or
-a presigned URL), and return the file's
-top-k. One native call, GIL released. The library the vector search scan is built from,
-and how it is tested.
+reading the index file locally or remotely in large parallel range GETs (gs:// with
+`auth_header`, or a presigned URL), and return the file's top-k. One native call, GIL
+released. The library the vector search scan is built from, and how it is tested.
 """
 
 from libcpp cimport bool as cppbool
@@ -24,16 +23,17 @@ cdef extern from "ops/ann/fp16_cosine_ivf.h" namespace "draken::ann" nogil:
 
 cdef extern from "engine/vector_index_search.hpp" namespace "opteryx::engine" nogil:
     cdef cppclass IndexFileRef:
-        string vectors
-        uint64_t vectors_bytes
-        string centroids
-        uint64_t centroids_bytes
+        string path
+        uint64_t file_bytes
+        uint64_t footer_bytes
         string auth_header
 
     cdef cppclass IndexSearchStats:
         uint32_t clusters
         uint32_t probed
-        uint32_t row_groups_read
+        uint32_t blocks_read
+        uint64_t bytes_read
+        uint32_t requests
         uint64_t rows_scored
 
     bint embed_query(VibEmbedFn embed, uint32_t dims, const DrakenVector& text,
@@ -45,10 +45,9 @@ cdef extern from "engine/vector_index_search.hpp" namespace "opteryx::engine" no
 
 
 def search_vector_index_file(
-    str vectors,
-    unsigned long long vectors_bytes,
-    str centroids,
-    unsigned long long centroids_bytes,
+    str path,
+    unsigned long long file_bytes,
+    unsigned long long footer_bytes,
     str query,
     unsigned long long embed_fn,
     uint32_t dims,
@@ -60,7 +59,8 @@ def search_vector_index_file(
 ):
     """The data file's top-`k` rows nearest `query` through its index: a list of
     (ordinal, cosine distance), nearest first, ties by ordinal; and the search's counts.
-    `nprobe` 0 = exact (every stored vector); >= 1 = the `nprobe` nearest clusters only."""
+    `nprobe` 0 = exact (every stored vector); >= 1 = the `nprobe` nearest clusters only.
+    `footer_bytes` 0 = unknown (the open costs one more round trip)."""
     from draken.interop.vector_sequence import vector_from_sequence
 
     if embed_fn == 0:
@@ -69,10 +69,9 @@ def search_vector_index_file(
     one.append_vector(b"q", vector_from_sequence([query], dtype="VARCHAR"))
     cdef shared_ptr[CxxMorsel] sp = morsel_to_cxx(one)
     cdef IndexFileRef ref
-    ref.vectors = vectors.encode("utf-8")
-    ref.vectors_bytes = vectors_bytes
-    ref.centroids = centroids.encode("utf-8")
-    ref.centroids_bytes = centroids_bytes
+    ref.path = path.encode("utf-8")
+    ref.file_bytes = file_bytes
+    ref.footer_bytes = footer_bytes
     ref.auth_header = auth_header.encode("utf-8")
     cdef cppvector[uint32_t] c_deleted
     cdef uint32_t ordinal
@@ -94,8 +93,8 @@ def search_vector_index_file(
         raise RuntimeError(err.decode("utf-8", "replace"))
     return (
         [(hits[i].ordinal, hits[i].distance) for i in range(hits.size())],
-        {"clusters": stats.clusters, "probed": stats.probed,
-         "row_groups_read": stats.row_groups_read, "rows_scored": stats.rows_scored},
+        {"clusters": stats.clusters, "probed": stats.probed, "blocks_read": stats.blocks_read,
+         "bytes_read": stats.bytes_read, "requests": stats.requests, "rows_scored": stats.rows_scored},
     )
 
 
@@ -124,7 +123,8 @@ cdef extern from "engine/vector_index_admission.hpp" namespace "opteryx::engine"
         uint32_t files_indexed
         uint32_t files_exact
         uint64_t clusters_probed
-        uint64_t row_groups_read
+        uint64_t index_bytes_read
+        uint64_t index_requests
         uint64_t candidates
         uint64_t rows_exact
 
@@ -157,9 +157,10 @@ cdef class VectorIndexAdmissionHandle:
     def __cinit__(self, list files, str query, unsigned long long embed_fn, uint32_t dims,
                   uint32_t k, uint32_t nprobe):
         """`files`: (fetch path, filter fetch path, physical rows, deleted ordinals, index
-        or None), where index = (vectors location, vectors bytes, centroids location,
-        centroids bytes, Authorization header for both - "" for none). The filter fetch path is how the WHERE's pass-1 plan names the
-        file (it may be signed separately); pass the fetch path when there is no WHERE."""
+        or None), where index = (index file location, file bytes, footer bytes,
+        Authorization header - "" for none). The filter fetch path is how the WHERE's
+        pass-1 plan names the file (it may be signed separately); pass the fetch path when
+        there is no WHERE."""
         from draken.interop.vector_sequence import vector_from_sequence
 
         if embed_fn == 0:
@@ -176,11 +177,10 @@ cdef class VectorIndexAdmissionHandle:
                 c_files[i].deleted.push_back(ordinal)
             c_files[i].indexed = index is not None
             if index is not None:
-                c_files[i].index.vectors = (<str>index[0]).encode("utf-8")
-                c_files[i].index.vectors_bytes = <uint64_t>index[1]
-                c_files[i].index.centroids = (<str>index[2]).encode("utf-8")
-                c_files[i].index.centroids_bytes = <uint64_t>index[3]
-                c_files[i].index.auth_header = (<str>index[4]).encode("utf-8")
+                c_files[i].index.path = (<str>index[0]).encode("utf-8")
+                c_files[i].index.file_bytes = <uint64_t>index[1]
+                c_files[i].index.footer_bytes = <uint64_t>index[2]
+                c_files[i].index.auth_header = (<str>index[3]).encode("utf-8")
             i += 1
         cdef Morsel one = Morsel()
         one.append_vector(b"q", vector_from_sequence([query], dtype="VARCHAR"))
@@ -200,8 +200,8 @@ cdef class VectorIndexAdmissionHandle:
         cdef const AdmissionCounts* c = &self.admission.counts()
         return {
             "files_indexed": c.files_indexed, "files_exact": c.files_exact,
-            "clusters_probed": c.clusters_probed, "index_row_groups_read": c.row_groups_read,
-            "candidates": c.candidates, "rows_exact": c.rows_exact,
+            "clusters_probed": c.clusters_probed, "index_bytes_read": c.index_bytes_read,
+            "index_requests": c.index_requests, "candidates": c.candidates, "rows_exact": c.rows_exact,
         }
 
     def set_predicate(self, NativeScanPlan plan, size_t fn, size_t ctx, list pred_col_to_p1,

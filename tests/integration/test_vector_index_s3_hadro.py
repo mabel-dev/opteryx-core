@@ -7,11 +7,11 @@ ranges; this proves the same reads against an S3 server that checks the SigV4 si
 on every request, so a URL that is mis-signed, mis-scoped or expired fails here as it
 would against AWS. Local disk is the oracle each time:
 
-  * the BUILD reads its data file through a presigned URL and writes byte-identical index
-    files;
-  * the SEARCH reads the centroids file and only the probed row groups of the vectors file
-    through presigned URLs, and answers exactly as the local search;
-  * compaction's CARRY reads its inputs' vectors files through presigned URLs and writes
+  * the BUILD reads its data file through a presigned URL and writes a byte-identical index
+    file;
+  * the SEARCH reads the index file through a presigned URL - its footer in one request,
+    then the blocks it needs - and answers exactly as the local search;
+  * compaction's CARRY reads its inputs' index files through presigned URLs and writes
     byte-identical outputs;
   * a URL signed with the wrong secret is refused by the server, and the read fails loud.
 """
@@ -58,10 +58,10 @@ def built(s3_root, tmp_path_factory):
     morsel = Morsel()
     morsel.append_vector("body", vector_from_sequence(texts, dtype="VARCHAR"))
     (local / "d.parquet").write_bytes(write_parquet(morsel, max_rows_per_row_group=256))
-    info = build_vector_index_local(str(local / "d.parquet"), "body", [], fn, dims,
-                                    str(local / "v.skene"), str(local / "c.skene"), flush_rows=32)
+    info = build_vector_index_local(str(local / "d.parquet"), "body", [], fn, dims, str(local / "i.vidx"),
+                                    flush_rows=32)
     (s3_root / BUCKET).mkdir(exist_ok=True)
-    for name in ("d.parquet", "v.skene", "c.skene"):
+    for name in ("d.parquet", "i.vidx"):
         shutil.copyfile(local / name, s3_root / BUCKET / name)
     return local, info
 
@@ -78,29 +78,29 @@ def test_the_build_reads_its_data_file_through_a_presigned_url(s3, built, tmp_pa
     local, _ = built
     fn, dims = _embed()
     url = _signed("d.parquet")
-    assert "X-Amz-Signature=" in url
-    build_vector_index_local(url, "body", [], fn, dims, str(tmp_path / "v"), str(tmp_path / "c"),
-                             flush_rows=32, data_bytes=_size(local, "d.parquet"))
-    assert (tmp_path / "v").read_bytes() == (local / "v.skene").read_bytes()
-    assert (tmp_path / "c").read_bytes() == (local / "c.skene").read_bytes()
+    build_vector_index_local(url, "body", [], fn, dims, str(tmp_path / "i.vidx"),
+                             data_bytes=_size(local, "d.parquet"), flush_rows=32)
+    assert (tmp_path / "i.vidx").read_bytes() == (local / "i.vidx").read_bytes()
 
 
-def test_the_search_reads_its_index_through_presigned_urls(s3, built):
+def test_the_search_reads_its_index_through_a_presigned_url(s3, built):
     local, info = built
     fn, dims = _embed()
 
-    def search(vectors, centroids, nprobe):
-        return search_vector_index_file(vectors, _size(local, "v.skene"), centroids, _size(local, "c.skene"),
-                                        QUERY, fn, dims, 10, nprobe, ROWS)
+    def search(path, nprobe):
+        return search_vector_index_file(path, info["file_bytes"], info["footer_bytes"], QUERY, fn, dims, 10,
+                                        nprobe, ROWS)
 
     for nprobe in (0, 2, info["clusters"]):              # 0 = exact (the default)
-        remote = search(_signed("v.skene"), _signed("c.skene"), nprobe)
-        assert remote == search(str(local / "v.skene"), str(local / "c.skene"), nprobe)
+        remote = search(_signed("i.vidx"), nprobe)
+        assert remote == search(str(local / "i.vidx"), nprobe)
         assert remote[0]                                           # it found something
+    # Exact: the footer in one request, the body in one more.
+    assert search(_signed("i.vidx"), 0)[1]["requests"] == 2
 
 
-def test_carry_reads_its_inputs_through_presigned_urls(s3, built, tmp_path):
-    local, _ = built
+def test_carry_reads_its_inputs_through_a_presigned_url(s3, built, tmp_path):
+    local, info = built
     _, dims = _embed()
 
     def carry(location, out):
@@ -110,13 +110,12 @@ def test_carry_reads_its_inputs_through_presigned_urls(s3, built, tmp_path):
         m.append_vector("$o", vector_from_sequence(list(reversed(range(ROWS))), dtype="INT64"))
         recorder.take(m)
         out.mkdir()
-        return carry_vector_index_local([(location, _size(local, "v.skene"), [], "")], [recorder], dims,
-                                        [str(out / "v")], [str(out / "c")], flush_rows=32)
+        return carry_vector_index_local([(location, info["file_bytes"], info["footer_bytes"], [], "")],
+                                        [recorder], dims, [str(out / "i.vidx")], flush_rows=32)
 
-    carry(_signed("v.skene"), tmp_path / "remote")
-    carry(str(local / "v.skene"), tmp_path / "local")
-    assert (tmp_path / "remote" / "v").read_bytes() == (tmp_path / "local" / "v").read_bytes()
-    assert (tmp_path / "remote" / "c").read_bytes() == (tmp_path / "local" / "c").read_bytes()
+    carry(_signed("i.vidx"), tmp_path / "remote")
+    carry(str(local / "i.vidx"), tmp_path / "local")
+    assert (tmp_path / "remote" / "i.vidx").read_bytes() == (tmp_path / "local" / "i.vidx").read_bytes()
 
 
 def test_a_url_signed_with_the_wrong_secret_is_refused(s3, built, monkeypatch):
@@ -125,10 +124,9 @@ def test_a_url_signed_with_the_wrong_secret_is_refused(s3, built, monkeypatch):
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "not-the-secret")
     reset_credential_cache()
     try:
-        bad = _signed("c.skene")
+        bad = _signed("i.vidx")
         with pytest.raises(RuntimeError, match="403|cannot read"):
-            search_vector_index_file(_signed("v.skene"), _size(local, "v.skene"), bad, _size(local, "c.skene"),
-                                     QUERY, fn, dims, 10, info["clusters"], ROWS)
+            search_vector_index_file(bad, info["file_bytes"], info["footer_bytes"], QUERY, fn, dims, 10, 0, ROWS)
     finally:
         monkeypatch.undo()
         reset_credential_cache()

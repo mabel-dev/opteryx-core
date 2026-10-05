@@ -3,39 +3,44 @@
 // Compaction never embeds (D-14). When it rewrites indexed files, each output's index is
 // built from the vectors its inputs' index files already hold: the compaction writer records,
 // for every output row, the (input file, input ordinal) it came from, and this
-// re-clusters those vectors into the output's own vectors and centroids files. No model.
+// re-clusters those vectors into the output's own index file. No model.
 //
-// Native end to end, called with the GIL released. Inputs are read row group by row group
-// through SkeneRangedFile (local, gs:// with a bearer header, or a presigned URL), never whole:
+// Native end to end, called with the GIL released. Inputs are read through VectorIndexFile
+// (local, gs:// with a bearer header, or a presigned URL) block by block in large parallel
+// range reads, never held whole:
 //
-//   pass 0  every input's `ordinal` column: which output rows have a vector (the carry
-//           candidates), and the INVARIANT — every indexed input row that is not deleted
-//           was written to exactly one output (a vector left behind is a row the compaction
-//           lost, and fails it). Output rows with no vector are rows the inputs did not
-//           index (null text, no defined cosine): they stay unindexed, as they were.
+//   pass 0  every input's ordinals: which output rows have a vector (the carry candidates),
+//           and the INVARIANT — every indexed input row that is not deleted was written to
+//           exactly one output (a vector left behind is a row the compaction lost, and fails
+//           it). Output rows with no vector are rows the inputs did not index (null text, no
+//           defined cosine): they stay unindexed, as they were.
 //   pass 1  the sampled candidates' vectors; train each output's centroids.
 //   pass 2  per output, the inputs it draws from: every carried vector, under its OUTPUT
-//           ordinal, through IvfFilesWriter — the write phase the embedding build uses.
+//           ordinal, through IvfIndexWriter — the write phase the embedding build uses.
 //
-// Deterministic: inputs are read in their given order and row groups in file order.
+// Each pass reads its inputs' bodies whole (a block holds its ordinals and vectors
+// together); the carry is maintenance, and bytes are cheap next to round trips.
+// Deterministic: inputs are read in their given order and blocks in file order.
 
 #pragma once
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-#include "engine/skene_ranged_file.hpp"
-#include "engine/vector_index_build.hpp"   // IvfFilesWriter, VectorIndexBuildResult, LocalBodyStream
+#include "engine/vector_index_file.hpp"
+#include "engine/vector_index_build.hpp"   // IvfIndexWriter, VectorIndexBuildResult, LocalIndexStream
 
 namespace opteryx::engine {
 
 struct CarryInput {
-    std::string           vectors;         // the input's vectors file: local path, gs:// or presigned URL
-    uint64_t              vectors_bytes = 0;
+    std::string           path;            // the input's index file: local path, gs:// or presigned URL
+    uint64_t              file_bytes = 0;
+    uint64_t              footer_bytes = 0;
     std::string           auth_header;     // Authorization for its remote reads; empty = none
     std::vector<uint32_t> deleted;         // ascending: its deleted ordinals at plan time
 };
@@ -58,56 +63,29 @@ namespace carry_detail {
 
 constexpr uint64_t kUnmapped = ~uint64_t{0};
 
-// The decoded columns of one vectors-file row group.
-struct VectorRows {
-    const uint16_t* embedding = nullptr;
-    const uint32_t* emb_sel = nullptr;
-    const uint32_t* ordinal = nullptr;
-    const uint32_t* ord_sel = nullptr;
-    uint32_t        rows = 0;
-};
-
-inline bool column_of(const CxxMorsel& m, const char* name, const DrakenVector** out) {
-    for (size_t i = 0; i < m.names.size(); ++i)
-        if (m.names[i] == name) { *out = &m.columns[i].view; return true; }
-    return false;
-}
-
-inline bool rows_of(const CxxMorsel& m, uint32_t dims, bool with_embedding, VectorRows* out, std::string* err) {
-    const DrakenVector* ord = nullptr;
-    if (!column_of(m, "ordinal", &ord) || ord->type != DRAKEN_UINT32) {
-        *err = "vector index carry: an input vectors file has no UINT32 `ordinal` column";
+inline bool open_input(const CarryInput& in, uint32_t dims, VectorIndexFile* file, std::string* err) {
+    if (!file->open(in.path, in.file_bytes, in.footer_bytes, in.auth_header, err)) return false;
+    if (file->dims() != dims) {
+        *err = "vector index carry: " + in.path + " holds " + std::to_string(file->dims()) +
+               "-dimensional vectors, the index is " + std::to_string(dims);
         return false;
     }
-    out->ordinal = static_cast<const uint32_t*>(ord->data);
-    out->ord_sel = ord->selection;
-    out->rows = ord->length;
-    if (!with_embedding) return true;
-    const DrakenVector* emb = nullptr;
-    if (!column_of(m, "embedding", &emb) || emb->type != DRAKEN_VECTOR_FP16 || emb->length != ord->length) {
-        *err = "vector index carry: an input vectors file has no fp16 `embedding` column";
-        return false;
-    }
-    out->embedding = static_cast<const uint16_t*>(emb->data);
-    out->emb_sel = emb->selection;
-    (void)dims;
     return true;
 }
 
 }  // namespace carry_detail
 
-// Re-cluster each output's carried vectors. `bodies[j]` receives output j's vectors body
-// (its prefix lands in results[j].vectors_prefix); a result with `empty` set carried no
-// vector and the caller abandons that body. Returns false with `err` on any failure,
-// including a broken carry invariant.
+// Re-cluster each output's carried vectors. `outs[j]` receives output j's index file; a
+// result with `empty` set carried no vector and the caller abandons that stream. Returns
+// false with `err` on any failure, including a broken carry invariant.
 inline bool carry_vector_index(const CarrySpec& spec, const std::vector<CarryOutput>& outputs,
-                               const std::vector<skene::OutputStream*>& bodies,
+                               const std::vector<skene::OutputStream*>& outs,
                                std::vector<VectorIndexBuildResult>* results, std::string* err) {
     using namespace carry_detail;
     const uint32_t n_in = static_cast<uint32_t>(spec.inputs.size());
     const uint32_t n_out = static_cast<uint32_t>(outputs.size());
     if (spec.dims == 0u || spec.flush_rows == 0u) { *err = "vector index carry: dims and flush_rows must be >= 1"; return false; }
-    if (bodies.size() != n_out) { *err = "vector index carry: one body per output"; return false; }
+    if (outs.size() != n_out) { *err = "vector index carry: one output stream per output"; return false; }
     results->assign(n_out, VectorIndexBuildResult());
 
     // ── The inverse of the writer's mapping: (input, ordinal) -> (output, output ordinal) ──
@@ -125,7 +103,7 @@ inline bool carry_vector_index(const CarrySpec& spec, const std::vector<CarryOut
             auto& w = where[k];
             if (ord >= w.size()) w.resize(static_cast<size_t>(ord) + 1u, kUnmapped);
             if (w[ord] != kUnmapped) {
-                *err = "vector index carry: input row " + std::to_string(ord) + " of " + spec.inputs[k].vectors +
+                *err = "vector index carry: input row " + std::to_string(ord) + " of " + spec.inputs[k].path +
                        " was written twice";
                 return false;
             }
@@ -141,27 +119,28 @@ inline bool carry_vector_index(const CarrySpec& spec, const std::vector<CarryOut
     std::vector<std::vector<uint32_t>> candidates(n_out);
     for (uint32_t k = 0; k < n_in; ++k) {
         const CarryInput& in = spec.inputs[k];
-        SkeneRangedFile file;
-        if (!file.open(in.vectors, in.vectors_bytes, {"ordinal"}, in.auth_header, err)) return false;
-        for (uint32_t g = 0; g < file.row_groups(); ++g) {
-            SkeneRangedFile::RowGroup rg;
-            if (!file.read(g, &rg, err)) return false;
-            VectorRows v;
-            if (!rows_of(rg.morsel, spec.dims, false, &v, err)) return false;
-            for (uint32_t i = 0; i < v.rows; ++i) {
-                const uint32_t ord = v.ordinal[v.ord_sel[i]];
+        VectorIndexFile file;
+        if (!open_input(in, spec.dims, &file, err)) return false;
+        VectorIndexReadStats stats;
+        std::string lost;
+        bool ok = file.for_each_block([&](const VectorIndexBlock& b) {
+            if (!lost.empty()) return;
+            for (uint32_t i = 0; i < b.rows; ++i) {
+                const uint32_t ord = b.ordinals[i];
                 const uint64_t at = mapped(k, ord);
                 if (at == kUnmapped) {
                     if (!std::binary_search(in.deleted.begin(), in.deleted.end(), ord)) {
-                        *err = "vector index carry: indexed row " + std::to_string(ord) + " of " + in.vectors +
+                        lost = "vector index carry: indexed row " + std::to_string(ord) + " of " + in.path +
                                " is live but was not written by the compaction; refusing to lose it";
-                        return false;
+                        return;
                     }
                     continue;
                 }
                 candidates[at >> 32].push_back(static_cast<uint32_t>(at));
             }
-        }
+        }, &stats, err);
+        if (!ok) return false;
+        if (!lost.empty()) { *err = lost; return false; }
     }
 
     // ── Pass 1: the samples; train ──
@@ -171,7 +150,7 @@ inline bool carry_vector_index(const CarrySpec& spec, const std::vector<CarryOut
     for (uint32_t j = 0; j < n_out; ++j) {
         std::sort(candidates[j].begin(), candidates[j].end());
         if (std::adjacent_find(candidates[j].begin(), candidates[j].end()) != candidates[j].end()) {
-            *err = "vector index carry: an input vectors file holds one ordinal twice";
+            *err = "vector index carry: an input index file holds one ordinal twice";
             return false;
         }
         try {
@@ -188,23 +167,21 @@ inline bool carry_vector_index(const CarrySpec& spec, const std::vector<CarryOut
         bool wanted = false;
         for (uint32_t j = 0; j < n_out; ++j) wanted |= feeds[j][k] && !plans[j].sample.empty();
         if (!wanted) continue;
-        SkeneRangedFile file;
-        if (!file.open(spec.inputs[k].vectors, spec.inputs[k].vectors_bytes, {"embedding", "ordinal"}, spec.inputs[k].auth_header, err)) return false;
-        for (uint32_t g = 0; g < file.row_groups(); ++g) {
-            SkeneRangedFile::RowGroup rg;
-            if (!file.read(g, &rg, err)) return false;
-            VectorRows v;
-            if (!rows_of(rg.morsel, spec.dims, true, &v, err)) return false;
-            for (uint32_t i = 0; i < v.rows; ++i) {
-                const uint64_t at = mapped(k, v.ordinal[v.ord_sel[i]]);
+        VectorIndexFile file;
+        if (!open_input(spec.inputs[k], spec.dims, &file, err)) return false;
+        VectorIndexReadStats stats;
+        bool ok = file.for_each_block([&](const VectorIndexBlock& b) {
+            for (uint32_t i = 0; i < b.rows; ++i) {
+                const uint64_t at = mapped(k, b.ordinals[i]);
                 if (at == kUnmapped) continue;
                 const uint32_t j = static_cast<uint32_t>(at >> 32);
                 auto s = sample_at[j].find(static_cast<uint32_t>(at));
                 if (s == sample_at[j].end()) continue;
                 std::memcpy(samples[j].data() + static_cast<size_t>(s->second) * spec.dims,
-                            v.embedding + static_cast<size_t>(v.emb_sel[i]) * spec.dims, spec.dims * 2u);
+                            b.vectors + static_cast<size_t>(i) * spec.dims, spec.dims * 2u);
             }
-        }
+        }, &stats, err);
+        if (!ok) return false;
     }
     std::vector<draken::ann::IvfCentroids> trained(n_out);
     for (uint32_t j = 0; j < n_out; ++j) {
@@ -226,28 +203,29 @@ inline bool carry_vector_index(const CarrySpec& spec, const std::vector<CarryOut
     for (uint32_t j = 0; j < n_out; ++j) {
         VectorIndexBuildResult& out = (*results)[j];
         if (trained[j].clusters == 0u) { out.empty = true; continue; }
-        IvfFilesWriter files(trained[j], spec.dims, spec.flush_rows);
-        if (!files.begin(bodies[j], &out, err)) return false;
+        IvfIndexWriter files(trained[j], spec.dims, spec.flush_rows);
+        files.begin(outs[j]);
         for (uint32_t k = 0; k < n_in; ++k) {
             if (!feeds[j][k]) continue;
-            SkeneRangedFile file;
-            if (!file.open(spec.inputs[k].vectors, spec.inputs[k].vectors_bytes, {"embedding", "ordinal"}, spec.inputs[k].auth_header, err)) return false;
-            for (uint32_t g = 0; g < file.row_groups(); ++g) {
-                SkeneRangedFile::RowGroup rg;
-                if (!file.read(g, &rg, err)) return false;
-                VectorRows v;
-                if (!rows_of(rg.morsel, spec.dims, true, &v, err)) return false;
-                for (uint32_t i = 0; i < v.rows; ++i) {
-                    const uint64_t at = mapped(k, v.ordinal[v.ord_sel[i]]);
+            VectorIndexFile file;
+            if (!open_input(spec.inputs[k], spec.dims, &file, err)) return false;
+            VectorIndexReadStats stats;
+            std::string failed;
+            bool ok = file.for_each_block([&](const VectorIndexBlock& b) {
+                if (!failed.empty()) return;
+                for (uint32_t i = 0; i < b.rows; ++i) {
+                    const uint64_t at = mapped(k, b.ordinals[i]);
                     if (at == kUnmapped || static_cast<uint32_t>(at >> 32) != j) continue;
-                    const uint16_t* row = v.embedding + static_cast<size_t>(v.emb_sel[i]) * spec.dims;
+                    const uint16_t* row = b.vectors + static_cast<size_t>(i) * spec.dims;
                     if (!draken::ann::ann_row_searchable(row, spec.dims)) {
-                        *err = "vector index carry: " + spec.inputs[k].vectors + " holds a vector with no defined cosine";
-                        return false;
+                        failed = "vector index carry: " + spec.inputs[k].path + " holds a vector with no defined cosine";
+                        return;
                     }
-                    if (!files.add(row, static_cast<uint32_t>(at), err)) return false;
+                    if (!files.add(row, static_cast<uint32_t>(at), &failed)) return;
                 }
-            }
+            }, &stats, err);
+            if (!ok) return false;
+            if (!failed.empty()) { *err = failed; return false; }
         }
         if (!files.finish(&out, err)) return false;
     }
@@ -256,58 +234,51 @@ inline bool carry_vector_index(const CarrySpec& spec, const std::vector<CarryOut
 
 // ── Output targets: local files, or GCS resumable sessions ──
 
-// Carry into local files: output j's vectors and centroids at `vectors[j]` / `centroids[j]`.
-// An output that carried nothing gets neither file. On failure no output file is left.
+// Carry into local files: output j's index at `paths[j]`. An output that carried nothing
+// gets no file. On failure no output file is left.
 inline bool carry_vector_index_local(const CarrySpec& spec, const std::vector<CarryOutput>& outputs,
-                                     const std::vector<std::string>& vectors,
-                                     const std::vector<std::string>& centroids,
+                                     const std::vector<std::string>& paths,
                                      std::vector<VectorIndexBuildResult>* results, std::string* err) {
-    if (vectors.size() != outputs.size() || centroids.size() != outputs.size()) {
-        *err = "vector index carry: one vectors and one centroids path per output";
-        return false;
-    }
-    std::vector<std::unique_ptr<LocalBodyStream>> owned;
-    std::vector<skene::OutputStream*> bodies;
-    for (const auto& path : vectors) {
-        owned.push_back(std::make_unique<LocalBodyStream>(path));
+    if (paths.size() != outputs.size()) { *err = "vector index carry: one path per output"; return false; }
+    std::vector<std::unique_ptr<LocalIndexStream>> owned;
+    std::vector<skene::OutputStream*> outs;
+    for (const auto& path : paths) {
+        owned.push_back(std::make_unique<LocalIndexStream>(path));
         if (!owned.back()->ok()) { *err = "vector index carry: cannot create " + owned.back()->partial; return false; }
-        bodies.push_back(owned.back().get());
+        outs.push_back(owned.back().get());
     }
-    if (!carry_vector_index(spec, outputs, bodies, results, err)) return false;
+    if (!carry_vector_index(spec, outputs, outs, results, err)) return false;
     for (size_t j = 0; j < outputs.size(); ++j) {
-        const VectorIndexBuildResult& r = (*results)[j];
-        if (r.empty) continue;
-        bool good = assemble_local(*owned[j], r.vectors_prefix, vectors[j], err) &&
-                    write_local_file(centroids[j], r.centroids, err);
-        if (!good) {
-            for (size_t i = 0; i <= j; ++i) { std::remove(vectors[i].c_str()); std::remove(centroids[i].c_str()); }
+        if ((*results)[j].empty) continue;
+        if (!owned[j]->commit(err)) {
+            for (size_t i = 0; i < j; ++i) std::remove(paths[i].c_str());
             return false;
         }
     }
     return true;
 }
 
-// Carry into GCS: output j's vectors BODY streams into the open resumable session
-// `sessions[j]`; the caller uploads each prefix and centroids file and composes. A session
-// whose output carried nothing, or any session after a failure, is left unfinished.
+// Carry into GCS: output j's index file streams into the open resumable session
+// `sessions[j]`, finished here. A session whose output carried nothing, or any session after
+// a failure, is left unfinished.
 inline bool carry_vector_index_to_sessions(const CarrySpec& spec, const std::vector<CarryOutput>& outputs,
                                            const std::vector<std::string>& sessions, size_t chunk_bytes,
                                            std::vector<VectorIndexBuildResult>* results, std::string* err) {
     if (sessions.size() != outputs.size()) { *err = "vector index carry: one session per output"; return false; }
     std::vector<std::unique_ptr<GcsResumableBody>> owned;
-    std::vector<skene::OutputStream*> bodies;
+    std::vector<skene::OutputStream*> outs;
     for (const auto& uri : sessions) {
         owned.push_back(std::make_unique<GcsResumableBody>(uri, chunk_bytes));
         if (!owned.back()->valid(err)) { *err = "vector index carry: " + *err; return false; }
-        bodies.push_back(owned.back().get());
+        outs.push_back(owned.back().get());
     }
-    if (!carry_vector_index(spec, outputs, bodies, results, err)) return false;
+    if (!carry_vector_index(spec, outputs, outs, results, err)) return false;
     for (size_t j = 0; j < outputs.size(); ++j) {
         const VectorIndexBuildResult& r = (*results)[j];
         if (r.empty) continue;
         skene::Status st = owned[j]->finish();
         if (!st.is_ok()) { *err = "vector index carry: " + st.message(); return false; }
-        if (owned[j]->committed() != r.vectors_body_bytes) {
+        if (owned[j]->committed() != r.file_bytes) {
             *err = "vector index carry: a session holds a different number of bytes than were written";
             return false;
         }

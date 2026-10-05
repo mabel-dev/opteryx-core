@@ -32,8 +32,10 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -70,10 +72,15 @@ struct AdmissionCounts {
     uint32_t files_indexed = 0;
     uint32_t files_exact = 0;        // uncovered files, searched exactly
     uint64_t clusters_probed = 0;
-    uint64_t row_groups_read = 0;    // vectors-file row groups fetched
+    uint64_t index_bytes_read = 0;   // of the index files' bodies
+    uint64_t index_requests = 0;     // range reads issued against index files
     uint64_t candidates = 0;         // rows admitted from indexed files
     uint64_t rows_exact = 0;         // rows admitted from uncovered files
 };
+
+// Indexed files are searched on this many threads at once: each search is a few remote
+// round trips, and the files' are independent.
+constexpr uint32_t kSearchThreads = 8u;
 
 class VectorIndexAdmission final : public RowAdmission {
   public:
@@ -102,23 +109,83 @@ class VectorIndexAdmission final : public RowAdmission {
         // dropped (or the dictionary skip proved empty) contributes no survivor.
         std::unordered_map<std::string, std::vector<uint8_t>> survivors;
         if (filtered_ && !run_pass1(footers, &survivors, err)) return false;
-        for (const AdmissionFile& f : files_) {
+        // Phase A, per file: its row-group extents, its filter survivors (minus deletes),
+        // and its masks' starting state. Phase B searches every indexed file, in parallel.
+        // Phase C admits what the searches found. The order of admission is the files'.
+        struct Prepared {
+            std::vector<uint64_t>           first;        // row group g starts at first[g]
+            std::vector<uint8_t>            bits;         // survivors by ordinal (filtered only)
+            uint64_t                        survivors_n = 0;
+            bool                            search = false;
+            std::vector<draken::ann::AnnHit> hits;
+            IndexSearchStats                stats;
+            std::string                     err;
+        };
+        std::vector<Prepared> prepared(files_.size());
+        for (size_t i = 0; i < files_.size(); ++i) {
+            const AdmissionFile& f = files_[i];
+            Prepared& p = prepared[i];
             auto fit = footers.find(f.path);
             if (fit == footers.end()) {
                 *err = "vector index search: " + f.path + " is not one of the scan's files";
                 return false;
             }
             const auto& groups = fit->second->row_groups;
-            std::vector<uint64_t> first(groups.size() + 1u, 0u);
-            for (size_t g = 0; g < groups.size(); ++g) first[g + 1u] = first[g] + static_cast<uint64_t>(groups[g].num_rows);
-            if (first.back() != f.rows) {
-                *err = "vector index search: " + f.path + " holds " + std::to_string(first.back()) +
+            p.first.assign(groups.size() + 1u, 0u);
+            for (size_t g = 0; g < groups.size(); ++g) p.first[g + 1u] = p.first[g] + static_cast<uint64_t>(groups[g].num_rows);
+            if (p.first.back() != f.rows) {
+                *err = "vector index search: " + f.path + " holds " + std::to_string(p.first.back()) +
                        " rows, its manifest entry " + std::to_string(f.rows);
                 return false;
             }
+            p.survivors_n = f.rows - f.deleted.size();
+            if (filtered_) {
+                auto sit = survivors.find(f.filter_path);
+                if (sit != survivors.end()) p.bits = std::move(sit->second);
+                p.bits.resize((f.rows + 7u) / 8u, 0u);
+                for (uint32_t ordinal : f.deleted)
+                    if (ordinal < f.rows) p.bits[ordinal >> 3] &= static_cast<uint8_t>(~(1u << (ordinal & 7u)));
+                p.survivors_n = 0;
+                for (uint8_t b : p.bits) p.survivors_n += static_cast<uint64_t>(__builtin_popcount(b));
+            }
+            p.search = f.indexed && searchable && p.survivors_n > 0u;
+        }
+
+        // Phase B: the searches, kSearchThreads at a time.
+        {
+            std::vector<size_t> todo;
+            for (size_t i = 0; i < files_.size(); ++i) if (prepared[i].search) todo.push_back(i);
+            std::atomic<size_t> next{0};
+            auto work = [&]() {
+                for (size_t t = next.fetch_add(1); t < todo.size(); t = next.fetch_add(1)) {
+                    const size_t i = todo[t];
+                    const AdmissionFile& f = files_[i];
+                    Prepared& p = prepared[i];
+                    search_index_file(f.index, q.data(), dims_, k_, nprobe, f.rows, f.deleted,
+                                      filtered_ ? p.bits.data() : nullptr, &p.hits, &p.stats, &p.err);
+                }
+            };
+            const uint32_t threads = static_cast<uint32_t>(std::min<size_t>(kSearchThreads, todo.size()));
+            if (threads <= 1u) {
+                work();
+            } else {
+                std::vector<std::thread> pool;
+                for (uint32_t t = 0; t < threads; ++t) pool.emplace_back(work);
+                for (auto& th : pool) th.join();
+            }
+            for (size_t i : todo)
+                if (!prepared[i].err.empty()) { *err = prepared[i].err; return false; }
+        }
+
+        // Phase C: admit.
+        for (size_t i = 0; i < files_.size(); ++i) {
+            const AdmissionFile& f = files_[i];
+            Prepared& p = prepared[i];
+            const std::vector<uint64_t>& first = p.first;
+            const size_t n_groups = first.size() - 1u;
             FileMasks& fm = masks_[f.path];
-            fm.kind.assign(groups.size(), kAll);
-            fm.masks.assign(groups.size(), {});
+            fm.kind.assign(n_groups, kAll);
+            fm.masks.assign(n_groups, {});
             auto set_row = [&](uint64_t ordinal) {
                 const size_t g = static_cast<size_t>(
                     std::upper_bound(first.begin(), first.end(), ordinal) - first.begin()) - 1u;
@@ -128,40 +195,21 @@ class VectorIndexAdmission final : public RowAdmission {
                 }
                 fm.masks[g][static_cast<size_t>(ordinal - first[g])] = 1u;
             };
-            // The filter's survivors, ordinal-indexed, minus the deleted rows (nullptr
-            // when there is no filter: every row is a candidate).
-            const std::vector<uint8_t>* admitted = nullptr;
-            std::vector<uint8_t> none;
-            uint64_t survivors_n = f.rows - f.deleted.size();
-            if (filtered_) {
-                auto sit = survivors.find(f.filter_path);
-                std::vector<uint8_t>& bits = sit == survivors.end() ? none : sit->second;
-                bits.resize((f.rows + 7u) / 8u, 0u);
-                for (uint32_t ordinal : f.deleted)
-                    if (ordinal < f.rows) bits[ordinal >> 3] &= static_cast<uint8_t>(~(1u << (ordinal & 7u)));
-                survivors_n = 0;
-                for (uint8_t b : bits) survivors_n += static_cast<uint64_t>(__builtin_popcount(b));
-                admitted = &bits;
-            }
             if (f.indexed) {
                 ++counts_.files_indexed;
-                fm.kind.assign(groups.size(), kNone);
-                if (!searchable || survivors_n == 0) continue;
-                std::vector<draken::ann::AnnHit> hits;
-                IndexSearchStats stats;
-                if (!search_index_file(f.index, q.data(), dims_, k_, nprobe, f.rows, f.deleted,
-                                       admitted == nullptr ? nullptr : admitted->data(), &hits, &stats, err))
-                    return false;
-                counts_.clusters_probed += stats.probed;
-                counts_.row_groups_read += stats.row_groups_read;
-                counts_.candidates += hits.size();
-                for (const auto& h : hits) set_row(h.ordinal);
+                fm.kind.assign(n_groups, kNone);
+                if (!p.search) continue;
+                counts_.clusters_probed += p.stats.probed;
+                counts_.index_bytes_read += p.stats.bytes_read;
+                counts_.index_requests += p.stats.requests;
+                counts_.candidates += p.hits.size();
+                for (const auto& h : p.hits) set_row(h.ordinal);
             } else if (filtered_) {
                 ++counts_.files_exact;
-                counts_.rows_exact += survivors_n;
-                fm.kind.assign(groups.size(), kNone);
+                counts_.rows_exact += p.survivors_n;
+                fm.kind.assign(n_groups, kNone);
                 for (uint64_t ordinal = 0; ordinal < f.rows; ++ordinal)
-                    if ((*admitted)[ordinal >> 3] >> (ordinal & 7u) & 1u) set_row(ordinal);
+                    if (p.bits[ordinal >> 3] >> (ordinal & 7u) & 1u) set_row(ordinal);
             } else {
                 ++counts_.files_exact;
                 counts_.rows_exact += f.rows - f.deleted.size();

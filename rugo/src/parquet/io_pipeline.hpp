@@ -231,6 +231,11 @@ struct MorselRef {
     // estimate this result holds on the pipeline's ledger, released by the
     // consumer's pop (try_get_result / wait_and_get_result). 0 = budget off.
     int64_t charged_bytes = 0;
+    // Row identity (ParquetIOPipeline::set_report_kept_rows): one byte per row of the
+    // row group, 1 = the row is in this result's non-predicate columns (row mask, page
+    // pruning and the worker prefilter's survivors combined). Empty = every row. Filled
+    // only when the pipeline was asked; a scan addressing rows numbers them from it.
+    std::vector<uint8_t> kept_rows;
 
     MorselRef() = default;
     MorselRef(const MorselRef&) = delete;
@@ -1866,6 +1871,8 @@ class ParquetIOPipeline {
     // scan — predicate columns decode first, the rest decode for survivors only
     // (see the worker). Off for latmat pass 1, which wants full columns + a mask.
     bool prefilter_ = false;
+    // Row identity: record each result's kept rows (MorselRef::kept_rows).
+    bool report_kept_rows_ = false;
     std::atomic<uint64_t> prefilter_rows_in_{0};
     std::atomic<uint64_t> prefilter_rows_out_{0};
 
@@ -3379,9 +3386,16 @@ class ParquetIOPipeline {
             // declines) the other columns decode unmasked and the consumer runs
             // the same program over the whole row group.
             const bool prefilter = prefilter_ && pass1_pred_.fn != nullptr;
+            // Row identity: the row-group rows the non-predicate columns hold.
+            const size_t mask_rows = !item.row_mask.empty() ? item.row_mask.size()
+                                                            : pp.row_mask.size();
+            auto record_kept = [&](const uint8_t* m, size_t n) {
+                if (report_kept_rows_ && m != nullptr) result.kept_rows.assign(m, m + n);
+            };
             if (!prefilter) {
                 for (size_t i = 0; i < ncols_total && !result.empty_filtered; ++i)
                     if (!decode_col(i, mask_ptr)) break;
+                record_kept(mask_ptr, mask_rows);
             } else {
                 if (!item.row_mask.empty())
                     throw std::logic_error("scan prefilter armed on a row-masked work item");
@@ -3431,6 +3445,8 @@ class ParquetIOPipeline {
                     if (!result.empty_filtered)
                         for (size_t i = 0; i < ncols_total; ++i)
                             if (!is_pred[i] && !decode_col(i, d_mask_ptr)) break;
+                    record_kept(d_mask_ptr, d_mask_ptr == d_mask.data() ? d_mask.size()
+                                                                        : mask_rows);
                 }
             }
         } catch (const std::exception& e) {
@@ -3783,6 +3799,9 @@ class ParquetIOPipeline {
     // Set once before submit; requires set_pass1_predicate.
     void set_prefilter(bool on) { prefilter_ = on; }
     bool prefilter() const { return prefilter_; }
+    // Row identity: report which row-group rows each result holds (MorselRef::kept_rows).
+    // Set once before submit.
+    void set_report_kept_rows(bool on) { report_kept_rows_ = on; }
     uint64_t prefilter_rows_in() const { return prefilter_rows_in_.load(std::memory_order_relaxed); }
     uint64_t prefilter_rows_out() const { return prefilter_rows_out_.load(std::memory_order_relaxed); }
 

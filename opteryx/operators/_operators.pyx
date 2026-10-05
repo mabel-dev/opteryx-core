@@ -461,6 +461,9 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void arm_latmat_topn_boundary(size_t p, size_t idx) except +
         int64_t topn_boundary_skipped(size_t idx) except +
         void set_native_scan_admission(size_t p, RowAdmission* admission) except +
+        void set_native_scan_row_identity(size_t p, cppvector[string] files,
+                                          cppvector[uint8_t] kinds,
+                                          cppvector[string] names) except +
         void set_sort_drop_unsearchable(size_t p) except +
         void set_native_postgres_scan_source(size_t p, const PgScanSpec* spec)
         void set_native_jsonl_scan_source(size_t p, const JsonlScanSpec* spec)
@@ -3005,7 +3008,7 @@ cdef class NativePlan:
         """Source = the fully-native parquet scan (NativeParquetScanSource): workers
         pull decoded row groups straight from the rugo IO pipeline — no GIL
         trampoline, no per-morsel thread attach. Only reachable when the plan-time
-        gate (``native_scan_supported``) proved every projected column eligible.
+        gate (``native_scan_rejection``) proved every projected column eligible.
         The Source borrows every pointer from ``splan``; this plan holds it alive
         and ``close_scan_plans`` tears it down only after the driver is done."""
         self.scan_plans.append(splan)
@@ -3545,6 +3548,22 @@ cdef class NativePlan:
         self.held.append(holder)
         self.vector_admission_scans.append((scan_identity, holder))
         self._e.set_native_scan_admission(p, <RowAdmission*><void*>admission)
+
+    def set_native_scan_row_identity(self, size_t p, list files, list kinds, list names):
+        """Make pipeline `p`'s native parquet scan append row identity after its read
+        set (opteryx/constants/row_identity.py): `files` the scan's file list in order as
+        fetch paths, `kinds` 0 ($file) or 1 ($ordinal) per appended column, `names` their
+        column names."""
+        cdef cppvector[string] c_files
+        cdef cppvector[uint8_t] c_kinds
+        cdef cppvector[string] c_names
+        for f in files:
+            c_files.push_back((<str>f).encode("utf-8"))
+        for k in kinds:
+            c_kinds.push_back(<uint8_t>k)
+        for n in names:
+            c_names.push_back((<str>n).encode("utf-8"))
+        self._e.set_native_scan_row_identity(p, c_files, c_kinds, c_names)
 
     def set_native_scan_deletes(self, size_t p, size_t admission, object holder):
         """Give pipeline `p`'s native parquet scan its merge-on-read deletes (a
