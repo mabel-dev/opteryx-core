@@ -25,7 +25,7 @@ precision/scale) must equal an explicit expected value — a silently rescaled d
 or a unit-shifted timestamp fails even when the raw payload coincides. Comparison is
 order-insensitive (a filtered/concurrent scan legitimately reorders row groups).
 
-Every scan must also select NativeParquetScanSource and record no residual reason.
+Every scan must also select NativeParquetScanSource (a refused scan raises).
 
 See docs/WP02_PREDICATE_RELOCATION_DESIGN.md for the column-role model this composes
 with.
@@ -45,10 +45,6 @@ import pytest
 from draken.draken_native import DrakenType, LogicalKind
 
 import opteryx
-import opteryx.config as config
-
-sys.path.insert(1, os.path.join(os.path.dirname(__file__), "../../../dev"))
-import instrument_engine as IE  # noqa: E402
 
 _UTC = datetime.timezone.utc
 
@@ -128,8 +124,6 @@ def _drain(sql):
 def _assert_native(session):
     assert list(session.telemetry["scan_sources"].values()) == ["NativeParquetScanSource"], (
         session.telemetry["scan_sources"])
-    assert session.telemetry.get("scan_residual_reasons", {}) == {}, (
-        session.telemetry["scan_residual_reasons"])
 
 
 def _assert_sig(sig, expected_sig):
@@ -795,26 +789,6 @@ def test_projected_uint_now_native(tmp_path):
     by the A1 suite test_wp_a1_native_int_widths_scan; here it is projection-only.)"""
     cols = {"u": (pa.uint32(), list(range(200))), "n": (pa.int64(), list(range(200)))}
     _check(tmp_path, cols, "u, n", {"u": _UINT32, "n": _INT64})
-
-
-# ── instrumentation: zero-Python on the admitted decimal/timestamp scan ──────
-
-def test_instrumentation_decimal_timestamp_zero_gil(tmp_path, monkeypatch):
-    cols = {"d": (pa.decimal128(18, 4), _decimals(18, 4)),
-            "t": (pa.timestamp("us"), _timestamps())}
-    ds = _write(str(tmp_path / "instr"), cols)
-    sql = "SELECT d, t FROM '%s'" % ds
-
-    monkeypatch.setattr(config, "OPTERYX_INSTRUMENT_ENGINE", True)
-    session = opteryx.session()
-    for _ in session.execute_to_morsels(sql):
-        pass
-    td = session.telemetry
-
-    assert list(td["scan_sources"].values()) == ["NativeParquetScanSource"]
-    assert td["gil_held_ns"] == 0
-    assert td.get("worker_gil_sites", []) == []
-    IE.assert_native_worker_purity(td, whitelist=())
 
 
 if __name__ == "__main__":

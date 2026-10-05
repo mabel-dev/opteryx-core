@@ -2,6 +2,7 @@
 #include "../../declared_parse.hpp"   // explicit_schema strict per-value parse (shared with JSONL)
 #include "../../predicate_literal.hpp" // predicate literal vs column type contract (shared with JSONL)
 #include "csv_scan.hpp"
+#include "../../chunk_limit.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -179,14 +180,24 @@ static void bit_copy(uint8_t* dst, size_t dst_bit_offset,
     }
 }
 
+// One piece of the body, at most kMaxChunkBytes long, starting at a row start and
+// (unless it is the last) ending one past a '\n' outside any quoted field. Every
+// position the parser stores is a uint32_t offset from its chunk's base, so a body
+// over 4 GiB is walked chunk by chunk; a body of at most 4 GiB is one chunk.
+struct Chunk {
+    const uint8_t* base;
+    size_t         len;
+};
+
 // ---------------------------------------------------------------------------
 // sniff_csv_column_types — scalar FSM, up to ctx.sniff_sample_size non-null
 // values per column. Returns one DrakenType per entry in proj_ordinals.
+// Walks the chunks in order with one FSM: each chunk starts at a row start, so
+// the values sampled are the first ones in the body, as for a single buffer.
 // ---------------------------------------------------------------------------
 
 static std::vector<DrakenType> sniff_csv_column_types(
-    const uint8_t*               body,
-    size_t                       body_len,
+    const std::vector<Chunk>&    chunks,
     const std::vector<uint32_t>& proj_ordinals,
     const std::vector<uint8_t>&  declared,   // 1 == caller declared this column's type
     const CsvParseContext&       ctx)
@@ -206,9 +217,10 @@ static std::vector<DrakenType> sniff_csv_column_types(
         }
     }
 
-    if (np == 0 || body_len == 0) return types;
+    if (np == 0) return types;
 
     std::vector<uint8_t> scratch;
+    const uint8_t* body = nullptr;   // the chunk being walked; field_start indexes it
 
     auto widen = [](DrakenType cur, const uint8_t* ptr, uint32_t len) -> DrakenType {
         if (cur == DRAKEN_VARCHAR) return DRAKEN_VARCHAR;
@@ -272,78 +284,83 @@ static std::vector<DrakenType> sniff_csv_column_types(
             if (types[i] != DRAKEN_VARCHAR && seen[i] < ctx.sniff_sample_size) { done = false; break; }
     };
 
-    for (size_t i = 0; i < body_len && !done; ++i) {
-        const uint8_t c = body[i];
+    for (size_t k = 0; k < chunks.size() && !done; ++k) {
+        body = chunks[k].base;
+        const size_t body_len = chunks[k].len;
+        field_start = 0;
+        for (size_t i = 0; i < body_len && !done; ++i) {
+            const uint8_t c = body[i];
 
-        if (cr_ended) {
-            if (c == '\n') { end_row(); field_start = static_cast<uint32_t>(i + 1); }
-            cr_ended = false;
-            continue;
-        }
+            if (cr_ended) {
+                if (c == '\n') { end_row(); field_start = static_cast<uint32_t>(i + 1); }
+                cr_ended = false;
+                continue;
+            }
 
-        switch (state) {
-            case S::FIELD_START:
-                if (c == '"') {
-                    was_quoted = true;
-                    field_start = static_cast<uint32_t>(i + 1);
-                    state = S::QUOTED;
-                } else if (c == ctx.delimiter) {
-                    process_field(static_cast<uint32_t>(i));
-                    field_start = static_cast<uint32_t>(i + 1);
-                } else if (c == '\n') {
-                    process_field(static_cast<uint32_t>(i));
-                    end_row();
-                    field_start = static_cast<uint32_t>(i + 1);
-                } else if (c == '\r') {
-                    if (i + 1 < body_len && body[i + 1] == '\n') {
+            switch (state) {
+                case S::FIELD_START:
+                    if (c == '"') {
+                        was_quoted = true;
+                        field_start = static_cast<uint32_t>(i + 1);
+                        state = S::QUOTED;
+                    } else if (c == ctx.delimiter) {
                         process_field(static_cast<uint32_t>(i));
-                        cr_ended = true;
-                    }
-                } else {
-                    state = S::UNQUOTED;
-                }
-                break;
-
-            case S::UNQUOTED:
-                if (c == ctx.delimiter) {
-                    process_field(static_cast<uint32_t>(i));
-                    field_start = static_cast<uint32_t>(i + 1);
-                } else if (c == '\n') {
-                    process_field(static_cast<uint32_t>(i));
-                    end_row();
-                    field_start = static_cast<uint32_t>(i + 1);
-                } else if (c == '\r') {
-                    if (i + 1 < body_len && body[i + 1] == '\n') {
+                        field_start = static_cast<uint32_t>(i + 1);
+                    } else if (c == '\n') {
                         process_field(static_cast<uint32_t>(i));
-                        cr_ended = true;
-                    }
-                }
-                break;
-
-            case S::QUOTED:
-                if (c == '"') { quote_close = static_cast<uint32_t>(i); state = S::DQ_PENDING; }
-                break;
-
-            case S::DQ_PENDING:
-                if (c == '"') { has_escape = true; state = S::QUOTED; }
-                else if (c == ctx.delimiter) {
-                    process_field(quote_close);
-                    field_start = static_cast<uint32_t>(i + 1);
-                } else if (c == '\n') {
-                    process_field(quote_close);
-                    end_row();
-                    field_start = static_cast<uint32_t>(i + 1);
-                } else if (c == '\r') {
-                    if (i + 1 < body_len && body[i + 1] == '\n') {
-                        process_field(quote_close);
-                        cr_ended = true;
+                        end_row();
+                        field_start = static_cast<uint32_t>(i + 1);
+                    } else if (c == '\r') {
+                        if (i + 1 < body_len && body[i + 1] == '\n') {
+                            process_field(static_cast<uint32_t>(i));
+                            cr_ended = true;
+                        }
                     } else {
                         state = S::UNQUOTED;
                     }
-                } else {
-                    state = S::UNQUOTED;
-                }
-                break;
+                    break;
+
+                case S::UNQUOTED:
+                    if (c == ctx.delimiter) {
+                        process_field(static_cast<uint32_t>(i));
+                        field_start = static_cast<uint32_t>(i + 1);
+                    } else if (c == '\n') {
+                        process_field(static_cast<uint32_t>(i));
+                        end_row();
+                        field_start = static_cast<uint32_t>(i + 1);
+                    } else if (c == '\r') {
+                        if (i + 1 < body_len && body[i + 1] == '\n') {
+                            process_field(static_cast<uint32_t>(i));
+                            cr_ended = true;
+                        }
+                    }
+                    break;
+
+                case S::QUOTED:
+                    if (c == '"') { quote_close = static_cast<uint32_t>(i); state = S::DQ_PENDING; }
+                    break;
+
+                case S::DQ_PENDING:
+                    if (c == '"') { has_escape = true; state = S::QUOTED; }
+                    else if (c == ctx.delimiter) {
+                        process_field(quote_close);
+                        field_start = static_cast<uint32_t>(i + 1);
+                    } else if (c == '\n') {
+                        process_field(quote_close);
+                        end_row();
+                        field_start = static_cast<uint32_t>(i + 1);
+                    } else if (c == '\r') {
+                        if (i + 1 < body_len && body[i + 1] == '\n') {
+                            process_field(quote_close);
+                            cr_ended = true;
+                        } else {
+                            state = S::UNQUOTED;
+                        }
+                    } else {
+                        state = S::UNQUOTED;
+                    }
+                    break;
+            }
         }
     }
 
@@ -739,7 +756,8 @@ static void stream_build_range(
 
 static ParsedCsvColumn finalize_col_buf(
     std::vector<ColBuf>& thread_bufs,
-    DrakenType           type)
+    DrakenType           type,
+    const std::string&   name)
 {
     ParsedCsvColumn pc;
     pc.type = type;
@@ -854,6 +872,11 @@ static ParsedCsvColumn finalize_col_buf(
     pc.is_string = true;
     size_t total_arena = 0;
     for (const auto& b : thread_bufs) total_arena += b.arena.size();
+    // A string slot addresses its bytes with a uint32_t arena offset.
+    if (total_arena > UINT32_MAX)
+        throw std::length_error("read_csv: column '" + name + "' holds " +
+                                std::to_string(total_arena) + " bytes of string values; a "
+                                "column holds at most " + std::to_string(UINT32_MAX) + " (4 GiB)");
 
     pc.slots = static_cast<DrakenStringSlot*>(
         draken_malloc(static_cast<size_t>(total) * sizeof(DrakenStringSlot)));
@@ -965,10 +988,55 @@ StreamResult build_columns_streaming(
         req_declared_names[r] = it->second;
     }
 
+    // Cut the body into chunks and each chunk into thread ranges. A chunk's window is
+    // the next kMaxChunkBytes; its safe row-boundary splits (outside quoted fields) are
+    // both the thread splits and, when the window is not the rest of the body, the cut:
+    // the chunk ends one past the window's last split, and the next window starts there.
+    size_t hw = std::thread::hardware_concurrency();
+    if (hw == 0) hw = 1;
+    const size_t nt = max_threads ? std::min(max_threads, hw) : hw;
+
+    struct Range { const uint8_t* base; size_t start; size_t end; };
+    std::vector<Chunk> chunks;
+    std::vector<Range> ranges;
+    size_t from = 0;
+    do {
+        const uint8_t* base   = body + from;
+        const size_t   rest   = body_len - from;
+        const size_t   window = std::min(rest, rugo::kMaxChunkBytes);
+        const std::vector<uint32_t> splits = find_safe_splits_parallel(base, window, ctx, nt);
+        size_t len = window;
+        if (window < rest) {
+            if (splits.empty())
+                throw std::length_error(
+                    "read_csv: the row at byte " + std::to_string(header_offset + from) +
+                    " is longer than " + std::to_string(rugo::kMaxChunkBytes) +
+                    " bytes (4 GiB), the most that can be parsed at once");
+            len = static_cast<size_t>(splits.back()) + 1;
+        }
+        chunks.push_back({base, len});
+
+        if (splits.size() < 2 || nt <= 1) {
+            ranges.push_back({base, 0, len});
+        } else {
+            const size_t nt_c = std::min(nt, splits.size());
+            size_t prev_end = 0;
+            for (size_t t = 0; t < nt_c; ++t) {
+                const size_t split_idx = ((t + 1) * splits.size() / nt_c) - 1;
+                const size_t split_pos = splits[split_idx];
+                ranges.push_back({base, prev_end, split_pos + 1});
+                prev_end = split_pos + 1;
+            }
+            if (prev_end < len)
+                ranges.back().end = len;
+        }
+        from += len;
+    } while (from < body_len);
+
     // Sniff every requested column — a predicate-only column included, because its
     // predicate's literal is checked against the type below.
     std::vector<DrakenType> req_types =
-        sniff_csv_column_types(body, body_len, request_ordinals, req_declared, ctx);
+        sniff_csv_column_types(chunks, request_ordinals, req_declared, ctx);
     for (size_t r = 0; r < n_req; ++r)
         if (req_declared[r]) req_types[r] = req_declared_types[r].type;
 
@@ -1031,35 +1099,10 @@ StreamResult build_columns_streaming(
         }
     }
 
-    // Find safe row-boundary splits for threading
-    size_t hw = std::thread::hardware_concurrency();
-    if (hw == 0) hw = 1;
-    size_t nt = max_threads ? std::min(max_threads, hw) : hw;
-
-    const std::vector<uint32_t> splits = find_safe_splits_parallel(body, body_len, ctx, nt);
-
-    struct Range { size_t start; size_t end; };
-    std::vector<Range> ranges;
-
-    if (splits.size() < 2 || nt <= 1) {
-        ranges.push_back({0, body_len});
-        nt = 1;
-    } else {
-        nt = std::min(nt, splits.size());
-        size_t prev_end = 0;
-        for (size_t t = 0; t < nt; ++t) {
-            const size_t split_idx = ((t + 1) * splits.size() / nt) - 1;
-            const size_t split_pos = splits[split_idx];
-            ranges.push_back({prev_end, split_pos + 1});
-            prev_end = split_pos + 1;
-        }
-        if (prev_end < body_len)
-            ranges.back().end = body_len;
-    }
-
-    // Allocate per-thread ColBufs: [thread][proj_col]
-    std::vector<std::vector<ColBuf>> thread_bufs(nt);
-    for (size_t t = 0; t < nt; ++t) {
+    // Allocate per-range ColBufs: [range][proj_col]
+    const size_t n_ranges = ranges.size();
+    std::vector<std::vector<ColBuf>> thread_bufs(n_ranges);
+    for (size_t t = 0; t < n_ranges; ++t) {
         thread_bufs[t].reserve(n_proj);
         for (size_t c = 0; c < n_proj; ++c) {
             if (is_declared[c])
@@ -1076,18 +1119,18 @@ StreamResult build_columns_streaming(
 
     auto run_thread = [&](size_t t) {
         stream_build_range(
-            body, ranges[t].start, ranges[t].end,
+            ranges[t].base, ranges[t].start, ranges[t].end,
             ctx, request_ordinals, proj_idx_map, preds_for_req, preds,
             proj_col_names, thread_bufs[t]);
     };
 
-    if (nt <= 1) {
+    if (n_ranges <= 1) {
         run_thread(0);
     } else {
-        BS::thread_pool<> pool(nt);
+        BS::thread_pool<> pool(std::min(nt, n_ranges));
         std::vector<std::future<void>> futs;
-        futs.reserve(nt);
-        for (size_t t = 0; t < nt; ++t)
+        futs.reserve(n_ranges);
+        for (size_t t = 0; t < n_ranges; ++t)
             futs.push_back(pool.submit_task([&, t]() { run_thread(t); }));
         // Drain every future before propagating -- a thread_build_range task
         // can throw on a type mismatch (see commit_row); if we rethrow after
@@ -1106,19 +1149,26 @@ StreamResult build_columns_streaming(
         if (first_exc) std::rethrow_exception(first_exc);
     }
 
-    // Count survivors and finalize
+    // Count survivors and finalize. A column is one draken vector, whose length is
+    // uint32_t.
     if (n_proj > 0) {
-        for (size_t t = 0; t < nt; ++t)
-            result.num_rows += thread_bufs[t][0].n;
+        size_t rows = 0;
+        for (size_t t = 0; t < n_ranges; ++t)
+            rows += thread_bufs[t][0].n;
+        if (rows > UINT32_MAX)
+            throw std::length_error("read_csv: " + std::to_string(rows) +
+                                    " rows in one read; a column holds at most " +
+                                    std::to_string(UINT32_MAX));
+        result.num_rows = static_cast<uint32_t>(rows);
     }
 
     result.columns.resize(n_proj);
     for (size_t c = 0; c < n_proj; ++c) {
         std::vector<ColBuf> col_bufs;
-        col_bufs.reserve(nt);
-        for (size_t t = 0; t < nt; ++t)
+        col_bufs.reserve(n_ranges);
+        for (size_t t = 0; t < n_ranges; ++t)
             col_bufs.push_back(std::move(thread_bufs[t][c]));
-        result.columns[c] = finalize_col_buf(col_bufs, col_types[c]);
+        result.columns[c] = finalize_col_buf(col_bufs, col_types[c], proj_col_names[c]);
     }
 
     return result;

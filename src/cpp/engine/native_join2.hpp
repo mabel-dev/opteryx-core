@@ -368,32 +368,7 @@ struct Join2BuildGlobal : GlobalSinkState {
         csr.append_probe_matches(key, probe_row, build_out, probe_out);
     }
     size_t probe_row_count(uint64_t key) const { return csr.row_count_for(key); }
-
-#ifdef OPTERYX_SWEEP_JOIN_PREFETCH
-    // ARCH SWEEP SWITCH (temporary, 2026-10-04, docs/ARCH_AWARE_PERFORMANCE_TEST_PLAN.md
-    // C5 / D2: re-testing the software-prefetch ban at the join probe, which it was
-    // never measured at). Pipelined like Pivot's probe: prefetch the off[] entry of
-    // the row 2*D ahead, then — that entry now cached — the hashes[] run of the row
-    // D ahead. Answers are unchanged (hints only). DELETE once banked; the ban
-    // stands for shipped code.
-    template <class H>
-    void probe_prefetch(const H& rowh, size_t i, size_t n) const {
-        constexpr size_t D = OPTERYX_SWEEP_JOIN_PREFETCH;
-        if (!csr.built) return;
-        if (i + 2 * D < n) __builtin_prefetch(csr.off.data() + (static_cast<size_t>(rowh[i + 2 * D]) & csr.mask));
-        if (i + D < n) {
-            const size_t b = static_cast<size_t>(rowh[i + D]) & csr.mask;
-            __builtin_prefetch(csr.hashes.data() + csr.off[b]);
-        }
-    }
-#endif
 };
-
-#ifdef OPTERYX_SWEEP_JOIN_PREFETCH
-#define OPTERYX_JOIN_PREFETCH(g, rowh, i, n) (g).probe_prefetch((rowh), (i), (n))
-#else
-#define OPTERYX_JOIN_PREFETCH(g, rowh, i, n) ((void)0)
-#endif
 
 // Runs `fn(0..nt-1)`, the calling thread taking tid 0, and joins. finalize() is
 // called once, on the executor's driver thread, with every pipeline worker already
@@ -1410,7 +1385,6 @@ struct Join2ProbeOperator : Operator {
 
         while (st.row < n) {
             uint32_t row = st.row;
-            OPTERYX_JOIN_PREFETCH(g, st.rowh, row, n);
             bool any_null = false;
             if (keys_nullable) {
                 for (size_t k : probe_key_idx) {
@@ -1919,7 +1893,6 @@ struct SemiAntiProbeOperator : Join2ProbeOperator, EmitSubset {
 
         for (uint32_t i = 0; i < n; ++i) {
             sel[i] = i;
-            if (residual_fn == nullptr && !build_empty) OPTERYX_JOIN_PREFETCH(g, rowh, i, n);
             bool any_null = false;
             if (keys_nullable) {
                 for (size_t k : probe_key_idx) {
@@ -2051,7 +2024,6 @@ struct SemiAntiProbeOperator : Join2ProbeOperator, EmitSubset {
                 build_rows.reserve(kBatch);
                 probe_rows.reserve(kBatch);
                 for (uint32_t i = 0; i < n; ++i) {
-                    OPTERYX_JOIN_PREFETCH(g, rowh, i, n);
                     bool any_null = false;
                     if (keys_nullable) {
                         for (size_t k : probe_key_idx) {
@@ -2082,7 +2054,6 @@ struct SemiAntiProbeOperator : Join2ProbeOperator, EmitSubset {
         std::vector<uint32_t> survivors;
         survivors.reserve(n);
         for (uint32_t i = 0; i < n; ++i) {
-            if (residual_fn == nullptr && !build_empty) OPTERYX_JOIN_PREFETCH(g, rowh, i, n);
             bool any_null = false;
             if (keys_nullable) {
                 for (size_t k : probe_key_idx) {
@@ -2452,7 +2423,6 @@ struct Join2MarkSink : Sink {
         std::atomic<uint8_t>* marks = g.matched.get();
 
         for (uint32_t i = 0; i < n; ++i) {
-            OPTERYX_JOIN_PREFETCH(g, rowh, i, n);
             if (keys_nullable) {
                 bool any_null = false;
                 for (size_t k : pair.probe_key_idx) {

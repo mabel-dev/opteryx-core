@@ -88,8 +88,7 @@ def _unique_ws():
 
 def _run(sql, *, latmat):
     """Write the fixture into a fresh workspace, run ``sql`` with the LATMAT flag
-    set as requested, and return (sorted payload rows, scan_sources,
-    residual_reasons)."""
+    set as requested, and return (sorted payload rows, scan_sources)."""
     table = _build_table()
     ws = _unique_ws()
     with tempfile.TemporaryDirectory() as tmp:
@@ -114,8 +113,7 @@ def _run(sql, *, latmat):
             for m in session.execute_to_morsels(sql.format(ws=ws)):
                 rows.extend(m.column(b"payload").to_pylist())
             telemetry = session.telemetry
-            return (sorted(rows), list(telemetry["scan_sources"].values()),
-                    dict(telemetry.get("scan_residual_reasons", {})))
+            return sorted(rows), list(telemetry["scan_sources"].values())
         finally:
             os.chdir(cwd)
 
@@ -134,15 +132,13 @@ def test_latmat_dict_skip_result_matches_oracle():
     """On LatmatScanSource, the row groups whose dictionary lacks the needle must
     not drop or corrupt any surviving row: exactly the needle-bearing rows come
     back (LIMIT 10 exceeds the 4 survivors, so all of them)."""
-    rows, src, reasons = _run(_SQL, latmat=True)
+    rows, src = _run(_SQL, latmat=True)
     assert src == ["LatmatScanSource"], src
-    assert reasons == {}, reasons
     assert rows == _expected_payloads(), rows
 
 
 def test_single_pass_result_matches_oracle():
     """With the feature off the same query is single-pass and answers the same."""
-    rows, src, reasons = _run(_SQL, latmat=False)
+    rows, src = _run(_SQL, latmat=False)
     assert src == ["NativeParquetScanSource"], src
-    assert reasons == {}, reasons
     assert rows == _expected_payloads(), rows

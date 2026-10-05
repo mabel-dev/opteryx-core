@@ -932,6 +932,25 @@ class NotSupportedError(DatabaseError):
     """Exception raised when an unsupported operation is attempted."""
 
 
+class NativeScanRefusedError(NotSupportedError):
+    """A parquet scan neither native Source admits. There is no fallback reader
+    (ruled 2026-10-03), so the query is refused naming the scan's residual reason.
+
+    Carries `relation` and `reason` as fields so tooling that measures the native
+    frontier (dev/native_residual_census.py) reads them rather than parsing the
+    message."""
+
+    def __init__(self, relation: str, reason: str):
+        self.relation = relation
+        self.reason = reason
+        super().__init__(
+            compose(
+                f"Reading {relation} ({reason}) is not supported",
+                "The native parquet reader cannot read this dataset yet",
+            )
+        )
+
+
 class UnsupportedFileTypeError(DatabaseError):
     """Exception raised when an unsupported file type is encountered."""
 

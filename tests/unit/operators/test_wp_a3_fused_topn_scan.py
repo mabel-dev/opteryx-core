@@ -35,9 +35,6 @@ import pyarrow.parquet as pq
 import pytest
 
 import opteryx
-import opteryx.config as config
-
-import instrument_engine as IE  # dev/instrument_engine.py
 
 
 def _write(dataset_dir, columns, use_dictionary=True, row_group_size=None):
@@ -52,7 +49,7 @@ def _write(dataset_dir, columns, use_dictionary=True, row_group_size=None):
 
 
 def _drain_ordered(sql):
-    """Drain `sql`; return (ordered_rows, source_list, residual_reasons).
+    """Drain `sql`; return (ordered_rows, source_list).
     `ordered_rows` is a LIST of per-row tuples of Python values in emission order."""
     session = opteryx.session()
     rows = []
@@ -62,8 +59,7 @@ def _drain_ordered(sql):
             rows.append(tuple(c[i] for c in cols))
     telemetry = session.telemetry
     src = list(telemetry["scan_sources"].values())
-    reasons = dict(telemetry.get("scan_residual_reasons", {}))
-    return rows, src, reasons
+    return rows, src
 
 
 def _oracle(columns, projection, sort_key, descending, limit, where=None):
@@ -87,15 +83,14 @@ def _assert_topn_matches_oracle(tmp_path, name, columns, sort_key, descending, l
                                 *, write_kw=None):
     """Write `columns`, run `SELECT s, <sort_key> ... ORDER BY ... LIMIT n` natively
     and assert the IDENTICAL row sequence to the plain-Python oracle, on
-    NativeParquetScanSource with no residual reason."""
+    NativeParquetScanSource."""
     ds = _write(str(tmp_path / name), columns, **(write_kw or {}))
     sql = "SELECT s, %s FROM '%s' ORDER BY %s %s LIMIT %d" % (
         sort_key, ds, sort_key, "DESC" if descending else "ASC", limit)
-    nat, nat_src, reasons = _drain_ordered(sql)
+    nat, nat_src = _drain_ordered(sql)
     expect = _oracle(columns, ("s", sort_key), sort_key, descending, limit)
     assert nat == expect, ("native TopN row sequence differs from the oracle", nat, expect)
     assert nat_src == ["NativeParquetScanSource"], nat_src
-    assert reasons == {}, reasons
     return nat
 
 
@@ -150,14 +145,13 @@ def test_topn_ties_on_sort_key(tmp_path):
     }
     ds = _write(str(tmp_path / "ties"), cols, row_group_size=50)
     sql = "SELECT s, sort_key FROM '%s' ORDER BY sort_key ASC LIMIT 20" % ds
-    nat, nat_src, reasons = _drain_ordered(sql)
+    nat, nat_src = _drain_ordered(sql)
     table_rows = set(zip(cols["s"][1], cols["sort_key"][1]))
     assert len(nat) == 20
     assert all(row[1] == 42 for row in nat), nat
     assert all(row in table_rows for row in nat), nat
     assert len(set(nat)) == 20, "a row was returned twice"
     assert nat_src == ["NativeParquetScanSource"], nat_src
-    assert reasons == {}, reasons
 
 
 def test_topn_nulls_in_sort_column(tmp_path):
@@ -177,19 +171,17 @@ def test_topn_nulls_in_sort_column(tmp_path):
     table_rows = set(zip(cols["s"][1], cols["sort_key"][1]))
 
     sql_asc = "SELECT s, sort_key FROM '%s' ORDER BY sort_key ASC LIMIT 15" % ds
-    nat, nat_src, reasons = _drain_ordered(sql_asc)
+    nat, nat_src = _drain_ordered(sql_asc)
     assert len(nat) == 15
     assert all(row[1] is None for row in nat), nat
     assert all(row in table_rows for row in nat), nat
     assert len(set(nat)) == 15, "a row was returned twice"
     assert nat_src == ["NativeParquetScanSource"], nat_src
-    assert reasons == {}, reasons
 
     sql_desc = "SELECT s, sort_key FROM '%s' ORDER BY sort_key DESC LIMIT 15" % ds
-    nat, nat_src, reasons = _drain_ordered(sql_desc)
+    nat, nat_src = _drain_ordered(sql_desc)
     assert nat == _oracle(cols, ("s", "sort_key"), "sort_key", True, 15)
     assert nat_src == ["NativeParquetScanSource"], nat_src
-    assert reasons == {}, reasons
 
 
 def test_topn_with_where_predicate_now_native(tmp_path):
@@ -212,12 +204,11 @@ def test_topn_with_where_predicate_now_native(tmp_path):
     cols, kw = _table(1000, row_group_size=100)
     ds = _write(str(tmp_path / "with_predicate"), cols, **kw)
     sql = "SELECT * FROM '%s' WHERE flag = 1 ORDER BY sort_key ASC LIMIT 20" % ds
-    nat, nat_src, reasons = _drain_ordered(sql)
+    nat, nat_src = _drain_ordered(sql)
     expect = _oracle(cols, ("s", "sort_key", "flag"), "sort_key", False, 20,
                      where=lambda r: r["flag"] == 1)
     assert nat == expect, (nat, expect)
     assert nat_src == ["LatmatScanSource"], nat_src
-    assert reasons == {}, reasons
 
 
 def test_topn_large_n_edge(tmp_path):
@@ -227,45 +218,16 @@ def test_topn_large_n_edge(tmp_path):
                                 write_kw=kw)
 
 
-def test_instrumentation_native_topn_zero_gil(tmp_path, monkeypatch):
-    """A fused-TopN SELECT: NativeParquetScanSource, scan-stage GIL time ~0,
-    no worker re-entry, and execute_bytecode/_scan_pull_run unreachable
-    (worker-purity guard, whitelist=())."""
-    cols, kw = _table(500, row_group_size=100)
-    ds = _write(str(tmp_path / "instr"), cols, **kw)
-    sql = "SELECT s, sort_key FROM '%s' ORDER BY sort_key ASC LIMIT 10" % ds
-
-    monkeypatch.setattr(config, "OPTERYX_INSTRUMENT_ENGINE", True)
-    session = opteryx.session()
-    for _ in session.execute_to_morsels(sql):
-        pass
-    td = session.telemetry
-
-    assert list(td["scan_sources"].values()) == ["NativeParquetScanSource"]
-    assert td["gil_held_ns"] == 0
-    assert td.get("worker_gil_sites", []) == []
-    IE.assert_native_worker_purity(td, whitelist=())
-
-
-def test_instrumentation_trampoline_calls_zero(tmp_path, monkeypatch):
-    cols, kw = _table(500, row_group_size=100)
-    ds = _write(str(tmp_path / "instr2"), cols, **kw)
-    sql = "SELECT s, sort_key FROM '%s' ORDER BY sort_key ASC LIMIT 10" % ds
-    monkeypatch.setattr(config, "OPTERYX_INSTRUMENT_ENGINE", True)
-    res = IE.measure_query_allocations(sql)
-    assert res["trampoline_calls"] == 0
-
-
 def test_census_reports_no_fused_topn_residual():
     """R3 close-out: the census tally over the clickbench + tpch battery no longer
     reports ANY `fused_topn` residual. ClickBench Q24 (fused TopN WITH a predicate)
     was the single trigger and now runs on `LatmatScanSource`. It was also the last
-    reachable residual of any kind in this battery, so the trampoline count is 0."""
+    reachable residual of any kind in this battery, so nothing is refused."""
     import native_residual_census as census  # dev/native_residual_census.py
 
     tally = census.census()
     assert tally.get("fused_topn") is None, tally
-    assert tally["__trampoline__"] == 0, tally
+    assert tally["__refused__"] == 0, tally
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -60,8 +60,9 @@ USING {SOURCE} AS u
 
 
 def _run_native(sql):
-    """Run `sql` to completion and assert every scan it planned went native with no
-    residual reason. Returns the scan count."""
+    """Run `sql` to completion and assert every scan it planned went native (a scan
+    neither native Source admits raises NativeScanRefusedError). Returns the scan
+    count."""
     from opteryx_catalog.catalog.manifest import clear_parsed_manifest_cache
 
     clear_parsed_manifest_cache()
@@ -69,9 +70,7 @@ def _run_native(sql):
     for _ in session.execute_to_morsels(sql):
         pass
     telemetry = session.telemetry
-    reasons = telemetry.get("scan_residual_reasons") or {}
     sources = telemetry.get("scan_sources") or {}
-    assert not reasons, f"a scan was refused or left the native path: {reasons}"
     assert sources, "no parquet scan observed"
     assert set(sources.values()) <= _NATIVE_SOURCES, f"non-native scan Source: {sources}"
     return len(sources)

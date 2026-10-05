@@ -363,6 +363,42 @@ remain after requiring a consistent shift (Mac Q01 1.5 ms metadata count,
 the switches. Both look like arm-position effects in very short queries, and
 both are inside the ±5% band.
 
+### Prefetch and bloom re-tests (2026-10-04/05, D2)
+
+**Microbench** (`src/cpp/engine/bench_join_csr_lookup.cpp --arms`, model of the
+JoinCsr probe, min of 7, arms alternating, match counts checked):
+- Pipelined prefetch (16 ahead) vs plain: ~10% SLOWER while the table is
+  cache-resident on both; 0.49-0.70x on the M5 from 4M build rows (61 MiB) up;
+  0.6-0.8x on the i5 from 100k rows (1.5 MiB) up. gcc and clang agree on x86.
+- Bloom (word-64, k=2): misses 0.17-0.57x on both; hits 1.05-1.10x on the M5
+  but **1.20-1.36x on the i5**; 50% misses 0.63-0.75x on the M5, 0.79-1.06x
+  on the i5. The 2026-08-07 ruling (net negative) stands, more firmly on x86.
+
+**Engine** (`OPTERYX_SWEEP_JOIN_PREFETCH=16`, all five JoinCsr probe loops):
+
+| | M5 | i5 |
+|---|---|---|
+| JOB | 1.014, 1/7 rounds faster | 1.024, 0/5 |
+| TPC-H SF10 | 0.946, 5/5 (Q04 0.58, Q21 0.82, Q22 0.84 — EXISTS paths; Q08 1.32) | 1.028, 0/5 |
+
+- The microbench gain does not survive the engine probe (which also appends
+  pairs and gathers rows). x86 loses every round of both suites. **Deleted**
+  per the decision table (ARM-only TPC-H win, x86 loss). The ban stands, now
+  measured at the join probe too.
+- Join-free TPC-H Q06 moved 1.14x (M5) / 1.18x (i5) in the variant: a
+  code-layout side effect of rebuilding `_operators`. Suite deltas under ~±3%
+  in .so-variant A/Bs are partly layout, not the change.
+- Mac JOB first run (2026-10-04 23:00) was void — both arms doubled mid-run
+  under another session's load. Rerun gated on idle (load1 < 2, top process <
+  30% for 3 consecutive minutes); per-round totals then stable 6.8-7.2 s.
+- **GROUP BY probe prefetch** (`OPTERYX_SWEEP_GB_PREFETCH`, carchar control line
+  8/16 rows ahead in pass B; ClickBench, 2026-10-05): M5 0.998 / 0.999 (7 rounds),
+  i5 0.995 / 0.997 (5 rounds). Per-round totals within ~1% across arms; per-query
+  moves (i5 Q13 0.905 at 16 only, Q36 0.954 at 8 only, Q18 +3-4% at both) are
+  inconsistent between distances and inside the layout-noise band. Not faster
+  on either architecture — **deleted**. The ban stands at the GROUP BY probe on
+  both, under the full-suite harness.
+
 ## 10. Still needed to start
 
 - Pi 5: address, RAM, OS (64-bit Raspberry Pi OS / Debian?).

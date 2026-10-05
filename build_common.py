@@ -935,6 +935,7 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/core/decimal_text.h",
                 "rugo/src/declared_type.hpp",
                 "rugo/src/declared_parse.hpp",
+                "rugo/src/chunk_limit.hpp",
             ],
             define_macros=[
                 ("HAVE_SNAPPY", "1"),

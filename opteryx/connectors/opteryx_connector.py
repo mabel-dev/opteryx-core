@@ -1071,9 +1071,13 @@ def _build_index_files(catalog, definition, data_file, data_bytes, deleted, inde
     from opteryx.operators._operators import build_vector_index_local
     from opteryx.operators._operators import build_vector_index_to_session
 
+    from opteryx.types.vectors.embedding_capability import active_embedding_capability
+
     embed_fn, _ = lookup_kernel("draken_embed")
     threads = config.resolve_max_execution_workers()
-    options = dict(clusters=definition["clusters"], embed_threads=threads, train_threads=threads)
+    # Rows per embedding call as the embedder wants them: 1 on a CPU, full batches on a GPU.
+    options = dict(clusters=definition["clusters"], embed_threads=threads, train_threads=threads,
+                   embed_batch=active_embedding_capability().batch_rows)
     task = _IndexTarget(data_file, data_bytes, tuple(deleted), index_path)
     if data_file.startswith("gs://"):
         built = _build_index_on_gcs(
@@ -1188,7 +1192,18 @@ def _build_index_on_gcs(io, task, column, embed_fn, dims, build_options, build_t
     The file streams natively into a resumable upload session while the build runs, and
     the build finishes the session: one object, written once. Returns the build's dict, or
     None (nothing written, the session cancelled) when the file has no indexable row."""
-    data_file, auth_header = _index_reads()(task.data_file)
+    import os
+
+    from opteryx import config
+
+    staged = None
+    if config.VECTOR_INDEX_STAGE_DIR:
+        # Read from a local copy: the bearer token is minted once and not refreshed, so a
+        # build that outlives it would fail on GCS's 401 mid-read (see the config entry).
+        staged = _stage_data_file(io, task, config.VECTOR_INDEX_STAGE_DIR)
+        data_file, auth_header = staged, ""
+    else:
+        data_file, auth_header = _index_reads()(task.data_file)
     session = io.open_upload_session(task.path)
     try:
         built = build_to_session(
@@ -1198,9 +1213,34 @@ def _build_index_on_gcs(io, task, column, embed_fn, dims, build_options, build_t
     except BaseException:
         io.cancel_upload_session(session)
         raise
+    finally:
+        if staged is not None:
+            os.remove(staged)
     if built is None:
         io.cancel_upload_session(session)
     return built
+
+
+def _stage_data_file(io, task, stage_dir: str) -> str:
+    """Copy one data file into `stage_dir` for a build to read locally; its size must be
+    the one the manifest records."""
+    import os
+    import shutil
+    import uuid
+
+    os.makedirs(stage_dir, exist_ok=True)
+    local = os.path.join(stage_dir, f"{uuid.uuid4().hex}-{os.path.basename(task.data_file)}")
+    with io.new_input(task.data_file).open() as source, open(local + ".partial", "wb") as target:
+        shutil.copyfileobj(source, target, 16 << 20)
+    staged_bytes = os.path.getsize(local + ".partial")
+    if staged_bytes != task.data_bytes:
+        os.remove(local + ".partial")
+        raise RuntimeError(
+            f"staging {task.data_file} for an index build read {staged_bytes} bytes; "
+            f"the manifest records {task.data_bytes}"
+        )
+    os.replace(local + ".partial", local)
+    return local
 
 
 # Decoded catalog manifests, shared across queries (the connector is recreated

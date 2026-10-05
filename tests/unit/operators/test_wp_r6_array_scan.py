@@ -30,7 +30,7 @@ The null-ish shapes are DIFFERENT things and all must be right:
   * a list of NULLs      (`[None]`)            — child validity bit clear
   * a NULL nested list   (`[[7], None, []]`)   — inner level's own validity
 
-Every query must also select NativeParquetScanSource and record no residual reason.
+Every query must also select NativeParquetScanSource (a refused scan raises).
 """
 
 import glob
@@ -83,7 +83,6 @@ def _drain(sql):
     telemetry = session.telemetry
     sources = sorted(set(telemetry["scan_sources"].values()))
     assert sources == ["NativeParquetScanSource"], sources
-    assert telemetry.get("scan_residual_reasons", {}) == {}, telemetry["scan_residual_reasons"]
     return rows
 
 
@@ -231,12 +230,23 @@ def test_array_role3_filter_only_matches_oracle():
 
 
 def _any_eq(needle, values):
-    """`needle = ANY(values)` as the engine defines it: a NULL list yields NULL;
-    otherwise TRUE iff a non-NULL element equals `needle`, else FALSE (a NULL
-    element does not make the answer NULL)."""
+    """`needle = ANY(values)`: a NULL list yields NULL; otherwise TRUE iff a
+    non-NULL element equals `needle`, else FALSE. A NULL ELEMENT does not make the
+    answer NULL (ruled 2026-10-05): the comparison is against an array that holds a
+    NULL, not against NULL, so `5 = ANY([7, NULL, 9])` is FALSE."""
     if values is None:
         return None
     return any(v == needle for v in values if v is not None)
+
+
+def test_any_over_an_array_holding_a_null_element():
+    """The `= ANY` NULL-element ruling (2026-10-05), stated as literals rather than
+    through `_any_eq`: corpus row 5 is `[7, NULL, 9]`, row 4 is `[NULL]`, row 2 is a
+    NULL list. A miss over an array holding a NULL is FALSE, a hit is TRUE, and only
+    a NULL list yields NULL."""
+    rows = _drain("SELECT id, 5 = ANY(ints), 7 = ANY(ints) FROM '%s' WHERE id IN (2, 4, 5)"
+                  % _ARRAY_TYPES)
+    assert sorted(rows) == [(2, None, None), (4, False, False), (5, False, True)]
 
 
 @pytest.mark.parametrize("sql,oracle", [

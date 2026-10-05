@@ -5,44 +5,30 @@
 
 """WP-INSTR — native execution-engine instrumentation harness (developer tooling).
 
-This module is the runnable front-end for the four measurement instruments built
-for the native execution engine. It does NOT change query behaviour; it only reads
-what the engine already records. See ``docs/instrumentation.md`` for the full note.
+The runnable front-end for the engine's measurement instruments. It does NOT change
+query behaviour; it only reads what the engine already records. See
+``docs/ENGINE_INSTRUMENTATION.md``.
 
-The four instruments
---------------------
-1. gil_held_ns          — per-query nanoseconds spent inside execution-time
-                          ``with gil`` bodies (scan-pull trampoline + error stash).
-                          Surfaced on telemetry when OPTERYX_INSTRUMENT_ENGINE=1.
-2. scan_sources         — per parquet scan, which Source it selected
-                          (NativeParquetScanSource vs StreamingScanSource).
-                          Always on telemetry (plan-time fact, ~0 cost).
-3. allocation harness   — ``measure_query_allocations`` / ``scaling_report`` below:
-                          samples ``sys.getallocatedblocks()`` across a drained
-                          query to show native scans allocate O(morsels) not
-                          O(rows).
-4. worker purity guard  — ``assert_native_worker_purity`` below: fails if any
-                          non-whitelisted GIL site ran on a worker thread.
+The instruments
+---------------
+* scan_sources        — per parquet scan, which native Source it selected
+                        (NativeParquetScanSource / LatmatScanSource). Always on
+                        telemetry (plan-time fact, ~0 cost).
+* allocation harness  — ``measure_query_allocations`` / ``scaling_report`` below:
+                        samples ``sys.getallocatedblocks()`` across a drained query
+                        to show a scan allocates O(morsels), not O(rows).
 
-Enabling the GIL instrumentation (instruments 1 & 4)
-----------------------------------------------------
-Set the config flag before opteryx is imported::
-
-    OPTERYX_INSTRUMENT_ENGINE=1 python dev/instrument_engine.py --sql "SELECT ..."
-
-or, in a test, monkeypatch the already-imported flag::
-
-    import opteryx.config as config
-    config.OPTERYX_INSTRUMENT_ENGINE = True   # execute_native reads it per-call
+(The execution-time GIL instrument — ``gil_held_ns``, ``worker_gil_sites`` and the
+worker purity guard — was removed 2026-10-05. It was armed only for native runs,
+whose execution never enters a Python operator body, and its sites ran only on the
+serial engine, which never armed it: it could not record anything.)
 
 CLI examples
 ------------
-    # Full readout for one query (native-gated vs trampoline are distinguishable):
-    OPTERYX_INSTRUMENT_ENGINE=1 python dev/instrument_engine.py \
-        --sql "SELECT followers FROM 'testdata/flat/formats/parquet'"
+    # Readout for one query:
+    python dev/instrument_engine.py --sql "SELECT followers FROM 'testdata/flat/formats/parquet'"
 
-    # Allocation scaling: prove flat blocks/row for a numeric scan, growing for a
-    # string scan. {n} is substituted with each --scale size as a LIMIT.
+    # Allocation scaling: {n} is substituted with each --scale size as a LIMIT.
     python dev/instrument_engine.py \
         --sql "SELECT followers FROM 'testdata/flat/formats/parquet' LIMIT {n}" \
         --scale 10000,50000,250000
@@ -56,11 +42,6 @@ from typing import Callable
 from typing import Iterable
 from typing import Optional
 
-# The two sites that are legitimately allowed to run Python on a worker thread
-# TODAY. Each future work package that de-Pythons one of these removes it from the
-# whitelist; the guard then fails until that path is genuinely native.
-DEFAULT_WORKER_WHITELIST = ("_scan_pull_run", "_stash_exc")
-
 
 def _telemetry_of(session) -> dict:
     """Read the drained query's telemetry dict from a session."""
@@ -68,12 +49,7 @@ def _telemetry_of(session) -> dict:
 
 
 def run_and_report(sql: str, session_factory: Optional[Callable] = None) -> dict:
-    """Execute ``sql`` to completion and return the instrumentation readings.
-
-    Requires OPTERYX_INSTRUMENT_ENGINE=1 (or a monkeypatched config flag) for the
-    ``gil_held_ns`` / ``worker_gil_sites`` readings to be populated; ``scan_sources``
-    is present regardless.
-    """
+    """Execute ``sql`` to completion and return its row count and scan Sources."""
     import opteryx
 
     session = (session_factory or opteryx.session)()
@@ -85,8 +61,6 @@ def run_and_report(sql: str, session_factory: Optional[Callable] = None) -> dict
         "sql": sql,
         "rows": rows,
         "scan_sources": telemetry.get("scan_sources", {}),
-        "gil_held_ns": telemetry.get("gil_held_ns", 0),
-        "worker_gil_sites": telemetry.get("worker_gil_sites", []),
     }
 
 
@@ -97,22 +71,12 @@ def measure_query_allocations(
 ) -> dict:
     """Run ``sql`` and measure allocation behaviour across the scan.
 
-    Two complementary readings:
-
-    * ``peak_block_delta`` — max of ``sys.getallocatedblocks()`` minus baseline,
-      sampled after every yielded morsel: the largest live-block footprint the
-      pipeline held at once. For BOTH Sources this is O(morsels) (bounded by morsel
-      size), so ``blocks_per_row`` falls toward zero as rows grow — the proof that
-      native operators do not hold O(rows) memory. Morsels are counted then dropped,
-      so this measures the engine's own footprint, not the caller hoarding results.
-
-    * ``trampoline_calls`` — the number of per-morsel Python re-entries through
-      ``_scan_pull_run`` (requires the GIL instrumentation armed). This is the
-      allocation-bearing event the peak-block metric CANNOT see: each trampoline
-      pull creates transient Python objects that are freed before the next
-      morsel-boundary sample. It is 0 for a NativeParquetScanSource and grows with
-      the scan (∝ morsels ∝ rows at fixed morsel size) for a StreamingScanSource —
-      the honest O(morsels)-vs-zero discriminator between the two paths.
+    ``peak_block_delta`` is the max of ``sys.getallocatedblocks()`` minus baseline,
+    sampled after every yielded morsel: the largest live-block footprint the pipeline
+    held at once. It is O(morsels) (bounded by morsel size), so ``blocks_per_row``
+    falls toward zero as rows grow — the proof that native operators do not hold
+    O(rows) memory. Morsels are counted then dropped, so this measures the engine's
+    own footprint, not the caller hoarding results.
 
     With ``use_tracemalloc`` a peak byte figure from :mod:`tracemalloc` is added
     (heavier; off by default).
@@ -143,11 +107,6 @@ def measure_query_allocations(
         del morsel
 
     telemetry = _telemetry_of(session)
-    trampoline_calls = sum(
-        s.get("calls", 0)
-        for s in (telemetry.get("worker_gil_sites", []) or [])
-        if s.get("site") == "_scan_pull_run"
-    )
     result = {
         "sql": sql,
         "rows": rows,
@@ -155,12 +114,6 @@ def measure_query_allocations(
         "peak_block_delta": peak_delta,
         "blocks_per_row": (peak_delta / rows) if rows else 0.0,
         "blocks_per_morsel": (peak_delta / morsels) if morsels else 0.0,
-        # The per-morsel Python re-entry count — 0 for a native scan, growing with
-        # the scan for the trampoline. This is the allocation-bearing event the
-        # peak-live-block metric cannot see (its allocations are transient), so it
-        # is the honest O(morsels)-vs-zero discriminator between the two Sources.
-        "trampoline_calls": trampoline_calls,
-        "gil_held_ns": telemetry.get("gil_held_ns", 0),
         "scan_sources": telemetry.get("scan_sources", {}),
     }
     if use_tracemalloc:
@@ -201,8 +154,7 @@ def generate_dataset(
 
     This exists so the allocation scaling demo can hold the projection/predicate
     shape fixed while growing the row count — the only way to separate O(rows) from
-    O(morsels) — without a scan-pushed LIMIT (which would itself force the
-    trampoline Source and defeat the native-vs-trampoline comparison).
+    O(morsels) — without a scan-pushed LIMIT changing the scan's shape.
     """
     import opteryx
     from opteryx.connectors.parquet_io.parquet_writer import write_morsel
@@ -224,9 +176,8 @@ def generate_dataset(
 def demo_scaling(out_dir: str, multipliers=(1, 2, 4)) -> dict:
     """Generate numeric-only and string parquet relations at several sizes and run
     the allocation scaling for each. Returns ``{"numeric": [...], "string": [...]}``
-    lists of :func:`measure_query_allocations` results. Prints two tables: the
-    numeric (native) trend should show ``blocks_per_row`` falling toward zero
-    (O(morsels)); the string (trampoline) trend should not fall as fast.
+    lists of :func:`measure_query_allocations` results. Prints two tables; both
+    trends should show ``blocks_per_row`` falling toward zero (O(morsels)).
     """
     base = "testdata/flat/formats/parquet"
     results: dict = {"numeric": [], "string": []}
@@ -242,68 +193,16 @@ def demo_scaling(out_dir: str, multipliers=(1, 2, 4)) -> dict:
     for label in ("numeric", "string"):
         print("== %s scaling ==" % label)
         print(
-            "  %-9s %-8s %-12s %-12s %-14s %s"
-            % ("rows", "morsels", "peak_blocks", "blocks/row", "trampoline_c", "source")
+            "  %-9s %-8s %-12s %-12s %s"
+            % ("rows", "morsels", "peak_blocks", "blocks/row", "source")
         )
         for r in results[label]:
             src = ",".join(sorted(set(r["scan_sources"].values()))) or "-"
             print(
-                "  %-9d %-8d %-12d %-12.4f %-14d %s"
-                % (
-                    r["rows"],
-                    r["morsels"],
-                    r["peak_block_delta"],
-                    r["blocks_per_row"],
-                    r["trampoline_calls"],
-                    src,
-                )
+                "  %-9d %-8d %-12d %-12.4f %s"
+                % (r["rows"], r["morsels"], r["peak_block_delta"], r["blocks_per_row"], src)
             )
     return results
-
-
-class WorkerPurityError(AssertionError):
-    """Raised when a non-whitelisted GIL site executed on a worker thread."""
-
-
-def assert_native_worker_purity(
-    telemetry: dict,
-    whitelist: Iterable[str] = DEFAULT_WORKER_WHITELIST,
-) -> list:
-    """Instrument 4 — the worker-thread purity guard.
-
-    Inspects ``telemetry['worker_gil_sites']`` (populated only when the GIL
-    instrumentation was armed) and raises :class:`WorkerPurityError` if any GIL site
-    outside ``whitelist`` ran on a worker thread. Returns the list of offending site
-    records when it passes (empty on a clean run).
-
-    What it catches / limitations:
-    * It counts entries into the INSTRUMENTED execution-time ``with gil`` bodies
-      (currently ``_scan_pull_run``, ``_dispatch_push`` and ``_stash_exc``). It is
-      an *enumerated* guard, not a universal ``settrace`` — a worker that re-entered
-      Python through some OTHER, not-yet-instrumented ``with gil`` body would not be
-      seen until that body is added to the instrumentation. As each such body is
-      discovered it must be wrapped (see ``_operators.pyx`` WP-INSTR block) so this
-      guard covers it. ``_dispatch_push`` was added for exactly that reason: it is
-      BasePlanNode's default per-morsel push path and was an uncounted GIL body, so
-      a ``gil_held_ns == 0`` reading previously proved only "no scan-pull re-entry".
-      It is deliberately absent from :data:`DEFAULT_WORKER_WHITELIST` — the point of
-      instrumenting it is to see it, not to permit it.
-    * Passing ``whitelist=()`` turns any execution-time Python re-entry into a
-      failure — this is how a test deliberately flags the trampoline path.
-    * Requires OPTERYX_INSTRUMENT_ENGINE armed for the run; on an unarmed run
-      ``worker_gil_sites`` is empty and the guard trivially passes.
-    """
-    allowed = set(whitelist)
-    sites = telemetry.get("worker_gil_sites", []) or []
-    offenders = [s for s in sites if s.get("site") not in allowed]
-    if offenders:
-        summary = ", ".join(
-            "%s x%d on thread %s" % (o["site"], o["calls"], o["thread_id"]) for o in offenders
-        )
-        raise WorkerPurityError(
-            "non-whitelisted Python ran on worker thread(s): " + summary
-        )
-    return sites
 
 
 def _main(argv: list) -> int:
@@ -320,11 +219,6 @@ def _main(argv: list) -> int:
         help="comma-separated row counts to substitute for {n} in --sql (alloc scaling)",
     )
     parser.add_argument(
-        "--guard",
-        action="store_true",
-        help="assert worker-thread purity (whitelist = scan-pull + error-stash)",
-    )
-    parser.add_argument(
         "--tracemalloc",
         action="store_true",
         help="also report a tracemalloc peak-bytes figure in the alloc measurement",
@@ -338,8 +232,6 @@ def _main(argv: list) -> int:
     )
     args = parser.parse_args(argv)
 
-    import opteryx.config as config
-
     if args.demo_scaling:
         demo_scaling(args.demo_scaling)
         return 0
@@ -347,32 +239,18 @@ def _main(argv: list) -> int:
     if not args.sql:
         parser.error("one of --sql or --demo-scaling is required")
 
-    if not config.OPTERYX_INSTRUMENT_ENGINE:
-        print(
-            "note: OPTERYX_INSTRUMENT_ENGINE is not set — gil_held_ns / worker_gil_sites "
-            "will be empty. Re-run with OPTERYX_INSTRUMENT_ENGINE=1 for those readings.",
-            file=sys.stderr,
-        )
-
     if args.scale:
         sizes = [int(x) for x in args.scale.split(",") if x.strip()]
         print("== allocation scaling ==")
         print(
-            "  %-9s %-8s %-12s %-12s %-14s %s"
-            % ("rows", "morsels", "peak_blocks", "blocks/row", "trampoline_c", "source")
+            "  %-9s %-8s %-12s %-12s %s"
+            % ("rows", "morsels", "peak_blocks", "blocks/row", "source")
         )
         for r in scaling_report(args.sql, sizes):
             src = ",".join(sorted(set(r["scan_sources"].values()))) or "-"
             print(
-                "  %-9d %-8d %-12d %-12.4f %-14d %s"
-                % (
-                    r["rows"],
-                    r["morsels"],
-                    r["peak_block_delta"],
-                    r["blocks_per_row"],
-                    r["trampoline_calls"],
-                    src,
-                )
+                "  %-9d %-8d %-12d %-12.4f %s"
+                % (r["rows"], r["morsels"], r["peak_block_delta"], r["blocks_per_row"], src)
             )
         return 0
 
@@ -380,21 +258,10 @@ def _main(argv: list) -> int:
     print("== instrumentation readout ==")
     print("  rows            :", report["rows"])
     print("  scan_sources    :", report["scan_sources"])
-    print("  gil_held_ns     :", report["gil_held_ns"])
-    print("  worker_gil_sites:", report["worker_gil_sites"])
     alloc = measure_query_allocations(args.sql, use_tracemalloc=args.tracemalloc)
     print("  peak_block_delta:", alloc["peak_block_delta"], "(blocks/row %.4f)" % alloc["blocks_per_row"])
     if args.tracemalloc:
         print("  tracemalloc_peak:", alloc["tracemalloc_peak_bytes"], "bytes")
-
-    if args.guard:
-        import opteryx
-
-        session = opteryx.session()
-        for _ in session.execute_to_morsels(args.sql):
-            pass
-        assert_native_worker_purity(_telemetry_of(session))
-        print("  worker purity   : PASS (only whitelisted sites ran)")
     return 0
 
 

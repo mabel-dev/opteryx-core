@@ -11,8 +11,8 @@ Python fallback (the per-morsel trampoline, ``StreamingScanSource``, was deleted
 ``NotSupportedError`` naming its residual reason. Each refusal starts at one
 ``return None`` guard in
 ``opteryx/managers/execution/compiler.py::_native_scan_plan`` (``_Compiler``),
-which records a stable machine-readable reason code (``scan_residual_reasons``,
-keyed by scan identity) that the refusal message carries.
+which records a stable machine-readable reason code; the refusal is raised as
+``NativeScanRefusedError`` carrying ``relation`` and ``reason`` as fields.
 
 This module is the measurement front-end for that frontier:
 
@@ -24,7 +24,7 @@ This module is the measurement front-end for that frontier:
     single-file SQL trigger, so the reachability test can prove each code stays
     wired (and did not silently drift / die).
 
-  * :func:`census` / :func:`main` — tally ``scan_residual_reasons`` over the
+  * :func:`census` / :func:`main` — tally native-scan refusals over the
     ``.run_tests`` SQL battery (clickbench + tpch), the corpus
     ``docs/NATIVE_RESIDUAL_PLAN.md`` reports against. Re-running after a close-out
     chip shows the closed reason's count fall.
@@ -74,30 +74,30 @@ def _read_battery() -> List[str]:
 
 
 def scan_residuals(sql: str) -> Tuple[Dict, Dict, Optional[BaseException]]:
-    """Run ``sql`` to completion and read its scan-Source census from telemetry.
+    """Run ``sql`` to completion and report how its parquet scans were read.
 
-    Returns ``(scan_sources, scan_residual_reasons, err)``:
-      * ``scan_sources``          — {scan_identity: Source class name} (plan-time
-                                     fact, present when the query ran).
-      * ``scan_residual_reasons`` — {scan_identity: reason_code} for scans that did
-                                     not go native ({} when every scan went native).
-                                     A refused scan raises, so its reason arrives
-                                     in ``err``'s message, not here.
-      * ``err``                   — the exception if the query raised, else None
-                                     (with empty dicts).
+    Returns ``(scan_sources, refusals, err)``:
+      * ``scan_sources`` — {scan_identity: Source class name} (plan-time fact,
+                           present when the query ran; {} when it raised).
+      * ``refusals``     — {relation: residual reason} for a scan the engine
+                           REFUSED (``NativeScanRefusedError``); {} otherwise. A
+                           refusal stops the query at its first refused scan, so
+                           this holds at most one entry.
+      * ``err``          — the exception if the query raised, else None. A refusal
+                           is also returned here, so callers can assert on it.
     """
     import opteryx
+    from opteryx.exceptions import NativeScanRefusedError
 
     session = opteryx.session()
     try:
         for morsel in session.execute_to_morsels(sql):
             _ = morsel.num_rows
+    except NativeScanRefusedError as exc:
+        return {}, {exc.relation: exc.reason}, exc
     except BaseException as exc:  # noqa: BLE001 — the census records, never swallows
         return {}, {}, exc
-    telemetry = session.telemetry
-    sources = dict(telemetry.get("scan_sources", {}))
-    reasons = dict(telemetry.get("scan_residual_reasons", {}))
-    return sources, reasons, None
+    return dict(session.telemetry.get("scan_sources", {})), {}, None
 
 
 # ---------------------------------------------------------------------------
@@ -210,33 +210,41 @@ _NATIVE_SOURCES = frozenset({"NativeParquetScanSource", "LatmatScanSource"})
 
 
 def census(verbose: bool = False) -> Dict[str, int]:
-    """Tally ``scan_residual_reasons`` over the ``.run_tests`` battery.
+    """Tally native-scan refusals over the ``.run_tests`` battery.
 
-    Returns ``{reason_code: count}`` plus the aggregate keys ``__native__`` and
-    ``__trampoline__`` (scan counts) and ``__raised__`` (queries that raised).
+    Returns ``{reason_code: count}`` (the code is the reason up to its first ``:``,
+    so ``footer_gate: column 'x' ...`` counts as ``footer_gate``) plus the aggregate
+    keys ``__queries__``, ``__scans__`` (scans in queries that ran), ``__native__``
+    (of those, on a native Source), ``__refused__`` (queries refused by a scan) and
+    ``__raised__`` (queries that raised for any OTHER reason — their scans are
+    unmeasured, so they are counted rather than folded into either side).
     """
     tally: Dict[str, int] = {}
-    native = trampoline = raised = queries = scans = 0
+    native = refused = raised = queries = scans = 0
     for sql in _read_battery():
         queries += 1
-        sources, reasons, err = scan_residuals(sql)
+        sources, refusals, err = scan_residuals(sql)
+        if refusals:
+            refused += 1
+            for relation, reason in refusals.items():
+                code = reason.split(":", 1)[0]
+                tally[code] = tally.get(code, 0) + 1
+                if verbose:
+                    print("  REFUSED: %s (%s)\n    %s" % (relation, reason, sql))
+            continue
         if err is not None:
             raised += 1
             if verbose:
-                print("  RAISED: %s\n    %s" % (type(err).__name__, sql))
+                print("  RAISED: %s: %s\n    %s" % (type(err).__name__, err, sql))
             continue
-        for identity, source in sources.items():
+        for source in sources.values():
             scans += 1
             if source in _NATIVE_SOURCES:
                 native += 1
-            else:
-                trampoline += 1
-                reason = reasons.get(identity, "unknown")
-                tally[reason] = tally.get(reason, 0) + 1
     tally["__queries__"] = queries
     tally["__scans__"] = scans
     tally["__native__"] = native
-    tally["__trampoline__"] = trampoline
+    tally["__refused__"] = refused
     tally["__raised__"] = raised
     return tally
 
@@ -248,14 +256,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("  queries        : %d" % tally.pop("__queries__"))
     print("  parquet scans  : %d" % tally.pop("__scans__"))
     print("  native         : %d" % tally.pop("__native__"))
-    print("  trampoline     : %d" % tally.pop("__trampoline__"))
+    print("  refused        : %d" % tally.pop("__refused__"))
     print("  raised         : %d" % tally.pop("__raised__"))
     if tally:
-        print("  residual reasons:")
+        print("  refusal reasons:")
         for reason in sorted(tally, key=lambda r: (-tally[r], r)):
             print("    %-28s %d" % (reason, tally[reason]))
     else:
-        print("  residual reasons: none — every scan went native")
+        print("  refusal reasons: none — every scan that ran went native")
     return 0
 
 

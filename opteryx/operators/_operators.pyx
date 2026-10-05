@@ -799,126 +799,6 @@ cdef extern from "time.h" nogil:
     int clock_gettime(int clk_id, timespec *tp)
 
 
-cdef extern from "pythread.h":
-    unsigned long PyThread_get_thread_ident()
-
-
-# -----------------------------------------------------------------------------
-# WP-INSTR: execution-time GIL instrumentation (off by default, ~0 cost when off)
-#
-# Instruments 1 & 4 of the measurement harness. Times the wall-clock nanoseconds
-# spent inside the KNOWN execution-time ``with gil`` bodies and records which OS
-# thread entered which named site. The instrumented sites are:
-#   * ``_dispatch_push``  — BasePlanNode's DEFAULT push path, the "transitional
-#     gil-adapter" that re-acquires the GIL to decode the carrier to a Python
-#     Morsel and run ``_push_impl``. Entered once per morsel per operator on any
-#     chain node that does NOT override it at C level. Instrumented so the purity
-#     guard stops being blind to it: before this it was an uncounted per-morsel
-#     GIL body, so ``gil_held_ns == 0`` proved only "no scan-pull re-entry", not
-#     "no execution Python". It is deliberately NOT whitelisted in
-#     ``dev/instrument_engine.DEFAULT_WORKER_WHITELIST`` — it is debt to be seen.
-#   * ``_stash_exc``      — the carrier-flip error stash (error path only). NOTE:
-#     on that path it nests INSIDE ``_dispatch_push``'s span, so its ns is counted
-#     twice in ``gil_held_ns``. Error path only, never the steady state.
-# Two derived readings:
-#   1. gil_held_ns  — summed over all sites; a native scan touches no execution
-#      Python and reports ~0.
-#   4. worker_gil_sites — the enumerated (thread, site) breakdown a purity guard
-#      checks: only whitelisted sites may appear; an empty list == zero
-#      execution-time Python ran on any worker.
-#
-# The NativeParquetScanSource path has NO Python callback, so it never records a
-# site — that absence IS the measurement.
-#
-# Armed for the span of one native run by ``execute_native`` when the
-# OPTERYX_INSTRUMENT_ENGINE config flag is set. The instrumented sites read a
-# single C flag and branch straight past when disarmed. The accumulators are
-# module globals mutated only from GIL-held bodies (no extra lock needed), and
-# are therefore NOT correct across concurrent queries in one process — this is a
-# diagnostic instrument, documented as such.
-# -----------------------------------------------------------------------------
-
-cdef struct _GilSite:
-    unsigned long tid
-    const char* name    # stable C string literal per call-site (compared by pointer)
-    long long calls
-    long long ns
-
-cdef int _gil_instr_enabled = 0
-cdef long long _gil_instr_total_ns = 0
-cdef _GilSite _gil_instr_sites[64]
-cdef int _gil_instr_site_count = 0
-
-# Stable C string literals (static storage) — safe to stash the pointer and to
-# compare by pointer identity; each call-site passes the same constant.
-cdef const char* _SITE_STASH_EXC = "_stash_exc"
-cdef const char* _SITE_DISPATCH_PUSH = "_dispatch_push"
-
-
-cdef inline long long _instr_mono_ns() noexcept:
-    cdef timespec ts
-    clock_gettime(CLOCK_MONOTONIC, &ts)
-    return (<long long>ts.tv_sec) * <long long>1000000000 + <long long>ts.tv_nsec
-
-
-cdef inline void _instr_record(const char* name, long long ns) noexcept:
-    """Attribute ``ns`` and one call to (current-thread, ``name``). Called only from
-    GIL-held bodies, so the shared accumulators need no extra lock."""
-    global _gil_instr_total_ns, _gil_instr_site_count
-    cdef unsigned long tid = PyThread_get_thread_ident()
-    cdef int i
-    _gil_instr_total_ns += ns
-    for i in range(_gil_instr_site_count):
-        if _gil_instr_sites[i].tid == tid and _gil_instr_sites[i].name == name:
-            _gil_instr_sites[i].calls += 1
-            _gil_instr_sites[i].ns += ns
-            return
-    if _gil_instr_site_count < 64:
-        _gil_instr_sites[_gil_instr_site_count].tid = tid
-        _gil_instr_sites[_gil_instr_site_count].name = name
-        _gil_instr_sites[_gil_instr_site_count].calls = 1
-        _gil_instr_sites[_gil_instr_site_count].ns = ns
-        _gil_instr_site_count += 1
-
-
-def instr_gil_set_enabled(bint on):
-    """Arm/disarm the execution-time GIL instrumentation (``execute_native`` only)."""
-    global _gil_instr_enabled
-    _gil_instr_enabled = 1 if on else 0
-
-
-def instr_gil_is_enabled():
-    return _gil_instr_enabled != 0
-
-
-def instr_gil_reset():
-    """Zero the per-query accumulators. Call before an armed run."""
-    global _gil_instr_total_ns, _gil_instr_site_count
-    _gil_instr_total_ns = 0
-    _gil_instr_site_count = 0
-
-
-def instr_gil_total_ns():
-    """Total nanoseconds spent inside instrumented execution-time GIL bodies."""
-    return _gil_instr_total_ns
-
-
-def instr_gil_worker_report():
-    """Per (thread, site) breakdown: list of ``{thread_id, site, calls, ns}``. The
-    distinct ``site`` values are the enumerated GIL-entry set a purity guard checks;
-    an empty list means no execution-time Python ran on any worker thread."""
-    cdef int i
-    out = []
-    for i in range(_gil_instr_site_count):
-        out.append({
-            "thread_id": <unsigned long>_gil_instr_sites[i].tid,
-            "site": (<bytes>_gil_instr_sites[i].name).decode("ascii"),
-            "calls": <long long>_gil_instr_sites[i].calls,
-            "ns": <long long>_gil_instr_sites[i].ns,
-        })
-    return out
-
-
 def reset_spill_telemetry():
     """Zero the morsel-spill counters (spill_store.hpp). Diagnostic only — call
     before a traced query to attribute the reading to it."""
@@ -1344,15 +1224,7 @@ cdef class BasePlanNode:
         """Record a body's Python exception so the driver can re-raise it at the
         gil boundary, and flag the status code. Prefer the shared context (every
         node on a pipeline shares it); fall back to the node when there is no
-        context (e.g. a direct-push unit test). First exception wins.
-
-        WP-INSTR: this is an execution-time GIL body; when the engine
-        instrumentation is armed, bracket it so error-path Python re-entry is
-        counted in ``worker_gil_sites`` too (normally ~0 calls — it only runs on a
-        body's exception)."""
-        cdef long long _t0
-        if _gil_instr_enabled:
-            _t0 = _instr_mono_ns()
+        context (e.g. a direct-push unit test). First exception wins."""
         if self._ctx is not None:
             if self._ctx._exc is None:
                 self._ctx._exc = exc
@@ -1360,8 +1232,6 @@ cdef class BasePlanNode:
             self._cxx_push_exc = exc
         if err != NULL:
             err.code = 1
-        if _gil_instr_enabled:
-            _instr_record(_SITE_STASH_EXC, _instr_mono_ns() - _t0)
 
     cdef inline object _peek_exc(self):
         """Return the stashed exception (context first, then node) WITHOUT
@@ -1436,20 +1306,10 @@ cdef class BasePlanNode:
         true C-level vtable dispatch. Default = transitional gil-adapter:
         re-acquire the GIL, decode the carrier to a Morsel (or recover the EOS
         sentinel from MorselState), and run the existing `_push_impl(Morsel)` so
-        Python-class subclasses (aggregate/unnest/insert) keep working unchanged.
-
-        WP-INSTR: this is an execution-time GIL body entered once per morsel per
-        operator, so when the engine instrumentation is armed it is bracketed and
-        reported as the `_dispatch_push` site. A subclass that overrides this
-        method at C level never runs this body and so records nothing — that
-        absence IS the measurement, exactly as it is for the native scan
-        Sources."""
+        Python-class subclasses (aggregate/unnest/insert) keep working unchanged."""
         cdef CxxMorsel* raw = m.get()
         cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
-        cdef long long _t0
         with gil:
-            if _gil_instr_enabled:
-                _t0 = _instr_mono_ns()
             try:
                 if is_eos:
                     self._push_impl(_EOS_SENTINEL)
@@ -1457,8 +1317,6 @@ cdef class BasePlanNode:
                     self._push_impl(cxx_to_morsel(m))
             except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx at the boundary
                 self._stash_exc(exc, err)
-            if _gil_instr_enabled:
-                _instr_record(_SITE_DISPATCH_PUSH, _instr_mono_ns() - _t0)
         return err.code if err != NULL else 0
 
     cpdef void _push_impl(self, Morsel morsel) except *:

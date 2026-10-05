@@ -27,8 +27,8 @@ Correctness gate: an INDEPENDENT plain-Python oracle — the native COUNT(*) mus
 the predicate evaluated in Python over the values this module wrote (the Python
 per-morsel scan that used to serve as the A/B baseline was deleted, ruling
 2026-10-03) — across single-file, multi-file/multi-row-group, and a zero-matching-rows
-predicate. Every query must also select NativeParquetScanSource and record no
-residual reason.
+predicate. Every query must also select NativeParquetScanSource (a refused scan
+raises).
 """
 
 import os
@@ -76,7 +76,7 @@ def _write_multi_file(dataset_dir, columns, n_files, **kw):
 
 def _count_star(sql):
     """Run `sql` (a COUNT(*) query) natively; return the count. Asserts the scan
-    selected NativeParquetScanSource and recorded no residual reason."""
+    selected NativeParquetScanSource (a refused scan raises)."""
     session = opteryx.session()
     values = []
     for morsel in session.execute_to_morsels(sql):
@@ -85,7 +85,6 @@ def _count_star(sql):
     telemetry = session.telemetry
     assert list(telemetry["scan_sources"].values()) == ["NativeParquetScanSource"], (
         telemetry["scan_sources"])
-    assert telemetry.get("scan_residual_reasons", {}) == {}, telemetry["scan_residual_reasons"]
     assert len(values) == 1, values
     return values[0]
 

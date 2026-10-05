@@ -26,7 +26,7 @@ scan that used to serve as the A/B baseline was deleted, ruling 2026-10-03):
     native DRAKEN_UINT64 vector (no truncation) — the boundary values below carry
     values > 2**63 and > 2**31.
 
-Every query must also select NativeParquetScanSource and record no residual reason.
+Every query must also select NativeParquetScanSource (a refused scan raises).
 
 Roles covered per width: projected, projected+predicate (c-native predicate INPUT on
 the narrow/unsigned column), and role-3 filter-only (predicate column read but not
@@ -79,7 +79,7 @@ def _col_sig(morsel, n):
 
 def _drain(sql):
     """Drain `sql` natively; return (per-column signature, row list). Asserts the
-    scan selected NativeParquetScanSource and recorded no residual reason."""
+    scan selected NativeParquetScanSource (a refused scan raises)."""
     session = opteryx.session()
     rows = []
     sig = None
@@ -92,7 +92,6 @@ def _drain(sql):
     telemetry = session.telemetry
     assert list(telemetry["scan_sources"].values()) == ["NativeParquetScanSource"], (
         telemetry["scan_sources"])
-    assert telemetry.get("scan_residual_reasons", {}) == {}, telemetry["scan_residual_reasons"]
     return sig, rows
 
 

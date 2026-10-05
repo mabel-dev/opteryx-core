@@ -53,8 +53,7 @@ Backbone: `opteryx/models/query_telemetry.py` (`QueryTelemetry`), surfaced via
 | `native_scan_facts` | scan sources | files/row-groups read + pruned, columns, pre-filter rows |
 | `io_scan_diagnostics` | `pool_reader.pyx:700-715` | **per scan**: `bytes_fetched` (real compressed IO), `http_request_count`, `http_retries`, `worker_blocked_ns`, `queue_high_watermark`, inline decodes |
 | `billing_bytes` | `planner/data_processed.py` | plan-time dense **logical** bytes (the billing meter — not an IO measurement) |
-| `gil_held_ns`, `worker_gil_sites` | WP-INSTR, `OPTERYX_INSTRUMENT_ENGINE` | execution-path Python re-entry |
-| `scan_sources`, `scan_residual_reasons` | plan time | which Source each scan got, and why |
+| `scan_sources` | plan time | which native Source each scan got (a scan neither admits is refused with `NativeScanRefusedError`, naming why) |
 
 Counters are bracketed **per morsel, never per row**, at three sites in the
 drive loop:

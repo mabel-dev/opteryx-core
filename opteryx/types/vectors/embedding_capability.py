@@ -36,6 +36,7 @@ Contract for a capability:
 import hashlib
 import importlib.util
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,12 +54,16 @@ class EmbeddingCapability:
     """What an embedding currently means.
 
     `name` is for diagnostics. `identity` is the exact embedder: two capabilities with the
-    same identity produce the same vector for the same text.
+    same identity produce the same vector for the same text. `batch_rows` is how many rows
+    one kernel call should carry to keep the embedder busy (1 on a CPU; a GPU wants full
+    batches) - a throughput hint for bulk callers such as the index builder, never part of
+    the identity.
     """
 
     name: str
     dimensions: int
     identity: str
+    batch_rows: int = 1
 
 
 _CORE = EmbeddingCapability(
@@ -84,7 +89,7 @@ def embedding_dimensions() -> int:
 
 
 def register_embedding_capability(
-    name: str, dimensions: int, kernel_ptr: int, identity: str
+    name: str, dimensions: int, kernel_ptr: int, identity: str, batch_rows: int = 1
 ) -> None:
     """Install `kernel_ptr` as the embedding kernel, replacing the core static-hash one.
 
@@ -95,6 +100,7 @@ def register_embedding_capability(
             C-ABI kernel. It must live for the process lifetime, and must honour the width
             handed to it in `vector_dim_ctx` or return an error sentinel.
         identity: the exact embedder (see EmbeddingCapability).
+        batch_rows: rows per kernel call that keep the embedder busy (see EmbeddingCapability).
 
     Raises:
         InvalidConfigurationError: on a bad width, or on a width change after the width has
@@ -130,7 +136,15 @@ def register_embedding_capability(
     from draken.ops.kernels._kernel_registry import register_kernel
 
     register_kernel(_EMBED_KERNEL_NAME, kernel_ptr)
-    _active = EmbeddingCapability(name=name, dimensions=dimensions, identity=identity)
+    if not isinstance(batch_rows, int) or isinstance(batch_rows, bool) or batch_rows < 1:
+        raise InvalidConfigurationError(
+            config_item="embedding_capability.batch_rows",
+            provided_value=repr(batch_rows),
+            valid_value_description="a whole number of rows, at least 1.",
+        )
+    _active = EmbeddingCapability(
+        name=name, dimensions=dimensions, identity=identity, batch_rows=batch_rows
+    )
 
 
 def _onnxruntime_library() -> Path:
@@ -164,7 +178,7 @@ def _onnxruntime_library() -> Path:
     return candidates[0]
 
 
-def install_minilm_capability(max_length: int = 256) -> EmbeddingCapability:
+def install_minilm_capability(max_length: int = 256, accelerator: str = None) -> EmbeddingCapability:
     """Make embeddings mean MiniLM (all-MiniLM-L6-v2) for the rest of this process.
 
     Needs onnxruntime's native library (`pip install --no-deps "onnxruntime>=1.30,<2"`)
@@ -172,6 +186,12 @@ def install_minilm_capability(max_length: int = 256) -> EmbeddingCapability:
     download `model.onnx` + `vocab.txt` yourself (in a deployed image, at container build)
     and point `OPTERYX_MINILM_MODEL_DIR` at the directory. Call during startup, before any
     query that embeds is planned. Explicit by design: nothing installs it implicitly.
+
+    `accelerator`: "coreml" runs the model on Apple's CoreML (the Mac GPU), "cpu" on the CPU.
+    None means the platform's: CoreML on macOS (measured ~2x all CPU cores, identical
+    output - see minilm_native.cpp), the CPU elsewhere. The SAME model file either way, so
+    the embedding identity does not depend on it. CoreML that cannot be loaded raises; it
+    never falls back to the CPU.
 
     Raises:
         MissingDependencyError: onnxruntime is not installed, or the model is absent.
@@ -204,13 +224,28 @@ def install_minilm_capability(max_length: int = 256) -> EmbeddingCapability:
             for chunk in iter(lambda: handle.read(1 << 20), b""):
                 digest.update(chunk)
 
-    kernel_ptr, dimensions = minilm_native.install_embed_capability(
-        str(library), str(model_path), str(vocab_path), max_length
+    if accelerator is None:
+        accelerator = "coreml" if sys.platform == "darwin" else "cpu"
+    if accelerator not in ("cpu", "coreml"):
+        raise InvalidConfigurationError(
+            config_item="accelerator",
+            provided_value=repr(accelerator),
+            valid_value_description='"cpu" or "coreml" (macOS only), or None for the platform\'s.',
+        )
+    if accelerator == "coreml" and sys.platform != "darwin":
+        raise InvalidConfigurationError(
+            config_item="accelerator",
+            provided_value="coreml",
+            valid_value_description="CoreML exists only on macOS; use \"cpu\".",
+        )
+    kernel_ptr, dimensions, batch_rows = minilm_native.install_embed_capability(
+        str(library), str(model_path), str(vocab_path), max_length, accelerator
     )
     register_embedding_capability(
         "minilm-l6-v2",
         int(dimensions),
         int(kernel_ptr),
         identity=f"minilm-l6-v2:{max_length}:sha256:{digest.hexdigest()}",
+        batch_rows=int(batch_rows),
     )
     return active_embedding_capability()

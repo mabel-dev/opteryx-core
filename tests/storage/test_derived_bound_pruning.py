@@ -423,7 +423,7 @@ def test_unsatisfiable_case_fold_returns_nothing():
 
 
 def _scan_census(sql):
-    """Run `sql`; return (rows, column_names, scan_sources, residual_reasons)."""
+    """Run `sql`; return (rows, column_names, scan_sources)."""
     session = opteryx.session()
     rows = []
     names = None
@@ -436,7 +436,6 @@ def _scan_census(sql):
         rows,
         names,
         list((telemetry.get("scan_sources") or {}).values()),
-        dict(telemetry.get("scan_residual_reasons") or {}),
     )
 
 
@@ -446,7 +445,7 @@ def test_pruning_every_file_stays_on_the_native_scan():
     to read, not a scan that cannot be planned."""
     dataset, ds_dir = _with_dataset("_tmp_bounds_prune_all")
     try:
-        rows, names, sources, reasons = _scan_census(
+        rows, names, sources = _scan_census(
             f"SELECT seq, label FROM {dataset} WHERE seq IS NULL"
         )
         assert rows == [], rows
@@ -454,7 +453,6 @@ def test_pruning_every_file_stays_on_the_native_scan():
         # to say WHICH columns it produced none of.
         assert names == [b"seq", b"label"], names
         assert sources == ["NativeParquetScanSource"], sources
-        assert reasons == {}, reasons
     finally:
         shutil.rmtree(ds_dir, ignore_errors=True)
 
@@ -464,11 +462,10 @@ def test_pruning_every_file_counts_zero_natively():
     0, computed by the native sink over an input that produced no morsels."""
     dataset, ds_dir = _with_dataset("_tmp_bounds_prune_all_count")
     try:
-        rows, _, sources, reasons = _scan_census(
+        rows, _, sources = _scan_census(
             f"SELECT COUNT(*) FROM {dataset} WHERE seq IS NULL"
         )
         assert rows == [(0,)], rows
         assert sources == ["NativeParquetScanSource"], sources
-        assert reasons == {}, reasons
     finally:
         shutil.rmtree(ds_dir, ignore_errors=True)

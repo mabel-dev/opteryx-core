@@ -28,12 +28,8 @@ import pyarrow.parquet as pq
 import pytest
 
 import opteryx
-import opteryx.config as config
 from draken.draken_native import DrakenType
 from opteryx.connectors.parquet_io import pool_reader
-
-sys.path.insert(1, os.path.join(os.path.dirname(__file__), "../../../dev"))
-import instrument_engine as IE  # noqa: E402
 
 #: The DrakenType the binder declares for each pyarrow type these tests write.
 _EXPECTED_TYPE = {
@@ -380,29 +376,6 @@ def test_pruning_matches_direct_source_plan(tmp_path):
     finally:
         pruned.close()
         full.close()
-
-
-# ── instrumentation: zero-Python on the relocated path ───────────────────────
-
-def test_instrumentation_native_predicate_zero_gil(tmp_path, monkeypatch):
-    """A string-column + predicate SELECT: NativeParquetScanSource, scan-stage GIL
-    time ~0, no worker re-entry, and execute_bytecode unreachable (worker-purity
-    guard with whitelist=() — any execution-time Python re-entry fails it)."""
-    cols, wk = _mixed()
-    ds = _write(str(tmp_path / "instr"), cols, **wk)
-    sql = "SELECT s FROM '%s' WHERE n > 200" % ds
-
-    monkeypatch.setattr(config, "OPTERYX_INSTRUMENT_ENGINE", True)
-    session = opteryx.session()
-    for _ in session.execute_to_morsels(sql):
-        pass
-    td = session.telemetry
-
-    assert list(td["scan_sources"].values()) == ["NativeParquetScanSource"]
-    assert td["gil_held_ns"] == 0
-    assert td.get("worker_gil_sites", []) == []
-    # no execution-time Python (e.g. execute_bytecode) may run on any worker thread.
-    IE.assert_native_worker_purity(td, whitelist=())
 
 
 if __name__ == "__main__":

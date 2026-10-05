@@ -31,6 +31,7 @@ from draken.draken_native import LogicalKind
 from opteryx.constants import ResultType
 from opteryx.exceptions import CidrAggTypeError
 from opteryx.exceptions import InvalidInternalStateError
+from opteryx.exceptions import NativeScanRefusedError
 from opteryx.exceptions import NotSupportedError
 from opteryx.exceptions import VariantKeyError
 from opteryx.exceptions import compose
@@ -4836,11 +4837,8 @@ class _Compiler:
         # No Python trampoline fallback (ruled 2026-10-03): a parquet scan neither
         # native Source admits is REFUSED, naming the residual reason, until that
         # reason is closed natively.
-        reason = self.scan_residual_reasons.get(scan.identity, "unrecorded")
-        _unsupported(
-            f"Reading {scan.relation} ({reason})",
-            "The native parquet reader cannot read this dataset yet",
-        )
+        raise NativeScanRefusedError(
+            str(scan.relation), self.scan_residual_reasons.get(scan.identity, "unrecorded"))
 
     def _arm_delete_admission(self, p, splan, manifest):
         """Give a delete-bearing native scan its merge-on-read deletes as a row
@@ -6921,10 +6919,6 @@ def execute_native(plan, telemetry=None, trace_sink=None):
         if scan_facts:
             telemetry._reading["native_scan_facts"] = dict(scan_facts)
 
-    # WP-INSTR instruments 1 & 4: arm the execution-time GIL instrumentation for the
-    # span of this run when the config flag is set. Disarmed by default → the
-    # instrumented sites pay a single-branch check and nothing else.
-    instrument_gil = bool(config.OPTERYX_INSTRUMENT_ENGINE)
     # docs/EXECUTION_TRACING_DESIGN.md: arm native span recording for this run when
     # the caller gave us somewhere to put the result (trace_sink) — recording
     # with nowhere to drain to would just be wasted work. The `trace` session
@@ -6962,18 +6956,11 @@ def execute_native(plan, telemetry=None, trace_sink=None):
         # must wait for the driver's finish() natively before teardown (see finally).
         _saw_finished = False
 
-        if instrument_gil:
-            from opteryx.operators._operators import instr_gil_reset
-            from opteryx.operators._operators import instr_gil_set_enabled
-
-            # Arm BEFORE the driver submits so every worker sees the flag set.
-            instr_gil_reset()
-            instr_gil_set_enabled(True)
         _trace_query_seq = 0
         if trace_enabled:
-            # Bump the generation and arm the gate BEFORE the driver submits, same
-            # ordering requirement as the GIL instrument above — every worker must
-            # see the new generation/enabled flag before it starts recording.
+            # Bump the generation and arm the gate BEFORE the driver submits — every
+            # worker must see the new generation/enabled flag before it starts
+            # recording.
             _trace_query_seq = native_trace_start_query()
             native_trace_set_enabled(True)
         _t0 = _t.perf_counter_ns()
@@ -7106,18 +7093,6 @@ def execute_native(plan, telemetry=None, trace_sink=None):
                 if loop_stats:
                     telemetry._reading["recursive_loop_stats"] = loop_stats
             _harvest_ns = _t.perf_counter_ns() - _th0
-            # WP-INSTR instruments 1 & 4: harvest the execution-time GIL readings
-            # after the driver (and therefore every worker) is done, so the
-            # accumulators are final. Then disarm — the flag is process-global.
-            if instrument_gil:
-                from opteryx.operators._operators import instr_gil_set_enabled
-                from opteryx.operators._operators import instr_gil_total_ns
-                from opteryx.operators._operators import instr_gil_worker_report
-
-                if telemetry is not None:
-                    telemetry._reading["gil_held_ns"] = instr_gil_total_ns()
-                    telemetry._reading["worker_gil_sites"] = instr_gil_worker_report()
-                instr_gil_set_enabled(False)
             if trace_enabled:
                 # Drain after every worker has joined — the same precondition
                 # collect_op_stats relies on below, so this reads finalized arenas.

@@ -299,18 +299,6 @@
         "default_source": "environment",
         "environment_key": "OPTERYX_HTTP_TIMEOUT_FLOOR_MS"
     },
-    "instrument_engine": {
-        "name": "instrument_engine",
-        "type": "BOOL",
-        "owner": "SERVER",
-        "visibility": "RESTRICTED",
-        "settable": false,
-        "requires_entitlement": null,
-        "set_by": "not settable via SQL",
-        "default": null,
-        "default_source": "environment",
-        "environment_key": "OPTERYX_INSTRUMENT_ENGINE"
-    },
     "kvstore_key_prefix": {
         "name": "kvstore_key_prefix",
         "type": "VARCHAR",

@@ -12,6 +12,7 @@
 #include "alloc.h"
 #include "markers.hpp"
 #include "parse_context.hpp"
+#include "../../chunk_limit.hpp"
 
 namespace rugo::_jsonl {
 
@@ -121,13 +122,9 @@ private:
 
 // Every position the parser stores — FieldSpan, the structural index, LineSpan — is a
 // uint32_t offset from the start of the buffer it was handed. So no buffer the parser walks
-// may be longer than this: a larger input is read as CHUNKS of at most this many bytes, each
-// cut after a newline, each walked from its own start (interpret_jsonl_threaded), and a
-// single line longer than this cannot be read at all (it throws std::length_error).
-inline constexpr size_t kMaxChunkBytes = UINT32_MAX;
-
-// Throws std::length_error unless `length` fits kMaxChunkBytes. `what` names the caller.
-void require_chunk_length(size_t length, const char* what);
+// may be longer than kMaxChunkBytes (chunk_limit.hpp): a larger input is read as CHUNKS,
+// each cut after a newline, each walked from its own start (interpret_jsonl_threaded), and a
+// single line longer than that cannot be read at all (it throws std::length_error).
 
 // The end of the chunk of [from, length) that starts at `from` (a line start): `length`
 // when the rest fits kMaxChunkBytes, else one past the last newline inside the first

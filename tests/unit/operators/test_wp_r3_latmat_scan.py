@@ -78,7 +78,7 @@ def _norm(value):
 
 
 def _drain(sql, latmat, monkeypatch):
-    """Run `sql`; return (rows, names, scan_sources, residual_reasons). `rows` are
+    """Run `sql`; return (rows, names, scan_sources). `rows` are
     tuples of normalized Python values in EMISSION order."""
     if not latmat:
         monkeypatch.setattr(config.features, "parquet_late_materialization", False)
@@ -93,10 +93,9 @@ def _drain(sql, latmat, monkeypatch):
             rows.append(tuple(_norm(c[i]) for c in cols))
     telemetry = session.telemetry
     src = list(telemetry["scan_sources"].values())
-    reasons = dict(telemetry.get("scan_residual_reasons", {}))
     if not latmat:
         monkeypatch.undo()
-    return rows, names, src, reasons
+    return rows, names, src
 
 
 def _sort_rank(value):
@@ -142,12 +141,11 @@ def _assert_latmat_matches_oracle(tmp_path, name, columns, where, monkeypatch, *
     if nulls is not None:
         order += " NULLS " + nulls
     sql = f"SELECT * FROM '{path}' WHERE {sql_where} ORDER BY {order} LIMIT {limit}"
-    rows, names, src, reasons = _drain(sql, latmat=True, monkeypatch=monkeypatch)
+    rows, names, src = _drain(sql, latmat=True, monkeypatch=monkeypatch)
 
     assert src == ["LatmatScanSource"], (
         f"{name}: expected the two-pass late-mat Source, got {src} — this case is "
         "not exercising R3 at all")
-    assert reasons == {}, f"{name}: residual reason recorded: {reasons}"
     assert names == list(columns), f"{name}: output column layout differs: {names}"
 
     nulls_first = None if nulls is None else (nulls == "FIRST")
@@ -359,9 +357,8 @@ def test_latmat_zero_survivors(tmp_path, monkeypatch):
                   _dataset([i for i in range(N)]))
     sql = (f"SELECT * FROM '{path}' WHERE tag LIKE '%nothing-matches-this%' "
            "ORDER BY k LIMIT 10")
-    nat_rows, _, nat_src, reasons = _drain(sql, latmat=True, monkeypatch=monkeypatch)
+    nat_rows, _, nat_src = _drain(sql, latmat=True, monkeypatch=monkeypatch)
     assert nat_src == ["LatmatScanSource"], nat_src
-    assert reasons == {}, reasons
     assert nat_rows == []
 
 
@@ -384,9 +381,8 @@ def test_latmat_pass2_columns_stay_aligned_with_their_own_rows(tmp_path, monkeyp
     keys = [i for i in range(N)]
     path = _write(os.path.join(str(tmp_path), "alignment"), _dataset(keys))
     sql = (f"SELECT * FROM '{path}' WHERE tag LIKE '{NEEDLE}' ORDER BY k DESC LIMIT 25")
-    rows, _, src, reasons = _drain(sql, latmat=True, monkeypatch=monkeypatch)
+    rows, _, src = _drain(sql, latmat=True, monkeypatch=monkeypatch)
     assert src == ["LatmatScanSource"], src
-    assert reasons == {}, reasons
     assert len(rows) == 25
     for tag, k, pay_str, pay_f64, pay_i64, pay_bool in rows:
         i = int(k)
@@ -450,7 +446,7 @@ def test_varbinary_predicate_is_pushed_to_the_workers(tmp_path, monkeypatch):
     path = _write(os.path.join(str(tmp_path), "varbinary_push"),
                   _binary_dataset([N - i for i in range(N)]))
     sql = (f"SELECT * FROM '{path}' WHERE tag LIKE '{NEEDLE}' ORDER BY k LIMIT 10")
-    _rows, _names, src, _reasons = _drain(sql, latmat=True, monkeypatch=monkeypatch)
+    _rows, _names, src = _drain(sql, latmat=True, monkeypatch=monkeypatch)
 
     assert src == ["LatmatScanSource"], f"not exercising the latmat scan at all: {src}"
     assert verdicts, "the push gate was never consulted — the predicate was not pushed"

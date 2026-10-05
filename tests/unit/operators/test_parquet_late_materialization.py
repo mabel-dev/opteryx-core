@@ -86,7 +86,7 @@ def _oracle_rows(columns=None, url_needle=None):
 
 def _execute(sql, latmat=True):
     """Drain `sql` with the late-materialization flag set as requested. Returns
-    (names, rows in emission order, scan_sources, residual_reasons)."""
+    (names, rows in emission order, scan_sources)."""
     config.features.parquet_late_materialization = latmat
     session = opteryx.session()
     try:
@@ -99,8 +99,7 @@ def _execute(sql, latmat=True):
             for i in range(morsel.num_rows):
                 rows.append(tuple(c[i] for c in cols))
         telemetry = session.telemetry
-        return (names, rows, list(telemetry["scan_sources"].values()),
-                dict(telemetry.get("scan_residual_reasons", {})))
+        return names, rows, list(telemetry["scan_sources"].values())
     finally:
         session.close()
 
@@ -141,14 +140,13 @@ def test_q24_no_matching_rows_on_latmat_source():
     assert len(oracle) == 0, (
         "fixture assumption broken: clickbench_tiny now contains 'google' URLs")
 
-    _, rows, src, reasons = _execute(
+    _, rows, src = _execute(
         "SELECT * FROM testdata.clickbench_tiny"
         " WHERE URL LIKE '%google%'"
         " ORDER BY EventTime LIMIT 10"
     )
     assert rows == []
     assert src == ["LatmatScanSource"], src
-    assert reasons == {}, reasons
 
 
 # ─── assembly correctness tests ───────────────────────────────────────────────
@@ -160,14 +158,13 @@ def test_assembly_correctness_matching_rows_yandex():
     _, survivors = _oracle_rows(("URL", "EventTime", "UserID"), "yandex")
     assert survivors, "fixture assumption broken: no 'yandex' URLs"
 
-    names, rows, src, reasons = _execute(
+    names, rows, src = _execute(
         "SELECT URL, EventTime, UserID"
         " FROM testdata.clickbench_tiny"
         " WHERE URL LIKE '%yandex%'"
         " ORDER BY EventTime LIMIT 20"
     )
     assert src == ["LatmatScanSource"], src
-    assert reasons == {}, reasons
     assert names == ["URL", "EventTime", "UserID"], names
     _assert_valid_topn(rows, names, survivors, "EventTime", 20)
 
@@ -179,14 +176,13 @@ def test_assembly_correctness_select_star():
     names_o, survivors = _oracle_rows(None, "yandex")
     assert survivors, "fixture assumption broken: no 'yandex' URLs"
 
-    names, rows, src, reasons = _execute(
+    names, rows, src = _execute(
         "SELECT *"
         " FROM testdata.clickbench_tiny"
         " WHERE URL LIKE '%yandex%'"
         " ORDER BY EventTime LIMIT 5"
     )
     assert src == ["LatmatScanSource"], src
-    assert reasons == {}, reasons
     assert names == names_o, "column order must match the file's column order"
     _assert_valid_topn(rows, names, survivors, "EventTime", 5)
 
@@ -197,34 +193,31 @@ def test_assembly_correctness_select_star():
 def test_two_pass_inactive_when_no_predicate():
     """Without a WHERE clause there are no pass-1 columns, so the fused top-n scan
     is not late-materialized: it runs on the single-pass Source."""
-    _, _, src, reasons = _execute(
+    _, _, src = _execute(
         "SELECT URL, EventTime FROM testdata.clickbench_tiny ORDER BY EventTime LIMIT 5")
     assert src == ["NativeParquetScanSource"], src
-    assert reasons == {}, reasons
 
 
 def test_two_pass_inactive_when_all_projected_columns_in_filter():
     """SELECT URL ... WHERE URL LIKE ... ORDER BY URL — every projected column is a
     pass-1 column, so there is nothing for pass 2 and the scan is single-pass."""
-    _, _, src, reasons = _execute(
+    _, _, src = _execute(
         "SELECT URL FROM testdata.clickbench_tiny WHERE URL LIKE '%yandex%'"
         " ORDER BY URL LIMIT 5"
     )
     assert src == ["NativeParquetScanSource"], src
-    assert reasons == {}, reasons
 
 
 def test_two_pass_inactive_when_feature_flag_disabled():
     """With the late-materialization feature flag off, an otherwise eligible query
     runs on the single-pass Source."""
-    _, _, src, reasons = _execute(
+    _, _, src = _execute(
         "SELECT * FROM testdata.clickbench_tiny"
         " WHERE URL LIKE '%google%'"
         " ORDER BY EventTime LIMIT 10",
         latmat=False,
     )
     assert src == ["NativeParquetScanSource"], src
-    assert reasons == {}, reasons
 
 
 # ─── regression / non-interference tests ──────────────────────────────────────
@@ -237,7 +230,7 @@ def test_non_like_predicate_not_affected(latmat):
     _, oracle = _oracle_rows(("AdvEngineID",))
     expect = sum(1 for r in oracle
                  if r["AdvEngineID"] is not None and r["AdvEngineID"] != 0)
-    _, rows, _, _ = _execute(
+    _, rows, _ = _execute(
         "SELECT COUNT(*) FROM testdata.clickbench_tiny WHERE AdvEngineID <> 0", latmat)
     assert rows == [(expect,)], (rows, expect)
 
@@ -254,7 +247,7 @@ def test_aggregate_query_not_affected(latmat):
         counts[r["UserID"]] = counts.get(r["UserID"], 0) + 1
     expect_counts = sorted(counts.values(), reverse=True)[:3]
 
-    _, rows, _, _ = _execute(
+    _, rows, _ = _execute(
         "SELECT UserID, COUNT(*)"
         " FROM testdata.clickbench_tiny"
         " GROUP BY UserID"
@@ -280,7 +273,7 @@ def test_q28_like_with_group_by_and_limit(latmat):
     expect = sorted(((p, mn, c) for p, (mn, c) in groups.items()),
                     key=lambda t: t[2], reverse=True)[:10]
 
-    _, rows, _, _ = _execute(
+    _, rows, _ = _execute(
         "SELECT SearchPhrase, MIN(URL), COUNT(*) AS c"
         " FROM testdata.clickbench_tiny"
         " WHERE URL LIKE '%google%' AND SearchPhrase <> ''"

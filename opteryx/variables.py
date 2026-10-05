@@ -445,7 +445,6 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # Diagnostics — same class as `trace`, but process-wide rather than per-query,
     # so they are env-set rather than SET-able.
     "opteryx_debug": (BOOLEAN, FromConfig("OPTERYX_DEBUG"), VariableOwner.SERVER, Visibility.RESTRICTED),
-    "instrument_engine": (BOOLEAN, FromConfig("OPTERYX_INSTRUMENT_ENGINE"), VariableOwner.SERVER, Visibility.RESTRICTED),
     "disable_gc_during_query": (BOOLEAN, FromConfig("OPTERYX_DISABLE_GC_DURING_QUERY"), VariableOwner.SERVER, Visibility.RESTRICTED),
     "validate_optimizer_plans": (BOOLEAN, FromConfig("VALIDATE_OPTIMIZER_PLANS"), VariableOwner.SERVER, Visibility.RESTRICTED),
 

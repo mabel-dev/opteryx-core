@@ -1100,13 +1100,6 @@ MapBuilder<kColumns> run_map(
 
 }  // namespace
 
-void require_chunk_length(size_t length, const char* what) {
-    if (length > kMaxChunkBytes)
-        throw std::length_error(std::string(what) + ": " + std::to_string(length) +
-                                " bytes in one buffer; at most " + std::to_string(kMaxChunkBytes) +
-                                " (4 GiB) can be parsed at once");
-}
-
 size_t chunk_end(const uint8_t* buffer, size_t from, size_t length) {
     if (length - from <= kMaxChunkBytes) return length;
     for (size_t p = from + kMaxChunkBytes; p > from; --p)

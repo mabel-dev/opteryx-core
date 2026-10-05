@@ -71,7 +71,8 @@ uint32_t unescape_csv_field(
 //
 // Parameters:
 //   buffer          — full file buffer
-//   length          — buffer length
+//   length          — buffer length; a body over 4 GiB (kMaxChunkBytes) is read
+//                     in chunks cut at row boundaries outside quoted fields
 //   header_offset   — byte offset where data rows start (from parse_csv_header)
 //   column_names    — column names in file order (from parse_csv_header)
 //   num_cols        — column count from header

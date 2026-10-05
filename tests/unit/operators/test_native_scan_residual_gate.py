@@ -1,11 +1,10 @@
 """A0 acceptance gate — native SELECT-path residual reasons.
 
-The native C++ engine runs plain SELECT end-to-end EXCEPT for parquet scans that
-fall back to the per-morsel Python trampoline (StreamingScanSource). Every such
-fallback is one of the `return None` guards in
-`opteryx/managers/execution/compiler.py::_native_scan_plan`, and each now records
-a stable machine-readable reason code on query telemetry
-(`scan_residual_reasons`, keyed by scan identity).
+The native C++ engine runs every parquet scan on a native Source. There is no
+Python fallback (the trampoline, StreamingScanSource, was deleted 2026-10-03): a
+scan neither native Source admits is REFUSED with NativeScanRefusedError, whose
+`reason` field is the stable machine-readable code of the `return None` guard in
+`opteryx/managers/execution/compiler.py::_native_scan_plan` that fired.
 
 This module is the acceptance gate a close-out chip points at:
 
@@ -14,7 +13,7 @@ This module is the acceptance gate a close-out chip points at:
     correctly wired (it is the guard against a tag silently drifting / dying).
 
   * FRONTIER (xfail) — one strict-xfail test per open category asserts the scan
-    goes NATIVE. It fails today (the scan is trampoline → xfail) and FLIPS TO A
+    goes NATIVE. It fails today (the scan is refused → xfail) and FLIPS TO A
     HARD FAILURE (xpass, strict) the moment a close-out chip admits that shape
     natively — the signal to delete the marker and move the category to "closed".
 
@@ -30,7 +29,7 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), "../../..", "dev"))
 
 import pytest
 
-from opteryx.exceptions import NotSupportedError
+from opteryx.exceptions import NativeScanRefusedError
 
 import native_residual_census as census  # dev/native_residual_census.py
 
@@ -56,9 +55,8 @@ def assert_scan_native(sql):
 
 def test_residual_reasons_reachable():
     """Each canonical query forces exactly its guard, is REFUSED (no trampoline
-    fallback, ruled 2026-10-03) and tags the matching reason.
-    The refusal message carries the reason (the census returns no reasons when the
-    query raises).
+    fallback, ruled 2026-10-03) and tags the matching reason — both as the
+    refusal's `reason` field (what the census reads) and in its message.
 
     HAND_SET holds one entry today — `footer_gate` via schema evolution, the last
     residual with a live SQL trigger. Written as a loop rather than a parametrize so
@@ -66,8 +64,9 @@ def test_residual_reasons_reachable():
     assertion instead of an empty parameter set, which pytest turns into a skip."""
     for expected_reason, sql in census.HAND_SET.items():
         sources, reasons, err = census.scan_residuals(sql)
-        assert isinstance(err, NotSupportedError), (
+        assert isinstance(err, NativeScanRefusedError), (
             f"{expected_reason}: expected a refusal, got err={err!r} sources={sources}")
+        assert [r.split(":", 1)[0] for r in reasons.values()] == [expected_reason], reasons
         assert f"({expected_reason}" in str(err), (
             f"{expected_reason}: refusal does not name the reason: {err}")
 
@@ -704,16 +703,22 @@ def test_regex_predicate_survivor_count_matches_oracle():
 # This is the number docs/NATIVE_RESIDUAL_PLAN.md reports against, and until now
 # NOTHING RAN IT automatically: the only assertion on it lived inside
 # test_wp_a3_fused_topn_scan.py, an A3-specific file, and it caught the
-# 2026-09-14 predicate_bounds regression (__trampoline__ 0 -> 2) purely because
-# someone happened to run that file by hand. Wired into `make q` so the frontier
-# cannot reopen unobserved.
+# 2026-09-14 predicate_bounds regression (then a trampoline count, 0 -> 2) purely
+# because someone happened to run that file by hand. Wired into `make q` so the
+# frontier cannot reopen unobserved.
+#
+# Since the trampoline was deleted (2026-10-03) a scan that leaves the native path
+# is REFUSED: the query raises NativeScanRefusedError instead of running slowly, so
+# the census counts refused QUERIES (`__refused__`). It used to count fallback
+# scans, which can no longer exist, so its gate could never fail — see
+# test_census_counts_a_refused_scan, which proves this one can.
 # ---------------------------------------------------------------------------
 
 #: Coverage floor for the census corpus. NOT an exact count — the battery grows,
 #: and pinning the exact number would make every new query a gate failure. It
 #: exists to catch the FAKE-GREEN case: `_read_battery` silently skips a battery
 #: file that has been moved or renamed, so a census measuring NOTHING would
-#: otherwise satisfy "zero trampoline" trivially. 168 scans today.
+#: otherwise satisfy "zero refused" trivially. 167 scans today.
 _MIN_CENSUS_SCANS = 150
 
 
@@ -721,21 +726,32 @@ def test_census_frontier_is_empty():
     """Every parquet scan in the clickbench + tpch battery selects a native Source.
 
     Asserts the corpus was actually measured before asserting what it measured —
-    a zero trampoline count over zero scans proves nothing.
+    a zero refusal count over zero scans proves nothing.
     """
     tally = census.census()
 
     assert tally["__scans__"] >= _MIN_CENSUS_SCANS, (
         "census measured only %d parquet scans (floor %d) — the battery corpus is "
-        "not being read; a 'zero trampoline' result over it is vacuous. tally=%r"
+        "not being read; a 'zero refused' result over it is vacuous. tally=%r"
         % (tally["__scans__"], _MIN_CENSUS_SCANS, tally)
     )
-    assert tally["__trampoline__"] == 0, (
-        "%d scan(s) fell back to the Python trampoline: %r"
-        % (tally["__trampoline__"], {k: v for k, v in tally.items()
-                                     if not k.startswith("__")})
+    assert tally["__refused__"] == 0, (
+        "%d battery quer(ies) refused by the native scan: %r"
+        % (tally["__refused__"], {k: v for k, v in tally.items()
+                                  if not k.startswith("__")})
     )
     assert tally["__native__"] == tally["__scans__"], tally
+
+
+def test_census_counts_a_refused_scan(monkeypatch):
+    """The gate above can fail: a battery holding one refused scan (HAND_SET's
+    schema-evolution trigger) tallies one refusal under its reason code, and is not
+    lost among the queries that raised for other reasons."""
+    monkeypatch.setattr(census, "_read_battery", lambda: [census.HAND_SET["footer_gate"]])
+    tally = census.census()
+    assert tally["__refused__"] == 1, tally
+    assert tally["footer_gate"] == 1, tally
+    assert tally["__raised__"] == 0, tally
 
 
 if __name__ == "__main__":  # pragma: no cover

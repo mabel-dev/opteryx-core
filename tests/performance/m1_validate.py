@@ -7,9 +7,8 @@ History: it was written to prove milestone M1 removed the scan-stage GIL
 bottleneck by running each query twice — native and forced onto the Python
 per-morsel scan (StreamingScanSource) — and comparing them. That Python scan was
 deleted (ruling 2026-10-03), so the A/B arm is gone and what remains measures the
-native scan alone: per-query dop scaling, CPU-cores utilised, gil_held_ns /
-worker-purity (both must read zero for a native scan), pruning facts, and
-aggregate throughput under concurrent queries.
+native scan alone: per-query dop scaling, CPU-cores utilised, pruning facts,
+and aggregate throughput under concurrent queries.
 
 The dev/test interpreter is a free-threaded 3.14 build whose GIL is toggled by
 the ``PYTHON_GIL`` env var:
@@ -47,11 +46,9 @@ import time
 # run-from-tree: this file is tests/performance/, repo root is two up.
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(1, _REPO)
-sys.path.insert(1, os.path.join(_REPO, "dev"))
 
 import opteryx  # noqa: E402
 import opteryx.config as config  # noqa: E402
-import instrument_engine as IE  # noqa: E402
 
 
 # ── dataset generation (pyarrow — test-only, never imported by the engine) ──────
@@ -181,7 +178,6 @@ def _measure(sql: str, dop: int, repeats: int) -> dict:
     measurement, so the dop is now read back rather than assumed.
     """
     config.MAX_EXECUTION_WORKERS = dop
-    config.OPTERYX_INSTRUMENT_ENGINE = True
 
     walls, cpus, out_rows = [], [], 0
     telemetry = None
@@ -212,12 +208,6 @@ def _measure(sql: str, dop: int, repeats: int) -> dict:
     facts = s._telemetry._reading.get("native_scan_facts", {})
     rg_read = sum(v.get("row_groups_read", 0) for v in facts.values()) if facts else None
     rg_pruned = sum(v.get("row_groups_pruned", 0) for v in facts.values()) if facts else None
-    # worker purity: whitelist=() flags ANY execution-time Python re-entry
-    try:
-        IE.assert_native_worker_purity(telemetry, whitelist=())
-        purity = "PASS"
-    except IE.WorkerPurityError as e:
-        purity = f"FLAG ({str(e).split(':')[-1].strip()[:40]})"
 
     return {
         "dop_used": dop_used,
@@ -227,11 +217,9 @@ def _measure(sql: str, dop: int, repeats: int) -> dict:
         "rows": out_rows,
         "krows_s": (out_rows / (wall_ns / 1e9)) / 1000.0 if wall_ns else 0.0,
         "src": ",".join(x.replace("ParquetScanSource", "").replace("ScanSource", "") for x in src),
-        "gil_ms": telemetry.get("gil_held_ns", 0) / 1e6,
         "files_pruned": telemetry.get("files_pruned", 0),
         "rg_read": rg_read,
         "rg_pruned": rg_pruned,
-        "purity": purity,
     }
 
 
@@ -241,7 +229,7 @@ def _run_scenario(name: str, sql: str, dataset_rows: int, dops, repeats: int) ->
     print(f"\n### {name}")
     print(f"    {sql}")
     hdr = (f"  {'dop':>4}{'wall_ms':>10}{'krows/s':>10}{'cores':>7}"
-           f"{'scan_krps':>11}{'gil_ms':>9}{'rg_rd':>7}{'rg_pr':>7}  purity")
+           f"{'scan_krps':>11}{'rg_rd':>7}{'rg_pr':>7}")
     print(hdr)
     rows = {"name": name, "sql": sql, "dataset_rows": dataset_rows, "native": []}
     for dop in dops:
@@ -261,8 +249,8 @@ def _run_scenario(name: str, sql: str, dataset_rows: int, dops, repeats: int) ->
         m["scan_krows_s"] = scan_krps
         rows["native"].append(m)
         print(f"  {m['dop_used']:>4}{m['wall_ms']:>10.1f}{m['krows_s']:>10.0f}{m['cores']:>7.2f}"
-              f"{scan_krps:>11.0f}{m['gil_ms']:>9.1f}"
-              f"{str(m['rg_read']):>7}{str(m['rg_pruned']):>7}  {m['purity']}")
+              f"{scan_krps:>11.0f}"
+              f"{str(m['rg_read']):>7}{str(m['rg_pruned']):>7}")
     # every dop must produce the same survivor row count.
     nat_rows = {r["rows"] for r in rows["native"]}
     rows["row_stable_across_dops"] = len(nat_rows) == 1
@@ -284,12 +272,10 @@ def _run_query_once(sql: str) -> int:
 def _concurrency_sweep(sql: str, dataset_rows: int, qs, per_query_dop: int, repeats: int) -> dict:
     """Run Q identical queries CONCURRENTLY (one per thread) and measure aggregate
     throughput + CPU-cores utilised for the native scan, which has no Python on the
-    pull path and should scale with cores. Instrumentation is OFF here — the
-    WP-INSTR GIL accumulators are single-query-only (module globals), so we rely on
-    wall-clock / process-CPU, which are concurrency-safe."""
+    pull path and should scale with cores. Measured by wall-clock / process-CPU,
+    which are concurrency-safe."""
     import threading
 
-    config.OPTERYX_INSTRUMENT_ENGINE = False
     config.MAX_EXECUTION_WORKERS = per_query_dop
     _probe = opteryx.session()
     for _ in _probe.execute_to_morsels("SELECT 1"):
@@ -391,7 +377,7 @@ def main(argv) -> int:
     ]
 
     print("\n" + "=" * 96)
-    print("PART A — per-query dop sweep (instrumentation ON): gil_held_ns / purity / pruning")
+    print("PART A — per-query dop sweep: throughput / cores / pruning")
     print("=" * 96)
     results = []
     for name, sql in scenarios:

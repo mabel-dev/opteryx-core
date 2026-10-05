@@ -150,32 +150,50 @@ std::vector<std::string> basic_tokenize(std::string_view text) {
 
 class MiniLMEmbedder {
   public:
+    // How a batch is run.
+    //   cpu:    one session, variable shapes, every batch padded only to its own longest row.
+    //   coreml: Apple's CoreML execution provider (the Mac GPU; ruled 2026-10-05). CoreML
+    //           needs fixed input shapes, so there is one session per sequence-length bucket,
+    //           each pinned to kCoreMLBatch rows by ONNX Runtime's free-dimension overrides
+    //           on the SAME model file (so the model, and the embedding identity, are
+    //           unchanged). A row goes to the smallest bucket that holds it; a short final
+    //           batch is filled with [CLS][SEP] rows whose outputs are discarded. Measured
+    //           2026-10-05 (M5 Pro, fp32, 128 tokens): batch 32 on CoreML 1,388 rows/s on one
+    //           thread vs 784 on all 16 CPU threads; outputs equal to the CPU's (min cosine
+    //           1.00000); the Neural Engine alone was slower (372) - CoreML picks the GPU.
+    enum class Accelerator { cpu, coreml };
+    static constexpr std::size_t kCoreMLBatch = 32;
+
     MiniLMEmbedder(const std::string& model_path, const std::string& vocab_path,
-                   std::size_t max_length)
-        : max_length_(max_length) {
+                   std::size_t max_length, Accelerator accelerator)
+        : max_length_(max_length), accelerator_(accelerator) {
         if (max_length_ < 3) throw std::runtime_error("max_length must be at least 3");
         load_vocab(vocab_path);
 
         OrtEnv* env = nullptr;
         ort_check(g_ort->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "opteryx_minilm", &env), "CreateEnv");
         env_.reset(env);
-
-        OrtSessionOptions* opts = nullptr;
-        ort_check(g_ort->CreateSessionOptions(&opts), "CreateSessionOptions");
-        OptsPtr opts_owner(opts);
-        ort_check(g_ort->SetIntraOpNumThreads(opts, 1), "SetIntraOpNumThreads");
-        ort_check(g_ort->SetSessionGraphOptimizationLevel(opts, ORT_ENABLE_ALL),
-                  "SetSessionGraphOptimizationLevel");
-
-        OrtSession* session = nullptr;
-        ort_check(g_ort->CreateSession(env_.get(), model_path.c_str(), opts, &session),
-                  "CreateSession");
-        session_.reset(session);
-
         ort_check(g_ort->GetAllocatorWithDefaultOptions(&allocator_),
                   "GetAllocatorWithDefaultOptions");
-        load_input_names();
-        load_output();
+
+        if (accelerator_ == Accelerator::cpu) {
+            session_ = make_session(model_path, 0);
+            load_input_names(session_.get());
+            load_output(session_.get());
+        } else {
+            // A model whose variable dimensions are not called batch_size/sequence_length
+            // would ignore the overrides and CoreML would take none of it - a silent
+            // fallback to the CPU. Refuse it instead.
+            SessPtr probe = make_session(model_path, 0);
+            require_dynamic_dims(probe.get());
+            for (std::size_t length : {std::size_t{64}, std::size_t{128}, max_length_}) {
+                if (length > max_length_ || (!buckets_.empty() && length <= buckets_.back().first))
+                    continue;
+                buckets_.emplace_back(length, make_session(model_path, static_cast<int64_t>(length)));
+            }
+            load_input_names(buckets_.front().second.get());
+            load_output(buckets_.front().second.get());
+        }
 
         OrtMemoryInfo* mem = nullptr;
         ort_check(g_ort->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &mem),
@@ -185,32 +203,127 @@ class MiniLMEmbedder {
 
     std::size_t dimensions() const { return hidden_size_; }
 
+    // Rows per call that keep this embedder busy: the CPU path is batch 1 (ruled: batching
+    // was the memory blow-up and no faster); CoreML wants several full batches per call.
+    std::size_t preferred_batch_rows() const {
+        return accelerator_ == Accelerator::cpu ? 1u : kCoreMLBatch * 4u;
+    }
+
     // Mean-pooled, L2-normalised fp32 rows, one per text. Thread-safe: OrtSession::Run is.
     std::vector<std::vector<float>> embed_texts(const std::vector<std::string>& texts) const {
         if (texts.empty()) return {};
+        std::vector<std::vector<std::int64_t>> encoded;
+        encoded.reserve(texts.size());
+        for (const std::string& text : texts) encoded.push_back(encode(text));
+        std::vector<std::vector<float>> embeddings(texts.size());
 
-        const std::size_t batch_size = texts.size();
-        std::vector<std::vector<std::int64_t>> encoded_rows;
-        encoded_rows.reserve(batch_size);
-        std::size_t sequence_length = 0;
-        for (const std::string& text : texts) {
-            auto encoded = encode(text);
-            sequence_length = std::max(sequence_length, encoded.size());
-            encoded_rows.push_back(std::move(encoded));
+        if (accelerator_ == Accelerator::cpu) {
+            std::vector<std::size_t> rows(texts.size());
+            std::size_t longest = 0;
+            for (std::size_t i = 0; i < rows.size(); ++i) {
+                rows[i] = i;
+                longest = std::max(longest, encoded[i].size());
+            }
+            forward(session_.get(), encoded, rows, rows.size(), longest, embeddings);
+            return embeddings;
         }
 
-        std::vector<std::int64_t> input_ids(batch_size * sequence_length, pad_id_);
-        std::vector<std::int64_t> attention_mask(batch_size * sequence_length, 0);
-        std::vector<std::int64_t> token_type_ids(batch_size * sequence_length, 0);
-        for (std::size_t row = 0; row < batch_size; ++row) {
-            const auto& encoded = encoded_rows[row];
-            for (std::size_t col = 0; col < encoded.size(); ++col) {
-                input_ids[row * sequence_length + col] = encoded[col];
-                attention_mask[row * sequence_length + col] = 1;
+        // CoreML: every row into the smallest bucket that holds it, kCoreMLBatch at a time.
+        std::vector<std::vector<std::size_t>> by_bucket(buckets_.size());
+        for (std::size_t i = 0; i < encoded.size(); ++i) {
+            std::size_t b = 0;
+            while (encoded[i].size() > buckets_[b].first) ++b;   // the last bucket is max_length
+            by_bucket[b].push_back(i);
+        }
+        for (std::size_t b = 0; b < buckets_.size(); ++b) {
+            const auto& rows = by_bucket[b];
+            for (std::size_t at = 0; at < rows.size(); at += kCoreMLBatch) {
+                const std::vector<std::size_t> chunk(
+                    rows.begin() + static_cast<std::ptrdiff_t>(at),
+                    rows.begin() + static_cast<std::ptrdiff_t>(std::min(at + kCoreMLBatch, rows.size())));
+                forward(buckets_[b].second.get(), encoded, chunk, kCoreMLBatch, buckets_[b].first,
+                        embeddings);
+            }
+        }
+        return embeddings;
+    }
+
+  private:
+    // A session over `model_path`. sequence_length 0: on the CPU, variable shapes.
+    // > 0: CoreML, pinned to kCoreMLBatch x sequence_length.
+    SessPtr make_session(const std::string& model_path, int64_t sequence_length) const {
+        OrtSessionOptions* opts = nullptr;
+        ort_check(g_ort->CreateSessionOptions(&opts), "CreateSessionOptions");
+        OptsPtr opts_owner(opts);
+        ort_check(g_ort->SetIntraOpNumThreads(opts, 1), "SetIntraOpNumThreads");
+        ort_check(g_ort->SetSessionGraphOptimizationLevel(opts, ORT_ENABLE_ALL),
+                  "SetSessionGraphOptimizationLevel");
+        if (sequence_length > 0) {
+            ort_check(g_ort->AddFreeDimensionOverrideByName(opts, "batch_size",
+                                                            static_cast<int64_t>(kCoreMLBatch)),
+                      "AddFreeDimensionOverrideByName(batch_size)");
+            ort_check(g_ort->AddFreeDimensionOverrideByName(opts, "sequence_length", sequence_length),
+                      "AddFreeDimensionOverrideByName(sequence_length)");
+            static const char* const keys[3] = {"MLComputeUnits", "ModelFormat",
+                                                "RequireStaticInputShapes"};
+            static const char* const values[3] = {"ALL", "MLProgram", "1"};
+            ort_check(g_ort->SessionOptionsAppendExecutionProvider(opts, "CoreML", keys, values, 3),
+                      "SessionOptionsAppendExecutionProvider(CoreML)");
+        }
+        OrtSession* session = nullptr;
+        ort_check(g_ort->CreateSession(env_.get(), model_path.c_str(), opts, &session),
+                  "CreateSession");
+        return SessPtr(session);
+    }
+
+    void require_dynamic_dims(const OrtSession* session) const {
+        std::size_t input_count = 0;
+        ort_check(g_ort->SessionGetInputCount(session, &input_count), "SessionGetInputCount");
+        for (std::size_t i = 0; i < input_count; ++i) {
+            OrtTypeInfo* type_raw = nullptr;
+            ort_check(g_ort->SessionGetInputTypeInfo(session, i, &type_raw), "SessionGetInputTypeInfo");
+            TypePtr type_info(type_raw);
+            const OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
+            ort_check(g_ort->CastTypeInfoToTensorInfo(type_info.get(), &tensor_info),
+                      "CastTypeInfoToTensorInfo");
+            std::size_t rank = 0;
+            ort_check(g_ort->GetDimensionsCount(tensor_info, &rank), "GetDimensionsCount");
+            std::vector<const char*> names(rank, nullptr);
+            ort_check(g_ort->GetSymbolicDimensions(tensor_info, names.data(), rank),
+                      "GetSymbolicDimensions");
+            if (rank != 2 || std::string(names[0]) != "batch_size" ||
+                std::string(names[1]) != "sequence_length")
+                throw std::runtime_error(
+                    "the CoreML embedder needs MiniLM inputs shaped [batch_size, sequence_length]; "
+                    "this model names its dimensions otherwise");
+        }
+    }
+
+    // One forward pass over `rows` (indices into `encoded`) padded to `batch_rows` x
+    // `sequence_length`; writes each real row's pooled embedding into `embeddings`.
+    void forward(OrtSession* session, const std::vector<std::vector<std::int64_t>>& encoded,
+                 const std::vector<std::size_t>& rows, std::size_t batch_rows,
+                 std::size_t sequence_length, std::vector<std::vector<float>>& embeddings) const {
+        std::vector<std::int64_t> input_ids(batch_rows * sequence_length, pad_id_);
+        std::vector<std::int64_t> attention_mask(batch_rows * sequence_length, 0);
+        std::vector<std::int64_t> token_type_ids(batch_rows * sequence_length, 0);
+        for (std::size_t r = 0; r < batch_rows; ++r) {
+            const std::size_t base = r * sequence_length;
+            if (r >= rows.size()) {
+                // Filler past the real rows: [CLS][SEP], discarded after the pass.
+                input_ids[base] = cls_id_;
+                input_ids[base + 1] = sep_id_;
+                attention_mask[base] = attention_mask[base + 1] = 1;
+                continue;
+            }
+            const std::vector<std::int64_t>& ids = encoded[rows[r]];
+            for (std::size_t col = 0; col < ids.size(); ++col) {
+                input_ids[base + col] = ids[col];
+                attention_mask[base + col] = 1;
             }
         }
 
-        const int64_t shape[2] = {static_cast<int64_t>(batch_size),
+        const int64_t shape[2] = {static_cast<int64_t>(batch_rows),
                                   static_cast<int64_t>(sequence_length)};
         std::vector<std::int64_t>* buffers[3] = {&input_ids, &attention_mask, &token_type_ids};
         ValPtr owned[3];
@@ -228,7 +341,7 @@ class MiniLMEmbedder {
 
         OrtValue* out_raw = nullptr;
         const char* output_name = output_name_.c_str();
-        ort_check(g_ort->Run(session_.get(), nullptr, input_name_ptrs_.data(), inputs,
+        ort_check(g_ort->Run(session, nullptr, input_name_ptrs_.data(), inputs,
                              input_name_ptrs_.size(), &output_name, 1, &out_raw),
                   "Run");
         ValPtr output(out_raw);
@@ -243,7 +356,7 @@ class MiniLMEmbedder {
         const std::vector<int64_t> out_shape = tensor_shape(info.get());
         if (out_shape.size() != 3)
             throw std::runtime_error("MiniLM output tensor has unexpected rank");
-        if (static_cast<std::size_t>(out_shape[0]) != batch_size ||
+        if (static_cast<std::size_t>(out_shape[0]) != batch_rows ||
             static_cast<std::size_t>(out_shape[1]) != sequence_length ||
             static_cast<std::size_t>(out_shape[2]) != hidden_size_)
             throw std::runtime_error("MiniLM output tensor shape does not match its input");
@@ -252,30 +365,29 @@ class MiniLMEmbedder {
         ort_check(g_ort->GetTensorMutableData(output.get(), reinterpret_cast<void**>(&output_data)),
                   "GetTensorMutableData");
 
-        std::vector<std::vector<float>> embeddings(batch_size, std::vector<float>(hidden_size_, 0.0f));
-        for (std::size_t row = 0; row < batch_size; ++row) {
+        for (std::size_t r = 0; r < rows.size(); ++r) {
+            std::vector<float>& embedding = embeddings[rows[r]];
+            embedding.assign(hidden_size_, 0.0f);
             float token_count = 0.0f;
             for (std::size_t col = 0; col < sequence_length; ++col) {
-                if (attention_mask[row * sequence_length + col] == 0) continue;
-                const std::size_t offset = (row * sequence_length + col) * hidden_size_;
+                if (attention_mask[r * sequence_length + col] == 0) continue;
+                const std::size_t offset = (r * sequence_length + col) * hidden_size_;
                 for (std::size_t dim = 0; dim < hidden_size_; ++dim)
-                    embeddings[row][dim] += output_data[offset + dim];
+                    embedding[dim] += output_data[offset + dim];
                 token_count += 1.0f;
             }
             // encode() always emits [CLS] and [SEP], so every row has tokens.
             float norm = 0.0f;
-            for (float& value : embeddings[row]) {
+            for (float& value : embedding) {
                 value /= token_count;
                 norm += value * value;
             }
             norm = std::sqrt(norm);
             if (norm > 0.0f)
-                for (float& value : embeddings[row]) value /= norm;
+                for (float& value : embedding) value /= norm;
         }
-        return embeddings;
     }
 
-  private:
     void load_vocab(const std::string& vocab_path) {
         std::ifstream vocab_file(vocab_path);
         if (!vocab_file) throw std::runtime_error("unable to open MiniLM vocab " + vocab_path);
@@ -292,15 +404,15 @@ class MiniLMEmbedder {
         sep_id_ = require_token_id("[SEP]");
     }
 
-    void load_input_names() {
+    void load_input_names(const OrtSession* session) {
         std::size_t input_count = 0;
-        ort_check(g_ort->SessionGetInputCount(session_.get(), &input_count), "SessionGetInputCount");
+        ort_check(g_ort->SessionGetInputCount(session, &input_count), "SessionGetInputCount");
         if (input_count < 2 || input_count > 3)
             throw std::runtime_error("MiniLM model must take 2 or 3 inputs");
         std::vector<std::string> names;
         for (std::size_t i = 0; i < input_count; ++i) {
             char* name = nullptr;
-            ort_check(g_ort->SessionGetInputName(session_.get(), i, allocator_, &name),
+            ort_check(g_ort->SessionGetInputName(session, i, allocator_, &name),
                       "SessionGetInputName");
             names.emplace_back(name);
             ort_check(g_ort->AllocatorFree(allocator_, name), "AllocatorFree");
@@ -315,12 +427,12 @@ class MiniLMEmbedder {
         for (const std::string& n : input_names_) input_name_ptrs_.push_back(n.c_str());
     }
 
-    void load_output() {
+    void load_output(const OrtSession* session) {
         std::size_t output_count = 0;
-        ort_check(g_ort->SessionGetOutputCount(session_.get(), &output_count), "SessionGetOutputCount");
+        ort_check(g_ort->SessionGetOutputCount(session, &output_count), "SessionGetOutputCount");
         if (output_count == 0) throw std::runtime_error("MiniLM model has no outputs");
         char* name = nullptr;
-        ort_check(g_ort->SessionGetOutputName(session_.get(), 0, allocator_, &name),
+        ort_check(g_ort->SessionGetOutputName(session, 0, allocator_, &name),
                   "SessionGetOutputName");
         output_name_ = name;
         ort_check(g_ort->AllocatorFree(allocator_, name), "AllocatorFree");
@@ -328,7 +440,7 @@ class MiniLMEmbedder {
         // The width is the model's, read from its declared output shape. No default: a
         // model whose hidden size is not static cannot declare a fixed embedding width.
         OrtTypeInfo* type_raw = nullptr;
-        ort_check(g_ort->SessionGetOutputTypeInfo(session_.get(), 0, &type_raw),
+        ort_check(g_ort->SessionGetOutputTypeInfo(session, 0, &type_raw),
                   "SessionGetOutputTypeInfo");
         TypePtr type_info(type_raw);
         const OrtTensorTypeAndShapeInfo* tensor_info = nullptr;
@@ -391,11 +503,13 @@ class MiniLMEmbedder {
     }
 
     EnvPtr env_;
-    SessPtr session_;
+    SessPtr session_;                                       // cpu
+    std::vector<std::pair<std::size_t, SessPtr>> buckets_;  // coreml: (sequence length, session)
     MemPtr memory_info_;
     OrtAllocator* allocator_ = nullptr;   // default allocator: owned by ORT, never released
     std::unordered_map<std::string, std::int64_t> vocab_;
     std::size_t max_length_;
+    Accelerator accelerator_;
     std::size_t hidden_size_ = 0;
     std::int64_t pad_id_ = 0;
     std::int64_t unk_id_ = 0;
@@ -533,10 +647,15 @@ NB_MODULE(minilm_native, m) {
     m.def(
         "install_embed_capability",
         [](const std::string& library_path, const std::string& model_path,
-           const std::string& vocab_path, std::size_t max_length) {
+           const std::string& vocab_path, std::size_t max_length, const std::string& accelerator) {
+            MiniLMEmbedder::Accelerator mode;
+            if (accelerator == "cpu") mode = MiniLMEmbedder::Accelerator::cpu;
+            else if (accelerator == "coreml") mode = MiniLMEmbedder::Accelerator::coreml;
+            else throw std::runtime_error("unknown MiniLM accelerator '" + accelerator +
+                                          "' (cpu or coreml)");
             load_onnxruntime(library_path);
             if (g_capability_embedder == nullptr) {
-                g_capability_embedder = new MiniLMEmbedder(model_path, vocab_path, max_length);
+                g_capability_embedder = new MiniLMEmbedder(model_path, vocab_path, max_length, mode);
                 g_capability_dims = g_capability_embedder->dimensions();
                 g_capability_model = model_path;
             } else if (model_path != g_capability_model) {
@@ -545,10 +664,10 @@ NB_MODULE(minilm_native, m) {
                                          g_capability_model + "; one model per process");
             }
             return nb::make_tuple(reinterpret_cast<std::uintptr_t>(&draken_embed_minilm),
-                                  g_capability_dims);
+                                  g_capability_dims, g_capability_embedder->preferred_batch_rows());
         },
         nb::arg("library_path"), nb::arg("model_path"), nb::arg("vocab_path"),
-        nb::arg("max_length") = 256);
+        nb::arg("max_length"), nb::arg("accelerator"));
 
     // Dev / measurement surface (dev/ fixtures, tests/embeddings): embed `texts` with the
     // INSTALLED capability and return the fp16 rows as raw bytes, row-major,

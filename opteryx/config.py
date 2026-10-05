@@ -170,23 +170,6 @@ natively and retrievable via :func:`~opteryx.query_session.Session.trace`.
 Truncation (per-thread span arena capacity) is controlled by
 ``OPTERYX_TRACE_ARENA_SPANS``, not a sampling rate — see
 draken/core/trace.hpp's trace_arena_capacity()."""
-OPTERYX_INSTRUMENT_ENGINE: bool = str(
-    get("OPTERYX_INSTRUMENT_ENGINE", "0")
-).lower() in (
-    "1",
-    "true",
-    "yes",
-)
-"""WP-INSTR diagnostic: arm the native execution-engine instrumentation for the
-duration of each native run. When enabled, ``execute_native`` measures the
-wall-clock nanoseconds spent inside the known execution-time ``with gil`` bodies
-(the scan-pull trampoline and the carrier-flip error stash) and records which
-worker thread entered which GIL site, surfacing them on the query telemetry as
-``gil_held_ns`` and ``worker_gil_sites``. Off by default — the instrumented sites
-read a single C flag and pay ~0 when disabled. NOT concurrency-safe across
-simultaneous queries in one process (module-global accumulators); it is a
-diagnostic, not a production counter."""
-
 OPTERYX_DISABLE_GC_DURING_QUERY: bool = str(
     get("OPTERYX_DISABLE_GC_DURING_QUERY", "0")
 ).lower() in (
@@ -580,6 +563,13 @@ def resolve_max_execution_workers(requested: Optional[int] = None) -> int:
         cpu = _os.cpu_count() or 1
         return max(2, cpu - 2, (cpu * 4) // 5)
     return requested
+
+VECTOR_INDEX_STAGE_DIR: str = str(get("VECTOR_INDEX_STAGE_DIR", "") or "")
+"""A directory a GCS vector index build copies its data file into, then reads locally.
+Empty (the default): the build reads the data file from GCS with a bearer token minted
+once, never refreshed (ruled 2026-10-03) - so a build longer than the token's life (about
+an hour; a multi-million-row file under MiniLM) fails mid-read. Set for such builds, e.g.
+off-platform backfills; the directory needs room for the largest data file."""
 
 # ── Vector index cost model (docs/VECTOR_INDEX_DESIGN.md §8, ruled 2026-10-04) ──────────
 # Whether a file is searched through its vector index or exactly is decided per file by
