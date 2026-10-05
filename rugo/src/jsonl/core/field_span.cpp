@@ -94,7 +94,8 @@ InterpreterResult interpret_jsonl(
             }
 
     const std::vector<uint8_t> copy = head_copy_columns(buffer_data, buffer_length, columns, context);
-    const MapProjection proj{&wanted_cols, &prepared_predicates, &pred_slot, columns.size(), &copy};
+    const MapProjection proj{&wanted_cols, &prepared_predicates, &pred_slot, columns.size(), &copy,
+                             /*early_exit=*/!context.projected_columns.empty()};
     ColumnMap map = build_columns(buffer_data, buffer_length, proj, range_start, lines);
 
     // bytes_consumed = byte after the range's last newline (backward scan — newline near

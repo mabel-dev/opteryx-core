@@ -45,7 +45,8 @@ struct WantedColumn {
 
 // Projection + predicate pushdown for build_columns. MINIMAL EXTENT: only fields whose key
 // matches a wanted column are captured, and once every wanted column is resolved nothing
-// more is materialised for the record (its tail is still parsed — see parse_record).
+// more is materialised for the record; with `early_exit` its tail is not even parsed (see
+// build_columns).
 // Predicate columns are evaluated INLINE the moment their value is captured — a failing row
 // stops materialising right there. Ordinals count every field, so captured spans carry true
 // positions.
@@ -61,6 +62,10 @@ struct MapProjection {
     // Per output column: 1 = copy each captured value's bytes into ColumnMap::arena while
     // they are hot (see ColumnMap); 0 = reference the source buffer. head_copy_columns.
     const std::vector<uint8_t>*      copy_bytes;
+    // Early exit (build_columns): stop reading each record once every wanted column is
+    // resolved, and only check the rest of its line's brackets and strings. Set when the
+    // read has a projection; an unprojected read wants every key, so it has no tail to skip.
+    bool                             early_exit;
 };
 
 // The column-major document map: for each output column, one span per surviving row —
@@ -179,6 +184,21 @@ struct RecordSet {
 // range_start must be the start of a line (0, or one past a newline). Every line in the
 // range is judged on its own: one that is not exactly one object is rejected whole (see
 // MapBuilder's line discipline), so a range can be cut at any newline.
+//
+// EARLY EXIT (proj.early_exit, unfiltered ranges only — not with `lines`): the range is
+// read a line at a time. Each line is indexed 64 bytes at a time (starting from what the
+// previous line needed) and parsed as it grows; once every wanted column is resolved — or
+// an inline predicate failed — the rest of the line is NOT indexed or parsed. It is read
+// once by check_line_tail (structural_scan.hpp), which finds the line's end and accepts
+// the record iff, outside strings, its brackets close to depth 0 exactly once, at the
+// line's last non-whitespace byte, which is '}', and the line does not end inside a
+// string. A line that fails that check, or that ends before its record is finished, is
+// indexed whole and judged by the full rules. So past the wanted columns a record's MEMBER
+// GRAMMAR AND SCALAR TOKENS ARE NOT VALIDATED (a missing ':' or a bare word there is
+// accepted): whether such a line is accepted depends on the projection (ruled 2026-10-05).
+// Everything before the last wanted column, every line that is not one object, a record
+// cut inside a string, unbalanced brackets and a second value on the line are still
+// rejected, whatever the projection.
 //
 // `lines` (the raw prefilter's survivors, prefilter_lines): when given, ONLY these lines —
 // ascending, each a whole line of the range — are input, and the bytes between them are

@@ -310,6 +310,17 @@ struct MapBuilder {
     const WantedColumn* cur_col = nullptr;
     bool record_dead = false;
 
+    // Early exit (build_columns, kColumns). `prefix_mode`: the index in hand covers only the
+    // head of the record's line, and parse_record returns PREFIX_DONE the moment the record
+    // needs nothing more. `prefix_ran_out`: the last parse_prefix stopped because the index
+    // ended, not because the line is malformed. `tail_from` / `tail_depth`: the first byte
+    // after the value that finished the record, and the brackets open there — where
+    // check_line_tail takes over.
+    bool prefix_mode = false;
+    bool prefix_ran_out = false;
+    uint32_t tail_from = 0;
+    int tail_depth = 0;
+
     // Line discipline. A JSONL line is a record: whitespace, ONE object whose closing '}'
     // ends it, whitespace. Anything else — content before the '{', a second object or any
     // marker after the '}', a newline before the '}' (truncated record, raw newline in a
@@ -565,6 +576,159 @@ struct MapBuilder {
     }
 
     static constexpr size_t NPOS = static_cast<size_t>(-1);
+    // parse_record in prefix_mode: every wanted column is resolved (or an inline predicate
+    // failed); the rest of the line is check_line_tail's, from tail_from / tail_depth.
+    static constexpr size_t PREFIX_DONE = static_cast<size_t>(-2);
+
+    // Does the nested key body [ks, ks+klen) decode to column `c`'s sub-key? Exactly
+    // find_nested_field's comparison.
+    inline bool nested_key_eq(uint32_t ks, uint32_t klen, const WantedColumn* c) const {
+        if (klen < c->sub_len) return false;
+        bool escaped = false;
+        for (uint32_t q = 0; q < klen && !escaped; ++q) escaped = buffer[ks + q] == '\\';
+        return escaped ? escaped_key_equals(buffer + ks, klen, c->sub, c->sub_len)
+                       : (klen == c->sub_len && buffer[ks] == c->sub_first &&
+                          std::memcmp(buffer + ks, c->sub, c->sub_len) == 0);
+    }
+
+    // Resolve nested column `c` to the unquoted scalar member value running from ':' to
+    // `end`: exactly find_nested_field's emit_scalar (empty or `null` = resolved missing).
+    inline bool nested_scalar(const WantedColumn* c, uint32_t colon_pos, uint32_t end) {
+        uint32_t vs = colon_pos + 1;
+        while (vs < end && is_ws(buffer[vs])) ++vs;
+        if (vs >= end) return resolved_missing(c);
+        uint32_t ve = end - 1;
+        while (ve > vs && is_ws(buffer[ve])) --ve;
+        if (ve - vs + 1 == 4 && std::memcmp(buffer + vs, "null", 4) == 0) return resolved_missing(c);
+        return stage(c, vs, ve - vs + 1, classify_first(buffer[vs]), c->slot);
+    }
+
+    // Is every wanted column on the key in hand a nested (`key->>'sub'`) column?
+    inline bool chain_all_nested() const {
+        if (cur_col == nullptr) return false;
+        for (const WantedColumn* c = cur_col; c != nullptr; c = next_in_group(c))
+            if (c->sub_len == 0) return false;
+        return true;
+    }
+
+    // Early exit, nested: read the nested columns on the key in hand in ONE walk of the
+    // object whose '{' is entry `open_idx`, WITHOUT bounding it first, so the walk can stop
+    // at the value that finishes the record. Value semantics, first-occurrence and depth
+    // safety are find_nested_field's (a nested container is skipped whole by
+    // bound_container). Returns 1 when the record is finished (tail_from / tail_depth set),
+    // 0 when the object closed first (`at` = its closing entry; every chain column it did
+    // not carry resolved missing), -1 when the line is malformed or the index ran out at
+    // `at`.
+    inline int nested_walk(const StructuralWindow& w, size_t open_idx, size_t& at) {
+        enum St : uint8_t { KEY_EXPECT, KEY_IN, COLON_EXPECT, VALUE_EXPECT, VALUE_STR_IN, AFTER_VALUE };
+        St st = KEY_EXPECT;
+        // The chain columns this member's key matched (a chain holds every wanted column on
+        // one top-level key; each is matched at most once per record).
+        constexpr int kMaxHits = 16;
+        const WantedColumn* hit[kMaxHits];
+        int nhit = 0;
+        uint32_t ks = 0, val_start = 0, colon_pos = 0;
+        bool fin = false;
+        auto closed_at = [&](size_t j) {
+            for (const WantedColumn* c = cur_col; c != nullptr && !record_dead; c = next_in_group(c))
+                resolved_missing(c);
+            at = j;
+            return 0;
+        };
+        for (size_t j = open_idx + 1; j < w.n; ++j) {
+            const uint32_t p = w.ix[j];
+            const uint8_t t = buffer[p];
+            if (t == '\n') { at = j; return -1; }
+            switch (st) {
+            case KEY_EXPECT:
+                if (t == '"') { ks = p + 1; st = KEY_IN; }
+                else if (t == '}' || t == ']') return closed_at(j);
+                break;
+            case KEY_IN:
+                if (t == '"') {
+                    nhit = 0;
+                    for (const WantedColumn* c = cur_col; c != nullptr; c = next_in_group(c))
+                        if (res_gen[c->out] != rec_gen && nested_key_eq(ks, p - ks, c)) {
+                            if (nhit == kMaxHits)
+                                throw std::length_error("JSONL: more than 16 nested columns on one key");
+                            hit[nhit++] = c;
+                        }
+                    st = COLON_EXPECT;
+                }
+                break;
+            case COLON_EXPECT:
+                if (t == ':') { colon_pos = p; st = VALUE_EXPECT; }
+                break;
+            case VALUE_EXPECT:
+                if (t == '"') {
+                    val_start = p + 1;
+                    st = VALUE_STR_IN;
+                } else if (t == '{' || t == '[') {
+                    bool closed = false;
+                    uint32_t cpos = 0;
+                    const size_t cidx = bound_container(w, j, buffer_length, closed, cpos);
+                    if (!closed) { at = cidx; return -1; }
+                    for (int h = 0; h < nhit && !record_dead; ++h)
+                        fin |= stage(hit[h], p, cpos - p + 1,
+                                     t == '[' ? ValueType::Array : ValueType::Object, hit[h]->slot);
+                    if (fin) { tail_from = cpos + 1; tail_depth = 2; return 1; }
+                    j = cidx;
+                    st = AFTER_VALUE;
+                } else if (t == ',' || t == '}' || t == ']') {
+                    for (int h = 0; h < nhit && !record_dead; ++h) fin |= nested_scalar(hit[h], colon_pos, p);
+                    if (fin) { tail_from = p; tail_depth = 2; return 1; }
+                    if (t != ',') return closed_at(j);
+                    st = KEY_EXPECT;
+                }
+                break;
+            case VALUE_STR_IN:
+                if (t == '"') {
+                    for (int h = 0; h < nhit && !record_dead; ++h)
+                        fin |= stage(hit[h], val_start, p - val_start, ValueType::String, hit[h]->slot);
+                    if (fin) { tail_from = p + 1; tail_depth = 2; return 1; }
+                    st = AFTER_VALUE;
+                }
+                break;
+            case AFTER_VALUE:
+                if (t == ',') st = KEY_EXPECT;
+                else if (t == '}' || t == ']') return closed_at(j);
+                break;
+            }
+        }
+        at = w.n;
+        return -1;
+    }
+
+    // Early exit: parse the record that opens the current line from a PREFIX index `w` of
+    // the line. True when every wanted column was resolved (or an inline predicate failed)
+    // inside the prefix — the record is staged, and check_line_tail decides the rest; then
+    // accept_prefix or reset_prefix. False otherwise, with no effect on the line's state:
+    // `prefix_ran_out` says whether a longer prefix could still finish it.
+    inline bool parse_prefix(const StructuralWindow& w) {
+        prefix_ran_out = false;
+        if (w.n == 0) { prefix_ran_out = true; return false; }
+        if (w.at(0) != '{' || !blank(line_start, w.ix[0])) return false;
+        size_t fail_at = 0;
+        prefix_mode = true;
+        const size_t r = parse_record(w, 0, fail_at);
+        prefix_mode = false;
+        if (r == PREFIX_DONE) return true;
+        prefix_ran_out = r == NPOS && fail_at >= w.n;
+        reset_prefix();
+        return false;
+    }
+    // The staged record is not taken: the line is judged again by the full rules.
+    inline void reset_prefix() {
+        saw_open_brace_since_newline = false;
+        record_dead = false;
+    }
+    // The staged record passed check_line_tail: bank it (or drop it — a predicate failed);
+    // `line_end` is its line's newline (or the buffer end), so nothing remains to judge.
+    inline void accept_prefix(uint32_t line_end) {
+        if (record_dead) { discard_record(); record_dead = false; }
+        else bank_record();
+        tail_start = line_end;
+    }
 
     // Parse the record whose '{' is entry `i`, strictly, at its top level:
     //
@@ -578,12 +742,13 @@ struct MapBuilder {
     // entry after an opening quote is its closing quote, or the newline that truncates it.
     //
     // Minimal extent: once every wanted column is resolved, or an inline predicate failed,
-    // keys are no longer matched and nothing is materialised — but the rest of the record
-    // is parsed by the same rules, so whether a line is accepted never depends on the
-    // projection.
+    // keys are no longer matched and nothing is materialised; the rest of the record is
+    // parsed by the same rules — except in prefix_mode (early exit), which returns
+    // PREFIX_DONE right there and leaves the rest of the line to check_line_tail.
     //
-    // Returns the index of the record's closing '}', or NPOS with `fail_at` = the entry
-    // where it stopped being valid (or w.n when the index ran out).
+    // Returns the index of the record's closing '}', PREFIX_DONE (prefix_mode only), or
+    // NPOS with `fail_at` = the entry where it stopped being valid (or w.n when the index
+    // ran out).
 #if defined(__GNUC__) || defined(__clang__)
     __attribute__((always_inline))
 #endif
@@ -631,6 +796,18 @@ struct MapBuilder {
                 }
                 after = w.ix[v + 1] + 1;
                 sep = v + 2;
+            } else if (kColumns && prefix_mode && !done && vc == '{' && chain_all_nested()) {
+                // Early exit through a nested key: read its sub-keys without bounding the
+                // object first, so the walk can stop inside it.
+                if (!gap_ok(colon + 1, w.ix[v])) RUGO_FAIL(v);
+                size_t at = 0;
+                const int r = nested_walk(w, v, at);
+                if (r < 0) RUGO_FAIL(at);
+                if (r > 0) return PREFIX_DONE;
+                ++ordinal;
+                stop = record_dead || found >= num_wanted;
+                after = w.ix[at] + 1;
+                sep = at + 1;
             } else if (vc == '{' || vc == '[') {
                 if (!gap_ok(colon + 1, w.ix[v])) RUGO_FAIL(v);
                 bool closed = false;
@@ -661,6 +838,11 @@ struct MapBuilder {
                 RUGO_FAIL(v);  // ':' / ']' / a newline where a value must start
             }
             done |= stop;
+            if (kColumns && prefix_mode && done) {
+                tail_from = after;
+                tail_depth = 1;
+                return PREFIX_DONE;
+            }
 
             // separator
             if (sep >= n) RUGO_FAIL(n);
@@ -808,6 +990,76 @@ MapBuilder<kColumns> run_map(
                 bytes += to - l.start;
             }
             walk_window<kColumns, true>(b, StructuralWindow{buffer, index.data(), n}, blen, lines, li);
+        }
+    } else if (kColumns && proj->early_exit) {
+        // Early exit (build_columns): one line at a time. The line is indexed 64 bytes at a
+        // time (state carried), starting from what the previous line needed, and parsed as
+        // the index grows; each step looks for the newline only inside its own chunk.
+        // Once the record is finished, check_line_tail reads the rest of the line once and
+        // finds its end. A line whose record is not finished before the line ends, that is
+        // malformed inside the indexed part, or that fails the tail check is indexed whole
+        // and judged by walk_window — the full rules.
+        size_t hint = 64;
+        size_t a = range_start;
+        while (a < buffer_length) {
+            b.begin_line(static_cast<uint32_t>(a));
+            uint64_t state[2] = {0, 0};
+            size_t n = 0, indexed = 0, take = hint, line_end = 0;
+            for (;;) {
+                const size_t pos = a + indexed;
+                const size_t avail = buffer_length - pos;
+                size_t t = std::min(take, avail);
+                const void* nl = std::memchr(buffer + pos, '\n', t);
+                const bool whole = nl != nullptr || t == avail;
+                if (nl) t = static_cast<size_t>(static_cast<const uint8_t*>(nl) - (buffer + pos)) + 1;
+                room(indexed + t + 64);
+                n += scan_structural_index_cont(buffer + pos, t, static_cast<uint32_t>(pos), index.data() + n, state);
+                indexed += t;
+                const StructuralWindow win{buffer, index.data(), n};
+                if (whole) {
+                    line_end = a + indexed;
+                    walk_window<kColumns, false>(b, win, blen, lines, li);
+                    break;
+                }
+                if (b.parse_prefix(win)) {
+                    const uint32_t from = b.tail_from;
+                    size_t close_off = 0, nl_off = 0;
+                    bool ok = check_line_tail(buffer + from, buffer_length - from, b.tail_depth, &close_off, &nl_off);
+                    const size_t le = from + nl_off;
+                    line_end = le < buffer_length ? le + 1 : buffer_length;
+                    if (ok) {
+                        // The record's close is the line's last non-whitespace byte.
+                        size_t e = le;
+                        while (e > from && is_ws(buffer[e - 1])) --e;
+                        ok = from + close_off == e - 1 && buffer[e - 1] == '}';
+                    }
+                    if (ok) {
+                        b.accept_prefix(static_cast<uint32_t>(le));
+                        hint = indexed;
+                        break;
+                    }
+                    b.reset_prefix();
+                    room((line_end - a) + 64);
+                    const size_t nn = scan_structural_index(buffer + a, line_end - a, static_cast<uint32_t>(a), index.data());
+                    walk_window<kColumns, false>(b, StructuralWindow{buffer, index.data(), nn}, blen, lines, li);
+                    break;
+                }
+                if (!b.prefix_ran_out) {
+                    // Malformed (or the record closed) inside the indexed part: index the
+                    // rest of the line and judge it by the full rules.
+                    const void* q = std::memchr(buffer + a + indexed, '\n', buffer_length - (a + indexed));
+                    line_end = q ? static_cast<size_t>(static_cast<const uint8_t*>(q) - buffer) + 1 : buffer_length;
+                    room((line_end - a) + 64);
+                    n += scan_structural_index_cont(buffer + a + indexed, line_end - (a + indexed),
+                                                    static_cast<uint32_t>(a + indexed), index.data() + n, state);
+                    walk_window<kColumns, false>(b, StructuralWindow{buffer, index.data(), n}, blen, lines, li);
+                    break;
+                }
+                take = 64;
+            }
+            scanned += line_end - a;
+            if (scanned >= kWindowBytes) reserve_from_density();
+            a = line_end;
         }
     } else {
         size_t a = range_start;
