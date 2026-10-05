@@ -11,7 +11,6 @@ Architecture:
 - OpteryxTable: Transient table-specific engine (handles data reading for one table)
 """
 
-import decimal
 import logging
 import threading
 from collections import OrderedDict
@@ -22,60 +21,6 @@ from opteryx.connectors import TableType
 
 logger = logging.getLogger(__name__)
 
-# One-shot guard for the "backend has no native sketch vectors" report, keyed by
-# the CLASS that failed the probe rather than by process. A global flag meant the
-# first backend to degrade silenced every other one for the life of the process,
-# so in a deployment mixing a native workspace with a third-party one you only
-# ever heard about whichever happened to be read first - and the line named no
-# dataset, so you could not tell which.
-_warned_no_native_sketches: set = set()
-
-
-def _warn_no_native_sketches(table: Any) -> None:
-    """Report, once per backend class, that a table exposes no sketch vectors.
-
-    Do not prescribe an upgrade unconditionally here. `manifest_sketch_vectors`
-    is probed by duck typing against whatever `Dataset` implementation the
-    workspace is registered with, and a missing accessor has two unrelated
-    causes:
-
-      * an opteryx_catalog older than the accessor - genuinely stale, and
-        upgrading is the fix, so this is a WARNING; or
-      * a catalog backend whose format simply has no sketch statistics to give.
-        Apache Iceberg is the case in point: its manifests have no field for
-        NDV/histogram sketches, so no version of opteryx_catalog would add them
-        and "upgrade opteryx_catalog" is advice the operator cannot act on. That
-        is a property of the format, not a fault, so it is logged at DEBUG.
-
-    The two are told apart by where the implementing class comes from, which is
-    the only thing the engine actually knows. Third-party backends should define
-    the accessor and return `{}` to declare "no sketches" explicitly rather than
-    relying on this path.
-    """
-    cls = type(table)
-    key = f"{cls.__module__}.{cls.__qualname__}"
-    if key in _warned_no_native_sketches:
-        return
-    _warned_no_native_sketches.add(key)
-
-    native = cls.__module__.split(".")[0] == "opteryx_catalog"
-    detail = (
-        f"{key} does not implement manifest_sketch_vectors, so whole-column "
-        f"NDV/histogram sketches are not available natively; the planner uses the "
-        f"per-file Python fallback where per-file sketch stats exist, and no sketch "
-        f"statistics at all where they do not."
-    )
-    if native:
-        logger.warning(
-            f"{detail} This is an opteryx_catalog dataset predating the accessor - "
-            f"upgrade opteryx_catalog to enable native sketch reductions."
-        )
-    else:
-        logger.debug(
-            f"{detail} This is a non-opteryx_catalog backend; if its format carries "
-            f"no sketch statistics this is expected and the backend should define "
-            f"manifest_sketch_vectors returning an empty dict to say so."
-        )
 from opteryx.connectors.base.base_connector import BaseTable
 from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable, TopNPushable, Writable
 from opteryx.connectors.capabilities.topn_pushable import single_physical_column_topn
@@ -153,8 +98,8 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
     supports_topn_pushdown = True
     # The reader that serves a catalog scan is not this class - it is chosen
     # from the manifest's file formats (physical_planner
-    # `_scan_reader_for_manifest`), and a catalog manifest is parquet-only
-    # (`_catalog_manifest` types every file PARQUET). That reader is
+    # `_scan_reader_for_manifest`), and a catalog manifest is parquet-only.
+    # That reader is
     # ParquetReadNode, which honours a scan-declared TIMESTAMP64 on an
     # int64-stored column. If the catalog ever hands back a non-parquet format,
     # this has to become format-aware the way FileSystemTable's is.
@@ -881,10 +826,9 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
         Get dataset schema and build manifest from catalog.
 
         Returns both schema and manifest to make the dual purpose explicit.
-        The manifest comes from whichever producer the dataset declares
-        (`has_opteryx_manifest`): the snapshot's manifest parquet decoded
-        natively, or - for a backend with no opteryx-format manifest
-        (opteryx-iceberg) - its `scan()` rows.
+        The manifest is the snapshot's opteryx manifest parquet
+        (`manifest_bytes()`), decoded natively - every backend serves that
+        format, opteryx-iceberg included.
 
         Returns:
             Tuple of (RelationDescriptor, Manifest)
@@ -893,13 +837,11 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
 
         # bounds_are_ordinal is asked of the DATASET, never assumed here. This
         # connector serves every metastore opteryx-catalog's `Dataset` interface
-        # covers -- the native catalog (ordinal keys) and external catalogs such
-        # as opteryx-iceberg (real decoded values, `from_bytes` off the Iceberg
-        # manifest) -- and the encoding travels with whoever produced the bounds.
-        # Hardcoding True read an Iceberg VARCHAR's real `str` bound as an
-        # ordinal and pruned every file of `WHERE <double col> >= 250.0`.
-        # A dataset that declares nothing is an ERROR, not a defaulting case:
-        # True and False are each silently wrong for one of the two producers.
+        # covers, and the encoding travels with whoever produced the bounds:
+        # reading real values as ordinals (or the reverse) prunes files that hold
+        # matching rows. A dataset that declares nothing is an ERROR, not a
+        # defaulting case: True and False are each silently wrong for one of the
+        # two dialects.
         # It is demanded even of an empty relation: the declaration is a
         # property of the metastore implementation, not of whether it holds
         # data, so a backend missing it fails on the first READ rather than
@@ -922,25 +864,14 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
             # snapshot genuinely HAS no rows: authoritative.
             self.dataset_committed_at = None
             self.schema = self.get_declared_schema()
-            self.manifest = _catalog_manifest(self.schema, bounds_are_ordinal, [], {}, None)
+            self.manifest = Manifest(_empty_manifest(self.schema, bounds_are_ordinal), self.schema)
             return self.schema, self.manifest
 
         raw_schema = self.table.schema(self.snapshot.schema_id)
         self.schema = self._normalize_schema(raw_schema, relation_name=self.dataset)
         self.dataset_committed_at = self.snapshot.timestamp_ms
 
-        has_opteryx_manifest = self.table.has_opteryx_manifest
-        if has_opteryx_manifest is None:
-            raise DatasetReadError(
-                f"{type(self.table).__name__} does not declare `has_opteryx_manifest`, so how "
-                "its snapshots' manifests are read is unknown. Implementations of "
-                "opteryx-catalog's `Dataset` must set it (True: `manifest_bytes()` serves the "
-                "opteryx manifest parquet; False: planning reads `scan()` rows)."
-            )
-        if has_opteryx_manifest:
-            self.manifest = Manifest(self._decoded_manifest(bounds_are_ordinal), self.schema)
-        else:
-            self.manifest = self._row_manifest(bounds_are_ordinal)
+        self.manifest = Manifest(self._decoded_manifest(bounds_are_ordinal), self.schema)
         return self.schema, self.manifest
 
     def _decoded_manifest(self, bounds_are_ordinal: bool):
@@ -952,7 +883,6 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
         for the RESOLVED snapshot by its own id: asking for "current" again
         could meet a commit that landed since, pairing this snapshot's schema
         with the next one's files."""
-        from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
         from opteryx.compiled.planner.native_manifest import decode_manifest_parquet
 
         columns = self.schema.columns
@@ -966,7 +896,7 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
         location = self.snapshot.manifest_list
         if not location:
             # a snapshot with no manifest is an empty dataset
-            return NativeManifestBuilder(names, physical, bounds_are_ordinal, True).build({})
+            return _empty_manifest(self.schema, bounds_are_ordinal)
 
         key = (location, names, physical, tuple(sorted(position_of_field_id.items())), bounds_are_ordinal)
         native = _decoded_manifest_cache_get(key)
@@ -1002,40 +932,6 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable, TopNPushable):
 
         _decoded_manifest_cache_put(key, native)
         return native
-
-    def _row_manifest(self, bounds_are_ordinal: bool) -> Manifest:
-        """The manifest of a backend with no opteryx-format manifest
-        (opteryx-iceberg), from its `scan()` rows."""
-        entries = [data_file.entry for data_file in self.table.scan(snapshot_id=self.snapshot.snapshot_id)]
-
-        protocols = {
-            entry.get("file_path").split("://")[0]
-            for entry in entries
-            if "://" in entry.get("file_path")
-        }
-        if len(protocols) > 1:
-            raise DatasetReadError(
-                f"Mixed protocols in manifest: {protocols}. All files must use the same protocol."
-            )
-
-        # Whole-column native sketch vectors. A backend that does not implement
-        # the accessor has no sketches, and _warn_no_native_sketches reports it
-        # once per backend class. A backend that returns {} has declared "no
-        # sketches" and is not reported.
-        sketch_vectors_fn = getattr(self.table, "manifest_sketch_vectors", None)
-        if sketch_vectors_fn is not None:
-            sketch_vectors = sketch_vectors_fn(self.snapshot.snapshot_id)
-        else:
-            sketch_vectors = {}
-            _warn_no_native_sketches(self.table)
-
-        resolved_deletes = None
-        if any(entry.get("deleted_record_count") for entry in entries):
-            resolved_deletes = self.table.delete_vectors(self.snapshot.snapshot_id)
-
-        return _catalog_manifest(
-            self.schema, bounds_are_ordinal, entries, sketch_vectors, resolved_deletes
-        )
 
     # --- vector search (docs/VECTOR_INDEX_DESIGN.md §7-§8) ---
 
@@ -1343,137 +1239,18 @@ def _decoded_manifest_cache_put(key, native) -> None:
             _DECODED_MANIFEST_COSTS.pop(evicted)
 
 
-_NO_BOUND = -(1 << 63)          # the ordinal NULL_FLAG: "no bound"
-_INT64_MIN = -(1 << 63)
-_INT64_MAX = (1 << 63) - 1
-
-
-def _catalog_manifest(schema, bounds_are_ordinal, entries, sketch_vectors, resolved_deletes):
-    """The Manifest for a snapshot of a backend with NO opteryx-format manifest
-    (`has_opteryx_manifest` False - opteryx-iceberg): its `scan()` rows
-    (`Datafile.entry` dicts) into the native builder. Also the empty manifest
-    of a relation with no committed snapshot. A backend whose manifests ARE the
-    opteryx manifest parquet is decoded natively instead
-    (`OpteryxTable._decoded_manifest`; architect ruling 2026-09-27 (6b)).
-
-    Every per-column stat a row carries (min/max values, lengths, null counts,
-    distinct counts, char bytes, column sizes) is a POSITIONAL list in the
-    row's own column order, keyed by the row's `field_ids`. Each maps to its
-    load-time position through the schema's field ids - one key space. A row
-    with no `field_ids` of its own was written in schema order, so its lists
-    are positional. A list that cannot be lined up with its keys is DROPPED:
-    no stats is correct but slower, keyed by the wrong column is a wrong answer.
-    """
+def _empty_manifest(schema, bounds_are_ordinal: bool):
+    """A NativeManifest with no files over `schema`: a relation with nothing
+    committed, or a snapshot with no manifest. Authoritative - it genuinely
+    has no rows."""
     from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
 
-    columns = schema.columns
-    builder = NativeManifestBuilder(
-        tuple(column.name for column in columns),
-        tuple(column.column_type.physical for column in columns),
+    return NativeManifestBuilder(
+        tuple(column.name for column in schema.columns),
+        tuple(column.column_type.physical for column in schema.columns),
         bounds_are_ordinal,
         True,
-    )
-    width = len(columns)
-    position_of_field = {
-        column.field_id: position for position, column in enumerate(columns) if column.field_id is not None
-    }
-    schema_fully_keyed = len(position_of_field) == width
-
-    for vector_row, entry in enumerate(entries):
-        file_path = entry.get("file_path")
-        deleted = int(entry.get("deleted_record_count") or 0)
-        delete_positions = None
-        if deleted:
-            vector = resolved_deletes.get(file_path)
-            if vector is None:
-                raise DatasetReadError(
-                    f"Manifest attributes {deleted} deleted rows to "
-                    f"{file_path} but the delete sidecar holds no vector for it."
-                )
-            delete_positions = tuple(vector)
-        uncompressed = entry.get("uncompressed_size_in_bytes")
-        row = builder.add_file(
-            file_path,
-            "PARQUET",
-            entry.get("record_count", 0),
-            entry.get("file_size_in_bytes", 0),
-            -1,
-            -1 if uncompressed is None else uncompressed,
-            # 0 is the writer's "no histogram" marker, not a bin count
-            entry.get("histogram_bins") or -1,
-            deleted,
-            entry.get("delete_file_path"),
-            delete_positions,
-            vector_row,
-        )
-
-        row_field_ids = entry.get("field_ids")
-        if row_field_ids and type(row_field_ids) in (list, tuple):
-            keys = [position_of_field.get(fid) for fid in row_field_ids]
-            strict = True
-        else:
-            keys = range(width)
-            strict = schema_fully_keyed
-
-        def keyed(name):
-            values = entry.get(name)
-            if not values or type(values) not in (list, tuple):
-                return ()
-            if strict and len(values) != len(keys):
-                return ()
-            return [(position, value) for position, value in zip(keys, values)
-                    if position is not None and value is not None]
-
-        for is_min, name in ((True, "min_values"), (False, "max_values")):
-            for position, value in keyed(name):
-                _set_catalog_bound(builder, row, position, is_min, value, bounds_are_ordinal)
-        for name, argument in (
-            ("null_counts", "null_count"),
-            ("min_lengths", "min_length"),
-            ("max_lengths", "max_length"),
-            ("char_total_bytes", "char_total_bytes"),
-            ("column_uncompressed_sizes_in_bytes", "uncompressed_size"),
-        ):
-            for position, value in keyed(name):
-                builder.set_counts(row, position, **{argument: value})
-        # ESTIMATE-ONLY: the format does not persist exactness, so never exact.
-        for position, value in keyed("distinct_counts"):
-            builder.set_distinct_count(row, position, value, False)
-
-    return Manifest(builder.build(dict(sketch_vectors)), schema)
-
-
-def _set_catalog_bound(builder, row, position, is_min, value, bounds_are_ordinal):
-    """One catalog bound into the builder, in the manifest's declared dialect."""
-    kind = type(value)
-    if bounds_are_ordinal:
-        if kind is not int:
-            raise DatasetReadError(f"An ordinal-dialect manifest bound of type {kind.__name__} ({value!r}).")
-        if value != _NO_BOUND:
-            builder.set_ordinal_bound(row, position, is_min, value)
-    elif kind is bool:
-        builder.set_bool_bound(row, position, is_min, value)
-    elif kind is int and value > _INT64_MAX:
-        builder.set_uint_bound(row, position, is_min, value)
-    elif kind is int:
-        builder.set_int_bound(row, position, is_min, value)
-    elif kind is float:
-        builder.set_double_bound(row, position, is_min, value)
-    elif kind is str:
-        builder.set_text_bound(row, position, is_min, value)
-    elif kind is bytes:
-        builder.set_bytes_bound(row, position, is_min, value)
-    elif kind is decimal.Decimal:
-        sign, digits, exponent = value.as_tuple()
-        unscaled = int("".join(map(str, digits)) or "0") * (-1 if sign else 1)
-        # A DECIMAL128-range bound has no int64 home; like the writers, which
-        # key no DECIMAL128, the column is left unbounded (no stats, not wrong).
-        if _INT64_MIN <= unscaled <= _INT64_MAX:
-            builder.set_decimal_bound(row, position, is_min, unscaled, -exponent, float(value))
-    else:
-        raise DatasetReadError(
-            f"A decoded manifest bound of type {kind.__name__} ({value!r}) has no manifest representation."
-        )
+    ).build({})
 
 
 def _normalized_view_schema(stored, view_name: str) -> Optional[RelationDescriptor]:

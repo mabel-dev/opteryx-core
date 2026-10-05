@@ -131,7 +131,7 @@ def test_unwidenable_mismatch_still_fails():
 def test_widening_refuses_a_narrowing_and_a_descriptor_type():
     """The mechanism's own refusals, at the level a relation cannot reach.
 
-    `vector_widen` is the single widening primitive both scan paths drive. A
+    `vector_widen` is draken's widening primitive. A
     narrowing and a descriptor-carrying source are the two cases that must never
     be coerced — a narrowing can lose a value, and a width cast drops the
     descriptor (a DECIMAL's scale, a TIMESTAMP's unit, IPv4-ness) that gives the
@@ -192,18 +192,13 @@ def test_unsigned_to_wider_signed_is_the_one_cross_ladder_widening(old, new, leg
     ) is legal
 
 
-@pytest.mark.parametrize("force_trampoline", [False, True], ids=["native", "trampoline"])
-def test_uint16_file_under_an_int32_relation(force_trampoline, monkeypatch):
+def test_uint16_file_under_an_int32_relation():
     """One file stores the column int32 (it declares the relation's type: INT32),
     another stores it uint16. The uint16 file must arrive as INT32 - a concat and
     a DATE cast both depend on it - with the top of its range intact (65535, never
-    -1: the widening takes the unsigned-source kernel). Both scan paths: the
-    native Source widens in C++, the trampoline through draken's vector_widen."""
-    if force_trampoline:
-        from opteryx.connectors.parquet_io import pool_reader
-
-        monkeypatch.setattr(pool_reader, "native_scan_supported", lambda *a, **k: False)
-    folder = f"widen_uint_tmp_{int(force_trampoline)}"
+    -1: the widening takes the unsigned-source kernel). The native Source widens
+    in C++."""
+    folder = "widen_uint_tmp"
     try:
         _write(folder, "a.parquet", [-5, 20], pa.int32())
         _write(folder, "b.parquet", [15888, None, 65535], pa.uint16())

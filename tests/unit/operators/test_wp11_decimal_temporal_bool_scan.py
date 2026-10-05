@@ -1,41 +1,37 @@
-"""WP-11 — admit DECIMAL / DATE / TIMESTAMP / TIME / BOOL to the native parquet scan.
+"""WP-11 — DECIMAL / DATE / TIMESTAMP / TIME / BOOL / IPV4 on the native parquet scan.
 
 These types complete the common-type coverage of NativeParquetScanSource (WP-01
 added strings; WP-02 relocated predicates). A projected — or filter-only — decimal /
-temporal / boolean column now decodes natively (no GIL trampoline) and is retagged
-in-scan to its exact logical type, byte-identically to the trampoline scan's
-`_coerce_vectors`:
+temporal / boolean column decodes natively and is retagged in-scan to its exact
+logical type:
 
-  * DATE      → DRAKEN_DATE32   (int64→int32 narrow, no descriptor)
-  * TIMESTAMP → DRAKEN_TIMESTAMP64 + LogicalType{unit}
-  * TIME      → DRAKEN_TIME32/64 + LogicalType{unit}
-  * DECIMAL   → DRAKEN_DECIMAL (int64-backed, +precision/scale) or DRAKEN_DECIMAL128
-                (int128, descriptor from the footer)
+  * DATE      → DRAKEN_DATE32   (no descriptor)
+  * TIMESTAMP → DRAKEN_TIMESTAMP64 + LogicalKind.TIMESTAMP + the FILE's unit
+                (parquet has no seconds unit — pyarrow writes `timestamp[s]` as ms)
+  * TIME      → the binder declares TIME[us]; the engine's TIME value (as CAST
+                produces it) is INT64 + LogicalKind.TIME + unit us, microseconds
+                since midnight
+  * DECIMAL   → DRAKEN_DECIMAL (int64-backed, precision ≤ 18) or DRAKEN_DECIMAL128
+                (precision > 18), + LogicalKind.DECIMAL + precision/scale
   * BOOL      → DRAKEN_BOOL
+  * IPV4      → DRAKEN_UINT32 + LogicalKind.IPV4
 
-The correctness gate is A/B PARITY: the native path must produce the same survivor
-set as the forced-trampoline path — values AND the full logical descriptor
-(DrakenType tag + timestamp unit + decimal precision/scale). The per-column
-signature folds the descriptor in, so a silently rescaled decimal or a unit-shifted
-timestamp changes the signature and fails the test. Comparison is order-insensitive
-(a filtered/concurrent scan legitimately reorders row groups).
+There is no fallback scan (ruled 2026-10-03): a scan the native Source cannot read
+is refused. So the correctness gate is an INDEPENDENT plain-Python oracle: the
+values the test itself wrote, with any WHERE predicate evaluated in Python under SQL
+three-valued logic. The survivor multiset must match, AND every output column's
+logical descriptor (DrakenType tag + logical kind + timestamp unit + decimal
+precision/scale) must equal an explicit expected value — a silently rescaled decimal
+or a unit-shifted timestamp fails even when the raw payload coincides. Comparison is
+order-insensitive (a filtered/concurrent scan legitimately reorders row groups).
 
-TIME columns are admitted too, but note opteryx's binder decodes parquet TIME as
-plain INT64 (it models no TIME logical type from a scan) — so a time column goes
-native decoded as INT64, byte-identically to the trampoline. True TIME logical
-typing is a separate binder change, out of WP-11's scan-admission scope.
-
-Not covered here: pyarrow writes DECIMAL as FIXED_LEN_BYTE_ARRAY, and rugo cannot
-decode FLBA decimal128 with precision > 18 on EITHER the native or the trampoline
-path (a pre-existing rugo limitation — both raise the same decode error). So the
-decimal tests use precision ≤ 18 (which decode fine, as int128-backed DK_DECIMAL128
-with the footer descriptor). The int64-backed DK_POOL decimal path is exercised by
-the TPC-H suite (rugo-written int64 decimals), not by pyarrow.
+Every scan must also select NativeParquetScanSource and record no residual reason.
 
 See docs/WP02_PREDICATE_RELOCATION_DESIGN.md for the column-role model this composes
 with.
 """
 
+import collections
 import datetime
 import decimal
 import os
@@ -43,16 +39,46 @@ import sys
 
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "../../.."))
 
-import pyarrow as pa  # test-only dep (allowed in tests/)
+import pyarrow as pa  # test-only dep (allowed in tests/) — WRITES the fixtures only
 import pyarrow.parquet as pq
 import pytest
+from draken.draken_native import DrakenType, LogicalKind
 
 import opteryx
 import opteryx.config as config
-from opteryx.connectors.parquet_io import pool_reader
 
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "../../../dev"))
 import instrument_engine as IE  # noqa: E402
+
+_UTC = datetime.timezone.utc
+
+#: Field wildcard for `_expect`. Used ONLY for the unit slot of a DECIMAL / IPV4
+#: descriptor: the descriptor struct always carries a unit field and it defaults to
+#: "us" for kinds that have no unit (a `CAST(... AS DECIMAL(5,2))` literal reports the
+#: same), so it is meaningless for those kinds and not asserted.
+_ANY = object()
+
+
+def _expect(tag, kind=None, unit=None, precision=None, scale=None):
+    """Expected descriptor tuple, same field order as `_col_sig`."""
+    return (tag, kind, unit, precision, scale)
+
+
+_INT64 = _expect(DrakenType.INT64)
+_UINT32 = _expect(DrakenType.UINT32)
+_BOOL = _expect(DrakenType.BOOL)
+_DATE = _expect(DrakenType.DATE32)
+_TIME = _expect(DrakenType.INT64, LogicalKind.TIME, "us")
+_IPV4 = _expect(DrakenType.UINT32, LogicalKind.IPV4, _ANY)
+
+
+def _ts(unit):
+    return _expect(DrakenType.TIMESTAMP64, LogicalKind.TIMESTAMP, unit)
+
+
+def _dec(precision, scale):
+    tag = DrakenType.DECIMAL if precision <= 18 else DrakenType.DECIMAL128
+    return _expect(tag, LogicalKind.DECIMAL, _ANY, precision, scale)
 
 
 def _write(dataset_dir, columns, use_dictionary=True, row_group_size=None):
@@ -75,61 +101,111 @@ def _col_sig(morsel, n):
     `logical_type_kind` is in here because every other field is blind to IPV4: it is
     the one kind that REFINES an already-complete physical type, so an IPv4 column
     and a plain unsigned one share a DrakenType tag, carry no unit and no
-    precision/scale, and differ only in the kind. Without it this signature reports
-    two different columns as identical — which is exactly how a missing IPV4 arm in
-    `_coerce_vectors` survived here undetected (see parquet_read.pyx).
+    precision/scale, and differ only in the kind.
     """
     col = morsel.column(n)
-    if col is None:
-        return (None, None, None, None, None)
     nb = col._nb
     return (col.type, nb.logical_type_kind, nb.logical_type_unit,
             nb.logical_type_precision, nb.logical_type_scale)
 
 
-def _drain(sql, force_trampoline, monkeypatch):
-    """Drain `sql`; return ((per-column signature tuple, sorted row multiset), sources).
-    The signature folds the logical descriptor in so a wrong unit/scale is caught even
-    when values coincide; the row multiset folds each value's repr per column."""
-    if force_trampoline:
-        monkeypatch.setattr(pool_reader, "native_scan_supported", lambda *a, **k: False)
+def _drain(sql):
+    """Drain `sql` natively; return (per-column signature dict, row Counter, session).
+    Rows are tuples of Python values in projection order."""
     session = opteryx.session()
-    rows = []
+    rows = collections.Counter()
     sig = None
     for morsel in session.execute_to_morsels(sql):
         names = list(morsel.column_names)
         if sig is None:
-            sig = tuple((n, _col_sig(morsel, n)) for n in names)
+            sig = {n.decode(): _col_sig(morsel, n) for n in names}
+        cols = [morsel.column(n).to_pylist() for n in names]
         for i in range(morsel.num_rows):
-            rows.append(tuple(
-                repr(None if morsel.column(n) is None else morsel.column(n)[i])
-                for n in names
-            ))
-    src = list(session.telemetry["scan_sources"].values())
-    if force_trampoline:
-        monkeypatch.undo()
-    return (sig, tuple(sorted(rows))), src
+            rows[tuple(c[i] for c in cols)] += 1
+    return sig, rows, session
 
 
-def _assert_parity(tmp_path, monkeypatch, columns, sql_tail, *, write_kw=None,
-                   expect_native=True):
-    """Write `columns`, run `SELECT {sql_tail}` native and forced-trampoline, assert
-    identical survivor set + descriptor. When `expect_native`, also assert the native
-    run selected NativeParquetScanSource (and the forced run did not)."""
+def _assert_native(session):
+    assert list(session.telemetry["scan_sources"].values()) == ["NativeParquetScanSource"], (
+        session.telemetry["scan_sources"])
+    assert session.telemetry.get("scan_residual_reasons", {}) == {}, (
+        session.telemetry["scan_residual_reasons"])
+
+
+def _assert_sig(sig, expected_sig):
+    assert sig is not None, "the scan emitted no morsel to read a descriptor from"
+    assert list(sig) == list(expected_sig), (list(sig), list(expected_sig))
+    for name, want in expected_sig.items():
+        got = sig[name]
+        for field, (g, w) in enumerate(zip(got, want)):
+            if w is not _ANY:
+                assert g == w, "column %r descriptor field %d: got %r, expected %r (full %r)" % (
+                    name, field, g, w, got)
+
+
+def _run_and_check(sql, expected_rows, expected_sig):
+    """Drain `sql`, assert native Source + no residual, the survivor multiset equals
+    `expected_rows`, and (when any morsel was emitted) the descriptor equals
+    `expected_sig`. Returns the survivor Counter."""
+    sig, rows, session = _drain(sql)
+    _assert_native(session)
+    expected = collections.Counter(expected_rows)
+    if expected or sig is not None:
+        _assert_sig(sig, expected_sig)
+    missing = expected - rows
+    extra = rows - expected
+    assert not missing and not extra, (
+        "survivor set differs from the Python oracle: missing %r, extra %r"
+        % (sorted(missing.items(), key=repr)[:10], sorted(extra.items(), key=repr)[:10]))
+    return rows
+
+
+def _oracle_rows(columns, project, keep=None, normalize=None):
+    """Plain-Python oracle over the values the test wrote. `project` = row-dict →
+    output tuple; `keep` = row-dict → bool (SQL WHERE under
+    three-valued logic: UNKNOWN is not a survivor); `normalize` = {name: fn} applied
+    to the written value to give the engine's representation of it."""
+    names = list(columns)
+    n = len(columns[names[0]][1])
+    normalize = normalize or {}
+    out = []
+    for i in range(n):
+        row = {}
+        for name in names:
+            v = columns[name][1][i]
+            fn = normalize.get(name)
+            row[name] = v if (v is None or fn is None) else fn(v)
+        if keep is not None and not keep(row):
+            continue
+        out.append(project(row))
+    return out
+
+
+def _check(tmp_path, columns, proj, expected_sig, *, keep=None, where=None,
+           normalize=None, write_kw=None, project=None):
+    """Write `columns`, run `SELECT {proj} FROM ds [WHERE {where}]`, check it against
+    the oracle. `proj` is the SQL projection; by default the oracle projects the same
+    column names, and `project` (row-dict → tuple) overrides that for expressions."""
     ds = _write(str(tmp_path / "wp11"), columns, **(write_kw or {}))
-    proj, _, where = sql_tail.partition(" WHERE ")
+    if project is None:
+        names = [c.strip() for c in proj.split(",")]
+        project = lambda r: tuple(r[c] for c in names)  # noqa: E731
     sql = "SELECT %s FROM '%s'" % (proj, ds)
     if where:
         sql += " WHERE %s" % where
+    expected = _oracle_rows(columns, project, keep, normalize)
+    return _run_and_check(sql, expected, expected_sig)
 
-    nat, nat_src = _drain(sql, False, monkeypatch)
-    tmp, tmp_src = _drain(sql, True, monkeypatch)
 
-    assert nat == tmp, "native survivor set / descriptor differs from trampoline"
-    if expect_native:
-        assert nat_src == ["NativeParquetScanSource"], nat_src
-        assert tmp_src == ["StreamingScanSource"], tmp_src
-    return nat[0], nat[1]  # (signature, sorted rows)
+def _utc(v):
+    """pyarrow writes a naive datetime as UTC wall time; the engine returns it
+    tz-aware UTC. Oracle normalization only."""
+    return v.replace(tzinfo=_UTC)
+
+
+def _time_us(v):
+    """TIME as the engine represents it: microseconds since midnight."""
+    return ((v.hour * 60 + v.minute) * 60 + v.second) * 1_000_000 + v.microsecond
 
 
 # ── IPV4 ─────────────────────────────────────────────────────────────────────
@@ -137,16 +213,17 @@ def _assert_parity(tmp_path, monkeypatch, columns, sql_tail, *, write_kw=None,
 # IPV4 is the one logical kind with NO physical tag of its own — it is
 # DRAKEN_UINT32 plus a descriptor — so a path that forgets to attach it returns a
 # perfectly well-formed unsigned integer column and nothing downstream can tell.
-# That is how the trampoline's single-pass `_coerce_vectors` shipped without an
-# IPV4 arm while its name-keyed twin `_coerce_logical_types` had one: the native
-# path retagged (LC_IPV4), the trampoline did not, and any query that failed the
-# native scan's footer gate served addresses as integers all the way to the API.
 # Measured on home.network.netflow, 2026-08-19.
 #
 # The file is written by rugo rather than pyarrow because parquet has no IPv4
 # logical type: the kind travels in rugo's key-value side channel, which is also
 # what lets the footer-derived schema declare the column IPV4 with no catalog in
 # the picture.
+
+_IPV4_ADDRESSES = [0x7F000001, 0x0A000001, 0xC0A80101, 0xFFFFFFFF]
+_IPV4_DOTTED = ["127.0.0.1", "10.0.0.1", "192.168.1.1", "255.255.255.255"]
+_IPV4_N = [1, 2, 3, 4]
+
 
 def _write_ipv4(dataset_dir):
     """One parquet file with an IPV4 column beside a plain UINT32 control column.
@@ -160,13 +237,12 @@ def _write_ipv4(dataset_dir):
     from draken.morsels.morsel import Morsel
     from draken.vectors.vector import Vector
 
-    addresses = [0x7F000001, 0x0A000001, 0xC0A80101, 0xFFFFFFFF]
     morsel = Morsel.from_vectors(
         ["addr", "plain", "n"],
         [
-            Vector(dn.vector_retag_uint32_as_ipv4(dn.vector_uint32_from_sequence(addresses))),
-            Vector(dn.vector_uint32_from_sequence(addresses)),
-            Vector(dn.vector_int64_from_sequence([1, 2, 3, 4])),
+            Vector(dn.vector_retag_uint32_as_ipv4(dn.vector_uint32_from_sequence(_IPV4_ADDRESSES))),
+            Vector(dn.vector_uint32_from_sequence(_IPV4_ADDRESSES)),
+            Vector(dn.vector_int64_from_sequence(_IPV4_N)),
         ],
     )
     os.makedirs(dataset_dir, exist_ok=True)
@@ -175,59 +251,40 @@ def _write_ipv4(dataset_dir):
     return dataset_dir
 
 
-def _ipv4_parity(tmp_path, monkeypatch, sql_tail):
-    """Run `SELECT {sql_tail}` native and forced-trampoline over the IPv4 fixture."""
+def _ipv4_sql(tmp_path, sql_tail):
     ds = _write_ipv4(str(tmp_path / "ipv4"))
     proj, _, where = sql_tail.partition(" WHERE ")
     sql = "SELECT %s FROM '%s'" % (proj, ds)
     if where:
         sql += " WHERE %s" % where
-    nat, _ = _drain(sql, False, monkeypatch)
-    tmp, _ = _drain(sql, True, monkeypatch)
-    assert nat == tmp, "native survivor set / descriptor differs from trampoline"
-    return dict(nat[0]), nat[1]
+    return sql
 
 
-def test_ipv4_projection_keeps_its_descriptor(tmp_path, monkeypatch):
-    """Both scan paths return IPV4, not a bare UINT32.
-
-    Parity alone is not enough here: before the fix the two paths DISAGREED, but
-    two paths that both dropped the descriptor would agree and still be wrong. So
-    assert the kind explicitly, on top of parity.
-    """
-    sig, rows = _ipv4_parity(tmp_path, monkeypatch, "addr, plain, n")
-
-    from draken.draken_native import LogicalKind
-    assert sig[b"addr"][1] == LogicalKind.IPV4, sig
-    # The control column is the same bits with no descriptor and must stay that way.
-    assert sig[b"plain"][1] is None, sig
-    assert sig[b"addr"][0] == sig[b"plain"][0], "both are physically UINT32"
+def test_ipv4_projection_keeps_its_descriptor(tmp_path):
+    """IPV4 comes back as IPV4, not a bare UINT32; the same-bits control column
+    carries no descriptor and must stay that way."""
+    expected = list(zip(_IPV4_DOTTED, _IPV4_ADDRESSES, _IPV4_N))
+    _run_and_check(_ipv4_sql(tmp_path, "addr, plain, n"), expected,
+                   {"addr": _IPV4, "plain": _UINT32, "n": _INT64})
 
 
-def test_ipv4_renders_dotted_quad(tmp_path, monkeypatch):
+def test_ipv4_renders_dotted_quad(tmp_path):
     """The descriptor is load-bearing for the VALUE, not just the label: an IPv4
     column renders dotted-decimal while the identical uint32 renders an integer.
     This is the assertion the `<<=` probe cannot make (it is rewritten to an
     integer range compare and never touches the type)."""
-    _, rows = _ipv4_parity(tmp_path, monkeypatch, "addr, plain")
-    addrs = sorted(row[0] for row in rows)
-    plains = sorted(row[1] for row in rows)
-    assert addrs == sorted(
-        [repr("127.0.0.1"), repr("10.0.0.1"), repr("192.168.1.1"), repr("255.255.255.255")]
-    ), addrs
-    assert plains == sorted(
-        [repr(0x7F000001), repr(0x0A000001), repr(0xC0A80101), repr(0xFFFFFFFF)]
-    ), plains
+    expected = list(zip(_IPV4_DOTTED, _IPV4_ADDRESSES))
+    _run_and_check(_ipv4_sql(tmp_path, "addr, plain"), expected,
+                   {"addr": _IPV4, "plain": _UINT32})
 
 
-def test_ipv4_survives_a_predicate(tmp_path, monkeypatch):
+def test_ipv4_survives_a_predicate(tmp_path):
     """A filtered scan takes a different route through the coercion plan; the
-    descriptor must survive it on both paths."""
-    sig, rows = _ipv4_parity(tmp_path, monkeypatch, "addr, n WHERE n > 2")
-
-    from draken.draken_native import LogicalKind
-    assert sig[b"addr"][1] == LogicalKind.IPV4, sig
-    assert len(rows) == 2, rows
+    descriptor must survive it."""
+    expected = [(a, n) for a, n in zip(_IPV4_DOTTED, _IPV4_N) if n > 2]
+    rows = _run_and_check(_ipv4_sql(tmp_path, "addr, n WHERE n > 2"), expected,
+                          {"addr": _IPV4, "n": _INT64})
+    assert sum(rows.values()) == 2, rows
 
 
 def test_ipv4_declared_by_schema_over_an_unannotated_file(tmp_path, monkeypatch):
@@ -238,27 +295,24 @@ def test_ipv4_declared_by_schema_over_an_unannotated_file(tmp_path, monkeypatch)
     recovers the descriptor from the file alone — which MASKS a missing coercion
     arm. Every file written before that side channel existed (i.e. all stored
     data) carries no annotation, and then the only thing making the column an
-    address is the schema-driven retag on whichever path runs.
+    address is the schema-driven retag in the scan.
 
     So the file here is written by PYARROW as a plain uint32 — genuinely
     unannotated — and the IPV4 declaration is injected at `rugo_to_relation_schema`,
     the seam where the schema for a scanned relation is decided. That is the same
-    ColumnType a catalog-declared IPV4 column produces and the same shape
-    `_sp_ipv4_col_set` is built from.
-
-    Fails with a bare UINT32 if the single-pass coercion plan has no IPV4 arm.
+    ColumnType a catalog-declared IPV4 column produces.
     """
     import rugo.parquet as rp
-    from draken.draken_native import LogicalKind
     from opteryx.connectors import _rugo_schema
     from opteryx.connectors import filesystem_connector
     from opteryx.types import logical_type as _lt
 
     addresses = [0xC0A804B6, 0x7F000001, 0x0A000001]
-    ds = _write(str(tmp_path / "ipv4decl"), {
+    columns = {
         "addr": (pa.uint32(), addresses),
         "n": (pa.int64(), [1, 2, 3]),
-    })
+    }
+    ds = _write(str(tmp_path / "ipv4decl"), columns)
     with open(os.path.join(ds, "part.parquet"), "rb") as handle:
         meta = rp.read_metadata_from_memoryview(memoryview(handle.read()))
     kinds = {column.name: column.draken_logical_kind for column in meta.schema_columns}
@@ -276,138 +330,152 @@ def test_ipv4_declared_by_schema_over_an_unannotated_file(tmp_path, monkeypatch)
     monkeypatch.setattr(_rugo_schema, "rugo_to_relation_schema", declares_ipv4)
     monkeypatch.setattr(filesystem_connector, "rugo_to_relation_schema", declares_ipv4,
                         raising=False)
-    monkeypatch.setattr(pool_reader, "native_scan_supported", lambda *a, **k: False)
 
-    seen = []
-    for morsel in opteryx.session().execute_to_morsels(
-        "SELECT addr, n FROM '%s'" % ds
-    ):
-        if morsel.num_rows:
-            column = morsel.column("addr")
-            seen.append((column._nb.logical_type_kind, column.to_pylist()))
-    monkeypatch.undo()
-
-    assert seen, "the scan returned no rows"
-    for kind, values in seen:
-        assert kind == LogicalKind.IPV4, f"schema-declared IPV4 came back as {kind}"
-        assert sorted(values) == sorted(["192.168.4.182", "127.0.0.1", "10.0.0.1"]), values
+    expected = [("192.168.4.182", 1), ("127.0.0.1", 2), ("10.0.0.1", 3)]
+    _run_and_check("SELECT addr, n FROM '%s'" % ds, expected,
+                   {"addr": _IPV4, "n": _INT64})
 
 
 # ── BOOL ─────────────────────────────────────────────────────────────────────
 
-def test_bool_projection(tmp_path, monkeypatch):
+def _b_eq(want):
+    """`b = want` — NULL compares UNKNOWN, never a survivor."""
+    return lambda r: r["b"] is not None and r["b"] == want
+
+
+def _b_ne(want):
+    return lambda r: r["b"] is not None and r["b"] != want
+
+
+def _b_is(want):
+    """`b IS want` — never UNKNOWN: a NULL row is simply not `want`."""
+    return lambda r: r["b"] is want
+
+
+def _b_is_not(want):
+    return lambda r: r["b"] is not want
+
+
+def test_bool_projection(tmp_path):
     cols = {"b": (pa.bool_(), [True, False, True, False, True] * 40),
             "n": (pa.int64(), list(range(200)))}
-    _assert_parity(tmp_path, monkeypatch, cols, "b, n")
+    _check(tmp_path, cols, "b, n", {"b": _BOOL, "n": _INT64})
 
 
-def test_bool_with_nulls(tmp_path, monkeypatch):
+def test_bool_with_nulls(tmp_path):
     cols = {"b": (pa.bool_(), [True, None, False, None, True] * 40)}
-    _assert_parity(tmp_path, monkeypatch, cols, "b")
+    _check(tmp_path, cols, "b", {"b": _BOOL})
 
 
-def test_bool_all_null(tmp_path, monkeypatch):
+def test_bool_all_null(tmp_path):
     cols = {"b": (pa.bool_(), [None] * 200)}
-    _assert_parity(tmp_path, monkeypatch, cols, "b")
+    _check(tmp_path, cols, "b", {"b": _BOOL})
 
 
-def test_bool_all_constant(tmp_path, monkeypatch):
+def test_bool_all_constant(tmp_path):
     cols = {"b": (pa.bool_(), [True] * 200)}
-    _assert_parity(tmp_path, monkeypatch, cols, "b")
+    _check(tmp_path, cols, "b", {"b": _BOOL})
 
 
-# R5 close-out — a BOOL PREDICATE INPUT is now native too. These two tests were
-# `test_bool_predicate_role2_fails_closed` / `test_bool_role3_filter_only_fails_closed`:
-# WP-11 fail-closed a bool predicate input because draken_compare_dv's type switch
-# had no DRAKEN_BOOL branch, so every bool comparison declined to nullptr and the
-# relocated ExprFilter (no fallback) raised err_op=11. draken/ops/bool_compare.h now
-# supplies that branch — BOOL is BIT-PACKED, so it needs its own kernel rather than a
-# fixed-width instantiation: it reads bit `selection[i]` of the bitmap for each logical
-# row (the uniform §11 access path — dense / constant / dict all correct through it),
-# orders FALSE < TRUE, and marks a result row NULL when EITHER operand row is NULL.
-# _assert_parity is the correctness gate: the native survivor set must equal the
-# forced-trampoline survivor set, values and descriptor.
+# A BOOL PREDICATE INPUT is native. draken/ops/bool_compare.h supplies the
+# DRAKEN_BOOL branch of draken_compare_dv — BOOL is BIT-PACKED, so it needs its own
+# kernel rather than a fixed-width instantiation: it reads bit `selection[i]` of the
+# bitmap for each logical row (the uniform §11 access path — dense / constant / dict
+# all correct through it), orders FALSE < TRUE, and marks a result row NULL when
+# EITHER operand row is NULL.
+
+def _alt():
+    return {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
 
 
-def test_bool_predicate_role2_now_native(tmp_path, monkeypatch):
-    cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
-    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "b, n WHERE b = true")
-    assert len(rows) == 100
+def _nulls5():
+    return {"b": (pa.bool_(), [True, None, False, None, True] * 40),
+            "n": (pa.int64(), list(range(200)))}
 
 
-def test_bool_predicate_eq_false(tmp_path, monkeypatch):
-    cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
-    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "b, n WHERE b = false")
-    assert len(rows) == 100
+def test_bool_predicate_role2_now_native(tmp_path):
+    rows = _check(tmp_path, _alt(), "b, n", {"b": _BOOL, "n": _INT64},
+                  where="b = true", keep=_b_eq(True))
+    assert sum(rows.values()) == 100
 
 
-def test_bool_predicate_not_equal(tmp_path, monkeypatch):
-    cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
-    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "b, n WHERE b <> true")
-    assert len(rows) == 100
+def test_bool_predicate_eq_false(tmp_path):
+    rows = _check(tmp_path, _alt(), "b, n", {"b": _BOOL, "n": _INT64},
+                  where="b = false", keep=_b_eq(False))
+    assert sum(rows.values()) == 100
 
 
-def test_bool_role3_filter_only_now_native(tmp_path, monkeypatch):
+def test_bool_predicate_not_equal(tmp_path):
+    rows = _check(tmp_path, _alt(), "b, n", {"b": _BOOL, "n": _INT64},
+                  where="b <> true", keep=_b_ne(True))
+    assert sum(rows.values()) == 100
+
+
+def test_bool_role3_filter_only_now_native(tmp_path):
     """The BOOL column is READ for the filter but never emitted (role 3) — the
     strictest shape, since a role-3 column must also be native-admissible."""
-    cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
-    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b = true")
-    assert len(rows) == 100
+    rows = _check(tmp_path, _alt(), "n", {"n": _INT64},
+                  where="b = true", keep=_b_eq(True))
+    assert sum(rows.values()) == 100
 
 
-def test_bool_predicate_with_nulls(tmp_path, monkeypatch):
+def test_bool_predicate_with_nulls(tmp_path):
     """A NULL bool row is UNKNOWN, never a survivor, for `= true` OR `= false` —
     the compare_vector null contract (result NULL if EITHER operand is NULL), which
     is what the bit-packed kernel must reproduce over the validity bitmap. 80 TRUE /
     40 FALSE / 80 NULL: the two survivor sets must be disjoint and sum to 120."""
-    cols = {"b": (pa.bool_(), [True, None, False, None, True] * 40),
-            "n": (pa.int64(), list(range(200)))}
-    _, t_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b = true")
-    _, f_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b = false")
-    _, u_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS NULL")
-    assert len(t_rows) == 80
-    assert len(f_rows) == 40
-    assert len(u_rows) == 80
+    t_rows = _check(tmp_path / "t", _nulls5(), "n", {"n": _INT64},
+                    where="b = true", keep=_b_eq(True))
+    f_rows = _check(tmp_path / "f", _nulls5(), "n", {"n": _INT64},
+                    where="b = false", keep=_b_eq(False))
+    u_rows = _check(tmp_path / "u", _nulls5(), "n", {"n": _INT64},
+                    where="b IS NULL", keep=lambda r: r["b"] is None)
+    assert sum(t_rows.values()) == 80
+    assert sum(f_rows.values()) == 40
+    assert sum(u_rows.values()) == 80
     assert not (set(t_rows) & set(f_rows))
-    assert len(t_rows) + len(f_rows) + len(u_rows) == 200
 
 
-def test_bool_predicate_all_null(tmp_path, monkeypatch):
+def test_bool_predicate_all_null(tmp_path):
     """Every row UNKNOWN → no survivors on either polarity."""
     cols = {"b": (pa.bool_(), [None] * 200), "n": (pa.int64(), list(range(200)))}
-    _, t_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b = true")
-    _, f_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b = false")
-    assert t_rows == () and f_rows == ()
+    t_rows = _check(tmp_path / "t", cols, "n", {"n": _INT64},
+                    where="b = true", keep=_b_eq(True))
+    f_rows = _check(tmp_path / "f", cols, "n", {"n": _INT64},
+                    where="b = false", keep=_b_eq(False))
+    assert not t_rows and not f_rows
 
 
-def test_bool_predicate_all_constant(tmp_path, monkeypatch):
+def test_bool_predicate_all_constant(tmp_path):
     """A single-valued bool column decodes to the CONSTANT shape (data_length == 1,
     selection = the global zero vector). The kernel has no shape discriminant, so
     this must come out through the same uniform bit read."""
     cols = {"b": (pa.bool_(), [True] * 200), "n": (pa.int64(), list(range(200)))}
-    _, t_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b = true")
-    _, f_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b = false")
-    assert len(t_rows) == 200
-    assert f_rows == ()
+    t_rows = _check(tmp_path / "t", cols, "n", {"n": _INT64},
+                    where="b = true", keep=_b_eq(True))
+    f_rows = _check(tmp_path / "f", cols, "n", {"n": _INT64},
+                    where="b = false", keep=_b_eq(False))
+    assert sum(t_rows.values()) == 200
+    assert not f_rows
 
 
-def test_bool_predicate_composed_with_int(tmp_path, monkeypatch):
+def test_bool_predicate_composed_with_int(tmp_path):
     """Bool compare AND int compare in ONE relocated c-native span."""
-    cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
-    _, rows = _assert_parity(tmp_path, monkeypatch, cols,
-                             "b, n WHERE b = true AND n > 100")
+    rows = _check(tmp_path, _alt(), "b, n", {"b": _BOOL, "n": _INT64},
+                  where="b = true AND n > 100",
+                  keep=lambda r: r["b"] is True and r["n"] > 100)
     # b is true on even n; n > 100 leaves the even values 102..198 → 49 rows.
-    assert len(rows) == 49
+    assert sum(rows.values()) == 49
 
 
-def test_bool_predicate_unaligned_tail(tmp_path, monkeypatch):
+def test_bool_predicate_unaligned_tail(tmp_path):
     """Row count not a multiple of 8 — the bitmap's partial last byte. A kernel that
     wrote past the logical length would show up as phantom survivors."""
     n = 203
     cols = {"b": (pa.bool_(), [i % 3 == 0 for i in range(n)]),
             "n": (pa.int64(), list(range(n)))}
-    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b = true")
-    assert len(rows) == len([i for i in range(n) if i % 3 == 0])
+    rows = _check(tmp_path, cols, "n", {"n": _INT64}, where="b = true", keep=_b_eq(True))
+    assert sum(rows.values()) == len([i for i in range(n) if i % 3 == 0])
 
 
 # ---------------------------------------------------------------------------
@@ -421,102 +489,103 @@ def test_bool_predicate_unaligned_tail(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_bool_is_true_predicate_now_native(tmp_path, monkeypatch):
-    cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
-    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "b, n WHERE b IS TRUE")
-    assert len(rows) == 100
+def test_bool_is_true_predicate_now_native(tmp_path):
+    rows = _check(tmp_path, _alt(), "b, n", {"b": _BOOL, "n": _INT64},
+                  where="b IS TRUE", keep=_b_is(True))
+    assert sum(rows.values()) == 100
 
 
-def test_bool_is_false_predicate_now_native(tmp_path, monkeypatch):
-    cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
-    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "b, n WHERE b IS FALSE")
-    assert len(rows) == 100
+def test_bool_is_false_predicate_now_native(tmp_path):
+    rows = _check(tmp_path, _alt(), "b, n", {"b": _BOOL, "n": _INT64},
+                  where="b IS FALSE", keep=_b_is(False))
+    assert sum(rows.values()) == 100
 
 
-def test_bool_is_not_true_predicate_now_native(tmp_path, monkeypatch):
-    cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
-    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "b, n WHERE b IS NOT TRUE")
-    assert len(rows) == 100
+def test_bool_is_not_true_predicate_now_native(tmp_path):
+    rows = _check(tmp_path, _alt(), "b, n", {"b": _BOOL, "n": _INT64},
+                  where="b IS NOT TRUE", keep=_b_is_not(True))
+    assert sum(rows.values()) == 100
 
 
-def test_bool_is_not_false_predicate_now_native(tmp_path, monkeypatch):
-    cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
-    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "b, n WHERE b IS NOT FALSE")
-    assert len(rows) == 100
+def test_bool_is_not_false_predicate_now_native(tmp_path):
+    rows = _check(tmp_path, _alt(), "b, n", {"b": _BOOL, "n": _INT64},
+                  where="b IS NOT FALSE", keep=_b_is_not(False))
+    assert sum(rows.values()) == 100
 
 
-def test_bool_is_predicate_role3_filter_only_now_native(tmp_path, monkeypatch):
+def test_bool_is_predicate_role3_filter_only_now_native(tmp_path):
     """The BOOL column is READ for the filter but never emitted (role 3)."""
-    cols = {"b": (pa.bool_(), [True, False] * 100), "n": (pa.int64(), list(range(200)))}
-    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS TRUE")
-    assert len(rows) == 100
+    rows = _check(tmp_path, _alt(), "n", {"n": _INT64},
+                  where="b IS TRUE", keep=_b_is(True))
+    assert sum(rows.values()) == 100
 
 
-def test_bool_is_predicate_with_nulls(tmp_path, monkeypatch):
+def test_bool_is_predicate_with_nulls(tmp_path):
     """The NULL-collapsing semantics that make IS TRUE/FALSE a DISTINCT opcode from
     `= TRUE`/`= FALSE`: a NULL row is never a survivor for IS TRUE or IS FALSE, but
-    IS ALWAYS a survivor for IS NOT TRUE and IS NOT FALSE (unlike `<> TRUE`/`!= FALSE`,
-    which are also NULL, never survivors, for a NULL operand). 80 TRUE / 40 FALSE /
+    IS ALWAYS a survivor for IS NOT TRUE and IS NOT FALSE. 80 TRUE / 40 FALSE /
     80 NULL out of 200."""
-    cols = {"b": (pa.bool_(), [True, None, False, None, True] * 40),
-            "n": (pa.int64(), list(range(200)))}
-    _, t_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS TRUE")
-    _, f_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS FALSE")
-    _, nt_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS NOT TRUE")
-    _, nf_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS NOT FALSE")
-    assert len(t_rows) == 80
-    assert len(f_rows) == 40
-    assert len(nt_rows) == 120   # FALSE ∪ NULL
-    assert len(nf_rows) == 160   # TRUE ∪ NULL
-    assert not (set(t_rows) & set(f_rows))
-    # every NULL row survives BOTH negated forms; every non-NULL row survives exactly one
-    null_rows = set(nt_rows) & set(nf_rows)
-    assert len(null_rows) == 80
-    assert set(nt_rows) == set(f_rows) | null_rows
-    assert set(nf_rows) == set(t_rows) | null_rows
-    assert set(t_rows) | set(f_rows) | null_rows == set(t_rows) | set(nt_rows) | set(nf_rows)
-    assert len(set(t_rows) | set(f_rows) | null_rows) == 200
+    t_rows = _check(tmp_path / "t", _nulls5(), "n", {"n": _INT64},
+                    where="b IS TRUE", keep=_b_is(True))
+    f_rows = _check(tmp_path / "f", _nulls5(), "n", {"n": _INT64},
+                    where="b IS FALSE", keep=_b_is(False))
+    nt_rows = _check(tmp_path / "nt", _nulls5(), "n", {"n": _INT64},
+                     where="b IS NOT TRUE", keep=_b_is_not(True))
+    nf_rows = _check(tmp_path / "nf", _nulls5(), "n", {"n": _INT64},
+                     where="b IS NOT FALSE", keep=_b_is_not(False))
+    assert sum(t_rows.values()) == 80
+    assert sum(f_rows.values()) == 40
+    assert sum(nt_rows.values()) == 120   # FALSE ∪ NULL
+    assert sum(nf_rows.values()) == 160   # TRUE ∪ NULL
 
 
-def test_bool_is_predicate_all_null(tmp_path, monkeypatch):
+def test_bool_is_predicate_all_null(tmp_path):
     """Every row NULL → IS TRUE/FALSE have no survivors; IS NOT TRUE/IS NOT FALSE
     survive on EVERY row (unlike `<> TRUE`/`!= FALSE`, which stay NULL too)."""
     cols = {"b": (pa.bool_(), [None] * 200), "n": (pa.int64(), list(range(200)))}
-    _, t_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS TRUE")
-    _, f_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS FALSE")
-    _, nt_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS NOT TRUE")
-    _, nf_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS NOT FALSE")
-    assert t_rows == () and f_rows == ()
-    assert len(nt_rows) == 200 and len(nf_rows) == 200
+    t_rows = _check(tmp_path / "t", cols, "n", {"n": _INT64},
+                    where="b IS TRUE", keep=_b_is(True))
+    f_rows = _check(tmp_path / "f", cols, "n", {"n": _INT64},
+                    where="b IS FALSE", keep=_b_is(False))
+    nt_rows = _check(tmp_path / "nt", cols, "n", {"n": _INT64},
+                     where="b IS NOT TRUE", keep=_b_is_not(True))
+    nf_rows = _check(tmp_path / "nf", cols, "n", {"n": _INT64},
+                     where="b IS NOT FALSE", keep=_b_is_not(False))
+    assert not t_rows and not f_rows
+    assert sum(nt_rows.values()) == 200 and sum(nf_rows.values()) == 200
 
 
-def test_bool_is_predicate_all_constant(tmp_path, monkeypatch):
+def test_bool_is_predicate_all_constant(tmp_path):
     """A single-valued bool column decodes to the CONSTANT shape (data_length == 1,
     selection = the global zero vector) — the kernel has no shape discriminant, so
     this must come out through the same uniform bit read as bool_and/bool_or."""
     cols = {"b": (pa.bool_(), [True] * 200), "n": (pa.int64(), list(range(200)))}
-    _, t_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS TRUE")
-    _, f_rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS FALSE")
-    assert len(t_rows) == 200
-    assert f_rows == ()
+    t_rows = _check(tmp_path / "t", cols, "n", {"n": _INT64},
+                    where="b IS TRUE", keep=_b_is(True))
+    f_rows = _check(tmp_path / "f", cols, "n", {"n": _INT64},
+                    where="b IS FALSE", keep=_b_is(False))
+    assert sum(t_rows.values()) == 200
+    assert not f_rows
 
 
-def test_bool_is_predicate_unaligned_tail(tmp_path, monkeypatch):
+def test_bool_is_predicate_unaligned_tail(tmp_path):
     """Row count not a multiple of 8 — the bitmap's partial last byte. A kernel that
     wrote past the logical length would show up as phantom survivors."""
     n = 203
     cols = {"b": (pa.bool_(), [i % 3 == 0 for i in range(n)]),
             "n": (pa.int64(), list(range(n)))}
-    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "n WHERE b IS TRUE")
-    assert len(rows) == len([i for i in range(n) if i % 3 == 0])
+    rows = _check(tmp_path, cols, "n", {"n": _INT64}, where="b IS TRUE", keep=_b_is(True))
+    assert sum(rows.values()) == len([i for i in range(n) if i % 3 == 0])
 
 
-def test_bool_is_true_projection(tmp_path, monkeypatch):
+def test_bool_is_true_projection(tmp_path):
     """IS TRUE as a PROJECTED expression (not a predicate) — exercises the same
     opcode through ExprMultiProjectOperator / `bytecode_ops_all_c_native`'s
-    projection-eligibility path rather than the Filter-node predicate path."""
+    projection-eligibility path rather than the Filter-node predicate path. The
+    result is never NULL, even for a NULL operand."""
     cols = {"b": (pa.bool_(), [True, None, False, None, True] * 40)}
-    _assert_parity(tmp_path, monkeypatch, cols, "b IS TRUE AS t, b IS FALSE AS f")
+    _check(tmp_path, cols, "b IS TRUE AS t, b IS FALSE AS f", {"t": _BOOL, "f": _BOOL},
+           project=lambda r: (r["b"] is True, r["b"] is False))
 
 
 # ── DATE ─────────────────────────────────────────────────────────────────────
@@ -526,27 +595,27 @@ def _dates(n=200):
     return [base + datetime.timedelta(days=i) for i in range(n)]
 
 
-def test_date_projection(tmp_path, monkeypatch):
+def test_date_projection(tmp_path):
     cols = {"d": (pa.date32(), _dates()), "n": (pa.int64(), list(range(200)))}
-    _assert_parity(tmp_path, monkeypatch, cols, "d, n")
+    _check(tmp_path, cols, "d, n", {"d": _DATE, "n": _INT64})
 
 
-def test_date_with_nulls(tmp_path, monkeypatch):
+def test_date_with_nulls(tmp_path):
     ds = _dates(200)
     ds[3] = ds[7] = ds[199] = None
     cols = {"d": (pa.date32(), ds)}
-    _assert_parity(tmp_path, monkeypatch, cols, "d")
+    _check(tmp_path, cols, "d", {"d": _DATE})
 
 
-def test_date_epoch_and_boundary(tmp_path, monkeypatch):
+def test_date_epoch_and_boundary(tmp_path):
     cols = {"d": (pa.date32(), [datetime.date(1970, 1, 1), datetime.date(1900, 1, 1),
                                 datetime.date(2262, 4, 11), datetime.date(9999, 12, 31)] * 20)}
-    _assert_parity(tmp_path, monkeypatch, cols, "d")
+    _check(tmp_path, cols, "d", {"d": _DATE})
 
 
-def test_date_role3_filter_only(tmp_path, monkeypatch):
+def test_date_role3_filter_only(tmp_path):
     cols = {"d": (pa.date32(), _dates()), "n": (pa.int64(), list(range(200)))}
-    _assert_parity(tmp_path, monkeypatch, cols, "n WHERE n > 100")
+    _check(tmp_path, cols, "n", {"n": _INT64}, where="n > 100", keep=lambda r: r["n"] > 100)
 
 
 # ── TIMESTAMP (multiple units, boundaries) ───────────────────────────────────
@@ -556,69 +625,82 @@ def _timestamps(n=200):
     return [base + datetime.timedelta(seconds=i * 37) for i in range(n)]
 
 
+#: The unit the scan must carry for each pyarrow write unit. Parquet's TIMESTAMP
+#: logical type has no seconds unit, so pyarrow stores `timestamp[s]` as MILLIS; the
+#: footer then says ms and the scan honours the FILE's unit.
+_PARQUET_TS_UNIT = {"s": "ms", "ms": "ms", "us": "us"}
+
+
 @pytest.mark.parametrize("unit", ["s", "ms", "us"])
-def test_timestamp_projection_units(tmp_path, monkeypatch, unit):
-    # The engine canonicalizes the timestamp column to its SCHEMA unit (both paths
-    # identically) — _assert_parity's signature folds the emitted unit in, so this
-    # confirms native and trampoline agree on unit + values for every file unit.
-    # 'ns' is excluded: an ns timestamp overflows the engine's value display on BOTH
-    # paths (a pre-existing unit-handling issue, not a WP-11 scan concern).
+def test_timestamp_projection_units(tmp_path, unit):
+    # 'ns' is excluded: an ns timestamp overflows the engine's value display (a
+    # pre-existing unit-handling issue, not a WP-11 scan concern).
     cols = {"t": (pa.timestamp(unit), _timestamps()), "n": (pa.int64(), list(range(200)))}
-    _assert_parity(tmp_path, monkeypatch, cols, "t, n")
+    _check(tmp_path, cols, "t, n", {"t": _ts(_PARQUET_TS_UNIT[unit]), "n": _INT64},
+           normalize={"t": _utc})
 
 
-def test_timestamp_with_nulls(tmp_path, monkeypatch):
+def test_timestamp_with_nulls(tmp_path):
     ts = _timestamps(200)
     ts[1] = ts[50] = ts[199] = None
     cols = {"t": (pa.timestamp("us"), ts)}
-    _assert_parity(tmp_path, monkeypatch, cols, "t")
+    _check(tmp_path, cols, "t", {"t": _ts("us")}, normalize={"t": _utc})
 
 
-def test_timestamp_epoch_and_boundary(tmp_path, monkeypatch):
+def test_timestamp_epoch_and_boundary(tmp_path):
     cols = {"t": (pa.timestamp("us"), [
         datetime.datetime(1970, 1, 1, 0, 0, 0),
         datetime.datetime(1900, 1, 1, 0, 0, 0),
         datetime.datetime(2262, 1, 1, 0, 0, 0),
         datetime.datetime(9999, 12, 31, 23, 59, 59),
     ] * 20)}
-    _assert_parity(tmp_path, monkeypatch, cols, "t")
+    _check(tmp_path, cols, "t", {"t": _ts("us")}, normalize={"t": _utc})
 
 
-def test_timestamp_all_constant(tmp_path, monkeypatch):
+def test_timestamp_all_constant(tmp_path):
     cols = {"t": (pa.timestamp("ms"), [datetime.datetime(2021, 6, 6, 6, 6, 6)] * 200)}
-    _assert_parity(tmp_path, monkeypatch, cols, "t")
+    _check(tmp_path, cols, "t", {"t": _ts("ms")}, normalize={"t": _utc})
 
 
-def test_timestamp_role3_filter_only(tmp_path, monkeypatch):
+def test_timestamp_role3_filter_only(tmp_path):
     cols = {"t": (pa.timestamp("us"), _timestamps()), "n": (pa.int64(), list(range(200)))}
-    _assert_parity(tmp_path, monkeypatch, cols, "n WHERE n < 50")
+    _check(tmp_path, cols, "n", {"n": _INT64}, where="n < 50", keep=lambda r: r["n"] < 50)
 
 
 # ── TIME (32 = ms, 64 = us/ns) ───────────────────────────────────────────────
+#
+# The binder declares every parquet TIME column TIME[us] (the canonical TIME), and
+# the engine's own TIME value — `CAST('01:02:03.5' AS TIME)` — is INT64 +
+# LogicalKind.TIME + unit us holding microseconds since midnight. A scanned TIME
+# column must match the type its schema declares, whatever unit the file stored.
 
 def _times(n=200):
     return [datetime.time((i * 7) % 24, (i * 11) % 60, (i * 13) % 60) for i in range(n)]
 
 
-def test_time32_ms_projection(tmp_path, monkeypatch):
+def test_time32_ms_projection(tmp_path):
     cols = {"tm": (pa.time32("ms"), _times())}
-    _assert_parity(tmp_path, monkeypatch, cols, "tm")
+    _check(tmp_path, cols, "tm", {"tm": _TIME}, normalize={"tm": _time_us})
 
 
 @pytest.mark.parametrize("unit", ["us", "ns"])
-def test_time64_projection_units(tmp_path, monkeypatch, unit):
+def test_time64_projection_units(tmp_path, unit):
     cols = {"tm": (pa.time64(unit), _times())}
-    _assert_parity(tmp_path, monkeypatch, cols, "tm")
+    _check(tmp_path, cols, "tm", {"tm": _TIME}, normalize={"tm": _time_us})
 
 
-def test_time_with_nulls(tmp_path, monkeypatch):
+def test_time_with_nulls(tmp_path):
     tms = _times(200)
     tms[2] = tms[99] = None
     cols = {"tm": (pa.time64("us"), tms)}
-    _assert_parity(tmp_path, monkeypatch, cols, "tm")
+    _check(tmp_path, cols, "tm", {"tm": _TIME}, normalize={"tm": _time_us})
 
 
 # ── DECIMAL (varied precision/scale, negatives, zero, max precision) ──────────
+#
+# pyarrow writes DECIMAL as FIXED_LEN_BYTE_ARRAY. Precision ≤ 18 must come back
+# int64-backed DRAKEN_DECIMAL, precision > 18 int128-backed DRAKEN_DECIMAL128, with
+# precision/scale from the footer either way.
 
 def _decimals(precision, scale, n=200):
     q = decimal.Decimal(1).scaleb(-scale)
@@ -630,100 +712,89 @@ def _decimals(precision, scale, n=200):
 
 
 @pytest.mark.parametrize("precision,scale", [(5, 2), (10, 0), (18, 6)])
-def test_decimal_projection(tmp_path, monkeypatch, precision, scale):
-    # precision ≤ 18: rugo decodes the pyarrow FLBA decimal as int128 DK_DECIMAL128;
-    # the descriptor (precision/scale) comes from the footer, both paths.
+def test_decimal_projection(tmp_path, precision, scale):
     cols = {"d": (pa.decimal128(precision, scale), _decimals(precision, scale)),
             "n": (pa.int64(), list(range(200)))}
-    sig, _ = _assert_parity(tmp_path, monkeypatch, cols, "d, n")
-    # _col_sig is (type, kind, unit, precision, scale) — precision/scale are [3]/[4].
-    assert sig[0][1][3] == precision and sig[0][1][4] == scale, sig
+    _check(tmp_path, cols, "d, n", {"d": _dec(precision, scale), "n": _INT64})
 
 
-def test_decimal_with_nulls(tmp_path, monkeypatch):
+def test_decimal_with_nulls(tmp_path):
     ds = _decimals(18, 6, 200)
     ds[0] = ds[100] = ds[199] = None
     cols = {"d": (pa.decimal128(18, 6), ds)}
-    _assert_parity(tmp_path, monkeypatch, cols, "d")
+    _check(tmp_path, cols, "d", {"d": _dec(18, 6)})
 
 
-def test_decimal_zero_and_negative(tmp_path, monkeypatch):
+def test_decimal_zero_and_negative(tmp_path):
     cols = {"d": (pa.decimal128(12, 3), [
         decimal.Decimal("0.000"), decimal.Decimal("-1.500"),
         decimal.Decimal("-999999.999"), decimal.Decimal("999999.999"),
     ] * 50)}
-    _assert_parity(tmp_path, monkeypatch, cols, "d")
+    _check(tmp_path, cols, "d", {"d": _dec(12, 3)})
 
 
-def test_decimal_all_constant(tmp_path, monkeypatch):
+def test_decimal_all_constant(tmp_path):
     cols = {"d": (pa.decimal128(9, 2), [decimal.Decimal("12.34")] * 200)}
-    _assert_parity(tmp_path, monkeypatch, cols, "d")
+    _check(tmp_path, cols, "d", {"d": _dec(9, 2)})
 
 
 @pytest.mark.parametrize("use_dictionary", [True, False], ids=["dict", "plain"])
-def test_decimal128_wide_projection(tmp_path, monkeypatch, use_dictionary):
+def test_decimal128_wide_projection(tmp_path, use_dictionary):
     """precision > 18 (int128). pyarrow DICTIONARY-encodes it by default, which
-    rugo now emits as DK_DECIMAL128_DICT (an __int128 dictionary + codes); before,
-    it fell to the pool path, the native scan refused it ("unsupported column
-    encoding") and the pool serializer read the empty int128_values. Both paths
-    must agree on values, nulls and the precision/scale descriptor."""
+    rugo emits as DK_DECIMAL128_DICT (an __int128 dictionary + codes); the plain
+    encoding goes through the int128 values. Values, nulls and the precision/scale
+    descriptor must survive both."""
     pool = [decimal.Decimal(v) for v in (
         "0.00", "-1.50", "12345678901234567890123.45", "-98765432109876543210987.65", "7.77")]
     ds = [pool[i % len(pool)] for i in range(200)]
     ds[3] = ds[150] = None
     cols = {"d": (pa.decimal128(38, 2), ds), "n": (pa.int64(), list(range(200)))}
-    sig, rows = _assert_parity(tmp_path, monkeypatch, cols, "d, n",
-                               write_kw={"use_dictionary": use_dictionary})
-    assert sig[0][1][3] == 38 and sig[0][1][4] == 2, sig
-    assert len(rows) == 200
+    rows = _check(tmp_path, cols, "d, n", {"d": _dec(38, 2), "n": _INT64},
+                  write_kw={"use_dictionary": use_dictionary})
+    assert sum(rows.values()) == 200
 
 
-def test_decimal128_dict_predicate(tmp_path, monkeypatch):
+def test_decimal128_dict_predicate(tmp_path):
     pool = [decimal.Decimal(v) for v in ("1.10", "2.20", "33333333333333333333.33")]
     cols = {"d": (pa.decimal128(38, 2), [pool[i % 3] for i in range(200)]),
             "n": (pa.int64(), list(range(200)))}
-    _, rows = _assert_parity(tmp_path, monkeypatch, cols, "d, n WHERE d > 2.0",
-                             expect_native=False)
-    assert len(rows) == 133  # every row whose d is 2.20 or 33333333333333333333.33
+    rows = _check(tmp_path, cols, "d, n", {"d": _dec(38, 2), "n": _INT64},
+                  where="d > 2.0",
+                  keep=lambda r: r["d"] is not None and r["d"] > decimal.Decimal("2.0"))
+    assert sum(rows.values()) == 133  # every row whose d is 2.20 or 33333333333333333333.33
 
 
-def test_decimal_predicate_role2(tmp_path, monkeypatch):
-    cols = {"d": (pa.decimal128(10, 2), [decimal.Decimal(i) / 4 for i in range(200)]),
+def test_decimal_predicate_role2(tmp_path):
+    q = decimal.Decimal("0.01")
+    cols = {"d": (pa.decimal128(10, 2), [(decimal.Decimal(i) / 4).quantize(q) for i in range(200)]),
             "n": (pa.int64(), list(range(200)))}
-    # parity is the invariant; source is informational (predicate may or may not lower).
-    _assert_parity(tmp_path, monkeypatch, cols, "d, n WHERE d > 10.0", expect_native=False)
+    _check(tmp_path, cols, "d, n", {"d": _dec(10, 2), "n": _INT64},
+           where="d > 10.0",
+           keep=lambda r: r["d"] is not None and r["d"] > decimal.Decimal("10.0"))
 
 
 # ── mixed decimal + timestamp + bool in one scan ─────────────────────────────
 
-def test_mixed_decimal_timestamp_bool(tmp_path, monkeypatch):
+def test_mixed_decimal_timestamp_bool(tmp_path):
     cols = {
         "d": (pa.decimal128(18, 4), _decimals(18, 4)),
         "t": (pa.timestamp("us"), _timestamps()),
         "b": (pa.bool_(), [True, False] * 100),
         "n": (pa.int64(), list(range(200))),
     }
-    _assert_parity(tmp_path, monkeypatch, cols, "d, t, b, n")
+    _check(tmp_path, cols, "d, t, b, n",
+           {"d": _dec(18, 4), "t": _ts("us"), "b": _BOOL, "n": _INT64},
+           normalize={"t": _utc})
 
 
-# ── fail-closed: a genuinely unadmitted type stays on the trampoline ─────────
+# ── UINT projection ──────────────────────────────────────────────────────────
 
-def test_projected_uint_now_native(tmp_path, monkeypatch):
-    """UINT was WP-11's deferred "separate follow-on"; A1 landed it. A PROJECTED uint
-    column now decodes on the native scan (exact-width DRAKEN_UINT*, byte-identical to
-    the trampoline), so this scan selects NativeParquetScanSource. (An unsigned column
-    used as a c-native PREDICATE INPUT still fails closed — covered by the A1 suite
-    test_wp_a1_native_int_widths_scan; here it is projection-only, so it goes native.)"""
+def test_projected_uint_now_native(tmp_path):
+    """A PROJECTED uint column decodes on the native scan as exact-width
+    DRAKEN_UINT*. (An unsigned column used as a c-native PREDICATE INPUT is covered
+    by the A1 suite test_wp_a1_native_int_widths_scan; here it is projection-only.)"""
     cols = {"u": (pa.uint32(), list(range(200))), "n": (pa.int64(), list(range(200)))}
-    ds = _write(str(tmp_path / "fc"), cols)
-    sql = "SELECT u, n FROM '%s'" % ds
-
-    nat, nat_src = _drain(sql, False, monkeypatch)
-    tmp, tmp_src = _drain(sql, True, monkeypatch)
-
-    assert nat_src == ["NativeParquetScanSource"], nat_src
-    assert tmp_src == ["StreamingScanSource"], tmp_src
-    assert nat == tmp
+    _check(tmp_path, cols, "u, n", {"u": _UINT32, "n": _INT64})
 
 
 # ── instrumentation: zero-Python on the admitted decimal/timestamp scan ──────
@@ -744,16 +815,6 @@ def test_instrumentation_decimal_timestamp_zero_gil(tmp_path, monkeypatch):
     assert td["gil_held_ns"] == 0
     assert td.get("worker_gil_sites", []) == []
     IE.assert_native_worker_purity(td, whitelist=())
-
-
-def test_instrumentation_trampoline_calls_zero(tmp_path, monkeypatch):
-    cols = {"d": (pa.decimal128(18, 4), _decimals(18, 4)),
-            "t": (pa.timestamp("us"), _timestamps())}
-    ds = _write(str(tmp_path / "instr2"), cols)
-    sql = "SELECT d, t FROM '%s'" % ds
-    monkeypatch.setattr(config, "OPTERYX_INSTRUMENT_ENGINE", True)
-    res = IE.measure_query_allocations(sql)
-    assert res["trampoline_calls"] == 0
 
 
 if __name__ == "__main__":

@@ -145,3 +145,30 @@ def build_manifest(
         for position, hashes in spec.distinct_sketches.items():
             builder.set_distinct_sketch(row, position, list(hashes), spec.distinct_sketch_family)
     return Manifest(builder.build(dict(sketches or {})), schema)
+
+
+def catalog_manifest(schema, entries: List[dict], *, bounds_are_ordinal: bool = True) -> Manifest:
+    """The Manifest a catalog snapshot holding `entries` (catalog manifest rows:
+    per-column lists keyed by the row's own `field_ids`) plans over - written by
+    opteryx-catalog's manifest encoder and decoded natively, the one path every
+    catalog backend's manifest takes."""
+    import os
+    import sys
+
+    from opteryx.compiled.planner.native_manifest import decode_manifest_parquet
+
+    catalog_repo = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "opteryx-catalog"))
+    if os.path.isdir(catalog_repo) and catalog_repo not in sys.path:
+        sys.path.insert(1, catalog_repo)
+    from opteryx_catalog.catalog.manifest import encode_parquet_manifest
+
+    columns = schema.columns
+    native = decode_manifest_parquet(
+        encode_parquet_manifest(entries),
+        tuple(column.name for column in columns),
+        tuple(column.column_type.physical for column in columns),
+        {column.field_id: position for position, column in enumerate(columns) if column.field_id is not None},
+        bounds_are_ordinal,
+        True,
+    )
+    return Manifest(native, schema)

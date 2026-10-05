@@ -4,33 +4,28 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Regression test for the LATMAT pass-1 dictionary-membership skip branch in
-``ParquetReadNode._run_pass1`` (opteryx/operators/parquet_read/parquet_read.pyx).
+Late materialization over a row group whose dictionary lacks the needle.
 
-When the two-pass late-materialization path is active and a pushed equality/IN
-conjunct's dictionary lacks every needle in a row group, the C++ pass-1 decoder
-flags the whole row group ``empty_filtered`` and the source hands the consumer a
-``vectors is None`` sentinel. ``_run_pass1`` must account the pre-filter rows and
-record the skip via ``self.scan_readings.record_pass1_skipped()`` — NOT
-``self.record_pass1_skipped()`` (no such method on the node). That latent
-AttributeError crashed any query reaching this branch and had ZERO coverage,
-because the branch only fires when LATMAT is active AND dictionary pruning
-eliminates a whole row group during pass 1.
+When a pushed equality conjunct's dictionary lacks every needle in a row group,
+rugo's pass-1 decoder flags the whole row group ``empty_filtered`` and
+``LatmatScanSource`` (src/cpp/engine/native_latmat_scan_source.hpp, pass 1) drops
+it without evaluating it. That Source records no per-row-group counters, so these
+tests cannot observe the skip itself; they pin the ANSWER over a fixture built to
+take it, against a plain-Python oracle.
 
-The fixture below makes the branch fire deterministically: ``key`` is a
-dictionary-encoded int column written across 10 row groups whose [min,max] range
-brackets the needle in EVERY row group (so min/max statistics never prune a row
-group before pass 1), but whose dictionary contains the needle in only two of
-them. The remaining 8 row groups reach the pass-1 decoder, fail dict-membership,
-and travel the ``vectors is None`` branch. A second, non-filter column
-(``payload``) is projected so two-pass late-materialization is eligible.
+The fixture: ``key`` is a dictionary-encoded int column written across 10 row
+groups whose [min,max] range brackets the needle in EVERY row group (so min/max
+statistics never prune a row group before pass 1), but whose dictionary contains
+the needle in only two of them. ``payload`` (the global row index) is projected
+and is not a predicate column, so pass 2 has a column to fetch and the
+``WHERE key = 333 ORDER BY key LIMIT n`` shape is late-materialized.
 """
 
 import os
 import sys
 import tempfile
 
-import pyarrow as pa
+import pyarrow as pa  # test-only dep, used to WRITE parquet only
 import pyarrow.parquet as pq
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
@@ -45,14 +40,6 @@ import pytest
 NEEDLE = 333
 _NEEDLE_ROW_GROUPS = (3, 7)
 _NEEDLE_ROWS = (10, 990)
-
-
-def _get_read_operation(telemetry: dict) -> dict:
-    """Return the first ReadRel operation dict from session telemetry."""
-    for operation in telemetry.get("operations", {}).values():
-        if operation.get("type") == "ReadRel":
-            return operation
-    raise AssertionError("No ReadRel operation found in telemetry")
 
 
 def _build_table():
@@ -100,30 +87,11 @@ def _unique_ws():
 
 
 def _run(sql, *, latmat):
-    """Write the fixture, run ``sql`` (with the LATMAT flag set as requested),
-    and return (sorted payload rows, ReadRel telemetry operation).
-
-    The native footer gate is DECLINED for the duration so the scan takes the
-    Python trampoline. The two-pass late-materialization path under test lives in
-    ``ParquetReadNode._run_pass1`` — i.e. on the trampoline — and this query now
-    selects ``NativeParquetScanSource`` on its own (the predicate relocates
-    natively, WP-02), which is single-pass and leaves every ``parquet_latmat_*``
-    sensor at zero. Without forcing, this test asserted 2 == 0 and the branch it
-    exists to guard was never entered at all.
-    """
-    from opteryx.connectors.parquet_io import pool_reader
-
+    """Write the fixture into a fresh workspace, run ``sql`` with the LATMAT flag
+    set as requested, and return (sorted payload rows, scan_sources,
+    residual_reasons)."""
     table = _build_table()
     ws = _unique_ws()
-    saved_gate = pool_reader.native_scan_supported
-    pool_reader.native_scan_supported = lambda *a, **k: False
-    try:
-        return _run_inner(sql, table, ws, latmat)
-    finally:
-        pool_reader.native_scan_supported = saved_gate
-
-
-def _run_inner(sql, table, ws, latmat):
     with tempfile.TemporaryDirectory() as tmp:
         data_dir = os.path.join(tmp, ws, "t")
         os.makedirs(data_dir)
@@ -145,8 +113,9 @@ def _run_inner(sql, table, ws, latmat):
             rows = []
             for m in session.execute_to_morsels(sql.format(ws=ws)):
                 rows.extend(m.column(b"payload").to_pylist())
-            read_op = _get_read_operation(session.telemetry)
-            return sorted(rows), read_op
+            telemetry = session.telemetry
+            return (sorted(rows), list(telemetry["scan_sources"].values()),
+                    dict(telemetry.get("scan_residual_reasons", {})))
         finally:
             os.chdir(cwd)
 
@@ -158,60 +127,22 @@ def _restore_latmat_config():
     config.features.parquet_late_materialization = orig
 
 
-def test_latmat_pass1_dict_membership_skip_branch():
-    """LATMAT pass-1 must survive a whole-row-group dictionary-membership skip
-    (the ``vectors is None`` branch) and return the correct rows.
+_SQL = "SELECT key, payload FROM {ws}.t WHERE key = " + str(NEEDLE) + " ORDER BY key LIMIT 10"
 
-    Telemetry proves the branch was taken: 8 row groups are skipped, yet only 2
-    were ever *evaluated* in pass 1 (the two that carry the needle). A skip that
-    increments ``skipped_row_groups`` WITHOUT incrementing ``pass1_row_groups``
-    can only be the source-level dict-membership skip — the mask-all-false skip
-    path evaluates the row group first (and so would push pass1 to 10)."""
-    rows, read_op = _run(
-        "SELECT payload FROM {ws}.t WHERE key = " + str(NEEDLE),
-        latmat=True,
-    )
 
-    # Correctness: exactly the needle-bearing rows, value-checked.
+def test_latmat_dict_skip_result_matches_oracle():
+    """On LatmatScanSource, the row groups whose dictionary lacks the needle must
+    not drop or corrupt any surviving row: exactly the needle-bearing rows come
+    back (LIMIT 10 exceeds the 4 survivors, so all of them)."""
+    rows, src, reasons = _run(_SQL, latmat=True)
+    assert src == ["LatmatScanSource"], src
+    assert reasons == {}, reasons
     assert rows == _expected_payloads(), rows
 
-    # Two-pass late-materialization actually engaged.
-    assert read_op.get("parquet_latmat_pass1_row_groups", 0) == 2, (
-        "only the 2 needle-bearing row groups should be decoded+evaluated in pass 1"
-    )
-    assert read_op.get("parquet_latmat_pass2_row_groups", 0) == 2, (
-        "pass 2 must run for the 2 surviving row groups"
-    )
 
-    # The decode-skip branch fired for the other 8 row groups.
-    assert read_op.get("parquet_latmat_skipped_row_groups", 0) == 8, (
-        "the 8 bracketed row groups must hit the vectors-is-None decode-skip branch"
-    )
-    # Pin it to the source-level branch: 8 skipped, 0 of them evaluated.
-    skipped = read_op.get("parquet_latmat_skipped_row_groups", 0)
-    evaluated = read_op.get("parquet_latmat_pass1_row_groups", 0)
-    survived = read_op.get("parquet_latmat_pass2_row_groups", 0)
-    assert evaluated - survived == 0, (
-        "no row group should be skipped via the mask-all-false (evaluated) path; "
-        f"evaluated={evaluated} survived={survived} skipped={skipped}"
-    )
-
-
-def test_latmat_dict_skip_result_matches_single_pass():
-    """The two-pass result must be byte-identical to the single-pass (feature
-    OFF) result — the decode-skip branch must not drop or corrupt any row."""
-    rows_on, _ = _run(
-        "SELECT payload FROM {ws}.t WHERE key = " + str(NEEDLE), latmat=True
-    )
-    rows_off, read_op_off = _run(
-        "SELECT payload FROM {ws}.t WHERE key = " + str(NEEDLE), latmat=False
-    )
-    assert rows_on == rows_off == _expected_payloads()
-    # Sanity: with the feature off, the two-pass sensors stay at zero.
-    assert read_op_off.get("parquet_latmat_pass1_row_groups", 0) == 0
-
-
-if __name__ == "__main__":
-    test_latmat_pass1_dict_membership_skip_branch()
-    test_latmat_dict_skip_result_matches_single_pass()
-    print("✅ LATMAT pass-1 dict-membership skip regression tests passed")
+def test_single_pass_result_matches_oracle():
+    """With the feature off the same query is single-pass and answers the same."""
+    rows, src, reasons = _run(_SQL, latmat=False)
+    assert src == ["NativeParquetScanSource"], src
+    assert reasons == {}, reasons
+    assert rows == _expected_payloads(), rows

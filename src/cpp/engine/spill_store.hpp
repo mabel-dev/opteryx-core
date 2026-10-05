@@ -70,7 +70,7 @@ inline int64_t sweep_removed_count() { return sweep_removed().load(); }
 }  // namespace spill_tel
 
 // RAII read-only mapping of a whole spill unit file, for read-back decode.
-// Same shape and posture as native_skene_scan_source.hpp's SkeneFileMapping:
+// Same shape and posture as skene_reader_cache.hpp's SkeneFileMapping:
 // fails loud (ok() == false) rather than throwing — this runs on worker
 // threads in a no-exception context.
 class SpillFileMapping {

@@ -160,11 +160,10 @@ def test_a_manifest_without_the_column_still_reads():
 
 def test_the_catalog_read_path_picks_up_distinct_counts():
     """The catalog is the manifest format's owner and writes its own manifests,
-    so the catalog connector's row reader (`_catalog_manifest`) - not the
-    manifest parquet decoder - is what the engine uses for a catalog-backed
-    relation. Without this the column could be written by the catalog and
-    silently dropped on the way in."""
-    from opteryx.connectors.opteryx_connector import _catalog_manifest
+    and every catalog-backed relation plans over them decoded natively. Without
+    this the column could be written by the catalog and silently dropped on the
+    way in."""
+    from tests.manifests import catalog_manifest
 
     entry = {
         "file_path": "a.parquet",
@@ -175,7 +174,7 @@ def test_the_catalog_read_path_picks_up_distinct_counts():
         "max_values": [9, None],
         "distinct_counts": [9, None],
     }
-    manifest = _catalog_manifest(_schema("a", "b", field_ids=True), True, [entry], {}, {})
+    manifest = catalog_manifest(_schema("a", "b", field_ids=True), [entry])
     # ESTIMATE-flagged, and a column with no count is absent rather than zero.
     assert manifest.native.cell(0, 0)["distinct_count"] == (9, False)
     assert manifest.native.cell(0, 1)["distinct_count"] is None
@@ -185,7 +184,7 @@ def test_a_catalog_row_without_the_column_reads_as_not_computed():
     """Every manifest the catalog wrote before this column existed, and every
     one it writes for a relation it sketched itself. "Not computed" - never
     "no distinct values"."""
-    from opteryx.connectors.opteryx_connector import _catalog_manifest
+    from tests.manifests import catalog_manifest
 
     entry = {
         "file_path": "a.parquet",
@@ -195,7 +194,7 @@ def test_a_catalog_row_without_the_column_reads_as_not_computed():
         "min_values": [1],
         "max_values": [9],
     }
-    manifest = _catalog_manifest(_schema("a", field_ids=True), True, [entry], {}, {})
+    manifest = catalog_manifest(_schema("a", field_ids=True), [entry])
     assert manifest.native.cell(0, 0)["distinct_count"] is None
 
 

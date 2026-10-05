@@ -204,15 +204,4 @@ inline SkeneApplied apply_skene_footer(NativeManifest& m, size_t row, const sken
     return applied;
 }
 
-// Parse the .skene file `file` (its bytes, or at least through its footer) and
-// apply its statistics to file `row`. Returns "" or skene's error message.
-inline std::string read_skene_footer_into(NativeManifest& m, size_t row, const void* file, size_t bytes,
-                                          const std::vector<DrakenType>& physical, SkeneApplied& applied) {
-    skene::FileMetadata meta;
-    const skene::Status status = skene::read_metadata(file, bytes, &meta);
-    if (!status.is_ok()) return status.message().empty() ? std::string("unreadable skene footer") : status.message();
-    applied = apply_skene_footer(m, row, meta, physical, skene_slot_positions(meta, m.positions()));
-    return std::string();
-}
-
 }  // namespace opteryx::planner

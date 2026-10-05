@@ -9,8 +9,8 @@ per-file null counts.
 
 The opteryx_catalog package's ParquetManifestEntry.to_dict() carries a
 "null_counts" key: a positional list parallel to "field_ids", exactly like
-"min_lengths"/"max_lengths". The reader (then FileEntry.from_datafile, now
-opteryx_connector._catalog_manifest) handled that positional-list-to-column
+"min_lengths"/"max_lengths". The reader (then FileEntry.from_datafile; now the
+native manifest decoder) handled that positional-list-to-column
 mapping correctly for min/max values and lengths, but hardcoded the null
 counts to "unknown" regardless of what the entry actually carried.
 
@@ -24,12 +24,12 @@ from __future__ import annotations
 
 from opteryx.compiled.structures.plan_steps import ExitStep
 from opteryx.compiled.structures.plan_steps import ScanStep
-from opteryx.connectors.opteryx_connector import _catalog_manifest
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
 from opteryx.planner.plan_context import PlanContext
 from opteryx.types.logical_type import INT64
 from opteryx.types.schema import RelationSchema
+from tests.manifests import catalog_manifest
 
 # Bound columns are minted by a query's ColumnTable; these tests share one.
 _PLAN_CONTEXT = PlanContext()
@@ -60,7 +60,7 @@ def _entry(**overrides):
 
 
 def _manifest(schema, entry):
-    return _catalog_manifest(schema, True, [entry], {}, None)
+    return catalog_manifest(schema, [entry])
 
 
 def _scan_statistics(manifest):

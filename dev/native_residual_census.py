@@ -5,12 +5,14 @@
 
 """A0 native SELECT-path residual census (developer tooling).
 
-The native C++ engine runs plain ``SELECT`` end-to-end EXCEPT for parquet scans
-that fall back to the per-morsel Python trampoline (``StreamingScanSource``).
-Every such fallback is one ``return None`` guard in
+The native C++ engine runs every parquet scan on a native Source. There is no
+Python fallback (the per-morsel trampoline, ``StreamingScanSource``, was deleted
+2026-10-03): a scan neither native Source admits is REFUSED with a
+``NotSupportedError`` naming its residual reason. Each refusal starts at one
+``return None`` guard in
 ``opteryx/managers/execution/compiler.py::_native_scan_plan`` (``_Compiler``),
-and each records a stable machine-readable reason code on query telemetry
-(``scan_residual_reasons``, keyed by scan identity, parallel to ``scan_sources``).
+which records a stable machine-readable reason code (``scan_residual_reasons``,
+keyed by scan identity) that the refusal message carries.
 
 This module is the measurement front-end for that frontier:
 
@@ -75,11 +77,12 @@ def scan_residuals(sql: str) -> Tuple[Dict, Dict, Optional[BaseException]]:
     """Run ``sql`` to completion and read its scan-Source census from telemetry.
 
     Returns ``(scan_sources, scan_residual_reasons, err)``:
-      * ``scan_sources``          — {scan_identity: "NativeParquetScanSource" |
-                                     "StreamingScanSource"} (plan-time fact,
-                                     always present).
-      * ``scan_residual_reasons`` — {scan_identity: reason_code} for the trampoline
-                                     scans only ({} when every scan went native).
+      * ``scan_sources``          — {scan_identity: Source class name} (plan-time
+                                     fact, present when the query ran).
+      * ``scan_residual_reasons`` — {scan_identity: reason_code} for scans that did
+                                     not go native ({} when every scan went native).
+                                     A refused scan raises, so its reason arrives
+                                     in ``err``'s message, not here.
       * ``err``                   — the exception if the query raised, else None
                                      (with empty dicts).
     """
@@ -157,7 +160,8 @@ HAND_SET: Dict[str, str] = {
     # structural fail-closed for any future non-lowerable predicate, exactly like
     # R6's. What is retired is the claim that SQL can still reach it. R4 was the
     # last entry in the test's `_OPEN_CATEGORIES` frontier, but NOT the last
-    # trampoline trigger overall — `footer_gate` (schema evolution) below still is.
+    # reachable residual overall — `footer_gate` (schema evolution) below still is,
+    # and is refused.
     # Note also
     # that a non-lowerable predicate which never PUSHES is a different class — it
     # becomes a standalone Filter and hard-errors in `_lower_expression` ("outside
@@ -200,8 +204,8 @@ HAND_SET: Dict[str, str] = {
 #: Scan Source classes that run with NO Python on the execution path.
 #: ``LatmatScanSource`` (R3) is the two-pass late-materialization scan — a different
 #: Source class from the single-pass one, but equally native: it never constructs a
-#: PyObject and never calls back into Python while executing. The trampoline is
-#: ``StreamingScanSource``, and only that.
+#: PyObject and never calls back into Python while executing. Any other Source name
+#: is a scan that left the native path.
 _NATIVE_SOURCES = frozenset({"NativeParquetScanSource", "LatmatScanSource"})
 
 

@@ -797,16 +797,27 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         skene_bounded = False
         skene_nulls = set()
         if dataset_fmt == SKENE:
-            for path in ordered:
-                file_obj = self.filesystem.open_input_file(path)
-                try:
-                    any_bounds, any_nulls = builder.set_skene_footer(rows[path], file_obj.memoryview)
-                except ValueError as err:
-                    raise DataError(
-                        f"The skene file {md_code(path)} could not be read. {md_cause(err)}"
-                    ) from err
-                finally:
-                    file_obj.close()
+            from opteryx.operators._operators import read_skene_footers
+
+            # Native: each file's tail and footer only, and the opened readers stay
+            # in the engine's reader cache for the scan. Local files only, as the
+            # scan is.
+            remote = [path for path in ordered if "://" in path]
+            if remote:
+                raise DataError(
+                    f"The skene file {md_code(remote[0])} is not on local storage; "
+                    "skene datasets are read from local storage only."
+                )
+            try:
+                applied = read_skene_footers(
+                    builder.borrowed_address(),
+                    builder.physical,
+                    [rows[path] for path in ordered],
+                    list(ordered),
+                )
+            except ValueError as err:
+                raise DataError(f"A skene file could not be read. {md_cause(err)}") from err
+            for path, (any_bounds, any_nulls) in zip(ordered, applied, strict=True):
                 skene_bounded = skene_bounded or any_bounds
                 if any_nulls:
                     skene_nulls.add(path)

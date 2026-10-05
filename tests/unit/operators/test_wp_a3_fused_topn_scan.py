@@ -1,40 +1,27 @@
-"""A3 (R3) — admit the scan-fused TopN shape to the native parquet scan.
+"""A3 (R3) — the scan-fused TopN shape on the native parquet scan.
 
-Background: `ORDER BY <col> LIMIT n` reading directly from a parquet Scan gets a
+`ORDER BY <col> LIMIT n` reading directly from a parquet Scan gets a
 `topn_sort_name`/`topn_limit`/`topn_descending` spec stamped onto the scan by
 `TopNScanPushdownStrategy` (opteryx/planner/optimizer/strategies/
-topn_scan_pushdown.py). That spec is a TRAMPOLINE-ONLY decode-skip hint consumed
-by `_apply_topn` in `parquet_read.pyx` — it only ever activates when a WHERE
-predicate is ALSO pushed (two-pass late-materialization eligibility); the
-no-predicate case never runs it even on the trampoline today. The actual
-sort/limit/tie-break/null-order is always performed by the native `HeapSortNode`
--> `set_topn_sink` operator downstream of the scan (compiler.py's
-`_compile_scan`), generically over the incoming layout, independent of which
-scan Source feeds it.
+topn_scan_pushdown.py). With NO predicate, `_native_scan_plan`
+(opteryx/managers/execution/compiler.py) ignores the hint: NativeParquetScanSource
+decodes its normal read-set and the native `HeapSortNode` -> `set_topn_sink`
+operator downstream of the scan performs the sort/limit/tie-break/null-order.
 
-A3 close-out: `_native_scan_plan` (opteryx/managers/execution/compiler.py) no
-longer bails when `scan._topn_sort_name` is set AND there is no predicate. The
-native scan simply ignores the hint and decodes its normal read-set; the
-pre-existing native TopN sink does the real cut, so the result is
-byte-identical (SET AND ORDER) to the forced-trampoline path. No new native
-TopN/heap-select kernel was needed for this sub-case.
+The composed shape (fused TopN WITH a predicate, e.g. ClickBench Q24) is served by
+`LatmatScanSource` (src/cpp/engine/native_latmat_scan_source.hpp), which runs the
+two-pass late-materialization natively — see `test_topn_with_where_predicate_now_native`
+below, and tests/unit/operators/test_wp_r3_latmat_scan.py for that Source's own
+correctness matrix. This file is the NO-predicate sub-case's harness.
 
-UPDATE (R3 close-out) — the composed shape (fused TopN WITH a predicate, e.g.
-ClickBench Q24: `SELECT * FROM hits WHERE URL LIKE '%google%' ORDER BY EventTime
-LIMIT 10`) is ALSO native now, but by a different route. Admitting it as a plain
-single-pass scan was tried and reverted: the two-pass late-mat decodes only the
-predicate + sort-key columns for the whole table, then the rest of a wide
-SELECT * only for the tiny surviving set, and losing that measured ~400% slower
-on Q24. `LatmatScanSource` (src/cpp/engine/native_latmat_scan_source.hpp) now
-performs both passes natively and KEEPS the skip — see
-`test_topn_with_where_predicate_now_native` below, and
-tests/unit/operators/test_wp_r3_latmat_scan.py for that Source's own correctness
-matrix. This file remains the NO-predicate sub-case's harness.
-
-Correctness gate (no-predicate sub-case): A/B parity, ORDER-SENSITIVE (this is
-exactly what ORDER BY + LIMIT means) — the native run and the forced-
-trampoline run must produce the identical row sequence, including
-tie-breaking and null-ordering.
+Correctness gate: the expected answer is computed in plain Python from the values
+the test wrote (`_oracle`), ORDER-SENSITIVE — ORDER BY + LIMIT output order is
+exactly what is verified. The engine's NULL rule (ruling 2026-09-27, resolved in
+`sort_nulls_first`): NULL is the lowest value, so ASC -> NULLS FIRST and DESC ->
+NULLS LAST by default. Where the sort key ties at the LIMIT boundary, which tied
+rows come back is unspecified (native_sort.hpp), so those tests check the key
+sequence and that every row is a real row of the table rather than one specific
+row set.
 """
 
 import os
@@ -43,13 +30,12 @@ import sys
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "../../.."))
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "../../..", "dev"))
 
-import pyarrow as pa  # test-only dep (allowed in tests/)
+import pyarrow as pa  # test-only dep, used to WRITE parquet only
 import pyarrow.parquet as pq
 import pytest
 
 import opteryx
 import opteryx.config as config
-from opteryx.connectors.parquet_io import pool_reader
 
 import instrument_engine as IE  # dev/instrument_engine.py
 
@@ -65,52 +51,60 @@ def _write(dataset_dir, columns, use_dictionary=True, row_group_size=None):
     return dataset_dir
 
 
-def _drain_ordered(sql, force_trampoline, monkeypatch):
-    """Drain `sql`; return (ordered_rows, source_list). `ordered_rows` is a LIST
-    (not sorted) of per-row tuples, preserving emission order — ORDER BY + LIMIT
-    output order is exactly what this harness verifies."""
-    if force_trampoline:
-        monkeypatch.setattr(pool_reader, "native_scan_supported", lambda *a, **k: False)
+def _drain_ordered(sql):
+    """Drain `sql`; return (ordered_rows, source_list, residual_reasons).
+    `ordered_rows` is a LIST of per-row tuples of Python values in emission order."""
     session = opteryx.session()
     rows = []
     for morsel in session.execute_to_morsels(sql):
-        names = list(morsel.column_names)
+        cols = [morsel.column(n) for n in morsel.column_names]
         for i in range(morsel.num_rows):
-            rows.append(tuple(
-                repr(None if morsel.column(n) is None else morsel.column(n)[i])
-                for n in names
-            ))
-    src = list(session.telemetry["scan_sources"].values())
-    if force_trampoline:
-        monkeypatch.undo()
-    return rows, src
+            rows.append(tuple(c[i] for c in cols))
+    telemetry = session.telemetry
+    src = list(telemetry["scan_sources"].values())
+    reasons = dict(telemetry.get("scan_residual_reasons", {}))
+    return rows, src, reasons
 
 
-def _assert_topn_parity(tmp_path, name, columns, sql_tail, monkeypatch, *,
-                         write_kw=None, expect_native=True):
-    """Write `columns`, run `SELECT {sql_tail}` native and forced-trampoline,
-    assert IDENTICAL row order. When `expect_native`, also assert the native run
-    selected NativeParquetScanSource and the trampoline run did not."""
+def _oracle(columns, projection, sort_key, descending, limit, where=None):
+    """Plain-Python WHERE / ORDER BY / LIMIT over the written values, returning the
+    projected rows in order. NULL lowest (engine default placement). Only valid for
+    a sort key without ties among non-NULL values — the callers guarantee it."""
+    n_rows = len(columns[sort_key][1])
+    rows = []
+    for i in range(n_rows):
+        row = {name: vals[i] for name, (_typ, vals) in columns.items()}
+        if where is None or where(row):
+            rows.append(row)
+    nulls = [r for r in rows if r[sort_key] is None]
+    non_null = sorted((r for r in rows if r[sort_key] is not None),
+                      key=lambda r: r[sort_key], reverse=descending)
+    ordered = non_null + nulls if descending else nulls + non_null
+    return [tuple(r[c] for c in projection) for r in ordered[:limit]]
+
+
+def _assert_topn_matches_oracle(tmp_path, name, columns, sort_key, descending, limit,
+                                *, write_kw=None):
+    """Write `columns`, run `SELECT s, <sort_key> ... ORDER BY ... LIMIT n` natively
+    and assert the IDENTICAL row sequence to the plain-Python oracle, on
+    NativeParquetScanSource with no residual reason."""
     ds = _write(str(tmp_path / name), columns, **(write_kw or {}))
-    proj, _, order_tail = sql_tail.partition(" ORDER BY ")
-    sql = "SELECT %s FROM '%s' ORDER BY %s" % (proj, ds, order_tail)
-
-    nat, nat_src = _drain_ordered(sql, False, monkeypatch)
-    tmp, tmp_src = _drain_ordered(sql, True, monkeypatch)
-
-    assert nat == tmp, "native TopN row order differs from forced-trampoline"
-    if expect_native:
-        assert nat_src == ["NativeParquetScanSource"], nat_src
-        assert tmp_src == ["StreamingScanSource"], tmp_src
+    sql = "SELECT s, %s FROM '%s' ORDER BY %s %s LIMIT %d" % (
+        sort_key, ds, sort_key, "DESC" if descending else "ASC", limit)
+    nat, nat_src, reasons = _drain_ordered(sql)
+    expect = _oracle(columns, ("s", sort_key), sort_key, descending, limit)
+    assert nat == expect, ("native TopN row sequence differs from the oracle", nat, expect)
+    assert nat_src == ["NativeParquetScanSource"], nat_src
+    assert reasons == {}, reasons
     return nat
 
 
 # ── a reusable table ─────────────────────────────────────────────────────────
 
 def _table(n, row_group_size=None):
-    # sort_key is unique per row (no ties) so strict ORDER-SENSITIVE parity is a
-    # valid check — dedicated tests below cover ties/NULLs separately, where the
-    # engine's own contract (native_sort.hpp) makes boundary order unspecified.
+    # sort_key is unique per row (no ties) so strict ORDER-SENSITIVE comparison is
+    # valid — dedicated tests below cover ties/NULLs separately, where the engine's
+    # own contract (native_sort.hpp) makes boundary order unspecified.
     return {
         "s": (pa.string(), ["row-%04d" % i for i in range(n)]),
         "sort_key": (pa.int64(), [(i * 7919) % 1000003 for i in range(n)]),
@@ -118,42 +112,37 @@ def _table(n, row_group_size=None):
     }, ({"row_group_size": row_group_size} if row_group_size else {})
 
 
-def test_topn_ascending_single_row_group(tmp_path, monkeypatch):
+def test_topn_ascending_single_row_group(tmp_path):
     cols, kw = _table(200)
-    _assert_topn_parity(
-        tmp_path, "asc_single", cols,
-        "s, sort_key ORDER BY sort_key ASC LIMIT 10", monkeypatch, write_kw=kw)
+    _assert_topn_matches_oracle(tmp_path, "asc_single", cols, "sort_key", False, 10,
+                                write_kw=kw)
 
 
-def test_topn_descending_single_row_group(tmp_path, monkeypatch):
+def test_topn_descending_single_row_group(tmp_path):
     cols, kw = _table(200)
-    _assert_topn_parity(
-        tmp_path, "desc_single", cols,
-        "s, sort_key ORDER BY sort_key DESC LIMIT 10", monkeypatch, write_kw=kw)
+    _assert_topn_matches_oracle(tmp_path, "desc_single", cols, "sort_key", True, 10,
+                                write_kw=kw)
 
 
-def test_topn_n_less_than_row_group(tmp_path, monkeypatch):
+def test_topn_n_less_than_row_group(tmp_path):
     # 500 rows, one row group (default) — N << row group size.
     cols, kw = _table(500)
-    _assert_topn_parity(
-        tmp_path, "n_lt_rg", cols,
-        "s, sort_key ORDER BY sort_key ASC LIMIT 5", monkeypatch, write_kw=kw)
+    _assert_topn_matches_oracle(tmp_path, "n_lt_rg", cols, "sort_key", False, 5,
+                                write_kw=kw)
 
 
-def test_topn_n_greater_than_row_group_spans_multiple(tmp_path, monkeypatch):
+def test_topn_n_greater_than_row_group_spans_multiple(tmp_path):
     # 2000 rows, row_group_size=100 -> 20 row groups; N spans several of them.
     cols, kw = _table(2000, row_group_size=100)
-    _assert_topn_parity(
-        tmp_path, "n_gt_rg", cols,
-        "s, sort_key ORDER BY sort_key ASC LIMIT 250", monkeypatch, write_kw=kw)
+    _assert_topn_matches_oracle(tmp_path, "n_gt_rg", cols, "sort_key", False, 250,
+                                write_kw=kw)
 
 
-def test_topn_ties_on_sort_key(tmp_path, monkeypatch):
+def test_topn_ties_on_sort_key(tmp_path):
     # A constant sort key forces every row into a tie at the boundary. Boundary
     # order is unspecified by the engine's own contract (native_sort.hpp), so
-    # the correctness bar is the survivor SET: with every row tied, any 20 of
-    # the 300 rows are a valid top-20 — so what must hold is just "20 rows,
-    # all with sort_key==42", not a specific 20.
+    # with every row tied any 20 of the 300 rows are a valid top-20: what must
+    # hold is "20 distinct real rows, all with sort_key==42".
     n = 300
     cols = {
         "s": (pa.string(), ["row-%04d" % i for i in range(n)]),
@@ -161,66 +150,57 @@ def test_topn_ties_on_sort_key(tmp_path, monkeypatch):
     }
     ds = _write(str(tmp_path / "ties"), cols, row_group_size=50)
     sql = "SELECT s, sort_key FROM '%s' ORDER BY sort_key ASC LIMIT 20" % ds
-    nat, nat_src = _drain_ordered(sql, False, monkeypatch)
-    tmp, tmp_src = _drain_ordered(sql, True, monkeypatch)
-    assert len(nat) == 20 and len(tmp) == 20
-    assert all(row[1] == "42" for row in nat)
-    assert all(row[1] == "42" for row in tmp)
+    nat, nat_src, reasons = _drain_ordered(sql)
+    table_rows = set(zip(cols["s"][1], cols["sort_key"][1]))
+    assert len(nat) == 20
+    assert all(row[1] == 42 for row in nat), nat
+    assert all(row in table_rows for row in nat), nat
+    assert len(set(nat)) == 20, "a row was returned twice"
     assert nat_src == ["NativeParquetScanSource"], nat_src
-    assert tmp_src == ["StreamingScanSource"], tmp_src
+    assert reasons == {}, reasons
 
 
-def test_topn_nulls_in_sort_column(tmp_path, monkeypatch):
-    # Verified from src/cpp/engine/native_sort.hpp's comparator: a NULL key
-    # compares as the MINIMUM (sorts FIRST for ASC, LAST for DESC) — the same
-    # rule in both the native TopN sink and (transitively, since the trampoline
-    # feeds the identical downstream HeapSort) the forced-trampoline path. 75 of
-    # 300 rows are NULL here — more than the LIMIT — so:
+def test_topn_nulls_in_sort_column(tmp_path):
+    # NULL is the lowest value (sorts FIRST for ASC, LAST for DESC). 75 of 300
+    # rows are NULL here — more than the LIMIT — so:
     #   ASC  LIMIT 15 -> all 15 results are NULL (a 75-way tie; WHICH 15 of the
-    #                    75 survive is unspecified — compare count/value only).
+    #                    75 survive is unspecified — check they are real NULL rows).
     #   DESC LIMIT 15 -> NULLs sort last, so the 15 largest non-null values win;
-    #                    non-null values are made unique below, so this SET is
-    #                    fully determined and checked exactly.
+    #                    non-null values are unique, so the SEQUENCE is fully
+    #                    determined and checked exactly against the oracle.
     n = 300
-    non_null = list(range(n))  # unique per row where present -> no value-ties
     cols = {
         "s": (pa.string(), ["row-%04d" % i for i in range(n)]),
-        "sort_key": (pa.int64(), [None if i % 4 == 0 else non_null[i] for i in range(n)]),
+        "sort_key": (pa.int64(), [None if i % 4 == 0 else i for i in range(n)]),
     }
     ds = _write(str(tmp_path / "nulls"), cols, row_group_size=60)
+    table_rows = set(zip(cols["s"][1], cols["sort_key"][1]))
 
     sql_asc = "SELECT s, sort_key FROM '%s' ORDER BY sort_key ASC LIMIT 15" % ds
-    nat, nat_src = _drain_ordered(sql_asc, False, monkeypatch)
-    tmp, tmp_src = _drain_ordered(sql_asc, True, monkeypatch)
-    assert len(nat) == 15 and len(tmp) == 15
-    assert all(row[1] == "None" for row in nat), nat
-    assert all(row[1] == "None" for row in tmp), tmp
+    nat, nat_src, reasons = _drain_ordered(sql_asc)
+    assert len(nat) == 15
+    assert all(row[1] is None for row in nat), nat
+    assert all(row in table_rows for row in nat), nat
+    assert len(set(nat)) == 15, "a row was returned twice"
     assert nat_src == ["NativeParquetScanSource"], nat_src
-    assert tmp_src == ["StreamingScanSource"], tmp_src
+    assert reasons == {}, reasons
 
-    expect_desc = sorted((v for i, v in enumerate(non_null) if i % 4 != 0), reverse=True)[:15]
     sql_desc = "SELECT s, sort_key FROM '%s' ORDER BY sort_key DESC LIMIT 15" % ds
-    nat, nat_src = _drain_ordered(sql_desc, False, monkeypatch)
-    tmp, tmp_src = _drain_ordered(sql_desc, True, monkeypatch)
-    assert nat == tmp
-    assert [int(row[1]) for row in nat] == expect_desc
+    nat, nat_src, reasons = _drain_ordered(sql_desc)
+    assert nat == _oracle(cols, ("s", "sort_key"), "sort_key", True, 15)
     assert nat_src == ["NativeParquetScanSource"], nat_src
-    assert tmp_src == ["StreamingScanSource"], tmp_src
+    assert reasons == {}, reasons
 
 
-def test_topn_with_where_predicate_now_native(tmp_path, monkeypatch):
-    """R3: the composed shape (fused TopN WITH a predicate) no longer falls back to
-    the trampoline. It used to, because admitting it as a plain single-pass native
-    scan lost the two-pass late-materialization decode-skip and measured ~400%
-    slower on ClickBench Q24. It is now served by `LatmatScanSource`, which does
-    both passes natively and keeps the skip — see
-    tests/unit/operators/test_wp_r3_latmat_scan.py for that Source's own
+def test_topn_with_where_predicate_now_native(tmp_path):
+    """R3: the composed shape (fused TopN WITH a predicate) is served by
+    `LatmatScanSource`, which does both passes natively and keeps the decode-skip —
+    see tests/unit/operators/test_wp_r3_latmat_scan.py for that Source's own
     correctness matrix (ties, NULLs, row-group-spanning tie blocks, alignment).
 
-    Kept here in its original A3 form because the ordering assertion is the point:
-    the native and forced-trampoline runs must still agree on the exact row
-    SEQUENCE for this fixture. `sort_key` is distinct here, so there are no ties to
-    make the order legitimately ambiguous.
+    The ordering assertion is the point: the exact row SEQUENCE must equal the
+    plain-Python oracle. `sort_key` is distinct here, so there are no ties to make
+    the order legitimately ambiguous.
 
     NOTE the SQL shape matters for actually EXERCISING the fused path:
     `TopNScanPushdownStrategy` only stamps the scan when HeapSort reads
@@ -232,19 +212,19 @@ def test_topn_with_where_predicate_now_native(tmp_path, monkeypatch):
     cols, kw = _table(1000, row_group_size=100)
     ds = _write(str(tmp_path / "with_predicate"), cols, **kw)
     sql = "SELECT * FROM '%s' WHERE flag = 1 ORDER BY sort_key ASC LIMIT 20" % ds
-    nat, nat_src = _drain_ordered(sql, False, monkeypatch)
-    tmp, tmp_src = _drain_ordered(sql, True, monkeypatch)
-    assert nat == tmp
+    nat, nat_src, reasons = _drain_ordered(sql)
+    expect = _oracle(cols, ("s", "sort_key", "flag"), "sort_key", False, 20,
+                     where=lambda r: r["flag"] == 1)
+    assert nat == expect, (nat, expect)
     assert nat_src == ["LatmatScanSource"], nat_src
-    assert tmp_src == ["StreamingScanSource"], tmp_src
+    assert reasons == {}, reasons
 
 
-def test_topn_large_n_edge(tmp_path, monkeypatch):
+def test_topn_large_n_edge(tmp_path):
     # LIMIT exceeds the total row count -> every row is returned, in sort order.
     cols, kw = _table(50)
-    _assert_topn_parity(
-        tmp_path, "large_n", cols,
-        "s, sort_key ORDER BY sort_key ASC LIMIT 1000", monkeypatch, write_kw=kw)
+    _assert_topn_matches_oracle(tmp_path, "large_n", cols, "sort_key", False, 1000,
+                                write_kw=kw)
 
 
 def test_instrumentation_native_topn_zero_gil(tmp_path, monkeypatch):

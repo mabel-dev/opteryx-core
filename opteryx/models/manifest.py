@@ -247,19 +247,7 @@ class Manifest:
         position = self.position_of(column)
         if position is None:
             return None
-        bounds = []
-        for row in range(self.get_file_count()):
-            cell = self.native.cell(row, position)
-            source = cell["bounds"]
-            if source["min"] is None or source["max"] is None:
-                footer = cell["footer"]
-                if footer is None:
-                    return None
-                source = footer["bounds"]
-            if source["min"] is None or source["max"] is None:
-                return None
-            bounds.append((source["min"], source["max"]))
-        return bounds
+        return self.native.value_bounds(position)
 
     def show_morsel(self):
         """SHOW MANIFEST's rows (bounds rendered as text)."""

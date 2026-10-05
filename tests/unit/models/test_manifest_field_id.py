@@ -7,8 +7,8 @@ the position a file's own writer used for its min/max lists.
 
 The manifest now has ONE key space - every per-column statistic is keyed by the
 column's LOAD-TIME position - and a catalog row's field-id-keyed lists are
-mapped onto those positions once, where the rows are read
-(`opteryx_connector._catalog_manifest`), through the schema's real,
+mapped onto those positions once, where the manifest is decoded
+(src/cpp/planner/manifest_decode.hpp), through the schema's real,
 catalog-assigned `field_id`s. A row with no `field_ids` of its own was written
 in schema order, so its lists are positional. The consumers
 (`get_min_max_from_manifest`, `Manifest.prune_files`) find a column by NAME, so
@@ -20,12 +20,12 @@ from __future__ import annotations
 from opteryx.models.manifest import Manifest
 
 from opteryx.expression import NodeType
-from opteryx.connectors.opteryx_connector import _catalog_manifest
 from opteryx.planner.optimizer.strategies.statistics_only_response import (
     get_min_max_from_manifest,
 )
 from opteryx.types.logical_type import INT64
 from opteryx.types.schema import RelationSchema
+from tests.manifests import catalog_manifest
 from opteryx.compiled.structures.expressions import Comparison
 from opteryx.compiled.structures.expressions import Literal
 from opteryx.compiled.structures.expressions import LogicalColumn
@@ -66,7 +66,7 @@ def _row(field_ids, min_values, max_values):
 
 
 def _manifest(schema, rows):
-    return _catalog_manifest(schema, False, rows, {}, None)
+    return catalog_manifest(schema, rows, bounds_are_ordinal=False)
 
 
 def test_catalog_rows_are_keyed_by_real_field_id_over_position():

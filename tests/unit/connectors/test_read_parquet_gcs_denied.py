@@ -125,7 +125,7 @@ def test_read_parquet_gcs_glob_is_rejected_before_any_network_call(anonymous_htt
 def test_read_parquet_gcs_scheme_is_rejected_not_treated_as_gs_alias(anonymous_http):
     # "gcs://" is deliberately NOT accepted as an alias for "gs://" here: the
     # native Parquet scan gate (opteryx.connectors.parquet_io.pool_reader.
-    # native_scan_supported) only recognizes the literal "gs://" prefix as a
+    # native_scan_rejection) only recognizes the literal "gs://" prefix as a
     # remote path -- "gcs://" isn't matched, so it would try to os.stat() the URI
     # as local and raise a raw RuntimeError instead of gracefully declining to
     # the trampoline scan. Rejected outright at bind time instead, before any

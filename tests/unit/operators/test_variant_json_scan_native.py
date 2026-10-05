@@ -1,12 +1,13 @@
 """VARIANT (JSON text) columns and JSON-annotated parquet strings scan NATIVELY.
 
 A VARIANT column is German-string storage holding JSON text (draken/core/buffers.h),
-so the native scan treats it as a string column. Before this, the classifier refused
-it (`non_admissible_kind:VARIANT`) and the footer gate refused a `json`-annotated
-byte_array, so both ran on the Python-driven StreamingScanSource trampoline.
+so the native scan treats it as a string column, and the footer gate admits a
+`json`-annotated byte_array.
 
-The oracle is the forced-trampoline path over the same file: native and trampoline
-must agree on values and on the column's DrakenType tag.
+The oracle is the plain-Python values the test wrote, and the column type the schema
+binder declares for a `json`-annotated parquet string (connectors/_rugo_schema.py
+PARQUET_LOGICAL_TYPE_MAP: "json" → NVARCHAR). The JSON text is passed through
+verbatim, not re-rendered.
 
 Physical parquet STRUCT/MAP columns are covered by test_nested_json_scan.py.
 """
@@ -22,7 +23,6 @@ import pytest
 
 import opteryx
 from draken.draken_native import DrakenType
-from opteryx.connectors.parquet_io import pool_reader
 from opteryx.managers.execution.compiler import _Compiler
 
 
@@ -36,28 +36,24 @@ def test_classifier_admits_variant_as_varchar_kind():
         None, [_Col(DrakenType.VARIANT), _Col(DrakenType.NVARCHAR)])
     assert bad is None
     assert kinds == ["varchar", "varchar"]
-    # VARIANT is tagged VARCHAR exactly as the trampoline's `_string_type_for` does.
+    # VARIANT is JSON text in German-string storage: it is scanned and tagged as VARCHAR.
     assert string_types == [DrakenType.VARCHAR.value, DrakenType.NVARCHAR.value]
 
 
-def _drain(sql, force_trampoline, monkeypatch):
-    if force_trampoline:
-        monkeypatch.setattr(pool_reader, "native_scan_supported", lambda *a, **k: False)
+def _drain(sql):
     session = opteryx.session()
     rows, tags = [], {}
     for morsel in session.execute_to_morsels(sql):
-        for n in morsel.column_names:
-            tags[n] = morsel.column(n).type
-            rows.extend((n, v) for v in morsel.column(n).to_pylist())
+        names = list(morsel.column_names)
+        for n in names:
+            tags[n.decode()] = morsel.column(n).type
+        rows.extend(zip(*(morsel.column(n).to_pylist() for n in names)))
     sources = set(session.telemetry["scan_sources"].values())
-    if force_trampoline:
-        monkeypatch.undo()
-    return sorted(map(repr, rows)), tags, sources
+    return sorted(rows, key=repr), tags, sources
 
 
 @pytest.mark.parametrize("use_dictionary", [False, True])
-def test_json_annotated_string_column_native_matches_trampoline(
-        tmp_path, monkeypatch, use_dictionary):
+def test_json_annotated_string_column_native_matches_oracle(tmp_path, use_dictionary):
     values = ['{"a": 1, "b": [2, 3]}', None, '{"k": "v\\"q"}', '[]', '{"a": 1, "b": [2, 3]}']
     table = pa.table({
         "id": pa.array(range(len(values)), pa.int64()),
@@ -67,13 +63,8 @@ def test_json_annotated_string_column_native_matches_trampoline(
     d.mkdir()
     pq.write_table(table, d / "part.parquet", use_dictionary=use_dictionary)
 
-    sql = f"SELECT id, doc FROM '{d}'"
-    native = _drain(sql, False, monkeypatch)
-    oracle = _drain(sql, True, monkeypatch)
+    rows, tags, sources = _drain(f"SELECT id, doc FROM '{d}'")
 
-    assert native[2] == {"NativeParquetScanSource"}, native[2]
-    assert oracle[2] == {"StreamingScanSource"}, oracle[2]
-    assert native[0] == oracle[0]
-    assert native[1] == oracle[1]
-    assert sorted(v for n, v in (eval(r) for r in native[0]) if n == b"doc" and v is not None) \
-        == sorted(v for v in values if v is not None)
+    assert sources == {"NativeParquetScanSource"}, sources
+    assert tags == {"id": DrakenType.INT64, "doc": DrakenType.NVARCHAR}, tags
+    assert rows == sorted(enumerate(values), key=repr)

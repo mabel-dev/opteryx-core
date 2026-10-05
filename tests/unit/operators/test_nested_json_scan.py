@@ -3,8 +3,7 @@
 A parquet STRUCT or MAP is stored as several leaf chunks with repetition/definition
 levels. The native scan expands a projected group column into its leaves, decodes
 them, and folds them back into one NVARCHAR column of JSON documents
-(rugo/src/parquet/nested_json.hpp). Until that existed the trampoline silently
-NULL-filled the column.
+(rugo/src/parquet/nested_json.hpp).
 
 Rulings under test (architect):
   * member order = schema order; a NULL field is JSON `null`; a NULL top-level group
@@ -35,7 +34,6 @@ import pyarrow.parquet as pq
 import pytest
 
 import opteryx
-from opteryx.connectors.parquet_io import pool_reader
 
 NATIVE = {"NativeParquetScanSource", "LatmatScanSource"}
 
@@ -88,18 +86,13 @@ def parse(text):
 
 # ── harness ─────────────────────────────────────────────────────────────────
 
-def run(directory, sql_tail="", columns="id, s", force_trampoline=False, monkeypatch=None,
-        ordered=False):
-    if force_trampoline:
-        monkeypatch.setattr(pool_reader, "native_scan_supported", lambda *a, **k: False)
+def run(directory, sql_tail="", columns="id, s", ordered=False):
     session = opteryx.session()
     cols = {}
     for morsel in session.execute_to_morsels(f"SELECT {columns} FROM '{directory}' {sql_tail}"):
         for n in morsel.column_names:
             cols.setdefault(n.decode(), []).extend(morsel.column(n).to_pylist())
     sources = set(session.telemetry["scan_sources"].values())
-    if force_trampoline:
-        monkeypatch.undo()
     # An unordered scan has no row order to assert; line the rows up by id unless the
     # query itself orders them.
     if not ordered and "id" in cols:
@@ -369,13 +362,3 @@ def test_non_string_map_key_is_refused_naming_the_column(tmp_path):
     d = write(tmp_path, t)
     with pytest.raises(NotImplementedError, match="(?s)column 's'.*non-string key"):
         run(d)
-
-
-def test_trampoline_refuses_instead_of_returning_nulls(tmp_path, monkeypatch):
-    t = pa.table({
-        "id": pa.array([1, 2], pa.int64()),
-        "s": pa.array([{"a": 1}, None], pa.struct([("a", pa.int64())])),
-    })
-    d = write(tmp_path, t)
-    with pytest.raises(NotImplementedError, match="column 's'"):
-        run(d, force_trampoline=True, monkeypatch=monkeypatch)

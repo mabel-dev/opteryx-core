@@ -34,7 +34,6 @@ import decimal
 
 from opteryx.compiled.structures.plan_steps import ExitStep
 from opteryx.compiled.structures.plan_steps import ScanStep
-from opteryx.connectors.opteryx_connector import _catalog_manifest
 from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
@@ -49,6 +48,7 @@ from opteryx.compiled.planner.statistics import StatisticsStore
 from tests.manifests import NULL_FLAG
 from tests.manifests import FileSpec
 from tests.manifests import build_manifest
+from tests.manifests import catalog_manifest
 
 
 def _schema(plan_context, column_type, name="value"):
@@ -408,7 +408,7 @@ def test_unsupported_ordinalize_type_skips_pruning_without_crashing():
 # assigns real, non-positional field_ids (observed live: insert_id=1,
 # labels=2, log_name=3, receive_timestamp=4, ...) and a catalog row's
 # min_values/max_values lists are keyed by the row's own `field_ids`, never
-# indexable by field_id directly. `_catalog_manifest` maps each field id to the
+# indexable by field_id directly. The manifest decoder maps each field id to the
 # column's load-time position - the manifest's one key space - and reading a
 # list by field_id instead silently reads a DIFFERENT column's bound whenever
 # field_id != position — this is exactly the bug this section pins down.
@@ -499,7 +499,7 @@ def test_ordinal_bounds_uses_real_field_id_not_position():
             VARCHAR.ordinalize("czz"),
         ],
     )
-    manifest = _catalog_manifest(schema, True, [row], {}, None)
+    manifest = catalog_manifest(schema, [row])
 
     bounds = _scan_column_statistics(plan_context, manifest, StatisticsStore.ordinal_bounds, "log_name")
 
@@ -574,7 +574,7 @@ def test_ordinal_bounds_none_for_unknown_column():
 # length-aware hard-impossibility guard shared by STARTS_WITH/INSTR/ENDS_WITH
 # selectivity estimation. Same field_id-vs-position trap as ordinal bounds: a catalog row's
 # min_lengths/max_lengths lists are keyed by the row's own `field_ids`, and
-# `_catalog_manifest` maps them to load-time positions. No bounds_are_ordinal
+# the manifest decoder maps them to load-time positions. No bounds_are_ordinal
 # gate (lengths are plain integers regardless); non-positive bounds are
 # excluded instead (0 is ambiguous between "no data" and "genuinely empty
 # string" — see length_bounds in src/cpp/planner/manifest_estimates.hpp).
@@ -597,7 +597,7 @@ def test_length_bounds_uses_real_field_id_not_position():
         plan_context, names_and_field_ids=[("a", 1), ("log_name", 3), ("c", 4)]
     )
     row = _catalog_row([1, 3, 4], min_lengths=[2, 40, 7], max_lengths=[5, 60, 9])
-    manifest = _catalog_manifest(schema, False, [row], {}, None)
+    manifest = catalog_manifest(schema, [row], bounds_are_ordinal=False)
 
     bounds = _scan_column_statistics(plan_context, manifest, StatisticsStore.length_bounds, "log_name")
 

@@ -25,8 +25,8 @@ negative-bound tests below pin that down so the guard can never be widened
 into one that silently disables pruning for ordinary signed data.
 
 In the ordinal dialect a producer records the sentinel as NO bound at all (the
-native builder is never handed it - see tests/manifests.py and the catalog's
-`_catalog_manifest`); in the real-value dialect it arrives as a plain INT64_MIN
+native builder is never handed it - see tests/manifests.py and the native
+manifest decoder); in the real-value dialect it arrives as a plain INT64_MIN
 value and the native pruner's own guard must disqualify it.
 """
 

@@ -1,15 +1,15 @@
 """The per-scan Parquet IO knobs must reach the NATIVE scan path.
 
-Until 2026-09-16 only the trampoline operator resolved these variables;
-`open_native_scan_plan` — the production default — took no `http_tuning`,
+Until 2026-09-16 only the (since deleted) Python per-morsel scan resolved these
+variables; `open_native_scan_plan` — the production path — took no `http_tuning`,
 `coalesce_tuning` or `in_flight_limit_override` at all. So every one of these
 SETs was silently inert in production while appearing to work in the tests that
-exercised the trampoline.
+exercised the Python scan.
 
 Two things are pinned here:
 
-1. The resolvers are shared (`connectors/parquet_io/io_tuning`), so the two scan
-   paths cannot drift apart again.
+1. The resolvers live in one place (`connectors/parquet_io/io_tuning`) and have
+   the shapes the native plan unpacks.
 2. `parquet_io_in_flight_limit` MOVES the window the native scan actually runs,
    read back from telemetry — not merely that the parameter is accepted.
 
@@ -105,17 +105,6 @@ def test_coalesce_tuning_shape():
 def test_in_flight_limit_default_is_auto_sentinel():
     """0 means auto — the absolute-vs-delta decision recorded in variables.py."""
     assert io_tuning.resolve_in_flight_limit(None) == 0
-
-
-def test_trampoline_and_native_share_one_resolver():
-    """The duplication that let the two paths drift must not come back."""
-    source = open(
-        os.path.join(REPO_ROOT, "opteryx/operators/parquet_read/parquet_read.pyx"),
-        encoding="utf-8",
-    ).read()
-    assert "from opteryx.connectors.parquet_io.io_tuning import" in source
-    # The trampoline must not carry its own copy of the resolution any more.
-    assert "config.HTTP_MAX_CONNECTIONS_PER_HOST" not in source
 
 
 if __name__ == "__main__":  # pragma: no cover

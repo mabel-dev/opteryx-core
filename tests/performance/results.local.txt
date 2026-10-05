@@ -1,4 +1,4 @@
-make clickbench          (7.35s)     (01-OCT) [rugo-parquet] [0.69x]
+make clickbench-rugo     (7.35s)     (01-OCT) [0.69x]
 make clickbench-skene    (6.81s)     (01-OCT) [0.64x]
 make clickbench-canon    (9.62s)     (01-OCT) [0.90x]
 make tpch-sf1            (408.1ms)   (28-SEP) [SF1] [1.17x]
@@ -10,7 +10,7 @@ make medicare1           (202.6ms)   (26-SEP) [1.17x]
 make job                 (5946.2ms)  (29-SEP) [0.88x] (33c)
 make h2o                 (33.2s)     (26-SEP) [medium]
 make jsonbench-10-jsonl  (1146.8ms)  (05-OCT) [10m] [0.44x]
-make jsonbench-10-zstd   (1945.4ms)  (03-OCT) [10m] [0.75x]
+make jsonbench-10-zstd   (1945.4ms)  (05-OCT) [10m] [0.75x]
 make dash                (121.7ms)   (03-OCT) [1.35x]
 make signals             (0.5s)      (03-OCT)
 

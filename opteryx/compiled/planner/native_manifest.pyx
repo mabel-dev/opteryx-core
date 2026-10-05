@@ -502,8 +502,6 @@ cdef extern from "planner/skene_stats.hpp" namespace "opteryx::planner":
         cbool any_bounds
         cbool any_nulls
 
-    string read_skene_footer_into(CNativeManifest& m, size_t row, const void* file, size_t bytes,
-                                  const vector[DrakenType]& physical, SkeneApplied& applied) except +
     SkeneApplied apply_skene_footer(CNativeManifest& m, size_t row, const SkeneFileMetadata& meta,
                                     const vector[DrakenType]& physical, const vector[int64_t]& positions) except +
 
@@ -960,6 +958,31 @@ cdef class NativeManifest:
         for row in range(self._manifest.file_count()):
             if file_key_range(self._manifest[0], row, self._position(position), lo, hi):
                 out.append((row, _end_value(lo), _end_value(hi)))
+        return out
+
+    def value_bounds(self, size_t position):
+        """[(min, max)] of the column per file, in file order, as tagged values
+        (`_bound_end`) - each file's own bounds, else its footer's. None, not a
+        partial list, when any file has no bound that is a value: a caller
+        reasoning about the whole file set must not reason about a subset of it."""
+        cdef size_t row
+        cdef size_t column = self._position(position)
+        cdef ManifestCell* c
+        cdef Bounds* b
+        out = []
+        for row in range(self._manifest.file_count()):
+            c = &self._manifest.cell(row, column)
+            b = &c.bounds
+            if b.min_tag == DECODED_NONE or b.max_tag == DECODED_NONE:
+                if not self._manifest.file(row).has_footer:
+                    return None
+                b = &c.footer.bounds
+            if b.min_tag == DECODED_NONE or b.max_tag == DECODED_NONE:
+                return None
+            out.append((
+                _bound_end(b.min_tag, b.min_int, b.min_double, b.min_text),
+                _bound_end(b.max_tag, b.max_int, b.max_double, b.max_text),
+            ))
         return out
 
     # --- pruning (manifest_prune.hpp) ---------------------------------------    # --- pruning (manifest_prune.hpp) ---------------------------------------
@@ -1609,20 +1632,17 @@ cdef class NativeManifestBuilder:
         self._char_class.carry_keyed(source._manifest.char_class, vector_row, added, at)
         return added
 
-    def set_skene_footer(self, size_t row, const unsigned char[::1] file not None):
-        """The .skene file's footer statistics (skene_stats.hpp) into file
-        `row`: its record and row group counts, and per column the union of the
-        row groups' ordinal bounds, the summed null count, the NDV and its floor,
-        and the file's own KMV sketch. `file` is the file's bytes. Returns
-        (any column bounded, any column's null count recorded). Raises
-        ValueError with skene's message when the footer cannot be read."""
-        cdef SkeneApplied applied
-        cdef string failure = read_skene_footer_into(
-            self._manifest[0], row, <const void*>&file[0], <size_t>file.shape[0], self._physical, applied
-        )
-        if not failure.empty():
-            raise ValueError(failure.decode("utf-8", "replace"))
-        return applied.any_bounds, applied.any_nulls
+    def borrowed_address(self):
+        """The address of the C++ manifest this builder is filling, for the
+        engine's skene footer read (`_operators.read_skene_footers`), which fills
+        rows of it in place within that call: the caller holds this builder for
+        the call's duration, and the pointer is not kept past it."""
+        return <uintptr_t>self._manifest
+
+    @property
+    def physical(self):
+        """Each column's DrakenType, in load-time order."""
+        return self._physical_types
 
     def set_file_counts(self, size_t row, record_count, row_group_count):
         """File `row`'s record and row group counts; None is UNKNOWN."""

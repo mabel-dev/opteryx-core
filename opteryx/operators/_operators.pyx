@@ -40,7 +40,7 @@ from opteryx.compiled.structures.buffers cimport IntBuffer, Int32Buffer
 from cpython.array cimport array
 import draken.draken_native as _draken_native
 
-from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint64_t, uint8_t, uint16_t, uint32_t
+from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint64_t, uint8_t, uint16_t, uint32_t, uintptr_t
 from libc.stdlib cimport malloc, realloc, free
 from libc.string cimport memcpy
 from cpython.ref cimport PyObject
@@ -350,6 +350,66 @@ def _apply_skene_reader_cache_budget():
 
 
 _apply_skene_reader_cache_budget()
+
+
+cdef extern from *:
+    """
+    #include "engine/skene_footer_stats.hpp"
+    // skene_footers_into over the planning manifest a NativeManifestBuilder owns,
+    // passed by address (NativeManifestBuilder.borrowed_address); what each file
+    // applied comes back as two flag vectors parallel to `paths`.
+    static inline std::string skene_footers_into_address(
+            uintptr_t manifest, const std::vector<size_t>& rows,
+            const std::vector<std::string>& paths, const std::vector<DrakenType>& physical,
+            std::vector<uint8_t>& bounded, std::vector<uint8_t>& nulled) {
+        std::vector<opteryx::planner::SkeneApplied> applied;
+        std::string err = opteryx::engine::skene_footers_into(
+            *reinterpret_cast<opteryx::planner::NativeManifest*>(manifest), rows, paths, physical, applied);
+        bounded.clear();
+        nulled.clear();
+        for (const opteryx::planner::SkeneApplied& a : applied) {
+            bounded.push_back(a.any_bounds ? 1 : 0);
+            nulled.push_back(a.any_nulls ? 1 : 0);
+        }
+        return err;
+    }
+    """
+    string skene_footers_into_address(uintptr_t manifest, const cppvector[size_t]& rows,
+                                      const cppvector[string]& paths,
+                                      const cppvector[DrakenType]& physical,
+                                      cppvector[uint8_t]& bounded,
+                                      cppvector[uint8_t]& nulled) except + nogil
+
+
+def read_skene_footers(uintptr_t manifest_address, tuple physical, list rows, list paths):
+    """Each .skene file's footer statistics into manifest row `rows[i]` of the
+    NativeManifestBuilder at `manifest_address` (its `borrowed_address()`, with
+    its `physical` types), reading each file's tail and footer and leaving the
+    opened reader in the engine's SkeneReaderCache for the scan
+    (engine/skene_footer_stats.hpp). Local files only. Returns
+    [(any column bounded, any column's null count recorded)] parallel to
+    `paths`; raises ValueError naming the file that could not be read."""
+    if len(rows) != len(paths):
+        raise ValueError("one manifest row per path")
+    cdef cppvector[size_t] c_rows
+    cdef cppvector[string] c_paths
+    cdef cppvector[DrakenType] c_physical
+    cdef cppvector[uint8_t] bounded
+    cdef cppvector[uint8_t] nulled
+    cdef string failure
+    cdef size_t i
+    for row in rows:
+        c_rows.push_back(<size_t?>row)
+    for path in paths:
+        c_paths.push_back((<str?>path).encode("utf-8"))
+    for draken_type in physical:
+        c_physical.push_back(<DrakenType><int>draken_type.value)
+    with nogil:
+        failure = skene_footers_into_address(manifest_address, c_rows, c_paths, c_physical,
+                                             bounded, nulled)
+    if not failure.empty():
+        raise ValueError(failure.decode("utf-8", "replace"))
+    return [(bounded[i] != 0, nulled[i] != 0) for i in range(bounded.size())]
 
 
 def skene_reader_cache_stats():

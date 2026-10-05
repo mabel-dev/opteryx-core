@@ -79,8 +79,6 @@ class _Dataset:
     one exactly as a full one does."""
 
     bounds_are_ordinal = True
-    # planning reads this double through `scan()` rows (an empty scan)
-    has_opteryx_manifest = False
 
     def __init__(self, identifier, history):
         self.identifier = identifier
@@ -105,8 +103,10 @@ class _Dataset:
     def previous_user_snapshot(self):
         return next((s for s in self._history if s.snapshot_id == _OLDER), None)
 
-    def scan(self, snapshot_id=None):
-        return []
+    def manifest_bytes(self, snapshot_id=None):
+        from opteryx_catalog.catalog.manifest import encode_parquet_manifest
+
+        return encode_parquet_manifest([])
 
     def schema(self, schema_id=None):
         return SimpleNamespace(columns=list(_COLUMNS), name=self.identifier)

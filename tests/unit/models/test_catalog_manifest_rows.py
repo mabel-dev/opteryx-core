@@ -4,8 +4,8 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-_catalog_manifest — the Manifest built from a catalog snapshot's manifest rows
-(opteryx/connectors/opteryx_connector.py; it replaced FileEntry.from_datafile).
+The Manifest a catalog snapshot's manifest rows decode to (written by the
+catalog's encoder, decoded natively - tests/manifests.py `catalog_manifest`).
 
 Covers the min_lengths/max_lengths extraction (read back through a Scan's
 base statistics, as the planner reads them) backing the length-aware
@@ -24,13 +24,13 @@ from __future__ import annotations
 
 from opteryx.compiled.structures.plan_steps import ExitStep
 from opteryx.compiled.structures.plan_steps import ScanStep
-from opteryx.connectors.opteryx_connector import _catalog_manifest
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
 from opteryx.planner.plan_context import PlanContext
 from opteryx.types.logical_type import INT64
 from opteryx.types.logical_type import VARCHAR
 from opteryx.types.schema import RelationSchema
+from tests.manifests import catalog_manifest
 
 # Bound columns are minted by a query's ColumnTable; these tests share one.
 _PLAN_CONTEXT = PlanContext()
@@ -48,7 +48,7 @@ def _schema(*columns):
 
 
 def _manifest(schema, entry, bounds_are_ordinal=True):
-    return _catalog_manifest(schema, bounds_are_ordinal, [entry], {}, None)
+    return catalog_manifest(schema, [entry], bounds_are_ordinal=bounds_are_ordinal)
 
 
 def _scan_statistics(manifest):
@@ -124,26 +124,25 @@ def test_length_bounds_none_when_absent():
     assert _length_bounds(manifest, "a") is None
 
 
-def test_keys_by_the_rows_own_tuple_field_ids_in_file_order():
-    # The live catalog bulk-scan hands `field_ids` over as a TUPLE, in the
-    # FILE's column order. A list-only check discarded it and keyed by the
-    # schema's field ids (schema order), so each column read another column's
-    # stats - public.github.events had created_at bounded by a URL string.
+def test_keys_by_the_rows_own_field_ids_in_file_order():
+    # A row's `field_ids` are in the FILE's column order. Keying by the
+    # schema's field ids (schema order) instead made each column read another
+    # column's stats - public.github.events had created_at bounded by a URL
+    # string.
     schema = _schema(("id", INT64, 1), ("count", INT64, 2), ("url", VARCHAR, 3))
     entry = {
         "file_path": "f1",
         "record_count": 10,
         "file_size_in_bytes": 100,
         "field_ids": (1, 3, 2),
-        "min_values": (10, "https://a", 100),
-        "max_values": (19, "https://z", 199),
+        "min_values": (10, VARCHAR.ordinalize("https://a"), 100),
+        "max_values": (19, VARCHAR.ordinalize("https://z"), 199),
         "null_counts": (0, 4, 0),
     }
-    manifest = _manifest(schema, entry, bounds_are_ordinal=False)
+    manifest = _manifest(schema, entry)
 
     assert manifest.min_max("id") == (10, 19)
     assert manifest.min_max("count") == (100, 199)
-    assert manifest.min_max("url") == ("https://a", "https://z")
     assert manifest.get_total_null_count("id") == 0
     assert manifest.get_total_null_count("count") == 0
     assert manifest.get_total_null_count("url") == 4

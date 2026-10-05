@@ -1,36 +1,23 @@
-"""M1-VALIDATE — prove/disprove that milestone M1 removed the scan-stage GIL
-bottleneck the audit named as the most probable cause of the GIL performance
-incident.
+"""M1-VALIDATE — native parquet-scan scaling harness (dop sweep + concurrent-query
+sweep), reading the instruments WP-INSTR exposes.
 
-This is a MEASUREMENT + REPORTING harness. It changes NO engine behaviour. It
-runs the SAME query twice — once on the default path (which now selects
-``NativeParquetScanSource``, a pure-C++/nogil scan) and once forced onto the old
-``StreamingScanSource`` (the per-morsel GIL trampoline) — and compares them across
-a worker/dop sweep, reading only the instruments WP-INSTR already exposes.
+This is a MEASUREMENT + REPORTING harness. It changes NO engine behaviour.
 
-Why this is observable on a GIL interpreter
--------------------------------------------
-The deployed service runs standard-GIL CPython 3.14. On a GIL build, pure-C++
-worker threads that never touch Python still run in parallel; the harm is threads
-that RE-ATTACH the GIL per morsel — those serialise. ``NativeParquetScanSource``
-does zero per-morsel Python; ``StreamingScanSource`` re-enters Python once per
-morsel per worker through ``_scan_pull_run``. So the discriminator is visible on
-a GIL interpreter: native should scale (or raise CPU-utilisation) with dop, the
-trampoline should flatten.
+History: it was written to prove milestone M1 removed the scan-stage GIL
+bottleneck by running each query twice — native and forced onto the Python
+per-morsel scan (StreamingScanSource) — and comparing them. That Python scan was
+deleted (ruling 2026-10-03), so the A/B arm is gone and what remains measures the
+native scan alone: per-query dop scaling, CPU-cores utilised, gil_held_ns /
+worker-purity (both must read zero for a native scan), pruning facts, and
+aggregate throughput under concurrent queries.
 
-This dev/test interpreter is a free-threaded 3.14 build whose GIL is toggled by
-the ``PYTHON_GIL`` env var. We therefore reproduce the DEPLOYED regime exactly:
+The dev/test interpreter is a free-threaded 3.14 build whose GIL is toggled by
+the ``PYTHON_GIL`` env var:
 
     PYTHON_GIL=1  ->  GIL enabled   (emulates the production standard-GIL service; PRIMARY)
     PYTHON_GIL=0  ->  GIL disabled  (free-threaded cross-check)
 
-The harness detects ``sys._is_gil_enabled()`` and labels the run.
-
-Force mechanism
----------------
-Identical to the WP-01/02/11 parity tests: monkeypatch
-``pool_reader.native_scan_supported`` to return False, which routes the scan to
-``StreamingScanSource`` with the predicate on the old bytecode-VM path.
+The harness reads ``sys._is_gil_enabled()`` and labels the run.
 
 Run
 ---
@@ -43,8 +30,8 @@ Run
     # smaller/faster smoke (fewer rows, single dop):
     PYTHON_GIL=1 ... python tests/performance/m1_validate.py --rows 2000000 --dops 1,4 --repeats 2
 
-Data is generated once (pyarrow, a test-only dep) under --data-dir and cached.
-Results are printed as before/after tables and written as JSON next to the report.
+Data is generated once (pyarrow, a test-only dep — writer only) under --data-dir
+and cached. Results are printed as tables and written as JSON next to the report.
 """
 
 from __future__ import annotations
@@ -64,7 +51,6 @@ sys.path.insert(1, os.path.join(_REPO, "dev"))
 
 import opteryx  # noqa: E402
 import opteryx.config as config  # noqa: E402
-from opteryx.connectors.parquet_io import pool_reader  # noqa: E402
 import instrument_engine as IE  # noqa: E402
 
 
@@ -164,7 +150,6 @@ def _gen_dectime(path: str, rows: int, files: int, row_group_size: int) -> None:
         while written < remaining:
             g = min(row_group_size, remaining - written)
             ids = list(range(base, base + g))
-            price = [pa.scalar(v % 100000, pa.decimal128(9, 2)) for v in ids]  # replaced below
             tbl = pa.table({
                 "id": pa.array(ids, pa.int64()),
                 "price": pa.array([(v % 100000) for v in ids], pa.decimal128(9, 2)),
@@ -183,9 +168,8 @@ def _gen_dectime(path: str, rows: int, files: int, row_group_size: int) -> None:
 
 # ── one measured run ────────────────────────────────────────────────────────
 
-def _measure(sql: str, force_tramp: bool, dop: int, repeats: int) -> dict:
-    """Run `sql` `repeats` times (plus one unmeasured warmup) at the given dop and
-    path. Returns median wall/cpu/throughput plus the WP-INSTR readings and pruning
+def _measure(sql: str, dop: int, repeats: int) -> dict:
+    """Run `sql` `repeats` times (plus one unmeasured warmup) at the given dop. Returns median wall/cpu/throughput plus the WP-INSTR readings and pruning
     facts from the LAST run (plan-time facts are run-invariant).
 
     The returned `dop_used` is the width the ENGINE reports, not the width asked
@@ -199,37 +183,29 @@ def _measure(sql: str, force_tramp: bool, dop: int, repeats: int) -> dict:
     config.MAX_EXECUTION_WORKERS = dop
     config.OPTERYX_INSTRUMENT_ENGINE = True
 
-    orig = pool_reader.native_scan_supported
-    if force_tramp:
-        pool_reader.native_scan_supported = lambda *a, **k: False
-    try:
-        walls, cpus, out_rows = [], [], 0
-        telemetry = None
-        for r in range(repeats + 1):  # r==0 is warmup (page-cache warm + JIT-ish)
-            gc.collect()
-            s = opteryx.session()
-            w0 = time.perf_counter_ns()
-            c0 = time.process_time_ns()
-            rows = 0
-            for m in s.execute_to_morsels(sql):
-                rows += m.num_rows
-            w = time.perf_counter_ns() - w0
-            c = time.process_time_ns() - c0
-            if r == 0:
-                continue
-            walls.append(w)
-            cpus.append(c)
-            out_rows = rows
-            telemetry = s.telemetry
-    finally:
-        pool_reader.native_scan_supported = orig
+    walls, cpus, out_rows = [], [], 0
+    telemetry = None
+    for r in range(repeats + 1):  # r==0 is warmup (page-cache warm + JIT-ish)
+        gc.collect()
+        s = opteryx.session()
+        w0 = time.perf_counter_ns()
+        c0 = time.process_time_ns()
+        rows = 0
+        for m in s.execute_to_morsels(sql):
+            rows += m.num_rows
+        w = time.perf_counter_ns() - w0
+        c = time.process_time_ns() - c0
+        if r == 0:
+            continue
+        walls.append(w)
+        cpus.append(c)
+        out_rows = rows
+        telemetry = s.telemetry
 
     wall_ns = statistics.median(walls)
     cpu_ns = statistics.median(cpus)
     src = sorted(set(telemetry["scan_sources"].values()))
-    tramp = sum(x.get("calls", 0) for x in (telemetry.get("worker_gil_sites") or [])
-                if x.get("site") == "_scan_pull_run")
-    # pruning facts (native path exposes native_scan_facts; both expose files_pruned).
+    # pruning facts.
     # native_scan_facts is intentionally stripped from as_dict() (it is overlaid onto
     # the scan's operation row by plan_telemetry), so read it from the raw _reading dict.
     dop_used = s._telemetry._reading.get("native_engine_dop")
@@ -252,7 +228,6 @@ def _measure(sql: str, force_tramp: bool, dop: int, repeats: int) -> dict:
         "krows_s": (out_rows / (wall_ns / 1e9)) / 1000.0 if wall_ns else 0.0,
         "src": ",".join(x.replace("ParquetScanSource", "").replace("ScanSource", "") for x in src),
         "gil_ms": telemetry.get("gil_held_ns", 0) / 1e6,
-        "tramp": tramp,
         "files_pruned": telemetry.get("files_pruned", 0),
         "rg_read": rg_read,
         "rg_pruned": rg_pruned,
@@ -265,46 +240,38 @@ def _measure(sql: str, force_tramp: bool, dop: int, repeats: int) -> dict:
 def _run_scenario(name: str, sql: str, dataset_rows: int, dops, repeats: int) -> dict:
     print(f"\n### {name}")
     print(f"    {sql}")
-    hdr = (f"  {'path':<9}{'dop':>4}{'wall_ms':>10}{'krows/s':>10}{'cores':>7}"
-           f"{'scan_krps':>11}{'gil_ms':>9}{'tramp':>7}{'rg_rd':>7}{'rg_pr':>7}  purity")
+    hdr = (f"  {'dop':>4}{'wall_ms':>10}{'krows/s':>10}{'cores':>7}"
+           f"{'scan_krps':>11}{'gil_ms':>9}{'rg_rd':>7}{'rg_pr':>7}  purity")
     print(hdr)
-    rows = {"name": name, "sql": sql, "dataset_rows": dataset_rows, "native": [], "tramp": []}
-    for force in (False, True):
-        key = "tramp" if force else "native"
-        for dop in dops:
-            m = _measure(sql, force, dop, repeats)
-            m["dop"] = dop
-            # The sweep is only a sweep if the engine actually moved. Abort rather
-            # than print a dop column that does not describe the run beside it.
-            if m["dop_used"] != dop:
-                raise SystemExit(
-                    f"dop {dop} was requested but the engine ran at "
-                    f"{m['dop_used']} — the worker setting is not reaching the "
-                    f"engine and this sweep would measure a single dop."
-                )
-            # scan throughput = full dataset rows / wall (work the scan did), so
-            # selective and non-selective are comparable across the A/B.
-            scan_krps = (dataset_rows / (m["wall_ms"] / 1000.0)) / 1000.0 if m["wall_ms"] else 0.0
-            m["scan_krows_s"] = scan_krps
-            rows[key].append(m)
-            print(f"  {key:<9}{m['dop_used']:>4}{m['wall_ms']:>10.1f}{m['krows_s']:>10.0f}{m['cores']:>7.2f}"
-                  f"{scan_krps:>11.0f}{m['gil_ms']:>9.1f}{m['tramp']:>7}"
-                  f"{str(m['rg_read']):>7}{str(m['rg_pruned']):>7}  {m['purity']}")
-    # cross-path correctness: identical survivor row count => predicate applied
-    # exactly once (no double / dropped filter), pruning did not change the result.
+    rows = {"name": name, "sql": sql, "dataset_rows": dataset_rows, "native": []}
+    for dop in dops:
+        m = _measure(sql, dop, repeats)
+        m["dop"] = dop
+        # The sweep is only a sweep if the engine actually moved. Abort rather
+        # than print a dop column that does not describe the run beside it.
+        if m["dop_used"] != dop:
+            raise SystemExit(
+                f"dop {dop} was requested but the engine ran at "
+                f"{m['dop_used']} — the worker setting is not reaching the "
+                f"engine and this sweep would measure a single dop."
+            )
+        # scan throughput = full dataset rows / wall (work the scan did), so
+        # selective and non-selective are comparable.
+        scan_krps = (dataset_rows / (m["wall_ms"] / 1000.0)) / 1000.0 if m["wall_ms"] else 0.0
+        m["scan_krows_s"] = scan_krps
+        rows["native"].append(m)
+        print(f"  {m['dop_used']:>4}{m['wall_ms']:>10.1f}{m['krows_s']:>10.0f}{m['cores']:>7.2f}"
+              f"{scan_krps:>11.0f}{m['gil_ms']:>9.1f}"
+              f"{str(m['rg_read']):>7}{str(m['rg_pruned']):>7}  {m['purity']}")
+    # every dop must produce the same survivor row count.
     nat_rows = {r["rows"] for r in rows["native"]}
-    tmp_rows = {r["rows"] for r in rows["tramp"]}
-    rows["row_parity"] = (nat_rows == tmp_rows and len(nat_rows) == 1)
-    rows["files_pruned_parity"] = (
-        {r["files_pruned"] for r in rows["native"]} == {r["files_pruned"] for r in rows["tramp"]}
-    )
-    print(f"    row-parity(native==tramp): {'PASS' if rows['row_parity'] else 'FAIL'}  "
-          f"(native rows={sorted(nat_rows)} tramp rows={sorted(tmp_rows)})  "
-          f"files_pruned-parity: {'PASS' if rows['files_pruned_parity'] else 'FAIL'}")
+    rows["row_stable_across_dops"] = len(nat_rows) == 1
+    print(f"    rows stable across dops: {'PASS' if rows['row_stable_across_dops'] else 'FAIL'}  "
+          f"(rows={sorted(nat_rows)})")
     return rows
 
 
-# ── concurrent-query scaling sweep (the scan-stage GIL money shot) ─────────────
+# ── concurrent-query scaling sweep ───────────────────────────────────────────
 
 def _run_query_once(sql: str) -> int:
     s = opteryx.session()
@@ -316,13 +283,10 @@ def _run_query_once(sql: str) -> int:
 
 def _concurrency_sweep(sql: str, dataset_rows: int, qs, per_query_dop: int, repeats: int) -> dict:
     """Run Q identical queries CONCURRENTLY (one per thread) and measure aggregate
-    throughput + CPU-cores utilised, native vs forced-trampoline. This is the
-    scan-stage GIL discriminator under load: on a GIL build the trampoline's
-    per-morsel Python re-entry serialises across concurrent pull loops (aggregate
-    cores plateau, throughput flattens); the native scan has no Python on the pull
-    path so it scales with cores. Instrumentation is OFF here — the WP-INSTR GIL
-    accumulators are single-query-only (module globals), so we rely on wall-clock /
-    process-CPU, which are concurrency-safe."""
+    throughput + CPU-cores utilised for the native scan, which has no Python on the
+    pull path and should scale with cores. Instrumentation is OFF here — the
+    WP-INSTR GIL accumulators are single-query-only (module globals), so we rely on
+    wall-clock / process-CPU, which are concurrency-safe."""
     import threading
 
     config.OPTERYX_INSTRUMENT_ENGINE = False
@@ -338,48 +302,40 @@ def _concurrency_sweep(sql: str, dataset_rows: int, qs, per_query_dop: int, repe
         )
     print(f"\n### CONCURRENCY  {sql}")
     print(f"    (per-query dop={per_query_dop}; aggregate over Q concurrent queries)")
-    print(f"  {'path':<9}{'Q':>4}{'wall_ms':>10}{'agg_krows_s':>13}{'cores':>8}{'scale':>8}")
-    out = {"sql": sql, "per_query_dop": per_query_dop, "native": [], "tramp": []}
-    for force in (False, True):
-        key = "tramp" if force else "native"
-        base_krps = None
-        orig = pool_reader.native_scan_supported
-        if force:
-            pool_reader.native_scan_supported = lambda *a, **k: False
-        try:
-            for q in qs:
-                walls, cpus = [], []
-                for r in range(repeats + 1):
-                    gc.collect()
-                    if r == 0:
-                        _run_query_once(sql)  # warmup
-                        continue
-                    threads = [threading.Thread(target=_run_query_once, args=(sql,)) for _ in range(q)]
-                    w0 = time.perf_counter_ns()
-                    c0 = time.process_time_ns()
-                    for t in threads:
-                        t.start()
-                    for t in threads:
-                        t.join()
-                    walls.append(time.perf_counter_ns() - w0)
-                    cpus.append(time.process_time_ns() - c0)
-                wall_ns = statistics.median(walls)
-                cpu_ns = statistics.median(cpus)
-                agg_krps = (dataset_rows * q / (wall_ns / 1e9)) / 1000.0
-                if base_krps is None:
-                    base_krps = agg_krps
-                rec = {"q": q, "wall_ms": wall_ns / 1e6, "agg_krows_s": agg_krps,
-                       "cores": cpu_ns / wall_ns, "scale": agg_krps / base_krps}
-                out[key].append(rec)
-                print(f"  {key:<9}{q:>4}{rec['wall_ms']:>10.1f}{agg_krps:>13.0f}"
-                      f"{rec['cores']:>8.2f}{rec['scale']:>7.2f}x")
-        finally:
-            pool_reader.native_scan_supported = orig
+    print(f"  {'Q':>4}{'wall_ms':>10}{'agg_krows_s':>13}{'cores':>8}{'scale':>8}")
+    out = {"sql": sql, "per_query_dop": per_query_dop, "native": []}
+    base_krps = None
+    for q in qs:
+        walls, cpus = [], []
+        for r in range(repeats + 1):
+            gc.collect()
+            if r == 0:
+                _run_query_once(sql)  # warmup
+                continue
+            threads = [threading.Thread(target=_run_query_once, args=(sql,)) for _ in range(q)]
+            w0 = time.perf_counter_ns()
+            c0 = time.process_time_ns()
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            walls.append(time.perf_counter_ns() - w0)
+            cpus.append(time.process_time_ns() - c0)
+        wall_ns = statistics.median(walls)
+        cpu_ns = statistics.median(cpus)
+        agg_krps = (dataset_rows * q / (wall_ns / 1e9)) / 1000.0
+        if base_krps is None:
+            base_krps = agg_krps
+        rec = {"q": q, "wall_ms": wall_ns / 1e6, "agg_krows_s": agg_krps,
+               "cores": cpu_ns / wall_ns, "scale": agg_krps / base_krps}
+        out["native"].append(rec)
+        print(f"  {q:>4}{rec['wall_ms']:>10.1f}{agg_krps:>13.0f}"
+              f"{rec['cores']:>8.2f}{rec['scale']:>7.2f}x")
     return out
 
 
 def main(argv) -> int:
-    ap = argparse.ArgumentParser(description="M1-VALIDATE scan-GIL benchmark")
+    ap = argparse.ArgumentParser(description="M1-VALIDATE native scan scaling benchmark")
     ap.add_argument("--rows", type=int, default=10_000_000, help="rows per dataset (>=10M for the deliverable)")
     ap.add_argument("--row-group-size", type=int, default=262_144)
     ap.add_argument("--files-multi", type=int, default=8, help="file count for the multi-file variant")
@@ -396,7 +352,7 @@ def main(argv) -> int:
     args.qs = [int(x) for x in args.qs.split(",") if x.strip()]
     os.chdir(_REPO)  # so relative dataset paths in SQL resolve
 
-    gil_on = sys._is_gil_enabled() if hasattr(sys, "_is_gil_enabled") else True
+    gil_on = sys._is_gil_enabled()
     regime = "GIL-ON (emulates deployed 3.14 service)" if gil_on else "GIL-OFF (free-threaded)"
     print("=" * 96)
     print(f"M1-VALIDATE  |  {regime}  |  cpus={os.cpu_count()}  |  rows={args.rows:,}  "
@@ -435,7 +391,7 @@ def main(argv) -> int:
     ]
 
     print("\n" + "=" * 96)
-    print("PART A — per-query dop sweep (instrumentation ON): trampoline_calls / gil_held_ns / purity / pruning")
+    print("PART A — per-query dop sweep (instrumentation ON): gil_held_ns / purity / pruning")
     print("=" * 96)
     results = []
     for name, sql in scenarios:
@@ -444,7 +400,7 @@ def main(argv) -> int:
         results.append(_run_scenario(name, sql, args.rows, dops, args.repeats))
 
     print("\n" + "=" * 96)
-    print("PART B — concurrent-query scaling sweep (instrumentation OFF): the scan-stage GIL discriminator")
+    print("PART B — concurrent-query scaling sweep (instrumentation OFF)")
     print("=" * 96)
     conc = []
     if not args.only or "conc" in args.only:
