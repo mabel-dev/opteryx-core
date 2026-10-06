@@ -130,6 +130,8 @@ class CompactionPlanningStrategy(OptimizationStrategy):
                 # unnecessary OPTIMIZE free, and therefore what lets the
                 # scheduled sweep submit without pre-checking.
                 scan.manifest = manifest.subset([])
+                if scan.emit_row_identity:
+                    scan.row_identity_files = ()
                 plan[scan_id] = scan
                 self._drop_order(plan, nid)
                 self.record_decision(
@@ -146,12 +148,15 @@ class CompactionPlanningStrategy(OptimizationStrategy):
             # with the surviving file list, which is why the file set is narrowed
             # through it rather than by rebuilding a Manifest.
             scan.manifest = manifest.subset(positions)
-            plan[scan_id] = scan
 
-            # In SCAN order - the narrowed manifest's order - because a row's `$file`
-            # is its position in that list, and the vector carry maps it back through
-            # this one (§5.6).
+            # In SCAN order - the narrowed manifest's order. The vector carry maps a
+            # row's `$file` back through this list (§5.6), so the scan numbers its
+            # files by it too: `$file` indexes ScanStep.row_identity_files, which the
+            # binder set to the UNNARROWED list and must be re-pinned to this one.
             sink.retired_files = [files[row].file_path for row in positions]
+            if scan.emit_row_identity:
+                scan.row_identity_files = tuple(sink.retired_files)
+            plan[scan_id] = scan
             sink.baseline_snapshot_id = scan.connector.snapshot_id
             # The ordering claim the sink writes into its output files. Only a
             # sort-aware plan has one: its rows arrive through the Order node,

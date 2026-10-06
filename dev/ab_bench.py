@@ -73,7 +73,7 @@ def _worker_load_clickbench(tree: str, dataset: str | None) -> list[tuple[str, s
     return out
 
 
-def _worker_load_tpch(tree: str, scale: str) -> list[tuple[str, str]]:
+def _worker_load_tpch(tree: str, scale: str, dataset_override: str | None = None) -> list[tuple[str, str]]:
     """[(name, sql)] mirroring tests/performance/tpch/runner.py's loader."""
     import glob as _glob
 
@@ -82,7 +82,7 @@ def _worker_load_tpch(tree: str, scale: str) -> list[tuple[str, str]]:
 
     opteryx.register_workspace("testdata", DiskConnector)
     qdir = os.path.join(tree, "tests", "performance", "tpch", "opteryx", "queries")
-    dataset = f"testdata.tpch_{scale}"
+    dataset = dataset_override or f"testdata.tpch_{scale}"
     queries = []
     for path in sorted(_glob.glob(os.path.join(qdir, "query*.sql"))):
         name = os.path.splitext(os.path.basename(path))[0]
@@ -95,7 +95,7 @@ def _worker_load_tpch(tree: str, scale: str) -> list[tuple[str, str]]:
     return queries
 
 
-def _worker_load_job(tree: str) -> list[tuple[str, str]]:
+def _worker_load_job(tree: str, dataset_override: str | None = None) -> list[tuple[str, str]]:
     """[(name, sql)] from the JOB runner's own query order and table rewrite (skene)."""
     import importlib.util
     from pathlib import Path
@@ -113,7 +113,7 @@ def _worker_load_job(tree: str) -> list[tuple[str, str]]:
     for qpath in sorted(qdir.glob("*.sql"), key=mod._query_sort_key):
         if not mod.QUERY_RE.match(qpath.name):
             continue
-        out.append((f"J{qpath.stem}", mod._rewrite_query(qpath.read_text(), "testdata.job_skene.")))
+        out.append((f"J{qpath.stem}", mod._rewrite_query(qpath.read_text(), f"{dataset_override}." if dataset_override else "testdata.job_skene.")))
     return out
 
 
@@ -138,9 +138,9 @@ def _worker(args: argparse.Namespace) -> None:
     if args.suite == "clickbench":
         queries = _worker_load_clickbench(tree, args.dataset)
     elif args.suite == "job":
-        queries = _worker_load_job(tree)
+        queries = _worker_load_job(tree, args.dataset)
     else:
-        queries = _worker_load_tpch(tree, args.scale)
+        queries = _worker_load_tpch(tree, args.scale, args.dataset)
 
     wanted = _query_names(args.queries, args.suite) or None
     if wanted is not None:

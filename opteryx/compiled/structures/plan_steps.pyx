@@ -8497,6 +8497,7 @@ cdef class ScanStep(PlanStep):
     cdef tuple _pushed_groups
     cdef str _relation
     cdef object _resolved_dataset
+    cdef tuple _row_identity_files
     cdef str _row_identity_statement
     cdef object _vector_search
     cdef object _schema
@@ -8527,7 +8528,7 @@ cdef class ScanStep(PlanStep):
         self._row.pushed_distinct = self._pushed_distinct is True
         self._check_row_arena()
 
-    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, at_date=None, connector=None, dataset_committed_at=None, emit_row_identity=None, end_date=None, for_manifest_only=None, for_snapshots_only=None, hint_settings=None, hints=None, history_view=None, internal_relation=None, length_only_columns=None, limit=None, manifest=None, pending_cte_key=None, predicates=None, pushed_aggregates=None, pushed_distinct=None, pushed_groups=None, relation=None, resolved_dataset=None, row_identity_statement=None, schema=None, source=None, start_date=None, topn_boundary_key=None, topn_descending=None, topn_limit=None, topn_nulls_first=None, topn_order_by=None, topn_sort_identity=None, topn_sort_name=None, unpruned_columns=None, version=None, version_tag=None, via_view=None, vector_search=None):
+    def __init__(self, *, columns=None, all_relations=None, pre_update_columns=None, uuid=None, alias=None, at_date=None, connector=None, dataset_committed_at=None, emit_row_identity=None, end_date=None, for_manifest_only=None, for_snapshots_only=None, hint_settings=None, hints=None, history_view=None, internal_relation=None, length_only_columns=None, limit=None, manifest=None, pending_cte_key=None, predicates=None, pushed_aggregates=None, pushed_distinct=None, pushed_groups=None, relation=None, resolved_dataset=None, row_identity_files=None, row_identity_statement=None, schema=None, source=None, start_date=None, topn_boundary_key=None, topn_descending=None, topn_limit=None, topn_nulls_first=None, topn_order_by=None, topn_sort_identity=None, topn_sort_name=None, unpruned_columns=None, version=None, version_tag=None, via_view=None, vector_search=None):
         self.node_type = _step_types().Scan
         self._init_common(columns, all_relations, pre_update_columns, uuid)
         self.alias = alias
@@ -8552,6 +8553,7 @@ cdef class ScanStep(PlanStep):
         self.pushed_groups = pushed_groups
         self.relation = relation
         self.resolved_dataset = resolved_dataset
+        self.row_identity_files = row_identity_files
         self.row_identity_statement = row_identity_statement
         self.vector_search = vector_search
         self.schema = schema
@@ -8794,6 +8796,19 @@ cdef class ScanStep(PlanStep):
         self._vector_search = value
 
     @property
+    def row_identity_files(self):
+        """The target's unpruned data-file list, in order, for a Scan asked for row
+        identity: `$file` is an index into it, and the write sink maps the index back
+        through this same tuple. Recorded at bind, before pruning, so a pruned scan
+        still numbers its files the way the sink reads them."""
+        return self._row_identity_files
+
+    @row_identity_files.setter
+    def row_identity_files(self, value):
+        self.write_count += 1  # a written field (auto-stale, ruling Q2)
+        self._row_identity_files = _frozen_list("ScanStep.row_identity_files", value)
+
+    @property
     def row_identity_statement(self):
         return self._row_identity_statement
 
@@ -8983,6 +8998,7 @@ cdef class ScanStep(PlanStep):
         out["pushed_groups"] = self._pushed_groups
         out["relation"] = self._relation
         out["resolved_dataset"] = self._resolved_dataset
+        out["row_identity_files"] = self._row_identity_files
         out["row_identity_statement"] = self._row_identity_statement
         out["vector_search"] = self._vector_search
         out["schema"] = self._schema
@@ -9033,6 +9049,7 @@ cdef class ScanStep(PlanStep):
         new._pushed_groups = _copy_field(self._pushed_groups, memo)
         new._relation = _copy_field(self._relation, memo)
         new._resolved_dataset = _copy_field(self._resolved_dataset, memo)
+        new._row_identity_files = _copy_field(self._row_identity_files, memo)
         new._row_identity_statement = _copy_field(self._row_identity_statement, memo)
         new._vector_search = _copy_field(self._vector_search, memo)
         new._schema = _copy_field(self._schema, memo)
@@ -9078,6 +9095,7 @@ cdef class ScanStep(PlanStep):
         new._pushed_groups = self._pushed_groups
         new._relation = self._relation
         new._resolved_dataset = self._resolved_dataset
+        new._row_identity_files = self._row_identity_files
         new._row_identity_statement = self._row_identity_statement
         new._vector_search = self._vector_search
         new._schema = self._schema
@@ -11140,6 +11158,7 @@ cpdef frozenset steps_with(str field):
             "right_readers": frozenset({T.Join}),
             "right_relation_names": frozenset({T.Except, T.Intersect, T.Join, T.Union}),
             "role": frozenset({T.GrantAccess, T.RevokeAccess}),
+            "row_identity_files": frozenset({T.Scan}),
             "row_identity_statement": frozenset({T.Scan}),
             "row_origins": frozenset({T.CompactionCommit}),
             "schedule": frozenset({T.CreateTrigger}),

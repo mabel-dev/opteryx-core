@@ -418,3 +418,122 @@ Nothing proceeds past §10 step A without rulings on D-C7-1, -14 and -16 at mini
   decompressed / compressed / absent, a hit that still decompresses, eviction
   weighing two forms — Pivot's model). Proposed: a later, separate part,
   measured on remote (AIStor) only, kept only if leave-one-out pays.
+
+## 15. Ceiling phase — results (2026-10-06, in progress)
+
+Tools (scratch, not production): `scratch/c7_decompress_rewrite.py` (census +
+page-preserving decompress-only rewrite), `scratch/c7_ceiling_probe.py`
+(answer check + interleaved A/B), `scratch/c7_ceiling_summary.py`.
+
+**A0** done (§12). **A1 footer census** — bytes a full T1 cache must hold
+(`total_uncompressed_size`, all row groups, no pruning):
+
+| dataset | files | rows | compressed | decompressed | ratio |
+|---|---|---|---|---|---|
+| canon `scratch/hits` (Snappy) | 100 | 99,997,497 | 13.72 GiB | 33.18 GiB | 2.42 |
+| `scratch/hits_rugo_262k` (ZSTD, some UNCOMPRESSED) | 8 | 99,997,497 | 7.73 GiB | 21.14 GiB | 2.74 |
+
+Largest columns, canon: URL 7.74 GiB, Title 7.30, Referer 5.96, OriginalURL
+4.92 — everything else under 1 GiB. rugo: URL 4.40 (dictionary encoded, so
+smaller than canon's PLAIN 7.74), OriginalURL 3.84, Referer 3.31, Title 2.53.
+
+Per-query working set, canon (referenced columns, no pruning; 1-based query
+numbers as in the runner): most queries < 2 GiB; the URL/Title/Referer queries
+are 6-16 GiB (Q21 7.74, Q22 8.49, Q23 16.07, Q24 8.33, Q28 7.74, Q29 5.96,
+Q34/Q35 7.74, Q37-39 7.3-7.75, Q40 13.77). At the ruled 20% budget:
+a 16 GiB container (3.2 GiB cache) holds **none** of the URL-family queries;
+the whole canon suite needs ~33 GiB of cache, i.e. a ~166 GiB container.
+c6a.4xlarge (32 GiB → 6.4 GiB cache) holds the < 6.4 GiB queries only.
+
+**A3 rewrite verified:** decompress-only copies `scratch/hits_c7plain` (33 GiB)
+and `scratch/hits_rugo_262k_c7plain` (22 GiB). OffsetIndex: none in either
+dataset. All 43 answers identical on a canon file and on the full rugo
+dataset; the queries that differ under LIMIT/OFFSET differ equally when a
+dataset is compared with itself (ties), and their full results (LIMIT/OFFSET
+removed) are identical.
+
+**A3 wall ceiling — Mac M5 Pro** (full 100M-row datasets, default DOP, 5
+interleaved rounds alternating arm order, fresh process per arm, 4 runs per
+query with run 1 discarded — warm OS page cache for both arms; A = original,
+B = decompress-only copy = a T1 hit without lookup cost):
+
+| dataset | suite A | suite B | B/A | rounds B faster | Q28 B/A | biggest wins |
+|---|---|---|---|---|---|---|
+| canon (Snappy) | 8.39-8.93 s | 7.85-8.38 s | **0.916** | 5/5, ranges separate | 0.876 | Q21-23 LIKE 0.67-0.75, Q25 0.77, Q39 0.77 |
+| rugo_262k (ZSTD) | 7.49-7.63 s | 6.26-6.63 s | **0.857** | 5/5, ranges separate | 0.622 | Q21-23 0.54-0.62, Q28 0.62, Q24/25/27 ~0.7, Q34/35 ~0.79 |
+
+- Controls answered from footers (Q1, Q3/Q4/Q7 on rugo) and the
+  CPU-bound GROUP BY queries without heavy decompression (Q16, Q33, Q36) are
+  flat (0.97-1.03): the harness is not moving untouchable queries.
+- Q28 on canon is 0.876, far below the 35.4%-of-CPU (≤1.55×) bound from the i5
+  profile: on the Mac the page read from memory costs a large part of what the
+  decompression cost (§2 caveat 2), and Q28 is no longer decompress-dominated
+  after the length-only stub decode.
+- Small CounterID=62 queries (Q37-43) gain 3-13% on canon with almost no
+  decompression time recorded (Q39 0.77 with 14 ms decompress); not explained
+  yet — candidates: page-search/pruning reads raw pages, fewer distinct mmaps.
+- Note: the suite is a lower bound on what a cache would see across the whole
+  ClickBench protocol only if the cache could hold the working set — at 20% of a
+  64 GiB Mac (12.8 GiB) the 7-16 GiB URL-family working sets (§15 A1) only
+  partly fit.
+
+## 16. Pivot's cache budget (read from source, github.com/pivotlake/pivot HEAD, 2026-10-06)
+
+- **Budget:** `bin/src/memory.rs` — `DEFAULT_MEMORY_PCT = 80` of **physical**
+  memory, minus `OVERHEAD_RESERVE_BYTES = 4 GiB` (marked HACK). Configurable as
+  bytes or %. The ClickBench entry sets none, so the default ran.
+- **One pool for everything:** the budget is a single "ring" of 2 MB slots
+  (`dispatch/src/memory/mod.rs`: "we're the only important process on the
+  machine"), **faulted in whole at boot** (the server refuses to start if free
+  memory can't back it). The compressed cache, the decompressed cache AND query
+  working memory (vectors, hash tables, write buffers) all take slots from it.
+  There is no separate cache budget: the cache is whatever the queries are not
+  using, and a worker that needs a slot evicts one (CLOCK). NUMA-split per node.
+- **Sizes:** c6a.4xlarge 32 GiB → 25.6 − 4 = **21.6 GiB** pool; canon URL
+  decompressed (7.74 GiB) fits. c6a.xlarge 8 GiB → 6.4 − 4 = **2.4 GiB**; it
+  does not → hot 7.4 s ≈ cold 9.1 s. Consistent with the published numbers.
+- **Entry rules are loose, not strict:** everything read is admitted. CLOCK
+  with a lives counter (+1 per touch, cap 16, `PIVOT_MAX_LIVES`), so one-shot
+  inserts die first. Compressed tier target 30% of cached slots
+  (`PIVOT_COMPRESSED_CACHE_PCT`). When one copy of some bytes is evicted, the
+  surviving copy gets +6 per touch (`PIVOT_REINFORCE_BUMP`) so the tiers
+  complement rather than die together.
+- **Decompressed entries:** keyed by (file, page byte offset, span); a
+  column-chunk `get_range` reports which pages are present and which are gaps.
+  Pages are decompressed **directly into** a bump-allocated region of an
+  already-faulted 2 MB slot — no per-entry malloc, no first-touch faults, so a
+  fill costs a cold run almost nothing.
+
+Implications for C7 (for the architect, not decided):
+- The gap in budget is 80% − 4 GiB shared with queries vs our ruled 20%
+  dedicated. On the ClickBench box that is 21.6 GiB vs 6.4 GiB.
+- Their "fast release" (D-C7-6) is structural: query memory and cache are the
+  same slots, so a query that needs memory takes it by eviction.
+- Pre-faulted slab slots remove the cold-run fill cost (D-C7-13) we accepted.
+- Per-page keys with a chunk-range lookup is a hybrid of D-C7-3's options.
+
+**A3 wall ceiling — i5-8500 (x86, prod ISA)** — tree `~/c7-20261006/tree`
+(current source incl. the A0 fix), same protocol, 5 rounds. RAM limits the
+data to subsets: canon hits_0..19 (20M rows), rugo part-000/001 (25M rows).
+Answers checked identical (Q1/3/21/28/34) on both.
+
+| dataset | suite A | suite B | B/A | rounds B faster | Q28 B/A | biggest wins |
+|---|---|---|---|---|---|---|
+| canon 20 files (Snappy) | 13.16-13.28 s | 11.47-11.55 s | **0.868** | 5/5, ranges separate | 0.869 | Q21-23 0.49-0.60, Q39 0.64, Q24/25/27 ~0.72 |
+| rugo 2 files (ZSTD) | 14.59-17.69 s | 13.38-13.47 s | **0.920** | 5/5 (one noisy A round) | 0.788 | Q21-23/24/25/27 0.69-0.75 |
+
+- Controls (Q1, Q3/Q4/Q7 rugo, Q16, Q33, Q36) flat at 0.98-1.01.
+- **The profile-based bound was wrong, on x86 too.** Canon Q28: telemetry
+  decompress_s 1.40 of 2.72 CPU-s (51%), yet removing decompression saves only
+  0.53 CPU-s (2.72 → 2.19) and 0.869× wall. "Decompress time" includes faulting
+  and reading the compressed bytes, and the decoder then streams the
+  decompressed bytes from DRAM instead of L2. **A T1 hit is worth roughly a
+  third of the measured decompression time on these queries**, not all of it.
+- Ceiling summary, both arches: suite 0.86-0.92 (8-14%); Q28 1.14-1.27×; LIKE
+  queries up to 2×. It passes the 5% gate everywhere — but only when the
+  working set fits, which at 20% it mostly does not (§15 A1).
+- Correction to the Pivot comparison given in chat: "decompression-free, our
+  CPU per Q28 ≈ Pivot's" is wrong. Decompress-free canon Q28 on the i5 is
+  2.19 CPU-s per 20M rows (~11 CPU-s per 100M) vs Pivot ~4 vCPU-s per 100M on
+  c6a — cross-hardware and rough, but a per-row gap of ~2-3× remains on top of
+  the cache and scaling.

@@ -869,7 +869,9 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
 
     // Row identity (opteryx/constants/row_identity.py): columns appended after the read
     // set, one per entry of identity_kinds_ - kIdentityFile is the row's file as its
-    // position in the scan's file list, kIdentityOrdinal its zero-based physical row
+    // index in the TARGET's unpruned file list (the list the write sink maps it back
+    // through - NOT this scan's position, which pruning shifts), kIdentityOrdinal its
+    // zero-based physical row
     // number in that file (counted before deletes, page pruning and filtering). Numbered
     // from the footer's row-group row counts and the rows each result kept
     // (MorselRef::kept_rows), so every path that drops rows keeps the address exact.
@@ -880,12 +882,16 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
     // Fetch path -> (its file index, the first row of each of its row groups).
     std::unordered_map<std::string, std::pair<int64_t, std::vector<int64_t>>> identity_files_;
 
-    // Plan-time only, on the compiler's thread, before run() is entered. `files` is the
-    // scan's file list in order, as fetch paths (the work items' keys).
-    void set_row_identity(const std::vector<std::string>& files, std::vector<uint8_t> kinds,
+    // Plan-time only, on the compiler's thread, before run() is entered. `files` is
+    // every file this scan reads, as fetch paths (the work items' keys); `file_index[f]`
+    // is files[f]'s index in the target's unpruned file list.
+    void set_row_identity(const std::vector<std::string>& files,
+                          const std::vector<int64_t>& file_index, std::vector<uint8_t> kinds,
                           std::vector<std::string> names) {
         if (kinds.empty() || kinds.size() != names.size())
             throw std::runtime_error("set_row_identity: one name per identity column");
+        if (file_index.size() != files.size())
+            throw std::runtime_error("set_row_identity: one file index per scanned file");
         if (footer_map == nullptr)
             throw std::runtime_error("set_row_identity: row identity needs the scan's footers");
         for (size_t f = 0; f < files.size(); ++f) {
@@ -899,7 +905,7 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                 first_rows.push_back(at);
                 at += rg.num_rows;
             }
-            if (!identity_files_.emplace(files[f], std::make_pair(static_cast<int64_t>(f),
+            if (!identity_files_.emplace(files[f], std::make_pair(file_index[f],
                                                                   std::move(first_rows))).second)
                 throw std::runtime_error("set_row_identity: a file is listed twice: " + files[f]);
         }

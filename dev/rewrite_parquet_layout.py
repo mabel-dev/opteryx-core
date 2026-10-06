@@ -1,7 +1,7 @@
 """Rewrite a directory of parquet files with rugo's writer at a chosen layout.
 
     python dev/rewrite_parquet_layout.py SRC_DIR DST_DIR --rows 65536 --block 4 \
-        [--procs 4] [--no-dictionary] [--limit N]
+        [--procs 4] [--no-dictionary] [--compression zstd|none] [--limit N]
 
 Every file is read whole (rugo), then written with write_parquet(
 max_rows_per_row_group=rows, row_groups_per_block=block) and the writer's
@@ -30,15 +30,15 @@ sys.path.insert(0, REPO)
 
 
 def one(job):
-    src, dst, rows, block, dictionary = job
+    src, dst, rows, block, dictionary, compression = job
     import rugo.parquet as rp
     from draken.morsels.morsel import Morsel
 
     with rp.read_parquet(src) as it:
         morsels = list(it)
     m = Morsel.combine(morsels) if len(morsels) > 1 else morsels[0]
-    data = rp.write_parquet(m, max_rows_per_row_group=rows, row_groups_per_block=block,
-                            dictionary=dictionary)
+    data = rp.write_parquet(m, compression=compression, max_rows_per_row_group=rows,
+                            row_groups_per_block=block, dictionary=dictionary)
     with open(dst + ".tmp", "wb") as f:
         f.write(data)
     os.replace(dst + ".tmp", dst)
@@ -58,7 +58,7 @@ def _numeric_order(paths):
     return sorted(paths, key=key)
 
 
-def repack(src_dir, dst_dir, rows, block, dictionary, file_bytes):
+def repack(src_dir, dst_dir, rows, block, dictionary, file_bytes, compression="zstd"):
     """Stream every source file, in numeric order, into files closed at the first
     BLOCK boundary at or past `file_bytes` - never mid-block, so every file but
     the last holds whole column-major blocks."""
@@ -85,7 +85,7 @@ def repack(src_dir, dst_dir, rows, block, dictionary, file_bytes):
         state["fh"] = open(state["path"] + ".tmp", "wb")
         state["bytes"] = 0
         state["rgs"] = 0
-        state["writer"] = rp.open_parquet_writer(sink, dictionary=dictionary,
+        state["writer"] = rp.open_parquet_writer(sink, compression=compression, dictionary=dictionary,
                                                  row_groups_per_block=block)
 
     def close_file():
@@ -139,6 +139,8 @@ def main():
     ap.add_argument("--block", type=int, default=4)
     ap.add_argument("--procs", type=int, default=4)
     ap.add_argument("--no-dictionary", action="store_true")
+    ap.add_argument("--compression", choices=("zstd", "none"), default="zstd",
+                    help="page codec (rugo writes zstd or none; default zstd)")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--file-bytes", type=int, default=0)
     args = ap.parse_args()
@@ -149,7 +151,7 @@ def main():
         if os.listdir(args.dst):
             ap.error(f"{args.dst} is not empty - a repack never writes over a corpus")
         repack(args.src, args.dst, args.rows, args.block, not args.no_dictionary,
-               args.file_bytes)
+               args.file_bytes, args.compression)
         return
     jobs = []
     for root, _dirs, files in os.walk(args.src):
@@ -163,7 +165,7 @@ def main():
             if os.path.exists(dst):
                 continue
             jobs.append((os.path.join(root, f), dst, args.rows, args.block,
-                         not args.no_dictionary))
+                         not args.no_dictionary, args.compression))
     if args.limit:
         import re
 

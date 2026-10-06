@@ -18,10 +18,15 @@ Both are INT64. A file index would fit UINT32 comfortably, but
 would be a type the scan cannot actually build. Widen to unsigned only once
 that gap is closed.
 
-`$file` carries an index into the scan's own ordered file list rather than the
-path itself: the scan already holds that list, so the index is exact and free,
-where a per-row path string would be a string payload dragged through a join
-for no information gain. The consumer maps index -> path through the same list.
+`$file` carries an index rather than the path itself: a per-row path string would
+be a string payload dragged through a join for no information gain. The index is
+into ONE list, `ScanStep.row_identity_files` - the target's file list recorded when
+the scan is bound, before pruning - and the consumer maps it back through that same
+tuple (the MERGE sink's `file_paths`; compaction re-pins both to its narrowed
+selection). It is NOT the file's position in the scan's own manifest: pruning drops
+files from that, which renumbers the rest, and an index read through a different
+list deletes rows the statement never matched (0.9.153-0.9.155: an UPDATE whose
+WHERE pruned a file deleted a row from the wrong file).
 
 MERGE, UPDATE, DELETE and OPTIMIZE (carrying a vector index) ask for these. They
 are deliberately NOT a general SQL surface - the names are unspellable in user SQL

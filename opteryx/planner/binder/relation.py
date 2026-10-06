@@ -2644,6 +2644,28 @@ def visit_insert(self, node: PlanStep, context: BindingContext) -> Tuple[PlanSte
     return node, context
 
 
+def _target_row_identity_files(graph, relation_name: str) -> tuple:
+    """The file list of the one Scan in `graph` asked for row identity - the MERGE /
+    UPDATE / DELETE target (merge_desugar stamps exactly one). Its scan was bound
+    before this sink (post-order), so the list is set unless the bind read no manifest
+    (a schema-only bind), where nothing executes and the empty list is never indexed."""
+    from opteryx.exceptions import InvalidInternalStateError
+    from opteryx.planner.logical_planner import LogicalPlanStepType
+
+    targets = [
+        plan_node
+        for _, plan_node in graph.nodes(True)
+        if plan_node.node_type == LogicalPlanStepType.Scan and plan_node.emit_row_identity
+    ]
+    if len(targets) != 1:
+        raise InvalidInternalStateError(
+            f"the write sink for {relation_name} expected exactly one Scan addressing rows, "
+            f"found {len(targets)}"
+        )
+    files = targets[0].row_identity_files
+    return () if files is None else files
+
+
 def visit_merge(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep, BindingContext]:
     """Bind the MERGE node.
 
@@ -2705,10 +2727,13 @@ def visit_merge(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep
     table = node.connector.table_engine(node.relation_name, telemetry=context.telemetry)
     target_schema, _target_manifest = table.get_dataset_metadata()
     node.target_schema = target_schema
-    # The ordered data-file list the sink maps `$merge_file` through. It must be
-    # the SAME list, in the SAME order, that the scan indexed against - both come
-    # from this relation's manifest, read once here.
-    node.file_paths = list(_target_manifest.get_file_paths()) if _target_manifest else []
+    # The ordered data-file list the sink maps `$merge_file` through. It IS the
+    # target scan's own list (ScanStep.row_identity_files, recorded when the scan was
+    # bound, before pruning) - not a second read of the manifest. A second read could
+    # meet a commit that landed in between, and the scan's pruned list numbers its
+    # files differently: either way the index addresses the wrong file and the
+    # statement deletes rows it never matched.
+    node.file_paths = _target_row_identity_files(self.graph, node.relation_name)
     node.columns = []  # binder convention; MERGE produces no output columns
 
     # ---- output shape -----------------------------------------------------

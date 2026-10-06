@@ -520,6 +520,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         int64_t topn_boundary_skipped(size_t idx) except +
         void set_native_scan_admission(size_t p, RowAdmission* admission) except +
         void set_native_scan_row_identity(size_t p, cppvector[string] files,
+                                          cppvector[int64_t] file_index,
                                           cppvector[uint8_t] kinds,
                                           cppvector[string] names) except +
         void set_native_scan_absent_columns(size_t p, cppvector[string] files,
@@ -3471,21 +3472,26 @@ cdef class NativePlan:
         self.vector_admission_scans.append((scan_identity, holder))
         self._e.set_native_scan_admission(p, <RowAdmission*><void*>admission)
 
-    def set_native_scan_row_identity(self, size_t p, list files, list kinds, list names):
+    def set_native_scan_row_identity(self, size_t p, list files, list file_index,
+                                     list kinds, list names):
         """Make pipeline `p`'s native parquet scan append row identity after its read
-        set (opteryx/constants/row_identity.py): `files` the scan's file list in order as
-        fetch paths, `kinds` 0 ($file) or 1 ($ordinal) per appended column, `names` their
-        column names."""
+        set (opteryx/constants/row_identity.py): `files` every file the scan reads, as
+        fetch paths; `file_index` each one's index in the target's unpruned file list
+        (what `$file` carries); `kinds` 0 ($file) or 1 ($ordinal) per appended column,
+        `names` their column names."""
         cdef cppvector[string] c_files
+        cdef cppvector[int64_t] c_index
         cdef cppvector[uint8_t] c_kinds
         cdef cppvector[string] c_names
         for f in files:
             c_files.push_back((<str>f).encode("utf-8"))
+        for i in file_index:
+            c_index.push_back(<int64_t>i)
         for k in kinds:
             c_kinds.push_back(<uint8_t>k)
         for n in names:
             c_names.push_back((<str>n).encode("utf-8"))
-        self._e.set_native_scan_row_identity(p, c_files, c_kinds, c_names)
+        self._e.set_native_scan_row_identity(p, c_files, c_index, c_kinds, c_names)
 
     def set_native_scan_absent_columns(self, size_t p, list files, list absent, list types,
                                        list logical):

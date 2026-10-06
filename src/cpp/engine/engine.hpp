@@ -645,16 +645,18 @@ public:
         src->set_row_admission(admission);
     }
     // Make pipeline `p`'s native parquet scan append row identity ($file / $ordinal,
-    // opteryx/constants/row_identity.py) after its read set: `files` is the scan's file
-    // list in order as fetch paths, `kinds` 0 = file index, 1 = ordinal, one per name.
+    // opteryx/constants/row_identity.py) after its read set: `files` is every file the
+    // scan reads as fetch paths, `file_index` each one's index in the target's unpruned
+    // file list, `kinds` 0 = file index, 1 = ordinal, one per name.
     void set_native_scan_row_identity(size_t p, std::vector<std::string> files,
+                                      std::vector<int64_t> file_index,
                                       std::vector<uint8_t> kinds,
                                       std::vector<std::string> names) {
         auto* src = dynamic_cast<NativeParquetScanSource*>(pipelines[p]->source.get());
         if (src == nullptr)
             throw std::runtime_error(
                 "set_native_scan_row_identity: pipeline source is not a native parquet scan");
-        src->set_row_identity(files, std::move(kinds), std::move(names));
+        src->set_row_identity(files, file_index, std::move(kinds), std::move(names));
     }
     // Schema evolution: give pipeline `p`'s native parquet scan the projected columns
     // each file lacks (fetch paths; `absent` flat, one flag per projected column per

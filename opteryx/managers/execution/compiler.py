@@ -4832,9 +4832,24 @@ class _Compiler:
                 self.nplan.set_native_scan_absent_columns(p, *absent)
             row_identity = self._native_scan_row_identity.get(scan.identity)
             if row_identity:
+                # `$file` is a file's index in the target's UNPRUNED list - the one the
+                # write sink maps it back through - never its position in this scan's
+                # (possibly pruned) manifest.
+                target_files = scan.step.row_identity_files
+                if target_files is None:
+                    raise InvalidInternalStateError(
+                        f"the row-identity scan of {scan.relation} carries no target file list")
+                index_of = {path: i for i, path in enumerate(target_files)}
+                scanned = manifest.get_file_paths()
+                unlisted = [path for path in scanned if path not in index_of]
+                if unlisted:
+                    raise InvalidInternalStateError(
+                        f"the row-identity scan of {scan.relation} reads {len(unlisted)} "
+                        f"file(s) its target file list does not hold, e.g. {unlisted[0]}")
                 self.nplan.set_native_scan_row_identity(
                     p,
-                    [splan.fetch_paths.get(path, path) for path in manifest.get_file_paths()],
+                    [splan.fetch_paths.get(path, path) for path in scanned],
+                    [index_of[path] for path in scanned],
                     [kind for _sc, kind in row_identity],
                     [sc.name for sc, _kind in row_identity],
                 )

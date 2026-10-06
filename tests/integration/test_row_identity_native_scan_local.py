@@ -131,6 +131,56 @@ def test_update_and_delete_read_their_target_natively(merge_env):
     assert _target_rows() == [(2, 21, 1), (3, 30, 1)]
 
 
+def _second_file():
+    """Append cve 4 as a second data file: the target is then seed.parquet (cve 1-3)
+    plus one file holding only cve 4, so `WHERE cve = 4` prunes the seed file."""
+    _run_native(f"INSERT INTO {TARGET} (cve, details, revision) "
+                f"SELECT cve, details, 1 FROM {SOURCE} WHERE cve = 4")
+    assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 30, 1), (4, 40, 1)]
+
+
+def _files_read(sql):
+    """Run `sql`; return how many files its (single) parquet scan read."""
+    from opteryx_catalog.catalog.manifest import clear_parsed_manifest_cache
+
+    clear_parsed_manifest_cache()
+    session = opteryx.session(user="tester")
+    for _ in session.execute_to_morsels(sql):
+        pass
+    (facts,) = session._telemetry._reading["native_scan_facts"].values()
+    return facts["files_read"]
+
+
+def test_update_whose_where_prunes_a_file_replaces_the_right_row(merge_env):
+    """THE 0.9.153-0.9.155 CORRUPTION. `$file` was the file's position in the scan's
+    PRUNED manifest while the sink mapped it through the UNPRUNED list: with the seed
+    file pruned, cve 4's file was index 0 to the scan and seed.parquet to the sink, so
+    the UPDATE deleted cve 1 (seed ordinal 0) and left the old cve 4 alive."""
+    _second_file()
+    assert _files_read(f"UPDATE {TARGET} SET details = details + 1 WHERE cve = 4") == 1, (
+        "the WHERE no longer prunes the seed file - this test no longer exercises pruning")
+    assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 30, 1), (4, 41, 1)]
+
+
+def test_delete_whose_where_prunes_a_file_deletes_the_right_row(merge_env):
+    _second_file()
+    assert _files_read(f"DELETE FROM {TARGET} WHERE cve = 4") == 1
+    assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 30, 1)]
+
+
+def test_writes_after_a_pruned_update_keep_addressing_the_right_rows(merge_env):
+    """The production sequence that surfaced it: a pruned UPDATE, then a DELETE of a
+    row in a later file, then a full sync MERGE over three files with deletes."""
+    _second_file()
+    _run_native(f"UPDATE {TARGET} SET details = details + 1 WHERE cve = 4")
+    _run_native(f"DELETE FROM {TARGET} WHERE cve = 2")
+    assert _target_rows() == [(1, 10, 1), (3, 30, 1), (4, 41, 1)]
+    _run_native(_SYNC)
+    # source is cve 2 -> 20, 3 -> 99, 4 -> 40: cve 1 deleted BY SOURCE, 2 inserted,
+    # 3 and 4 replaced (revision read from the live row each time).
+    assert _target_rows() == [(2, 20, 1), (3, 99, 2), (4, 40, 2)]
+
+
 def test_optimize_of_a_multi_file_table_with_deletes_reads_natively(optimize_env):
     """OPTIMIZE over several files carrying a delete vector: the compaction scan
     goes native, drops the deleted rows and leaves one file with no delete debt."""

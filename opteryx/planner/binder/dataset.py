@@ -1638,6 +1638,12 @@ def visit_scan(self, node: PlanStep, context: BindingContext) -> Tuple[PlanStep,
                 from opteryx.models.manifest import Manifest
 
                 node.manifest = Manifest(node.manifest.native, extended)
+                # `$file` indexes THIS list, recorded now - before manifest pruning
+                # drops files from the scan - and the write sink maps the index back
+                # through the same tuple (visit_merge). A second manifest read, or the
+                # scan's pruned list, numbers the files differently and addresses the
+                # wrong file.
+                node.row_identity_files = tuple(node.manifest.get_file_paths())
             node.schema = extended
 
         context.schemas[node.alias] = node.schema
