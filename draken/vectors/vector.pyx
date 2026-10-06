@@ -515,13 +515,10 @@ cdef class Vector:
 
         Dense numeric/bool/string/interval types are translated in C++ without
         going through Python object boxing. Dict, constant, DECIMAL, DECIMAL128,
-        TIME32/64, ARRAY and VECTOR_FP16 fall back to to_pylist(); of those,
-        DECIMAL, DECIMAL128, TIME32/64, ARRAY and VECTOR_FP16 use an explicit
-        pyarrow type from the vector's own descriptor (build_arrow_type_for)
-        rather than value inference, so an empty or all-NULL result keeps its
-        declared type (plain dict/constant-encoded ordinary types still rely on
-        inference — they always carry real values whenever they reach this
-        fallback at all).
+        TIME32/64, ARRAY and VECTOR_FP16 fall back to to_pylist(), always with
+        the explicit pyarrow type from the vector's own descriptor
+        (build_arrow_type_for) -- never value inference, which widens every
+        integer to int64 and collapses an empty or all-NULL list to pa.null().
         """
         try:
             import pyarrow as pa
@@ -537,22 +534,13 @@ cdef class Vector:
         # Fallback: types not supported by the C++ exporter (dict, constant,
         # DECIMAL, DECIMAL128, TIME32/64, ARRAY, VECTOR_FP16).
         #
-        # DECIMAL, DECIMAL128, TIME32/64, ARRAY and VECTOR_FP16 land here
-        # regardless of shape -- every dense/dict/constant vector of these
-        # types, not just dict/constant-encoded ones. For those, resolve the
-        # pyarrow type explicitly from the vector's own descriptor
-        # (build_arrow_type_for) instead of letting pa.array() infer it from
-        # to_pylist() -- inference silently collapses to pa.null() when the
-        # list is empty or all-NULL, and for DECIMAL/DECIMAL128 is wrong even
-        # when non-empty (see build_arrow_type_for's docstring). Plain
-        # dict/constant-encoded columns of ordinary types (VARCHAR, INT64, ...)
-        # keep relying on inference here -- their to_pylist() carries real
-        # values whenever they reach this fallback at all.
-        if dv.type == DRAKEN_TIME32 or dv.type == DRAKEN_TIME64 \
-                or dv.type == DRAKEN_DECIMAL or dv.type == DRAKEN_DECIMAL128 \
-                or dv.type == DRAKEN_ARRAY or dv.type == DRAKEN_VECTOR_FP16:
-            return pa.array(self._nb.to_pylist(), type=build_arrow_type_for(self._nb, pa))
-        return pa.array(self._nb.to_pylist())
+        # The pyarrow type always comes from the vector's own descriptor
+        # (build_arrow_type_for), never from pa.array() inference over
+        # to_pylist(): inference widens a dict/constant-shaped INT32 to int64
+        # (so morsels of one column disagree on type), is wrong for
+        # DECIMAL/DECIMAL128 even when non-empty (see build_arrow_type_for's
+        # docstring), and collapses an empty or all-NULL list to pa.null().
+        return pa.array(self._nb.to_pylist(), type=build_arrow_type_for(self._nb, pa))
 
     def materialize(self):
         from draken.vectors.vector import Vector as _V

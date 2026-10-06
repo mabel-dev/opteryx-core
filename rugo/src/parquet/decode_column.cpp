@@ -1450,9 +1450,11 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               } else {
                 try {
                   auto codec = rugo::compression::CodecFromInt(col_codec);
+                  RUGO_TEL_START(_pt_t0);
                   rugo::compression::DecompressInto(
                       ptask.compressed_data, ptask.compressed_size,
                       ptask.uncompressed_size, codec, decomp_buf);
+                  RUGO_TEL_ACCUM(rugo_tel::decompress_ns, _pt_t0);
                   dp = decomp_buf.data();
                   ds = decomp_buf.size();
                 } catch (...) {
@@ -2881,6 +2883,41 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                 result.string_lens.push_back(length);
                 data_ptr += length;
               }
+            } else if (stub_strings && page_vsel == nullptr) {
+              // Length-only PLAIN page, every value kept: the same stubs
+              // append_string_stub writes, with the three output buffers sized once
+              // for the page instead of a capacity check per value per buffer. Each
+              // value copies a fixed 16-byte window (when the page has 16 bytes left)
+              // and the arena cursor advances only by what the stub keeps; the
+              // trailing bytes land in slack the next value overwrites or the final
+              // resize drops. (interning is always off here: rederive excludes stubs.)
+              const size_t n0 = result.string_lens.size();
+              const size_t a0 = result.string_arena.size();
+              result.string_offsets.resize_uninit(n0 + (size_t)present_count);
+              result.string_lens.resize_uninit(n0 + (size_t)present_count);
+              result.string_arena.resize_uninit(a0 + (size_t)present_count * kStringStubInline + 16);
+              uint32_t* offs = result.string_offsets.data() + n0;
+              int32_t*  lens = result.string_lens.data() + n0;
+              uint8_t*  arena = result.string_arena.data();
+              size_t a = a0;
+              int32_t k = 0;
+              for (; k < present_count && data_ptr + 4 <= data_end; ++k) {
+                const int32_t length = ReadLE32(data_ptr);
+                data_ptr += 4;
+                if (length < 0 || data_ptr + length > data_end) break;
+                const size_t keep = (size_t)length <= kStringStubInline ? (size_t)length
+                                                                        : kStringStubPrefix;
+                offs[k] = static_cast<uint32_t>(a);
+                lens[k] = length;
+                if (data_ptr + 16 <= data_end) std::memcpy(arena + a, data_ptr, 16);
+                else                           std::memcpy(arena + a, data_ptr, keep);
+                a += keep;
+                data_ptr += length;
+              }
+              result.string_offsets.resize_uninit(n0 + (size_t)k);
+              result.string_lens.resize_uninit(n0 + (size_t)k);
+              result.string_arena.resize_uninit(a);
+              if (k > 0) result.payloads_stubbed = true;
             } else
             for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
               int32_t length = ReadLE32(data_ptr);

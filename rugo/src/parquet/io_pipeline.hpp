@@ -3249,14 +3249,9 @@ class ParquetIOPipeline {
                 // needs (DecodedColumn::append_string_stub). Only when a direct builder
                 // exists to consume the stubs — a pool-path column is serialized from
                 // string_arena and would overread them. emit_col re-checks the shape.
-                // RUGO_LENGTH_ONLY_DECODE=0 is the A/B arm: the old full-payload decode.
-                static const bool length_only_decode_enabled = []() {
-                    const char* v = getenv("RUGO_LENGTH_ONLY_DECODE");
-                    return !(v != nullptr && v[0] == '0');
-                }();
                 const size_t i_orig = item.nested ? item.nested->orig[i] : i;
                 const bool col_length_only =
-                    length_only_decode_enabled && ng == nullptr && pool_sink_.draken_alloc != nullptr &&
+                    ng == nullptr && pool_sink_.draken_alloc != nullptr &&
                     i_orig < length_only_columns_.size() && length_only_columns_[i_orig] != 0;
                 // PageIndex jump plan for this column (nullptr = header-walk).
                 const PageJumpPlan* jump_ptr =
