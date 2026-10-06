@@ -266,7 +266,7 @@ inline int32_t rep_at(const Leaf& l) {
     return l.d->rep_levels.empty() ? 0 : l.d->rep_levels[l.pos];
 }
 
-inline size_t rle_next(const std::vector<int32_t>& runs, size_t& run, int64_t& left) {
+inline size_t rle_next(const draken::AppendBuffer<int32_t>& runs, size_t& run, int64_t& left) {
     while (left == 0) {
         if (run >= runs.size()) throw std::runtime_error("RLE run table exhausted");
         left = runs[run];
@@ -551,8 +551,10 @@ void assemble(const Plan& plan, const std::vector<DecodedColumn>& leaves,
         }
     }
 
-    std::vector<uint32_t> offs, lens;
-    std::vector<uint8_t> valid((rows + 7) / 8, 0);
+    draken::AppendBuffer<uint32_t> offs;
+    draken::AppendBuffer<int32_t> lens;
+    draken::AppendBuffer<uint8_t> valid;
+    valid.resize_fill((rows + 7) / 8, 0);
     bool any_null = false;
     size_t n_out = 0;
     a.o.reserve(rows * 32);
@@ -577,7 +579,7 @@ void assemble(const Plan& plan, const std::vector<DecodedColumn>& leaves,
         if (!selected) { a.o.resize(mark); continue; }
         if (a.o.size() > UINT32_MAX) fail(plan.name, "rendered JSON exceeds 4 GiB for one row group");
         offs.push_back(static_cast<uint32_t>(mark));
-        lens.push_back(static_cast<uint32_t>(a.o.size() - mark));
+        lens.push_back(static_cast<int32_t>(a.o.size() - mark));
         valid[n_out >> 3] |= static_cast<uint8_t>(1u << (n_out & 7));
         ++n_out;
     }
@@ -591,11 +593,12 @@ void assemble(const Plan& plan, const std::vector<DecodedColumn>& leaves,
     out.logical_type = "varchar";
     out.num_rows = static_cast<int32_t>(n_out);
     out.success = true;
-    out.string_arena.assign(a.o.begin(), a.o.end());
-    out.string_offsets.assign(offs.begin(), offs.end());
-    out.string_lens.assign(lens.begin(), lens.end());
+    out.string_arena.assign(reinterpret_cast<const uint8_t*>(a.o.data()),
+                            reinterpret_cast<const uint8_t*>(a.o.data()) + a.o.size());
+    out.string_offsets = std::move(offs);
+    out.string_lens = std::move(lens);
     if (any_null) {
-        valid.resize((n_out + 7) / 8);
+        valid.resize_uninit((n_out + 7) / 8);   // shrink only: n_out <= rows
         out.valid_bits = std::move(valid);
     }
 }

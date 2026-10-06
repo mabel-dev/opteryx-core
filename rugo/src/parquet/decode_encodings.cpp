@@ -260,7 +260,7 @@ static unpack_groups_fn_t get_unpack_fn()
 static inline void decode_bitpacked_run(
         const uint8_t* run_start, int32_t values_in_run, int32_t bytes_needed,
         int32_t num_values, int bit_width,
-        std::vector<int32_t>& indices, int32_t& decoded)
+        draken::AppendBuffer<int32_t>& indices, int32_t& decoded)
 {
     const int32_t to_decode   = std::min(values_in_run, num_values - decoded);
     const int32_t full_groups = to_decode / 8;
@@ -268,7 +268,7 @@ static inline void decode_bitpacked_run(
     const int     bpg         = (bit_width <= 8) ? bit_width : (8 * bit_width + 7) / 8;
 
     const size_t old_sz = indices.size();
-    indices.resize(old_sz + to_decode);
+    indices.resize_uninit(old_sz + to_decode);
     int32_t* dst = indices.data() + old_sz;
 
     if (full_groups > 0)
@@ -314,7 +314,7 @@ size_t SkipRLEBitPackedLevels(const uint8_t *data, size_t max_size,
 
 int32_t DecodeRLEBitPackedIndices(const uint8_t *data, size_t data_size,
                                   int32_t num_values, int bit_width,
-                                  std::vector<int32_t> &indices) {
+                                  draken::AppendBuffer<int32_t> &indices) {
   if (bit_width <= 0 || bit_width > 32 || data_size < 4) return -1;
 
   indices.clear();
@@ -361,8 +361,7 @@ int32_t DecodeRLEBitPackedIndices(const uint8_t *data, size_t data_size,
       // Bulk fill: resize+fill_n avoids per-element push_back overhead.
       const int32_t to_fill = std::min(count, num_values - decoded);
       const size_t  old_sz  = indices.size();
-      indices.resize(old_sz + to_fill);
-      std::fill_n(indices.data() + old_sz, to_fill, (int32_t)value);
+      indices.resize_fill(old_sz + to_fill, (int32_t)value);
       decoded += to_fill;
     }
   }
@@ -376,7 +375,7 @@ int32_t DecodeRLEBitPackedIndices(const uint8_t *data, size_t data_size,
 
 int32_t DecodeRLEBitPackedIndicesWithConsumption(const uint8_t *data, size_t data_size,
                                                  int32_t num_values, int bit_width,
-                                                 std::vector<int32_t> &indices,
+                                                 draken::AppendBuffer<int32_t> &indices,
                                                  size_t &bytes_consumed) {
   if (bit_width <= 0 || bit_width > 32 || data_size < 4) return -1;
 
@@ -424,8 +423,7 @@ int32_t DecodeRLEBitPackedIndicesWithConsumption(const uint8_t *data, size_t dat
 
       const int32_t to_fill = std::min(count, num_values - decoded);
       const size_t  old_sz  = indices.size();
-      indices.resize(old_sz + to_fill);
-      std::fill_n(indices.data() + old_sz, to_fill, (int32_t)value);
+      indices.resize_fill(old_sz + to_fill, (int32_t)value);
       decoded += to_fill;
     }
   }
@@ -445,11 +443,12 @@ int32_t DecodeRLEBitPackedIndicesWithConsumption(const uint8_t *data, size_t dat
 
 int32_t DecodeRLEBitPackedIndicesNoPrefix(const uint8_t *data, size_t data_size,
                                           int32_t num_values, int bit_width,
-                                          std::vector<int32_t> &indices) {
+                                          draken::AppendBuffer<int32_t> &indices) {
   if (bit_width > 32) return -1;
   if (bit_width == 0) {
     // Single-entry dictionary: every present value is index 0, no bits on wire.
-    indices.assign(num_values, 0);
+    indices.clear();
+    indices.resize_fill((size_t)num_values, 0);
     return num_values;
   }
 
@@ -489,8 +488,7 @@ int32_t DecodeRLEBitPackedIndicesNoPrefix(const uint8_t *data, size_t data_size,
 
       const int32_t to_fill = std::min(count, num_values - decoded);
       const size_t  old_sz  = indices.size();
-      indices.resize(old_sz + to_fill);
-      std::fill_n(indices.data() + old_sz, to_fill, (int32_t)value);
+      indices.resize_fill(old_sz + to_fill, (int32_t)value);
       decoded += to_fill;
     }
   }
@@ -518,12 +516,12 @@ static inline int32_t count_selected(const uint8_t *sel, int32_t n) {
 int32_t DecodeRLEBitPackedIndicesSelected(const uint8_t *data, size_t data_size,
                                           int32_t num_values, int bit_width,
                                           const uint8_t *sel,
-                                          std::vector<int32_t> &out) {
+                                          draken::AppendBuffer<int32_t> &out) {
   if (bit_width > 32) return -1;
   out.clear();
   if (bit_width == 0) {
     // Single-entry dictionary: every value is index 0, no bits on wire.
-    out.assign((size_t)count_selected(sel, num_values), 0);
+    out.resize_fill((size_t)count_selected(sel, num_values), 0);
     return num_values;
   }
   out.reserve((size_t)num_values);
@@ -573,7 +571,7 @@ int32_t DecodeRLEBitPackedIndicesSelected(const uint8_t *data, size_t data_size,
       if (count <= 0) return -1;
       const int32_t to_fill = std::min(count, num_values - walked);
       const int32_t n_sel = count_selected(sel + walked, to_fill);
-      out.insert(out.end(), (size_t)n_sel, (int32_t)value);
+      out.resize_fill(out.size() + (size_t)n_sel, (int32_t)value);
       walked += to_fill;
     }
   }
@@ -652,27 +650,33 @@ bool LevelStreamIsSingleRunOf(const uint8_t *data, size_t data_size,
 // neutral (0.78 -> 0.80) on the genuinely run-heavy l_linestatus (0.137).
 //
 // The cost of that is pre-sizing both arrays to num_values (8 bytes per value,
-// transient for the page, released by the resize-down below) so the cursor can
-// store without a capacity check.  Measured at 0.01-0.04 ns/value against warm
-// buffers, i.e. the zero-fill is not a factor.
+// transient for the page, trimmed by the resize-down below) so the cursor can
+// store without a capacity check.  The arrays are sized uninitialised: every
+// cell is written before it is read.
 // ---------------------------------------------------------------------------
 
 int32_t DecodeRLEBitPackedIndicesToRuns(const uint8_t *data, size_t data_size,
                                         int32_t num_values, int bit_width,
-                                        std::vector<int32_t> &run_codes,
-                                        std::vector<int32_t> &run_counts) {
+                                        draken::AppendBuffer<int32_t> &run_codes,
+                                        draken::AppendBuffer<int32_t> &run_counts) {
   if (bit_width > 32) return -1;
   if (bit_width == 0) {
     // Single-entry dictionary: every present value is index 0, no bits on wire.
-    run_codes.assign(1, 0);
-    run_counts.assign(1, num_values);
+    run_codes.clear();
+    run_codes.push_back(0);
+    run_counts.clear();
+    run_counts.push_back(num_values);
     return num_values;
   }
 
   // Worst case is one run per value; size for it once so the merge loop can
   // store unconditionally.  Trimmed to the real run count before returning.
-  run_codes.assign((size_t)num_values, 0);
-  run_counts.assign((size_t)num_values, 0);
+  // Uninitialised: every cell is written (cursor advance) before it is read,
+  // and the tail is trimmed below.
+  run_codes.clear();
+  run_codes.resize_uninit((size_t)num_values);
+  run_counts.clear();
+  run_counts.resize_uninit((size_t)num_values);
   int32_t *__restrict__ out_codes  = run_codes.data();
   int32_t *__restrict__ out_counts = run_counts.data();
 
@@ -688,7 +692,7 @@ int32_t DecodeRLEBitPackedIndicesToRuns(const uint8_t *data, size_t data_size,
   // the underlying allocation on the first (largest-so-far) segment; later
   // segments that are smaller or equal reuse the existing buffer with no
   // realloc, avoiding a fresh heap allocation per segment.
-  std::vector<int32_t> scratch;
+  draken::AppendBuffer<int32_t> scratch;
 
   int32_t decoded = 0;
   while (decoded < num_values && ptr < end) {
@@ -711,7 +715,7 @@ int32_t DecodeRLEBitPackedIndicesToRuns(const uint8_t *data, size_t data_size,
 
       const int32_t to_decode = std::min(values_in_run, num_values - decoded);
       // Decode into the shared scratch buffer (O(segment_size), not O(column_size)).
-      scratch.resize(to_decode);
+      scratch.resize_uninit(to_decode);
       {
         const int32_t full_groups = to_decode / 8;
         const int32_t remainder   = to_decode - full_groups * 8;
@@ -780,8 +784,8 @@ int32_t DecodeRLEBitPackedIndicesToRuns(const uint8_t *data, size_t data_size,
   // Trim to the runs actually emitted.  Done on the failure path too, so a
   // short/corrupt stream never leaves the caller looking at zero-filled tail
   // cells that would read as valid (code 0, count 0) runs.
-  run_codes.resize((size_t)(cursor + 1));
-  run_counts.resize((size_t)(cursor + 1));
+  run_codes.resize_uninit((size_t)(cursor + 1));    // shrink only
+  run_counts.resize_uninit((size_t)(cursor + 1));
 
   return (decoded == num_values) ? decoded : -1;
 }

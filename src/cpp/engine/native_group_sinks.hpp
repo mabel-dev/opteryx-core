@@ -63,6 +63,8 @@
 
 #include <ankerl/unordered_dense.h>
 
+#include "core/append_buffer.h"   // draken::AppendBuffer — key-store raw/arena
+
 #include "operator.hpp"
 #include "pipeline_buffers.hpp"
 #include "groupby_tel.hpp"       // diagnostic hash/probe/apply phase timing (GroupBySink::sink)
@@ -152,8 +154,8 @@ struct GroupKeyColumn {
     DrakenType type = DRAKEN_INT64;
     size_t elem_size = 0;
     const LogicalType* logical = nullptr;  // borrowed; carried to output columns
-    std::vector<uint8_t> raw;    // elem_size bytes/row (slots for strings)
-    std::vector<uint8_t> arena;  // strings only: consolidated long-string bytes
+    draken::AppendBuffer<uint8_t> raw;    // elem_size bytes/row (slots for strings)
+    draken::AppendBuffer<uint8_t> arena;  // strings only: consolidated long-string bytes
     std::vector<uint8_t> validity;  // lazy — see comment above
 
     size_t row_count() const { return elem_size ? raw.size() / elem_size : 0; }
@@ -168,6 +170,33 @@ struct GroupKeyColumn {
         else validity[row >> 3] |= static_cast<uint8_t>(1u << (row & 7));
     }
 
+    // Append `n` UNINITIALISED bytes to `buf` for the caller to fill. Not
+    // zero-filling them is the measured win over std::vector::resize (ClickBench
+    // string-key GROUP BYs, 2026-10-06); every byte claimed is written next.
+    static inline uint8_t* claim(draken::AppendBuffer<uint8_t>& buf, size_t n) {
+        return buf.extend(n);
+    }
+
+    // One fixed-width key value. (A width-specialised store measured no better
+    // than this one memcpy, 2026-10-06 — don't re-add it without a new A/B.)
+    inline void put_fixed(const uint8_t* src) {
+        std::memcpy(claim(raw, elem_size), src, elem_size);
+    }
+
+    inline void put_slot(const DrakenStringSlot& s) {
+        std::memcpy(claim(raw, sizeof(DrakenStringSlot)), &s, sizeof(DrakenStringSlot));
+    }
+
+    // A NULL row's slot is zero bytes (emit re-zeroes NULL slots regardless).
+    inline void put_null() { std::memset(claim(raw, elem_size), 0, elem_size); }
+
+    // Copy a long string's bytes into this column's arena; returns their offset.
+    inline uint32_t put_long(const uint8_t* bytes, uint32_t slen) {
+        size_t arena_pos = arena.size();
+        std::memcpy(claim(arena, slen), bytes, slen);
+        return static_cast<uint32_t>(arena_pos);
+    }
+
     void append_row(const DrakenVector& v, uint32_t row, ErrCtx&, const char*) {
         size_t out_row = row_count();
         bool is_null = v.validity != nullptr
@@ -175,19 +204,16 @@ struct GroupKeyColumn {
         uint32_t phys = v.selection[row];
         if (gb_key_is_bool(type)) {
             // Bit-packed on the way in, one unpacked 0/1 byte per row in the store.
-            raw.push_back(is_null ? 0 : gb_read_bool_bit(v, phys));
+            *claim(raw, 1) = is_null ? 0 : gb_read_bool_bit(v, phys);
             note_null(out_row, is_null);
             return;
         }
+        if (is_null) {
+            put_null();
+            note_null(out_row, true);
+            return;
+        }
         if (gb_key_is_string(type)) {
-            if (is_null) {
-                DrakenStringSlot zero;
-                std::memset(&zero, 0, sizeof(zero));
-                const uint8_t* rb = reinterpret_cast<const uint8_t*>(&zero);
-                raw.insert(raw.end(), rb, rb + sizeof(DrakenStringSlot));
-                note_null(out_row, true);
-                return;
-            }
             // CANONICAL layout (buffers.h): a string vector's `data` points at a
             // DrakenStringArena STRUCT — slots and arena resolve through it.
             const auto* sa = static_cast<const DrakenStringArena*>(v.data);
@@ -197,23 +223,14 @@ struct GroupKeyColumn {
                 rebased = *slot;
             } else {
                 uint32_t slen = str_length(slot);
-                size_t arena_pos = arena.size();
-                arena.resize(arena_pos + slen);
-                std::memcpy(arena.data() + arena_pos, str_data(slot, sa->arena), slen);
-                str_clone_with_offset(&rebased, slot, static_cast<uint32_t>(arena_pos));
+                uint32_t off = put_long(str_data(slot, sa->arena), slen);
+                str_clone_with_offset(&rebased, slot, off);
             }
-            const uint8_t* rb = reinterpret_cast<const uint8_t*>(&rebased);
-            raw.insert(raw.end(), rb, rb + sizeof(DrakenStringSlot));
-            note_null(out_row, false);
-            return;
-        }
-        if (is_null) {
-            raw.resize(raw.size() + elem_size, 0);
+            put_slot(rebased);
         } else {
-            const uint8_t* src = static_cast<const uint8_t*>(v.data) + static_cast<size_t>(phys) * elem_size;
-            raw.insert(raw.end(), src, src + elem_size);
+            put_fixed(static_cast<const uint8_t*>(v.data) + static_cast<size_t>(phys) * elem_size);
         }
-        note_null(out_row, is_null);
+        note_null(out_row, false);
     }
 
     // Append row `r` of another GroupKeyColumn (same type) to this one, rebasing
@@ -224,19 +241,16 @@ struct GroupKeyColumn {
         bool is_null = !src.validity.empty()
             && !((src.validity[r >> 3] >> (r & 7)) & 1u);
         if (gb_key_is_bool(type)) {
-            raw.push_back(is_null ? 0 : src.raw[r]);
+            *claim(raw, 1) = is_null ? 0 : src.raw[r];
             note_null(out_row, is_null);
             return;
         }
+        if (is_null) {
+            put_null();
+            note_null(out_row, true);
+            return;
+        }
         if (gb_key_is_string(type)) {
-            if (is_null) {
-                DrakenStringSlot zero;
-                std::memset(&zero, 0, sizeof(zero));
-                const uint8_t* rb = reinterpret_cast<const uint8_t*>(&zero);
-                raw.insert(raw.end(), rb, rb + sizeof(DrakenStringSlot));
-                note_null(out_row, true);
-                return;
-            }
             const DrakenStringSlot* slot = reinterpret_cast<const DrakenStringSlot*>(
                 src.raw.data() + r * sizeof(DrakenStringSlot));
             DrakenStringSlot rebased;
@@ -244,25 +258,15 @@ struct GroupKeyColumn {
                 rebased = *slot;
             } else {
                 uint32_t slen = str_length(slot);
-                size_t arena_pos = arena.size();
-                arena.resize(arena_pos + slen);
-                std::memcpy(arena.data() + arena_pos,
-                            str_data(slot, src.arena.empty() ? nullptr : src.arena.data()),
-                            slen);
-                str_clone_with_offset(&rebased, slot, static_cast<uint32_t>(arena_pos));
+                uint32_t off = put_long(
+                    str_data(slot, src.arena.empty() ? nullptr : src.arena.data()), slen);
+                str_clone_with_offset(&rebased, slot, off);
             }
-            const uint8_t* rb = reinterpret_cast<const uint8_t*>(&rebased);
-            raw.insert(raw.end(), rb, rb + sizeof(DrakenStringSlot));
-            note_null(out_row, false);
-            return;
-        }
-        if (is_null) {
-            raw.resize(raw.size() + elem_size, 0);
+            put_slot(rebased);
         } else {
-            raw.insert(raw.end(), src.raw.data() + r * elem_size,
-                       src.raw.data() + (r + 1) * elem_size);
+            put_fixed(src.raw.data() + r * elem_size);
         }
-        note_null(out_row, is_null);
+        note_null(out_row, false);
     }
 };
 

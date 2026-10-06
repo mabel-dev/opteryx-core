@@ -5,11 +5,14 @@ from libcpp.vector cimport vector
 from libcpp.unordered_map cimport unordered_map
 
 
-cdef extern from "compression.hpp" namespace "rugo::compression":
-    cdef cppclass ScratchBuffer:
-        uint8_t* data()
+cdef extern from "core/append_buffer.h" namespace "draken":
+    # draken::AppendBuffer<T> — DecodedColumn's buffer type. Read-only view here:
+    # Cython never grows or copies a decoded column's buffers.
+    cdef cppclass AppendBuffer[T]:
+        T* data()
         size_t size()
         bint empty()
+        T& operator[](size_t)
 
 
 cdef extern from "metadata.hpp":
@@ -161,26 +164,26 @@ cdef extern from "filesystem.hpp" namespace "rugo":
 
 cdef extern from "decode.hpp":
     cdef cppclass DecodedColumn:
-        vector[uint8_t] valid_bits
+        AppendBuffer[uint8_t] valid_bits
         int32_t num_rows
         int32_t max_rep_level
         int32_t max_def_level
-        vector[int32_t] rep_levels
-        vector[int32_t] def_levels
+        AppendBuffer[int32_t] rep_levels
+        AppendBuffer[int32_t] def_levels
         vector[int32_t] list_def_thresholds
-        vector[int32_t] int32_values
-        vector[int64_t] int64_values
-        ScratchBuffer string_arena  # NOT packed: use string_offsets + string_lens
-        vector[uint32_t] string_offsets
-        vector[int32_t] string_lens
-        vector[int32_t] dict_indices
-        vector[int32_t] dict_int32_values
-        vector[int64_t] dict_int64_values
-        vector[float] dict_float32_values
-        vector[double] dict_float64_values
-        vector[uint8_t] boolean_values
-        vector[float] float32_values
-        vector[double] float64_values
+        AppendBuffer[int32_t] int32_values
+        AppendBuffer[int64_t] int64_values
+        AppendBuffer[uint8_t] string_arena  # NOT packed: use string_offsets + string_lens
+        AppendBuffer[uint32_t] string_offsets
+        AppendBuffer[int32_t] string_lens
+        AppendBuffer[int32_t] dict_indices
+        AppendBuffer[int32_t] dict_int32_values
+        AppendBuffer[int64_t] dict_int64_values
+        AppendBuffer[float] dict_float32_values
+        AppendBuffer[double] dict_float64_values
+        AppendBuffer[uint8_t] boolean_values
+        AppendBuffer[float] float32_values
+        AppendBuffer[double] float64_values
         string type
         string logical_type
         bint is_unsigned
@@ -200,21 +203,21 @@ cdef extern from "decode.hpp":
         int32_t  ext_written
         # byte_array dict arena: NOT packed (the decompressed dict page); use
         # string_dict_offsets + string_dict_lens for every entry's extent.
-        ScratchBuffer    string_dict_arena
-        vector[uint32_t] string_dict_offsets
-        vector[int32_t]  string_dict_lens
+        AppendBuffer[uint8_t] string_dict_arena
+        AppendBuffer[uint32_t] string_dict_offsets
+        AppendBuffer[int32_t]  string_dict_lens
         uint8_t code_width
         bint dict_ordered
         # Packed dictionary codes (for nullable dict columns)
-        vector[uint8_t] dict_codes_array  # Full-width packed code array (code_width bytes/row)
+        AppendBuffer[uint8_t] dict_codes_array  # Full-width packed code array (code_width bytes/row)
         # RLE skip-dense outputs (non-nullable dict columns only)
-        vector[int64_t]  rle_int64_values
-        vector[double]   rle_float64_values
-        vector[int32_t]  rle_run_lengths
+        AppendBuffer[int64_t]  rle_int64_values
+        AppendBuffer[double]   rle_float64_values
+        AppendBuffer[int32_t]  rle_run_lengths
         size_t           rle_total_length
-        vector[uint8_t]  rle_str_arena
-        vector[uint32_t] rle_str_offsets
-        vector[int32_t]  rle_str_lens
+        AppendBuffer[uint8_t]  rle_str_arena
+        AppendBuffer[uint32_t] rle_str_offsets
+        AppendBuffer[int32_t]  rle_str_lens
 
     cdef cppclass DecodedTable:
         vector[vector[DecodedColumn]] row_groups  # [row_group][column]

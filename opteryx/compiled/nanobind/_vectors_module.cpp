@@ -39,7 +39,7 @@ void register_vector_string_case(nb::module_ &m);
 void register_vector_string_misc(nb::module_ &m);
 void register_vector_string_misc2(nb::module_ &m);
 void register_vector_string_misc3(nb::module_ &m);
-void register_vector_string_search(nb::module_ &m);
+void register_vector_array_membership(nb::module_ &m);
 void register_vector_string_slice(nb::module_ &m);
 void register_vector_temporal_arith(nb::module_ &m);
 void register_vector_temporal_convert(nb::module_ &m);
@@ -65,7 +65,7 @@ NB_MODULE(vectors, m) {
     register_vector_string_misc(m);
     register_vector_string_misc2(m);
     register_vector_string_misc3(m);
-    register_vector_string_search(m);
+    register_vector_array_membership(m);
     register_vector_string_slice(m);
     register_vector_temporal_arith(m);
     register_vector_temporal_convert(m);

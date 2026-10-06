@@ -17,6 +17,7 @@
 
 #include "cpu_features.h"
 #include "simd_dispatch.h"
+#include "core/append_buffer.h"
 
 // SIMD-accelerated dictionary gather operations for parquet decoding.
 //
@@ -37,10 +38,10 @@ static inline void gather_int32_scalar(
     const int32_t* dict,
     const int32_t* indices,
     size_t count,
-    std::vector<int32_t>& output)
+    draken::AppendBuffer<int32_t>& output)
 {
     size_t old_sz = output.size();
-    output.resize(old_sz + count);
+    output.resize_uninit(old_sz + count);
     int32_t* dst = output.data() + old_sz;
 
     for (size_t i = 0; i < count; ++i) {
@@ -56,10 +57,10 @@ static inline void gather_int32_avx2(
     const int32_t* dict,
     const int32_t* indices,
     size_t count,
-    std::vector<int32_t>& output)
+    draken::AppendBuffer<int32_t>& output)
 {
     size_t old_sz = output.size();
-    output.resize(old_sz + count);
+    output.resize_uninit(old_sz + count);
     int32_t* dst = output.data() + old_sz;
 
     // Process 8 indices at a time
@@ -86,7 +87,7 @@ static inline void gather_int32_avx2(
 #endif
 
 // Dispatch
-using gather_int32_fn_t = void(*)(const int32_t*, const int32_t*, size_t, std::vector<int32_t>&);
+using gather_int32_fn_t = void(*)(const int32_t*, const int32_t*, size_t, draken::AppendBuffer<int32_t>&);
 
 static inline gather_int32_fn_t get_gather_int32_fn()
 {
@@ -97,7 +98,7 @@ static inline void gather_int32(
     const int32_t* dict,
     const int32_t* indices,
     size_t count,
-    std::vector<int32_t>& output)
+    draken::AppendBuffer<int32_t>& output)
 {
     return get_gather_int32_fn()(dict, indices, count, output);
 }
@@ -111,10 +112,10 @@ static inline void gather_int64_scalar(
     const int64_t* dict,
     const int32_t* indices,
     size_t count,
-    std::vector<int64_t>& output)
+    draken::AppendBuffer<int64_t>& output)
 {
     size_t old_sz = output.size();
-    output.resize(old_sz + count);
+    output.resize_uninit(old_sz + count);
     int64_t* dst = output.data() + old_sz;
 
     for (size_t i = 0; i < count; ++i) {
@@ -128,10 +129,10 @@ static inline void gather_int64_avx2(
     const int64_t* dict,
     const int32_t* indices,
     size_t count,
-    std::vector<int64_t>& output)
+    draken::AppendBuffer<int64_t>& output)
 {
     size_t old_sz = output.size();
-    output.resize(old_sz + count);
+    output.resize_uninit(old_sz + count);
     int64_t* dst = output.data() + old_sz;
 
     // Process 4 indices at a time
@@ -159,7 +160,7 @@ static inline void gather_int64_avx2(
 #endif
 
 // Dispatch
-using gather_int64_fn_t = void(*)(const int64_t*, const int32_t*, size_t, std::vector<int64_t>&);
+using gather_int64_fn_t = void(*)(const int64_t*, const int32_t*, size_t, draken::AppendBuffer<int64_t>&);
 
 static inline gather_int64_fn_t get_gather_int64_fn()
 {
@@ -170,7 +171,7 @@ static inline void gather_int64(
     const int64_t* dict,
     const int32_t* indices,
     size_t count,
-    std::vector<int64_t>& output)
+    draken::AppendBuffer<int64_t>& output)
 {
     return get_gather_int64_fn()(dict, indices, count, output);
 }
@@ -184,10 +185,10 @@ static inline void gather_float32_scalar(
     const float* dict,
     const int32_t* indices,
     size_t count,
-    std::vector<float>& output)
+    draken::AppendBuffer<float>& output)
 {
     size_t old_sz = output.size();
-    output.resize(old_sz + count);
+    output.resize_uninit(old_sz + count);
     float* dst = output.data() + old_sz;
 
     for (size_t i = 0; i < count; ++i) {
@@ -201,10 +202,10 @@ static inline void gather_float32_avx2(
     const float* dict,
     const int32_t* indices,
     size_t count,
-    std::vector<float>& output)
+    draken::AppendBuffer<float>& output)
 {
     size_t old_sz = output.size();
-    output.resize(old_sz + count);
+    output.resize_uninit(old_sz + count);
     float* dst = output.data() + old_sz;
 
     size_t full_groups = count / 8;
@@ -225,7 +226,7 @@ static inline void gather_float32_avx2(
 #endif
 
 // Dispatch
-using gather_float32_fn_t = void(*)(const float*, const int32_t*, size_t, std::vector<float>&);
+using gather_float32_fn_t = void(*)(const float*, const int32_t*, size_t, draken::AppendBuffer<float>&);
 
 static inline gather_float32_fn_t get_gather_float32_fn()
 {
@@ -236,7 +237,7 @@ static inline void gather_float32(
     const float* dict,
     const int32_t* indices,
     size_t count,
-    std::vector<float>& output)
+    draken::AppendBuffer<float>& output)
 {
     return get_gather_float32_fn()(dict, indices, count, output);
 }
@@ -250,10 +251,10 @@ static inline void gather_float64_scalar(
     const double* dict,
     const int32_t* indices,
     size_t count,
-    std::vector<double>& output)
+    draken::AppendBuffer<double>& output)
 {
     size_t old_sz = output.size();
-    output.resize(old_sz + count);
+    output.resize_uninit(old_sz + count);
     double* dst = output.data() + old_sz;
 
     for (size_t i = 0; i < count; ++i) {
@@ -267,10 +268,10 @@ static inline void gather_float64_avx2(
     const double* dict,
     const int32_t* indices,
     size_t count,
-    std::vector<double>& output)
+    draken::AppendBuffer<double>& output)
 {
     size_t old_sz = output.size();
-    output.resize(old_sz + count);
+    output.resize_uninit(old_sz + count);
     double* dst = output.data() + old_sz;
 
     size_t full_groups = count / 4;
@@ -292,7 +293,7 @@ static inline void gather_float64_avx2(
 #endif
 
 // Dispatch
-using gather_float64_fn_t = void(*)(const double*, const int32_t*, size_t, std::vector<double>&);
+using gather_float64_fn_t = void(*)(const double*, const int32_t*, size_t, draken::AppendBuffer<double>&);
 
 static inline gather_float64_fn_t get_gather_float64_fn()
 {
@@ -303,7 +304,7 @@ static inline void gather_float64(
     const double* dict,
     const int32_t* indices,
     size_t count,
-    std::vector<double>& output)
+    draken::AppendBuffer<double>& output)
 {
     return get_gather_float64_fn()(dict, indices, count, output);
 }

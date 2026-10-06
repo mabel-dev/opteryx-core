@@ -24,7 +24,6 @@ from opteryx.compiled.nanobind.vectors import (
     vector_anyop_gte,
     vector_anyop_lte,
 )
-from opteryx.compiled.nanobind.vectors import vector_contains
 from libc.stdint cimport int16_t
 
 from opteryx.compiled.nanobind.vectors import vector_in_list

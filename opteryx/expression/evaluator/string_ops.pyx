@@ -13,7 +13,6 @@ from opteryx.compiled.vector_ops import (
     vector_rlike,
 )
 from opteryx.compiled.nanobind.vectors import vector_in_list
-from opteryx.compiled.nanobind.vectors import vector_contains
 
 from draken.vectors.bool_vector import BoolVector
 import draken.draken_native as _draken_native
@@ -47,19 +46,17 @@ cdef _string_compare(int op_code, vec, right):
         if op_code == OP_GT_EQ:
             return vec.greater_than_or_equals_vector(right)
 
-    # LIKE / RLIKE / InStr family: vector-to-scalar. The pattern arrives wrapped
-    # as a StringVector; the kernels enforce the single-pattern shape rule
+    # LIKE / RLIKE: vector-to-scalar. The pattern arrives wrapped as a
+    # StringVector; the kernels enforce the single-pattern shape rule
     # (data_length == 1) and read the pattern bytes from the arena.
+    # InStr / IInStr are c-native only (compiled_expression → draken_contains);
+    # they have no Python kernel and fall through to the refusal below.
     if op_code == OP_LIKE:
         return vector_like(vec, right, False)
     if op_code == OP_ILIKE:
         return vector_like(vec, right, True)
     if op_code == OP_RLIKE:
         return vector_rlike(vec, right)
-    if op_code == OP_IN_STR:
-        return _wrap_nb_bool_result(vector_contains(_nb_vec_unwrap(vec), _nb_vec_unwrap(right), False))
-    if op_code == OP_I_IN_STR:
-        return _wrap_nb_bool_result(vector_contains(_nb_vec_unwrap(vec), _nb_vec_unwrap(right), True))
     raise NotImplementedError(f"StringVector: unsupported op (code {op_code})")
 
 

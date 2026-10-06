@@ -91,6 +91,12 @@ static void fill_vec(std::vector<T, A>& v) {
     for (size_t i = 0; i < kFill; ++i) v.push_back(static_cast<T>(i + 1));
 }
 
+template <typename T>
+static void fill_vec(draken::AppendBuffer<T>& v) {
+    v.clear();
+    for (size_t i = 0; i < kFill; ++i) v.push_back(static_cast<T>(i + 1));
+}
+
 // ── Test 1: every owning container is cleared ───────────────────────────────
 static void test_containers_cleared() {
     std::printf("reset() clears every owning container\n");

@@ -112,6 +112,13 @@ cdef extern from "telemetry.hpp" namespace "rugo_tel":
     long long ba_emit_dict_entries_sum()
     long long ba_emit_dict_rows_sum()
     long long ba_emit_dense_rows_sum()
+    long long ps_pages_count()
+    long long ps_pages_discarded_count()
+    long long ps_pages_fallthrough_count()
+    long long ps_rows_in_count()
+    long long ps_rows_out_count()
+    long long ps_dict_entries_count()
+    long long ps_dict_entries_pass_count()
     void reset() nogil
 
 
@@ -150,6 +157,14 @@ def get_cpp_telemetry():
         "ba_emit_dict_entries": ba_emit_dict_entries_sum(),
         "ba_emit_dict_rows":    ba_emit_dict_rows_sum(),
         "ba_emit_dense_rows":   ba_emit_dense_rows_sum(),
+        # page search outcomes (counts; docs/PARQUET_PAGE_SEARCH_DESIGN.md §9).
+        "ps_pages":             ps_pages_count(),
+        "ps_pages_discarded":   ps_pages_discarded_count(),
+        "ps_pages_fallthrough": ps_pages_fallthrough_count(),
+        "ps_rows_in":           ps_rows_in_count(),
+        "ps_rows_out":          ps_rows_out_count(),
+        "ps_dict_entries":      ps_dict_entries_count(),
+        "ps_dict_entries_pass": ps_dict_entries_pass_count(),
     }
 
 cimport parquet_reader
@@ -808,7 +823,7 @@ cdef inline bint _row_valid(parquet_reader.DecodedColumn& col, Py_ssize_t i) noe
     return ((col.valid_bits[i >> 3] >> (i & 7)) & 1) != 0
 
 
-cdef inline uint32_t _read_code(vector[uint8_t]& arr, Py_ssize_t i, uint8_t width) noexcept:
+cdef inline uint32_t _read_code(parquet_reader.AppendBuffer[uint8_t]& arr, Py_ssize_t i, uint8_t width) noexcept:
     cdef Py_ssize_t off = i * width
     if width == 1:
         return arr[off]
@@ -1534,7 +1549,7 @@ cdef object _morsel_from_row_group(vector[parquet_reader.DecodedColumn]& row_gro
     cdef list successful_col_names = []
     cdef int32_t num_rows = 0
     cdef Py_ssize_t col_idx
-    cdef parquet_reader.DecodedColumn column
+    cdef parquet_reader.DecodedColumn* cp  # borrowed, never copied
     cdef str col_type
     cdef Vector vec
     cdef double _t0
@@ -1560,77 +1575,77 @@ cdef object _morsel_from_row_group(vector[parquet_reader.DecodedColumn]& row_gro
     _TEL["row_groups"] += 1
 
     for col_idx in range(<Py_ssize_t>row_group_columns.size()):
-        column = row_group_columns[col_idx]
-        if not column.success:
+        cp = &row_group_columns[col_idx]
+        if not cp[0].success:
             continue
 
         _t0 = _time.perf_counter()
 
-        if column.rep_levels.size() > 0:
+        if cp[0].rep_levels.size() > 0:
             # Repeated (LIST) column — reconstruct nested vector from
             # rep/def levels. Must precede the scalar type branches so a
             # list<int64> / list<float64> etc. is never flattened.
-            vec = _make_array_vector(column)
-            if column.string_dict_lens.size() > 0:
+            vec = _make_array_vector(cp[0])
+            if cp[0].string_dict_lens.size() > 0:
                 _TEL["parquet_dict_materialize_fallbacks"] += 1
             _TEL["cython_str_s"] += _time.perf_counter() - _t0
-        elif column.is_decimal:
+        elif cp[0].is_decimal:
             # DECIMAL (any tier): real DECIMAL/DECIMAL128 vector, not a bare
             # int — and never drop the int128 tier.
-            vec = _make_decimal_vector(column, num_rows)
+            vec = _make_decimal_vector(cp[0], num_rows)
             _TEL["cython_other_s"] += _time.perf_counter() - _t0
-        elif column.type == b"int64":
-            if _should_emit_constant_vector(column, num_rows):
-                vec = _make_typed_constant_vector(column, num_rows)
-            elif _should_emit_dictionary_vector(column, num_rows):
-                vec = _make_typed_int64_dictionary_vector(column, num_rows)
+        elif cp[0].type == b"int64":
+            if _should_emit_constant_vector(cp[0], num_rows):
+                vec = _make_typed_constant_vector(cp[0], num_rows)
+            elif _should_emit_dictionary_vector(cp[0], num_rows):
+                vec = _make_typed_int64_dictionary_vector(cp[0], num_rows)
             else:
-                if _decoded_has_dictionary(column):
+                if _decoded_has_dictionary(cp[0]):
                     _TEL["parquet_dict_materialize_fallbacks"] += 1
-                vec = _make_int64_vector(column, num_rows)
+                vec = _make_int64_vector(cp[0], num_rows)
             _TEL["cython_int64_s"] += _time.perf_counter() - _t0
-        elif column.type == b"int32":
-            if _should_emit_constant_vector(column, num_rows):
-                vec = _make_typed_constant_vector(column, num_rows)
-            elif _should_emit_dictionary_vector(column, num_rows):
-                vec = _make_typed_int64_from_int32_dictionary_vector(column, num_rows)
+        elif cp[0].type == b"int32":
+            if _should_emit_constant_vector(cp[0], num_rows):
+                vec = _make_typed_constant_vector(cp[0], num_rows)
+            elif _should_emit_dictionary_vector(cp[0], num_rows):
+                vec = _make_typed_int64_from_int32_dictionary_vector(cp[0], num_rows)
             else:
-                if _decoded_has_dictionary(column):
+                if _decoded_has_dictionary(cp[0]):
                     _TEL["parquet_dict_materialize_fallbacks"] += 1
-                vec = _make_int64_from_int32_vector(column, num_rows)
+                vec = _make_int64_from_int32_vector(cp[0], num_rows)
             _TEL["cython_int64_s"] += _time.perf_counter() - _t0
-        elif column.type == b"byte_array":
-            if _should_emit_constant_vector(column, num_rows):
-                vec = _make_typed_constant_vector(column, num_rows)
-            elif _should_emit_dictionary_vector(column, num_rows):
-                vec = _make_typed_string_dictionary_vector(column, num_rows)
+        elif cp[0].type == b"byte_array":
+            if _should_emit_constant_vector(cp[0], num_rows):
+                vec = _make_typed_constant_vector(cp[0], num_rows)
+            elif _should_emit_dictionary_vector(cp[0], num_rows):
+                vec = _make_typed_string_dictionary_vector(cp[0], num_rows)
             else:
-                if _decoded_has_dictionary(column):
+                if _decoded_has_dictionary(cp[0]):
                     _TEL["parquet_dict_materialize_fallbacks"] += 1
-                vec = _make_string_vector(column, num_rows)
+                vec = _make_string_vector(cp[0], num_rows)
             _TEL["cython_str_s"] += _time.perf_counter() - _t0
-        elif column.type == b"boolean":
-            vec = _make_bool_vector(column, num_rows)
+        elif cp[0].type == b"boolean":
+            vec = _make_bool_vector(cp[0], num_rows)
             _TEL["cython_bool_s"] += _time.perf_counter() - _t0
-        elif column.type == b"float32":
-            if _should_emit_constant_vector(column, num_rows):
-                vec = _make_typed_constant_vector(column, num_rows)
-            elif _should_emit_dictionary_vector(column, num_rows):
-                vec = _make_typed_float32_dictionary_vector(column, num_rows)
+        elif cp[0].type == b"float32":
+            if _should_emit_constant_vector(cp[0], num_rows):
+                vec = _make_typed_constant_vector(cp[0], num_rows)
+            elif _should_emit_dictionary_vector(cp[0], num_rows):
+                vec = _make_typed_float32_dictionary_vector(cp[0], num_rows)
             else:
-                if _decoded_has_dictionary(column):
+                if _decoded_has_dictionary(cp[0]):
                     _TEL["parquet_dict_materialize_fallbacks"] += 1
-                vec = _make_float32_vector(column, num_rows)
+                vec = _make_float32_vector(cp[0], num_rows)
             _TEL["cython_float_s"] += _time.perf_counter() - _t0
-        elif column.type == b"float64":
-            if _should_emit_constant_vector(column, num_rows):
-                vec = _make_typed_constant_vector(column, num_rows)
-            elif _should_emit_dictionary_vector(column, num_rows):
-                vec = _make_typed_float64_dictionary_vector(column, num_rows)
+        elif cp[0].type == b"float64":
+            if _should_emit_constant_vector(cp[0], num_rows):
+                vec = _make_typed_constant_vector(cp[0], num_rows)
+            elif _should_emit_dictionary_vector(cp[0], num_rows):
+                vec = _make_typed_float64_dictionary_vector(cp[0], num_rows)
             else:
-                if _decoded_has_dictionary(column):
+                if _decoded_has_dictionary(cp[0]):
                     _TEL["parquet_dict_materialize_fallbacks"] += 1
-                vec = _make_float64_vector(column, num_rows)
+                vec = _make_float64_vector(cp[0], num_rows)
             _TEL["cython_float_s"] += _time.perf_counter() - _t0
         else:
             # A column the C++ decoder accepted but no materializer here can
@@ -1641,7 +1656,7 @@ cdef object _morsel_from_row_group(vector[parquet_reader.DecodedColumn]& row_gro
             raise NotImplementedError(
                 "rugo parquet reader: no vector materializer for column %r "
                 "of decoded physical type %r"
-                % (col_names[col_idx], column.type.decode("utf-8"))
+                % (col_names[col_idx], cp[0].type.decode("utf-8"))
             )
 
         # Draken logical descriptor the parquet type system cannot express.
@@ -1649,8 +1664,8 @@ cdef object _morsel_from_row_group(vector[parquet_reader.DecodedColumn]& row_gro
         # this attaches the descriptor and changes nothing else. A column with
         # no annotation (every file written before the writer emitted one)
         # falls straight through: absent means "don't know", never "not IPV4".
-        if column.draken_logical_kind != 0:
-            vec = _attach_draken_logical(vec, column.draken_logical_kind,
+        if cp[0].draken_logical_kind != 0:
+            vec = _attach_draken_logical(vec, cp[0].draken_logical_kind,
                                          col_names[col_idx])
 
         _TEL["columns"] += 1

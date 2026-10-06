@@ -2024,18 +2024,21 @@ def _needle_slot(value):
     return None
 
 
-def _flatten_dict_skip_predicates(predicates):
-    """Flatten pushed (col, op, value) triples into dictionary decode-skip inputs:
+def _flatten_value_predicates(predicates):
+    """Flatten pushed (col, op, value) triples into the decoder's per-value
+    predicate inputs (ValuePredicate, rugo/src/parquet/decode.hpp):
     ``(int_needles{col:[int]}, str_preds{col:(kind,[bytes])})``. kind: 1=membership
-    (=/IN), 2=starts-with, 3=ends-with, 4=contains. One predicate per column for
-    strings (first wins) — a single conjunct is sound for skipping.
+    (=/IN), 2=starts-with, 3=ends-with, 4=contains, 5=not-contains. One predicate
+    per column for strings (first wins) — a single conjunct is sound for skipping.
+    `str_preds` keeps the order the conjuncts were pushed in, and the page search
+    picks its column in that order (first registered kind 4/5 column wins).
 
     Every int needle leaves here already in the probe's int64 slot (`_needle_slot`)
     — the two callers below push straight into a `vector[int64_t]` and must not be
     the place that discovers a value does not fit."""
     int_needles = {}
     str_preds = {}
-    _kind = {"_STARTS_WITH": 2, "_ENDS_WITH": 3, "InStr": 4}
+    _kind = {"_STARTS_WITH": 2, "_ENDS_WITH": 3, "InStr": 4, "NotInStr": 5}
     for pred in predicates:
         p_col, p_op, p_val = pred
         if p_op == "Eq":
@@ -2273,6 +2276,42 @@ cdef void _parse_and_cache_footer(
         footer_map[0][path.encode('utf-8')] = footer
 
 
+cdef ParquetFooterRef _footer_after_acquire(
+    str path,
+    dict orig_to_cpp,
+    dict file_sizes,
+    ParquetFooterBytesCache footer_bytes_cache,
+    ParquetFooterMap* footer_map,
+):
+    """The parsed footer of `path` once `_acquire_remote_footers` has run over it:
+    from `footer_map` for a remote file (its postcondition, holding for cache hits
+    and fetches alike), else read directly - a local path needs no signing, so the
+    original path IS the fetch path."""
+    cdef string path_bytes = path.encode("utf-8")
+    cdef ParquetFooterRef footer
+    cdef bytes envelope
+    cdef const uint8_t* buf_ptr
+    cdef size_t buf_size
+    cdef str fetch_url
+    # Probe with count() first: indexing a std::unordered_map default-constructs
+    # an empty FileStats on a miss, which reads downstream as "zero row groups".
+    if footer_map[0].count(path_bytes) != 0:
+        return footer_map[0][path_bytes]
+    footer = _PARSED_FOOTER_CACHE.get(path)
+    if footer.get() == NULL:
+        fetch_url = orig_to_cpp.get(path, path)
+        envelope, _ = _read_footer_payload(
+            fetch_url,
+            file_sizes.get(path, -1) if file_sizes else -1,
+            footer_bytes_cache,
+        )
+        buf_ptr = <const uint8_t*>envelope
+        buf_size = <size_t>len(envelope)
+        footer = _PARSED_FOOTER_CACHE.put(
+            path, ReadParquetMetadataFromBuffer(buf_ptr, buf_size))
+    return footer
+
+
 cpdef list fetch_column_stats_many(
     object filesystem,
     list paths,
@@ -2320,13 +2359,9 @@ cpdef list fetch_column_stats_many(
     cdef list out = []
     cdef dict orig_to_cpp
     cdef ParquetFooterMap footer_map
-    cdef string path_bytes
     cdef ParquetFooterRef footer
     cdef vector[AggColumnStat] agg_stats
-    cdef bytes envelope
-    cdef const uint8_t* buf_ptr
-    cdef size_t buf_size
-    cdef str path, fetch_url
+    cdef str path
 
     if not paths:
         return out
@@ -2336,34 +2371,97 @@ cpdef list fetch_column_stats_many(
                             &footer_map, None, _native_auth_header(filesystem))
 
     for path in paths:
-        path_bytes = path.encode("utf-8")
-        # Every remote file is in `footer_map` — that is _acquire_remote_footers'
-        # postcondition, and it holds for its cache hits as well as its fetches.
-        # Probe with count() first: indexing a std::unordered_map default-constructs
-        # an empty FileStats on a miss, which reads downstream as "zero row groups".
-        if footer_map.count(path_bytes) != 0:
-            footer = footer_map[path_bytes]
-        else:
-            # Local file (or a remote one this build classifies as local). No
-            # signing applies, so the original path IS the fetch path.
-            footer = _PARSED_FOOTER_CACHE.get(path)
-            if footer.get() == NULL:
-                fetch_url = orig_to_cpp.get(path, path)
-                envelope, _ = _read_footer_payload(
-                    fetch_url,
-                    file_sizes.get(path, -1) if file_sizes else -1,
-                    footer_bytes_cache,
-                )
-                buf_ptr = <const uint8_t*>envelope
-                buf_size = <size_t>len(envelope)
-                footer = _PARSED_FOOTER_CACHE.put(
-                    path, ReadParquetMetadataFromBuffer(buf_ptr, buf_size))
+        footer = _footer_after_acquire(path, orig_to_cpp, file_sizes, footer_bytes_cache, &footer_map)
         agg_stats = AggregateColumnStats(deref(footer))
         out.append((
             deref(footer).num_rows,
             <int>deref(footer).row_groups.size(),
             file_column_stats_from_agg(agg_stats),
         ))
+
+    return out
+
+
+cdef extern from "metadata.hpp":
+    bint StatsLogicalIsUnsigned(const string&)
+
+
+cdef object _int_stat_value(const ColumnStats* cs, const string& raw):
+    """One min/max statistic of a signed/unsigned 32/64-bit integer column as a
+    Python int, or None when the column is any other type or the buffer is short
+    (a malformed footer is not a value). Signedness is rugo's own predicate."""
+    cdef bint is_unsigned = StatsLogicalIsUnsigned(deref(cs).logical_type)
+    cdef size_t width
+    if deref(cs).physical_type == b"int32":
+        width = 4
+    elif deref(cs).physical_type == b"int64":
+        width = 8
+    else:
+        return None
+    if raw.size() < width:
+        return None
+    return int.from_bytes(raw.substr(0, width), "little", signed=not is_unsigned)
+
+
+cpdef list row_group_int_bounds(
+    object filesystem,
+    list paths,
+    str column,
+    dict file_sizes = None,
+    ParquetFooterBytesCache footer_bytes_cache = None,
+):
+    """Per-row-group (min, max) Python ints of one top-level integer column, per file.
+
+    Returns a list parallel to `paths`; each entry is a list of (min, max) in row
+    group order, or None for a file whose row groups do not ALL carry integer
+    statistics for the column (a partial list would let a caller reason about a
+    subset of the file). Reads the same signed, concurrent, cached footers
+    `fetch_column_stats_many` does, so a scan of these files finds them parsed.
+    """
+    cdef list out = []
+    cdef dict orig_to_cpp
+    cdef ParquetFooterMap footer_map
+    cdef ParquetFooterRef footer
+    cdef str path
+    cdef bytes name = column.encode("utf-8")
+    cdef size_t g, c
+    cdef const RowGroupStats* rg
+    cdef const ColumnStats* cs
+    cdef list bounds
+    cdef bint found
+
+    if not paths:
+        return out
+
+    orig_to_cpp, _ = _sign_paths(filesystem, paths)
+    _acquire_remote_footers(paths, orig_to_cpp, file_sizes, footer_bytes_cache,
+                            &footer_map, None, _native_auth_header(filesystem))
+
+    for path in paths:
+        footer = _footer_after_acquire(path, orig_to_cpp, file_sizes, footer_bytes_cache, &footer_map)
+        bounds = []
+        for g in range(deref(footer).row_groups.size()):
+            rg = &deref(footer).row_groups[g]
+            found = False
+            for c in range(deref(rg).columns.size()):
+                cs = &deref(rg).columns[c]
+                if deref(cs).name != name:
+                    continue
+                found = True
+                if not (deref(cs).has_min and deref(cs).has_max):
+                    bounds = None
+                    break
+                lo = _int_stat_value(cs, deref(cs).min)
+                hi = _int_stat_value(cs, deref(cs).max)
+                if lo is None or hi is None:
+                    bounds = None
+                    break
+                bounds.append((lo, hi))
+                break
+            if bounds is None or not found:
+                bounds = None
+                break
+        out.append(bounds)
 
     return out
 
@@ -2585,7 +2683,7 @@ cpdef IpcRowGroupSource open_ipc_source(
     # Phase 2: pushed per-value predicates → worker dictionary decode-skip. Same
     # conjunct assumption as min/max row-group pruning above.
     if predicates:
-        int_needles, str_preds = _flatten_dict_skip_predicates(predicates)
+        int_needles, str_preds = _flatten_value_predicates(predicates)
         for cname, needles in int_needles.items():
             if needles and cname not in str_preds:
                 src.pipeline.add_int_needles(cname, needles)
@@ -3286,7 +3384,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     cdef int64_t _needle
     cdef bytes _pat
     if predicates:
-        int_needles, str_preds = _flatten_dict_skip_predicates(predicates)
+        int_needles, str_preds = _flatten_value_predicates(predicates)
         for cname, needles in int_needles.items():
             if needles and cname not in str_preds:
                 _int_v.clear()

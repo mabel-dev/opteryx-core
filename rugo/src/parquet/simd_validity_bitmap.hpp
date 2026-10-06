@@ -11,6 +11,7 @@
 
 #include "cpu_features.h"
 #include "simd_dispatch.h"
+#include "core/append_buffer.h"
 
 // SIMD-accelerated validity bitmap building for parquet decoding.
 //
@@ -34,10 +35,10 @@ static inline void build_validity_bitmap_scalar(
     const int32_t* def_levels,
     size_t total_rows,
     int32_t max_def,
-    std::vector<uint8_t>& bitmap)
+    draken::AppendBuffer<uint8_t>& bitmap)
 {
     int32_t bitmap_bytes = (int32_t)((total_rows + 7) / 8);
-    bitmap.resize(bitmap_bytes, 0);
+    bitmap.resize_fill(bitmap_bytes, 0);
 
     for (size_t i = 0; i < total_rows; ++i) {
         if (def_levels[i] == max_def) {
@@ -53,10 +54,10 @@ static inline void build_validity_bitmap_avx2(
     const int32_t* def_levels,
     size_t total_rows,
     int32_t max_def,
-    std::vector<uint8_t>& bitmap)
+    draken::AppendBuffer<uint8_t>& bitmap)
 {
     int32_t bitmap_bytes = (int32_t)((total_rows + 7) / 8);
-    bitmap.resize(bitmap_bytes, 0);
+    bitmap.resize_fill(bitmap_bytes, 0);
 
     // Create comparison vector with max_def replicated 8 times
     __m256i max_def_vec = _mm256_set1_epi32(max_def);
@@ -118,7 +119,7 @@ static inline void build_validity_bitmap_avx2(
 #endif
 
 // Dispatch
-using build_validity_bitmap_fn_t = void(*)(const int32_t*, size_t, int32_t, std::vector<uint8_t>&);
+using build_validity_bitmap_fn_t = void(*)(const int32_t*, size_t, int32_t, draken::AppendBuffer<uint8_t>&);
 
 static inline build_validity_bitmap_fn_t get_build_validity_bitmap_fn()
 {
@@ -129,7 +130,7 @@ static inline void build_validity_bitmap(
     const int32_t* def_levels,
     size_t total_rows,
     int32_t max_def,
-    std::vector<uint8_t>& bitmap)
+    draken::AppendBuffer<uint8_t>& bitmap)
 {
     return get_build_validity_bitmap_fn()(def_levels, total_rows, max_def, bitmap);
 }

@@ -14,7 +14,7 @@
 //   1. parsing the two Thrift structs (parquet.thrift `ColumnIndex`, `OffsetIndex`);
 //   2. deciding, per page, whether a pushed per-value predicate can match ANY row
 //      of that page — the same conjunct predicates the dictionary decode-skip
-//      consults (DictSkipPredicate kinds), evaluated against page bounds instead
+//      consults (ValuePredicate kinds), evaluated against page bounds instead
 //      of dictionary values.
 //
 // The evaluation is a BOUNDS test and is sound under truncated bounds: the spec
@@ -68,7 +68,7 @@ OffsetIndexData ParseOffsetIndex(const uint8_t *data, size_t size);
 
 // Per-page predicate test. Fills `keep` (size = num_pages; 1 = the page may hold
 // a matching row, 0 = it provably holds none) and returns the number of pages
-// marked 0. `kind` and the value lists follow DictSkipPredicate (decode.hpp):
+// marked 0. `kind` and the value lists follow ValuePredicate (decode.hpp):
 //   0 int membership (=/IN)   int_vals, column physical int32/int64
 //   1 str membership (=/IN)   str_vals, column physical byte_array
 //   2 str starts-with         str_vals (one or more prefixes; ANY may match)

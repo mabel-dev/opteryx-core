@@ -1,21 +1,44 @@
 #pragma once
 #include "compression.hpp"
 #include "metadata.hpp"
+#include "core/append_buffer.h"  // draken::AppendBuffer — every decoded buffer
 #include <cstdint>
 #include <string>
 #include <vector>
 
-// Dictionary-membership decode-skip predicate (Phase 2). Evaluated against a
-// dict-encoded column's dictionary BEFORE decoding its data pages: if no unique
-// value satisfies it, the whole row group yields zero rows (for a pushed
-// conjunct) and the data pages are skipped. Valid for any per-value predicate;
-// kinds below cover what the planner pushes today.
-struct DictSkipPredicate {
+// Per-value predicate pushed to the decoder: one conjunct of the scan's WHERE,
+// of the form `column <op> literal`. Used two ways:
+//   * Dictionary decode-skip (Phase 2): evaluated against a dict-encoded
+//     column's dictionary BEFORE decoding its data pages. If no unique value
+//     satisfies it, the whole row group yields zero rows (for a pushed conjunct)
+//     and the data pages are skipped.
+//   * Page search (docs/PARQUET_PAGE_SEARCH_DESIGN.md), kinds 4/5 only, and only
+//     when the caller also passes a PageSearchOut: the conjunct is evaluated on
+//     the raw page bytes and only passing rows are emitted.
+// Either way it only ever drops rows the conjunct proves dead; the scan's own
+// filter still evaluates the full predicate over whatever survives.
+struct ValuePredicate {
   // -1 none, 0 int membership (=/IN), 1 str membership (=/IN),
-  // 2 str starts-with, 3 str ends-with, 4 str contains.
+  // 2 str starts-with, 3 str ends-with, 4 str contains (LIKE '%x%'),
+  // 5 str not-contains (NOT LIKE '%x%': a value passes when it contains none of
+  // the patterns).
   int kind = -1;
   const std::vector<int64_t>*     int_vals = nullptr;  // kind 0
-  const std::vector<std::string>* str_vals = nullptr;  // kinds 1..4 (operands/patterns)
+  const std::vector<std::string>* str_vals = nullptr;  // kinds 1..5 (operands/patterns)
+};
+
+// Page search result (docs/PARQUET_PAGE_SEARCH_DESIGN.md §3). A caller arms the
+// search on ONE column by passing a non-null PageSearchOut together with a kind
+// 4/5 ValuePredicate; the decoder then emits only the rows that pass (and that a
+// row_mask, if any, selects) and records them here, so the caller can decode the
+// row group's other columns under the same rows.
+struct PageSearchOut {
+  // One byte per row of the column chunk, 1 = emitted. Valid only when `applied`.
+  std::vector<uint8_t> row_mask;
+  // False when the decoder declined the search (not a scalar byte_array column,
+  // not kind 4/5, an empty pattern): the column was decoded exactly as it would
+  // have been without it and `row_mask` is meaningless.
+  bool applied = false;
 };
 
 // PageIndex page-jump plan (page_index.hpp). Built by the IO pipeline from the
@@ -112,10 +135,10 @@ struct DecodedColumnMeta {
 // test_decoded_column_reset_is_complete enforces this. 32 owning containers
 // (29 std::vector + `type` + `logical_type` + `error_message`) + scalars (in DecodedColumnMeta).
 struct DecodedColumn : DecodedColumnMeta {
-  std::vector<uint8_t> valid_bits;       // Arrow-style validity bitmap: 1=valid, 0=null; empty=all-valid
-  std::vector<int32_t> int32_values;
-  std::vector<int64_t> int64_values;
-  std::vector<__int128> int128_values;   // FIXED_LEN_BYTE_ARRAY DECIMAL with width 9..16
+  draken::AppendBuffer<uint8_t> valid_bits;       // Arrow-style validity bitmap: 1=valid, 0=null; empty=all-valid
+  draken::AppendBuffer<int32_t> int32_values;
+  draken::AppendBuffer<int64_t> int64_values;
+  draken::AppendBuffer<__int128> int128_values;   // FIXED_LEN_BYTE_ARRAY DECIMAL with width 9..16
                                          //   (precision > 18 → DECIMAL128). type == "int128".
   // Flat arena for dense (non-dict) byte_array values — one entry per PRESENT
   // value, in stream order. Mirrors the string_dict_* triple below; replaces the
@@ -124,18 +147,18 @@ struct DecodedColumn : DecodedColumnMeta {
   // + string_lens[k]). NOT necessarily packed — a PLAIN page may be appended
   // whole (length prefixes and all) with offsets pointing past each prefix — so
   // offsets + lens are the only authority for a value's extent.
-  rugo::compression::ScratchBuffer string_arena;
-  std::vector<uint32_t> string_offsets;  // byte start offset per value
-  std::vector<int32_t>  string_lens;     // byte length per value
-  std::vector<int32_t> dict_indices;      // non-empty → dict codes; per-row indices
-  std::vector<int32_t> dict_int32_values; // compact dictionary payload for int32 columns
-  std::vector<int64_t> dict_int64_values; // compact dictionary payload for int64 columns
-  std::vector<__int128> dict_int128_values; // compact dictionary payload for int128 (DECIMAL128) columns
-  std::vector<float> dict_float32_values; // compact dictionary payload for float32 columns
-  std::vector<double> dict_float64_values; // compact dictionary payload for float64 columns
-  std::vector<uint8_t> boolean_values;   // for boolean (using uint8_t instead of bool)
-  std::vector<float> float32_values;     // for float32
-  std::vector<double> float64_values;    // for float64
+  draken::AppendBuffer<uint8_t> string_arena;
+  draken::AppendBuffer<uint32_t> string_offsets;  // byte start offset per value
+  draken::AppendBuffer<int32_t> string_lens;     // byte length per value
+  draken::AppendBuffer<int32_t> dict_indices;      // non-empty → dict codes; per-row indices
+  draken::AppendBuffer<int32_t> dict_int32_values; // compact dictionary payload for int32 columns
+  draken::AppendBuffer<int64_t> dict_int64_values; // compact dictionary payload for int64 columns
+  draken::AppendBuffer<__int128> dict_int128_values; // compact dictionary payload for int128 (DECIMAL128) columns
+  draken::AppendBuffer<float> dict_float32_values; // compact dictionary payload for float32 columns
+  draken::AppendBuffer<double> dict_float64_values; // compact dictionary payload for float64 columns
+  draken::AppendBuffer<uint8_t> boolean_values;   // for boolean (using uint8_t instead of bool)
+  draken::AppendBuffer<float> float32_values;     // for float32
+  draken::AppendBuffer<double> float64_values;    // for float64
   std::string type; // "int32", "int64", "string", "boolean", "float32", "float64"
   // The column's LOGICAL type string as metadata.cpp built it ("varchar",
   // "decimal(P,S)", "array<byte_array>", "array<varchar>", …), copied verbatim
@@ -149,8 +172,8 @@ struct DecodedColumn : DecodedColumnMeta {
   std::string logical_type;
   // Raw level vectors (populated when max_rep > 0 or max_def > 0, respectively).
   // Used by the Cython binding for list column offset/null-bitmap reconstruction.
-  std::vector<int32_t> rep_levels;  // one entry per logical value (all pages)
-  std::vector<int32_t> def_levels;  // one entry per logical value (all pages)
+  draken::AppendBuffer<int32_t> rep_levels;  // one entry per logical value (all pages)
+  draken::AppendBuffer<int32_t> def_levels;  // one entry per logical value (all pages)
   // Per-nesting-depth definition-level thresholds, copied verbatim from
   // ColumnStats — see the comment there for the derivation. Size is
   // max_rep_level + 1 for a list column (index 0 unused, depth k at [k]); empty
@@ -171,12 +194,12 @@ struct DecodedColumn : DecodedColumnMeta {
   // entries), with any re-interned values appended after it. offsets + lens are
   // the ONLY authority for an entry's extent; never derive a length from the
   // distance between two offsets or from the arena size.
-  rugo::compression::ScratchBuffer string_dict_arena;
-  std::vector<uint32_t> string_dict_offsets;  // byte start offset per entry
-  std::vector<int32_t>  string_dict_lens;     // byte length per entry
+  draken::AppendBuffer<uint8_t> string_dict_arena;
+  draken::AppendBuffer<uint32_t> string_dict_offsets;  // byte start offset per entry
+  draken::AppendBuffer<int32_t> string_dict_lens;     // byte length per entry
 
   // Packed dictionary codes for nullable dict columns
-  std::vector<uint8_t> dict_codes_array;      // Full-width packed code array (code_width bytes per row)
+  draken::AppendBuffer<uint8_t> dict_codes_array;      // Full-width packed code array (code_width bytes per row)
                                               // One code per row (nulls filled with 0); empty = not used
 
   // ── RLE skip-dense outputs ─────────────────────────────────────────────────
@@ -190,20 +213,20 @@ struct DecodedColumn : DecodedColumnMeta {
   //
   // Exactly one of {rle_int64_values, rle_float64_values, rle_str_lens} is
   // non-empty for a given column; rle_run_lengths is shared across all types.
-  std::vector<int64_t>  rle_int64_values;    // int32 and int64 dict columns
-  std::vector<double>   rle_float64_values;  // float32 and float64 dict columns
-  std::vector<int32_t>  rle_run_lengths;     // shared repeat counts [num_runs]
+  draken::AppendBuffer<int64_t> rle_int64_values;    // int32 and int64 dict columns
+  draken::AppendBuffer<double> rle_float64_values;  // float32 and float64 dict columns
+  draken::AppendBuffer<int32_t> rle_run_lengths;     // shared repeat counts [num_runs]
   // String RLE (byte_array dict columns):
-  std::vector<uint8_t>  rle_str_arena;       // packed bytes for all run string values
-  std::vector<uint32_t> rle_str_offsets;     // byte offset per run in arena [num_runs]
-  std::vector<int32_t>  rle_str_lens;        // byte length per run value [num_runs]
+  draken::AppendBuffer<uint8_t> rle_str_arena;       // packed bytes for all run string values
+  draken::AppendBuffer<uint32_t> rle_str_offsets;     // byte offset per run in arena [num_runs]
+  draken::AppendBuffer<int32_t> rle_str_lens;        // byte length per run value [num_runs]
 
   // Append one dense byte_array value to the string arena triple.
   void append_string(const void* p, size_t len) {
     string_offsets.push_back(static_cast<uint32_t>(string_arena.size()));
     string_lens.push_back(static_cast<int32_t>(len));
     const uint8_t* b = static_cast<const uint8_t*>(p);
-    string_arena.insert(string_arena.end(), b, b + len);
+    string_arena.append(b, len);
   }
 
   // Reset to the default-constructed state WITHOUT releasing vector capacity, so
@@ -242,7 +265,8 @@ struct DecodedColumn : DecodedColumnMeta {
 // The sizes are DERIVED, never hardcoded: sizeof(std::string) is 24 on libc++
 // (ARM dev) and 32 on libstdc++ (x86 prod), so a literal byte count would pin
 // this to one toolchain and break the other's wheel build. Every std::vector<T>
-// instantiation is the same size regardless of T, so counting one of them is exact.
+// (and every draken::AppendBuffer<T>) instantiation is the same size regardless
+// of T, so counting one of each is exact.
 //
 // These two counts are the SINGLE SOURCE OF TRUTH for the member list, shared
 // with the test: decoded_column_reset_test.cpp asserts its own coverage lists
@@ -250,12 +274,18 @@ struct DecodedColumn : DecodedColumnMeta {
 // numbers — bumping a count here to clear this assert breaks the test file until
 // the new member is actually added to its coverage list, and therefore actually
 // filled, reset and checked.
+// kDecodedColumnVectorMembers counts every owning element container (the test's
+// X-list); all but list_def_thresholds (a std::vector copied from ColumnStats)
+// are draken::AppendBuffers.
 constexpr int kDecodedColumnVectorMembers = 29;
+constexpr int kDecodedColumnStdVectorMembers = 1;  // list_def_thresholds
 constexpr int kDecodedColumnStringMembers = 3;  // type, logical_type, error_message
 
 static_assert(sizeof(DecodedColumn) ==
                   sizeof(DecodedColumnMeta)
-                  + kDecodedColumnVectorMembers * sizeof(std::vector<int32_t>)
+                  + kDecodedColumnStdVectorMembers * sizeof(std::vector<int32_t>)
+                  + (kDecodedColumnVectorMembers - kDecodedColumnStdVectorMembers)
+                        * sizeof(draken::AppendBuffer<int32_t>)
                   + kDecodedColumnStringMembers * sizeof(std::string),
               "DecodedColumn gained or lost a member: clear it in reset() AND cover it in "
               "decoded_column_reset_test.cpp (bump the count above and the X-list there).");
@@ -325,6 +355,9 @@ DecodedTable ReadParquet(const uint8_t* data, size_t size,
 // prefer_dict is likewise armed under a mask: a masked dict column comes back
 // Dict-shaped with its codes compacted to the survivors.
 // jump: PageIndex page-jump plan (see PageJumpPlan) — only with a row_mask.
+// search: page search (see PageSearchOut) — armed only together with a kind 4/5
+// skip_pred. The column then emits only the rows that pass the conjunct (ANDed
+// with row_mask when one is given) and search->row_mask says which.
 // In-place (buffer-reusing) primary: decodes into caller-owned `out`, resetting
 // it at entry. Hoist one `out` above a per-row-group column loop and pass it each
 // column to reuse its vector capacity across columns. `out` is a function-local
@@ -337,19 +370,21 @@ void DecodeColumnFromChunk(DecodedColumn& out, const uint8_t* data, size_t size,
                            float*   ext_float32 = nullptr,
                            const uint8_t* row_mask = nullptr,
                            bool prefer_dict = false,
-                           const DictSkipPredicate* skip_pred = nullptr,
-                           const PageJumpPlan* jump = nullptr);
+                           const ValuePredicate* skip_pred = nullptr,
+                           const PageJumpPlan* jump = nullptr,
+                           PageSearchOut* search = nullptr);
 
 // In-place convenience: mask-only (matches the 4-arg by-value convenience below).
 inline void DecodeColumnFromChunk(DecodedColumn& out, const uint8_t* data, size_t size,
                                   const ColumnStats* target_col,
                                   const uint8_t* row_mask,
                                   bool prefer_dict = false,
-                                  const DictSkipPredicate* skip_pred = nullptr,
-                                  const PageJumpPlan* jump = nullptr) {
+                                  const ValuePredicate* skip_pred = nullptr,
+                                  const PageJumpPlan* jump = nullptr,
+                                  PageSearchOut* search = nullptr) {
   DecodeColumnFromChunk(out, data, size, target_col,
                         nullptr, nullptr, nullptr, nullptr,
-                        row_mask, prefer_dict, skip_pred, jump);
+                        row_mask, prefer_dict, skip_pred, jump, search);
 }
 
 // By-value overload (thin shim over the in-place primary — see decode_column.cpp).
@@ -361,7 +396,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t* data, size_t size,
                                     float*   ext_float32 = nullptr,
                                     const uint8_t* row_mask = nullptr,
                                     bool prefer_dict = false,
-                                    const DictSkipPredicate* skip_pred = nullptr,
+                                    const ValuePredicate* skip_pred = nullptr,
                                     const PageJumpPlan* jump = nullptr);
 
 // Convenience overload: no ext_* zero-copy buffers, only a row_mask.
@@ -370,7 +405,7 @@ inline DecodedColumn DecodeColumnFromChunk(const uint8_t* data, size_t size,
                                            const ColumnStats* target_col,
                                            const uint8_t* row_mask,
                                            bool prefer_dict = false,
-                                           const DictSkipPredicate* skip_pred = nullptr,
+                                           const ValuePredicate* skip_pred = nullptr,
                                            const PageJumpPlan* jump = nullptr) {
   return DecodeColumnFromChunk(data, size, target_col,
                                nullptr, nullptr, nullptr, nullptr,

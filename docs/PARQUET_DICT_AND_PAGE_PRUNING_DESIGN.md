@@ -54,12 +54,12 @@ Three stages, Python → Cython → C++:
 | Extract | [predicates.py:227](opteryx/connectors/parquet_io/predicates.py:227) `_try_extract_str_func` | pulls `_STARTS_WITH` / `_ENDS_WITH` / `InStr` (the optimizer's LIKE lowering) out of the pushed expression tree |
 | Extract | [predicates.py:458](opteryx/connectors/parquet_io/predicates.py:458) `_can_prune_rowgroup`, [:515](opteryx/connectors/parquet_io/predicates.py:515) `row_group_may_satisfy` | the **separate** footer min/max row-group prune |
 | Encode | [pool_reader.pyx:1368](opteryx/connectors/parquet_io/pool_reader.pyx:1368) `_needle_slot` | puts every int needle into the probe's int64 slot (two's-complement for values above `INT64_MAX`) |
-| Flatten | [pool_reader.pyx:1405](opteryx/connectors/parquet_io/pool_reader.pyx:1405) `_flatten_dict_skip_predicates` | `(col, op, val)` triples → `int_needles` / `str_preds`; called at [:1940](opteryx/connectors/parquet_io/pool_reader.pyx:1940) and [:2421](opteryx/connectors/parquet_io/pool_reader.pyx:2421) |
+| Flatten | [pool_reader.pyx:1405](opteryx/connectors/parquet_io/pool_reader.pyx:1405) `_flatten_value_predicates` (was `_flatten_dict_skip_predicates`) | `(col, op, val)` triples → `int_needles` / `str_preds`; called at [:1940](opteryx/connectors/parquet_io/pool_reader.pyx:1940) and [:2421](opteryx/connectors/parquet_io/pool_reader.pyx:2421) |
 | Carry | [io_pipeline.hpp:1626](rugo/src/parquet/io_pipeline.hpp:1626) `dict_preds_`, setters at [:2720](rugo/src/parquet/io_pipeline.hpp:2720) `add_int_needles` / [:2724](rugo/src/parquet/io_pipeline.hpp:2724) `add_str_pred` | per-column predicate carried to the decode worker |
 | **Enforce** | [decode_column.cpp:910](rugo/src/parquet/decode_column.cpp:910) soundness guard, [:933–:995](rugo/src/parquet/decode_column.cpp:933) the probe | evaluates the conjunct against the just-decoded dictionary; on disjoint sets `result.dict_all_filtered` ([decode.hpp:81](rugo/src/parquet/decode.hpp:81)) and returns **without decoding any data page** |
 | Propagate | [io_pipeline.hpp:2218–2324](rugo/src/parquet/io_pipeline.hpp:2218) | a filtered column sets `result.empty_filtered` ([:208](rugo/src/parquet/io_pipeline.hpp:208)); the whole row group's remaining columns are abandoned and the consumer skips the morsel entirely |
 
-The predicate struct is `DictSkipPredicate` at [decode.hpp:12](rugo/src/parquet/decode.hpp:12).
+The predicate struct is `ValuePredicate` (renamed from `DictSkipPredicate` 2026-10-06) at [decode.hpp:12](rugo/src/parquet/decode.hpp:12).
 
 ### A.2 Exactly how far it reaches today
 

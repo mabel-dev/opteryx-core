@@ -290,6 +290,7 @@ decoded-column-reset-test: ## Build and run the DecodedColumn::reset() completen
 	@cd /tmp/opteryx-tests && \
 	  clang++ -std=c++20 -O2 -Wall -Wextra \
 	    -I$(CURDIR)/rugo/src/parquet \
+	    -I$(CURDIR)/draken \
 	    -I$(CURDIR)/third_party/ankerl \
 	    $(CURDIR)/rugo/src/parquet/decoded_column_reset_test.cpp \
 	    -o decoded_column_reset_test

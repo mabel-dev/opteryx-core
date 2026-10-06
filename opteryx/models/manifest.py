@@ -249,6 +249,15 @@ class Manifest:
             return None
         return self.native.value_bounds(position)
 
+    def file_distinct_floors(self, column: str) -> Optional[List[int]]:
+        """Per-file PROVEN distinct non-null count of one column, in file order (0 =
+        nothing proven), or ``None`` when the column is unknown. A floor, never an
+        estimate: see ``NativeManifest.distinct_floors``."""
+        position = self.position_of(column)
+        if position is None:
+            return None
+        return self.native.distinct_floors(position)
+
     def show_morsel(self):
         """SHOW MANIFEST's rows (bounds rendered as text)."""
         return self.native.show_morsel()

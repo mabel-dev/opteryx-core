@@ -38,6 +38,7 @@
 #include "ops/kernels/like_program.h"    // draken_like_prog::match — SIMD op-program LIKE matcher
 #include "ops/kernels/utf8_ci_match.h"   // draken_utf8ci::* — Unicode casefold match for ci+NVARCHAR
 #include "xxhash.h"                // XXH3_64bits — long-slot hash32, same as every builder
+#include "simd_find.h"             // simd_contains_cs — draken/simd shared search
 
 namespace {
 
@@ -1217,20 +1218,7 @@ static inline bool fk_contains_hit(const uint8_t* hay, uint32_t hlen,
     if (nlen == 0) return true;
     if (nlen > hlen) return false;
     if (ci_utf8) return draken_utf8ci::contains(hay, hlen, ndl, nlen);
-    if (!ci) {
-        const uint8_t first = ndl[0];
-        const uint8_t* cur = hay;
-        const uint8_t* end = hay + hlen - nlen + 1;
-        while (cur < end) {
-            const uint8_t* found = static_cast<const uint8_t*>(
-                std::memchr(cur, first, static_cast<size_t>(end - cur)));
-            if (found == nullptr) return false;
-            if (nlen == 1 || std::memcmp(found + 1, ndl + 1, nlen - 1) == 0)
-                return true;
-            cur = found + 1;
-        }
-        return false;
-    }
+    if (!ci) return simd_contains_cs(hay, hlen, ndl, nlen);
     for (uint32_t s0 = 0; s0 + nlen <= hlen; ++s0) {
         uint32_t k = 0;
         while (k < nlen && fk_ascii_lower(hay[s0 + k]) == fk_ascii_lower(ndl[k])) ++k;

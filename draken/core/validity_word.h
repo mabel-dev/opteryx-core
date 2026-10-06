@@ -263,8 +263,7 @@ static const uint32_t draken_identity64[64] = {
 // ns/row, and the no-null column regressed +80%. The 8-way byte pack has NO
 // read-modify-write dependency on dst, so the eight string comparisons issue
 // independently; a per-row `dst[i>>3] |= ...` serialises them behind a
-// loop-carried dependency on one byte. The packing is load-bearing here even
-// though it buys nothing in the (already per-row) string_search.h kernels.
+// loop-carried dependency on one byte. The packing is load-bearing here.
 //
 // So this macro changes ONE thing: a word with no valid rows at all is skipped,
 // which is where the wasted work actually is. The body — the pack and store —

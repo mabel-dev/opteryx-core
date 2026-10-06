@@ -36,7 +36,6 @@ from draken.core.buffers cimport (
 )
 from opteryx.compiled.structures.carchar_set cimport CarcharSetWrapper
 from opteryx.compiled.structures.perfect_hash_set cimport PerfectHashSet
-from opteryx.compiled.structures.buffers cimport IntBuffer, Int32Buffer
 from cpython.array cimport array
 import draken.draken_native as _draken_native
 

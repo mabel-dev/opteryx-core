@@ -106,6 +106,28 @@ static inline void* draken_calloc(size_t count, size_t size) {
     return p;
 }
 
+// Resize a draken_malloc'd block, preserving its contents up to the smaller
+// size; new bytes are uninitialised. Unlike malloc + memcpy + free, the
+// allocator may grow the block in place or remap its pages rather than copy.
+// Returns NULL on failure with the original block untouched, like realloc.
+// Pairs with draken_free.
+static inline void* draken_realloc(void* ptr, size_t size) {
+    void* p = realloc(ptr, size);
+    const DrakenTraceConfig* tc = draken_trace_config();
+    if (tc->enabled && p != nullptr) {
+        size_t asize = DRAKEN_USABLE_SIZE(p);
+        if (asize >= tc->min_sz && asize <= tc->max_sz) {
+            fprintf(stderr, "DRAKEN_REALLOC TRACE: old=%p ptr=%p req=%zu size=%zu\n", ptr, p, size, asize);
+            void* bt[32];
+            int bt_sz = backtrace(bt, 32);
+            backtrace_symbols_fd(bt, bt_sz, STDERR_FILENO);
+            fprintf(stderr, "-- end DRAKEN_REALLOC TRACE --\n");
+            fflush(stderr);
+        }
+    }
+    return p;
+}
+
 static inline void* draken_aligned_malloc(size_t size, size_t alignment) {
     // posix_memalign requires alignment to be a power of two and a multiple of
     // sizeof(void*); clamp small alignments up (over-alignment is harmless).

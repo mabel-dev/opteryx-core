@@ -38,12 +38,6 @@ from opteryx.compiled.nanobind.vectors import (
     vector_replace,
 )
 from opteryx.compiled.nanobind.vectors import (
-    vector_ci_ends_with,
-    vector_ci_starts_with,
-    vector_ends_with,
-    vector_starts_with,
-)
-from opteryx.compiled.nanobind.vectors import (
     vector_length,
     vector_octet_length,
     vector_string_length,
@@ -69,6 +63,41 @@ from opteryx.expression.functions import (
 # NULL is refused by the `string` family), so it is the result type.
 _SAME_STRING_TYPE = ReturnSpec(mode="same_as_arg", arg_index=0)
 
+
+
+def _native_only_affix(name, summary, cost):
+    """`_STARTS_WITH` / `_ENDS_WITH` and their `_CI_` forms — the optimizer's
+    `LIKE 'x%'` / `LIKE '%x'` rewrites. c-native only: compiled_expression lowers
+    them to draken_starts_with / draken_ends_with (its `_affix_map`), so there is
+    no Python kernel (callable_ref None). The nanobind vector_starts_with /
+    vector_ends_with this used to point at were never dispatched (traced
+    2026-10-06 over the sql and battery suites) and are deleted."""
+    return FunctionDefinition(
+        name=name,
+        aliases=(),
+        category="misc",
+        volatility="immutable",
+        deterministic=True,
+        lifecycle=LifecycleSpec(status="active"),
+        summary=summary,
+        documentation=summary,
+        overloads=(
+            FunctionOverload(
+                id=f"{name}_default",
+                parameters=(
+                    ParameterSpec(name="haystack", type_family="string"),
+                    ParameterSpec(name="needle", type_family="string", constant_only=True),
+                ),
+                return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_BOOLEAN),
+                kernel=KernelSpec(
+                    engine="draken",
+                    id="default",
+                    callable_ref=None,
+                    cost_us_per_million=cost,
+                ),
+            ),
+        ),
+    )
 
 def get_builtin_text_functions() -> List[FunctionDefinition]:
     """
@@ -348,54 +377,10 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
             summary="Extract rightmost characters.",
             cost=8458.26,
         ),
-        _make(
-            "_STARTS_WITH",
-            vector_starts_with,
-            _CT_BOOLEAN,
-            (
-                ParameterSpec(name="haystack", type_family="string"),
-                ParameterSpec(name="needle", type_family="string", constant_only=True),
-            ),
-            engine="draken",
-            summary="Internal prefix match (case-sensitive).",
-            cost=2862.78,
-        ),
-        _make(
-            "_CI_STARTS_WITH",
-            vector_ci_starts_with,
-            _CT_BOOLEAN,
-            (
-                ParameterSpec(name="haystack", type_family="string"),
-                ParameterSpec(name="needle", type_family="string", constant_only=True),
-            ),
-            engine="draken",
-            summary="Internal prefix match (case-insensitive).",
-            cost=1746.19,
-        ),
-        _make(
-            "_ENDS_WITH",
-            vector_ends_with,
-            _CT_BOOLEAN,
-            (
-                ParameterSpec(name="haystack", type_family="string"),
-                ParameterSpec(name="needle", type_family="string", constant_only=True),
-            ),
-            engine="draken",
-            summary="Internal suffix match (case-sensitive).",
-            cost=2892.33,
-        ),
-        _make(
-            "_CI_ENDS_WITH",
-            vector_ci_ends_with,
-            _CT_BOOLEAN,
-            (
-                ParameterSpec(name="haystack", type_family="string"),
-                ParameterSpec(name="needle", type_family="string", constant_only=True),
-            ),
-            engine="draken",
-            summary="Internal suffix match (case-insensitive).",
-            cost=1734.30,
-        ),
+        _native_only_affix("_STARTS_WITH", "Internal prefix match (case-sensitive).", 2862.78),
+        _native_only_affix("_CI_STARTS_WITH", "Internal prefix match (case-insensitive).", 1746.19),
+        _native_only_affix("_ENDS_WITH", "Internal suffix match (case-sensitive).", 2892.33),
+        _native_only_affix("_CI_ENDS_WITH", "Internal suffix match (case-insensitive).", 1734.30),
     ]
 
 

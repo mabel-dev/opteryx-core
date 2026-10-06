@@ -24,7 +24,6 @@ from opteryx.compiled.vector_ops import (
     vector_rlike,
 )
 from opteryx.compiled.nanobind.vectors import vector_in_list
-from opteryx.compiled.nanobind.vectors import vector_contains
 # Phase 4: draken_compare (string-keyed) deleted; use draken_compare_int with
 # bind-time-resolved op_code. The shim below stays plan-time-only.
 from opteryx.expression.evaluator.comparisons import draken_compare_int
@@ -249,10 +248,6 @@ def _inner_filter_operations(arr, operator, value):
         return like_match(raw_arr, value, operator)
     elif operator.startswith("RLike"):
         return rlike_match(raw_arr, value, operator)
-    elif operator.startswith("ArrayContains"):
-        from draken.draken_native import vector_from_string_sequence as _vfss
-        # vector_from_string_sequence is bytes-only — encode the needle.
-        return vector_contains(raw_arr, _vfss([str(value).encode("utf-8")]))
     else:
         # AnyOp* / AllOp* / AtArrow are dispatched via
         # evaluator.comparisons.draken_compare before they can reach here.

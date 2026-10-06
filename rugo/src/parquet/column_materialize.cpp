@@ -33,7 +33,7 @@ DrakenPtr<T> draken_alloc(size_t count) {
     return DrakenPtr<T>(p);
 }
 
-inline uint32_t read_code(const std::vector<uint8_t>& arr, size_t i, uint8_t width) {
+inline uint32_t read_code(const draken::AppendBuffer<uint8_t>& arr, size_t i, uint8_t width) {
     size_t off = (size_t)i * width;
     if (width == 1) return arr[off];
     if (width == 2) return arr[off] | ((uint32_t)arr[off + 1] << 8);
@@ -97,8 +97,8 @@ MaterializedColumn finish(DrakenType type, uint32_t length, DrakenPtr<T>& data,
 // int64 tier read a physical int32 column without a second copy of the loop.
 template <typename T, typename DictT, typename PlainT>
 void scatter_unscaled(const DecodedColumn& col, int32_t num_rows,
-                      const std::vector<DictT>& dict_vals,
-                      const std::vector<PlainT>& plain_vals,
+                      const draken::AppendBuffer<DictT>& dict_vals,
+                      const draken::AppendBuffer<PlainT>& plain_vals,
                       bool has_dict, bool is_rle,
                       T* out, uint8_t* validity, bool* has_nulls) {
     const bool has_v = !col.valid_bits.empty();
@@ -224,8 +224,8 @@ inline void put_int(OutT* out, size_t i, MidT v, const char* tname) {
 template <typename OutT, typename MidT, typename RleMidT,
           typename DictT, typename PlainT>
 void scatter_int(const DecodedColumn& col, int32_t num_rows,
-                 const std::vector<DictT>& dict_vals,
-                 const std::vector<PlainT>& plain_vals,
+                 const draken::AppendBuffer<DictT>& dict_vals,
+                 const draken::AppendBuffer<PlainT>& plain_vals,
                  bool has_dict, bool is_rle,
                  OutT* out, uint8_t* validity, bool* has_nulls,
                  const char* tname) {
@@ -314,8 +314,8 @@ MaterializedColumn build_int(const DecodedColumn& col, int32_t num_rows,
 // way in — see the banner above.
 template <typename OutT, typename DictT, typename PlainT>
 void scatter_float(const DecodedColumn& col, int32_t num_rows,
-                   const std::vector<DictT>& dict_vals,
-                   const std::vector<PlainT>& plain_vals,
+                   const draken::AppendBuffer<DictT>& dict_vals,
+                   const draken::AppendBuffer<PlainT>& plain_vals,
                    bool has_dict, bool is_rle,
                    OutT* out, uint8_t* validity, bool* has_nulls) {
     const bool has_v = !col.valid_bits.empty();

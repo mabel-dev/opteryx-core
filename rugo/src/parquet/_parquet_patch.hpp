@@ -746,7 +746,7 @@ inline std::vector<uint8_t> PatchParquetColumns(const uint8_t *src, size_t src_l
         // convention the writer reads, so it is handed straight over. An empty
         // one means all-valid, which is also the writer's nullptr.
         if (!dc.valid_bits.empty()) {
-          mask_store.emplace_back(dc.valid_bits);
+          mask_store.emplace_back(dc.valid_bits.begin(), dc.valid_bits.end());
           ci.validity = mask_store.back().data();
         }
         // Let the writer's own auto-dictionary decide, exactly as it would for

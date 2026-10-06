@@ -104,6 +104,17 @@ def _refuse_vector_columns(schema: RelationDescriptor, blob_name: str) -> Relati
     return schema
 
 
+# skene StatFlag kStatMin | kStatMax (skene/include/skene/format.h): a row group's
+# min/max ordinals are only meaningful when both are tracked.
+_SKENE_STAT_MIN_MAX = 0b11
+
+
+def _skene_node_count(node) -> int:
+    """A schema node and every descendant: the width it takes in a row group's
+    depth-first statistics list."""
+    return 1 + sum(_skene_node_count(child) for child in node["children"])
+
+
 class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable):
     """
     Transient table reader for filesystem-based datasets.
@@ -240,6 +251,58 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         # Normalize dataset path
         if self.dataset and OS_SEP not in self.dataset and "/" not in self.dataset:
             self.dataset = self.dataset.replace(".", OS_SEP)
+
+    def row_group_key_bounds(self, column: str, paths, sizes):
+        """Per-row-group ``(min, max, proven_distinct)`` of one top-level integer
+        column, for each of `paths` (parallel list).
+
+        An entry is a list in row-group order, or ``None`` for a file whose row groups
+        do not ALL carry integer statistics for the column - a partial list would let
+        a caller reason about a subset of the file. ``proven_distinct`` is a count the
+        footer PROVES (skene's exact row-group count), 0 where it only estimates or
+        does not track one; parquet footers carry no such flag, so it is always 0
+        there.
+        """
+        sized = {path: size for path, size in zip(paths, sizes, strict=True)}
+        if self.dataset_file_format == PARQUET:
+            from opteryx.connectors.parquet_io.pool_reader import row_group_int_bounds
+
+            return [
+                None if groups is None else [(lo, hi, 0) for lo, hi in groups]
+                for groups in row_group_int_bounds(self.filesystem, list(paths), column, sized)
+            ]
+        if self.dataset_file_format == SKENE:
+            return [self._skene_row_group_key_bounds(column, path) for path in paths]
+        raise RuntimeError(
+            f"row_group_key_bounds is not served for {self.dataset_file_format} datasets; "
+            "the caller must check supports_row_group_key_bounds"
+        )
+
+    def _skene_row_group_key_bounds(self, column: str, path: str):
+        from skene import read_metadata as _skene_read_metadata
+
+        file_obj = self.filesystem.open_input_file(path)
+        try:
+            metadata = _skene_read_metadata(file_obj.memoryview)
+        finally:
+            file_obj.close()
+        # A row group's statistics list runs depth-first over the schema nodes,
+        # children included, so a column's slot is the node count before it.
+        slot = 0
+        for node in metadata["columns"]:
+            if node["name"] == column:
+                break
+            slot += _skene_node_count(node)
+        else:
+            return None
+        groups = []
+        for row_group in metadata["row_groups"]:
+            stats = row_group["column_statistics"][slot]
+            if stats is None or (stats["flags"] & _SKENE_STAT_MIN_MAX) != _SKENE_STAT_MIN_MAX:
+                return None
+            proven = stats["ndv"] if stats["ndv_exact"] else 0
+            groups.append((stats["min_ordinal"], stats["max_ordinal"], proven))
+        return groups
 
     def can_push_topn(self, order_by) -> bool:
         return single_physical_column_topn(order_by)
@@ -729,6 +792,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable)
         self.supports_limit_pushdown = dataset_fmt == PARQUET
         # Only ParquetReadNode reads the top-N stamp; skene/jsonl/csv ignore it.
         self.supports_topn_pushdown = dataset_fmt == PARQUET
+        self.supports_row_group_key_bounds = dataset_fmt in (PARQUET, SKENE)
         if dataset_fmt == SKENE:
             # Per-instance, alongside the limit gate above and for the same reason:
             # one class fronts readers with genuinely different capabilities, and

@@ -1046,11 +1046,16 @@ static void serialize_core(const DecodedColumn& col,
             // dict_indices present but the dict table lives in the dense string
             // arena (old-style producer) — the triples share a layout, so the
             // promotion is a straight copy into the dict fields.
-            DecodedColumn promoted = col;
+            // Only what serialize_string_dict reads (scalars, valid_bits, the
+            // codes, the dict triple) is carried over — not the whole column.
+            DecodedColumn promoted;
+            static_cast<DecodedColumnMeta&>(promoted) = col;
+            promoted.valid_bits.assign(col.valid_bits.begin(), col.valid_bits.end());
+            promoted.dict_indices.assign(col.dict_indices.begin(), col.dict_indices.end());
+            promoted.dict_codes_array.assign(col.dict_codes_array.begin(), col.dict_codes_array.end());
             promoted.string_dict_arena.assign(col.string_arena.begin(), col.string_arena.end());
-            promoted.string_dict_offsets = col.string_offsets;
-            promoted.string_dict_lens    = col.string_lens;
-            promoted.code_width = col.code_width;
+            promoted.string_dict_offsets.assign(col.string_offsets.begin(), col.string_offsets.end());
+            promoted.string_dict_lens.assign(col.string_lens.begin(), col.string_lens.end());
             serialize_string_dict(out, promoted);
         } else {
             // Plain (non-dict) strings

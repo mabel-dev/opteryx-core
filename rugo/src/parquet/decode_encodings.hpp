@@ -10,6 +10,8 @@
 #include "decode_primitives.hpp"
 #include <cstdint>
 #include <vector>
+
+#include "core/append_buffer.h"
 #include <string>
 
 // ---------------------------------------------------------------------------
@@ -34,20 +36,20 @@ size_t SkipRLEBitPackedLevels(const uint8_t *data, size_t max_size,
 // on-disk data before calling this function (see DecodeColumnFromChunk).
 int32_t DecodeRLEBitPackedIndices(const uint8_t *data, size_t data_size,
                                   int32_t num_values, int bit_width,
-                                  std::vector<int32_t> &indices);
+                                  draken::AppendBuffer<int32_t> &indices);
 
 // Variant that also returns the number of bytes consumed (including the 4-byte prefix).
 // On success, updates `bytes_consumed` with the total bytes read.
 // Returns the number of indices decoded, or -1 on error.
 int32_t DecodeRLEBitPackedIndicesWithConsumption(const uint8_t *data, size_t data_size,
                                                  int32_t num_values, int bit_width,
-                                                 std::vector<int32_t> &indices,
+                                                 draken::AppendBuffer<int32_t> &indices,
                                                  size_t &bytes_consumed);
 
 // Variant with no 4-byte length prefix: data points directly at the RLE stream.
 int32_t DecodeRLEBitPackedIndicesNoPrefix(const uint8_t *data, size_t data_size,
                                           int32_t num_values, int bit_width,
-                                          std::vector<int32_t> &indices);
+                                          draken::AppendBuffer<int32_t> &indices);
 
 // Selective variant of DecodeRLEBitPackedIndicesNoPrefix: walks the same stream
 // of `num_values` codes but APPENDS only the codes whose `sel` byte is non-zero
@@ -59,7 +61,7 @@ int32_t DecodeRLEBitPackedIndicesNoPrefix(const uint8_t *data, size_t data_size,
 int32_t DecodeRLEBitPackedIndicesSelected(const uint8_t *data, size_t data_size,
                                           int32_t num_values, int bit_width,
                                           const uint8_t *sel,
-                                          std::vector<int32_t> &out);
+                                          draken::AppendBuffer<int32_t> &out);
 
 // Header-only probe: is this level stream a SINGLE RLE run of `expect_value`
 // that covers at least `num_values` entries?  Used to recognise the
@@ -83,8 +85,8 @@ bool LevelStreamIsSingleRunOf(const uint8_t *data, size_t data_size,
 // Returns total values decoded, or -1 on error.
 int32_t DecodeRLEBitPackedIndicesToRuns(const uint8_t *data, size_t data_size,
                                         int32_t num_values, int bit_width,
-                                        std::vector<int32_t> &run_codes,
-                                        std::vector<int32_t> &run_counts);
+                                        draken::AppendBuffer<int32_t> &run_codes,
+                                        draken::AppendBuffer<int32_t> &run_counts);
 
 // ---------------------------------------------------------------------------
 // DELTA_BINARY_PACKED (encoding id 4) -- template; must live in header

@@ -6,6 +6,7 @@
 //                             file buffer and delegates to DecodeColumnFromChunk
 
 #include "decode.hpp"
+#include "page_search.hpp"
 #include "decode_primitives.hpp"
 #include "decode_encodings.hpp"
 #include "decode_page.hpp"
@@ -154,9 +155,9 @@ inline int32_t InternByteArrayToDictionary(
     const char* value_ptr,
     int32_t value_len,
     StringInternTable& table,
-    rugo::compression::ScratchBuffer& arena,
-    std::vector<uint32_t>& offsets,
-    std::vector<int32_t>& lens) {
+    draken::AppendBuffer<uint8_t>& arena,
+    draken::AppendBuffer<uint32_t>& offsets,
+    draken::AppendBuffer<int32_t>& lens) {
   if (table.slots.empty()) table.resize_to(64);
   // Grow at 75% load factor.
   if ((table.used + 1) * 4 > (table.mask + 1) * 3) {
@@ -169,9 +170,9 @@ inline int32_t InternByteArrayToDictionary(
     if (s.len < 0) {
       // Empty: append to arena, register slot.
       const uint32_t off = static_cast<uint32_t>(arena.size());
-      arena.insert(arena.end(),
+      arena.append(
                    reinterpret_cast<const uint8_t*>(value_ptr),
-                   reinterpret_cast<const uint8_t*>(value_ptr) + value_len);
+                   static_cast<size_t>(value_len));
       const int32_t code = static_cast<int32_t>(lens.size());
       offsets.push_back(off);
       lens.push_back(value_len);
@@ -192,9 +193,9 @@ inline int32_t InternByteArrayToDictionary(
 
 inline void SeedDictionaryMapFromArena(
     StringInternTable& table,
-    const rugo::compression::ScratchBuffer& arena,
-    const std::vector<uint32_t>& offsets,
-    const std::vector<int32_t>& lens) {
+    const draken::AppendBuffer<uint8_t>& arena,
+    const draken::AppendBuffer<uint32_t>& offsets,
+    const draken::AppendBuffer<int32_t>& lens) {
   if (lens.empty()) return;
   size_t cap = 64;
   while (cap < lens.size() * 2) cap *= 2;
@@ -226,7 +227,7 @@ inline void SeedDictionaryMapFromArena(
 // those whose `sel` byte is set, in place. sel is indexed from the page's first
 // PRESENT value, which is v[from].
 template <typename T>
-inline void compact_page_tail(std::vector<T>& v, size_t from, const uint8_t* sel) {
+inline void compact_page_tail(draken::AppendBuffer<T>& v, size_t from, const uint8_t* sel) {
   const size_t n = v.size() - from;
   if (n == 0) return;
   T* p = v.data() + from;
@@ -235,34 +236,34 @@ inline void compact_page_tail(std::vector<T>& v, size_t from, const uint8_t* sel
     p[w] = p[i];
     w += sel[i];
   }
-  v.resize(from + w);
+  v.resize_uninit(from + w);   // shrink only
 }
 
-inline void GatherDictValues(const std::vector<int32_t>& dict,
+inline void GatherDictValues(const draken::AppendBuffer<int32_t>& dict,
                              const int32_t* codes, size_t n,
-                             std::vector<int32_t>& out) {
+                             draken::AppendBuffer<int32_t>& out) {
   parquet_simd::gather_int32(dict.data(), codes, n, out);
 }
-inline void GatherDictValues(const std::vector<int64_t>& dict,
+inline void GatherDictValues(const draken::AppendBuffer<int64_t>& dict,
                              const int32_t* codes, size_t n,
-                             std::vector<int64_t>& out) {
+                             draken::AppendBuffer<int64_t>& out) {
   parquet_simd::gather_int64(dict.data(), codes, n, out);
 }
-inline void GatherDictValues(const std::vector<float>& dict,
+inline void GatherDictValues(const draken::AppendBuffer<float>& dict,
                              const int32_t* codes, size_t n,
-                             std::vector<float>& out) {
+                             draken::AppendBuffer<float>& out) {
   parquet_simd::gather_float32(dict.data(), codes, n, out);
 }
-inline void GatherDictValues(const std::vector<double>& dict,
+inline void GatherDictValues(const draken::AppendBuffer<double>& dict,
                              const int32_t* codes, size_t n,
-                             std::vector<double>& out) {
+                             draken::AppendBuffer<double>& out) {
   parquet_simd::gather_float64(dict.data(), codes, n, out);
 }
-inline void GatherDictValues(const std::vector<__int128>& dict,
+inline void GatherDictValues(const draken::AppendBuffer<__int128>& dict,
                              const int32_t* codes, size_t n,
-                             std::vector<__int128>& out) {
+                             draken::AppendBuffer<__int128>& out) {
   const size_t old_sz = out.size();
-  out.resize(old_sz + n);
+  out.resize_uninit(old_sz + n);
   __int128* dst = out.data() + old_sz;
   for (size_t i = 0; i < n; ++i) dst[i] = dict[codes[i]];
 }
@@ -280,12 +281,12 @@ inline void GatherDictValues(const std::vector<__int128>& dict,
 // Returns false (fail loud) on any out-of-range code.
 template <typename T>
 inline bool MaterializeDictPrefixToDense(
-    std::vector<T>& dict_values,
-    std::vector<T>& dense_values,
-    std::vector<int32_t>& dict_indices,
-    std::vector<uint8_t>& dict_codes_array,
+    draken::AppendBuffer<T>& dict_values,
+    draken::AppendBuffer<T>& dense_values,
+    draken::AppendBuffer<int32_t>& dict_indices,
+    draken::AppendBuffer<uint8_t>& dict_codes_array,
     uint8_t code_width,
-    const std::vector<int32_t>& all_def_levels,
+    const draken::AppendBuffer<int32_t>& all_def_levels,
     int32_t rows_so_far,
     int32_t max_def,
     int32_t total_needed) {
@@ -478,9 +479,14 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                                     float*   ext_float32,
                                     const uint8_t* row_mask,
                                     bool prefer_dict,
-                                    const DictSkipPredicate* skip_pred,
-                                    const PageJumpPlan* jump) {
+                                    const ValuePredicate* skip_pred,
+                                    const PageJumpPlan* jump,
+                                    PageSearchOut* search) {
   result.reset();
+  if (search != nullptr) {
+    search->row_mask.clear();
+    search->applied = false;
+  }
   result.ext_int64   = ext_int64;
   result.ext_float64 = ext_float64;
   result.ext_int32   = ext_int32;
@@ -674,8 +680,8 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     int32_t dict_size = 0;
 
     // Keep decompressed buffers alive across dictionary and data page decoding.
-    rugo::compression::ScratchBuffer dict_decompressed_data;
-    rugo::compression::ScratchBuffer page_decompressed_data;
+    draken::AppendBuffer<uint8_t> dict_decompressed_data;
+    draken::AppendBuffer<uint8_t> page_decompressed_data;
 
     if (target_col->dictionary_page_offset >= 0 &&
         (uint64_t)target_col->dictionary_page_offset < file_size) {
@@ -723,7 +729,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           try {
             auto codec = rugo::compression::CodecFromInt(target_col->codec);
             { RUGO_TEL_START(_dc_t0);
-              rugo::compression::ScratchBuffer& dict_dst =
+              draken::AppendBuffer<uint8_t>& dict_dst =
                   zc_byte_array ? result.string_dict_arena : dict_decompressed_data;
               rugo::compression::DecompressInto(
                   dict_compressed_data, dict_compressed_size,
@@ -752,7 +758,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         if (result.type == "int32") {
           int32_t safe_count = std::min(dict_size, (int32_t)((dict_end - dict_data_ptr) / 4));
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-          result.dict_int32_values.resize(safe_count);
+          result.dict_int32_values.resize_uninit(safe_count);
           std::memcpy(result.dict_int32_values.data(), dict_data_ptr, safe_count * sizeof(int32_t));
           dict_data_ptr += safe_count * 4;
 #else
@@ -770,7 +776,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             int32_t safe_count = std::min(
                 dict_size,
                 (int32_t)((dict_end - dict_data_ptr) / int96_stride));
-            result.dict_int64_values.resize(safe_count);
+            result.dict_int64_values.resize_uninit(safe_count);
             for (int32_t i = 0; i < safe_count; i++) {
               if (!Int96ToUnixNanos(dict_data_ptr,
                                     result.dict_int64_values.data() + i)) {
@@ -796,7 +802,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           } else {
           int32_t safe_count = std::min(dict_size, (int32_t)((dict_end - dict_data_ptr) / 8));
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-          result.dict_int64_values.resize(safe_count);
+          result.dict_int64_values.resize_uninit(safe_count);
           std::memcpy(result.dict_int64_values.data(), dict_data_ptr, safe_count * sizeof(int64_t));
           dict_data_ptr += safe_count * 8;
 #else
@@ -837,7 +843,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         } else if (result.type == "float32") {
           int32_t safe_count = std::min(dict_size, (int32_t)((dict_end - dict_data_ptr) / 4));
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-          result.dict_float32_values.resize(safe_count);
+          result.dict_float32_values.resize_uninit(safe_count);
           std::memcpy(result.dict_float32_values.data(), dict_data_ptr, safe_count * sizeof(float));
           dict_data_ptr += safe_count * 4;
 #else
@@ -850,7 +856,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         } else if (result.type == "float64") {
           int32_t safe_count = std::min(dict_size, (int32_t)((dict_end - dict_data_ptr) / 8));
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-          result.dict_float64_values.resize(safe_count);
+          result.dict_float64_values.resize_uninit(safe_count);
           std::memcpy(result.dict_float64_values.data(), dict_data_ptr, safe_count * sizeof(double));
           dict_data_ptr += safe_count * 8;
 #else
@@ -909,8 +915,8 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     // rep_levels: only populated when max_repetition_level > 0 (list columns).
     // def_levels: used both for validity bitmap (all nullable columns) and for
     //             list offset reconstruction (Step 10).
-    std::vector<int32_t> all_rep_levels;
-    std::vector<int32_t> all_def_levels;
+    draken::AppendBuffer<int32_t> all_rep_levels;
+    draken::AppendBuffer<int32_t> all_def_levels;
     if (target_col->max_repetition_level > 0) {
       all_rep_levels.reserve(total_needed > 0 ? total_needed : 100000);
     }
@@ -952,9 +958,8 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     auto flush_deferred_def_levels = [&]() {
       if (deferred_all_present_rows <= 0) return;
       if (total_needed > 0) all_def_levels.reserve((size_t)total_needed);
-      all_def_levels.insert(all_def_levels.end(),
-                            (size_t)deferred_all_present_rows,
-                            target_col->max_definition_level);
+      all_def_levels.resize_fill(all_def_levels.size() + (size_t)deferred_all_present_rows,
+                                 target_col->max_definition_level);
       deferred_all_present_rows = 0;
     };
 
@@ -978,6 +983,54 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     bool float32_dict_mode = (result.type == "float32" && dict_size > 0);
     bool float64_dict_mode = (result.type == "float64" && dict_size > 0);
     bool int128_dict_mode = (result.type == "int128" && dict_size > 0);
+
+    // ── Page search arming (docs/PARQUET_PAGE_SEARCH_DESIGN.md) ──────────────
+    // The caller arms it on one column by passing `search`; it applies to a
+    // scalar byte_array column under a kind 4 (contains) / 5 (not-contains)
+    // conjunct with no empty pattern. Anything else is declined and the column
+    // decodes exactly as it would without it (search->applied stays false).
+    //
+    const bool contains_kind =
+        skip_pred != nullptr && (skip_pred->kind == 4 || skip_pred->kind == 5) &&
+        skip_pred->str_vals != nullptr && !skip_pred->str_vals->empty();
+    bool patterns_nonempty = contains_kind;
+    if (contains_kind)
+      for (const std::string& pat : *skip_pred->str_vals)
+        if (pat.empty()) { patterns_nonempty = false; break; }
+    const bool search_on =
+        search != nullptr && patterns_nonempty &&
+        result.type == "byte_array" && target_col->max_repetition_level == 0;
+    const bool search_negate = contains_kind && skip_pred->kind == 5;
+
+    // Per-dictionary-entry verdict of a kind 4/5 conjunct: one SIMD search over
+    // the dictionary page itself (string_dict_arena IS the decompressed page,
+    // length prefixes intact) instead of a per-entry match. An empty pattern is
+    // contained by every value. Computed at most once per chunk.
+    std::vector<uint8_t> entry_pass;
+    uint32_t entry_pass_count = 0;
+    bool entry_pass_ready = false;
+    auto compute_entry_pass = [&]() {
+      if (entry_pass_ready) return;
+      entry_pass_ready = true;
+      const uint32_t n = static_cast<uint32_t>(result.string_dict_lens.size());
+      entry_pass.assign(n, 0);
+      bool all_hit = false;
+      for (const std::string& pat : *skip_pred->str_vals)
+        if (pat.empty()) { all_hit = true; break; }
+      if (all_hit) {
+        std::fill(entry_pass.begin(), entry_pass.end(), uint8_t(1));
+      } else {
+        for (const std::string& pat : *skip_pred->str_vals)
+          rugo::page_search::mark_values_containing(
+              result.string_dict_arena.data(), result.string_dict_arena.size(), n,
+              reinterpret_cast<const uint8_t*>(pat.data()), pat.size(), entry_pass.data());
+      }
+      if (search_negate)
+        for (uint32_t k = 0; k < n; ++k) entry_pass[k] ^= 1u;
+      for (uint32_t k = 0; k < n; ++k) entry_pass_count += entry_pass[k];
+      rugo_tel::ps_dict_entries.fetch_add(n, std::memory_order_relaxed);
+      rugo_tel::ps_dict_entries_pass.fetch_add(entry_pass_count, std::memory_order_relaxed);
+    };
 
     // ── Phase 2: dictionary-membership / per-value decode-skip ────────────────
     // Evaluate the pushed predicate against this dict-encoded column's dictionary
@@ -1072,7 +1125,11 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             if (any_match) break;
           }
         }
-      } else if (kind >= 1 && byte_array_dict_mode && skip_pred->str_vals) {
+      } else if ((kind == 4 || kind == 5) && byte_array_dict_mode && skip_pred->str_vals) {
+        // Contains / not-contains: one SIMD pass over the dictionary page.
+        compute_entry_pass();
+        any_match = entry_pass_count > 0;
+      } else if (kind >= 1 && kind <= 3 && byte_array_dict_mode && skip_pred->str_vals) {
         // String dictionary: arena bytes addressed by per-entry offset+len.
         const int32_t dsz = (int32_t)result.string_dict_lens.size();
         const uint8_t* arena = result.string_dict_arena.data();
@@ -1087,10 +1144,8 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               hit = (sl == pl) && (pl == 0 || std::memcmp(s, pd, pl) == 0);
             } else if (kind == 2) {   // starts-with
               hit = (sl >= pl) && (pl == 0 || std::memcmp(s, pd, pl) == 0);
-            } else if (kind == 3) {   // ends-with
+            } else {                  // ends-with (kind 3)
               hit = (sl >= pl) && (pl == 0 || std::memcmp(s + sl - pl, pd, pl) == 0);
-            } else {                  // contains
-              hit = (pl == 0) || (sl >= pl && std::search(s, s + sl, pd, pd + pl) != s + sl);
             }
             if (hit) { any_match = true; break; }
           }
@@ -1101,6 +1156,13 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       }
       if (!any_match) {
         result.dict_all_filtered = true;
+        if (search_on) {
+          // Every row of the chunk is dropped; the caller stops on
+          // dict_all_filtered, but the mask stays truthful.
+          search->row_mask.assign(
+              target_col->num_values > 0 ? (size_t)target_col->num_values : 0, 0);
+          search->applied = true;
+        }
         if (row_mask != nullptr) {
           // Scalar column (LIST declined above): one mask byte per value.
           int64_t survivors = 0;
@@ -1138,7 +1200,10 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     // compacted per page. There is no post-loop compaction (measured
     // 2026-09-28: removing this costs JOB 11.4%, ClickBench 2.0%). LIST columns
     // keep the post-loop logical-row filter.
-    const bool sel_mode = row_mask != nullptr && target_col->max_repetition_level == 0;
+    // The page search selects rows itself (only scalar columns are armed), so
+    // it runs on the same selective machinery as a caller's row mask.
+    const bool sel_mode =
+        (row_mask != nullptr || search_on) && target_col->max_repetition_level == 0;
     // Rows emitted under sel_mode (total_collected keeps counting rows WALKED,
     // which drives the page loop and the success check).
     int32_t total_emitted = 0;
@@ -1189,7 +1254,8 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         // PLAIN page whether to intern (dict_indices) or materialise to dense.
         // When row_mask is active the dict_codes_array would not be filtered, so
         // fall through to the dict_indices path which IS correctly compacted.
-        result.dict_codes_array.assign(
+        result.dict_codes_array.clear();
+        result.dict_codes_array.resize_fill(
             static_cast<size_t>(tn) * result.code_width, 0);
       } else if (dict_size > 0) {
         result.dict_indices.reserve(tn);
@@ -1210,10 +1276,32 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     // Page-local scratch, hoisted to chunk scope so each page reuses the
     // previous page's capacity instead of allocating afresh. Every consumer
     // clear()s before writing (see the references inside the page loop).
-    std::vector<int32_t> _page_rep_levels;
-    std::vector<int32_t> _page_def_levels;
-    std::vector<int32_t> _page_dict_indices;
-    std::vector<uint8_t> _page_vsel;  // sel_mode: one 0/1 byte per PRESENT value of the page
+    draken::AppendBuffer<int32_t> _page_rep_levels;
+    draken::AppendBuffer<int32_t> _page_def_levels;
+    draken::AppendBuffer<int32_t> _page_dict_indices;
+    draken::AppendBuffer<uint8_t> _page_vsel;  // sel_mode: one 0/1 byte per PRESENT value of the page
+    // Page search scratch (search_on): per-PRESENT-value verdict, per-row
+    // selection, and the dictionary codes of a dict-encoded page.
+    std::vector<uint8_t> _page_vpass;
+    std::vector<uint8_t> _page_search_sel;
+    draken::AppendBuffer<int32_t> _page_search_codes;
+    // Page search counters, flushed once after the page loop.
+    long long _ps_pages = 0, _ps_discarded = 0, _ps_fallthrough = 0;
+    long long _ps_rows_in = 0, _ps_rows_out = 0;
+    if (search_on) {
+      search->row_mask.assign(
+          target_col->num_values > 0 ? (size_t)target_col->num_values : 0, 0);
+      search->applied = true;
+      if (byte_array_dict_mode) compute_entry_pass();
+    }
+    // Rows [base, base + n) of the chunk: copy the page's selection (or mark
+    // every row) into the search row mask.
+    auto search_mark_rows = [&](int32_t base, int32_t n, const uint8_t* sel) {
+      const size_t end = (size_t)base + (size_t)n;
+      if (search->row_mask.size() < end) search->row_mask.resize(end, 0);
+      if (sel != nullptr) std::memcpy(search->row_mask.data() + base, sel, (size_t)n);
+      else std::memset(search->row_mask.data() + base, 1, (size_t)n);
+    };
 
     // ── Tier 3: Parallel page decode ──────────────────────────────────────
     // For non-nullable, non-dict, non-nested, fixed-width columns with more
@@ -1261,10 +1349,10 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                                 result.ext_float32 != nullptr || result.ext_float64 != nullptr);
           if (!has_ext) {
             const size_t tn = (size_t)prescan_total;
-            if      (result.type == "int32")   result.int32_values.resize(tn);
-            else if (result.type == "int64")   result.int64_values.resize(tn);
-            else if (result.type == "float32") result.float32_values.resize(tn);
-            else if (result.type == "float64") result.float64_values.resize(tn);
+            if      (result.type == "int32")   result.int32_values.resize_uninit(tn);
+            else if (result.type == "int64")   result.int64_values.resize_uninit(tn);
+            else if (result.type == "float32") result.float32_values.resize_uninit(tn);
+            else if (result.type == "float64") result.float64_values.resize_uninit(tn);
           }
 
           // Phase 3: Dispatch pages to module-level thread pool.
@@ -1328,7 +1416,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               // handled. Confirmed via dev/decomp_buffer_ab (matched A/B
               // against the real DecompressInto + the real page-decode pool):
               // consistent win at every page size tested, no regression.
-              static thread_local rugo::compression::ScratchBuffer decomp_buf;
+              static thread_local draken::AppendBuffer<uint8_t> decomp_buf;
               const uint8_t* dp;
               size_t         ds;
 
@@ -1549,6 +1637,21 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       }
       // ────────────────────────────────────────────────────────────────
 
+      // ── Page search: a dictionary-encoded page when no entry passes ───────
+      // Every row of the page is a guaranteed non-pass: drop it before it is
+      // decompressed. This is the page-level form of the dictionary skip, so
+      // it also covers chunks whose dictionary spilled to PLAIN pages.
+      if (search_on && byte_array_dict_mode && entry_pass_count == 0 &&
+          (page_header.encoding == 2 || page_header.encoding == 8)) {
+        ++_ps_pages;
+        ++_ps_discarded;
+        _ps_rows_in += page_values;
+        total_collected += page_values;
+        cursor = compressed_data + compressed_size;
+        ++result.pages_skipped;
+        continue;
+      }
+
       ++result.pages_decoded;  // this page survived the row_mask check (or no mask); will be decompressed
 
       // Step 3: Decompress and decode repetition/definition levels.
@@ -1568,8 +1671,8 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       // entry point clear()s its output before writing, so these carry no state
       // across pages — but they do carry their CAPACITY, which turns a
       // reserve+realloc per page into one allocation per column chunk.
-      std::vector<int32_t>& page_rep_levels = _page_rep_levels;
-      std::vector<int32_t>& def_levels      = _page_def_levels;
+      draken::AppendBuffer<int32_t>& page_rep_levels = _page_rep_levels;
+      draken::AppendBuffer<int32_t>& def_levels      = _page_def_levels;
 
       // Set when THIS page's def levels were proven to be one all-present RLE
       // run and therefore never expanded. def_levels is cleared in that case,
@@ -1629,8 +1732,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           if (decoded_rep != page_values) return;
           data_ptr  += rep_slice_size;
           data_size -= rep_slice_size;
-          all_rep_levels.insert(all_rep_levels.end(),
-                                page_rep_levels.begin(), page_rep_levels.end());
+          all_rep_levels.append(page_rep_levels.data(), page_rep_levels.size());
         }
 
         // Definition levels: RLE/bit-packed with a 4-byte LE length prefix.
@@ -1656,8 +1758,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                 data_ptr, level_slice_size,
                 page_values, def_bit_width, def_levels, bytes_consumed);
             if (decoded_levels != page_values) return;
-            all_def_levels.insert(all_def_levels.end(),
-                                  def_levels.begin(), def_levels.end());
+            all_def_levels.append(def_levels.data(), def_levels.size());
           }
           data_ptr  += level_slice_size;
           data_size -= level_slice_size;
@@ -1691,8 +1792,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               rep_region, (size_t)rep_len, page_values, rep_bit_width,
               page_rep_levels);
           if (decoded_rep != page_values) return;
-          all_rep_levels.insert(all_rep_levels.end(),
-                                page_rep_levels.begin(), page_rep_levels.end());
+          all_rep_levels.append(page_rep_levels.data(), page_rep_levels.size());
         }
 
         // Definition levels: raw RLE span, EXPLICIT byte count, no prefix.
@@ -1710,8 +1810,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                 def_region, (size_t)def_len, page_values, def_bit_width,
                 def_levels);
             if (decoded_levels != page_values) return;
-            all_def_levels.insert(all_def_levels.end(),
-                                  def_levels.begin(), def_levels.end());
+            all_def_levels.append(def_levels.data(), def_levels.size());
           }
         }
 
@@ -1746,6 +1845,101 @@ void DecodeColumnFromChunk(DecodedColumn &result,
 
       const uint8_t *data_end = data_ptr + data_size;
 
+      // ── Page search (docs/PARQUET_PAGE_SEARCH_DESIGN.md §3, §4) ──────────
+      // Decide each PRESENT value of the page from its raw bytes (PLAIN) or its
+      // dictionary code (dict-encoded), then fold the verdicts into a per-row
+      // selection ANDed with the row mask. A page with no passing row is
+      // dropped here — its def levels are taken back out and nothing is
+      // copied. Otherwise the selection drives the existing selective decode.
+      if (search_on) {
+        const int32_t enc = page_header.encoding;
+        const int32_t max_def = target_col->max_definition_level;
+        int32_t pc = page_values;
+        if (!def_levels.empty()) {
+          pc = 0;
+          for (int32_t dl : def_levels) pc += (dl == max_def);
+        }
+        bool evaluated = false;
+        if (enc == 0) {
+          _page_vpass.assign((size_t)pc, 0);
+          for (const std::string& pat : *skip_pred->str_vals)
+            rugo::page_search::mark_values_containing(
+                data_ptr, data_size, (uint32_t)pc,
+                reinterpret_cast<const uint8_t*>(pat.data()), pat.size(),
+                _page_vpass.data());
+          if (search_negate)
+            for (int32_t v = 0; v < pc; ++v) _page_vpass[v] ^= 1u;
+          evaluated = true;
+        } else if ((enc == 2 || enc == 8) && dict_size > 0 && byte_array_dict_mode &&
+                   entry_pass_count < entry_pass.size()) {
+          // Codes: 1 byte bit width, then RLE/bit-packed with no length prefix.
+          if (data_size < 1) return;
+          const int bw = (int)data_ptr[0];
+          int32_t got = DecodeRLEBitPackedIndicesNoPrefix(
+              data_ptr + 1, data_size - 1, pc, bw, _page_search_codes);
+          if (got != pc) return;
+          _page_vpass.resize((size_t)pc);
+          const uint32_t nent = (uint32_t)entry_pass.size();
+          for (int32_t v = 0; v < pc; ++v) {
+            const uint32_t code = (uint32_t)_page_search_codes[v];
+            if (code >= nent) {
+              result.error_message = "dictionary code " + std::to_string(code) +
+                                     " out of range for a dictionary of " +
+                                     std::to_string(nent) + " entries";
+              return;
+            }
+            _page_vpass[v] = entry_pass[code];
+          }
+          evaluated = true;
+        } else if (enc == 7) {
+          ++_ps_fallthrough;   // DELTA_BYTE_ARRAY: front-coded, not searchable raw
+        }
+        if (evaluated) {
+          _page_search_sel.resize((size_t)page_values);
+          uint8_t* sel = _page_search_sel.data();
+          int32_t n = 0;
+          if (def_levels.empty()) {
+            for (int32_t i = 0; i < page_values; ++i) {
+              const uint8_t keep = _page_vpass[i] &
+                  (page_sel_mask != nullptr ? page_sel_mask[i] : uint8_t(1));
+              sel[i] = keep;
+              n += keep;
+            }
+          } else {
+            int32_t vi = 0;
+            for (int32_t i = 0; i < page_values; ++i) {
+              uint8_t keep = 0;
+              if (def_levels[i] == max_def) {
+                keep = _page_vpass[vi++] &
+                    (page_sel_mask != nullptr ? page_sel_mask[i] : uint8_t(1));
+              }
+              sel[i] = keep;
+              n += keep;
+            }
+          }
+          ++_ps_pages;
+          _ps_rows_in += page_values;
+          _ps_rows_out += n;
+          if (n == 0) {
+            // Take this page's def levels back out: it emits nothing.
+            if (page_all_present) {
+              deferred_all_present_rows -= page_values;
+            } else if (!def_levels.empty()) {
+              all_def_levels.resize_uninit(all_def_levels.size() - (size_t)page_values);
+            }
+            ++_ps_discarded;
+            total_collected += page_values;
+            cursor = compressed_data + compressed_size;
+            continue;
+          }
+          if (n < page_values) {
+            page_selective = true;
+            page_sel_rows  = n;
+            page_sel_mask  = sel;
+          }
+        }
+      }
+
       // sel_mode: compact this page's def levels to the selected rows and build
       // the per-PRESENT-value selection the value decoders consume.
       const uint8_t* page_vsel = nullptr;
@@ -1767,7 +1961,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             if (dl == max_def) _page_vsel.push_back(page_sel_mask[i]);
             if (page_sel_mask[i]) all_def_levels[w++] = dl;
           }
-          all_def_levels.resize(w);
+          all_def_levels.resize_uninit(w);   // shrink only
           page_vsel = _page_vsel.data();
         }
       }
@@ -1812,7 +2006,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           // Decode RLE/bit-packed indices directly into per-page run arrays
           // (no O(N) dense intermediate).  For each run, resolve the dict code
           // to the actual value in C++ and accumulate with page-boundary merge.
-          std::vector<int32_t> run_codes, run_counts;
+          draken::AppendBuffer<int32_t> run_codes, run_counts;
           { RUGO_TEL_START(_rle_t0);
             int32_t decoded = DecodeRLEBitPackedIndicesToRuns(
                 data_ptr, data_size, present_count, bit_width, run_codes, run_counts);
@@ -1903,8 +2097,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                 const int32_t  len = result.string_dict_lens[code];
                 result.rle_str_offsets.push_back((uint32_t)result.rle_str_arena.size());
                 result.rle_str_lens.push_back(len);
-                result.rle_str_arena.insert(result.rle_str_arena.end(),
-                    str_arena + off, str_arena + off + len);
+                result.rle_str_arena.append(str_arena + off, (size_t)len);
                 result.rle_run_lengths.push_back(cnt);
                 result.rle_last_code = code;
               }
@@ -1914,7 +2107,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
 
         } else {
           // ── Dense path: nullable columns or non-RLE-mode dict types ─────
-          std::vector<int32_t>& indices = _page_dict_indices;  // chunk-scoped; cleared by the decoder
+          draken::AppendBuffer<int32_t>& indices = _page_dict_indices;  // chunk-scoped; cleared by the decoder
           { RUGO_TEL_START(_rle_t0);
             // sel_mode: only the selected codes land in `indices`; everything
             // below then gathers / appends survivors only.
@@ -1963,7 +2156,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           // ── Tier 1B helper: batch bounds-check + insert for dict indices ──
           // Hoists the per-element range check into a single min/max scan
           // (auto-vectorizable), then uses bulk insert instead of push_back.
-          auto batch_append_dict_indices = [&](const std::vector<int32_t>& idx_vec,
+          auto batch_append_dict_indices = [&](const draken::AppendBuffer<int32_t>& idx_vec,
                                                int32_t dict_sz) -> bool {
             if (idx_vec.empty()) return true;
             int32_t lo = idx_vec[0], hi = idx_vec[0];
@@ -1973,16 +2166,15 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               if (v > hi) hi = v;
             }
             if (lo < 0 || hi >= dict_sz) return false;
-            result.dict_indices.insert(result.dict_indices.end(),
-                                       idx_vec.begin(), idx_vec.end());
+            result.dict_indices.append(idx_vec.data(), idx_vec.size());
             return true;
           };
 
           // ── Tier 2A helper: validate indices then SIMD gather ──
           // Validates all indices upfront (min/max scan), then uses SIMD gather
           // if available, with scalar fallback.
-          auto validate_and_gather_int32 = [&](const std::vector<int32_t>& idx_vec,
-                                               std::vector<int32_t>& result_vec) -> bool {
+          auto validate_and_gather_int32 = [&](const draken::AppendBuffer<int32_t>& idx_vec,
+                                               draken::AppendBuffer<int32_t>& result_vec) -> bool {
             if (idx_vec.empty()) return true;
             int32_t lo = idx_vec[0], hi = idx_vec[0];
             for (size_t i = 1; i < idx_vec.size(); ++i) {
@@ -1995,8 +2187,8 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             return true;
           };
 
-          auto validate_and_gather_int64 = [&](const std::vector<int32_t>& idx_vec,
-                                               std::vector<int64_t>& result_vec) -> bool {
+          auto validate_and_gather_int64 = [&](const draken::AppendBuffer<int32_t>& idx_vec,
+                                               draken::AppendBuffer<int64_t>& result_vec) -> bool {
             if (idx_vec.empty()) return true;
             int32_t lo = idx_vec[0], hi = idx_vec[0];
             for (size_t i = 1; i < idx_vec.size(); ++i) {
@@ -2009,8 +2201,8 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             return true;
           };
 
-          auto validate_and_gather_float32 = [&](const std::vector<int32_t>& idx_vec,
-                                                 std::vector<float>& result_vec) -> bool {
+          auto validate_and_gather_float32 = [&](const draken::AppendBuffer<int32_t>& idx_vec,
+                                                 draken::AppendBuffer<float>& result_vec) -> bool {
             if (idx_vec.empty()) return true;
             int32_t lo = idx_vec[0], hi = idx_vec[0];
             for (size_t i = 1; i < idx_vec.size(); ++i) {
@@ -2023,8 +2215,8 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             return true;
           };
 
-          auto validate_and_gather_float64 = [&](const std::vector<int32_t>& idx_vec,
-                                                 std::vector<double>& result_vec) -> bool {
+          auto validate_and_gather_float64 = [&](const draken::AppendBuffer<int32_t>& idx_vec,
+                                                 draken::AppendBuffer<double>& result_vec) -> bool {
             if (idx_vec.empty()) return true;
             int32_t lo = idx_vec[0], hi = idx_vec[0];
             for (size_t i = 1; i < idx_vec.size(); ++i) {
@@ -2387,11 +2579,11 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               // reallocates in the success path — decode straight into the
               // grown tail instead of a temp vector + insert().
               size_t old_sz = result.int32_values.size();
-              result.int32_values.resize(old_sz + present_count);
+              result.int32_values.resize_uninit(old_sz + present_count);
               int32_t decoded = DecodeDeltaBinaryPacked(
                   data_ptr, data_size, present_count, result.int32_values.data() + old_sz);
               if (decoded != present_count) {
-                result.int32_values.resize(old_sz);
+                result.int32_values.resize_uninit(old_sz);
                 return;
               }
             } else {
@@ -2399,7 +2591,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               // LE bulk copy: on-disk int32 LE layout matches in-memory layout.
               int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 4));
               size_t old_sz = result.int32_values.size();
-              result.int32_values.resize(old_sz + safe_count);
+              result.int32_values.resize_uninit(old_sz + safe_count);
               std::memcpy(result.int32_values.data() + old_sz, data_ptr, safe_count * sizeof(int32_t));
               data_ptr += safe_count * 4;
 #else
@@ -2463,11 +2655,11 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               // reallocates in the success path — decode straight into the
               // grown tail instead of a temp vector + insert().
               size_t old_sz = result.int64_values.size();
-              result.int64_values.resize(old_sz + present_count);
+              result.int64_values.resize_uninit(old_sz + present_count);
               int32_t decoded = DecodeDeltaBinaryPacked(
                   data_ptr, data_size, present_count, result.int64_values.data() + old_sz);
               if (decoded != present_count) {
-                result.int64_values.resize(old_sz);
+                result.int64_values.resize_uninit(old_sz);
                 return;
               }
             } else if (int96_stride > 0) {
@@ -2475,14 +2667,14 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                   present_count,
                   (int32_t)((data_end - data_ptr) / int96_stride));
               size_t old_sz = result.int64_values.size();
-              result.int64_values.resize(old_sz + safe_count);
+              result.int64_values.resize_uninit(old_sz + safe_count);
               int64_t* dst = result.int64_values.data() + old_sz;
               for (int32_t i = 0; i < safe_count; i++) {
                 if (!Int96ToUnixNanos(data_ptr + i * int96_stride, dst + i)) {
                   result.error_message =
                       "int96 timestamp out of representable range at row " +
                       std::to_string(old_sz + i);
-                  result.int64_values.resize(old_sz);
+                  result.int64_values.resize_uninit(old_sz);
                   return;
                 }
               }
@@ -2492,7 +2684,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                   present_count,
                   (int32_t)((data_end - data_ptr) / flba_byte_width));
               size_t old_sz = result.int64_values.size();
-              result.int64_values.resize(old_sz + safe_count);
+              result.int64_values.resize_uninit(old_sz + safe_count);
               int64_t* dst = result.int64_values.data() + old_sz;
               for (int32_t i = 0; i < safe_count; i++) {
                 dst[i] = ReadBESignExt(data_ptr + i * flba_byte_width,
@@ -2503,7 +2695,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
               int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 8));
               size_t old_sz = result.int64_values.size();
-              result.int64_values.resize(old_sz + safe_count);
+              result.int64_values.resize_uninit(old_sz + safe_count);
               std::memcpy(result.int64_values.data() + old_sz, data_ptr, safe_count * sizeof(int64_t));
               data_ptr += safe_count * 8;
 #else
@@ -2526,7 +2718,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                 present_count,
                 (int32_t)((data_end - data_ptr) / flba_byte_width));
             size_t old_sz = result.int128_values.size();
-            result.int128_values.resize(old_sz + safe_count);
+            result.int128_values.resize_uninit(old_sz + safe_count);
             __int128* dst = result.int128_values.data() + old_sz;
             for (int32_t i = 0; i < safe_count; i++) {
               dst[i] = ReadBESignExt128(data_ptr + i * flba_byte_width,
@@ -2648,7 +2840,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             if (!interning && page_vsel == nullptr) {
               const size_t base = result.string_arena.size();
               const uint8_t* page_start = data_ptr;
-              result.string_arena.insert(result.string_arena.end(), data_ptr, data_end);
+              result.string_arena.append(data_ptr, (size_t)(data_end - data_ptr));
               result.string_offsets.reserve(result.string_offsets.size() + (size_t)present_count);
               result.string_lens.reserve(result.string_lens.size() + (size_t)present_count);
               for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
@@ -2710,7 +2902,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           if (page_encoding == 3) {
             // RLE encoding (encoding id 3): 4-byte LE length prefix + RLE/bit-packed
             // data with bit_width=1.  The value stream contains only present values.
-            std::vector<int32_t> rle_vals;
+            draken::AppendBuffer<int32_t> rle_vals;
             int32_t decoded = DecodeRLEBitPackedIndices(
                 data_ptr, data_size, present_count, 1, rle_vals);
             if (decoded != present_count) return;
@@ -2742,7 +2934,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
             int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 4));
             size_t old_sz = result.float32_values.size();
-            result.float32_values.resize(old_sz + safe_count);
+            result.float32_values.resize_uninit(old_sz + safe_count);
             std::memcpy(result.float32_values.data() + old_sz, data_ptr, safe_count * sizeof(float));
             data_ptr += safe_count * 4;
 #else
@@ -2769,7 +2961,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
             int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 8));
             size_t old_sz = result.float64_values.size();
-            result.float64_values.resize(old_sz + safe_count);
+            result.float64_values.resize_uninit(old_sz + safe_count);
             std::memcpy(result.float64_values.data() + old_sz, data_ptr, safe_count * sizeof(double));
             data_ptr += safe_count * 8;
 #else
@@ -2791,10 +2983,19 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         }
       }
 
+      if (search_on)
+        search_mark_rows(total_collected, page_values, page_selective ? page_sel_mask : nullptr);
       total_collected += page_values;
       total_emitted += page_selective ? page_sel_rows : page_values;
       cursor = compressed_data + compressed_size;
     }  // end page loop
+    if (search_on) {
+      rugo_tel::ps_pages.fetch_add(_ps_pages, std::memory_order_relaxed);
+      rugo_tel::ps_pages_discarded.fetch_add(_ps_discarded, std::memory_order_relaxed);
+      rugo_tel::ps_pages_fallthrough.fetch_add(_ps_fallthrough, std::memory_order_relaxed);
+      rugo_tel::ps_rows_in.fetch_add(_ps_rows_in, std::memory_order_relaxed);
+      rugo_tel::ps_rows_out.fetch_add(_ps_rows_out, std::memory_order_relaxed);
+    }
     }  // end if (!used_parallel_path) [sequential fallback]
 
     const int32_t total_rows_all_pages = total_collected;
@@ -2811,11 +3012,11 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       // rep_level == 0 marks the start of each new logical row.
       const int32_t max_def_lvl = target_col->max_definition_level;
 
-      std::vector<int32_t> new_rep, new_def;
-      rugo::compression::ScratchBuffer new_str_arena;
-      std::vector<uint32_t> new_str_offsets;
-      std::vector<int32_t>  new_str_lens;
-      std::vector<int32_t> new_dict_indices;
+      draken::AppendBuffer<int32_t> new_rep, new_def;
+      draken::AppendBuffer<uint8_t> new_str_arena;
+      draken::AppendBuffer<uint32_t> new_str_offsets;
+      draken::AppendBuffer<int32_t>  new_str_lens;
+      draken::AppendBuffer<int32_t> new_dict_indices;
       const bool use_strings = !result.string_lens.empty();
       const bool use_dicts   = !result.dict_indices.empty();
 
@@ -2843,8 +3044,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               new_str_lens.push_back(result.string_lens[value_idx]);
               const uint8_t* b =
                   result.string_arena.data() + result.string_offsets[value_idx];
-              new_str_arena.insert(new_str_arena.end(),
-                                   b, b + result.string_lens[value_idx]);
+              new_str_arena.append(b, (size_t)result.string_lens[value_idx]);
             }
             if (use_dicts && value_idx < (int32_t)result.dict_indices.size())
               new_dict_indices.push_back(result.dict_indices[value_idx]);
@@ -2979,7 +3179,7 @@ DecodedColumn DecodeColumnFromChunk(const uint8_t *file_data,
                                     float*   ext_float32,
                                     const uint8_t* row_mask,
                                     bool prefer_dict,
-                                    const DictSkipPredicate* skip_pred,
+                                    const ValuePredicate* skip_pred,
                                     const PageJumpPlan* jump) {
   DecodedColumn result;
   DecodeColumnFromChunk(result, file_data, file_size, target_col,

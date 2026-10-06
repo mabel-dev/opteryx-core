@@ -167,6 +167,9 @@ class BaseTable:
     supports_distinct_pushdown = False  # one read = deduplicated rows (see DistinctPushable)
     supports_statistics = False  # Statistics gathering
     supports_async = False  # Asynchronous reads
+    # Serves `row_group_key_bounds`: per-row-group integer min/max (and proven distinct
+    # count) of one column, from footers it has already parsed (GroupLimitKeyBoundStrategy).
+    supports_row_group_key_bounds = False
 
     # This reader honours a SCAN-DECLARED DrakenType.TIMESTAMP64 on a column its
     # files store as INT64, emitting the int64 payload verbatim under a

@@ -67,6 +67,16 @@ inline std::atomic<long long> ba_emit_dict_entries {0};  // dict entries on dict
 inline std::atomic<long long> ba_emit_dict_rows    {0};  // logical rows on dict-shaped emits
 inline std::atomic<long long> ba_emit_dense_rows   {0};  // logical rows on dense emits
 
+// ── Page search counters (docs/PARQUET_PAGE_SEARCH_DESIGN.md §9) ────────────
+// Per armed column chunk, accumulated in locals and flushed once per chunk.
+inline std::atomic<long long> ps_pages             {0};  // data pages the search evaluated
+inline std::atomic<long long> ps_pages_discarded   {0};  // of those, pages that emitted no row
+inline std::atomic<long long> ps_pages_fallthrough {0};  // pages the search cannot read (DELTA_BYTE_ARRAY)
+inline std::atomic<long long> ps_rows_in           {0};  // rows of evaluated pages
+inline std::atomic<long long> ps_rows_out          {0};  // rows of evaluated pages that passed
+inline std::atomic<long long> ps_dict_entries      {0};  // dictionary entries searched
+inline std::atomic<long long> ps_dict_entries_pass {0};  // dictionary entries that passed
+
 inline void reset() {
     metadata_ns.store(0, std::memory_order_relaxed);
     decompress_ns.store(0, std::memory_order_relaxed);
@@ -92,6 +102,13 @@ inline void reset() {
     ba_emit_dict_entries.store(0, std::memory_order_relaxed);
     ba_emit_dict_rows.store(0, std::memory_order_relaxed);
     ba_emit_dense_rows.store(0, std::memory_order_relaxed);
+    ps_pages.store(0, std::memory_order_relaxed);
+    ps_pages_discarded.store(0, std::memory_order_relaxed);
+    ps_pages_fallthrough.store(0, std::memory_order_relaxed);
+    ps_rows_in.store(0, std::memory_order_relaxed);
+    ps_rows_out.store(0, std::memory_order_relaxed);
+    ps_dict_entries.store(0, std::memory_order_relaxed);
+    ps_dict_entries_pass.store(0, std::memory_order_relaxed);
 }
 
 using Clock = std::chrono::steady_clock;
@@ -130,6 +147,15 @@ inline long long ba_drop_cap_values_sum()     { return ba_drop_cap_values.load(s
 inline long long ba_emit_dict_entries_sum()   { return ba_emit_dict_entries.load(std::memory_order_relaxed); }
 inline long long ba_emit_dict_rows_sum()      { return ba_emit_dict_rows.load(std::memory_order_relaxed); }
 inline long long ba_emit_dense_rows_sum()     { return ba_emit_dense_rows.load(std::memory_order_relaxed); }
+
+// Page search counters (plain counts).
+inline long long ps_pages_count()             { return ps_pages.load(std::memory_order_relaxed); }
+inline long long ps_pages_discarded_count()   { return ps_pages_discarded.load(std::memory_order_relaxed); }
+inline long long ps_pages_fallthrough_count() { return ps_pages_fallthrough.load(std::memory_order_relaxed); }
+inline long long ps_rows_in_count()           { return ps_rows_in.load(std::memory_order_relaxed); }
+inline long long ps_rows_out_count()          { return ps_rows_out.load(std::memory_order_relaxed); }
+inline long long ps_dict_entries_count()      { return ps_dict_entries.load(std::memory_order_relaxed); }
+inline long long ps_dict_entries_pass_count() { return ps_dict_entries_pass.load(std::memory_order_relaxed); }
 
 } // namespace rugo_tel
 

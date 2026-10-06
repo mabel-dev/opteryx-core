@@ -800,17 +800,6 @@ extensions = [
         language="c++",
         extra_compile_args=CPP_FLAGS,
     ),
-    # C-backed integer buffer used across joins and other kernels
-    Extension(
-        "opteryx.compiled.structures.buffers",
-        sources=[
-            "opteryx/compiled/structures/buffers.pyx",
-            "src/cpp/intbuffer.cpp",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
     # Planner join estimator: join cardinality + DPccp/greedy join enumeration.
     # Header-only native core (src/cpp/planner/join_estimator.hpp); the pyx is
     # the conversion boundary the planner calls.
@@ -1330,7 +1319,7 @@ _vectors_op_cpp = [
     "opteryx/compiled/nanobind/vector_string_misc.cpp",
     "opteryx/compiled/nanobind/vector_string_misc2.cpp",
     "opteryx/compiled/nanobind/vector_string_misc3.cpp",
-    "opteryx/compiled/nanobind/vector_string_search.cpp",
+    "opteryx/compiled/nanobind/vector_array_membership.cpp",
     "opteryx/compiled/nanobind/vector_string_slice.cpp",
     "opteryx/compiled/nanobind/vector_temporal_arith.cpp",
     "opteryx/compiled/nanobind/vector_temporal_convert.cpp",

@@ -264,22 +264,24 @@ def extract_predicate_stats(conditions) -> List[Tuple[str, str, Any]]:
 
 
 def _try_extract_str_func(node) -> Optional[Tuple[str, str, Any]]:
-    """Return ``(col_name, "_STARTS_WITH"/"_ENDS_WITH"/"InStr", pattern_bytes)`` for
-    a LIKE-rewritten string-match FUNCTION node, or None.
+    """Return ``(col_name, "_STARTS_WITH"/"_ENDS_WITH"/"InStr"/"NotInStr", pattern_bytes)``
+    for a LIKE-rewritten string-match FUNCTION node, or None.
 
     These are the case-sensitive prefix/suffix/substring predicates the optimizer
-    produces from ``col LIKE 'p%'`` / ``'%s'`` / ``'%x%'``. They are pure
-    per-value predicates, so the dictionary decode-skip can evaluate them against
-    the unique values. (Case-insensitive ``_CI_*`` / ``IInStr`` variants need case
-    folding and are intentionally not extracted here.) Used only by the dict
-    decode-skip; ``_rg_passes_predicates_native`` ignores these op tags (fail-open).
+    produces from ``col LIKE 'p%'`` / ``'%s'`` / ``'%x%'``, and ``col NOT LIKE
+    '%x%'``. They are pure per-value predicates, so the dictionary decode-skip
+    can evaluate them against the unique values, and the parquet page search
+    (docs/PARQUET_PAGE_SEARCH_DESIGN.md) on raw page bytes. (Case-insensitive
+    ``_CI_*`` / ``IInStr`` variants need case folding and are intentionally not
+    extracted here.) Used only by those two; ``_rg_passes_predicates_native``
+    and ``row_group_may_satisfy`` ignore these op tags (fail-open).
     """
     if node is None:
         return None
 
     from opteryx.expression import NodeType
 
-    if node.value not in ("_STARTS_WITH", "_ENDS_WITH", "InStr"):
+    if node.value not in ("_STARTS_WITH", "_ENDS_WITH", "InStr", "NotInStr"):
         return None
     # Two node shapes carry the same rewritten predicate, and BOTH have to be
     # read here. The optimizer's LIKE rewrite emits a COMPARISON_OPERATOR with

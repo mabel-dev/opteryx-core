@@ -38,6 +38,7 @@
 #include <type_traits>
 #include "core/buffers.h"
 #include "core/alloc.h"
+#include "ops/int64_addsub_simd.h"
 
 namespace draken { namespace ops {
 
@@ -126,6 +127,36 @@ template <typename Op>
         " overflow: exact integer result exceeds INT64 — fail loud, never a wrapped answer");
 }
 
+// Contiguous vector-with-scalar loops: dst[j] = Op(a[j], s) / Op(s, b[j]) for j in
+// [0, k). Returns true iff any element overflowed (dst holds the wrapped results).
+// Add and sub run the SIMD kernels (ops/int64_addsub_simd.h); every other op runs the
+// scalar loop. Same flag, same wrapped dst either way.
+template <typename Op>
+static inline bool i64_loop_vs(const int64_t* a, int64_t s, int64_t* dst, uint32_t k) {
+    if constexpr (std::is_same<Op, I64OvfAdd>::value) {
+        return i64_addsub_vs<false>(a, s, dst, k);
+    } else if constexpr (std::is_same<Op, I64OvfSub>::value) {
+        return i64_addsub_vs<true>(a, s, dst, k);
+    } else {
+        bool any = false;
+        for (uint32_t j = 0; j < k; ++j) any |= Op::apply(a[j], s, dst[j]);
+        return any;
+    }
+}
+
+template <typename Op>
+static inline bool i64_loop_sv(int64_t s, const int64_t* b, int64_t* dst, uint32_t k) {
+    if constexpr (std::is_same<Op, I64OvfAdd>::value) {
+        return i64_addsub_sv<false>(s, b, dst, k);
+    } else if constexpr (std::is_same<Op, I64OvfSub>::value) {
+        return i64_addsub_sv<true>(s, b, dst, k);
+    } else {
+        bool any = false;
+        for (uint32_t j = 0; j < k; ++j) any |= Op::apply(s, b[j], dst[j]);
+        return any;
+    }
+}
+
 // Uniform logical-row loop: dst[i] = Op(xat(i), yat(i)) for i in [0, n).
 // `xat`/`yat` return the int64 operand of logical row i. `av`/`bv` are the
 // operand validity bitmaps (nullptr = all valid). Frees `dst` and throws
@@ -153,9 +184,7 @@ template <typename Op>
 static inline void i64_checked_physical(const DrakenVector& src, const int64_t* ad,
                                         int64_t scalar, int64_t* dst) {
     const uint32_t k = src.data_length;
-    bool any = false;
-    for (uint32_t j = 0; j < k; ++j)
-        any |= Op::apply(ad[j], scalar, dst[j]);
+    const bool any = i64_loop_vs<Op>(ad, scalar, dst, k);
     if (!any) return;
     for (uint32_t i = 0; i < src.length; ++i) {
         int64_t t;

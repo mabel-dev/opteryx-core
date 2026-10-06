@@ -19,7 +19,7 @@
 //           kernels themselves touch no Python and run with the GIL released.
 //
 // NULL / EMPTY SEMANTICS — deliberately matches the OLD Python path this replaces
-// (opteryx/compiled/nanobind/vector_string_search.cpp impl_contains_any/all),
+// (opteryx/compiled/nanobind/vector_array_membership.cpp impl_contains_any/all),
 // NOT array_reductions.h's TVL semantics:
 //   Null ARRAY ROW    → False. No output validity bitmap (validity == nullptr).
 //   Null CHILD ELEM   → skipped (cannot match a real item).

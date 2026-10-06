@@ -986,7 +986,7 @@ static inline bool build_direct_int64_dict(const DecodedColumn& d,
 // change of key.
 template <typename T>
 static inline bool rle_dedupe_and_expand(const DecodedColumn& d, uint32_t n,
-                                         const std::vector<T>& run_values,
+                                         const draken::AppendBuffer<T>& run_values,
                                          std::vector<T>& uniq,
                                          uint32_t* codes) {
     static_assert(sizeof(T) == sizeof(uint64_t), "run value must be 64-bit");
@@ -1585,7 +1585,7 @@ class ParquetIOPipeline {
  private:
     // PageIndex page pruning (compute_page_prune). The footer's per-page
     // min/max (ColumnIndex) are tested against the pushed per-value predicates
-    // (dict_preds_, the same conjuncts the dictionary decode-skip consults); a
+    // (value_preds_, the same conjuncts the dictionary decode-skip consults); a
     // page no predicate can match contributes its row range as zeros to a
     // row-group-wide mask, and the OffsetIndex then turns that mask into, per
     // column, (a) a PageJumpPlan the decoder advances by without reading the
@@ -1802,16 +1802,22 @@ class ParquetIOPipeline {
     // set_pool_sink(); workers reserve+serialize+finalize through it.
     PoolSink pool_sink_;
 
-    // Phase 2 dictionary decode-skip: per-column pushed predicate, keyed by
-    // parquet column name. Set once before any submit (workers read it const, no
-    // coordination). A worker decoding a dict-encoded column whose dictionary
-    // satisfies none of the predicate skips its data pages. Empty = feature off.
-    struct ColDictPred {
-        int kind = -1;                       // see DictSkipPredicate::kind
+    // Pushed per-value predicates (ValuePredicate, decode.hpp), keyed by parquet
+    // column name. Set once before any submit (workers read it const, no
+    // coordination). Used by the dictionary decode-skip (a dict-encoded column
+    // whose dictionary satisfies none of the predicate skips its data pages), by
+    // PageIndex page pruning, and by the page search. Empty = all three off.
+    struct ColValuePred {
+        int kind = -1;                       // see ValuePredicate::kind
         std::vector<int64_t>     int_vals;   // kind 0
-        std::vector<std::string> str_vals;   // kinds 1..4
+        std::vector<std::string> str_vals;   // kinds 1..5
     };
-    ankerl::unordered_dense::map<std::string, ColDictPred> dict_preds_;
+    ankerl::unordered_dense::map<std::string, ColValuePred> value_preds_;
+    // Page search (docs/PARQUET_PAGE_SEARCH_DESIGN.md §5): the columns carrying a
+    // contains / not-contains conjunct (kinds 4/5), in registration order — the
+    // order the planner pushed the conjuncts — and the first one present in a
+    // row group is the column the worker searches.
+    std::vector<std::string> search_cols_;
 
     // PROTOTYPE (2026-08-14, unratified) — H6: per-pipeline whole-file mmap
     // cache for LOCAL files. Previously every row-group decode opened the file
@@ -2064,7 +2070,7 @@ class ParquetIOPipeline {
      * Returns (bytes, elapsed_ns).
      */
     // ── Remote fetch geometry ────────────────────────────────────────────────
-    // Pure functions of the WorkItem (+ dict_preds_, set before any submit).
+    // Pure functions of the WorkItem (+ value_preds_, set before any submit).
     // Factored out so the fetch-ahead stage and decode_row_group derive the SAME
     // extents from ONE definition rather than two copies that could drift: a
     // drift here would decode a column from the wrong offset.
@@ -2113,7 +2119,7 @@ class ParquetIOPipeline {
             return !(v != nullptr && v[0] == '0' && v[1] == '\0');
         }();
         if (!prune_enabled) return;
-        if (!item.row_mask.empty() || dict_preds_.empty() || item.column_stats.empty())
+        if (!item.row_mask.empty() || value_preds_.empty() || item.column_stats.empty())
             return;
 
         const size_t ncols = item.column_stats.size();
@@ -2129,7 +2135,7 @@ class ParquetIOPipeline {
             lo = std::min(lo, std::min(cs.column_index_offset, cs.offset_index_offset));
             hi = std::max(hi, std::max(cs.column_index_offset + cs.column_index_length,
                                        cs.offset_index_offset + cs.offset_index_length));
-            if (cs.max_repetition_level == 0 && dict_preds_.count(cs.name) != 0) any_pred = true;
+            if (cs.max_repetition_level == 0 && value_preds_.count(cs.name) != 0) any_pred = true;
         }
         if (!any_pred) return;
 
@@ -2231,8 +2237,8 @@ class ParquetIOPipeline {
         for (size_t i = 0; i < ncols; ++i) {
             if (!has_oi[i]) continue;
             const ColumnStats& cs = item.column_stats[i];
-            auto pit = dict_preds_.find(cs.name);
-            if (pit == dict_preds_.end()) continue;
+            auto pit = value_preds_.find(cs.name);
+            if (pit == value_preds_.end()) continue;
             const ColumnIndexData ci = ParseColumnIndex(
                 at(cs.column_index_offset, cs.column_index_length),
                 static_cast<size_t>(cs.column_index_length));
@@ -3169,8 +3175,11 @@ class ParquetIOPipeline {
             // Decode column i under `col_mask` (uint8 per row group row, or null)
             // into result.columns[i]. Returns false when the row group must stop
             // decoding: an error (result.success = false) or a dictionary miss
-            // that proves it empty (result.empty_filtered).
-            auto decode_col = [&](size_t i, const uint8_t* col_mask) -> bool {
+            // that proves it empty (result.empty_filtered). `search_out` arms the
+            // page search on this column (its kind 4/5 predicate); the decoder
+            // reports the rows it emitted there.
+            auto decode_col = [&](size_t i, const uint8_t* col_mask,
+                                  PageSearchOut* search_out = nullptr) -> bool {
                 // A leaf of a projected STRUCT/MAP decodes UNMASKED (the fold applies the row
                 // mask once, over the assembled rows), with no dictionary retention, dictionary
                 // skip or page jump: the fold reads every level of every leaf.
@@ -3249,17 +3258,18 @@ class ParquetIOPipeline {
                 // could only ever agree — and leaving it off keeps the pass-2
                 // consumer's "a masked submit never comes back empty" invariant
                 // exactly as strong as it was.
-                DictSkipPredicate skip;
-                const DictSkipPredicate* skip_ptr = nullptr;
-                if (ng == nullptr && item.row_mask.empty() && !dict_preds_.empty()) {
-                    auto nit = dict_preds_.find(col_stats.name);
-                    if (nit != dict_preds_.end()) {
+                ValuePredicate skip;
+                const ValuePredicate* skip_ptr = nullptr;
+                if (ng == nullptr && item.row_mask.empty() && !value_preds_.empty()) {
+                    auto nit = value_preds_.find(col_stats.name);
+                    if (nit != value_preds_.end()) {
                         skip.kind = nit->second.kind;
                         skip.int_vals = &nit->second.int_vals;
                         skip.str_vals = &nit->second.str_vals;
                         skip_ptr = &skip;
                     }
                 }
+                PageSearchOut* search_ptr = (skip_ptr != nullptr) ? search_out : nullptr;
 
                 DecodedColumn& decoded = scratch;   // reused; reset at decode entry
                 // H15 (2026-08-14, unratified): a SMALL column chunk is cheaper to
@@ -3288,7 +3298,7 @@ class ParquetIOPipeline {
                         static_cast<const uint8_t*>(mmap_base) + (base_offset - mmap_offset);
                     auto t_dec = std::chrono::steady_clock::now();
                     DecodeColumnFromChunk(scratch,
-                        chunk_ptr, static_cast<size_t>(chunk_size), &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr);
+                        chunk_ptr, static_cast<size_t>(chunk_size), &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                     // A jumped-over page is never faulted in from the mapping.
@@ -3311,7 +3321,7 @@ class ParquetIOPipeline {
                     result.bytes_fetched += col_fetched[i];   // what was actually transferred
                     auto t_dec = std::chrono::steady_clock::now();
                     DecodeColumnFromChunk(scratch,
-                        raw_data, raw_size, &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr);
+                        raw_data, raw_size, &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                 } else {
@@ -3322,7 +3332,7 @@ class ParquetIOPipeline {
                     total_read_ns += read_ns;
                     auto t_dec = std::chrono::steady_clock::now();
                     DecodeColumnFromChunk(scratch,
-                        raw_bytes.data(), raw_bytes.size(), &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr);
+                        raw_bytes.data(), raw_bytes.size(), &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                 }
@@ -3393,10 +3403,69 @@ class ParquetIOPipeline {
             auto record_kept = [&](const uint8_t* m, size_t n) {
                 if (report_kept_rows_ && m != nullptr) result.kept_rows.assign(m, m + n);
             };
+
+            // ── Page search (docs/PARQUET_PAGE_SEARCH_DESIGN.md §5) ──────────
+            // The first registered contains / not-contains column present in this
+            // row group decodes FIRST, with the search armed: it emits only the
+            // rows that can pass its conjunct, and every other column then decodes
+            // under those rows (selective decode). The scan's own filter still
+            // evaluates the full predicate over the survivors — the search only
+            // drops rows its conjunct proves dead.
+            //
+            // Not armed for a pass-2 item (item.row_mask: its rows already passed;
+            // the decoder declines the predicate there anyway) nor under the latmat
+            // pass-1 predicate without the prefilter: that survivor mask is mapped
+            // back to row-group rows by pass 2, so its columns must stay full-length.
+            size_t search_i = SIZE_MAX;
+            if (item.row_mask.empty() && !search_cols_.empty() &&
+                !(pass1_pred_.fn != nullptr && !prefilter)) {
+                for (const std::string& name : search_cols_) {
+                    for (size_t i = 0; i < ncols_total; ++i) {
+                        if (item.column_stats[i].name != name) continue;
+                        bool nested_leaf = false;
+                        if (item.nested)
+                            for (const NestedGroup& g : item.nested->groups)
+                                if (i >= g.first && i < g.first + g.count) { nested_leaf = true; break; }
+                        if (!nested_leaf && item.column_stats[i].max_repetition_level == 0)
+                            search_i = i;
+                        break;
+                    }
+                    if (search_i != SIZE_MAX) break;
+                }
+            }
+            // Decode the search column under `base` (the page-prune mask or null).
+            // Returns the mask every other column decodes under: `base` when the
+            // search dropped nothing (or was declined), else the search's rows.
+            // Sets empty_filtered when no row survives. False = stop (error / empty).
+            PageSearchOut search_out;
+            auto decode_search_col = [&](const uint8_t* base, const uint8_t*& rest) -> bool {
+                rest = base;
+                if (!decode_col(search_i, base, &search_out)) return false;
+                if (!search_out.applied) return true;
+                const size_t rows = search_out.row_mask.size();
+                if (base != nullptr && rows != mask_rows)
+                    throw std::logic_error("page search: row mask and page mask lengths disagree");
+                size_t kept = 0, base_kept = 0;
+                for (size_t r = 0; r < rows; ++r) kept += search_out.row_mask[r];
+                if (base != nullptr) { for (size_t r = 0; r < rows; ++r) base_kept += base[r]; }
+                else base_kept = rows;
+                if (kept == 0) {
+                    result.empty_filtered = true;
+                    result.empty_rows = static_cast<int64_t>(base_kept);
+                    return false;
+                }
+                if (kept < base_kept) rest = search_out.row_mask.data();
+                return true;
+            };
+
             if (!prefilter) {
-                for (size_t i = 0; i < ncols_total && !result.empty_filtered; ++i)
-                    if (!decode_col(i, mask_ptr)) break;
-                record_kept(mask_ptr, mask_rows);
+                const uint8_t* m = mask_ptr;
+                bool ok = !result.empty_filtered;
+                if (ok && search_i != SIZE_MAX) ok = decode_search_col(mask_ptr, m);
+                for (size_t i = 0; ok && i < ncols_total && !result.empty_filtered; ++i)
+                    if (i != search_i && !decode_col(i, m)) break;
+                record_kept(m, m == search_out.row_mask.data() ? search_out.row_mask.size()
+                                                               : mask_rows);
             } else {
                 if (!item.row_mask.empty())
                     throw std::logic_error("scan prefilter armed on a row-masked work item");
@@ -3404,16 +3473,22 @@ class ParquetIOPipeline {
                 for (size_t i = 0; i < ncols_total; ++i)
                     for (const auto& pc : pass1_pred_.cols)
                         if (item.column_stats[i].name == pc) { is_pred[i] = 1; break; }
+                // p_mask: the rows the predicate columns hold — the page-prune mask,
+                // narrowed by the page search when it dropped any.
+                const uint8_t* p_mask = mask_ptr;
                 bool ok = true;
+                if (search_i != SIZE_MAX) ok = decode_search_col(mask_ptr, p_mask);
+                const size_t p_mask_rows =
+                    p_mask == search_out.row_mask.data() ? search_out.row_mask.size() : mask_rows;
                 for (size_t i = 0; i < ncols_total && ok; ++i)
-                    if (is_pred[i]) ok = decode_col(i, mask_ptr);
+                    if (is_pred[i] && i != search_i) ok = decode_col(i, p_mask);
                 if (ok && !result.empty_filtered) {
                     pass1_run_predicate(result, pass1_pred_);
                     std::vector<uint8_t> d_mask;
-                    const uint8_t* d_mask_ptr = mask_ptr;
+                    const uint8_t* d_mask_ptr = p_mask;
                     if (!result.survivor_mask.empty()) {
-                        // Predicate-column length: the page-pruned survivors when a
-                        // page mask is active, else the row group.
+                        // Predicate-column length: the rows p_mask selects when one
+                        // is active, else the row group.
                         uint32_t np = 0;
                         for (size_t i = 0; i < ncols_total; ++i)
                             if (is_pred[i]) { np = result.columns[i].length; break; }
@@ -3425,15 +3500,15 @@ class ParquetIOPipeline {
                         if (kept == 0) {
                             result.empty_filtered = true;
                             result.empty_rows = np;
-                        } else if (kept < np || mask_ptr != nullptr) {
+                        } else if (kept < np || p_mask != nullptr) {
                             // Row-group-row mask for the other columns: the survivor
                             // bit of each row that reached the predicate columns.
-                            const size_t rg_rows = mask_ptr != nullptr
-                                ? pp.row_mask.size() : static_cast<size_t>(np);
+                            const size_t rg_rows = p_mask != nullptr
+                                ? p_mask_rows : static_cast<size_t>(np);
                             d_mask.assign(rg_rows, 0);
                             uint32_t rank = 0;
                             for (size_t r = 0; r < rg_rows; ++r) {
-                                if (mask_ptr != nullptr && !mask_ptr[r]) continue;
+                                if (p_mask != nullptr && !p_mask[r]) continue;
                                 d_mask[r] = (sm[rank >> 3] >> (rank & 7)) & 1u;
                                 ++rank;
                             }
@@ -3445,9 +3520,9 @@ class ParquetIOPipeline {
                     }
                     if (!result.empty_filtered)
                         for (size_t i = 0; i < ncols_total; ++i)
-                            if (!is_pred[i] && !decode_col(i, d_mask_ptr)) break;
+                            if (!is_pred[i] && i != search_i && !decode_col(i, d_mask_ptr)) break;
                     record_kept(d_mask_ptr, d_mask_ptr == d_mask.data() ? d_mask.size()
-                                                                        : mask_rows);
+                                                                        : p_mask_rows);
                 }
             }
         } catch (const std::exception& e) {
@@ -3774,18 +3849,22 @@ class ParquetIOPipeline {
         return trace_node_id_;
     }
 
-    // Phase 2: register a pushed dictionary decode-skip predicate for a column.
-    // Call once per column before any submit. One predicate per column (last
-    // wins); a single conjunct is sound for skipping.
+    // Register a pushed per-value predicate (ValuePredicate) for a column. Call
+    // once per column before any submit. One predicate per column (last wins); a
+    // single conjunct is sound for skipping. Kinds 4/5 also make the column a
+    // page-search candidate, in the order registered.
     void add_int_needles(const std::string& column, const std::vector<int64_t>& needles) {
-        ColDictPred& p = dict_preds_[column];
+        ColValuePred& p = value_preds_[column];
         p.kind = 0; p.int_vals = needles;
     }
     void add_str_pred(const std::string& column, int kind, const std::vector<std::string>& vals) {
-        ColDictPred& p = dict_preds_[column];
+        ColValuePred& p = value_preds_[column];
         p.kind = kind; p.str_vals = vals;
+        if ((kind == 4 || kind == 5) &&
+            std::find(search_cols_.begin(), search_cols_.end(), column) == search_cols_.end())
+            search_cols_.push_back(column);
     }
-    void clear_eq_needles() { dict_preds_.clear(); }
+    void clear_eq_needles() { value_preds_.clear(); search_cols_.clear(); }
 
     // Q24 latmat: register the pushed pass-1 predicate. `fn`/`ctx` are opaque
     // (opteryx_pass1_predicate_eval + Pass1PredCtx); `cols` are the predicate's

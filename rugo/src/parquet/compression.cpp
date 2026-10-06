@@ -252,7 +252,7 @@ void DecompressInto(
     size_t compressed_size,
     size_t uncompressed_size,
     CompressionCodec codec,
-    ScratchBuffer& out_buf)
+    draken::AppendBuffer<uint8_t>& out_buf)
 {
     switch (codec) {
         case CompressionCodec::UNCOMPRESSED:
@@ -260,7 +260,7 @@ void DecompressInto(
             break;
 
         case CompressionCodec::SNAPPY: {
-            out_buf.resize(uncompressed_size);
+            out_buf.resize_uninit(uncompressed_size);
             if (!snappy::RawUncompress(
                     reinterpret_cast<const char*>(compressed_data),
                     compressed_size,
@@ -271,7 +271,7 @@ void DecompressInto(
         }
 
         case CompressionCodec::ZSTD: {
-            out_buf.resize(uncompressed_size);
+            out_buf.resize_uninit(uncompressed_size);
             size_t result = ZSTD_decompressDCtx(
                 get_thread_dctx(),
                 out_buf.data(), uncompressed_size,
@@ -285,14 +285,14 @@ void DecompressInto(
         }
 
         case CompressionCodec::GZIP: {
-            out_buf.resize(uncompressed_size);
+            out_buf.resize_uninit(uncompressed_size);
             gzip_decode(compressed_data, compressed_size,
                         out_buf.data(), uncompressed_size);
             break;
         }
 
         case CompressionCodec::LZ4_RAW: {
-            out_buf.resize(uncompressed_size);
+            out_buf.resize_uninit(uncompressed_size);
             lz4_raw_decode(compressed_data, compressed_size,
                            out_buf.data(), uncompressed_size);
             break;

@@ -19,8 +19,9 @@
 //   result_valid[i] = a_valid[i] AND b_valid[i].
 //   For unary neg: result_valid[i] = a_valid[i].
 //
-// SIMD note: scalar loops structured for auto-vectorisation.
-// Manual NEON/AVX2 intrinsics are a follow-up; time-boxed waiver per 09_delivery §3.
+// SIMD: add / sub run explicit NEON / AVX2 kernels (ops/int64_addsub_simd.h) over
+// contiguous data — the checked-overflow scalar loops are NOT auto-vectorised by clang.
+// mul / div / mod stay scalar (no 64-bit SIMD multiply or divide on NEON/AVX2).
 
 #include <stdint.h>
 #include <stddef.h>
@@ -189,16 +190,14 @@ static inline bool i64_const_fold(const DrakenVector& a, const DrakenVector& b,
         const int64_t s = bd[0];
         const uint32_t k = a.data_length;
         int64_t* dst = alloc_i64(k);
-        bool ovf = false;
-        for (uint32_t j = 0; j < k; ++j) ovf |= Op::apply(ad[j], s, dst[j]);
+        const bool ovf = i64_loop_vs<Op>(ad, s, dst, k);
         if (ovf) { draken_free(dst); return false; }
         out = make_shaped_result(dst, a);
     } else {                             // a constant, b varies — shape from b
         const int64_t s = ad[0];
         const uint32_t k = b.data_length;
         int64_t* dst = alloc_i64(k);
-        bool ovf = false;
-        for (uint32_t j = 0; j < k; ++j) ovf |= Op::apply(s, bd[j], dst[j]);
+        const bool ovf = i64_loop_sv<Op>(s, bd, dst, k);
         if (ovf) { draken_free(dst); return false; }
         out = make_shaped_result(dst, b);
     }
@@ -217,6 +216,12 @@ static inline VecResult i64_add(const DrakenVector& a, const DrakenVector& b) {
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const int64_t* bd = static_cast<const int64_t*>(b.data);
     int64_t* dst = alloc_i64(n);
+    // Both operands identity-selected: contiguous SIMD kernel. A flagged overflow is
+    // not decided here — fall through to the uniform loop, which recomputes and raises
+    // iff a LIVE row overflowed (NULL slots / dead entries may overflow harmlessly).
+    if ((a.flags & b.flags & DRAKEN_SEL_IDENTITY) &&
+        !i64_addsub_vv<false>(ad, bd, dst, n))
+        return make_dense_result(dst, combine_validity(a.validity, b.validity, n), n);
     i64_checked_rows<I64OvfAdd>(n, dst,
         [&](uint32_t i) { return ad[a.selection[i]]; },
         [&](uint32_t i) { return bd[b.selection[i]]; },
@@ -246,6 +251,10 @@ static inline VecResult i64_sub(const DrakenVector& a, const DrakenVector& b) {
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const int64_t* bd = static_cast<const int64_t*>(b.data);
     int64_t* dst = alloc_i64(n);
+    // See i64_add: identity fast path; any overflow flag falls to the uniform loop.
+    if ((a.flags & b.flags & DRAKEN_SEL_IDENTITY) &&
+        !i64_addsub_vv<true>(ad, bd, dst, n))
+        return make_dense_result(dst, combine_validity(a.validity, b.validity, n), n);
     i64_checked_rows<I64OvfSub>(n, dst,
         [&](uint32_t i) { return ad[a.selection[i]]; },
         [&](uint32_t i) { return bd[b.selection[i]]; },

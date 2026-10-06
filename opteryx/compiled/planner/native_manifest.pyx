@@ -995,6 +995,27 @@ cdef class NativeManifest:
             ))
         return out
 
+    def distinct_floors(self, size_t position):
+        """[floor] per file, in file order: the number of distinct non-null values the
+        file's footers PROVE it holds in the column (an exact count, or the largest
+        exact row-group count), 0 where nothing is proven. An estimate (a sketch's
+        count) is never a floor. A caller needing a bound reads this, never
+        `cell()["distinct_count"]` alone."""
+        cdef size_t row
+        cdef size_t column = self._position(position)
+        cdef ManifestCell* c
+        cdef int64_t floor
+        out = []
+        for row in range(self._manifest.file_count()):
+            c = &self._manifest.cell(row, column)
+            floor = 0
+            if c.distinct_floor > 0:
+                floor = c.distinct_floor
+            if c.distinct_count != kUnknown and c.distinct_exact and c.distinct_count > floor:
+                floor = c.distinct_count
+            out.append(floor)
+        return out
+
     # --- pruning (manifest_prune.hpp) ---------------------------------------    # --- pruning (manifest_prune.hpp) ---------------------------------------
 
     def prune_files(self, ExprArena arena not None, ColumnTable columns not None, list predicate_ids, dict live_types):
