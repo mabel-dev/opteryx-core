@@ -48,6 +48,7 @@
 #include "ops/slice_shape.h"  // slice_keep_dict — the shared keep-or-flatten rule
 #include "ops/int64_compare.h"    // CmpEq/Ne/Gt/Ge/Lt/Le, cmp_alloc_bool_buf,
                                   // cmp_copy_validity, cmp_and_validity
+#include "ops/fixed_int_cmp_simd.h"  // native-width SIMD compare (identity operands)
 #include "ops/int64_predicates.h" // BetweenOp<lo_incl,hi_incl>
 #include "simd_hash.h"            // simd_hash_i64, NULL_HASH
 #include "carchar_set.hpp"        // opteryx::carchar::CarcharSet
@@ -463,6 +464,15 @@ static inline void fi_cmp_scalar_kernel(
     uint32_t        n)
 {
     const uint32_t whole_bytes = n >> 3;
+    // Identity: native-width SIMD (ops/fixed_int_cmp_simd.h) writes whole bytes for
+    // rows [0, 8*b0); the uniform loops below finish the rest. b0 == 0 when there is
+    // no SIMD target or the scalar does not fit T — the loops then do all the work.
+    uint32_t b0 = 0;
+    if constexpr (Identity) {
+        b0 = fi_native_cmp_vs<T, Op>(data, scalar, dst, n) >> 3;
+        if (src_null != nullptr)
+            for (uint32_t b = 0; b < b0; ++b) dst[b] &= src_null[b];
+    }
     auto at = [&](uint32_t pos) -> int64_t {
         if constexpr (Identity) return static_cast<int64_t>(data[pos]);
         else                    return static_cast<int64_t>(data[selection[pos]]);
@@ -480,12 +490,12 @@ static inline void fi_cmp_scalar_kernel(
             (static_cast<unsigned>(Op::apply(at(base+7), scalar)) << 7));
     };
     if (src_null == nullptr) {
-        for (uint32_t b = 0; b < whole_bytes; ++b) dst[b] = pack(b << 3);
+        for (uint32_t b = b0; b < whole_bytes; ++b) dst[b] = pack(b << 3);
         for (uint32_t i = whole_bytes << 3; i < n; ++i)
             if (Op::apply(at(i), scalar))
                 dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
     } else {
-        for (uint32_t b = 0; b < whole_bytes; ++b)
+        for (uint32_t b = b0; b < whole_bytes; ++b)
             dst[b] = static_cast<uint8_t>(pack(b << 3) & src_null[b]);
         for (uint32_t i = whole_bytes << 3; i < n; ++i)
             if ((src_null[i >> 3] >> (i & 7)) & 1u)
@@ -569,6 +579,13 @@ static inline void fi_cmp_vector_kernel(
     uint32_t        n)
 {
     const uint32_t whole_bytes = n >> 3;
+    // Identity: native-width SIMD for rows [0, 8*b0); see fi_cmp_scalar_kernel.
+    uint32_t b0 = 0;
+    if constexpr (Identity) {
+        b0 = fi_native_cmp_vv<T, Op>(a_data, b_data, dst, n) >> 3;
+        if (comb_null != nullptr)
+            for (uint32_t b = 0; b < b0; ++b) dst[b] &= comb_null[b];
+    }
     auto at_a = [&](uint32_t pos) -> int64_t {
         if constexpr (Identity) return static_cast<int64_t>(a_data[pos]);
         else                    return static_cast<int64_t>(a_data[a_sel[pos]]);
@@ -589,12 +606,12 @@ static inline void fi_cmp_vector_kernel(
             (static_cast<unsigned>(Op::apply(at_a(base+7), at_b(base+7))) << 7));
     };
     if (comb_null == nullptr) {
-        for (uint32_t b = 0; b < whole_bytes; ++b) dst[b] = pack(b << 3);
+        for (uint32_t b = b0; b < whole_bytes; ++b) dst[b] = pack(b << 3);
         for (uint32_t i = whole_bytes << 3; i < n; ++i)
             if (Op::apply(at_a(i), at_b(i)))
                 dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
     } else {
-        for (uint32_t b = 0; b < whole_bytes; ++b)
+        for (uint32_t b = b0; b < whole_bytes; ++b)
             dst[b] = static_cast<uint8_t>(pack(b << 3) & comb_null[b]);
         for (uint32_t i = whole_bytes << 3; i < n; ++i)
             if ((comb_null[i >> 3] >> (i & 7)) & 1u)
