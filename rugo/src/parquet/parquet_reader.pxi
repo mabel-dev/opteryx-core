@@ -100,6 +100,7 @@ cdef extern from "telemetry.hpp" namespace "rugo_tel":
     long long calls_count()
     long long dict_pages_parsed_unused_count()
     long long ba_chunks_count()
+    long long ba_stub_chunks_count()
     long long ba_intern_values_count()
     long long ba_drop_no_rederive_count()
     long long ba_drop_cap_count()
@@ -145,6 +146,7 @@ def get_cpp_telemetry():
         # byte_array dictionary-shape outcomes (counts, not seconds). Keys are
         # prefixed ba_ so callers that sum "*_s" timing keys skip them.
         "ba_chunks":            ba_chunks_count(),
+        "ba_stub_chunks":       ba_stub_chunks_count(),
         "ba_intern_values":     ba_intern_values_count(),
         "ba_drop_no_rederive":  ba_drop_no_rederive_count(),
         "ba_drop_cap":          ba_drop_cap_count(),

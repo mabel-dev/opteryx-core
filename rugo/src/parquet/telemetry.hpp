@@ -53,6 +53,7 @@ inline std::atomic<long long> dict_pages_parsed_unused {0};
 // ba_chunks lands in exactly one of ba_emit_dict / ba_emit_dense, and each drop
 // counter attributes one of the three routes out of dict mode.
 inline std::atomic<long long> ba_chunks            {0};  // byte_array chunks entering WITH a dict page
+inline std::atomic<long long> ba_stub_chunks        {0};  // byte_array chunks decoded length-only (value bytes stubbed)
 inline std::atomic<long long> ba_intern_values     {0};  // values pushed through InternByteArrayToDictionary
 inline std::atomic<long long> ba_drop_no_rederive  {0};  // rederive gate off (rugo writer / DELTA_BYTE_ARRAY)
 inline std::atomic<long long> ba_drop_cap          {0};  // intern table outgrew dict_cap mid-page
@@ -90,6 +91,7 @@ inline void reset() {
     calls.store(0, std::memory_order_relaxed);
     dict_pages_parsed_unused.store(0, std::memory_order_relaxed);
     ba_chunks.store(0, std::memory_order_relaxed);
+    ba_stub_chunks.store(0, std::memory_order_relaxed);
     ba_intern_values.store(0, std::memory_order_relaxed);
     ba_drop_no_rederive.store(0, std::memory_order_relaxed);
     ba_drop_cap.store(0, std::memory_order_relaxed);
@@ -135,6 +137,7 @@ inline long long dict_pages_parsed_unused_count() { return dict_pages_parsed_unu
 
 // byte_array dictionary-shape counters (plain counts, not seconds).
 inline long long ba_chunks_count()            { return ba_chunks.load(std::memory_order_relaxed); }
+inline long long ba_stub_chunks_count()       { return ba_stub_chunks.load(std::memory_order_relaxed); }
 inline long long ba_intern_values_count()     { return ba_intern_values.load(std::memory_order_relaxed); }
 inline long long ba_drop_no_rederive_count()  { return ba_drop_no_rederive.load(std::memory_order_relaxed); }
 inline long long ba_drop_cap_count()          { return ba_drop_cap.load(std::memory_order_relaxed); }

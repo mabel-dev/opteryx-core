@@ -71,6 +71,12 @@ struct PageJumpPlan {
 // the flat member list mirrored in parquet_reader.pxd (Cython resolves the
 // members through the base transparently). If you add a scalar, add it HERE and
 // it is reset for free; do NOT add scalars directly to DecodedColumn.
+// Length-only string stubs (DecodedColumn::append_string_stub). kStringStubInline MUST equal
+// draken's STR_INLINE_MAX (core/string_slot.h): the longest value a slot stores inline.
+// io_pipeline.hpp, which includes that header, static_asserts the equality.
+constexpr size_t kStringStubInline = 12;
+constexpr size_t kStringStubPrefix = 4;
+
 struct DecodedColumnMeta {
   // E33: set from the column's Parquet IntType logical-type annotation.
   // int_bit_width is the DECLARED width (8/16/32/64) and is_unsigned its
@@ -126,6 +132,13 @@ struct DecodedColumnMeta {
   // arbitrary (zero) codes — every row is a guaranteed non-match for the
   // equality, so the codes never surface (0 rows survive the conjunct).
   bool dict_all_filtered = false;
+  // Set when the decoder was asked for a length-only column and stubbed at least one
+  // value: string_arena then holds only the bytes a length-only consumer reads (each
+  // value's full bytes when it is inline in a slot, otherwise just its 4-byte
+  // prefix) — see append_string_stub. Such a column may ONLY be consumed by the
+  // direct string builders, which take lengths from string_lens; anything that
+  // reads `len` bytes at string_offsets[i] (the IPC serializer) would overread.
+  bool payloads_stubbed = false;
 };
 
 // Structure to hold decoded column data.
@@ -227,6 +240,21 @@ struct DecodedColumn : DecodedColumnMeta {
     string_lens.push_back(static_cast<int32_t>(len));
     const uint8_t* b = static_cast<const uint8_t*>(p);
     string_arena.append(b, len);
+  }
+
+  // Length-only counterpart of append_string: the planner proved no read of this
+  // column ever dereferences a long value's payload, so only what the slot builder
+  // consumes is kept. A value of at most kStringStubInline bytes is stored whole
+  // (it lives inline in its slot); a longer one keeps just its first 4 bytes (the
+  // slot's lex-order prefix). string_lens records the TRUE length, so offsets +
+  // lens remain the authority for a value's extent and `len` bytes must never be
+  // read back at string_offsets[i] for a stubbed value. Sets payloads_stubbed.
+  void append_string_stub(const void* p, size_t len) {
+    string_offsets.push_back(static_cast<uint32_t>(string_arena.size()));
+    string_lens.push_back(static_cast<int32_t>(len));
+    const uint8_t* b = static_cast<const uint8_t*>(p);
+    string_arena.append(b, len <= kStringStubInline ? len : kStringStubPrefix);
+    payloads_stubbed = true;
   }
 
   // Reset to the default-constructed state WITHOUT releasing vector capacity, so
@@ -372,7 +400,8 @@ void DecodeColumnFromChunk(DecodedColumn& out, const uint8_t* data, size_t size,
                            bool prefer_dict = false,
                            const ValuePredicate* skip_pred = nullptr,
                            const PageJumpPlan* jump = nullptr,
-                           PageSearchOut* search = nullptr);
+                           PageSearchOut* search = nullptr,
+                           bool length_only = false);
 
 // In-place convenience: mask-only (matches the 4-arg by-value convenience below).
 inline void DecodeColumnFromChunk(DecodedColumn& out, const uint8_t* data, size_t size,
@@ -381,10 +410,11 @@ inline void DecodeColumnFromChunk(DecodedColumn& out, const uint8_t* data, size_
                                   bool prefer_dict = false,
                                   const ValuePredicate* skip_pred = nullptr,
                                   const PageJumpPlan* jump = nullptr,
-                                  PageSearchOut* search = nullptr) {
+                                  PageSearchOut* search = nullptr,
+                                  bool length_only = false) {
   DecodeColumnFromChunk(out, data, size, target_col,
                         nullptr, nullptr, nullptr, nullptr,
-                        row_mask, prefer_dict, skip_pred, jump, search);
+                        row_mask, prefer_dict, skip_pred, jump, search, length_only);
 }
 
 // By-value overload (thin shim over the in-place primary — see decode_column.cpp).

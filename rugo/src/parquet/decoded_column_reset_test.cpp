@@ -144,7 +144,7 @@ static void test_scalars_defaulted() {
     d.pages_decoded = 9;           d.max_rep_level = 3;
     d.max_def_level = 4;           d.success = true;
     d.code_width = 4;              d.dict_ordered = true;
-    d.dict_all_filtered = true;
+    d.dict_all_filtered = true;    d.payloads_stubbed = true;
     d.ext_written = 99;            d.rle_total_length = 4096;
     d.rle_last_code = 77;
     int64_t i64 = 0; double f64 = 0; int32_t i32 = 0; float f32 = 0;
@@ -167,6 +167,7 @@ static void test_scalars_defaulted() {
     check(d.code_width == fresh.code_width, "code_width defaulted");
     check(d.dict_ordered == fresh.dict_ordered, "dict_ordered defaulted");
     check(d.dict_all_filtered == fresh.dict_all_filtered, "dict_all_filtered defaulted");
+    check(d.payloads_stubbed == fresh.payloads_stubbed, "payloads_stubbed defaulted");
     check(d.ext_int64 == nullptr, "ext_int64 nulled");
     check(d.ext_float64 == nullptr, "ext_float64 nulled");
     check(d.ext_int32 == nullptr, "ext_int32 nulled");

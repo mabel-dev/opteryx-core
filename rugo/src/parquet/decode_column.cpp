@@ -481,7 +481,8 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                                     bool prefer_dict,
                                     const ValuePredicate* skip_pred,
                                     const PageJumpPlan* jump,
-                                    PageSearchOut* search) {
+                                    PageSearchOut* search,
+                                    bool length_only) {
   result.reset();
   if (search != nullptr) {
     search->row_mask.clear();
@@ -978,6 +979,29 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     // dictionary page is one that COULD emit dict-shaped. Counting entries here
     // is what makes the emit counters at the tail interpretable as a rate.
     if (byte_array_dict_mode) rugo_tel::ba_chunks.fetch_add(1, std::memory_order_relaxed);
+    // Length-only decode (the planner proved no read of this column dereferences a
+    // payload). A LIST column cannot be length-only — its post-loop mask filter
+    // re-reads each value's bytes — so asking is a caller bug, refused loudly.
+    if (length_only && target_col->max_repetition_level != 0) {
+      result.error_message = "length_only requested for a LIST column";
+      return;
+    }
+    // Stub the value bytes only when no stubbed value can reach the IPC serializer.
+    // A column with nulls takes the pool path (compact present-only strings +
+    // validity), and the serializer reads `len` bytes at each offset; a stub would be
+    // overread. The footer proves "no nulls" two ways — a REQUIRED column, or an
+    // explicit zero null_count (-1 means the writer recorded none: not proof). A
+    // column the footer cannot clear decodes in full, exactly as it did before.
+    // If the footer lies and a null page appears anyway, the consumer refuses the
+    // column (io_pipeline.hpp, emit_col) instead of serializing stubs.
+    const bool stub_strings =
+        length_only && result.type == "byte_array" &&
+        (target_col->max_definition_level == 0 || target_col->null_count == 0);
+    // One entry point for every dense append below: full bytes, or the stub.
+    auto append_value = [&](const void* p, size_t len) {
+      if (stub_strings) result.append_string_stub(p, len);
+      else              result.append_string(p, len);
+    };
     bool int32_dict_mode = (result.type == "int32" && dict_size > 0);
     bool int64_dict_mode = (result.type == "int64" && dict_size > 0);
     bool float32_dict_mode = (result.type == "float32" && dict_size > 0);
@@ -2412,7 +2436,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               const char* sp = reinterpret_cast<const char*>(
                   result.rle_str_arena.data() + off);
               for (int32_t j = 0; j < cnt; ++j)
-                result.append_string(sp, static_cast<size_t>(len));
+                append_value(sp, static_cast<size_t>(len));
             }
             result.rle_str_arena.clear();
             result.rle_str_offsets.clear();
@@ -2758,7 +2782,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               if (code >= 0 && code < (int32_t)result.string_dict_lens.size()) {
                 const uint32_t off = result.string_dict_offsets[code];
                 const int32_t  len = result.string_dict_lens[code];
-                result.append_string(
+                append_value(
                     result.string_dict_arena.data() + off,
                     static_cast<size_t>(len));
               }
@@ -2776,9 +2800,14 @@ void DecodeColumnFromChunk(DecodedColumn &result,
 
           // DELTA_BYTE_ARRAY is decoded whole-page into std::string; it is rare and
           // is not worth a second interning path, so it always honours the switch.
+          // A length-only column never re-derives: interning hashes and compares every
+          // value's full bytes to build a dictionary nothing will read, and the stub
+          // path below keeps no bytes to intern. It takes the same dictionary-to-dense
+          // transition as a rugo-written file.
           const bool rederive = byte_array_dict_mode &&
                                 !target_col->writer_is_rugo &&
-                                page_encoding != 7;
+                                page_encoding != 7 &&
+                                !stub_strings;
           // Route B of three out of dict mode (A = cap overflow below,
           // C = RLE skip-dense materialisation upstream). Counted before the
           // call, because drop_dictionary_to_dense clears the flag it tests.
@@ -2794,7 +2823,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             if (decoded != present_count) return;
             for (size_t si = 0; si < page_strs.size(); ++si) {
               if (page_vsel != nullptr && !page_vsel[si]) continue;
-              result.append_string(page_strs[si].data(), page_strs[si].size());
+              append_value(page_strs[si].data(), page_strs[si].size());
             }
           } else {
             // NO per-page reserve() here. reserve(size + page_span) sets capacity
@@ -2837,7 +2866,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             // build then copies the arena once (build_direct_string_plain).
             // Measured 2026-09-28: removing this costs JOB 4.0%, ClickBench 2.9%.
             // Interning and selective pages keep the per-value loop below.
-            if (!interning && page_vsel == nullptr) {
+            if (!interning && page_vsel == nullptr && !stub_strings) {
               const size_t base = result.string_arena.size();
               const uint8_t* page_start = data_ptr;
               result.string_arena.append(data_ptr, (size_t)(data_end - data_ptr));
@@ -2891,7 +2920,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                   interning = false;
                 }
               } else {
-                result.append_string(data_ptr, length);
+                append_value(data_ptr, length);
               }
               data_ptr += length;
             }
@@ -3141,6 +3170,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     // If the two ever drift, that drift is itself the bug, and a counter with
     // its own private definition of "dict" would hide it.
     if (result.type == "byte_array") {
+      if (result.payloads_stubbed) rugo_tel::ba_stub_chunks.fetch_add(1, std::memory_order_relaxed);
       const bool emits_dict = !result.string_dict_lens.empty() &&
                               result.rle_str_lens.empty() &&
                               (!result.dict_indices.empty() ||

@@ -531,6 +531,10 @@ static inline void canonicalise_decoded_floats(DecodedColumn& d) {
     for (double& v : d.rle_float64_values)  v = draken::ops::fp_canon(v);
 }
 
+// DecodedColumn::append_string_stub keeps a value whole only when it is inline in its slot.
+static_assert(kStringStubInline == STR_INLINE_MAX && kStringStubPrefix == 4,
+              "length-only string stubs must match the slot layout (draken/core/string_slot.h)");
+
 static inline DirectKind direct_kind_for(const DecodedColumn& d) {
     if (!d.rep_levels.empty()) return DK_POOL;           // list
     const std::string& t = d.type;
@@ -3116,6 +3120,17 @@ class ParquetIOPipeline {
                 if (dk != DK_POOL && dk != DK_VARCHAR && dk != DK_VARCHAR_DICT && !safe_logical)
                     dk = DK_POOL;
 
+                // A length-only decode stubbed this column's payload bytes. Only the direct
+                // string builders know to read lengths instead of bytes; a pool-path
+                // serialization would overread the stubs and emit garbage. The decoder only
+                // stubs when the footer proves no nulls, so reaching here means the footer
+                // lied (nulls on a page whose null_count was 0): refuse, never serialize.
+                if (decoded.payloads_stubbed && dk != DK_VARCHAR && dk != DK_VARCHAR_DICT) {
+                    result.success = false;
+                    result.error = "length-only decode of column '" + col_stats.name +
+                                   "' cannot take the pool path (footer null_count=0 contradicted by the data)";
+                    return false;
+                }
                 if (dk != DK_POOL) {
                     // Direct path: the worker builds the positional Draken
                     // buffer (+ validity), doing any compact→positional scatter
@@ -3229,6 +3244,20 @@ class ParquetIOPipeline {
                 }
                 const uint8_t* dec_mask = ng ? nullptr : col_mask;
                 const auto& col_stats = item.column_stats[i];
+                // Length-only decode: the planner proved every read of this column is
+                // length-answerable, so the decoder may keep just what the slot builder
+                // needs (DecodedColumn::append_string_stub). Only when a direct builder
+                // exists to consume the stubs — a pool-path column is serialized from
+                // string_arena and would overread them. emit_col re-checks the shape.
+                // RUGO_LENGTH_ONLY_DECODE=0 is the A/B arm: the old full-payload decode.
+                static const bool length_only_decode_enabled = []() {
+                    const char* v = getenv("RUGO_LENGTH_ONLY_DECODE");
+                    return !(v != nullptr && v[0] == '0');
+                }();
+                const size_t i_orig = item.nested ? item.nested->orig[i] : i;
+                const bool col_length_only =
+                    length_only_decode_enabled && ng == nullptr && pool_sink_.draken_alloc != nullptr &&
+                    i_orig < length_only_columns_.size() && length_only_columns_[i_orig] != 0;
                 // PageIndex jump plan for this column (nullptr = header-walk).
                 const PageJumpPlan* jump_ptr =
                     (ng == nullptr && pp.active && i < pp.jump.size() && pp.jump[i].size() > 0) ? &pp.jump[i] : nullptr;
@@ -3335,7 +3364,7 @@ class ParquetIOPipeline {
                         static_cast<const uint8_t*>(mmap_base) + (base_offset - mmap_offset);
                     auto t_dec = std::chrono::steady_clock::now();
                     DecodeColumnFromChunk(scratch,
-                        chunk_ptr, static_cast<size_t>(chunk_size), &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr);
+                        chunk_ptr, static_cast<size_t>(chunk_size), &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr, col_length_only);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                     // A jumped-over page is never faulted in from the mapping.
@@ -3358,7 +3387,7 @@ class ParquetIOPipeline {
                     result.bytes_fetched += col_fetched[i];   // what was actually transferred
                     auto t_dec = std::chrono::steady_clock::now();
                     DecodeColumnFromChunk(scratch,
-                        raw_data, raw_size, &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr);
+                        raw_data, raw_size, &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr, col_length_only);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                 } else {
@@ -3369,7 +3398,7 @@ class ParquetIOPipeline {
                     total_read_ns += read_ns;
                     auto t_dec = std::chrono::steady_clock::now();
                     DecodeColumnFromChunk(scratch,
-                        raw_bytes.data(), raw_bytes.size(), &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr);
+                        raw_bytes.data(), raw_bytes.size(), &adjusted, dec_mask, prefer_dict, skip_ptr, jump_ptr, search_ptr, col_length_only);
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                 }

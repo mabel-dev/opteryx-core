@@ -543,7 +543,10 @@ static inline VecResult i64_compare_scalar(const DrakenVector& v, int64_t scalar
 // comb_null is the pre-computed AND of both validities (nullptr when both
 // inputs are non-null). Same 8-way byte-pack technique as scalar kernel.
 // ---------------------------------------------------------------------------
-template<typename Op>
+// Identity == true requires BOTH operands identity-selected: contiguous loads the
+// compiler can vectorise. Any other mix takes the uniform gather form. Same answer
+// either way (CLAUDE.md §11 hint-based dispatch, ratified identity fast path).
+template<typename Op, bool Identity>
 static inline void cmp_vector_kernel(
     const int64_t*  a_data, const uint32_t* a_sel,
     const int64_t*  b_data, const uint32_t* b_sel,
@@ -552,41 +555,38 @@ static inline void cmp_vector_kernel(
     uint32_t        n)
 {
     const uint32_t whole_bytes = n >> 3;
+    auto at_a = [&](uint32_t pos) -> int64_t {
+        if constexpr (Identity) return a_data[pos];
+        else                    return a_data[a_sel[pos]];
+    };
+    auto at_b = [&](uint32_t pos) -> int64_t {
+        if constexpr (Identity) return b_data[pos];
+        else                    return b_data[b_sel[pos]];
+    };
+    auto pack = [&](uint32_t base) -> uint8_t {
+        return static_cast<uint8_t>(
+            (static_cast<unsigned>(Op::apply(at_a(base+0), at_b(base+0))) << 0) |
+            (static_cast<unsigned>(Op::apply(at_a(base+1), at_b(base+1))) << 1) |
+            (static_cast<unsigned>(Op::apply(at_a(base+2), at_b(base+2))) << 2) |
+            (static_cast<unsigned>(Op::apply(at_a(base+3), at_b(base+3))) << 3) |
+            (static_cast<unsigned>(Op::apply(at_a(base+4), at_b(base+4))) << 4) |
+            (static_cast<unsigned>(Op::apply(at_a(base+5), at_b(base+5))) << 5) |
+            (static_cast<unsigned>(Op::apply(at_a(base+6), at_b(base+6))) << 6) |
+            (static_cast<unsigned>(Op::apply(at_a(base+7), at_b(base+7))) << 7));
+    };
 
     if (comb_null == nullptr) {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
-            const uint32_t base = b << 3;
-            dst[b] = static_cast<uint8_t>(
-                (static_cast<unsigned>(Op::apply(a_data[a_sel[base+0]], b_data[b_sel[base+0]])) << 0) |
-                (static_cast<unsigned>(Op::apply(a_data[a_sel[base+1]], b_data[b_sel[base+1]])) << 1) |
-                (static_cast<unsigned>(Op::apply(a_data[a_sel[base+2]], b_data[b_sel[base+2]])) << 2) |
-                (static_cast<unsigned>(Op::apply(a_data[a_sel[base+3]], b_data[b_sel[base+3]])) << 3) |
-                (static_cast<unsigned>(Op::apply(a_data[a_sel[base+4]], b_data[b_sel[base+4]])) << 4) |
-                (static_cast<unsigned>(Op::apply(a_data[a_sel[base+5]], b_data[b_sel[base+5]])) << 5) |
-                (static_cast<unsigned>(Op::apply(a_data[a_sel[base+6]], b_data[b_sel[base+6]])) << 6) |
-                (static_cast<unsigned>(Op::apply(a_data[a_sel[base+7]], b_data[b_sel[base+7]])) << 7));
-        }
+        for (uint32_t b = 0; b < whole_bytes; ++b) dst[b] = pack(b << 3);
         for (uint32_t i = whole_bytes << 3; i < n; ++i) {
-            if (Op::apply(a_data[a_sel[i]], b_data[b_sel[i]]))
+            if (Op::apply(at_a(i), at_b(i)))
                 dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
         }
     } else {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
-            const uint32_t base = b << 3;
-            const uint8_t m = static_cast<uint8_t>(
-                (static_cast<unsigned>(Op::apply(a_data[a_sel[base+0]], b_data[b_sel[base+0]])) << 0) |
-                (static_cast<unsigned>(Op::apply(a_data[a_sel[base+1]], b_data[b_sel[base+1]])) << 1) |
-                (static_cast<unsigned>(Op::apply(a_data[a_sel[base+2]], b_data[b_sel[base+2]])) << 2) |
-                (static_cast<unsigned>(Op::apply(a_data[a_sel[base+3]], b_data[b_sel[base+3]])) << 3) |
-                (static_cast<unsigned>(Op::apply(a_data[a_sel[base+4]], b_data[b_sel[base+4]])) << 4) |
-                (static_cast<unsigned>(Op::apply(a_data[a_sel[base+5]], b_data[b_sel[base+5]])) << 5) |
-                (static_cast<unsigned>(Op::apply(a_data[a_sel[base+6]], b_data[b_sel[base+6]])) << 6) |
-                (static_cast<unsigned>(Op::apply(a_data[a_sel[base+7]], b_data[b_sel[base+7]])) << 7));
-            dst[b] = static_cast<uint8_t>(m & comb_null[b]);
-        }
+        for (uint32_t b = 0; b < whole_bytes; ++b)
+            dst[b] = static_cast<uint8_t>(pack(b << 3) & comb_null[b]);
         for (uint32_t i = whole_bytes << 3; i < n; ++i) {
             if ((comb_null[i >> 3] >> (i & 7)) & 1u) {
-                if (Op::apply(a_data[a_sel[i]], b_data[b_sel[i]]))
+                if (Op::apply(at_a(i), at_b(i)))
                     dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
             }
         }
@@ -664,9 +664,14 @@ static inline VecResult compare_vector_impl(const DrakenVector& a, const DrakenV
         throw;
     }
 
-    cmp_vector_kernel<Op>(
-        a_data, a.selection, b_data, b.selection,
-        out_null, dst, n);
+    if (a.flags & b.flags & DRAKEN_SEL_IDENTITY)
+        cmp_vector_kernel<Op, true>(
+            a_data, a.selection, b_data, b.selection,
+            out_null, dst, n);
+    else
+        cmp_vector_kernel<Op, false>(
+            a_data, a.selection, b_data, b.selection,
+            out_null, dst, n);
 
     VecResult r;
     r.data           = dst;
