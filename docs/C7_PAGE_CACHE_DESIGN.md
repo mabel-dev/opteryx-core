@@ -410,3 +410,11 @@ Nothing proceeds past §10 step A without rulings on D-C7-1, -14 and -16 at mini
      (extra work on the cold run).
   3. Entry contents: the decompressed pages + parsed page headers + the
      dictionary page, so a hit needs nothing from the file.
+- **Partial chunks — ruled (a)** (2026-10-06): only fully decompressed chunks
+  are cached; partial decodes add nothing. Raised by the architect: also keep
+  the *compressed* bytes of pages that were fetched but skipped. Assessment in
+  the reply: pointless locally (the OS page cache already holds them); for
+  remote it saves a later GET but adds a second entry form (per-page state
+  decompressed / compressed / absent, a hit that still decompresses, eviction
+  weighing two forms — Pivot's model). Proposed: a later, separate part,
+  measured on remote (AIStor) only, kept only if leave-one-out pays.

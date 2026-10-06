@@ -254,8 +254,9 @@ def _run_side(arm: dict, args: argparse.Namespace) -> dict:
     ]
     if args.queries:
         cmd += ["--queries", args.queries]
-    if args.dataset:
-        cmd += ["--dataset", args.dataset]
+    dataset = arm.get("dataset") or args.dataset
+    if dataset:
+        cmd += ["--dataset", dataset]
     if args.profile:
         cmd += ["--profile"]
     cmd += ["--warmup", str(args.warmup)]
@@ -291,7 +292,9 @@ def _sha256(path: str) -> str:
 def _load_arms(args: argparse.Namespace) -> list[dict]:
     """Arms from --arms (JSON) or the legacy --a/--b pair.
 
-    An arm is {"label", "tree", "env": {VAR: value}, "so": {relpath: built .so}}.
+    An arm is {"label", "tree", "env": {VAR: value}, "so": {relpath: built .so},
+    "dataset": optional ClickBench dataset overriding --dataset for that arm — the way
+    to interleave two data FORMATS (e.g. scratch.hits_rugo_262k vs scratch.hits_skene)}.
     `so` substitutes extension modules inside `tree` for that arm's runs only —
     the way to A/B compile-time constants without a second tree. Arms sharing a
     tree that do not override a path get the tree's ORIGINAL file (stashed at
@@ -318,7 +321,7 @@ def _load_arms(args: argparse.Namespace) -> list[dict]:
             if not os.path.isfile(os.path.join(tree, rel)):
                 raise SystemExit(f"arm {item['label']}: {rel} is not a file in {tree}")
             so[rel] = src
-        arms.append({"label": item["label"], "tree": tree,
+        arms.append({"label": item["label"], "tree": tree, "dataset": item.get("dataset"),
                      "env": {k: str(v) for k, v in item.get("env", {}).items()}, "so": so})
     labels = [a["label"] for a in arms]
     if len(set(labels)) != len(labels):

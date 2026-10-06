@@ -46,7 +46,8 @@ INCLUDES := -Iinclude \
             -I$(DRAKEN_ROOT)/draken/core \
             -I$(DRAKEN_ROOT)/draken/simd \
             -I$(DRAKEN_ROOT)/third_party/mabel/carchar \
-            -I$(DRAKEN_ROOT)/third_party/cyan4973
+            -I$(DRAKEN_ROOT)/third_party/cyan4973 \
+            -I$(DRAKEN_ROOT)/third_party/ankerl
 # -MMD -MP makes the compiler emit a .d file listing every header each object
 # actually included; the `-include` below feeds those back to make. Without it
 # NO rule here depended on a header at all, so editing include/skene/format.h —
