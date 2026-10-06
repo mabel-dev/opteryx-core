@@ -107,10 +107,10 @@ def scan_residuals(sql: str) -> Tuple[Dict, Dict, Optional[BaseException]]:
 # gate matches on the prefix.
 #
 # `footer_gate` is the integer/narrow/unsigned admission gate (A1 closed the
-# integer widths). It stays reachable here via a SCHEMA-EVOLUTION dataset (a
-# projected column absent from one of the files) — the native scan does not
-# support schema evolution, so native_scan_rejection names the missing column and the
-# scan is refused, through the same R7b guard the integer case hit.
+# integer widths). A projected column absent from one of the files (schema
+# evolution) is read as NULL from that file — except where the NULL column's type
+# would be the FILE's, not the schema's (an ARRAY's element, parquet TIME's width):
+# that column is refused through the same R7b guard, naming the column and file.
 # ---------------------------------------------------------------------------
 _FLAT = "testdata/flat/formats/parquet"
 _TEN = "testdata/flat/ten_files"
@@ -190,8 +190,9 @@ HAND_SET: Dict[str, str] = {
     # column with no usable logical descriptor — has no parquet-scan trigger in the
     # test corpus, making it a defensive check like `no_manifest`/R7a. Same
     # retirement convention as R2 / R5 / R5b.)
-    # R7b — the footer gate; still reachable via schema evolution (missing column).
-    "footer_gate": "SELECT followers FROM '%s'" % _EVOLVING,
+    # R7b — the footer gate; still reachable via schema evolution: an ARRAY column
+    # (`cves`) absent from one file cannot be filled with NULL.
+    "footer_gate": "SELECT cves FROM '%s'" % _EVOLVING,
     # (R5b (A1) `unsigned_predicate_input` is RETIRED — no longer reachable, so it has
     # no hand-set entry. An unsigned predicate input used to fail closed because the
     # relocated ExprFilter's compare requires both operands to share a DrakenType and

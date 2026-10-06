@@ -25,6 +25,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <ankerl/unordered_dense.h>
+
 #include "core/buffers.h"
 #include "engine/native_roaring32.hpp"
 #include "morsels/cxx_morsel.h"
@@ -62,9 +64,9 @@ struct MergeAddressState {
     // rather than merely retired rows is what makes the cardinality check
     // complete: a target row matched twice where both arms yielded NOOP is
     // still a violation, and contributes no delete position to notice it by.
-    std::unordered_map<int64_t, MergeRoaring> matched;
+    ankerl::unordered_dense::map<int64_t, MergeRoaring> matched;
     // The subset whose old version is retired — UPDATE and DELETE alike.
-    std::unordered_map<int64_t, MergeRoaring> retired;
+    ankerl::unordered_dense::map<int64_t, MergeRoaring> retired;
 
     int64_t rows_inserted = 0;
     int64_t rows_updated  = 0;

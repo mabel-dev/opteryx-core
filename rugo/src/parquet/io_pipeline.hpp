@@ -14,6 +14,7 @@
 
 #include <string>
 #include <vector>
+#include <ankerl/unordered_dense.h>
 #include <memory>
 #include <atomic>
 #include <deque>
@@ -1810,7 +1811,7 @@ class ParquetIOPipeline {
         std::vector<int64_t>     int_vals;   // kind 0
         std::vector<std::string> str_vals;   // kinds 1..4
     };
-    std::unordered_map<std::string, ColDictPred> dict_preds_;
+    ankerl::unordered_dense::map<std::string, ColDictPred> dict_preds_;
 
     // PROTOTYPE (2026-08-14, unratified) — H6: per-pipeline whole-file mmap
     // cache for LOCAL files. Previously every row-group decode opened the file
@@ -3924,6 +3925,23 @@ class ParquetIOPipeline {
         submit_block(path, std::vector<int>{rg_idx}, column_names,
                      std::vector<std::vector<ColumnStats>>{column_stats},
                      std::vector<std::vector<uint8_t>>{row_mask});
+    }
+
+    /**
+     * Queue a result the caller built whole — one that needs no read and no decode
+     * (a row group whose file holds none of the projected columns). It is popped like
+     * any decoded result, so a consumer counting one result per submitted row group
+     * keeps counting right. Not back-pressured: the caller is the consumer, and
+     * blocking it on its own queue could never be released.
+     */
+    void post_result(MorselRef&& r) {
+        if (shutdown_) return;
+        {
+            std::lock_guard<std::mutex> lk(queue_mutex_);
+            result_queue_.push_back(std::move(r));
+            enqueue_count_.fetch_add(1, std::memory_order_relaxed);
+        }
+        queue_cv_.notify_all();
     }
 
     bool try_get_result(MorselRef& out) {

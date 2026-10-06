@@ -35,7 +35,6 @@ from libc.stdint cimport uint32_t
 from libcpp cimport bool as cbool
 from libcpp.string cimport string
 from libcpp.utility cimport move
-from libcpp.vector cimport vector
 
 from opteryx.compiled.planner.column_type cimport ColumnType
 

@@ -22,7 +22,6 @@ from libc.stdint cimport uint8_t, int32_t, int64_t, uint32_t, uint64_t
 from libc.stddef cimport size_t
 from libcpp.string cimport string
 from libcpp.vector cimport vector
-from libcpp.unordered_map cimport unordered_map
 from libcpp.pair cimport pair
 from libcpp.memory cimport shared_ptr
 from cython.operator cimport dereference as deref
@@ -550,12 +549,16 @@ cdef int _count_remote_fetch_blocks_native(list work_items,
     """`_count_remote_fetch_blocks` for the native plan, whose block ids come
     straight from the C++ footer map (keyed by the FETCH url, as `work_items`
     is)."""
-    cdef vector[string] names
+    cdef vector[string] names, held
     cdef vector[int32_t] ids
     cdef dict per_file = {}
     cdef set seen = set()
     cdef object p
     cdef string path_bytes_cpp
+    cdef const FileStats* fsp
+    cdef const RowGroupStats* rg0
+    cdef size_t ci, k
+    cdef bint present
     for c in column_names:
         names.push_back(c.encode('utf-8'))
     for p, rg_idx in work_items:
@@ -563,7 +566,22 @@ cdef int _count_remote_fetch_blocks_native(list work_items,
             continue
         if p not in per_file:
             path_bytes_cpp = p.encode('utf-8')
-            ids = ParquetIOPipeline.infer_fetch_blocks(deref(footer_map[0][path_bytes_cpp]), names)
+            fsp = footer_map[0][path_bytes_cpp].get()
+            # Blocks are inferred over the columns the file HOLDS, exactly as the Source
+            # assigns them (a schema-evolved file lacks some projected columns, and an
+            # absent column has no chunk to be adjacent): the schema is per file, so
+            # row group 0 speaks for every row group.
+            held.clear()
+            rg0 = &fsp.row_groups[0]
+            for k in range(names.size()):
+                present = _has_group_chunks(rg0, names[k])
+                for ci in range(rg0.columns.size()):
+                    if rg0.columns[ci].name == names[k]:
+                        present = True
+                        break
+                if present:
+                    held.push_back(names[k])
+            ids = ParquetIOPipeline.infer_fetch_blocks(deref(fsp), held)
             per_file[p] = [ids[k] for k in range(ids.size())]
         seen.add((p, per_file[p][rg_idx]))
     return len(seen)
@@ -3301,7 +3319,7 @@ cdef str _footer_type_rejection(path, size_t rg_i, const string& name, str kind,
 
 
 cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=None,
-                                filesystem=None, footer_bytes_cache=None):
+                                filesystem=None, footer_bytes_cache=None, dict absent=None):
     """Plan-time gate for the zero-Python native scan Source (increment-1 scope).
 
     Returns None when the scan is admitted, otherwise a one-line reason naming what
@@ -3312,10 +3330,16 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
     Proves, from parsed footers (cache-warmed — not wasted work when the answer
     is False, the trampoline path needs the same footers), that EVERY projected
     column in EVERY row group of EVERY file:
-      - is present (no schema evolution on this path), and
+      - is present, and
       - has a footer physical/logical type that provably decodes to a shape the
         native Source can build (io_pipeline.hpp direct_kind_for + its Stage-4a
         logical gate, plus the Source's own pool-path decoders).
+
+    Schema evolution: with ``absent`` (a dict the caller owns) a projected column a
+    file does not hold is RECORDED instead of refused — ``absent[path]`` is the list
+    of its projected indices, set only for a file lacking at least one — for a Source
+    that fills it with NULL. Every row group of the file must agree on what it lacks.
+    Without ``absent`` a missing column is refused, for the callers that cannot fill.
 
     ``expected_kinds[i]`` pairs with ``column_names[i]`` and is one of "int"
     (every integer width and signedness, plus parquet TIME), "float32",
@@ -3475,9 +3499,11 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
             buf_size = <size_t>len(envelope)
             footer = _PARSED_FOOTER_CACHE.put(path, ReadParquetMetadataFromBuffer(buf_ptr, buf_size))
         fsp = footer.get()
+        file_missing = None
         for rg_i in range(fsp.row_groups.size()):
             rgp = &fsp.row_groups[rg_i]
             n_rg_cols = rgp.columns.size()
+            rg_missing = []
             for k in range(ncols):
                 found = False
                 for ci in range(n_rg_cols):
@@ -3610,8 +3636,18 @@ cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=
                             raise NotImplementedError(
                                 f"cannot read {path}: {group_err.decode('utf-8')}")
                         continue
-                    return (f"column '{wanted[<size_t>k].decode('utf-8', 'replace')}' is not in "
-                            f"{path} (row group {rg_i})")
+                    if absent is None:
+                        return (f"column '{wanted[<size_t>k].decode('utf-8', 'replace')}' is not in "
+                                f"{path} (row group {rg_i})")
+                    rg_missing.append(k)
+            if rg_i == 0:
+                file_missing = rg_missing
+            elif rg_missing != file_missing:
+                return (f"the row groups of {path} disagree on which projected columns they "
+                        f"hold (row group 0 lacks {file_missing}, row group {rg_i} lacks "
+                        f"{rg_missing})")
+        if file_missing:
+            absent[path] = file_missing
     return None
 
 

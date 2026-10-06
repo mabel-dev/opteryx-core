@@ -48,6 +48,7 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
+#include <ankerl/unordered_dense.h>
 
 #include <new>        // std::bad_alloc / placement new — not reliably pulled in by <stdexcept> on stricter libc++
 #include "core/alloc.h"
@@ -320,7 +321,7 @@ struct SgDirectOffsets {
 };
 
 struct SgHashOffsets {
-    std::unordered_map<uint32_t, uint32_t> m;
+    ankerl::unordered_dense::map<uint32_t, uint32_t> m;
     explicit SgHashOffsets(uint32_t n) { m.reserve(n); }
     inline bool has(uint32_t code) const { return m.find(code) != m.end(); }
     inline void set(uint32_t code, uint32_t value) { m[code] = value; }

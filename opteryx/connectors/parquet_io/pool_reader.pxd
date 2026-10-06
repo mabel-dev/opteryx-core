@@ -13,7 +13,6 @@ from libc.stddef cimport size_t
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp.pair cimport pair
-from libcpp.unordered_map cimport unordered_map
 from libcpp.memory cimport shared_ptr
 
 from opteryx.compiled.structures.memory_pool cimport MemoryPool, CppMemoryPool
@@ -291,6 +290,7 @@ cpdef NativeScanPlan open_native_scan_plan(
 # Plan-time eligibility gate for the native scan Source: proves from parsed
 # footers that every projected column, in every row group, decodes to a
 # DirectKind the Source supports (increment-1 scope: plain numerics only).
+# `absent`, when given, records the columns each file lacks instead of refusing.
 # `filesystem` supplies the signed-URL rewrite that makes a remote path eligible.
 cpdef str native_scan_rejection(paths, column_names, expected_kinds, file_sizes=*,
-                                filesystem=*, footer_bytes_cache=*)
+                                filesystem=*, footer_bytes_cache=*, dict absent=*)

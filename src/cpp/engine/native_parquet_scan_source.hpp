@@ -94,6 +94,8 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -120,6 +122,7 @@
 #include "logical_type.h"                  // LogicalType / logical_type_intern (WP-11 descriptors)
 #include "core/alloc.h"                    // draken_malloc / draken_free (WP-11 temporal narrow)
 #include "native_expression.hpp"           // ExprProgram / ExprFilterFn — scan prefilter
+#include "null_constant_column.hpp"         // null_constant_column — schema-evolution fill
 
 // R2 (scan-pushed LIMIT) row truncation. Lives in draken next to the take/slice
 // machinery; resolved at load time from draken_native, the same dynamic-lookup
@@ -906,6 +909,92 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
         if (pipeline != nullptr) pipeline->set_report_kept_rows(true);
     }
 
+    // Schema evolution: projected columns a file does not hold (a column added after
+    // the file was written). The footer gate recorded them per file at plan time; the
+    // file's row groups are read without them and each is emitted as an all-NULL
+    // constant of the column's declared type — nothing read, nothing decoded.
+    // Fetch path -> one flag per projected column (1 = the file lacks it). A file
+    // absent from the map holds every projected column.
+    std::unordered_map<std::string, std::vector<uint8_t>> absent_;
+    // Parallel to column_names: a one-row all-NULL column of the declared type for
+    // every column some file lacks (null `own` for the rest). Each emitted fill is a
+    // constant view over it (null_constant_column), so its one slot is shared.
+    std::vector<CxxColumn> null_templates_;
+
+    // One data slot of type `t`, zeroed, as the source of a constant all-NULL view.
+    // Every type the scan can emit has a flat slot except ARRAY, which the compiler
+    // refuses to fill (its element type is the file's, not the schema's).
+    static CxxColumn make_null_template(DrakenType t, const LogicalType* lt) {
+        OwnedBuffer<void> buf;
+        if (draken_type_is_string_storage(t)) {
+            // [DrakenStringArena | DrakenStringSlot[1]] — a zeroed slot is the NULL
+            // sentinel (length 0), the same single-block layout a string constant uses.
+            constexpr size_t kSlotAlign = alignof(DrakenStringSlot);
+            const size_t struct_end =
+                (sizeof(DrakenStringArena) + kSlotAlign - 1u) & ~(kSlotAlign - 1u);
+            const size_t total = struct_end + sizeof(DrakenStringSlot);
+            buf = OwnedBuffer<void>(draken_malloc(total));
+            if (!buf) throw std::bad_alloc();
+            std::memset(buf.get(), 0, total);
+            auto* block = static_cast<uint8_t*>(buf.get());
+            auto* sa = reinterpret_cast<DrakenStringArena*>(block);
+            sa->slots = reinterpret_cast<DrakenStringSlot*>(block + struct_end);
+            sa->length = 1u;
+            sa->type = t;
+        } else {
+            const size_t width = t == DRAKEN_BOOL ? 1u : draken_type_fixed_itemsize(t);
+            if (width == 0u)
+                throw std::invalid_argument(
+                    "set_absent_columns: no all-NULL fill for draken type " +
+                    std::to_string(static_cast<int>(t)));
+            buf = OwnedBuffer<void>(draken_malloc(width));
+            if (!buf) throw std::bad_alloc();
+            std::memset(buf.get(), 0, width);
+        }
+        DrakenVector v = draken_vector_from_constant(buf.get(), 1u, t, nullptr);
+        auto owner = std::make_shared<VectorOwner>(v, std::move(buf), OwnedBuffer<uint8_t>(nullptr));
+        owner->logical_type = lt;
+        CxxColumn c;
+        c.view = owner->vec;
+        c.own = std::move(owner);
+        return c;
+    }
+
+    // Plan-time only, on the compiler's thread, before run() is entered. `files` are
+    // fetch paths (the work items' keys); `absent[f]` holds one flag per projected
+    // column for files[f]. `types`/`logical` are every projected column's declared
+    // type — what this Source emits for it from a file that holds it.
+    void set_absent_columns(const std::vector<std::string>& files,
+                            const std::vector<std::vector<uint8_t>>& absent,
+                            const std::vector<DrakenType>& types,
+                            const std::vector<const LogicalType*>& logical) {
+        const size_t ncols = column_names->size();
+        if (files.size() != absent.size())
+            throw std::invalid_argument("set_absent_columns: one flag set per file");
+        if (types.size() != ncols || logical.size() != ncols)
+            throw std::invalid_argument("set_absent_columns: one declared type per projected column");
+        null_templates_.assign(ncols, CxxColumn{});
+        for (size_t f = 0; f < files.size(); ++f) {
+            if (absent[f].size() != ncols)
+                throw std::invalid_argument("set_absent_columns: one flag per projected column");
+            for (size_t i = 0; i < ncols; ++i) {
+                if (absent[f][i] == 0 || null_templates_[i].own) continue;
+                if (is_array_column(i))
+                    throw std::invalid_argument("set_absent_columns: an ARRAY column cannot be filled");
+                null_templates_[i] = make_null_template(types[i], logical[i]);
+            }
+            if (!absent_.emplace(files[f], absent[f]).second)
+                throw std::invalid_argument("set_absent_columns: a file is listed twice: " + files[f]);
+        }
+    }
+
+    // The projected columns `path` lacks, or nullptr when it holds them all.
+    const std::vector<uint8_t>* absent_for(const std::string& path) const {
+        if (absent_.empty()) return nullptr;
+        auto it = absent_.find(path);
+        return it == absent_.end() ? nullptr : &it->second;
+    }
+
     // Append the identity columns for row group `rg` of `path` to `m`: its rows are the
     // row group's rows where `kept` is 1 (nullptr = every row), at most `limit` of them
     // (-1 = all). Fails loud when the count disagrees with the morsel's.
@@ -1135,8 +1224,19 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
             if (pit == per_file.end()) {
                 auto fit = footer_map->find(path);
                 std::vector<int32_t> ids;
-                if (fit != footer_map->end())
-                    ids = rugo::ParquetIOPipeline::infer_fetch_blocks(*fit->second, *column_names);
+                if (fit != footer_map->end()) {
+                    // Blocks are inferred over the columns the file HOLDS — a column it
+                    // lacks has no chunk to be adjacent, and would split every block.
+                    const std::vector<uint8_t>* absent = absent_for(path);
+                    if (absent == nullptr) {
+                        ids = rugo::ParquetIOPipeline::infer_fetch_blocks(*fit->second, *column_names);
+                    } else {
+                        std::vector<std::string> present;
+                        for (size_t c = 0; c < column_names->size(); ++c)
+                            if ((*absent)[c] == 0) present.push_back((*column_names)[c]);
+                        ids = rugo::ParquetIOPipeline::infer_fetch_blocks(*fit->second, present);
+                    }
+                }
                 pit = per_file.emplace(path, std::move(ids)).first;
             }
             const size_t rg = static_cast<size_t>((*work_items)[i].second);
@@ -1249,14 +1349,40 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                 masks.push_back(m == nullptr ? std::vector<uint8_t>{} : *m);
             }
         }
+        // Schema evolution: the file is read for the projected columns it HOLDS; the
+        // ones it lacks are filled with NULL when the result is built (get_morsel).
+        const std::vector<uint8_t>* absent = absent_for(path);
+        std::vector<std::string> present;
+        std::vector<uint32_t> present_to_projected;
+        if (absent != nullptr) {
+            for (size_t i = 0; i < column_names->size(); ++i) {
+                if ((*absent)[i] != 0) continue;
+                present.push_back((*column_names)[i]);
+                present_to_projected.push_back(static_cast<uint32_t>(i));
+            }
+            if (present.empty()) {
+                // Nothing to read: each row group's result is built whole, with no IO,
+                // and queued like a decoded one so the result count stays one per row
+                // group. get_morsel sizes its fill from the footer and the admission.
+                for (int rg : rg_idxs) {
+                    rugo::MorselRef r;
+                    r.path = path;
+                    r.rg_idx = rg;
+                    r.success = true;
+                    pipeline->post_result(std::move(r));
+                }
+                return;
+            }
+        }
+        const std::vector<std::string>& read_names = absent != nullptr ? present : *column_names;
         // A projected STRUCT/MAP is expanded to its leaf chunks here (and folded back
-        // by the pipeline's worker). A projected column the row group lacks is schema
-        // evolution — out of scope on this path, so it fails loud, no NULL-fill guess.
+        // by the pipeline's worker). A column the footer gate did not record as absent
+        // and the row group lacks fails loud here.
         std::vector<std::string> names;
         std::vector<std::vector<ColumnStats>> stats;
         std::shared_ptr<const rugo::NestedSpec> nested;
         std::string rerr;
-        if (!rugo::resolve_projection(*fit->second, rg_idxs, *column_names, names, stats,
+        if (!rugo::resolve_projection(*fit->second, rg_idxs, read_names, names, stats,
                                       nested, rerr)) {
             // ErrCtx::msg is a bare const char*: stash the text in a thread_local that
             // outlives this call (see the decode-error path in get_morsel).
@@ -1265,6 +1391,19 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
             err.code = 1;
             err.msg = resolve_err_buf.c_str();
             return;
+        }
+        if (absent != nullptr) {
+            // The pipeline's per-column flags (hash seed, length-only) are parallel to
+            // the PROJECTION, and it addresses them through NestedSpec::orig. Re-point
+            // each read column at its projected position, past the ones left out.
+            auto spec = std::make_shared<rugo::NestedSpec>();
+            if (nested) {
+                spec->groups = nested->groups;
+                for (uint32_t o : nested->orig) spec->orig.push_back(present_to_projected[o]);
+            } else {
+                spec->orig = present_to_projected;   // names == present, one leaf each
+            }
+            nested = std::move(spec);
         }
         pipeline->submit_block(path, rg_idxs, names, stats, masks, nested);
     }
@@ -1464,12 +1603,59 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
             }
             if (result.empty_filtered) continue;  // Phase 2 dict-skip; no rows — pull again
 
-            size_t ncols = result.columns.size();
-            if (ncols != column_names->size()) {
+            const size_t ncols = column_names->size();
+            // Schema evolution: the columns this file lacks were never read. Re-slot
+            // the result to the projection — an empty placeholder where each one goes —
+            // so `i` addresses the same column in the result and in every per-column
+            // flag array; the placeholders are filled with NULL below, never built.
+            const std::vector<uint8_t>* absent = absent_for(result.path);
+            size_t n_present = ncols;
+            if (absent != nullptr)
+                n_present -= static_cast<size_t>(std::count(absent->begin(), absent->end(), uint8_t{1}));
+            if (result.columns.size() != n_present) {
                 err.code = 1;
                 err.msg = "NativeParquetScanSource: decoded column count does not "
-                          "match the projection (schema evolution is not supported)";
+                          "match the columns the file holds";
                 return SourceResult::FINISHED;
+            }
+            if (absent != nullptr) {
+                std::vector<rugo::ColumnOut> slotted(ncols);
+                size_t r = 0;
+                for (size_t i = 0; i < ncols; ++i)
+                    if ((*absent)[i] == 0) slotted[i] = result.columns[r++];
+                result.columns = std::move(slotted);
+            }
+            auto is_absent = [&](size_t i) { return absent != nullptr && (*absent)[i] != 0; };
+            // The rows a result kept, for row identity: the pipeline's record, or — for
+            // a file holding no projected column, which the pipeline never read — the
+            // row admission's mask (nullptr = every row of the row group).
+            const uint8_t* kept_ptr = result.kept_rows.empty() ? nullptr : result.kept_rows.data();
+            size_t kept_len = result.kept_rows.size();
+            // Rows in a result with no column read: the row group's, less what the row
+            // admission (merge-on-read deletes) excludes.
+            int64_t unread_rows = -1;
+            if (n_present == 0) {
+                auto fit = footer_map->find(result.path);
+                if (fit == footer_map->end() || result.rg_idx < 0 ||
+                    static_cast<size_t>(result.rg_idx) >= fit->second->row_groups.size()) {
+                    err.code = 1;
+                    err.msg = "NativeParquetScanSource: an unread row group is missing from its footer";
+                    return SourceResult::FINISHED;
+                }
+                unread_rows = fit->second->row_groups[static_cast<size_t>(result.rg_idx)].num_rows;
+                const std::vector<uint8_t>* am =
+                    admission_ != nullptr ? admission_->mask(result.path, result.rg_idx) : nullptr;
+                if (am != nullptr) {
+                    unread_rows = static_cast<int64_t>(std::count(am->begin(), am->end(), uint8_t{1}));
+                    kept_ptr = am->data();
+                    kept_len = am->size();
+                }
+                if (unread_rows > static_cast<int64_t>(UINT32_MAX)) {
+                    err.code = 1;
+                    err.msg = "NativeParquetScanSource: row group exceeds the 2^32-1 row morsel limit";
+                    return SourceResult::FINISHED;
+                }
+                if (unread_rows == 0) continue;
             }
 
             auto m = std::make_shared<CxxMorsel>();
@@ -1496,6 +1682,14 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                 std::vector<int> p_pos(ncols, -1);
                 for (size_t i = 0; i < ncols; ++i) {
                     if (!prefilter_is_pred_[i]) continue;
+                    if (is_absent(i)) {
+                        // The worker evaluates only over columns it decoded, so a
+                        // survivor mask over a column the file lacks cannot exist.
+                        err.code = 1;
+                        err.msg = "NativeParquetScanSource: a survivor mask over a "
+                                  "predicate column the file does not hold";
+                        return SourceResult::FINISHED;
+                    }
                     CxxColumn col;
                     if (!build_column(result, i, col, err)) { build_err(); return SourceResult::FINISHED; }
                     p_pos[i] = static_cast<int>(pm->columns.size());
@@ -1518,9 +1712,14 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                 }
                 std::unique_ptr<CxxMorsel, void (*)(CxxMorsel*)> masked_owner(masked,
                                                                              cxx_morsel_delete);
+                const uint32_t n_survivors = static_cast<uint32_t>(masked->num_rows());
                 for (size_t i = 0; i < ncols; ++i) {
                     if (p_pos[i] >= 0) {
                         m->columns.push_back(masked->columns[static_cast<size_t>(p_pos[i])]);
+                        continue;
+                    }
+                    if (is_absent(i)) {
+                        m->columns.push_back(null_constant_column(null_templates_[i], n_survivors));
                         continue;
                     }
                     CxxColumn col;
@@ -1528,21 +1727,23 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                     m->columns.push_back(std::move(col));
                 }
                 if (!identity_kinds_.empty() &&
-                    !append_row_identity(*m, result.path, result.rg_idx,
-                                         result.kept_rows.empty() ? nullptr : result.kept_rows.data(),
-                                         result.kept_rows.size(), -1, err))
+                    !append_row_identity(*m, result.path, result.rg_idx, kept_ptr, kept_len, -1, err))
                     return SourceResult::FINISHED;
             } else {
+                m->columns.resize(ncols);
+                // The fill's length: any column that was read, else the unread count.
+                int64_t nrows = unread_rows;
                 for (size_t i = 0; i < ncols; ++i) {
-                    CxxColumn col;
-                    if (!build_column(result, i, col, err)) { build_err(); return SourceResult::FINISHED; }
-                    m->columns.push_back(std::move(col));
+                    if (is_absent(i)) continue;
+                    if (!build_column(result, i, m->columns[i], err)) { build_err(); return SourceResult::FINISHED; }
+                    nrows = m->columns[i].view.length;
                 }
+                for (size_t i = 0; i < ncols; ++i)
+                    if (is_absent(i))
+                        m->columns[i] = null_constant_column(null_templates_[i], static_cast<uint32_t>(nrows));
                 // Before the Source's own prefilter, which filters them with the rest.
                 if (!identity_kinds_.empty() &&
-                    !append_row_identity(*m, result.path, result.rg_idx,
-                                         result.kept_rows.empty() ? nullptr : result.kept_rows.data(),
-                                         result.kept_rows.size(), -1, err))
+                    !append_row_identity(*m, result.path, result.rg_idx, kept_ptr, kept_len, -1, err))
                     return SourceResult::FINISHED;
                 if (prefilter_) {
                     // The worker declined: run the program over the whole row group.

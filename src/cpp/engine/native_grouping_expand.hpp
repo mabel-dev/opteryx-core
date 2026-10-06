@@ -45,47 +45,13 @@
 
 #include "core/alloc.h"          // draken_malloc
 #include "core/buffers.h"        // DrakenVector
-#include "core/vector_alloc.h"   // draken_zero_sel, draken_zero_validity, draken_vector_from_constant
+#include "core/vector_alloc.h"   // draken_vector_from_constant
 #include "core/vector_owner.h"   // VectorOwner, OwnedBuffer
 #include "morsels/cxx_morsel.h"  // CxxMorsel, CxxColumn
+#include "null_constant_column.hpp"   // null_constant_column — a masked key
 #include "operator.hpp"
 
 namespace opteryx::engine {
-
-// A constant-shaped, all-NULL view of `src`, `n` rows long.
-//
-// The payload is BORROWED, never copied: `data_source` holds the source column's owner
-// alive, which is the sanctioned borrowing path (see vector_owner.h — `data_buf` and
-// `arena_buf` stay null exactly because the bytes live in the source). `selection` and
-// `validity` point at draken's process-wide shared globals, which are never freed and
-// so are not owned here either. The net cost is one VectorOwner allocation per masked
-// column per grouping set — no per-row work at all.
-//
-// Type and logical type ride along from the source, so a masked TIMESTAMP64 key keeps
-// its MANDATORY descriptor (a timestamp vector with a null logical_type is a hard error
-// in draken) and a masked DECIMAL keeps its precision/scale.
-inline CxxColumn grouping_masked_column(const CxxColumn& src, uint32_t n) {
-    DrakenVector v = src.view;
-    v.selection   = draken_zero_sel(n);
-    v.data_length = 1;
-    v.length      = n;
-    v.validity    = const_cast<uint8_t*>(draken_zero_validity(n));
-    // No layout hints survive the reshape: this is neither the source's shape nor a
-    // known-identity selection. 0 == "don't know", which is always safe.
-    v.flags       = 0;
-
-    auto owner = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(nullptr),
-                                               OwnedBuffer<uint8_t>(nullptr));
-    owner->logical_type = src.own ? src.own->logical_type : nullptr;
-    // Null when the source column is itself unowned (a constant/zero-column morsel);
-    // borrowing from nothing is the source's own lifetime story, not a new one.
-    owner->data_source  = src.own;
-
-    CxxColumn out;
-    out.view = v;
-    out.own  = std::move(owner);
-    return out;
-}
 
 // The synthetic grouping_id key: one INT64 broadcast over the morsel, holding the
 // grouping set's ordinal. Returns false (setting `err`) if the one-word allocation fails.
@@ -153,7 +119,7 @@ struct GroupingExpandOperator : Operator {
                           "compiler's layout tracking disagrees with the stream";
                 return OpResult::NEED_INPUT;
             }
-            m->columns[idx] = grouping_masked_column(in->columns[idx], n);
+            m->columns[idx] = null_constant_column(in->columns[idx], n);
         }
 
         CxxColumn gid;

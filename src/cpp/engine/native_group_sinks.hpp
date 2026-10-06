@@ -61,6 +61,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include <ankerl/unordered_dense.h>
+
 #include "operator.hpp"
 #include "pipeline_buffers.hpp"
 #include "groupby_tel.hpp"       // diagnostic hash/probe/apply phase timing (GroupBySink::sink)
@@ -1347,6 +1349,16 @@ inline std::unique_ptr<VectorOwner> aa_steal_owner(CxxColumn&& c) {
     return std::make_unique<VectorOwner>(std::move(*c.own));
 }
 
+// ankerl has no hash for __int128: fold the halves through its avalanching u64 mix.
+struct AAI128Hash {
+    using is_avalanching = void;
+    uint64_t operator()(__int128 v) const noexcept {
+        const auto u = static_cast<unsigned __int128>(v);
+        return ankerl::unordered_dense::detail::hash_int(
+            static_cast<uint64_t>(u) ^ ankerl::unordered_dense::detail::hash_int(static_cast<uint64_t>(u >> 64)));
+    }
+};
+
 // Apply DISTINCT → ORDER BY → LIMIT to one group's element list, in that order.
 // Matches SQL evaluation order: DISTINCT collapses duplicates, ORDER BY sorts what
 // survives, LIMIT truncates last. `idx` is rewritten to the surviving element
@@ -1365,9 +1377,9 @@ inline void aa_finalize_group(const AggSpec2& sp, AAStore st,
         std::vector<uint32_t> keep;
         keep.reserve(idx.size());
         bool seen_null = false;
-        std::unordered_set<int64_t> seen_raw;
-        std::set<__int128> seen_i128;
-        std::unordered_set<std::string_view> seen_str;
+        ankerl::unordered_dense::set<int64_t> seen_raw;
+        ankerl::unordered_dense::set<__int128, AAI128Hash> seen_i128;
+        ankerl::unordered_dense::set<std::string_view> seen_str;
         for (uint32_t i : idx) {
             if (A.nulls[i]) {
                 if (seen_null) continue;
@@ -5708,7 +5720,7 @@ inline void window_topk_offer(std::vector<WindowTopKCandidate>& heap,
     }
 }
 
-using WindowTopKHeapMap = std::unordered_map<uint64_t, std::vector<WindowTopKCandidate>>;
+using WindowTopKHeapMap = ankerl::unordered_dense::map<uint64_t, std::vector<WindowTopKCandidate>>;
 
 struct WindowTopKLocal : LocalSinkState {
     std::vector<MorselPtr> morsels;

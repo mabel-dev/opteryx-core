@@ -72,9 +72,7 @@ inline SkeneApplied apply_skene_footer(NativeManifest& m, size_t row, const sken
                                        const std::vector<DrakenType>& physical,
                                        const std::vector<int64_t>& positions) {
     SkeneApplied applied;
-    ManifestFile& file = m.file(row);
-    file.record_count = static_cast<int64_t>(meta.row_count);
-    file.row_group_count = static_cast<int64_t>(meta.row_groups.size());
+    m.set_counts(row, static_cast<int64_t>(meta.row_count), static_cast<int64_t>(meta.row_groups.size()));
 
     // One file, one hash family: every sketch a footer carries came from one writer.
     int32_t family = 0;
@@ -200,7 +198,7 @@ inline SkeneApplied apply_skene_footer(NativeManifest& m, size_t row, const sken
             cell.sum = sum_total;
         }
     }
-    if (any_sketch) file.distinct_sketch_family = family;
+    if (any_sketch) m.set_distinct_sketch_family(row, family);
     return applied;
 }
 

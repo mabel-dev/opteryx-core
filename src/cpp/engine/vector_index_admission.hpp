@@ -38,6 +38,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <ankerl/unordered_dense.h>
 
 #include "engine/native_parquet_scan_source.hpp"   // RowAdmission
 #include "engine/vector_index_search.hpp"         // search_index_file, embed_query
@@ -339,7 +340,7 @@ class VectorIndexAdmission final : public RowAdmission {
     uint32_t                                   dims_;
     uint32_t                                   k_;
     uint32_t                                   nprobe_;
-    std::unordered_map<std::string, FileMasks> masks_;
+    ankerl::unordered_dense::map<std::string, FileMasks> masks_;
     AdmissionCounts                            counts_;
     AdmissionPredicate                         predicate_;
     bool                                       filtered_ = false;

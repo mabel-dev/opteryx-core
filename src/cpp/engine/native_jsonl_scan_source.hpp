@@ -18,6 +18,9 @@
 // morsel on a ready queue that the engine's workers drain, so decode overlaps
 // execution. At most `decode_workers + 2` chunks are claimed-but-unconsumed at any
 // time, which bounds resident memory instead of holding the whole decoded dataset.
+// Guided tail: once every file has been started, a chunk is cut at the remaining
+// plain bytes spread twice over the pool (never below kGuidedFloor), so the scan
+// does not end on one worker decoding one full-size chunk while the rest idle.
 //
 // Files: a local file is memory-mapped; a remote one (http(s):// URLs, and public
 // gs:// / s3:// objects whose credential-free URLs planning resolved) is fetched
@@ -25,8 +28,12 @@
 // (architect ruling 2026-10-01: authenticated remote JSONL is not supported). A
 // worker loads a file only when no loaded file has bytes left to cut, and loads run
 // outside the cursor lock, so several files load in parallel and a slow GET never
-// stalls chunks of files already loaded. A file's bytes are released when its last
-// chunk is decoded (decoded columns own their bytes — nothing points back in).
+// stalls chunks of files already loaded. A mapped file is released piecewise: the
+// worker that decodes a chunk unmaps the whole pages strictly inside it, and the
+// pages shared between neighbouring chunks go when the file's last chunk is done.
+// Unmapping the whole file at once put one serial munmap (~14 ms per 5 GB) on the
+// scan's tail. This relies on decoded columns owning their bytes — nothing points
+// back into the mapping.
 //
 // Compressed files (gzip / zstd / lz4, detected by magic bytes —
 // rugo/src/compression/stream_decompress.hpp) cannot be cut at arbitrary offsets,
@@ -73,7 +80,10 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
+
+#include <unistd.h>                        // getpagesize
 
 #include "operator.hpp"
 #include "morsels/cxx_morsel.h"
@@ -134,6 +144,10 @@ inline void jsonl_scan_spec_set_context(JsonlScanSpec* spec, const void* context
 
 namespace jsonl_detail {
 
+// Smallest chunk the guided tail cuts. Measured 2026-10-05 (Bluesky, 18T, M5 Pro):
+// 8 MiB beat 16 MiB and matched fixed 32 MiB chunks without their 4x morsel count.
+constexpr size_t kGuidedFloor = size_t(8) << 20;
+
 // One loaded file: a mapping (local) or a fetched body (remote). Shared by every
 // chunk cut from it; released when the last chunk holding it is decoded. For a
 // compressed file it is the COMPRESSED bytes, and each decompressed chunk is its
@@ -144,7 +158,42 @@ struct Mapping {
     bool     mapped = false;          // ptr is an mmap; otherwise it points into `body`/`chunk`
     std::vector<uint8_t> body;
     rugo::compression::ByteBuffer chunk;
-    ~Mapping() { if (mapped && ptr != nullptr) unmap_memory_c(ptr, len); }
+
+    // Page ranges [a, b) (offsets from ptr) already unmapped by release_range; the
+    // destructor unmaps only what is left, never a range twice (the address space
+    // may have been reused since).
+    std::mutex released_mtx;
+    std::vector<std::pair<size_t, size_t>> released;
+
+    // Unmap the whole pages strictly inside the decoded chunk [start, end). No other
+    // chunk reads them: chunks are disjoint and rugo pads its own tail reads.
+    void release_range(size_t start, size_t end) {
+        if (!mapped || ptr == nullptr) return;
+        const size_t pg = static_cast<size_t>(getpagesize());
+        const size_t a = (start + pg - 1) / pg * pg;
+        const size_t b = end == len ? (len + pg - 1) / pg * pg : end / pg * pg;
+        if (b <= a) return;
+        unmap_memory_c(ptr + a, b - a);
+        std::lock_guard<std::mutex> lock(released_mtx);
+        released.emplace_back(a, b);
+    }
+
+    ~Mapping() {
+        if (!mapped || ptr == nullptr) return;
+        if (released.empty()) {
+            unmap_memory_c(ptr, len);
+            return;
+        }
+        const size_t pg = static_cast<size_t>(getpagesize());
+        const size_t total = (len + pg - 1) / pg * pg;
+        std::sort(released.begin(), released.end());
+        size_t at = 0;
+        for (const auto& r : released) {
+            if (r.first > at) unmap_memory_c(ptr + at, r.first - at);
+            at = r.second;
+        }
+        if (at < total) unmap_memory_c(ptr + at, total - at);
+    }
 };
 
 enum class FileStatus : uint8_t { PENDING, LOADING, READY, DONE };
@@ -451,7 +500,22 @@ private:
                     f.data.reset();
                     continue;
                 }
-                size_t end = f.offset + static_cast<size_t>(spec_->chunk_size);
+                size_t want = static_cast<size_t>(spec_->chunk_size);
+                if (g.next_pending >= n) {
+                    // Guided tail (see the header): no file is left to start, so the
+                    // bytes still to cut are known exactly.
+                    size_t remaining = 0;
+                    for (size_t k = i; k < n; ++k) {
+                        const jsonl_detail::FileState& r = g.files[k];
+                        if (r.status == FileStatus::READY && !r.stream)
+                            remaining += r.data->len - r.offset;
+                    }
+                    const size_t pool = static_cast<size_t>(
+                        spec_->decode_workers > 0 ? spec_->decode_workers : 1);
+                    want = std::min(want, std::max(jsonl_detail::kGuidedFloor,
+                                                   remaining / (2 * pool)));
+                }
+                size_t end = f.offset + want;
                 if (end >= len) {
                     end = len;
                 } else {
@@ -526,6 +590,7 @@ private:
             } catch (const std::exception& e) {
                 error = "READ_JSONL('" + spec_->files[chunk.file] + "'): " + e.what();
             }
+            if (error.empty()) chunk.map->release_range(chunk.start, chunk.end);
             chunk.map.reset();
             if (!error.empty()) {
                 fail(g, std::move(error));

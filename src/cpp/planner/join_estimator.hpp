@@ -32,6 +32,7 @@
 #include <unordered_map>
 #include <vector>
 
+
 namespace opteryx { namespace planner {
 
 // The flat equality selectivity used when either side of a key has no NDV.

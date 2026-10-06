@@ -25,6 +25,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include <ankerl/unordered_dense.h>
+
 #include "executor.hpp"
 #include "morsel_queue.hpp"
 #include "native_expression.hpp"    // ExprFilterOperator, ExprMultiProjectOperator
@@ -249,7 +251,7 @@ struct LoopSpan {
     // here, the same sanctioned contract native DISTINCT runs on (see
     // DistinctSink, native_group_sinks.hpp). Convergence on a cyclic input is
     // exactly this set refusing the rows it has already seen.
-    std::unordered_set<uint64_t> visited;
+    ankerl::unordered_dense::set<uint64_t> visited;
 };
 
 class Engine {
@@ -653,6 +655,31 @@ public:
             throw std::runtime_error(
                 "set_native_scan_row_identity: pipeline source is not a native parquet scan");
         src->set_row_identity(files, std::move(kinds), std::move(names));
+    }
+    // Schema evolution: give pipeline `p`'s native parquet scan the projected columns
+    // each file lacks (fetch paths; `absent` flat, one flag per projected column per
+    // file, files in order) and every projected column's declared type, as the
+    // (kind, unit, precision, scale, dimension) arrays intern_logical_vec takes. The
+    // scan emits each absent column as an all-NULL constant of that type.
+    void set_native_scan_absent_columns(size_t p, std::vector<std::string> files,
+                                        std::vector<uint8_t> absent,
+                                        std::vector<DrakenType> types,
+                                        std::vector<int> lk, std::vector<int> lu,
+                                        std::vector<int> lp, std::vector<int> ls,
+                                        std::vector<int> ld) {
+        auto* src = dynamic_cast<NativeParquetScanSource*>(pipelines[p]->source.get());
+        if (src == nullptr)
+            throw std::runtime_error(
+                "set_native_scan_absent_columns: pipeline source is not a native parquet scan");
+        const size_t ncols = types.size();
+        if (absent.size() != files.size() * ncols)
+            throw std::runtime_error(
+                "set_native_scan_absent_columns: one flag per projected column per file");
+        std::vector<std::vector<uint8_t>> per_file(files.size());
+        for (size_t f = 0; f < files.size(); ++f)
+            per_file[f].assign(absent.begin() + static_cast<std::ptrdiff_t>(f * ncols),
+                               absent.begin() + static_cast<std::ptrdiff_t>((f + 1) * ncols));
+        src->set_absent_columns(files, per_file, types, intern_logical_vec(lk, lu, lp, ls, ld));
     }
     // Arm pipeline `p`'s native parquet scan as the CONSUMER, testing `column` (the
     // leading key's PHYSICAL name) under its NULL placement.

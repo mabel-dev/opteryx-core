@@ -65,7 +65,6 @@ from opteryx.expression.evaluator._impl cimport (
 )
 from opteryx.compiled.morsel_queue cimport PyMorselQueue, MorselQueue
 from libcpp.vector cimport vector as cppvector
-from libcpp.unordered_map cimport unordered_map
 from libcpp.pair cimport pair
 from libcpp.string cimport string
 from opteryx.connectors.parquet_io.pool_reader cimport NativeScanPlan, ParquetIOPipeline
@@ -524,6 +523,12 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void set_native_scan_row_identity(size_t p, cppvector[string] files,
                                           cppvector[uint8_t] kinds,
                                           cppvector[string] names) except +
+        void set_native_scan_absent_columns(size_t p, cppvector[string] files,
+                                            cppvector[uint8_t] absent,
+                                            cppvector[DrakenType] types,
+                                            cppvector[int] lk, cppvector[int] lu,
+                                            cppvector[int] lp, cppvector[int] ls,
+                                            cppvector[int] ld) except +
         void set_sort_drop_unsearchable(size_t p) except +
         void set_native_postgres_scan_source(size_t p, const PgScanSpec* spec)
         void set_native_jsonl_scan_source(size_t p, const JsonlScanSpec* spec)
@@ -3482,6 +3487,32 @@ cdef class NativePlan:
         for n in names:
             c_names.push_back((<str>n).encode("utf-8"))
         self._e.set_native_scan_row_identity(p, c_files, c_kinds, c_names)
+
+    def set_native_scan_absent_columns(self, size_t p, list files, list absent, list types,
+                                       list logical):
+        """Schema evolution: pipeline `p`'s native parquet scan emits, for each file in
+        `files` (fetch paths), the projected columns it lacks as all-NULL constants.
+        `absent[f]` is one 0/1 flag per projected column for files[f]; `types` (DrakenType
+        ints) and `logical` ((kind, unit, precision, scale, dimension) tuples or None) are
+        every projected column's declared type, in projection order."""
+        cdef cppvector[string] c_files
+        cdef cppvector[uint8_t] c_absent
+        cdef cppvector[DrakenType] c_types
+        cdef cppvector[int] lk, lu, lp, ls, ld
+        for f in files:
+            c_files.push_back((<str>f).encode("utf-8"))
+        for flags in absent:
+            for flag in flags:
+                c_absent.push_back(<uint8_t>flag)
+        for t in types:
+            c_types.push_back(<DrakenType><int>t)
+        for entry in logical:
+            if entry is None:
+                lk.push_back(0); lu.push_back(0); lp.push_back(0); ls.push_back(0); ld.push_back(0)
+            else:
+                lk.push_back(<int>entry[0]); lu.push_back(<int>entry[1])
+                lp.push_back(<int>entry[2]); ls.push_back(<int>entry[3]); ld.push_back(<int>entry[4])
+        self._e.set_native_scan_absent_columns(p, c_files, c_absent, c_types, lk, lu, lp, ls, ld)
 
     def set_native_scan_deletes(self, size_t p, size_t admission, object holder):
         """Give pipeline `p`'s native parquet scan its merge-on-read deletes (a

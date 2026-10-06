@@ -426,6 +426,132 @@ design on the 6-core box; mimalloc preload as the harness uses).
   the small SF1 queries (Q02/Q11/Q16/Q22), which are latency-bound, not
   distribution-bound.
 
+### C2 ceiling — i5 (2026-10-05)
+
+Per-operator self-time (EXPLAIN ANALYZE telemetry), ClickBench ORDER BY…LIMIT:
+Q24 sink 0% (latmat path), Q25 12%, Q27 13% (only ~2M of 13M rows reach the
+sink; the runtime boundary already prunes row groups), Q26 24% (string leading
+key: the int64-ordinal boundary never publishes, so 13.2M rows go through
+repeated 65k-row sorts). Suite ceiling ≈ 0.3% — **not built**. Q26 needs a
+string-capable boundary (exact per-worker k-th string, or an 8-byte-prefix
+ordinal), a separate design question.
+
+### Where the time goes — i5 (2026-10-05, `dev/suite_time_split.py`, native trace)
+
+| suite | wall | process CPU | dominant work |
+|---|---|---|---|
+| ClickBench parquet | 61.1 s | 315 s (5.2/6 cores) | rugo decode ~45-50% of CPU, GROUP BY ~40%; engine workers ~29% of their time waiting on the scan |
+| TPC-H SF10 skene | 23.5 s | 94 s | scan (inline skene decode) 44%, joins ~35%, GROUP BY ~15% |
+| TPC-H SF10 parquet | 33.6 s | 182 s | decode 40% of span time, heavy waits; skene is 30% less wall and half the CPU |
+
+- The scan is the largest cost on every suite, which is why none of the
+  Pivot-derived scheduling and operator ideas moved the numbers.
+- Decompress vs decode is NOT split: rugo emits no `decode_phase` spans. The
+  i5 has `perf` but `kernel.perf_event_paranoid = 3` (unprivileged perf
+  disabled; needs sudo to lower).
+
+### Symbol-level CPU profile — i5 (2026-10-05, perf -F 499, symbol build)
+
+Profiling tree `~/arch-20261004/tree-perf` built with
+`INCLUDE_DEBUG_SYMBOLS_IN_COMPILED_CODE=YES` (skips the link-time `-s`, same
+codegen). One warm and one timed pass per suite. libc hot spots identified by
+disassembly (`rep movsb`/`vmovdqu` = memmove_avx_unaligned_erms, `rep stos` =
+memset).
+
+| | ClickBench parquet (zstd) | TPC-H SF10 parquet (zstd) | TPC-H SF10 skene (lz4) |
+|---|---|---|---|
+| decompression | zstd 18.7% | zstd 37.4% | LZ4 15.0% |
+| memcpy/memmove | ~8.5% | ~10% | ~7% (4.5% tiny 8-16 B copies) |
+| memset | 0.8% | 1.7% | 2.4% |
+| kernel | 13% (faults, clear_page, irq) | ~5% | 7.7% (3.3% copy_user) |
+| page decode (rugo) | ~9.6% | ~9% | skene bitpack 2.8% |
+| GROUP BY | ~19% | ~3% | ~5% |
+| join | — | ~11% | ~22% |
+| draken kernels | ~7% | ~9% | ~13% |
+
+- Moving and unpacking bytes (decompress + memcpy + kernel page handling) is
+  40-55% of x86 CPU. None of C1-C7 targets it.
+- Codec choice is a candidate per-architecture decision: the zstd mirrors here
+  vs snappy in ClickBench's canonical files and Pivot's TPC-H files. CPU vs
+  GCS bytes is an architect trade-off.
+- Next (measurement only): callers of memcpy/memset/faults (`perf
+  --call-graph lbr`), a codec A/B (zstd/snappy/lz4/none dataset arms), and a
+  vendored-zstd build check against system `zstd`.
+
+### zstd build check — i5 (2026-10-05, `dev/bench_zstd_build.cpp`)
+
+Real hits columns (URL, Title, SearchPhrase, UserID, EventTime, RegionID; 340
+MiB), 1 MiB frames at level 3, one reused DCtx, min of 7, three interleaved
+rounds:
+
+| build of vendored zstd 1.5.7 | MiB/s |
+|---|---|
+| C++ `-O3 -march=haswell -mtune=generic` (**production**) | 1106-1109 |
+| C++ `-O3` | 1247-1254 |
+| C `-O3` | 1254-1260 |
+| **C `-O3 -march=haswell -mtune=generic`** | **1325-1334** |
+| system libzstd 1.5.4 (Debian) | 1321-1324 |
+
+~~Proposed: rename back to `.c`~~ — **withdrawn**. The zstd configuration
+macros are identical in C and C++ mode (static BMI2, asm on), and function
+sizes match. The cause is **branch alignment: the Intel JCC erratum** (the
+i5-8500 is Skylake-family; the microcode fix makes jumps crossing or ending on
+a 32-byte boundary miss the decoded-uop cache). Padding branches recovers the
+C++ build: `-Wa,-mbranches-within-32B-boundaries` takes it from 1106 to 1301
+MiB/s (+18%), and the C build from 1328 to 1355. The C build was only a lucky
+layout.
+- Microarchitecture-specific: Skylake through Cascade Lake are affected; Ice
+  Lake+ and AMD Zen are not (padding there costs only code size).
+- Likely engine-wide, not zstd-only. It also explains the large layout swings
+  in x86 `.so`-variant A/Bs (join-free Q06 +18%).
+- Next: whole-tree build with the padding flag vs current, ClickBench + TPC-H
+  SF10 A/B on the i5. Production's CPU family (`/proc/cpuinfo` on Cloud Run)
+  decides whether it ships for x86 wheels.
+
+### Callers of memcpy/memset/page faults — i5 ClickBench (LBR call graph)
+
+- GROUP BY vector growth ≈ 7-9% of CPU: `vector<uint8>::_M_range_insert` /
+  `resize`, `vector<long>::resize`, `scatter_into`, `gb_lanes_resize`
+  (reallocation memmove plus zero-fill memset plus faults on fresh pages), and
+  `GroupKeyColumn::append_row` memcpy 2.7%.
+- rugo decode output copies ≈ 4% plus ~2% faults (`decode_row_group` memcpy,
+  `default_init_allocator` vector, zstd output faults).
+- mimalloc purge ≈ 3% (`_mi_os_purge_ex` → madvise, then
+  `mi_page_free_list_extend` refaults) at `MIMALLOC_PURGE_DELAY=1000`.
+- 15% of CPU is rugo row-group decode run inline by engine workers
+  (`wait_and_get_result`), vs 28% on the decode pool.
+
+### Whole-tree JCC branch padding A/B — i5 (2026-10-05)
+
+Two fresh full builds of identical source (`~/arch-20261004/tree-base2`,
+`tree-jcc`). The padded tree has `CPPFLAGS=-Wa,-mbranches-within-32B-boundaries`
+on all 534 C/C++/asm compile commands (0 in base); modules are ~2.7% larger.
+5 alternating rounds:
+
+| suite | base | padded | ratio | rounds | queries faster/slower (>100 ms) |
+|---|---|---|---|---|---|
+| ClickBench parquet | 61.2-62.1 s | 59.5-59.8 s | **0.970** | 5/5 | 28/3 |
+| TPC-H SF10 skene | 23.4-23.7 s | 22.4-22.6 s | **0.955** | 5/5 | 22/0 |
+| TPC-H SF10 parquet | 33.8-33.9 s | 32.0-32.2 s | **0.951** | 5/5 | 22/0 |
+
+- Row counts identical; ranges separate on every suite. **First real win of
+  the programme, and it is microarchitecture-specific** (Intel Skylake through
+  Cascade Lake, i.e. the JCC erratum).
+- Shipping it in x86 wheels (`build_common.py` x86 branch, beside
+  `-march=haswell`; D3 option A) waits on two things: production's CPU family
+  (`/proc/cpuinfo` on Cloud Run) and the cost on an unaffected CPU. The
+  i3-14xxx (Raptor Lake, unaffected) under WSL is the test machine for that.
+- The Rust `compute.so` (planning) is not padded: it isn't built through the
+  setuptools C/C++ compiles.
+- **Ruling 2026-10-06: not shipped.** The target hardware is mostly unaffected
+  (c6a/c7a AMD EPYC Zen 3/4, c6i Ice Lake, Graviton; Cloud Run's CPU is
+  unknown), so there is nothing to recover there. x86 build flags unchanged.
+  The zstd C-vs-C++ gap was the same erratum, so the vendored build stays.
+- Consequence: the i5 is an AFFECTED part, so code-layout effects there are
+  inflated. A ±3-5% x86 result on the i5 (especially one that moves queries the
+  change cannot reach) needs confirming on an unaffected box (i3-14xxx Raptor
+  Lake, or c6a) before acting on it.
+
 ## 10. Still needed to start
 
 - Pi 5: address, RAM, OS (64-bit Raspberry Pi OS / Debian?).

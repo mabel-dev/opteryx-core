@@ -6,6 +6,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <ankerl/unordered_dense.h>
+
 class HllppSketch {
 public:
     enum class Mode : std::uint8_t {
@@ -44,7 +46,7 @@ private:
     std::size_t sparse_threshold_;
     Mode mode_;
     std::vector<std::uint64_t> explicit_hashes_;
-    std::unordered_map<std::uint32_t, std::uint8_t> sparse_registers_;
+    ankerl::unordered_dense::map<std::uint32_t, std::uint8_t> sparse_registers_;
     std::vector<std::uint8_t> dense_registers_;
 
     static std::size_t default_explicit_threshold(std::size_t register_count) noexcept;

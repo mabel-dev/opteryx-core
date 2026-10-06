@@ -192,7 +192,16 @@ cdef extern from "planner/native_manifest.hpp" namespace "opteryx::planner":
         NestedArrayView min_k
         NestedArrayView histogram
         NestedArrayView char_class
-        ManifestFile& file(size_t row) except +
+        const ManifestFile& file(size_t row) except +
+        void set_path(size_t row, string path) except +
+        void set_file_size(size_t row, int64_t file_size) except +
+        void set_counts(size_t row, int64_t record_count, int64_t row_group_count) except +
+        void set_uncompressed_size(size_t row, int64_t size) except +
+        void set_histogram_bins(size_t row, int64_t bins) except +
+        void set_vector_row(size_t row, uint32_t vector_row) except +
+        void set_distinct_sketch_family(size_t row, int32_t family) except +
+        void set_has_footer(size_t row, cbool has_footer) except +
+        void set_delete_positions(size_t row, vector[int64_t] positions) except +
         ManifestCell& cell(size_t row, size_t column) except +
         int64_t record_count()
         int64_t total_size()
@@ -857,7 +866,7 @@ cdef class NativeManifest:
         merge-on-read deletes. A file whose deletes were never resolved raises:
         serving it would resurrect deleted rows."""
         cdef size_t row
-        cdef ManifestFile* file
+        cdef const ManifestFile* file
         out = {}
         for row in range(self._manifest.file_count()):
             file = &self._manifest.file(row)
@@ -877,7 +886,7 @@ cdef class NativeManifest:
         whose merge-on-read deletes are counted but not yet resolved - what a
         catalog's sidecar reader takes."""
         cdef size_t row
-        cdef ManifestFile* file
+        cdef const ManifestFile* file
         out = []
         for row in range(self._manifest.file_count()):
             file = &self._manifest.file(row)
@@ -896,7 +905,8 @@ cdef class NativeManifest:
         manifest before anything else holds it. A file left without a vector
         raises - scanning it would resurrect deleted rows."""
         cdef size_t row
-        cdef ManifestFile* file
+        cdef const ManifestFile* file
+        cdef vector[int64_t] resolved
         for row in range(self._manifest.file_count()):
             file = &self._manifest.file(row)
             if file.deleted_record_count == 0 or file.delete_positions_resolved:
@@ -908,10 +918,10 @@ cdef class NativeManifest:
                     f"{path} reports {file.deleted_record_count} deleted rows but its delete "
                     "sidecar holds no vector for it; refusing to scan and serve deleted rows."
                 )
-            file.delete_positions.clear()
+            resolved.clear()
             for ordinal in vector:
-                file.delete_positions.push_back(<int64_t?>ordinal)
-            file.delete_positions_resolved = True
+                resolved.push_back(<int64_t?>ordinal)
+            self._manifest.set_delete_positions(row, resolved)
 
     def with_paths(self, list paths):
         """A copy of this manifest whose files live at `paths` (one per file,
@@ -921,7 +931,7 @@ cdef class NativeManifest:
             raise ValueError("one path per file")
         cdef NativeManifest out = self.subset(list(range(self._manifest.file_count())))
         for row in range(out._manifest.file_count()):
-            out._manifest.file(row).path = (<str?>paths[row]).encode("utf-8")
+            out._manifest.set_path(row, (<str?>paths[row]).encode("utf-8"))
         return out
 
     def subset(self, list rows):
@@ -1018,7 +1028,7 @@ cdef class NativeManifest:
 
     def file_row(self, size_t row):
         """File `row` as a dict - for checking the rows against another reader."""
-        cdef ManifestFile* f = &self._manifest.file(row)
+        cdef const ManifestFile* f = &self._manifest.file(row)
         return {
             "file_path": f.path.decode("utf-8"),
             "file_format": f.format.decode("utf-8"),
@@ -1445,8 +1455,7 @@ cdef class NativeManifestBuilder:
         """The file's parquet footer statistics (manifest_footer.hpp), beside the
         manifest's own. A column the footer does not describe stays unknown."""
         cdef size_t position
-        cdef ManifestFile* file = &self._manifest.file(row)
-        file.has_footer = True
+        self._manifest.set_has_footer(row, True)
         for position in range(len(self._columns)):
             index = footer._name_to_idx.get(self._columns[position])
             if index is None:
@@ -1521,12 +1530,11 @@ cdef class NativeManifestBuilder:
     def set_distinct_sketch(self, size_t row, size_t position, list hashes, int32_t family):
         """A skene file's own KMV sketch for the column, in hash family `family`."""
         cdef ManifestCell* cell = &self._manifest.cell(row, position)
-        cdef ManifestFile* file = &self._manifest.file(row)
         cell.has_distinct_sketch = True
         cell.distinct_sketch.clear()
         for hash_value in hashes:
             cell.distinct_sketch.push_back(<uint64_t?>hash_value)
-        file.distinct_sketch_family = family
+        self._manifest.set_distinct_sketch_family(row, family)
 
     def copy_manifest_row(self, size_t row, NativeManifest source not None, size_t source_row):
         """Every column statistic of `source`'s row `source_row` - a decoded
@@ -1535,7 +1543,6 @@ cdef class NativeManifestBuilder:
         cdef size_t position
         cdef ManifestCell* target
         cdef FooterStats footer
-        cdef ManifestFile* file
         if source._manifest.column_count() != len(self._columns):
             raise ValueError("the manifest describes different columns")
         for position in range(len(self._columns)):
@@ -1543,9 +1550,8 @@ cdef class NativeManifestBuilder:
             footer = target.footer
             target[0] = source._manifest.cell(source_row, position)
             target.footer = footer
-        file = &self._manifest.file(row)
-        file.histogram_bins = source._manifest.file(source_row).histogram_bins
-        file.uncompressed_size = source._manifest.file(source_row).uncompressed_size
+        self._manifest.set_histogram_bins(row, source._manifest.file(source_row).histogram_bins)
+        self._manifest.set_uncompressed_size(row, source._manifest.file(source_row).uncompressed_size)
 
     cdef SketchStaging* _staging(self, str kind) except NULL:
         if kind == "min_k":
@@ -1587,8 +1593,7 @@ cdef class NativeManifestBuilder:
         cdef size_t position
         cdef ManifestCell* target
         cdef ManifestCell* source
-        cdef ManifestFile* file = &self._manifest.file(row)
-        cdef ManifestFile* source_file = &analyzed._manifest.file(analyzed_row)
+        cdef const ManifestFile* source_file = &analyzed._manifest.file(analyzed_row)
         if analyzed._manifest.column_count() != columns:
             raise ValueError("the ANALYZE manifest describes different columns")
         for position in range(columns):
@@ -1604,9 +1609,9 @@ cdef class NativeManifestBuilder:
                 target.null_count = source.null_count
             if cell_has_sum(source[0]):
                 cell_copy_sum(target[0], source[0])
-        file.uncompressed_size = source_file.uncompressed_size
-        file.histogram_bins = source_file.histogram_bins
-        file.vector_row = source_file.vector_row
+        self._manifest.set_uncompressed_size(row, source_file.uncompressed_size)
+        self._manifest.set_histogram_bins(row, source_file.histogram_bins)
+        self._manifest.set_vector_row(row, source_file.vector_row)
 
     def add_file_from(self, NativeManifest source not None, size_t source_row, list positions):
         """File `source_row` of `source` as a new file row - its cells and its
@@ -1646,9 +1651,11 @@ cdef class NativeManifestBuilder:
 
     def set_file_counts(self, size_t row, record_count, row_group_count):
         """File `row`'s record and row group counts; None is UNKNOWN."""
-        cdef ManifestFile* file = &self._manifest.file(row)
-        file.record_count = kUnknown if record_count is None else <int64_t?>record_count
-        file.row_group_count = kUnknown if row_group_count is None else <int64_t?>row_group_count
+        self._manifest.set_counts(
+            row,
+            kUnknown if record_count is None else <int64_t?>record_count,
+            kUnknown if row_group_count is None else <int64_t?>row_group_count,
+        )
 
     def set_bounds_are_ordinal(self, bint ordinal):
         """The dialect the manifest's bounds are in, for a producer that learns
@@ -1657,18 +1664,16 @@ cdef class NativeManifestBuilder:
 
     def set_delete_positions(self, size_t row, tuple positions):
         """File `row`'s merge-on-read deletes, resolved: file-local row ordinals."""
-        cdef ManifestFile* file = &self._manifest.file(row)
-        file.delete_positions.clear()
+        cdef vector[int64_t] resolved
         for position in positions:
-            file.delete_positions.push_back(<int64_t?>position)
-        file.delete_positions_resolved = True
+            resolved.push_back(<int64_t?>position)
+        self._manifest.set_delete_positions(row, resolved)
 
     def relocate_file(self, size_t row, str path, int64_t file_size):
         """File `row` now lives at `path` and is `file_size` bytes (its file was
         rewritten - the statistics describe the same rows)."""
-        cdef ManifestFile* file = &self._manifest.file(row)
-        file.path = path.encode("utf-8")
-        file.file_size = file_size
+        self._manifest.set_path(row, path.encode("utf-8"))
+        self._manifest.set_file_size(row, file_size)
 
     def carry_statistics(self, size_t row, NativeManifest source not None, size_t source_row):
         """A prior manifest's statistics of one file into this file's row: the
@@ -1749,7 +1754,7 @@ cdef class NativeManifestBuilder:
         if staged_rows:
             # owned sketches are laid out one outer row per file, in file order
             for row in range(rows):
-                out._manifest.file(row).vector_row = <uint32_t>row
+                out._manifest.set_vector_row(row, <uint32_t>row)
             out._manifest.own_sketches(min_k, histogram, char_class)
         else:
             _bind_sketch_views(out)

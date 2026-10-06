@@ -14,6 +14,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <ankerl/unordered_dense.h>
 
 #include "engine/native_parquet_scan_source.hpp"
 
@@ -69,7 +70,7 @@ struct DeleteAdmission : RowAdmission {
 
   private:
     // path -> per-row-group mask; an EMPTY mask is "no deleted row" (admit all).
-    std::unordered_map<std::string, std::vector<std::vector<uint8_t>>> masks_;
+    ankerl::unordered_dense::map<std::string, std::vector<std::vector<uint8_t>>> masks_;
 };
 
 }  // namespace opteryx::engine

@@ -8,6 +8,7 @@
 #include <functional>
 #include <stdexcept>
 #include <vector>
+#include <ankerl/unordered_dense.h>
 
 // ------------------- Helpers -------------------
 
@@ -1503,7 +1504,7 @@ static int CompareStatBytes(const std::string &a, const std::string &b,
 
 std::vector<AggColumnStat> AggregateColumnStats(const FileStats &fs) {
   // Build display-name → index map from schema_columns (top-level only).
-  std::unordered_map<std::string, size_t> col_index;
+  ankerl::unordered_dense::map<std::string, size_t> col_index;
   col_index.reserve(fs.schema_columns.size());
   std::vector<AggColumnStat> result;
   result.reserve(fs.schema_columns.size());

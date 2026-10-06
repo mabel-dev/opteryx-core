@@ -292,3 +292,4 @@ skene/src/skene_native.cpp
 # testdata/band_join (8KB), which IS committed.
 testdata/band_scale/**
 testdata/band_small/**
+dev/bench_results/**

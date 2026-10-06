@@ -1143,13 +1143,6 @@ extensions = [
     ),
     # NOTE: morsel_ops.sort moved to draken.morsels.sort (a Draken core primitive
     # built by build_common.draken_rugo_extensions, shipped in both wheels).
-    Extension(
-        "opteryx.compiled.morsel_ops.null_filter",
-        sources=["opteryx/compiled/morsel_ops/null_filter.pyx"],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
     # Thread pool (BS::thread_pool via BSThreadPoolBridge). thread_pool_bridge.cpp
     # is the ONE compiled home of bs_pool_bridge_c.h's cross-.so entry points —
     # see that header for why they must live only here.

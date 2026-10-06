@@ -73,6 +73,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <ankerl/unordered_dense.h>
 
 #include "native_parquet_scan_source.hpp"   // NativeScanColumnBuilder, LC_* packing
 #include "native_sort.hpp"                  // build_sort_keys / SortKeyCmp / gather_rows
@@ -118,7 +119,7 @@ struct LatmatScanGlobal : GlobalSourceState {
     // make the whole pass-2 drain quadratic in the work-item count (fine for a
     // 10-row-group top-n, not for a large LIMIT that keeps thousands). Written once
     // during pass 1, read-only afterwards.
-    std::unordered_map<std::string, size_t> work_index;
+    ankerl::unordered_dense::map<std::string, size_t> work_index;
     int   next_to_submit = 0;
     int   results_received = 0;
     // Pass-1 fetch-block id per work item (parallel to `work_items`) and pass-2
@@ -448,7 +449,7 @@ struct LatmatScanSource : Source {
 
     void reduce_to_topn(std::vector<LatmatRowGroup>& rgs,
                         std::vector<LatmatPass2Item>& work,
-                        std::unordered_map<std::string, size_t>& work_index,
+                        ankerl::unordered_dense::map<std::string, size_t>& work_index,
                         ErrCtx& err) {
         // Pass 1 delivered these in COMPLETION order; pass 2 submits `work` in
         // this order, so put the row groups back in file order first — the kept

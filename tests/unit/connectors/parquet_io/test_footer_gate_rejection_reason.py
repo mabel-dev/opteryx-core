@@ -30,6 +30,22 @@ def test_a_missing_column_is_named_with_its_file():
     assert reason == f"column 'absent' is not in {_TWEETS} (row group 0)"
 
 
+def test_a_missing_column_is_recorded_when_the_caller_can_fill_it():
+    """Schema evolution: with `absent`, a column a file lacks is recorded by its
+    projected index instead of refusing the scan."""
+    absent = {}
+    reason = native_scan_rejection([_TWEETS], ["user_name", "absent", "followers", "gone"],
+                                   ["varchar", "int", "int", "varchar"], absent=absent)
+    assert reason is None
+    assert absent == {_TWEETS: [1, 3]}
+
+
+def test_a_file_holding_every_column_records_nothing():
+    absent = {}
+    assert native_scan_rejection([_TWEETS], ["user_name"], ["varchar"], absent=absent) is None
+    assert absent == {}
+
+
 def test_a_synthesized_row_identity_column_is_named():
     """The 0.9.155 production failure: `$file` handed to the gate as if it were stored."""
     reason = native_scan_rejection([_TWEETS], ["user_name", "$file"], ["varchar", "int"])
@@ -50,12 +66,14 @@ def test_a_kind_with_no_decoder_is_named():
 
 
 def test_the_sql_refusal_carries_the_reason():
-    """End to end: a schema-evolved dataset (a projected column absent from one file)
-    is refused, and the message names the column and the file."""
+    """End to end: a schema-evolved dataset whose absent column cannot be filled with
+    NULL (an ARRAY — its element type is the file's) is refused, and the message
+    names the column and the file."""
     with pytest.raises(NotSupportedError) as err:
-        list(opteryx.session().execute_to_morsels("SELECT followers FROM 'testdata/flat/different'"))
+        list(opteryx.session().execute_to_morsels("SELECT cves FROM 'testdata/flat/different'"))
     message = str(err.value)
-    assert "(footer_gate: column 'followers' is not in testdata/flat/different/" in message
+    assert "(footer_gate: column 'cves' is not in testdata/flat/different/planets.parquet" in message
+    assert "(ARRAY) cannot be filled with NULL" in message
 
 
 if __name__ == "__main__":  # pragma: no cover

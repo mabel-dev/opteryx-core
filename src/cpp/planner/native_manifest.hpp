@@ -423,12 +423,10 @@ public:
         return added;
     }
 
-    // The row of the file at `path`, or -1.
+    // The row of the file at `path` (the first, when rows share a path), or -1.
     int64_t find_file(const std::string& path) const {
-        for (size_t f = 0; f < files_.size(); ++f) {
-            if (files_[f].path == path) return static_cast<int64_t>(f);
-        }
-        return -1;
+        auto found = path_rows_.find(path);
+        return found == path_rows_.end() ? -1 : static_cast<int64_t>(found->second.first);
     }
 
     // This manifest's identity token (see ManifestIdentity).
@@ -439,9 +437,11 @@ public:
 
     // A new file row with a cell per column; its index.
     size_t add_file(ManifestFile file) {
+        const size_t row = files_.size();
         files_.push_back(std::move(file));
         cells_.resize(files_.size() * columns_.size());
-        return files_.size() - 1;
+        index_path(files_[row].path, row);
+        return row;
     }
 
     size_t file_count() const { return files_.size(); }
@@ -472,8 +472,35 @@ public:
         if (owned_char_class_) char_class = owned_char_class_->view();
     }
 
-    ManifestFile& file(size_t row) { return files_.at(row); }
+    // A file row is read-only from outside: its path keys path_rows_, so every
+    // write goes through a setter below and set_path keeps the index whole.
     const ManifestFile& file(size_t row) const { return files_.at(row); }
+
+    void set_path(size_t row, std::string path) {
+        ManifestFile& file = files_.at(row);
+        if (file.path == path) return;
+        unindex_path(file.path, row);
+        file.path = std::move(path);
+        index_path(file.path, row);
+    }
+    void set_file_size(size_t row, int64_t file_size) { files_.at(row).file_size = file_size; }
+    void set_counts(size_t row, int64_t record_count, int64_t row_group_count) {
+        ManifestFile& file = files_.at(row);
+        file.record_count = record_count;
+        file.row_group_count = row_group_count;
+    }
+    void set_uncompressed_size(size_t row, int64_t size) { files_.at(row).uncompressed_size = size; }
+    void set_histogram_bins(size_t row, int64_t bins) { files_.at(row).histogram_bins = bins; }
+    void set_vector_row(size_t row, uint32_t vector_row) { files_.at(row).vector_row = vector_row; }
+    void set_distinct_sketch_family(size_t row, int32_t family) { files_.at(row).distinct_sketch_family = family; }
+    void set_has_footer(size_t row, bool has_footer) { files_.at(row).has_footer = has_footer; }
+    // The file's merge-on-read deletes, resolved: file-local row ordinals.
+    void set_delete_positions(size_t row, std::vector<int64_t> positions) {
+        ManifestFile& file = files_.at(row);
+        file.delete_positions = std::move(positions);
+        file.delete_positions_resolved = true;
+    }
+
     ManifestCell& cell(size_t row, size_t column) {
         return cells_.at(row * columns_.size() + column);
     }
@@ -516,6 +543,12 @@ public:
                      heap_bytes(c.footer.bounds.min_text) + heap_bytes(c.footer.bounds.max_text) +
                      (c.distinct_sketch.capacity() + c.element_min_k.capacity()) * sizeof(uint64_t);
         }
+        // The path index: its buckets, and per path a node (the entry plus the
+        // node's next pointer and cached hash) and the key's heap copy.
+        total += path_rows_.bucket_count() * sizeof(void*);
+        for (const auto& entry : path_rows_) {
+            total += sizeof(entry) + sizeof(void*) + sizeof(size_t) + heap_bytes(entry.first);
+        }
         for (const NestedArrayView* v : {&min_k, &histogram, &char_class}) {
             if (!v->present()) continue;
             total += draken_vector_nbytes(v->outer) + draken_vector_nbytes(v->mid) + draken_vector_nbytes(v->leaf);
@@ -543,6 +576,35 @@ public:
     }
 
 private:
+    // The rows at one path: the first (what find_file answers) and how many.
+    struct PathRows {
+        size_t first;
+        size_t count;
+    };
+
+    void index_path(const std::string& path, size_t row) {
+        auto entry = path_rows_.try_emplace(path, PathRows{row, 0}).first;
+        ++entry->second.count;
+        if (row < entry->second.first) entry->second.first = row;
+    }
+
+    // `row` leaves `path` (its path is still `path` in files_). Only when rows
+    // share the path and `row` was the first is the next first found by scan.
+    void unindex_path(const std::string& path, size_t row) {
+        auto entry = path_rows_.find(path);
+        if (--entry->second.count == 0) {
+            path_rows_.erase(entry);
+            return;
+        }
+        if (entry->second.first != row) return;
+        for (size_t f = 0; f < files_.size(); ++f) {
+            if (f != row && files_[f].path == path) {
+                entry->second.first = f;
+                return;
+            }
+        }
+    }
+
     std::shared_ptr<const OwnedNested> owned_min_k_, owned_histogram_, owned_char_class_;
     std::vector<std::string> columns_;
     std::unordered_map<std::string, size_t> positions_;
@@ -550,6 +612,7 @@ private:
     bool stats_are_authoritative_;
     std::vector<ManifestFile> files_;
     std::vector<ManifestCell> cells_;   // files x columns, row-major
+    std::unordered_map<std::string, PathRows> path_rows_;   // path -> its rows, kept by add_file/set_path
     ManifestIdentity identity_;
 };
 

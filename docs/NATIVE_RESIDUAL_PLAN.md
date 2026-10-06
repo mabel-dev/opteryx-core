@@ -9,11 +9,12 @@
 > (`src/cpp/engine/native_latmat_scan_source.hpp`) that keeps the decode-skip
 > instead of losing it. See item 6.
 >
-> **`StreamingScanSource` is NOT dead** — do not delete it. It is still selected
-> by the one residual with a live SQL trigger, `footer_gate` via schema evolution
-> (a projected column absent from some files), which `HAND_SET["footer_gate"]`
-> exercises. It is also still the fixture several instrumentation tests force via
-> `native_scan_supported`. What HAS gone is any *battery* query reaching it.
+> **`StreamingScanSource` is DELETED** (2026-10-03, no trampoline fallback): a scan
+> neither native Source admits is REFUSED with `NativeScanRefusedError`. The one
+> residual with a live SQL trigger is `footer_gate` via schema evolution of a column
+> whose NULL type is the file's (an absent ARRAY/TIME column) —
+> `HAND_SET["footer_gate"]` exercises it. An absent column of any other type is read
+> as NULL (2026-10-05).
 >
 > `unlowerable_predicate` (R4) is now **CLOSED** — see item 7. It was the last
 > entry in the strict-xfail frontier, which is now empty; `footer_gate` via schema
@@ -116,7 +117,8 @@ the claim that SQL can still reach it.
 
 R4 was the last entry in the strict-xfail frontier, so `_OPEN_CATEGORIES` is now
 empty. That is **not** the same as "nothing reaches the trampoline":
-`footer_gate` via schema evolution still does, and keeps its `HAND_SET` entry.
+`footer_gate` via schema evolution (an absent ARRAY/TIME column, which cannot be
+filled with NULL) still does, and keeps its `HAND_SET` entry.
 
 `footer_gate` was **77% of all A0 fallbacks**. **A1 closed the integer sub-case**:
 after A1 the battery has 4 trampoline scans (native 154 / 158), and `footer_gate`
@@ -240,8 +242,12 @@ captured from the trampoline before the change) — see
 `test_cast_driven_timestamp_matches_trampoline`.
 
 `footer_gate` stays reachable as a residual only via **schema evolution** (a
-projected column absent from some files — `HAND_SET["footer_gate"]`), which is a
-distinct, still-open structural gap.
+projected column absent from some files — `HAND_SET["footer_gate"]`). Since
+2026-10-05 an absent column is read as NULL from the file that lacks it — the gate
+records it (`native_scan_rejection(absent=)`) and `NativeParquetScanSource` emits an
+all-NULL constant of the declared type. What still refuses is an absent column
+whose NULL type would be the FILE's, not the schema's: ARRAY (its element) and
+parquet TIME (its stored width) — `_null_fill_type` in compiler.py.
 
 ### 2. `zero_projection` (R1) — census 2 → **0** — **CLOSED (A2)**
 `not scan.columns` — a scan with an empty projection. Inventory finding (A2):

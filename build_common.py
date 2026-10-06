@@ -491,6 +491,7 @@ include_dirs = [
     "third_party/boost_math",  # E.3: vendored boost::math headers (round via 2^52 trick)
     "third_party/utf8h",  # E.26: sheredom/utf8.h single-header UTF-8 library
     "third_party/pcg",  # vendored PCG PRNG — RANDOM/NORMAL native kernels
+    "third_party/ankerl",  # ankerl::unordered_dense v5.3.1 (MIT) — dense hash map/set
 ]
 
 # Common SIMD / environment C++ sources used by multiple extensions

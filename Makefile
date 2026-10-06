@@ -258,6 +258,7 @@ err-latch-test: ## Build (ASan) and run the executor ErrCtx message-lifetime tes
 	  clang++ -std=c++20 -O1 -g -fsanitize=address -fno-omit-frame-pointer -pthread \
 	    -I$(CURDIR) \
 	    -I$(CURDIR)/draken \
+	    -I$(CURDIR)/third_party/ankerl \
 	    -I$(CURDIR)/draken/core \
 	    -I$(CURDIR)/src/cpp \
 	    -I$(CURDIR)/src/cpp/engine \
@@ -276,6 +277,7 @@ medius-test: ## Build and run the Medius bounded middle-tier tests
 	  clang++ -std=c++20 -O2 -DNDEBUG \
 	    -I$(CURDIR) \
 	    -I$(CURDIR)/draken \
+	    -I$(CURDIR)/third_party/ankerl \
 	    -I$(CURDIR)/draken/simd \
 	    -I$(CURDIR)/third_party/mabel/carchar \
 	    -I$(CURDIR)/third_party/mabel/medius \
@@ -288,6 +290,7 @@ decoded-column-reset-test: ## Build and run the DecodedColumn::reset() completen
 	@cd /tmp/opteryx-tests && \
 	  clang++ -std=c++20 -O2 -Wall -Wextra \
 	    -I$(CURDIR)/rugo/src/parquet \
+	    -I$(CURDIR)/third_party/ankerl \
 	    $(CURDIR)/rugo/src/parquet/decoded_column_reset_test.cpp \
 	    -o decoded_column_reset_test
 	@/tmp/opteryx-tests/decoded_column_reset_test
@@ -299,6 +302,7 @@ page-index-test: ## Build and run the PageIndex (ColumnIndex/OffsetIndex) parse 
 	@cd /tmp/opteryx-tests && \
 	  clang++ -std=c++20 -O1 -Wall -Wextra \
 	    -I$(CURDIR)/rugo/src/parquet \
+	    -I$(CURDIR)/third_party/ankerl \
 	    $(CURDIR)/rugo/src/parquet/page_index.cpp \
 	    $(CURDIR)/rugo/src/parquet/page_index_test.cpp \
 	    -o page_index_test
@@ -312,6 +316,7 @@ rle-dict-test: ## Build and run the RLE skip-dense -> Dict direct-builder tests
 	  clang++ -std=c++20 -O1 -DNDEBUG \
 	    -DHAVE_SNAPPY=1 -DHAVE_ZSTD=1 -DZSTD_STATIC_LINKING_ONLY=1 -DHAVE_CONFIG_H=1 \
 	    -I$(CURDIR)/rugo/src/parquet \
+	    -I$(CURDIR)/third_party/ankerl \
 	    -I$(CURDIR) \
 	    -I$(CURDIR)/src/cpp \
 	    -I$(CURDIR)/draken \
@@ -426,6 +431,7 @@ DRAKEN_KERNEL_C_SRCS := \
 DRAKEN_KERNEL_INCLUDES := \
 	-I$(CURDIR) \
 	-I$(CURDIR)/src/cpp \
+	-I$(CURDIR)/third_party/ankerl \
 	-I$(CURDIR)/draken \
 	-I$(CURDIR)/draken/core \
 	-I$(CURDIR)/draken/simd \

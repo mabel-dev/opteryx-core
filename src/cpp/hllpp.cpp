@@ -265,8 +265,7 @@ void HllppSketch::promote_sparse_to_dense() {
     for (const auto& entry : sparse_registers_) {
         dense_registers_[entry.first] = std::max(dense_registers_[entry.first], entry.second);
     }
-    sparse_registers_.clear();
-    sparse_registers_.rehash(0);
+    sparse_registers_ = decltype(sparse_registers_){};  // release index and values
     mode_ = Mode::DENSE;
 }
 

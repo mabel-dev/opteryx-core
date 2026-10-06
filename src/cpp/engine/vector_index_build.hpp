@@ -35,6 +35,7 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -82,6 +83,10 @@ struct VectorIndexBuildSpec {
     uint32_t              embed_batch = 1;
     uint32_t              embed_threads = 1;
     uint32_t              decode_workers = 2;
+    // Pass 2 writes a progress line to stderr at most this often (rows embedded of the
+    // total, rate, time left): a build of millions of rows runs for hours and was otherwise
+    // silent until it ended. 0 = silent.
+    uint32_t              progress_seconds = 60;
 };
 
 struct VectorIndexBuildResult {
@@ -476,6 +481,27 @@ inline bool build_vector_index_file(const VectorIndexBuildSpec& spec, skene::Out
     };
     top_up(window);
     std::unordered_map<uint32_t, CxxColumn> arrived;   // decoded ahead of their turn
+    // Progress: every row not deleted is embedded once in this pass.
+    const uint64_t to_embed = static_cast<uint64_t>(first_row[row_groups]) - spec.deleted.size();
+    uint64_t embedded = 0;
+    const auto pass_start = std::chrono::steady_clock::now();
+    auto last_report = pass_start;
+    auto report = [&](const char* state) {
+        const double secs =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - pass_start).count();
+        const double rate = secs > 0.0 ? static_cast<double>(embedded) / secs : 0.0;
+        const double left = rate > 0.0 ? static_cast<double>(to_embed - embedded) / rate : 0.0;
+        std::fprintf(stderr,
+                     "vector index build %s (%s): %s %llu / %llu rows (%.1f%%), %.0f rows/s, "
+                     "%.0f min left\n",
+                     spec.data_path.c_str(), spec.column.c_str(), state,
+                     static_cast<unsigned long long>(embedded),
+                     static_cast<unsigned long long>(to_embed),
+                     to_embed ? 100.0 * static_cast<double>(embedded) / static_cast<double>(to_embed)
+                              : 100.0,
+                     rate, left / 60.0);
+        std::fflush(stderr);
+    };
     for (uint32_t g = 0; g < row_groups; ++g) {
         while (arrived.find(g) == arrived.end()) {
             uint32_t got = 0;
@@ -506,7 +532,16 @@ inline bool build_vector_index_file(const VectorIndexBuildSpec& spec, skene::Out
             if (!ok[i] || !draken::ann::ann_row_searchable(row, spec.dims)) continue;
             if (!files.add(row, ordinals[i], err)) return false;
         }
+        embedded += n;
+        if (spec.progress_seconds != 0u) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last_report >= std::chrono::seconds(spec.progress_seconds)) {
+                last_report = now;
+                report("embedding");
+            }
+        }
     }
+    if (spec.progress_seconds != 0u) report("embedded");
     return files.finish(out, err);
 }
 

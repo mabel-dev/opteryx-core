@@ -537,6 +537,22 @@ def _logical_tuple(ct):
             int(lg.precision), int(lg.scale), int(getattr(lg, "dimension", 0) or 0))
 
 
+def _null_fill_type(sc):
+    """(DrakenType int, logical tuple or None) of the all-NULL column the native parquet
+    Source emits for `sc` from a file that does not hold it — the type it emits for
+    `sc` from a file that does (see `_classify_scan_columns`) — or None when that type
+    is the FILE's, not the schema's, so no fill can be typed without a file to read:
+    parquet TIME decodes at its stored integer width, and an ARRAY's element is the
+    file's."""
+    pt = _physical_type(sc)
+    if pt is None or pt in (DrakenType.TIME32, DrakenType.TIME64, DrakenType.ARRAY):
+        return None
+    if pt == DrakenType.VARIANT:
+        # VARIANT reads as VARCHAR (the `string_types` tag `_classify_scan_columns` sends).
+        return DrakenType.VARCHAR.value, None
+    return pt.value, _logical_tuple(sc.column_type)
+
+
 def _element_chain(ct):
     """An ARRAY ColumnType's element subtree, flattened for the native wire.
 
@@ -1015,6 +1031,10 @@ class _Compiler:
         # natively: its identity columns' (schema column, kind), appended by the Source
         # after the read set. _native_scan_plan -> _compile_scan, like the above.
         self._native_scan_row_identity: dict = {}
+        # Schema evolution for a scan admitted natively: the projected columns each
+        # file lacks and every projected column's declared type, for the Source to
+        # fill the absent ones with NULL. _native_scan_plan -> _compile_scan.
+        self._native_scan_absent: dict = {}
         # Statistics coverage (P3, docs/MANIFEST_SUM_STATISTIC_DESIGN.md §7): an
         # ungrouped aggregate directly over a scan registers what it needs by the
         # scan's identity before compiling it; the scan's plan answers the row
@@ -3835,8 +3855,9 @@ class _Compiler:
         VARBINARY, decoded natively via the DK_VARCHAR / DK_VARCHAR_DICT /
         DK_POOL-string paths — WP-01); no scan-pushed LIMIT (R2, still open); and
         the footer gate (native_scan_rejection) proves every column of every row
-        group eligible — no schema evolution, no DECIMAL/temporal/BOOL logical
-        types. A scan-fused TopN hint (R3) is admitted (see below) — it is
+        group eligible — a column a file lacks (schema evolution) is recorded and
+        read as NULL from that file (`_null_fill_type`), no DECIMAL/temporal/BOOL
+        logical types. A scan-fused TopN hint (R3) is admitted (see below) — it is
         ignored, not honoured, because the real sort/limit already happens in a
         downstream native operator regardless of scan source.
 
@@ -4065,17 +4086,32 @@ class _Compiler:
         # trampoline's `_ensure_scan_started` uses, so the two paths cannot disagree
         # about which filesystem a scan has.
         filesystem, connector_type = resolve_scan_filesystem(scan.connector, paths)
+        absent = {}
         rejection = native_scan_rejection(paths, names, kinds, file_sizes or None,
                                           filesystem=filesystem,
-                                          footer_bytes_cache=scan_footer_bytes_cache())
+                                          footer_bytes_cache=scan_footer_bytes_cache(),
+                                          absent=absent)
         if rejection is not None:
-            # R7b: the footer gate (native_scan_rejection) rejected the scan — schema
-            # evolution, a row group whose types are not all eligible, or a remote path
-            # the filesystem can neither sign nor authenticate by bearer header (its
-            # fetch would 401 at execution time). Signed or bearer remote paths ARE
-            # admitted. The gate's own reason (column, kind, file) rides on the code.
+            # R7b: the footer gate (native_scan_rejection) rejected the scan — a row
+            # group whose types are not all eligible, or a remote path the filesystem
+            # can neither sign nor authenticate by bearer header (its fetch would 401
+            # at execution time). Signed or bearer remote paths ARE admitted. The
+            # gate's own reason (column, kind, file) rides on the code.
             self.scan_residual_reasons[scan.identity] = "footer_gate: " + rejection
             return None
+        if absent:
+            # Schema evolution: a projected column some file does not hold (added after
+            # the file was written) is read as NULL from that file. The Source fills it
+            # at the column's declared type, so a type only a file could decide refuses.
+            fill = [_null_fill_type(sc) for sc in read_scs]
+            for path, missing in absent.items():
+                for k in missing:
+                    if fill[k] is None:
+                        self.scan_residual_reasons[scan.identity] = (
+                            f"footer_gate: column '{names[k]}' is not in {path}, and its "
+                            f"type ({_physical_type(read_scs[k]).name}) cannot be filled "
+                            "with NULL — the file decides it")
+                        return None
         # Pruning triples — identical to the trampoline path's `_sp_predicate_stats`
         # so row groups excluded / bytes read are unchanged. Only pruning; the
         # per-row residual is the relocated ExprFilter, not the scan.
@@ -4178,6 +4214,18 @@ class _Compiler:
             coverage=coverage,
         )
         self.footer_fetch_ns += splan.footer_fetch_ns
+        if absent:
+            # Keyed by FETCH path — the work items' (and so the results') file key.
+            files, flags = [], []
+            for path, missing in absent.items():
+                files.append(splan.fetch_paths.get(path, path))
+                flags.append([1 if k in missing else 0 for k in range(len(read_scs))])
+            # A column no file lacks is never filled; its type slot is 0 (not a
+            # DrakenType) and the Source builds nothing for it.
+            self._native_scan_absent[scan.identity] = (
+                files, flags,
+                [0 if f is None else f[0] for f in fill],
+                [None if f is None else f[1] for f in fill])
         if coverage is not None and splan.covered_items:
             # (request, seed): the aggregate above shapes the seed - ungrouped, one
             # partial per aggregate; grouped, (key tuple, partials) per group.
@@ -4779,6 +4827,9 @@ class _Compiler:
             # `_apply_to_scan`), so no downstream LimitOperator truncates. Pushdown
             # only fires with no pushed predicate and no OFFSET.
             self.nplan.set_native_scan_source(p, splan, scan.limit)
+            absent = self._native_scan_absent.get(scan.identity)
+            if absent is not None:
+                self.nplan.set_native_scan_absent_columns(p, *absent)
             row_identity = self._native_scan_row_identity.get(scan.identity)
             if row_identity:
                 self.nplan.set_native_scan_row_identity(
@@ -6299,9 +6350,11 @@ class _Compiler:
             [decode_index[name] for name in physical],
             zero_columns,
             DEFAULT_CHUNK_SIZE,
-            # The Source's own decode pool: every core but two (architect,
-            # 2026-10-01) — not the parquet IO derivation's 80%-of-host branch.
-            max(1, (os.cpu_count() or 1) - 2),
+            # The Source's own decode pool: every core (architect, 2026-10-05,
+            # replacing the 2026-10-01 "every core but two") — decode is the scan's
+            # critical path and the engine's workers sit idle waiting on it. Not the
+            # parquet IO derivation's 80%-of-host branch.
+            max(1, os.cpu_count() or 1),
         )
         plan.scan_identity = scan.identity
         self.scan_sources[scan.identity] = "NativeJsonlScanSource"
