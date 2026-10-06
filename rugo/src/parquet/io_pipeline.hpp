@@ -99,6 +99,11 @@ struct PoolSink {
     void    (*finalize)(void* ctx, int64_t ref_id, int64_t actual_len) = nullptr;
     void*   (*draken_alloc)(size_t n) = nullptr;
     void    (*draken_free)(void* p) = nullptr;
+    // True when draken_free releases draken_malloc'd memory — the allocator a
+    // DecodedColumn's AppendBuffers use. Only then may a decoded buffer become a
+    // direct column's data without a copy (AppendBuffer::release). Set by the
+    // sink's owner, never inferred from the function pointers.
+    bool    adopts_decoded_buffers = false;
 };
 
 // rugo-local discriminant for a column's handoff form. Kept as a plain int in
@@ -670,10 +675,10 @@ static inline DirectKind direct_kind_for(const DecodedColumn& d) {
 // true length (and its free 4-byte prefix) is still recorded; only the payload
 // copy is skipped, and the slot carries STR_ELIDED_PAYLOAD_OFFSET so any misuse
 // faults. The STATE is carried explicitly on the arena via out.payloads_elided.
-static inline bool build_direct_string_plain(const DecodedColumn& d,
+static inline bool build_direct_string_plain(DecodedColumn& d,
                                              void* (*alloc)(size_t), void (*freefn)(void*),
-                                             ColumnOut& out, bool want_seed = false,
-                                             bool length_only = false) {
+                                             ColumnOut& out, bool want_seed,
+                                             bool length_only, bool adopt) {
     const uint32_t n = static_cast<uint32_t>(d.num_rows);
     const bool nullable = !d.valid_bits.empty();
     const uint8_t* nb = nullable ? d.valid_bits.data() : nullptr;
@@ -691,14 +696,24 @@ static inline bool build_direct_string_plain(const DecodedColumn& d,
     DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(
         alloc((n ? n : 1u) * sizeof(DrakenStringSlot)));
     if (!slots) return false;
-    uint8_t* arena = static_cast<uint8_t*>(alloc(arena_len ? arena_len : 1u));
+    // Zero-copy: the decoder's arena becomes the column's arena (slots already
+    // address it at the decoder's offsets). The bytes pointer `vbytes` stays
+    // valid — release() hands over the same block. The DecodedColumn is reset
+    // before its next decode.
+    const bool adopt_arena = adopt && arena_len > 0;
+    uint8_t* arena = adopt_arena ? d.string_arena.release()
+                                 : static_cast<uint8_t*>(alloc(arena_len ? arena_len : 1u));
     if (!arena) { freefn(slots); return false; }
-    if (arena_len) std::memcpy(arena, vbytes, arena_len);
+    if (!adopt_arena && arena_len) std::memcpy(arena, vbytes, arena_len);
     uint8_t* validity = nullptr;
     if (nullable) {
-        validity = static_cast<uint8_t*>(alloc(d.valid_bits.size()));
-        if (!validity) { freefn(arena); freefn(slots); return false; }
-        std::memcpy(validity, d.valid_bits.data(), d.valid_bits.size());
+        if (adopt) {
+            validity = d.valid_bits.release();   // `nb` already points at this block
+        } else {
+            validity = static_cast<uint8_t*>(alloc(d.valid_bits.size()));
+            if (!validity) { freefn(arena); freefn(slots); return false; }
+            std::memcpy(validity, d.valid_bits.data(), d.valid_bits.size());
+        }
     }
     // E37: build the hash seed ONLY when the plan marks this column a downstream
     // key (want_seed). Non-key columns take the cheap builder — NO XXH3 at all.
@@ -1408,15 +1423,19 @@ static inline bool build_direct_int128_dict(const DecodedColumn& d,
 // otherwise the array is already positional and is copied wholesale. Allocates
 // via `alloc` (the Draken allocator); on failure frees what it took via `freefn`
 // and returns false. dec_* are filled for DK_DECIMAL128.
-static inline bool build_direct_fixed(const DecodedColumn& d, DirectKind dk,
+static inline bool build_direct_fixed(DecodedColumn& d, DirectKind dk,
                                       void* (*alloc)(size_t), void (*freefn)(void*),
-                                      ColumnOut& out) {
+                                      ColumnOut& out, bool adopt) {
     const uint32_t n = static_cast<uint32_t>(d.num_rows);
     const bool nullable = !d.valid_bits.empty();
 
     uint32_t elem;
     const uint8_t* csrc;
     size_t compact_count;
+    // Set only where csrc IS one of d's own buffers (not a staging copy).
+    void* (*take)(DecodedColumn&) = nullptr;
+    auto take_int32 = [](DecodedColumn& c) -> void* { return c.int32_values.release(); };
+    auto take_int64 = [](DecodedColumn& c) -> void* { return c.int64_values.release(); };
     std::vector<int64_t> widened;        // int32→int64 staging
     std::vector<uint8_t> narrowed;        // E33: unsigned narrow/reinterpret staging
     if (dk == DK_UINT8 || dk == DK_UINT16 || dk == DK_UINT32 || dk == DK_UINT64) {
@@ -1437,6 +1456,7 @@ static inline bool build_direct_fixed(const DecodedColumn& d, DirectKind dk,
             csrc = src_is_32
                 ? reinterpret_cast<const uint8_t*>(d.int32_values.data())
                 : reinterpret_cast<const uint8_t*>(d.int64_values.data());
+            take = src_is_32 ? take_int32 : take_int64;
         } else {
             narrowed.resize(count * static_cast<size_t>(elem_bytes));
             for (size_t i = 0; i < count; ++i) {
@@ -1462,6 +1482,7 @@ static inline bool build_direct_fixed(const DecodedColumn& d, DirectKind dk,
             // copy (one memcpy call per element, then a second full pass). Point
             // straight at the source; the bulk copy below is the only pass.
             csrc = reinterpret_cast<const uint8_t*>(d.int32_values.data());
+            take = take_int32;
         } else {
             narrowed.resize(count * static_cast<size_t>(elem_bytes));
             for (size_t i = 0; i < count; ++i) {
@@ -1480,22 +1501,32 @@ static inline bool build_direct_fixed(const DecodedColumn& d, DirectKind dk,
     } else if (dk == DK_INT64) {
         csrc = reinterpret_cast<const uint8_t*>(d.int64_values.data());
         elem = 8; compact_count = d.int64_values.size();
+        take = take_int64;
     } else if (dk == DK_FLOAT32) {
         csrc = reinterpret_cast<const uint8_t*>(d.float32_values.data());
         elem = 4; compact_count = d.float32_values.size();
+        take = [](DecodedColumn& c) -> void* { return c.float32_values.release(); };
     } else if (dk == DK_FLOAT64) {
         csrc = reinterpret_cast<const uint8_t*>(d.float64_values.data());
         elem = 8; compact_count = d.float64_values.size();
+        take = [](DecodedColumn& c) -> void* { return c.float64_values.release(); };
     } else {  // DK_DECIMAL128
         csrc = reinterpret_cast<const uint8_t*>(d.int128_values.data());
         elem = 16; compact_count = d.int128_values.size();
+        take = [](DecodedColumn& c) -> void* { return c.int128_values.release(); };
     }
 
     const size_t full_bytes = static_cast<size_t>(n) * elem;
-    void* pos = alloc(full_bytes ? full_bytes : 1);
+    // Zero-copy: when the decoded buffer IS the positional column (no staging,
+    // no compact→positional scatter, at least n values), it becomes the
+    // vector's data. The DecodedColumn is reset before its next decode.
+    const bool adopt_data = adopt && take != nullptr && n > 0 && compact_count >= n;
+    void* pos = adopt_data ? take(d) : alloc(full_bytes ? full_bytes : 1);
     if (!pos) return false;
 
-    if (nullable && compact_count < n) {
+    if (adopt_data) {
+        // the decoded buffer is the column: nothing to copy
+    } else if (nullable && compact_count < n) {
         std::memset(pos, 0, full_bytes);
         const uint8_t* nb = d.valid_bits.data();
         uint8_t* dst = static_cast<uint8_t*>(pos);
@@ -1513,9 +1544,13 @@ static inline bool build_direct_fixed(const DecodedColumn& d, DirectKind dk,
 
     uint8_t* val = nullptr;
     if (nullable) {
-        val = static_cast<uint8_t*>(alloc(d.valid_bits.size()));
-        if (!val) { freefn(pos); return false; }
-        std::memcpy(val, d.valid_bits.data(), d.valid_bits.size());
+        if (adopt) {
+            val = d.valid_bits.release();
+        } else {
+            val = static_cast<uint8_t*>(alloc(d.valid_bits.size()));
+            if (!val) { freefn(pos); return false; }
+            std::memcpy(val, d.valid_bits.data(), d.valid_bits.size());
+        }
     }
     out.data = pos;
     out.validity = val;
@@ -3102,7 +3137,8 @@ class ParquetIOPipeline {
                     if (dk == DK_BOOL)
                         ok = build_direct_bool(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     else if (dk == DK_VARCHAR)
-                        ok = build_direct_string_plain(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout, want_seed, length_only);
+                        ok = build_direct_string_plain(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout, want_seed, length_only,
+                                                       pool_sink_.adopts_decoded_buffers);
                     else if (dk == DK_VARCHAR_DICT)
                         ok = build_direct_string_dict(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout, want_seed, length_only);
                     else if (dk == DK_INT64_DICT)
@@ -3122,7 +3158,8 @@ class ParquetIOPipeline {
                     else if (dk == DK_DECIMAL128_DICT)
                         ok = build_direct_int128_dict(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     else
-                        ok = build_direct_fixed(decoded, dk, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
+                        ok = build_direct_fixed(decoded, dk, pool_sink_.draken_alloc, pool_sink_.draken_free, cout,
+                                                pool_sink_.adopts_decoded_buffers);
                     if (!ok) {
                         result.success = false;
                         result.error = "draken_alloc failed for column: " + col_stats.name;

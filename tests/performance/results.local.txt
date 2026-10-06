@@ -6,6 +6,9 @@ make tpch-sf10           (2664.9ms)  (01-OCT) [SF10] [0.64x]
 make tpch-sf100          (29065.8ms) (30-SEP) [SF100] [0.95x]
 make tpcds-sf1           (20.7s)     (06-OCT) [1 fails (Q51)] [SF1]
 make tpcds-sf001         (17.2s)     (06-OCT) [1 fails (Q51)] [SF001]
+make ssb-sf1
+make ssb-sf10
+make ssb-sf100
 make medicare1           (202.6ms)   (26-SEP) [1.17x]
 make job                 (5946.2ms)  (29-SEP) [0.88x] (33c)
 make h2o                 (30.3s)     (06-OCT) [medium]

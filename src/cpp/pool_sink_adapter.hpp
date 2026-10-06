@@ -48,6 +48,7 @@ inline void wire_pool_sink(rugo::ParquetIOPipeline* pipe, MemoryPool* pool) {
     sink.finalize     = &pool_sink_finalize;
     sink.draken_alloc = &pool_sink_draken_alloc;
     sink.draken_free  = &pool_sink_draken_free;
+    sink.adopts_decoded_buffers = true;   // draken_free == free of draken_malloc'd memory
     pipe->set_pool_sink(sink);
 }
 

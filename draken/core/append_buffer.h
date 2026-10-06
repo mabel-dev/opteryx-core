@@ -105,6 +105,15 @@ class AppendBuffer {
 
     void clear() noexcept { size_ = 0; }
 
+    // Give up ownership of the bytes (draken_malloc'd: the receiver frees them
+    // with draken_free) and become empty with no capacity. Lets a finished
+    // buffer become a vector's data without a copy.
+    T* release() noexcept {
+        T* p = data_;
+        data_ = nullptr; size_ = 0; cap_ = 0;
+        return p;
+    }
+
     const T* data() const noexcept { return data_; }
     T* data() noexcept { return data_; }
     size_t size() const noexcept { return size_; }
