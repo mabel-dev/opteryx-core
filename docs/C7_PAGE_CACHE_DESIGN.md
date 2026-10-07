@@ -916,3 +916,46 @@ The decompress-free ceiling (§15, Mac canon) was 0.916: the cache delivers it.
 Hot path only — run-1 fill cost not in this table (indicative +16%, §24).
 Still outstanding: x86 A/B, admission leave-one-out, removing the
 DRAKEN_MEM_ACCOUNT switch.
+
+## 26. Give-way to the OPERATING SYSTEM's memory — REVERTED 2026-10-07
+
+**Reverted on the architect's order** (make clickbench-rugo ~1 s slower with it;
+ruling: the engine does not try to read or game the OS's memory management). The
+limit is back to `min(B, C - R - charged)`; no OS figures are read. The record
+below is kept for the finding, not the mechanism.
+
+### (as built, now removed)
+
+Finding (Mac, train — counters, not timings): `make clickbench-canon` was ~1 s
+slower with the cache. Not cache thrashing: two suite rounds in one process
+showed 0 evictions, 0 refusals, 0 give-way, round 2 all hits (23.6 GiB held).
+macOS's memory compressor was the thrasher: free memory went 37.5 → 0 GiB within
+4 s of round 1, the compressor grew 12.7 → 32 GiB (kernel pressure level 2),
++36-46 GiB compressed in round 1 and +21-25 GiB decompressed in round 2 — the
+cache's idle pages compressed by the kernel, every "hit" paying a kernel
+decompression. Q34 (7.7 GiB URL) 781 → 1,632-2,314 ms. The budget rule only saw
+our own query memory, not other processes or the OS file cache.
+
+Built (`draken/core/mem_account.cpp`, native): a third term in the limit,
+    limit = min(B, C - R - charged, cache + system_available - R)
+refreshed at most every 100 ms (cache lookup/insert, every 256th charge), and
+the cache shrinks on refresh when over it.
+- Linux: `MemAvailable`; under a cgroup v2 limit also
+  `memory.max - (memory.current - inactive_file)`, the smaller.
+- macOS: free + speculative pages; 0 at `kern.memorystatus_vm_pressure_level`
+  ≥ 2. File-backed pages are NOT counted — measured, the kernel compressed the
+  cache while 6-12 GiB of file cache stayed resident.
+- Stats/telemetry: `system_available` (`chunk_cache_system_available`).
+
+Result (same two-round check): compressions +0.0 GiB in both rounds; Q34 984 /
+878 ms; round 2 9.0 s (was 10.7 s). The cache now lives in 4-11 GiB on this
+laptop and churns (40.6 GiB given way, 6,092 inserts in round 2): fills given
+away again are wasted work. Remedies on the table: second-miss admission
+(architect decision pending) or hysteresis (no admission after a give-way until
+the OS figure recovers past reserve + margin).
+Dedicated hosts (c6a.4xlarge, Cloud Run — no other processes, no compressor,
+file cache reclaimed first) should rarely hit the new term.
+Test caveat: tests/unit/core/test_chunk_cache.py expects the cache to fill; on a
+machine with < 4 GiB actually available the cache correctly refuses and those
+asserts would fail.
+make q + cache/pool tests (47) pass.

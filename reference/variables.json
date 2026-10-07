@@ -65,6 +65,52 @@
         "default": "utf8",
         "default_source": "literal"
     },
+    "chunk_cache_admit": {
+        "name": "chunk_cache_admit",
+        "type": "BOOL",
+        "owner": "USER",
+        "visibility": "UNRESTRICTED",
+        "settable": true,
+        "requires_entitlement": null,
+        "set_by": "any session",
+        "default": true,
+        "default_source": "literal"
+    },
+    "chunk_cache_budget_bytes": {
+        "name": "chunk_cache_budget_bytes",
+        "type": "INT64",
+        "owner": "SERVER",
+        "visibility": "UNRESTRICTED",
+        "settable": false,
+        "requires_entitlement": null,
+        "set_by": "not settable via SQL",
+        "default": 43808666419,
+        "default_source": "literal"
+    },
+    "chunk_cache_memory_percent": {
+        "name": "chunk_cache_memory_percent",
+        "type": "INT64",
+        "owner": "SERVER",
+        "visibility": "UNRESTRICTED",
+        "settable": false,
+        "requires_entitlement": null,
+        "set_by": "not settable via SQL",
+        "default": null,
+        "default_source": "environment",
+        "environment_key": "CHUNK_CACHE_MEMORY_PERCENT"
+    },
+    "chunk_cache_reserve_bytes": {
+        "name": "chunk_cache_reserve_bytes",
+        "type": "INT64",
+        "owner": "SERVER",
+        "visibility": "UNRESTRICTED",
+        "settable": false,
+        "requires_entitlement": null,
+        "set_by": "not settable via SQL",
+        "default": null,
+        "default_source": "environment",
+        "environment_key": "CHUNK_CACHE_RESERVE_BYTES"
+    },
     "cidr_agg_emit_budget_bytes": {
         "name": "cidr_agg_emit_budget_bytes",
         "type": "INT64",

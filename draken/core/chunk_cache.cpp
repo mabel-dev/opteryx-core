@@ -151,7 +151,6 @@ int draken_cc_enabled(void) { return draken_mem_cache_budget() > 0 ? 1 : 0; }
 
 const DrakenChunkEntry* draken_cc_lookup(const char* path, size_t path_len, int64_t chunk_offset,
                                          int predicated, int* fill_ok) {
-    draken_mem_refresh();   // before any shard lock: a refresh may shrink the cache
     Key k{std::string(path, path_len), chunk_offset};
     Shard& sh = shard_for(k);
     std::lock_guard<std::mutex> lk(sh.mu);
@@ -207,7 +206,6 @@ void draken_cc_fill_discard(uint8_t* buffer) { std::free(buffer); }
 int draken_cc_insert(const char* path, size_t path_len, int64_t chunk_offset,
                      uint8_t* buffer, int64_t buffer_bytes,
                      const int64_t* page_index, int32_t npages, int64_t cost_ns) {
-    draken_mem_refresh();   // before any shard lock: a refresh may shrink the cache
     const int64_t budget = draken_mem_cache_budget();
     if (budget <= 0 || buffer_bytes <= 0 || buffer_bytes > budget) {
         std::free(buffer);

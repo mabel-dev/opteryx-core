@@ -1,6 +1,6 @@
 make clickbench-rugo    5.54s     (07-OCT) [0.52x]
 make clickbench-skene   6.75s     (06-OCT) [0.63x]
-make clickbench-canon   7.68s     (06-OCT) [0.72x]
+make clickbench-canon   7.68s     (06-OCT) [0.72x] [8.65s post caching change]
 make tpch-sf1           402.9ms   (07-OCT) [1.16x]
 make tpch-sf10          2664.9ms  (01-OCT) [0.64x]
 make tpch-sf100         29065.8ms (30-SEP) [0.95x]

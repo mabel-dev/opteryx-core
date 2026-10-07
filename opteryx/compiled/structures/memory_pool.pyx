@@ -253,7 +253,6 @@ cdef extern from "core/mem_account.h" nogil:
     int64_t draken_mem_reserve()
     int64_t draken_mem_cache_budget()
     int64_t draken_mem_cache_limit()
-    int64_t draken_mem_system_available()
 
 
 cdef extern from "core/chunk_cache.h" nogil:
@@ -315,8 +314,6 @@ def chunk_cache_stats() -> dict:
         "limit": draken_mem_cache_limit(),
         "container": draken_mem_container(),
         "reserve": draken_mem_reserve(),
-        # The OS's available memory at the last refresh (-1 = not readable).
-        "system_available": draken_mem_system_available(),
     }
 
 
